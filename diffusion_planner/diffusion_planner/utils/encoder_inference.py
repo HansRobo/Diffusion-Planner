@@ -129,12 +129,23 @@ class EncoderInference:
             if info.name not in ENCODER_INPUT_NAMES
         ]
 
+    @staticmethod
+    def _heading_to_cos_sin(x: torch.Tensor) -> torch.Tensor:
+        """Convert (x, y, heading) to (x, y, cos(heading), sin(heading)). Idempotent on 4-col input."""
+        if x.shape[-1] == 4:
+            return x
+        return torch.cat([x[..., :2], x[..., 2:3].cos(), x[..., 2:3].sin()], dim=-1)
+
     def encode_batch(self, batch: dict) -> torch.Tensor:
         """Run the encoder on a batch, return [B, hidden_dim] L2-normalized embeddings."""
         batch = {
             k: v.to(self.device) if isinstance(v, torch.Tensor) else v
             for k, v in batch.items()
         }
+        if "ego_agent_past" in batch:
+            batch["ego_agent_past"] = self._heading_to_cos_sin(batch["ego_agent_past"])
+        if "goal_pose" in batch:
+            batch["goal_pose"] = self._heading_to_cos_sin(batch["goal_pose"])
         batch = self.obs_norm(batch)
 
         if self._backend == "onnx":
