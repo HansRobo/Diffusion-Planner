@@ -48,13 +48,20 @@ class LatentOODScorer:
         embeddings: np.ndarray,
         records: list[dict],
         metadata: dict,
+        device: str = "cpu",
     ) -> LatentOODScorer:
         if embeddings.ndim != 2:
             raise ValueError(f"Expected 2D embeddings, got shape {embeddings.shape}")
+        if len(records) != embeddings.shape[0]:
+            raise ValueError(
+                f"records length ({len(records)}) != embeddings count ({embeddings.shape[0]})"
+            )
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         norms = np.maximum(norms, 1e-8)
         embeddings = (embeddings / norms).astype(np.float32)
-        return cls(embeddings=embeddings, records=records, metadata=metadata)
+        scorer = cls(embeddings=embeddings, records=records, metadata=metadata)
+        scorer._device = device
+        return scorer
 
     def _get_bank(self) -> torch.Tensor:
         if self._bank_tensor is None or self._bank_tensor.device.type != self._device:

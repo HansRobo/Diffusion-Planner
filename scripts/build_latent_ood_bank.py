@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -120,7 +119,7 @@ def main():
         "train_list": str(args.train_list),
     }
 
-    scorer = LatentOODScorer.build(embeddings, records, metadata)
+    scorer = LatentOODScorer.build(embeddings, records, metadata, device=args.device)
 
     if args.val_list:
         print(f"Calibrating on validation set {args.val_list}")
