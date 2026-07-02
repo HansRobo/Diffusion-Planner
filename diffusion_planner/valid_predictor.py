@@ -8,7 +8,6 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
-from diffusion_planner.utils.path_key import data_path_to_rel
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.valid_config import ValidConfig
 from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
@@ -195,7 +194,7 @@ def run_validation(valid_cfg: ValidConfig):
     n_save = predictions.shape[0]
     pbar = tqdm(total=n_save, desc="save (slowest rank)", disable=global_rank != 0)
     for i in range(n_save):
-        rel = data_path_to_rel(valid_set.data_list[sampler_indices[i]])
+        rel = valid_set.rel_for_index(sampler_indices[i])
         out_base = save_predictions_dir / rel
         out_base.parent.mkdir(parents=True, exist_ok=True)
         np.savez(
