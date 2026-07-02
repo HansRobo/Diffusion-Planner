@@ -69,6 +69,14 @@ def add_current_xy(future: torch.Tensor, current_states: torch.Tensor) -> torch.
     return torch.cat([xy, future[..., 2:]], dim=-1)
 
 
+def _last_history_chunk(past: torch.Tensor, history_len: int) -> torch.Tensor:
+    if past.shape[-2] >= history_len + 1:
+        return past[..., -history_len - 1 : -1, :4]
+    pad_shape = list(past.shape[:-2]) + [history_len + 1 - past.shape[-2], 4]
+    pad = past[..., :1, :4].expand(*pad_shape)
+    return torch.cat([pad, past[..., :4]], dim=-2)[..., -history_len - 1 : -1, :]
+
+
 def build_dfp_training_inputs(
     inputs: dict[str, torch.Tensor],
     ego_future: torch.Tensor,
@@ -85,12 +93,7 @@ def build_dfp_training_inputs(
     future_chunks = T // chunk_len
 
     raw_inputs = args.observation_normalizer.inverse(inputs)
-    ego_past = raw_inputs["ego_agent_past"][..., :4]
-    if ego_past.shape[1] >= history_len + 1:
-        history = ego_past[:, -history_len - 1 : -1]
-    else:
-        pad = ego_past[:, :1].expand(B, history_len + 1 - ego_past.shape[1], 4)
-        history = torch.cat([pad, ego_past], dim=1)[:, -history_len - 1 : -1]
+    history = _last_history_chunk(raw_inputs["ego_agent_past"], history_len)
 
     current = raw_inputs["ego_current_state"][:, :4]
     current = current[:, None, :].expand(B, chunk_len, 4)
@@ -497,12 +500,7 @@ class Decoder(nn.Module):
 
     def _dfp_clean_condition_chunks(self, inputs, B):
         raw_inputs = self._observation_normalizer.inverse(inputs)
-        ego_past = raw_inputs["ego_agent_past"][..., :4]
-        if ego_past.shape[1] >= self._dfp_history_len + 1:
-            history = ego_past[:, -self._dfp_history_len - 1 : -1]
-        else:
-            pad = ego_past[:, :1].expand(B, self._dfp_history_len + 1 - ego_past.shape[1], 4)
-            history = torch.cat([pad, ego_past], dim=1)[:, -self._dfp_history_len - 1 : -1]
+        history = _last_history_chunk(raw_inputs["ego_agent_past"], self._dfp_history_len)
 
         current = raw_inputs["ego_current_state"][:, :4]
         current = current[:, None, :].expand(B, self._dfp_chunk_len, 4)

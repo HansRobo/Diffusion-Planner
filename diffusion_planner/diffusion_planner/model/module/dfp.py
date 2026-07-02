@@ -3,6 +3,8 @@ import math
 import torch
 import torch.nn as nn
 
+from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+
 
 class TimestepEmbedder(nn.Module):
     """Sinusoidal timestep embedding followed by an MLP."""
@@ -33,13 +35,11 @@ class TimestepEmbedder(nn.Module):
         return self.mlp(t_freq)
 
 
+_VP_SDE = VPSDE_linear()
+
+
 def vp_alpha_sigma(t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """VP-SDE marginal coefficients used by DFP chunk noising."""
-    beta_min = 0.1
-    beta_max = 20.0
-    log_alpha = -0.25 * t**2 * (beta_max - beta_min) - 0.5 * beta_min * t
-    alpha = torch.exp(log_alpha)
-    sigma = torch.sqrt(torch.clamp(1.0 - torch.exp(2.0 * log_alpha), min=1.0e-12))
+    alpha, sigma = _VP_SDE.marginal_prob(torch.ones_like(t), t)
     return alpha, sigma
 
 
