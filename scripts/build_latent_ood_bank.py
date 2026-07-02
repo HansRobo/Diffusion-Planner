@@ -24,13 +24,12 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.latent_ood import LatentOODScorer
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 
 def parse_args():
