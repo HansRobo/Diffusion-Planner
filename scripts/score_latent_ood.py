@@ -21,9 +21,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.encoder_inference import EncoderInference
 from diffusion_planner.utils.latent_ood import LatentOODScorer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -31,7 +30,7 @@ from tqdm import tqdm
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model_path", type=Path, required=True)
+    p.add_argument("--model_path", type=Path, required=True, help="Path to model (.pth checkpoint or .onnx)")
     p.add_argument("--args_path", type=Path, required=True)
     p.add_argument("--eval_list", type=Path, required=True, help="JSON list of eval .npz paths")
     p.add_argument("--bank_dir", type=Path, required=True, help="Pre-built bank directory")
@@ -52,15 +51,7 @@ def main():
     print(f"  Bank: {scorer.num_embeddings} embeddings, dim={scorer.embedding_dim}")
 
     print(f"Loading model from {args.model_path}")
-    config_obj = Config(str(args.args_path))
-    model = Diffusion_Planner(config_obj)
-    model.eval()
-    ckpt = torch.load(str(args.model_path), map_location="cpu")
-    state_dict = ckpt["model"] if "model" in ckpt else ckpt
-    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict)
-    model.to(args.device)
-    obs_norm = config_obj.observation_normalizer
+    encoder = EncoderInference(args.args_path, args.model_path, args.device)
 
     with open(args.eval_list) as f:
         npz_paths = json.load(f)
@@ -76,10 +67,7 @@ def main():
 
     with open(args.output, "w") as fout, torch.no_grad():
         for batch in tqdm(loader, desc="Scoring"):
-            batch = {k: v.to(args.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-            batch = obs_norm(batch)
-            encoding = model.encoder(batch)
-            z = encoding.mean(dim=1)
+            z = encoder.encode_batch(batch)
 
             result = scorer.score(z, k=args.knn_k)
             neighbors_batch = scorer.nearest(z, k=args.top_k_neighbors)

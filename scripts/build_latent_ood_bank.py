@@ -22,10 +22,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.encoder_inference import EncoderInference
 from diffusion_planner.utils.latent_ood import LatentOODScorer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -33,7 +31,7 @@ from tqdm import tqdm
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model_path", type=Path, required=True, help="Path to model checkpoint (.pth)")
+    p.add_argument("--model_path", type=Path, required=True, help="Path to model (.pth checkpoint or .onnx)")
     p.add_argument("--args_path", type=Path, required=True, help="Path to training args.json")
     p.add_argument("--train_list", type=Path, required=True, help="JSON list of training .npz paths")
     p.add_argument("--output_dir", type=Path, required=True, help="Output bank directory")
@@ -44,22 +42,9 @@ def parse_args():
     return p.parse_args()
 
 
-def load_model(args_path: Path, model_path: Path, device: str):
-    config_obj = Config(str(args_path))
-    model = Diffusion_Planner(config_obj)
-    model.eval()
-    ckpt = torch.load(str(model_path), map_location="cpu")
-    state_dict = ckpt["model"] if "model" in ckpt else ckpt
-    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict)
-    model.to(device)
-    obs_norm = config_obj.observation_normalizer
-    return model, obs_norm, config_obj
-
-
-def extract_embeddings(model, obs_norm, data_list: Path, batch_size: int, num_workers: int, device: str):
+def extract_embeddings(encoder: EncoderInference, data_list: Path, batch_size: int, num_workers: int):
     dataset = DiffusionPlannerData(str(data_list))
-    loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=(device != "cpu"))
+    loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
 
     with open(data_list) as f:
         npz_paths = json.load(f)
@@ -70,11 +55,7 @@ def extract_embeddings(model, obs_norm, data_list: Path, batch_size: int, num_wo
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Extracting embeddings"):
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-            batch = obs_norm(batch)
-            encoding = model.encoder(batch)
-            z = encoding.mean(dim=1)
-            z = F.normalize(z, dim=-1)
+            z = encoder.encode_batch(batch)
             embeddings.append(z.cpu().numpy())
 
             for i in range(z.shape[0]):
@@ -96,14 +77,14 @@ def main():
     args = parse_args()
 
     print(f"Loading model from {args.model_path}")
-    model, obs_norm, config_obj = load_model(args.args_path, args.model_path, args.device)
-    hidden_dim = config_obj.hidden_dim
+    encoder = EncoderInference(args.args_path, args.model_path, args.device)
+    hidden_dim = encoder.config.hidden_dim
     print(f"  hidden_dim={hidden_dim}")
 
     print(f"Extracting training embeddings from {args.train_list}")
     t0 = time.time()
     embeddings, records = extract_embeddings(
-        model, obs_norm, args.train_list, args.batch_size, args.num_workers, args.device
+        encoder, args.train_list, args.batch_size, args.num_workers
     )
     print(f"  Extracted {embeddings.shape[0]} embeddings in {time.time() - t0:.1f}s")
 
@@ -124,7 +105,7 @@ def main():
     if args.val_list:
         print(f"Calibrating on validation set {args.val_list}")
         val_emb, _ = extract_embeddings(
-            model, obs_norm, args.val_list, args.batch_size, args.num_workers, args.device
+            encoder, args.val_list, args.batch_size, args.num_workers
         )
         val_z = torch.from_numpy(val_emb).to(args.device)
         val_scores = []
