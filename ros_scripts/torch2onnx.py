@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
 
 torch.backends.cuda.enable_flash_sdp(False)
@@ -75,6 +74,12 @@ TURN_INDICATOR_OUTPUT_NAMES = ["turn_indicator_logit"]
 
 TensorDict = dict[str, torch.Tensor]
 NumpyDict = dict[str, np.ndarray]
+
+
+def heading_to_cos_sin(x: torch.Tensor) -> torch.Tensor:
+    if x.shape[-1] == 4:
+        return x
+    return torch.cat([x[..., :2], x[..., 2:3].cos(), x[..., 2:3].sin()], dim=-1)
 
 
 @dataclass(frozen=True)
@@ -275,7 +280,14 @@ class FullONNXWrapper(nn.Module):
             "delay": delay,
         }
         _, decoder_outputs = self.model(inputs)
-        return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
+        delay_noop = delay.to(dtype=decoder_outputs["prediction"].dtype)
+        prediction = decoder_outputs["prediction"] + delay_noop.reshape(
+            delay.shape[0], 1, 1, 1
+        ) * 0
+        turn_indicator_logit = (
+            decoder_outputs["turn_indicator_logit"] + delay_noop.reshape(delay.shape[0], 1) * 0
+        )
+        return prediction, turn_indicator_logit
 
 
 def build_inputs_from_npz(npz_path: Path) -> TensorDict:
@@ -384,6 +396,18 @@ def build_turn_indicator_inputs(encoding: torch.Tensor, final_x0: torch.Tensor) 
     }
 
 
+def normalize_checkpoint_keys(state_dict: TensorDict) -> TensorDict:
+    normalized = {}
+    for raw_key, value in state_dict.items():
+        key = raw_key.replace("module.", "")
+        if key.startswith("decoder.dfp_shared_"):
+            key = key.replace("decoder.dfp_shared_", "decoder.dfp_", 1)
+        if key in normalized:
+            raise ValueError(f"Duplicate checkpoint key after normalization: {key}")
+        normalized[key] = value
+    return normalized
+
+
 def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusion_Planner:
     config_obj = Config(config_json_path)
     model = Diffusion_Planner(config_obj)
@@ -401,7 +425,7 @@ def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusio
     else:
         state_dict = ckpt["model"]
         print("Loading regular model weights")
-    model.load_state_dict({k.replace("module.", ""): v for k, v in state_dict.items()})
+    model.load_state_dict(normalize_checkpoint_keys(state_dict))
     return model
 
 

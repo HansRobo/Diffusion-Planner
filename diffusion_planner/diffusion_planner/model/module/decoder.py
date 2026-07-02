@@ -512,14 +512,16 @@ class Decoder(nn.Module):
         history_chunk, current_chunk = self._dfp_clean_condition_chunks(inputs, B)
         history_chunk = history_chunk.to(device=device, dtype=dtype)
         current_chunk = current_chunk.to(device=device, dtype=dtype)
-        future_xt = torch.randn(
-            B,
-            self._dfp_future_chunks,
-            self._dfp_chunk_len,
-            4,
-            device=device,
-            dtype=dtype,
+
+        sampled_trajectories = inputs["sampled_trajectories"].reshape(
+            B, 1 + self._predicted_neighbor_num, 1 + self._future_len, 4
         )
+        sampled_ego_future = sampled_trajectories[:, 0, 1:, :].to(device=device, dtype=dtype)
+        future_xt = sampled_ego_future.reshape(
+            B, self._dfp_future_chunks, self._dfp_chunk_len, 4
+        )
+        history_noise = future_xt[:, :1]
+
         eps = 1.0e-3
         timesteps = torch.linspace(
             1.0, eps, self._dfp_sampler_steps + 1, device=device, dtype=dtype
@@ -530,8 +532,7 @@ class Decoder(nn.Module):
             t_next = timesteps[step + 1]
             future_t = t_s.expand(B, self._dfp_future_chunks)
 
-            hist_noise = torch.randn_like(history_chunk)
-            unguided_chunks = torch.cat([hist_noise, current_chunk, future_xt], dim=1)
+            unguided_chunks = torch.cat([history_noise, current_chunk, future_xt], dim=1)
             unguided_t = torch.cat(
                 [
                     torch.ones(B, 1, device=device, dtype=dtype),
@@ -544,9 +545,7 @@ class Decoder(nn.Module):
 
             t_hist = torch.clamp(t_s.pow(self._dfp_guidance_beta), min=eps)
             hist_alpha, hist_sigma = vp_alpha_sigma(t_hist)
-            guided_history = hist_alpha * history_chunk + hist_sigma * torch.randn_like(
-                history_chunk
-            )
+            guided_history = hist_alpha * history_chunk + hist_sigma * history_noise
             guided_chunks = torch.cat([guided_history, current_chunk, future_xt], dim=1)
             guided_t = torch.cat(
                 [
@@ -588,6 +587,24 @@ class Decoder(nn.Module):
             ego_trajectory, encoding_pooled
         )
         return output
+
+    def _inference_dfp_only(self, encoding, inputs, current_states, encoding_pooled):
+        B, P, _ = current_states.shape
+        prediction = self._state_normalizer.inverse(
+            current_states[:, :, None, :].expand(B, P, self._future_len, 4)
+        ).clone()
+        future = self._dfp_sample_ego_future(
+            encoding,
+            inputs,
+            B,
+            prediction.device,
+            prediction.dtype,
+        )
+        prediction[:, 0] = future
+        future_norm = normalize_ego_trajectory(self._state_normalizer, future)
+        ego_trajectory = future_norm[:, ::10, :2].reshape(B, 2 * (self._future_len // 10))
+        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
+        return {"prediction": prediction, "turn_indicator_logit": turn_indicator_logit}
 
     def _forward_training(self, encoding, inputs, neighbor_current_mask, encoding_pooled):
         """Forward pass for training mode.
@@ -786,6 +803,9 @@ class Decoder(nn.Module):
         """
         B = encoding.shape[0]
         P = 1 + self._predicted_neighbor_num
+
+        if self._has_dfp_path() and self._dfp_use_inference:
+            return self._inference_dfp_only(encoding, inputs, current_states, encoding_pooled)
 
         sampled_trajectories = inputs["sampled_trajectories"].reshape(
             B, P, (1 + self._future_len) * 4

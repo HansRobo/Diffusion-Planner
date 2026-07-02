@@ -56,9 +56,9 @@ class ObservationNormalizer:
         for k, v in self._normalization_dict.items():
             if k not in data:  # Check if key `k` exists in `data`
                 continue
-            mask = torch.sum(torch.ne(data[k], 0), dim=-1) == 0
-            norm_data[k] = (data[k] - v["mean"].to(data[k].device)) / v["std"].to(data[k].device)
-            norm_data[k][mask] = 0
+            mask = torch.sum(torch.ne(data[k], 0), dim=-1, keepdim=True) == 0
+            normalized = (data[k] - v["mean"].to(data[k].device)) / v["std"].to(data[k].device)
+            norm_data[k] = torch.where(mask, torch.zeros_like(normalized), normalized)
         return norm_data
 
     def inverse(self, data):
@@ -66,9 +66,9 @@ class ObservationNormalizer:
         for k, v in self._normalization_dict.items():
             if k not in data:  # Check if key `k` exists in `data`
                 continue
-            mask = torch.sum(torch.ne(data[k], 0), dim=-1) == 0
-            norm_data[k] = data[k] * v["std"].to(data[k].device) + v["mean"].to(data[k].device)
-            norm_data[k][mask] = 0
+            mask = torch.sum(torch.ne(data[k], 0), dim=-1, keepdim=True) == 0
+            denormalized = data[k] * v["std"].to(data[k].device) + v["mean"].to(data[k].device)
+            norm_data[k] = torch.where(mask, torch.zeros_like(denormalized), denormalized)
         return norm_data
 
     def to_dict(self):
