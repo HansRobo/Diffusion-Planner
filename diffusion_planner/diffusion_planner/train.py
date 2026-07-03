@@ -1,8 +1,8 @@
+import csv
 import json
 import os
 from pathlib import Path
 
-import pandas as pd
 import torch
 import wandb
 from timm.utils import ModelEma
@@ -430,8 +430,10 @@ def model_training(args: TrainConfig):
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }
             data_list.append(curr_data)
-            df = pd.DataFrame(data_list)
-            df.to_csv(os.path.join(save_path, "train_log.tsv"), index=False, sep="\t")
+            with open(os.path.join(save_path, "train_log.tsv"), "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=list(data_list[0].keys()), delimiter="\t")
+                writer.writeheader()
+                writer.writerows(data_list)
 
             model_dict = {
                 "epoch": epoch + 1,
