@@ -171,6 +171,20 @@ def get_args(args_list=None):
         default=10,
         help="Gradient detach window size W for the waypoint loss term",
     )
+    parser.add_argument(
+        "--ego_velocity_mean",
+        type=float,
+        nargs=4,
+        default=[0.0, 0.0, 0.0, 0.0],
+        help="HDP ego velocity latent mean for [dx, dy, cos, sin]",
+    )
+    parser.add_argument(
+        "--ego_velocity_std",
+        type=float,
+        nargs=4,
+        default=[0.5, 0.5, 1.0, 1.0],
+        help="HDP ego velocity latent std for [dx, dy, cos, sin]",
+    )
 
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")

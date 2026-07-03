@@ -33,6 +33,8 @@ from diffusion_planner.loss import (
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
     hybrid_loss,
+    inverse_normalize_ego_velocity,
+    normalize_ego_velocity,
     weighted_waypoint_dpm_loss,
     waypoints_to_velocity,
 )
@@ -303,10 +305,10 @@ def compute_grpo_loss(
     )  # [B, P, T+1, 4]
     all_gt = waypoint_gt.clone()
     if use_velocity:
-        ego_traj = torch.cat(
-            [current_states[:, :1, None, :], ego_target[:, None, :, :]], dim=2
-        )  # [B, 1, T+1, 4]
-        all_gt[:, 0, 1:, :] = waypoints_to_velocity(ego_traj)[:, 0]
+        ego_velocity_gt = waypoints_to_velocity(ego_target)
+        all_gt[:, 0, 1:, :] = normalize_ego_velocity(
+            ego_velocity_gt, args.ego_velocity_mean, args.ego_velocity_std
+        )
     all_gt[:, 1:] = all_gt[:, 1:].masked_fill(neighbor_mask.unsqueeze(-1), 0.0)
 
     mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
@@ -327,9 +329,14 @@ def compute_grpo_loss(
     gt_target = all_gt[:, :, 1:, :]
 
     if use_velocity:
+        ego_pred_velocity_raw = inverse_normalize_ego_velocity(
+            model_output[:, 0], args.ego_velocity_mean, args.ego_velocity_std
+        )
         ego_reconstruction = hybrid_loss(
             model_output[:, 0],
             gt_target[:, 0],
+            ego_pred_velocity_raw,
+            ego_target,
             omega=args.hybrid_loss_omega,
             W=args.hybrid_loss_window,
         )

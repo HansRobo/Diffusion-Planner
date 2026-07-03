@@ -171,10 +171,9 @@ class Encoder(nn.Module):
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
         ego = torch.cat(
-            # [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
-            [ego[:, :6], torch.zeros_like(ego[:, 6:])],
+            [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
             dim=1,
-        )  # Only keep the current + first 5 steps of ego history
+        )  # Only keep the current + nearest 5 steps of ego history
 
         # agents
         neighbors = inputs["neighbor_agents_past"].clone()  # (B, N=32, T=21, D=11)

@@ -288,8 +288,10 @@ def get_args():
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 
     parser.add_argument("--use_velocity_representation", type=boolean, default=False)
-    parser.add_argument("--hybrid_loss_omega", type=float, default=0.1)
+    parser.add_argument("--hybrid_loss_omega", type=float, default=0.01)
     parser.add_argument("--hybrid_loss_window", type=int, default=10)
+    parser.add_argument("--ego_velocity_mean", type=float, nargs=4, default=[0.0, 0.0, 0.0, 0.0])
+    parser.add_argument("--ego_velocity_std", type=float, nargs=4, default=[0.5, 0.5, 1.0, 1.0])
 
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="cuda")

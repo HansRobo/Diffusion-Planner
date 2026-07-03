@@ -14,27 +14,54 @@ _TYPE_PEDESTRIAN = 1
 _TYPE_BICYCLE = 2
 
 
-# ---------------------------------------------------------------------------
-# Velocity (delta) representation utilities  (HDP paper, Section IV-B)
-# ---------------------------------------------------------------------------
-
-
 def waypoints_to_velocity(waypoints: torch.Tensor) -> torch.Tensor:
-    """Convert waypoints to per-step displacement representation."""
-    if waypoints.shape[-2] < 2:
-        raise ValueError("waypoints_to_velocity expects at least two timesteps")
-    vel_pos = torch.diff(waypoints[..., :2], dim=-2)  # [..., T, 2]
+    """Convert ego-centric future waypoints to HDP per-step displacement actions."""
+    if waypoints.shape[-2] < 1:
+        raise ValueError("waypoints_to_velocity expects at least one future timestep")
+    origin = torch.zeros_like(waypoints[..., :1, :])
+    velocity = torch.diff(torch.cat([origin, waypoints], dim=-2), dim=-2)
     if waypoints.shape[-1] > 2:
-        return torch.cat([vel_pos, waypoints[..., 1:, 2:]], dim=-1)
-    return vel_pos
+        velocity = torch.cat([velocity[..., :2], waypoints[..., 2:]], dim=-1)
+    return velocity
 
 
 def velocity_to_waypoints(velocity: torch.Tensor) -> torch.Tensor:
-    """Integrate per-step displacement back to relative waypoints."""
+    """Integrate HDP per-step displacement actions back to ego-centric waypoints."""
     pos = torch.cumsum(velocity[..., :2], dim=-2)
     if velocity.shape[-1] > 2:
         return torch.cat([pos, velocity[..., 2:]], dim=-1)
     return pos
+
+
+def normalize_ego_state(data: torch.Tensor, normalizer) -> torch.Tensor:
+    mean = normalizer.mean[0].to(device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
+    std = normalizer.std[0].to(device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
+    shape = (1,) * (data.ndim - 1) + (data.shape[-1],)
+    return (data - mean.reshape(shape)) / std.reshape(shape)
+
+
+def inverse_normalize_ego_state(data: torch.Tensor, normalizer) -> torch.Tensor:
+    mean = normalizer.mean[0].to(device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
+    std = normalizer.std[0].to(device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
+    shape = (1,) * (data.ndim - 1) + (data.shape[-1],)
+    return data * std.reshape(shape) + mean.reshape(shape)
+
+
+def _velocity_stats(data: torch.Tensor, mean, std) -> tuple[torch.Tensor, torch.Tensor]:
+    mean = torch.as_tensor(mean, device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
+    std = torch.as_tensor(std, device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
+    shape = (1,) * (data.ndim - 1) + (data.shape[-1],)
+    return mean.reshape(shape), std.reshape(shape)
+
+
+def normalize_ego_velocity(data: torch.Tensor, mean, std) -> torch.Tensor:
+    mean, std = _velocity_stats(data, mean, std)
+    return (data - mean) / std
+
+
+def inverse_normalize_ego_velocity(data: torch.Tensor, mean, std) -> torch.Tensor:
+    mean, std = _velocity_stats(data, mean, std)
+    return data * std + mean
 
 
 def _detached_integral(v: torch.Tensor, W: int) -> torch.Tensor:
@@ -54,20 +81,21 @@ def _detached_integral(v: torch.Tensor, W: int) -> torch.Tensor:
 
 
 def hybrid_loss(
-    pred_v: torch.Tensor,
-    gt_v: torch.Tensor,
+    pred_v_norm: torch.Tensor,
+    gt_v_norm: torch.Tensor,
+    pred_v_raw: torch.Tensor,
+    gt_waypoints_raw: torch.Tensor,
     omega: float,
     W: int,
 ) -> torch.Tensor:
-    """Compute HDP velocity + detached-waypoint hybrid loss."""
-    l_v = torch.sum((pred_v - gt_v) ** 2, dim=-1)  # [..., T]
+    """Compute HDP normalized-velocity diffusion loss plus raw-waypoint hybrid loss."""
+    l_v = torch.sum((pred_v_norm - gt_v_norm) ** 2, dim=-1)  # [..., T]
 
     if omega <= 0.0:
         return l_v
 
-    pred_pos = _detached_integral(pred_v[..., :2], W)  # [..., T, 2]
-    gt_pos = torch.cumsum(gt_v[..., :2], dim=-2)  # [..., T, 2]
-    l_wpt = torch.sum((pred_pos - gt_pos) ** 2, dim=-1)  # [..., T]
+    pred_pos = _detached_integral(pred_v_raw[..., :2], W)  # [..., T, 2]
+    l_wpt = torch.sum((pred_pos - gt_waypoints_raw[..., :2]) ** 2, dim=-1)  # [..., T]
 
     return l_v + omega * l_wpt
 

@@ -113,6 +113,8 @@ class TrainConfig:
     use_velocity_representation: bool = False
     hybrid_loss_omega: float = 0.01
     hybrid_loss_window: int = 10
+    ego_velocity_mean: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
+    ego_velocity_std: list[float] = field(default_factory=lambda: [0.5, 0.5, 1.0, 1.0])
 
     guidance_scale: float = 0.5
     device: str = "cuda"

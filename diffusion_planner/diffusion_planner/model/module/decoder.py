@@ -12,7 +12,10 @@ from diffusion_planner.loss import (
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
     hybrid_loss,
+    inverse_normalize_ego_velocity,
     make_turn_indicator_gt,
+    normalize_ego_velocity,
+    normalize_ego_state,
     weighted_waypoint_dpm_loss,
     velocity_to_waypoints,
     waypoints_to_velocity,
@@ -54,12 +57,6 @@ def generate_prefix_mask(delay: torch.Tensor, num_agents: int, max_len: int) -> 
 def replace_current_state(x: torch.Tensor, current_states: torch.Tensor) -> torch.Tensor:
     """Return a trajectory tensor with the first timestep replaced."""
     return torch.cat([current_states[:, :, None, :], x[:, :, 1:, :]], dim=2)
-
-
-def add_current_xy(future: torch.Tensor, current_states: torch.Tensor) -> torch.Tensor:
-    """Add current xy position to future xy channels without mutating the input."""
-    xy = future[..., :2] + current_states[:, :, None, :2]
-    return torch.cat([xy, future[..., 2:]], dim=-1)
 
 
 def compute_training_loss(
@@ -112,10 +109,10 @@ def compute_training_loss(
     waypoint_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
     all_gt = waypoint_gt.clone()
     if use_velocity:
-        ego_traj = torch.cat(
-            [current_states[:, :1, None, :], ego_future[:, None, :, :]], dim=2
-        )  # [B, 1, T+1, 4]
-        all_gt[:, 0, 1:, :] = waypoints_to_velocity(ego_traj)[:, 0]
+        ego_velocity_gt = waypoints_to_velocity(ego_future)  # [B, T, 4]
+        all_gt[:, 0, 1:, :] = normalize_ego_velocity(
+            ego_velocity_gt, args.ego_velocity_mean, args.ego_velocity_std
+        )
     all_gt[:, 1:] = all_gt[:, 1:].masked_fill(neighbor_mask.unsqueeze(-1), 0.0)
 
     if model_type == "x_start":
@@ -140,10 +137,15 @@ def compute_training_loss(
         gt_target = all_gt[:, :, 1:, :]  # [B, P, T, 4]
 
         if use_velocity:
+            ego_pred_velocity_raw = inverse_normalize_ego_velocity(
+                model_output[:, 0], args.ego_velocity_mean, args.ego_velocity_std
+            )
             dpm_loss = torch.zeros(B, P, T, device=model_output.device, dtype=model_output.dtype)
             dpm_loss[:, 0, :] = hybrid_loss(
                 model_output[:, 0],
                 gt_target[:, 0],
+                ego_pred_velocity_raw,
+                ego_future,
                 omega=hybrid_omega,
                 W=hybrid_window,
             )
@@ -212,9 +214,11 @@ def compute_training_loss(
     if need_ego_edge:
         ego_pred = model_output[:, 0]  # [B, T, 4]
         if use_velocity:
-            ego_current_raw = current_states[:, 0]  # [B, 4]
-            ego_pred_world = velocity_to_waypoints(ego_pred)
-            ego_pred_world[..., :2] = ego_pred_world[..., :2] + ego_current_raw[:, None, :2]
+            ego_pred_world = velocity_to_waypoints(
+                inverse_normalize_ego_velocity(
+                    ego_pred, args.ego_velocity_mean, args.ego_velocity_std
+                )
+            )
         else:
             ego_pred_world = ego_pred * norm.std[0].to(model_output.device) + norm.mean[0].to(
                 model_output.device
@@ -302,6 +306,16 @@ class Decoder(nn.Module):
         self._use_velocity = config.use_velocity_representation
         if self._use_velocity and self._model_type != "x_start":
             raise NotImplementedError("Velocity representation is only defined for x_start diffusion.")
+        self.register_buffer(
+            "_ego_velocity_mean",
+            torch.as_tensor(config.ego_velocity_mean, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_ego_velocity_std",
+            torch.as_tensor(config.ego_velocity_std, dtype=torch.float32),
+            persistent=False,
+        )
 
         # Initialize transformer layers:
         def _basic_init(m):
@@ -358,19 +372,19 @@ class Decoder(nn.Module):
         turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
         return self.turn_indicator_predictor(turn_indicator_input)
 
-    def _ego_velocity_to_waypoints(self, ego_velocity, current_states):
-        ego_future = velocity_to_waypoints(ego_velocity)
-        return add_current_xy(ego_future, current_states[:, :1])
+    def _ego_velocity_to_waypoints(self, ego_velocity):
+        ego_velocity = inverse_normalize_ego_velocity(
+            ego_velocity, self._ego_velocity_mean, self._ego_velocity_std
+        )
+        return velocity_to_waypoints(ego_velocity)
 
     def _normalize_ego_future(self, ego_future):
-        mean = self._state_normalizer.mean[0].to(ego_future.device)
-        std = self._state_normalizer.std[0].to(ego_future.device)
-        return (ego_future - mean) / std
+        return normalize_ego_state(ego_future, self._state_normalizer)
 
-    def _turn_indicator_trajectory_from_latent(self, latent, current_states):
+    def _turn_indicator_trajectory_from_latent(self, latent):
         B = latent.shape[0]
         if self._use_velocity:
-            ego_future = self._ego_velocity_to_waypoints(latent[:, :1, 1:, :], current_states)
+            ego_future = self._ego_velocity_to_waypoints(latent[:, :1, 1:, :])
             ego_future = self._normalize_ego_future(ego_future)
             return ego_future[:, 0, ::10, :2].reshape(B, 2 * (self._future_len // 10))
         return latent[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
@@ -378,9 +392,7 @@ class Decoder(nn.Module):
     def _latent_to_prediction(self, latent, current_states):
         prediction = self._state_normalizer.inverse(latent)[:, :, 1:]
         if self._use_velocity:
-            prediction[:, :1] = self._ego_velocity_to_waypoints(
-                latent[:, :1, 1:, :], current_states
-            )
+            prediction[:, :1] = self._ego_velocity_to_waypoints(latent[:, :1, 1:, :])
         return prediction
 
     def _forward_training(self, encoding, inputs, neighbor_current_mask, encoding_pooled):
@@ -458,7 +470,7 @@ class Decoder(nn.Module):
         # x = heun_integration(func, x, NUM_STEP)
         # x = rk4_integration(func, x, NUM_STEP)
         x = x.reshape(B, P, (1 + self._future_len), 4)
-        ego_trajectory = self._turn_indicator_trajectory_from_latent(x, current_states)
+        ego_trajectory = self._turn_indicator_trajectory_from_latent(x)
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
         x = self._latent_to_prediction(x, current_states)
         return {"prediction": x, "turn_indicator_logit": turn_indicator_logit}
@@ -536,7 +548,7 @@ class Decoder(nn.Module):
         x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
 
         x0 = x0.reshape(B, P, (1 + self._future_len), 4)
-        ego_trajectory = self._turn_indicator_trajectory_from_latent(x0, current_states)
+        ego_trajectory = self._turn_indicator_trajectory_from_latent(x0)
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
         x0 = self._latent_to_prediction(x0, current_states)
 
