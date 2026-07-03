@@ -26,6 +26,17 @@ from torch import nn
 logger = logging.getLogger(__name__)
 
 
+def _disable_dynamo_if_available():
+    dynamo = getattr(torch, "_dynamo", None)
+    if dynamo is not None and hasattr(dynamo, "disable"):
+        return dynamo.disable()
+
+    def decorator(func):
+        return func
+
+    return decorator
+
+
 TensorOrNDArray = TypeVar("TensorOrNDArray", torch.Tensor, np.ndarray)
 
 
@@ -374,7 +385,7 @@ def third_order_D(
 
 @torch.amp.autocast(device_type="cuda", enabled=False)
 @torch.no_grad()
-@torch._dynamo.disable()
+@_disable_dynamo_if_available()
 def construct_DTD(
     N: int,
     lead: tuple[int, ...],
@@ -458,7 +469,7 @@ def construct_DTD(
 
 @torch.amp.autocast(device_type="cuda", enabled=False)
 @torch.no_grad()
-@torch._dynamo.disable()
+@_disable_dynamo_if_available()
 def solve_single_constraint(
     x_init: torch.Tensor,
     x_target: torch.Tensor,
@@ -534,7 +545,7 @@ def solve_single_constraint(
 
 @torch.amp.autocast(device_type="cuda", enabled=False)
 @torch.no_grad()
-@torch._dynamo.disable()
+@_disable_dynamo_if_available()
 def solve_xs_eq_y(
     s: torch.Tensor,
     y: torch.Tensor,
@@ -612,7 +623,7 @@ def solve_xs_eq_y(
 
 @torch.no_grad()
 @torch.amp.autocast(device_type="cuda", enabled=False)
-@torch._dynamo.disable()
+@_disable_dynamo_if_available()
 def dxy_theta_to_v_without_v0(
     dxy: torch.Tensor,
     theta: torch.Tensor,
@@ -698,7 +709,7 @@ def dxy_theta_to_v_without_v0(
 
 @torch.no_grad()
 @torch.amp.autocast(device_type="cuda", enabled=False)
-@torch._dynamo.disable()
+@_disable_dynamo_if_available()
 def dxy_theta_to_v(
     dxy: torch.Tensor,
     theta: torch.Tensor,
@@ -784,7 +795,7 @@ def dxy_theta_to_v(
 
 @torch.no_grad()
 @torch.amp.autocast(device_type="cuda", enabled=False)
-@torch._dynamo.disable()
+@_disable_dynamo_if_available()
 def theta_smooth(
     traj_future_rot: torch.Tensor,
     dt: float = 1.0,
@@ -1074,7 +1085,7 @@ class UnicycleAccelCurvatureActionSpace(ActionSpace):
         return {"v": v_t0}
 
     @torch.no_grad()
-    @torch._dynamo.disable()
+    @_disable_dynamo_if_available()
     @torch.amp.autocast(device_type="cuda", enabled=False)
     def traj_to_action(
         self,
