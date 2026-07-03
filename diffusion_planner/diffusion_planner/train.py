@@ -319,7 +319,11 @@ def model_training(args: TrainConfig):
 
         # this function creates dataset artifacts and associate them with wandb run
         # if wandb_run_id is given, the input artifact is assumed to be created externally and will not be executed
-        if args.use_wandb and args.wandb_run_id is None:
+        if (
+            args.use_wandb
+            and args.wandb_run_id is None
+            and os.environ.get("WANDB_LOG_DATASET_ARTIFACT", "1") != "0"
+        ):
             log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
 
     if args.ddp:

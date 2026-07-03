@@ -22,6 +22,7 @@ export WANDB_CACHE_DIR
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export WANDB_ENTITY=advanced-technology-department
 export WANDB_PROJECT=Diffusion-Planner-Temporal
+export WANDB_LOG_DATASET_ARTIFACT=${WANDB_LOG_DATASET_ARTIFACT:-0}
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_LEVEL=NVL
 export NCCL_ASYNC_ERROR_HANDLING=1
