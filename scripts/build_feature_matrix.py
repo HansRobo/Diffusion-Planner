@@ -99,7 +99,23 @@ def extract_category_from_path(npz_path: str) -> str:
     for part in parts:
         if part in CATEGORY_TO_MANEUVER:
             return part
+        # Strip common suffixes and retry
+        for suffix in ("_test", "_v2", "_old"):
+            stripped = part.removesuffix(suffix)
+            if stripped in CATEGORY_TO_MANEUVER:
+                return stripped
     return "unknown"
+
+
+def extract_session_from_normal_path(npz_path: str) -> str:
+    """Extract date_time session ID from normal npz path."""
+    parts = Path(npz_path).parts
+    # Find 'train' in the path, session is train/<date>/<time>
+    for i, part in enumerate(parts):
+        if part == "train" and i + 2 < len(parts):
+            return f"normal_{parts[i+1]}_{parts[i+2]}"
+    # Fallback: use parent directory name
+    return f"normal_{Path(npz_path).parent.name}"
 
 
 def main():
@@ -204,13 +220,24 @@ def main():
 
     print(f"  Override: matched={matched}, unmatched={unmatched}")
 
+    if matched:
+        unknown_count = sum(1 for r in rows if r["category"] == "unknown")
+        unknown_frac = unknown_count / matched
+        if unknown_frac > 0.10:
+            print(
+                f"  WARNING: {unknown_count}/{matched} ({unknown_frac:.1%}) override "
+                "rows have category='unknown' — check CATEGORY_TO_MANEUVER coverage "
+                "against actual directory names."
+            )
+
     # Add normal frames (label=0, is_override=0)
     for ood_entry in normal_ood:
         maneuver = normal_maneuver.get(ood_entry["npz_path"], "straight")
         ood_residual = ood_entry["knn_mean"] - maneuver_medians.get(maneuver, maneuver_medians.get("straight", 0))
+        session_bag = extract_session_from_normal_path(ood_entry["npz_path"])
 
         row = {
-            "bag": "normal",
+            "bag": session_bag,
             "ts_sec": f"{ood_entry['ts_sec']:.3f}" if ood_entry["ts_sec"] else "",
             "category": "normal",
             "maneuver_type": maneuver,
