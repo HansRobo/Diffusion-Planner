@@ -131,7 +131,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # heading to cos sin
         ego_future = heading_to_cos_sin(ego_future)
 
-        mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
+        mask = torch.sum(torch.ne(neighbors_future[..., :4], 0), dim=-1) == 0
         neighbors_future = heading_to_cos_sin(neighbors_future)
         neighbors_future[mask] = 0.0
         inputs = args.observation_normalizer(inputs)

@@ -1737,7 +1737,8 @@ class Decoder(nn.Module):
         assert P == (1 + self._predicted_neighbor_num)
 
         # Pool encoding to get a fixed-size representation
-        encoding_pooled = torch.mean(encoding, dim=1)  # [B, D]
+        encoding_mask = torch.any(torch.ne(encoding, 0), dim=-1, keepdim=True)
+        encoding_pooled = (encoding * encoding_mask).sum(dim=1) / encoding_mask.sum(dim=1).clamp_min(1)
 
         # Dispatch to training or inference
         if self.training:
