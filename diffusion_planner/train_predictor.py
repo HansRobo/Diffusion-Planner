@@ -82,11 +82,40 @@ def get_args(args_list=None):
 
     # Training
     parser.add_argument("--seed", type=int, default=3407)
-    parser.add_argument("--train_epochs", type=int, default=100)
+    parser.add_argument(
+        "--train_steps",
+        type=int,
+        default=_train_config_default("train_steps"),
+        help="total number of optimizer steps",
+    )
     parser.add_argument("--batch_size", type=int, default=512)
-    parser.add_argument("--save_utd", type=int, default=10)
+    parser.add_argument(
+        "--valid_interval_ratio",
+        type=float,
+        default=_train_config_default("valid_interval_ratio"),
+        help="validate + log + save latest.pth every this fraction of train_steps "
+        "(resolved to steps at runtime)",
+    )
+    parser.add_argument(
+        "--save_interval_ratio",
+        type=float,
+        default=_train_config_default("save_interval_ratio"),
+        help="save a checkpoint dir + ONNX + closed-loop every this fraction of train_steps "
+        "(resolved to steps at runtime)",
+    )
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--warm_up_epoch", type=int, default=5)
+    parser.add_argument(
+        "--warm_up_ratio",
+        type=float,
+        default=_train_config_default("warm_up_ratio"),
+        help="linear LR warm-up length as a fraction of train_steps (resolved to steps at runtime)",
+    )
+    parser.add_argument(
+        "--final_phase_ratio",
+        type=float,
+        default=_train_config_default("final_phase_ratio"),
+        help="final-phase LR decay length as a fraction of train_steps (last half at lr*0.01, prior half at lr*0.1)",
+    )
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
@@ -209,14 +238,14 @@ def get_args(args_list=None):
     parser.add_argument("--ddp", default=True, type=boolean, help="use ddp or not")
     parser.add_argument("--port", default="22323", type=str, help="port")
 
-    # per-epoch closed-loop validation (rendered rollout + wandb video).
+    # closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence.
     # Disabled unless --closed_loop_npz_root is given (dir tree of one route's NPZ frames).
     parser.add_argument(
         "--closed_loop_npz_root",
         type=str,
         default="",
         help="dir tree of route NPZ frames for closed-loop validation, run on the checkpoint-save "
-        "cadence (save_utd). Empty = disabled. One route per trial.",
+        "cadence (save_interval_steps). Empty = disabled. One route per trial.",
     )
     parser.add_argument(
         "--closed_loop_seg_len",

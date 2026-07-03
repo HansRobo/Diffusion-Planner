@@ -1,11 +1,9 @@
 import torch
 from torch import nn
-from tqdm import tqdm
 
 from diffusion_planner.model.module.decoder import compute_training_loss
-from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
+from diffusion_planner.utils.train_utils import compute_grad_stats
 
 
 def heading_to_cos_sin(x):
@@ -32,72 +30,62 @@ def heading_to_cos_sin(x):
     )
 
 
-def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
-    epoch_loss = []
+def train_one_step(inputs, model, optimizer, args, ema, aug: StatePerturbation = None):
+    """Run a single optimizer step on one batch and return the loss dictionary.
 
-    model.train()
+    The caller owns the training loop (step counting, LR scheduling, validation cadence);
+    this function only performs forward/backward/step for one batch. ``model.train()`` is
+    assumed to have been set by the caller.
+    """
+    inputs = {key: value.to(args.device) for key, value in inputs.items()}
+    inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
+    inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
+
+    ego_future = inputs["ego_agent_future"]
+    neighbors_future = inputs["neighbor_agents_future"]
+    # Normalize to ego-centric
+    if aug is not None:
+        inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
+
+    # heading to cos sin
+    ego_future = heading_to_cos_sin(ego_future)
+
+    mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
+    neighbors_future = heading_to_cos_sin(neighbors_future)
+    neighbors_future[mask] = 0.0
+    inputs = args.observation_normalizer(inputs)
+
+    # call the model
+    optimizer.zero_grad()
+
+    loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
+
+    loss["loss"] = (
+        args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]
+        + args.alpha_planning_loss * loss["ego_planning_loss"]
+        + loss["turn_indicator_loss"]
+        + args.coeff_road_border_loss * loss["road_border_loss"]
+        + args.coeff_neighbor_collision_loss * loss["neighbor_collision_loss"]
+    )
+
+    # loss backward
+    loss["loss"].backward()
+
+    # Gradient statistics (computed before clipping so that exploding
+    # gradients are not masked by clip_grad_norm_).
+    loss.update(compute_grad_stats(model.parameters()))
+
+    nn.utils.clip_grad_norm_(model.parameters(), 5)
+    optimizer.step()
+
+    ema.update(model)
 
     if args.ddp:
         torch.cuda.synchronize()
 
-    if ddp.get_rank() == 0:
-        data_loader = tqdm(data_loader, desc="Training", unit="batch")
-
-    for inputs in data_loader:
-        inputs = {key: value.to(args.device) for key, value in inputs.items()}
-        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
-
-        ego_future = inputs["ego_agent_future"]
-        neighbors_future = inputs["neighbor_agents_future"]
-        # Normalize to ego-centric
-        if aug is not None:
-            inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
-
-        # heading to cos sin
-        ego_future = heading_to_cos_sin(ego_future)
-
-        mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
-        neighbors_future = heading_to_cos_sin(neighbors_future)
-        neighbors_future[mask] = 0.0
-        inputs = args.observation_normalizer(inputs)
-
-        # call the model
-        optimizer.zero_grad()
-
-        loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
-
-        loss["loss"] = (
-            args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]
-            + args.alpha_planning_loss * loss["ego_planning_loss"]
-            + loss["turn_indicator_loss"]
-            + args.coeff_road_border_loss * loss["road_border_loss"]
-            + args.coeff_neighbor_collision_loss * loss["neighbor_collision_loss"]
-        )
-
-        # loss backward
-        loss["loss"].backward()
-
-        # Gradient statistics (computed before clipping so that exploding
-        # gradients are not masked by clip_grad_norm_).
-        loss.update(compute_grad_stats(model.parameters()))
-
-        nn.utils.clip_grad_norm_(model.parameters(), 5)
-        optimizer.step()
-
-        ema.update(model)
-
-        if args.ddp:
-            torch.cuda.synchronize()
-        epoch_loss.append(loss)
-
-    epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
-
-    if args.ddp:
-        epoch_mean_loss = ddp.reduce_and_average_losses(epoch_mean_loss, torch.device(args.device))
-
-    if ddp.get_rank() == 0:
-        print(f"{epoch_mean_loss['loss']=:.4f}")
-        print(f"{epoch_mean_loss['turn_indicator_accuracy']=:.4f}")
-
-    return epoch_mean_loss, epoch_mean_loss["loss"]
+    # Detach to python floats so the caller can accumulate an interval's worth of losses
+    # without retaining autograd graphs / GPU tensors.
+    return {
+        key: (value if isinstance(value, (int, float)) else value.item())
+        for key, value in loss.items()
+    }

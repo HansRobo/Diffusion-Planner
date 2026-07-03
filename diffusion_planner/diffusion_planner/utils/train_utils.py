@@ -100,10 +100,10 @@ def resume_model(path: str, model, optimizer, scheduler, ema, device):
 
     # load step
     try:
-        init_epoch = ckpt["epoch"]
+        init_step = ckpt["step"]
         print("Step load done")
     except:
-        init_epoch = 0
+        init_step = 0
 
     # Load wandb id
     try:
@@ -122,4 +122,4 @@ def resume_model(path: str, model, optimizer, scheduler, ema, device):
     except:
         print("no ema shadow found")
 
-    return model, optimizer, scheduler, init_epoch, wandb_id, ema
+    return model, optimizer, scheduler, init_step, wandb_id, ema

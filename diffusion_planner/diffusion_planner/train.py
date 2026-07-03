@@ -9,11 +9,12 @@ from timm.utils import ModelEma
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
+from tqdm import tqdm
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_config import TrainConfig
-from diffusion_planner.train_epoch import train_epoch
+from diffusion_planner.train_epoch import train_one_step
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
@@ -23,7 +24,7 @@ from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
-from diffusion_planner.utils.train_utils import resume_model, set_seed
+from diffusion_planner.utils.train_utils import get_epoch_mean_loss, resume_model, set_seed
 from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
 
 
@@ -86,12 +87,12 @@ def mean_epdms_metric(loss_dict):
     return result
 
 
-def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
+def closed_loop_validate(model, args, step: int, out_dir: str) -> None:
     """Closed-loop rendered rollout; logs metrics + the rollout video to wandb.
 
     Drives the ego in CLOSED LOOP over the route NPZ frames under ``args.closed_loop_npz_root``
     (one route = one trial), renders an MP4 into ``out_dir``, aggregates collision/clearance
-    metrics, and logs both to wandb at ``step=epoch+1``. Called on the checkpoint-save cadence.
+    metrics, and logs both to wandb at ``step``. Called on the checkpoint-save cadence.
     No-op when ``closed_loop_npz_root`` is unset. Rank-0 only: pass the unwrapped model; it is
     switched to eval for the rollout (so the diffusion sampler runs and produces ``prediction``)
     and restored afterwards.
@@ -148,11 +149,48 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     }
     for mp4 in summary["video_mp4s"]:
         log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
-    wandb.log(log, step=epoch + 1)
+    wandb.log(log, step=step)
     print(
-        f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
+        f"closed-loop @step {step}: {summary['n_segments']} seg in "
         f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
         f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+    )
+
+
+def run_validation(model, valid_loader, args):
+    """Validate on all ranks (metrics are all-reduced inside ``aggregate_valid_metrics``) and
+    return the rank-0 scalar summary used for logging and checkpointing."""
+    valid_dict = validate_model(model, valid_loader, args)
+    agg = aggregate_valid_metrics(valid_dict, args.device)
+    mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
+    mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
+    return {
+        "valid_loss_ego": agg["avg_loss_ego"],
+        "valid_loss_neighbor": agg["avg_loss_neighbor"],
+        "valid_loss_ego_position_lat_loss": mean_ego_loss_dict.get(
+            "valid_loss/ego_position_lat_loss", 0.0
+        ),
+        "valid_loss_ego_position_lon_loss": mean_ego_loss_dict.get(
+            "valid_loss/ego_position_lon_loss", 0.0
+        ),
+        "turn_indicator_accuracy": agg["turn_indicator_accuracy"],
+        "turn_indicator_change_accuracy": agg["turn_indicator_change_accuracy"],
+        "turn_indicator_change_total": agg["turn_indicator_change_total"],
+        "mean_ego_loss_dict": mean_ego_loss_dict,
+        "mean_epdms_dict": mean_epdms_dict,
+    }
+
+
+def print_validation_summary(summary, header):
+    print(
+        f"{header}\n"
+        f"valid_loss_ego={summary['valid_loss_ego']:.3f}\n"
+        f"valid_loss_neighbor={summary['valid_loss_neighbor']:.3f}\n"
+        f"valid_loss_ego_position_lat_loss={summary['valid_loss_ego_position_lat_loss']:.3f}\n"
+        f"valid_loss_ego_position_lon_loss={summary['valid_loss_ego_position_lon_loss']:.3f}\n"
+        f"turn_indicator_accuracy={summary['turn_indicator_accuracy']:.3f}\n"
+        f"turn_indicator_change_accuracy={summary['turn_indicator_change_accuracy']:.3f}\n"
+        f"turn_indicator_change_total={summary['turn_indicator_change_total']:.3f}"
     )
 
 
@@ -190,10 +228,19 @@ def model_training(args: TrainConfig):
     # set seed
     set_seed(args.seed + global_rank)
 
-    # training parameters
-    train_epochs = args.train_epochs
+    # training parameters (step-based). All cadences / schedule lengths are resolved from
+    # train_steps at runtime (defaults: valid 2%, save 10%, warm-up 1%, final-phase 10%).
+    train_steps = args.train_steps
     batch_size = args.batch_size
-    save_utd = args.save_utd
+    valid_interval_steps = int(train_steps * args.valid_interval_ratio)
+    save_interval_steps = int(train_steps * args.save_interval_ratio)
+    warm_up_steps = int(train_steps * args.warm_up_ratio)
+    final_phase_steps = int(train_steps * args.final_phase_ratio)
+    if global_rank == 0:
+        print(
+            f"{train_steps=}, {valid_interval_steps=}, {save_interval_steps=}, "
+            f"{warm_up_steps=}, {final_phase_steps=}"
+        )
 
     # set up data loaders
     if args.use_data_augment:
@@ -278,12 +325,12 @@ def model_training(args: TrainConfig):
     ]
 
     optimizer = optim.AdamW(params)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
+    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_steps, warm_up_steps)
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
         # We always use new wandb run for each training session, so we don't need to load the wandb_id from the model_dict.
-        diffusion_planner, optimizer, scheduler, init_epoch, _, model_ema = resume_model(
+        diffusion_planner, optimizer, scheduler, init_step, _, model_ema = resume_model(
             args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
         )
 
@@ -293,7 +340,7 @@ def model_training(args: TrainConfig):
         print(f"Learning rate reset to {args.learning_rate}")
 
     else:
-        init_epoch = 0
+        init_step = 0
     # logger
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
@@ -321,105 +368,106 @@ def model_training(args: TrainConfig):
     data_list = []
     best_loss = float("inf")
 
-    valid_dict = validate_model(diffusion_planner, valid_loader, args)
-    agg = aggregate_valid_metrics(valid_dict, args.device)
+    summary = run_validation(diffusion_planner, valid_loader, args)
     if global_rank == 0:
-        valid_loss_ego = agg["avg_loss_ego"]
-        valid_loss_neighbor = agg["avg_loss_neighbor"]
-        mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
-        mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
-        valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
-            "valid_loss/ego_position_lat_loss", 0.0
-        )
-        valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
-            "valid_loss/ego_position_lon_loss", 0.0
-        )
-        turn_indicator_accuracy = agg["turn_indicator_accuracy"]
-        turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
-        turn_indicator_change_total = agg["turn_indicator_change_total"]
-        print(
-            f"{valid_loss_ego=:.3f}\n"
-            f"{valid_loss_neighbor=:.3f}\n"
-            f"{valid_loss_ego_position_lat_loss=:.3f}\n"
-            f"{valid_loss_ego_position_lon_loss=:.3f}\n"
-            f"{turn_indicator_accuracy=:.3f}\n"
-            f"{turn_indicator_change_accuracy=:.3f}\n"
-            f"{turn_indicator_change_total=:.3f}"
-        )
+        print_validation_summary(summary, header="Initial validation")
 
-    # begin training
-    for epoch in range(init_epoch, train_epochs):
-        # Synchronize all processes before training
-        if args.ddp:
-            torch.distributed.barrier()
+    # begin training (step-based). One optimizer step == one batch; the dataset loader is
+    # cycled as many times as needed to reach ``train_steps`` total optimizer steps.
+    base_lr = args.learning_rate
+    global_step = init_step
+    sampler_epoch = 0
+    train_sampler.set_epoch(sampler_epoch)
+    train_iter = iter(train_loader)
+    interval_losses = []
 
-        # Adjust learning rate for final 10 epochs
-        final_epoch_count = 10
-        if epoch >= train_epochs - final_epoch_count:
-            base_lr = args.learning_rate
-            if epoch >= train_epochs - final_epoch_count // 2:  # Last 5 epochs: LR * 1/100
+    pbar = (
+        tqdm(total=train_steps, initial=global_step, desc="Training", unit="step")
+        if global_rank == 0
+        else None
+    )
+
+    while global_step < train_steps:
+        # Restore train mode each iteration: validate_model() below switches the model to eval()
+        # and does not restore it.
+        diffusion_planner.train()
+
+        # Fetch the next batch, starting a fresh pass over the (reshuffled) loader when exhausted.
+        try:
+            inputs = next(train_iter)
+        except StopIteration:
+            sampler_epoch += 1
+            train_sampler.set_epoch(sampler_epoch)
+            train_iter = iter(train_loader)
+            inputs = next(train_iter)
+
+        # Final-phase LR decay over the last ``final_phase_steps`` steps: the last half runs at
+        # base_lr * 0.01, the half before it at base_lr * 0.1. Set before the optimizer step; the
+        # post-warmup scheduler multiplies by 1.0 so this override persists across steps.
+        steps_into_final = global_step - (train_steps - final_phase_steps)
+        if steps_into_final >= 0:
+            if steps_into_final >= final_phase_steps - final_phase_steps // 2:
                 adjusted_lr = base_lr * 0.01
-            else:  # First 5 of final 10 epochs: LR * 1/10
+            else:
                 adjusted_lr = base_lr * 0.1
             for param_group in optimizer.param_groups:
                 param_group["lr"] = adjusted_lr
-            if global_rank == 0:
-                print(f"Final phase: Epoch {epoch + 1}, LR adjusted to {adjusted_lr}")
 
-        # training step
-        train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug
-        )
+        loss = train_one_step(inputs, diffusion_planner, optimizer, args, model_ema, aug)
+        interval_losses.append(loss)
+        global_step += 1
+        scheduler.step()
 
-        valid_dict = validate_model(diffusion_planner, valid_loader, args)
-        agg = aggregate_valid_metrics(valid_dict, args.device)
+        if pbar is not None:
+            pbar.update(1)
+
+        is_valid_step = global_step % valid_interval_steps == 0 or global_step == train_steps
+        is_save_step = global_step % save_interval_steps == 0 or global_step == train_steps
+        # Validation runs on either cadence: a checkpoint save needs fresh validation metrics, so a
+        # save step that is not also a valid step still validates here (the two cadences are
+        # independent and need not be multiples of each other).
+        if not is_valid_step and not is_save_step:
+            continue
+
+        # Mean train loss over this interval, reduced across ranks (matches per-key reduction the
+        # old per-epoch path used).
+        train_loss = get_epoch_mean_loss(interval_losses)
+        if args.ddp:
+            train_loss = ddp.reduce_and_average_losses(train_loss, torch.device(args.device))
+        interval_losses = []
+
+        summary = run_validation(diffusion_planner, valid_loader, args)
+
         if global_rank == 0:
-            valid_loss_ego = agg["avg_loss_ego"]
-            valid_loss_neighbor = agg["avg_loss_neighbor"]
-            mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
-            mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
-            valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
-                "valid_loss/ego_position_lat_loss", 0.0
-            )
-            valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
-                "valid_loss/ego_position_lon_loss", 0.0
-            )
-            turn_indicator_accuracy = agg["turn_indicator_accuracy"]
-            turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
-            turn_indicator_change_total = agg["turn_indicator_change_total"]
-            print(
-                f"Epoch {epoch + 1}/{train_epochs}\n"
-                f"{valid_loss_ego=:.3f}\n"
-                f"{valid_loss_neighbor=:.3f}\n"
-                f"{valid_loss_ego_position_lat_loss=:.3f}\n"
-                f"{valid_loss_ego_position_lon_loss=:.3f}\n"
-                f"{turn_indicator_accuracy=:.3f}\n"
-                f"{turn_indicator_change_accuracy=:.3f}\n"
-                f"{turn_indicator_change_total=:.3f}"
-            )
+            print_validation_summary(summary, header=f"Step {global_step}/{train_steps}")
+            print(f"train_loss={train_loss['loss']:.4f}")
 
+            mean_ego_loss_dict = summary["mean_ego_loss_dict"]
+            mean_epdms_dict = summary["mean_epdms_dict"]
             lr_dict = {"lr": optimizer.param_groups[0]["lr"]}
             wandb.log(
                 {
                     **{f"train_loss/{k}": v for k, v in train_loss.items()},
                     **{f"lr/{k}": v for k, v in lr_dict.items()},
-                    "valid_loss/ego": valid_loss_ego,
-                    "valid_loss/neighbors": valid_loss_neighbor,
-                    "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
-                    "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+                    "valid_loss/ego": summary["valid_loss_ego"],
+                    "valid_loss/neighbors": summary["valid_loss_neighbor"],
+                    "valid_loss/turn_indicator_accuracy": summary["turn_indicator_accuracy"],
+                    "valid_loss/turn_indicator_change_accuracy": summary[
+                        "turn_indicator_change_accuracy"
+                    ],
                     **mean_ego_loss_dict,
                     **mean_epdms_dict,
                 },
-                step=epoch + 1,
+                step=global_step,
             )
 
             curr_data = {
-                "epoch": epoch + 1,
-                "train_loss": train_total_loss,
-                "valid_loss_ego": valid_loss_ego,
-                "valid_loss_neighbor": valid_loss_neighbor,
-                "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
-                "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
+                "step": global_step,
+                "train_loss": train_loss["loss"],
+                "valid_loss_ego": summary["valid_loss_ego"],
+                "valid_loss_neighbor": summary["valid_loss_neighbor"],
+                "valid_loss_ego_position_lat_loss": summary["valid_loss_ego_position_lat_loss"],
+                "valid_loss_ego_position_lon_loss": summary["valid_loss_ego_position_lon_loss"],
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }
             data_list.append(curr_data)
@@ -427,19 +475,19 @@ def model_training(args: TrainConfig):
             df.to_csv(os.path.join(save_path, "train_log.tsv"), index=False, sep="\t")
 
             model_dict = {
-                "epoch": epoch + 1,
+                "step": global_step,
                 "model": diffusion_planner.state_dict(),
                 "ema_state_dict": model_ema.ema.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "schedule": scheduler.state_dict(),
-                "loss": valid_loss_ego,
+                "loss": summary["valid_loss_ego"],
                 # We always use new wandb run for each training session, so we don't need to save the wandb_id in the model_dict.
                 "wandb_id": None,
             }
             torch.save(model_dict, f"{save_path}/latest.pth")
 
-            if (epoch + 1 - init_epoch) % save_utd == 0:
-                curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
+            if is_save_step:
+                curr_dir = os.path.join(save_path, f"step{global_step:08d}")
                 os.makedirs(curr_dir, exist_ok=True)
                 torch.save(model_dict, f"{curr_dir}/best_model.pth")
                 with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
@@ -460,14 +508,14 @@ def model_training(args: TrainConfig):
                 # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
                 # (videos + metrics) land next to the saved weights they correspond to.
                 closed_loop_validate(
-                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
+                    diffusion_planner, args, global_step, os.path.join(curr_dir, "closed_loop")
                 )
 
-            if valid_loss_ego_position_lat_loss < best_loss:
+            if summary["valid_loss_ego_position_lat_loss"] < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")
                 os.makedirs(curr_dir, exist_ok=True)
                 torch.save(model_dict, f"{curr_dir}/best_model.pth")
-                best_loss = valid_loss_ego_position_lat_loss
+                best_loss = summary["valid_loss_ego_position_lat_loss"]
                 curr_data["best_loss"] = best_loss
                 with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
                     json.dump(curr_data, f, indent=4)
@@ -485,8 +533,13 @@ def model_training(args: TrainConfig):
                     external_data=False,
                 )
 
-        scheduler.step()
-        train_sampler.set_epoch(epoch + 1)
+        # Resync all ranks after rank-0's (potentially long) save / ONNX export / closed-loop
+        # work so non-zero ranks don't race ahead into the next backward's allreduce.
+        if args.ddp:
+            torch.distributed.barrier()
+
+    if pbar is not None:
+        pbar.close()
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()

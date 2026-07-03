@@ -69,11 +69,23 @@ class TrainConfig:
     # Training Parameters
     # ---------------------------------------------------------
     seed: int = 3407
-    train_epochs: int = 100
+    # Step-based training schedule. Reference run 20260503-220950 was 80 epochs over a
+    # 5,446,154-sample dataset at batch_size 512 (drop_last) = floor(5446154/512)*80 = 850,960
+    # optimizer steps; the defaults below reproduce that total and its per-epoch cadences.
+    train_steps: int = 850000
     batch_size: int = 512
-    save_utd: int = 10
+    # Validation + tsv/wandb logging + latest.pth cadence, as a fraction of train_steps
+    # (resolved to steps at runtime).
+    valid_interval_ratio: float = 0.02
+    # Checkpoint dir + ONNX export + closed-loop validation cadence, as a fraction of train_steps
+    # (resolved to steps at runtime).
+    save_interval_ratio: float = 0.10
     learning_rate: float = 1e-4
-    warm_up_epoch: int = 5
+    # Linear LR warm-up length as a fraction of train_steps (resolved to steps at runtime).
+    warm_up_ratio: float = 0.01
+    # Final-phase LR decay length as a fraction of train_steps (resolved to steps at runtime). The
+    # last half of this window runs at learning_rate * 0.01, the half before it at learning_rate * 0.1.
+    final_phase_ratio: float = 0.10
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True
@@ -142,8 +154,8 @@ class TrainConfig:
 
     # ---------------------------------------------------------
     # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
-    # (``save_utd``). Disabled unless ``closed_loop_npz_root`` is set (dir tree of route NPZ frames,
-    # one route).
+    # (``save_interval_steps``). Disabled unless ``closed_loop_npz_root`` is set (dir tree of route
+    # NPZ frames, one route).
     # ---------------------------------------------------------
     closed_loop_npz_root: str = ""
     closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
