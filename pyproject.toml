@@ -7,11 +7,13 @@ dependencies = [
     "diffusion-planner",
     "exploration-policy",
     "guidance-gui",
+    "lightgbm>=4.6.0",
     "planner-metrics",
     "preference-optimization",
     "rlvr",
     "scenario-generation",
     "scene-search",
+    "scikit-learn>=1.7.2",
 ]
 
 [dependency-groups]
