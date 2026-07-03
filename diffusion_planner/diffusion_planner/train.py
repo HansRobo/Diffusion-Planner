@@ -163,12 +163,19 @@ def model_training(args: TrainConfig):
     global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
 
+    if args.tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
+
     if global_rank == 0:
         # Logging
         print("------------- {} -------------".format(args.exp_name))
         print("Batch size: {}".format(args.batch_size))
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
+        print("TF32: {}".format(args.tf32))
 
         save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)

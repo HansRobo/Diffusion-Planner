@@ -174,6 +174,7 @@ def get_args(args_list=None):
 
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
+    parser.add_argument("--tf32", default=False, type=boolean, help="enable TensorFloat-32 on CUDA")
 
     parser.add_argument("--use_ema", default=True, type=boolean)
 

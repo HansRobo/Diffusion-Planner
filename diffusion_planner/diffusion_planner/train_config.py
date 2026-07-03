@@ -116,6 +116,7 @@ class TrainConfig:
 
     guidance_scale: float = 0.5
     device: str = "cuda"
+    tf32: bool = False
     use_ema: bool = True
 
     # ---------------------------------------------------------
