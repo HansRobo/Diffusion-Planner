@@ -109,9 +109,9 @@ class TrainConfig:
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1
 
-    # Velocity Representation & Hybrid Loss
+    # HDP ego velocity representation & hybrid loss
     use_velocity_representation: bool = False
-    hybrid_loss_omega: float = 0.1
+    hybrid_loss_omega: float = 0.01
     hybrid_loss_window: int = 10
 
     guidance_scale: float = 0.5

@@ -18,8 +18,9 @@ The pipeline is:
                                ``mean(advantage_i * loss_i)`` pushes probability mass toward
                                higher-reward (lower-collision) trajectories.
 
-Only the ``x_start`` diffusion model type (the default) without velocity representation is
-supported; the helpers raise a clear error otherwise.
+Only the ``x_start`` diffusion model type (the default) is supported. When HDP velocity
+representation is enabled, the ego reconstruction term uses the same velocity + detached-waypoint
+hybrid loss as supervised training.
 """
 
 import random
@@ -31,7 +32,9 @@ from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
-    loss_func,
+    hybrid_loss,
+    weighted_waypoint_dpm_loss,
+    waypoints_to_velocity,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.module.decoder import generate_prefix_mask
@@ -262,10 +265,8 @@ def compute_grpo_loss(
             f"GRPO loss only supports diffusion_model_type='x_start', got "
             f"'{args.diffusion_model_type}'."
         )
-    if args.use_velocity_representation:
-        raise NotImplementedError("GRPO loss does not support velocity representation.")
-
     norm = args.state_normalizer
+    use_velocity = args.use_velocity_representation
     ego_target = ego_pseudo_gt.detach()
 
     B, Pn, T, _ = neighbors_future.shape
@@ -297,8 +298,16 @@ def compute_grpo_loss(
     curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=device))
     t = torch.where(prefix_mask, curr_mask_time, t)
 
-    all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)  # [B, P, T+1, 4]
-    all_gt[:, 1:][neighbor_mask] = 0.0
+    waypoint_gt = torch.cat(
+        [current_states[:, :, None, :], norm(gt_future)], dim=2
+    )  # [B, P, T+1, 4]
+    all_gt = waypoint_gt.clone()
+    if use_velocity:
+        ego_traj = torch.cat(
+            [current_states[:, :1, None, :], ego_target[:, None, :, :]], dim=2
+        )  # [B, 1, T+1, 4]
+        all_gt[:, 0, 1:, :] = waypoints_to_velocity(ego_traj)[:, 0]
+    all_gt[:, 1:] = all_gt[:, 1:].masked_fill(neighbor_mask.unsqueeze(-1), 0.0)
 
     mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
     xT = mean + std * z
@@ -308,6 +317,7 @@ def compute_grpo_loss(
     merged_inputs = {
         **norm_inputs,
         "gt_trajectories": all_gt,
+        "turn_indicator_trajectories": waypoint_gt,
         "sampled_trajectories": xT,
         "diffusion_time": t,
         "prefix_mask": prefix_mask,
@@ -316,30 +326,26 @@ def compute_grpo_loss(
     model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
     gt_target = all_gt[:, :, 1:, :]
 
-    loss_dict = loss_func(model_output, gt_target)
-    heading_l2_loss = loss_dict["heading_l2_loss"]
-    position_lat_loss = loss_dict["position_lat_loss"]
-    position_lon_loss = loss_dict["position_lon_loss"]
-
-    velocity_weight = torch.abs(longitudinal_velocity * args.coeff_velocity)
-    velocity_weight = torch.clamp_min(velocity_weight, 1.0).unsqueeze(-1)  # [B, 1, 1]
-    position_lon_loss = position_lon_loss / velocity_weight
-
-    timestep_weight = args.coeff_timestep
-    unit = T // len(timestep_weight)
-    for i in range(len(timestep_weight)):
-        position_lat_loss[:, :, i * unit : (i + 1) * unit] *= timestep_weight[i]
-        position_lon_loss[:, :, i * unit : (i + 1) * unit] *= timestep_weight[i]
-        heading_l2_loss[:, :, i * unit : (i + 1) * unit] *= timestep_weight[i]
-
-    dpm_loss = (
-        args.coeff_position_lat_loss * position_lat_loss
-        + args.coeff_position_lon_loss * position_lon_loss
-        + args.coeff_heading_l2_loss * heading_l2_loss
-    )  # [B, P, T]
-
-    # Per-sample ego diffusion loss (proxy for negative log-likelihood of the trajectory).
-    ego_loss_per_sample = dpm_loss[:, 0, : args.ego_prediction_horizon].mean(dim=-1)  # [B]
+    if use_velocity:
+        ego_reconstruction = hybrid_loss(
+            model_output[:, 0],
+            gt_target[:, 0],
+            omega=args.hybrid_loss_omega,
+            W=args.hybrid_loss_window,
+        )
+        ego_loss_per_sample = ego_reconstruction[:, : args.ego_prediction_horizon].mean(dim=-1)
+    else:
+        dpm_loss = weighted_waypoint_dpm_loss(
+            model_output,
+            gt_target,
+            longitudinal_velocity,
+            args.coeff_position_lat_loss,
+            args.coeff_position_lon_loss,
+            args.coeff_heading_l2_loss,
+            args.coeff_velocity,
+            args.coeff_timestep,
+        )
+        ego_loss_per_sample = dpm_loss[:, 0, : args.ego_prediction_horizon].mean(dim=-1)
 
     # GRPO policy-gradient surrogate: minimise advantage-weighted reconstruction loss.
     grpo_loss = (advantages * ego_loss_per_sample).mean()

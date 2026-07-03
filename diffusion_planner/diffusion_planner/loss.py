@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from diffusion_planner.dimensions import INPUT_T, OUTPUT_T, TURN_INDICATOR_OUTPUT_KEEP
+from diffusion_planner.dimensions import INPUT_T, TURN_INDICATOR_OUTPUT_KEEP
 from diffusion_planner.model.guidance.collision import center_rect_to_points
 
 _NEIGHBOR_EVAL_STEPS = [0, 20, 40, 60, 79]
@@ -20,18 +20,9 @@ _TYPE_BICYCLE = 2
 
 
 def waypoints_to_velocity(waypoints: torch.Tensor) -> torch.Tensor:
-    """Convert absolute waypoints to per-frame displacement (velocity).
-
-    Only the position channels (first 2) are converted to finite differences;
-    heading channels (cos, sin) are taken from the destination frame.
-
-    Args:
-        waypoints: [..., T+1, D] where D >= 2.  The first two channels are (x, y).
-
-    Returns:
-        velocity: [..., T, D].  velocity[..., i, :2] = waypoints[..., i+1, :2] - waypoints[..., i, :2].
-    """
-    assert waypoints.shape[-2] == OUTPUT_T + 1, "Expected waypoints shape [..., T+1, D]"
+    """Convert waypoints to per-step displacement representation."""
+    if waypoints.shape[-2] < 2:
+        raise ValueError("waypoints_to_velocity expects at least two timesteps")
     vel_pos = torch.diff(waypoints[..., :2], dim=-2)  # [..., T, 2]
     if waypoints.shape[-1] > 2:
         return torch.cat([vel_pos, waypoints[..., 1:, 2:]], dim=-1)
@@ -39,14 +30,7 @@ def waypoints_to_velocity(waypoints: torch.Tensor) -> torch.Tensor:
 
 
 def velocity_to_waypoints(velocity: torch.Tensor) -> torch.Tensor:
-    """Integrate per-frame displacement back to absolute waypoints (cumulative sum).
-
-    Args:
-        velocity: [..., T, D].  First two channels are (dx, dy).
-
-    Returns:
-        waypoints: [..., T, D].
-    """
+    """Integrate per-step displacement back to relative waypoints."""
     pos = torch.cumsum(velocity[..., :2], dim=-2)
     if velocity.shape[-1] > 2:
         return torch.cat([pos, velocity[..., 2:]], dim=-1)
@@ -54,25 +38,14 @@ def velocity_to_waypoints(velocity: torch.Tensor) -> torch.Tensor:
 
 
 def _detached_integral(v: torch.Tensor, W: int) -> torch.Tensor:
-    """Compute waypoints from velocity with gradient detach window.
+    """Integrate velocity while limiting waypoint-loss gradients to a recent window."""
+    T = v.shape[-2]
+    W = max(1, min(int(W), T))
 
-    This implements Algorithm 1 from the HDP paper appendix.
-    Gradients only flow through a sliding window of size *W* so that the
-    position loss does not cause gradient accumulation over the full horizon.
-
-    Args:
-        v: [..., T, 2] predicted displacement (position channels only).
-        W: gradient detach window size.
-
-    Returns:
-        waypoints: [..., T, 2] integrated positions.
-    """
-    # Fully-detached cumsum shifted by W
     wpt_sg = torch.cumsum(v.detach(), dim=-2)  # [..., T, 2]
     shift_sg = torch.roll(wpt_sg, shifts=W, dims=-2)
     shift_sg[..., :W, :] = 0.0
 
-    # Live cumsum (gradients flow)
     wpt = torch.cumsum(v, dim=-2)  # [..., T, 2]
     shift = torch.roll(wpt, shifts=W, dims=-2)
     shift[..., :W, :] = 0.0
@@ -86,24 +59,12 @@ def hybrid_loss(
     omega: float,
     W: int,
 ) -> torch.Tensor:
-    """Compute hybrid velocity + waypoint loss per the HDP paper (Eq. 5).
-
-    Args:
-        pred_v: [..., T, D] predicted per-frame displacement (D >= 2).
-        gt_v:   [..., T, D] ground-truth per-frame displacement.
-        omega:  balancing weight for the waypoint loss term.
-        W:      gradient detach window size for waypoint loss.
-
-    Returns:
-        loss: [..., T] per-timestep loss (velocity L2 + omega * waypoint L2).
-    """
-    # Velocity loss on all D channels
+    """Compute HDP velocity + detached-waypoint hybrid loss."""
     l_v = torch.sum((pred_v - gt_v) ** 2, dim=-1)  # [..., T]
 
     if omega <= 0.0:
         return l_v
 
-    # Waypoint loss only on position channels
     pred_pos = _detached_integral(pred_v[..., :2], W)  # [..., T, 2]
     gt_pos = torch.cumsum(gt_v[..., :2], dim=-2)  # [..., T, 2]
     l_wpt = torch.sum((pred_pos - gt_pos) ** 2, dim=-1)  # [..., T]
@@ -179,6 +140,42 @@ def loss_func(
     result_dict["cosine_similarity_loss"] = 1.0 - cosine_similarity  # [..., T]
 
     return result_dict
+
+
+def weighted_waypoint_dpm_loss(
+    model_output: torch.Tensor,
+    gt_target: torch.Tensor,
+    longitudinal_velocity: torch.Tensor,
+    coeff_position_lat_loss: float,
+    coeff_position_lon_loss: float,
+    coeff_heading_l2_loss: float,
+    coeff_velocity: float,
+    coeff_timestep: list[float],
+) -> torch.Tensor:
+    loss_dict = loss_func(model_output, gt_target)
+    heading_l2_loss = loss_dict["heading_l2_loss"]  # [B, P, T]
+    position_lat_loss = loss_dict["position_lat_loss"]  # [B, P, T]
+    position_lon_loss = loss_dict["position_lon_loss"]  # [B, P, T]
+
+    velocity_weight = torch.abs(longitudinal_velocity * coeff_velocity)
+    velocity_weight = torch.clamp_min(velocity_weight, 1.0).unsqueeze(-1)
+    position_lon_loss = position_lon_loss / velocity_weight
+
+    T = gt_target.shape[2]
+    assert T % len(coeff_timestep) == 0, (
+        f"Timestep {T} is not divisible by the number of timestep weights {len(coeff_timestep)}"
+    )
+    unit = T // len(coeff_timestep)
+    for i, weight in enumerate(coeff_timestep):
+        position_lat_loss[:, :, i * unit : (i + 1) * unit] *= weight
+        position_lon_loss[:, :, i * unit : (i + 1) * unit] *= weight
+        heading_l2_loss[:, :, i * unit : (i + 1) * unit] *= weight
+
+    return (
+        coeff_position_lat_loss * position_lat_loss
+        + coeff_position_lon_loss * position_lon_loss
+        + coeff_heading_l2_loss * heading_l2_loss
+    )
 
 
 def point_to_segment_distance(

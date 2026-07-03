@@ -157,12 +157,12 @@ def get_args(args_list=None):
         "--use_velocity_representation",
         type=boolean,
         default=False,
-        help="Output trajectory as per-frame displacement instead of absolute waypoints",
+        help="Represent ego future xy as per-step displacement and train it with HDP hybrid loss",
     )
     parser.add_argument(
         "--hybrid_loss_omega",
         type=float,
-        default=0.1,
+        default=0.01,
         help="Weight for waypoint loss term in hybrid loss (omega in the paper)",
     )
     parser.add_argument(
