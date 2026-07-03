@@ -14,4 +14,7 @@ class DiffusionPlannerData(Dataset):
     def __getitem__(self, idx):
         data = np.load(self.data_list[idx], allow_pickle=True)
         data = dict(data)  # npz to dict
+        for key, value in data.items():
+            if isinstance(value, np.ndarray) and np.issubdtype(value.dtype, np.unsignedinteger) and value.dtype != np.uint8:
+                data[key] = value.astype(np.int64, copy=False)
         return data
