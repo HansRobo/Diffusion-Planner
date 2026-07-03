@@ -588,24 +588,6 @@ class Decoder(nn.Module):
         )
         return output
 
-    def _inference_dfp_only(self, encoding, inputs, current_states, encoding_pooled):
-        B, P, _ = current_states.shape
-        prediction = self._state_normalizer.inverse(
-            current_states[:, :, None, :].expand(B, P, self._future_len, 4)
-        ).clone()
-        future = self._dfp_sample_ego_future(
-            encoding,
-            inputs,
-            B,
-            prediction.device,
-            prediction.dtype,
-        )
-        prediction[:, 0] = future
-        future_norm = normalize_ego_trajectory(self._state_normalizer, future)
-        ego_trajectory = future_norm[:, ::10, :2].reshape(B, 2 * (self._future_len // 10))
-        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
-        return {"prediction": prediction, "turn_indicator_logit": turn_indicator_logit}
-
     def _forward_training(self, encoding, inputs, neighbor_current_mask, encoding_pooled):
         """Forward pass for training mode.
 
@@ -803,9 +785,6 @@ class Decoder(nn.Module):
         """
         B = encoding.shape[0]
         P = 1 + self._predicted_neighbor_num
-
-        if self._has_dfp_path() and self._dfp_use_inference:
-            return self._inference_dfp_only(encoding, inputs, current_states, encoding_pooled)
 
         sampled_trajectories = inputs["sampled_trajectories"].reshape(
             B, P, (1 + self._future_len) * 4
