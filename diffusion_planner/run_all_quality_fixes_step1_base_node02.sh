@@ -27,7 +27,7 @@ export NCCL_P2P_LEVEL=NVL
 export NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export OMP_NUM_THREADS=8
-export PYTHONPATH=/mnt/nvme/Diffusion-Planner-all-quality-fixes/diffusion_planner:${PYTHONPATH:-}
+export PYTHONPATH=/mnt/nvme/Diffusion-Planner-all-quality-fixes:/mnt/nvme/Diffusion-Planner-all-quality-fixes/diffusion_planner:${PYTHONPATH:-}
 
 cd /mnt/nvme/Diffusion-Planner-all-quality-fixes/diffusion_planner
 
