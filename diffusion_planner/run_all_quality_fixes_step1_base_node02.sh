@@ -7,14 +7,17 @@ TRAIN_LIST=${TRAIN_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260623_fu
 VALID_LIST=${VALID_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_valid_sft.json}
 NORMALIZATION=${NORMALIZATION:-/mnt/nvme/Diffusion-Planner-dfp/normalization_33d.json}
 PORT=${PORT:-22461}
+TMPDIR=${TMPDIR:-/mnt/nvme/Diffusion-Planner-all-quality-fixes/tmp}
+XDG_CACHE_HOME=${XDG_CACHE_HOME:-/mnt/nvme/Diffusion-Planner-all-quality-fixes/cache}
+WANDB_CACHE_DIR=${WANDB_CACHE_DIR:-/mnt/nvme/Diffusion-Planner-dfp/wandb_cache}
 
-mkdir -p "${SAVE_DIR}"
+mkdir -p "${SAVE_DIR}" "${TMPDIR}" "${XDG_CACHE_HOME}" "${WANDB_CACHE_DIR}"
 
 export HOME=/mnt/nvme/Diffusion-Planner-dfp/home
-export TMPDIR=/mnt/nvme/Diffusion-Planner-all-quality-fixes/tmp
-export XDG_CACHE_HOME=/mnt/nvme/Diffusion-Planner-all-quality-fixes/cache
+export TMPDIR
+export XDG_CACHE_HOME
 export WANDB_DIR="${SAVE_DIR}"
-export WANDB_CACHE_DIR=/mnt/nvme/Diffusion-Planner-dfp/wandb_cache
+export WANDB_CACHE_DIR
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export WANDB_ENTITY=advanced-technology-department
 export WANDB_PROJECT=Diffusion-Planner-Temporal
