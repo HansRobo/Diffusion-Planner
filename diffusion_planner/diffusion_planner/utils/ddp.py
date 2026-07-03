@@ -46,6 +46,8 @@ def ddp_setup_universal(verbose=False, args=None):
         rank=rank,
         timeout=timedelta(seconds=1000),
     )
+    torch.distributed.barrier()
+    if verbose:
         setup_for_distributed(rank == 0)
     return rank, gpu, world_size
 
