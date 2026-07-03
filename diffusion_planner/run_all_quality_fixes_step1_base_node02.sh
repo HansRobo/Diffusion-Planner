@@ -3,8 +3,8 @@ set -euo pipefail
 
 RUN_NAME=${RUN_NAME:-all_quality_fixes_step1_base_tier4main_node02_8gpu_tf32_20260703}
 SAVE_DIR=${SAVE_DIR:-/mnt/nvme/Diffusion-Planner-all-quality-fixes/outputs/${RUN_NAME}}
-TRAIN_LIST=${TRAIN_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train.json}
-VALID_LIST=${VALID_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_valid_sft.json}
+TRAIN_LIST=${TRAIN_LIST:-/mnt/nvme/Diffusion-Planner-all-quality-fixes/artifacts/full_sequence_base_from_20260622_step3/path_list_train_fullseq_from_20260622_step3.json}
+VALID_LIST=${VALID_LIST:-/mnt/nvme/Diffusion-Planner-all-quality-fixes/artifacts/full_sequence_base_from_20260622_step3/path_list_valid_fullseq_from_20260622_step3.json}
 NORMALIZATION=${NORMALIZATION:-/mnt/nvme/Diffusion-Planner-dfp/normalization_33d.json}
 PORT=${PORT:-22461}
 PYTHON=${PYTHON:-/mnt/nvme/Diffusion-Planner-dfp/.venv/bin/python}
