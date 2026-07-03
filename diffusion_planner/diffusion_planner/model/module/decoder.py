@@ -600,8 +600,10 @@ class Decoder(nn.Module):
         B, P, _ = current_states.shape
         assert P == (1 + self._predicted_neighbor_num)
 
-        # Pool encoding to get a fixed-size representation
-        encoding_pooled = torch.mean(encoding, dim=1)  # [B, D]
+        # Pool only valid encoder tokens. The encoder zero-fills masked tokens.
+        encoding_valid = torch.any(encoding != 0, dim=-1)  # [B, N]
+        encoding_count = encoding_valid.sum(dim=1).clamp_min(1).unsqueeze(-1)
+        encoding_pooled = (encoding * encoding_valid.unsqueeze(-1)).sum(dim=1) / encoding_count
 
         # Dispatch to training or inference
         if self.training:
