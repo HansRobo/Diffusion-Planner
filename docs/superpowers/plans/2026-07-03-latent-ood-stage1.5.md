@@ -19,8 +19,14 @@
 - ROS2 scripts require `source external/pilot-auto.x2/install/setup.bash` (from the risk-scene repo, not `/opt/ros/humble`).
 - Branch: `feat/latent-ood-stage1` in Diffusion-Planner repo.
 - NEVER commit directly to `tier4-main`.
-- Override bags: 74 total (15 takanawa + 59 odaiba), **not** 174.
-- Bags use different map versions per area/date. Takanawa bags use map v23, odaiba bags use v531/v532. Each version needs its own extracted `.osm` map.
+- Override bags: 75 total (15 takanawa + 60 odaiba), **not** 174.
+- Bags use 5 distinct map versions. Each needs its own extracted `.osm` map:
+  - takanawa v23: 15 bags
+  - odaiba v521: 21 bags
+  - odaiba v531: 9 bags
+  - odaiba v532: 26 bags
+  - odaiba v544: 4 bags
+- Version-to-bag mapping saved at `data/bag_map_versions.json`.
 - Takanawa v23 map already exists: `/home/chenglin/autoware_map/takanawa/lanelet2_map_v23.osm`.
 - EPDMS CSV: `/home/chenglin/workspace/at-team-tools/lin/diffusion-planner-risk-scene/results/analysis/samples_epdms_all.csv` (86,463 frames, 157 bags). Only 68 of these overlap with bags on NAS.
 - Override transitions: `/home/chenglin/workspace/at-team-tools/lin/diffusion-planner-risk-scene/results/override_transitions.json` (98 OR events).
