@@ -112,7 +112,7 @@ def extract_session_from_normal_path(npz_path: str) -> str:
     parts = Path(npz_path).parts
     # Find 'train' in the path, session is train/<date>/<time>
     for i, part in enumerate(parts):
-        if part == "train" and i + 2 < len(parts):
+        if part in ("train", "valid") and i + 2 < len(parts):
             return f"normal_{parts[i+1]}_{parts[i+2]}"
     # Fallback: use parent directory name
     return f"normal_{Path(npz_path).parent.name}"
