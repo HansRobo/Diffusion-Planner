@@ -7,6 +7,7 @@ TRAIN_LIST=${TRAIN_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260623_fu
 VALID_LIST=${VALID_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_valid_sft.json}
 NORMALIZATION=${NORMALIZATION:-/mnt/nvme/Diffusion-Planner-dfp/normalization_33d.json}
 PORT=${PORT:-22461}
+PYTHON=${PYTHON:-/mnt/nvme/Diffusion-Planner-dfp/.venv/bin/python}
 TMPDIR=${TMPDIR:-/mnt/nvme/Diffusion-Planner-all-quality-fixes/tmp}
 XDG_CACHE_HOME=${XDG_CACHE_HOME:-/mnt/nvme/Diffusion-Planner-all-quality-fixes/cache}
 WANDB_CACHE_DIR=${WANDB_CACHE_DIR:-/mnt/nvme/Diffusion-Planner-dfp/wandb_cache}
@@ -24,12 +25,13 @@ export WANDB_PROJECT=Diffusion-Planner-Temporal
 export NCCL_IB_DISABLE=1
 export NCCL_P2P_LEVEL=NVL
 export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export OMP_NUM_THREADS=8
 export PYTHONPATH=/mnt/nvme/Diffusion-Planner-all-quality-fixes/diffusion_planner:${PYTHONPATH:-}
 
 cd /mnt/nvme/Diffusion-Planner-all-quality-fixes/diffusion_planner
 
-exec /mnt/nvme/Diffusion-Planner-all-quality-fixes/.venv/bin/python -m torch.distributed.run \
+exec "${PYTHON}" -m torch.distributed.run \
   --nproc_per_node=8 \
   --master_port="${PORT}" \
   train_predictor.py \
