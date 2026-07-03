@@ -1,8 +1,14 @@
-"""This script performs recursive glob *.npz files and creates a train set path file."""
+"""This script performs recursive glob *.npz files and creates a train set path file.
+
+Frames whose sibling ``<stem>.json`` sidecar marks ``is_skipped=true`` are excluded (they
+exist only for the closed-loop reproducer's gap-free timeline, not as valid supervision).
+"""
 
 import argparse
 import json
 from pathlib import Path
+
+from diffusion_planner.utils.scene_skip import filter_scene_list
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,7 +39,14 @@ if __name__ == "__main__":
         print(f"Found {len(npz_files)} npz files in {root_dir}.")
         log.write(f"Found {len(npz_files)} npz files in {root_dir}.\n")
 
-        all_list.extend(npz_files)
+        # Drop frames whose sibling <stem>.json marks is_skipped=true.
+        kept = filter_scene_list([str(npz_file) for npz_file in npz_files], label=str(root_dir))
+        log.write(
+            f"Kept {len(kept)}/{len(npz_files)} after is_skipped filter in {root_dir} "
+            f"(dropped {len(npz_files) - len(kept)}).\n"
+        )
+
+        all_list.extend(kept)
 
     print(f"Found {len(all_list)} npz files in total.")
     log.write(f"Found {len(all_list)} npz files in total.\n")
