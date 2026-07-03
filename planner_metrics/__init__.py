@@ -1,11 +1,6 @@
-from planner_metrics.aggregate import compute_planning_metrics  # noqa: F401
-from planner_metrics.config import MetricConfig, default_metric_config  # noqa: F401
-from planner_metrics.subscores import (  # noqa: F401
-    compute_comfort_metrics,
-    compute_collision_score,
-    compute_progress_metrics,
-    compute_score,
-)
+"""Planner metric helpers."""
+
+__all__ = ["pdms_proxy", "pdms_proxy_masked"]
 
 
 def __getattr__(name):
