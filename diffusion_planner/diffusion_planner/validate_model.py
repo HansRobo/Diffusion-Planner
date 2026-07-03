@@ -26,6 +26,7 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.masks import pose_padding_mask
 
 EPDMS_DT = 0.1
 
@@ -259,9 +260,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         ego_future = inputs["ego_agent_future"]
         ego_future = heading_to_cos_sin(ego_future)  # (B, T, 4)
         neighbors_future = inputs["neighbor_agents_future"]
-        neighbor_future_mask = (
-            torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
-        )  # (B, Pn, T)
+        neighbor_future_mask = pose_padding_mask(neighbors_future)  # (B, Pn, T)
         neighbors_future = heading_to_cos_sin(neighbors_future)  # (B, Pn, T, 4)
         neighbors_future[neighbor_future_mask] = 0.0
 

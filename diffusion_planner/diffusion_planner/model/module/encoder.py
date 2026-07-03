@@ -6,6 +6,7 @@ from timm.models.layers import Mlp
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.module.mixer import MixerBlock
+from diffusion_planner.utils.masks import neighbor_past_padding_mask
 
 CLASS_TYPE_EGO = 0
 CLASS_TYPE_NEIGHBOR = 1
@@ -447,11 +448,10 @@ class NeighborEncoder(nn.Module):
         pos = add_class_type(pos, CLASS_TYPE_NEIGHBOR)
 
         B, P, V, _ = x.shape
-        mask_v = torch.sum(torch.ne(x[..., :8], 0), dim=-1).to(x.device) == 0
+        mask_v = neighbor_past_padding_mask(x).to(x.device)
         mask_p = torch.sum(~mask_v, dim=-1) == 0
         x = torch.cat([x, (~mask_v).float().unsqueeze(-1)], dim=-1)
         x = x.view(B * P, V, -1)
-        x = torch.cat([x[..., :4], torch.zeros_like(x[..., 4:6]), x[..., 6:]], dim=-1)
 
         valid_indices = ~mask_p.view(-1)
         x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))

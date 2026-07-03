@@ -31,12 +31,13 @@ from diffusion_planner.grpo_utils import (
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.masks import pose_padding_mask
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
 
 
 def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
     """Convert raw neighbor future (x, y, heading) to world-frame (x, y, cos, sin) + mask."""
-    mask = torch.sum(torch.ne(neighbor_future_raw[..., :3], 0), dim=-1) == 0  # [B, Pn, T]
+    mask = pose_padding_mask(neighbor_future_raw)  # [B, Pn, T]
     neighbors_future = heading_to_cos_sin(neighbor_future_raw)  # [B, Pn, T, 4]
     neighbors_future[mask] = 0.0
     return neighbors_future, mask

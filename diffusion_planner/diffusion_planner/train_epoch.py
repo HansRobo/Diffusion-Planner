@@ -5,6 +5,7 @@ from tqdm import tqdm
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.masks import pose_padding_mask
 from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
 
 
@@ -57,7 +58,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # heading to cos sin
         ego_future = heading_to_cos_sin(ego_future)
 
-        mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
+        mask = pose_padding_mask(neighbors_future)
         neighbors_future = heading_to_cos_sin(neighbors_future)
         neighbors_future[mask] = 0.0
         inputs = args.observation_normalizer(inputs)

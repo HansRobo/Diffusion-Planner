@@ -3,6 +3,14 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from diffusion_planner.utils.masks import (
+    lane_point_padding_mask,
+    neighbor_past_padding_mask,
+    pose_padding_mask,
+    static_object_padding_mask,
+    zero_padding_mask,
+)
+
 TIME_INTERVAL = 0.1
 DENSE_SAMPLE_DS = 0.05
 
@@ -1400,7 +1408,7 @@ class StatePerturbation:
         )
 
         # ego past
-        ego_past_mask = torch.sum(torch.ne(inputs["ego_agent_past"][..., :4], 0), dim=-1) == 0
+        ego_past_mask = pose_padding_mask(inputs["ego_agent_past"])
         inputs["ego_agent_past"][..., :2] = vector_transform(
             inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
         )
@@ -1415,7 +1423,7 @@ class StatePerturbation:
         inputs["ego_agent_future"] = ego_future
 
         # neighbor past xy
-        mask = torch.sum(torch.ne(inputs["neighbor_agents_past"][..., :6], 0), dim=-1) == 0
+        mask = neighbor_past_padding_mask(inputs["neighbor_agents_past"])
         inputs["neighbor_agents_past"][..., :2] = vector_transform(
             inputs["neighbor_agents_past"][..., :2], transform_matrix, center_xy
         )
@@ -1430,7 +1438,7 @@ class StatePerturbation:
         inputs["neighbor_agents_past"][mask] = 0.0
 
         # neighbor future xy
-        mask = torch.sum(torch.ne(neighbors_future[..., :2], 0), dim=-1) == 0
+        mask = pose_padding_mask(neighbors_future)
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )
@@ -1438,7 +1446,7 @@ class StatePerturbation:
         neighbors_future[mask] = 0.0
 
         # lanes
-        mask = torch.sum(torch.ne(inputs["lanes"][..., :8], 0), dim=-1) == 0
+        mask = lane_point_padding_mask(inputs["lanes"])
         inputs["lanes"][..., :2] = vector_transform(
             inputs["lanes"][..., :2], transform_matrix, center_xy
         )
@@ -1448,7 +1456,7 @@ class StatePerturbation:
         inputs["lanes"][mask] = 0.0
 
         # route_lanes
-        mask = torch.sum(torch.ne(inputs["route_lanes"][..., :8], 0), dim=-1) == 0
+        mask = lane_point_padding_mask(inputs["route_lanes"])
         inputs["route_lanes"][..., :2] = vector_transform(
             inputs["route_lanes"][..., :2], transform_matrix, center_xy
         )
@@ -1464,21 +1472,21 @@ class StatePerturbation:
         inputs["route_lanes"][mask] = 0.0
 
         # polygons
-        mask = torch.sum(torch.ne(inputs["polygons"], 0), dim=-1) == 0
+        mask = zero_padding_mask(inputs["polygons"])
         inputs["polygons"][..., :2] = vector_transform(
             inputs["polygons"][..., :2], transform_matrix, center_xy
         )
         inputs["polygons"][mask] = 0.0
 
         # line_strings
-        mask = torch.sum(torch.ne(inputs["line_strings"], 0), dim=-1) == 0
+        mask = zero_padding_mask(inputs["line_strings"])
         inputs["line_strings"][..., :2] = vector_transform(
             inputs["line_strings"][..., :2], transform_matrix, center_xy
         )
         inputs["line_strings"][mask] = 0.0
 
         # static objects xy
-        mask = torch.sum(torch.ne(inputs["static_objects"][..., :10], 0), dim=-1) == 0
+        mask = static_object_padding_mask(inputs["static_objects"])
         inputs["static_objects"][..., :2] = vector_transform(
             inputs["static_objects"][..., :2], transform_matrix, center_xy
         )
