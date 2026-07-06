@@ -386,8 +386,14 @@ def _compute_policy_ego_loss_per_sample(
         "diffusion_time": t,
         "prefix_mask": prefix_mask,
     }
-    _, decoder_output = model(merged_inputs)
-    model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
+    # Same amp scoping as decoder.compute_training_loss: forward only, losses stay fp32.
+    with torch.autocast(
+        device_type="cuda",
+        dtype=torch.bfloat16,
+        enabled=getattr(args, "amp_dtype", "off") == "bf16",
+    ):
+        _, decoder_output = model(merged_inputs)
+    model_output = decoder_output["model_output"][:, :, 1:, :].float()  # [B, P, T, 4]
 
     pred_x_start = sde.transform(f"{model_type}->x_start", model_output, t_future, xT_future)
     supervised_prediction = sde.transform(

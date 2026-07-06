@@ -82,6 +82,9 @@ def compute_training_loss(
             "HDP velocity representation is enabled only for x_start prediction with x_start supervision."
         )
     hybrid_window = args.hybrid_loss_window
+    # bf16 autocast is scoped to the model forward ONLY: noising, SDE schedule math and
+    # every loss below stay fp32 (the diffusion-sensitive parts). Off by default.
+    use_bf16 = getattr(args, "amp_dtype", "off") == "bf16"
 
     ego_future, neighbors_future, neighbor_future_mask = futures
     neighbors_future_valid = ~neighbor_future_mask  # [B, Pn, V]
@@ -160,8 +163,10 @@ def compute_training_loss(
             "diffusion_time": t,
             "prefix_mask": prefix_mask,
         }
-        _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
-        model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
+        # .float() is a no-op when autocast is off (same tensor returned for fp32 inputs).
+        model_output = decoder_output["model_output"][:, :, 1:, :].float()  # [B, P, T, 4]
 
         gt_target = all_gt[:, :, 1:, :]  # [B, P, T, 4]
         pred_x_start = sde.transform(f"{model_type}->x_start", model_output, t_future, xT_future)
@@ -226,8 +231,9 @@ def compute_training_loss(
             "diffusion_time": t,
             "prefix_mask": prefix_mask,
         }
-        _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
-        model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
+        model_output = decoder_output["model_output"][:, :, 1:, :].float()  # [B, P, T, 4]
 
         target_v = all_gt[:, :, 1:, :] - z
         dpm_loss = torch.sum((model_output - target_v) ** 2, dim=-1)
@@ -309,7 +315,7 @@ def compute_training_loss(
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
-    turn_indicator_logit = decoder_output["turn_indicator_logit"]  # [B, TURN_INDICATOR_OUTPUT_KEEP]
+    turn_indicator_logit = decoder_output["turn_indicator_logit"].float()  # [B, TURN_INDICATOR_OUTPUT_KEEP]
     turn_indicator_gt = make_turn_indicator_gt(inputs["turn_indicators"])  # [B,]
     turn_indicator_loss = nn.functional.cross_entropy(
         turn_indicator_logit, turn_indicator_gt, reduction="none"

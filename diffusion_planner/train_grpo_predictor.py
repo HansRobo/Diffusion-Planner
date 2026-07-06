@@ -389,6 +389,13 @@ def get_args():
 
     parser.add_argument("--ddp", default=True, type=boolean)
     parser.add_argument("--port", default="22323", type=str)
+    parser.add_argument(
+        "--amp_dtype",
+        type=str,
+        choices=["off", "bf16"],
+        default=_train_config_default("amp_dtype"),
+        help="bf16 autocasts ONLY the model forward; noising/SDE/losses stay fp32",
+    )
 
     # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
     # (save_utd). Disabled unless --closed_loop_npz_root is given (dir tree of one route's NPZ).

@@ -267,6 +267,9 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
 
 
 def model_training(args: TrainConfig):
+    # Reduce CUDA allocator fragmentation for the many small per-step tensors this
+    # training loop produces. setdefault so operators can override from the launcher.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
     # init ddp
@@ -386,6 +389,8 @@ def model_training(args: TrainConfig):
             diffusion_planner,
             device_ids=[rank],
             find_unused_parameters=getattr(args, "find_unused_parameters", False),
+            gradient_as_bucket_view=True,
+            static_graph=getattr(args, "ddp_static_graph", False),
         )
 
     if args.resume_model_path is None and args.init_weights_path is not None:
@@ -416,7 +421,7 @@ def model_training(args: TrainConfig):
         }
     ]
 
-    optimizer = optim.AdamW(params)
+    optimizer = optim.AdamW(params, fused=getattr(args, "fused_optimizer", False) or None)
     scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
 
     if args.resume_model_path is not None:

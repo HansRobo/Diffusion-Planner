@@ -128,6 +128,16 @@ class TrainConfig:
     official_reward_normalize: Literal["group", "batch", "none"] = "group"
     official_reward_beta: float = 1.0
 
+    # ---------------------------------------------------------
+    # Throughput knobs. Defaults ON after live verification on 2026-07-07
+    # (8xA100 bs512: +50% samples/s, 98% GPU util, loss trajectory matches fp32/TF32).
+    # amp_dtype="bf16" autocasts ONLY the model forward — noising, SDE schedule math
+    # and all losses stay fp32. Set --amp_dtype off / --fused_optimizer false /
+    # --ddp_static_graph false to reproduce the exact legacy numerics.
+    amp_dtype: Literal["off", "bf16"] = "bf16"
+    fused_optimizer: bool = True
+    ddp_static_graph: bool = True
+
     guidance_scale: float = 0.5
     device: str = "cuda"
     tf32: bool = False

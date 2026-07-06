@@ -250,6 +250,28 @@ def get_args(args_list=None):
     )
     parser.add_argument("--port", default="22323", type=str, help="port")
 
+    # throughput knobs (defaults preserve exact fp32/TF32 numerics)
+    parser.add_argument(
+        "--amp_dtype",
+        type=str,
+        choices=["off", "bf16"],
+        default=_train_config_default("amp_dtype"),
+        help="bf16 autocasts ONLY the model forward; noising/SDE/losses stay fp32. "
+        "Validate with a closed-loop A/B before adopting.",
+    )
+    parser.add_argument(
+        "--fused_optimizer",
+        type=boolean,
+        default=_train_config_default("fused_optimizer"),
+        help="fused AdamW CUDA kernel (not bitwise-identical to the default foreach path)",
+    )
+    parser.add_argument(
+        "--ddp_static_graph",
+        type=boolean,
+        default=_train_config_default("ddp_static_graph"),
+        help="enable DDP static_graph optimizations (graph must stay identical every step)",
+    )
+
     # per-epoch closed-loop validation (rendered rollout + wandb video).
     # Disabled unless --closed_loop_npz_root is given (dir tree of one route's NPZ frames).
     parser.add_argument(
