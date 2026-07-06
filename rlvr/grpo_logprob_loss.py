@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.module.decoder import generate_prefix_mask
+from diffusion_planner.utils.hdp_compat import require_waypoint_diffusion
 
 from rlvr.vpsde_logprob import (
     compute_discount_weights,
@@ -51,6 +52,7 @@ def _build_model_inputs(
     Returns:
         Merged input dict ready for model forward pass.
     """
+    require_waypoint_diffusion(model_args, "rlvr.logprob._build_model_inputs")
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
     eps = 1e-3
@@ -165,6 +167,7 @@ def collect_logprob_rollout(
             "log_probs": [N, num_steps] per-step log-probs
             "trajectories_norm": [N, T, 4] normalized ego trajectories
     """
+    require_waypoint_diffusion(model_args, "rlvr.collect_logprob_rollout")
     sde = VPSDE_linear()
     N = trajectories.shape[0]
     P = 1 + model_args.predicted_neighbor_num
@@ -326,6 +329,7 @@ def compute_logprob_grpo_loss(
         (loss, metrics_dict) where loss is a scalar tensor and metrics_dict
         contains diagnostic values.
     """
+    require_waypoint_diffusion(model_args, "rlvr.compute_logprob_grpo_loss")
     sde = VPSDE_linear()
     chain = rollout["chain"]
     traj_norm = rollout["trajectories_norm"]

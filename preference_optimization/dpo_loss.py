@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+from diffusion_planner.utils.hdp_compat import require_waypoint_diffusion
 
 
 def compute_trajectory_loss(
@@ -34,6 +35,7 @@ def compute_trajectory_loss(
     Returns:
         MSE loss value
     """
+    require_waypoint_diffusion(model_args, "preference_optimization.compute_trajectory_loss")
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len

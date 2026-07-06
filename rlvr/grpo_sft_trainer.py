@@ -24,6 +24,7 @@ import torch
 import torch.nn.functional as F
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.module.decoder import generate_prefix_mask
+from diffusion_planner.utils.hdp_compat import require_waypoint_diffusion
 from scipy.signal import savgol_filter
 from torch import nn
 from tqdm import tqdm
@@ -191,6 +192,7 @@ def _compute_sft_diffusion_loss(
     Returns:
         (loss, metrics_dict)
     """
+    require_waypoint_diffusion(model_args, "rlvr._compute_sft_diffusion_loss")
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     Pn = P - 1
@@ -484,6 +486,7 @@ def train_epoch_ranked_sft(
     Returns:
         Dict of averaged training metrics.
     """
+    require_waypoint_diffusion(model_args, "rlvr.train_epoch_ranked_sft")
     torch.cuda.empty_cache()
     gc.collect()
 

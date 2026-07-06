@@ -35,6 +35,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from preference_optimization.dpo_loss import compute_trajectory_loss as _compute_trajectory_loss_raw
+from diffusion_planner.utils.hdp_compat import require_waypoint_diffusion
 from rlvr.grpo_config import GRPOConfig
 
 
@@ -44,6 +45,7 @@ def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, devic
     Matches SFT training in decoder.py: includes prefix mask with random delay,
     per-timestep t modulation, and clean prefix injection.
     """
+    require_waypoint_diffusion(model_args, "rlvr.compute_trajectory_loss")
     import random as _random
 
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
@@ -174,6 +176,7 @@ def compute_direct_best_loss(
     Returns:
         (loss, metrics_dict)
     """
+    require_waypoint_diffusion(model_args, "rlvr.compute_direct_best_loss")
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
@@ -276,6 +279,7 @@ def compute_batched_trajectory_losses(
     Returns:
         [N] tensor of per-trajectory MSE losses.
     """
+    require_waypoint_diffusion(model_args, "rlvr.compute_batched_trajectory_losses")
     import random as _random
 
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
@@ -572,6 +576,7 @@ def _compute_neighbor_reg_loss(
     When B>1 (batched trainers expand per-scene data), uses only the first
     element since all B entries come from the same scene.
     """
+    require_waypoint_diffusion(model_args, "rlvr._compute_neighbor_reg_loss")
     import random as _random
 
     from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
@@ -717,6 +722,7 @@ def compute_batched_grpo_loss(
     Returns:
         (loss, metrics_dict)
     """
+    require_waypoint_diffusion(model_args, "rlvr.compute_batched_grpo_loss")
     N = trajectories_tensor.shape[0]
     if N == 0:
         zero = torch.tensor(0.0, device=device, requires_grad=True)
@@ -815,6 +821,7 @@ def compute_log_probs(
         - noise: (B, P, T, 4) shared noise sample.
         - t: (B,) diffusion timestep.
     """
+    require_waypoint_diffusion(model_args, "rlvr.compute_log_probs")
     N = len(trajectories)
     B = data["ego_current_state"].shape[0]
     P = 1 + model_args.predicted_neighbor_num
@@ -890,6 +897,7 @@ def compute_grpo_loss(
     Returns:
         (loss, metrics_dict)
     """
+    require_waypoint_diffusion(model_args, "rlvr.compute_grpo_loss")
     N = len(trajectories)
     if N == 0:
         zero = torch.tensor(0.0, device=device, requires_grad=True)

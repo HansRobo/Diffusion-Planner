@@ -26,6 +26,7 @@ if str(parent_dir) not in sys.path:
 
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.utils.hdp_compat import require_waypoint_diffusion
 from torch import optim
 from torch.utils.data import DataLoader
 
@@ -537,6 +538,7 @@ def main():
 
     # Load model
     policy_model, model_args = load_model(checkpoint_path, DEVICE)
+    require_waypoint_diffusion(model_args, "preference_optimization.train_dpo")
 
     # Apply LoRA before creating the optimizer so the optimizer captures only the
     # trainable LoRA parameters (A and B matrices), not the frozen base weights.

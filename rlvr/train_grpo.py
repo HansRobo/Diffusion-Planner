@@ -41,6 +41,7 @@ from pathlib import Path
 import torch
 from torch import optim
 
+from diffusion_planner.utils.hdp_compat import require_waypoint_diffusion
 from preference_optimization.model_utils import load_model
 from rlvr.grpo_config import GRPOConfig
 from rlvr.grpo_trainer import GRPOTrainer
@@ -132,6 +133,7 @@ def main():
 
     # Load model
     policy_model, model_args = load_model(checkpoint_path, DEVICE)
+    require_waypoint_diffusion(model_args, "rlvr.train_grpo")
 
     # Apply LoRA
     if config.use_lora:
