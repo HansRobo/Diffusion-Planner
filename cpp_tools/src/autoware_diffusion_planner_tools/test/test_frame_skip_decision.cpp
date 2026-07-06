@@ -45,7 +45,6 @@ FrameSkipInputs make_clear_inputs()
   in.cov_xx = 0.0;
   in.cov_yy = 0.0;
   in.is_stop = false;
-  in.is_red_light_run = false;
   in.is_red_or_yellow = false;
   in.is_future_forward = true;
   in.stopping_count = 0;
@@ -206,7 +205,6 @@ TEST(DecideFrameSkipTest, RedOrYellowLightSkip)
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = true;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
@@ -229,7 +227,6 @@ TEST(DecideFrameSkipTest, AcceleratingIntoRedLightSkipsEvenWhenMoving)
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = false;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
@@ -251,7 +248,6 @@ TEST(DecideFrameSkipTest, StoppedThenAcceleratingKeepsRedOrYellowLabel)
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = true;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
@@ -274,7 +270,6 @@ TEST(DecideFrameSkipTest, CreepingIntoRedWhileMovingIsKept)
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = false;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
@@ -320,7 +315,6 @@ TEST(DecideFrameSkipTest, StaleDataWinsOverRedLight)
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.max_msg_age_ns = 600'000'000LL;
   inputs.is_stop = true;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
@@ -352,7 +346,6 @@ TEST(DecideFrameSkipTest, PerpendicularRedLaneDoesNotCauseFalsePositive)
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = true;
-  inputs.is_red_light_run = true;
   inputs.is_red_or_yellow = true;
   inputs.is_future_forward = true;
 
