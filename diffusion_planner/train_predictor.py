@@ -225,12 +225,6 @@ def get_args(args_list=None):
         help="frames per segment; large => one route = one segment = one trial",
     )
     parser.add_argument(
-        "--closed_loop_replan_interval",
-        type=int,
-        default=40,
-        help="re-plan every N steps; 1 = forward every step (slow, ~minutes/epoch). 40 default",
-    )
-    parser.add_argument(
         "--closed_loop_draw_every",
         type=int,
         default=4,
@@ -256,12 +250,6 @@ def get_args(args_list=None):
         help="e.g. x2_dev/2231_odaiba_shinagawa_copied_from_xx1 for auto JSON lookup under "
         "SCENARIO_CLASSIFICATION_JSON_ROOT or ../Diffusion-Planner-Meta-Repository/dataset/"
         "scenario_classification_json/",
-    )
-    parser.add_argument(
-        "--closed_loop_grouped_wandb_max_videos",
-        type=int,
-        default=_train_config_default("closed_loop_grouped_wandb_max_videos"),
-        help="cap grouped episode videos uploaded to wandb per checkpoint save",
     )
 
     args = parser.parse_args(args_list)

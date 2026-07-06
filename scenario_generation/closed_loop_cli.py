@@ -77,12 +77,6 @@ def add_rollout_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--fps", type=int, default=10, help="output video frame rate")
     parser.add_argument(
-        "--replan_interval",
-        type=int,
-        default=40,
-        help="re-run model every N sim steps (ego still steps at 10 Hz)",
-    )
-    parser.add_argument(
         "--draw_every",
         type=int,
         default=8,
@@ -162,7 +156,6 @@ def run_full_route_eval(args: argparse.Namespace) -> dict:
         unstick_radius_mult=args.unstick_radius_mult,
         unstick_teleport_after=args.unstick_teleport_after,
         fps=args.fps,
-        replan_interval=args.replan_interval,
         draw_every=args.draw_every,
         neighbor_history_mode="recorded",
         verbose=True,
@@ -188,7 +181,6 @@ def run_grouped_eval(args: argparse.Namespace) -> int:
         warmup_steps=args.warmup_steps,
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,
-        replan_interval=args.replan_interval,
         draw_every=args.draw_every,
         fps=args.fps,
         areas=args.areas,

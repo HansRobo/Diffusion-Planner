@@ -141,15 +141,11 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
                 warmup_steps=args.closed_loop_warmup_steps,
                 unstick_after=args.closed_loop_unstick_after,
                 unstick_advance_m=args.closed_loop_unstick_advance_m,
-                replan_interval=args.closed_loop_replan_interval,
                 draw_every=args.closed_loop_draw_every,
                 fps=float(args.closed_loop_fps),
                 verbose=False,
             )
-            log = build_grouped_closed_loop_wandb_log(
-                summary,
-                max_videos=args.closed_loop_grouped_wandb_max_videos,
-            )
+            log = build_grouped_closed_loop_wandb_log(summary)
             print(
                 f"grouped closed-loop @epoch {epoch + 1}: {summary['n_episodes']} episodes, "
                 f"{summary['n_bags']} bags in {summary['elapsed_sec']:.1f}s "
@@ -171,7 +167,6 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
                 unstick_after=args.closed_loop_unstick_after,
                 unstick_advance_m=args.closed_loop_unstick_advance_m,
                 fps=args.closed_loop_fps,
-                replan_interval=args.closed_loop_replan_interval,
                 draw_every=args.closed_loop_draw_every,
                 neighbor_history_mode="recorded",
                 verbose=False,

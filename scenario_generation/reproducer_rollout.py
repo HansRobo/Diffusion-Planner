@@ -1294,10 +1294,8 @@ def render_segment(
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
-    ``replan_interval``: re-run the model every N steps (1 = every step). Between inferences the
-    cached plan keeps being executed — pinned in the world frame and re-expressed in the current
-    ego frame each step (``_world_plan_to_ego``), so the ego advances along the trajectory. The
-    ego still single-steps at 10 Hz; only the model call is throttled.
+    ``replan_interval``: accepted for call-site compatibility; closed-loop always re-runs the
+    model every sim step (equivalent to ``replan_interval=1``). Cached-plan override is not used.
 
     ``draw_every``: write a PNG only every N steps (1 = every step). The rollout still single-steps
     at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
@@ -1351,7 +1349,6 @@ def render_segment(
         if interpolate and neighbor_history_mode != "sim"
         else {}
     )
-    plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
     # goal is the recorded GT end pose `poses[end-1]`, which a diverging closed-loop ego may never
@@ -1412,40 +1409,10 @@ def render_segment(
             )
             + "\n"
         )
-        # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
-        # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
-        # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
-        # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
-        # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
-        # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
-        offset = k % replan_interval
-        override = None
-        if plan_world is None or offset == 0:
-            data = _to_torch_batch([np_dict], model_args, device)
-            _, outputs = model(data)
-            pred = outputs["prediction"][0, 0].cpu().numpy()
-            plan_world = _ego_pred_to_world(
-                pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
-            )
-            pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
-            _feed_turn_indicator(s, outputs)
-        else:
-            # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
-            off = min(offset, len(plan_world[0]) - 1)
-            tx, ty, th = (
-                float(plan_world[0][off, 0]),
-                float(plan_world[0][off, 1]),
-                float(plan_world[1][off]),
-            )
-            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-            override = (np.array([tx, ty, th], dtype=np.float64), spd)
-            pred_cur = _world_plan_to_ego(
-                plan_world[0][off:],
-                plan_world[1][off:],
-                s.live_pose[0],
-                s.live_pose[1],
-                s.live_pose[2],
-            )
+        data = _to_torch_batch([np_dict], model_args, device)
+        _, outputs = model(data)
+        pred_cur = outputs["prediction"][0, 0].cpu().numpy()
+        _feed_turn_indicator(s, outputs)
         nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
@@ -1463,13 +1430,7 @@ def render_segment(
                 view_half_m=view_half_m,
             )
         _score_into(s, neighbors_live, device, timers)
-        snaps_before = s.n_snaps
-        _advance_step(s, pred_cur, idx, device, timers, override=override)
-        if s.n_snaps > snaps_before:
-            # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
-            # world location, so executing it next step would drag the ego right back. Invalidate
-            # it to force a fresh inference at the snapped pose (else the snap never sticks).
-            plan_world = None
+        _advance_step(s, pred_cur, idx, device, timers)
     dbg.close()
     return _finalize(s, timers).metrics
 

@@ -27,11 +27,7 @@ RESULTS_TABLE_COLUMNS = [
 ]
 
 
-def build_grouped_closed_loop_wandb_log(
-    summary: dict,
-    *,
-    max_videos: int = 24,
-) -> dict:
+def build_grouped_closed_loop_wandb_log(summary: dict) -> dict:
     """Scalars, per-area/per-group aggregates, results table, and episode videos."""
     log: dict = {"closed_loop/mode": "grouped"}
     log["closed_loop/grouped/n_episodes"] = int(summary.get("n_episodes", 0))
@@ -59,17 +55,12 @@ def build_grouped_closed_loop_wandb_log(
         extra = [c for c in df.columns if c not in cols and c != "labeled_ranges"]
         log["closed_loop/grouped/results_table"] = wandb.Table(dataframe=df[cols + extra])
 
-    for i, mp4 in enumerate(summary.get("video_mp4s") or []):
-        if i >= max_videos:
-            break
+    video_mp4s = summary.get("video_mp4s") or []
+    log["closed_loop/grouped/n_videos"] = len(video_mp4s)
+    for mp4 in video_mp4s:
         mp4_path = Path(mp4)
         key = _video_wandb_key(mp4_path)
         log[key] = wandb.Video(str(mp4_path), format="mp4")
-
-    if len(summary.get("video_mp4s") or []) > max_videos:
-        log["closed_loop/grouped/videos_truncated"] = True
-        log["closed_loop/grouped/videos_logged"] = max_videos
-        log["closed_loop/grouped/videos_total"] = len(summary["video_mp4s"])
 
     return log
 

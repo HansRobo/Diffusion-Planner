@@ -12,7 +12,6 @@ from scenario_generation.metrics.safety_clearance import score_safety_step
 from scenario_generation.metrics.turn_indicator import score_turn_indicator_step
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import (
-    DT,
     _advance_step,
     _pre_step,
     _seed_state,
@@ -50,7 +49,6 @@ def run_segment_instrumented(
     near_miss_thresh: float = 0.3,
     search_radius: float = 1.5,
     warmup_steps: int = 0,
-    replan_interval: int = 40,
 ) -> InstrumentedSegmentResult:
     """Closed-loop segment with per-step metrics for scenario-group evaluation."""
     cap = max(3 * (end - start), end - start)
@@ -75,46 +73,18 @@ def run_segment_instrumented(
     rb_viol: list[bool] = []
     clearances: list[float] = []
     collisions: list[bool] = []
-    plan_world = None
 
     while not s.done:
         pre = _pre_step(s)
         if pre is None:
             break
         np_dict, neighbors_live, idx, _slot_uuids, _wbu = pre
-        offset = s.k % replan_interval
-        override = None
-        if plan_world is None or offset == 0:
-            data = _to_torch_batch([np_dict], model_args, device)
-            _, outputs = model(data)
-            pred = outputs["prediction"][0, 0].cpu().numpy()
-            from scenario_generation.reproducer_rollout import _ego_pred_to_world
-
-            plan_world = _ego_pred_to_world(
-                pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
-            )
-            pred_cur = pred
-            ti = score_turn_indicator_step(outputs, metric_group)
-            if ti["turn_match"] is not None:
-                turn_matches.append(bool(ti["turn_match"]))
-        else:
-            from scenario_generation.reproducer_rollout import _world_plan_to_ego
-
-            off = min(offset, len(plan_world[0]) - 1)
-            tx, ty, th = (
-                float(plan_world[0][off, 0]),
-                float(plan_world[0][off, 1]),
-                float(plan_world[1][off]),
-            )
-            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-            override = (np.array([tx, ty, th], dtype=np.float64), spd)
-            pred_cur = _world_plan_to_ego(
-                plan_world[0][off:],
-                plan_world[1][off:],
-                s.live_pose[0],
-                s.live_pose[1],
-                s.live_pose[2],
-            )
+        data = _to_torch_batch([np_dict], model_args, device)
+        _, outputs = model(data)
+        pred_cur = outputs["prediction"][0, 0].cpu().numpy()
+        ti = score_turn_indicator_step(outputs, metric_group)
+        if ti["turn_match"] is not None:
+            turn_matches.append(bool(ti["turn_match"]))
 
         if metric_group in ("straight", "curve"):
             centerline.append(lateral_offset_from_route_lanes(np_dict["route_lanes"]))
@@ -131,9 +101,7 @@ def run_segment_instrumented(
         neighbor_viol.append(bool(safety["neighbor_violation"]))
         rb_viol.append(bool(safety["rb_violation"]))
 
-        _advance_step(s, pred_cur, idx, device, timers, override=override)
-        if s.n_snaps > 0 and override is not None:
-            plan_world = None
+        _advance_step(s, pred_cur, idx, device, timers)
 
     cl_arr = np.array(centerline, dtype=np.float32)
     tm_arr = np.array(turn_matches, dtype=bool)

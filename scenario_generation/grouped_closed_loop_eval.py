@@ -46,7 +46,6 @@ def run_grouped_closed_loop_eval(
     warmup_steps: int = 0,
     unstick_after: int = 300,
     unstick_advance_m: float = 2.5,
-    replan_interval: int = 40,
     draw_every: int = 8,
     fps: float = 10.0,
     areas: list[str] | None = None,
@@ -118,7 +117,6 @@ def run_grouped_closed_loop_eval(
             warmup_steps=warmup_steps,
             unstick_after=unstick_after,
             unstick_advance_m=unstick_advance_m,
-            replan_interval=replan_interval,
             draw_every=draw_every,
         )
         rollouts[bag_name] = rollout

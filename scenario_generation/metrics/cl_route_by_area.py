@@ -16,7 +16,6 @@ from scenario_generation.metrics.safety_clearance import score_safety_step
 from scenario_generation.metrics.turn_indicator import score_turn_indicator_step
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import (
-    DT,
     _advance_step,
     _draw_step,
     _pre_step,
@@ -75,7 +74,6 @@ def run_full_route_rollout(
     warmup_steps: int = 0,
     unstick_after: int = 300,
     unstick_advance_m: float = 2.5,
-    replan_interval: int = 40,
     draw_every: int = 8,
 ) -> RouteRolloutResult:
     """One closed-loop pass over the entire route; tag each step by reproducer ``rec_idx`` area."""
@@ -106,7 +104,6 @@ def run_full_route_rollout(
     )
 
     steps: list[StepRecord] = []
-    plan_world = None
 
     while not s.done:
         pre = _pre_step(s)
@@ -116,41 +113,14 @@ def run_full_route_rollout(
         area = area_at_idx(segments, int(idx))
         metric_group = area_to_metric_group.get(area) if area else None
 
-        offset = s.k % replan_interval
-        override = None
         turn_match = None
-        if plan_world is None or offset == 0:
-            data = _to_torch_batch([np_dict], model_args, device)
-            _, outputs = model(data)
-            pred = outputs["prediction"][0, 0].cpu().numpy()
-            from scenario_generation.reproducer_rollout import _ego_pred_to_world
-
-            plan_world = _ego_pred_to_world(
-                pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
-            )
-            pred_cur = pred
-            if metric_group is not None:
-                ti = score_turn_indicator_step(outputs, metric_group)
-                if ti["turn_match"] is not None:
-                    turn_match = bool(ti["turn_match"])
-        else:
-            from scenario_generation.reproducer_rollout import _world_plan_to_ego
-
-            off = min(offset, len(plan_world[0]) - 1)
-            tx, ty, th = (
-                float(plan_world[0][off, 0]),
-                float(plan_world[0][off, 1]),
-                float(plan_world[1][off]),
-            )
-            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-            override = (np.array([tx, ty, th], dtype=np.float64), spd)
-            pred_cur = _world_plan_to_ego(
-                plan_world[0][off:],
-                plan_world[1][off:],
-                s.live_pose[0],
-                s.live_pose[1],
-                s.live_pose[2],
-            )
+        data = _to_torch_batch([np_dict], model_args, device)
+        _, outputs = model(data)
+        pred_cur = outputs["prediction"][0, 0].cpu().numpy()
+        if metric_group is not None:
+            ti = score_turn_indicator_step(outputs, metric_group)
+            if ti["turn_match"] is not None:
+                turn_match = bool(ti["turn_match"])
 
         centerline_m = None
         if metric_group in ("straight", "curve"):
@@ -194,9 +164,7 @@ def run_full_route_rollout(
             )
         )
 
-        _advance_step(s, pred_cur, idx, device, timers, override=override)
-        if s.n_snaps > 0 and override is not None:
-            plan_world = None
+        _advance_step(s, pred_cur, idx, device, timers)
 
     return RouteRolloutResult(
         route_key=route_key,
