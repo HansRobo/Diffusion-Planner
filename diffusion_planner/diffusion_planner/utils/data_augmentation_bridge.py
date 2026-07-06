@@ -1044,13 +1044,39 @@ class StatePerturbation:
         self.dense_sample_ds = dense_sample_ds
 
     def __call__(self, inputs, ego_future, neighbors_future):
-        aug_flag, aug_current_state, aug_ego_past, aug_ego_future = self.augment(inputs, ego_future)
+        future_is_cos_sin = ego_future.shape[-1] == 4
+        if future_is_cos_sin:
+            ego_future_work = torch.cat(
+                [
+                    ego_future[..., :2],
+                    torch.atan2(ego_future[..., 3], ego_future[..., 2]).unsqueeze(-1),
+                ],
+                dim=-1,
+            )
+        else:
+            ego_future_work = ego_future
+
+        aug_flag, aug_current_state, aug_ego_past, aug_ego_future = self.augment(inputs, ego_future_work)
 
         inputs["ego_current_state"][aug_flag] = aug_current_state[aug_flag]
         inputs["ego_agent_past"][aug_flag] = aug_ego_past[aug_flag]
-        ego_future[aug_flag] = aug_ego_future[aug_flag]
+        ego_future_work[aug_flag] = aug_ego_future[aug_flag]
 
-        return self.centric_transform(inputs, ego_future, neighbors_future)
+        inputs, ego_future_work, neighbors_future = self.centric_transform(
+            inputs, ego_future_work, neighbors_future
+        )
+        if future_is_cos_sin:
+            ego_future = torch.cat(
+                [
+                    ego_future_work[..., :2],
+                    torch.cos(ego_future_work[..., 2:3]),
+                    torch.sin(ego_future_work[..., 2:3]),
+                ],
+                dim=-1,
+            )
+            inputs["ego_agent_future"] = ego_future
+            return inputs, ego_future, neighbors_future
+        return inputs, ego_future_work, neighbors_future
 
     def normalize_angle(self, angle: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
         return (angle + np.pi) % (2 * np.pi) - np.pi
@@ -1442,7 +1468,12 @@ class StatePerturbation:
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )
-        neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
+        if neighbors_future.shape[-1] == 3:
+            neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
+        else:
+            neighbors_future[..., 2:4] = vector_transform(
+                neighbors_future[..., 2:4], transform_matrix
+            )
         neighbors_future[mask] = 0.0
 
         # lanes
@@ -1495,5 +1526,20 @@ class StatePerturbation:
             inputs["static_objects"][..., 2:4], transform_matrix
         )
         inputs["static_objects"][mask] = 0.0
+
+        if "goal_pose" in inputs:
+            goal_mask = torch.sum(torch.ne(inputs["goal_pose"], 0), dim=-1) == 0
+            inputs["goal_pose"][..., :2] = vector_transform(
+                inputs["goal_pose"][..., :2], transform_matrix, center_xy
+            )
+            if inputs["goal_pose"].shape[-1] == 3:
+                inputs["goal_pose"][..., 2] = heading_transform(
+                    inputs["goal_pose"][..., 2], transform_matrix
+                )
+            else:
+                inputs["goal_pose"][..., 2:4] = vector_transform(
+                    inputs["goal_pose"][..., 2:4], transform_matrix
+                )
+            inputs["goal_pose"][goal_mask] = 0.0
 
         return inputs, ego_future, neighbors_future
