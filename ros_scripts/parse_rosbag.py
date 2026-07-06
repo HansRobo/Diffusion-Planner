@@ -162,7 +162,7 @@ def create_ego_sequence_interp(
     first_sec = _stamp_to_sec(odoms[0].header.stamp)
     last_sec = _stamp_to_sec(odoms[-1].header.stamp)
 
-    out = np.zeros((num_timesteps, 3), dtype=np.float64)
+    out = np.zeros((num_timesteps, 3), dtype=np.float32)
     search_start = 0
     for t in range(num_timesteps):
         # t=0 is the oldest, t=num_timesteps-1 is the reference time.
@@ -382,8 +382,10 @@ def build_neighbor_future(data_list, i, map2bl_matrix_4x4, agent_ids, max_num_ob
         seed_obj = current_objs.get(oid)
         if seed_obj is None:
             continue
+        # NOTE: do NOT seed the deque with the current-frame state. Futures must start at
+        # t+0.1s (matching the ego future); seeding shifted every short-tracked neighbor's
+        # GT one step late (future[0] == past[-1]). Mirrors the C++ neighbor_processor fix.
         dq = deque(maxlen=out_t)
-        dq.append(_agent_state_from_object(seed_obj))
         for fmap in future_maps:
             if fmap is None:
                 break
@@ -874,9 +876,9 @@ def main(
 
             curr_data = {
                 "version": 2,
-                "ego_agent_past": ego_past_np,
+                "ego_agent_past": np.asarray(ego_past_np, dtype=np.float32),
                 "ego_current_state": ego_tensor.numpy(),
-                "ego_agent_future": ego_future_np,
+                "ego_agent_future": np.asarray(ego_future_np, dtype=np.float32),
                 "neighbor_agents_past": neighbor_past_tensor.numpy(),
                 "neighbor_agents_future": neighbor_future_tensor.numpy(),
                 "static_objects": np.zeros((5, 10), dtype=np.float32),

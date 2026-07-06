@@ -158,9 +158,6 @@ NeighborResult process_neighbor_agents_and_future(
   for (size_t i = 0; i < agent_histories.size(); ++i) {
     const auto object_id = agent_histories[i].get_latest_state().object_id;
     id_to_history.emplace(object_id, AgentHistory(OUTPUT_T));
-    id_to_history.at(object_id).update(
-      agent_histories[i].get_latest_state().original_info,
-      agent_histories[i].get_latest_state().timestamp);
   }
 
   // Future data: use AgentHistory for each agent
