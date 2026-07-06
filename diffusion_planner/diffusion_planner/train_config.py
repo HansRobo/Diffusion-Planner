@@ -1,3 +1,4 @@
+import ast
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -84,7 +85,11 @@ class TrainConfig:
     coeff_position_lat_loss: float = 1.0
     coeff_position_lon_loss: float = 1.0
     coeff_heading_l2_loss: float = 1.0
-    coeff_velocity: float = 1.0
+    # Weights PHYSICAL longitudinal speed (m/s): lon loss is divided by
+    # clamp_min(|v_mps * coeff_velocity|, 1). The default 0.05 (= 1/obs-std 20) exactly
+    # reproduces the legacy behavior where the channel was read in normalized units and
+    # the attenuation only engaged above 20 m/s; raise it to activate at lower speeds.
+    coeff_velocity: float = 0.05
     # Use default_factory for mutable default values like lists
     coeff_timestep: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 1.0])
 
@@ -111,10 +116,17 @@ class TrainConfig:
 
     # HDP ego velocity representation & hybrid loss
     use_velocity_representation: bool = False
-    hybrid_loss_omega: float = 0.01
+    planning_hybrid_loss: float = 0.01
     hybrid_loss_window: int = 10
-    ego_velocity_mean: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
-    ego_velocity_std: list[float] = field(default_factory=lambda: [0.5, 0.5, 1.0, 1.0])
+    diffusion_supervision_type: Literal["x_start", "noise", "score", "v"] = "x_start"
+    diffusion_time_sample_method: Literal["uniform"] = "uniform"
+    diffusion_sample_steps: int = 10
+
+    # HDP RL objective. Keep GRPO as the safe default so existing GRPO launchers
+    # do not silently switch objective; official_reward_weighted is opt-in.
+    rl_objective: Literal["grpo", "official_reward_weighted"] = "grpo"
+    official_reward_normalize: Literal["group", "batch", "none"] = "group"
+    official_reward_beta: float = 1.0
 
     guidance_scale: float = 0.5
     device: str = "cuda"
@@ -129,9 +141,10 @@ class TrainConfig:
     decoder_depth: int = 3
     num_heads: int = 8
     hidden_dim: int = 256
-    diffusion_model_type: Literal["x_start", "flow_matching"] = "x_start"
+    diffusion_model_type: Literal["x_start", "noise", "score", "v", "flow_matching"] = "x_start"
     predicted_neighbor_num: int = MAX_NUM_NEIGHBORS
     resume_model_path: Optional[str] = None
+    init_weights_path: Optional[str] = None
 
     # ---------------------------------------------------------
     # Logging & Distributed Setup
@@ -139,8 +152,10 @@ class TrainConfig:
     use_wandb: bool = False
     wandb_run_id: Optional[str] = None
     wandb_project_name: str = "Diffusion-Planner"
+    wandb_step_log_interval: int = 0
     notes: str = ""
     ddp: bool = True
+    find_unused_parameters: bool = False
     port: str = "22323"
 
     # ---------------------------------------------------------
@@ -166,3 +181,18 @@ class TrainConfig:
     # ---------------------------------------------------------
     state_normalizer: Optional[StateNormalizer] = None
     observation_normalizer: Optional[ObservationNormalizer] = None
+
+
+def parse_float_list(value) -> list[float]:
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        text = str(value).strip()
+        if text.startswith("["):
+            items = ast.literal_eval(text)
+        else:
+            items = text.replace(",", " ").split()
+    parsed = [float(item) for item in items]
+    if len(parsed) != 4:
+        raise ValueError("coeff_timestep must contain exactly 4 values")
+    return parsed

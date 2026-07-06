@@ -18,7 +18,7 @@ import wandb
 from diffusion_planner.dimensions import *
 from diffusion_planner.grpo_epoch import train_grpo_epoch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train import closed_loop_validate
+from diffusion_planner.train import assert_checkpoint_compatible, closed_loop_validate
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
@@ -37,6 +37,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from valid_predictor import aggregate_valid_metrics, validate_model
 
+from diffusion_planner.train_config import TrainConfig, parse_float_list
+
 
 def boolean(v):
     if isinstance(v, bool):
@@ -47,6 +49,10 @@ def boolean(v):
         return False
     else:
         raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def _train_config_default(name):
+    return TrainConfig.__dataclass_fields__[name].default
 
 
 def get_args():
@@ -179,6 +185,26 @@ def get_args():
         help="probability of running a normal supervised step instead of a "
         "GRPO step on a given batch (0 = pure GRPO, 1 = pure supervised)",
     )
+    parser.add_argument(
+        "--rl_objective",
+        type=str,
+        choices=["grpo", "official_reward_weighted"],
+        default=_train_config_default("rl_objective"),
+        help="RL objective for non-SFT steps: GRPO advantage loss or official HDP reward-weighted loss",
+    )
+    parser.add_argument(
+        "--official_reward_normalize",
+        type=str,
+        choices=["group", "batch", "none"],
+        default=_train_config_default("official_reward_normalize"),
+        help="reward normalization before official HDP exp weighting",
+    )
+    parser.add_argument(
+        "--official_reward_beta",
+        type=float,
+        default=_train_config_default("official_reward_beta"),
+        help="temperature beta in the official HDP exp(beta * normalized_reward) weighting",
+    )
 
     # Synthetic adversarial neighbor augmentation (see utils/synthetic_neighbors.py):
     # spawn constant-acceleration neighbors that are guaranteed to collide with the ego GT
@@ -257,8 +283,13 @@ def get_args():
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
     parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
     parser.add_argument("--coeff_heading_l2_loss", type=float, default=1.0)
-    parser.add_argument("--coeff_velocity", type=float, default=1.0)
-    parser.add_argument("--coeff_timestep", type=list, default=[1.0, 1.0, 1.0, 1.0])
+    parser.add_argument(
+        "--coeff_velocity",
+        type=float,
+        default=_train_config_default("coeff_velocity"),
+        help="per-(m/s) weight for high-speed lon-loss attenuation; 0.05 = legacy behavior",
+    )
+    parser.add_argument("--coeff_timestep", type=parse_float_list, default=[1.0, 1.0, 1.0, 1.0])
 
     parser.add_argument("--coeff_road_border_loss", type=float, default=1.0)
     parser.add_argument("--road_border_margin", type=float, default=0.25)
@@ -287,11 +318,38 @@ def get_args():
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 
-    parser.add_argument("--use_velocity_representation", type=boolean, default=False)
-    parser.add_argument("--hybrid_loss_omega", type=float, default=0.01)
-    parser.add_argument("--hybrid_loss_window", type=int, default=10)
-    parser.add_argument("--ego_velocity_mean", type=float, nargs=4, default=[0.0, 0.0, 0.0, 0.0])
-    parser.add_argument("--ego_velocity_std", type=float, nargs=4, default=[0.5, 0.5, 1.0, 1.0])
+    parser.add_argument(
+        "--use_velocity_representation",
+        type=boolean,
+        default=_train_config_default("use_velocity_representation"),
+    )
+    parser.add_argument(
+        "--planning_hybrid_loss",
+        type=float,
+        default=_train_config_default("planning_hybrid_loss"),
+    )
+    parser.add_argument(
+        "--hybrid_loss_window",
+        type=int,
+        default=_train_config_default("hybrid_loss_window"),
+    )
+    parser.add_argument(
+        "--diffusion_supervision_type",
+        type=str,
+        choices=["x_start", "noise", "score", "v"],
+        default=_train_config_default("diffusion_supervision_type"),
+    )
+    parser.add_argument(
+        "--diffusion_time_sample_method",
+        type=str,
+        choices=["uniform"],
+        default="uniform",
+    )
+    parser.add_argument(
+        "--diffusion_sample_steps",
+        type=int,
+        default=_train_config_default("diffusion_sample_steps"),
+    )
 
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="cuda")
@@ -305,7 +363,10 @@ def get_args():
     parser.add_argument("--num_heads", type=int, default=8)
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument(
-        "--diffusion_model_type", type=str, choices=["x_start", "flow_matching"], default="x_start"
+        "--diffusion_model_type",
+        type=str,
+        choices=["x_start", "noise", "score", "v", "flow_matching"],
+        default="x_start",
     )
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
@@ -317,6 +378,13 @@ def get_args():
     )
 
     parser.add_argument("--use_wandb", default=True, type=boolean)
+    parser.add_argument(
+        "--wandb_project_name",
+        type=str,
+        default="Diffusion-Planner-GRPO",
+        help="Weights & Biases project name (GRPO runs keep their historical project so "
+        "dashboards and run comparisons stay separate from supervised runs)",
+    )
     parser.add_argument("--notes", default="", type=str)
 
     parser.add_argument("--ddp", default=True, type=boolean)
@@ -399,6 +467,9 @@ def model_training(args):
             json.dump(args_dict, f, indent=4)
     else:
         save_path = None
+
+    if args.resume_model_path is not None:
+        assert_checkpoint_compatible(args.resume_model_path, args)
 
     set_seed(args.seed + global_rank)
 
@@ -502,7 +573,7 @@ def model_training(args):
     if args.ddp:
         diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
 
-    model_ema = ModelEma(diffusion_planner, decay=0.999, device=args.device)
+    model_ema = ModelEma(diffusion_planner, decay=0.999, device=args.device) if args.use_ema else None
 
     if global_rank == 0:
         print(
@@ -537,7 +608,7 @@ def model_training(args):
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
         wandb.init(
-            project="Diffusion-Planner-GRPO",
+            project=args.wandb_project_name,
             name=args.exp_name,
             notes=args.notes,
             resume="allow",
@@ -572,7 +643,8 @@ def model_training(args):
             valid_loss_ego = agg["avg_loss_ego"]
             valid_neighbor_margin = agg["ego_means"]["ego_neighbor_margin_loss"]
             valid_road_border = agg["ego_means"]["ego_road_border_loss"]
-            train_reward = train_loss["reward_mean"]
+            has_reward = "reward_mean" in train_loss
+            train_reward = train_loss["reward_mean"] if has_reward else float("nan")
             print(
                 f"Epoch {epoch + 1}/{train_epochs}\n"
                 f"{train_reward=:.4f}\n"
@@ -588,13 +660,14 @@ def model_training(args):
                     "valid/ego": valid_loss_ego,
                     "valid/neighbor_margin": valid_neighbor_margin,
                     "valid/road_border": valid_road_border,
+                    "valid/epdms_total": agg["epdms_means"].get("total", 0.0),
                 },
                 step=epoch + 1,
             )
 
             curr_data = {
                 "epoch": epoch + 1,
-                "train_reward_mean": train_reward,
+                "train_reward_mean": train_reward if has_reward else None,
                 "train_loss": train_total_loss,
                 "valid_loss_ego": valid_loss_ego,
                 "valid_neighbor_margin": valid_neighbor_margin,
@@ -608,7 +681,7 @@ def model_training(args):
             model_dict = {
                 "epoch": epoch + 1,
                 "model": diffusion_planner.state_dict(),
-                "ema_state_dict": model_ema.ema.state_dict(),
+                "ema_state_dict": model_ema.ema.state_dict() if model_ema is not None else None,
                 "optimizer": optimizer.state_dict(),
                 "schedule": scheduler.state_dict(),
                 "loss": valid_loss_ego,
@@ -639,7 +712,7 @@ def model_training(args):
                     diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
                 )
 
-            if train_reward > best_reward:
+            if has_reward and train_reward > best_reward:
                 curr_dir = os.path.join(save_path, "best_model")
                 os.makedirs(curr_dir, exist_ok=True)
                 torch.save(model_dict, f"{curr_dir}/best_model.pth")

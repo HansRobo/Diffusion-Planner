@@ -25,11 +25,12 @@ from diffusion_planner.grpo_utils import (
     compute_grpo_loss,
     compute_gt_l2_distance,
     compute_kinematic_consistency_penalty,
+    compute_official_reward_weighted_loss,
     expand_batch,
     sample_group,
 )
 from diffusion_planner.model.module.decoder import compute_training_loss
-from diffusion_planner.train_epoch import heading_to_cos_sin
+from diffusion_planner.train_epoch import compose_supervised_total_loss, heading_to_cos_sin
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.masks import pose_padding_mask
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
@@ -66,23 +67,23 @@ def _sft_step(raw_inputs, model, optimizer, args, ema, aug):
     loss = compute_training_loss(
         model, inputs, (ego_future, neighbors_future, neighbor_future_mask), args
     )
-    loss["loss"] = (
-        args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]
-        + args.alpha_planning_loss * loss["ego_planning_loss"]
-        + loss["turn_indicator_loss"]
-        + args.coeff_road_border_loss * loss["road_border_loss"]
-        + args.coeff_neighbor_collision_loss * loss["neighbor_collision_loss"]
-    )
+    loss["loss"] = compose_supervised_total_loss(loss, args)
     loss["loss"].backward()
     nn.utils.clip_grad_norm_(model.parameters(), 5)
     optimizer.step()
-    ema.update(model)
+    if ema is not None:
+        ema.update(model)
 
-    return {
+    result = {
         "loss": loss["loss"].detach(),
         "sft_ego_planning_loss": loss["ego_planning_loss"].detach(),
         "is_grpo": torch.tensor(0.0),
     }
+    if "ego_hdp_diffusion_loss" in loss:
+        result["ego_hdp_diffusion_loss"] = loss["ego_hdp_diffusion_loss"].detach()
+    if "ego_hdp_waypoint_loss" in loss:
+        result["ego_hdp_waypoint_loss"] = loss["ego_hdp_waypoint_loss"].detach()
+    return result
 
 
 def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
@@ -152,16 +153,42 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
         )
         reward = reward - args.w_kinematic * kinematic_drift
 
-    advantages = compute_group_advantages(reward, num_scenes, n, args.advantage_eps)
-
     optimizer.zero_grad()
-    loss_dict = compute_grpo_loss(
-        model, norm_exp, ego_world, neighbors_future, neighbor_future_mask, advantages, args
-    )
+    rl_objective = getattr(args, "rl_objective", "grpo")
+    if rl_objective == "grpo":
+        advantages = compute_group_advantages(reward, num_scenes, n, args.advantage_eps)
+        loss_dict = compute_grpo_loss(
+            model, norm_exp, ego_world, neighbors_future, neighbor_future_mask, advantages, args
+        )
+        abs_advantage = loss_dict["abs_advantage"]
+        official_weight_mean = torch.zeros_like(abs_advantage)
+        official_weight_max = torch.zeros_like(abs_advantage)
+        official_weight_min = torch.zeros_like(abs_advantage)
+        official_valid_group_fraction = torch.ones_like(abs_advantage)
+    elif rl_objective == "official_reward_weighted":
+        loss_dict = compute_official_reward_weighted_loss(
+            model,
+            norm_exp,
+            ego_world,
+            neighbors_future,
+            neighbor_future_mask,
+            reward,
+            num_scenes,
+            n,
+            args,
+        )
+        abs_advantage = torch.zeros_like(loss_dict["loss"].detach())
+        official_weight_mean = loss_dict["official_reward_weight_mean"]
+        official_weight_max = loss_dict["official_reward_weight_max"]
+        official_weight_min = loss_dict["official_reward_weight_min"]
+        official_valid_group_fraction = loss_dict["official_valid_group_fraction"]
+    else:
+        raise ValueError(f"Unsupported rl_objective={rl_objective!r}")
     loss_dict["loss"].backward()
     nn.utils.clip_grad_norm_(model.parameters(), 5)
     optimizer.step()
-    ema.update(model)
+    if ema is not None:
+        ema.update(model)
 
     return {
         "loss": loss_dict["loss"].detach(),
@@ -172,7 +199,13 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
         "road_border_penalty": rb_penalty.sum(dim=-1).mean().detach(),
         "gt_l2_distance": gt_l2_dist.mean().detach(),
         "kinematic_drift": kinematic_drift.mean().detach(),
-        "abs_advantage": loss_dict["abs_advantage"],
+        "ego_hdp_diffusion_loss": loss_dict["ego_hdp_diffusion_loss"],
+        "ego_hdp_waypoint_loss": loss_dict["ego_hdp_waypoint_loss"],
+        "abs_advantage": abs_advantage,
+        "official_reward_weight_mean": official_weight_mean.detach(),
+        "official_reward_weight_max": official_weight_max.detach(),
+        "official_reward_weight_min": official_weight_min.detach(),
+        "official_valid_group_fraction": official_valid_group_fraction.detach(),
         "is_grpo": torch.tensor(1.0),
     }
 

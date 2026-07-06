@@ -1,4 +1,5 @@
 import torch
+import wandb
 from torch import nn
 from tqdm import tqdm
 
@@ -7,6 +8,18 @@ from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.masks import pose_padding_mask
 from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
+
+
+def compose_supervised_total_loss(loss, args):
+    return (
+        args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]
+        + args.alpha_planning_loss * loss["ego_planning_loss"]
+        + args.planning_hybrid_loss
+        * loss.get("ego_planning_hybrid_loss", torch.zeros_like(loss["ego_planning_loss"]))
+        + loss["turn_indicator_loss"]
+        + args.coeff_road_border_loss * loss["road_border_loss"]
+        + args.coeff_neighbor_collision_loss * loss["neighbor_collision_loss"]
+    )
 
 
 def heading_to_cos_sin(x):
@@ -37,14 +50,21 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     epoch_loss = []
 
     model.train()
+    step_log = getattr(args, "wandb_step_log_interval", 0)
+    log_step = args.use_wandb and step_log > 0 and ddp.get_rank() == 0
+    if not hasattr(args, "_wandb_global_step"):
+        args._wandb_global_step = 0
+    current_epoch = getattr(args, "_current_epoch", 0)
+    total_epochs = getattr(args, "_train_epochs", 0)
+
+    num_batches = len(data_loader)
+    if ddp.get_rank() == 0:
+        data_loader = tqdm(data_loader, desc="Training", unit="batch")
 
     if args.ddp:
         torch.cuda.synchronize()
 
-    if ddp.get_rank() == 0:
-        data_loader = tqdm(data_loader, desc="Training", unit="batch")
-
-    for inputs in data_loader:
+    for batch_idx, inputs in enumerate(data_loader, start=1):
         inputs = {key: value.to(args.device) for key, value in inputs.items()}
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
@@ -68,13 +88,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
         loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
 
-        loss["loss"] = (
-            args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]
-            + args.alpha_planning_loss * loss["ego_planning_loss"]
-            + loss["turn_indicator_loss"]
-            + args.coeff_road_border_loss * loss["road_border_loss"]
-            + args.coeff_neighbor_collision_loss * loss["neighbor_collision_loss"]
-        )
+        loss["loss"] = compose_supervised_total_loss(loss, args)
 
         # loss backward
         loss["loss"].backward()
@@ -86,7 +100,32 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         nn.utils.clip_grad_norm_(model.parameters(), 5)
         optimizer.step()
 
-        ema.update(model)
+        if ema is not None:
+            ema.update(model)
+        args._wandb_global_step += 1
+
+        if log_step and args._wandb_global_step % step_log == 0:
+            current_lr = optimizer.param_groups[0]["lr"]
+            wandb.log(
+                {
+                    f"train_step/{key}": (value.item() if torch.is_tensor(value) else value)
+                    for key, value in loss.items()
+                    if key != "loss" or torch.is_tensor(value)
+                }
+                | {
+                    "epoch": current_epoch,
+                    "global_step": args._wandb_global_step,
+                    "lr/lr": current_lr,
+                    "train_step/global_step": args._wandb_global_step,
+                    "train_step/epoch": current_epoch,
+                    "train_step/total_epochs": total_epochs,
+                    "train_step/batch": batch_idx,
+                    "train_step/num_batches": num_batches,
+                    "train_step/epoch_progress": batch_idx / max(num_batches, 1),
+                    "train_step/lr": current_lr,
+                },
+                commit=True,
+            )
 
         if args.ddp:
             torch.cuda.synchronize()

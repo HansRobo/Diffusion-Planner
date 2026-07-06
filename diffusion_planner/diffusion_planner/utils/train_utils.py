@@ -112,14 +112,17 @@ def resume_model(path: str, model, optimizer, scheduler, ema, device):
     except:
         wandb_id = None
 
-    try:
-        ema.ema.load_state_dict(ckpt["ema_state_dict"])
-        ema.ema.eval()
-        for p in ema.ema.parameters():
-            p.requires_grad_(False)
-
-        print("ema load done")
-    except:
-        print("no ema shadow found")
+    if ema is not None:
+        try:
+            ema_state = ckpt.get("ema_state_dict") if isinstance(ckpt, dict) else None
+            if ema_state is None:
+                raise KeyError("ema_state_dict")
+            ema.ema.load_state_dict(ema_state)
+            ema.ema.eval()
+            for p in ema.ema.parameters():
+                p.requires_grad_(False)
+            print("ema load done")
+        except Exception:
+            print("no ema shadow found")
 
     return model, optimizer, scheduler, init_epoch, wandb_id, ema

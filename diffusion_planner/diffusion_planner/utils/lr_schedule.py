@@ -5,8 +5,11 @@ def CosineAnnealingWarmUpRestarts(optimizer, epoch, warm_up_epoch, start_factor=
     assert epoch >= warm_up_epoch
     T_warmup = warm_up_epoch
 
-    warmup_scheduler = LinearLR(optimizer, start_factor=start_factor, total_iters=warm_up_epoch - 1)
     fixed_scheduler = MultiplicativeLR(optimizer, lr_lambda=lambda epoch: 1.0)
+    if warm_up_epoch <= 1:
+        return fixed_scheduler
+
+    warmup_scheduler = LinearLR(optimizer, start_factor=start_factor, total_iters=warm_up_epoch - 1)
 
     scheduler = SequentialLR(
         optimizer, schedulers=[warmup_scheduler, fixed_scheduler], milestones=[T_warmup]

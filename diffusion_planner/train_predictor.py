@@ -2,7 +2,7 @@ import argparse
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.train import model_training
-from diffusion_planner.train_config import TrainConfig
+from diffusion_planner.train_config import TrainConfig, parse_float_list
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
@@ -96,10 +96,15 @@ def get_args(args_list=None):
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
     parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
     parser.add_argument("--coeff_heading_l2_loss", type=float, default=1.0)
-    parser.add_argument("--coeff_velocity", type=float, default=1.0)
+    parser.add_argument(
+        "--coeff_velocity",
+        type=float,
+        default=_train_config_default("coeff_velocity"),
+        help="per-(m/s) weight for high-speed lon-loss attenuation; 0.05 = legacy behavior",
+    )
     parser.add_argument(
         "--coeff_timestep",
-        type=list,
+        type=parse_float_list,
         default=[1.0, 1.0, 1.0, 1.0],
         help="Set for 4 sections [0,20), [20, 40), [40, 60), [60, 80)",
     )
@@ -156,34 +161,37 @@ def get_args(args_list=None):
     parser.add_argument(
         "--use_velocity_representation",
         type=boolean,
-        default=False,
+        default=_train_config_default("use_velocity_representation"),
         help="Represent ego future xy as per-step displacement and train it with HDP hybrid loss",
     )
     parser.add_argument(
-        "--hybrid_loss_omega",
+        "--planning_hybrid_loss",
         type=float,
-        default=0.01,
-        help="Weight for waypoint loss term in hybrid loss (omega in the paper)",
+        default=_train_config_default("planning_hybrid_loss"),
+        help="Weight for waypoint loss term in the official HDP hybrid loss",
     )
     parser.add_argument(
         "--hybrid_loss_window",
         type=int,
-        default=10,
+        default=_train_config_default("hybrid_loss_window"),
         help="Gradient detach window size W for the waypoint loss term",
     )
     parser.add_argument(
-        "--ego_velocity_mean",
-        type=float,
-        nargs=4,
-        default=[0.0, 0.0, 0.0, 0.0],
-        help="HDP ego velocity latent mean for [dx, dy, cos, sin]",
+        "--diffusion_supervision_type",
+        type=str,
+        choices=["x_start", "noise", "score", "v"],
+        default=_train_config_default("diffusion_supervision_type"),
     )
     parser.add_argument(
-        "--ego_velocity_std",
-        type=float,
-        nargs=4,
-        default=[0.5, 0.5, 1.0, 1.0],
-        help="HDP ego velocity latent std for [dx, dy, cos, sin]",
+        "--diffusion_time_sample_method",
+        type=str,
+        choices=["uniform"],
+        default="uniform",
+    )
+    parser.add_argument(
+        "--diffusion_sample_steps",
+        type=int,
+        default=_train_config_default("diffusion_sample_steps"),
     )
 
     parser.add_argument("--guidance_scale", type=float, default=0.5)
@@ -201,12 +209,18 @@ def get_args(args_list=None):
     parser.add_argument(
         "--diffusion_model_type",
         type=str,
-        choices=["x_start", "flow_matching"],
-        default="x_start",
+        choices=["x_start", "noise", "score", "v", "flow_matching"],
+        default=_train_config_default("diffusion_model_type"),
     )
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
+    parser.add_argument(
+        "--init_weights_path",
+        type=str,
+        default=None,
+        help="weights-only warm start; loads compatible model weights with fresh optimizer/schedule",
+    )
 
     parser.add_argument("--use_wandb", default=False, type=boolean)
     parser.add_argument(
@@ -218,10 +232,22 @@ def get_args(args_list=None):
         default="Diffusion-Planner",
         help="Weights & Biases project name",
     )
+    parser.add_argument(
+        "--wandb_step_log_interval",
+        type=int,
+        default=_train_config_default("wandb_step_log_interval"),
+        help="log train metrics every N optimizer steps (0 = epoch only)",
+    )
     parser.add_argument("--notes", default="", type=str)
 
     # distributed training parameters
     parser.add_argument("--ddp", default=True, type=boolean, help="use ddp or not")
+    parser.add_argument(
+        "--find_unused_parameters",
+        default=_train_config_default("find_unused_parameters"),
+        type=boolean,
+        help="set DDP find_unused_parameters=True only when a model has conditional unused parameters",
+    )
     parser.add_argument("--port", default="22323", type=str, help="port")
 
     # per-epoch closed-loop validation (rendered rollout + wandb video).
