@@ -242,6 +242,27 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
+    parser.add_argument(
+        "--closed_loop_classification_json",
+        type=str,
+        default="",
+        help="scenario_classification_json path for grouped closed-loop eval. Empty = auto-resolve "
+        "from --closed_loop_scenario_dataset_name + npz date, else full-route fallback.",
+    )
+    parser.add_argument(
+        "--closed_loop_scenario_dataset_name",
+        type=str,
+        default="",
+        help="e.g. x2_dev/2231_odaiba_shinagawa_copied_from_xx1 for auto JSON lookup under "
+        "SCENARIO_CLASSIFICATION_JSON_ROOT or ../Diffusion-Planner-Meta-Repository/dataset/"
+        "scenario_classification_json/",
+    )
+    parser.add_argument(
+        "--closed_loop_grouped_wandb_max_videos",
+        type=int,
+        default=_train_config_default("closed_loop_grouped_wandb_max_videos"),
+        help="cap grouped episode videos uploaded to wandb per checkpoint save",
+    )
 
     args = parser.parse_args(args_list)
     return args

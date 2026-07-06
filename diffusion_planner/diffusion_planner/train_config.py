@@ -157,6 +157,11 @@ class TrainConfig:
     closed_loop_warmup_steps: int = 0
     closed_loop_unstick_after: int = 300
     closed_loop_unstick_advance_m: float = 2.5
+    # Grouped closed-loop (scenario_classification_json episodes). When a JSON is resolved,
+    # training logs per-area metrics + videos to wandb; otherwise falls back to full-route CL.
+    closed_loop_classification_json: str = ""
+    closed_loop_scenario_dataset_name: str = ""
+    closed_loop_grouped_wandb_max_videos: int = 24
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)
