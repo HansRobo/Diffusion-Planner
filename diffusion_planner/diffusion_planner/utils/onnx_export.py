@@ -83,7 +83,7 @@ NumpyDict = dict[str, np.ndarray]
 class ModelWrappers:
     full: nn.Module
     encoder: nn.Module
-    decoder: nn.Module
+    decoder: "nn.Module | None"  # None when the split-graph contract doesn't apply
     turn_indicator: nn.Module
 
 
@@ -168,11 +168,25 @@ class DecoderONNXWrapper(nn.Module):
 
     This wrapper intentionally does not call a sampler. An external denoising loop should
     update x_t and timesteps, then call this ONNX model once per model evaluation.
+
+    Contract: the output is the RAW DiT prediction in model_type-native semantics, and the
+    external loop's x_start/waypoint decoding assumptions only hold for waypoint-mode
+    x_start checkpoints. HDP velocity checkpoints carry a velocity-space ego row the
+    external loop would mis-decode as waypoints, and noise/score/v models do not emit
+    x_start at all — for those, deploy FullONNXWrapper (it traces the decoder's own
+    sampling and latent decoding), so this wrapper refuses them.
     """
 
     def __init__(self, model: Diffusion_Planner):
         super().__init__()
-        self.decoder = model.decoder
+        decoder = model.decoder
+        if decoder._use_velocity or decoder._model_type != "x_start":
+            raise RuntimeError(
+                "Split-graph decoder ONNX export supports only waypoint-mode x_start "
+                f"checkpoints (got use_velocity={decoder._use_velocity}, "
+                f"model_type={decoder._model_type!r}); deploy FullONNXWrapper instead."
+            )
+        self.decoder = decoder
 
     def forward(
         self,
@@ -212,10 +226,8 @@ class TurnIndicatorONNXWrapper(nn.Module):
         agent_num = 1 + self.decoder._predicted_neighbor_num
         final_x0 = final_x0.reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
 
-        encoding_pooled = torch.mean(encoding, dim=1)
-        ego_trajectory = final_x0[:, 0, 1::10, :2].reshape(
-            batch_size, 2 * (self.decoder._future_len // 10)
-        )
+        encoding_pooled = self.decoder._pool_encoding(encoding)
+        ego_trajectory = self.decoder._turn_indicator_trajectory_from_latent(final_x0)
         return self.decoder._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
 
@@ -345,10 +357,22 @@ def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusio
 
 
 def build_wrappers(model: Diffusion_Planner) -> ModelWrappers:
+    decoder = model.decoder
+    if decoder._use_velocity or decoder._model_type != "x_start":
+        # The split decoder graph's external-loop contract does not hold for these models
+        # (see DecoderONNXWrapper docstring); export the full graph and skip the split one.
+        print(
+            "Skipping split decoder ONNX export: unsupported for "
+            f"use_velocity={decoder._use_velocity}, model_type={decoder._model_type!r}; "
+            "the full ONNX graph remains the deployable artifact."
+        )
+        decoder_wrapper = None
+    else:
+        decoder_wrapper = DecoderONNXWrapper(model).eval()
     return ModelWrappers(
         full=FullONNXWrapper(model).eval(),
         encoder=EncoderONNXWrapper(model).eval(),
-        decoder=DecoderONNXWrapper(model).eval(),
+        decoder=decoder_wrapper,
         turn_indicator=TurnIndicatorONNXWrapper(model).eval(),
     )
 
@@ -378,12 +402,18 @@ def build_export_specs(
             output_names=ENCODER_OUTPUT_NAMES,
             output_path=encoder_onnx_path,
         ),
-        ExportSpec(
-            wrapper=wrappers.decoder,
-            inputs=decoder_inputs,
-            input_names=DECODER_INPUT_NAMES,
-            output_names=DECODER_OUTPUT_NAMES,
-            output_path=decoder_onnx_path,
+        *(
+            [
+                ExportSpec(
+                    wrapper=wrappers.decoder,
+                    inputs=decoder_inputs,
+                    input_names=DECODER_INPUT_NAMES,
+                    output_names=DECODER_OUTPUT_NAMES,
+                    output_path=decoder_onnx_path,
+                )
+            ]
+            if wrappers.decoder is not None
+            else []
         ),
         ExportSpec(
             wrapper=wrappers.turn_indicator,

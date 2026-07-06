@@ -183,8 +183,12 @@ class CollisionGuidance(BaseGuidance):
         x_padded = torch.cat([ego_padded, neighbor_current], dim=1)  # [B, 1+Pn, T+1, 4]
 
         inputs_with_mask = {**inputs, "neighbor_current_mask": neighbor_current_mask}
-        raw = self._compute(x_padded, inputs_with_mask)
-        return self._energy_scale * self.config.scale * raw
+        # _compute differentiates its surrogate energy w.r.t. x internally, so a local
+        # autograd graph is required even though reward() itself runs under no_grad.
+        with torch.enable_grad():
+            x_padded = x_padded.detach().requires_grad_(True)
+            raw = self._compute(x_padded, inputs_with_mask)
+        return (self._energy_scale * self.config.scale * raw).detach()
 
 
 # ---------------------------------------------------------------------------
