@@ -70,7 +70,7 @@ struct ZeroVectors
   std::vector<float> lanes;
   std::vector<float> route_lanes;
 
-  ZeroVectors() 
+  ZeroVectors()
   {
     using namespace autoware::diffusion_planner;
     ego_future.assign(OUTPUT_T * POSE_DIM, 0.0f);
@@ -122,7 +122,8 @@ void set_route_lane_point(
   route_lanes[base + 1] = y;
 }
 
-void set_lane_point(std::vector<float> & lanes, int64_t segment_idx, int64_t point_idx, float x, float y)
+void set_lane_point(
+  std::vector<float> & lanes, int64_t segment_idx, int64_t point_idx, float x, float y)
 {
   const int64_t base = (segment_idx * POINTS_PER_SEGMENT + point_idx) * SEGMENT_POINT_DIM;
   lanes[base + 0] = x;
