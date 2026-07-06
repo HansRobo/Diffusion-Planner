@@ -351,6 +351,8 @@ def model_training(args: TrainConfig):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=4 if args.num_workers > 0 else None,
     )
 
     # Validation is sharded across all ranks (DistributedSampler); each rank computes
@@ -365,6 +367,8 @@ def model_training(args: TrainConfig):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=4 if args.num_workers > 0 else None,
     )
 
     if global_rank == 0:

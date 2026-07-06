@@ -369,7 +369,9 @@ def _compute_policy_ego_loss_per_sample(
     if sde is None:
         sde = VPSDE_linear()
     t_future = t[..., 1:, :]
-    alpha, std = sde.marginal_prob(torch.ones_like(all_gt[..., 1:, :]), t_future)
+    # Same schedule values as marginal_prob(ones_like(...)) without the full-size ones tensor.
+    alpha = sde.marginal_alpha(t_future)
+    std = sde.marginal_prob_std(t_future)
     x0_target = all_gt[:, :, 1:, :]
     xT_future = alpha * x0_target + std * z
     xT = torch.cat([all_gt[:, :, :1, :], xT_future], dim=2)

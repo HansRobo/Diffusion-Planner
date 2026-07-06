@@ -64,8 +64,13 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     if args.ddp:
         torch.cuda.synchronize()
 
+    # Grad stats are diagnostics only: computing them every step concatenates ALL
+    # gradients and calls .item() five times (five device syncs per step). Sample them
+    # on the wandb logging cadence instead (or every 100 steps when step logging is off).
+    stats_interval = step_log if step_log > 0 else 100
+
     for batch_idx, inputs in enumerate(data_loader, start=1):
-        inputs = {key: value.to(args.device) for key, value in inputs.items()}
+        inputs = {key: value.to(args.device, non_blocking=True) for key, value in inputs.items()}
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
@@ -94,8 +99,11 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         loss["loss"].backward()
 
         # Gradient statistics (computed before clipping so that exploding
-        # gradients are not masked by clip_grad_norm_).
-        loss.update(compute_grad_stats(model.parameters()))
+        # gradients are not masked by clip_grad_norm_). Sampled on the logging
+        # cadence — see stats_interval above; the counter is identical on all
+        # ranks so the branch is DDP-consistent.
+        if (args._wandb_global_step + 1) % stats_interval == 0:
+            loss.update(compute_grad_stats(model.parameters()))
 
         nn.utils.clip_grad_norm_(model.parameters(), 5)
         optimizer.step()
@@ -127,9 +135,13 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
                 commit=True,
             )
 
-        if args.ddp:
-            torch.cuda.synchronize()
-        epoch_loss.append(loss)
+        # NOTE: no per-step torch.cuda.synchronize() here — it stalled the whole
+        # pipeline every iteration for no correctness benefit (DDP synchronizes via
+        # its allreduce; kernels are stream-ordered). Detach stored values so 35k+
+        # steps of scalars don't keep autograd-graph references alive all epoch.
+        epoch_loss.append(
+            {k: (v.detach() if torch.is_tensor(v) else v) for k, v in loss.items()}
+        )
 
     epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
 

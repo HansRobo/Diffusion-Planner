@@ -140,7 +140,10 @@ def compute_training_loss(
         if sde is None:
             sde = VPSDE_linear()
         t_future = t[..., 1:, :]
-        alpha, std = sde.marginal_prob(torch.ones_like(all_gt[..., 1:, :]), t_future)
+        # marginal_alpha/marginal_prob_std give the same schedule values as
+        # marginal_prob(ones_like(...)) without materializing a full-size ones tensor.
+        alpha = sde.marginal_alpha(t_future)
+        std = sde.marginal_prob_std(t_future)
         mean = alpha * all_gt[..., 1:, :]
         # mean([B, P, T, D]), std([B, 1, T, 1]), z([B, P, T, D])
         xT = mean + std * z
@@ -272,7 +275,11 @@ def compute_training_loss(
         ego_edge_points = compute_ego_edge_points(
             ego_pred_world, inputs["ego_shape"], n_interp=args.road_border_n_interp
         )
-        denorm_inputs = args.observation_normalizer.inverse(inputs)
+        # Only the penalty terms consume denormalized inputs — inverse just those keys
+        # instead of every observation tensor each step.
+        denorm_inputs = args.observation_normalizer.inverse(
+            {k: inputs[k] for k in ("line_strings", "neighbor_agents_past") if k in inputs}
+        )
 
     # Road border collision loss (ego only, x_start mode)
     if args.coeff_road_border_loss > 0 and model_type in vp_model_types:
