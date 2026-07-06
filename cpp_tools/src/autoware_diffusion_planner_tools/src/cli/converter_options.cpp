@@ -126,8 +126,8 @@ ConverterOptions ConverterOptions::default_converter_options()
   options.offlane_time_stride = 1;
 
   // Red-light-run detector defaults match the integrated python heuristic.
-  options.red_light_run_radius_m = 5.0f;
-  options.red_light_run_heading_tol_deg = 30.0f;
+  options.red_light_run_radius_m = 12.0f;
+  options.red_light_run_heading_tol_deg = 45.0f;
 
   // Inspection-only: production keeps this off so skipped frames write no npz.
   options.write_skipped_npz = false;
