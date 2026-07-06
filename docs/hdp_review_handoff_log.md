@@ -129,6 +129,31 @@ All four remaining hygiene items done, verified BIT-IDENTICAL where they touch l
 3. GRPO wandb project default restored to "Diffusion-Planner-GRPO" (sweep-2).
 4. DecoderONNXWrapper: contract documented + constructor refuses velocity/non-x_start; build_wrappers/build_export_specs skip ONLY the split decoder graph for such models (FullONNXWrapper still exported; training auto-export unaffected — uses _guarded anyway). ModelWrappers.decoder now Optional.
 Whole working tree committed in 7 thematic groups (see git log). Remaining decisions intentionally left open: eval/rollout init alignment (needs closed-loop A/B).
+
+## ROUND-7: LIVE-RUN PATH AUDIT (2026-07-07, run zx8l6fmi / hdp_velocity_hybrid_omega001_..._fixed_rerun2)
+Runtime evidence + fresh full re-read of the exact running path (velocity x_start/x_start, ω=0.01, quintic aug+smoothing, 8-GPU DDP, from-scratch, 60ep, no closed-loop):
+- args.json CORRECT: split-scale live (SN row0 std [20,20,1,1] + ego_velocity_std [0.5,0.5,1,1]), coeff_velocity=0.05, rb=1.0, nc=0.0.
+- **Loss composition PROVEN on live data**: 0.1·0.4930(nbr) + 1.0·0.0488(ego vel) + 0.01·10.064(hybrid) + 0.0052(ti) + 0.0019(rb) = 0.20590 == logged train_step/loss 0.2058982. ego_hdp_diffusion_loss≡ego_planning_loss, hybrid≡waypoint alias ✓. Magnitudes sane.
+- Full fresh read of compute_training_loss (incl. round-5/6 self-edits never independently reviewed): consistent — guards, split-scale, prefix masking indexing, velocity-branch cat refactor, lon-vel denorm (stats("ego_current_state")[4], float scalars), penalty path integrate(inverse_velocity) ✓.
+- Validation under velocity VERIFIED correct space: prediction (integrated physical waypoints) vs raw GT; EPDMS proxy consumes physical ego_pred; zeros xT init unchanged (deliberate, comparable with history).
+- train.log: no NaN/err; epoch-0 validation completed; ~3.1 batch/s.
+- turn_indicator_accuracy=0.000 at epoch-0 EXPLAINED: untrained constant-argmax head vs KEEP-dominated GT — init artifact, not a bug; expect it to climb.
+- Watch points ahead: first checkpoint save + guarded ONNX export at epoch 10 (velocity → split decoder graph skipped by design, full graph exported); LR final-phase override engages at epoch 50 (intended for 60ep runs); monitor hybrid-vs-velocity term ratio (ω=0.01 official; hybrid currently ~2× the velocity term).
+**Verdict: no known correctness defect on the running path. Remaining unknowns are hyperparameter-level (ω ratio, lateral weighting) and deferred decisions (eval init) — measurable only via closed-loop probes, not further static audit.**
+
+## ROUND-8: TRAINING THROUGHPUT (2026-07-07, commit ddb0bb9)
+Live evidence: GPU util sawtooth 46-100% (~70% avg), 3.1 batch/s (global bs256 = 32/GPU), load avg 13.5 (CPU not saturated). Root causes = CPU-GPU serialization in the loop, NOT the model:
+per-step torch.cuda.synchronize(); compute_grad_stats every step (cat of ALL grads + 5×.item() = 5 syncs/step); blocking .to(device); ~20 H2D normalizer-stat copies/step; marginal_prob(ones_like [B,321,80,4]); full-dict observation inverse for 2 needed keys; no persistent_workers/prefetch; epoch_loss holding graph-attached tensors (part of 42GB RSS/proc).
+**All fixed numerics-identical (verified bitwise: sde alpha/std swap, normalizer cache; grad stats now sampled on the wandb cadence — diagnostics-only change).** Expected +20-40% throughput; live run zx8l6fmi does NOT pick these up (module already loaded) — restart required to benefit; at ~7.9 days/60ep a restart at epoch≤2 pays for itself if gain ≥~5%.
+**Not applied (change numerics/dynamics — separate decisions):** bf16 autocast (est. 1.3-1.8×, needs closed-loop check), bigger per-GPU batch (32 is small for this model; needs LR retune), torch.compile, EMA every-k-steps, num_workers increase (CPU headroom exists).
+
+### ROUND-8b: second wave, live-verified, defaults flipped ON (commit 5d926ff); production relaunched
+User approved stopping the run + batch×2. Measured on the 8-GPU node:
+- bs512 + bf16 + fused AdamW + static_graph + bucket views: **1193 samples/s vs 794 baseline (+50%), 98% avg GPU util** (was ~70% sawtooth), loss trajectory healthy vs fp32 at equal samples (3.79→3.04 vs old 7.99→5.92 at half the samples).
+- Batch sweep: bs768 = 1190 samples/s @ 78.6/80GB (no gain, 1.4GB headroom = OOM risk with EPDMS eval on); bs1024 = OOM at first batch. **bs512 is the knee — compute-bound, not memory-bound; filling VRAM buys nothing here.**
+- Worker analysis: npz load p50 4.3ms / p99 5.6ms / max 181ms (RDMA cold tail) vs 107ms/worker budget → 18× headroom; 16 workers/rank sufficient; more workers only bloat RAM (9M-path list COW per persistent worker). Residual 2-5% util gap = per-step python orchestration + DDP 8-rank straggler coupling + rank-0 wandb/tqdm; next lever would be torch.compile/CUDA graphs (experimental, not attempted).
+- TF32 remains ON and applies outside the autocast region (bf16 supersedes it inside the model forward only).
+- **Production run: outputs/hdp_velocity_hybrid_omega001_base60_fullseq_node01_8gpu_bf16_bs512_rerun3, wandb pfdnaqp8** — bs512, lr 2e-4 (linear scaling from 1e-4@256), workers 16, EPDMS/PDMS on, 60ep ETA ~5.3 days (was ~7.9). Old zx8l6fmi stopped at epoch 1 (user-approved); wandb junk runs khe2w159 (verify) + n2psrn5i (aborted first relaunch) deleted; probes ran wandb-offline (no cloud runs).
 5. NOT fixed (known, mostly base-repo/lower priority): python parse_rosbag.py neighbor seed + float64; collision.py reward() no_grad landmine; validate/eval zeros xT init + RL init skew (M-10); stationary-GT + 5-step collision reward holes (M-11); coeff_velocity normalization no-op (M-12 — needs deliberate decision); loss.py dead code; DecoderONNXWrapper split-graph contract docs (D-2); GRPO wandb project default flip (sweep-2); SFT/RL supervision-ladder duplication (compose helper unified only the total-loss composition).
 
 ## Verifier agent outputs (raw, appended as they arrive)
