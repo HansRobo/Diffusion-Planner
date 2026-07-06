@@ -79,6 +79,8 @@ enum class SkippingLabel {
                           // GT future — i.e. the GT pulls away from the line on red.
   StoppedAtTrafficLight,  // Sustained stop at red/yellow light (formerly VehicleStopped;
                           // contrast with NoFutureProgress for non-light stops)
+  DetectedRedLightRun,    // Detected red light run: ego future crosses a stop line segment
+                          // near the entry point of a heading-aligned red route lane
 
   // Filter skipping reasons (ported from the standalone python filter scripts)
   Collision,  // GT ego trajectory collides with a static object, neighbor, or road border
@@ -169,6 +171,16 @@ struct SkippingInfo
     return {
       SkippingLabel::AcceleratingAtTrafficLight,
       "Accelerating into red/yellow light while moving (linear.x >= 0.1)",
+      {},
+      {}};
+  }
+
+  static SkippingInfo detected_red_light_run()
+  {
+    return {
+      SkippingLabel::DetectedRedLightRun,
+      "Detected red light run: ego future crosses a stop line segment near the entry point of a "
+      "heading-aligned red route lane",
       {},
       {}};
   }
