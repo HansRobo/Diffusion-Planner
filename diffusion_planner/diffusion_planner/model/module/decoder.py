@@ -11,11 +11,14 @@ from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
-    hybrid_loss,
+    hybrid_loss_components,
+    inverse_normalize_ego_state,
     inverse_normalize_ego_velocity,
     make_turn_indicator_gt,
-    normalize_ego_velocity,
     normalize_ego_state,
+    normalize_ego_velocity,
+    sample_diffusion_time,
+    vp_supervision_elementwise_loss,
     weighted_waypoint_dpm_loss,
     velocity_to_waypoints,
     waypoints_to_velocity,
@@ -68,9 +71,16 @@ def compute_training_loss(
     norm = args.state_normalizer
     model_type = args.diffusion_model_type
     use_velocity = args.use_velocity_representation
-    if use_velocity and model_type != "x_start":
-        raise NotImplementedError("Velocity representation is only defined for x_start diffusion.")
-    hybrid_omega = args.hybrid_loss_omega
+    vp_model_types = {"x_start", "noise", "score", "v"}
+    if use_velocity and model_type not in vp_model_types:
+        raise NotImplementedError("Velocity representation is only defined for VP diffusion.")
+    supervision_type = getattr(args, "diffusion_supervision_type", model_type)
+    if model_type in vp_model_types and supervision_type not in vp_model_types:
+        raise ValueError(f"Unsupported diffusion_supervision_type={supervision_type!r}")
+    if use_velocity and (model_type != "x_start" or supervision_type != "x_start"):
+        raise NotImplementedError(
+            "HDP velocity representation is enabled only for x_start prediction with x_start supervision."
+        )
     hybrid_window = args.hybrid_loss_window
 
     ego_future, neighbors_future, neighbor_future_mask = futures
@@ -82,7 +92,13 @@ def compute_training_loss(
         inputs["ego_current_state"][:, :4],
         inputs["neighbor_agents_past"][:, :Pn, -1, :4],
     )
-    longitudinal_velocity = inputs["ego_current_state"][:, 4:5]
+    # inputs are observation-normalized here; convert the longitudinal-velocity channel back
+    # to m/s so coeff_velocity weights physical speed (with the default coeff_velocity=0.05
+    # this exactly reproduces the legacy normalized-units behavior).
+    _lv_mean, _lv_std = args.observation_normalizer.stats("ego_current_state")
+    longitudinal_velocity = inputs["ego_current_state"][:, 4:5] * float(_lv_std[4]) + float(
+        _lv_mean[4]
+    )
     neighbor_current_mask = torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
     neighbor_mask = torch.concat(
         (neighbor_current_mask.unsqueeze(-1), neighbor_future_mask), dim=-1
@@ -94,7 +110,12 @@ def compute_training_loss(
     current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
 
     eps = 1e-3
-    t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
+    t = sample_diffusion_time(
+        B,
+        gt_future.device,
+        eps,
+        getattr(args, "diffusion_time_sample_method", "uniform"),
+    )  # [B,]
     t = t.view(B, 1, 1, 1)
     t = t.expand(B, P, T + 1, 1)
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
@@ -110,18 +131,23 @@ def compute_training_loss(
     all_gt = waypoint_gt.clone()
     if use_velocity:
         ego_velocity_gt = waypoints_to_velocity(ego_future)  # [B, T, 4]
-        all_gt[:, 0, 1:, :] = normalize_ego_velocity(
-            ego_velocity_gt, args.ego_velocity_mean, args.ego_velocity_std
-        )
+        all_gt[:, 0, 1:, :] = normalize_ego_velocity(ego_velocity_gt, norm)
     all_gt[:, 1:] = all_gt[:, 1:].masked_fill(neighbor_mask.unsqueeze(-1), 0.0)
 
-    if model_type == "x_start":
-        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
+    if model_type in vp_model_types:
+        model_ref = getattr(model, "module", model)
+        sde = getattr(model_ref, "sde", None)
+        if sde is None:
+            sde = VPSDE_linear()
+        t_future = t[..., 1:, :]
+        alpha, std = sde.marginal_prob(torch.ones_like(all_gt[..., 1:, :]), t_future)
+        mean = alpha * all_gt[..., 1:, :]
         # mean([B, P, T, D]), std([B, 1, T, 1]), z([B, P, T, D])
         xT = mean + std * z
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
         xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, 1 + T, 4]
+        xT_future = xT[:, :, 1:, :]
 
         merged_inputs = {
             **inputs,
@@ -135,22 +161,28 @@ def compute_training_loss(
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
 
         gt_target = all_gt[:, :, 1:, :]  # [B, P, T, 4]
+        pred_x_start = sde.transform(f"{model_type}->x_start", model_output, t_future, xT_future)
+        supervised_prediction = sde.transform(
+            f"{model_type}->{supervision_type}", model_output, t_future, xT_future
+        )
 
         if use_velocity:
-            ego_pred_velocity_raw = inverse_normalize_ego_velocity(
-                model_output[:, 0], args.ego_velocity_mean, args.ego_velocity_std
+            # Guarded at function entry: velocity mode implies model_type == supervision_type
+            # == "x_start", so supervised_prediction IS the x_start prediction and the ego
+            # target is the normalized velocity GT.
+            ego_diffusion_loss = torch.sum(
+                (supervised_prediction[:, 0] - gt_target[:, 0]) ** 2, dim=-1
             )
-            dpm_loss = torch.zeros(B, P, T, device=model_output.device, dtype=model_output.dtype)
-            dpm_loss[:, 0, :] = hybrid_loss(
-                model_output[:, 0],
+            ego_pred_velocity_raw = inverse_normalize_ego_velocity(pred_x_start[:, 0], norm)
+            _, ego_waypoint_loss = hybrid_loss_components(
+                pred_x_start[:, 0],
                 gt_target[:, 0],
                 ego_pred_velocity_raw,
                 ego_future,
-                omega=hybrid_omega,
                 W=hybrid_window,
             )
-            dpm_loss[:, 1:, :] = weighted_waypoint_dpm_loss(
-                model_output[:, 1:],
+            neighbor_dpm_loss = weighted_waypoint_dpm_loss(
+                pred_x_start[:, 1:],
                 waypoint_gt[:, 1:, 1:, :],
                 longitudinal_velocity,
                 args.coeff_position_lat_loss,
@@ -159,9 +191,10 @@ def compute_training_loss(
                 args.coeff_velocity,
                 args.coeff_timestep,
             )
-        else:
+            dpm_loss = torch.cat([ego_diffusion_loss[:, None, :], neighbor_dpm_loss], dim=1)
+        elif supervision_type == "x_start":
             dpm_loss = weighted_waypoint_dpm_loss(
-                model_output,
+                pred_x_start,
                 gt_target,
                 longitudinal_velocity,
                 args.coeff_position_lat_loss,
@@ -170,6 +203,10 @@ def compute_training_loss(
                 args.coeff_velocity,
                 args.coeff_timestep,
             )  # [B, P, T]
+        else:
+            dpm_loss = vp_supervision_elementwise_loss(
+                supervised_prediction, z, std, supervision_type, sde, t_future, xT_future
+            )
 
     elif model_type == "flow_matching":
         # t=0 is noise, t=1 is data
@@ -203,24 +240,33 @@ def compute_training_loss(
     else:
         loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=masked_prediction_loss.device)
 
-    loss["ego_planning_loss"] = dpm_loss[:, 0, : args.ego_prediction_horizon].mean()
+    ego_loss_horizon = dpm_loss[:, 0, : args.ego_prediction_horizon]
+    ego_loss_valid = ~prefix_mask[:, 0, 1 : 1 + args.ego_prediction_horizon, 0]
+    loss["ego_planning_loss"] = (
+        ego_loss_horizon.masked_fill(~ego_loss_valid, 0.0).sum()
+        / ego_loss_valid.sum().clamp_min(1)
+    )
     if use_velocity:
-        loss["ego_hdp_hybrid_loss"] = loss["ego_planning_loss"].detach()
+        ego_waypoint_horizon = ego_waypoint_loss[:, : args.ego_prediction_horizon]
+        loss["ego_planning_hybrid_loss"] = (
+            ego_waypoint_horizon.masked_fill(~ego_loss_valid, 0.0).sum()
+            / ego_loss_valid.sum().clamp_min(1)
+        )
+        loss["ego_hdp_diffusion_loss"] = loss["ego_planning_loss"].detach()
+        loss["ego_hdp_waypoint_loss"] = loss["ego_planning_hybrid_loss"].detach()
 
     # Compute ego edge points for penalty losses
-    need_ego_edge = model_type == "x_start" and (
+    need_ego_edge = model_type in vp_model_types and (
         args.coeff_road_border_loss > 0 or args.coeff_neighbor_collision_loss > 0
     )
     if need_ego_edge:
         ego_pred = model_output[:, 0]  # [B, T, 4]
         if use_velocity:
             ego_pred_world = velocity_to_waypoints(
-                inverse_normalize_ego_velocity(
-                    ego_pred, args.ego_velocity_mean, args.ego_velocity_std
-                )
+                inverse_normalize_ego_velocity(pred_x_start[:, 0], norm)
             )
         else:
-            ego_pred_world = ego_pred * norm.std[0].to(model_output.device) + norm.mean[0].to(
+            ego_pred_world = pred_x_start[:, 0] * norm.std[0].to(model_output.device) + norm.mean[0].to(
                 model_output.device
             )  # [B, T, 4]
         ego_edge_points = compute_ego_edge_points(
@@ -229,7 +275,7 @@ def compute_training_loss(
         denorm_inputs = args.observation_normalizer.inverse(inputs)
 
     # Road border collision loss (ego only, x_start mode)
-    if args.coeff_road_border_loss > 0 and model_type == "x_start":
+    if args.coeff_road_border_loss > 0 and model_type in vp_model_types:
         rb_loss = compute_road_border_penalty(
             ego_edge_points,
             denorm_inputs["line_strings"],
@@ -240,7 +286,7 @@ def compute_training_loss(
         loss["road_border_loss"] = torch.tensor(0.0, device=dpm_loss.device)
 
     # Neighbor collision loss (ego only, x_start mode)
-    if args.coeff_neighbor_collision_loss > 0 and model_type == "x_start":
+    if args.coeff_neighbor_collision_loss > 0 and model_type in vp_model_types:
         nc_loss = compute_neighbor_collision_penalty(
             ego_edge_points,
             neighbors_future,
@@ -282,6 +328,7 @@ class Decoder(nn.Module):
         dpr = config.decoder_drop_path_rate
         self._predicted_neighbor_num = config.predicted_neighbor_num
         self._future_len = config.future_len
+        self._sde = VPSDE_linear()
 
         self.dit = DiT(
             depth=config.decoder_depth,
@@ -289,6 +336,8 @@ class Decoder(nn.Module):
             hidden_dim=config.hidden_dim,
             heads=config.num_heads,
             dropout=dpr,
+            model_type=config.diffusion_model_type,
+            sde=self._sde,
         )
         self.turn_indicator_predictor = nn.Linear(
             2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM
@@ -305,17 +354,8 @@ class Decoder(nn.Module):
         self._model_type = config.diffusion_model_type
         self._use_velocity = config.use_velocity_representation
         if self._use_velocity and self._model_type != "x_start":
-            raise NotImplementedError("Velocity representation is only defined for x_start diffusion.")
-        self.register_buffer(
-            "_ego_velocity_mean",
-            torch.as_tensor(config.ego_velocity_mean, dtype=torch.float32),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_ego_velocity_std",
-            torch.as_tensor(config.ego_velocity_std, dtype=torch.float32),
-            persistent=False,
-        )
+            raise NotImplementedError("HDP velocity representation is enabled only for x_start diffusion.")
+        self._sample_steps = config.diffusion_sample_steps
 
         # Initialize transformer layers:
         def _basic_init(m):
@@ -334,6 +374,10 @@ class Decoder(nn.Module):
         # Zero-out output layers:
         nn.init.constant_(self.dit.final_layer.proj[-1].weight, 0)
         nn.init.constant_(self.dit.final_layer.proj[-1].bias, 0)
+
+    @property
+    def sde(self):
+        return self._sde
 
     def _prepare_current_states(self, inputs):
         """Extract and prepare current states for ego and neighbors.
@@ -372,10 +416,13 @@ class Decoder(nn.Module):
         turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
         return self.turn_indicator_predictor(turn_indicator_input)
 
+    def _pool_encoding(self, encoding):
+        encoding_valid = torch.any(encoding != 0, dim=-1)
+        encoding_count = encoding_valid.sum(dim=1).clamp_min(1).unsqueeze(-1)
+        return (encoding * encoding_valid.unsqueeze(-1)).sum(dim=1) / encoding_count
+
     def _ego_velocity_to_waypoints(self, ego_velocity):
-        ego_velocity = inverse_normalize_ego_velocity(
-            ego_velocity, self._ego_velocity_mean, self._ego_velocity_std
-        )
+        ego_velocity = inverse_normalize_ego_velocity(ego_velocity, self._state_normalizer)
         return velocity_to_waypoints(ego_velocity)
 
     def _normalize_ego_future(self, ego_future):
@@ -502,7 +549,8 @@ class Decoder(nn.Module):
 
         action_prefix = sampled_trajectories.reshape(B, P, 1 + self._future_len, 4)
         action_prefix = replace_current_state(action_prefix, current_states)
-        xT = action_prefix.reshape(B, P, (1 + self._future_len) * 4)
+        prefix_latent = action_prefix.clone()
+        xT = prefix_latent.reshape(B, P, (1 + self._future_len) * 4)
 
         B, P, T_plus_1, D = action_prefix.shape
 
@@ -512,6 +560,7 @@ class Decoder(nn.Module):
         def prefix_constraint(xt, t, step):
             xt = xt.reshape(B, P, 1 + self._future_len, 4)
             xt = replace_current_state(xt, current_states)
+            xt = torch.where(mask, prefix_latent, xt)
             return xt
 
         model_wrapper_params = {
@@ -529,6 +578,10 @@ class Decoder(nn.Module):
             "guidance_scale": self._guidance_scale,
             "guidance_type": "classifier" if self._guidance_fn is not None else "uncond",
         }
+        if self._guidance_fn is not None and (self._use_velocity or self._model_type != "x_start"):
+            raise RuntimeError(
+                "Classifier guidance is currently only supported for waypoint x_start checkpoints."
+            )
 
         noise_schedule = dpm.NoiseScheduleVP()
 
@@ -545,7 +598,7 @@ class Decoder(nn.Module):
 
         dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, correcting_xt_fn=prefix_constraint)
 
-        x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
+        x0 = dpm_solver.sample(xT, steps=self._sample_steps, prefix_mask=mask, skip_type="logSNR")
 
         x0 = x0.reshape(B, P, (1 + self._future_len), 4)
         ego_trajectory = self._turn_indicator_trajectory_from_latent(x0)
@@ -585,7 +638,7 @@ class Decoder(nn.Module):
                 encoding_pooled,
                 sampled_trajectories,
             )
-        elif self._model_type == "x_start":
+        elif self._model_type in {"x_start", "noise", "score", "v"}:
             return self._inference_x_start(
                 encoding,
                 inputs,
@@ -634,10 +687,7 @@ class Decoder(nn.Module):
         B, P, _ = current_states.shape
         assert P == (1 + self._predicted_neighbor_num)
 
-        # Pool only valid encoder tokens. The encoder zero-fills masked tokens.
-        encoding_valid = torch.any(encoding != 0, dim=-1)  # [B, N]
-        encoding_count = encoding_valid.sum(dim=1).clamp_min(1).unsqueeze(-1)
-        encoding_pooled = (encoding * encoding_valid.unsqueeze(-1)).sum(dim=1) / encoding_count
+        encoding_pooled = self._pool_encoding(encoding)
 
         # Dispatch to training or inference
         if self.training:

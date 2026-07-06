@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from timm.models.layers import Mlp
 
+from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+
 
 def modulate(x, shift, scale):
     x = x * (1 + scale) + shift
@@ -108,8 +110,15 @@ class DiT(nn.Module):
         heads=6,
         dropout=0.1,
         mlp_ratio=4.0,
+        model_type="x_start",
+        sde=None,
     ):
         super().__init__()
+
+        if model_type not in {"x_start", "noise", "score", "v", "flow_matching"}:
+            raise ValueError(f"Unsupported model_type={model_type!r}")
+        self._model_type = model_type
+        self._sde = sde if sde is not None else VPSDE_linear()
 
         T = 81
         D = 4
@@ -133,23 +142,35 @@ class DiT(nn.Module):
         )
         self.final_layer = FinalLayer(hidden_dim, output_dim)
 
+    @property
+    def model_type(self):
+        return self._model_type
+
     def forward(self, x, t, cross_c, neighbor_current_mask):
         """
         Forward pass of DiT.
         x: (B, P, T, D)   -> Embedded out of DiT
-        t: (B, P, T, 1)
+        t: (B,) or (B, P, T, 1)
         cross_c: (B, N, D)      -> Cross-Attention context
         """
         assert x.dim() == 4, f"{x.dim()=}"
-        assert t.dim() == 4, f"{t.dim()=}"
-        assert x.shape[2] == t.shape[2], f"{x.shape[2]=} {t.shape[2]=}"
         B, P, T, D = x.shape
 
         x = x.reshape(B, P, T * D)  # (B, P, T*D)
-        t = t.reshape(B, P, T)  # (B, P, T)
+        if t.dim() == 1:
+            t = t.reshape(B, 1, 1).expand(B, P, T)
+        elif t.dim() == 3:
+            assert t.shape == (B, P, T), f"{t.shape=} expected {(B, P, T)}"
+        elif t.dim() == 4:
+            assert P == t.shape[1], f"{P=} {t.shape[1]=}"
+            assert T == t.shape[2], f"{T=} {t.shape[2]=}"
+            t = t.reshape(B, P, T)
+        else:
+            raise AssertionError(f"{t.dim()=}")
+        diffusion_time = t
 
         x = self.preproj(x)  # (B, P, hidden_dim)
-        t = self.t_embedder(t)  # (B, P, hidden_dim)
+        t = self.t_embedder(diffusion_time)  # (B, P, hidden_dim)
 
         x_embedding = torch.cat(
             [
@@ -170,4 +191,7 @@ class DiT(nn.Module):
 
         x = self.final_layer(x, t)  # (B, P, output_dim)
         x = x.reshape(B, P, T, D)
+        if self._model_type == "score":
+            std = self._sde.marginal_prob_std(diffusion_time).unsqueeze(-1)
+            x = x / (std + 1e-6)
         return x

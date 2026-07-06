@@ -47,21 +47,64 @@ def inverse_normalize_ego_state(data: torch.Tensor, normalizer) -> torch.Tensor:
     return data * std.reshape(shape) + mean.reshape(shape)
 
 
-def _velocity_stats(data: torch.Tensor, mean, std) -> tuple[torch.Tensor, torch.Tensor]:
-    mean = torch.as_tensor(mean, device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
-    std = torch.as_tensor(std, device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
+def _ego_velocity_stats(data: torch.Tensor, normalizer) -> tuple[torch.Tensor, torch.Tensor]:
+    if normalizer.ego_velocity_mean is None or normalizer.ego_velocity_std is None:
+        raise RuntimeError("ego_velocity normalization stats are required for HDP velocity mode")
+    mean = normalizer.ego_velocity_mean.to(device=data.device, dtype=data.dtype).reshape(-1)[
+        : data.shape[-1]
+    ]
+    std = normalizer.ego_velocity_std.to(device=data.device, dtype=data.dtype).reshape(-1)[
+        : data.shape[-1]
+    ]
     shape = (1,) * (data.ndim - 1) + (data.shape[-1],)
     return mean.reshape(shape), std.reshape(shape)
 
 
-def normalize_ego_velocity(data: torch.Tensor, mean, std) -> torch.Tensor:
-    mean, std = _velocity_stats(data, mean, std)
+def normalize_ego_velocity(data: torch.Tensor, normalizer) -> torch.Tensor:
+    mean, std = _ego_velocity_stats(data, normalizer)
     return (data - mean) / std
 
 
-def inverse_normalize_ego_velocity(data: torch.Tensor, mean, std) -> torch.Tensor:
-    mean, std = _velocity_stats(data, mean, std)
+def inverse_normalize_ego_velocity(data: torch.Tensor, normalizer) -> torch.Tensor:
+    mean, std = _ego_velocity_stats(data, normalizer)
     return data * std + mean
+
+
+def sample_diffusion_time(
+    batch_size: int,
+    device: torch.device,
+    eps: float,
+    method: str,
+) -> torch.Tensor:
+    if method == "uniform":
+        return torch.rand(batch_size, device=device) * (1.0 - eps) + eps
+    raise ValueError(f"Unsupported diffusion_time_sample_method={method!r}")
+
+
+def vp_supervision_elementwise_loss(
+    supervised_prediction: torch.Tensor,
+    z: torch.Tensor,
+    std: torch.Tensor,
+    supervision_type: str,
+    sde,
+    t_future: torch.Tensor,
+    x_t_future: torch.Tensor,
+) -> torch.Tensor:
+    """Per-element VP diffusion loss for score/noise/v supervision.
+
+    x_start supervision goes through the weighted waypoint path instead, so it is
+    deliberately not handled here. Shared by decoder.compute_training_loss and
+    grpo_utils._compute_policy_ego_loss_per_sample — keep them in sync via this helper.
+    """
+    if supervision_type == "score":
+        return torch.sum((supervised_prediction * std + z) ** 2, dim=-1)
+    if supervision_type == "noise":
+        supervised_target = z
+    elif supervision_type == "v":
+        supervised_target = sde.transform("noise->v", z, t_future, x_t_future)
+    else:
+        raise ValueError(f"Unsupported diffusion_supervision_type={supervision_type!r}")
+    return torch.sum((supervised_prediction - supervised_target) ** 2, dim=-1)
 
 
 def _detached_integral(v: torch.Tensor, W: int) -> torch.Tensor:
@@ -80,24 +123,17 @@ def _detached_integral(v: torch.Tensor, W: int) -> torch.Tensor:
     return wpt + shift_sg - shift
 
 
-def hybrid_loss(
+def hybrid_loss_components(
     pred_v_norm: torch.Tensor,
     gt_v_norm: torch.Tensor,
     pred_v_raw: torch.Tensor,
     gt_waypoints_raw: torch.Tensor,
-    omega: float,
     W: int,
-) -> torch.Tensor:
-    """Compute HDP normalized-velocity diffusion loss plus raw-waypoint hybrid loss."""
+) -> tuple[torch.Tensor, torch.Tensor]:
     l_v = torch.sum((pred_v_norm - gt_v_norm) ** 2, dim=-1)  # [..., T]
-
-    if omega <= 0.0:
-        return l_v
-
     pred_pos = _detached_integral(pred_v_raw[..., :2], W)  # [..., T, 2]
     l_wpt = torch.sum((pred_pos - gt_waypoints_raw[..., :2]) ** 2, dim=-1)  # [..., T]
-
-    return l_v + omega * l_wpt
+    return l_v, l_wpt
 
 
 def make_turn_indicator_gt(
@@ -424,6 +460,7 @@ def compute_neighbor_collision_penalty(
     margin_vehicle: float,
     margin_pedestrian: float,
     margin_bicycle: float,
+    eval_steps: "list[int] | None" = None,
 ) -> torch.Tensor:
     """Compute neighbor collision penalty for ego trajectory.
 
@@ -454,8 +491,9 @@ def compute_neighbor_collision_penalty(
     Pn = neighbors_future.shape[1]
     device = ego_edge_points.device
 
+    step_list = _NEIGHBOR_EVAL_STEPS if eval_steps is None else eval_steps
     steps = torch.tensor(
-        [s for s in _NEIGHBOR_EVAL_STEPS if s < T_full], device=device, dtype=torch.long
+        sorted({s for s in step_list if s < T_full}), device=device, dtype=torch.long
     )
     S = steps.shape[0]
     if S == 0:

@@ -192,7 +192,9 @@ def model_wrapper(
                 noise_schedule.marginal_alpha(t_continuous),
                 noise_schedule.marginal_std(t_continuous),
             )
-            return (x - alpha_t * output) / sigma_t
+            return (x - expand_dims(alpha_t, x.dim()) * output) / expand_dims(
+                sigma_t, x.dim()
+            )
         elif model_type == "v":
             alpha_t, sigma_t = (
                 noise_schedule.marginal_alpha(t_continuous),
@@ -300,7 +302,7 @@ class DPM_Solver:
             self.noise_schedule.marginal_alpha(t),
             self.noise_schedule.marginal_std(t),
         )
-        x0 = (x - sigma_t * noise) / alpha_t
+        x0 = (x - expand_dims(sigma_t, x.dim()) * noise) / expand_dims(alpha_t, x.dim())
         return x0
 
     def model_fn(self, x, t):
@@ -499,7 +501,7 @@ class DPM_Solver:
                 "Cannot use adaptive solver when correcting_xt_fn is not None"
             )
         device = x.device
-        T = 81
+        T = prefix_mask.shape[2]
         x = x.reshape(x.shape[0], x.shape[1], T, -1)
         t_shape = (x.shape[0], x.shape[1], T, 1)
         with torch.no_grad():

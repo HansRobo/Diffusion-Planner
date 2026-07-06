@@ -1,8 +1,20 @@
 import abc
+from typing import List, Optional, Union
 
 import torch
+from torch import Tensor
 
 STD_MIN = 1e-6
+
+
+def expand_dim(x: torch.Tensor, ref: torch.Tensor):
+    return x.reshape(*x.shape, *([1] * (ref.ndim - x.ndim)))
+
+
+def reshape_time(t: torch.Tensor, ref: torch.Tensor):
+    if t.ndim == 1:
+        return t.reshape([-1] + [1] * (ref.ndim - 1))
+    return t
 
 
 class SDE(abc.ABC):
@@ -79,6 +91,7 @@ class VPSDE_linear(SDE):
         drift = $-\frac{\beta(t)}{2} x$
         diffusion = $\sqrt{\beta(t)}$
         """
+        t = reshape_time(t, x)
 
         beta_t = (self._beta_max - self._beta_min) * t + self._beta_min
         drift = -0.5 * beta_t * x
@@ -90,11 +103,16 @@ class VPSDE_linear(SDE):
         """
         Parameters to determine the marginal distribution of the SDE, $p_t(x)$.
         """
+        t = reshape_time(t, x)
         mean_log_coeff = -0.25 * t**2 * (self._beta_max - self._beta_min) - 0.5 * self._beta_min * t
 
         mean = torch.exp(mean_log_coeff) * x
         std = torch.sqrt(1 - torch.exp(2.0 * mean_log_coeff))
         return mean, std
+
+    def marginal_alpha(self, t):
+        mean_log_coeff = -0.25 * t**2 * (self._beta_max - self._beta_min) - 0.5 * self._beta_min * t
+        return torch.exp(mean_log_coeff)
 
     def diffusion_coeff(self, t):
         beta_t = (self._beta_max - self._beta_min) * t + self._beta_min
@@ -105,6 +123,40 @@ class VPSDE_linear(SDE):
         discount = torch.exp(-0.5 * t**2 * (self._beta_max - self._beta_min) - self._beta_min * t)
         std = torch.sqrt(1 - discount)
         return std
+
+    def transform(
+        self, pattern, input: Tensor, t: Tensor, x_t: Optional[Tensor]
+    ) -> Union[Tensor, List[Tensor]]:
+        src, tgt = pattern.split("->")
+        if src == tgt:
+            return input
+
+        alpha_t = expand_dim(self.marginal_alpha(t), input)
+        sigma_t = expand_dim(self.marginal_prob_std(t), input)
+
+        if src == "noise":
+            noise = input
+        elif src == "score":
+            noise = -input * sigma_t
+        elif src == "x_start":
+            noise = (x_t - alpha_t * input) / (sigma_t + 1e-6)
+        elif src == "v":
+            noise = sigma_t * x_t + alpha_t * input
+        else:
+            raise ValueError(f"Unknown src: {src}")
+
+        if tgt == "noise":
+            output = noise
+        elif tgt == "score":
+            output = -noise / (sigma_t + 1e-6)
+        elif tgt == "x_start":
+            output = (x_t - sigma_t * noise) / (alpha_t + 1e-6)
+        elif tgt == "v":
+            output = (noise - sigma_t * x_t) / (alpha_t + 1e-6)
+        else:
+            raise ValueError(f"Unknown tgt: {tgt}")
+
+        return output
 
 
 class subVPSDE_exp(SDE):
