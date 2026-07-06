@@ -246,6 +246,7 @@ void process_sequence(
                                        point_idx * SEGMENT_POINT_DIM + TRAFFIC_LIGHT_YELLOW;
     const bool is_yellow_light = route_lanes[yellow_light_index] > 0.5 && !options.convert_yellow;
     const bool is_red_or_yellow = is_red_light || is_yellow_light;
+    const bool is_red_light_run_candidate = is_red_light;
 
     float sum_mileage = 0.0;
     for (int64_t j = 0; j < OUTPUT_T - 1; ++j) {
@@ -277,6 +278,7 @@ void process_sequence(
       covariance[0],
       covariance[7],
       is_stop,
+      is_red_light_run_candidate,
       is_red_or_yellow,
       is_future_forward,
       stopping_count,
@@ -284,14 +286,15 @@ void process_sequence(
 
     const frame_processor::FrameFilterParams filter_params{
       options.static_object_margin,  options.neighbor_margin,   options.road_border_margin,
-      options.collision_time_stride, options.offlane_max_score, options.offlane_time_stride};
+      options.collision_time_stride, options.offlane_max_score, options.offlane_time_stride,
+      options.red_light_run_radius_m, options.red_light_run_heading_tol_deg};
 
     const std::vector<float> ego_shape = {
       options.ego_wheel_base, options.ego_length, options.ego_width};
 
     const SkippingInfo skipping_info = frame_processor::decide_frame_skip(
       skip_inputs, ego_future, ego_shape, static_objects, neighbor_future, neighbor_past,
-      line_strings, lanes, filter_params);
+      line_strings, lanes, route_lanes, filter_params);
 
     const bool is_skipped = skipping_info.label != SkippingLabel::NotSkipped;
     if (options.pack_sequence) {

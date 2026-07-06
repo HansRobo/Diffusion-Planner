@@ -32,6 +32,7 @@ struct FrameSkipInputs
   double cov_xx;                      // kinematic_state.pose.covariance[0]
   double cov_yy;                      // kinematic_state.pose.covariance[7]
   bool is_stop;                       // linear.x < 0.1
+  bool is_red_light_run;              // GT future crosses its own red-light stop line
   bool is_red_or_yellow;              // next route segment has red/yellow light
   bool is_future_forward;             // GT future mileage > 1.0 m
   int64_t stopping_count;             // consecutive ticks ego has been stopped
@@ -48,6 +49,8 @@ struct FrameFilterParams
   int64_t collision_time_stride;
   float offlane_max_score;
   int64_t offlane_time_stride;
+  float red_light_run_radius_m;
+  float red_light_run_heading_tol_deg;
 };
 
 // Pure skip-reason computation — no I/O, no ROS time, no file system.
@@ -57,7 +60,7 @@ SkippingInfo decide_frame_skip(
   const std::vector<float> & ego_shape, const std::vector<float> & static_objects,
   const std::vector<float> & neighbor_future, const std::vector<float> & neighbor_past,
   const std::vector<float> & line_strings, const std::vector<float> & lanes,
-  const FrameFilterParams & filter_params);
+  const std::vector<float> & route_lanes, const FrameFilterParams & filter_params);
 
 }  // namespace frame_processor
 

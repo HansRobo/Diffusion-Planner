@@ -54,6 +54,11 @@ struct ConverterOptions
   float offlane_max_score;
   int64_t offlane_time_stride;
 
+  // Red-light-run filter. A frame is skipped only when the ego future crosses a
+  // stop line near the entry point of a heading-aligned red route lane.
+  float red_light_run_radius_m;
+  float red_light_run_heading_tol_deg;
+
   // When true, also write the npz for frame-level skipped frames (collision,
   // off-lane, red/yellow light, vehicle stopped) so they can be visualised with
   // their skip reason. Intended for inspection/testing only; off in production.
