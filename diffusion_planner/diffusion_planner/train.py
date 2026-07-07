@@ -48,8 +48,11 @@ def log_dataset_artifact(
     valid_path = Path(valid_set_list)
     artifact.add_file(str(train_path), name=train_path.name)
     artifact.add_file(str(valid_path), name=valid_path.name)
-    summary_csv = find_upward(train_set_list, "summary.csv")
-    artifact.add_file(str(summary_csv), name="summary.csv")
+    try:
+        summary_csv = find_upward(train_set_list, "summary.csv")
+        artifact.add_file(str(summary_csv), name="summary.csv")
+    except FileNotFoundError:
+        print("summary.csv not found, skipping.")
     try:
         rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
         artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
@@ -260,7 +263,11 @@ def model_training(args: TrainConfig):
     diffusion_planner = diffusion_planner.to(rank if args.device == "cuda" else args.device)
 
     if args.ddp:
-        diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
+        diffusion_planner = DDP(
+            diffusion_planner,
+            device_ids=[rank],
+            find_unused_parameters=getattr(args, "find_unused_parameters", True),
+        )
 
     if args.use_ema:
         model_ema = ModelEma(
@@ -331,6 +338,7 @@ def model_training(args: TrainConfig):
 
     data_list = []
     best_loss = float("inf")
+    best_epdms = -float("inf")
 
     valid_dict = validate_model(diffusion_planner, valid_loader, args)
     agg = aggregate_valid_metrics(valid_dict, args.device)
@@ -357,6 +365,20 @@ def model_training(args: TrainConfig):
             f"{turn_indicator_change_accuracy=:.3f}\n"
             f"{turn_indicator_change_total=:.3f}"
         )
+        if args.use_wandb:
+            wandb.log(
+                {
+                    "epoch": 0,
+                    "global_step": 0,
+                    "lr/lr": optimizer.param_groups[0]["lr"],
+                    "valid_loss/ego": valid_loss_ego,
+                    "valid_loss/neighbors": valid_loss_neighbor,
+                    "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
+                    "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+                    **mean_ego_loss_dict,
+                    **mean_epdms_dict,
+                }
+            )
 
     # begin training
     for epoch in range(init_epoch, train_epochs):
@@ -378,6 +400,8 @@ def model_training(args: TrainConfig):
                 print(f"Final phase: Epoch {epoch + 1}, LR adjusted to {adjusted_lr}")
 
         # training step
+        args._current_epoch = epoch + 1
+        args._train_epochs = train_epochs
         train_loss, train_total_loss = train_epoch(
             train_loader, diffusion_planner, optimizer, args, model_ema, aug
         )
@@ -412,6 +436,8 @@ def model_training(args: TrainConfig):
             lr_dict = {"lr": optimizer.param_groups[0]["lr"]}
             wandb.log(
                 {
+                    "epoch": epoch + 1,
+                    "global_step": getattr(args, "_wandb_global_step", epoch + 1),
                     **{f"train_loss/{k}": v for k, v in train_loss.items()},
                     **{f"lr/{k}": v for k, v in lr_dict.items()},
                     "valid_loss/ego": valid_loss_ego,
@@ -420,8 +446,7 @@ def model_training(args: TrainConfig):
                     "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
                     **mean_ego_loss_dict,
                     **mean_epdms_dict,
-                },
-                step=epoch + 1,
+                }
             )
 
             curr_data = {
@@ -434,7 +459,9 @@ def model_training(args: TrainConfig):
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }
             data_list.append(curr_data)
-            with open(os.path.join(save_path, "train_log.tsv"), "w", newline="", encoding="utf-8") as f:
+            with open(
+                os.path.join(save_path, "train_log.tsv"), "w", newline="", encoding="utf-8"
+            ) as f:
                 writer = csv.DictWriter(f, fieldnames=list(data_list[0].keys()), delimiter="\t")
                 writer.writeheader()
                 writer.writerows(data_list)
@@ -481,12 +508,36 @@ def model_training(args: TrainConfig):
                 os.makedirs(curr_dir, exist_ok=True)
                 torch.save(model_dict, f"{curr_dir}/best_model.pth")
                 best_loss = valid_loss_ego_position_lat_loss
-                curr_data["best_loss"] = best_loss
+                best_data = dict(curr_data)
+                best_data["best_loss"] = best_loss
                 with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
-                    json.dump(curr_data, f, indent=4)
+                    json.dump(best_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
                 # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
+                export_checkpoint_onnx_guarded(
+                    config_json_path=os.path.join(curr_dir, "args.json"),
+                    ckpt_path=f"{curr_dir}/best_model.pth",
+                    output_dir=Path(curr_dir),
+                    output_prefix="diffusion_planner",
+                    use_ema=False,
+                    use_simplify=False,
+                    opset_version=20,
+                    external_data=False,
+                )
+
+            valid_epdms_total = mean_epdms_dict.get("valid_epdms/total")
+            if valid_epdms_total is not None and valid_epdms_total > best_epdms:
+                curr_dir = os.path.join(save_path, "best_epdms_model")
+                os.makedirs(curr_dir, exist_ok=True)
+                torch.save(model_dict, f"{curr_dir}/best_model.pth")
+                best_epdms = valid_epdms_total
+                best_data = dict(curr_data)
+                best_data["best_epdms"] = best_epdms
+                with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
+                    json.dump(best_data, f, indent=4)
+                with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
+                    json.dump(args_dict, f, indent=4)
                 export_checkpoint_onnx_guarded(
                     config_json_path=os.path.join(curr_dir, "args.json"),
                     ckpt_path=f"{curr_dir}/best_model.pth",

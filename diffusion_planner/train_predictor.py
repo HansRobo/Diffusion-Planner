@@ -204,6 +204,12 @@ def get_args(args_list=None):
         default="Diffusion-Planner",
         help="Weights & Biases project name",
     )
+    parser.add_argument(
+        "--wandb_step_log_interval",
+        type=int,
+        default=0,
+        help="log train metrics every N optimizer steps (0 = epoch only)",
+    )
     parser.add_argument("--notes", default="", type=str)
 
     # distributed training parameters

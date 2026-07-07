@@ -1,4 +1,5 @@
 import torch
+import wandb
 from torch import nn
 from tqdm import tqdm
 
@@ -37,6 +38,13 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     epoch_loss = []
 
     model.train()
+    step_log = getattr(args, "wandb_step_log_interval", 0)
+    log_step = args.use_wandb and step_log > 0 and ddp.get_rank() == 0
+    if not hasattr(args, "_wandb_global_step"):
+        args._wandb_global_step = 0
+    current_epoch = getattr(args, "_current_epoch", 0)
+    total_epochs = getattr(args, "_train_epochs", 0)
+    num_batches = len(data_loader)
 
     if args.ddp:
         torch.cuda.synchronize()
@@ -44,7 +52,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     if ddp.get_rank() == 0:
         data_loader = tqdm(data_loader, desc="Training", unit="batch")
 
-    for inputs in data_loader:
+    for batch_idx, inputs in enumerate(data_loader, start=1):
         inputs = {key: value.to(args.device) for key, value in inputs.items()}
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
@@ -87,6 +95,31 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         optimizer.step()
 
         ema.update(model)
+        args._wandb_global_step += 1
+
+        if log_step and args._wandb_global_step % step_log == 0:
+            current_lr = optimizer.param_groups[0]["lr"]
+            train_step_metrics = {
+                f"train_step/{k}": (v.item() if torch.is_tensor(v) else v)
+                for k, v in loss.items()
+                if k != "loss" or torch.is_tensor(v)
+            }
+            wandb.log(
+                {
+                    "epoch": current_epoch,
+                    "global_step": args._wandb_global_step,
+                    "lr/lr": current_lr,
+                    "train_step/global_step": args._wandb_global_step,
+                    "train_step/epoch": current_epoch,
+                    "train_step/total_epochs": total_epochs,
+                    "train_step/batch": batch_idx,
+                    "train_step/num_batches": num_batches,
+                    "train_step/epoch_progress": batch_idx / max(num_batches, 1),
+                    "train_step/lr": current_lr,
+                    **train_step_metrics,
+                },
+                commit=True,
+            )
 
         if args.ddp:
             torch.cuda.synchronize()

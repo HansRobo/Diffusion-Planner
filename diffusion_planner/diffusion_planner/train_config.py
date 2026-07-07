@@ -137,6 +137,7 @@ class TrainConfig:
     use_wandb: bool = False
     wandb_run_id: Optional[str] = None
     wandb_project_name: str = "Diffusion-Planner"
+    wandb_step_log_interval: int = 0
     notes: str = ""
     ddp: bool = True
     port: str = "22323"

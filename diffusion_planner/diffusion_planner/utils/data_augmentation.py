@@ -394,9 +394,22 @@ class StatePerturbation:
             inputs["ego_current_state"][..., 6:8], transform_matrix
         )
 
-        # ego future xy
+        # ego future
+        ego_future_is_heading = ego_future.shape[-1] == 3
         ego_future[..., :2] = vector_transform(ego_future[..., :2], transform_matrix, center_xy)
-        ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
+        if ego_future_is_heading:
+            ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
+            ego_future4d = torch.cat(
+                [
+                    ego_future[..., :2],
+                    torch.cos(ego_future[..., 2:3]),
+                    torch.sin(ego_future[..., 2:3]),
+                ],
+                dim=-1,
+            )
+        else:
+            ego_future[..., 2:4] = vector_transform(ego_future[..., 2:4], transform_matrix)
+            ego_future4d = ego_future
 
         # ego past
         ego_past_mask = pose_padding_mask(inputs["ego_agent_past"])
@@ -408,30 +421,21 @@ class StatePerturbation:
         )
         inputs["ego_agent_past"][ego_past_mask] = 0.0
 
-        ego_past4d = inputs["ego_agent_past"]
-        ego_future4d = torch.cat(
-            [
-                ego_future[..., :2],  # x, y
-                torch.cos(ego_future[..., 2:3]),  # cos
-                torch.sin(ego_future[..., 2:3]),  # sin
-            ],
-            dim=-1,
-        )
-
         if self._use_smoothing_future_trajectory:
             ego_future4d = smoothing_future_trajectory(
-                ego_past4d, inputs["ego_current_state"], ego_future4d
+                inputs["ego_agent_past"], inputs["ego_current_state"], ego_future4d
             )
 
-        ego_future = torch.cat(
-            [
-                ego_future4d[..., :2],  # x, y
-                torch.atan2(ego_future4d[..., 3], ego_future4d[..., 2]).unsqueeze(
-                    -1
-                ),  # heading from cos, sin
-            ],
-            dim=-1,
-        )
+        if ego_future_is_heading:
+            ego_future = torch.cat(
+                [
+                    ego_future4d[..., :2],
+                    torch.atan2(ego_future4d[..., 3], ego_future4d[..., 2]).unsqueeze(-1),
+                ],
+                dim=-1,
+            )
+        else:
+            ego_future = ego_future4d
         inputs["ego_agent_future"] = ego_future
 
         # neighbor past xy
@@ -449,12 +453,17 @@ class StatePerturbation:
         )
         inputs["neighbor_agents_past"][mask] = 0.0
 
-        # neighbor future xy
+        # neighbor future
         mask = pose_padding_mask(neighbors_future)
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )
-        neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
+        if neighbors_future.shape[-1] == 3:
+            neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
+        else:
+            neighbors_future[..., 2:4] = vector_transform(
+                neighbors_future[..., 2:4], transform_matrix
+            )
         neighbors_future[mask] = 0.0
 
         # lanes
