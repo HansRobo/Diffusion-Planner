@@ -37,12 +37,10 @@ def ddp_setup_universal(verbose=False, args=None):
 
     torch.cuda.set_device(gpu)
     dist_backend = "nccl"
-    # I don't know why but this is needed for DDP to work instead of 'env://'
-    dist_url = "file://"
-    file_path = "/tmp/tmp_dist_init"
+    dist_url = "env://"
     print("| distributed init (rank {}): {}, gpu {}".format(rank, dist_url, gpu), flush=True)
     init_process_group(
-        init_method=f"{dist_url}{file_path}",
+        init_method=dist_url,
         backend=dist_backend,
         world_size=world_size,
         rank=rank,

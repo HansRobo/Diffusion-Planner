@@ -158,6 +158,11 @@ def run_validation(valid_cfg: ValidConfig):
         )
     if "ego_road_border_loss" in valid_dict:
         print(f"ego_road_border_loss_mean={valid_dict['ego_road_border_loss'].mean().item():.4f}")
+    if "ego_trajectory_consistency_error" in valid_dict:
+        print(
+            "ego_trajectory_consistency_error_mean="
+            f"{valid_dict['ego_trajectory_consistency_error'].mean().item():.4f}"
+        )
 
     # Save results
     if valid_cfg.save_predictions_dir is None:

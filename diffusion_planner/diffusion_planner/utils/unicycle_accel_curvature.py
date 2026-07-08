@@ -17,10 +17,33 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Optional, TypeVar, Union
 
-import einops
+try:
+    import einops
+except ModuleNotFoundError:
+    class _EinopsFallback:
+        @staticmethod
+        def einsum(*args):
+            *tensors, pattern = args
+            return torch.einsum(pattern, *tensors)
+    einops = _EinopsFallback()
 import numpy as np
 import torch
-from scipy.spatial.transform import Rotation as R
+try:
+    from scipy.spatial.transform import Rotation as R
+except ModuleNotFoundError:
+    class _RotationFallback:
+        @staticmethod
+        def from_euler(*args, **kwargs):
+            raise ModuleNotFoundError("scipy is required for euler_2_so3, but that helper is unused during training augmentation")
+    R = _RotationFallback()
+if not hasattr(torch, "_dynamo"):
+    class _DynamoFallback:
+        @staticmethod
+        def disable(*args, **kwargs):
+            def deco(fn):
+                return fn
+            return deco
+    torch._dynamo = _DynamoFallback()
 from torch import nn
 
 logger = logging.getLogger(__name__)

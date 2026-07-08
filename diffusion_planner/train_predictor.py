@@ -74,6 +74,7 @@ def get_args(args_list=None):
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
+    parser.add_argument("--skip_filter", default=True, type=boolean)
 
     # Training
     parser.add_argument("--seed", type=int, default=3407)
@@ -82,6 +83,7 @@ def get_args(args_list=None):
     parser.add_argument("--save_utd", type=int, default=10)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--warm_up_epoch", type=int, default=5)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
@@ -105,6 +107,50 @@ def get_args(args_list=None):
 
     parser.add_argument("--coeff_neighbor_collision_loss", type=float, default=0.0)
     parser.add_argument("--neighbor_collision_margin", type=float, default=0.25)
+    parser.add_argument(
+        "--coeff_comfort_loss",
+        type=float,
+        default=0.0,
+        help="Weight for differentiable NAVSIM/PDMS comfort-threshold surrogate loss.",
+    )
+    parser.add_argument(
+        "--coeff_progress_loss",
+        type=float,
+        default=0.0,
+        help="Weight for differentiable ego-progress under-driving surrogate loss.",
+    )
+
+    parser.add_argument("--enable_pdms_eval", default=False, type=boolean)
+    parser.add_argument("--pdms_eval_use_agent_boxes", default=True, type=boolean)
+    parser.add_argument("--pdms_eval_use_road_border", default=True, type=boolean)
+
+    parser.add_argument("--use_dfp_decoder", default=False, type=boolean)
+    parser.add_argument(
+        "--dfp_decoder_mode",
+        type=str,
+        choices=["additive", "fusion", "unified_ego", "shared_stack_unified_ego", "shared_stack_gated_ego", "shared_stack_interaction_ego", "joint_temporal_agent"],
+        default="additive",
+        help=(
+            "DFP integration mode: auxiliary branch, residual fusion, DFP as main ego decoder, "
+            "DFP ego head reusing the original decoder block stack, gated shared-stack ego fusion, or one-decoder joint temporal all-agent DFP"
+        ),
+    )
+    parser.add_argument("--dfp_use_inference", default=False, type=boolean)
+    parser.add_argument("--dfp_history_len", type=int, default=20)
+    parser.add_argument("--dfp_chunk_len", type=int, default=20)
+    parser.add_argument("--dfp_lambda_hist", type=float, default=1.0)
+    parser.add_argument("--dfp_lambda_future", type=float, default=1.0)
+    parser.add_argument("--dfp_lambda_current", type=float, default=0.0)
+    parser.add_argument("--dfp_history_beta_a", type=float, default=0.5)
+    parser.add_argument("--dfp_history_beta_b", type=float, default=0.5)
+    parser.add_argument("--dfp_guidance_w", type=float, default=0.2)
+    parser.add_argument("--dfp_guidance_beta", type=float, default=2.0)
+    parser.add_argument("--dfp_sampler_steps", type=int, default=10)
+    parser.add_argument("--dfp_fusion_mode", type=str, choices=["none", "residual"], default="none")
+    parser.add_argument("--dfp_fusion_residual_scale", type=float, default=1.0)
+    parser.add_argument("--dfp_gate_alpha_init", type=float, default=0.1)
+    parser.add_argument("--dfp_interaction_detach", default=True, type=boolean)
+    parser.add_argument("--dfp_lambda_original_ego", type=float, default=0.0)
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
@@ -133,6 +179,7 @@ def get_args(args_list=None):
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
 
     parser.add_argument("--use_ema", default=True, type=boolean)
+    parser.add_argument("--tf32", default=True, type=boolean)
 
     # Model
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)
@@ -149,6 +196,7 @@ def get_args(args_list=None):
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
+    parser.add_argument("--init_weights_path", type=str, default=None, help="weights-only warm start; loads model with strict=False and fresh optimizer/schedule")
 
     parser.add_argument("--use_wandb", default=False, type=boolean)
     parser.add_argument(
@@ -159,6 +207,12 @@ def get_args(args_list=None):
         type=str,
         default="Diffusion-Planner",
         help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--wandb_step_log_interval",
+        type=int,
+        default=0,
+        help="log train metrics every N optimizer steps (0 = epoch only)",
     )
     parser.add_argument("--notes", default="", type=str)
 

@@ -63,6 +63,7 @@ class TrainConfig:
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True
+    skip_filter: bool = True
 
     # ---------------------------------------------------------
     # Training Parameters
@@ -73,6 +74,7 @@ class TrainConfig:
     save_utd: int = 10
     learning_rate: float = 1e-4
     warm_up_epoch: int = 5
+    gradient_accumulation_steps: int = 1
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True
@@ -93,6 +95,41 @@ class TrainConfig:
 
     coeff_neighbor_collision_loss: float = 0.0
     neighbor_collision_margin: float = 0.25
+    coeff_comfort_loss: float = 0.0
+    coeff_progress_loss: float = 0.0
+
+    # Validation-only NAVSIM-formula PDMS proxy metrics. Default-off to keep
+    # legacy runs byte-compatible unless explicitly enabled.
+    enable_pdms_eval: bool = False
+    pdms_eval_use_agent_boxes: bool = True
+    pdms_eval_use_road_border: bool = True
+
+    use_dfp_decoder: bool = False
+    dfp_decoder_mode: Literal[
+        "additive",
+        "fusion",
+        "unified_ego",
+        "shared_stack_unified_ego",
+        "shared_stack_gated_ego",
+        "shared_stack_interaction_ego",
+        "joint_temporal_agent",
+    ] = "additive"
+    dfp_use_inference: bool = False
+    dfp_history_len: int = 20
+    dfp_chunk_len: int = 20
+    dfp_lambda_hist: float = 1.0
+    dfp_lambda_future: float = 1.0
+    dfp_lambda_current: float = 0.0
+    dfp_history_beta_a: float = 0.5
+    dfp_history_beta_b: float = 0.5
+    dfp_guidance_w: float = 0.2
+    dfp_guidance_beta: float = 2.0
+    dfp_sampler_steps: int = 10
+    dfp_fusion_mode: Literal["none", "residual"] = "none"
+    dfp_fusion_residual_scale: float = 1.0
+    dfp_gate_alpha_init: float = 0.1
+    dfp_interaction_detach: bool = True
+    dfp_lambda_original_ego: float = 0.0
 
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1
@@ -105,6 +142,7 @@ class TrainConfig:
     guidance_scale: float = 0.5
     device: str = "cuda"
     use_ema: bool = True
+    tf32: bool = True
 
     # ---------------------------------------------------------
     # Model Architecture
@@ -117,6 +155,7 @@ class TrainConfig:
     diffusion_model_type: Literal["x_start", "flow_matching"] = "x_start"
     predicted_neighbor_num: int = MAX_NUM_NEIGHBORS
     resume_model_path: Optional[str] = None
+    init_weights_path: Optional[str] = None
 
     # ---------------------------------------------------------
     # Logging & Distributed Setup
@@ -124,6 +163,7 @@ class TrainConfig:
     use_wandb: bool = False
     wandb_run_id: Optional[str] = None
     wandb_project_name: str = "Diffusion-Planner"
+    wandb_step_log_interval: int = 0
     notes: str = ""
     ddp: bool = True
     port: str = "22323"
