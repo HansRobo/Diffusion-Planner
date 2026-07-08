@@ -124,7 +124,7 @@ def get_args(args_list=None):
         help="per-side neighbor box inflation [m] for bicycles",
     )
 
-    parser.add_argument("--enable_epdms_eval", default=False, type=boolean)
+    parser.add_argument("--enable_epdms_eval", default=True, type=boolean)
     parser.add_argument("--enable_pdms_eval", default=False, type=boolean)
     parser.add_argument("--epdms_eval_use_agent_boxes", default=True, type=boolean)
     parser.add_argument("--epdms_eval_use_road_border", default=True, type=boolean)
