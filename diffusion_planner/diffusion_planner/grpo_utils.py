@@ -72,10 +72,7 @@ def sample_group(
     Args:
         model: the Diffusion_Planner (or DDP-wrapped) model.
         norm_inputs: observation-normalized inputs, batch dimension already expanded.
-        noise_scale: the *maximum* initial-noise std. Each row draws its own scale uniformly
-            from ``U[0, noise_scale]`` (fresh every call), so a group spans a range of
-            diversities rather than all sharing one fixed scale. ``noise_scale=0`` stays
-            deterministic (temperature 0).
+        noise_scale: rollout sampling temperature. ``0`` stays deterministic.
         device: target device.
 
     Returns:
@@ -87,9 +84,8 @@ def sample_group(
 
     B = norm_inputs["ego_current_state"].shape[0]
     inference_inputs = dict(norm_inputs)
-    # Per-row noise std ~ U[0, noise_scale]: each generated trajectory uses its own initial-noise
-    # magnitude, drawn fresh each call.
-    per_row_scale = torch.rand(B, 1, 1, 1, device=device) * noise_scale
+    # Official HDP-RL samples rollouts with a fixed sampling temperature.
+    per_row_scale = torch.full((B, 1, 1, 1), float(noise_scale), device=device)
     inference_inputs["sampled_trajectories"] = (
         torch.randn(B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, device=device) * per_row_scale
     )
@@ -263,12 +259,13 @@ def compute_official_reward_weights(
     finite_group = torch.isfinite(grouped).all(dim=1, keepdim=True)
     if normalize == "group":
         mean = grouped.mean(dim=1, keepdim=True)
+        valid_group = finite_group & (group_std > eps)
         reward_norm = torch.where(
-            group_std > eps,
+            valid_group,
             (grouped - mean) / (group_std + eps),
             torch.zeros_like(grouped),
         ).reshape(-1)
-        valid_sample = finite_group.expand(-1, n).reshape(-1)
+        valid_sample = valid_group.expand(-1, n).reshape(-1)
     elif normalize == "batch":
         finite = torch.isfinite(reward)
         if finite.any():

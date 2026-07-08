@@ -1,10 +1,8 @@
-"""GRPO fine-tuning entrypoint, placed alongside ``train_predictor.py``.
+"""HDP reinforcement-learning fine-tuning entrypoint, placed alongside ``train_predictor.py``.
 
 This mirrors the supervised trainer (same DDP setup, optimizer/scheduler, EMA, checkpointing
-and wandb logging) but swaps the per-epoch training step for ``train_grpo_epoch``: it samples
-groups of trajectories, scores them with a collision-based reward, and takes group-relative
-policy-gradient steps. It is intended to be run starting from a pretrained checkpoint
-(``--resume_model_path``).
+and wandb logging) but swaps the per-epoch training step for ``train_grpo_epoch``. By default it
+uses the official HDP reward-weighted RL-Hybrid objective; GRPO remains an explicit ablation.
 """
 
 import argparse
@@ -18,7 +16,7 @@ import wandb
 from diffusion_planner.dimensions import *
 from diffusion_planner.grpo_epoch import train_grpo_epoch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train import assert_checkpoint_compatible, closed_loop_validate
+from diffusion_planner.train import assert_checkpoint_compatible, closed_loop_validate, load_weights_only
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
@@ -140,15 +138,14 @@ def get_args():
     parser.add_argument(
         "--num_generations",
         type=int,
-        default=8,
-        help="N: trajectories sampled per scene (the GRPO group size)",
+        default=32,
+        help="N: trajectories sampled per scene (official HDP RL group size)",
     )
     parser.add_argument(
         "--grpo_noise_scale",
         type=float,
-        default=3.0,
-        help="MAX initial-noise std during sampling; each row draws its own scale from "
-        "U[0, this] every step (0 = deterministic)",
+        default=0.5,
+        help="rollout sampling temperature used by the official HDP RL path",
     )
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
     parser.add_argument(
@@ -181,16 +178,16 @@ def get_args():
     parser.add_argument(
         "--sft_prob",
         type=float,
-        default=0.5,
+        default=0.0,
         help="probability of running a normal supervised step instead of a "
-        "GRPO step on a given batch (0 = pure GRPO, 1 = pure supervised)",
+        "RL step on a given batch (0 = pure official HDP-RL, 1 = pure supervised)",
     )
     parser.add_argument(
         "--rl_objective",
         type=str,
         choices=["grpo", "official_reward_weighted"],
         default=_train_config_default("rl_objective"),
-        help="RL objective for non-SFT steps: GRPO advantage loss or official HDP reward-weighted loss",
+        help="RL objective for non-SFT steps: official HDP reward-weighted loss or GRPO ablation",
     )
     parser.add_argument(
         "--official_reward_normalize",
@@ -218,7 +215,7 @@ def get_args():
     parser.add_argument(
         "--neighbor_inject_prob",
         type=float,
-        default=0.5,
+        default=0.0,
         help="per-scene probability of injecting any synthetic colliders",
     )
     parser.add_argument(
@@ -255,7 +252,7 @@ def get_args():
     parser.add_argument(
         "--neighbor_db_path",
         type=str,
-        default="/mnt/storage_rdma/diffusion_planner/dataset/basic_dataset/neighbor_db.npz",
+        default="",
         help="path to a neighbor-pattern DB (built by neighbor_db.py); "
         "empty = use the synthetic collider generator instead",
     )
@@ -374,16 +371,28 @@ def get_args():
         "--resume_model_path",
         type=str,
         default=None,
-        help="pretrained checkpoint to start GRPO from (recommended)",
+        help="checkpoint for strict training resume, including optimizer/scheduler state",
+    )
+    parser.add_argument(
+        "--init_weights_path",
+        type=str,
+        default=None,
+        help="weights-only checkpoint for starting a fresh RL run from an SFT model",
+    )
+    parser.add_argument(
+        "--rl_train_scope",
+        type=str,
+        choices=["decoder", "all"],
+        default="decoder",
+        help="parameters optimized during RL; official HDP RL fine-tunes the decoder",
     )
 
     parser.add_argument("--use_wandb", default=True, type=boolean)
     parser.add_argument(
         "--wandb_project_name",
         type=str,
-        default="Diffusion-Planner-GRPO",
-        help="Weights & Biases project name (GRPO runs keep their historical project so "
-        "dashboards and run comparisons stay separate from supervised runs)",
+        default="Diffusion-Planner-Temporal",
+        help="Weights & Biases project name",
     )
     parser.add_argument("--notes", default="", type=str)
 
@@ -432,6 +441,8 @@ def get_args():
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=2.5)
 
     args = parser.parse_args()
+    if args.resume_model_path is not None and args.init_weights_path is not None:
+        raise ValueError("--resume_model_path and --init_weights_path are mutually exclusive")
 
     args.state_normalizer = StateNormalizer.from_json(args)
     args.observation_normalizer = ObservationNormalizer.from_json(args)
@@ -455,6 +466,9 @@ def model_training(args):
         print("------------- {} -------------".format(args.exp_name))
         print("Scenes per step (batch_size): {}".format(args.batch_size))
         print("Group size (num_generations): {}".format(args.num_generations))
+        print("RL objective: {}".format(args.rl_objective))
+        print("RL train scope: {}".format(args.rl_train_scope))
+        print("Rollout sampling temperature: {}".format(args.grpo_noise_scale))
         print("Learning rate: {}".format(args.learning_rate))
 
         if args.resume_model_path is not None:
@@ -477,6 +491,8 @@ def model_training(args):
 
     if args.resume_model_path is not None:
         assert_checkpoint_compatible(args.resume_model_path, args)
+    if args.init_weights_path is not None:
+        assert_checkpoint_compatible(args.init_weights_path, args)
 
     set_seed(args.seed + global_rank)
 
@@ -577,6 +593,10 @@ def model_training(args):
     diffusion_planner = Diffusion_Planner(args)
     diffusion_planner = diffusion_planner.to(rank if args.device == "cuda" else args.device)
 
+    if args.rl_train_scope == "decoder":
+        for name, param in diffusion_planner.named_parameters():
+            param.requires_grad_(name.startswith("decoder."))
+
     if args.ddp:
         diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
 
@@ -589,12 +609,12 @@ def model_training(args):
             )
         )
 
-    params = [
-        {
-            "params": ddp.get_model(diffusion_planner, args.ddp).parameters(),
-            "lr": args.learning_rate,
-        }
+    trainable_params = [
+        p for p in ddp.get_model(diffusion_planner, args.ddp).parameters() if p.requires_grad
     ]
+    if not trainable_params:
+        raise RuntimeError("No trainable parameters found for RL training")
+    params = [{"params": trainable_params, "lr": args.learning_rate}]
     optimizer = optim.AdamW(params)
     scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
 
@@ -608,6 +628,11 @@ def model_training(args):
             param_group["lr"] = args.learning_rate
         init_epoch = 0
         print(f"Learning rate set to {args.learning_rate}")
+    elif args.init_weights_path is not None:
+        print(f"Initializing RL weights from {args.init_weights_path}")
+        load_weights_only(args.init_weights_path, diffusion_planner, args.device)
+        init_epoch = 0
+        wandb_id = None
     else:
         init_epoch = 0
         wandb_id = None

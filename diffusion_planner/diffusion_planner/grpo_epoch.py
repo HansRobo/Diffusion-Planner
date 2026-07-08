@@ -36,6 +36,15 @@ from diffusion_planner.utils.masks import pose_padding_mask
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
 
 
+def _set_official_rl_train_mode(model, args):
+    if getattr(args, "rl_train_scope", "all") != "decoder":
+        return
+    net = ddp.get_model(model, args.ddp)
+    encoder = getattr(net, "encoder", None)
+    if encoder is not None:
+        encoder.eval()
+
+
 def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
     """Convert raw neighbor future (x, y, heading) to world-frame (x, y, cos, sin) + mask."""
     mask = pose_padding_mask(neighbor_future_raw)  # [B, Pn, T]
@@ -64,6 +73,7 @@ def _sft_step(raw_inputs, model, optimizer, args, ema, aug):
     inputs = args.observation_normalizer(inputs)
 
     optimizer.zero_grad()
+    _set_official_rl_train_mode(model, args)
     loss = compute_training_loss(
         model, inputs, (ego_future, neighbors_future, neighbor_future_mask), args
     )
@@ -132,6 +142,7 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
 
     # Multi-batch inference: draw one trajectory per row (group of N per scene).
     ego_world = sample_group(model, norm_exp, args.grpo_noise_scale, args.device)
+    _set_official_rl_train_mode(model, args)
 
     # Collision-based reward -> group-relative advantages.
     reward, nc_penalty, rb_penalty = compute_collision_reward(
@@ -190,9 +201,9 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
     if ema is not None:
         ema.update(model)
 
-    return {
+    result = {
         "loss": loss_dict["loss"].detach(),
-        "grpo_loss": loss_dict["loss"].detach(),
+        "rl_loss": loss_dict["loss"].detach(),
         "reward_mean": reward.mean().detach(),
         "reward_max": reward.view(num_scenes, n).max(dim=1).values.mean().detach(),
         "neighbor_collision_penalty": nc_penalty.sum(dim=-1).mean().detach(),
@@ -208,12 +219,18 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
         "official_valid_group_fraction": official_valid_group_fraction.detach(),
         "is_grpo": torch.tensor(1.0),
     }
+    if rl_objective == "grpo":
+        result["grpo_loss"] = loss_dict["loss"].detach()
+    else:
+        result["official_reward_weighted_loss"] = loss_dict["official_reward_weighted_loss"]
+    return result
 
 
 def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector, aug):
     epoch_loss = []
 
     model.train()
+    _set_official_rl_train_mode(model, args)
 
     if args.ddp:
         torch.cuda.synchronize()

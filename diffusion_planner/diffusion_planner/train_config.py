@@ -122,9 +122,9 @@ class TrainConfig:
     diffusion_time_sample_method: Literal["uniform"] = "uniform"
     diffusion_sample_steps: int = 10
 
-    # HDP RL objective. Keep GRPO as the safe default so existing GRPO launchers
-    # do not silently switch objective; official_reward_weighted is opt-in.
-    rl_objective: Literal["grpo", "official_reward_weighted"] = "grpo"
+    # HDP RL objective. The default follows the paper/official implementation:
+    # reward-weighted RL-Hybrid loss. GRPO remains available as an explicit ablation.
+    rl_objective: Literal["grpo", "official_reward_weighted"] = "official_reward_weighted"
     official_reward_normalize: Literal["group", "batch", "none"] = "group"
     official_reward_beta: float = 1.0
 
