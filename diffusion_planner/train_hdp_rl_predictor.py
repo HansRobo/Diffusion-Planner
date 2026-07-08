@@ -1,20 +1,19 @@
 """HDP reinforcement-learning fine-tuning entrypoint, placed alongside ``train_predictor.py``.
 
 This mirrors the supervised trainer (same DDP setup, optimizer/scheduler, EMA, checkpointing
-and wandb logging) but swaps the per-epoch training step for ``train_grpo_epoch``. By default it
-uses the official HDP reward-weighted RL-Hybrid objective; GRPO remains an explicit ablation.
+and wandb logging) but swaps the per-epoch training step for the official HDP reward-weighted
+RL-Hybrid objective.
 """
 
 import argparse
 import json
 import os
 
-import numpy as np
 import pandas as pd
 import torch
 import wandb
 from diffusion_planner.dimensions import *
-from diffusion_planner.grpo_epoch import train_grpo_epoch
+from diffusion_planner.hdp_rl_epoch import train_hdp_rl_epoch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import assert_checkpoint_compatible, closed_loop_validate, load_weights_only
 from diffusion_planner.utils import ddp
@@ -24,10 +23,8 @@ from diffusion_planner.utils.data_augmentation_bridge import (
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
-from diffusion_planner.utils.neighbor_db import NeighborPatternDB
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
-from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from timm.utils import ModelEma
 from torch import optim
@@ -54,7 +51,7 @@ def _train_config_default(name):
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="GRPO Training")
+    parser = argparse.ArgumentParser(description="HDP RL training")
     parser.add_argument("--exp_name", type=str, required=True)
     parser.add_argument("--save_dir", type=str, help="save path for model ckpt", required=True)
 
@@ -64,7 +61,7 @@ def get_args():
     parser.add_argument(
         "--train_subsample_step",
         type=int,
-        default=10,
+        default=1,
         help="keep every Nth training sample (data_list[::N]); 1 = use all, "
         "10 = use 1/10 for faster iteration",
     )
@@ -98,8 +95,7 @@ def get_args():
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
 
-    # Data augmentation (StatePerturbation, shared with the supervised trainer). Applied to both
-    # the SFT and GRPO steps (see grpo_epoch).
+    # Data augmentation (StatePerturbation, shared with the supervised trainer).
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, default=0.5, help="augmentation probability")
     parser.add_argument(
@@ -134,7 +130,7 @@ def get_args():
     parser.add_argument("--ego_history_dropout_rate", type=float, default=0.5)
     parser.add_argument("--use_turn_indicators", type=boolean, default=True)
 
-    # ----- GRPO-specific -----
+    # ----- HDP-RL-specific -----
     parser.add_argument(
         "--num_generations",
         type=int,
@@ -142,52 +138,29 @@ def get_args():
         help="N: trajectories sampled per scene (official HDP RL group size)",
     )
     parser.add_argument(
-        "--grpo_noise_scale",
+        "--rl_noise_scale",
         type=float,
-        default=0.5,
+        default=_train_config_default("rl_noise_scale"),
         help="rollout sampling temperature used by the official HDP RL path",
     )
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
     parser.add_argument(
-        "--w_collision",
+        "--rl_reward_w_risk",
         type=float,
-        default=1.0,
-        help="weight on the neighbor-collision penalty in the reward",
+        default=_train_config_default("rl_reward_w_risk"),
+        help="official HDP multi-reward weight for risk/safety",
     )
     parser.add_argument(
-        "--w_road_border",
+        "--rl_reward_w_follow",
         type=float,
-        default=1.0,
-        help="weight on the road-border penalty in the reward (0 disables)",
+        default=_train_config_default("rl_reward_w_follow"),
+        help="official HDP multi-reward weight for route/GT following",
     )
     parser.add_argument(
-        "--w_gt_l2",
+        "--rl_reward_w_lane",
         type=float,
-        default=0.1,
-        help="weight on the realism penalty: ADE (mean L2) between the generated "
-        "ego trajectory and the scene's own GT ego future (0 disables)",
-    )
-    parser.add_argument(
-        "--w_kinematic",
-        type=float,
-        default=1.0,
-        help="weight on the kinematic-feasibility penalty: per-waypoint L2 drift between "
-        "the generated ego trajectory and the same trajectory after a round-trip through "
-        "the (accel, curvature) action space (0 disables)",
-    )
-    parser.add_argument(
-        "--sft_prob",
-        type=float,
-        default=0.0,
-        help="probability of running a normal supervised step instead of a "
-        "RL step on a given batch (0 = pure official HDP-RL, 1 = pure supervised)",
-    )
-    parser.add_argument(
-        "--rl_objective",
-        type=str,
-        choices=["grpo", "official_reward_weighted"],
-        default=_train_config_default("rl_objective"),
-        help="RL objective for non-SFT steps: official HDP reward-weighted loss or GRPO ablation",
+        default=_train_config_default("rl_reward_w_lane"),
+        help="official HDP multi-reward weight for lane keeping",
     )
     parser.add_argument(
         "--official_reward_normalize",
@@ -201,79 +174,6 @@ def get_args():
         type=float,
         default=_train_config_default("official_reward_beta"),
         help="temperature beta in the official HDP exp(beta * normalized_reward) weighting",
-    )
-
-    # Synthetic adversarial neighbor augmentation (see utils/synthetic_neighbors.py):
-    # spawn constant-acceleration neighbors that are guaranteed to collide with the ego GT
-    # (but avoidable -- they keep clear of the ego's t=0 pose), to drive the collision reward.
-    parser.add_argument(
-        "--neighbor_inject_max",
-        type=int,
-        default=1,
-        help="max synthetic colliders injected per scene (count ~ U[1, max])",
-    )
-    parser.add_argument(
-        "--neighbor_inject_prob",
-        type=float,
-        default=0.0,
-        help="per-scene probability of injecting any synthetic colliders",
-    )
-    parser.add_argument(
-        "--pedestrian_prob",
-        type=float,
-        default=0.3,
-        help="fraction of injected colliders that are pedestrians",
-    )
-    parser.add_argument(
-        "--bicycle_prob",
-        type=float,
-        default=0.2,
-        help="fraction of injected colliders that are bicycles (rest: vehicles)",
-    )
-    parser.add_argument(
-        "--collider_keep_clear_radius",
-        type=float,
-        default=3.0,
-        help="min distance the collider path keeps from the ego t=0 pose "
-        "(guarantees the forced collision is avoidable)",
-    )
-    parser.add_argument(
-        "--collider_straight_line",
-        type=boolean,
-        default=True,
-        help="colliders drive at constant velocity straight at the collision "
-        "point (easy, history-predictable). False = random-heading "
-        "constant-accel (curved) colliders",
-    )
-
-    # Real-neighbor DB collision-search augmentation (utils/neighbor_db.py). When
-    # --neighbor_db_path is set, real neighbor tracks that already collide with the scene's ego
-    # GT are searched and pasted verbatim, instead of the synthetic colliders above.
-    parser.add_argument(
-        "--neighbor_db_path",
-        type=str,
-        default="",
-        help="path to a neighbor-pattern DB (built by neighbor_db.py); "
-        "empty = use the synthetic collider generator instead",
-    )
-    parser.add_argument(
-        "--neighbor_db_collision_margin",
-        type=float,
-        default=10.0,
-        help="(DB) max distance [m] from an ego GT waypoint to count as a "
-        "colliding track during the DB search",
-    )
-    parser.add_argument(
-        "--neighbor_min_collision_time",
-        type=float,
-        default=0.8,
-        help="(DB) earliest future time [s] a collision may occur at",
-    )
-    parser.add_argument(
-        "--neighbor_search_subsample",
-        type=int,
-        default=0,
-        help="(DB) cap the per-scene search to this many random patterns (0 = search the whole DB)",
     )
 
     # Loss coefficients (shared with the supervised trainer / loss machinery)
@@ -397,6 +297,19 @@ def get_args():
     parser.add_argument("--notes", default="", type=str)
 
     parser.add_argument("--ddp", default=True, type=boolean)
+    parser.add_argument("--tf32", default=_train_config_default("tf32"), type=boolean)
+    parser.add_argument(
+        "--fused_optimizer",
+        default=_train_config_default("fused_optimizer"),
+        type=boolean,
+        help="use fused AdamW when CUDA supports it",
+    )
+    parser.add_argument(
+        "--ddp_static_graph",
+        default=_train_config_default("ddp_static_graph"),
+        type=boolean,
+        help="enable DDP static_graph for lower reducer overhead",
+    )
     parser.add_argument("--port", default="22323", type=str)
     parser.add_argument(
         "--amp_dtype",
@@ -443,6 +356,8 @@ def get_args():
     args = parser.parse_args()
     if args.resume_model_path is not None and args.init_weights_path is not None:
         raise ValueError("--resume_model_path and --init_weights_path are mutually exclusive")
+    if args.num_generations < 2:
+        raise ValueError("--num_generations must be >= 2 for HDP-RL group reward normalization")
 
     args.state_normalizer = StateNormalizer.from_json(args)
     args.observation_normalizer = ObservationNormalizer.from_json(args)
@@ -458,18 +373,32 @@ def mean_ego_loss(loss_dict):
     return result
 
 
+def scalar(value):
+    if torch.is_tensor(value):
+        return float(value.detach().cpu().item())
+    return float(value)
+
+
 def model_training(args):
     global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
+    if args.tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
 
     if global_rank == 0:
         print("------------- {} -------------".format(args.exp_name))
         print("Scenes per step (batch_size): {}".format(args.batch_size))
         print("Group size (num_generations): {}".format(args.num_generations))
-        print("RL objective: {}".format(args.rl_objective))
+        print("RL objective: official reward-weighted HDP hybrid loss")
+        print("RL reward: EPDMS-style risk/follow/lane")
         print("RL train scope: {}".format(args.rl_train_scope))
-        print("Rollout sampling temperature: {}".format(args.grpo_noise_scale))
+        print("Rollout sampling temperature: {}".format(args.rl_noise_scale))
         print("Learning rate: {}".format(args.learning_rate))
+        print("TF32: {}".format(args.tf32))
+        print("Fused optimizer: {}".format(args.fused_optimizer))
+        print("DDP static graph: {}".format(args.ddp_static_graph))
 
         if args.resume_model_path is not None:
             save_path = args.save_dir
@@ -500,44 +429,7 @@ def model_training(args):
     batch_size = args.batch_size
     save_utd = args.save_utd
 
-    # Adversarial neighbor generator for GRPO augmentation: either real tracks searched from a
-    # DB (collision-search) or synthetic constant-velocity/accel colliders.
-    if args.neighbor_db_path:
-        collider_injector = NeighborPatternDB(
-            db_path=args.neighbor_db_path,
-            collision_margin=args.neighbor_db_collision_margin,
-            keep_clear_radius=args.collider_keep_clear_radius,
-            min_collision_time=args.neighbor_min_collision_time,
-            search_subsample=args.neighbor_search_subsample,
-        )
-        if global_rank == 0:
-            print(
-                f"Neighbor DB collision-search augmentation: "
-                f"{collider_injector.num_patterns} patterns, "
-                f"margin={args.neighbor_db_collision_margin}m "
-                f"keep_clear={args.collider_keep_clear_radius}m"
-            )
-    else:
-        collider_injector = SyntheticColliderInjector(
-            pedestrian_prob=args.pedestrian_prob,
-            bicycle_prob=args.bicycle_prob,
-            keep_clear_radius=args.collider_keep_clear_radius,
-            straight_line=args.collider_straight_line,
-        )
-        if global_rank == 0:
-            print(
-                f"Synthetic collider augmentation: ped={args.pedestrian_prob} "
-                f"bike={args.bicycle_prob} keep_clear={args.collider_keep_clear_radius}m"
-            )
-
-    if global_rank == 0 and args.w_gt_l2 > 0.0:
-        print(f"GT-L2 realism reward enabled: w_gt_l2={args.w_gt_l2}")
-
-    if global_rank == 0 and args.w_kinematic > 0.0:
-        print(f"Kinematic-feasibility reward enabled: w_kinematic={args.w_kinematic}")
-
-    # StatePerturbation data augmentation (same as the supervised trainer), applied to both the
-    # SFT and GRPO steps. None disables it.
+    # StatePerturbation data augmentation (same as the supervised trainer).
     if args.use_data_augment:
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
@@ -598,7 +490,12 @@ def model_training(args):
             param.requires_grad_(name.startswith("decoder."))
 
     if args.ddp:
-        diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
+        diffusion_planner = DDP(
+            diffusion_planner,
+            device_ids=[rank],
+            find_unused_parameters=False,
+            static_graph=args.ddp_static_graph,
+        )
 
     model_ema = ModelEma(diffusion_planner, decay=0.999, device=args.device) if args.use_ema else None
 
@@ -615,7 +512,14 @@ def model_training(args):
     if not trainable_params:
         raise RuntimeError("No trainable parameters found for RL training")
     params = [{"params": trainable_params, "lr": args.learning_rate}]
-    optimizer = optim.AdamW(params)
+    if args.fused_optimizer and args.device == "cuda":
+        try:
+            optimizer = optim.AdamW(params, fused=True)
+        except TypeError:
+            optimizer = optim.AdamW(params)
+            args.fused_optimizer = False
+    else:
+        optimizer = optim.AdamW(params)
     scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
 
     if args.resume_model_path is not None:
@@ -623,7 +527,7 @@ def model_training(args):
         diffusion_planner, optimizer, scheduler, init_epoch, wandb_id, model_ema = resume_model(
             args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
         )
-        # GRPO restarts the LR schedule from the configured base rate.
+        # HDP-RL restarts the LR schedule from the configured base rate.
         for param_group in optimizer.param_groups:
             param_group["lr"] = args.learning_rate
         init_epoch = 0
@@ -653,36 +557,37 @@ def model_training(args):
         torch.distributed.barrier()
 
     data_list = []
-    best_reward = -float("inf")
+    best_valid_score = -float("inf")
 
     for epoch in range(init_epoch, train_epochs):
         if args.ddp:
             torch.distributed.barrier()
 
-        train_loss, train_total_loss = train_grpo_epoch(
+        train_loss, train_total_loss = train_hdp_rl_epoch(
             train_loader,
             diffusion_planner,
             optimizer,
             args,
             model_ema,
-            collider_injector,
             aug,
         )
 
         valid_dict = validate_model(diffusion_planner, valid_loader, args)
         agg = aggregate_valid_metrics(valid_dict, args.device)
         if global_rank == 0:
-            valid_loss_ego = agg["avg_loss_ego"]
-            valid_neighbor_margin = agg["ego_means"]["ego_neighbor_margin_loss"]
-            valid_road_border = agg["ego_means"]["ego_road_border_loss"]
+            valid_loss_ego = scalar(agg["avg_loss_ego"])
+            valid_neighbor_margin = scalar(agg["ego_means"]["ego_neighbor_margin_loss"])
+            valid_road_border = scalar(agg["ego_means"]["ego_road_border_loss"])
+            valid_epdms_total = scalar(agg["epdms_means"].get("total", 0.0))
             has_reward = "reward_mean" in train_loss
-            train_reward = train_loss["reward_mean"] if has_reward else float("nan")
+            train_reward = scalar(train_loss["reward_mean"]) if has_reward else float("nan")
             print(
                 f"Epoch {epoch + 1}/{train_epochs}\n"
                 f"{train_reward=:.4f}\n"
                 f"{valid_loss_ego=:.4f}\n"
                 f"{valid_neighbor_margin=:.4f}\n"
-                f"{valid_road_border=:.4f}"
+                f"{valid_road_border=:.4f}\n"
+                f"{valid_epdms_total=:.4f}"
             )
 
             wandb.log(
@@ -692,7 +597,7 @@ def model_training(args):
                     "valid/ego": valid_loss_ego,
                     "valid/neighbor_margin": valid_neighbor_margin,
                     "valid/road_border": valid_road_border,
-                    "valid/epdms_total": agg["epdms_means"].get("total", 0.0),
+                    "valid/epdms_total": valid_epdms_total,
                 },
                 step=epoch + 1,
             )
@@ -700,10 +605,11 @@ def model_training(args):
             curr_data = {
                 "epoch": epoch + 1,
                 "train_reward_mean": train_reward if has_reward else None,
-                "train_loss": train_total_loss,
+                "train_loss": scalar(train_total_loss),
                 "valid_loss_ego": valid_loss_ego,
                 "valid_neighbor_margin": valid_neighbor_margin,
                 "valid_road_border": valid_road_border,
+                "valid_epdms_total": valid_epdms_total,
             }
             data_list.append(curr_data)
             pd.DataFrame(data_list).to_csv(
@@ -744,12 +650,13 @@ def model_training(args):
                     diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
                 )
 
-            if has_reward and train_reward > best_reward:
+            selection_score = valid_epdms_total if valid_epdms_total > 0.0 else -valid_loss_ego
+            if selection_score > best_valid_score:
                 curr_dir = os.path.join(save_path, "best_model")
                 os.makedirs(curr_dir, exist_ok=True)
                 torch.save(model_dict, f"{curr_dir}/best_model.pth")
-                best_reward = train_reward
-                curr_data["best_reward"] = best_reward
+                best_valid_score = selection_score
+                curr_data["best_valid_score"] = best_valid_score
                 with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
                     json.dump(curr_data, f, indent=4)
                 # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).

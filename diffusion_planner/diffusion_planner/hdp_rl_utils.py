@@ -1,26 +1,17 @@
-"""GRPO (Group Relative Policy Optimization) building blocks for the diffusion planner.
+"""HDP reward-weighted RL-Hybrid building blocks for the diffusion planner.
 
-This module is the GRPO counterpart of ``train_epoch.py``/``decoder.compute_training_loss``.
-The pipeline is:
+This module is the RL counterpart of ``train_epoch.py``/``decoder.compute_training_loss``.
+The single supported pipeline is:
 
   1. ``expand_batch``        - replicate every scene in the batch ``N`` times so we can
                                draw a *group* of ``N`` trajectories per scene in a single
                                multi-batch inference pass.
   2. ``sample_group``        - run the model in inference mode with random initial noise to
                                produce ``N`` diverse ego trajectories per scene.
-  3. ``compute_collision_reward`` - score each trajectory with a collision-based reward
-                               (neighbor collision + optional road-border), reusing the same
-                               penalty functions used by the supervised trainer.
-  4. ``compute_group_advantages`` - normalise rewards within each group of ``N``.
-  5. ``compute_grpo_loss``   - advantage-weighted diffusion (denoising) loss. Treating the
-                               diffusion reconstruction loss of a generated trajectory as a
-                               proxy for its negative log-likelihood, minimising
-                               ``mean(advantage_i * loss_i)`` pushes probability mass toward
-                               higher-reward (lower-collision) trajectories.
-
-The policy loss mirrors the supervised HDP loss-space path: the ego target may use
-velocity representation, diffusion prediction/supervision can be x_start/noise/score/v,
-and the official reward-weighted objective applies exp(beta * normalized_reward).
+  3. ``compute_epdms_style_reward`` - score each trajectory with the Tier IV NPZ adaptation
+                               of the official HDP multi-reward setting.
+  4. ``compute_official_reward_weighted_loss`` - apply exp(beta * group-normalized reward)
+                               to the HDP hybrid diffusion loss.
 """
 
 import random
@@ -29,9 +20,6 @@ import torch
 
 from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
 from diffusion_planner.loss import (
-    compute_ego_edge_points,
-    compute_neighbor_collision_penalty,
-    compute_road_border_penalty,
     hybrid_loss_components,
     inverse_normalize_ego_velocity,
     normalize_ego_velocity,
@@ -42,13 +30,10 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.module.decoder import generate_prefix_mask
-from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
+from planner_metrics.aggregate import compute_subscores_scene_batch
+from planner_metrics.config import RewardConfig
 
-# Denser collision sampling for the RL reward than the training-loss default: with only
-# 5 eval steps a collision entered and exited between them contributes zero penalty
-# (cummax carries only *detected* hits forward). Every 5th step plus the final step closes
-# that blind spot; the extra SAT cost is negligible next to the rollout's denoiser passes.
-_RL_COLLISION_EVAL_STEPS = sorted(set(range(0, OUTPUT_T, 5)) | {OUTPUT_T - 1})
+_RL_REWARD_CONFIG = RewardConfig()
 
 
 def expand_batch(inputs: dict[str, torch.Tensor], n: int) -> dict[str, torch.Tensor]:
@@ -85,10 +70,14 @@ def sample_group(
     B = norm_inputs["ego_current_state"].shape[0]
     inference_inputs = dict(norm_inputs)
     # Official HDP-RL samples rollouts with a fixed sampling temperature.
-    per_row_scale = torch.full((B, 1, 1, 1), float(noise_scale), device=device)
-    inference_inputs["sampled_trajectories"] = (
-        torch.randn(B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, device=device) * per_row_scale
-    )
+    if noise_scale == 0.0:
+        sampled = torch.zeros(B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, device=device)
+    else:
+        sampled = (
+            torch.randn(B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, device=device)
+            * float(noise_scale)
+        )
+    inference_inputs["sampled_trajectories"] = sampled
     inference_inputs["delay"] = torch.zeros(B, dtype=torch.float32, device=device)
 
     _, outputs = model(inference_inputs)
@@ -99,151 +88,129 @@ def sample_group(
     return ego_world
 
 
-@torch.no_grad()
-def compute_collision_reward(
-    ego_world: torch.Tensor,
-    norm_inputs: dict[str, torch.Tensor],
-    neighbors_future: torch.Tensor,
-    neighbors_future_valid: torch.Tensor,
-    args,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Collision-based reward for a batch of generated ego trajectories.
-
-    Higher reward == fewer/less-severe collisions. The reward is the negative of the
-    accumulated hinge penalties used by the supervised trainer, so the units are directly
-    comparable to the ``neighbor_collision_loss`` / ``road_border_loss`` metrics.
-
-    Args:
-        ego_world: [B*N, T, 4] generated ego trajectories (world frame).
-        norm_inputs: observation-normalized inputs (batch already expanded).
-        neighbors_future: [B*N, Pn, T, 4] neighbor futures (world frame, cos/sin).
-        neighbors_future_valid: [B*N, Pn, T] validity mask.
-        args: namespace with reward weights / margins.
-
-    Returns:
-        reward: [B*N] scalar reward per trajectory.
-        nc_penalty: [B*N, T] neighbor-collision penalty per timestep (for logging).
-        rb_penalty: [B*N, T] road-border penalty per timestep (for logging).
-    """
-    denorm_inputs = args.observation_normalizer.inverse(norm_inputs)
-
-    ego_edge_points = compute_ego_edge_points(
-        ego_world, norm_inputs["ego_shape"], n_interp=args.road_border_n_interp
-    )
-
-    nc_penalty = compute_neighbor_collision_penalty(
-        ego_edge_points,
-        neighbors_future,
-        neighbors_future_valid,
-        denorm_inputs["neighbor_agents_past"],
-        margin_vehicle=args.neighbor_collision_margin_vehicle,
-        margin_pedestrian=args.neighbor_collision_margin_pedestrian,
-        margin_bicycle=args.neighbor_collision_margin_bicycle,
-        eval_steps=_RL_COLLISION_EVAL_STEPS,
-    )  # [B*N, T]
-
-    if args.w_road_border > 0.0:
-        rb_penalty = compute_road_border_penalty(
-            ego_edge_points,
-            denorm_inputs["line_strings"],
-            margin=args.road_border_margin,
-        )  # [B*N, T]
-    else:
-        rb_penalty = torch.zeros_like(nc_penalty)
-
-    # Once a collision/border violation occurs it cannot be "undone": carry each penalty forward
-    # as a running max over time (penalty_t = max(penalty_{0..t})). This makes the per-timestep
-    # penalty monotonically non-decreasing, so a trajectory that briefly hits then speeds through
-    # is never cheaper than one that stops at the hit -- it removes the "plow through quickly"
-    # exploit. (Equivalently, the per-step reward -penalty is a running min.)
-    nc_penalty = torch.cummax(nc_penalty, dim=-1).values
-    rb_penalty = torch.cummax(rb_penalty, dim=-1).values
-
-    reward = -(
-        args.w_collision * nc_penalty.sum(dim=-1) + args.w_road_border * rb_penalty.sum(dim=-1)
-    )
-    return reward, nc_penalty, rb_penalty
+def _group_reference_path_length(ego_future_gt: torch.Tensor, n: int) -> torch.Tensor:
+    gt_xy = ego_future_gt[..., :2]
+    valid = gt_xy.abs().sum(dim=-1) > 1e-6
+    step_valid = valid[:, 1:] & valid[:, :-1]
+    step = torch.linalg.norm(gt_xy[:, 1:] - gt_xy[:, :-1], dim=-1)
+    path_len = (step * step_valid.float()).sum(dim=-1)
+    return path_len[:, None].expand(-1, n)
 
 
-@torch.no_grad()
-def compute_gt_l2_distance(
-    ego_world: torch.Tensor,
+def _group_ade_to_gt(
+    ego_world_group: torch.Tensor,
     ego_future_gt: torch.Tensor,
 ) -> torch.Tensor:
-    """ADE (mean per-waypoint L2) from each generated trajectory to the scene's own GT future.
-
-    Penalising this distance keeps the generated ego trajectory close to the real recorded
-    maneuver, so the policy cannot reward-hack the collision term by, e.g., standing still.
-
-    Args:
-        ego_world: [B, T, 4] generated ego trajectories (x, y, cos, sin), ego frame, metres.
-        ego_future_gt: [B, Tg, >=2] GT ego future (x, y, ...), same ego-centric frame.
-
-    Returns:
-        ade: [B] mean L2 distance over valid (non-zero-padded) GT waypoints.
-    """
-    gen_xy = ego_world[..., :2]
-    gt_xy = ego_future_gt[..., :2]
-    T = min(gen_xy.shape[1], gt_xy.shape[1])
-    gen_xy, gt_xy = gen_xy[:, :T], gt_xy[:, :T]
-    dist = torch.linalg.norm(gen_xy - gt_xy, dim=-1)  # [B, T]
-    valid = (gt_xy.abs().sum(dim=-1) > 1e-6).float()  # mask zero-padded GT waypoints
-    valid_count = valid.sum(dim=-1)  # [B]
-    masked_ade = (dist * valid).sum(dim=-1) / valid_count.clamp_min(1.0)  # [B]
-    # An all-"padding" ego GT means a stationary ego (the ego-frame future stays at the
-    # origin), not missing data: fall back to the unmasked ADE so stop scenes keep their
-    # realism anchor instead of handing out ADE=0 for any generated motion.
-    return torch.where(valid_count > 0, masked_ade, dist.mean(dim=-1))
+    gt_xy = ego_future_gt[:, None, :, :2]
+    pred_xy = ego_world_group[..., :2]
+    T = min(pred_xy.shape[2], gt_xy.shape[2])
+    pred_xy = pred_xy[:, :, :T]
+    gt_xy = gt_xy[:, :, :T]
+    valid = gt_xy.abs().sum(dim=-1) > 1e-6
+    dist = torch.linalg.norm(pred_xy - gt_xy, dim=-1)
+    valid_count = valid.sum(dim=-1).clamp_min(1)
+    masked = (dist * valid.float()).sum(dim=-1) / valid_count
+    unmasked = dist.mean(dim=-1)
+    return torch.where(valid.any(dim=-1), masked, unmasked)
 
 
 @torch.no_grad()
-def compute_kinematic_consistency_penalty(
+def compute_epdms_style_reward(
     ego_world: torch.Tensor,
-    ego_agent_past_4d: torch.Tensor,
-    ego_current_state: torch.Tensor,
-) -> torch.Tensor:
-    """Round-trip drift of a generated trajectory through the (accel, curvature) action space.
+    scene_inputs: dict[str, torch.Tensor],
+    neighbors_future: torch.Tensor,
+    num_scenes: int,
+    n: int,
+    args,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Tier IV NPZ reward with official HDP multi-reward semantics.
 
-    A kinematically feasible trajectory survives a trajectory -> action -> trajectory round-trip
-    almost unchanged, because the unicycle action space can represent it exactly. An infeasible /
-    jerky trajectory (e.g. teleporting, instantaneous heading flips) cannot be reproduced from any
-    smooth control sequence, so the reconstruction drifts away. Penalising this drift pushes the
-    policy toward dynamically realisable trajectories without needing a reference GT.
-
-    Args:
-        ego_world: [B, T, 4] generated ego trajectory (x, y, cos, sin), ego-centric frame, metres.
-        ego_agent_past_4d: [B, Th, 4] ego past trajectory (x, y, cos, sin), same frame. The last
-            history step is assumed to be the (zeroed) current pose.
-        ego_current_state: [B, >=5] ego current state; index 4 is the longitudinal velocity used
-            as the integration's initial speed.
-
-    Returns:
-        drift: [B] mean per-waypoint L2 distance between the trajectory and its round-trip.
+    The official HDP RL objective consumes a scalar reward but does not require
+    the reward backend to be NAVSIM-specific. This reward mirrors the paper's
+    multi-reward grouping on the tensors available in Diffusion-Planner NPZs:
+    risk, route/GT following, and lane keeping. It reuses the same EPDMS-style
+    subscore implementation as validation, then applies only monotonic
+    normalizations before the official group-normalized exp weighting.
     """
-    smoothed = smoothing_future_trajectory(ego_agent_past_4d, ego_current_state, ego_world)
-    drift = torch.linalg.norm(ego_world[..., :2] - smoothed[..., :2], dim=-1)  # [B, T]
-    return drift.mean(dim=-1)  # [B]
+    ego_group = ego_world.reshape(num_scenes, n, ego_world.shape[1], ego_world.shape[2])
 
+    scene_data = {}
+    for key in (
+        "ego_shape",
+        "neighbor_agents_past",
+        "route_lanes",
+        "lanes",
+        "line_strings",
+        "goal_pose",
+        "ego_agent_future",
+    ):
+        if key in scene_inputs:
+            scene_data[key] = scene_inputs[key]
+    if "ego_agent_future" not in scene_data:
+        raise ValueError("epdms_style RL reward requires ego_agent_future in the training batch.")
 
-def compute_group_advantages(reward: torch.Tensor, num_scenes: int, n: int, eps: float):
-    """Group-relative advantages: normalise rewards within each group of ``n`` samples.
+    scene_data["neighbor_agents_future"] = neighbors_future.reshape(
+        num_scenes, n, neighbors_future.shape[1], neighbors_future.shape[2], neighbors_future.shape[3]
+    )[:, 0]
 
-    Args:
-        reward: [B*N] rewards laid out as ``num_scenes`` contiguous groups of ``n``.
-        num_scenes: number of distinct scenes (B).
-        n: group size (N).
-        eps: numerical floor for the per-group std.
+    subscores = compute_subscores_scene_batch(ego_group, scene_data, _RL_REWARD_CONFIG)
 
-    Returns:
-        advantages: [B*N] normalised advantages (mean 0, std ~1 within each group).
-    """
-    grouped = reward.view(num_scenes, n)
-    mean = grouped.mean(dim=1, keepdim=True)
-    std = grouped.std(dim=1, keepdim=True)
-    valid_group = torch.isfinite(grouped).all(dim=1, keepdim=True) & (std > eps)
-    advantages = torch.nan_to_num((grouped - mean) / (std + eps), nan=0.0, posinf=0.0, neginf=0.0)
-    advantages = torch.where(valid_group, advantages, torch.zeros_like(grouped))
-    return advantages.reshape(-1)
+    safety_raw = subscores["safety"].float()
+    collision_score = torch.where(
+        safety_raw <= 0.5 * _RL_REWARD_CONFIG.collision_penalty,
+        torch.zeros_like(safety_raw),
+        torch.exp(safety_raw.clamp(max=0.0)),
+    ).clamp(0.0, 1.0)
+    ttc_score = subscores["ttc"].float().clamp(0.0, 1.0)
+    dac_score = subscores["rb_crossing_gate"].float().clamp(0.0, 1.0)
+    red_light_score = torch.where(
+        subscores["red_light"].float() <= 0.5 * _RL_REWARD_CONFIG.red_light_penalty,
+        torch.zeros_like(safety_raw),
+        torch.ones_like(safety_raw),
+    )
+    kinematic_gate = subscores["kinematic_gate"].float().clamp(0.0, 1.0)
+    risk_score = collision_score * ttc_score * dac_score * red_light_score * kinematic_gate
+
+    gt_path_len = _group_reference_path_length(scene_data["ego_agent_future"], n)
+    progress_score = (
+        subscores["progress"].float().clamp_min(0.0) / gt_path_len.clamp_min(1.0)
+    ).clamp(0.0, 1.0)
+    gt_follow_score = torch.exp(-_group_ade_to_gt(ego_group, scene_data["ego_agent_future"]) / 2.0)
+    comfort_score = torch.exp((subscores["comfort"].float() / 20.0).clamp(min=-20.0, max=0.0))
+    feasibility_score = torch.exp(
+        (subscores["feasibility"].float() / 10.0).clamp(min=-20.0, max=0.0)
+    ) * kinematic_gate
+    follow_score = (
+        0.45 * progress_score + 0.35 * gt_follow_score + 0.20 * comfort_score * feasibility_score
+    ).clamp(0.0, 1.0)
+
+    centerline_score = torch.exp(subscores["centerline"].float().clamp(min=-20.0, max=0.0))
+    lane_score = centerline_score.clamp(0.0, 1.0) * subscores["lane_crossing_gate"].float().clamp(
+        0.0, 1.0
+    )
+
+    reward = (
+        args.rl_reward_w_risk * risk_score
+        + args.rl_reward_w_follow * follow_score
+        + args.rl_reward_w_lane * lane_score
+    )
+
+    flat_metrics = {
+        "reward_risk_score": risk_score.mean(),
+        "reward_follow_score": follow_score.mean(),
+        "reward_lane_score": lane_score.mean(),
+        "reward_collision_score": collision_score.mean(),
+        "reward_ttc_score": ttc_score.mean(),
+        "reward_dac_score": dac_score.mean(),
+        "reward_progress_score": progress_score.mean(),
+        "reward_gt_follow_score": gt_follow_score.mean(),
+        "reward_comfort_score": comfort_score.mean(),
+        "reward_feasibility_score": feasibility_score.mean(),
+        "reward_centerline_score": centerline_score.mean(),
+        "neighbor_collision_penalty": (1.0 - collision_score).mean(),
+        "road_border_penalty": (1.0 - dac_score).mean(),
+    }
+    return reward.reshape(-1), flat_metrics
 
 
 def compute_official_reward_weights(
@@ -254,12 +221,14 @@ def compute_official_reward_weights(
     beta: float,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if n < 2:
+        raise ValueError("HDP-RL requires num_generations >= 2 for group reward normalization.")
     grouped = reward.view(num_scenes, n)
     group_std = grouped.std(dim=1, keepdim=True)
     finite_group = torch.isfinite(grouped).all(dim=1, keepdim=True)
     if normalize == "group":
         mean = grouped.mean(dim=1, keepdim=True)
-        valid_group = finite_group & (group_std > eps)
+        valid_group = finite_group
         reward_norm = torch.where(
             valid_group,
             (grouped - mean) / (group_std + eps),
@@ -443,57 +412,6 @@ def _compute_policy_ego_loss_per_sample(
         "ego_loss_per_sample": ego_loss_per_sample,
         "ego_hdp_diffusion_loss": ego_diffusion_loss.mean().detach(),
         "ego_hdp_waypoint_loss": ego_waypoint_loss.mean().detach(),
-    }
-
-
-def compute_grpo_loss(
-    model,
-    norm_inputs: dict[str, torch.Tensor],
-    ego_pseudo_gt: torch.Tensor,
-    neighbors_future: torch.Tensor,
-    neighbor_future_mask: torch.Tensor,
-    advantages: torch.Tensor,
-    args,
-) -> dict[str, torch.Tensor]:
-    """Advantage-weighted diffusion loss (the GRPO policy-gradient surrogate).
-
-    This mirrors the ``x_start`` branch of :func:`decoder.compute_training_loss`, but:
-      * the ego target is the *generated* trajectory (``ego_pseudo_gt``) rather than GT,
-      * the per-sample ego loss is weighted by its group-relative advantage,
-      * neighbor / turn-indicator / penalty terms are dropped (GRPO only shapes the ego policy).
-
-    Args:
-        model: the Diffusion_Planner (training mode forward).
-        norm_inputs: observation-normalized inputs (batch already expanded to B*N).
-        ego_pseudo_gt: [B*N, T, 4] generated ego trajectory (world frame), detached.
-        neighbors_future: [B*N, Pn, T, 4] neighbor futures (world frame).
-        neighbor_future_mask: [B*N, Pn, T] True where a neighbor timestep is invalid.
-        advantages: [B*N] group-relative advantages.
-        args: namespace with normalizers, loss coefficients, horizon.
-
-    Returns:
-        dict with ``loss`` (scalar, to backprop) plus detached scalar diagnostics.
-    """
-    loss_terms = _compute_policy_ego_loss_per_sample(
-        model,
-        norm_inputs,
-        ego_pseudo_gt,
-        neighbors_future,
-        neighbor_future_mask,
-        args,
-    )
-    ego_loss_per_sample = loss_terms["ego_loss_per_sample"]
-
-    # GRPO policy-gradient surrogate: minimise advantage-weighted reconstruction loss.
-    grpo_loss = (advantages * ego_loss_per_sample).mean()
-
-    return {
-        "loss": grpo_loss,
-        "ego_diffusion_loss": ego_loss_per_sample.mean().detach(),
-        "ego_hdp_diffusion_loss": loss_terms["ego_hdp_diffusion_loss"],
-        "ego_hdp_waypoint_loss": loss_terms["ego_hdp_waypoint_loss"],
-        "mean_advantage": advantages.mean().detach(),
-        "abs_advantage": advantages.abs().mean().detach(),
     }
 
 

@@ -20,9 +20,9 @@ class Config:
             "diffusion_supervision_type": getattr(self, "diffusion_model_type", "x_start"),
             "diffusion_time_sample_method": "uniform",
             "diffusion_sample_steps": 10,
-            "rl_objective": "grpo",
             "official_reward_normalize": "group",
             "official_reward_beta": 1.0,
+            "rl_noise_scale": 0.5,
         }
         for key, value in defaults.items():
             if not hasattr(self, key):

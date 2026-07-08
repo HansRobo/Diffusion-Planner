@@ -14,7 +14,7 @@ class GuidanceComposer:
     signature as GuidanceWrapper so it can be assigned to
     model.decoder._guidance_fn without any Decoder changes.
 
-    Also exposes compute_rewards() for DPO/GRPO reward evaluation.
+    Also exposes compute_rewards() for trajectory-preference reward evaluation.
     """
 
     def __init__(self, set_config: GuidanceSetConfig, **build_kwargs):
@@ -88,7 +88,7 @@ class GuidanceComposer:
         """
         Evaluate all active guidance functions as scalar reward signals.
 
-        Used by DPO (trajectory pair scoring) and GRPO (rollout scoring).
+        Used by trajectory pair or rollout scoring.
 
         Args:
             trajectory: [B, T, 4] completed ego trajectory in physical

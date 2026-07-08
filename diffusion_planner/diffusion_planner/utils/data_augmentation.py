@@ -583,7 +583,8 @@ class StatePerturbation:
             ego_future_heading[:, P, 0],
             ego_future_heading[:, P, 1],
             ego_future_heading[:, P, 2],
-            torch.norm(ego_future_heading[:, P, :2] - ego_future_heading[:, P - 1, :2], dim=-1) / dt,
+            torch.norm(ego_future_heading[:, P, :2] - ego_future_heading[:, P - 1, :2], dim=-1)
+            / dt,
             torch.norm(
                 ego_future_heading[:, P, :2]
                 - 2 * ego_future_heading[:, P - 1, :2]
@@ -591,7 +592,8 @@ class StatePerturbation:
                 dim=-1,
             )
             / dt**2,
-            self.normalize_angle(ego_future_heading[:, P, 2] - ego_future_heading[:, P - 1, 2]) / dt,
+            self.normalize_angle(ego_future_heading[:, P, 2] - ego_future_heading[:, P - 1, 2])
+            / dt,
         )
 
         # Boundary conditions

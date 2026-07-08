@@ -1,9 +1,8 @@
 """Route-centerline-following guidance for the diffusion planner.
 
 Identical to ``centerline_following.py`` except it uses the planned
-``route_lanes`` tensor instead of all ``lanes``. This matches
-``rlvr.reward.compute_centerline_score_batch`` which scores against
-route_lanes, so guidance and ranking are aligned.
+``route_lanes`` tensor instead of all ``lanes``. This matches the route-lane
+centerline metric used by the planner metrics stack.
 
 For each future ego position:
   1. Find the nearest point among all valid route-lane polyline points.

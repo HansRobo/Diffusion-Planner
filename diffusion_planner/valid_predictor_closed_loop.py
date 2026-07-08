@@ -17,12 +17,12 @@ aggregated into ``summary.json`` (both next to the checkpoint).
 
 Only ``--model_path`` and ``--npz_root`` are required; all outputs are written next to
 the checkpoint (``<model_path dir>/closed_loop/``) and the rollout knobs default to the
-closed-loop mining config. Example (1st epoch of a GRPO run)::
+closed-loop mining config. Example (1st epoch of an HDP-RL run)::
 
     NPZ=/path/to/closed_loop_npz_dir
 
     python3 valid_predictor_closed_loop.py \
-        --model_path /mnt/nvme/training_result/20260622-083517_per_sample_noise_grpo/epoch0001/best_model.pth \
+        --model_path /mnt/nvme/training_result/hdp_rl_run/epoch0001/best_model.pth \
         --npz_root ${NPZ}
 """
 

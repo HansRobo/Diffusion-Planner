@@ -91,7 +91,10 @@ def assert_checkpoint_compatible(
 ) -> None:
     args_path = _checkpoint_args_path(path)
     if args_path is None:
-        if getattr(args, "use_velocity_representation", False) and not allow_waypoint_to_velocity_init:
+        if (
+            getattr(args, "use_velocity_representation", False)
+            and not allow_waypoint_to_velocity_init
+        ):
             raise RuntimeError(
                 "Cannot verify representation compatibility for a checkpoint without args.json: "
                 f"{path}. HDP velocity checkpoints must be loaded from a directory that contains args.json."
@@ -588,7 +591,9 @@ def model_training(args: TrainConfig):
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }
             data_list.append(curr_data)
-            with open(os.path.join(save_path, "train_log.tsv"), "w", newline="", encoding="utf-8") as f:
+            with open(
+                os.path.join(save_path, "train_log.tsv"), "w", newline="", encoding="utf-8"
+            ) as f:
                 writer = csv.DictWriter(f, fieldnames=list(data_list[0].keys()), delimiter="\t")
                 writer.writeheader()
                 writer.writerows(data_list)

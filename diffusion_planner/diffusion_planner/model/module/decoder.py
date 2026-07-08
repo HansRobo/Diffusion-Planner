@@ -18,10 +18,10 @@ from diffusion_planner.loss import (
     normalize_ego_state,
     normalize_ego_velocity,
     sample_diffusion_time,
-    vp_supervision_elementwise_loss,
-    weighted_waypoint_dpm_loss,
     velocity_to_waypoints,
+    vp_supervision_elementwise_loss,
     waypoints_to_velocity,
+    weighted_waypoint_dpm_loss,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.flow_matching_utils.ode_solver import (
@@ -251,16 +251,14 @@ def compute_training_loss(
 
     ego_loss_horizon = dpm_loss[:, 0, : args.ego_prediction_horizon]
     ego_loss_valid = ~prefix_mask[:, 0, 1 : 1 + args.ego_prediction_horizon, 0]
-    loss["ego_planning_loss"] = (
-        ego_loss_horizon.masked_fill(~ego_loss_valid, 0.0).sum()
-        / ego_loss_valid.sum().clamp_min(1)
-    )
+    loss["ego_planning_loss"] = ego_loss_horizon.masked_fill(
+        ~ego_loss_valid, 0.0
+    ).sum() / ego_loss_valid.sum().clamp_min(1)
     if use_velocity:
         ego_waypoint_horizon = ego_waypoint_loss[:, : args.ego_prediction_horizon]
-        loss["ego_planning_hybrid_loss"] = (
-            ego_waypoint_horizon.masked_fill(~ego_loss_valid, 0.0).sum()
-            / ego_loss_valid.sum().clamp_min(1)
-        )
+        loss["ego_planning_hybrid_loss"] = ego_waypoint_horizon.masked_fill(
+            ~ego_loss_valid, 0.0
+        ).sum() / ego_loss_valid.sum().clamp_min(1)
         loss["ego_hdp_diffusion_loss"] = loss["ego_planning_loss"].detach()
         loss["ego_hdp_waypoint_loss"] = loss["ego_planning_hybrid_loss"].detach()
 
@@ -275,9 +273,9 @@ def compute_training_loss(
                 inverse_normalize_ego_velocity(pred_x_start[:, 0], norm)
             )
         else:
-            ego_pred_world = pred_x_start[:, 0] * norm.std[0].to(model_output.device) + norm.mean[0].to(
-                model_output.device
-            )  # [B, T, 4]
+            ego_pred_world = pred_x_start[:, 0] * norm.std[0].to(model_output.device) + norm.mean[
+                0
+            ].to(model_output.device)  # [B, T, 4]
         ego_edge_points = compute_ego_edge_points(
             ego_pred_world, inputs["ego_shape"], n_interp=args.road_border_n_interp
         )
@@ -315,7 +313,9 @@ def compute_training_loss(
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
-    turn_indicator_logit = decoder_output["turn_indicator_logit"].float()  # [B, TURN_INDICATOR_OUTPUT_KEEP]
+    turn_indicator_logit = decoder_output[
+        "turn_indicator_logit"
+    ].float()  # [B, TURN_INDICATOR_OUTPUT_KEEP]
     turn_indicator_gt = make_turn_indicator_gt(inputs["turn_indicators"])  # [B,]
     turn_indicator_loss = nn.functional.cross_entropy(
         turn_indicator_logit, turn_indicator_gt, reduction="none"
@@ -367,7 +367,9 @@ class Decoder(nn.Module):
         self._model_type = config.diffusion_model_type
         self._use_velocity = config.use_velocity_representation
         if self._use_velocity and self._model_type != "x_start":
-            raise NotImplementedError("HDP velocity representation is enabled only for x_start diffusion.")
+            raise NotImplementedError(
+                "HDP velocity representation is enabled only for x_start diffusion."
+            )
         self._sample_steps = config.diffusion_sample_steps
 
         # Initialize transformer layers:

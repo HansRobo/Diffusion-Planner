@@ -2,7 +2,7 @@
 
 This module holds the model wrappers and the export machinery shared between the standalone
 ``ros_scripts/torch2onnx.py`` CLI and the training entrypoints (``train_predictor.py`` /
-``train_grpo_predictor.py``), which export ONNX next to each saved checkpoint.
+``train_hdp_rl_predictor.py``), which export ONNX next to each saved checkpoint.
 
 Unlike ``torch2onnx.py``, this module does NOT toggle the SDPA / MHA backends at import time.
 The backends are only forced (and restored) inside :func:`onnx_export_backends`, scoped around

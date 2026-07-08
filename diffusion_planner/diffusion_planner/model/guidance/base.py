@@ -19,7 +19,7 @@ class BaseGuidance(ABC):
         _compute(x, inputs) -> torch.Tensor [B]
 
     energy() is called during DPM-Solver sampling; gradients flow through x.
-    reward() is called on completed trajectories for DPO/GRPO scoring; no_grad.
+    reward() is called on completed trajectories for preference or rollout scoring; no_grad.
 
     Scale formula applied by both methods:
         output = _energy_scale * config.scale * _compute(x, inputs)
@@ -98,7 +98,7 @@ class BaseGuidance(ABC):
         """
         Scalar quality score for a completed ego trajectory.
 
-        Used in DPO preference scoring and GRPO reward evaluation.
+        Used in trajectory preference or rollout reward evaluation.
 
         Args:
             trajectory: [B, T, 4] completed ego trajectory in physical

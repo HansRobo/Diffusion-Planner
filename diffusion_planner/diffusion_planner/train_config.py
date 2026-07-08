@@ -115,18 +115,23 @@ class TrainConfig:
     alpha_neighbor_loss: float = 0.1
 
     # HDP ego velocity representation & hybrid loss
-    use_velocity_representation: bool = False
+    use_velocity_representation: bool = True
     planning_hybrid_loss: float = 0.01
     hybrid_loss_window: int = 10
     diffusion_supervision_type: Literal["x_start", "noise", "score", "v"] = "x_start"
     diffusion_time_sample_method: Literal["uniform"] = "uniform"
     diffusion_sample_steps: int = 10
 
-    # HDP RL objective. The default follows the paper/official implementation:
-    # reward-weighted RL-Hybrid loss. GRPO remains available as an explicit ablation.
-    rl_objective: Literal["grpo", "official_reward_weighted"] = "official_reward_weighted"
+    # HDP RL objective. The branch intentionally keeps only the official-style
+    # reward-weighted RL-Hybrid path.
     official_reward_normalize: Literal["group", "batch", "none"] = "group"
     official_reward_beta: float = 1.0
+    # Official HDP multi-reward uses risk/follow/lane weights of 1.0/3.0/2.5.
+    # On Tier IV NPZs these are computed from available EPDMS-style subscores.
+    rl_noise_scale: float = 0.5
+    rl_reward_w_risk: float = 1.0
+    rl_reward_w_follow: float = 3.0
+    rl_reward_w_lane: float = 2.5
 
     # ---------------------------------------------------------
     # Throughput knobs. Defaults ON after live verification on 2026-07-07
@@ -140,7 +145,7 @@ class TrainConfig:
 
     guidance_scale: float = 0.5
     device: str = "cuda"
-    tf32: bool = False
+    tf32: bool = True
     use_ema: bool = True
 
     # ---------------------------------------------------------
@@ -161,7 +166,7 @@ class TrainConfig:
     # ---------------------------------------------------------
     use_wandb: bool = False
     wandb_run_id: Optional[str] = None
-    wandb_project_name: str = "Diffusion-Planner"
+    wandb_project_name: str = "Diffusion-Planner-Temporal"
     wandb_step_log_interval: int = 0
     notes: str = ""
     ddp: bool = True

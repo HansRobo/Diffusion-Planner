@@ -97,7 +97,7 @@ Do not change from velocity representation to waypoint representation between ba
 
 ## Official HDP-RL path
 
-The official HDP RL idea is reward-weighted RL-Hybrid, not GRPO as the main path.
+The official HDP RL idea is reward-weighted RL-Hybrid. This branch keeps only that RL path.
 
 The TeX algorithm computes a group-normalized reward and weights the hybrid loss with:
 
@@ -108,22 +108,26 @@ exp(beta * normalized_reward)
 The local default RL path now follows that objective:
 
 ```text
-rl_objective=official_reward_weighted
 official_reward_normalize=group
 official_reward_beta=1.0
+rl_reward_w_risk=1.0
+rl_reward_w_follow=3.0
+rl_reward_w_lane=2.5
 num_generations=32
-grpo_noise_scale=0.5
+rl_noise_scale=0.5
 rl_train_scope=decoder
-sft_prob=0.0
 ```
 
 Implementation notes:
 
-- Zero-variance reward groups are discarded instead of being treated as weight 1 training samples.
+- Zero-variance finite reward groups are kept with neutral weight `exp(0)=1`, matching the reward-weighted hybrid formula and avoiding silent no-op epochs on saturated rewards.
+- Reward scoring uses raw scene tensors before group expansion; only rollout/loss tensors are expanded to `B * num_generations`.
 - Rollout sampling uses a fixed temperature instead of a random per-row temperature range.
 - RL starts from SFT with `--init_weights_path`, so optimizer/scheduler/W&B state are fresh.
 - `rl_train_scope=decoder` freezes non-decoder parameters, matching the official decoder fine-tuning style.
 - Encoder modules are kept in eval mode during decoder-only RL so frozen dropout/drop-path does not inject noise.
+- The reward backend is fixed to an NPZ-native multi-reward adaptation of the paper's risk/follow/lane setting, using the official weights 1.0/3.0/2.5.
+- Best-checkpoint selection is based on validation EPDMS when available, falling back to negative ego validation loss.
 
 ### What is faithful and what is DP-native
 
@@ -132,6 +136,7 @@ Faithful to HDP:
 - Reward-weighted RL-Hybrid loss form.
 - Group reward normalization.
 - `exp(beta * normalized_reward)` weighting.
+- Multi-reward risk/follow/lane weighting with the official 1.0/3.0/2.5 coefficients.
 - Decoder-only RL fine-tuning by default.
 - SFT checkpoint as RL initialization.
 - Fixed rollout temperature.
@@ -139,20 +144,10 @@ Faithful to HDP:
 DP-native adaptation:
 
 - The official NAVSIM implementation uses NAVSIM PDM metric caches, Ray scoring, and a replay buffer.
-- This branch runs on Tier IV NPZ data and uses the available DP scene tensors and proxy reward path.
+- This branch runs on Tier IV NPZ data and uses available DP scene tensors to build EPDMS-style risk, route/GT-following, and lane-keeping rewards.
 - Exact NAVSIM PDM cache behavior is not assumed to exist in this repository.
 
 This means the branch is faithful at the objective and training-interface level, but not a byte-for-byte reproduction of the NAVSIM runtime environment.
-
-## GRPO and legacy RLVR
-
-GRPO remains available as an explicit ablation:
-
-```text
---rl_objective grpo
-```
-
-The `rlvr/` directory contains older research infrastructure for GRPO, PRiSM, ranked SFT, and closed-loop exploration. It is not the default HDP-RL implementation path.
 
 ## Validation and model selection
 

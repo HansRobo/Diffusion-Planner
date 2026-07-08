@@ -64,26 +64,14 @@ import matplotlib
 matplotlib.use("Agg")
 import numpy as np
 import torch
+from scipy.signal import savgol_filter
 
-# Live per-step lane / border / centerline scoring. Imports are module-
-# level (unconditional); the scoring path itself only runs when both
-# dump_npz_dir and reward_config_path are set in SpawnConfig. Matches
-# the exact same primitives ranked-SFT uses for its reward, so the
-# metrics log here and the training run speak the same thresholds.
-from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
-
-# Reuse the Savitzky-Golay smoother from the RL pipeline. Used there by
-# ranked-SFT to smooth diffusion-planner outputs before the SFT loss; same
-# defaults (window=11, order=3) and cos/sin-renormalisation logic apply at
-# replay time to suppress diffusion-sampler jitter. Importing rather than
-# duplicating so the two pipelines stay in sync.
-from rlvr.grpo_sft_trainer import _smooth_trajectory as _sg_smooth_trajectory
-from rlvr.reward import (
-    RewardConfig,
+from planner_metrics.aggregate import compute_subscores_batch
+from planner_metrics.config import RewardConfig
+from planner_metrics.geometry import _closest_points_between_rects
+from planner_metrics.subscores import (
     compute_centerline_score_batch,
-    compute_reward_batch,
     compute_road_border_penalty,
-    reward_breakdown_to_json_dict,
 )
 from scenario_generation.gui.lanelet_scene_builder import (
     LaneletSceneBuilder,
@@ -107,6 +95,55 @@ from scenario_generation.visualize import (
     draw_agent_box,
     draw_trajectory,
 )
+
+
+def load_reward_config(path: str | Path | None) -> RewardConfig:
+    if not path:
+        return RewardConfig()
+    with open(path) as f:
+        raw = json.load(f)
+    valid_keys = RewardConfig.__dataclass_fields__.keys()
+    return RewardConfig(**{k: v for k, v in raw.items() if k in valid_keys})
+
+
+def _smooth_trajectory(traj: np.ndarray, window: int, polyorder: int) -> np.ndarray:
+    if traj.shape[0] < window or window < 3:
+        return traj
+    if window % 2 == 0:
+        window -= 1
+    if window <= polyorder:
+        return traj
+    out = np.asarray(traj, dtype=np.float32).copy()
+    out[:, :2] = savgol_filter(out[:, :2], window_length=window, polyorder=polyorder, axis=0)
+    if out.shape[1] >= 4:
+        heading = np.unwrap(np.arctan2(out[:, 3], out[:, 2]))
+        heading = savgol_filter(heading, window_length=window, polyorder=polyorder)
+        out[:, 2] = np.cos(heading)
+        out[:, 3] = np.sin(heading)
+    return out
+
+
+def compute_reward_batch(
+    traj: torch.Tensor, data: dict[str, torch.Tensor], reward_cfg: RewardConfig
+) -> list[dict]:
+    subscores = compute_subscores_batch(traj, data, reward_cfg)
+    out = []
+    n = traj.shape[0]
+    for i in range(n):
+        item = {}
+        for key, value in subscores.items():
+            if torch.is_tensor(value):
+                item[key] = float(value[i].detach().cpu().item())
+            elif isinstance(value, list):
+                item[key] = value[i]
+        item["lane_crossing"] = item.get("lane_crossing_steps") is not None
+        out.append(item)
+    return out
+
+
+def reward_breakdown_to_json_dict(breakdown: dict) -> dict:
+    return dict(breakdown)
+
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -203,7 +240,7 @@ class SpawnConfig:
     map_mask_range_m: float = 200.0
     # Savitzky-Golay smoothing applied to each agent's predicted
     # trajectory before ``advance_scene`` uses its first step. Matches the
-    # defaults from ``rlvr.grpo_sft_trainer._smooth_trajectory`` (ranked
+    # defaults from the local Savitzky-Golay smoother (
     # SFT uses the same smoother on generated trajectories before the SFT
     # loss). Set ``sg_smooth_enabled=False`` to disable (e.g. for A/B
     # comparison).
@@ -234,7 +271,7 @@ class SpawnConfig:
     inference_delay: int = 0
     # Exploration-policy guidance for the EGO (frozen planner + learned
     # per-step guidance etas). Directory must contain exploration_policy.pth
-    # + exploration_policy_config.json (rlvr.train_explorer_regression
+    # + exploration_policy_config.json (
     # output). None = disabled (plain forward for everyone). Other agents
     # always use the plain forward. The guidance-envelope strengths live in
     # scenario_generation.explorer_runner.ExplorerEnvelope and must match
@@ -276,7 +313,7 @@ class SpawnConfig:
     # neighbor dimension (320). Set lower only when dumping for a model with
     # a different neighbor dimension. Past and future are built at this count.
     dump_neighbor_count: int = 320
-    # Path to a training-style (GRPO) config JSON. Required when dump_npz_dir
+    # Path to a training-style config JSON. Required when dump_npz_dir
     # is set: per-step lane / border / centerline metrics are logged using
     # the same thresholds the training run will use, so downstream scene
     # selection can re-threshold without re-running the sim.
@@ -1313,7 +1350,7 @@ def _ego_nearest_static_npc(
     """Return the ego↔static-NPC closest-pair when min clearance < threshold.
 
     Walks every ``static_npc_*`` agent, batches OBB-OBB closest-pair distance
-    against the ego's current OBB via :func:`rlvr.reward._closest_points_between_rects`
+    against the ego's current OBB via :func:`planner_metrics.geometry._closest_points_between_rects`
     (single canonical impl — do not duplicate the SAT / vertex-to-edge
     logic here), and returns the best pair if it falls under ``threshold_m``.
     ``None`` when no static NPC is within range.
@@ -1337,9 +1374,6 @@ def _ego_nearest_static_npc(
     ]
     if not candidates:
         return None
-
-    # torch is imported at module scope — just need the reward helper.
-    from rlvr.reward import _closest_points_between_rects
 
     ego_corners = _obb_corners(
         float(ego_pos[0]),
@@ -1401,8 +1435,6 @@ def _ego_nearest_moving_npc(
     ]
     if not candidates:
         return None
-
-    from rlvr.reward import _closest_points_between_rects
 
     ego_corners = _obb_corners(
         float(ego_pos[0]),
@@ -1890,13 +1922,9 @@ def _score_step(
     primitives skip t=0 for near/wide fractions; the duplicate t=1 slot
     gives them one timestep to evaluate, representing the current pose.
 
-    Everything dispatches to ``compute_reward_batch`` so that adding a new
-    field to ``rlvr.reward.RewardBreakdown`` automatically flows into the
-    log — no per-field mapping here to maintain. The one extra is an
-    explicit baselink-mode centerline score (the ``RewardBreakdown``
-    already holds a centerline term, but whether it used body or baselink
-    depends on the training config; the heatmap wants the rear-axle
-    version).
+    Everything dispatches through the planner_metrics subscore stack. The
+    one extra is an explicit baselink-mode centerline score, because the
+    heatmap wants the rear-axle version regardless of reward config.
     """
 
     def _to_t(arr: np.ndarray) -> torch.Tensor:
@@ -1950,9 +1978,6 @@ def _score_step(
         usage_mode="baselink",
     )
 
-    # Dump every RewardBreakdown field by iterating the dataclass, so
-    # adding a new component only requires touching rlvr.reward — this
-    # function stays untouched.
     out: dict = {"step": step}
     out.update(reward_breakdown_to_json_dict(br))
 
@@ -2638,13 +2663,12 @@ def run_route_replay(
 
             # Optional Savitzky-Golay smoothing on each agent's predicted
             # trajectory. Reuses the same smoother the RL ranked-SFT
-            # pipeline applies before its SFT loss (rlvr/grpo_sft_trainer.
-            # _smooth_trajectory). Helps when the diffusion sampler emits
-            # jitter at the first step; benign at worst when the output is
-            # already clean.
+            # Optional Savitzky-Golay smoothing on each predicted trajectory.
+            # Helps when the diffusion sampler emits first-step jitter; benign
+            # at worst when the output is already clean.
             if spawn_config.sg_smooth_enabled:
                 for aid, traj in agent_predictions.items():
-                    agent_predictions[aid] = _sg_smooth_trajectory(
+                    agent_predictions[aid] = _smooth_trajectory(
                         traj,
                         spawn_config.sg_filter_window,
                         spawn_config.sg_filter_order,
@@ -2906,7 +2930,7 @@ def run_route_replay(
         _backfill_neighbor_futures(Path(spawn_config.dump_npz_dir))
 
     # Persist the effective SpawnConfig alongside the dumps so downstream
-    # tools (notably rlvr.autoresearch.tools.rescore_replay_run) can reload
+    # tools can reload
     # ego dimensions / inference_delay / reward_config_path without the
     # user having to track the original JSON separately.
     spawn_cfg_path = output_dir / "spawn_config.json"

@@ -2,7 +2,7 @@
 
 Provides a structured scene representation (SceneContext) that:
 - Stores all data in a world/scene coordinate frame
-- Can be loaded from NPZ files used in SFT/GRPO training
+- Can be loaded from NPZ files used in SFT/HDP-RL training
 - Supports extensible per-agent attributes (routes, goals, turn indicators)
 - Converts to normalized model input tensors for any agent as ego
 """

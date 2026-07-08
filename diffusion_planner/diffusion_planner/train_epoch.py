@@ -139,9 +139,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # pipeline every iteration for no correctness benefit (DDP synchronizes via
         # its allreduce; kernels are stream-ordered). Detach stored values so 35k+
         # steps of scalars don't keep autograd-graph references alive all epoch.
-        epoch_loss.append(
-            {k: (v.detach() if torch.is_tensor(v) else v) for k, v in loss.items()}
-        )
+        epoch_loss.append({k: (v.detach() if torch.is_tensor(v) else v) for k, v in loss.items()})
 
     epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
 

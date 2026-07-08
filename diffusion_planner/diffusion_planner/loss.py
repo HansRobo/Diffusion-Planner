@@ -7,7 +7,7 @@ from diffusion_planner.model.guidance.collision import center_rect_to_points
 _NEIGHBOR_EVAL_STEPS = [0, 20, 40, 60, 79]
 
 # One-hot agent type occupies columns 8..10 = [vehicle, pedestrian, bicycle]
-# (matches synthetic_neighbors._TYPE_BASE / neighbor_db).
+# (kept consistent with the agent type encoding used by planner metrics).
 _TYPE_BASE = 8
 _TYPE_VEHICLE = 0
 _TYPE_PEDESTRIAN = 1
@@ -94,7 +94,7 @@ def vp_supervision_elementwise_loss(
 
     x_start supervision goes through the weighted waypoint path instead, so it is
     deliberately not handled here. Shared by decoder.compute_training_loss and
-    grpo_utils._compute_policy_ego_loss_per_sample — keep them in sync via this helper.
+    hdp_rl_utils._compute_policy_ego_loss_per_sample — keep them in sync via this helper.
     """
     if supervision_type == "score":
         return torch.sum((supervised_prediction * std + z) ** 2, dim=-1)

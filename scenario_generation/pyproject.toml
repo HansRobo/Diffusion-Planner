@@ -8,7 +8,6 @@ dependencies = [
     "gradio",
     "matplotlib",
     "numpy>=1.26,<2",
-    "rlvr",
     "scene-search",
     "scipy",
     "torch",
@@ -31,5 +30,4 @@ scenario_generation = ["configs/*.json"]
 
 [tool.uv.sources]
 diffusion-planner = { workspace = true }
-rlvr = { workspace = true }
 scene-search = { workspace = true }

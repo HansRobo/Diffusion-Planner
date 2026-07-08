@@ -10,7 +10,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-06-23T05:08:44.49130837Z"
+exclude-newer = "2026-07-01T09:12:13.947087141Z"
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -21,7 +21,6 @@ members = [
     "guidance-gui",
     "planner-metrics",
     "preference-optimization",
-    "rlvr",
     "scenario-generation",
     "scene-search",
 ]
@@ -409,7 +408,6 @@ dependencies = [
     { name = "guidance-gui" },
     { name = "planner-metrics" },
     { name = "preference-optimization" },
-    { name = "rlvr" },
     { name = "scenario-generation" },
     { name = "scene-search" },
 ]
@@ -428,7 +426,6 @@ requires-dist = [
     { name = "guidance-gui", editable = "guidance_gui" },
     { name = "planner-metrics", editable = "planner_metrics" },
     { name = "preference-optimization", editable = "preference_optimization" },
-    { name = "rlvr", editable = "rlvr" },
     { name = "scenario-generation", editable = "scenario_generation" },
     { name = "scene-search", editable = "scene_search" },
 ]
@@ -1725,43 +1722,6 @@ wheels = [
 ]
 
 [[package]]
-name = "rlvr"
-version = "0.1.0"
-source = { editable = "rlvr" }
-dependencies = [
-    { name = "diffusion-planner" },
-    { name = "exploration-policy" },
-    { name = "gradio" },
-    { name = "guidance-gui" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "planner-metrics" },
-    { name = "preference-optimization" },
-    { name = "safetensors" },
-    { name = "scenario-generation" },
-    { name = "scipy" },
-    { name = "torch" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "diffusion-planner", editable = "diffusion_planner" },
-    { name = "exploration-policy", editable = "exploration_policy" },
-    { name = "gradio" },
-    { name = "guidance-gui", editable = "guidance_gui" },
-    { name = "matplotlib" },
-    { name = "numpy", specifier = ">=1.26,<2" },
-    { name = "pandas", specifier = ">=2,<3" },
-    { name = "planner-metrics", editable = "planner_metrics" },
-    { name = "preference-optimization", editable = "preference_optimization" },
-    { name = "safetensors" },
-    { name = "scenario-generation", editable = "scenario_generation" },
-    { name = "scipy" },
-    { name = "torch" },
-]
-
-[[package]]
 name = "ruff"
 version = "0.15.16"
 source = { registry = "https://pypi.flatt.tech/simple/" }
@@ -1833,7 +1793,6 @@ dependencies = [
     { name = "gradio" },
     { name = "matplotlib" },
     { name = "numpy" },
-    { name = "rlvr" },
     { name = "scene-search" },
     { name = "scipy" },
     { name = "torch" },
@@ -1845,7 +1804,6 @@ requires-dist = [
     { name = "gradio" },
     { name = "matplotlib" },
     { name = "numpy", specifier = ">=1.26,<2" },
-    { name = "rlvr", editable = "rlvr" },
     { name = "scene-search", editable = "scene_search" },
     { name = "scipy" },
     { name = "torch" },

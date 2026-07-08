@@ -400,7 +400,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         # Raw per-rank accumulators, kept so callers that run validation on ALL ranks
         # (DistributedSampler shards) can all-reduce them into globally-correct metrics
         # via aggregate_valid_metrics(). validate_model itself stays collective-free so
-        # it remains safe to call on rank 0 only (as train.py / grpo do at some sites).
+        # it remains safe to call on rank 0 only (as train.py / HDP-RL do at some sites).
         "_loss_ego_sum": total_loss_ego,
         "_samples_ego": total_samples_ego,
         "_loss_neighbor_sum": total_loss_neighbor,

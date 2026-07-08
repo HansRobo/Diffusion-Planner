@@ -192,9 +192,7 @@ def model_wrapper(
                 noise_schedule.marginal_alpha(t_continuous),
                 noise_schedule.marginal_std(t_continuous),
             )
-            return (x - expand_dims(alpha_t, x.dim()) * output) / expand_dims(
-                sigma_t, x.dim()
-            )
+            return (x - expand_dims(alpha_t, x.dim()) * output) / expand_dims(sigma_t, x.dim())
         elif model_type == "v":
             alpha_t, sigma_t = (
                 noise_schedule.marginal_alpha(t_continuous),

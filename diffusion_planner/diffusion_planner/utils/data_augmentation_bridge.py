@@ -1056,7 +1056,9 @@ class StatePerturbation:
         else:
             ego_future_work = ego_future
 
-        aug_flag, aug_current_state, aug_ego_past, aug_ego_future = self.augment(inputs, ego_future_work)
+        aug_flag, aug_current_state, aug_ego_past, aug_ego_future = self.augment(
+            inputs, ego_future_work
+        )
 
         inputs["ego_current_state"][aug_flag] = aug_current_state[aug_flag]
         inputs["ego_agent_past"][aug_flag] = aug_ego_past[aug_flag]
