@@ -1,3 +1,9 @@
+# Legacy RLVR research workspace
+
+This directory is not the default Hyper Diffusion Planner RL path. The HDP branch defaults to official reward-weighted RL-Hybrid through `diffusion_planner/train_grpo_predictor.py` with `--rl_objective official_reward_weighted`. Use this `rlvr/` workspace only for explicit GRPO, PRiSM, ranked-SFT, or closed-loop exploration ablations.
+
+---
+
 # RLVR -- Reinforcement Learning with Verifiable Rewards
 
 Infrastructure for Group Relative Policy Optimization (GRPO) training of the Diffusion Planner.

@@ -1,96 +1,98 @@
-# README
+# Diffusion Planner - Hyper Diffusion Planner branch
 
-## 1. Setup
+This branch is the Tier IV integration branch for Hyper Diffusion Planner (HDP). It keeps the original Diffusion Planner training/evaluation pipeline usable, but the branch is documented and maintained as an HDP-focused branch.
 
-This project uses [uv](https://docs.astral.sh/uv/) for dependency management with a workspace structure.
+## Branch status
+
+Primary mode: HDP.
+
+Compatibility mode: original Diffusion Planner supervised training can still be run by disabling the HDP flags, but this branch should not be treated as a clean vanilla-DP branch. Use upstream `tier4-main` for a pure baseline.
+
+The HDP path adds:
+
+- Ego velocity representation for the HDP ego trajectory target.
+- Hybrid velocity-to-waypoint planning loss.
+- Official HDP-style reward-weighted RL-Hybrid objective.
+- EPDMS / temporal-stability validation support inherited from this development line.
+- Full-sequence data compatibility for temporal metrics and history-aware training.
+
+Local references used for implementation:
+
+- Paper TeX: `reference/hyper_diffusion_planner_paper/src/`
+- Official code: `reference/external/Hyper-Diffusion-Planner/`
+
+These reference files are for local research and do not need to be included in production PRs unless explicitly requested.
+
+## Setup
+
+This workspace uses `uv`.
 
 ```bash
-# Sync workspace and create virtual environment
 uv sync
-
-# Activate the virtual environment
 source .venv/bin/activate
-
-# Install git hooks
 uv run pre-commit install
-
-# check torch
 python3 -c "import torch; print(torch.cuda.is_available())"
 ```
 
-Run all configured hooks manually with:
+Run hooks manually before preparing PRs:
 
 ```bash
 uv run pre-commit run --all-files
 ```
 
-## Autoresearch Control Panel
+## Data
 
-The autoresearch workflows can be launched from a unified Gradio control panel:
+Use the fixed full-sequence train/valid lists for HDP experiments. Do not mix unrelated project/area lists into these runs.
 
-```bash
-source .venv/bin/activate
-python -m control_panel
+Current HDP experiments use branch-local artifacts such as:
+
+```text
+artifacts/full_sequence_base_from_20260622_step3/path_list_train_fullseq_from_20260622_step3.json
+artifacts/full_sequence_base_from_20260622_step3/path_list_valid_fullseq_from_20260622_step3.json
 ```
 
-See `control_panel/README.md` for the workspace layout, asset registry, training/eval tabs,
-PRiSM flow, Perception Reproducer route mining, rendering, and Scene Editor integration.
+SFT should use the corresponding SFT full-sequence list. Temporal consistency metrics require consecutive frames; single-frame lists can still train the model but cannot evaluate inter-frame consistency correctly.
 
-## 2. Create dataset
+## Recommended training order
 
-### 2.1. Prepare rosbags
+The intended HDP workflow is:
 
-We assume the following directory structure:
+1. Base train from scratch with HDP velocity representation and hybrid loss.
+2. SFT from the base checkpoint using `--init_weights_path`.
+3. Official HDP-RL from the SFT checkpoint using `train_grpo_predictor.py` and `--init_weights_path`.
 
-```bash
-driving_dataset$ tree . -L 2
-.
-├── bag
-│   ├── 2024-07-18
-│   │ ├── 10-05-28
-│   │ ├── 10-05-51
-│   │ ├── ...
-│   │ ├── 16-10-07
-│   │ └── 16-27-15
-│   ├── 2024-12-11
-│   ├── 2025-01-24
-│   ├── 2025-02-04
-│   ├── 2025-03-25
-│   └── 2025-04-16
-└── map
-     ├── 2024-07-18
-     │   ├── lanelet2_map.osm
-     │   ├── pointcloud_map_metadata.yaml
-     │   ├── pointcloud_map.pcd
-     │   └── stop_points.csv
-     ├── 2024-12-11
-     ├── 2025-01-24
-     ├── 2025-02-04
-     ├── 2025-03-25
-     └── 2025-04-16
+Do not start RL directly from base unless the experiment is explicitly labeled as an ablation.
+
+Detailed commands and flag policy are in:
+
+```text
+docs/hyper_diffusion_planner.md
+diffusion_planner/README.md
 ```
 
-### 2.2. Convert to diffusion_planner's format (npz)
+## Checkpoint compatibility
 
-use `parse_rosbag_for_directory.py` directly.
+HDP velocity checkpoints and vanilla waypoint checkpoints are not semantically interchangeable.
 
-```bash
-python3 ./ros_scripts/parse_rosbag_for_directory.py <target_dir_list> --save_root <save_root> [--step <step>] [--limit <limit>]
+Safe patterns:
+
+- Vanilla waypoint checkpoint to HDP base/SFT bootstrap: use `--init_weights_path` only when this is intentional.
+- HDP base to HDP SFT: use `--init_weights_path`.
+- HDP SFT to HDP-RL: use `--init_weights_path`.
+- Exact interrupted-run continuation: use `--resume_model_path`.
+
+Unsafe pattern:
+
+- Using `--resume_model_path` to reinterpret waypoint latents as velocity latents.
+
+The training code performs representation checks to prevent silent checkpoint misuse.
+
+## W&B
+
+Use the same comparison project for HDP / DFP / quality-fix experiments unless a run is intentionally isolated:
+
+```text
+Diffusion-Planner-Temporal
 ```
 
-### 2.3. Generate path_list.json
-
-This script search `*.npz` files and create `path_list.json`.
-
-```bash
-python3 ./diffusion_planner/util_scripts/create_train_set_path.py <root_dir_list>
-```
-
-## 3. Train
-
-Edit `train_run.sh` and run
-
-```bash
-cd ./diffusion_planner
-./train_run.sh
-```
+Temporary failed runs should be removed after investigation so the project remains readable.

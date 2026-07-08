@@ -1,0 +1,183 @@
+# Hyper Diffusion Planner integration guide
+
+This document defines how this branch should be used for HDP experiments in the Tier IV Diffusion Planner codebase.
+
+## Decision: HDP-specialized branch with vanilla compatibility
+
+This branch should be treated as HDP-specialized.
+
+It remains possible to run vanilla Diffusion Planner supervised training by disabling HDP flags, but the branch defaults, docs, and experiment workflow are HDP-oriented. This avoids ambiguity when comparing HDP, DFP, quality-fix DP, and original DP runs.
+
+## Local ground truth references
+
+Implementation decisions should be checked against local references first:
+
+```text
+reference/hyper_diffusion_planner_paper/src/
+reference/external/Hyper-Diffusion-Planner/
+```
+
+Relevant paper-side item:
+
+```text
+reference/hyper_diffusion_planner_paper/src/code_rl.tex
+```
+
+Relevant official implementation-side items:
+
+```text
+reference/external/Hyper-Diffusion-Planner/HDP-navsim/hdp_navsim/agent/dp_vla/dp_vla_rl_agent.py
+reference/external/Hyper-Diffusion-Planner/HDP-navsim/hdp_navsim/agent/dp_vla/model/rl_utils.py
+reference/external/Hyper-Diffusion-Planner/HDP-navsim/hdp_navsim/config/agent/dp_vla_rl_agent.yaml
+```
+
+## Model changes relative to original Diffusion Planner
+
+Original Diffusion Planner predicts all-agent future waypoints directly.
+
+This HDP branch keeps the original scene encoder, neighbor prediction, turn-indicator path, and validation stack, but changes the ego planning target in HDP mode:
+
+- Ego target can be represented as normalized velocity/action-like latent rather than direct waypoint latent.
+- The HDP ego prediction is converted back to waypoints through integration for trajectory loss and evaluation.
+- Hybrid loss combines velocity-space diffusion supervision with waypoint-space reconstruction.
+- Neighbor futures are still trained through the original all-agent prediction path.
+- Turn indicators and Tier IV validation metrics remain available.
+
+The intended HDP supervised setting is:
+
+```text
+use_velocity_representation=True
+planning_hybrid_loss=0.01
+hybrid_loss_window=10
+diffusion_model_type=x_start
+diffusion_supervision_type=x_start
+diffusion_sample_steps=10
+```
+
+## Checkpoint rules
+
+Use the right loading mode.
+
+| Use case | Flag |
+| --- | --- |
+| Start SFT from base weights | `--init_weights_path` |
+| Start RL from SFT weights | `--init_weights_path` |
+| Continue the exact same interrupted run | `--resume_model_path` |
+| Start HDP from a vanilla waypoint checkpoint intentionally | `--init_weights_path` only |
+
+Do not use `--resume_model_path` to change representation. The code checks representation compatibility to avoid silently interpreting waypoint latents as velocity latents.
+
+## Data policy
+
+Use fixed full-sequence lists for HDP experiments.
+
+Reasons:
+
+- HDP uses ego history and temporal behavior as part of the model design.
+- Temporal stability metrics need consecutive frames.
+- Mixed project/area lists can change the distribution and make comparisons unfair.
+
+Single-frame lists can still run ordinary supervised training, but they are not sufficient for temporal-consistency evaluation.
+
+## Supervised training stages
+
+### Stage 1: HDP base
+
+Base is trained from scratch with HDP flags enabled. Use full-sequence base train/valid lists. Use the same W&B project as the comparable DFP and quality-fix runs:
+
+```text
+Diffusion-Planner-Temporal
+```
+
+### Stage 2: HDP SFT
+
+SFT starts from the base checkpoint with `--init_weights_path`. The SFT run must keep the same HDP representation flags as base.
+
+Do not change from velocity representation to waypoint representation between base and SFT.
+
+## Official HDP-RL path
+
+The official HDP RL idea is reward-weighted RL-Hybrid, not GRPO as the main path.
+
+The TeX algorithm computes a group-normalized reward and weights the hybrid loss with:
+
+```text
+exp(beta * normalized_reward)
+```
+
+The local default RL path now follows that objective:
+
+```text
+rl_objective=official_reward_weighted
+official_reward_normalize=group
+official_reward_beta=1.0
+num_generations=32
+grpo_noise_scale=0.5
+rl_train_scope=decoder
+sft_prob=0.0
+```
+
+Implementation notes:
+
+- Zero-variance reward groups are discarded instead of being treated as weight 1 training samples.
+- Rollout sampling uses a fixed temperature instead of a random per-row temperature range.
+- RL starts from SFT with `--init_weights_path`, so optimizer/scheduler/W&B state are fresh.
+- `rl_train_scope=decoder` freezes non-decoder parameters, matching the official decoder fine-tuning style.
+- Encoder modules are kept in eval mode during decoder-only RL so frozen dropout/drop-path does not inject noise.
+
+### What is faithful and what is DP-native
+
+Faithful to HDP:
+
+- Reward-weighted RL-Hybrid loss form.
+- Group reward normalization.
+- `exp(beta * normalized_reward)` weighting.
+- Decoder-only RL fine-tuning by default.
+- SFT checkpoint as RL initialization.
+- Fixed rollout temperature.
+
+DP-native adaptation:
+
+- The official NAVSIM implementation uses NAVSIM PDM metric caches, Ray scoring, and a replay buffer.
+- This branch runs on Tier IV NPZ data and uses the available DP scene tensors and proxy reward path.
+- Exact NAVSIM PDM cache behavior is not assumed to exist in this repository.
+
+This means the branch is faithful at the objective and training-interface level, but not a byte-for-byte reproduction of the NAVSIM runtime environment.
+
+## GRPO and legacy RLVR
+
+GRPO remains available as an explicit ablation:
+
+```text
+--rl_objective grpo
+```
+
+The `rlvr/` directory contains older research infrastructure for GRPO, PRiSM, ranked SFT, and closed-loop exploration. It is not the default HDP-RL implementation path.
+
+## Validation and model selection
+
+Use validation metrics consistently across base, SFT, and RL:
+
+- `valid_loss/*` for supervised losses.
+- `valid_epdms/*` for planning-quality proxy metrics.
+- Temporal metrics only when pair/full-sequence loading is available.
+
+For deployment or closed-loop handoff, record:
+
+- Branch path.
+- Commit hash if available.
+- Run name.
+- Checkpoint path.
+- `args.json` path.
+- W&B run URL.
+- Data-list paths.
+- Whether the checkpoint is base, SFT, or RL.
+
+## Production caution
+
+This branch is for HDP development and experiments. Before making a clean upstream PR:
+
+- Remove local experiment-only scripts and notes.
+- Keep reference paper/code files out of the PR unless requested.
+- Split metric-only changes from model-training changes.
+- Keep the PR description explicit about compatibility and checkpoint semantics.
