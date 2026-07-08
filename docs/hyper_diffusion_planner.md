@@ -162,6 +162,60 @@ Use validation metrics consistently across base, SFT, and RL:
 - `valid_epdms/*` for planning-quality proxy metrics.
 - Temporal metrics only when pair/full-sequence loading is available.
 
+## ONNX export
+
+HDP velocity checkpoints should be deployed with the full ONNX graph:
+
+```text
+diffusion_planner.onnx
+```
+
+The full graph runs the model's own sampler and decodes the HDP ego velocity latent back to
+waypoint-space prediction before returning `prediction`.
+
+The split decoder ONNX contract is only valid for vanilla waypoint-mode `x_start` checkpoints.
+For HDP velocity checkpoints, exporting a split decoder would expose velocity-space ego latents
+that an external waypoint denoising loop could misinterpret. Therefore the exporter skips the
+split decoder for HDP and keeps the full graph as the deployable artifact.
+
+Precision policy:
+
+- Export uses float32 model execution.
+- bf16 training autocast is not used during ONNX export.
+- HDP velocity normalization is decoded inside the traced full graph.
+- The standalone converter validates the full ONNX output against the PyTorch wrapper when
+  `ros_scripts/torch2onnx.py` is used.
+
+Smoke validation performed on this branch:
+
+```text
+checkpoint:
+  outputs/hdp_velocity_hybrid_omega001_base60_fullseq_node01_8gpu_bf16_bs512_rerun3/epoch0010/best_model.pth
+
+command:
+  CUDA_VISIBLE_DEVICES="" .venv/bin/python ros_scripts/torch2onnx.py \
+    outputs/onnx_smoke_hdp_epoch0010 \
+    --output-prefix diffusion_planner_hdp_smoke \
+    --opset-version 20
+
+result:
+  full prediction      max diff = 4.3487548828125e-4, mean diff = 1.4785410712647717e-5
+  turn indicator logit max diff = 8.58306884765625e-6, mean diff = 3.4928320928884204e-6
+  encoder output       max diff = 4.082918167114258e-6, mean diff = 4.0447002902510576e-7
+  ORT provider         CPUExecutionProvider
+  split decoder        intentionally skipped for HDP velocity checkpoints
+```
+
+The checked full graph outputs:
+
+```text
+prediction: [B, 321, 80, 4]
+turn_indicator_logit: [B, 5]
+```
+
+`prediction[:, 0]` is the HDP ego trajectory decoded back to waypoint space. It is not the
+normalized velocity latent.
+
 For deployment or closed-loop handoff, record:
 
 - Branch path.

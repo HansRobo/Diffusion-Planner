@@ -188,6 +188,19 @@ def validate_split_models(
 ) -> None:
     with torch.no_grad():
         torch_encoding = wrappers.encoder(*(inputs[name] for name in ENCODER_INPUT_NAMES))
+    encoder_onnx_inputs = {name: inputs[name].cpu().numpy() for name in ENCODER_INPUT_NAMES}
+    onnx_encoding = run_ort_in_subprocess(encoder_onnx_path, encoder_onnx_inputs)[0]
+    compare("encoding", torch_encoding.cpu().numpy(), onnx_encoding)
+
+    if wrappers.decoder is None:
+        print(
+            "Skipping split decoder and split turn-indicator ORT validation: "
+            "this checkpoint uses HDP velocity representation or a non-x_start model. "
+            "The full ONNX graph is the deployable artifact and was validated above."
+        )
+        return
+
+    with torch.no_grad():
         torch_model_output = wrappers.decoder(
             torch_encoding,
             decoder_inputs["sampled_trajectories"],
@@ -195,10 +208,6 @@ def validate_split_models(
             decoder_inputs["neighbor_agents_past"],
         )
         torch_turn_indicator = wrappers.turn_indicator(torch_encoding, torch_model_output)
-
-    encoder_onnx_inputs = {name: inputs[name].cpu().numpy() for name in ENCODER_INPUT_NAMES}
-    onnx_encoding = run_ort_in_subprocess(encoder_onnx_path, encoder_onnx_inputs)[0]
-    compare("encoding", torch_encoding.cpu().numpy(), onnx_encoding)
 
     decoder_onnx_inputs = {
         "encoding": onnx_encoding,
@@ -237,7 +246,7 @@ def convert_model(
     print(f"Config: {config_json_path}")
     print(f"Full output: {full_onnx_path}")
     print(f"Encoder output: {encoder_onnx_path}")
-    print(f"Decoder output: {decoder_onnx_path}")
+    print(f"Decoder output: {decoder_onnx_path} (skipped for HDP velocity / non-x_start models)")
     print(f"Turn indicator output: {turn_indicator_onnx_path}")
     print(f"Using EMA: {use_ema}")
     print("ONNX exporter: legacy")
@@ -281,13 +290,11 @@ def convert_model(
         turn_indicator_onnx_path,
     )
 
-    print(
-        "\nSuccessfully converted to ONNX:"
-        f"\n  {full_onnx_path}"
-        f"\n  {encoder_onnx_path}"
-        f"\n  {decoder_onnx_path}"
-        f"\n  {turn_indicator_onnx_path}\n"
-    )
+    exported_paths = [full_onnx_path, encoder_onnx_path]
+    if wrappers.decoder is not None:
+        exported_paths.append(decoder_onnx_path)
+    exported_paths.append(turn_indicator_onnx_path)
+    print("\nSuccessfully converted to ONNX:" + "".join(f"\n  {p}" for p in exported_paths) + "\n")
 
 
 if __name__ == "__main__":

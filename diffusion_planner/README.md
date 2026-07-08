@@ -135,3 +135,34 @@ This branch can still run original DP-style supervised training by disabling HDP
 ```
 
 This compatibility mode is useful for local comparison, but it is not the branch's primary contract. For clean baseline PRs or production vanilla-DP changes, use the upstream Tier IV main branch.
+
+## HDP ONNX export
+
+For HDP velocity checkpoints, deploy the full ONNX graph:
+
+```text
+diffusion_planner.onnx
+```
+
+The split decoder graph is intentionally skipped for HDP because its ego row is a velocity latent,
+not a waypoint latent. The full graph runs sampling and decodes ego velocity back to waypoint-space
+`prediction`.
+
+Smoke-test conversion pattern:
+
+```bash
+CUDA_VISIBLE_DEVICES="" ../.venv/bin/python ../ros_scripts/torch2onnx.py \
+  <CHECKPOINT_DIR_WITH_ARGS_JSON_AND_PTH> \
+  --output-prefix diffusion_planner_hdp \
+  --opset-version 20
+```
+
+Expected HDP outputs:
+
+```text
+prediction: [B, 321, 80, 4]
+turn_indicator_logit: [B, 5]
+```
+
+The branch smoke test on `epoch0010/best_model.pth` passed PyTorch-vs-ORT validation with
+`prediction` max diff `4.35e-4` and mean diff `1.48e-5`.

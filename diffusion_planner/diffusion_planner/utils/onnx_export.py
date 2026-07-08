@@ -215,7 +215,11 @@ class DecoderONNXWrapper(nn.Module):
 
 
 class TurnIndicatorONNXWrapper(nn.Module):
-    """Turn-indicator head evaluated once after the external denoising loop."""
+    """Turn-indicator head evaluated once after denoising.
+
+    ``final_x0`` is a waypoint latent for vanilla DP and an HDP velocity latent for the ego row
+    when ``use_velocity_representation=True``.
+    """
 
     def __init__(self, model: Diffusion_Planner):
         super().__init__()
@@ -333,6 +337,28 @@ def build_turn_indicator_inputs(encoding: torch.Tensor, final_x0: torch.Tensor) 
         "encoding": encoding,
         "final_x0": final_x0,
     }
+
+
+def build_turn_indicator_final_x0(model: Diffusion_Planner, inputs: TensorDict) -> torch.Tensor:
+    """Build a trace-only latent input for the turn-indicator graph.
+
+    HDP velocity checkpoints intentionally do not export the split decoder graph because the
+    external-loop contract would expose velocity-space ego latents. The turn-indicator head still
+    has a valid standalone graph; for export tracing it only needs a correctly shaped latent. The
+    deployable HDP artifact remains the full graph, whose prediction output is already decoded back
+    to waypoint space.
+    """
+    decoder = model.decoder
+    batch_size = inputs["sampled_trajectories"].shape[0]
+    agent_num = 1 + decoder._predicted_neighbor_num
+    return torch.zeros(
+        batch_size,
+        agent_num,
+        1 + decoder._future_len,
+        4,
+        dtype=inputs["sampled_trajectories"].dtype,
+        device=inputs["sampled_trajectories"].device,
+    )
 
 
 def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusion_Planner:
@@ -507,7 +533,10 @@ def export_model_to_onnx(
     opset_version: int,
     external_data: bool,
 ) -> None:
-    """Export the four ONNX graphs (full / encoder / decoder / turn_indicator) for ``model``.
+    """Export ONNX graphs for ``model``.
+
+    The split decoder graph is exported only for waypoint-mode x_start checkpoints. HDP velocity
+    checkpoints export full / encoder / turn_indicator; the full graph is the deployable artifact.
 
     No ORT validation is performed; the caller is responsible for that (the standalone CLI does,
     the training loop skips it). The SDPA / MHA backends are forced only for the duration of the
@@ -521,13 +550,16 @@ def export_model_to_onnx(
             encoding = wrappers.encoder(*(export_inputs[name] for name in ENCODER_INPUT_NAMES))
 
         decoder_inputs = build_decoder_inputs(export_inputs, encoding)
-        with torch.no_grad():
-            final_x0 = wrappers.decoder(
-                decoder_inputs["encoding"],
-                decoder_inputs["sampled_trajectories"],
-                decoder_inputs["diffusion_time"],
-                decoder_inputs["neighbor_agents_past"],
-            )
+        if wrappers.decoder is not None:
+            with torch.no_grad():
+                final_x0 = wrappers.decoder(
+                    decoder_inputs["encoding"],
+                    decoder_inputs["sampled_trajectories"],
+                    decoder_inputs["diffusion_time"],
+                    decoder_inputs["neighbor_agents_past"],
+                )
+        else:
+            final_x0 = build_turn_indicator_final_x0(model, export_inputs)
         turn_indicator_inputs = build_turn_indicator_inputs(encoding, final_x0)
 
         export_specs = build_export_specs(

@@ -450,10 +450,11 @@ class Decoder(nn.Module):
         return latent[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
 
     def _latent_to_prediction(self, latent, current_states):
-        prediction = self._state_normalizer.inverse(latent)[:, :, 1:]
         if self._use_velocity:
-            prediction[:, :1] = self._ego_velocity_to_waypoints(latent[:, :1, 1:, :])
-        return prediction
+            ego_prediction = self._ego_velocity_to_waypoints(latent[:, :1, 1:, :])
+            neighbor_prediction = self._state_normalizer.inverse(latent)[:, 1:, 1:]
+            return torch.cat([ego_prediction, neighbor_prediction], dim=1)
+        return self._state_normalizer.inverse(latent)[:, :, 1:]
 
     def _forward_training(self, encoding, inputs, neighbor_current_mask, encoding_pooled):
         """Forward pass for training mode.
