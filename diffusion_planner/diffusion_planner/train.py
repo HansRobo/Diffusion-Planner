@@ -337,6 +337,16 @@ def model_training(args: TrainConfig):
                 )
             )
 
+    if global_rank == 0 and args.cluster_json:
+        import json as _json
+
+        with open(args.cluster_json, "r") as f:
+            _clusters = _json.load(f)
+        _cluster_sizes = {k: len(v) for k, v in _clusters.items()}
+        print("Cluster distribution:")
+        for k, v in sorted(_cluster_sizes.items()):
+            print(f"  {k}: {v} samples")
+
     if args.ddp:
         torch.distributed.barrier()
 
