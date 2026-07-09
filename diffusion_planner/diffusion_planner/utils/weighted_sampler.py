@@ -12,6 +12,10 @@ class ClusterWeightedDistributedSampler(Sampler):
     Reads a cluster assignment JSON (Fumiya's cluster.py output format) and assigns
     each sample a weight of 1/cluster_frequency. Rare clusters are sampled more often;
     no data is discarded.
+
+    The cluster JSON must contain the exact same path strings as the training
+    data_list JSON. Run cluster.py with the same --data_list file used for
+    --train_set_list to ensure paths match.
     """
 
     def __init__(
@@ -34,9 +38,7 @@ class ClusterWeightedDistributedSampler(Sampler):
             cluster_json_path
         )
 
-    def _compute_weights(
-        self, cluster_json_path: str
-    ) -> tuple[torch.Tensor, dict[str, int], int]:
+    def _compute_weights(self, cluster_json_path: str) -> tuple[torch.Tensor, dict[str, int], int]:
         with open(cluster_json_path, "r") as f:
             clusters = json.load(f)
 

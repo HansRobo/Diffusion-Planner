@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
         help="optional: dir tree of route NPZ frames for closed-loop validation, OR a .json path "
         "list of such dirs (like --train_set_list). Empty = disabled.",
     )
+    p.add_argument(
+        "--cluster_json",
+        default=None,
+        help="optional: path to cluster assignment JSON for weighted sampling",
+    )
     return p.parse_args()
 
 
@@ -59,6 +64,8 @@ def main() -> None:
         optional += ["--wandb_run_id", args.wandb_run_id]
     if args.wandb_project_name:
         optional += ["--wandb_project_name", args.wandb_project_name]
+    if args.cluster_json:
+        optional += ["--cluster_json", str(Path(args.cluster_json).resolve())]
 
     Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
 
