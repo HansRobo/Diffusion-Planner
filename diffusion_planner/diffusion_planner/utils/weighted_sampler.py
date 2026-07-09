@@ -67,8 +67,14 @@ class ClusterWeightedDistributedSampler(Sampler):
             self.weights, self.total_size, replacement=True, generator=g
         ).tolist()
 
+        # Pad indices to ensure every rank gets exactly num_samples indices.
+        # Pad by repeating from the front to reach num_samples * num_replicas length.
+        padded_length = self.num_samples * self.num_replicas
+        if len(indices) < padded_length:
+            indices.extend(indices[: padded_length - len(indices)])
+
         # Shard across ranks
-        indices = indices[self.rank : self.total_size : self.num_replicas]
+        indices = indices[self.rank : padded_length : self.num_replicas]
         return iter(indices)
 
     def __len__(self) -> int:

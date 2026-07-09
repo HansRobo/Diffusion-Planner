@@ -2,7 +2,6 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
 from diffusion_planner.utils.weighted_sampler import ClusterWeightedDistributedSampler
 
 
