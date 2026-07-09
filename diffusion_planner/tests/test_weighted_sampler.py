@@ -1,6 +1,9 @@
 import json
 import tempfile
+import warnings
 from pathlib import Path
+
+import pytest
 
 from diffusion_planner.utils.weighted_sampler import ClusterWeightedDistributedSampler
 
@@ -101,6 +104,34 @@ class TestDDP:
             assert len(i0) == 10
             assert len(i1) == 10
 
+    def test_two_ranks_get_different_shards(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(20)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            s0 = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=2, rank=0, seed=42
+            )
+            s1 = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=2, rank=1, seed=42
+            )
+            i0, i1 = list(s0), list(s1)
+            assert i0 != i1, "Different ranks should receive different index shards"
+
+    def test_padding_with_non_divisible_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(21)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            s0 = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=2, rank=0, seed=42
+            )
+            s1 = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=2, rank=1, seed=42
+            )
+            assert len(list(s0)) == 11
+            assert len(list(s1)) == 11
+
     def test_set_epoch_changes_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_list = [f"/data/sample_{i}.npz" for i in range(50)]
@@ -118,10 +149,17 @@ class TestDDP:
 
 class TestEdgeCases:
     def test_missing_paths_get_default_weight(self):
-        """Paths not in cluster JSON get weight 1.0 (neutral)."""
+        """Paths not in any cluster get pre-normalization weight 1.0.
+
+        After normalization, clustered paths are upweighted relative to
+        unclustered ones, so unmatched paths end up with the lowest weight.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            data_list = [f"/data/sample_{i}.npz" for i in range(5)]
-            clusters = {"cluster_id0": data_list[:2]}
+            data_list = [f"/data/sample_{i}.npz" for i in range(10)]
+            clusters = {
+                "cluster_id0": data_list[:2],
+                "cluster_id1": data_list[2:6],
+            }
             cluster_path = str(Path(tmp) / "clusters.json")
             with open(cluster_path, "w") as f:
                 json.dump(clusters, f)
@@ -129,6 +167,57 @@ class TestEdgeCases:
             sampler = ClusterWeightedDistributedSampler(
                 data_list, cluster_path, num_replicas=1, rank=0, seed=42
             )
-            assert len(sampler.weights) == 5
-            indices = list(sampler)
-            assert len(indices) == 5
+            assert len(sampler.weights) == 10
+            assert sampler.matched_count == 6
+
+            rare_weight = sampler.weights[0].item()
+            common_weight = sampler.weights[3].item()
+            unmatched_weight = sampler.weights[7].item()
+
+            assert rare_weight > common_weight > unmatched_weight, (
+                f"Expected rare ({rare_weight:.3f}) > common ({common_weight:.3f}) "
+                f"> unmatched ({unmatched_weight:.3f})"
+            )
+            for i in range(6, 10):
+                assert sampler.weights[i].item() == unmatched_weight
+
+    def test_no_matching_paths_raises_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(5)]
+            clusters = {"cluster_id0": ["/other/path_0.npz", "/other/path_1.npz"]}
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                json.dump(clusters, f)
+
+            with pytest.raises(ValueError, match="No paths in data_list matched"):
+                ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=1, rank=0, seed=42
+                )
+
+    def test_low_match_rate_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(10)]
+            clusters = {"cluster_id0": data_list[:2]}
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                json.dump(clusters, f)
+
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                sampler = ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=1, rank=0, seed=42
+                )
+                matching_warnings = [x for x in w if "paths matched cluster JSON" in str(x.message)]
+                assert len(matching_warnings) == 1
+                assert sampler.matched_count == 2
+
+    def test_cluster_counts_exposed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(20)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42
+            )
+            assert sampler.cluster_counts == {"cluster_id0": 2, "cluster_id1": 18}
+            assert sampler.matched_count == 20

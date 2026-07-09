@@ -1,5 +1,6 @@
 import json
 import math
+import warnings
 
 import torch
 from torch.utils.data import Sampler
@@ -29,9 +30,13 @@ class ClusterWeightedDistributedSampler(Sampler):
         self.total_size = len(data_list)
         self.num_samples = math.ceil(self.total_size / self.num_replicas)
 
-        self.weights = self._compute_weights(cluster_json_path)
+        self.weights, self.cluster_counts, self.matched_count = self._compute_weights(
+            cluster_json_path
+        )
 
-    def _compute_weights(self, cluster_json_path: str) -> torch.Tensor:
+    def _compute_weights(
+        self, cluster_json_path: str
+    ) -> tuple[torch.Tensor, dict[str, int], int]:
         with open(cluster_json_path, "r") as f:
             clusters = json.load(f)
 
@@ -47,14 +52,27 @@ class ClusterWeightedDistributedSampler(Sampler):
         total_in_clusters = sum(cluster_counts.values())
         cluster_freq = {cid: count / total_in_clusters for cid, count in cluster_counts.items()}
 
+        matched = 0
         weights = torch.ones(len(self.data_list), dtype=torch.float64)
         for i, path in enumerate(self.data_list):
             cluster_id = path_to_cluster.get(path)
             if cluster_id is not None:
+                matched += 1
                 weights[i] = 1.0 / (cluster_freq[cluster_id] + 1e-8)
 
+        if matched == 0:
+            raise ValueError(
+                f"No paths in data_list matched cluster JSON "
+                f"({len(path_to_cluster)} cluster entries). Check path formats."
+            )
+        if matched < len(self.data_list) // 2:
+            warnings.warn(
+                f"Only {matched}/{len(self.data_list)} paths matched cluster JSON. "
+                f"Check path formats."
+            )
+
         weights = weights / weights.mean()
-        return weights
+        return weights, cluster_counts, matched
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
