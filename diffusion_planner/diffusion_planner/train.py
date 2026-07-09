@@ -25,6 +25,7 @@ from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
+from diffusion_planner.utils.weighted_sampler import ClusterWeightedDistributedSampler
 from diffusion_planner.validate_model import (
     aggregate_replan_consistency_metrics,
     aggregate_valid_metrics,
@@ -270,9 +271,20 @@ def model_training(args: TrainConfig):
 
     train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 
-    train_sampler = DistributedSampler(
-        train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
-    )
+    if args.cluster_json:
+        train_sampler = ClusterWeightedDistributedSampler(
+            train_set.data_list,
+            args.cluster_json,
+            num_replicas=ddp.get_world_size(),
+            rank=global_rank,
+            seed=args.seed,
+        )
+        if global_rank == 0:
+            print(f"Using cluster-weighted sampling from {args.cluster_json}")
+    else:
+        train_sampler = DistributedSampler(
+            train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
+        )
     train_loader = DataLoader(
         train_set,
         sampler=train_sampler,

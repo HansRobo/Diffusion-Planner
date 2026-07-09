@@ -30,6 +30,12 @@ def get_args(args_list=None):
     parser.add_argument("--train_set_list", type=str, required=True)
     parser.add_argument("--valid_set_list", type=str, required=True)
     parser.add_argument("--train_subsample_step", type=int, default=1)
+    parser.add_argument(
+        "--cluster_json",
+        type=str,
+        default="",
+        help="Path to cluster assignment JSON from cluster.py. Enables weighted sampling.",
+    )
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
