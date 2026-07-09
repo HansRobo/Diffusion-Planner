@@ -651,28 +651,45 @@ class LineEncoder(nn.Module):
 
     def forward(self, x):
         """
-        x: B, P, V, D(x, y)
+        x: B, P, V, D (x, y, type one-hot...)
         """
         B, P, V, D = x.shape
-        # diffを取る
-        diff_x = x[:, :, 1:, 0] - x[:, :, :-1, 0]  # (B, P, V-1)
-        diff_y = x[:, :, 1:, 1] - x[:, :, :-1, 1]  # (B, P, V-1)
+        # Valid points are detected on the raw features (before the diff concat):
+        # real points always have a non-zero type one-hot, so points lying on the
+        # normalized origin are still classified as valid.
+        valid_pt = torch.sum(torch.ne(x, 0), dim=-1) != 0  # (B, P, V)
+
+        # Compute diffs only between pairs of valid points, so the last valid
+        # point does not get a spurious diff toward the zero padding.
+        pair_valid = (valid_pt[:, :, 1:] & valid_pt[:, :, :-1]).to(x.dtype)  # (B, P, V-1)
+        diff_x = (x[:, :, 1:, 0] - x[:, :, :-1, 0]) * pair_valid
+        diff_y = (x[:, :, 1:, 1] - x[:, :, :-1, 1]) * pair_valid
         diff_x = torch.cat([diff_x, torch.zeros_like(diff_x[:, :, :1])], dim=2)  # (B, P, V)
         diff_x = diff_x.view(B, P, V, 1)
         diff_y = torch.cat([diff_y, torch.zeros_like(diff_y[:, :, :1])], dim=2)  # (B, P, V)
         diff_y = diff_y.view(B, P, V, 1)
-        x = torch.concat([x, diff_x, diff_y], dim=-1)  # (B, P, V, D+2)
+        # Insert the diffs right after xy so the layout matches LaneEncoder's
+        # (x, y, dx, dy, attributes...) convention.
+        x = torch.concat([x[..., :2], diff_x, diff_y, x[..., 2:]], dim=-1)  # (B, P, V, D+2)
 
-        pos = x[:, :, int(self._line_len / 2), :4].clone()  # x, y, x'-x, y'-y
-        heading = torch.atan2(pos[..., 3], pos[..., 2])
-        pos = torch.stack(
-            [pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1
-        )
+        # pos comes from the centroid of the valid points and the mean diff
+        # direction, instead of the center index (which is padding for short
+        # elements such as 2-point stop lines).
+        valid = valid_pt.to(x.dtype).unsqueeze(-1)  # (B, P, V, 1)
+        count = valid.sum(dim=2).clamp(min=1.0)  # (B, P, 1)
+        center_xy = (x[..., :2] * valid).sum(dim=2) / count  # (B, P, 2)
+        mean_diff = (x[..., 2:4] * valid).sum(dim=2) / count  # (B, P, 2)
+        # Normalize instead of atan2 to get (cos, sin); fall back to (1, 0)
+        # when the mean diff degenerates (e.g. closed polygons, padding).
+        norm = mean_diff.norm(dim=-1, keepdim=True)  # (B, P, 1)
+        unit = mean_diff / norm.clamp(min=1e-6)
+        default_dir = torch.zeros_like(unit)
+        default_dir[..., 0] = 1.0
+        unit = torch.where(norm > 1e-6, unit, default_dir)
+        pos = torch.cat([center_xy, unit], dim=-1)  # (B, P, 4)
         pos = add_class_type(pos, self._class_type)
 
-        B, P, V, _ = x.shape
-        mask_v = torch.sum(torch.ne(x[..., :4], 0), dim=-1).to(x.device) == 0
-        mask_p = torch.sum(~mask_v, dim=-1) == 0
+        mask_p = ~valid_pt.any(dim=-1)  # (B, P)
         valid_indices = ~mask_p.view(-1)
 
         x = x.view(B * P, V, -1)
