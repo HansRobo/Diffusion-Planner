@@ -28,6 +28,7 @@ NORMALIZATION=${REPO}/diffusion_planner/normalization.json
 PYTHON=${REPO}/.venv/bin/python
 PORT=22631
 MAX_ATTEMPTS=3
+WANDB_RUN_ID=${HDP_WANDB_RUN_ID:-hdp-base-${SLURM_JOB_ID}}
 
 mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache" "${REPO}/wandb_cache"
 HEALTH_LOG=${SAVE_DIR}/health_monitor.log
@@ -133,7 +134,7 @@ BASE_ARGS=(
   --ego_past_noise_std 0.1
   --use_smoothing_future_trajectory True
   --use_wandb True
-  --wandb_run_id "hdp-base-${SLURM_JOB_ID}"
+  --wandb_run_id "${WANDB_RUN_ID}"
   --wandb_project_name Diffusion-Planner-Temporal
   --wandb_step_log_interval 50
   --future_len 80
