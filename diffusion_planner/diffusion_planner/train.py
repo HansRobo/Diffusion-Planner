@@ -589,6 +589,9 @@ def model_training(args: TrainConfig):
 
     # prepare dataset
     align_legacy_futures = bool(getattr(args, "align_legacy_neighbor_futures", True))
+    train_needs_neighbor_futures = (
+        int(args.predicted_neighbor_num) > 0 or args.coeff_neighbor_collision_loss > 0
+    )
     train_set = DiffusionPlannerData(
         args.train_set_list,
         align_legacy_neighbor_futures=align_legacy_futures,
@@ -597,6 +600,7 @@ def model_training(args: TrainConfig):
         extra_data_mask_traffic_lights=getattr(
             args, "extra_train_set_mask_traffic_lights", False
         ),
+        include_neighbor_futures=train_needs_neighbor_futures,
     )
     valid_set = DiffusionPlannerData(
         args.valid_set_list, align_legacy_neighbor_futures=align_legacy_futures
@@ -644,6 +648,8 @@ def model_training(args: TrainConfig):
 
     if global_rank == 0:
         print("Dataset Prepared: {} train data\n".format(len(train_set)))
+        if not train_needs_neighbor_futures:
+            print("Ego-only training: skipping unused neighbor_agents_future NPZ payloads")
 
     if args.ddp:
         torch.distributed.barrier()

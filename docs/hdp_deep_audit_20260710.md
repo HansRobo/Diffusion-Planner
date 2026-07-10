@@ -218,7 +218,9 @@ best score.
 - Decoder-only expansion repeats current action-state tensors, not full 31-frame scene
   observations.
 - Ego-only SFT skips heading conversion for the unused 320-agent future tensor and
-  releases it before the model forward when neighbor-collision supervision is disabled.
+  does not materialize that NPZ payload at all when neighbor-collision supervision is
+  disabled. On a real cached sample this reduced loaded array bytes from 1.206 MB to
+  0.899 MB and single-process materialization time by about 24%.
 - Penalty losses inverse-normalize only the inputs they consume; road-border-only Base
   no longer allocates a denormalized 320-by-31 neighbor-history tensor every step.
 - Full 320-neighbor logged futures remain scene-level instead of being duplicated 32x,
@@ -290,7 +292,7 @@ control slices before any model-quality conclusion.
 
 ## Verification status
 
-- Full `diffusion_planner/tests`: 129 passed.
+- Full `diffusion_planner/tests`: 130 passed.
 - Targeted ruff: passed.
 - Python compileall: passed.
 - Git whitespace check: passed.

@@ -99,14 +99,28 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     # gradients and calls .item() five times (five device syncs per step). Sample them
     # on the wandb logging cadence instead (or every 100 steps when step logging is off).
     stats_interval = step_log if step_log > 0 else 100
+    needs_neighbor_futures = (
+        int(args.predicted_neighbor_num) > 0 or args.coeff_neighbor_collision_loss > 0
+    )
 
     for batch_idx, inputs in enumerate(data_loader, start=1):
+        neighbor_future_cpu = inputs.pop("neighbor_agents_future", None)
+        if needs_neighbor_futures and neighbor_future_cpu is None:
+            raise KeyError(
+                "neighbor_agents_future is required for joint-action or collision supervision"
+            )
         inputs = {key: value.to(args.device, non_blocking=True) for key, value in inputs.items()}
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
         ego_future = inputs["ego_agent_future"]
-        neighbors_future = inputs["neighbor_agents_future"]
+        if neighbor_future_cpu is None:
+            batch_size, future_len = ego_future.shape[:2]
+            neighbors_future = ego_future.new_zeros(
+                (batch_size, 0, future_len, ego_future.shape[-1])
+            )
+        else:
+            neighbors_future = neighbor_future_cpu.to(args.device, non_blocking=True)
         # Normalize to ego-centric
         if aug is not None:
             inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
@@ -122,7 +136,6 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         )
         # Future GT is not an encoder input. In ego-only training this also releases the
         # full 320-agent tensor before normalization and the model forward.
-        inputs.pop("neighbor_agents_future", None)
         inputs = args.observation_normalizer(inputs)
 
         # call the model

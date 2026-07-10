@@ -211,6 +211,23 @@ def test_extra_dataset_traffic_light_mask_is_in_memory_and_extra_only(tmp_path):
         assert np.all(source["route_lanes"][..., TRAFFIC_LIGHT_GREEN] == 1.0)
 
 
+def test_ego_only_dataset_skips_unused_neighbor_future_npz_payload(tmp_path):
+    sample_path = tmp_path / "sample.npz"
+    np.savez(
+        sample_path,
+        ego_agent_future=np.zeros((80, 3), dtype=np.float32),
+        neighbor_agents_future=np.ones((320, 80, 3), dtype=np.float32),
+    )
+    data_list = tmp_path / "data.json"
+    data_list.write_text(json.dumps([str(sample_path)]), encoding="utf-8")
+
+    ego_only = DiffusionPlannerData(str(data_list), include_neighbor_futures=False)[0]
+    joint = DiffusionPlannerData(str(data_list), include_neighbor_futures=True)[0]
+
+    assert "neighbor_agents_future" not in ego_only
+    assert joint["neighbor_agents_future"].shape == (320, 80, 3)
+
+
 def test_ego_only_neighbor_supervision_skips_unused_full_future_conversion():
     raw = torch.randn(2, 320, 80, 3)
     action_future, action_mask, collision_futures = prepare_neighbor_supervision(

@@ -43,6 +43,7 @@ class DiffusionPlannerData(Dataset):
         extra_data_list=None,
         extra_data_repeat: int = 0,
         extra_data_mask_traffic_lights: bool = False,
+        include_neighbor_futures: bool = True,
     ):
         self.data_list = openjson(data_list)
         if extra_data_repeat < 0:
@@ -63,14 +64,19 @@ class DiffusionPlannerData(Dataset):
             set(extra_paths) if extra_data_mask_traffic_lights else set()
         )
         self.align_legacy_neighbor_futures = align_legacy_neighbor_futures
+        self.include_neighbor_futures = include_neighbor_futures
 
     def __len__(self):
         return len(self.data_list)
 
     def __getitem__(self, idx):
         path = self.data_list[idx]
-        data = np.load(path, allow_pickle=True)
-        data = dict(data)  # npz to dict
+        with np.load(path, allow_pickle=True) as archive:
+            data = {
+                key: archive[key]
+                for key in archive.files
+                if self.include_neighbor_futures or key != "neighbor_agents_future"
+            }
         if path in self.traffic_light_mask_paths:
             self._mask_traffic_lights(data)
         if self.align_legacy_neighbor_futures:
