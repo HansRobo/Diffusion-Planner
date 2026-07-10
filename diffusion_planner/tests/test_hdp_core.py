@@ -36,6 +36,7 @@ from diffusion_planner.utils.dataset import (
     DistributedEvalSampler,
     align_legacy_neighbor_futures_on_load,
 )
+from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.masks import neighbor_future_padding_mask
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import (
@@ -68,6 +69,21 @@ def test_hdp_representation_and_normalization_round_trip():
     torch.testing.assert_close(
         inverse_normalize_ego_velocity(normalized, normalizer), velocity, rtol=0, atol=0
     )
+
+
+def test_supervised_lr_warms_up_then_stays_fixed_for_twenty_epochs():
+    parameter = torch.nn.Parameter(torch.zeros(()))
+    optimizer = torch.optim.AdamW([parameter], lr=2e-4)
+    scheduler = CosineAnnealingWarmUpRestarts(optimizer, epoch=20, warm_up_epoch=5)
+
+    used_lrs = []
+    for _ in range(20):
+        used_lrs.append(optimizer.param_groups[0]["lr"])
+        optimizer.step()
+        scheduler.step()
+
+    assert used_lrs[:5] == pytest.approx([2e-5, 6.5e-5, 1.1e-4, 1.55e-4, 2e-4])
+    assert used_lrs[5:] == pytest.approx([2e-4] * 15)
 
 
 def test_detached_integral_preserves_forward_and_limits_gradient_window():

@@ -853,19 +853,6 @@ def model_training(args: TrainConfig):
         if args.ddp:
             torch.distributed.barrier()
 
-        # Adjust learning rate for final 10 epochs on full-length runs only.
-        final_epoch_count = 10
-        if train_epochs > final_epoch_count and epoch >= train_epochs - final_epoch_count:
-            base_lr = args.learning_rate
-            if epoch >= train_epochs - final_epoch_count // 2:  # Last 5 epochs: LR * 1/100
-                adjusted_lr = base_lr * 0.01
-            else:  # First 5 of final 10 epochs: LR * 1/10
-                adjusted_lr = base_lr * 0.1
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = adjusted_lr
-            if global_rank == 0:
-                print(f"Final phase: Epoch {epoch + 1}, LR adjusted to {adjusted_lr}")
-
         # training step
         args._current_epoch = epoch + 1
         args._train_epochs = train_epochs

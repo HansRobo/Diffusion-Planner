@@ -82,6 +82,11 @@ The SFT and RL implementations both use sum over action coordinates followed by 
 temporal mean, matching the public nuPlan loss scale. `planning_hybrid_loss=0.01`
 therefore has the same relative convention in SFT and RL.
 
+Supervised training uses the released HDP schedule: five-epoch linear warmup followed by
+a fixed learning rate. The inherited Tier IV rule that reduced LR by 10x/100x over the
+last ten epochs was removed because it consumes half of a 20-epoch Base run and is not
+present in the paper or released HDP implementation.
+
 For delay augmentation, known prefix predictions are clamped to the prefix target before
 waypoint integration. Direct loss and future integrated loss therefore cannot send a
 gradient through a prefix that inference constrains exactly.
