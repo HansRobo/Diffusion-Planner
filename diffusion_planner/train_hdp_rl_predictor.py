@@ -800,7 +800,12 @@ def model_training(args):
             id=wandb_id,
             dir=f"{save_path}",
         )
-        wandb.config.update(args_dict)
+        # Strict checkpoint compatibility runs before W&B initialization. An in-place
+        # recovery legitimately changes resume_model_path from None to latest.pth.
+        wandb.config.update(
+            args_dict,
+            allow_val_change=args.resume_model_path is not None,
+        )
         wandb_id = wandb.run.id
 
     if args.ddp:

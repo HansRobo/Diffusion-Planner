@@ -733,7 +733,13 @@ def model_training(args: TrainConfig):
             dir=f"{save_path}",
         )
 
-        wandb.config.update(args_dict)
+        # Strict checkpoint compatibility has already validated every training field.
+        # W&B still sees resume_model_path change from None to latest.pth on an in-place
+        # recovery, so allow that runtime-state update instead of aborting the resumed job.
+        wandb.config.update(
+            args_dict,
+            allow_val_change=args.resume_model_path is not None,
+        )
 
         # this function creates dataset artifacts and associate them with wandb run
         # if wandb_run_id is given, the input artifact is assumed to be created externally and will not be executed
