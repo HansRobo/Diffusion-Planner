@@ -454,7 +454,13 @@ def build_export_specs(
 def build_dynamic_axes(
     input_names: list[str], output_names: list[str]
 ) -> dict[str, dict[int, str]]:
-    return {name: {0: "batch"} for name in [*input_names, *output_names]}
+    dynamic_axes = {
+        name: {0: "batch"}
+        for name in input_names
+        if name != "delay"
+    }
+    dynamic_axes.update({name: {0: "batch"} for name in output_names})
+    return dynamic_axes
 
 
 def export_onnx(

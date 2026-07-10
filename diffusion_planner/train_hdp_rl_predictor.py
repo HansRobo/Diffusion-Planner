@@ -461,6 +461,8 @@ def model_training(args):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=4 if args.num_workers > 0 else None,
     )
 
     # Validation is sharded across all ranks (DistributedSampler) and the per-rank
@@ -475,6 +477,8 @@ def model_training(args):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False,
+        persistent_workers=args.num_workers > 0,
+        prefetch_factor=4 if args.num_workers > 0 else None,
     )
     if global_rank == 0:
         print("Dataset Prepared: {} train data\n".format(len(train_set)))
@@ -567,6 +571,7 @@ def model_training(args):
             train_loader,
             diffusion_planner,
             optimizer,
+            trainable_params,
             args,
             model_ema,
             aug,
