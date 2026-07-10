@@ -294,8 +294,13 @@ def compute_training_loss(
         )
         # Only the penalty terms consume denormalized inputs — inverse just those keys
         # instead of every observation tensor each step.
+        penalty_input_keys = []
+        if args.coeff_road_border_loss > 0:
+            penalty_input_keys.append("line_strings")
+        if args.coeff_neighbor_collision_loss > 0:
+            penalty_input_keys.append("neighbor_agents_past")
         denorm_inputs = args.observation_normalizer.inverse(
-            {k: inputs[k] for k in ("line_strings", "neighbor_agents_past") if k in inputs}
+            {key: inputs[key] for key in penalty_input_keys}
         )
 
     # Road border collision loss (ego only, x_start mode)

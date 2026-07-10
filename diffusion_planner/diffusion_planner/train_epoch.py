@@ -46,6 +46,37 @@ def heading_to_cos_sin(x):
     )
 
 
+def prepare_neighbor_supervision(
+    neighbors_future: torch.Tensor,
+    action_neighbor_num: int,
+    include_collision_futures: bool,
+) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+    """Prepare only the neighbor futures consumed by the configured training losses."""
+    if action_neighbor_num == 0 and not include_collision_futures:
+        batch_size, _, future_len, _ = neighbors_future.shape
+        empty_future = neighbors_future.new_zeros((batch_size, 0, future_len, 4))
+        empty_mask = torch.zeros(
+            (batch_size, 0, future_len), dtype=torch.bool, device=neighbors_future.device
+        )
+        return empty_future, empty_mask, None
+
+    if include_collision_futures:
+        all_neighbor_mask = neighbor_future_padding_mask(neighbors_future)
+        all_neighbors_future = heading_to_cos_sin(neighbors_future)
+        all_neighbors_future[all_neighbor_mask] = 0.0
+        return (
+            all_neighbors_future[:, :action_neighbor_num],
+            all_neighbor_mask[:, :action_neighbor_num],
+            (all_neighbors_future, all_neighbor_mask),
+        )
+
+    action_future = neighbors_future[:, :action_neighbor_num]
+    action_mask = neighbor_future_padding_mask(action_future)
+    action_future = heading_to_cos_sin(action_future)
+    action_future[action_mask] = 0.0
+    return action_future, action_mask, None
+
+
 def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
     epoch_loss = []
 
@@ -83,12 +114,15 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # heading to cos sin
         ego_future = heading_to_cos_sin(ego_future)
 
-        all_neighbor_mask = neighbor_future_padding_mask(neighbors_future)
-        all_neighbors_future = heading_to_cos_sin(neighbors_future)
-        all_neighbors_future[all_neighbor_mask] = 0.0
         action_neighbor_num = int(args.predicted_neighbor_num)
-        neighbors_future = all_neighbors_future[:, :action_neighbor_num]
-        mask = all_neighbor_mask[:, :action_neighbor_num]
+        neighbors_future, mask, collision_futures = prepare_neighbor_supervision(
+            neighbors_future,
+            action_neighbor_num,
+            include_collision_futures=args.coeff_neighbor_collision_loss > 0,
+        )
+        # Future GT is not an encoder input. In ego-only training this also releases the
+        # full 320-agent tensor before normalization and the model forward.
+        inputs.pop("neighbor_agents_future", None)
         inputs = args.observation_normalizer(inputs)
 
         # call the model
@@ -99,7 +133,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
             inputs,
             (ego_future, neighbors_future, mask),
             args,
-            collision_futures=(all_neighbors_future, all_neighbor_mask),
+            collision_futures=collision_futures,
         )
 
         loss["loss"] = compose_supervised_total_loss(loss, args)

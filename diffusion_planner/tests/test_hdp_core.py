@@ -29,6 +29,7 @@ from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.train import assert_checkpoint_compatible, load_weights_only
 from diffusion_planner.train_config import TrainConfig
+from diffusion_planner.train_epoch import prepare_neighbor_supervision
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.dataset import (
     DiffusionPlannerData,
@@ -208,6 +209,20 @@ def test_extra_dataset_traffic_light_mask_is_in_memory_and_extra_only(tmp_path):
     with np.load(extra_npz) as source:
         assert np.all(source["lanes"][..., TRAFFIC_LIGHT_RED] == 1.0)
         assert np.all(source["route_lanes"][..., TRAFFIC_LIGHT_GREEN] == 1.0)
+
+
+def test_ego_only_neighbor_supervision_skips_unused_full_future_conversion():
+    raw = torch.randn(2, 320, 80, 3)
+    action_future, action_mask, collision_futures = prepare_neighbor_supervision(
+        raw,
+        action_neighbor_num=0,
+        include_collision_futures=False,
+    )
+
+    assert action_future.shape == (2, 0, 80, 4)
+    assert action_mask.shape == (2, 0, 80)
+    assert collision_futures is None
+    assert action_future.data_ptr() != raw.data_ptr()
 
 
 def test_distributed_eval_sampler_has_no_duplicates_or_padding():
@@ -427,6 +442,11 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
             assert key == "ego_current_state"
             return torch.zeros(10), torch.ones(10)
 
+        @staticmethod
+        def inverse(data):
+            assert set(data) == {"line_strings"}
+            return data
+
     class FakeModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -466,8 +486,9 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
             "coeff_velocity": 0.05,
             "coeff_timestep": [1.0, 1.0, 1.0, 1.0],
             "ego_prediction_horizon": 80,
-            "coeff_road_border_loss": 0.0,
+            "coeff_road_border_loss": 1.0,
             "coeff_neighbor_collision_loss": 0.0,
+            "road_border_margin": 0.25,
             "road_border_n_interp": 2,
             "turn_indicator_generated_loss_weight": 1.0,
             "turn_indicator_expert_loss_weight": 1.0,
@@ -482,6 +503,8 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
     inputs = {
         "ego_current_state": torch.zeros(B, 10),
         "neighbor_agents_past": torch.zeros(B, 0, 1, 11),
+        "line_strings": torch.zeros(B, 1, 2, 4),
+        "ego_shape": torch.tensor([[2.8, 4.8, 1.8]]).expand(B, -1),
         "turn_indicators": torch.ones(B, 31),
     }
     loss = compute_training_loss(
