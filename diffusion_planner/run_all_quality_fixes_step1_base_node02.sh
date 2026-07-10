@@ -49,7 +49,6 @@ exec "${PYTHON}" -m torch.distributed.run \
   --save_utd 10 \
   --num_workers 8 \
   --enable_epdms_eval True \
-  --enable_pdms_eval True \
   --epdms_eval_use_agent_boxes True \
   --epdms_eval_use_road_border True \
   --ddp True \

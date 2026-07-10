@@ -5,6 +5,7 @@ import torch
 
 from diffusion_planner.utils.masks import (
     lane_point_padding_mask,
+    neighbor_future_padding_mask,
     neighbor_past_padding_mask,
     pose_padding_mask,
     static_object_padding_mask,
@@ -1466,7 +1467,7 @@ class StatePerturbation:
         inputs["neighbor_agents_past"][mask] = 0.0
 
         # neighbor future xy
-        mask = pose_padding_mask(neighbors_future)
+        mask = neighbor_future_padding_mask(neighbors_future)
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )

@@ -8,6 +8,7 @@ import torch.nn as nn
 import diffusion_planner.model.diffusion_utils.dpm_solver_pytorch as dpm
 from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
 from diffusion_planner.loss import (
+    clamp_known_prefix,
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
@@ -67,6 +68,7 @@ def compute_training_loss(
     inputs: dict[str, torch.Tensor],
     futures: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
     args: Namespace,
+    collision_futures: tuple[torch.Tensor, torch.Tensor] | None = None,
 ):
     norm = args.state_normalizer
     model_type = args.diffusion_model_type
@@ -88,6 +90,12 @@ def compute_training_loss(
 
     ego_future, neighbors_future, neighbor_future_mask = futures
     neighbors_future_valid = ~neighbor_future_mask  # [B, Pn, V]
+    if collision_futures is None:
+        collision_neighbors_future = neighbors_future
+        collision_neighbors_valid = neighbors_future_valid
+    else:
+        collision_neighbors_future, collision_neighbor_mask = collision_futures
+        collision_neighbors_valid = ~collision_neighbor_mask
 
     B, Pn, T, _ = neighbors_future.shape
     P = 1 + Pn
@@ -181,9 +189,14 @@ def compute_training_loss(
             ego_diffusion_loss = torch.sum(
                 (supervised_prediction[:, 0] - gt_target[:, 0]) ** 2, dim=-1
             )
-            ego_pred_velocity_raw = inverse_normalize_ego_velocity(pred_x_start[:, 0], norm)
-            _, ego_waypoint_loss = hybrid_loss_components(
+            ego_pred_velocity = clamp_known_prefix(
                 pred_x_start[:, 0],
+                gt_target[:, 0],
+                prefix_mask[:, 0, 1:, 0],
+            )
+            ego_pred_velocity_raw = inverse_normalize_ego_velocity(ego_pred_velocity, norm)
+            _, ego_waypoint_loss = hybrid_loss_components(
+                ego_pred_velocity,
                 gt_target[:, 0],
                 ego_pred_velocity_raw,
                 ego_future,
@@ -300,8 +313,8 @@ def compute_training_loss(
     if args.coeff_neighbor_collision_loss > 0 and model_type in vp_model_types:
         nc_loss = compute_neighbor_collision_penalty(
             ego_edge_points,
-            neighbors_future,
-            neighbors_future_valid,
+            collision_neighbors_future,
+            collision_neighbors_valid,
             denorm_inputs["neighbor_agents_past"],
             margin_vehicle=args.neighbor_collision_margin_vehicle,
             margin_pedestrian=args.neighbor_collision_margin_pedestrian,
@@ -313,23 +326,43 @@ def compute_training_loss(
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
-    turn_indicator_logit = decoder_output[
-        "turn_indicator_logit"
-    ].float()  # [B, TURN_INDICATOR_OUTPUT_KEEP]
+    turn_indicator_logit = decoder_output["turn_indicator_logit"].float()
+    turn_indicator_expert_logit = decoder_output.get(
+        "turn_indicator_expert_logit", turn_indicator_logit
+    ).float()
     turn_indicator_gt = make_turn_indicator_gt(inputs["turn_indicators"])  # [B,]
-    turn_indicator_loss = nn.functional.cross_entropy(
+    generated_turn_indicator_loss = nn.functional.cross_entropy(
         turn_indicator_logit, turn_indicator_gt, reduction="none"
+    )
+    expert_turn_indicator_loss = nn.functional.cross_entropy(
+        turn_indicator_expert_logit, turn_indicator_gt, reduction="none"
     )
     turn_indicator_change = inputs["turn_indicators"][:, -2] != inputs["turn_indicators"][:, -1]
     turn_indicator_coeff = torch.where(turn_indicator_change, 1.0, 0.05)
-    turn_indicator_loss = (turn_indicator_loss * turn_indicator_coeff).mean()
+    generated_turn_indicator_loss = (generated_turn_indicator_loss * turn_indicator_coeff).mean()
+    expert_turn_indicator_loss = (expert_turn_indicator_loss * turn_indicator_coeff).mean()
+    generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
+    expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
+    turn_indicator_loss = (
+        generated_weight * generated_turn_indicator_loss
+        + expert_weight * expert_turn_indicator_loss
+    ) / max(generated_weight + expert_weight, 1e-12)
     loss["turn_indicator_loss"] = turn_indicator_loss
+    loss["turn_indicator_generated_loss"] = generated_turn_indicator_loss.detach()
+    loss["turn_indicator_expert_loss"] = expert_turn_indicator_loss.detach()
 
     with torch.no_grad():
-        turn_indicator_accuracy = (
+        generated_accuracy = (
             (turn_indicator_logit.argmax(dim=-1) == turn_indicator_gt).float().mean()
         )
-        loss["turn_indicator_accuracy"] = turn_indicator_accuracy
+        expert_accuracy = (
+            (turn_indicator_expert_logit.argmax(dim=-1) == turn_indicator_gt).float().mean()
+        )
+        # Keep the historical key deployment-aligned: validation/inference also consumes the
+        # model-generated trajectory rather than an expert trajectory.
+        loss["turn_indicator_accuracy"] = generated_accuracy
+        loss["turn_indicator_generated_accuracy"] = generated_accuracy
+        loss["turn_indicator_expert_accuracy"] = expert_accuracy
 
     return loss
 
@@ -458,6 +491,29 @@ class Decoder(nn.Module):
             return torch.cat([ego_prediction, neighbor_prediction], dim=1)
         return self._state_normalizer.inverse(latent)[:, :, 1:]
 
+    def _training_x_start_latent(self, model_output, sampled_trajectories, inputs):
+        """Build a detached inference-like trajectory for turn-head supervision."""
+        if self._model_type == "x_start":
+            generated = model_output
+        elif self._model_type in {"noise", "score", "v"}:
+            t_future = inputs["diffusion_time"][..., 1:, :]
+            generated_future = self._sde.transform(
+                f"{self._model_type}->x_start",
+                model_output[:, :, 1:, :],
+                t_future,
+                sampled_trajectories[:, :, 1:, :],
+            )
+            generated = torch.cat([sampled_trajectories[:, :, :1, :], generated_future], dim=2)
+        else:
+            # Flow-matching training predicts a vector field rather than a denoised trajectory.
+            # Keep its existing expert-head behavior instead of pretending the field is x-start.
+            return None
+
+        prefix_mask = inputs.get("prefix_mask")
+        if prefix_mask is not None:
+            generated = torch.where(prefix_mask, inputs["gt_trajectories"], generated)
+        return generated.detach()
+
     def _forward_training(self, encoding, inputs, neighbor_current_mask, encoding_pooled):
         """Forward pass for training mode.
 
@@ -478,25 +534,39 @@ class Decoder(nn.Module):
         )
         diffusion_time = inputs["diffusion_time"]
 
+        model_output = self.dit(
+            sampled_trajectories,
+            diffusion_time,
+            encoding,
+            neighbor_current_mask,
+        ).reshape(B, P, -1, 4)
+        output = {"model_output": model_output}
+        if inputs.get("_skip_turn_indicator_training", False):
+            return output
+
         gt_trajectories = inputs["gt_trajectories"].reshape(B, P, (1 + self._future_len), 4)
-        turn_indicator_trajectories = inputs.get("turn_indicator_trajectories", gt_trajectories)
-        turn_indicator_trajectories = turn_indicator_trajectories.reshape(
+        expert_trajectories = inputs.get("turn_indicator_trajectories", gt_trajectories).reshape(
             B, P, (1 + self._future_len), 4
         )
-        ego_trajectory = turn_indicator_trajectories[:, 0, 1::10, :2].reshape(
+        expert_ego_trajectory = expert_trajectories[:, 0, 1::10, :2].reshape(
             B, 2 * (self._future_len // 10)
         )
-        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
+        expert_logit = self._compute_turn_indicator(expert_ego_trajectory, encoding_pooled)
 
-        return {
-            "model_output": self.dit(
-                sampled_trajectories,
-                diffusion_time,
-                encoding,
-                neighbor_current_mask,
-            ).reshape(B, P, -1, 4),
-            "turn_indicator_logit": turn_indicator_logit,
-        }
+        generated_latent = self._training_x_start_latent(model_output, sampled_trajectories, inputs)
+        if generated_latent is None:
+            generated_logit = expert_logit
+        else:
+            generated_ego_trajectory = self._turn_indicator_trajectory_from_latent(
+                generated_latent
+            )
+            generated_logit = self._compute_turn_indicator(
+                generated_ego_trajectory, encoding_pooled
+            )
+
+        output["turn_indicator_logit"] = generated_logit
+        output["turn_indicator_expert_logit"] = expert_logit
+        return output
 
     def _inference_flow_matching(
         self,

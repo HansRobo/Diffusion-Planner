@@ -3,6 +3,7 @@ import torch
 
 from diffusion_planner.utils.masks import (
     lane_point_padding_mask,
+    neighbor_future_padding_mask,
     neighbor_past_padding_mask,
     pose_padding_mask,
     static_object_padding_mask,
@@ -140,11 +141,12 @@ class StatePerturbation:
 
     def __init__(
         self,
-        augment_prob: float,
-        num_refine: int,
-        device: torch.device | str,
-        ego_past_noise_std: float,
-        use_smoothing_future_trajectory: bool,
+        augment_prob: float = 0.5,
+        num_refine: int = 20,
+        device: torch.device | str = "cpu",
+        ego_past_noise_std: float = 0.1,
+        use_smoothing_future_trajectory: bool = True,
+        wheel_base: float = 2.75,
     ) -> None:
         """
         Initialize the augmentor,
@@ -158,6 +160,9 @@ class StatePerturbation:
         self._device = torch.device(device)
         self._ego_past_noise_std = ego_past_noise_std
         self._use_smoothing_future_trajectory = use_smoothing_future_trajectory
+        # Production samples carry per-vehicle wheelbase in ego_shape. Keep the historical
+        # constructor value as a fallback for lightweight callers and unit tests.
+        self._wheel_base = wheel_base
         lo = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
         hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
         self._low = torch.tensor(lo).to(self._device)
@@ -221,9 +226,11 @@ class StatePerturbation:
     def augment(self, inputs):
         # Only aug current state
         ego_current_state = inputs["ego_current_state"].clone()
-        wheel_base = inputs["ego_shape"][:, 0]  # (B,)
-
         B = ego_current_state.shape[0]
+        if "ego_shape" in inputs:
+            wheel_base = inputs["ego_shape"][:, 0]  # (B,)
+        else:
+            wheel_base = ego_current_state.new_full((B,), self._wheel_base)
         aug_flag = (torch.rand(B) < self._augment_prob).bool().to(self._device) & ~(
             abs(ego_current_state[:, 4]) < 2.0
         )
@@ -413,17 +420,34 @@ class StatePerturbation:
 
         # ego past
         ego_past_mask = pose_padding_mask(inputs["ego_agent_past"])
+        ego_past_is_heading = inputs["ego_agent_past"].shape[-1] == 3
         inputs["ego_agent_past"][..., :2] = vector_transform(
             inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
         )
-        inputs["ego_agent_past"][..., 2:4] = vector_transform(
-            inputs["ego_agent_past"][..., 2:4], transform_matrix
-        )
+        if ego_past_is_heading:
+            inputs["ego_agent_past"][..., 2] = heading_transform(
+                inputs["ego_agent_past"][..., 2], transform_matrix
+            )
+        else:
+            inputs["ego_agent_past"][..., 2:4] = vector_transform(
+                inputs["ego_agent_past"][..., 2:4], transform_matrix
+            )
         inputs["ego_agent_past"][ego_past_mask] = 0.0
 
         if self._use_smoothing_future_trajectory:
+            smoothing_ego_past = inputs["ego_agent_past"]
+            if ego_past_is_heading:
+                smoothing_ego_past = torch.cat(
+                    [
+                        smoothing_ego_past[..., :2],
+                        torch.cos(smoothing_ego_past[..., 2:3]),
+                        torch.sin(smoothing_ego_past[..., 2:3]),
+                    ],
+                    dim=-1,
+                )
+                smoothing_ego_past[ego_past_mask] = 0.0
             ego_future4d = smoothing_future_trajectory(
-                inputs["ego_agent_past"], inputs["ego_current_state"], ego_future4d
+                smoothing_ego_past, inputs["ego_current_state"], ego_future4d
             )
 
         if ego_future_is_heading:
@@ -454,7 +478,7 @@ class StatePerturbation:
         inputs["neighbor_agents_past"][mask] = 0.0
 
         # neighbor future
-        mask = pose_padding_mask(neighbors_future)
+        mask = neighbor_future_padding_mask(neighbors_future)
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )

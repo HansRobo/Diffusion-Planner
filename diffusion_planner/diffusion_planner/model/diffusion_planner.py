@@ -15,7 +15,11 @@ class Diffusion_Planner(nn.Module):
         return self.decoder.sde
 
     def forward(self, inputs):
-        encoder_outputs = self.encoder(inputs)
+        # RL group sampling and multi-sample validation share scene observations across
+        # candidates. Reusing a detached encoding avoids repeating the expensive scene encoder.
+        encoder_outputs = inputs.get("_cached_encoding")
+        if encoder_outputs is None:
+            encoder_outputs = self.encoder(inputs)
         decoder_outputs = self.decoder(encoder_outputs, inputs)
 
         return encoder_outputs, decoder_outputs

@@ -285,10 +285,10 @@ class FullONNXWrapper(nn.Module):
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
 
 
-def build_dummy_inputs() -> TensorDict:
+def build_dummy_inputs(action_agent_num: int = MAX_NUM_AGENTS) -> TensorDict:
     inputs = {}
     inputs["sampled_trajectories"] = torch.ones(
-        1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
+        1, action_agent_num, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
     )
     inputs["ego_agent_past"] = torch.randn(1, INPUT_T + 1, POSE_DIM, dtype=torch.float32)
     inputs["ego_current_state"] = torch.randn(1, 10, dtype=torch.float32)
@@ -324,10 +324,11 @@ def build_dummy_inputs() -> TensorDict:
 
 
 def build_decoder_inputs(inputs: TensorDict, encoding: torch.Tensor) -> TensorDict:
+    action_agent_num = inputs["sampled_trajectories"].shape[1]
     return {
         "encoding": encoding,
         "sampled_trajectories": inputs["sampled_trajectories"],
-        "diffusion_time": torch.ones(1, MAX_NUM_AGENTS, OUTPUT_T + 1, 1, dtype=torch.float32),
+        "diffusion_time": torch.ones(1, action_agent_num, OUTPUT_T + 1, 1, dtype=torch.float32),
         "neighbor_agents_past": inputs["neighbor_agents_past"],
     }
 
@@ -371,7 +372,7 @@ def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusio
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
     if use_ema:
-        if "ema_state_dict" not in ckpt:
+        if "ema_state_dict" not in ckpt or ckpt["ema_state_dict"] is None:
             raise ValueError(f"EMA state dict not found in checkpoint: {ckpt_path}")
         state_dict = ckpt["ema_state_dict"]
         print("Loading EMA model weights")
@@ -454,11 +455,7 @@ def build_export_specs(
 def build_dynamic_axes(
     input_names: list[str], output_names: list[str]
 ) -> dict[str, dict[int, str]]:
-    dynamic_axes = {
-        name: {0: "batch"}
-        for name in input_names
-        if name != "delay"
-    }
+    dynamic_axes = {name: {0: "batch"} for name in input_names}
     dynamic_axes.update({name: {0: "batch"} for name in output_names})
     return dynamic_axes
 
@@ -549,7 +546,7 @@ def export_model_to_onnx(
     export via :func:`onnx_export_backends` and restored afterwards.
     """
     wrappers = build_wrappers(model)
-    export_inputs = build_dummy_inputs()
+    export_inputs = build_dummy_inputs(1 + model.decoder._predicted_neighbor_num)
 
     with onnx_export_backends():
         with torch.no_grad():

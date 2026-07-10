@@ -6,7 +6,7 @@ from tqdm import tqdm
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.masks import pose_padding_mask
+from diffusion_planner.utils.masks import neighbor_future_padding_mask
 from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
 
 
@@ -83,15 +83,24 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # heading to cos sin
         ego_future = heading_to_cos_sin(ego_future)
 
-        mask = pose_padding_mask(neighbors_future)
-        neighbors_future = heading_to_cos_sin(neighbors_future)
-        neighbors_future[mask] = 0.0
+        all_neighbor_mask = neighbor_future_padding_mask(neighbors_future)
+        all_neighbors_future = heading_to_cos_sin(neighbors_future)
+        all_neighbors_future[all_neighbor_mask] = 0.0
+        action_neighbor_num = int(args.predicted_neighbor_num)
+        neighbors_future = all_neighbors_future[:, :action_neighbor_num]
+        mask = all_neighbor_mask[:, :action_neighbor_num]
         inputs = args.observation_normalizer(inputs)
 
         # call the model
         optimizer.zero_grad()
 
-        loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
+        loss = compute_training_loss(
+            model,
+            inputs,
+            (ego_future, neighbors_future, mask),
+            args,
+            collision_futures=(all_neighbors_future, all_neighbor_mask),
+        )
 
         loss["loss"] = compose_supervised_total_loss(loss, args)
 

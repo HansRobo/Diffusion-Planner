@@ -136,6 +136,17 @@ def hybrid_loss_components(
     return l_v, l_wpt
 
 
+def clamp_known_prefix(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    prefix_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Use known delay-prefix targets so integrated training matches constrained inference."""
+    if prefix_mask.ndim == prediction.ndim - 1:
+        prefix_mask = prefix_mask.unsqueeze(-1)
+    return torch.where(prefix_mask, target, prediction)
+
+
 def make_turn_indicator_gt(
     turn_indicators: torch.Tensor,  # # [B, INPUT_T + 1]
 ) -> torch.Tensor:

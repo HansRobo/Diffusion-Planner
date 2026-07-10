@@ -27,6 +27,9 @@ class TrainConfig:
     train_set_list: str
     valid_set_list: str
     train_subsample_step: int
+    extra_train_set_list: Optional[str | list[str]] = None
+    extra_train_set_repeat: int = 0
+    extra_train_set_mask_traffic_lights: bool = False
 
     # ---------------------------------------------------------
     # Data Dimensions
@@ -65,6 +68,9 @@ class TrainConfig:
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True
+    # The 2026-06 Tier IV corpus predates converter commit 55eff4f and duplicates t=0 in
+    # short neighbor futures. Keep this on for that corpus; disable it for regenerated data.
+    align_legacy_neighbor_futures: bool = True
 
     # ---------------------------------------------------------
     # Training Parameters
@@ -80,6 +86,11 @@ class TrainConfig:
     use_ego_history: bool = True
     ego_history_dropout_rate: float = 0.6
     use_turn_indicators: bool = True
+    # The turn head sees generated trajectories at inference. Train it on both the detached
+    # model x-start trajectory and the expert trajectory; the normalized combination keeps the
+    # historical loss scale while removing pure teacher-forcing exposure bias.
+    turn_indicator_generated_loss_weight: float = 1.0
+    turn_indicator_expert_loss_weight: float = 1.0
 
     # Loss Coefficients
     coeff_position_lat_loss: float = 1.0
@@ -106,10 +117,14 @@ class TrainConfig:
     # these defaults when constructing argparse, so this remains the single
     # default source while keeping existing behavior unchanged unless explicitly enabled.
     enable_epdms_eval: bool = False
-    # Backward-compatible alias for local scripts that used PDMS naming.
-    enable_pdms_eval: bool = False
     epdms_eval_use_agent_boxes: bool = True
     epdms_eval_use_road_border: bool = True
+    # HDP open-loop protocol: six stochastic trajectories, minADE/minFDE, six DPM steps.
+    # Set num_samples=0 for a fast deterministic-only validation pass.
+    multisample_eval_num_samples: int = 6
+    multisample_eval_noise_scale: float = 0.1
+    multisample_eval_sample_steps: int = 6
+    multisample_eval_seed: int = 3407
 
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1
@@ -124,14 +139,32 @@ class TrainConfig:
 
     # HDP RL objective. The branch intentionally keeps only the official-style
     # reward-weighted RL-Hybrid path.
-    official_reward_normalize: Literal["group", "batch", "none"] = "group"
-    official_reward_beta: float = 1.0
-    # Official HDP multi-reward uses risk/follow/lane weights of 1.0/3.0/2.5.
-    # On Tier IV NPZs these are computed from available EPDMS-style subscores.
+    rl_reward_normalize: Literal["group", "batch", "none"] = "group"
+    rl_reward_beta: float = 1.0
     rl_noise_scale: float = 0.5
+    # Paper real-vehicle inference uses six DPM-Solver steps. Keeping the RL rollout count
+    # independent from general validation/export avoids paying for a stale SFT setting.
+    rl_rollout_steps: int = 6
+    rl_init_use_ema: bool = True
     rl_reward_w_risk: float = 1.0
     rl_reward_w_follow: float = 3.0
     rl_reward_w_lane: float = 2.5
+    # Paper table reports EMA=0.05. timm uses the complementary decay coefficient,
+    # so update_rate=0.05 maps to ModelEma(decay=0.95).
+    rl_ema_update_rate: float = 0.05
+    # The paper does not publish the numerical speed-adaptive shaping functions.
+    # These checkpointed values are tunable local defaults.
+    rl_reward_dt: float = 0.1
+    rl_ttc_critical_s: float = 0.5
+    rl_ttc_safe_s: float = 3.0
+    rl_thw_critical_s: float = 0.5
+    rl_thw_safe_s: float = 2.0
+    rl_occupancy_critical_m: float = 0.25
+    rl_occupancy_safe_m: float = 2.0
+    rl_occupancy_speed_gain_s: float = 0.10
+    rl_lane_half_width_m: float = 1.75
+    rl_leader_lateral_margin_m: float = 0.75
+    rl_full_eval_utd: int = 5
 
     # ---------------------------------------------------------
     # Throughput knobs. Defaults ON after live verification on 2026-07-07
@@ -142,6 +175,7 @@ class TrainConfig:
     amp_dtype: Literal["off", "bf16"] = "bf16"
     fused_optimizer: bool = True
     ddp_static_graph: bool = True
+    export_onnx_on_save: bool = False
 
     guidance_scale: float = 0.5
     device: str = "cuda"
@@ -157,7 +191,7 @@ class TrainConfig:
     num_heads: int = 8
     hidden_dim: int = 256
     diffusion_model_type: Literal["x_start", "noise", "score", "v", "flow_matching"] = "x_start"
-    predicted_neighbor_num: int = MAX_NUM_NEIGHBORS
+    predicted_neighbor_num: int = 0
     resume_model_path: Optional[str] = None
     init_weights_path: Optional[str] = None
 

@@ -1,8 +1,21 @@
 import json
+import os
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
+
+
+def atomic_torch_save(obj, path) -> None:
+    """Write a checkpoint atomically so an interrupted save cannot corrupt the target."""
+    target = Path(path)
+    temporary = target.with_name(f".{target.name}.tmp.{os.getpid()}")
+    try:
+        torch.save(obj, temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def openjson(path):
@@ -71,58 +84,87 @@ def get_epoch_mean_loss(epoch_loss):
     return epoch_mean_loss
 
 
-def resume_model(path: str, model, optimizer, scheduler, ema, device):
-    """
-    load ckpt from path
-    """
+def resume_model(
+    path: str,
+    model,
+    optimizer,
+    scheduler,
+    ema,
+    device,
+    *,
+    strict_training_state: bool = False,
+):
+    """Restore a checkpoint, optionally requiring every training-state component."""
     ckpt = torch.load(path, map_location=device)
 
-    # load model
+    if strict_training_state and (not isinstance(ckpt, dict) or "model" not in ckpt):
+        raise RuntimeError(f"Strict resume checkpoint has no model state: {path}")
     try:
         model.load_state_dict(ckpt["model"])
-    except:
+    except (KeyError, TypeError):
         model.load_state_dict(ckpt)
     print("Model load done")
 
-    # load optimizer
-    try:
-        optimizer.load_state_dict(ckpt["optimizer"])
-        print("Optimizer load done")
-    except:
+    optimizer_state = ckpt.get("optimizer") if isinstance(ckpt, dict) else None
+    if optimizer_state is None:
+        if strict_training_state:
+            raise RuntimeError(f"Strict resume checkpoint has no optimizer state: {path}")
         print("no pretrained optimizer found")
+    else:
+        try:
+            optimizer.load_state_dict(optimizer_state)
+            print("Optimizer load done")
+        except Exception as exc:
+            if strict_training_state:
+                raise RuntimeError(f"Failed to restore optimizer state from {path}") from exc
+            print(f"no compatible pretrained optimizer found: {exc}")
 
-    # load schedule
-    try:
-        scheduler.load_state_dict(ckpt["schedule"])
-        print("Schedule load done")
-    except:
-        print("no schedule found,")
+    if scheduler is not None:
+        schedule_state = ckpt.get("schedule") if isinstance(ckpt, dict) else None
+        if schedule_state is None:
+            if strict_training_state:
+                raise RuntimeError(f"Strict resume checkpoint has no scheduler state: {path}")
+            print("no schedule found")
+        else:
+            try:
+                scheduler.load_state_dict(schedule_state)
+                print("Schedule load done")
+            except Exception as exc:
+                if strict_training_state:
+                    raise RuntimeError(f"Failed to restore scheduler state from {path}") from exc
+                print(f"no compatible schedule found: {exc}")
 
-    # load step
-    try:
-        init_epoch = ckpt["epoch"]
+    if isinstance(ckpt, dict) and "epoch" in ckpt:
+        init_epoch = int(ckpt["epoch"])
         print("Step load done")
-    except:
+    elif strict_training_state:
+        raise RuntimeError(f"Strict resume checkpoint has no epoch: {path}")
+    else:
         init_epoch = 0
+    if isinstance(ckpt, dict) and "global_step" in ckpt:
+        model._resume_global_step = int(ckpt["global_step"])
 
-    # Load wandb id
-    try:
-        wandb_id = ckpt["wandb_id"]
+    wandb_id = ckpt.get("wandb_id") if isinstance(ckpt, dict) else None
+    if wandb_id is not None:
         print("wandb id load done")
-    except:
-        wandb_id = None
 
     if ema is not None:
-        try:
-            ema_state = ckpt.get("ema_state_dict") if isinstance(ckpt, dict) else None
-            if ema_state is None:
-                raise KeyError("ema_state_dict")
+        ema_state = ckpt.get("ema_state_dict") if isinstance(ckpt, dict) else None
+        if ema_state is not None:
             ema.ema.load_state_dict(ema_state)
             ema.ema.eval()
-            for p in ema.ema.parameters():
-                p.requires_grad_(False)
+            for parameter in ema.ema.parameters():
+                parameter.requires_grad_(False)
+            ema.loaded_from_checkpoint = True
             print("ema load done")
-        except Exception:
-            print("no ema shadow found")
+        elif strict_training_state:
+            raise RuntimeError(f"Strict resume checkpoint has no EMA state: {path}")
+        else:
+            ema.ema.load_state_dict(model.state_dict())
+            ema.ema.eval()
+            for parameter in ema.ema.parameters():
+                parameter.requires_grad_(False)
+            ema.loaded_from_checkpoint = False
+            print("no ema shadow found; initialized EMA from loaded model")
 
     return model, optimizer, scheduler, init_epoch, wandb_id, ema

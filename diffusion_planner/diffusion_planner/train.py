@@ -1,8 +1,10 @@
 import csv
 import json
+import math
 import os
 from pathlib import Path
 
+import numpy as np
 import torch
 import wandb
 from timm.utils import ModelEma
@@ -19,18 +21,26 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
-from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.dataset import DiffusionPlannerData, DistributedEvalSampler
 from diffusion_planner.utils.hdp_compat import require_velocity_normalizer
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
-from diffusion_planner.utils.train_utils import resume_model, set_seed
+from diffusion_planner.utils.train_utils import atomic_torch_save, resume_model, set_seed
 from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
 
 
-def load_weights_only(path: str, model, device):
+def load_weights_only(path: str, model, device, *, prefer_ema: bool = False):
     ckpt = torch.load(path, map_location="cpu")
-    state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+    using_ema = bool(
+        prefer_ema and isinstance(ckpt, dict) and ckpt.get("ema_state_dict") is not None
+    )
+    if using_ema:
+        state = ckpt["ema_state_dict"]
+    else:
+        state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+        if prefer_ema:
+            print(f"WARNING: {path} has no EMA weights; falling back to live model weights")
 
     model_keys = list(model.state_dict().keys())
     state_keys = list(state.keys())
@@ -53,7 +63,7 @@ def load_weights_only(path: str, model, device):
         if not key.startswith(allowed_unexpected_prefixes)
     ]
 
-    print(f"Weights-only init loaded from {path}")
+    print(f"Weights-only init loaded from {path} ({'EMA' if using_ema else 'live'} weights)")
     print(
         f"missing_keys={len(incompatible.missing_keys)} "
         f"unexpected_keys={len(incompatible.unexpected_keys)}"
@@ -83,11 +93,80 @@ def _checkpoint_args_path(path: str) -> Path | None:
     return None
 
 
+def _assert_numeric_config_equal(label: str, checkpoint_value, current_value) -> None:
+    checkpoint_array = np.asarray(checkpoint_value)
+    current_array = np.asarray(current_value)
+    if checkpoint_array.shape != current_array.shape or not np.allclose(
+        checkpoint_array,
+        current_array,
+        rtol=0.0,
+        atol=1e-7,
+        equal_nan=True,
+    ):
+        raise RuntimeError(
+            f"Checkpoint {label} mismatch: checkpoint shape/value "
+            f"{checkpoint_array.shape}, current {current_array.shape}."
+        )
+
+
+def _assert_normalizers_compatible(
+    ckpt_args: dict,
+    args,
+    *,
+    allow_predicted_neighbor_change: bool,
+    waypoint_to_velocity_init: bool,
+) -> None:
+    checkpoint_state = ckpt_args.get("state_normalizer")
+    checkpoint_observation = ckpt_args.get("observation_normalizer")
+    if checkpoint_state is None or checkpoint_observation is None:
+        raise RuntimeError("Checkpoint args.json is missing saved normalization statistics")
+
+    current_state = args.state_normalizer.to_dict()
+    current_observation = args.observation_normalizer.to_dict()
+    for statistic in ("mean", "std"):
+        _assert_numeric_config_equal(
+            f"state_normalizer.{statistic}.ego",
+            checkpoint_state[statistic][0],
+            current_state[statistic][0],
+        )
+        if not allow_predicted_neighbor_change:
+            _assert_numeric_config_equal(
+                f"state_normalizer.{statistic}",
+                checkpoint_state[statistic],
+                current_state[statistic],
+            )
+
+    if bool(getattr(args, "use_velocity_representation", False)) and not waypoint_to_velocity_init:
+        for statistic in ("ego_velocity_mean", "ego_velocity_std"):
+            if statistic not in checkpoint_state or statistic not in current_state:
+                raise RuntimeError(f"Checkpoint is missing state_normalizer.{statistic}")
+            _assert_numeric_config_equal(
+                f"state_normalizer.{statistic}",
+                checkpoint_state[statistic],
+                current_state[statistic],
+            )
+
+    if checkpoint_observation.keys() != current_observation.keys():
+        raise RuntimeError(
+            "Checkpoint observation_normalizer keys mismatch: "
+            f"checkpoint={sorted(checkpoint_observation)}, current={sorted(current_observation)}"
+        )
+    for key in checkpoint_observation:
+        for statistic in ("mean", "std"):
+            _assert_numeric_config_equal(
+                f"observation_normalizer.{key}.{statistic}",
+                checkpoint_observation[key][statistic],
+                current_observation[key][statistic],
+            )
+
+
 def assert_checkpoint_compatible(
     path: str,
     args,
     *,
     allow_waypoint_to_velocity_init: bool = False,
+    allow_predicted_neighbor_change: bool = False,
+    strict_training_config: bool = True,
 ) -> None:
     args_path = _checkpoint_args_path(path)
     if args_path is None:
@@ -111,8 +190,10 @@ def assert_checkpoint_compatible(
 
     ckpt_velocity = bool(ckpt_args.get("use_velocity_representation", False))
     current_velocity = bool(getattr(args, "use_velocity_representation", False))
+    waypoint_to_velocity_init = False
     if ckpt_velocity != current_velocity:
         if allow_waypoint_to_velocity_init and not ckpt_velocity and current_velocity:
+            waypoint_to_velocity_init = True
             print(
                 "WARNING: loading waypoint checkpoint as HDP velocity init weights. "
                 f"checkpoint_args={args_path}. This is allowed only for weights-only bootstrap; "
@@ -136,6 +217,141 @@ def assert_checkpoint_compatible(
             f"{args_path} has {ckpt_model_type!r}, current run has {current_model_type!r}."
         )
 
+    architecture_fields = (
+        "future_len",
+        "time_len",
+        "agent_state_dim",
+        "agent_num",
+        "static_objects_state_dim",
+        "static_objects_num",
+        "lane_num",
+        "lane_len",
+        "route_num",
+        "route_len",
+        "polygon_num",
+        "polygon_len",
+        "line_string_num",
+        "line_string_len",
+        "use_ego_history",
+        "use_turn_indicators",
+        "encoder_mixer_depth",
+        "encoder_fusion_depth",
+        "decoder_depth",
+        "num_heads",
+        "hidden_dim",
+    )
+    missing_fields = [field for field in architecture_fields if field not in ckpt_args]
+    if missing_fields:
+        raise RuntimeError(f"Checkpoint args.json is missing architecture fields: {missing_fields}")
+    mismatches = [
+        (field, ckpt_args[field], getattr(args, field))
+        for field in architecture_fields
+        if ckpt_args[field] != getattr(args, field)
+    ]
+    if mismatches:
+        raise RuntimeError(f"Checkpoint architecture mismatch: {mismatches}")
+
+    if strict_training_config:
+        training_fields = (
+            "train_set_list",
+            "valid_set_list",
+            "train_subsample_step",
+            "extra_train_set_list",
+            "extra_train_set_repeat",
+            "extra_train_set_mask_traffic_lights",
+            "align_legacy_neighbor_futures",
+            "use_data_augment",
+            "augment_prob",
+            "augment_type",
+            "num_refine",
+            "ego_past_noise_std",
+            "use_smoothing_future_trajectory",
+            "seed",
+            "train_epochs",
+            "batch_size",
+            "learning_rate",
+            "warm_up_epoch",
+            "ego_prediction_horizon",
+            "alpha_planning_loss",
+            "alpha_neighbor_loss",
+            "planning_hybrid_loss",
+            "hybrid_loss_window",
+            "diffusion_supervision_type",
+            "diffusion_time_sample_method",
+            "coeff_position_lat_loss",
+            "coeff_position_lon_loss",
+            "coeff_heading_l2_loss",
+            "coeff_velocity",
+            "coeff_timestep",
+            "coeff_road_border_loss",
+            "road_border_margin",
+            "road_border_n_interp",
+            "coeff_neighbor_collision_loss",
+            "neighbor_collision_margin_vehicle",
+            "neighbor_collision_margin_pedestrian",
+            "neighbor_collision_margin_bicycle",
+            "turn_indicator_generated_loss_weight",
+            "turn_indicator_expert_loss_weight",
+            "use_ema",
+            "amp_dtype",
+            "tf32",
+            "num_generations",
+            "rl_train_scope",
+            "rl_reward_normalize",
+            "rl_reward_beta",
+            "rl_noise_scale",
+            "rl_rollout_steps",
+            "rl_reward_w_risk",
+            "rl_reward_w_follow",
+            "rl_reward_w_lane",
+            "rl_ema_update_rate",
+            "rl_reward_dt",
+            "rl_ttc_critical_s",
+            "rl_ttc_safe_s",
+            "rl_thw_critical_s",
+            "rl_thw_safe_s",
+            "rl_occupancy_critical_m",
+            "rl_occupancy_safe_m",
+            "rl_occupancy_speed_gain_s",
+            "rl_lane_half_width_m",
+            "rl_leader_lateral_margin_m",
+        )
+        missing_training_fields = [
+            field
+            for field in training_fields
+            if hasattr(args, field) and field not in ckpt_args
+        ]
+        if missing_training_fields:
+            raise RuntimeError(
+                "Checkpoint args.json is missing strict training fields: "
+                f"{missing_training_fields}"
+            )
+        training_mismatches = [
+            (field, ckpt_args[field], getattr(args, field))
+            for field in training_fields
+            if hasattr(args, field)
+            and field in ckpt_args
+            and ckpt_args[field] != getattr(args, field)
+        ]
+        if training_mismatches:
+            raise RuntimeError(f"Checkpoint training configuration mismatch: {training_mismatches}")
+
+    checkpoint_neighbors = int(ckpt_args.get("predicted_neighbor_num", MAX_NUM_NEIGHBORS))
+    current_neighbors = int(getattr(args, "predicted_neighbor_num"))
+    if checkpoint_neighbors != current_neighbors and not allow_predicted_neighbor_change:
+        raise RuntimeError(
+            "Checkpoint action shape mismatch: "
+            f"predicted_neighbor_num={checkpoint_neighbors}, current={current_neighbors}. "
+            "Only weights-only initialization may change the ego/joint action shape."
+        )
+
+    _assert_normalizers_compatible(
+        ckpt_args,
+        args,
+        allow_predicted_neighbor_change=allow_predicted_neighbor_change,
+        waypoint_to_velocity_init=waypoint_to_velocity_init,
+    )
+
 
 def find_upward(start_file: str, target_name: str) -> Path:
     directory = Path(start_file).resolve().parent
@@ -147,17 +363,36 @@ def find_upward(start_file: str, target_name: str) -> Path:
 
 
 def log_dataset_artifact(
-    run: wandb.sdk.wandb_run.Run, exp_name: str, train_set_list: str, valid_set_list: str
+    run: wandb.sdk.wandb_run.Run,
+    exp_name: str,
+    train_set_list: str,
+    valid_set_list: str,
+    extra_train_set_list: str | list[str] | None = None,
+    extra_train_set_repeat: int = 0,
 ) -> None:
     artifact = wandb.Artifact(
         name=f"dataset_{exp_name}",
         type="dataset",
-        metadata={"train_set_list": train_set_list, "valid_set_list": valid_set_list},
+        metadata={
+            "train_set_list": train_set_list,
+            "valid_set_list": valid_set_list,
+            "extra_train_set_list": extra_train_set_list,
+            "extra_train_set_repeat": extra_train_set_repeat,
+        },
     )
     train_path = Path(train_set_list)
     valid_path = Path(valid_set_list)
     artifact.add_file(str(train_path), name=train_path.name)
     artifact.add_file(str(valid_path), name=valid_path.name)
+    if extra_train_set_list:
+        extra_lists = (
+            [extra_train_set_list]
+            if isinstance(extra_train_set_list, str)
+            else extra_train_set_list
+        )
+        for index, list_path in enumerate(extra_lists):
+            extra_path = Path(list_path)
+            artifact.add_file(str(extra_path), name=f"extra_{index}_{extra_path.name}")
     try:
         summary_csv = find_upward(train_set_list, "summary.csv")
         artifact.add_file(str(summary_csv), name="summary.csv")
@@ -259,9 +494,10 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
         for k in scalar_keys
         if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
     }
-    for mp4 in summary["video_mp4s"]:
-        log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
-    wandb.log(log)
+    if getattr(args, "use_wandb", False):
+        for mp4 in summary["video_mp4s"]:
+            log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
+        wandb.log(log)
     print(
         f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
         f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
@@ -278,6 +514,25 @@ def model_training(args: TrainConfig):
     # init ddp
     global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
+    world_size = ddp.get_world_size()
+    if args.batch_size < world_size or args.batch_size % world_size != 0:
+        raise ValueError(
+            f"batch_size ({args.batch_size}) must be a positive multiple of "
+            f"DDP world size ({world_size})"
+        )
+
+    # Check before writing the new run's args.json. On an in-place resume, writing first would
+    # overwrite the only sidecar that describes the checkpoint we are about to validate.
+    if args.resume_model_path is not None:
+        assert_checkpoint_compatible(args.resume_model_path, args)
+    if args.resume_model_path is None and args.init_weights_path is not None:
+        assert_checkpoint_compatible(
+            args.init_weights_path,
+            args,
+            allow_waypoint_to_velocity_init=True,
+            allow_predicted_neighbor_change=True,
+            strict_training_config=False,
+        )
 
     if args.tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -309,15 +564,6 @@ def model_training(args: TrainConfig):
     else:
         save_path = None
 
-    if args.resume_model_path is not None:
-        assert_checkpoint_compatible(args.resume_model_path, args)
-    if args.resume_model_path is None and args.init_weights_path is not None:
-        assert_checkpoint_compatible(
-            args.init_weights_path,
-            args,
-            allow_waypoint_to_velocity_init=True,
-        )
-
     # set seed
     set_seed(args.seed + global_rank)
 
@@ -342,34 +588,53 @@ def model_training(args: TrainConfig):
         aug = None
 
     # prepare dataset
-    train_set = DiffusionPlannerData(args.train_set_list)
-    valid_set = DiffusionPlannerData(args.valid_set_list)
+    align_legacy_futures = bool(getattr(args, "align_legacy_neighbor_futures", True))
+    train_set = DiffusionPlannerData(
+        args.train_set_list,
+        align_legacy_neighbor_futures=align_legacy_futures,
+        extra_data_list=getattr(args, "extra_train_set_list", None),
+        extra_data_repeat=getattr(args, "extra_train_set_repeat", 0),
+        extra_data_mask_traffic_lights=getattr(
+            args, "extra_train_set_mask_traffic_lights", False
+        ),
+    )
+    valid_set = DiffusionPlannerData(
+        args.valid_set_list, align_legacy_neighbor_futures=align_legacy_futures
+    )
 
     train_set.data_list = train_set.data_list[:: args.train_subsample_step]
+    if len(train_set) == 0:
+        raise ValueError("Training data list is empty after subsampling")
+    if len(valid_set) == 0:
+        raise ValueError("Validation data list is empty")
+    if len(valid_set) < world_size:
+        raise ValueError("Validation set must contain at least one sample per DDP rank")
 
     train_sampler = DistributedSampler(
-        train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
+        train_set, num_replicas=world_size, rank=global_rank, shuffle=True
     )
     train_loader = DataLoader(
         train_set,
         sampler=train_sampler,
-        batch_size=batch_size // ddp.get_world_size(),
+        batch_size=batch_size // world_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
         persistent_workers=args.num_workers > 0,
         prefetch_factor=4 if args.num_workers > 0 else None,
     )
+    if len(train_loader) == 0:
+        raise ValueError(
+            "Training loader has zero batches; the dataset must contain at least one global batch"
+        )
 
-    # Validation is sharded across all ranks (DistributedSampler); each rank computes
+    # Validation is sharded without duplicate padding; each rank computes
     # metrics on its shard and they are all-reduced via aggregate_valid_metrics.
-    valid_sampler = DistributedSampler(
-        valid_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=False
-    )
+    valid_sampler = DistributedEvalSampler(valid_set, num_replicas=world_size, rank=global_rank)
     valid_loader = DataLoader(
         valid_set,
         sampler=valid_sampler,
-        batch_size=batch_size // ddp.get_world_size(),
+        batch_size=batch_size // world_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False,
@@ -431,20 +696,27 @@ def model_training(args: TrainConfig):
         print(f"Model loaded from {args.resume_model_path}")
         # We always use new wandb run for each training session, so we don't need to load the wandb_id from the model_dict.
         diffusion_planner, optimizer, scheduler, init_epoch, _, model_ema = resume_model(
-            args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
+            args.resume_model_path,
+            diffusion_planner,
+            optimizer,
+            scheduler,
+            model_ema,
+            args.device,
+            strict_training_state=True,
         )
-
-        # Override learning rate with the new value
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = args.learning_rate
-        print(f"Learning rate reset to {args.learning_rate}")
+        print(
+            f"Strict resume at epoch {init_epoch} with optimizer LR "
+            f"{optimizer.param_groups[0]['lr']}"
+        )
 
     else:
         init_epoch = 0
+    args._wandb_global_step = int(
+        getattr(diffusion_planner, "_resume_global_step", init_epoch * len(train_loader))
+    )
     # logger
-    if global_rank == 0:
-        os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
-
+    if global_rank == 0 and args.use_wandb:
+        os.environ["WANDB_MODE"] = "online"
         # if wandb_run_id is given, the training will be logged to the existing run instead of creating a new one.
         wandb.init(
             project=args.wandb_project_name,
@@ -462,23 +734,54 @@ def model_training(args: TrainConfig):
         if (
             args.use_wandb
             and args.wandb_run_id is None
-            and os.environ.get("WANDB_LOG_DATASET_ARTIFACT", "1") != "0"
+            and os.environ.get("WANDB_LOG_DATASET_ARTIFACT", "0") == "1"
         ):
-            log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
+            log_dataset_artifact(
+                wandb.run,
+                args.exp_name,
+                args.train_set_list,
+                args.valid_set_list,
+                getattr(args, "extra_train_set_list", None),
+                getattr(args, "extra_train_set_repeat", 0),
+            )
 
     if args.ddp:
         torch.distributed.barrier()
 
+    train_log_path = os.path.join(save_path, "train_log.tsv") if global_rank == 0 else None
     data_list = []
     best_loss = float("inf")
+    best_epdms = -float("inf")
+    if global_rank == 0 and args.resume_model_path is not None and os.path.exists(train_log_path):
+        with open(train_log_path, newline="", encoding="utf-8") as file:
+            data_list = list(csv.DictReader(file, delimiter="\t"))
+        previous_losses = [
+            float(row["valid_loss_ego_position_lat_loss"])
+            for row in data_list
+            if row.get("valid_loss_ego_position_lat_loss") not in (None, "")
+        ]
+        if previous_losses:
+            best_loss = min(previous_losses)
+        previous_epdms = [
+            float(row["valid_epdms_total"])
+            for row in data_list
+            if row.get("valid_epdms_total") not in (None, "")
+            and math.isfinite(float(row["valid_epdms_total"]))
+        ]
+        if previous_epdms:
+            best_epdms = max(previous_epdms)
 
-    valid_dict = validate_model(diffusion_planner, valid_loader, args)
+    eval_model = model_ema.ema if model_ema is not None else diffusion_planner
+    valid_dict = validate_model(eval_model, valid_loader, args)
     agg = aggregate_valid_metrics(valid_dict, args.device)
     if global_rank == 0:
         valid_loss_ego = agg["avg_loss_ego"]
         valid_loss_neighbor = agg["avg_loss_neighbor"]
         mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
         mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
+        mean_multisample_dict = {
+            f"valid_multisample/{k}": v for k, v in agg["multisample_means"].items()
+        }
         valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
             "valid_loss/ego_position_lat_loss", 0.0
         )
@@ -488,6 +791,13 @@ def model_training(args: TrainConfig):
         turn_indicator_accuracy = agg["turn_indicator_accuracy"]
         turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
         turn_indicator_change_total = agg["turn_indicator_change_total"]
+        turn_indicator_class_metrics = {
+            f"valid_loss/turn_indicator_{name}_accuracy": value
+            for name, value in agg["turn_indicator_class_accuracy"].items()
+        } | {
+            f"valid_loss/turn_indicator_{name}_count": value
+            for name, value in agg["turn_indicator_class_count"].items()
+        }
         print(
             f"{valid_loss_ego=:.3f}\n"
             f"{valid_loss_neighbor=:.3f}\n"
@@ -507,8 +817,10 @@ def model_training(args: TrainConfig):
                     "valid_loss/neighbors": valid_loss_neighbor,
                     "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
                     "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+                    **turn_indicator_class_metrics,
                     **mean_ego_loss_dict,
                     **mean_epdms_dict,
+                    **mean_multisample_dict,
                 }
             )
 
@@ -538,13 +850,21 @@ def model_training(args: TrainConfig):
             train_loader, diffusion_planner, optimizer, args, model_ema, aug
         )
 
-        valid_dict = validate_model(diffusion_planner, valid_loader, args)
+        eval_model = model_ema.ema if model_ema is not None else diffusion_planner
+        valid_dict = validate_model(eval_model, valid_loader, args)
         agg = aggregate_valid_metrics(valid_dict, args.device)
+        # Checkpoints contain the scheduler state for the next epoch. Capture the LR used for
+        # this epoch before stepping so metrics and resume behavior both remain exact.
+        train_lr = optimizer.param_groups[0]["lr"]
+        scheduler.step()
         if global_rank == 0:
             valid_loss_ego = agg["avg_loss_ego"]
             valid_loss_neighbor = agg["avg_loss_neighbor"]
             mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
             mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
+            mean_multisample_dict = {
+                f"valid_multisample/{k}": v for k, v in agg["multisample_means"].items()
+            }
             valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
                 "valid_loss/ego_position_lat_loss", 0.0
             )
@@ -554,6 +874,13 @@ def model_training(args: TrainConfig):
             turn_indicator_accuracy = agg["turn_indicator_accuracy"]
             turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
             turn_indicator_change_total = agg["turn_indicator_change_total"]
+            turn_indicator_class_metrics = {
+                f"valid_loss/turn_indicator_{name}_accuracy": value
+                for name, value in agg["turn_indicator_class_accuracy"].items()
+            } | {
+                f"valid_loss/turn_indicator_{name}_count": value
+                for name, value in agg["turn_indicator_class_count"].items()
+            }
             print(
                 f"Epoch {epoch + 1}/{train_epochs}\n"
                 f"{valid_loss_ego=:.3f}\n"
@@ -565,21 +892,24 @@ def model_training(args: TrainConfig):
                 f"{turn_indicator_change_total=:.3f}"
             )
 
-            lr_dict = {"lr": optimizer.param_groups[0]["lr"]}
-            wandb.log(
-                {
-                    "epoch": epoch + 1,
-                    "global_step": getattr(args, "_wandb_global_step", epoch + 1),
-                    **{f"train_loss/{k}": v for k, v in train_loss.items()},
-                    **{f"lr/{k}": v for k, v in lr_dict.items()},
-                    "valid_loss/ego": valid_loss_ego,
-                    "valid_loss/neighbors": valid_loss_neighbor,
-                    "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
-                    "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
-                    **mean_ego_loss_dict,
-                    **mean_epdms_dict,
-                }
-            )
+            lr_dict = {"lr": train_lr}
+            if args.use_wandb:
+                wandb.log(
+                    {
+                        "epoch": epoch + 1,
+                        "global_step": getattr(args, "_wandb_global_step", epoch + 1),
+                        **{f"train_loss/{k}": v for k, v in train_loss.items()},
+                        **{f"lr/{k}": v for k, v in lr_dict.items()},
+                        "valid_loss/ego": valid_loss_ego,
+                        "valid_loss/neighbors": valid_loss_neighbor,
+                        "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
+                        "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+                        **turn_indicator_class_metrics,
+                        **mean_ego_loss_dict,
+                        **mean_epdms_dict,
+                        **mean_multisample_dict,
+                    }
+                )
 
             curr_data = {
                 "epoch": epoch + 1,
@@ -588,13 +918,20 @@ def model_training(args: TrainConfig):
                 "valid_loss_neighbor": valid_loss_neighbor,
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
                 "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
+                "valid_turn_indicator_accuracy": turn_indicator_accuracy,
+                "valid_turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+                "valid_turn_indicator_change_total": turn_indicator_change_total,
+                **{
+                    key.replace("valid_loss/", "valid_"): value
+                    for key, value in turn_indicator_class_metrics.items()
+                },
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
+                **{k.replace("/", "_"): v for k, v in mean_multisample_dict.items()},
             }
             data_list.append(curr_data)
-            with open(
-                os.path.join(save_path, "train_log.tsv"), "w", newline="", encoding="utf-8"
-            ) as f:
-                writer = csv.DictWriter(f, fieldnames=list(data_list[0].keys()), delimiter="\t")
+            fieldnames = list(dict.fromkeys(key for row in data_list for key in row))
+            with open(train_log_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
                 writer.writeheader()
                 writer.writerows(data_list)
 
@@ -605,59 +942,70 @@ def model_training(args: TrainConfig):
                 "optimizer": optimizer.state_dict(),
                 "schedule": scheduler.state_dict(),
                 "loss": valid_loss_ego,
+                "global_step": args._wandb_global_step,
                 # We always use new wandb run for each training session, so we don't need to save the wandb_id in the model_dict.
                 "wandb_id": None,
             }
-            torch.save(model_dict, f"{save_path}/latest.pth")
+            atomic_torch_save(model_dict, f"{save_path}/latest.pth")
 
             if (epoch + 1 - init_epoch) % save_utd == 0:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
-                torch.save(model_dict, f"{curr_dir}/best_model.pth")
+                atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
                 with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
-                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
-                export_checkpoint_onnx_guarded(
-                    config_json_path=os.path.join(curr_dir, "args.json"),
-                    ckpt_path=f"{curr_dir}/best_model.pth",
-                    output_dir=Path(curr_dir),
-                    output_prefix="diffusion_planner",
-                    use_ema=False,
-                    use_simplify=False,
-                    opset_version=20,
-                    external_data=False,
-                )
+                if args.export_onnx_on_save:
+                    export_checkpoint_onnx_guarded(
+                        config_json_path=os.path.join(curr_dir, "args.json"),
+                        ckpt_path=f"{curr_dir}/best_model.pth",
+                        output_dir=Path(curr_dir),
+                        output_prefix="diffusion_planner",
+                        use_ema=model_ema is not None,
+                        use_simplify=False,
+                        opset_version=20,
+                        external_data=False,
+                    )
                 # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
                 # (videos + metrics) land next to the saved weights they correspond to.
-                closed_loop_validate(
-                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
-                )
+                closed_loop_validate(eval_model, args, epoch, os.path.join(curr_dir, "closed_loop"))
+
+            valid_epdms_total = float(mean_epdms_dict.get("valid_epdms/total", float("nan")))
+            if math.isfinite(valid_epdms_total) and valid_epdms_total > best_epdms:
+                curr_dir = os.path.join(save_path, "best_epdms_model")
+                os.makedirs(curr_dir, exist_ok=True)
+                atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
+                best_epdms = valid_epdms_total
+                epdms_data = {**curr_data, "best_valid_epdms_total": best_epdms}
+                with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
+                    json.dump(epdms_data, f, indent=4)
+                with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
+                    json.dump(args_dict, f, indent=4)
+                print(f"New best EPDMS checkpoint: {best_epdms:.6f} at epoch {epoch + 1}")
 
             if valid_loss_ego_position_lat_loss < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")
                 os.makedirs(curr_dir, exist_ok=True)
-                torch.save(model_dict, f"{curr_dir}/best_model.pth")
+                atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
                 best_loss = valid_loss_ego_position_lat_loss
                 curr_data["best_loss"] = best_loss
                 with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
-                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
-                export_checkpoint_onnx_guarded(
-                    config_json_path=os.path.join(curr_dir, "args.json"),
-                    ckpt_path=f"{curr_dir}/best_model.pth",
-                    output_dir=Path(curr_dir),
-                    output_prefix="diffusion_planner",
-                    use_ema=False,
-                    use_simplify=False,
-                    opset_version=20,
-                    external_data=False,
-                )
+                if args.export_onnx_on_save:
+                    export_checkpoint_onnx_guarded(
+                        config_json_path=os.path.join(curr_dir, "args.json"),
+                        ckpt_path=f"{curr_dir}/best_model.pth",
+                        output_dir=Path(curr_dir),
+                        output_prefix="diffusion_planner",
+                        use_ema=model_ema is not None,
+                        use_simplify=False,
+                        opset_version=20,
+                        external_data=False,
+                    )
 
-        scheduler.step()
         train_sampler.set_epoch(epoch + 1)
 
     if global_rank == 0 and wandb.run is not None:

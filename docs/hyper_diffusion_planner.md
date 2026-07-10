@@ -35,13 +35,14 @@ reference/external/Hyper-Diffusion-Planner/HDP-navsim/hdp_navsim/config/agent/dp
 
 Original Diffusion Planner predicts all-agent future waypoints directly.
 
-This HDP branch keeps the original scene encoder, neighbor prediction, turn-indicator path, and validation stack, but changes the ego planning target in HDP mode:
+This HDP branch keeps the original scene encoder, turn-indicator path, and validation stack, but changes the ego planning target in HDP mode:
 
 - Ego target can be represented as normalized velocity/action-like latent rather than direct waypoint latent.
 - The HDP ego prediction is converted back to waypoints through integration for trajectory loss and evaluation.
 - Hybrid loss combines velocity-space diffusion supervision with waypoint-space reconstruction.
-- Neighbor futures are still trained through the original all-agent prediction path.
+- The default HDP action head is ego-only. The original all-agent neighbor prediction path remains available as an explicit ablation.
 - Turn indicators and Tier IV validation metrics remain available.
+- Turn-indicator SFT uses equal-weight expert and detached generated-trajectory supervision by default, removing the pure teacher-forcing train/inference mismatch without allowing classification gradients to distort the planned trajectory.
 
 The intended HDP supervised setting is:
 
@@ -65,7 +66,13 @@ Use the right loading mode.
 | Continue the exact same interrupted run | `--resume_model_path` |
 | Start HDP from a vanilla waypoint checkpoint intentionally | `--init_weights_path` only |
 
-Do not use `--resume_model_path` to change representation. The code checks representation compatibility to avoid silently interpreting waypoint latents as velocity latents.
+Do not use `--resume_model_path` to change representation or action shape. Strict resume requires model, optimizer, scheduler, epoch, and (when enabled) EMA state; it also checks architecture and exact normalization statistics before the new run can overwrite `args.json`. Checkpoints use atomic replacement so interruption cannot leave a partial `latest.pth`.
+
+The branch has one encoder implementation. It includes valid-point LineEncoder geometry from Tier IV PR
+[#212](https://github.com/tier4/Diffusion-Planner/pull/212) and categorical turn-history
+encoding from [#210](https://github.com/tier4/Diffusion-Planner/pull/210). There is no
+legacy mode. #210 changes a weight shape, so old Base/SFT checkpoints fail loading instead
+of silently reusing stale encoder features. Train the new ego-only Base from scratch.
 
 ## Data policy
 
@@ -78,6 +85,14 @@ Reasons:
 - Mixed project/area lists can change the distribution and make comparisons unfair.
 
 Single-frame lists can still run ordinary supervised training, but they are not sufficient for temporal-consistency evaluation.
+
+The current 2026-06 Tier IV corpus was generated before converter commit `55eff4f` and duplicates the current frame in short neighbor futures. `align_legacy_neighbor_futures=true` detects those short tracks in `Dataset.__getitem__`, reads from the next frame, and zero-pads the tail in worker memory. It never writes, renames, or migrates the shared NPZ. Regenerated corpora should set the flag to `false`; standalone validation inherits the checkpoint setting unless explicitly overridden.
+
+Oversampling accepts repeated `extra_train_set_list` flags and one shared
+`extra_train_set_repeat` inside the Dataset. It concatenates the sources and appends
+Python path references in memory instead of materializing a multi-hundred-MB combined
+JSON. Optional extra-only traffic-light masking also happens in worker memory. Dataset-list
+upload to W&B is opt-in through `WANDB_LOG_DATASET_ARTIFACT=1`.
 
 ## Supervised training stages
 
@@ -95,9 +110,9 @@ SFT starts from the base checkpoint with `--init_weights_path`. The SFT run must
 
 Do not change from velocity representation to waypoint representation between base and SFT.
 
-## Official HDP-RL path
+## HDP-RL path
 
-The official HDP RL idea is reward-weighted RL-Hybrid. This branch keeps only that RL path.
+The HDP paper's RL objective is reward-weighted RL-Hybrid. This branch keeps only that RL path, adapted to signals actually present in Tier IV NPZs.
 
 The TeX algorithm computes a group-normalized reward and weights the hybrid loss with:
 
@@ -108,26 +123,47 @@ exp(beta * normalized_reward)
 The local default RL path now follows that objective:
 
 ```text
-official_reward_normalize=group
-official_reward_beta=1.0
+rl_reward_normalize=group
+rl_reward_beta=1.0
 rl_reward_w_risk=1.0
 rl_reward_w_follow=3.0
 rl_reward_w_lane=2.5
 num_generations=32
 rl_noise_scale=0.5
+rl_rollout_steps=6
+rl_ema_update_rate=0.05
+rl_init_use_ema=true
 rl_train_scope=decoder
 ```
 
 Implementation notes:
 
-- Zero-variance finite reward groups are kept with neutral weight `exp(0)=1`, matching the reward-weighted hybrid formula and avoiding silent no-op epochs on saturated rewards.
+- Zero-variance and non-finite reward groups are discarded; they do not become unweighted self-distillation samples.
 - Reward scoring uses raw scene tensors before group expansion; only rollout/loss tensors are expanded to `B * num_generations`.
+- Logged futures for all 320 neighbors stay scene-level and are not duplicated across the 32 candidates.
 - Rollout sampling uses a fixed temperature instead of a random per-row temperature range.
-- RL starts from SFT with `--init_weights_path`, so optimizer/scheduler/W&B state are fresh.
-- `rl_train_scope=decoder` freezes non-decoder parameters, matching the official decoder fine-tuning style.
+- RL starts from the SFT EMA shadow with `--init_weights_path` and `rl_init_use_ema=true`, while optimizer/scheduler/W&B state are fresh. Missing EMA weights produce an explicit live-weight fallback warning.
+- `rl_train_scope=decoder` updates only the DiT trajectory policy and freezes the encoder plus the separate turn-indicator classifier. This matches the released decoder-policy intent without leaving an unsupervised Tier IV-only head in DDP.
 - Encoder modules are kept in eval mode during decoder-only RL so frozen dropout/drop-path does not inject noise.
-- The reward backend is fixed to an NPZ-native multi-reward adaptation of the paper's risk/follow/lane setting, using the official weights 1.0/3.0/2.5.
+- The EMA shadow is the previous rollout policy. The live decoder is updated first and EMA is refreshed afterward with update rate `0.05` (`timm` decay `0.95`).
+- The single reward path contains SAT collision, continuous TTC, THW, occupancy clearance, leader-conditioned following, lane-center scoring, lane-change/off-lane masking, and rear-end attenuation, using risk/follow/lane weights 1.0/3.0/2.5.
+- Occupancy automatically uses real static boxes, stopped-agent clearance, then road-border clearance as a corpus fallback. Missing sources are neutral and their coverage is logged.
+- Scene encoding is computed once per candidate group. Decoder-only RL repeats only current action-state tensors, not the full 31-frame observation history.
+- Full stochastic/EPDMS validation runs on `rl_full_eval_utd`; the deterministic proxy remains available each epoch.
 - Best-checkpoint selection is based on validation EPDMS when available, falling back to negative ego validation loss.
+- Turn-indicator validation logs overall, change-only, and all five per-class accuracies plus class counts; the overall metric is computed from generated trajectories, never teacher-forced trajectories.
+- SFT/RL ONNX export on every save is disabled by default because synchronous export stalls all other DDP ranks at the next barrier. Set `export_onnx_on_save=true` only when needed, or use the strict standalone converter.
+
+### Joint and ego-only action heads
+
+The encoder always consumes all configured neighbor histories. The action head is selected per run:
+
+```text
+predicted_neighbor_num=0    # default ego-only HDP action head
+predicted_neighbor_num=320  # retained DP joint ego/neighbor-action ablation
+```
+
+In ego-only mode, supervised and RL losses do not predict neighbor futures, but collision and reward evaluation still use every logged neighbor future. Parameter shapes are independent of the number of action tokens, so a joint checkpoint can initialize an ego-only SFT adaptation run. A clean ego-only Base/SFT/RL run remains the unbiased comparison arm.
 
 ### What is faithful and what is DP-native
 
@@ -136,16 +172,20 @@ Faithful to HDP:
 - Reward-weighted RL-Hybrid loss form.
 - Group reward normalization.
 - `exp(beta * normalized_reward)` weighting.
-- Multi-reward risk/follow/lane weighting with the official 1.0/3.0/2.5 coefficients.
+- Multi-reward risk/follow/lane weighting with the paper's 1.0/3.0/2.5 coefficients.
 - Decoder-only RL fine-tuning by default.
 - SFT checkpoint as RL initialization.
 - Fixed rollout temperature.
 
 DP-native adaptation:
 
-- The official NAVSIM implementation uses NAVSIM PDM metric caches, Ray scoring, and a replay buffer.
-- This branch runs on Tier IV NPZ data and uses available DP scene tensors to build EPDMS-style risk, route/GT-following, and lane-keeping rewards.
+- The released NAVSIM implementation uses NAVSIM PDM metric caches, Ray scoring, and a replay buffer; it does not expose the real-vehicle reward shaping implementation described in the paper.
+- The public NAVSIM configuration uses group size 10, five rollout steps, a ten-epoch replay refresh, and no active EMA by default. The paper table instead reports group size 32 and EMA update 0.05; the real-vehicle table reports six inference steps. This branch chooses the paper/real-vehicle-oriented values rather than claiming that all released artifacts agree.
+- This branch runs on Tier IV NPZ data and computes the HDP reward directly from available geometry and map tensors.
 - Exact NAVSIM PDM cache behavior is not assumed to exist in this repository.
+- Tier IV line strings and polygons use valid-point centroid/direction positional geometry
+  with masked consecutive diffs. Historical turn reports are one-hot encoded inside the graph;
+  NPZ, ROS, and ONNX input tensors remain raw codes with unchanged shapes.
 
 This means the branch is faithful at the objective and training-interface level, but not a byte-for-byte reproduction of the NAVSIM runtime environment.
 
@@ -155,7 +195,10 @@ Use validation metrics consistently across base, SFT, and RL:
 
 - `valid_loss/*` for supervised losses.
 - `valid_epdms/*` for planning-quality proxy metrics.
+- `valid_multisample/minADE`, `minFDE`, and their thresholded scores for stochastic open-loop diagnostics.
 - Temporal metrics only when pair/full-sequence loading is available.
+
+The six-trajectory count is not invented by this repository: the paper's Appendix "Open-Loop Metrics" explicitly says it generates six trajectories before computing minADE/minFDE. The seeded zero-noise trajectory remains a lower-variance checkpoint proxy; it is not mislabeled as that six-trajectory protocol.
 
 ## ONNX export
 
@@ -180,6 +223,7 @@ Precision policy:
 - HDP velocity normalization is decoded inside the traced full graph.
 - The standalone converter validates the full ONNX output against the PyTorch wrapper when
   `ros_scripts/torch2onnx.py` is used.
+- Every full-graph input, including `delay`, has a dynamic batch axis. Native ego-only output is `[B,1,80,4]`; no compatibility rows are padded for the old 321-row ROS consumer.
 
 Smoke validation performed on this branch:
 
@@ -201,7 +245,7 @@ result:
   split decoder        intentionally skipped for HDP velocity checkpoints
 ```
 
-The checked full graph outputs:
+The joint-action checked full graph outputs:
 
 ```text
 prediction: [B, 321, 80, 4]
@@ -210,6 +254,13 @@ turn_indicator_logit: [B, 5]
 
 `prediction[:, 0]` is the HDP ego trajectory decoded back to waypoint space. It is not the
 normalized velocity latent.
+
+An ego-only export instead has `sampled_trajectories: [B, 1, 81, 4]` and
+`prediction: [B, 1, 80, 4]`; scene encoder inputs, including 320 neighbor histories, are unchanged.
+
+The 2026-07-11 native ego-only EMA audit measured prediction max/mean PyTorch-ORT
+difference `1.38e-5 / 2.42e-6`. ORT also ran batch 2 with two different per-row delay
+values and returned prediction `[2,1,80,4]` plus turn logits `[2,5]`.
 
 For deployment or closed-loop handoff, record:
 
