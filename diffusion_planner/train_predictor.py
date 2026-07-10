@@ -30,6 +30,24 @@ def get_args(args_list=None):
     parser.add_argument("--train_set_list", type=str, required=True)
     parser.add_argument("--valid_set_list", type=str, required=True)
     parser.add_argument("--train_subsample_step", type=int, default=1)
+    parser.add_argument(
+        "--extra_train_set_list",
+        type=str,
+        default=None,
+        help="Optional extra training datalist appended after train_set_list.",
+    )
+    parser.add_argument(
+        "--extra_train_set_repeat",
+        type=int,
+        default=1,
+        help="Repeat count for extra_train_set_list before appending; 0 disables it.",
+    )
+    parser.add_argument(
+        "--extra_train_set_mask_traffic_lights",
+        default=False,
+        type=boolean,
+        help="Mask traffic-light lane attributes for samples from extra_train_set_list.",
+    )
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)

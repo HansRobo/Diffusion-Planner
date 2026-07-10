@@ -1,5 +1,6 @@
 import csv
 import json
+import math
 import os
 from pathlib import Path
 
@@ -144,6 +145,59 @@ def find_upward(start_file: str, target_name: str) -> Path:
         if candidate.exists():
             return candidate
     raise FileNotFoundError(f"{target_name} up {directory}")
+
+
+def prepare_weighted_train_set_list(args, global_rank: int) -> None:
+    extra_list = getattr(args, "extra_train_set_list", None)
+    repeat = int(getattr(args, "extra_train_set_repeat", 1))
+    if repeat < 0:
+        raise ValueError("extra_train_set_repeat must be >= 0")
+    if not extra_list or repeat == 0:
+        args.weighted_train_set_list = None
+        return
+
+    output_path = Path(args.save_dir) / "weighted_train_set_list.json"
+    if global_rank == 0:
+        with open(args.train_set_list, "r", encoding="utf-8") as f:
+            base = json.load(f)
+        with open(extra_list, "r", encoding="utf-8") as f:
+            extra = json.load(f)
+        if not isinstance(base, list) or not isinstance(extra, list):
+            raise TypeError("train_set_list and extra_train_set_list must be JSON arrays")
+        combined = base + extra * repeat
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(combined, f, ensure_ascii=False, separators=(",", ":"))
+        if getattr(args, "extra_train_set_mask_traffic_lights", False):
+            args.traffic_light_mask_set_list = extra_list
+        metadata = {
+            "base_train_set_list": args.train_set_list,
+            "base_count": len(base),
+            "extra_train_set_list": extra_list,
+            "extra_count": len(extra),
+            "extra_train_set_repeat": repeat,
+            "extra_train_set_mask_traffic_lights": bool(
+                getattr(args, "extra_train_set_mask_traffic_lights", False)
+            ),
+            "traffic_light_mask_set_list": getattr(args, "traffic_light_mask_set_list", None),
+            "combined_count": len(combined),
+            "deduplicate": False,
+            "weighted_train_set_list": str(output_path),
+        }
+        with open(Path(args.save_dir) / "weighted_train_set_list_metadata.json", "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        print(
+            "Weighted train datalist prepared: "
+            f"base={len(base)} extra={len(extra)} repeat={repeat} combined={len(combined)}"
+        )
+
+    if args.ddp:
+        torch.distributed.barrier()
+    if getattr(args, "extra_train_set_mask_traffic_lights", False):
+        args.traffic_light_mask_set_list = extra_list
+    args.original_train_set_list = args.train_set_list
+    args.weighted_train_set_list = str(output_path)
+    args.train_set_list = str(output_path)
 
 
 def log_dataset_artifact(
@@ -295,7 +349,12 @@ def model_training(args: TrainConfig):
 
         save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
+    else:
+        save_path = None
 
+    prepare_weighted_train_set_list(args, global_rank)
+
+    if global_rank == 0:
         # Save args
         args_dict = vars(args)
         args_dict = {
@@ -306,8 +365,6 @@ def model_training(args: TrainConfig):
 
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
-    else:
-        save_path = None
 
     if args.resume_model_path is not None:
         assert_checkpoint_compatible(args.resume_model_path, args)
@@ -342,7 +399,10 @@ def model_training(args: TrainConfig):
         aug = None
 
     # prepare dataset
-    train_set = DiffusionPlannerData(args.train_set_list)
+    train_set = DiffusionPlannerData(
+        args.train_set_list,
+        traffic_light_mask_list=getattr(args, "traffic_light_mask_set_list", None),
+    )
     valid_set = DiffusionPlannerData(args.valid_set_list)
 
     train_set.data_list = train_set.data_list[:: args.train_subsample_step]
@@ -462,7 +522,7 @@ def model_training(args: TrainConfig):
         if (
             args.use_wandb
             and args.wandb_run_id is None
-            and os.environ.get("WANDB_LOG_DATASET_ARTIFACT", "1") != "0"
+            and os.environ.get("WANDB_LOG_DATASET_ARTIFACT", "0") != "0"
         ):
             log_dataset_artifact(wandb.run, args.exp_name, args.train_set_list, args.valid_set_list)
 
@@ -471,6 +531,7 @@ def model_training(args: TrainConfig):
 
     data_list = []
     best_loss = float("inf")
+    best_epdms = -float("inf")
 
     valid_dict = validate_model(diffusion_planner, valid_loader, args)
     agg = aggregate_valid_metrics(valid_dict, args.device)
@@ -633,6 +694,30 @@ def model_training(args: TrainConfig):
                 # (videos + metrics) land next to the saved weights they correspond to.
                 closed_loop_validate(
                     diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
+                )
+
+            valid_epdms_total = mean_epdms_dict.get("valid_epdms/total", float("nan"))
+            valid_epdms_total = float(valid_epdms_total)
+            if math.isfinite(valid_epdms_total) and valid_epdms_total > best_epdms:
+                curr_dir = os.path.join(save_path, "best_epdms_model")
+                os.makedirs(curr_dir, exist_ok=True)
+                torch.save(model_dict, f"{curr_dir}/best_model.pth")
+                best_epdms = valid_epdms_total
+                epdms_data = dict(curr_data)
+                epdms_data["best_valid_epdms_total"] = best_epdms
+                with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
+                    json.dump(epdms_data, f, indent=4)
+                with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
+                    json.dump(args_dict, f, indent=4)
+                export_checkpoint_onnx_guarded(
+                    config_json_path=os.path.join(curr_dir, "args.json"),
+                    ckpt_path=f"{curr_dir}/best_model.pth",
+                    output_dir=Path(curr_dir),
+                    output_prefix="diffusion_planner",
+                    use_ema=False,
+                    use_simplify=False,
+                    opset_version=20,
+                    external_data=False,
                 )
 
             if valid_loss_ego_position_lat_loss < best_loss:
