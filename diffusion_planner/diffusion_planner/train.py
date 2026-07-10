@@ -267,7 +267,6 @@ def assert_checkpoint_compatible(
             "ego_past_noise_std",
             "use_smoothing_future_trajectory",
             "seed",
-            "train_epochs",
             "batch_size",
             "learning_rate",
             "warm_up_epoch",
@@ -335,6 +334,14 @@ def assert_checkpoint_compatible(
         ]
         if training_mismatches:
             raise RuntimeError(f"Checkpoint training configuration mismatch: {training_mismatches}")
+
+        checkpoint_train_epochs = int(ckpt_args.get("train_epochs", args.train_epochs))
+        if checkpoint_train_epochs != int(args.train_epochs):
+            print(
+                "WARNING: changing the total training horizon on strict resume: "
+                f"checkpoint={checkpoint_train_epochs}, current={args.train_epochs}. "
+                "Model, optimizer, scheduler, EMA, and completed epoch state remain strict."
+            )
 
     checkpoint_neighbors = int(ckpt_args.get("predicted_neighbor_num", MAX_NUM_NEIGHBORS))
     current_neighbors = int(getattr(args, "predicted_neighbor_num"))
@@ -714,6 +721,10 @@ def model_training(args: TrainConfig):
             f"Strict resume at epoch {init_epoch} with optimizer LR "
             f"{optimizer.param_groups[0]['lr']}"
         )
+        if init_epoch > train_epochs:
+            raise RuntimeError(
+                f"Cannot resume epoch {init_epoch} with train_epochs={train_epochs}"
+            )
 
     else:
         init_epoch = 0

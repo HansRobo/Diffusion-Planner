@@ -620,6 +620,10 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
     with pytest.raises(RuntimeError, match="training configuration mismatch"):
         assert_checkpoint_compatible(str(checkpoint_path), same_shape)
 
+    shorter_horizon = _checkpoint_compat_config(predicted_neighbor_num=1)
+    shorter_horizon.train_epochs = 20
+    assert_checkpoint_compatible(str(checkpoint_path), shorter_horizon)
+
 def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
     model = torch.nn.Linear(2, 1)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)

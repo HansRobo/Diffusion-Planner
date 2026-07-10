@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=hdp-ego-base60
+#SBATCH --job-name=hdp-ego-base20
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --nodelist=node01
@@ -114,7 +114,7 @@ BASE_ARGS=(
   --batch_size 512
   --learning_rate 2e-4
   --warm_up_epoch 5
-  --train_epochs 60
+  --train_epochs 20
   --save_utd 10
   --num_workers 16
   --enable_epdms_eval True
@@ -244,12 +244,12 @@ p = pathlib.Path(sys.argv[1])
 ckpt = torch.load(p / "latest.pth", map_location="cpu", weights_only=False)
 with (p / "train_log.tsv").open(newline="", encoding="utf-8") as f:
     rows = list(csv.DictReader(f, delimiter="\t"))
-assert int(ckpt["epoch"]) == 60, ckpt["epoch"]
-assert rows and int(rows[-1]["epoch"]) == 60, rows[-1].get("epoch") if rows else None
+assert int(ckpt["epoch"]) == 20, ckpt["epoch"]
+assert rows and int(rows[-1]["epoch"]) == 20, rows[-1].get("epoch") if rows else None
 assert (p / "best_model" / "best_model.pth").is_file()
 assert (p / "best_epdms_model" / "best_model.pth").is_file()
 print(f"verified epoch={ckpt['"'"'epoch'"'"']} rows={len(rows)}")' \
   "${SAVE_DIR}" | tee -a "${HEALTH_LOG}"
 
 touch "${SAVE_DIR}/RUN_COMPLETE"
-log_health "RUN_COMPLETE: verified 60 epochs and both best checkpoints"
+log_health "RUN_COMPLETE: verified 20 epochs and both best checkpoints"

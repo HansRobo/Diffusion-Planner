@@ -373,6 +373,8 @@ def get_args(args_list=None):
         raise ValueError("--batch_size must be >= 1")
     if args.save_utd < 1:
         raise ValueError("--save_utd must be >= 1")
+    if args.train_epochs < 1:
+        raise ValueError("--train_epochs must be >= 1")
     if args.diffusion_sample_steps < 3:
         raise ValueError("--diffusion_sample_steps must be >= 3 for the third-order DPM solver")
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
