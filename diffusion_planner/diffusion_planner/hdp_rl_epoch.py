@@ -40,7 +40,7 @@ def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
     return neighbors_future, mask
 
 
-def _hdp_rl_step(raw_inputs, model, optimizer, args, ema, aug):
+def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug):
     n = args.num_generations
 
     raw_inputs = dict(raw_inputs)
@@ -56,12 +56,15 @@ def _hdp_rl_step(raw_inputs, model, optimizer, args, ema, aug):
         raw_inputs["ego_agent_past"] = heading_to_cos_sin(raw_inputs["ego_agent_past"])
         raw_inputs["goal_pose"] = heading_to_cos_sin(raw_inputs["goal_pose"])
 
-    exp = expand_batch(raw_inputs, n)
-    batch_size = exp["ego_current_state"].shape[0]
+    neighbors_future_raw, neighbor_future_mask_raw = _neighbor_future_world(
+        raw_inputs["neighbor_agents_future"]
+    )
+    norm_inputs = args.observation_normalizer(raw_inputs)
+    norm_exp = expand_batch(norm_inputs, n)
+    neighbors_future = neighbors_future_raw.repeat_interleave(n, dim=0)
+    neighbor_future_mask = neighbor_future_mask_raw.repeat_interleave(n, dim=0)
+    batch_size = norm_exp["ego_current_state"].shape[0]
     num_scenes = batch_size // n
-
-    neighbors_future, neighbor_future_mask = _neighbor_future_world(exp["neighbor_agents_future"])
-    norm_exp = args.observation_normalizer(exp)
 
     ego_world = sample_group(model, norm_exp, args.rl_noise_scale, args.device)
     _set_official_rl_train_mode(model, args)
@@ -83,7 +86,7 @@ def _hdp_rl_step(raw_inputs, model, optimizer, args, ema, aug):
         args,
     )
     loss_dict["loss"].backward()
-    nn.utils.clip_grad_norm_(model.parameters(), 5)
+    nn.utils.clip_grad_norm_(trainable_params, 5)
     optimizer.step()
     if ema is not None:
         ema.update(model)
@@ -105,14 +108,11 @@ def _hdp_rl_step(raw_inputs, model, optimizer, args, ema, aug):
     return result
 
 
-def train_hdp_rl_epoch(data_loader, model, optimizer, args, ema, aug):
+def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, ema, aug):
     epoch_loss = []
 
     model.train()
     _set_official_rl_train_mode(model, args)
-
-    if args.ddp:
-        torch.cuda.synchronize()
 
     if ddp.get_rank() == 0:
         data_loader = tqdm(data_loader, desc="HDP-RL", unit="batch")
@@ -121,10 +121,7 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, args, ema, aug):
         raw_inputs = {
             key: value.to(args.device, non_blocking=True) for key, value in raw_inputs.items()
         }
-        step_loss = _hdp_rl_step(raw_inputs, model, optimizer, args, ema, aug)
-
-        if args.ddp:
-            torch.cuda.synchronize()
+        step_loss = _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug)
         epoch_loss.append(step_loss)
 
     epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
