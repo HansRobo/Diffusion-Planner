@@ -38,24 +38,43 @@ class StateNormalizer:
             ego_velocity["std"] if ego_velocity is not None else None,
         )
 
-    def _mean_std_on(self, device):
+    def _cached_stats(self, name, mean, std, device, dtype=None):
         # Per-device cache: without it every call issues two host->device copies in the
         # training hot loop. getattr-lazy so unpickled instances from old checkpoints work.
         cache = getattr(self, "_device_cache", None)
         if cache is None:
             cache = {}
             self._device_cache = cache
-        key = str(device)
+        key = (name, str(device), dtype)
         if key not in cache:
-            cache[key] = (self.mean.to(device), self.std.to(device))
+            cache[key] = (
+                mean.to(device=device, dtype=dtype),
+                std.to(device=device, dtype=dtype),
+            )
         return cache[key]
 
+    def _mean_std_on(self, device, dtype=None):
+        return self._cached_stats("state", self.mean, self.std, device, dtype)
+
+    def ego_velocity_stats_on(self, device, dtype=None):
+        if self.ego_velocity_mean is None or self.ego_velocity_std is None:
+            raise RuntimeError(
+                "ego_velocity normalization stats are required for HDP velocity mode"
+            )
+        return self._cached_stats(
+            "ego_velocity",
+            self.ego_velocity_mean,
+            self.ego_velocity_std,
+            device,
+            dtype,
+        )
+
     def __call__(self, data):
-        mean, std = self._mean_std_on(data.device)
+        mean, std = self._mean_std_on(data.device, data.dtype)
         return (data - mean) / std
 
     def inverse(self, data):
-        mean, std = self._mean_std_on(data.device)
+        mean, std = self._mean_std_on(data.device, data.dtype)
         return data * std + mean
 
     def to_dict(self):

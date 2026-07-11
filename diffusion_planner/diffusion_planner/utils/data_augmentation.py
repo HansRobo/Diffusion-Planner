@@ -46,11 +46,6 @@ def heading_transform(heading, transform_mat):
     ).reshape(*shape)
 
 
-def _cross2d(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """2D cross product along the last dimension: u × v = u.x*v.y - u.y*v.x"""
-    return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
-
-
 def _rect_corners(rect: torch.Tensor) -> torch.Tensor:
     """
     rect: [B, 6] — (x, y, cos_h, sin_h, length, width)
@@ -85,52 +80,6 @@ def _sat_signed_distance(c1: torch.Tensor, c2: torch.Tensor) -> torch.Tensor:
     is_overlap = (overlap < 0).all(dim=1)
     pos = torch.where(overlap < 0, torch.full_like(overlap, 1e5), overlap)
     return torch.where(is_overlap, overlap.max(1).values, pos.min(1).values)
-
-
-def _segments_intersect_rect(
-    seg_start: torch.Tensor,
-    seg_end: torch.Tensor,
-    rect_corners: torch.Tensor,
-    valid: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """
-    Returns [B] bool — True if any valid segment touches the rectangle.
-
-    seg_start, seg_end: [B, N, 2]
-    rect_corners:       [B, 4, 2]
-    valid:              [B, N] bool — True for valid segments
-    """
-    hit = torch.zeros(seg_start.shape[:2], dtype=torch.bool, device=seg_start.device)
-    edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
-
-    # Proper segment–edge crossing: both pairs straddle each other's line
-    for i, j in edges:
-        C = rect_corners[:, i, :].unsqueeze(1)  # [B, 1, 2]
-        D = rect_corners[:, j, :].unsqueeze(1)  # [B, 1, 2]
-        AB = seg_end - seg_start  # [B, N, 2]
-        CD = D - C  # [B, 1, 2]
-        hit = hit | (
-            (_cross2d(AB, C - seg_start) * _cross2d(AB, D - seg_start) < 0)
-            & (_cross2d(CD, seg_start - C) * _cross2d(CD, seg_end - C) < 0)
-        )
-
-    # Endpoint inside polygon: all edge cross products share the same sign
-    for pt in (seg_start, seg_end):
-        crosses = torch.stack(
-            [
-                _cross2d(
-                    (rect_corners[:, j, :] - rect_corners[:, i, :]).unsqueeze(1),
-                    pt - rect_corners[:, i, :].unsqueeze(1),
-                )
-                for i, j in edges
-            ],
-            dim=-1,
-        )  # [B, N, 4]
-        hit = hit | (crosses > 0).all(-1) | (crosses < 0).all(-1)
-
-    if valid is not None:
-        hit = hit & valid
-    return hit.any(dim=1)  # [B]
 
 
 class StatePerturbation:
@@ -289,9 +238,11 @@ class StatePerturbation:
         """
         Returns [B] bool — True where the augmented ego position is invalid.
 
-        Invalid conditions:
-          1. Ego polygon overlaps with a neighbour agent polygon.
-          2. Ego polygon intersects a lane left or right boundary segment.
+        An augmented pose is invalid when its ego polygon overlaps a neighbour polygon.
+
+        Lane boundaries are deliberately not treated as solid obstacles. ``lanes`` contains
+        every nearby lane, including internal markings and overlapping intersection geometry;
+        rejecting against all of them suppresses even centimetre-scale recovery perturbations.
         """
         B = aug_ego_state.shape[0]
         device = aug_ego_state.device
@@ -308,8 +259,6 @@ class StatePerturbation:
         # Match the convention used by training penalties and planner metrics.
         ego_center = aug_ego_state[:, :2] + heading * (ego_shape[:, 0:1] * 0.5)
         ego_rect = torch.cat([ego_center, heading, ego_length, ego_width], dim=-1)
-        ego_corners = _rect_corners(ego_rect)  # [B, 4, 2]
-
         collision = torch.zeros(B, dtype=torch.bool, device=device)
 
         # ── 1. Neighbour agent polygon collision ──────────────────────────────
@@ -327,39 +276,6 @@ class StatePerturbation:
                     _rect_corners(nbr_rect.reshape(B * N, 6)),
                 ).reshape(B, N)
                 collision = collision | ((dists < 0) & valid).any(dim=1)
-
-        # ── 2. Lane boundary segment collision ───────────────────────────────
-        if "lanes" in inputs:
-            lanes = inputs["lanes"]  # [B, L, P, 33]
-            left_offset = lanes[..., 4:6]  # [B, L, P, 2]
-            right_offset = lanes[..., 6:8]  # [B, L, P, 2]
-
-            # Absolute boundary positions
-            left_pts = lanes[..., :2] + left_offset  # [B, L, P, 2]
-            right_pts = lanes[..., :2] + right_offset  # [B, L, P, 2]
-
-            # A waypoint is valid when its first 8 features are not all zero.
-            # Additionally, only include a boundary side when its offset is
-            # non-trivial; a near-zero offset means no boundary data.
-            lane_valid = torch.sum(torch.ne(lanes[..., :8], 0), dim=-1) > 0  # [B, L, P]
-            left_bound_valid = (torch.norm(left_offset, dim=-1) > 0.01) & lane_valid
-            right_bound_valid = (torch.norm(right_offset, dim=-1) > 0.01) & lane_valid
-
-            def _boundary_segs(pts, point_valid):
-                s = pts[:, :, :-1, :].reshape(B, -1, 2)
-                e = pts[:, :, 1:, :].reshape(B, -1, 2)
-                v = (point_valid[:, :, :-1] & point_valid[:, :, 1:]).reshape(B, -1)
-                return s, e, v
-
-            ls, le, lv = _boundary_segs(left_pts, left_bound_valid)
-            rs, re, rv = _boundary_segs(right_pts, right_bound_valid)
-
-            collision = collision | _segments_intersect_rect(
-                torch.cat([ls, rs], dim=1),
-                torch.cat([le, re], dim=1),
-                ego_corners,
-                torch.cat([lv, rv], dim=1),
-            )
 
         return collision
 

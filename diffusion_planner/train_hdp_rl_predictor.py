@@ -552,13 +552,13 @@ def get_args():
         raise ValueError("--wandb_step_log_interval must be >= 0")
     if args.num_generations < 2:
         raise ValueError("--num_generations must be >= 2 for HDP-RL group reward normalization")
-    if args.rl_rollout_steps < 3:
-        raise ValueError("--rl_rollout_steps must be >= 3 for the third-order DPM solver")
+    if args.rl_rollout_steps < 2:
+        raise ValueError("--rl_rollout_steps must be >= 2 for the second-order DPM solver")
     if args.diffusion_sample_steps < 2:
         raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
-    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
+    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
         raise ValueError(
-            "--multisample_eval_sample_steps must be >= 3 for the third-order DPM solver"
+            "--multisample_eval_sample_steps must be >= 2 for the second-order DPM solver"
         )
     if args.rl_noise_scale < 0.0:
         raise ValueError("--rl_noise_scale must be >= 0")

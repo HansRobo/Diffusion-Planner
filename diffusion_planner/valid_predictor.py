@@ -96,9 +96,9 @@ def get_args(args_list=None):
     )
 
     args = parser.parse_args(args_list)
-    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
+    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
         raise ValueError(
-            "--multisample_eval_sample_steps must be >= 3 for the third-order DPM solver"
+            "--multisample_eval_sample_steps must be >= 2 for the second-order DPM solver"
         )
     return args
 

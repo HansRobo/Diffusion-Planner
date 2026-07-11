@@ -25,13 +25,10 @@ Covers:
   end-point proximity
 - StatePerturbation.centric_transform: identity ego (positions unchanged),
   zero-mask preserved, translation, ego xy zeroed
-- _cross2d: basic values, parallel vectors, batched
 - _rect_corners: heading=0 corner positions, heading=90° rotation
 - _sat_signed_distance: overlapping (negative), separated (positive), touching (~0)
-- _segments_intersect_rect: crossing, endpoint inside, outside, fully inside,
-  valid mask filtering, batch
 - StatePerturbation._check_aug_validity: no keys, neighbor overlap/clear,
-  left/right boundary cross/clear, zero offset ignored, batch mixed
+  internal lane boundaries ignored, batch mixed
 - StatePerturbation.augment (integration): collision suppresses aug_flag,
   no-collision preserves aug_flag
 
@@ -54,10 +51,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from diffusion_planner.utils.data_augmentation import (
     StatePerturbation,
-    _cross2d,
     _rect_corners,
     _sat_signed_distance,
-    _segments_intersect_rect,
     heading_transform,
     vector_transform,
 )
@@ -599,39 +594,6 @@ def _check_inputs(
     }
 
 
-# ──────────────────────────────── _cross2d ──────────────────────────────────
-
-
-def test_cross2d_ccw_positive():
-    """(1,0) × (0,1) = +1 (CCW orientation)."""
-    u = torch.tensor([[1.0, 0.0]])
-    v = torch.tensor([[0.0, 1.0]])
-    assert abs(_cross2d(u, v).item() - 1.0) < ATOL, f"Expected 1.0, got {_cross2d(u, v).item()}"
-    assert abs(_cross2d(v, u).item() + 1.0) < ATOL, f"Expected -1.0, got {_cross2d(v, u).item()}"
-    print("  [PASS] _cross2d CCW positive / CW negative")
-
-
-def test_cross2d_parallel_zero():
-    """Parallel vectors have zero cross product."""
-    u = torch.tensor([[2.0, 3.0]])
-    v = torch.tensor([[4.0, 6.0]])  # v = 2*u
-    assert abs(_cross2d(u, v).item()) < ATOL, (
-        f"Parallel vectors: expected 0, got {_cross2d(u, v).item()}"
-    )
-    print("  [PASS] _cross2d parallel zero")
-
-
-def test_cross2d_batched():
-    """Batched input produces per-element cross products."""
-    u = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
-    v = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
-    out = _cross2d(u, v)
-    assert out.shape == (2,)
-    assert abs(out[0].item() - 1.0) < ATOL  # (1,0)×(0,1) = +1
-    assert abs(out[1].item() + 1.0) < ATOL  # (0,1)×(1,0) = -1
-    print("  [PASS] _cross2d batched")
-
-
 # ────────────────────────────── _rect_corners ───────────────────────────────
 
 
@@ -737,114 +699,6 @@ def test_sat_signed_distance_batch():
     print("  [PASS] _sat_signed_distance batch")
 
 
-# ─────────────────────────── _segments_intersect_rect ───────────────────────
-# Reference rect for these tests:
-# center=(0,0), heading=0, l=4, w=2 → x∈[-2,2], y∈[-1,1]
-
-_UNIT_RECT = None  # lazy-initialised once below
-
-
-def _get_unit_rect(B: int = 1) -> torch.Tensor:
-    spec = torch.tensor([[0.0, 0.0, 1.0, 0.0, 4.0, 2.0]]).expand(B, -1)
-    return _rect_corners(spec)
-
-
-def test_segments_intersect_rect_crossing():
-    """Segment crossing both sides of the rectangle → True."""
-    rect = _get_unit_rect()
-    s = torch.tensor([[[-5.0, 0.0]]])  # [1, 1, 2]
-    e = torch.tensor([[[5.0, 0.0]]])
-    assert _segments_intersect_rect(s, e, rect).item(), "Through-crossing segment should intersect"
-    print("  [PASS] _segments_intersect_rect crossing")
-
-
-def test_segments_intersect_rect_endpoint_inside():
-    """Segment with one endpoint inside the rectangle → True."""
-    rect = _get_unit_rect()
-    s = torch.tensor([[[0.0, 0.0]]])  # inside rect (x∈[-2,2], y∈[-1,1])
-    e = torch.tensor([[[10.0, 0.0]]])  # outside
-    assert _segments_intersect_rect(s, e, rect).item(), (
-        "Segment with inside endpoint should intersect"
-    )
-    print("  [PASS] _segments_intersect_rect endpoint inside")
-
-
-def test_segments_intersect_rect_fully_inside():
-    """Segment fully inside the rectangle → True (both endpoints inside)."""
-    rect = _get_unit_rect()
-    s = torch.tensor([[[-0.5, 0.0]]])
-    e = torch.tensor([[[0.5, 0.0]]])
-    assert _segments_intersect_rect(s, e, rect).item(), "Fully-inside segment should be detected"
-    print("  [PASS] _segments_intersect_rect fully inside")
-
-
-def test_segments_intersect_rect_outside():
-    """Segment entirely outside the rectangle → False."""
-    rect = _get_unit_rect()
-    s = torch.tensor([[[-5.0, 5.0]]])  # y=5 is well above rect (y∈[-1,1])
-    e = torch.tensor([[[5.0, 5.0]]])
-    assert not _segments_intersect_rect(s, e, rect).item(), "Outside segment should not intersect"
-    print("  [PASS] _segments_intersect_rect outside")
-
-
-def test_segments_intersect_rect_parallel_outside():
-    """Segment parallel to a rect edge but just outside → False."""
-    rect = _get_unit_rect()
-    # Rect top edge at y=1; segment at y=1.5 (above)
-    s = torch.tensor([[[-5.0, 1.5]]])
-    e = torch.tensor([[[5.0, 1.5]]])
-    assert not _segments_intersect_rect(s, e, rect).item(), (
-        "Parallel segment above rect should not intersect"
-    )
-    print("  [PASS] _segments_intersect_rect parallel outside")
-
-
-def test_segments_intersect_rect_valid_mask_excludes_crossing():
-    """valid=False for an otherwise-crossing segment → no intersection reported."""
-    rect = _get_unit_rect()
-    s = torch.tensor([[[-5.0, 0.0], [10.0, 5.0]]])  # seg0 crosses, seg1 doesn't
-    e = torch.tensor([[[5.0, 0.0], [20.0, 5.0]]])
-    # All invalid
-    assert not _segments_intersect_rect(s, e, rect, torch.tensor([[False, False]])).item(), (
-        "All-invalid mask: no intersection"
-    )
-    # Only the non-crossing segment is valid
-    assert not _segments_intersect_rect(s, e, rect, torch.tensor([[False, True]])).item(), (
-        "Only non-crossing segment valid: no intersection"
-    )
-    # Only the crossing segment is valid
-    assert _segments_intersect_rect(s, e, rect, torch.tensor([[True, False]])).item(), (
-        "Only crossing segment valid: intersection"
-    )
-    print("  [PASS] _segments_intersect_rect valid mask")
-
-
-def test_segments_intersect_rect_batch():
-    """Batch B=2: b=0 has crossing segment, b=1 has outside segment."""
-    rect = _get_unit_rect(B=2)  # [2, 4, 2]
-    # b=0: (-5,0)→(5,0) crosses; b=1: (-5,5)→(5,5) is above
-    s = torch.tensor([[[-5.0, 0.0]], [[-5.0, 5.0]]])  # [2, 1, 2]
-    e = torch.tensor([[[5.0, 0.0]], [[5.0, 5.0]]])
-    result = _segments_intersect_rect(s, e, rect)
-    assert result.shape == (2,)
-    assert result[0].item() and not result[1].item(), (
-        f"Expected [True, False], got {result.tolist()}"
-    )
-    print("  [PASS] _segments_intersect_rect batch")
-
-
-def test_segments_intersect_rect_multiple_segments_any():
-    """With N segments: True if ANY valid segment intersects."""
-    rect = _get_unit_rect()
-    # Two segments: one outside, one crossing; no mask
-    s = torch.tensor([[[-5.0, 5.0], [-5.0, 0.0]]])  # [1, 2, 2]
-    e = torch.tensor([[[5.0, 5.0], [5.0, 0.0]]])
-    assert _segments_intersect_rect(s, e, rect).item(), (
-        "Should return True when any segment crosses"
-    )
-    print("  [PASS] _segments_intersect_rect multiple (any)")
-
-
 # ────────────────────────── _check_aug_validity ─────────────────────────────
 
 
@@ -910,70 +764,17 @@ def test_check_aug_validity_all_zero_neighbors_ignored():
     print("  [PASS] _check_aug_validity all-zero neighbors ignored")
 
 
-def test_check_aug_validity_lane_left_boundary_cross():
-    """Ego shifted left until it straddles the left lane boundary → collision."""
+def test_check_aug_validity_ignores_internal_lane_boundaries():
+    """Nearby lane markings are scene context, not solid collision obstacles."""
     aug = StatePerturbation()
     B = 1
-    # Ego at y=0.8, width=2 → spans y∈[-0.2, 1.8].
-    # Left boundary at absolute y=1.0 (center y=0, left_off=+1.0) → inside ego.
     ego = _ego_state(B, y=0.8, vx=5.0)
     inputs = _check_inputs(
         B,
         torch.zeros(B, 5, 31, 11),
         _lanes(B, list(range(-10, 10)), left_y_off=1.0, right_y_off=-3.0),
     )
-    collision = aug._check_aug_validity(ego, inputs)
-    assert collision.item(), "Left boundary inside ego must trigger collision"
-    print("  [PASS] _check_aug_validity left boundary cross")
-
-
-def test_check_aug_validity_lane_right_boundary_cross():
-    """Ego shifted left until it straddles the right lane boundary → collision."""
-    aug = StatePerturbation()
-    B = 1
-    # Ego at y=0.8 → spans y∈[-0.2, 1.8].
-    # Right boundary at absolute y=-0.1 (right_off=-0.1) → inside ego.
-    ego = _ego_state(B, y=0.8, vx=5.0)
-    inputs = _check_inputs(
-        B,
-        torch.zeros(B, 5, 31, 11),
-        _lanes(B, list(range(-10, 10)), left_y_off=3.0, right_y_off=-0.1),
-    )
-    collision = aug._check_aug_validity(ego, inputs)
-    assert collision.item(), "Right boundary inside ego must trigger collision"
-    print("  [PASS] _check_aug_validity right boundary cross")
-
-
-def test_check_aug_validity_lane_both_boundaries_clear():
-    """Ego centered in lane with boundaries at ±2 m: no collision."""
-    aug = StatePerturbation()
-    B = 1
-    # Ego at (0, 0), width=2 → spans y∈[-1, 1].
-    # Left boundary at y=+2.0, right at y=-2.0: both well outside.
-    ego = _ego_state(B, vx=5.0)
-    inputs = _check_inputs(
-        B,
-        torch.zeros(B, 5, 31, 11),
-        _lanes(B, list(range(-10, 10)), left_y_off=2.0, right_y_off=-2.0),
-    )
-    collision = aug._check_aug_validity(ego, inputs)
-    assert not collision.item(), "Ego centered in lane should not collide"
-    print("  [PASS] _check_aug_validity lane both boundaries clear")
-
-
-def test_check_aug_validity_zero_boundary_offset_ignored():
-    """Boundary offset ≤ 0.01 m is treated as 'no data' and ignored."""
-    aug = StatePerturbation()
-    B = 1
-    # Ego at (0, 0). If zero right_off were honoured, abs right boundary = center = (cx, 0)
-    # which would be inside ego.  It must be skipped.
-    ego = _ego_state(B, vx=5.0)
-    inputs = _check_inputs(
-        B, torch.zeros(B, 5, 31, 11), _lanes(B, list(range(-3, 4)), left_y_off=2.0, right_y_off=0.0)
-    )
-    collision = aug._check_aug_validity(ego, inputs)
-    assert not collision.item(), "Zero boundary offset must not trigger collision"
-    print("  [PASS] _check_aug_validity zero boundary offset ignored")
+    assert not aug._check_aug_validity(ego, inputs).item()
 
 
 def test_check_aug_validity_batch_mixed():
@@ -1144,10 +945,6 @@ ALL_TESTS = [
     test_centric_transform_zero_mask_preserved,
     test_centric_transform_translation,
     test_centric_transform_ego_xy_zeroed,
-    # ── _cross2d ──
-    test_cross2d_ccw_positive,
-    test_cross2d_parallel_zero,
-    test_cross2d_batched,
     # ── _rect_corners ──
     test_rect_corners_shape,
     test_rect_corners_heading_zero,
@@ -1158,24 +955,13 @@ ALL_TESTS = [
     test_sat_signed_distance_separated_positive,
     test_sat_signed_distance_touching_zero,
     test_sat_signed_distance_batch,
-    # ── _segments_intersect_rect ──
-    test_segments_intersect_rect_crossing,
-    test_segments_intersect_rect_endpoint_inside,
-    test_segments_intersect_rect_fully_inside,
-    test_segments_intersect_rect_outside,
-    test_segments_intersect_rect_parallel_outside,
-    test_segments_intersect_rect_valid_mask_excludes_crossing,
-    test_segments_intersect_rect_batch,
-    test_segments_intersect_rect_multiple_segments_any,
     # ── _check_aug_validity ──
     test_check_aug_validity_no_collision_sources,
     test_check_aug_validity_neighbor_at_ego_position,
     test_check_aug_validity_neighbor_far,
+    test_check_aug_validity_uses_rear_axle_pose_for_ego_box,
     test_check_aug_validity_all_zero_neighbors_ignored,
-    test_check_aug_validity_lane_left_boundary_cross,
-    test_check_aug_validity_lane_right_boundary_cross,
-    test_check_aug_validity_lane_both_boundaries_clear,
-    test_check_aug_validity_zero_boundary_offset_ignored,
+    test_check_aug_validity_ignores_internal_lane_boundaries,
     test_check_aug_validity_batch_mixed,
     test_check_aug_validity_ego_shape_controls_size,
     # ── augment + collision filter (integration) ──

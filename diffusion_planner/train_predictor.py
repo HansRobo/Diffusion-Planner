@@ -417,9 +417,9 @@ def get_args(args_list=None):
         raise ValueError("--planning_hybrid_loss must be >= 0")
     if args.diffusion_sample_steps < 2:
         raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
-    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
+    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
         raise ValueError(
-            "--multisample_eval_sample_steps must be >= 3 for the third-order DPM solver"
+            "--multisample_eval_sample_steps must be >= 2 for the second-order DPM solver"
         )
     if args.learning_rate <= 0.0:
         raise ValueError("--learning_rate must be > 0")

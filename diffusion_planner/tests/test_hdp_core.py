@@ -88,6 +88,31 @@ def test_hdp_representation_and_normalization_round_trip():
     )
 
 
+def test_state_normalizer_caches_stats_by_kind_device_and_dtype():
+    normalizer = StateNormalizer(
+        [[[10, 0, 0, 0]]],
+        [[[20, 20, 1, 1]]],
+        [0, 0, 0, 0],
+        [0.5, 0.5, 1, 1],
+    )
+
+    state_fp32 = normalizer._mean_std_on(torch.device("cpu"), torch.float32)
+    velocity_fp32 = normalizer.ego_velocity_stats_on(torch.device("cpu"), torch.float32)
+    state_bf16 = normalizer._mean_std_on(torch.device("cpu"), torch.bfloat16)
+
+    assert state_fp32[0] is normalizer._mean_std_on(torch.device("cpu"), torch.float32)[0]
+    assert (
+        velocity_fp32[0] is normalizer.ego_velocity_stats_on(torch.device("cpu"), torch.float32)[0]
+    )
+    assert state_fp32[0] is not velocity_fp32[0]
+    assert state_fp32[0].dtype == torch.float32
+    assert state_bf16[0].dtype == torch.bfloat16
+
+    data = torch.tensor([[[[0.5, -0.25, 1.0, 0.0]]]], dtype=torch.float32)
+    expected = (data - torch.tensor([0.0, 0.0, 0.0, 0.0])) / torch.tensor([0.5, 0.5, 1.0, 1.0])
+    torch.testing.assert_close(normalize_ego_velocity(data, normalizer), expected)
+
+
 def test_hdp_dit_self_attention_runs_over_future_timesteps():
     model = DiT(depth=1, output_dim=4, hidden_dim=32, heads=4, future_len=80).eval()
     observed = []
