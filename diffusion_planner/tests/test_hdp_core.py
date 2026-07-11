@@ -16,6 +16,7 @@ from diffusion_planner.hdp_rl_utils import (
     _attenuate_rear_only_risk,
     _collision_and_leader_terms,
     _hdp_lane_score,
+    _lane_reward_centerlines,
     _occupancy_score,
     _scene_neighbors,
     compute_reward_weights,
@@ -197,7 +198,9 @@ def test_hdp_decoder_repeats_only_global_route_condition_for_rl_groups():
     output = decoder(encoding, inputs)["model_output"]
     assert output.shape == (candidate_batch, 1, 80, 4)
     output.square().mean().backward()
-    assert all(parameter.grad is not None for parameter in decoder.global_route_encoder.parameters())
+    assert all(
+        parameter.grad is not None for parameter in decoder.global_route_encoder.parameters()
+    )
 
 
 def test_hdp_temporal_position_initialization_matches_navsim_frequency_base():
@@ -650,6 +653,26 @@ def test_hdp_lane_reward_masks_centerline_to_centerline_change_without_indicator
 
     assert lane_change
     torch.testing.assert_close(lane_score, torch.zeros(1))
+
+
+def test_hdp_lane_reward_prefers_aligned_route_and_falls_back_when_route_is_wrong():
+    x = torch.linspace(0.1, 20.0, 20)
+    lanes = torch.zeros(2, 20, 8)
+    lanes[:, :, 0] = x
+    lanes[1, :, 1] = 3.5
+    lanes[..., 2] = 1.0
+    expert = lanes[0, :, :4].clone()
+
+    aligned_route = lanes[:1].clone()
+    selected, route_used = _lane_reward_centerlines(expert, lanes, aligned_route, HDPRewardConfig())
+    assert route_used
+    torch.testing.assert_close(selected, aligned_route)
+
+    wrong_route = aligned_route.clone()
+    wrong_route[..., 1] = 20.0
+    selected, route_used = _lane_reward_centerlines(expert, lanes, wrong_route, HDPRewardConfig())
+    assert not route_used
+    torch.testing.assert_close(selected, lanes)
 
 
 def test_seeded_multisample_metrics_compute_minade_and_minfde():

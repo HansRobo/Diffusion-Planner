@@ -388,6 +388,26 @@ def _nearest_lane_distance(points: torch.Tensor, lanes: torch.Tensor) -> torch.T
     return distance.reshape(points.shape[:-1])
 
 
+def _lane_reward_centerlines(
+    expert_future: torch.Tensor,
+    lanes: torch.Tensor,
+    route_lanes: torch.Tensor | None,
+    config: HDPRewardConfig,
+) -> tuple[torch.Tensor, bool]:
+    """Prefer the navigation route when it agrees with the logged expert trajectory."""
+    if route_lanes is None or not (route_lanes[..., :2].abs().sum(dim=-1) > 1e-6).any():
+        return lanes, False
+
+    expert_valid = expert_future[..., 2:4].norm(dim=-1) > 0.5
+    if not expert_valid.any():
+        return lanes, False
+    route_distance = _nearest_lane_distance(expert_future[expert_valid, :2], route_lanes)
+    route_aligned = (route_distance.mean() <= config.lane_half_width_m) & (
+        route_distance.max() <= 2.0 * config.lane_half_width_m
+    )
+    return (route_lanes, True) if bool(route_aligned.item()) else (lanes, False)
+
+
 def _hdp_lane_score(
     ego_trajs: torch.Tensor,
     expert_future: torch.Tensor,
@@ -480,6 +500,7 @@ def compute_hdp_reward(
             "collision_rear",
             "lane_masked",
             "lane_change_masked",
+            "lane_route_source",
             "occupancy_any_source",
             "occupancy_static_source",
             "occupancy_stopped_source",
@@ -528,10 +549,17 @@ def compute_hdp_reward(
             terms["collision_active"],
             config.rear_end_penalty,
         )
+        expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])
+        lane_centerlines, lane_route_source = _lane_reward_centerlines(
+            expert_future,
+            scene_inputs["lanes"][scene],
+            scene_inputs.get("route_lanes", None)[scene] if "route_lanes" in scene_inputs else None,
+            config,
+        )
         lane, expert_off_lane, expert_lane_change = _hdp_lane_score(
             ego_group[scene],
-            heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene]),
-            scene_inputs["lanes"][scene],
+            expert_future,
+            lane_centerlines,
             scene_inputs.get("turn_indicators", None)[scene]
             if "turn_indicators" in scene_inputs
             else None,
@@ -555,6 +583,7 @@ def compute_hdp_reward(
         metric_lists["collision_rear"].append(terms["collision_rear"])
         metric_lists["lane_masked"].append(lane.new_full((n,), float(expert_off_lane)))
         metric_lists["lane_change_masked"].append(lane.new_full((n,), float(expert_lane_change)))
+        metric_lists["lane_route_source"].append(lane.new_full((n,), float(lane_route_source)))
         metric_lists["occupancy_any_source"].append(
             lane.new_full((n,), float(any(occupancy_sources.values())))
         )
@@ -652,9 +681,7 @@ def sample_group(
                 cached_global_route_condition = net.decoder.global_route_encoder(
                     scene_norm_inputs["route_lanes"]
                 ).repeat_interleave(group_size, dim=0)
-                inference_inputs["_cached_global_route_condition"] = (
-                    cached_global_route_condition
-                )
+                inference_inputs["_cached_global_route_condition"] = cached_global_route_condition
                 outputs = net.decoder(cached_encoding, inference_inputs)
             else:
                 _, outputs = model(inference_inputs)
