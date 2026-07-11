@@ -49,6 +49,7 @@ def run_grouped_closed_loop_eval(
     draw_every: int = 8,
     fps: float = 10.0,
     areas: list[str] | None = None,
+    replan_interval: int = 10,
     verbose: bool = True,
 ) -> dict:
     """Run grouped-by-area closed-loop eval; return summary for disk + wandb.
@@ -118,6 +119,7 @@ def run_grouped_closed_loop_eval(
             unstick_after=unstick_after,
             unstick_advance_m=unstick_advance_m,
             draw_every=draw_every,
+            replan_interval=replan_interval,
         )
         rollouts[bag_name] = rollout
         timelines[bag_name] = tl

@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-
 from scenario_generation.scenario_classification import (
     area_at_idx,
+    discover_classification_eval_jobs,
     episodes_from_entry,
     idx_in_labeled_ranges,
     iter_area_spans,
     iter_segments,
     load_area_metric_groups,
     load_classification_json,
+    parse_npz_valid_layout,
     resolve_classification_json,
     time_series_from_doc,
     validate_classification_npz_root,
@@ -112,10 +114,10 @@ def test_validate_classification_npz_root_date_mismatch(tmp_path: Path) -> None:
 def test_resolve_classification_json_explicit(tmp_path: Path) -> None:
     json_path = tmp_path / "2026-01-15.json"
     json_path.write_text("{}", encoding="utf-8")
-    resolved = resolve_classification_json(
-        tmp_path / "2026-01-15",
-        json_path,
-    )
+    npz_root = tmp_path / "x2_dev" / "foo" / "valid" / "2026-01-15"
+    npz_root.mkdir(parents=True)
+    (npz_root / "10-00-00").mkdir()
+    resolved = resolve_classification_json(npz_root, json_path)
     assert resolved == json_path.resolve()
 
 
@@ -125,13 +127,44 @@ def test_resolve_classification_json_auto(tmp_path: Path) -> None:
     (root / dataset).mkdir(parents=True)
     json_path = root / dataset / "2026-01-15.json"
     json_path.write_text("{}", encoding="utf-8")
+    npz_root = tmp_path / "corpus" / "x2_dev" / "foo" / "valid" / "2026-01-15"
+    npz_root.mkdir(parents=True)
+    (npz_root / "13-42-45").mkdir()
     resolved = resolve_classification_json(
-        tmp_path / "2026-01-15",
+        npz_root,
         None,
-        dataset_name=dataset,
-        search_roots=[root],
+        classification_root=root,
     )
     assert resolved == json_path.resolve()
+
+
+def test_discover_classification_eval_jobs_from_root(tmp_path: Path) -> None:
+    root = tmp_path / "scenario_classification_json"
+    dataset = "x2_dev/2231_map"
+    (root / dataset).mkdir(parents=True)
+    for date in ("2026-01-15", "2026-01-16"):
+        (root / dataset / f"{date}.json").write_text('{"date": "' + date + '"}', encoding="utf-8")
+
+    valid = tmp_path / "corpus" / "x2_dev" / "2231_map" / "valid"
+    for date in ("2026-01-15", "2026-01-16", "2026-01-17"):
+        day = valid / date
+        day.mkdir(parents=True)
+        (day / "10-00-00").mkdir()
+
+    jobs = discover_classification_eval_jobs(valid, classification_root=root)
+    assert len(jobs) == 2
+    assert {j.date for j in jobs} == {"2026-01-15", "2026-01-16"}
+    assert all(j.dataset_key == dataset for j in jobs)
+
+
+def test_parse_npz_valid_layout_infer_dataset_key(tmp_path: Path) -> None:
+    npz = tmp_path / "20260623" / "x2_dev" / "2231_map" / "valid" / "2026-01-15" / "13-42-45"
+    npz.mkdir(parents=True)
+    layout = parse_npz_valid_layout(npz)
+    assert layout is not None
+    assert layout.dataset_key == "x2_dev/2231_map"
+    assert layout.dates == ("2026-01-15",)
+    assert layout.npz_roots_by_date["2026-01-15"] == npz.parent
 
 
 def test_resolve_classification_json_missing_returns_none(tmp_path: Path) -> None:

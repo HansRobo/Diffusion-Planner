@@ -7,46 +7,70 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+# Keys rolled up with sum() across segment rows (validation / per-area totals).
+_SUM_KEYS = (
+    "n_steps_run",
+    "neighbor_violation_steps",
+    "rb_violation_steps",
+    "collision_steps",
+    "n_collision_steps",
+    "n_near_miss_steps",
+    "n_snaps",
+)
+
+# Keys excluded from wandb scalar comparison (episode/video counts vary by dataset).
+WANDB_EXCLUDED_SCALAR_KEYS = frozenset({"n_segments", "n_segments_total", "n_episodes", "n_videos"})
+
 
 def aggregate_segment_rows(rows: list[dict]) -> dict:
-    """Build per metric_group and per area_name summaries from segment rows."""
-    by_group: dict[str, list[dict]] = defaultdict(list)
+    """Build per-area and validation-wide totals from segment rows."""
     by_area: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
-        by_group[row["metric_group"]].append(row)
         by_area[row["area_name"]].append(row)
 
-    def _agg(items: list[dict]) -> dict:
-        if not items:
-            return {"n_segments": 0}
-        n = len(items)
-
-        def _mean(key: str) -> float | None:
-            vals = [r[key] for r in items if r.get(key) is not None and r[key] == r[key]]
-            return float(sum(vals) / len(vals)) if vals else None
-
-        def _sum(key: str) -> int:
-            return int(sum(r.get(key, 0) or 0 for r in items))
-
-        return {
-            "n_segments": n,
-            "centerline_mean_m": _mean("centerline_mean_m"),
-            "centerline_p95_m": _mean("centerline_p95_m"),
-            "turn_match_rate": _mean("turn_match_rate"),
-            "neighbor_violation_steps": _sum("neighbor_violation_steps"),
-            "rb_violation_steps": _sum("rb_violation_steps"),
-            "collision_steps": _sum("collision_steps"),
-            "min_clearance_m": min(
-                (r["min_clearance_m"] for r in items if r.get("min_clearance_m") is not None),
-                default=None,
-            ),
-        }
-
     return {
-        "by_metric_group": {k: _agg(v) for k, v in sorted(by_group.items())},
-        "by_area_name": {k: _agg(v) for k, v in sorted(by_area.items())},
-        "n_segments_total": len(rows),
+        "by_area_name": {k: _agg_segment_stats(v) for k, v in sorted(by_area.items())},
+        "totals": _agg_segment_stats(rows),
     }
+
+
+def _agg_segment_stats(items: list[dict]) -> dict:
+    if not items:
+        return {}
+
+    def _sum(key: str) -> int:
+        return int(sum(r.get(key, 0) or 0 for r in items))
+
+    def _weighted_mean(rate_key: str, weight_key: str = "n_steps_run") -> float | None:
+        num = 0.0
+        den = 0.0
+        for row in items:
+            rate = row.get(rate_key)
+            if rate is None or rate != rate:
+                continue
+            weight = float(row.get(weight_key) or 0)
+            if weight <= 0:
+                continue
+            num += float(rate) * weight
+            den += weight
+        return float(num / den) if den > 0 else None
+
+    def _mean(key: str) -> float | None:
+        vals = [r[key] for r in items if r.get(key) is not None and r[key] == r[key]]
+        return float(sum(vals) / len(vals)) if vals else None
+
+    finite_min_cl = [
+        r["min_clearance_m"]
+        for r in items
+        if r.get("min_clearance_m") is not None and r["min_clearance_m"] == r["min_clearance_m"]
+    ]
+
+    out: dict = {key: _sum(key) for key in _SUM_KEYS}
+    out["centerline_mean_m"] = _weighted_mean("centerline_mean_m")
+    out["centerline_p95_m"] = _mean("centerline_p95_m")
+    out["turn_match_rate"] = _weighted_mean("turn_match_rate")
+    out["min_clearance_m"] = float(min(finite_min_cl)) if finite_min_cl else None
+    return out
 
 
 RESULTS_TABLE_COLUMNS = [

@@ -57,6 +57,51 @@ def _ego_pred_to_world(pred_xy, pred_cos_sin, ex, ey, eyaw):
     return np.stack([wx, wy], axis=-1).astype(np.float32), wh.astype(np.float32)
 
 
+def _closed_loop_replan_step(
+    k: int,
+    replan_interval: int,
+    plan_world,
+    live_pose: np.ndarray,
+    np_dict,
+    model,
+    model_args,
+    device: str,
+):
+    """Run model inference on replan steps; execute cached world plan between replans.
+
+    Returns ``(pred_cur, plan_world, override, outputs)`` where ``override`` is passed to
+    ``_advance_step`` on cached-plan steps (open-loop pose from the pinned world trajectory).
+    """
+    offset = k % replan_interval
+    override = None
+    outputs = None
+    if plan_world is None or offset == 0:
+        data = _to_torch_batch([np_dict], model_args, device)
+        _, outputs = model(data)
+        pred = outputs["prediction"][0, 0].cpu().numpy()
+        plan_world = _ego_pred_to_world(
+            pred[:, :2], pred[:, 2:4], live_pose[0], live_pose[1], live_pose[2]
+        )
+        pred_cur = pred
+    else:
+        off = min(offset, len(plan_world[0]) - 1)
+        tx, ty, th = (
+            float(plan_world[0][off, 0]),
+            float(plan_world[0][off, 1]),
+            float(plan_world[1][off]),
+        )
+        spd = float(np.hypot(tx - live_pose[0], ty - live_pose[1]) / DT)
+        override = (np.array([tx, ty, th], dtype=np.float64), spd)
+        pred_cur = _world_plan_to_ego(
+            plan_world[0][off:],
+            plan_world[1][off:],
+            live_pose[0],
+            live_pose[1],
+            live_pose[2],
+        )
+    return pred_cur, plan_world, override, outputs
+
+
 def _world_plan_to_ego(world_xy, world_h, ex, ey, eyaw):
     """Inverse of ``_ego_pred_to_world``: express a fixed world-frame plan in the ego frame at
     pose ``(ex, ey, eyaw)``.
@@ -1289,13 +1334,14 @@ def render_segment(
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
     *,
-    replan_interval: int = 1,
+    replan_interval: int = 10,
     draw_every: int = 1,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
-    ``replan_interval``: accepted for call-site compatibility; closed-loop always re-runs the
-    model every sim step (equivalent to ``replan_interval=1``). Cached-plan override is not used.
+    ``replan_interval``: re-run the model every N steps (1 = every step). Between inferences the
+    cached plan keeps being executed — pinned in the world frame and re-expressed in the current
+    ego frame each step (``_world_plan_to_ego``), so the ego advances along the trajectory.
 
     ``draw_every``: write a PNG only every N steps (1 = every step). The rollout still single-steps
     at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
@@ -1349,6 +1395,7 @@ def render_segment(
         if interpolate and neighbor_history_mode != "sim"
         else {}
     )
+    plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
     # goal is the recorded GT end pose `poses[end-1]`, which a diverging closed-loop ego may never
@@ -1409,10 +1456,18 @@ def render_segment(
             )
             + "\n"
         )
-        data = _to_torch_batch([np_dict], model_args, device)
-        _, outputs = model(data)
-        pred_cur = outputs["prediction"][0, 0].cpu().numpy()
-        _feed_turn_indicator(s, outputs)
+        pred_cur, plan_world, override, outputs = _closed_loop_replan_step(
+            k,
+            replan_interval,
+            plan_world,
+            s.live_pose,
+            np_dict,
+            model,
+            model_args,
+            device,
+        )
+        if outputs is not None:
+            _feed_turn_indicator(s, outputs)
         nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
@@ -1430,7 +1485,11 @@ def render_segment(
                 view_half_m=view_half_m,
             )
         _score_into(s, neighbors_live, device, timers)
-        _advance_step(s, pred_cur, idx, device, timers)
+        snaps_before = s.n_snaps
+        _advance_step(s, pred_cur, idx, device, timers, override=override)
+        if s.n_snaps > snaps_before:
+            # Unstick teleport: cached plan is pinned pre-snap — force a fresh inference.
+            plan_world = None
     dbg.close()
     return _finalize(s, timers).metrics
 

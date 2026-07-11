@@ -82,6 +82,13 @@ def add_rollout_args(parser: argparse.ArgumentParser) -> None:
         default=8,
         help="render PNG every N steps (matplotlib cost throttle)",
     )
+    parser.add_argument(
+        "--replan_interval",
+        type=int,
+        default=10,
+        help="re-run the model every N sim steps (1=every step); between replans execute the "
+        "cached world-frame plan open-loop",
+    )
 
 
 def add_output_args(parser: argparse.ArgumentParser) -> None:
@@ -106,10 +113,17 @@ def add_full_route_args(parser: argparse.ArgumentParser) -> None:
 
 def add_grouped_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--classification_json_root",
+        type=Path,
+        default=None,
+        help="Root of scenario_classification_json/ ({root}/{project}/{map}/{date}.json). "
+        "Auto-matched to --npz_root valid layout.",
+    )
+    parser.add_argument(
         "--classification_json",
         type=Path,
         default=None,
-        help="scenario_classification_json/.../<date>.json from classify_scenario_corpus (grouped mode)",
+        help="Optional legacy single {date}.json override. Prefer --classification_json_root.",
     )
     parser.add_argument(
         "--areas",
@@ -157,6 +171,7 @@ def run_full_route_eval(args: argparse.Namespace) -> dict:
         unstick_teleport_after=args.unstick_teleport_after,
         fps=args.fps,
         draw_every=args.draw_every,
+        replan_interval=args.replan_interval,
         neighbor_history_mode="recorded",
         verbose=True,
     )
@@ -165,29 +180,72 @@ def run_full_route_eval(args: argparse.Namespace) -> dict:
 
 
 def run_grouped_eval(args: argparse.Namespace) -> int:
-    if args.classification_json is None or args.out_dir is None:
-        raise SystemExit("grouped mode requires --classification_json and --out_dir")
+    if args.out_dir is None:
+        raise SystemExit("grouped mode requires --out_dir")
+
+    from scenario_generation.scenario_classification import (
+        discover_classification_eval_jobs,
+        merge_grouped_eval_summaries,
+    )
+
+    cl_root = args.classification_json_root
+    cl_explicit = args.classification_json
+    if cl_explicit is not None and cl_explicit.is_dir():
+        cl_root = cl_root or cl_explicit
+        cl_explicit = None
+
+    jobs = discover_classification_eval_jobs(
+        args.npz_root,
+        classification_root=cl_root,
+        explicit_path=cl_explicit,
+        dataset_name=getattr(args, "scenario_dataset_name", None),
+    )
+    if not jobs:
+        raise SystemExit(
+            "grouped mode: no classification JSON matched npz_root. Set "
+            "--classification_json_root (scenario_classification_json/) and ensure "
+            "npz path follows .../{project}/{map}/valid/{date}/..."
+        )
 
     model, model_args = load_model(args.model_path, args.device)
-    summary = run_grouped_closed_loop_eval(
-        model,
-        model_args,
-        args.npz_root,
-        args.classification_json,
-        args.out_dir,
-        device=args.device,
-        near_miss_thresh=args.near_miss_thresh,
-        search_radius=args.search_radius,
-        warmup_steps=args.warmup_steps,
-        unstick_after=args.unstick_after,
-        unstick_advance_m=args.unstick_advance_m,
-        draw_every=args.draw_every,
-        fps=args.fps,
-        areas=args.areas,
-        verbose=True,
-    )
+    summaries: list[dict] = []
+    for job in jobs:
+        job_out = args.out_dir if len(jobs) == 1 else args.out_dir / job.date
+        print(
+            f"Grouped job: {job.dataset_key} {job.date} "
+            f"npz={job.npz_root} json={job.classification_json}"
+        )
+        job_summary = run_grouped_closed_loop_eval(
+            model,
+            model_args,
+            job.npz_root,
+            job.classification_json,
+            job_out,
+            device=args.device,
+            near_miss_thresh=args.near_miss_thresh,
+            search_radius=args.search_radius,
+            warmup_steps=args.warmup_steps,
+            unstick_after=args.unstick_after,
+            unstick_advance_m=args.unstick_advance_m,
+            draw_every=args.draw_every,
+            replan_interval=args.replan_interval,
+            fps=args.fps,
+            areas=args.areas,
+            verbose=True,
+        )
+        job_summary["date"] = job.date
+        job_summary["dataset_key"] = job.dataset_key
+        summaries.append(job_summary)
+
+    summary = merge_grouped_eval_summaries(summaries)
+    out_dir = Path(args.out_dir)
+    from scenario_generation.metrics.group_report import write_metrics_summary, write_results_table
+
+    write_results_table(summary.get("segments") or [], out_dir / "results_table.csv")
+    write_metrics_summary(summary.get("grouped_summary") or {}, out_dir / "metrics_summary.json")
     print(
-        f"Wrote {summary['n_episodes']} episode rows -> {Path(args.out_dir) / 'results_table.csv'}"
+        f"Wrote {summary['n_episodes']} episode rows ({len(jobs)} date(s)) -> "
+        f"{out_dir / 'results_table.csv'}"
     )
     return 0
 

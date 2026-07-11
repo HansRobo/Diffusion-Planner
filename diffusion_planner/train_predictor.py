@@ -4,6 +4,7 @@ from diffusion_planner.dimensions import *
 from diffusion_planner.train import model_training
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.train_utils import train_config_defaults_from_args_json
 
 
 def boolean(v):
@@ -22,7 +23,21 @@ def _train_config_default(name):
 
 
 def get_args(args_list=None):
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--args_json", type=str, default=None)
+    pre_known, remaining = pre_parser.parse_known_args(args_list)
+
     parser = argparse.ArgumentParser(description="Training")
+    if pre_known.args_json:
+        parser.set_defaults(**train_config_defaults_from_args_json(pre_known.args_json))
+
+    parser.add_argument(
+        "--args_json",
+        type=str,
+        default=None,
+        help="Optional args.json from a training run; seeds argparse defaults for model "
+        "architecture and data dims. Explicit CLI flags override these defaults.",
+    )
     parser.add_argument("--exp_name", type=str, required=True)
     parser.add_argument("--save_dir", type=str, help="save path for model ckpt", required=True)
 
@@ -237,28 +252,42 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
     parser.add_argument(
+        "--closed_loop_replan_interval",
+        type=int,
+        default=10,
+        help="re-run the model every N closed-loop steps (1=every step); between replans execute "
+        "the cached world-frame plan",
+    )
+    parser.add_argument(
+        "--closed_loop_classification_json_root",
+        type=str,
+        default="",
+        help="Root of scenario_classification_json/ (layout: {root}/{project}/{map}/{date}.json). "
+        "Matched against closed_loop_npz_root valid dates. Also via SCENARIO_CLASSIFICATION_JSON_ROOT.",
+    )
+    parser.add_argument(
         "--closed_loop_classification_json",
         type=str,
         default="",
-        help="scenario_classification_json path for grouped closed-loop eval. Empty = auto-resolve "
-        "from --closed_loop_scenario_dataset_name + npz date, else full-route fallback.",
+        help="Optional legacy override: path to a single {date}.json file. Prefer "
+        "--closed_loop_classification_json_root for new workflows.",
     )
     parser.add_argument(
         "--closed_loop_scenario_dataset_name",
         type=str,
         default="",
-        help="e.g. x2_dev/2231_odaiba_shinagawa_copied_from_xx1 for auto JSON lookup under "
-        "SCENARIO_CLASSIFICATION_JSON_ROOT or ../Diffusion-Planner-Meta-Repository/dataset/"
-        "scenario_classification_json/",
+        help="Optional dataset key e.g. x2_dev/2231_odaiba_... when NPZ path cannot be parsed; "
+        "otherwise inferred from .../{project}/{map}/valid/...",
     )
 
-    args = parser.parse_args(args_list)
+    args = parser.parse_args(remaining)
     return args
 
 
 def main():
     args = get_args()
     args_dict = vars(args)
+    args_dict.pop("args_json", None)
     train_config = TrainConfig(**args_dict)
 
     train_config.state_normalizer = StateNormalizer.from_json(train_config)

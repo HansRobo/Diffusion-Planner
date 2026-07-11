@@ -17,10 +17,10 @@ from scenario_generation.metrics.turn_indicator import score_turn_indicator_step
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import (
     _advance_step,
+    _closed_loop_replan_step,
     _draw_step,
     _pre_step,
     _seed_state,
-    _to_torch_batch,
 )
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.scenario_classification import AreaEpisode, area_at_idx
@@ -75,6 +75,7 @@ def run_full_route_rollout(
     unstick_after: int = 300,
     unstick_advance_m: float = 2.5,
     draw_every: int = 8,
+    replan_interval: int = 10,
 ) -> RouteRolloutResult:
     """One closed-loop pass over the entire route; tag each step by reproducer ``rec_idx`` area."""
     n = len(tl)
@@ -104,6 +105,7 @@ def run_full_route_rollout(
     )
 
     steps: list[StepRecord] = []
+    plan_world = None
 
     while not s.done:
         pre = _pre_step(s)
@@ -114,10 +116,17 @@ def run_full_route_rollout(
         metric_group = area_to_metric_group.get(area) if area else None
 
         turn_match = None
-        data = _to_torch_batch([np_dict], model_args, device)
-        _, outputs = model(data)
-        pred_cur = outputs["prediction"][0, 0].cpu().numpy()
-        if metric_group is not None:
+        pred_cur, plan_world, override, outputs = _closed_loop_replan_step(
+            int(s.k),
+            replan_interval,
+            plan_world,
+            s.live_pose,
+            np_dict,
+            model,
+            model_args,
+            device,
+        )
+        if outputs is not None and metric_group is not None:
             ti = score_turn_indicator_step(outputs, metric_group)
             if ti["turn_match"] is not None:
                 turn_match = bool(ti["turn_match"])
@@ -164,7 +173,10 @@ def run_full_route_rollout(
             )
         )
 
-        _advance_step(s, pred_cur, idx, device, timers)
+        snaps_before = s.n_snaps
+        _advance_step(s, pred_cur, idx, device, timers, override=override)
+        if s.n_snaps > snaps_before:
+            plan_world = None
 
     return RouteRolloutResult(
         route_key=route_key,

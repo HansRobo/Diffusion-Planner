@@ -347,6 +347,12 @@ def get_args():
     parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=2.5)
+    parser.add_argument(
+        "--closed_loop_replan_interval",
+        type=int,
+        default=10,
+        help="re-run the model every N closed-loop steps (1=every step)",
+    )
 
     args = parser.parse_args()
 

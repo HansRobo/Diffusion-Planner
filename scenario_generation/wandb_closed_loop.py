@@ -8,8 +8,9 @@ from pathlib import Path
 import pandas as pd
 import wandb
 
+from scenario_generation.metrics.group_report import WANDB_EXCLUDED_SCALAR_KEYS
+
 RESULTS_TABLE_COLUMNS = [
-    "metric_group",
     "area_name",
     "bag",
     "span_index",
@@ -18,6 +19,8 @@ RESULTS_TABLE_COLUMNS = [
     "centerline_mean_m",
     "centerline_p95_m",
     "turn_match_rate",
+    "neighbor_violation_steps",
+    "rb_violation_steps",
     "collision_steps",
     "n_collision_steps",
     "n_near_miss_steps",
@@ -28,41 +31,39 @@ RESULTS_TABLE_COLUMNS = [
 
 
 def build_grouped_closed_loop_wandb_log(summary: dict) -> dict:
-    """Scalars, per-area/per-group aggregates, results table, and episode videos."""
+    """Per-area scalars, validation totals, results table, and episode videos."""
     log: dict = {"closed_loop/mode": "grouped"}
-    log["closed_loop/grouped/n_episodes"] = int(summary.get("n_episodes", 0))
-    log["closed_loop/grouped/n_bags"] = int(summary.get("n_bags", 0))
     log["closed_loop/grouped/elapsed_sec"] = float(summary.get("elapsed_sec", 0.0))
 
     agg = summary.get("grouped_summary") or {}
-    for group, stats in (agg.get("by_metric_group") or {}).items():
-        for key, val in stats.items():
-            if not _wandb_scalar(val):
-                continue
-            log[f"closed_loop/grouped/metric_group/{group}/{key}"] = val
+    _log_scalar_group(log, "closed_loop/grouped/total", agg.get("totals") or {})
 
     for area, stats in (agg.get("by_area_name") or {}).items():
         safe_area = area.replace("/", "_")
-        for key, val in stats.items():
-            if not _wandb_scalar(val):
-                continue
-            log[f"closed_loop/grouped/area/{safe_area}/{key}"] = val
+        _log_scalar_group(log, f"closed_loop/grouped/area/{safe_area}", stats)
 
     rows = summary.get("segments") or []
     if rows:
         df = pd.DataFrame(rows)
         cols = [c for c in RESULTS_TABLE_COLUMNS if c in df.columns]
-        extra = [c for c in df.columns if c not in cols and c != "labeled_ranges"]
+        extra = [c for c in df.columns if c not in cols and c not in ("labeled_ranges", "metric_group")]
         log["closed_loop/grouped/results_table"] = wandb.Table(dataframe=df[cols + extra])
 
-    video_mp4s = summary.get("video_mp4s") or []
-    log["closed_loop/grouped/n_videos"] = len(video_mp4s)
-    for mp4 in video_mp4s:
+    for mp4 in summary.get("video_mp4s") or []:
         mp4_path = Path(mp4)
         key = _video_wandb_key(mp4_path)
         log[key] = wandb.Video(str(mp4_path), format="mp4")
 
     return log
+
+
+def _log_scalar_group(log: dict, prefix: str, stats: dict) -> None:
+    for key, val in stats.items():
+        if key in WANDB_EXCLUDED_SCALAR_KEYS:
+            continue
+        if not _wandb_scalar(val):
+            continue
+        log[f"{prefix}/{key}"] = val
 
 
 def build_full_closed_loop_wandb_log(summary: dict) -> dict:
@@ -104,6 +105,10 @@ def _video_wandb_key(mp4_path: Path) -> str:
     parts = mp4_path.parts
     if "videos" in parts:
         idx = parts.index("videos")
-        rel = "/".join(parts[idx + 1 :])
+        rel_parts = list(parts[idx + 1 :])
+        # videos/<metric_group>/<area>/file.mp4 -> area/file for stable area-level keys
+        if len(rel_parts) >= 2:
+            rel_parts = rel_parts[1:]
+        rel = "/".join(rel_parts)
         return f"closed_loop/grouped/video/{rel.replace('/', '_')}"
     return f"closed_loop/grouped/video/{mp4_path.stem}"

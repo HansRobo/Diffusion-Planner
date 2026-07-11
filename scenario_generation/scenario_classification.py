@@ -1,14 +1,50 @@
-"""Load and resolve portable scenario classification JSON (Meta-Repository format)."""
+"""Load and resolve portable scenario classification JSON (Meta-Repository format).
+
+Layout convention (mirrors on-disk NPZ valid trees)::
+
+    NPZ valid:   {corpus}/{project}/{map}/valid/{date}/{bag}/
+    Class JSON:  {root}/{project}/{map}/{date}.json
+
+Example::
+
+    .../x2_dev/2231_odaiba_shinagawa_copied_from_xx1/valid/2026-01-15/13-42-45/
+    .../scenario_classification_json/x2_dev/2231_odaiba_shinagawa_copied_from_xx1/2026-01-15.json
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 AreaEpisode = dict
 # keys: area, metric_group, video_start_idx, video_end_idx, labeled_ranges
+
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+BAG_RE = re.compile(r"^\d{2}-\d{2}-\d{2}$")
+
+
+@dataclass(frozen=True)
+class NpzValidLayout:
+    """Parsed NPZ path under ``.../{project}/{map}/valid/...``."""
+
+    dataset_key: str
+    valid_root: Path
+    dates: tuple[str, ...]
+    npz_roots_by_date: dict[str, Path]
+
+
+@dataclass(frozen=True)
+class ClassificationEvalJob:
+    """One grouped closed-loop eval: one valid date folder + one classification JSON."""
+
+    npz_root: Path
+    classification_json: Path
+    dataset_key: str
+    date: str
 
 
 def load_classification_json(path: Path) -> dict:
@@ -170,7 +206,7 @@ def validate_classification_npz_root(doc: dict, npz_root: Path) -> list[str]:
 
 
 def classification_json_search_roots() -> list[Path]:
-    """Candidate roots for auto-resolving ``scenario_classification_json/<dataset>/<date>.json``."""
+    """Default roots for ``scenario_classification_json/{dataset_key}/{date}.json``."""
     roots: list[Path] = []
     env = os.environ.get("SCENARIO_CLASSIFICATION_JSON_ROOT")
     if env:
@@ -185,32 +221,239 @@ def classification_json_search_roots() -> list[Path]:
     return roots
 
 
+def parse_npz_valid_layout(
+    npz_root: Path | str,
+    *,
+    dataset_name: str | None = None,
+) -> NpzValidLayout | None:
+    """Infer ``{project}/{map}``, valid root, and date(s) from an NPZ path.
+
+  Supported ``npz_root`` shapes::
+
+      .../{project}/{map}/valid
+      .../{project}/{map}/valid/{date}
+      .../{project}/{map}/valid/{date}/{bag}
+    """
+    path = Path(npz_root).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    # Keep symlink components (e.g. .../diffusion_planner_local_dataset/x2_dev/.../valid)
+    # so dataset_key inference matches classification JSON layout; do not .resolve().
+    parts = path.parts
+    if "valid" not in parts:
+        return None
+
+    valid_idx = parts.index("valid")
+    if valid_idx < 2:
+        return None
+
+    inferred_key = "/".join(parts[valid_idx - 2 : valid_idx])
+    dataset_key = (dataset_name or inferred_key).strip("/")
+    valid_root = Path(*parts[: valid_idx + 1])
+
+    def _npz_date_dir(date: str) -> Path:
+        logical = valid_root / date
+        if logical.is_dir():
+            return logical
+        return (valid_root / date).resolve()
+
+    after_valid = parts[valid_idx + 1 :]
+    if not after_valid:
+        dates = sorted(
+            d.name
+            for d in valid_root.iterdir()
+            if d.is_dir() and DATE_RE.match(d.name)
+        )
+        return NpzValidLayout(
+            dataset_key=dataset_key,
+            valid_root=valid_root,
+            dates=tuple(dates),
+            npz_roots_by_date={d: _npz_date_dir(d) for d in dates},
+        )
+
+    if not DATE_RE.match(after_valid[0]):
+        return None
+
+    date = after_valid[0]
+    return NpzValidLayout(
+        dataset_key=dataset_key,
+        valid_root=valid_root,
+        dates=(date,),
+        npz_roots_by_date={date: _npz_date_dir(date)},
+    )
+
+
+def _classification_search_roots(
+    classification_root: Path | str | None,
+    search_roots: list[Path] | None,
+) -> list[Path]:
+    roots: list[Path] = []
+    if classification_root:
+        root = Path(classification_root).expanduser()
+        if root.is_dir():
+            roots.append(root.resolve())
+    for root in search_roots or classification_json_search_roots():
+        resolved = root.expanduser().resolve()
+        if resolved.is_dir() and resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def _npz_date_has_bags(npz_date_root: Path) -> bool:
+    """True when the date folder exists and has at least one bag subdir or NPZ files."""
+    if not npz_date_root.is_dir():
+        return False
+    for child in npz_date_root.iterdir():
+        if child.is_dir() and BAG_RE.match(child.name):
+            return True
+        if child.suffix == ".npz":
+            return True
+    return False
+
+
+def discover_classification_eval_jobs(
+    npz_root: Path | str,
+    classification_root: Path | str | None = None,
+    *,
+    explicit_path: str | Path | None = None,
+    dataset_name: str | None = None,
+    search_roots: list[Path] | None = None,
+) -> list[ClassificationEvalJob]:
+    """Match classification JSON files under ``classification_root`` to NPZ valid dates.
+
+    Resolution order:
+    1. ``explicit_path`` when it is an existing ``.json`` file (legacy single-file override).
+    2. ``{root}/{dataset_key}/{date}.json`` for each valid date under ``npz_root``.
+    """
+    layout = parse_npz_valid_layout(npz_root, dataset_name=dataset_name)
+    if layout is None:
+        return []
+
+    if explicit_path:
+        path = Path(explicit_path).expanduser()
+        if path.is_file():
+            date = path.stem
+            npz_date_root = layout.npz_roots_by_date.get(date)
+            if npz_date_root is None:
+                # Legacy: npz_root may already be the date folder while JSON path is explicit.
+                npz_date_root = Path(npz_root).expanduser().resolve()
+                if DATE_RE.match(npz_date_root.name):
+                    date = npz_date_root.name
+                else:
+                    return []
+            return [
+                ClassificationEvalJob(
+                    npz_root=npz_date_root,
+                    classification_json=path.resolve(),
+                    dataset_key=layout.dataset_key,
+                    date=date,
+                )
+            ]
+        if path.is_dir():
+            classification_root = path
+
+    roots = _classification_search_roots(classification_root, search_roots)
+    if not roots:
+        return []
+
+    jobs: list[ClassificationEvalJob] = []
+    for date in layout.dates:
+        npz_date_root = layout.npz_roots_by_date[date]
+        if not _npz_date_has_bags(npz_date_root):
+            continue
+        json_path: Path | None = None
+        for root in roots:
+            candidate = root / layout.dataset_key / f"{date}.json"
+            if candidate.is_file():
+                json_path = candidate.resolve()
+                break
+        if json_path is None:
+            continue
+        jobs.append(
+            ClassificationEvalJob(
+                npz_root=npz_date_root,
+                classification_json=json_path,
+                dataset_key=layout.dataset_key,
+                date=date,
+            )
+        )
+    return jobs
+
+
 def resolve_classification_json(
     npz_root: Path | str,
     explicit: str | Path | None = None,
     *,
     dataset_name: str | None = None,
+    classification_root: str | Path | None = None,
     search_roots: list[Path] | None = None,
 ) -> Path | None:
-    """Resolve classification JSON path for grouped closed-loop eval.
+    """Resolve a single classification JSON for grouped closed-loop eval.
 
-    Resolution order:
-    1. ``explicit`` path when the file exists.
-    2. ``<search_root>/<dataset_name>/<npz_date>.json`` for each search root.
+    When multiple dates match, returns the JSON for the first matched date (sorted).
+    Prefer :func:`discover_classification_eval_jobs` for multi-date validation.
     """
-    npz_root = Path(npz_root).expanduser().resolve()
+    root = classification_root
+    explicit_path = explicit
     if explicit:
         path = Path(explicit).expanduser()
-        if path.is_file():
-            return path.resolve()
-        return None
+        if path.is_dir():
+            root = path
+            explicit_path = None
 
-    if not dataset_name:
+    jobs = discover_classification_eval_jobs(
+        npz_root,
+        classification_root=root,
+        explicit_path=explicit_path,
+        dataset_name=dataset_name,
+        search_roots=search_roots,
+    )
+    if not jobs:
         return None
+    return jobs[0].classification_json
 
-    date = npz_root.name
-    for root in search_roots or classification_json_search_roots():
-        candidate = root.expanduser() / dataset_name / f"{date}.json"
-        if candidate.is_file():
-            return candidate.resolve()
-    return None
+
+def merge_grouped_eval_summaries(summaries: list[dict]) -> dict:
+    """Merge multiple grouped closed-loop summaries (e.g. several valid dates)."""
+    from scenario_generation.metrics.group_report import aggregate_segment_rows
+
+    if not summaries:
+        return {"mode": "grouped", "grouped_summary": {"by_area_name": {}, "totals": {}}}
+    if len(summaries) == 1:
+        return summaries[0]
+
+    all_segments: list[dict] = []
+    video_mp4s: list = []
+    elapsed_sec = 0.0
+    n_bags = 0
+    jobs_meta: list[dict] = []
+
+    for summary in summaries:
+        all_segments.extend(summary.get("segments") or [])
+        video_mp4s.extend(summary.get("video_mp4s") or [])
+        elapsed_sec += float(summary.get("elapsed_sec", 0.0))
+        n_bags += int(summary.get("n_bags", 0))
+        jobs_meta.append(
+            {
+                "date": summary.get("date"),
+                "dataset_key": summary.get("dataset_key"),
+                "classification_json": summary.get("classification_json"),
+                "npz_root": summary.get("npz_root"),
+            }
+        )
+
+    grouped_summary = aggregate_segment_rows(all_segments)
+    base = summaries[0]
+    return {
+        "mode": "grouped",
+        "classification_json": [m["classification_json"] for m in jobs_meta],
+        "classification_jobs": jobs_meta,
+        "npz_root": base.get("npz_root"),
+        "near_miss_thresh": base.get("near_miss_thresh"),
+        "n_episodes": len(all_segments),
+        "n_bags": n_bags,
+        "elapsed_sec": elapsed_sec,
+        "grouped_summary": grouped_summary,
+        "segments": all_segments,
+        "video_mp4s": video_mp4s,
+    }

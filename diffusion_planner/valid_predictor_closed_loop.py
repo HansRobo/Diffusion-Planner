@@ -20,10 +20,12 @@ Examples::
     python diffusion_planner/valid_predictor_closed_loop.py \\
         --mode grouped \\
         --model_path ./best_model.pth \\
-        --npz_root /path/to/valid/2026-01-15 \\
-        --classification_json ../Diffusion-Planner-Meta-Repository/dataset/scenario_classification_json/x2_dev/2231_odaiba_shinagawa_copied_from_xx1/2026-01-15.json \\
+        --npz_root /path/to/x2_dev/2231_odaiba.../valid/2026-01-15 \\
+        --classification_json_root ../Diffusion-Planner-Meta-Repository/dataset/scenario_classification_json \\
         --out_dir ./odaiba_cl_results \\
-        --near_miss_thresh 0.3
+        --near_miss_thresh 0.3 \\
+        --replan_interval 10 \\
+        --draw_every 8
 """
 
 from __future__ import annotations

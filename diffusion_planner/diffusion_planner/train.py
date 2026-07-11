@@ -98,58 +98,84 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     if not args.closed_loop_npz_root:
         return
 
-    from scenario_generation.scenario_classification import resolve_classification_json
+    from scenario_generation.scenario_classification import (
+        discover_classification_eval_jobs,
+        merge_grouped_eval_summaries,
+    )
     from scenario_generation.wandb_closed_loop import (
         build_full_closed_loop_wandb_log,
         build_grouped_closed_loop_wandb_log,
     )
 
-    classification_json = resolve_classification_json(
+    cl_root = args.closed_loop_classification_json_root or None
+    cl_explicit = args.closed_loop_classification_json or None
+    if cl_explicit and Path(cl_explicit).is_dir():
+        cl_root = cl_root or cl_explicit
+        cl_explicit = None
+
+    jobs = discover_classification_eval_jobs(
         args.closed_loop_npz_root,
-        args.closed_loop_classification_json or None,
+        classification_root=cl_root,
+        explicit_path=cl_explicit,
         dataset_name=args.closed_loop_scenario_dataset_name or None,
     )
-    if args.closed_loop_classification_json and classification_json is None:
+    if (cl_root or cl_explicit) and not jobs:
         print(
-            f"Warning: closed_loop_classification_json not found: "
-            f"{args.closed_loop_classification_json!r}; using full-route closed-loop"
+            "Warning: no classification JSON matched npz_root="
+            f"{args.closed_loop_npz_root!r} under root={cl_root!r}; using full-route closed-loop"
         )
-    elif classification_json is None and args.closed_loop_scenario_dataset_name:
+    elif not jobs and args.closed_loop_scenario_dataset_name:
         print(
-            "Warning: no scenario classification JSON resolved for "
+            "Warning: no scenario classification JSON matched for "
             f"dataset={args.closed_loop_scenario_dataset_name!r} "
-            f"date={Path(args.closed_loop_npz_root).name!r}; using full-route closed-loop"
+            f"npz_root={args.closed_loop_npz_root!r}; using full-route closed-loop"
         )
 
     net = ddp.get_model(model, args.ddp)
     was_training = net.training
     net.eval()
     try:
-        if classification_json is not None:
+        if jobs:
             from scenario_generation.grouped_closed_loop_eval import run_grouped_closed_loop_eval
 
             grouped_dir = os.path.join(out_dir, "grouped")
-            summary = run_grouped_closed_loop_eval(
-                net,
-                args,
-                args.closed_loop_npz_root,
-                classification_json,
-                grouped_dir,
-                device=args.device,
-                near_miss_thresh=args.closed_loop_near_miss_thresh,
-                search_radius=args.closed_loop_search_radius,
-                warmup_steps=args.closed_loop_warmup_steps,
-                unstick_after=args.closed_loop_unstick_after,
-                unstick_advance_m=args.closed_loop_unstick_advance_m,
-                draw_every=args.closed_loop_draw_every,
-                fps=float(args.closed_loop_fps),
-                verbose=False,
-            )
+            summaries: list[dict] = []
+            for job in jobs:
+                job_out = grouped_dir if len(jobs) == 1 else os.path.join(grouped_dir, job.date)
+                print(
+                    f"grouped closed-loop job: {job.dataset_key} {job.date} "
+                    f"npz={job.npz_root} json={job.classification_json.name}"
+                )
+                job_summary = run_grouped_closed_loop_eval(
+                    net,
+                    args,
+                    job.npz_root,
+                    job.classification_json,
+                    job_out,
+                    device=args.device,
+                    near_miss_thresh=args.closed_loop_near_miss_thresh,
+                    search_radius=args.closed_loop_search_radius,
+                    warmup_steps=args.closed_loop_warmup_steps,
+                    unstick_after=args.closed_loop_unstick_after,
+                    unstick_advance_m=args.closed_loop_unstick_advance_m,
+                    draw_every=args.closed_loop_draw_every,
+                    fps=float(args.closed_loop_fps),
+                    replan_interval=args.closed_loop_replan_interval,
+                    verbose=False,
+                )
+                job_summary["date"] = job.date
+                job_summary["dataset_key"] = job.dataset_key
+                summaries.append(job_summary)
+
+            summary = merge_grouped_eval_summaries(summaries)
             log = build_grouped_closed_loop_wandb_log(summary)
+            totals = (summary.get("grouped_summary") or {}).get("totals") or {}
             print(
-                f"grouped closed-loop @epoch {epoch + 1}: {summary['n_episodes']} episodes, "
-                f"{summary['n_bags']} bags in {summary['elapsed_sec']:.1f}s "
-                f"-> {len(summary['video_mp4s'])} video(s)"
+                f"grouped closed-loop @epoch {epoch + 1}: "
+                f"{totals.get('n_steps_run', 0)} steps, "
+                f"coll={totals.get('collision_steps', 0)}, "
+                f"near_miss={totals.get('n_near_miss_steps', 0)} "
+                f"in {summary['elapsed_sec']:.1f}s"
             )
         else:
             from scenario_generation.closed_loop_eval import run_closed_loop_eval
@@ -168,6 +194,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
                 unstick_advance_m=args.closed_loop_unstick_advance_m,
                 fps=args.closed_loop_fps,
                 draw_every=args.closed_loop_draw_every,
+                replan_interval=args.closed_loop_replan_interval,
                 neighbor_history_mode="recorded",
                 verbose=False,
             )
@@ -271,6 +298,10 @@ def model_training(args: TrainConfig):
 
     if global_rank == 0:
         print("Dataset Prepared: {} train data\n".format(len(train_set)))
+        if len(train_set) == 0:
+            print("Warning: empty train set — training steps will be skipped (smoke / CL-only run)")
+        if len(valid_set) == 0:
+            print("Warning: empty valid set — validation will be skipped")
 
     if args.ddp:
         torch.distributed.barrier()
