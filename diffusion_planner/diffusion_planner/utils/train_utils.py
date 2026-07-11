@@ -96,50 +96,52 @@ def resume_model(path: str, model, optimizer, scheduler, ema, device, use_ddp: b
     """
     load ckpt from path
     """
-    ckpt = torch.load(path, map_location=device, weights_only=False)
+    ckpt = torch.load(path, map_location=device)
 
     # load model
-    state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     if use_ddp:
-        model.module.load_state_dict(strip_module_prefix(state))
+        try:
+            model.load_state_dict(ckpt["model"])
+        except:
+            model.load_state_dict(ckpt)
     else:
         try:
-            model.load_state_dict(state)
-        except Exception:
-            model.load_state_dict(ckpt)
+            model.load_state_dict(strip_module_prefix(ckpt["model"]))
+        except:
+            model.load_state_dict(strip_module_prefix(ckpt))
     print("Model load done")
 
     # load optimizer
     try:
         optimizer.load_state_dict(ckpt["optimizer"])
         print("Optimizer load done")
-    except Exception:
+    except:
         print("no pretrained optimizer found")
 
     # load schedule
     try:
         scheduler.load_state_dict(ckpt["schedule"])
         print("Schedule load done")
-    except Exception:
+    except:
         print("no schedule found,")
 
     # load step
     try:
         init_epoch = ckpt["epoch"]
         print("Step load done")
-    except Exception:
+    except:
         init_epoch = 0
 
     # Load wandb id
     try:
         wandb_id = ckpt["wandb_id"]
         print("wandb id load done")
-    except Exception:
+    except:
         wandb_id = None
 
     try:
         ema_state = ckpt["ema_state_dict"]
-        if use_ddp:
+        if not use_ddp:
             ema_state = strip_module_prefix(ema_state)
         ema.ema.load_state_dict(ema_state)
         ema.ema.eval()
@@ -147,7 +149,7 @@ def resume_model(path: str, model, optimizer, scheduler, ema, device, use_ddp: b
             p.requires_grad_(False)
 
         print("ema load done")
-    except Exception:
+    except:
         print("no ema shadow found")
 
     return model, optimizer, scheduler, init_epoch, wandb_id, ema
