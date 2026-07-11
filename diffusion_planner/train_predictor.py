@@ -2,7 +2,7 @@ import argparse
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.train import model_training
-from diffusion_planner.train_config import TrainConfig, parse_float_list
+from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
@@ -111,6 +111,12 @@ def get_args(args_list=None):
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--save_utd", type=int, default=10)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=_train_config_default("weight_decay"),
+        help="AdamW weight decay; the HDP paper uses 0.01",
+    )
     parser.add_argument("--warm_up_epoch", type=int, default=5)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
@@ -130,22 +136,6 @@ def get_args(args_list=None):
         "--turn_indicator_expert_loss_weight",
         type=float,
         default=_train_config_default("turn_indicator_expert_loss_weight"),
-    )
-
-    parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
-    parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
-    parser.add_argument("--coeff_heading_l2_loss", type=float, default=1.0)
-    parser.add_argument(
-        "--coeff_velocity",
-        type=float,
-        default=_train_config_default("coeff_velocity"),
-        help="per-(m/s) weight for high-speed lon-loss attenuation; 0.05 = legacy behavior",
-    )
-    parser.add_argument(
-        "--coeff_timestep",
-        type=parse_float_list,
-        default=[1.0, 1.0, 1.0, 1.0],
-        help="Set for 4 sections [0,20), [20, 40), [40, 60), [60, 80)",
     )
 
     parser.add_argument(
@@ -212,9 +202,6 @@ def get_args(args_list=None):
         type=int,
         default=_train_config_default("multisample_eval_seed"),
     )
-
-    parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
-    parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 
     # Velocity representation & hybrid loss (HDP paper, Section IV-B)
     parser.add_argument(
@@ -398,6 +385,16 @@ def get_args(args_list=None):
         raise ValueError("--save_utd must be >= 1")
     if args.train_epochs < 1:
         raise ValueError("--train_epochs must be >= 1")
+    if not 0 <= args.warm_up_epoch <= args.train_epochs:
+        raise ValueError("--warm_up_epoch must be between 0 and --train_epochs")
+    if not 0.0 <= args.augment_prob <= 1.0:
+        raise ValueError("--augment_prob must be in [0, 1]")
+    if not 1 <= args.ego_prediction_horizon <= args.future_len:
+        raise ValueError("--ego_prediction_horizon must be in [1, future_len]")
+    if not 1 <= args.hybrid_loss_window <= args.future_len:
+        raise ValueError("--hybrid_loss_window must be in [1, future_len]")
+    if args.planning_hybrid_loss < 0.0:
+        raise ValueError("--planning_hybrid_loss must be >= 0")
     if args.diffusion_sample_steps < 2:
         raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
@@ -406,6 +403,8 @@ def get_args(args_list=None):
         )
     if args.learning_rate <= 0.0:
         raise ValueError("--learning_rate must be > 0")
+    if args.weight_decay < 0.0:
+        raise ValueError("--weight_decay must be >= 0")
     if args.turn_indicator_generated_loss_weight < 0.0:
         raise ValueError("--turn_indicator_generated_loss_weight must be >= 0")
     if args.turn_indicator_expert_loss_weight < 0.0:

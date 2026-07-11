@@ -447,7 +447,8 @@ class DPM_Solver:
 
         We support the following algorithms for both noise prediction model and data prediction model:
             - 'multistep':
-                Multistep DPM-Solver with the order of `order`. The total number of function evaluations (NFE) == `steps`.
+                Multistep DPM-Solver with the order of `order`. Integration uses `steps`
+                model evaluations; the enabled denoise-to-zero prediction adds one more.
                 We initialize the first `order` values by lower order multistep solvers.
                 Given a fixed NFE == `steps`, the sampling procedure is:
                     Denote K = steps.
@@ -477,7 +478,8 @@ class DPM_Solver:
         =====================================================
         Args:
             x: (B, P, T, D)
-            steps: A `int`. The total number of function evaluations (NFE).
+            steps: Number of solver integration steps. This implementation always performs
+                a final denoise-to-zero prediction, so total model evaluations are `steps + 1`.
             skip_type: A `str`. The type for the spacing of the time steps. 'time_uniform' or 'logSNR' or 'time_quadratic'.
         Returns:
             x_end: A pytorch tensor. The approximated solution at time `t_end`.

@@ -2,6 +2,7 @@ from argparse import Namespace
 
 import torch
 import torch.nn as nn
+from timm.layers import Mlp
 
 import diffusion_planner.model.diffusion_utils.dpm_solver_pytorch as dpm
 from diffusion_planner.dimensions import OUTPUT_T, TURN_INDICATOR_OUTPUT_DIM
@@ -20,7 +21,69 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.module.dit import DiT
+from diffusion_planner.model.module.mixer import MixerBlock
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+
+
+class GlobalRouteEncoder(nn.Module):
+    """Compress ordered route geometry into the HDP AdaLN condition."""
+
+    def __init__(
+        self,
+        route_num: int,
+        route_len: int,
+        hidden_dim: int,
+        drop_path_rate: float,
+        tokens_mlp_dim: int = 32,
+        channels_mlp_dim: int = 64,
+    ):
+        super().__init__()
+        route_points = route_num * route_len
+        self._route_shape = (route_num, route_len)
+        self.channel_pre_project = Mlp(
+            in_features=4,
+            hidden_features=channels_mlp_dim,
+            out_features=channels_mlp_dim,
+            act_layer=nn.GELU,
+            drop=0.0,
+        )
+        self.token_pre_project = Mlp(
+            in_features=route_points,
+            hidden_features=tokens_mlp_dim,
+            out_features=tokens_mlp_dim,
+            act_layer=nn.GELU,
+            drop=0.0,
+        )
+        self.mixer = MixerBlock(tokens_mlp_dim, channels_mlp_dim, drop_path_rate)
+        self.norm = nn.LayerNorm(channels_mlp_dim)
+        self.emb_project = Mlp(
+            in_features=channels_mlp_dim,
+            hidden_features=hidden_dim,
+            out_features=hidden_dim,
+            act_layer=nn.GELU,
+            drop=drop_path_rate,
+        )
+
+    def forward(self, route_lanes: torch.Tensor) -> torch.Tensor:
+        if route_lanes.dim() != 4 or tuple(route_lanes.shape[1:3]) != self._route_shape:
+            raise ValueError(
+                f"Expected route lanes [B,{self._route_shape[0]},{self._route_shape[1]},D], "
+                f"got {tuple(route_lanes.shape)}"
+            )
+        if route_lanes.shape[-1] < 4:
+            raise ValueError(f"Route lanes need at least four geometry channels, got {route_lanes.shape[-1]}")
+
+        # Match the official NuPlan HDP route conditioner: ordered x/y geometry and
+        # direction vectors are mixed across the complete route, then pooled once.
+        route_geometry = route_lanes[..., :4]
+        batch_size = route_geometry.shape[0]
+        valid_route = torch.any(route_geometry != 0, dim=-1).flatten(1).any(dim=1)
+        x = route_geometry.reshape(batch_size, -1, 4)
+        x = self.channel_pre_project(x)
+        x = self.token_pre_project(x.transpose(1, 2)).transpose(1, 2)
+        x = self.mixer(x).mean(dim=1)
+        x = self.emb_project(self.norm(x))
+        return x * valid_route.to(dtype=x.dtype).unsqueeze(-1)
 
 
 def compute_training_loss(
@@ -36,10 +99,6 @@ def compute_training_loss(
     if args.diffusion_model_type != "x_start" or args.diffusion_supervision_type != "x_start":
         raise ValueError("HDP training requires x_start prediction and supervision")
     hybrid_window = args.hybrid_loss_window
-    # bf16 autocast is scoped to the model forward ONLY: noising, SDE schedule math and
-    # every loss below stay fp32 (the diffusion-sensitive parts). Off by default.
-    use_bf16 = getattr(args, "amp_dtype", "off") == "bf16"
-
     ego_future, neighbors_future, neighbor_future_mask = futures
     if neighbors_future.shape[1] != 0:
         raise ValueError("HDP training is ego-only; neighbor future supervision is unsupported")
@@ -53,6 +112,11 @@ def compute_training_loss(
 
     B, Pn, T, _ = neighbors_future.shape
     gt_future = ego_future[:, None]  # [B, 1, T, 4]
+    # bf16 autocast is scoped to the model forward ONLY: noising, SDE schedule math and
+    # every loss below stay fp32 (the diffusion-sensitive parts). Off on CPU.
+    use_bf16 = (
+        getattr(args, "amp_dtype", "off") == "bf16" and gt_future.device.type == "cuda"
+    )
 
     eps = 1e-3
     t = sample_diffusion_time(
@@ -96,8 +160,6 @@ def compute_training_loss(
     dpm_loss = ego_diffusion_loss[:, None, :]
 
     loss = {}
-    loss["neighbor_prediction_loss"] = dpm_loss.new_zeros(())
-
     ego_loss_horizon = dpm_loss[:, 0, : args.ego_prediction_horizon]
     loss["ego_planning_loss"] = ego_loss_horizon.mean()
     ego_waypoint_horizon = ego_waypoint_loss[:, : args.ego_prediction_horizon]
@@ -210,6 +272,10 @@ class Decoder(nn.Module):
             )
         if not config.use_velocity_representation:
             raise ValueError("HDP requires use_velocity_representation=True")
+        if not 1 <= config.ego_prediction_horizon <= config.future_len:
+            raise ValueError("ego_prediction_horizon must be in [1, future_len]")
+        if not 1 <= config.hybrid_loss_window <= config.future_len:
+            raise ValueError("hybrid_loss_window must be in [1, future_len]")
         if (
             config.diffusion_model_type != "x_start"
             or config.diffusion_supervision_type != "x_start"
@@ -217,6 +283,13 @@ class Decoder(nn.Module):
             raise ValueError("HDP requires x_start prediction and x_start supervision")
         self._future_len = config.future_len
         self._sde = VPSDE_linear()
+
+        self.global_route_encoder = GlobalRouteEncoder(
+            route_num=config.route_num,
+            route_len=config.route_len,
+            hidden_dim=config.hidden_dim,
+            drop_path_rate=config.encoder_drop_path_rate,
+        )
 
         self.dit = DiT(
             depth=config.decoder_depth,
@@ -312,7 +385,7 @@ class Decoder(nn.Module):
         """Build a detached inference-like trajectory for turn-head supervision."""
         return model_output.detach()
 
-    def _forward_training(self, encoding, inputs, encoding_pooled):
+    def _forward_training(self, encoding, inputs, encoding_pooled, global_route_condition):
         """Forward pass for training mode.
 
         Args:
@@ -334,6 +407,7 @@ class Decoder(nn.Module):
             diffusion_time,
             encoding,
             inputs["ego_current_state"][:, 4:6],
+            global_route_condition,
         ).reshape(B, P, -1, 4)
         output = {"model_output": model_output}
         if inputs.get("_skip_turn_indicator_training", False):
@@ -364,6 +438,7 @@ class Decoder(nn.Module):
         encoding,
         inputs,
         encoding_pooled,
+        global_route_condition,
         sampled_trajectories,
     ):
         """Inference using X-Start (DPM Solver) approach.
@@ -372,7 +447,7 @@ class Decoder(nn.Module):
             encoding: [B, N, D] encoded features
             inputs: Dict containing input data
             encoding_pooled: [B, D] pooled encoding
-            sampled_trajectories: [B, P, (1 + T) * 4] sampled trajectories
+            sampled_trajectories: [B, P, T * 4] sampled trajectories
 
         Returns:
             Dict containing prediction and turn_indicator_logit
@@ -391,6 +466,7 @@ class Decoder(nn.Module):
             model_kwargs={
                 "cross_c": encoding,
                 "ego_current_velocity": inputs["ego_current_state"][:, 4:6],
+                "global_condition": global_route_condition,
             },
             guidance_type="uncond",
         )
@@ -406,7 +482,7 @@ class Decoder(nn.Module):
 
         return {"prediction": x0, "turn_indicator_logit": turn_indicator_logit}
 
-    def _forward_inference(self, encoding, inputs, encoding_pooled):
+    def _forward_inference(self, encoding, inputs, encoding_pooled, global_route_condition):
         """Forward pass for inference mode.
 
         Args:
@@ -426,6 +502,7 @@ class Decoder(nn.Module):
             encoding,
             inputs,
             encoding_pooled,
+            global_route_condition,
             sampled_trajectories,
         )
 
@@ -458,8 +535,32 @@ class Decoder(nn.Module):
 
         """
         encoding_pooled = self._pool_encoding(encoding)
+        global_route_condition = inputs.get("_cached_global_route_condition")
+        if global_route_condition is None:
+            global_route_condition = self.global_route_encoder(inputs["route_lanes"])
+            repeat_interleave = int(inputs.get("_global_route_repeat_interleave", 1))
+            if repeat_interleave < 1:
+                raise ValueError("_global_route_repeat_interleave must be >= 1")
+            if repeat_interleave > 1:
+                global_route_condition = global_route_condition.repeat_interleave(
+                    repeat_interleave, dim=0
+                )
+        elif global_route_condition.shape != (encoding.shape[0], encoding.shape[-1]):
+            raise ValueError(
+                "Cached global route condition must match [batch, hidden_dim], got "
+                f"{tuple(global_route_condition.shape)} for encoding {tuple(encoding.shape)}"
+            )
+        if global_route_condition.shape != (encoding.shape[0], encoding.shape[-1]):
+            raise ValueError(
+                "Global route condition must match [batch, hidden_dim], got "
+                f"{tuple(global_route_condition.shape)} for encoding {tuple(encoding.shape)}"
+            )
 
         # Dispatch to training or inference
         if self.training:
-            return self._forward_training(encoding, inputs, encoding_pooled)
-        return self._forward_inference(encoding, inputs, encoding_pooled)
+            return self._forward_training(
+                encoding, inputs, encoding_pooled, global_route_condition
+            )
+        return self._forward_inference(
+            encoding, inputs, encoding_pooled, global_route_condition
+        )

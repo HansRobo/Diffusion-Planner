@@ -1,5 +1,4 @@
-import ast
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, Optional
 
 from diffusion_planner.dimensions import (
@@ -80,6 +79,7 @@ class TrainConfig:
     batch_size: int = 512
     save_utd: int = 10
     learning_rate: float = 1e-4
+    weight_decay: float = 0.01
     warm_up_epoch: int = 5
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
@@ -91,18 +91,6 @@ class TrainConfig:
     # historical loss scale while removing pure teacher-forcing exposure bias.
     turn_indicator_generated_loss_weight: float = 1.0
     turn_indicator_expert_loss_weight: float = 1.0
-
-    # Loss Coefficients
-    coeff_position_lat_loss: float = 1.0
-    coeff_position_lon_loss: float = 1.0
-    coeff_heading_l2_loss: float = 1.0
-    # Weights PHYSICAL longitudinal speed (m/s): lon loss is divided by
-    # clamp_min(|v_mps * coeff_velocity|, 1). The default 0.05 (= 1/obs-std 20) exactly
-    # reproduces the legacy behavior where the channel was read in normalized units and
-    # the attenuation only engaged above 20 m/s; raise it to activate at lower speeds.
-    coeff_velocity: float = 0.05
-    # Use default_factory for mutable default values like lists
-    coeff_timestep: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 1.0])
 
     # Keep Base diffusion training on the unbiased HDP hybrid objective. Road-border
     # compliance remains an evaluation signal and is optimized explicitly during RL.
@@ -128,17 +116,14 @@ class TrainConfig:
     multisample_eval_sample_steps: int = 6
     multisample_eval_seed: int = 3407
 
-    alpha_planning_loss: float = 1.0
-    alpha_neighbor_loss: float = 0.1
-
     # HDP ego velocity representation & hybrid loss
     use_velocity_representation: bool = True
     planning_hybrid_loss: float = 0.01
     hybrid_loss_window: int = 10
     diffusion_supervision_type: Literal["x_start"] = "x_start"
     diffusion_time_sample_method: Literal["uniform"] = "uniform"
-    # HDP real-vehicle setup uses six DPM-Solver evaluations. Keep validation and
-    # deployment on the same denoising budget used to judge the trained policy.
+    # HDP real-vehicle setup reports six DPM-Solver integration steps. With the
+    # final denoise-to-zero prediction this executes seven decoder forwards.
     diffusion_sample_steps: int = 6
 
     # HDP RL objective. The branch intentionally keeps only the official-style
@@ -146,8 +131,8 @@ class TrainConfig:
     rl_reward_normalize: Literal["group", "batch", "none"] = "group"
     rl_reward_beta: float = 1.0
     rl_noise_scale: float = 0.5
-    # Paper real-vehicle inference uses six DPM-Solver steps. Keeping the RL rollout count
-    # independent from general validation/export avoids paying for a stale SFT setting.
+    # Keep the RL rollout budget independent from validation/export so it can be profiled
+    # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
     rl_init_use_ema: bool = True
     rl_reward_w_risk: float = 1.0
@@ -235,18 +220,3 @@ class TrainConfig:
     # ---------------------------------------------------------
     state_normalizer: Optional[StateNormalizer] = None
     observation_normalizer: Optional[ObservationNormalizer] = None
-
-
-def parse_float_list(value) -> list[float]:
-    if isinstance(value, (list, tuple)):
-        items = list(value)
-    else:
-        text = str(value).strip()
-        if text.startswith("["):
-            items = ast.literal_eval(text)
-        else:
-            items = text.replace(",", " ").split()
-    parsed = [float(item) for item in items]
-    if len(parsed) != 4:
-        raise ValueError("coeff_timestep must contain exactly 4 values")
-    return parsed

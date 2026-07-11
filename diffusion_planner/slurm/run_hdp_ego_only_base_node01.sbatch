@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=hdp-ego-base20
+#SBATCH --job-name=hdp-route-base20
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --nodelist=node01
@@ -9,13 +9,13 @@
 #SBATCH --gres=gpu:h100:8
 #SBATCH --exclusive
 #SBATCH --requeue
-#SBATCH --output=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512/slurm-%j.out
-#SBATCH --error=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512/slurm-%j.err
+#SBATCH --output=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512/slurm-%j.out
+#SBATCH --error=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512/slurm-%j.err
 
 set -euo pipefail
 
 REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
-RUN_NAME=hdp_ego_only_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512
+RUN_NAME=hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 WAIT_FOR_RUN=hdp_velocity_hybrid_omega001_sft20_fullseq_plus_unprotected_right_turn_x10_node01_8gpu_bf16_bs512_from_base_ep25
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with --export=ALL,HDP_EXPECTED_COMMIT=<commit>}
@@ -28,7 +28,7 @@ NORMALIZATION=${REPO}/diffusion_planner/normalization.json
 PYTHON=${REPO}/.venv/bin/python
 PORT=22631
 MAX_ATTEMPTS=3
-WANDB_RUN_ID=${HDP_WANDB_RUN_ID:-hdp-base-${SLURM_JOB_ID}}
+FRESH_WANDB_RUN_ID=${HDP_WANDB_RUN_ID:-hdp-route-base-${SLURM_JOB_ID}}
 
 mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache" "${REPO}/wandb_cache"
 HEALTH_LOG=${SAVE_DIR}/health_monitor.log
@@ -113,6 +113,7 @@ BASE_ARGS=(
   --normalization_file_path "${NORMALIZATION}"
   --batch_size 512
   --learning_rate 2e-4
+  --weight_decay 0.01
   --warm_up_epoch 5
   --train_epochs 20
   --save_utd 10
@@ -134,7 +135,6 @@ BASE_ARGS=(
   --ego_past_noise_std 0.1
   --use_smoothing_future_trajectory True
   --use_wandb True
-  --wandb_run_id "${WANDB_RUN_ID}"
   --wandb_project_name Diffusion-Planner-Temporal
   --wandb_step_log_interval 50
   --future_len 80
@@ -150,9 +150,11 @@ BASE_ARGS=(
   --num_heads 8
   --encoder_mixer_depth 6
   --encoder_fusion_depth 6
+  --decoder_depth 6
   --diffusion_model_type x_start
   --diffusion_supervision_type x_start
   --diffusion_time_sample_method uniform
+  --diffusion_sample_steps 6
   --use_velocity_representation True
   --planning_hybrid_loss 0.01
   --hybrid_loss_window 10
@@ -203,7 +205,8 @@ while (( attempt <= MAX_ATTEMPTS )); do
     RESUME_ARGS=(--resume_model_path "${SAVE_DIR}/latest.pth")
     log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: strict resume from latest.pth"
   else
-    log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: start clean Base training"
+    RESUME_ARGS=(--wandb_run_id "${FRESH_WANDB_RUN_ID}")
+    log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: start clean Base training with W&B ${FRESH_WANDB_RUN_ID}"
   fi
 
   set +e
@@ -239,7 +242,7 @@ fi
 "${PYTHON}" -c \
   'import csv, pathlib, sys, torch
 p = pathlib.Path(sys.argv[1])
-ckpt = torch.load(p / "latest.pth", map_location="cpu", weights_only=False)
+ckpt = torch.load(p / "latest.pth", map_location="cpu", weights_only=True)
 with (p / "train_log.tsv").open(newline="", encoding="utf-8") as f:
     rows = list(csv.DictReader(f, delimiter="\t"))
 assert int(ckpt["epoch"]) == 20, ckpt["epoch"]

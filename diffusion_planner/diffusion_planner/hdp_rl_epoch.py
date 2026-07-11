@@ -71,6 +71,11 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
     else:
         decoder_inputs = norm_inputs
     norm_exp = expand_batch(decoder_inputs, n)
+    if getattr(args, "rl_train_scope", "decoder") == "decoder":
+        # Keep one route tensor per scene. Decoder compresses it inside the DDP forward,
+        # then repeats only the small global condition across the candidate group.
+        norm_exp["route_lanes"] = norm_inputs["route_lanes"]
+        norm_exp["_global_route_repeat_interleave"] = n
     batch_size = norm_exp["ego_current_state"].shape[0]
     num_scenes = batch_size // n
 

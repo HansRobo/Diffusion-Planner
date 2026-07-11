@@ -2,7 +2,7 @@
 
 Date: 2026-07-11 (Asia/Tokyo)
 
-Branch: `feature/issue-219-hdp-rl` (GitHub issue #219)
+Target branch: `feature/hyper-diffusion-planner` (RL work also tracks GitHub issue #219)
 
 This report records the post-fix state of the HDP branch. Local paper LaTeX and the
 downloaded official implementations are the primary ground truth:
@@ -34,9 +34,8 @@ planning_hybrid_loss=0.01
 hybrid_loss_window=10
 ```
 
-Joint ego/neighbor action prediction remains available with
-`predicted_neighbor_num=320` as a DP ablation. Both modes encode all 320 neighbor
-histories and score safety against all logged neighbor futures.
+There is no joint action-head mode. The encoder still consumes all 320 neighbor histories,
+and validation/RL safety scoring still uses all logged neighbor futures.
 
 ## Reference variants are not identical
 
@@ -56,6 +55,12 @@ This branch uses the nuPlan-compatible SFT values (`omega=0.01`, `W=10`) and the
 paper/real-vehicle-oriented RL values (group 32, beta 1, EMA update 0.05, six rollout
 steps). Rollout temperature 0.5 follows the released NAVSIM RL path. These choices are
 checkpointed and should be ablated rather than called universally official.
+
+A gradient-scale check on four real validation scenes from the epoch-1 Base EMA found that
+`omega=0.01, W=10` makes the waypoint-gradient norm about 0.3--1.0 times the velocity-gradient
+norm. The paper-table combination `omega=0.1, W=79` made it about 13--50 times larger on the
+same predictions. The public nuPlan values are therefore retained as the safer starting point;
+the paper-table pair must be tested as a controlled ablation rather than silently substituted.
 
 ## Formula and representation audit
 
@@ -85,11 +90,13 @@ therefore has the same relative convention in SFT and RL.
 Supervised training uses the released HDP schedule: five-epoch linear warmup followed by
 a fixed learning rate. The inherited Tier IV rule that reduced LR by 10x/100x over the
 last ten epochs was removed because it consumes half of a 20-epoch Base run and is not
-present in the paper or released HDP implementation.
+present in the paper or released HDP implementation. AdamW weight decay is explicitly
+checkpointed at the paper value `0.01` rather than relying on the PyTorch default.
 
-For delay augmentation, known prefix predictions are clamped to the prefix target before
-waypoint integration. Direct loss and future integrated loss therefore cannot send a
-gradient through a prefix that inference constrains exactly.
+The temporal DiT retains detailed Tier IV route tokens in scene cross-attention and adds a
+small ordered-route encoder to the AdaLN condition, matching the global conditioning path in
+the public NuPlan HDP. The route embedding is computed once and reused through all six DPM
+integration steps (plus the final denoise-to-zero prediction).
 
 ### Goal and augmentation
 
@@ -102,8 +109,9 @@ A 90-degree transform regression test passes.
 
 The training step is:
 
-1. Encode each scene once.
-2. Sample 32 candidates from the EMA previous policy with six DPM-Solver steps.
+1. Encode each scene and its global route condition once.
+2. Sample 32 candidates from the EMA previous policy with six DPM-Solver integration steps,
+   followed by denoise-to-zero, and no autograd graph.
 3. Score logged-neighbor pseudo-closed-loop rollouts.
 4. Normalize rewards within each scene group.
 5. Discard non-finite and equal-reward groups.
@@ -215,8 +223,9 @@ counts are logged separately. This is a Tier IV path rather than an HDP paper co
 RL step logs include reward mean/std/range, equal-group coverage, reward weights,
 endpoint diversity, optimizer-step fraction, gradient norm, rollout/reward/update time,
 scenes/s, candidates/s, and peak CUDA memory. Step metrics are rank-0 local; epoch means
-are DDP-reduced. Checkpoints persist the real global step, W&B run ID, TSV history, and
-best score.
+are DDP-reduced. Checkpoints persist the real global step, W&B run ID, TSV history, best
+score, and Python/NumPy/Torch/CUDA RNG state for every rank. Strict resume requires the
+same DDP world size so diffusion noise and augmentation continue from the same streams.
 
 ## Performance changes
 

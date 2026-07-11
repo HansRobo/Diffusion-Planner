@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_inputs_from_npz(npz_path: Path, action_agent_num: int = MAX_NUM_AGENTS) -> TensorDict:
+def build_inputs_from_npz(npz_path: Path, action_agent_num: int = 1) -> TensorDict:
     data = np.load(npz_path, allow_pickle=True)
     inputs = {}
     inputs["sampled_trajectories"] = 0.5 * torch.randn(
@@ -111,9 +111,7 @@ def build_inputs_from_npz(npz_path: Path, action_agent_num: int = MAX_NUM_AGENTS
     return inputs
 
 
-def load_validation_inputs(
-    eval_npz_path: Path | None, action_agent_num: int = MAX_NUM_AGENTS
-) -> TensorDict:
+def load_validation_inputs(eval_npz_path: Path | None, action_agent_num: int = 1) -> TensorDict:
     if eval_npz_path:
         return build_inputs_from_npz(eval_npz_path, action_agent_num)
     return build_dummy_inputs(action_agent_num)

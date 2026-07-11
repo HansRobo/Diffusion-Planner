@@ -201,12 +201,20 @@ def _multisample_metrics(
             .expand(B, num_samples, -1)
             .reshape(B * num_samples, -1)
         )
+        use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and device.type == "cuda"
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            global_route_condition = decoder.global_route_encoder(norm_inputs["route_lanes"])
+        repeated_global_route_condition = (
+            global_route_condition[:, None]
+            .expand(B, num_samples, -1)
+            .reshape(B * num_samples, -1)
+        )
         inference_inputs = {
             "sampled_trajectories": sampled,
             "ego_current_state": ego_current_state,
             "_cached_encoding": repeated_encoding,
+            "_cached_global_route_condition": repeated_global_route_condition,
         }
-        use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and device.type == "cuda"
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
             _, outputs = model(inference_inputs)
         sampled_xy = outputs["prediction"][:, 0, :, :2].reshape(B, num_samples, OUTPUT_T, 2)

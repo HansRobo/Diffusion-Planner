@@ -42,13 +42,13 @@ class DiTBlock(nn.Module):
 
     def __init__(self, dim=192, heads=6, dropout=0.1, mlp_ratio=4.0):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
+        self.norm1 = nn.LayerNorm(dim, eps=1e-6)
         self.attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
-        self.norm2 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         mlp_hidden_dim = int(dim * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.cross_attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
-        self.norm3 = nn.LayerNorm(dim)
+        self.norm3 = nn.LayerNorm(dim, eps=1e-6)
         self.mlp = Mlp(
             in_features=dim,
             hidden_features=mlp_hidden_dim,
@@ -148,13 +148,14 @@ class DiT(nn.Module):
         )
         self.final_layer = FinalLayer(hidden_dim, output_dim)
 
-    def forward(self, x, t, cross_c, ego_current_velocity):
+    def forward(self, x, t, cross_c, ego_current_velocity, global_condition):
         """
         Args:
             x: ``[B, 1, T, 4]`` or ``[B, T, 4]`` noised ego action trajectory.
             t: ``[B]`` continuous diffusion time, one scalar per scene.
             cross_c: ``[B, N, H]`` scene tokens.
             ego_current_velocity: ``[B, 2]`` normalized current ego vx/vy.
+            global_condition: ``[B, H]`` global route intent embedding.
         """
         if x.dim() == 4:
             if x.shape[1] != 1:
@@ -166,8 +167,13 @@ class DiT(nn.Module):
 
         if t.shape != (B,):
             raise ValueError(f"Expected one diffusion time per scene [B], got {tuple(t.shape)}")
+        if global_condition.shape != (B, self.action_pos_emb.shape[-1]):
+            raise ValueError(
+                "Expected global condition "
+                f"[B,{self.action_pos_emb.shape[-1]}], got {tuple(global_condition.shape)}"
+            )
 
-        condition = self.t_embedder(t)
+        condition = self.t_embedder(t) + global_condition
         x = (
             self.action_in_proj(x)
             + self.action_pos_emb

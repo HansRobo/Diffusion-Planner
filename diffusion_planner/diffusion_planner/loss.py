@@ -81,32 +81,6 @@ def sample_diffusion_time(
     raise ValueError(f"Unsupported diffusion_time_sample_method={method!r}")
 
 
-def vp_supervision_elementwise_loss(
-    supervised_prediction: torch.Tensor,
-    z: torch.Tensor,
-    std: torch.Tensor,
-    supervision_type: str,
-    sde,
-    t_future: torch.Tensor,
-    x_t_future: torch.Tensor,
-) -> torch.Tensor:
-    """Per-element VP diffusion loss for score/noise/v supervision.
-
-    x_start supervision goes through the weighted waypoint path instead, so it is
-    deliberately not handled here. Shared by decoder.compute_training_loss and
-    hdp_rl_utils._compute_policy_ego_loss_per_sample — keep them in sync via this helper.
-    """
-    if supervision_type == "score":
-        return torch.sum((supervised_prediction * std + z) ** 2, dim=-1)
-    if supervision_type == "noise":
-        supervised_target = z
-    elif supervision_type == "v":
-        supervised_target = sde.transform("noise->v", z, t_future, x_t_future)
-    else:
-        raise ValueError(f"Unsupported diffusion_supervision_type={supervision_type!r}")
-    return torch.sum((supervised_prediction - supervised_target) ** 2, dim=-1)
-
-
 def _detached_integral(v: torch.Tensor, W: int) -> torch.Tensor:
     """Integrate velocity while limiting waypoint-loss gradients to a recent window."""
     T = v.shape[-2]
@@ -204,42 +178,6 @@ def loss_func(
     result_dict["cosine_similarity_loss"] = 1.0 - cosine_similarity  # [..., T]
 
     return result_dict
-
-
-def weighted_waypoint_dpm_loss(
-    model_output: torch.Tensor,
-    gt_target: torch.Tensor,
-    longitudinal_velocity: torch.Tensor,
-    coeff_position_lat_loss: float,
-    coeff_position_lon_loss: float,
-    coeff_heading_l2_loss: float,
-    coeff_velocity: float,
-    coeff_timestep: list[float],
-) -> torch.Tensor:
-    loss_dict = loss_func(model_output, gt_target)
-    heading_l2_loss = loss_dict["heading_l2_loss"]  # [B, P, T]
-    position_lat_loss = loss_dict["position_lat_loss"]  # [B, P, T]
-    position_lon_loss = loss_dict["position_lon_loss"]  # [B, P, T]
-
-    velocity_weight = torch.abs(longitudinal_velocity * coeff_velocity)
-    velocity_weight = torch.clamp_min(velocity_weight, 1.0).unsqueeze(-1)
-    position_lon_loss = position_lon_loss / velocity_weight
-
-    T = gt_target.shape[2]
-    assert T % len(coeff_timestep) == 0, (
-        f"Timestep {T} is not divisible by the number of timestep weights {len(coeff_timestep)}"
-    )
-    unit = T // len(coeff_timestep)
-    for i, weight in enumerate(coeff_timestep):
-        position_lat_loss[:, :, i * unit : (i + 1) * unit] *= weight
-        position_lon_loss[:, :, i * unit : (i + 1) * unit] *= weight
-        heading_l2_loss[:, :, i * unit : (i + 1) * unit] *= weight
-
-    return (
-        coeff_position_lat_loss * position_lat_loss
-        + coeff_position_lon_loss * position_lon_loss
-        + coeff_heading_l2_loss * heading_l2_loss
-    )
 
 
 def point_to_segment_distance(

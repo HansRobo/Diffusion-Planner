@@ -293,7 +293,7 @@ def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusio
     model.decoder.eval()
     model.decoder.training = False
 
-    ckpt = torch.load(ckpt_path, map_location="cpu")
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     if use_ema:
         if "ema_state_dict" not in ckpt or ckpt["ema_state_dict"] is None:
             raise ValueError(f"EMA state dict not found in checkpoint: {ckpt_path}")

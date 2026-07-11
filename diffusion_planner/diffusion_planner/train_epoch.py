@@ -16,8 +16,7 @@ from diffusion_planner.utils.train_utils import (
 
 def compose_supervised_total_loss(loss, args):
     return (
-        args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]
-        + args.alpha_planning_loss * loss["ego_planning_loss"]
+        loss["ego_planning_loss"]
         + args.planning_hybrid_loss
         * loss.get("ego_planning_hybrid_loss", torch.zeros_like(loss["ego_planning_loss"]))
         + loss["turn_indicator_loss"]
