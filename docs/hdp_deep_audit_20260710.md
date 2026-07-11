@@ -188,23 +188,26 @@ List counts from the audit:
 | Clean Base source | 9,081,354 | not recomputed | preserved |
 | Filtered Base | 9,054,475 | not recomputed | preserved |
 | Three-source right-turn extra | 52,870 | 52,870 | 0 |
-| Validation | 53,008 | 53,008 | 0 |
+| Validation | 53,382 | 53,382 | 0 |
 
 Train/validation overlap is zero. Node01 base intersects its extra list in 33,913 paths;
 with `extra*10`, those paths receive 11 total exposures while extra-only paths receive 10.
 This is acceptable only if that slight extra emphasis is intended. The new clean Base
-uses the supplied filtered list instead: 26,879 matching right-turn samples were removed,
-then the complete, unique 53,185-sample three-source extra set is appended ten times.
-The JT extra manifest originally contained 315 validation paths; those entries were removed
-from the extra manifest without changing the Base list or any NPZ. The resulting 9,583,175
-path exposures contain no train/validation overlap and do not retain an accidental eleventh copy.
+uses the supplied filtered list instead: 26,879 matching right-turn samples were removed.
+The three source manifests initially contributed 53,185 unique right-turn samples. The JT
+manifest contained 315 validation paths; those entries were removed from the extra manifest
+without changing the Base list or any NPZ, leaving 52,870 samples that are appended ten times.
+The resulting 9,583,175 path exposures contain no train/validation overlap and do not retain
+an accidental eleventh copy.
 
 ## Validation and logging
 
 The deterministic zero-noise trajectory is retained as a stable checkpoint proxy. The
-paper Appendix explicitly generates six trajectories and reports minADE/minFDE; this
-branch separately implements a seeded six-sample metric and does not call the
-deterministic proxy the paper protocol. Six-sample evaluation reuses one scene encoding.
+paper Appendix explicitly generates six trajectories and reports minADE/minFDE over all
+future waypoints; this branch separately implements a seeded six-sample metric and does not
+call the deterministic proxy the paper protocol. Ego futures have a fixed 80-frame contract,
+so stationary all-zero xy trajectories remain valid metric samples. Six-sample evaluation
+reuses one scene encoding.
 Evaluation shards no longer use duplicate padding, so non-divisible validation-set sizes
 produce exact global metrics and prediction files are never written by two ranks.
 

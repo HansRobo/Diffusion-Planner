@@ -112,10 +112,10 @@
 - 问题：`extra_train_set_mask_traffic_lights` 按路径字符串成员（`path in traffic_light_mask_paths`）判定；同一路径若同时在 base 与 extra 列表中，其 **base 侧样本也被掩码**，违反"仅对 extra 样本掩码"的文档承诺。审计文档记录 node01 base∩extra = 33,913 条重叠（当前 sbatch 用过滤后列表规避了，但 API 陷阱仍在）。
 - 修复方向：按索引区间（extra 段起始下标）而非路径成员判定。
 
-### 18. 多样本评测中无效 GT 样本污染 minADE/minFDE
+### 18. 多样本评测曾错误地从 xy 非零值推断 ego GT 有效性
 - 位置：`diffusion_planner/diffusion_planner/validate_model.py:229`（`valid[no_valid] = True`）
-- 问题：ego future 全无效的样本被伪造为有效，其"minADE"是相对零填充原点的伪距离，直接混入均值。
-- 修复方向：将此类样本从均值中剔除（分子分母都不计）。
+- 最终复核：原发现不成立。ego future 没有 padding mask，数据契约固定为完整 80 帧；合法停车可以表现为全零 `(x,y,yaw)`。从 xy 是否非零推断有效性会系统性漏掉停车场景。
+- 最终修复：严格按论文定义，对全部 80 个 waypoints 计算 ADE，并在第 80 帧计算 FDE。
 
 ### 19. `rl_reward_normalize=batch` 不丢弃同奖励组
 - 位置：`diffusion_planner/diffusion_planner/hdp_rl_utils.py:697`
@@ -200,7 +200,7 @@
 | 15 | 成立 | HDP-only 分支完整删除永远不可达的 split decoder 导出/验证路径，只保留 full/encoder/turn 图。 |
 | 16 | 成立 | supervised/RL 两个循环都在每个 epoch 开始前调用 `sampler.set_epoch(epoch)`，严格 resume 不再复用 epoch-0 shuffle。 |
 | 17 | 成立 | Dataset 用 extra 起始索引和 subsample stride 按 occurrence 判定，不再按路径集合命中，也不分配 958 万项来源列表。base list/NPZ 未修改。 |
-| 18 | 成立 | 无任何有效 GT timestep 的 scene 从所有 multisample 均值分子和分母中排除；新增混合有效/无效 batch 测试；全空集合报告 NaN 而非伪装成 0。 |
+| 18 | 原报告不成立，已纠正 | ego future 是固定 80 帧且无 padding mask；合法停车可为全零。multisample ADE/FDE 现按论文定义覆盖全部 80 帧，并新增静止场景测试。 |
 | 19 | 成立 | “同场景候选奖励全相同则丢弃”现在独立于 normalization mode，group/batch/none 都执行；默认仍是论文的 group normalization。 |
 | 20 | 成立 | `valid_group_fraction` 改为每组 `.any(dim=1)`，不再只读 candidate 0。 |
 | 21 | 成立，但最佳修复不是移动 clamp | endpoint heading/acos 判据随错误的 ego-y lane-change proxy 一起删除，因此 NaN 路径不存在。 |
