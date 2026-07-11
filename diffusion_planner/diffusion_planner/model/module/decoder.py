@@ -284,13 +284,6 @@ class Decoder(nn.Module):
         self._future_len = config.future_len
         self._sde = VPSDE_linear()
 
-        self.global_route_encoder = GlobalRouteEncoder(
-            route_num=config.route_num,
-            route_len=config.route_len,
-            hidden_dim=config.hidden_dim,
-            drop_path_rate=config.encoder_drop_path_rate,
-        )
-
         self.dit = DiT(
             depth=config.decoder_depth,
             output_dim=4,  # dx, dy, cos, sin per future time token
@@ -302,7 +295,6 @@ class Decoder(nn.Module):
         self.turn_indicator_predictor = nn.Linear(
             2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM
         )
-
         self._state_normalizer: StateNormalizer = config.state_normalizer
         self._observation_normalizer: ObservationNormalizer = config.observation_normalizer
         self._sample_steps = config.diffusion_sample_steps
@@ -341,6 +333,17 @@ class Decoder(nn.Module):
         nn.init.constant_(self.dit.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.dit.final_layer.proj[-1].weight, 0)
         nn.init.constant_(self.dit.final_layer.proj[-1].bias, 0)
+
+        # Construct new conditioning modules only after the historical model is fully
+        # initialized. This keeps every pre-route parameter bitwise identical for a fixed
+        # seed, so route AdaLN is a controlled architecture change rather than a seed change.
+        self.global_route_encoder = GlobalRouteEncoder(
+            route_num=config.route_num,
+            route_len=config.route_len,
+            hidden_dim=config.hidden_dim,
+            drop_path_rate=config.encoder_drop_path_rate,
+        )
+        self.global_route_encoder.apply(_basic_init)
 
     @property
     def sde(self):

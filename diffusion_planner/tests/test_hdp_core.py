@@ -2,6 +2,7 @@ import json
 import math
 import random
 
+import diffusion_planner.model.module.decoder as decoder_module
 import numpy as np
 import pytest
 import torch
@@ -122,6 +123,44 @@ def test_hdp_global_route_encoder_is_batch_safe_and_zero_for_missing_route():
     assert condition.shape == (2, 32)
     torch.testing.assert_close(condition[0], torch.zeros(32))
     assert torch.count_nonzero(condition[1]).item() > 0
+
+
+def test_global_route_construction_does_not_shift_policy_initialization(monkeypatch):
+    args = TrainConfig(
+        exp_name="test",
+        save_dir="/tmp",
+        train_set_list="",
+        valid_set_list="",
+        train_subsample_step=1,
+        hidden_dim=32,
+        decoder_depth=1,
+    )
+    args.state_normalizer = StateNormalizer(
+        [[[10.0, 0.0, 0.0, 0.0]]],
+        [[[20.0, 20.0, 1.0, 1.0]]],
+        [0.0, 0.0, 0.0, 0.0],
+        [0.5, 0.5, 1.0, 1.0],
+    )
+    args.observation_normalizer = ObservationNormalizer({})
+
+    torch.manual_seed(3407)
+    reference = Decoder(args)
+
+    class EntropyConsumingRoute(torch.nn.Module):
+        def __init__(self, *unused_args, **unused_kwargs):
+            super().__init__()
+            self.register_buffer("random_values", torch.randn(10_000))
+
+    monkeypatch.setattr(decoder_module, "GlobalRouteEncoder", EntropyConsumingRoute)
+    torch.manual_seed(3407)
+    perturbed_route = Decoder(args)
+
+    for key, value in reference.dit.state_dict().items():
+        torch.testing.assert_close(value, perturbed_route.dit.state_dict()[key], rtol=0, atol=0)
+    for key, value in reference.turn_indicator_predictor.state_dict().items():
+        torch.testing.assert_close(
+            value, perturbed_route.turn_indicator_predictor.state_dict()[key], rtol=0, atol=0
+        )
 
 
 def test_hdp_decoder_repeats_only_global_route_condition_for_rl_groups():
