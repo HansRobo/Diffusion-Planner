@@ -612,7 +612,8 @@ def model_training(args: TrainConfig):
                 )
 
         if (epoch + 1 - init_epoch) % save_utd == 0 and args.closed_loop_npz_root:
-            cl_out = os.path.join(save_path, f"epoch{epoch + 1:04d}", "closed_loop")
+            # All DDP ranks write CL shard files; save_path is rank-0-only.
+            cl_out = os.path.join(args.save_dir, f"epoch{epoch + 1:04d}", "closed_loop")
             ddp_cl = (
                 args.ddp and ddp.is_dist_avail_and_initialized() and ddp.get_world_size() > 1
             )
