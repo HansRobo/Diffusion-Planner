@@ -9,7 +9,12 @@ from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DistributedEvalSampler
 from diffusion_planner.utils.path_key import data_path_to_rel
-from diffusion_planner.utils.train_utils import ModelEma, resume_model, set_seed
+from diffusion_planner.utils.train_utils import (
+    ModelEma,
+    compile_model_components,
+    resume_model,
+    set_seed,
+)
 from diffusion_planner.valid_config import ValidConfig
 from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
 from torch import optim
@@ -58,6 +63,11 @@ def get_args(args_list=None):
     parser.add_argument("--args_json_path", type=str, required=True)
     parser.add_argument("--save_predictions_dir", type=str, default=None)
     parser.add_argument("--ddp", default=True, type=boolean)
+    parser.add_argument(
+        "--compile_model",
+        default=_valid_config_default("compile_model"),
+        type=boolean,
+    )
     parser.add_argument("--port", default="22323", type=str)
     parser.add_argument(
         "--enable_epdms_eval",
@@ -120,6 +130,10 @@ def run_validation(valid_cfg: ValidConfig):
     config_obj.multisample_eval_noise_scale = valid_cfg.multisample_eval_noise_scale
     config_obj.multisample_eval_sample_steps = valid_cfg.multisample_eval_sample_steps
     config_obj.multisample_eval_seed = valid_cfg.multisample_eval_seed
+    if valid_cfg.device == "cuda" and bool(getattr(config_obj, "tf32", False)):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
     if valid_cfg.align_legacy_neighbor_futures is not None:
         config_obj.align_legacy_neighbor_futures = valid_cfg.align_legacy_neighbor_futures
     align_legacy_neighbor_futures = bool(
@@ -205,6 +219,8 @@ def run_validation(valid_cfg: ValidConfig):
         model_ema,
         valid_cfg.device,
     )
+    if valid_cfg.compile_model:
+        compile_model_components(model_ema.ema)
 
     if valid_cfg.ddp:
         torch.distributed.barrier()

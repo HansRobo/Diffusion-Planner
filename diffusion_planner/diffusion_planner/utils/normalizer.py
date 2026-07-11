@@ -133,9 +133,9 @@ class ObservationNormalizer:
             if k not in data:  # Check if key `k` exists in `data`
                 continue
             mean, std = self._stats_on(k, data[k].device)
-            mask = torch.sum(torch.ne(data[k], 0), dim=-1) == 0
+            mask = torch.all(data[k] == 0, dim=-1, keepdim=True)
             norm_data[k] = (data[k] - mean) / std
-            norm_data[k][mask] = 0
+            norm_data[k].masked_fill_(mask, 0)
         return norm_data
 
     def inverse(self, data):
@@ -144,9 +144,9 @@ class ObservationNormalizer:
             if k not in data:  # Check if key `k` exists in `data`
                 continue
             mean, std = self._stats_on(k, data[k].device)
-            mask = torch.sum(torch.ne(data[k], 0), dim=-1) == 0
+            mask = torch.all(data[k] == 0, dim=-1, keepdim=True)
             norm_data[k] = data[k] * std + mean
-            norm_data[k][mask] = 0
+            norm_data[k].masked_fill_(mask, 0)
         return norm_data
 
     def to_dict(self):

@@ -9,7 +9,10 @@ from diffusion_planner.utils.masks import (
     static_object_padding_mask,
     zero_padding_mask,
 )
-from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
+from diffusion_planner.utils.unicycle_accel_curvature import (
+    UnicycleAccelCurvatureActionSpace,
+    smoothing_future_trajectory,
+)
 
 TIME_INTERVAL = 0.1
 
@@ -111,6 +114,11 @@ class StatePerturbation:
         self._device = torch.device(device)
         self._ego_past_noise_std = ego_past_noise_std
         self._use_smoothing_future_trajectory = use_smoothing_future_trajectory
+        self._smoothing_action_space = (
+            UnicycleAccelCurvatureActionSpace(n_waypoints=80).to(self._device)
+            if use_smoothing_future_trajectory
+            else None
+        )
         # Production samples carry per-vehicle wheelbase in ego_shape. Keep the historical
         # constructor value as a fallback for lightweight callers and unit tests.
         self._wheel_base = wheel_base
@@ -158,24 +166,28 @@ class StatePerturbation:
         ).clamp(1.0 - 2 * W, 1.0 + 2 * W)
         ego_past_aug = inputs["ego_agent_past"].clone()
         ego_past_aug[..., :2] *= scale
-        inputs["ego_agent_past"][aug_flag] = ego_past_aug[aug_flag]
+        inputs["ego_agent_past"] = torch.where(
+            aug_flag[:, None, None], ego_past_aug, inputs["ego_agent_past"]
+        )
 
         scale_1d = scale.squeeze(-1)
-        aug_ego_current_state[aug_flag, 4:6] *= scale_1d[aug_flag]
-        aug_ego_current_state[aug_flag, 6:8] *= scale_1d[aug_flag]
+        aug_ego_current_state[:, 4:6] *= scale_1d
+        aug_ego_current_state[:, 6:8] *= scale_1d
         wheel_base = inputs["ego_shape"][:, 0]
         speed = aug_ego_current_state[:, 4].abs()
         steering = torch.atan(
             aug_ego_current_state[:, 9] * wheel_base / speed.clamp_min(0.2)
         ).clamp(-2 / 3 * np.pi, 2 / 3 * np.pi)
         steering = torch.where(speed >= 0.2, steering, torch.zeros_like(steering))
-        aug_ego_current_state[aug_flag, 8] = steering[aug_flag]
+        aug_ego_current_state[:, 8] = steering
 
         interpolated_ego_future = self.interpolation_future_trajectory(
             aug_ego_current_state, ego_future
         )
-        inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
-        ego_future[aug_flag] = interpolated_ego_future[aug_flag]
+        inputs["ego_current_state"] = torch.where(
+            aug_flag[:, None], aug_ego_current_state, inputs["ego_current_state"]
+        )
+        ego_future = torch.where(aug_flag[:, None, None], interpolated_ego_future, ego_future)
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
@@ -199,7 +211,7 @@ class StatePerturbation:
             :, 4:10
         ]  # x, y, h is 0 because of ego-centric, update vx, vy, ax, ay, steering angle, yaw rate
         new_state = new_state + scaled_random_tensor
-        new_state[:, 3] = torch.max(new_state[:, 3], torch.tensor(0.0, device=new_state.device))
+        new_state[:, 3].clamp_min_(0.0)
         new_state[:, -1] = torch.clip(new_state[:, -1], -0.85, 0.85)
 
         ego_current_state[:, :2] = new_state[:, :2]
@@ -212,18 +224,15 @@ class StatePerturbation:
         cur_velocity = ego_current_state[:, 4]
         yaw_rate = ego_current_state[:, 9]
 
-        steering_angle = torch.zeros_like(cur_velocity)
-        new_yaw_rate = torch.zeros_like(yaw_rate)
-
         mask = torch.abs(cur_velocity) < 0.2
         not_mask = ~mask
-        steering_angle[not_mask] = torch.atan(
-            yaw_rate[not_mask] * wheel_base[not_mask] / torch.abs(cur_velocity[not_mask])
+        steering_angle = torch.atan(yaw_rate * wheel_base / torch.abs(cur_velocity).clamp_min(0.2))
+        steering_angle = torch.where(
+            not_mask,
+            torch.clamp(steering_angle, -2 / 3 * np.pi, 2 / 3 * np.pi),
+            torch.zeros_like(steering_angle),
         )
-        steering_angle[not_mask] = torch.clamp(
-            steering_angle[not_mask], -2 / 3 * np.pi, 2 / 3 * np.pi
-        )
-        new_yaw_rate[not_mask] = yaw_rate[not_mask]
+        new_yaw_rate = torch.where(not_mask, yaw_rate, torch.zeros_like(yaw_rate))
 
         ego_current_state[:, 8] = steering_angle
         ego_current_state[:, 9] = new_yaw_rate
@@ -265,17 +274,16 @@ class StatePerturbation:
         if "neighbor_agents_past" in inputs:
             nbr = inputs["neighbor_agents_past"][:, :, -1, :]  # [B, N, 11]
             N = nbr.shape[1]
-            valid = torch.sum(torch.ne(nbr[:, :, :4], 0), dim=-1) > 0  # [B, N]
-            if valid.any():
-                # neighbor_agents_past layout: x,y,cos,sin (0:4), width (6), length (7)
-                nbr_rect = torch.cat(
-                    [nbr[:, :, :4], nbr[:, :, 7:8], nbr[:, :, 6:7]], dim=-1
-                )  # [B, N, 6]  — (x,y,cos,sin,length,width)
-                dists = _sat_signed_distance(
-                    _rect_corners(ego_rect.unsqueeze(1).expand(-1, N, -1).reshape(B * N, 6)),
-                    _rect_corners(nbr_rect.reshape(B * N, 6)),
-                ).reshape(B, N)
-                collision = collision | ((dists < 0) & valid).any(dim=1)
+            valid = torch.any(nbr[:, :, :4] != 0, dim=-1)  # [B, N]
+            # neighbor_agents_past layout: x,y,cos,sin (0:4), width (6), length (7)
+            nbr_rect = torch.cat(
+                [nbr[:, :, :4], nbr[:, :, 7:8], nbr[:, :, 6:7]], dim=-1
+            )  # [B, N, 6]  — (x,y,cos,sin,length,width)
+            dists = _sat_signed_distance(
+                _rect_corners(ego_rect.unsqueeze(1).expand(-1, N, -1).reshape(B * N, 6)),
+                _rect_corners(nbr_rect.reshape(B * N, 6)),
+            ).reshape(B, N)
+            collision = collision | ((dists < 0) & valid).any(dim=1)
 
         return collision
 
@@ -357,7 +365,7 @@ class StatePerturbation:
             inputs["ego_agent_past"][..., 2:4] = vector_transform(
                 inputs["ego_agent_past"][..., 2:4], transform_matrix
             )
-        inputs["ego_agent_past"][ego_past_mask] = 0.0
+        inputs["ego_agent_past"].masked_fill_(ego_past_mask.unsqueeze(-1), 0.0)
 
         if self._use_smoothing_future_trajectory:
             smoothing_ego_past = inputs["ego_agent_past"]
@@ -370,9 +378,12 @@ class StatePerturbation:
                     ],
                     dim=-1,
                 )
-                smoothing_ego_past[ego_past_mask] = 0.0
+                smoothing_ego_past.masked_fill_(ego_past_mask.unsqueeze(-1), 0.0)
             ego_future4d = smoothing_future_trajectory(
-                smoothing_ego_past, inputs["ego_current_state"], ego_future4d
+                smoothing_ego_past,
+                inputs["ego_current_state"],
+                ego_future4d,
+                action_space=self._smoothing_action_space,
             )
 
         if ego_future_is_heading:
@@ -400,7 +411,7 @@ class StatePerturbation:
         inputs["neighbor_agents_past"][..., 4:6] = vector_transform(
             inputs["neighbor_agents_past"][..., 4:6], transform_matrix
         )
-        inputs["neighbor_agents_past"][mask] = 0.0
+        inputs["neighbor_agents_past"].masked_fill_(mask.unsqueeze(-1), 0.0)
 
         # neighbor future
         mask = neighbor_future_padding_mask(neighbors_future)
@@ -413,7 +424,7 @@ class StatePerturbation:
             neighbors_future[..., 2:4] = vector_transform(
                 neighbors_future[..., 2:4], transform_matrix
             )
-        neighbors_future[mask] = 0.0
+        neighbors_future.masked_fill_(mask.unsqueeze(-1), 0.0)
 
         # lanes
         mask = lane_point_padding_mask(inputs["lanes"])
@@ -423,7 +434,7 @@ class StatePerturbation:
         inputs["lanes"][..., 2:4] = vector_transform(inputs["lanes"][..., 2:4], transform_matrix)
         inputs["lanes"][..., 4:6] = vector_transform(inputs["lanes"][..., 4:6], transform_matrix)
         inputs["lanes"][..., 6:8] = vector_transform(inputs["lanes"][..., 6:8], transform_matrix)
-        inputs["lanes"][mask] = 0.0
+        inputs["lanes"].masked_fill_(mask.unsqueeze(-1), 0.0)
 
         # route_lanes
         mask = lane_point_padding_mask(inputs["route_lanes"])
@@ -439,21 +450,21 @@ class StatePerturbation:
         inputs["route_lanes"][..., 6:8] = vector_transform(
             inputs["route_lanes"][..., 6:8], transform_matrix
         )
-        inputs["route_lanes"][mask] = 0.0
+        inputs["route_lanes"].masked_fill_(mask.unsqueeze(-1), 0.0)
 
         # polygons
         mask = zero_padding_mask(inputs["polygons"])
         inputs["polygons"][..., :2] = vector_transform(
             inputs["polygons"][..., :2], transform_matrix, center_xy
         )
-        inputs["polygons"][mask] = 0.0
+        inputs["polygons"].masked_fill_(mask.unsqueeze(-1), 0.0)
 
         # line_strings
         mask = zero_padding_mask(inputs["line_strings"])
         inputs["line_strings"][..., :2] = vector_transform(
             inputs["line_strings"][..., :2], transform_matrix, center_xy
         )
-        inputs["line_strings"][mask] = 0.0
+        inputs["line_strings"].masked_fill_(mask.unsqueeze(-1), 0.0)
 
         # static objects xy
         mask = static_object_padding_mask(inputs["static_objects"])
@@ -464,10 +475,10 @@ class StatePerturbation:
         inputs["static_objects"][..., 2:4] = vector_transform(
             inputs["static_objects"][..., 2:4], transform_matrix
         )
-        inputs["static_objects"][mask] = 0.0
+        inputs["static_objects"].masked_fill_(mask.unsqueeze(-1), 0.0)
 
         if "goal_pose" in inputs:
-            goal_mask = torch.sum(torch.ne(inputs["goal_pose"], 0), dim=-1) == 0
+            goal_mask = torch.all(inputs["goal_pose"] == 0, dim=-1)
             inputs["goal_pose"][..., :2] = vector_transform(
                 inputs["goal_pose"][..., :2], transform_matrix, center_xy
             )
@@ -479,7 +490,7 @@ class StatePerturbation:
                 inputs["goal_pose"][..., 2:4] = vector_transform(
                     inputs["goal_pose"][..., 2:4], transform_matrix
                 )
-            inputs["goal_pose"][goal_mask] = 0.0
+            inputs["goal_pose"].masked_fill_(goal_mask.unsqueeze(-1), 0.0)
 
         return inputs, ego_future, neighbors_future
 

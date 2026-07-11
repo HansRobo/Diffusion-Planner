@@ -28,6 +28,7 @@ from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
+    compile_model_components,
     gather_rng_states,
     resume_model,
     set_seed,
@@ -564,6 +565,7 @@ def model_training(args: TrainConfig):
         print("Weight decay: {}".format(args.weight_decay))
         print("Use device: {}".format(args.device))
         print("TF32: {}".format(args.tf32))
+        print("TorchInductor model compile: {}".format(args.compile_model))
 
         save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
@@ -746,6 +748,10 @@ def model_training(args: TrainConfig):
     args._wandb_global_step = int(
         getattr(diffusion_planner, "_resume_global_step", init_epoch * len(train_loader))
     )
+    if args.compile_model:
+        compile_model_components(diffusion_planner)
+        if model_ema is not None:
+            compile_model_components(model_ema.ema)
     requested_wandb_id = args.wandb_run_id or checkpoint_wandb_id
     active_wandb_id = requested_wandb_id
     # logger

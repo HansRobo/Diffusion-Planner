@@ -157,6 +157,9 @@ Implementation notes:
 - Encoder modules are kept in eval mode during decoder-only RL so frozen dropout/drop-path does not inject noise.
 - The EMA shadow is the previous rollout policy. The live decoder is updated first and EMA is refreshed afterward with update rate `0.05` (`timm` decay `0.95`).
 - EMA updates use timm's foreach implementation to fuse the per-tensor interpolation kernels while preserving the existing `.ema` checkpoint state.
+- SFT, RL, and standalone validation compile the encoder and decoder in place by default. The
+  state dict stays unchanged, while RL's direct component calls and DPM validation use the same
+  compiled modules. Use a persistent `TORCHINDUCTOR_CACHE_DIR` across restarts.
 - The single reward path contains SAT collision, continuous TTC, THW, occupancy clearance, leader-conditioned following, lane-center scoring, lane-change/off-lane masking, and rear-end attenuation, using risk/follow/lane weights 1.0/3.0/2.5. Lane scoring uses the navigation route when it agrees with the logged expert trajectory and otherwise falls back to all visible lane centerlines.
 - Occupancy automatically uses real static boxes, stopped-agent clearance, then road-border clearance as a corpus fallback. Missing sources are neutral and their coverage is logged.
 - Scene encoding is computed once per candidate group. Decoder-only RL repeats only current action-state tensors, not the full 31-frame observation history.

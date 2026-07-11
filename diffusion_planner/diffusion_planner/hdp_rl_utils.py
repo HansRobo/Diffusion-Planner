@@ -29,13 +29,15 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from planner_metrics.config import RewardConfig
-from planner_metrics.geometry import _point_to_segments_min_dist
+from planner_metrics.geometry import _point_to_segments_dist
 from planner_metrics.subscores import (
     compute_ego_neighbor_signed_clearance,
     compute_road_border_penalty,
 )
 
 _RL_REWARD_CONFIG = RewardConfig()
+_COMPILED_COLLISION_AND_LEADER_TERMS = None
+_COMPILED_POINT_TO_SEGMENTS_DIST = None
 
 
 @dataclass(frozen=True)
@@ -116,8 +118,9 @@ def _scene_neighbors(
     # (cos, sin) vector even when its center crosses the ego origin.
     pose_valid = neighbors_future[..., 2:4].norm(dim=-1) > 0.5
     slot_valid = pose_valid.any(dim=1)
-    future = neighbors_future[slot_valid, :T, :4]
-    past = neighbor_past[slot_valid]
+    valid_indices = slot_valid.nonzero(as_tuple=True)[0]
+    future = neighbors_future.index_select(0, valid_indices)[:, :T, :4]
+    past = neighbor_past.index_select(0, valid_indices)
     valid = future[..., 2:4].norm(dim=-1) > 0.5
     if future.shape[0] == 0:
         return (
@@ -252,10 +255,8 @@ def _collision_and_leader_terms(
         & (neighbor_speed[:, 1] < _RL_REWARD_CONFIG.sc_neighbor_vel_thresh)
         & (max_displacement < _RL_REWARD_CONFIG.sc_neighbor_disp_thresh)
     )
-    stopped_clearance = (
-        clearance[:, stopped_mask].min(dim=1).values
-        if stopped_mask.any()
-        else torch.full((C, T), float("inf"), device=device)
+    stopped_clearance = clearance.masked_fill(~stopped_mask[None, :, None], float("inf")).amin(
+        dim=1
     )
     selected_leader_speed = torch.gather(
         neighbor_speed[None].expand(C, -1, -1),
@@ -297,6 +298,20 @@ def _collision_and_leader_terms(
     }
 
 
+def _run_collision_and_leader_terms(*args, compile_kernel: bool):
+    if not compile_kernel or args[0].device.type != "cuda":
+        return _collision_and_leader_terms(*args)
+    global _COMPILED_COLLISION_AND_LEADER_TERMS
+    if _COMPILED_COLLISION_AND_LEADER_TERMS is None:
+        _COMPILED_COLLISION_AND_LEADER_TERMS = torch.compile(
+            _collision_and_leader_terms,
+            mode="default",
+            dynamic=True,
+            fullgraph=True,
+        )
+    return _COMPILED_COLLISION_AND_LEADER_TERMS(*args)
+
+
 def _occupancy_score(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
@@ -316,8 +331,8 @@ def _occupancy_score(
         valid = (static_objects[..., :2].abs().sum(dim=-1) > 1e-6) | (
             static_objects[..., 4:6].abs().sum(dim=-1) > 1e-6
         )
-        objects = static_objects[valid]
-        if objects.shape[0] > 0:
+        if valid.any():
+            objects = static_objects[valid]
             poses = objects[:, None, :4].expand(-1, T, -1).clone()
             heading_norm = poses[..., 2:4].norm(dim=-1, keepdim=True)
             poses[..., 2:4] = torch.where(
@@ -372,19 +387,50 @@ def _occupancy_score(
     return _linear_safe_score(clearance, critical_distance, safe_distance), sources
 
 
-def _nearest_lane_distance(points: torch.Tensor, lanes: torch.Tensor) -> torch.Tensor:
+def _run_point_to_segments_dist(
+    points: torch.Tensor,
+    seg_start: torch.Tensor,
+    seg_end: torch.Tensor,
+    *,
+    compile_kernel: bool,
+) -> torch.Tensor:
+    if not compile_kernel or points.device.type != "cuda":
+        return _point_to_segments_dist(points, seg_start, seg_end)
+    global _COMPILED_POINT_TO_SEGMENTS_DIST
+    if _COMPILED_POINT_TO_SEGMENTS_DIST is None:
+        _COMPILED_POINT_TO_SEGMENTS_DIST = torch.compile(
+            _point_to_segments_dist,
+            mode="default",
+            dynamic=True,
+            fullgraph=True,
+        )
+    return _COMPILED_POINT_TO_SEGMENTS_DIST(points, seg_start, seg_end)
+
+
+def _nearest_lane_distance(
+    points: torch.Tensor,
+    lanes: torch.Tensor,
+    *,
+    compile_kernel: bool = False,
+) -> torch.Tensor:
     center = lanes[..., :2]
     valid = center.abs().sum(dim=-1) > 1e-6
-    valid_pair = valid[..., :-1] & valid[..., 1:]
-    seg_start = center[..., :-1, :][valid_pair]
-    seg_end = center[..., 1:, :][valid_pair]
-    if seg_start.shape[0] == 0:
-        lane_points = center[valid]
-        if lane_points.shape[0] == 0:
-            raise RuntimeError("HDP lane reward requires valid lane centerline points.")
-        distance = torch.cdist(points.reshape(-1, 2), lane_points).min(dim=-1).values
-    else:
-        distance = _point_to_segments_min_dist(points.reshape(-1, 2), seg_start, seg_end)
+    valid_pair = (valid[..., :-1] & valid[..., 1:]).reshape(-1)
+    seg_start = center[..., :-1, :].reshape(-1, 2)
+    seg_end = center[..., 1:, :].reshape(-1, 2)
+    flat_points = points.reshape(-1, 2)
+    max_distance_elements = 10_000_000
+    chunk_size = max(1, max_distance_elements // seg_start.shape[0])
+    chunks = []
+    for start in range(0, flat_points.shape[0], chunk_size):
+        distance = _run_point_to_segments_dist(
+            flat_points[start : start + chunk_size],
+            seg_start,
+            seg_end,
+            compile_kernel=compile_kernel,
+        )
+        chunks.append(distance.masked_fill(~valid_pair[None], float("inf")).amin(dim=-1))
+    distance = torch.cat(chunks)
     return distance.reshape(points.shape[:-1])
 
 
@@ -393,15 +439,19 @@ def _lane_reward_centerlines(
     lanes: torch.Tensor,
     route_lanes: torch.Tensor | None,
     config: HDPRewardConfig,
+    *,
+    compile_kernel: bool = False,
 ) -> tuple[torch.Tensor, bool]:
     """Prefer the navigation route when it agrees with the logged expert trajectory."""
-    if route_lanes is None or not (route_lanes[..., :2].abs().sum(dim=-1) > 1e-6).any():
+    if route_lanes is None:
+        return lanes, False
+    route_valid = route_lanes[..., :2].abs().sum(dim=-1) > 1e-6
+    if not (route_valid[..., :-1] & route_valid[..., 1:]).any():
         return lanes, False
 
-    expert_valid = expert_future[..., 2:4].norm(dim=-1) > 0.5
-    if not expert_valid.any():
-        return lanes, False
-    route_distance = _nearest_lane_distance(expert_future[expert_valid, :2], route_lanes)
+    route_distance = _nearest_lane_distance(
+        expert_future[..., :2], route_lanes, compile_kernel=compile_kernel
+    )
     route_aligned = (route_distance.mean() <= config.lane_half_width_m) & (
         route_distance.max() <= 2.0 * config.lane_half_width_m
     )
@@ -414,29 +464,25 @@ def _hdp_lane_score(
     lanes: torch.Tensor,
     turn_indicators: torch.Tensor | None,
     config: HDPRewardConfig,
-) -> tuple[torch.Tensor, bool, bool]:
-    if not (lanes[..., :2].abs().sum(dim=-1) > 1e-6).any():
-        return torch.zeros(ego_trajs.shape[0], device=ego_trajs.device), True, False
-    pred_distance = _nearest_lane_distance(ego_trajs[..., :2], lanes)
+    *,
+    compile_kernel: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    lane_valid = lanes[..., :2].abs().sum(dim=-1) > 1e-6
+    if not (lane_valid[..., :-1] & lane_valid[..., 1:]).any():
+        zero = torch.zeros((), dtype=torch.bool, device=ego_trajs.device)
+        return torch.zeros(ego_trajs.shape[0], device=ego_trajs.device), ~zero, zero
+    pred_distance = _nearest_lane_distance(ego_trajs[..., :2], lanes, compile_kernel=compile_kernel)
     center_score = (1.0 - pred_distance / config.lane_half_width_m).clamp(0.0, 1.0)
 
     expert_xy = expert_future[..., :2]
-    expert_valid = expert_future[..., 2:4].norm(dim=-1) > 0.5
-    if not expert_valid.any():
-        return torch.zeros(ego_trajs.shape[0], device=ego_trajs.device), True, False
-    expert_distance = _nearest_lane_distance(expert_xy[expert_valid], lanes)
-    expert_off_lane = bool(
-        (
-            (expert_distance.mean() > config.lane_half_width_m)
-            | (expert_distance.max() > 2.0 * config.lane_half_width_m)
-        ).item()
+    expert_distance = _nearest_lane_distance(expert_xy, lanes, compile_kernel=compile_kernel)
+    expert_off_lane = (expert_distance.mean() > config.lane_half_width_m) | (
+        expert_distance.max() > 2.0 * config.lane_half_width_m
     )
 
-    indicator_active = bool(
-        turn_indicators is not None
-        and turn_indicators.numel() > 0
-        and int(turn_indicators[-1].item()) in (2, 3)
-    )
+    indicator_active = torch.zeros((), dtype=torch.bool, device=ego_trajs.device)
+    if turn_indicators is not None and turn_indicators.numel() > 0:
+        indicator_active = (turn_indicators[-1] == 2) | (turn_indicators[-1] == 3)
     # Measure lateral motion in the road frame. Ego-frame endpoint y is not a lateral offset on a
     # curve and used to classify ordinary bends as lane changes. A centerline-to-centerline change
     # has a pronounced distance peak while both ends remain close to some lane centerline. When a
@@ -455,15 +501,10 @@ def _hdp_lane_score(
     indicated_departure = starts_on_lane & (
         peak_distance - start_distance > 0.5 * config.lane_half_width_m
     )
-    expert_lane_change = bool((centerline_change | (indicator_active & indicated_departure)).item())
-    masked = expert_off_lane or expert_lane_change
-    if masked:
-        return (
-            torch.zeros(ego_trajs.shape[0], device=ego_trajs.device),
-            expert_off_lane,
-            expert_lane_change,
-        )
-    return center_score.mean(dim=-1), False, False
+    expert_lane_change = centerline_change | (indicator_active & indicated_departure)
+    masked = expert_off_lane | expert_lane_change
+    lane_score = torch.where(masked, torch.zeros_like(center_score), center_score).mean(dim=-1)
+    return lane_score, expert_off_lane, expert_lane_change
 
 
 @torch.no_grad()
@@ -508,6 +549,7 @@ def compute_hdp_reward(
         )
     }
     rewards = []
+    compile_kernels = bool(getattr(args, "compile_model", False))
 
     required = ("ego_shape", "neighbor_agents_past", "ego_agent_future", "lanes")
     missing = [key for key in required if key not in scene_inputs]
@@ -519,7 +561,7 @@ def compute_hdp_reward(
         nf, neighbor_shapes, neighbor_valid, neighbor_initial, neighbor_is_vehicle = (
             _scene_neighbors(neighbor_group[scene], scene_inputs["neighbor_agents_past"][scene])
         )
-        terms = _collision_and_leader_terms(
+        terms = _run_collision_and_leader_terms(
             ego_group[scene],
             ego_shape,
             nf,
@@ -528,6 +570,7 @@ def compute_hdp_reward(
             neighbor_initial,
             neighbor_is_vehicle,
             config,
+            compile_kernel=compile_kernels,
         )
         occupancy, occupancy_sources = _occupancy_score(
             ego_group[scene],
@@ -555,6 +598,7 @@ def compute_hdp_reward(
             scene_inputs["lanes"][scene],
             scene_inputs.get("route_lanes", None)[scene] if "route_lanes" in scene_inputs else None,
             config,
+            compile_kernel=compile_kernels,
         )
         lane, expert_off_lane, expert_lane_change = _hdp_lane_score(
             ego_group[scene],
@@ -564,6 +608,7 @@ def compute_hdp_reward(
             if "turn_indicators" in scene_inputs
             else None,
             config,
+            compile_kernel=compile_kernels,
         )
         reward = (
             args.rl_reward_w_risk * risk
@@ -581,8 +626,8 @@ def compute_hdp_reward(
         metric_lists["leader_fraction"].append(terms["leader_fraction"])
         metric_lists["collision_active"].append(terms["collision_active"])
         metric_lists["collision_rear"].append(terms["collision_rear"])
-        metric_lists["lane_masked"].append(lane.new_full((n,), float(expert_off_lane)))
-        metric_lists["lane_change_masked"].append(lane.new_full((n,), float(expert_lane_change)))
+        metric_lists["lane_masked"].append(expert_off_lane.to(lane.dtype).expand(n))
+        metric_lists["lane_change_masked"].append(expert_lane_change.to(lane.dtype).expand(n))
         metric_lists["lane_route_source"].append(lane.new_full((n,), float(lane_route_source)))
         metric_lists["occupancy_any_source"].append(
             lane.new_full((n,), float(any(occupancy_sources.values())))
@@ -606,11 +651,9 @@ def heading_to_cos_sin_if_needed(trajectory: torch.Tensor) -> torch.Tensor:
         return trajectory[..., :4]
     if trajectory.shape[-1] != 3:
         raise ValueError(f"Expected trajectory last dimension 3 or >=4, got {trajectory.shape}")
-    padding = trajectory[..., :3].abs().sum(dim=-1) == 0
-    converted = torch.cat(
+    return torch.cat(
         [trajectory[..., :2], trajectory[..., 2:3].cos(), trajectory[..., 2:3].sin()], dim=-1
     )
-    return converted.masked_fill(padding.unsqueeze(-1), 0.0)
 
 
 def expand_batch(inputs: dict[str, torch.Tensor], n: int) -> dict[str, torch.Tensor]:

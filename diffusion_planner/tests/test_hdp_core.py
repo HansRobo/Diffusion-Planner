@@ -58,6 +58,7 @@ from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
     capture_rng_state,
+    compile_model_components,
     compute_grad_stats,
     finalize_epoch_loss_sums,
     resume_model,
@@ -107,10 +108,40 @@ def test_state_normalizer_caches_stats_by_kind_device_and_dtype():
     assert state_fp32[0] is not velocity_fp32[0]
     assert state_fp32[0].dtype == torch.float32
     assert state_bf16[0].dtype == torch.bfloat16
-
     data = torch.tensor([[[[0.5, -0.25, 1.0, 0.0]]]], dtype=torch.float32)
     expected = (data - torch.tensor([0.0, 0.0, 0.0, 0.0])) / torch.tensor([0.5, 0.5, 1.0, 1.0])
     torch.testing.assert_close(normalize_ego_velocity(data, normalizer), expected)
+
+
+def test_observation_normalizer_preserves_zero_padding_in_both_directions():
+    normalizer = ObservationNormalizer(
+        {"feature": {"mean": torch.tensor([2.0, -3.0]), "std": torch.tensor([2.0, 4.0])}}
+    )
+    data = {"feature": torch.tensor([[[0.0, 0.0], [4.0, 5.0]]])}
+
+    normalized = normalizer(data)
+    restored = normalizer.inverse(normalized)
+
+    torch.testing.assert_close(normalized["feature"][0, 0], torch.zeros(2))
+    torch.testing.assert_close(normalized["feature"][0, 1], torch.tensor([1.0, 2.0]))
+    torch.testing.assert_close(restored["feature"], data["feature"])
+
+
+def test_compile_model_components_preserves_checkpoint_keys():
+    class TinyPlanner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder = torch.nn.Linear(2, 2)
+            self.decoder = torch.nn.Linear(2, 2)
+
+    model = TinyPlanner()
+    keys_before = tuple(model.state_dict())
+
+    compile_model_components(model)
+
+    assert tuple(model.state_dict()) == keys_before
+    assert model.encoder._compiled_call_impl is not None
+    assert model.decoder._compiled_call_impl is not None
 
 
 def test_hdp_dit_self_attention_runs_over_future_timesteps():
@@ -566,7 +597,16 @@ def test_hdp_neighbor_at_ego_origin_remains_valid():
     raw = torch.zeros(1, 3, 3)
     raw[:, 0, 0] = 1.0
     converted = heading_to_cos_sin_if_needed(raw)
-    torch.testing.assert_close(converted[:, 1:], torch.zeros_like(converted[:, 1:]))
+    torch.testing.assert_close(converted[..., :2], raw[..., :2])
+    torch.testing.assert_close(converted[..., 2], torch.ones_like(converted[..., 2]))
+    torch.testing.assert_close(converted[..., 3], torch.zeros_like(converted[..., 3]))
+
+
+def test_hdp_stationary_ego_future_is_not_treated_as_padding():
+    converted = heading_to_cos_sin_if_needed(torch.zeros(2, 80, 3))
+
+    assert converted[..., 2].eq(1.0).all()
+    assert converted[..., 3].eq(0.0).all()
 
 
 def test_neighbor_future_mask_preserves_internal_zero_pose():

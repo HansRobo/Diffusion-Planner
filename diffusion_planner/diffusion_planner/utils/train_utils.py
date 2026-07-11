@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +53,25 @@ class ModelEma(ModelEmaV3):
     @property
     def ema(self):
         return self.module
+
+
+def compile_model_components(model) -> None:
+    """Compile the HDP encoder and decoder in place without changing state-dict keys."""
+    net = getattr(model, "module", model)
+    with warnings.catch_warnings():
+        # PyTorch 2.11 imports torch.utils.mkldnn while initializing Inductor; that upstream
+        # module still defines ScriptModule helpers and emits this warning even for CUDA compile.
+        warnings.filterwarnings(
+            "ignore",
+            message=r"`torch\.jit\.script_method` is deprecated\..*",
+            category=DeprecationWarning,
+            module=r"torch\.jit\._script",
+        )
+        for name in ("encoder", "decoder"):
+            component = getattr(net, name)
+            if not hasattr(component, "compile"):
+                raise RuntimeError("--compile_model requires torch.nn.Module.compile support")
+            component.compile(mode="default", dynamic=False, fullgraph=False)
 
 
 def capture_rng_state() -> dict:

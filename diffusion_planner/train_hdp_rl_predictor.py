@@ -34,6 +34,7 @@ from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
+    compile_model_components,
     gather_rng_states,
     resume_model,
     set_seed,
@@ -470,6 +471,12 @@ def get_args():
         type=boolean,
         help="enable DDP static_graph for lower reducer overhead",
     )
+    parser.add_argument(
+        "--compile_model",
+        type=boolean,
+        default=_train_config_default("compile_model"),
+        help="compile the encoder and decoder with TorchInductor",
+    )
     parser.add_argument("--port", default="22323", type=str)
     parser.add_argument(
         "--amp_dtype",
@@ -641,6 +648,7 @@ def model_training(args):
         print("TF32: {}".format(args.tf32))
         print("Fused optimizer: {}".format(args.fused_optimizer))
         print("DDP static graph: {}".format(args.ddp_static_graph))
+        print("TorchInductor model compile: {}".format(args.compile_model))
         if not args.use_ema:
             print(
                 "WARNING: --use_ema false removes the stable previous-policy rollout used by "
@@ -840,6 +848,11 @@ def model_training(args):
         )
         init_epoch = 0
         wandb_id = None
+
+    if args.compile_model:
+        compile_model_components(diffusion_planner)
+        if model_ema is not None:
+            compile_model_components(model_ema.ema)
 
     requested_wandb_id = args.wandb_run_id or wandb_id
     if global_rank == 0 and args.use_wandb:

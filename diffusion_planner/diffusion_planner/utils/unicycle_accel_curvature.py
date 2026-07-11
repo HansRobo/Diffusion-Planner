@@ -15,6 +15,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from typing import Any, Optional, TypeVar, Union
 
 import einops
@@ -383,6 +384,32 @@ def third_order_D(
     return D
 
 
+@lru_cache(maxsize=64)
+def _cached_scalar_dtd(
+    N: int,
+    order: int,
+    lead: tuple[int, ...],
+    device: torch.device,
+    dtype: torch.dtype,
+    weight: float,
+    coefficient: float,
+) -> torch.Tensor:
+    if order == 1:
+        difference = first_order_D(N, lead, device=device, dtype=dtype)
+    elif order == 2:
+        difference = second_order_D(N, lead, device=device, dtype=dtype)
+    elif order == 3:
+        difference = third_order_D(N, lead, device=device, dtype=dtype)
+    else:
+        raise ValueError(f"Unsupported finite-difference order: {order}")
+    weight_tensor = torch.full((*lead, max(N - order, 0)), weight, dtype=dtype, device=device)
+    return coefficient * einops.einsum(
+        difference * weight_tensor.unsqueeze(-1),
+        difference,
+        "... i j, ... i k -> ... j k",
+    )
+
+
 @torch.amp.autocast(device_type="cuda", enabled=False)
 @torch.no_grad()
 @_disable_dynamo_if_available()
@@ -423,48 +450,45 @@ def construct_DTD(
     Returns:
         DTD: torch.Tensor, the dense matrix D^T s D for multiple orders of smoothing.
     """
-    DTD = torch.zeros(*lead, N, N, dtype=dtype, device=device)
-    if w_smooth1 is not None:
-        lam_1 = lam / dt**2
-        if isinstance(w_smooth1, float):
-            w_smooth1_tensor = torch.full(
-                (*lead, max(N - 1, 0)), w_smooth1, dtype=dtype, device=device
+    terms = []
+    for order, weight in ((1, w_smooth1), (2, w_smooth2), (3, w_smooth3)):
+        if weight is None:
+            continue
+        coefficient = lam / dt ** (2 * order)
+        if isinstance(weight, float):
+            terms.append(
+                _cached_scalar_dtd(
+                    N,
+                    order,
+                    tuple(lead),
+                    device,
+                    dtype,
+                    weight,
+                    coefficient,
+                ).clone()
             )
+            continue
+        if order == 1:
+            difference = first_order_D(N, lead, device=device, dtype=dtype)
+        elif order == 2:
+            difference = second_order_D(N, lead, device=device, dtype=dtype)
         else:
-            w_smooth1_tensor = w_smooth1
-        D1 = first_order_D(N, lead, device=device, dtype=dtype)
-        DTD += lam_1 * einops.einsum(
-            D1 * w_smooth1_tensor.unsqueeze(-1), D1, "... i j, ... i k -> ... j k"
+            difference = third_order_D(N, lead, device=device, dtype=dtype)
+        terms.append(
+            coefficient
+            * einops.einsum(
+                difference * weight.unsqueeze(-1),
+                difference,
+                "... i j, ... i k -> ... j k",
+            )
         )
 
-    if w_smooth2 is not None:
-        lam_2 = lam / dt**4
-        if isinstance(w_smooth2, float):
-            w_smooth2_tensor = torch.full(
-                (*lead, max(N - 2, 0)), w_smooth2, dtype=dtype, device=device
-            )
-        else:
-            w_smooth2_tensor = w_smooth2
-        D2 = second_order_D(N, lead, device=device, dtype=dtype)
-        DTD += lam_2 * einops.einsum(
-            D2 * w_smooth2_tensor.unsqueeze(-1), D2, "... i j, ... i k -> ... j k"
-        )
-
-    if w_smooth3 is not None:
-        lam_3 = lam / dt**6
-        if isinstance(w_smooth3, float):
-            w_smooth3_tensor = torch.full(
-                (*lead, max(N - 3, 0)), w_smooth3, dtype=dtype, device=device
-            )
-        else:
-            w_smooth3_tensor = w_smooth3
-        D3 = third_order_D(N, lead, device=device, dtype=dtype)
-
-        DTD += lam_3 * einops.einsum(
-            D3 * w_smooth3_tensor.unsqueeze(-1), D3, "... i j, ... i k -> ... j k"
-        )
-
-    return DTD
+    if not terms:
+        return torch.zeros(*lead, N, N, dtype=dtype, device=device)
+    result = terms[0]
+    for term in terms[1:]:
+        result = result + term
+    return result
 
 
 @torch.amp.autocast(device_type="cuda", enabled=False)
@@ -512,11 +536,8 @@ def solve_single_constraint(
 
     # Solve the normal equation
     # (A^TA + D^TD + ridge * I) x = A^T b
-    A_data = torch.eye(N, dtype=dtype, device=device).expand(*lead, N, N)
-    Aw_data = A_data * w_data.unsqueeze(-1)
-    with torch.amp.autocast(device_type="cuda", enabled=False):
-        ATA = einops.einsum(Aw_data, A_data, "... i j, ... i k -> ... j k")
-        rhs = einops.einsum(Aw_data, x_target, "... i j, ... i -> ... j")
+    ATA = torch.diag_embed(w_data)
+    rhs = w_data * x_target
 
     # The dim is N + 1 because we have x_init as the first element
     DTD = construct_DTD(
@@ -584,11 +605,9 @@ def solve_xs_eq_y(
 
     # Solve the normal equation
     # (A^TA + D^TD + ridge * I) x = A^T b
-    A_data = torch.diag_embed(s)
-    Aw_data = A_data * w_data.unsqueeze(-1)
-    with torch.amp.autocast(device_type="cuda", enabled=False):
-        ATA = einops.einsum(Aw_data, A_data, "... i j, ... i k -> ... j k")
-        rhs = einops.einsum(Aw_data, y, "... i j, ... i -> ... j")
+    weighted_s = s * w_data
+    ATA = torch.diag_embed(weighted_s * s)
+    rhs = weighted_s * y
 
     DTD = construct_DTD(
         N,
@@ -1246,9 +1265,13 @@ class UnicycleAccelCurvatureActionSpace(ActionSpace):
 
 
 def smoothing_future_trajectory(
-    ego_agent_past: torch.Tensor, ego_current_state: torch.Tensor, ego_future: torch.Tensor
+    ego_agent_past: torch.Tensor,
+    ego_current_state: torch.Tensor,
+    ego_future: torch.Tensor,
+    action_space: UnicycleAccelCurvatureActionSpace | None = None,
 ) -> torch.Tensor:
-    action_space = UnicycleAccelCurvatureActionSpace(n_waypoints=80)
+    if action_space is None:
+        action_space = UnicycleAccelCurvatureActionSpace(n_waypoints=80).to(ego_future.device)
     t0_states = {"v": ego_current_state[:, 4]}
     ego_actions = traj4d_to_action(
         action_space,

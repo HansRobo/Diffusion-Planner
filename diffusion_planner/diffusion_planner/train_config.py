@@ -164,6 +164,7 @@ class TrainConfig:
     amp_dtype: Literal["off", "bf16"] = "bf16"
     fused_optimizer: bool = True
     ddp_static_graph: bool = True
+    compile_model: bool = True
     export_onnx_on_save: bool = False
 
     device: str = "cuda"

@@ -332,6 +332,12 @@ def get_args(args_list=None):
         help="enable DDP static_graph optimizations (graph must stay identical every step)",
     )
     parser.add_argument(
+        "--compile_model",
+        type=boolean,
+        default=_train_config_default("compile_model"),
+        help="compile the encoder and decoder with TorchInductor",
+    )
+    parser.add_argument(
         "--export_onnx_on_save",
         type=boolean,
         default=_train_config_default("export_onnx_on_save"),

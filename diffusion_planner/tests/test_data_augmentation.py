@@ -56,6 +56,11 @@ from diffusion_planner.utils.data_augmentation import (
     heading_transform,
     vector_transform,
 )
+from diffusion_planner.utils.unicycle_accel_curvature import (
+    UnicycleAccelCurvatureActionSpace,
+    construct_DTD,
+    smoothing_future_trajectory,
+)
 
 # Standard ego vehicle shape used across tests: (wheelbase, length, width) in metres.
 _EGO_SHAPE_DEFAULT = torch.tensor([[2.75, 5.0, 2.0]])
@@ -222,6 +227,42 @@ def test_state_perturbation_init():
     assert aug.coeff_matrix.shape == (6, 6), f"coeff_matrix shape: {aug.coeff_matrix.shape}"
     assert aug.t_matrix.shape == (20, 6), f"t_matrix shape: {aug.t_matrix.shape}"
     print("  [PASS] StatePerturbation init")
+
+
+def test_smoothing_action_space_cache_preserves_output():
+    B, past_steps, future_steps = 1, 31, 80
+    past = torch.zeros(B, past_steps, 4)
+    past[..., 0] = torch.linspace(-3.0, 0.0, past_steps)
+    past[..., 2] = 1.0
+    current = torch.zeros(B, 10)
+    current[:, 2] = 1.0
+    current[:, 4] = 1.0
+    future = torch.zeros(B, future_steps, 4)
+    future[..., 0] = torch.linspace(0.1, 8.0, future_steps)
+    future[..., 2] = 1.0
+    cached_space = UnicycleAccelCurvatureActionSpace(n_waypoints=future_steps)
+
+    uncached = smoothing_future_trajectory(past, current, future)
+    cached = smoothing_future_trajectory(past, current, future, action_space=cached_space)
+
+    torch.testing.assert_close(cached, uncached, rtol=0, atol=0)
+
+
+def test_cached_smoothing_matrix_is_not_exposed_to_caller_mutation():
+    kwargs = {
+        "N": 8,
+        "lead": (2,),
+        "w_smooth2": 1.0,
+        "lam": 0.01,
+        "dt": 0.1,
+    }
+    first = construct_DTD(**kwargs)
+    expected = first.clone()
+    first.zero_()
+
+    second = construct_DTD(**kwargs)
+
+    torch.testing.assert_close(second, expected, rtol=0, atol=0)
 
 
 def test_state_perturbation_rejects_too_short_refinement_window():
