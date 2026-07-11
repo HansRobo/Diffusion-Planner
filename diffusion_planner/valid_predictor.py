@@ -5,19 +5,14 @@ from pathlib import Path
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.train import load_weights_only
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DistributedEvalSampler
 from diffusion_planner.utils.path_key import data_path_to_rel
-from diffusion_planner.utils.train_utils import (
-    ModelEma,
-    compile_model_components,
-    resume_model,
-    set_seed,
-)
+from diffusion_planner.utils.train_utils import compile_model_components, set_seed
 from diffusion_planner.valid_config import ValidConfig
 from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
-from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -130,7 +125,8 @@ def run_validation(valid_cfg: ValidConfig):
     config_obj.multisample_eval_noise_scale = valid_cfg.multisample_eval_noise_scale
     config_obj.multisample_eval_sample_steps = valid_cfg.multisample_eval_sample_steps
     config_obj.multisample_eval_seed = valid_cfg.multisample_eval_seed
-    if valid_cfg.device == "cuda" and bool(getattr(config_obj, "tf32", False)):
+    device_type = torch.device(valid_cfg.device).type
+    if device_type == "cuda" and bool(getattr(config_obj, "tf32", False)):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.set_float32_matmul_precision("high")
@@ -145,6 +141,8 @@ def run_validation(valid_cfg: ValidConfig):
 
     # init ddp
     global_rank, rank, _ = ddp.ddp_setup_universal(True, valid_cfg)
+    config_obj.device = valid_cfg.device
+    config_obj.ddp = valid_cfg.ddp
     print(f"{global_rank=}, {rank=}")
     world_size = ddp.get_world_size()
     if valid_cfg.batch_size < world_size or valid_cfg.batch_size % world_size != 0:
@@ -189,9 +187,7 @@ def run_validation(valid_cfg: ValidConfig):
 
     # set up model (restore structure using training config_obj)
     diffusion_planner = Diffusion_Planner(config_obj)
-    diffusion_planner = diffusion_planner.to(
-        rank if valid_cfg.device == "cuda" else valid_cfg.device
-    )
+    diffusion_planner = diffusion_planner.to(valid_cfg.device)
 
     if valid_cfg.ddp:
         diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
@@ -203,29 +199,22 @@ def run_validation(valid_cfg: ValidConfig):
             )
         )
 
-    # optimizer (dummy)
-    params = [{"params": ddp.get_model(diffusion_planner, valid_cfg.ddp).parameters(), "lr": 0.0}]
-    optimizer = optim.AdamW(params)
-
-    # load weights
+    # Validation needs weights only. Loading optimizer/scheduler/RNG state here used to allocate
+    # the complete AdamW state on the GPU and overwrite the validation RNG for no benefit.
     print(f"Model loaded from {valid_cfg.resume_model_path}")
-    model_ema = ModelEma(diffusion_planner, decay=0.999, device=valid_cfg.device)
-
-    diffusion_planner, _, _, _, _, model_ema = resume_model(
+    load_weights_only(
         valid_cfg.resume_model_path,
         diffusion_planner,
-        optimizer,
-        None,  # scheduler is not needed
-        model_ema,
         valid_cfg.device,
+        prefer_ema=True,
     )
     if valid_cfg.compile_model:
-        compile_model_components(model_ema.ema)
+        compile_model_components(diffusion_planner)
 
     if valid_cfg.ddp:
         torch.distributed.barrier()
 
-    valid_dict = validate_model(model_ema.ema, valid_loader, config_obj, return_pred=True)
+    valid_dict = validate_model(diffusion_planner, valid_loader, config_obj, return_pred=True)
 
     # Per-rank tensors (this rank's disjoint eval shard, in loader order).
     loss_ego = valid_dict["loss_ego"]

@@ -879,6 +879,27 @@ def test_empty_multisample_metrics_aggregate_to_nan_not_false_zero():
     assert math.isnan(metrics["multisample_means"]["minADE"])
 
 
+def test_epdms_metric_without_availability_excludes_nonfinite_values():
+    metrics = aggregate_valid_metrics(
+        {
+            "_loss_ego_sum": 0.0,
+            "_samples_ego": 1,
+            "_loss_neighbor_sum": 0.0,
+            "_samples_neighbor": 0,
+            "_turn_correct": 0,
+            "_turn_total": 0,
+            "_turn_change_correct": 0,
+            "turn_indicator_change_total": 0,
+            "_turn_class_correct": [0, 0, 0, 0, 0],
+            "_turn_class_total": [0, 0, 0, 0, 0],
+            "epdms_unmasked_metric": torch.tensor([0.25, float("nan"), 0.75]),
+        },
+        "cpu",
+    )
+
+    assert metrics["epdms_means"]["unmasked_metric"] == pytest.approx(0.5)
+
+
 def test_ego_only_supervised_loss_and_onnx_shapes():
     class FakeObservationNormalizer:
         @staticmethod

@@ -58,6 +58,16 @@ class ModelEma(ModelEmaV3):
 def compile_model_components(model) -> None:
     """Compile the HDP encoder and decoder in place without changing state-dict keys."""
     net = getattr(model, "module", model)
+    # Dynamo's tensor wrapper probes ``.grad`` on the non-leaf encoder output passed into the
+    # separately compiled decoder. PyTorch emits a false-positive warning even though neither
+    # our model nor autograd requests that intermediate gradient buffer. Keep this filter scoped
+    # to Dynamo's probe; genuine non-leaf ``.grad`` access elsewhere must remain visible.
+    warnings.filterwarnings(
+        "ignore",
+        message=r"The \.grad attribute of a Tensor that is not a leaf Tensor is being accessed\..*",
+        category=UserWarning,
+        module=r"torch\.(?:_dynamo\.variables\.builder|_subclasses\.meta_utils)",
+    )
     with warnings.catch_warnings():
         # PyTorch 2.11 imports torch.utils.mkldnn while initializing Inductor; that upstream
         # module still defines ScriptModule helpers and emits this warning even for CUDA compile.

@@ -221,7 +221,7 @@ class RouteTimeline:
         # Decompress OUTSIDE the lock (the expensive part) so concurrent build threads
         # don't serialize on np.load; a rare double-decompress of the same idx is benign.
         with self.timers("timeline_load_npz"):
-            with np.load(self.npz_paths[idx], allow_pickle=True) as z:
+            with np.load(self.npz_paths[idx], allow_pickle=False) as z:
                 # Only decompress the keys we need (skip GT futures) — lazy npz access.
                 data = {k: z[k] for k in _NEEDED_KEYS if k in z.files}
         with self._cache_lock:
@@ -239,7 +239,7 @@ class RouteTimeline:
         so reading just this one key is ~10x cheaper per frame (it dominated timeline_load_npz).
         Not cached: the track-build touches each frame once."""
         with self.timers("timeline_load_npz"):
-            with np.load(self.npz_paths[idx], allow_pickle=True) as z:
+            with np.load(self.npz_paths[idx], allow_pickle=False) as z:
                 return z["neighbor_agents_past"][:, -1]
 
     def prefetch(self, indices) -> None:

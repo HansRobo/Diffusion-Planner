@@ -188,6 +188,8 @@ def run_grouped_eval(args: argparse.Namespace) -> int:
         warmup_steps=args.warmup_steps,
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,
+        unstick_radius_mult=args.unstick_radius_mult,
+        unstick_teleport_after=args.unstick_teleport_after,
         draw_every=args.draw_every,
         fps=args.fps,
         areas=args.areas,

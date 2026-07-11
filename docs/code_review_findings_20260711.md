@@ -221,3 +221,25 @@
 - Ruff import lint、format check、`git diff --check`：通过。
 - 当前 BaseTrain epoch-1 EMA checkpoint：成功加载到精简后的 Decoder，state dict 无缺失/多余 key。
 - ONNX：full/encoder/turn checker 通过；PyTorch/ORT parity 通过；full graph 动态 batch 1/2 通过；真实 validation NPZ 输出 `[1,1,80,4]`，最大差约 `7.6e-6`。
+
+## 第三轮独立全仓复核（同日追加）
+
+在上述 25 项全部完成后，又对训练恢复、DDP、RL all-scope、独立验证、场景闭环和
+ONNX 实机路径做了一轮独立复核，新增并修复：
+
+27. 独立 validation 不再构造 dummy AdamW/EMA 或恢复 optimizer、scheduler、RNG；直接优先加载 EMA 权重，避免额外 GPU 状态和验证随机数被 checkpoint 覆盖。
+28. `scenario_generation.load_model` 原先总是加载 live policy，现默认优先 checkpoint EMA，与训练验证和 ONNX 保持一致；真实 epoch-1 checkpoint 已逐参数确认。
+29. 没有 availability tensor 的 EPDMS 子指标不再把 NaN/Inf 当作分母中的零分样本，而是从分子和分母同时排除。
+30. grouped closed-loop 的两阶段 unstick 参数原先在 CLI 调用链中静默丢失，现完整传至 rollout state。
+31. grouped episode 完成度原先使用整条 route 的全局最大 index，可能把完全跳过的早期 episode 标成完成；现只使用 episode 视频区间内实际访问的 index。near-miss 也不再重复计入负 clearance 的 collision steps。
+32. 直接启动且没有 torchrun/Slurm 环境时，DDP fallback 原先仍保留 `ddp=True` 并在后续 collective 崩溃；现一致回退单进程。显式 `cuda:0` 在多卡 DDP 下也会按 `LOCAL_RANK` 绑定，非 DDP 的 `cuda:N` 仍被保留。
+33. resume 后周期 checkpoint/closed-loop 原先相对 `init_epoch` 重新计数，可能把 epoch 10/20 漂移到 17；SFT/RL 均改为绝对 epoch cadence。
+34. RL `all` scope 原先把 320x80 的 reward-only neighbor future 复制到每个候选，默认 32 generations 时可能 OOM；policy batch 现剔除 ego/neighbor supervision futures，reward 保留每场景原张量。
+35. RL 启动参数新增数学有效性检查（reward 权重、normalization epsilon、时间步长和 shaping 阈值）；仍允许 occupancy source 缺失并通过 source coverage 指标显式记录，不增加用户已拒绝的严格报错模式。
+36. ONNX CLI 不再在 import 时永久关闭 Flash-SDP/MHA fastpath，只在已有的可恢复导出上下文中切换；真实 NPZ 的 full/encoder/turn ORT parity 重新通过，full graph 动态 batch=2 最大差约 `1.9e-5`。
+37. 训练和场景主路径的 NPZ 读取关闭 pickle，并只解压实际消费字段；正式 JT 样本已通过 SceneContext、RouteTimeline 和 ONNX 输入实读。
+38. PyTorch 2.11 在分组件编译边界探测非叶子 encoder 输出时会产生上游 `.grad` 假阳性 warning；过滤范围限定在 Dynamo 内部模块。保留分组件方案，因为 H100 B64 稳态约 185 ms，而整图编译实测约 206 ms（慢约 12%）。
+
+追加验证：根目录 `368 passed, 15 skipped`（`PYTHONWARNINGS=error`）；pre-commit 全通过；
+2xH100 compiled DDP 真实 checkpoint forward/backward 后两 rank 参数 checksum 完全一致；
+EMA 场景推理输出有限且形状为 `[1,1,80,4]`。

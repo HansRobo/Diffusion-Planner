@@ -9,8 +9,12 @@ from torch.distributed import init_process_group
 
 def ddp_setup_universal(verbose=False, args=None):
     if args.ddp == False:
-        print(f"do not use ddp, train on GPU 0")
+        print(f"DDP disabled; using {args.device}")
         return 0, 0, 1
+
+    requested_device = torch.device(args.device)
+    if requested_device.type != "cuda":
+        raise ValueError("DDP training/validation requires a CUDA device")
 
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
@@ -29,6 +33,10 @@ def ddp_setup_universal(verbose=False, args=None):
         os.environ["MASTER_ADDR"] = addr
     else:
         print("Not using DDP mode")
+        # The caller may be launched directly with the default --ddp=True. Keep the
+        # advertised single-process fallback internally consistent so it does not later
+        # wrap DDP or call collectives without an initialized process group.
+        args.ddp = False
         return 0, 0, 1
 
     os.environ["WORLD_SIZE"] = str(world_size)
@@ -36,6 +44,8 @@ def ddp_setup_universal(verbose=False, args=None):
     os.environ["RANK"] = str(rank)
 
     torch.cuda.set_device(gpu)
+    # Explicit inputs such as --device cuda:0 must still follow LOCAL_RANK under DDP.
+    args.device = str(torch.device("cuda", gpu))
     dist_backend = "nccl"
     dist_url = "env://"
     print("| distributed init (rank {}): {}, gpu {}".format(rank, dist_url, gpu), flush=True)

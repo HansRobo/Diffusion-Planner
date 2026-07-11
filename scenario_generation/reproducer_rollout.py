@@ -2084,7 +2084,7 @@ def _dump_precollision_window(
                     traj[: present[0]] = traj[present[0]]
             scene["neighbor_agents_future"] = naf_sim
         else:
-            with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
+            with np.load(tl.npz_paths[idx], allow_pickle=False) as z:
                 naf = z["neighbor_agents_future"] if "neighbor_agents_future" in z.files else None
             if naf is not None:
                 dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)

@@ -569,20 +569,45 @@ def get_args():
         )
     if args.rl_noise_scale < 0.0:
         raise ValueError("--rl_noise_scale must be >= 0")
+    if args.advantage_eps <= 0.0:
+        raise ValueError("--advantage_eps must be > 0")
     if args.rl_reward_beta <= 0.0:
         raise ValueError("--rl_reward_beta must be > 0")
+    reward_weights = (
+        args.rl_reward_w_risk,
+        args.rl_reward_w_follow,
+        args.rl_reward_w_lane,
+    )
+    if any(weight < 0.0 for weight in reward_weights):
+        raise ValueError("RL reward weights must be non-negative")
+    if sum(reward_weights) <= 0.0:
+        raise ValueError("At least one RL reward weight must be positive")
     if args.predicted_neighbor_num != 0:
         raise ValueError("HDP-RL is ego-only; --predicted_neighbor_num must be 0")
     if args.rl_full_eval_utd < 1:
         raise ValueError("--rl_full_eval_utd must be >= 1")
     if not 0.0 < args.rl_ema_update_rate <= 1.0:
         raise ValueError("--rl_ema_update_rate must be in (0, 1]")
+    if args.rl_ttc_critical_s < 0.0:
+        raise ValueError("--rl_ttc_critical_s must be >= 0")
     if args.rl_ttc_safe_s <= args.rl_ttc_critical_s:
         raise ValueError("--rl_ttc_safe_s must be greater than --rl_ttc_critical_s")
+    if args.rl_thw_critical_s < 0.0:
+        raise ValueError("--rl_thw_critical_s must be >= 0")
     if args.rl_thw_safe_s <= args.rl_thw_critical_s:
         raise ValueError("--rl_thw_safe_s must be greater than --rl_thw_critical_s")
+    if args.rl_occupancy_critical_m < 0.0:
+        raise ValueError("--rl_occupancy_critical_m must be >= 0")
     if args.rl_occupancy_safe_m <= args.rl_occupancy_critical_m:
         raise ValueError("--rl_occupancy_safe_m must be greater than --rl_occupancy_critical_m")
+    if args.rl_reward_dt <= 0.0:
+        raise ValueError("--rl_reward_dt must be > 0")
+    if args.rl_occupancy_speed_gain_s < 0.0:
+        raise ValueError("--rl_occupancy_speed_gain_s must be >= 0")
+    if args.rl_lane_half_width_m <= 0.0:
+        raise ValueError("--rl_lane_half_width_m must be > 0")
+    if args.rl_leader_lateral_margin_m < 0.0:
+        raise ValueError("--rl_leader_lateral_margin_m must be >= 0")
     if not args.use_velocity_representation:
         raise ValueError("HDP-RL requires --use_velocity_representation true")
     if args.diffusion_model_type != "x_start" or args.diffusion_supervision_type != "x_start":
@@ -767,6 +792,7 @@ def model_training(args):
             diffusion_planner,
             device_ids=[rank],
             find_unused_parameters=False,
+            gradient_as_bucket_view=True,
             static_graph=args.ddp_static_graph,
         )
 
@@ -783,7 +809,7 @@ def model_training(args):
     if not trainable_params:
         raise RuntimeError("No trainable parameters found for RL training")
     params = [{"params": trainable_params, "lr": args.learning_rate}]
-    if args.fused_optimizer and args.device == "cuda":
+    if args.fused_optimizer and torch.device(args.device).type == "cuda":
         try:
             optimizer = optim.AdamW(params, fused=True, weight_decay=args.weight_decay)
         except TypeError:
@@ -1008,7 +1034,8 @@ def model_training(args):
             }
             atomic_torch_save(model_dict, f"{save_path}/latest.pth")
 
-            if (epoch + 1 - init_epoch) % save_utd == 0:
+            # Resume must not shift the configured checkpoint/closed-loop cadence.
+            if (epoch + 1) % save_utd == 0:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
                 atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")

@@ -22,11 +22,6 @@ from diffusion_planner.utils.onnx_export import (
     load_model,
 )
 
-torch.backends.cuda.enable_flash_sdp(False)
-torch.backends.cuda.enable_mem_efficient_sdp(False)
-torch.backends.cuda.enable_math_sdp(True)
-torch.backends.mha.set_fastpath_enabled(False)
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -66,7 +61,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_inputs_from_npz(npz_path: Path, action_agent_num: int = 1) -> TensorDict:
-    data = np.load(npz_path, allow_pickle=True)
+    required_keys = set(FULL_INPUT_NAMES) - {"sampled_trajectories"}
+    with np.load(npz_path, allow_pickle=False) as archive:
+        data = {key: archive[key] for key in required_keys if key in archive.files}
     inputs = {}
     inputs["sampled_trajectories"] = 0.5 * torch.randn(
         1, action_agent_num, OUTPUT_T, POSE_DIM, dtype=torch.float32
@@ -126,8 +123,8 @@ def run_ort_in_subprocess(model_path: Path, np_inputs: NumpyDict) -> list[np.nda
         script = f"""
 import numpy as np
 import onnxruntime as ort
-data = np.load("{input_path}", allow_pickle=True)
-inputs = {{k: data[k] for k in data.files}}
+with np.load("{input_path}", allow_pickle=False) as data:
+    inputs = {{k: data[k] for k in data.files}}
 sess_options = ort.SessionOptions()
 sess_options.log_severity_level = 3
 sess = ort.InferenceSession(
@@ -146,8 +143,8 @@ np.savez("{output_path}", **{{f"out_{{i}}": o for i, o in enumerate(outputs)}})
         if result.returncode != 0:
             raise RuntimeError(f"ORT subprocess failed:\n{result.stderr[-1000:]}")
         print(result.stdout.strip())
-        data = np.load(output_path, allow_pickle=True)
-        return [data[f"out_{i}"] for i in range(len(data.files))]
+        with np.load(output_path, allow_pickle=False) as data:
+            return [data[f"out_{i}"] for i in range(len(data.files))]
 
 
 def compare(name: str, torch_output: np.ndarray, onnx_output: np.ndarray) -> None:

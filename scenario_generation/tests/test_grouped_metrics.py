@@ -78,6 +78,54 @@ def test_missing_geometry_is_json_safe(monkeypatch, tmp_path):
     json.loads(path.read_text(encoding="utf-8"))
 
 
+def test_later_route_progress_does_not_mark_a_skipped_episode_complete(monkeypatch, tmp_path):
+    monkeypatch.setattr(cl_route_by_area, "is_skipped", lambda _: False)
+    steps = [cl_route_by_area.StepRecord(k=0, rec_idx=8, area="later_area")]
+    row = cl_route_by_area.aggregate_area_metrics(
+        steps,
+        "target_area",
+        "right_turn",
+        "route",
+        "bag",
+        _timeline(tmp_path),
+        labeled_ranges=[[2, 5]],
+        video_start_idx=2,
+        video_end_idx=5,
+        span_index=0,
+    )
+
+    assert row["episode_reached"] is False
+    assert row["episode_completed"] is False
+    assert row["episode_progress_fraction"] == 0.0
+
+
+def test_near_miss_count_excludes_collision_steps(monkeypatch, tmp_path):
+    monkeypatch.setattr(cl_route_by_area, "is_skipped", lambda _: False)
+    steps = [
+        cl_route_by_area.StepRecord(
+            k=0, rec_idx=2, area="target_area", clearance_m=-0.1, collision=True
+        ),
+        cl_route_by_area.StepRecord(k=1, rec_idx=3, area="target_area", clearance_m=0.2),
+        cl_route_by_area.StepRecord(k=2, rec_idx=4, area="target_area", clearance_m=0.5),
+    ]
+    row = cl_route_by_area.aggregate_area_metrics(
+        steps,
+        "target_area",
+        "straight",
+        "route",
+        "bag",
+        _timeline(tmp_path),
+        labeled_ranges=[[2, 5]],
+        video_start_idx=2,
+        video_end_idx=5,
+        span_index=0,
+        near_miss_thresh=0.3,
+    )
+
+    assert row["n_collision_steps"] == 1
+    assert row["n_near_miss_steps"] == 1
+
+
 def test_safety_metric_does_not_double_batch_line_strings(monkeypatch):
     captured = {}
     monkeypatch.setattr(

@@ -20,6 +20,26 @@ _DEFAULT_WIDTH = 1.70
 # Wheelbase-to-length ratio for deriving wheelbase from neighbor shape
 _WHEELBASE_LENGTH_RATIO = 0.65
 
+_SCENE_KEYS = {
+    "ego_agent_past",
+    "ego_current_state",
+    "ego_agent_future",
+    "ego_shape",
+    "goal_pose",
+    "neighbor_agents_past",
+    "neighbor_agents_future",
+    "route_lanes",
+    "route_lanes_speed_limit",
+    "route_lanes_has_speed_limit",
+    "turn_indicators",
+    "lanes",
+    "lanes_speed_limit",
+    "lanes_has_speed_limit",
+    "polygons",
+    "line_strings",
+    "static_objects",
+}
+
 
 def _correct_heading_flip(
     past_traj: np.ndarray,
@@ -321,8 +341,8 @@ def from_npz(path: str | Path) -> SceneContext:
     Returns:
         SceneContext with ego + neighbors + map data.
     """
-    with np.load(str(path), allow_pickle=True) as loaded:
-        data = {k: v for k, v in loaded.items() if k not in {"map_name", "token"}}
+    with np.load(str(path), allow_pickle=False) as loaded:
+        data = {key: loaded[key] for key in _SCENE_KEYS if key in loaded.files}
 
     # Ego shape: [wheelbase, length, width]
     ego_shape = data.get("ego_shape")

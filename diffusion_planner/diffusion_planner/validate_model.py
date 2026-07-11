@@ -581,9 +581,12 @@ def aggregate_valid_metrics(valid_dict, device):
 
         available = valid_dict.get(f"{key}_available")
         if available is None:
-            local_sum = ddp.all_reduce_sum(torch.nan_to_num(tensor).sum().item(), device)
-            local_cnt = ddp.all_reduce_sum(tensor.numel(), device)
-            epdms_means[metric] = local_sum / max(local_cnt, 1)
+            finite = torch.isfinite(tensor)
+            local_sum = ddp.all_reduce_sum(
+                tensor[finite].sum().item() if finite.any() else 0.0, device
+            )
+            local_cnt = ddp.all_reduce_sum(finite.sum().item(), device)
+            epdms_means[metric] = local_sum / local_cnt if local_cnt > 0 else float("nan")
             continue
 
         mask = available.float() > 0.5

@@ -75,6 +75,8 @@ def run_full_route_rollout(
     warmup_steps: int = 0,
     unstick_after: int = 300,
     unstick_advance_m: float = 2.5,
+    unstick_radius_mult: float = 3.0,
+    unstick_teleport_after: int = 300,
     draw_every: int = 8,
 ) -> RouteRolloutResult:
     """One closed-loop pass over the entire route; tag each step by reproducer ``rec_idx`` area."""
@@ -100,6 +102,8 @@ def run_full_route_rollout(
         max_steps=cap,
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
+        unstick_radius_mult=unstick_radius_mult,
+        unstick_teleport_after=unstick_teleport_after,
         neighbor_history_mode="recorded",
         goal_mode="route",
     )
@@ -202,7 +206,6 @@ def aggregate_area_metrics(
         and idx_in_labeled_ranges(st.rec_idx, labeled_ranges)
         and not is_skipped(tl.npz_paths[st.rec_idx])
     ]
-    idxs = [st.rec_idx for st in area_steps]
     f_start = int(tl.frame_indices[video_start_idx])
     f_end = int(tl.frame_indices[min(video_end_idx - 1, len(tl.frame_indices) - 1)])
 
@@ -221,12 +224,15 @@ def aggregate_area_metrics(
     finite_rb = rb_distances[np.isfinite(rb_distances)]
     finite_centerline = cl[np.isfinite(cl)]
     final_labeled_idx = max(int(end) for _, end in labeled_ranges) - 1
-    route_max_idx = max((step.rec_idx for step in steps), default=-1)
-    episode_reached = route_max_idx >= video_start_idx
-    reached_end = route_max_idx >= final_labeled_idx
+    episode_indices = [
+        step.rec_idx for step in steps if video_start_idx <= step.rec_idx < video_end_idx
+    ]
+    episode_max_idx = max(episode_indices, default=video_start_idx - 1)
+    episode_reached = bool(episode_indices)
+    reached_end = episode_max_idx >= final_labeled_idx
     span_length = max(video_end_idx - video_start_idx, 1)
     span_progress = min(
-        max((route_max_idx - video_start_idx + 1) / span_length, 0.0),
+        max((episode_max_idx - video_start_idx + 1) / span_length, 0.0),
         1.0,
     )
 
@@ -248,7 +254,7 @@ def aggregate_area_metrics(
         "min_clearance": float(finite_clearance.min()) if finite_clearance.size else None,
         "mean_clearance": float(finite_clearance.mean()) if finite_clearance.size else None,
         "n_collision_steps": int(sum(collisions)),
-        "n_near_miss_steps": int(np.sum(clearances <= near_miss_thresh)),
+        "n_near_miss_steps": int(np.sum((clearances >= 0.0) & (clearances <= near_miss_thresh))),
         "n_snaps": 0,
         "centerline_mean_m": float(finite_centerline.mean()) if finite_centerline.size else None,
         "centerline_p95_m": _percentile(finite_centerline, 95) if finite_centerline.size else None,

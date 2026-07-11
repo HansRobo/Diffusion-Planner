@@ -982,7 +982,9 @@ def model_training(args: TrainConfig):
             }
             atomic_torch_save(model_dict, f"{save_path}/latest.pth")
 
-            if (epoch + 1 - init_epoch) % save_utd == 0:
+            # Keep checkpoint and closed-loop cadence anchored to the absolute epoch.
+            # A resume from (for example) epoch 7 must still save at epochs 10 and 20.
+            if (epoch + 1) % save_utd == 0:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
                 atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")

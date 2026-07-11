@@ -36,20 +36,30 @@ from scenario_generation.tensor_converter import MapTensorCache, dump_step_npz, 
 from scenario_generation.visualize import draw_scene, draw_trajectory
 
 
-def load_model(model_path: str | Path, device: str = "cuda"):
-    """Load Diffusion-Planner model and args."""
+def _checkpoint_model_state(checkpoint, *, prefer_ema: bool = True):
+    if not isinstance(checkpoint, dict):
+        return checkpoint, "live"
+    ema_state = checkpoint.get("ema_state_dict")
+    if prefer_ema and ema_state is not None:
+        return ema_state, "EMA"
+    return checkpoint.get("model", checkpoint), "live"
+
+
+def load_model(model_path: str | Path, device: str = "cuda", *, prefer_ema: bool = True):
+    """Load Diffusion-Planner model and args, preferring its validated EMA policy."""
     from diffusion_planner.model.diffusion_planner import Diffusion_Planner
     from diffusion_planner.utils.config import Config
 
     args_file = str(Path(model_path).parent / "args.json")
     args = Config(args_file)
     model = Diffusion_Planner(args)
-    ckpt = torch.load(str(model_path), map_location=device)
-    state = ckpt.get("model", ckpt)
-    state = {k.replace("module.", ""): v for k, v in state.items()}
+    ckpt = torch.load(str(model_path), map_location="cpu", weights_only=True)
+    state, weight_kind = _checkpoint_model_state(ckpt, prefer_ema=prefer_ema)
+    state = {k.removeprefix("module."): v for k, v in state.items()}
     model.load_state_dict(state)
     model.to(device)
     model.eval()
+    print(f"Loaded {weight_kind} policy weights from {model_path}")
     return model, args
 
 
