@@ -150,7 +150,6 @@ BASE_ARGS=(
   --num_heads 8
   --encoder_mixer_depth 6
   --encoder_fusion_depth 6
-  --decoder_depth 3
   --diffusion_model_type x_start
   --diffusion_supervision_type x_start
   --diffusion_time_sample_method uniform
@@ -159,8 +158,7 @@ BASE_ARGS=(
   --hybrid_loss_window 10
   --turn_indicator_generated_loss_weight 1.0
   --turn_indicator_expert_loss_weight 1.0
-  --diffusion_sample_steps 10
-  --coeff_road_border_loss 1.0
+  --coeff_road_border_loss 0.0
   --road_border_margin 0.25
   --road_border_n_interp 2
   --coeff_neighbor_collision_loss 0.0

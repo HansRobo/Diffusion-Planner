@@ -179,7 +179,7 @@ List counts from the audit:
 | Node01 extra | 55,402 | 55,402 | 0 |
 | Clean Base source | 9,081,354 | not recomputed | preserved |
 | Filtered Base | 9,054,475 | not recomputed | preserved |
-| Three-source right-turn extra | 53,185 | 53,185 | 0 |
+| Three-source right-turn extra | 52,870 | 52,870 | 0 |
 | Validation | 53,008 | 53,008 | 0 |
 
 Train/validation overlap is zero. Node01 base intersects its extra list in 33,913 paths;
@@ -187,7 +187,9 @@ with `extra*10`, those paths receive 11 total exposures while extra-only paths r
 This is acceptable only if that slight extra emphasis is intended. The new clean Base
 uses the supplied filtered list instead: 26,879 matching right-turn samples were removed,
 then the complete, unique 53,185-sample three-source extra set is appended ten times.
-The resulting 9,586,325 path exposures do not retain an accidental eleventh copy.
+The JT extra manifest originally contained 315 validation paths; those entries were removed
+from the extra manifest without changing the Base list or any NPZ. The resulting 9,583,175
+path exposures contain no train/validation overlap and do not retain an accidental eleventh copy.
 
 ## Validation and logging
 

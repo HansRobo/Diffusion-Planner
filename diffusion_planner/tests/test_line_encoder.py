@@ -94,9 +94,7 @@ def test_line_padding_element_is_masked_and_finite():
 def test_closed_line_direction_has_deterministic_fallback():
     encoder = _make_encoder()
     x = torch.zeros(1, 1, POINTS_PER_LINE_STRING, POINT_DIM)
-    square = torch.tensor(
-        [[0.1, 0.1], [-0.1, 0.1], [-0.1, -0.1], [0.1, -0.1], [0.1, 0.1]]
-    )
+    square = torch.tensor([[0.1, 0.1], [-0.1, 0.1], [-0.1, -0.1], [0.1, -0.1], [0.1, 0.1]])
     x[0, 0, :5, :2] = square
     x[0, 0, :5, 2 + ROAD_BORDER] = 1.0
 
