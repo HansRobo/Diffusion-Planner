@@ -3,17 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from scenario_generation.tensor_converter import (
     _MAX_NUM_NEIGHBORS,
     _NUM_LANES,
-    _NUM_LINE_STRINGS,
-    _NUM_POLYGONS,
-    _NUM_STATIC,
-    _POINTS_PER_LANELET,
-    _POINTS_PER_LINE_STRING,
-    _POINTS_PER_POLYGON,
-    _SEGMENT_POINT_DIM,
     MapTensorCache,
     _build_lanes,
     _build_line_strings,
@@ -149,7 +143,7 @@ class TestMapTensorCache:
 
 
 class TestInferenceDelay:
-    """``to_model_tensors`` threads ``inference_delay`` into the ``delay`` tensor."""
+    """The temporal HDP decoder has no legacy delay-prefix input."""
 
     def _args(self):
         from unittest.mock import MagicMock
@@ -161,49 +155,31 @@ class TestInferenceDelay:
         return args
 
     def test_delay_defaults_to_zero(self, synthetic_scene):
-        import torch
-
         out = to_model_tensors(synthetic_scene, "ego", self._args(), "cpu")
-        assert "delay" in out
-        assert out["delay"].dtype == torch.long
-        assert out["delay"].shape == (1,)
-        assert int(out["delay"].item()) == 0
+        assert "delay" not in out
+        assert out["sampled_trajectories"].shape == (1, 6, 80, 4)
 
-    def test_delay_matches_inference_delay(self, synthetic_scene):
-        import torch
+    def test_nonzero_delay_is_rejected(self, synthetic_scene):
+        with pytest.raises(NotImplementedError, match="inference_delay=7"):
+            to_model_tensors(
+                synthetic_scene,
+                "ego",
+                self._args(),
+                "cpu",
+                inference_delay=7,
+            )
 
-        out = to_model_tensors(
-            synthetic_scene,
-            "ego",
-            self._args(),
-            "cpu",
-            inference_delay=7,
-        )
-        assert out["delay"].dtype == torch.long
-        assert out["delay"].shape == (1,)
-        assert int(out["delay"].item()) == 7
-
-    def test_delay_unaffected_by_map_cache(self, synthetic_scene):
-        """Cache path shouldn't mutate delay — it must match the configured value."""
+    def test_nonzero_delay_is_rejected_with_map_cache(self, synthetic_scene):
         cache = MapTensorCache(synthetic_scene.map_data)
-        cached = to_model_tensors(
-            synthetic_scene,
-            "ego",
-            self._args(),
-            "cpu",
-            map_cache=cache,
-            inference_delay=3,
-        )
-        uncached = to_model_tensors(
-            synthetic_scene,
-            "ego",
-            self._args(),
-            "cpu",
-            map_cache=None,
-            inference_delay=3,
-        )
-        assert int(cached["delay"].item()) == 3
-        assert int(uncached["delay"].item()) == 3
+        with pytest.raises(NotImplementedError, match="inference_delay=3"):
+            to_model_tensors(
+                synthetic_scene,
+                "ego",
+                self._args(),
+                "cpu",
+                map_cache=cache,
+                inference_delay=3,
+            )
 
 
 class TestDumpStepNPZ:

@@ -31,6 +31,7 @@
 #include <rcl_yaml_param_parser/parser.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -111,7 +112,10 @@ preprocess::InputDataMap generate_random_inputs(std::mt19937 & gen)
   };
 
   preprocess::InputDataMap input;
-  input["sampled_trajectories"] = make_random(SAMPLED_TRAJECTORIES_SHAPE);
+  // The installed Autoware dimensions header can still describe the upstream joint planner.
+  // This benchmark targets this branch's ego-only temporal HDP ONNX contract explicitly.
+  constexpr std::array<int64_t, 4> hdp_sampled_trajectories_shape{1, 1, OUTPUT_T, POSE_DIM};
+  input["sampled_trajectories"] = make_random(hdp_sampled_trajectories_shape);
   input["ego_agent_past"] = make_random(EGO_HISTORY_SHAPE);
   input["ego_current_state"] = make_random(EGO_CURRENT_STATE_SHAPE);
   input["neighbor_agents_past"] = make_random(NEIGHBOR_SHAPE);

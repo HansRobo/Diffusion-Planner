@@ -47,6 +47,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -226,6 +227,11 @@ def test_state_perturbation_init():
     assert aug.coeff_matrix.shape == (6, 6), f"coeff_matrix shape: {aug.coeff_matrix.shape}"
     assert aug.t_matrix.shape == (20, 6), f"t_matrix shape: {aug.t_matrix.shape}"
     print("  [PASS] StatePerturbation init")
+
+
+def test_state_perturbation_rejects_too_short_refinement_window():
+    with pytest.raises(ValueError, match="num_refine must be >= 3"):
+        StatePerturbation(num_refine=2)
 
 
 def test_normalize_angle_in_range():

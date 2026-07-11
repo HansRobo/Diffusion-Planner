@@ -161,9 +161,9 @@ For HDP velocity checkpoints, deploy the full ONNX graph:
 diffusion_planner.onnx
 ```
 
-The split decoder graph is intentionally skipped for HDP because its ego row is a velocity latent,
-not a waypoint latent. The full graph runs sampling and decodes ego velocity back to waypoint-space
-`prediction`.
+This HDP-only branch does not export the legacy split decoder because its ego row is a velocity
+latent, not a waypoint latent. The full graph runs sampling and decodes ego velocity back to
+waypoint-space `prediction`.
 
 Smoke-test conversion pattern:
 

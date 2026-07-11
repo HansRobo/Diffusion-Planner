@@ -15,8 +15,8 @@ from diffusion_planner.utils.onnx_export import (
     ModelWrappers,
     NumpyDict,
     TensorDict,
-    build_decoder_inputs,
     build_dummy_inputs,
+    build_turn_indicator_final_x0,
     build_wrappers,
     export_model_to_onnx,
     load_model,
@@ -69,7 +69,7 @@ def build_inputs_from_npz(npz_path: Path, action_agent_num: int = MAX_NUM_AGENTS
     data = np.load(npz_path, allow_pickle=True)
     inputs = {}
     inputs["sampled_trajectories"] = 0.5 * torch.randn(
-        1, action_agent_num, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
+        1, action_agent_num, OUTPUT_T, POSE_DIM, dtype=torch.float32
     )
     inputs["ego_agent_past"] = heading_to_cos_sin(
         torch.tensor(data["ego_agent_past"], dtype=torch.float32).unsqueeze(0)
@@ -108,7 +108,6 @@ def build_inputs_from_npz(npz_path: Path, action_agent_num: int = MAX_NUM_AGENTS
     inputs["turn_indicators"] = torch.tensor(
         data["turn_indicators"], dtype=torch.float32
     ).unsqueeze(0)
-    inputs["delay"] = torch.zeros(1, 1, dtype=torch.float32)
     return inputs
 
 
@@ -189,10 +188,9 @@ def validate_full_model(
 
 def validate_split_models(
     wrappers: ModelWrappers,
+    model,
     inputs: TensorDict,
-    decoder_inputs: TensorDict,
     encoder_onnx_path: Path,
-    decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
 ) -> None:
     with torch.no_grad():
@@ -201,35 +199,13 @@ def validate_split_models(
     onnx_encoding = run_ort_in_subprocess(encoder_onnx_path, encoder_onnx_inputs)[0]
     compare("encoding", torch_encoding.cpu().numpy(), onnx_encoding)
 
-    if wrappers.decoder is None:
-        print(
-            "Skipping split decoder and split turn-indicator ORT validation: "
-            "this checkpoint uses HDP velocity representation or a non-x_start model. "
-            "The full ONNX graph is the deployable artifact and was validated above."
-        )
-        return
-
+    final_x0 = build_turn_indicator_final_x0(model, inputs)
     with torch.no_grad():
-        torch_model_output = wrappers.decoder(
-            torch_encoding,
-            decoder_inputs["sampled_trajectories"],
-            decoder_inputs["diffusion_time"],
-            decoder_inputs["neighbor_agents_past"],
-        )
-        torch_turn_indicator = wrappers.turn_indicator(torch_encoding, torch_model_output)
-
-    decoder_onnx_inputs = {
-        "encoding": onnx_encoding,
-        "sampled_trajectories": decoder_inputs["sampled_trajectories"].cpu().numpy(),
-        "diffusion_time": decoder_inputs["diffusion_time"].cpu().numpy(),
-        "neighbor_agents_past": decoder_inputs["neighbor_agents_past"].cpu().numpy(),
-    }
-    onnx_model_output = run_ort_in_subprocess(decoder_onnx_path, decoder_onnx_inputs)[0]
-    compare("model_output", torch_model_output.cpu().numpy(), onnx_model_output)
+        torch_turn_indicator = wrappers.turn_indicator(torch_encoding, final_x0)
 
     turn_indicator_onnx_inputs = {
         "encoding": onnx_encoding,
-        "final_x0": onnx_model_output,
+        "final_x0": final_x0.cpu().numpy(),
     }
     onnx_turn_indicator = run_ort_in_subprocess(
         turn_indicator_onnx_path, turn_indicator_onnx_inputs
@@ -242,7 +218,6 @@ def convert_model(
     ckpt_path: str,
     full_onnx_path: Path,
     encoder_onnx_path: Path,
-    decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
     eval_npz_path: Path | None,
     use_ema: bool,
@@ -255,7 +230,6 @@ def convert_model(
     print(f"Config: {config_json_path}")
     print(f"Full output: {full_onnx_path}")
     print(f"Encoder output: {encoder_onnx_path}")
-    print(f"Decoder output: {decoder_onnx_path} (skipped for HDP velocity / non-x_start models)")
     print(f"Turn indicator output: {turn_indicator_onnx_path}")
     print(f"Using EMA: {use_ema}")
     print("ONNX exporter: legacy")
@@ -273,7 +247,6 @@ def convert_model(
         model,
         full_onnx_path,
         encoder_onnx_path,
-        decoder_onnx_path,
         turn_indicator_onnx_path,
         use_simplify,
         opset_version,
@@ -285,26 +258,16 @@ def convert_model(
     action_agent_num = 1 + model.decoder._predicted_neighbor_num
     validation_inputs = load_validation_inputs(eval_npz_path, action_agent_num)
     validation_inputs = model.decoder._observation_normalizer(validation_inputs)
-    with torch.no_grad():
-        validation_encoding = wrappers.encoder(
-            *(validation_inputs[name] for name in ENCODER_INPUT_NAMES)
-        )
-    validation_decoder_inputs = build_decoder_inputs(validation_inputs, validation_encoding)
-
     validate_full_model(wrappers, validation_inputs, full_onnx_path)
     validate_split_models(
         wrappers,
+        model,
         validation_inputs,
-        validation_decoder_inputs,
         encoder_onnx_path,
-        decoder_onnx_path,
         turn_indicator_onnx_path,
     )
 
-    exported_paths = [full_onnx_path, encoder_onnx_path]
-    if wrappers.decoder is not None:
-        exported_paths.append(decoder_onnx_path)
-    exported_paths.append(turn_indicator_onnx_path)
+    exported_paths = [full_onnx_path, encoder_onnx_path, turn_indicator_onnx_path]
     print("\nSuccessfully converted to ONNX:" + "".join(f"\n  {p}" for p in exported_paths) + "\n")
 
 
@@ -328,7 +291,6 @@ if __name__ == "__main__":
         config_file = pth_dir / "args.json"
         full_onnx_file = pth_dir / f"{args.output_prefix}.onnx"
         encoder_onnx_file = pth_dir / f"{args.output_prefix}_encoder.onnx"
-        decoder_onnx_file = pth_dir / f"{args.output_prefix}_decoder.onnx"
         turn_indicator_onnx_file = pth_dir / f"{args.output_prefix}_turn_indicator.onnx"
 
         print(f"\n{'#' * 80}")
@@ -344,7 +306,6 @@ if __name__ == "__main__":
             ckpt_path=str(pth_file),
             full_onnx_path=full_onnx_file,
             encoder_onnx_path=encoder_onnx_file,
-            decoder_onnx_path=decoder_onnx_file,
             turn_indicator_onnx_path=turn_indicator_onnx_file,
             eval_npz_path=args.eval_npz,
             use_ema=args.use_ema,

@@ -135,7 +135,7 @@ class TrainConfig:
     use_velocity_representation: bool = True
     planning_hybrid_loss: float = 0.01
     hybrid_loss_window: int = 10
-    diffusion_supervision_type: Literal["x_start", "noise", "score", "v"] = "x_start"
+    diffusion_supervision_type: Literal["x_start"] = "x_start"
     diffusion_time_sample_method: Literal["uniform"] = "uniform"
     # HDP real-vehicle setup uses six DPM-Solver evaluations. Keep validation and
     # deployment on the same denoising budget used to judge the trained policy.
@@ -181,7 +181,6 @@ class TrainConfig:
     ddp_static_graph: bool = True
     export_onnx_on_save: bool = False
 
-    guidance_scale: float = 0.5
     device: str = "cuda"
     tf32: bool = True
     use_ema: bool = True
@@ -196,7 +195,7 @@ class TrainConfig:
     num_heads: int = 8
     hidden_dim: int = 256
     decoder_tokenization: Literal["temporal"] = "temporal"
-    diffusion_model_type: Literal["x_start", "noise", "score", "v", "flow_matching"] = "x_start"
+    diffusion_model_type: Literal["x_start"] = "x_start"
     predicted_neighbor_num: int = 0
     resume_model_path: Optional[str] = None
     init_weights_path: Optional[str] = None

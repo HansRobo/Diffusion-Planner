@@ -4,8 +4,6 @@ import torch
 import torch.nn as nn
 from timm.layers import Mlp
 
-from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-
 
 def modulate(x, shift, scale):
     return x * (1 + scale[:, None]) + shift[:, None]
@@ -128,18 +126,12 @@ class DiT(nn.Module):
         heads=6,
         dropout=0.1,
         mlp_ratio=4.0,
-        model_type="x_start",
-        sde=None,
         future_len=80,
     ):
         super().__init__()
-        if model_type not in {"x_start", "noise", "score", "v", "flow_matching"}:
-            raise ValueError(f"Unsupported model_type={model_type!r}")
         if output_dim != 4:
             raise ValueError(f"Temporal HDP DiT requires output_dim=4, got {output_dim}")
 
-        self._model_type = model_type
-        self._sde = sde if sde is not None else VPSDE_linear()
         self.future_len = future_len
         self.action_in_proj = Mlp(
             in_features=4,
@@ -155,10 +147,6 @@ class DiT(nn.Module):
             [DiTBlock(hidden_dim, heads, dropout, mlp_ratio) for _ in range(depth)]
         )
         self.final_layer = FinalLayer(hidden_dim, output_dim)
-
-    @property
-    def model_type(self):
-        return self._model_type
 
     def forward(self, x, t, cross_c, ego_current_velocity):
         """
@@ -189,6 +177,4 @@ class DiT(nn.Module):
         for block in self.blocks:
             x = block(x, cross_c, condition, cross_attn_mask)
         x = self.final_layer(x, condition)
-        if self._model_type == "score":
-            x = x / (self._sde.marginal_prob_std(t).unsqueeze(-1) + 1e-6)
         return x[:, None]

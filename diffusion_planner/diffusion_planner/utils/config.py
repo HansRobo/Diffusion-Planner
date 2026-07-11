@@ -7,7 +7,7 @@ from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNorma
 
 
 class Config:
-    def __init__(self, args_file, guidance_fn=None):
+    def __init__(self, args_file):
         with open(args_file, "r") as f:
             args_dict = json.load(f)
 
@@ -15,6 +15,7 @@ class Config:
             setattr(self, key, value)
         defaults = {
             "use_velocity_representation": False,
+            "diffusion_model_type": "x_start",
             "planning_hybrid_loss": 0.0,
             "hybrid_loss_window": 10,
             "diffusion_supervision_type": getattr(self, "diffusion_model_type", "x_start"),
@@ -33,6 +34,10 @@ class Config:
                 "This HDP branch requires a temporal-token decoder checkpoint; "
                 f"args.json has decoder_tokenization={tokenization!r}."
             )
+        if not self.use_velocity_representation:
+            raise RuntimeError("This HDP branch requires a velocity-representation checkpoint.")
+        if self.diffusion_model_type != "x_start" or self.diffusion_supervision_type != "x_start":
+            raise RuntimeError("This HDP branch requires x_start prediction and supervision.")
         state_normalizer = getattr(self, "state_normalizer", None)
         if not isinstance(state_normalizer, dict):
             raise RuntimeError("args.json/state_normalizer is required to load Diffusion Planner.")
@@ -50,9 +55,3 @@ class Config:
                 for k, v in self.observation_normalizer.items()
             }
         )
-
-        self.guidance_fn = guidance_fn
-
-        # Default guidance scale; overridable without reloading the model.
-        if not hasattr(self, "guidance_scale"):
-            self.guidance_scale = 0.5

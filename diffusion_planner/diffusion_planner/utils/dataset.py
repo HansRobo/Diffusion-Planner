@@ -46,6 +46,9 @@ class DiffusionPlannerData(Dataset):
         include_neighbor_futures: bool = True,
     ):
         self.data_list = openjson(data_list)
+        base_data_count = len(self.data_list)
+        self._source_index_stride = 1
+        self._traffic_light_mask_start = None
         if extra_data_repeat < 0:
             raise ValueError("extra_data_repeat must be >= 0")
         if extra_data_repeat > 0:
@@ -58,11 +61,10 @@ class DiffusionPlannerData(Dataset):
             # List multiplication copies references, not path strings or NPZ contents. This keeps
             # weighting in memory and avoids writing a multi-hundred-MB combined JSON manifest.
             self.data_list.extend(extra_paths * extra_data_repeat)
+            if extra_data_mask_traffic_lights:
+                self._traffic_light_mask_start = base_data_count
         else:
             extra_paths = []
-        self.traffic_light_mask_paths = (
-            set(extra_paths) if extra_data_mask_traffic_lights else set()
-        )
         self.align_legacy_neighbor_futures = align_legacy_neighbor_futures
         self.include_neighbor_futures = include_neighbor_futures
 
@@ -77,7 +79,12 @@ class DiffusionPlannerData(Dataset):
                 for key in archive.files
                 if self.include_neighbor_futures or key != "neighbor_agents_future"
             }
-        if path in self.traffic_light_mask_paths:
+        normalized_idx = idx if idx >= 0 else len(self.data_list) + idx
+        source_idx = normalized_idx * self._source_index_stride
+        if (
+            self._traffic_light_mask_start is not None
+            and source_idx >= self._traffic_light_mask_start
+        ):
             self._mask_traffic_lights(data)
         if self.align_legacy_neighbor_futures:
             align_legacy_neighbor_futures_on_load(data)
@@ -89,6 +96,12 @@ class DiffusionPlannerData(Dataset):
             ):
                 data[key] = value.astype(np.int64, copy=False)
         return data
+
+    def subsample(self, step: int) -> None:
+        if step < 1:
+            raise ValueError("subsample step must be >= 1")
+        self.data_list = self.data_list[::step]
+        self._source_index_stride *= step
 
     @staticmethod
     def _mask_traffic_lights(data: dict) -> None:

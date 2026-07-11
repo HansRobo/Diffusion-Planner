@@ -525,7 +525,7 @@ class MapTensorCache:
         dists[~eligible] = 1e9
 
         n_all = len(dists)
-        n_select = min(_NUM_LANES, n_all)
+        n_select = min(_NUM_LANES, int(eligible.sum()))
         if n_select == 0:
             out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
             self._lanes_speed_limit = np.zeros((1, _NUM_LANES, 1), dtype=np.float32)
@@ -539,11 +539,11 @@ class MapTensorCache:
             top_idx = top_idx[np.argsort(dists[top_idx])]
 
         selected = self._all_lanes[top_idx].copy()
+        mask = np.sum(np.abs(selected[:, :, :8]), axis=-1) == 0
         selected[:, :, :2] = transform_positions(selected[:, :, :2], R, ego_xy)
         selected[:, :, 2:4] = transform_directions(selected[:, :, 2:4], R)
         selected[:, :, 4:6] = transform_directions(selected[:, :, 4:6], R)
         selected[:, :, 6:8] = transform_directions(selected[:, :, 6:8], R)
-        mask = np.sum(np.abs(selected[:, :, :8]), axis=-1) == 0
         selected[mask] = 0.0
 
         out = np.zeros((_NUM_LANES, _POINTS_PER_LANELET, _SEGMENT_POINT_DIM), dtype=np.float32)
@@ -694,17 +694,21 @@ def to_model_tensors(
         data_np["turn_indicators"], dtype=torch.long, device=device
     )
 
-    # Delay: number of prefix timesteps to keep fixed during diffusion.
-    data_torch["delay"] = torch.tensor([inference_delay], dtype=torch.long, device=device)
+    # The temporal HDP decoder has no delay-prefix input; refusing beats silently
+    # ignoring a knob that used to constrain the first N diffusion steps.
+    if inference_delay != 0:
+        raise NotImplementedError(
+            "inference_delay is unsupported: the temporal HDP decoder removed the "
+            f"delay-prefix constraint (requested inference_delay={inference_delay})"
+        )
 
     # Sampled trajectories: zeros = deterministic (caller can override for stochastic).
-    # generate_samples.py overrides this with its own xT construction.
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
     data_torch["sampled_trajectories"] = torch.zeros(
         1,
         P,
-        future_len + 1,
+        future_len,
         _POSE_DIM,
         dtype=torch.float32,
         device=device,

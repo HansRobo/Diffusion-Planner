@@ -156,6 +156,8 @@ class StatePerturbation:
         :param ego_past_noise_std: std of noise applied to ego past trajectory
         :param use_smoothing_future_trajectory: whether to apply smoothing to future trajectory
         """
+        if num_refine < 3:
+            raise ValueError("num_refine must be >= 3 for the terminal finite differences")
         self._augment_prob = augment_prob
         self._device = torch.device(device)
         self._ego_past_noise_std = ego_past_noise_std
@@ -591,6 +593,10 @@ class StatePerturbation:
             ego_future_heading = ego_future
 
         P = self.num_refine
+        if P >= ego_future.shape[1]:
+            raise ValueError(
+                f"num_refine ({P}) must be smaller than the future horizon ({ego_future.shape[1]})"
+            )
         dt = self.time_interval
         B = aug_current_state.shape[0]
         M_t = self.t_matrix.unsqueeze(0).expand(B, -1, -1)

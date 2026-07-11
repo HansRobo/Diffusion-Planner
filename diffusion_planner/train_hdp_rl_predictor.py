@@ -7,6 +7,7 @@ RL-Hybrid objective.
 
 import argparse
 import json
+import math
 import os
 
 import pandas as pd
@@ -51,6 +52,35 @@ def boolean(v):
 
 def _train_config_default(name):
     return TrainConfig.__dataclass_fields__[name].default
+
+
+def configure_rl_trainable_parameters(model: torch.nn.Module, scope: str) -> None:
+    if scope not in {"decoder", "all"}:
+        raise ValueError(f"Unsupported RL train scope: {scope!r}")
+    for name, param in model.named_parameters():
+        if scope == "decoder":
+            trainable = name.startswith("decoder.dit.")
+        else:
+            trainable = not name.startswith("decoder.turn_indicator_predictor.")
+        param.requires_grad_(trainable)
+
+
+def best_valid_score_from_rows(rows: list[dict]) -> float:
+    best = -float("inf")
+    for row in rows:
+        full_eval = row.get("valid_full_eval", False)
+        if isinstance(full_eval, str):
+            full_eval = full_eval.strip().lower() in {"1", "true", "yes"}
+        if not pd.notna(full_eval) or not bool(full_eval):
+            continue
+        raw_epdms = row.get("valid_epdms_total", 0.0)
+        raw_ego_loss = row.get("valid_loss_ego", float("inf"))
+        epdms = float(raw_epdms) if pd.notna(raw_epdms) else 0.0
+        ego_loss = float(raw_ego_loss) if pd.notna(raw_ego_loss) else float("inf")
+        score = epdms if epdms > 0.0 else -ego_loss
+        if math.isfinite(score):
+            best = max(best, score)
+    return best
 
 
 def get_args():
@@ -350,7 +380,7 @@ def get_args():
     parser.add_argument(
         "--diffusion_supervision_type",
         type=str,
-        choices=["x_start", "noise", "score", "v"],
+        choices=["x_start"],
         default=_train_config_default("diffusion_supervision_type"),
     )
     parser.add_argument(
@@ -365,7 +395,6 @@ def get_args():
         default=_train_config_default("diffusion_sample_steps"),
     )
 
-    parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="cuda")
 
     parser.add_argument("--use_ema", default=True, type=boolean)
@@ -380,7 +409,7 @@ def get_args():
     parser.add_argument(
         "--diffusion_model_type",
         type=str,
-        choices=["x_start", "noise", "score", "v", "flow_matching"],
+        choices=["x_start"],
         default="x_start",
     )
     parser.add_argument(
@@ -602,10 +631,7 @@ def model_training(args):
         if args.resume_model_path is None and args.init_weights_path is None:
             print("WARNING: RL is starting without an imitation-pretrained checkpoint")
 
-        if args.resume_model_path is not None:
-            save_path = args.save_dir
-        else:
-            save_path = args.save_dir
+        save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
 
         args_dict = vars(args)
@@ -655,7 +681,7 @@ def model_training(args):
         align_legacy_neighbor_futures=args.align_legacy_neighbor_futures,
     )
 
-    train_set.data_list = train_set.data_list[:: args.train_subsample_step]
+    train_set.subsample(args.train_subsample_step)
     if len(train_set) == 0:
         raise ValueError("Training data list is empty after subsampling")
     if len(valid_set) == 0:
@@ -706,11 +732,9 @@ def model_training(args):
     diffusion_planner = Diffusion_Planner(args)
     diffusion_planner = diffusion_planner.to(rank if args.device == "cuda" else args.device)
 
-    if args.rl_train_scope == "decoder":
-        for name, param in diffusion_planner.named_parameters():
-            # The reward-weighted objective consumes only DiT trajectory outputs. The separate
-            # turn-indicator classifier would otherwise be an unused DDP parameter.
-            param.requires_grad_(name.startswith("decoder.dit."))
+    # The policy objective does not consume the auxiliary turn classifier. It must stay frozen
+    # in both scopes so DDP's find_unused_parameters=False contract remains valid.
+    configure_rl_trainable_parameters(diffusion_planner, args.rl_train_scope)
 
     if args.ddp:
         diffusion_planner = DDP(
@@ -828,17 +852,12 @@ def model_training(args):
     if global_rank == 0 and args.resume_model_path is not None and os.path.exists(train_log_path):
         previous_log = pd.read_csv(train_log_path, sep="\t")
         data_list = previous_log.to_dict("records")
-        for row in data_list:
-            if not bool(row.get("valid_full_eval", False)):
-                continue
-            epdms = float(row.get("valid_epdms_total", 0.0) or 0.0)
-            ego_loss = float(row.get("valid_loss_ego", float("inf")))
-            score = epdms if epdms > 0.0 else -ego_loss
-            best_valid_score = max(best_valid_score, score)
+        best_valid_score = best_valid_score_from_rows(data_list)
     configured_multisample_count = args.multisample_eval_num_samples
     configured_epdms = args.enable_epdms_eval
 
     for epoch in range(init_epoch, train_epochs):
+        train_sampler.set_epoch(epoch)
         if args.ddp:
             torch.distributed.barrier()
 
@@ -998,8 +1017,6 @@ def model_training(args):
                         opset_version=20,
                         external_data=False,
                     )
-
-        train_sampler.set_epoch(epoch + 1)
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()

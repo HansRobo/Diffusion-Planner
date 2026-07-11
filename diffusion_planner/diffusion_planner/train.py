@@ -607,7 +607,7 @@ def model_training(args: TrainConfig):
         args.valid_set_list, align_legacy_neighbor_futures=align_legacy_futures
     )
 
-    train_set.data_list = train_set.data_list[:: args.train_subsample_step]
+    train_set.subsample(args.train_subsample_step)
     if len(train_set) == 0:
         raise ValueError("Training data list is empty after subsampling")
     if len(valid_set) == 0:
@@ -840,6 +840,7 @@ def model_training(args: TrainConfig):
 
     # begin training
     for epoch in range(init_epoch, train_epochs):
+        train_sampler.set_epoch(epoch)
         # Synchronize all processes before training
         if args.ddp:
             torch.distributed.barrier()
@@ -1006,8 +1007,6 @@ def model_training(args: TrainConfig):
                         opset_version=20,
                         external_data=False,
                     )
-
-        train_sampler.set_epoch(epoch + 1)
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()

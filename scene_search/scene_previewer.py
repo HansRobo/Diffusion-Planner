@@ -23,8 +23,7 @@ from scene_search.batch_search import Batch
 def _load_npz_as_viz_data(npz_path: str) -> dict[str, torch.Tensor]:
     """Load an NPZ file into the dict format expected by visualize_inputs().
 
-    Same logic as preference_optimization/utils.py:load_npz_data but CPU-only
-    and without model-specific keys (delay, etc.).
+    Loads numeric visualization inputs on CPU and skips model-specific metadata.
     """
     loaded = np.load(str(npz_path))
     data: dict[str, torch.Tensor] = {}

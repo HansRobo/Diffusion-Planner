@@ -25,9 +25,7 @@ from diffusion_planner.loss import (
     normalize_ego_state,
     normalize_ego_velocity,
     sample_diffusion_time,
-    vp_supervision_elementwise_loss,
     waypoints_to_velocity,
-    weighted_waypoint_dpm_loss,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from planner_metrics.config import RewardConfig
@@ -414,35 +412,30 @@ def _hdp_lane_score(
         ).item()
     )
 
-    valid_expert = expert_future[expert_valid]
-    displacement = valid_expert[-1, :2] - valid_expert[0, :2]
-    lateral_displacement = displacement[1].abs()
-    start_heading = valid_expert[0, 2:4]
-    end_heading = valid_expert[-1, 2:4]
-    heading_change = torch.acos(
-        (start_heading * end_heading).sum().clamp(-1.0, 1.0)
-        / (start_heading.norm() * end_heading.norm()).clamp_min(1e-6)
-    )
     indicator_active = bool(
         turn_indicators is not None
         and turn_indicators.numel() > 0
         and int(turn_indicators[-1].item()) in (2, 3)
     )
-    # The paper masks samples whose expert trajectory exhibits lane-change behavior. Historical
-    # turn-indicator state is useful supporting evidence, but cannot be a prerequisite: labels can
-    # be late/missing and the signal describes the current report rather than future intent.
-    kinematic_lane_change = bool(
-        lateral_displacement > config.lane_half_width_m
-        and heading_change < torch.deg2rad(heading_change.new_tensor(30.0))
+    # Measure lateral motion in the road frame. Ego-frame endpoint y is not a lateral offset on a
+    # curve and used to classify ordinary bends as lane changes. A centerline-to-centerline change
+    # has a pronounced distance peak while both ends remain close to some lane centerline. When a
+    # turn indicator is active, a one-sided distance increase is sufficient because the target
+    # centerline can be absent from the cropped lane tensor.
+    edge_window = min(3, expert_distance.numel())
+    start_distance = expert_distance[:edge_window].mean()
+    end_distance = expert_distance[-edge_window:].mean()
+    peak_distance = expert_distance.max()
+    starts_on_lane = start_distance < 0.5 * config.lane_half_width_m
+    centerline_change = (
+        starts_on_lane
+        & (end_distance < 0.5 * config.lane_half_width_m)
+        & (peak_distance > 0.75 * config.lane_half_width_m)
     )
-    expert_lane_change = bool(
-        kinematic_lane_change
-        or (
-            indicator_active
-            and lateral_displacement > 0.5 * config.lane_half_width_m
-            and heading_change < torch.deg2rad(heading_change.new_tensor(45.0))
-        )
+    indicated_departure = starts_on_lane & (
+        peak_distance - start_distance > 0.5 * config.lane_half_width_m
     )
+    expert_lane_change = bool((centerline_change | (indicator_active & indicated_departure)).item())
     masked = expert_off_lane or expert_lane_change
     if masked:
         return (
@@ -682,12 +675,14 @@ def compute_reward_weights(
     grouped = reward.view(num_scenes, n)
     group_std = grouped.std(dim=1, keepdim=True)
     finite_group = torch.isfinite(grouped).all(dim=1, keepdim=True)
+    # This filter is part of the paper's RL procedure, independently of the normalization
+    # ablation: a scene with identical candidate rewards contains no action preference signal.
+    valid_group = finite_group & torch.isfinite(group_std) & (group_std > eps)
     if normalize == "group":
         mean = grouped.mean(dim=1, keepdim=True)
         # The HDP paper discards scenes whose candidate actions all receive the
         # same reward. Keeping them at exp(0) == 1 silently turns those scenes
         # into unweighted self-distillation and can dominate the useful groups.
-        valid_group = finite_group & torch.isfinite(group_std) & (group_std > eps)
         reward_norm = torch.where(
             valid_group,
             (grouped - mean) / (group_std + eps),
@@ -695,9 +690,9 @@ def compute_reward_weights(
         ).reshape(-1)
         valid_sample = valid_group.expand(-1, n).reshape(-1)
     elif normalize == "batch":
-        finite = torch.isfinite(reward)
-        if finite.any():
-            finite_reward = reward[finite]
+        valid_sample = valid_group.expand(-1, n).reshape(-1)
+        if valid_sample.any():
+            finite_reward = reward[valid_sample]
             std = finite_reward.std()
             if torch.isfinite(std) and std > eps:
                 reward_norm = (reward - finite_reward.mean()) / (std + eps)
@@ -705,10 +700,9 @@ def compute_reward_weights(
                 reward_norm = torch.zeros_like(reward)
         else:
             reward_norm = torch.zeros_like(reward)
-        valid_sample = finite
     elif normalize == "none":
         reward_norm = reward
-        valid_sample = torch.isfinite(reward)
+        valid_sample = valid_group.expand(-1, n).reshape(-1)
     else:
         raise ValueError(f"Unsupported rl_reward_normalize={normalize!r}")
     reward_norm = torch.nan_to_num(reward_norm, nan=0.0, posinf=0.0, neginf=0.0)
@@ -742,33 +736,15 @@ def _compute_policy_ego_loss_per_sample(
     args,
     cached_encoding: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
-    vp_model_types = {"x_start", "noise", "score", "v"}
-    if args.diffusion_model_type not in vp_model_types:
-        raise NotImplementedError(
-            f"RL loss only supports VP diffusion model types {sorted(vp_model_types)}, got "
-            f"'{args.diffusion_model_type}'."
-        )
-
+    if not args.use_velocity_representation:
+        raise ValueError("HDP RL requires velocity representation")
+    if args.diffusion_model_type != "x_start" or args.diffusion_supervision_type != "x_start":
+        raise ValueError("HDP RL requires x_start prediction and supervision")
     norm = args.state_normalizer
-    model_type = args.diffusion_model_type
-    supervision_type = getattr(args, "diffusion_supervision_type", model_type)
-    if supervision_type not in vp_model_types:
-        raise ValueError(f"Unsupported diffusion_supervision_type={supervision_type!r}")
-    use_velocity = args.use_velocity_representation
-    if use_velocity and (model_type != "x_start" or supervision_type != "x_start"):
-        raise NotImplementedError(
-            "HDP velocity representation is enabled only for x_start prediction with x_start supervision."
-        )
     ego_target = ego_pseudo_gt.detach()
 
     B, T, _ = ego_target.shape
     device = ego_pseudo_gt.device
-
-    # norm_inputs are observation-normalized; convert back to m/s (see decoder.py, same fix).
-    _lv_mean, _lv_std = args.observation_normalizer.stats("ego_current_state")
-    longitudinal_velocity = norm_inputs["ego_current_state"][:, 4:5] * float(_lv_std[4]) + float(
-        _lv_mean[4]
-    )
 
     gt_future = ego_target[:, None]  # [B, 1, T, 4]
 
@@ -783,10 +759,8 @@ def _compute_policy_ego_loss_per_sample(
     z = torch.randn_like(gt_future)
 
     waypoint_gt = normalize_ego_state(gt_future, norm)
-    all_gt = waypoint_gt.clone()
-    if use_velocity:
-        ego_velocity_gt = waypoints_to_velocity(ego_target)
-        all_gt[:, 0] = normalize_ego_velocity(ego_velocity_gt, norm)
+    ego_velocity_gt = waypoints_to_velocity(ego_target)
+    all_gt = normalize_ego_velocity(ego_velocity_gt, norm)[:, None]
 
     model_ref = getattr(model, "module", model)
     sde = getattr(model_ref, "sde", None)
@@ -818,47 +792,19 @@ def _compute_policy_ego_loss_per_sample(
         _, decoder_output = model(merged_inputs)
     model_output = decoder_output["model_output"].float()  # [B, 1, T, 4]
 
-    pred_x_start = sde.transform(f"{model_type}->x_start", model_output, t_broadcast, xT)
-    supervised_prediction = sde.transform(
-        f"{model_type}->{supervision_type}", model_output, t_broadcast, xT
+    pred_x_start = model_output
+    ego_diffusion_loss = torch.sum((pred_x_start[:, 0] - x0_target[:, 0]) ** 2, dim=-1)
+    ego_pred_velocity = pred_x_start[:, 0]
+    ego_pred_velocity_raw = inverse_normalize_ego_velocity(ego_pred_velocity, norm)
+    _, ego_waypoint_loss = hybrid_loss_components(
+        ego_pred_velocity,
+        x0_target[:, 0],
+        ego_pred_velocity_raw,
+        ego_target,
+        W=args.hybrid_loss_window,
     )
-
-    if use_velocity:
-        # Guarded at function entry: velocity mode implies model_type == supervision_type
-        # == "x_start" (mirrors decoder.compute_training_loss).
-        ego_diffusion_loss = torch.sum((supervised_prediction[:, 0] - x0_target[:, 0]) ** 2, dim=-1)
-        ego_pred_velocity = pred_x_start[:, 0]
-        ego_pred_velocity_raw = inverse_normalize_ego_velocity(ego_pred_velocity, norm)
-        _, ego_waypoint_loss = hybrid_loss_components(
-            ego_pred_velocity,
-            x0_target[:, 0],
-            ego_pred_velocity_raw,
-            ego_target,
-            W=args.hybrid_loss_window,
-        )
-        ego_reconstruction = ego_diffusion_loss + args.planning_hybrid_loss * ego_waypoint_loss
-        ego_loss_per_sample = ego_reconstruction[:, : args.ego_prediction_horizon].mean(dim=-1)
-    elif supervision_type == "x_start":
-        dpm_loss = weighted_waypoint_dpm_loss(
-            pred_x_start,
-            x0_target,
-            longitudinal_velocity,
-            args.coeff_position_lat_loss,
-            args.coeff_position_lon_loss,
-            args.coeff_heading_l2_loss,
-            args.coeff_velocity,
-            args.coeff_timestep,
-        )
-        ego_loss_per_sample = dpm_loss[:, 0, : args.ego_prediction_horizon].mean(dim=-1)
-        ego_diffusion_loss = torch.zeros_like(ego_loss_per_sample)
-        ego_waypoint_loss = torch.zeros_like(ego_loss_per_sample)
-    else:
-        dpm_loss = vp_supervision_elementwise_loss(
-            supervised_prediction, z, std, supervision_type, sde, t_broadcast, xT
-        )
-        ego_loss_per_sample = dpm_loss[:, 0, : args.ego_prediction_horizon].mean(dim=-1)
-        ego_diffusion_loss = torch.zeros_like(ego_loss_per_sample)
-        ego_waypoint_loss = torch.zeros_like(ego_loss_per_sample)
+    ego_reconstruction = ego_diffusion_loss + args.planning_hybrid_loss * ego_waypoint_loss
+    ego_loss_per_sample = ego_reconstruction[:, : args.ego_prediction_horizon].mean(dim=-1)
 
     return {
         "ego_loss_per_sample": ego_loss_per_sample,
@@ -921,5 +867,5 @@ def compute_reward_weighted_loss(
         "reward_weight_mean": reward_weights.mean().detach(),
         "reward_weight_max": reward_weights.max().detach(),
         "reward_weight_min": reward_weights.min().detach(),
-        "valid_group_fraction": valid_sample.view(num_scenes, n)[:, 0].float().mean().detach(),
+        "valid_group_fraction": valid_sample.view(num_scenes, n).any(dim=1).float().mean().detach(),
     }

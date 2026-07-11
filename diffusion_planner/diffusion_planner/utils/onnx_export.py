@@ -60,18 +60,10 @@ ENCODER_INPUT_NAMES = [
     "turn_indicators",
 ]
 
-DECODER_INPUT_NAMES = [
-    "encoding",
-    "sampled_trajectories",
-    "diffusion_time",
-    "ego_current_state",
-]
-
 TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0"]
 
 FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit"]
 ENCODER_OUTPUT_NAMES = ["encoding"]
-DECODER_OUTPUT_NAMES = ["model_output"]
 TURN_INDICATOR_OUTPUT_NAMES = ["turn_indicator_logit"]
 
 TensorDict = dict[str, torch.Tensor]
@@ -82,7 +74,6 @@ NumpyDict = dict[str, np.ndarray]
 class ModelWrappers:
     full: nn.Module
     encoder: nn.Module
-    decoder: "nn.Module | None"  # None when the split-graph contract doesn't apply
     turn_indicator: nn.Module
 
 
@@ -160,54 +151,6 @@ class EncoderONNXWrapper(nn.Module):
             "turn_indicators": turn_indicators,
         }
         return self.encoder(inputs)
-
-
-class DecoderONNXWrapper(nn.Module):
-    """One denoising-network evaluation.
-
-    This wrapper intentionally does not call a sampler. An external denoising loop should
-    update x_t and timesteps, then call this ONNX model once per model evaluation.
-
-    Contract: the output is the RAW DiT prediction in model_type-native semantics, and the
-    external loop's x_start/waypoint decoding assumptions only hold for waypoint-mode
-    x_start checkpoints. HDP velocity checkpoints carry a velocity-space ego row the
-    external loop would mis-decode as waypoints, and noise/score/v models do not emit
-    x_start at all — for those, deploy FullONNXWrapper (it traces the decoder's own
-    sampling and latent decoding), so this wrapper refuses them.
-    """
-
-    def __init__(self, model: Diffusion_Planner):
-        super().__init__()
-        decoder = model.decoder
-        if decoder._use_velocity or decoder._model_type != "x_start":
-            raise RuntimeError(
-                "Split-graph decoder ONNX export supports only waypoint-mode x_start "
-                f"checkpoints (got use_velocity={decoder._use_velocity}, "
-                f"model_type={decoder._model_type!r}); deploy FullONNXWrapper instead."
-            )
-        self.decoder = decoder
-
-    def forward(
-        self,
-        encoding: torch.Tensor,
-        sampled_trajectories: torch.Tensor,
-        diffusion_time: torch.Tensor,
-        ego_current_state: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size = encoding.shape[0]
-
-        sampled_trajectories = sampled_trajectories.reshape(
-            batch_size, 1, self.decoder._future_len, 4
-        )
-
-        model_output = self.decoder.dit(
-            sampled_trajectories,
-            diffusion_time,
-            encoding,
-            ego_current_state[:, 4:6],
-        ).reshape(batch_size, 1, self.decoder._future_len, 4)
-
-        return model_output
 
 
 class TurnIndicatorONNXWrapper(nn.Module):
@@ -316,16 +259,6 @@ def build_dummy_inputs(action_agent_num: int = 1) -> TensorDict:
     return inputs
 
 
-def build_decoder_inputs(inputs: TensorDict, encoding: torch.Tensor) -> TensorDict:
-    action_agent_num = inputs["sampled_trajectories"].shape[1]
-    return {
-        "encoding": encoding,
-        "sampled_trajectories": inputs["sampled_trajectories"],
-        "diffusion_time": torch.ones(1, dtype=torch.float32),
-        "ego_current_state": inputs["ego_current_state"],
-    }
-
-
 def build_turn_indicator_inputs(encoding: torch.Tensor, final_x0: torch.Tensor) -> TensorDict:
     return {
         "encoding": encoding,
@@ -336,11 +269,8 @@ def build_turn_indicator_inputs(encoding: torch.Tensor, final_x0: torch.Tensor) 
 def build_turn_indicator_final_x0(model: Diffusion_Planner, inputs: TensorDict) -> torch.Tensor:
     """Build a trace-only latent input for the turn-indicator graph.
 
-    HDP velocity checkpoints intentionally do not export the split decoder graph because the
-    external-loop contract would expose velocity-space ego latents. The turn-indicator head still
-    has a valid standalone graph; for export tracing it only needs a correctly shaped latent. The
-    deployable HDP artifact remains the full graph, whose prediction output is already decoded back
-    to waypoint space.
+    The standalone turn head only needs a correctly shaped velocity latent for export tracing.
+    The deployable artifact is the full graph, which runs sampling and latent decoding itself.
     """
     decoder = model.decoder
     batch_size = inputs["sampled_trajectories"].shape[0]
@@ -377,22 +307,9 @@ def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusio
 
 
 def build_wrappers(model: Diffusion_Planner) -> ModelWrappers:
-    decoder = model.decoder
-    if decoder._use_velocity or decoder._model_type != "x_start":
-        # The split decoder graph's external-loop contract does not hold for these models
-        # (see DecoderONNXWrapper docstring); export the full graph and skip the split one.
-        print(
-            "Skipping split decoder ONNX export: unsupported for "
-            f"use_velocity={decoder._use_velocity}, model_type={decoder._model_type!r}; "
-            "the full ONNX graph remains the deployable artifact."
-        )
-        decoder_wrapper = None
-    else:
-        decoder_wrapper = DecoderONNXWrapper(model).eval()
     return ModelWrappers(
         full=FullONNXWrapper(model).eval(),
         encoder=EncoderONNXWrapper(model).eval(),
-        decoder=decoder_wrapper,
         turn_indicator=TurnIndicatorONNXWrapper(model).eval(),
     )
 
@@ -400,11 +317,9 @@ def build_wrappers(model: Diffusion_Planner) -> ModelWrappers:
 def build_export_specs(
     wrappers: ModelWrappers,
     inputs: TensorDict,
-    decoder_inputs: TensorDict,
     turn_indicator_inputs: TensorDict,
     full_onnx_path: Path,
     encoder_onnx_path: Path,
-    decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
 ) -> list[ExportSpec]:
     return [
@@ -421,19 +336,6 @@ def build_export_specs(
             input_names=ENCODER_INPUT_NAMES,
             output_names=ENCODER_OUTPUT_NAMES,
             output_path=encoder_onnx_path,
-        ),
-        *(
-            [
-                ExportSpec(
-                    wrapper=wrappers.decoder,
-                    inputs=decoder_inputs,
-                    input_names=DECODER_INPUT_NAMES,
-                    output_names=DECODER_OUTPUT_NAMES,
-                    output_path=decoder_onnx_path,
-                )
-            ]
-            if wrappers.decoder is not None
-            else []
         ),
         ExportSpec(
             wrapper=wrappers.turn_indicator,
@@ -523,7 +425,6 @@ def export_model_to_onnx(
     model: Diffusion_Planner,
     full_onnx_path: Path,
     encoder_onnx_path: Path,
-    decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
     use_simplify: bool,
     opset_version: int,
@@ -531,8 +432,7 @@ def export_model_to_onnx(
 ) -> None:
     """Export ONNX graphs for ``model``.
 
-    The split decoder graph is exported only for waypoint-mode x_start checkpoints. HDP velocity
-    checkpoints export full / encoder / turn_indicator; the full graph is the deployable artifact.
+    HDP exports full / encoder / turn_indicator graphs; the full graph is deployable.
 
     No ORT validation is performed; the caller is responsible for that (the standalone CLI does,
     the training loop skips it). The SDPA / MHA backends are forced only for the duration of the
@@ -545,27 +445,15 @@ def export_model_to_onnx(
         with torch.no_grad():
             encoding = wrappers.encoder(*(export_inputs[name] for name in ENCODER_INPUT_NAMES))
 
-        decoder_inputs = build_decoder_inputs(export_inputs, encoding)
-        if wrappers.decoder is not None:
-            with torch.no_grad():
-                final_x0 = wrappers.decoder(
-                    decoder_inputs["encoding"],
-                    decoder_inputs["sampled_trajectories"],
-                    decoder_inputs["diffusion_time"],
-                    decoder_inputs["ego_current_state"],
-                )
-        else:
-            final_x0 = build_turn_indicator_final_x0(model, export_inputs)
+        final_x0 = build_turn_indicator_final_x0(model, export_inputs)
         turn_indicator_inputs = build_turn_indicator_inputs(encoding, final_x0)
 
         export_specs = build_export_specs(
             wrappers,
             export_inputs,
-            decoder_inputs,
             turn_indicator_inputs,
             full_onnx_path,
             encoder_onnx_path,
-            decoder_onnx_path,
             turn_indicator_onnx_path,
         )
         for spec in export_specs:
@@ -599,7 +487,6 @@ def export_checkpoint_onnx(
         model,
         output_dir / f"{output_prefix}.onnx",
         output_dir / f"{output_prefix}_encoder.onnx",
-        output_dir / f"{output_prefix}_decoder.onnx",
         output_dir / f"{output_prefix}_turn_indicator.onnx",
         use_simplify,
         opset_version,

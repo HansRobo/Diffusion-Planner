@@ -1,7 +1,4 @@
-import argparse
-import json
 from collections import defaultdict
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -223,12 +220,9 @@ def _multisample_metrics(
     gt_xy = gt_xy[:, :T]
 
     valid = gt_xy.abs().sum(dim=-1) > 1e-6
-    no_valid = ~valid.any(dim=-1)
-    if no_valid.any():
-        valid = valid.clone()
-        valid[no_valid] = True
+    has_valid = valid.any(dim=-1)
     distance = torch.linalg.norm(sampled_xy - gt_xy[:, None], dim=-1)
-    ade = (distance * valid[:, None]).sum(dim=-1) / valid.sum(dim=-1, keepdim=True)
+    ade = (distance * valid[:, None]).sum(dim=-1) / valid.sum(dim=-1, keepdim=True).clamp_min(1)
     last_valid = (
         valid.long() * torch.arange(1, T + 1, device=device, dtype=torch.long)[None]
     ).argmax(dim=-1)
@@ -248,13 +242,13 @@ def _multisample_metrics(
     endpoint_center = endpoints.mean(dim=1, keepdim=True)
     endpoint_divergence = torch.linalg.norm(endpoints - endpoint_center, dim=-1).mean(dim=1)
     return {
-        "multisample_minADE": min_ade,
-        "multisample_minFDE": min_fde,
+        "multisample_minADE": min_ade[has_valid],
+        "multisample_minFDE": min_fde[has_valid],
         "multisample_ADE_score": 100.0
-        * (1.0 - min_ade / MULTISAMPLE_ADE_THRESHOLD_M).clamp(0.0, 1.0),
+        * (1.0 - min_ade[has_valid] / MULTISAMPLE_ADE_THRESHOLD_M).clamp(0.0, 1.0),
         "multisample_FDE_score": 100.0
-        * (1.0 - min_fde / MULTISAMPLE_FDE_THRESHOLD_M).clamp(0.0, 1.0),
-        "multisample_endpoint_divergence": endpoint_divergence,
+        * (1.0 - min_fde[has_valid] / MULTISAMPLE_FDE_THRESHOLD_M).clamp(0.0, 1.0),
+        "multisample_endpoint_divergence": endpoint_divergence[has_valid],
     }
 
 
@@ -609,7 +603,9 @@ def aggregate_valid_metrics(valid_dict, device):
             continue
         local_sum = ddp.all_reduce_sum(val.float().sum().item(), device)
         local_cnt = ddp.all_reduce_sum(val.numel(), device)
-        multisample_means[key.removeprefix("multisample_")] = local_sum / max(local_cnt, 1)
+        multisample_means[key.removeprefix("multisample_")] = (
+            local_sum / local_cnt if local_cnt > 0 else float("nan")
+        )
 
     return {
         "avg_loss_ego": loss_ego_sum / max(samples_ego, 1),

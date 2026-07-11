@@ -196,6 +196,10 @@ Use validation metrics consistently across base, SFT, and RL:
 
 The six-trajectory count is not invented by this repository: the paper's Appendix "Open-Loop Metrics" explicitly says it generates six trajectories before computing minADE/minFDE. The seeded zero-noise trajectory remains a lower-variance checkpoint proxy; it is not mislabeled as that six-trajectory protocol.
 
+When `amp_dtype=bf16`, validation inference uses the same bf16 autocast as training and RL
+rollouts. Compare those metrics only with runs using the same precision; pre-temporal fp32
+validation logs are not an exactly identical numerical baseline.
+
 ## ONNX export
 
 HDP velocity checkpoints should be deployed with the full ONNX graph:
@@ -207,10 +211,9 @@ diffusion_planner.onnx
 The full graph runs the model's own sampler and decodes the HDP ego velocity latent back to
 waypoint-space prediction before returning `prediction`.
 
-The split decoder ONNX contract is only valid for vanilla waypoint-mode `x_start` checkpoints.
-For HDP velocity checkpoints, exporting a split decoder would expose velocity-space ego latents
-that an external waypoint denoising loop could misinterpret. Therefore the exporter skips the
-split decoder for HDP and keeps the full graph as the deployable artifact.
+The old waypoint split-decoder graph is not exported in this HDP-only branch: exposing the
+velocity latent to an external waypoint denoising loop would be incorrect. Encoder and
+turn-indicator diagnostic graphs remain available; production should consume the full graph.
 
 Precision policy:
 
@@ -229,7 +232,7 @@ result:
   ORT provider         CPUExecutionProvider, dynamic batch 1 and 2 passed
   full prediction      [B, 1, 80, 4], finite
   turn indicator       [B, 5], finite
-  split decoder        intentionally skipped for HDP velocity checkpoints
+  split decoder        not part of the HDP export surface
 ```
 
 The full graph takes `sampled_trajectories: [B,1,80,4]`. `prediction[:,0]` is the

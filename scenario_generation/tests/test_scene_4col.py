@@ -1,10 +1,8 @@
 """Scene-generation futures are ALWAYS 4-col [x,y,cos,sin], never 3-col [x,y,heading].
 
-Covers the extractor's widening/recenter helpers and that load_npz_data tolerates the
+Covers the extractor's widening/recenter helpers and that the scene NPZ loader tolerates
 string `origin` metadata the extractor writes.
 """
-
-import json
 
 import numpy as np
 
@@ -49,10 +47,8 @@ def test_recenter_neighbor_future_is_4col():
     assert _recenter_neighbor_future(naf4, 0.0, 0.0, 0.0).shape == (320, 1, 4)
 
 
-def test_load_npz_data_skips_origin_string(tmp_path):
-    import torch
-
-    from preference_optimization.utils import load_npz_data
+def test_scene_npz_loader_tolerates_origin_string(tmp_path):
+    from scenario_generation.npz_loader import from_npz
 
     p = tmp_path / "scene.npz"
     np.savez(
@@ -62,9 +58,9 @@ def test_load_npz_data_skips_origin_string(tmp_path):
         neighbor_agents_future=np.zeros((320, 80, 4), np.float32),
         origin=np.array("live"),  # string metadata the extractor writes
     )
-    data = load_npz_data(p, torch.device("cpu"))  # must not crash on the string key
-    assert "origin" not in data
-    assert "neighbor_agents_future" in data and data["neighbor_agents_future"].shape[-1] == 4
+    scene = from_npz(p)  # must not crash on the string key
+    assert scene.ego_agent.id == "ego"
+    assert np.isclose(scene.ego_agent.length, 7.24)
 
 
 def test_heading_to_cos_sin_is_idempotent():

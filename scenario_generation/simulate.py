@@ -571,7 +571,6 @@ def _predict_as_ego(
 ) -> np.ndarray:
     """Run a single agent as ego and return its ego prediction (80, 4)."""
     data = to_model_tensors(scene, agent_id, model_args, device)
-    model.decoder._guidance_fn = None
     _, outputs = model(data)
     return outputs["prediction"][0, 0].cpu().numpy()
 

@@ -2,7 +2,7 @@
 """Parse a single rosbag into npz and visualize the result as an mp4.
 
 Example:
-    python3 test_scripts/test_parse_rosbag.py \
+    python3 test_scripts/parse_rosbag_smoke.py \
         /path/to/rosbag_directory/
 
 The vector map is resolved automatically from ``log_file_info.json``

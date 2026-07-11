@@ -1,9 +1,6 @@
 """Oriented-bounding-box geometry primitives (SAT signed distance + corners).
 
-Pure torch helpers shared by the subscores and by the planner's
-collision-avoidance guidance. Moved here so both can use them without a
-dependency cycle; ``diffusion_planner.model.guidance.collision`` re-exports them
-for backward compatibility.
+Pure torch helpers shared by planner metrics, training losses, and scenario replay.
 """
 
 import torch

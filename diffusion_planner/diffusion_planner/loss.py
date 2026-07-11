@@ -1,8 +1,8 @@
 import torch
 import torch.nn.functional as F
 
-from diffusion_planner.dimensions import INPUT_T, TURN_INDICATOR_OUTPUT_KEEP
-from diffusion_planner.model.guidance.collision import center_rect_to_points
+from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_KEEP
+from planner_metrics.collision_geometry import center_rect_to_points
 
 _NEIGHBOR_EVAL_STEPS = [0, 20, 40, 60, 79]
 

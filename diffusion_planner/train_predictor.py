@@ -238,7 +238,7 @@ def get_args(args_list=None):
     parser.add_argument(
         "--diffusion_supervision_type",
         type=str,
-        choices=["x_start", "noise", "score", "v"],
+        choices=["x_start"],
         default=_train_config_default("diffusion_supervision_type"),
     )
     parser.add_argument(
@@ -253,7 +253,6 @@ def get_args(args_list=None):
         default=_train_config_default("diffusion_sample_steps"),
     )
 
-    parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
     parser.add_argument(
         "--tf32",
@@ -279,7 +278,7 @@ def get_args(args_list=None):
     parser.add_argument(
         "--diffusion_model_type",
         type=str,
-        choices=["x_start", "noise", "score", "v", "flow_matching"],
+        choices=["x_start"],
         default=_train_config_default("diffusion_model_type"),
     )
     parser.add_argument(

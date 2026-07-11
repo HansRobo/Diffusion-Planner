@@ -26,11 +26,11 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 from diffusion_planner.dimensions import INPUT_T, POSE_DIM
-from diffusion_planner.model.guidance.collision import (
+
+from planner_metrics.collision_geometry import (
     batch_signed_distance_rect,
     center_rect_to_points,
 )
-
 from planner_metrics.geometry import (
     _build_ego_bbox_corners,
     _closest_points_between_rects,
@@ -215,12 +215,11 @@ def _arrays_to_device(arrays: dict, device: str) -> dict:
 
 
 def _add_static_inputs(data: dict, model_args, n: int, device: str) -> None:
-    """Add the per-batch ``delay`` + zero ``sampled_trajectories`` the model expects
-    (P = 1 ego + predicted neighbors, T = future_len + 1). In place."""
-    data["delay"] = torch.zeros((n,), dtype=torch.long, device=device)
+    """Add the zero ``sampled_trajectories`` action latent the model expects
+    (P = 1 ego + predicted neighbors, T = future_len). In place."""
     n_agents = 1 + model_args.predicted_neighbor_num
     data["sampled_trajectories"] = torch.zeros(
-        (n, n_agents, model_args.future_len + 1, POSE_DIM), dtype=torch.float32, device=device
+        (n, n_agents, model_args.future_len, POSE_DIM), dtype=torch.float32, device=device
     )
 
 

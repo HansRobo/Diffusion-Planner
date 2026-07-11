@@ -1,4 +1,5 @@
 import json
+import math
 
 import numpy as np
 import pytest
@@ -43,7 +44,6 @@ from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.masks import neighbor_future_padding_mask
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import (
-    build_decoder_inputs,
     build_dummy_inputs,
     build_dynamic_axes,
 )
@@ -180,6 +180,18 @@ def test_reward_weights_discard_identical_and_nonfinite_groups():
     assert torch.isfinite(weights).all()
 
 
+@pytest.mark.parametrize("normalize", ["batch", "none"])
+def test_reward_weight_ablations_still_discard_groups_without_preferences(normalize):
+    reward = torch.tensor([0.4, 0.4, 0.1, 0.3])
+    weights, valid = compute_reward_weights(
+        reward, num_scenes=2, n=2, normalize=normalize, beta=1.0, eps=1e-6
+    )
+
+    assert not valid[:2].any()
+    assert valid[2:].all()
+    torch.testing.assert_close(weights[:2], torch.zeros(2), rtol=0, atol=0)
+
+
 def test_legacy_short_neighbor_future_alignment_keeps_full_tracks():
     past = np.zeros((2, 3, 11), dtype=np.float32)
     past[:, -1, 2] = 1.0
@@ -286,6 +298,33 @@ def test_extra_dataset_traffic_light_mask_is_in_memory_and_extra_only(tmp_path):
         assert np.all(source["route_lanes"][..., TRAFFIC_LIGHT_GREEN] == 1.0)
 
 
+def test_extra_dataset_mask_tracks_occurrence_when_base_and_extra_overlap(tmp_path):
+    lanes = np.zeros((1, 2, 33), dtype=np.float32)
+    lanes[0, :, 0] = [1.0, 2.0]
+    lanes[..., TRAFFIC_LIGHT_RED] = 1.0
+    sample = tmp_path / "overlap.npz"
+    np.savez(sample, lanes=lanes)
+    base_list = tmp_path / "base.json"
+    extra_list = tmp_path / "extra.json"
+    base_list.write_text(json.dumps([str(sample)]), encoding="utf-8")
+    extra_list.write_text(json.dumps([str(sample)]), encoding="utf-8")
+
+    dataset = DiffusionPlannerData(
+        str(base_list),
+        extra_data_list=str(extra_list),
+        extra_data_repeat=2,
+        extra_data_mask_traffic_lights=True,
+    )
+    assert dataset[0]["lanes"][..., TRAFFIC_LIGHT_RED].all()
+    assert not dataset[1]["lanes"][..., TRAFFIC_LIGHT_RED].any()
+    assert not dataset[2]["lanes"][..., TRAFFIC_LIGHT_RED].any()
+
+    dataset.subsample(2)
+    assert dataset.data_list == [str(sample), str(sample)]
+    assert dataset[0]["lanes"][..., TRAFFIC_LIGHT_RED].all()
+    assert not dataset[1]["lanes"][..., TRAFFIC_LIGHT_RED].any()
+
+
 def test_ego_only_dataset_skips_unused_neighbor_future_npz_payload(tmp_path):
     sample_path = tmp_path / "sample.npz"
     np.savez(
@@ -329,7 +368,7 @@ def test_distributed_eval_sampler_has_no_duplicates_or_padding():
 def test_augmentation_transforms_goal_pose_with_the_scene():
     augmentor = StatePerturbation(
         augment_prob=0.0,
-        num_refine=2,
+        num_refine=3,
         device="cpu",
         ego_past_noise_std=0.0,
         use_smoothing_future_trajectory=False,
@@ -466,6 +505,52 @@ def test_hdp_lane_change_mask_and_neutral_occupancy_fallback():
     assert not any(sources.values())
 
 
+def test_hdp_lane_reward_does_not_mask_a_curved_centerline():
+    theta = torch.linspace(0.0, 0.15, 20)
+    radius = 80.0
+    lanes = torch.zeros(1, 20, 8)
+    lanes[0, :, 0] = radius * torch.sin(theta)
+    lanes[0, :, 1] = radius * (1.0 - torch.cos(theta))
+    lanes[0, :, 2] = torch.cos(theta)
+    lanes[0, :, 3] = torch.sin(theta)
+    expert = lanes[0, 1:17, :4].clone()
+
+    lane_score, off_lane, lane_change = _hdp_lane_score(
+        expert.unsqueeze(0),
+        expert,
+        lanes,
+        torch.tensor([0, 0]),
+        HDPRewardConfig(),
+    )
+
+    assert not off_lane
+    assert not lane_change
+    assert lane_score.item() > 0.99
+
+
+def test_hdp_lane_reward_masks_centerline_to_centerline_change_without_indicator():
+    x = torch.linspace(0.1, 20.0, 20)
+    lanes = torch.zeros(2, 20, 8)
+    lanes[:, :, 0] = x
+    lanes[1, :, 1] = 3.5
+    lanes[..., 2] = 1.0
+    expert = torch.zeros(20, 4)
+    expert[:, 0] = x
+    expert[:, 1] = 1.75 * (1.0 - torch.cos(torch.linspace(0.0, torch.pi, 20)))
+    expert[:, 2] = 1.0
+
+    lane_score, _, lane_change = _hdp_lane_score(
+        expert.unsqueeze(0),
+        expert,
+        lanes,
+        torch.tensor([0, 0]),
+        HDPRewardConfig(),
+    )
+
+    assert lane_change
+    torch.testing.assert_close(lane_score, torch.zeros(1))
+
+
 def test_seeded_multisample_metrics_compute_minade_and_minfde():
     class FakeModel(torch.nn.Module):
         def __init__(self):
@@ -506,6 +591,47 @@ def test_seeded_multisample_metrics_compute_minade_and_minfde():
     torch.testing.assert_close(metrics["multisample_minFDE"], torch.tensor([1.0]))
 
 
+def test_multisample_metrics_exclude_scenes_without_valid_ground_truth():
+    class FakeModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.decoder = torch.nn.Identity()
+            self.decoder._sample_steps = 6
+            self.decoder._predicted_neighbor_num = 0
+
+        def forward(self, inputs):
+            batch = inputs["sampled_trajectories"].shape[0]
+            prediction = torch.zeros(batch, 1, 80, 4)
+            prediction[..., 2] = 1.0
+            return inputs["_cached_encoding"], {"prediction": prediction}
+
+    args = type(
+        "Args",
+        (),
+        {
+            "multisample_eval_num_samples": 2,
+            "multisample_eval_noise_scale": 0.1,
+            "multisample_eval_seed": 7,
+            "multisample_eval_sample_steps": 6,
+            "amp_dtype": "off",
+        },
+    )()
+    gt = torch.zeros(2, 80, 4)
+    gt[1, :, 0] = 1.0
+    gt[1, :, 2] = 1.0
+    metrics = _multisample_metrics(
+        FakeModel(),
+        {"ego_current_state": torch.zeros(2, 10)},
+        torch.zeros(2, 2, 4),
+        gt,
+        args,
+        0,
+    )
+
+    assert all(value.shape == (1,) for value in metrics.values())
+    torch.testing.assert_close(metrics["multisample_minADE"], torch.tensor([1.0]))
+
+
 def test_turn_indicator_class_metrics_keep_counts_visible():
     metrics = aggregate_valid_metrics(
         {
@@ -532,6 +658,27 @@ def test_turn_indicator_class_metrics_keep_counts_visible():
     }
     assert metrics["turn_indicator_class_count"]["none"] == 0
     assert metrics["turn_indicator_class_count"]["enable_right"] == 2
+
+
+def test_empty_multisample_metrics_aggregate_to_nan_not_false_zero():
+    metrics = aggregate_valid_metrics(
+        {
+            "_loss_ego_sum": 0.0,
+            "_samples_ego": 1,
+            "_loss_neighbor_sum": 0.0,
+            "_samples_neighbor": 0,
+            "_turn_correct": 0,
+            "_turn_total": 0,
+            "_turn_change_correct": 0,
+            "turn_indicator_change_total": 0,
+            "_turn_class_correct": [0, 0, 0, 0, 0],
+            "_turn_class_total": [0, 0, 0, 0, 0],
+            "multisample_minADE": torch.empty(0),
+        },
+        "cpu",
+    )
+
+    assert math.isnan(metrics["multisample_means"]["minADE"])
 
 
 def test_ego_only_supervised_loss_and_onnx_shapes():
@@ -623,9 +770,7 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
     )
 
     dummy = build_dummy_inputs(action_agent_num=1)
-    decoder_inputs = build_decoder_inputs(dummy, torch.zeros(1, 4, 8))
     assert dummy["sampled_trajectories"].shape == (1, 1, 80, 4)
-    assert decoder_inputs["diffusion_time"].shape == (1,)
     assert build_dynamic_axes(["sampled_trajectories"], ["prediction"])["sampled_trajectories"] == {
         0: "batch"
     }

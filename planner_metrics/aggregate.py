@@ -3,9 +3,8 @@
 ``compute_subscores_batch`` runs the input marshalling (ego_shape / neighbors /
 goal) and every per-subscore computation, but stops before any reward *shaping*
 (weights / gates / survival aggregation). It returns the raw per-trajectory
-subscores + diagnostics as a dict; ``rlvr.reward.compute_reward_batch`` feeds
-this straight into ``_shape_reward`` (single source of truth — no duplicated
-marshalling), and the validation loop logs the continuous subscores.
+subscores + diagnostics as a dict. Scenario replay serializes those diagnostics,
+and validation/RL consume the same underlying geometry primitives.
 
 These are reward-shaping subscores (custom thresholds, goal-based ego-progress,
 penalty signs), i.e. EPDMS-INSPIRED, NOT a faithful EPDMS port. Single scene /
