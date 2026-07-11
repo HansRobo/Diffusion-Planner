@@ -439,7 +439,13 @@ def model_training(args: TrainConfig):
         print(f"Model loaded from {args.resume_model_path}")
         # We always use new wandb run for each training session, so we don't need to load the wandb_id from the model_dict.
         diffusion_planner, optimizer, scheduler, init_epoch, _, model_ema = resume_model(
-            args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
+            args.resume_model_path,
+            diffusion_planner,
+            optimizer,
+            scheduler,
+            model_ema,
+            args.device,
+            use_ddp=args.ddp,
         )
 
         # Override learning rate with the new value
@@ -667,7 +673,7 @@ def model_training(args: TrainConfig):
                 )
 
         if (epoch + 1 - init_epoch) % save_utd == 0 and args.closed_loop_npz_root:
-            cl_out = os.path.join(save_path, f"epoch{epoch + 1:04d}", "closed_loop")
+            cl_out = os.path.join(args.save_dir, f"epoch{epoch + 1:04d}", "closed_loop")
             ddp_cl = (
                 args.ddp and ddp.is_dist_avail_and_initialized() and ddp.get_world_size() > 1
             )

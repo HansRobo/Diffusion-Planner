@@ -77,15 +77,6 @@ def strip_module_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
     return {k.replace("module.", "", 1) if k.startswith("module.") else k: v for k, v in state_dict.items()}
 
 
-def extract_model_state_dict(ckpt: dict[str, Any] | Any) -> dict[str, Any]:
-    """Return model weights from a training checkpoint or raw state dict."""
-    if isinstance(ckpt, dict) and "model" in ckpt:
-        return strip_module_prefix(ckpt["model"])
-    if isinstance(ckpt, dict):
-        return strip_module_prefix(ckpt)
-    raise TypeError(f"Unsupported checkpoint type: {type(ckpt)}")
-
-
 def train_config_defaults_from_args_json(path: str) -> dict[str, Any]:
     """Load saved training hyperparameters for argparse defaults (architecture + dims)."""
     from diffusion_planner.train_config import TrainConfig
@@ -101,51 +92,62 @@ def train_config_defaults_from_args_json(path: str) -> dict[str, Any]:
     return defaults
 
 
-def resume_model(path: str, model, optimizer, scheduler, ema, device):
+def resume_model(path: str, model, optimizer, scheduler, ema, device, use_ddp: bool = False):
     """
     load ckpt from path
     """
     ckpt = torch.load(path, map_location=device, weights_only=False)
 
-    model.load_state_dict(extract_model_state_dict(ckpt))
+    # load model
+    state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+    if use_ddp:
+        model.module.load_state_dict(strip_module_prefix(state))
+    else:
+        try:
+            model.load_state_dict(state)
+        except Exception:
+            model.load_state_dict(ckpt)
     print("Model load done")
 
     # load optimizer
     try:
         optimizer.load_state_dict(ckpt["optimizer"])
         print("Optimizer load done")
-    except:
+    except Exception:
         print("no pretrained optimizer found")
 
     # load schedule
     try:
         scheduler.load_state_dict(ckpt["schedule"])
         print("Schedule load done")
-    except:
+    except Exception:
         print("no schedule found,")
 
     # load step
     try:
         init_epoch = ckpt["epoch"]
         print("Step load done")
-    except:
+    except Exception:
         init_epoch = 0
 
     # Load wandb id
     try:
         wandb_id = ckpt["wandb_id"]
         print("wandb id load done")
-    except:
+    except Exception:
         wandb_id = None
 
     try:
-        ema.ema.load_state_dict(strip_module_prefix(ckpt["ema_state_dict"]))
+        ema_state = ckpt["ema_state_dict"]
+        if use_ddp:
+            ema_state = strip_module_prefix(ema_state)
+        ema.ema.load_state_dict(ema_state)
         ema.ema.eval()
         for p in ema.ema.parameters():
             p.requires_grad_(False)
 
         print("ema load done")
-    except:
+    except Exception:
         print("no ema shadow found")
 
     return model, optimizer, scheduler, init_epoch, wandb_id, ema
