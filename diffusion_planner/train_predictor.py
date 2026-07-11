@@ -279,6 +279,18 @@ def get_args(args_list=None):
         help="Optional dataset key e.g. x2_dev/2231_odaiba_... when NPZ path cannot be parsed; "
         "otherwise inferred from .../{project}/{map}/valid/...",
     )
+    parser.add_argument(
+        "--closed_loop_profile",
+        default=False,
+        type=boolean,
+        help="emit per-stage closed-loop timing (timing.json + stdout report)",
+    )
+    parser.add_argument(
+        "--closed_loop_profile_sync_gpu",
+        default=False,
+        type=boolean,
+        help="torch.cuda.synchronize() around model_forward when profiling (accurate, slower)",
+    )
 
     args = parser.parse_args(remaining)
     return args

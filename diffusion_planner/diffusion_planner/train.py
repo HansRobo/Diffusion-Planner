@@ -94,10 +94,19 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
 
     Uses grouped-by-area eval when a scenario classification JSON is resolved; otherwise
     falls back to legacy full-route closed-loop over ``closed_loop_npz_root``.
+
+    With DDP (``torchrun`` / ``WORLD_SIZE`` > 1), bags are sharded across ranks on
+    each GPU; rank 0 merges shard JSON after a barrier.
     """
     if not args.closed_loop_npz_root:
         return
 
+    import torch.distributed as dist
+
+    from scenario_generation.grouped_closed_loop_ddp import (
+        ddp_device_for_rank,
+        merge_ddp_grouped_shards,
+    )
     from scenario_generation.scenario_classification import (
         discover_classification_eval_jobs,
         merge_grouped_eval_summaries,
@@ -106,6 +115,11 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
         build_full_closed_loop_wandb_log,
         build_grouped_closed_loop_wandb_log,
     )
+
+    rank = ddp.get_rank()
+    world_size = ddp.get_world_size()
+    ddp_active = args.ddp and ddp.is_dist_avail_and_initialized() and world_size > 1
+    cl_device = ddp_device_for_rank(args.device) if ddp_active else args.device
 
     cl_root = args.closed_loop_classification_json_root or None
     cl_explicit = args.closed_loop_classification_json or None
@@ -119,40 +133,46 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
         explicit_path=cl_explicit,
         dataset_name=args.closed_loop_scenario_dataset_name or None,
     )
-    if (cl_root or cl_explicit) and not jobs:
-        print(
-            "Warning: no classification JSON matched npz_root="
-            f"{args.closed_loop_npz_root!r} under root={cl_root!r}; using full-route closed-loop"
-        )
-    elif not jobs and args.closed_loop_scenario_dataset_name:
-        print(
-            "Warning: no scenario classification JSON matched for "
-            f"dataset={args.closed_loop_scenario_dataset_name!r} "
-            f"npz_root={args.closed_loop_npz_root!r}; using full-route closed-loop"
-        )
+    if rank == 0:
+        if (cl_root or cl_explicit) and not jobs:
+            print(
+                "Warning: no classification JSON matched npz_root="
+                f"{args.closed_loop_npz_root!r} under root={cl_root!r}; using full-route closed-loop"
+            )
+        elif not jobs and args.closed_loop_scenario_dataset_name:
+            print(
+                "Warning: no scenario classification JSON matched for "
+                f"dataset={args.closed_loop_scenario_dataset_name!r} "
+                f"npz_root={args.closed_loop_npz_root!r}; using full-route closed-loop"
+            )
+
+    if not jobs and ddp_active and rank != 0:
+        return
 
     net = ddp.get_model(model, args.ddp)
     was_training = net.training
     net.eval()
+    log = {}
     try:
         if jobs:
             from scenario_generation.grouped_closed_loop_eval import run_grouped_closed_loop_eval
 
             grouped_dir = os.path.join(out_dir, "grouped")
-            summaries: list[dict] = []
+            job_summaries: list[dict] = []
             for job in jobs:
                 job_out = grouped_dir if len(jobs) == 1 else os.path.join(grouped_dir, job.date)
-                print(
-                    f"grouped closed-loop job: {job.dataset_key} {job.date} "
-                    f"npz={job.npz_root} json={job.classification_json.name}"
-                )
+                if rank == 0 or args.closed_loop_profile:
+                    print(
+                        f"grouped closed-loop job: {job.dataset_key} {job.date} "
+                        f"npz={job.npz_root} json={job.classification_json.name}"
+                    )
                 job_summary = run_grouped_closed_loop_eval(
                     net,
                     args,
                     job.npz_root,
                     job.classification_json,
                     job_out,
-                    device=args.device,
+                    device=cl_device,
                     near_miss_thresh=args.closed_loop_near_miss_thresh,
                     search_radius=args.closed_loop_search_radius,
                     warmup_steps=args.closed_loop_warmup_steps,
@@ -161,22 +181,55 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
                     draw_every=args.closed_loop_draw_every,
                     fps=float(args.closed_loop_fps),
                     replan_interval=args.closed_loop_replan_interval,
-                    verbose=False,
+                    verbose=args.closed_loop_profile and (rank == 0 or not ddp_active),
+                    profile=args.closed_loop_profile,
+                    profile_sync_gpu=args.closed_loop_profile_sync_gpu,
+                    ddp_rank=rank,
+                    ddp_world_size=world_size if ddp_active else 1,
                 )
                 job_summary["date"] = job.date
                 job_summary["dataset_key"] = job.dataset_key
-                summaries.append(job_summary)
+                job_summaries.append(job_summary)
 
-            summary = merge_grouped_eval_summaries(summaries)
-            log = build_grouped_closed_loop_wandb_log(summary)
-            totals = (summary.get("grouped_summary") or {}).get("totals") or {}
-            print(
-                f"grouped closed-loop @epoch {epoch + 1}: "
-                f"{totals.get('n_steps_run', 0)} steps, "
-                f"coll={totals.get('collision_steps', 0)}, "
-                f"near_miss={totals.get('n_near_miss_steps', 0)} "
-                f"in {summary['elapsed_sec']:.1f}s"
-            )
+            if ddp_active:
+                dist.barrier()
+                if rank == 0:
+                    merged_jobs: list[dict] = []
+                    for job, partial in zip(jobs, job_summaries):
+                        job_out = (
+                            grouped_dir if len(jobs) == 1 else os.path.join(grouped_dir, job.date)
+                        )
+                        if partial.get("ddp_shard"):
+                            merged = merge_ddp_grouped_shards(
+                                job_out,
+                                world_size,
+                                classification_json=job.classification_json,
+                                npz_root=job.npz_root,
+                                near_miss_thresh=args.closed_loop_near_miss_thresh,
+                                profile=args.closed_loop_profile,
+                            )
+                            merged["date"] = job.date
+                            merged["dataset_key"] = job.dataset_key
+                            merged_jobs.append(merged)
+                        else:
+                            merged_jobs.append(partial)
+                    summary = merge_grouped_eval_summaries(merged_jobs)
+                else:
+                    summary = {}
+            else:
+                summary = merge_grouped_eval_summaries(job_summaries)
+
+            if rank == 0:
+                log = build_grouped_closed_loop_wandb_log(summary)
+                totals = (summary.get("grouped_summary") or {}).get("totals") or {}
+                print(
+                    f"grouped closed-loop @epoch {epoch + 1}: "
+                    f"{totals.get('n_steps_run', 0)} steps, "
+                    f"coll={totals.get('collision_steps', 0)}, "
+                    f"near_miss={totals.get('n_near_miss_steps', 0)} "
+                    f"in {summary['elapsed_sec']:.1f}s"
+                    + (f" (DDP x{world_size})" if ddp_active else "")
+                )
         else:
             from scenario_generation.closed_loop_eval import run_closed_loop_eval
 
@@ -186,7 +239,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
                 args.closed_loop_npz_root,
                 out_dir,
                 seg_len=args.closed_loop_seg_len,
-                device=args.device,
+                device=cl_device,
                 near_miss_thresh=args.closed_loop_near_miss_thresh,
                 search_radius=args.closed_loop_search_radius,
                 warmup_steps=args.closed_loop_warmup_steps,
@@ -207,7 +260,8 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     finally:
         net.train(was_training)
 
-    wandb.log(log, step=epoch + 1)
+    if rank == 0 and log:
+        wandb.log(log, step=epoch + 1)
 
 
 def model_training(args: TrainConfig):
@@ -515,11 +569,6 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
-                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
-                # (videos + metrics) land next to the saved weights they correspond to.
-                closed_loop_validate(
-                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
-                )
 
             if valid_loss_ego_position_lat_loss < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")
@@ -542,6 +591,17 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
+
+        if (epoch + 1 - init_epoch) % save_utd == 0 and args.closed_loop_npz_root:
+            cl_out = os.path.join(save_path, f"epoch{epoch + 1:04d}", "closed_loop")
+            ddp_cl = (
+                args.ddp and ddp.is_dist_avail_and_initialized() and ddp.get_world_size() > 1
+            )
+            if ddp_cl:
+                torch.distributed.barrier()
+                closed_loop_validate(diffusion_planner, args, epoch, cl_out)
+            elif global_rank == 0:
+                closed_loop_validate(diffusion_planner, args, epoch, cl_out)
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)

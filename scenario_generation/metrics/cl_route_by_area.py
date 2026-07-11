@@ -48,6 +48,7 @@ class RouteRolloutResult:
     png_dir: Path | None = None
     n_steps_run: int = 0
     terminated: str = ""
+    timers: Timers | None = None
 
 
 def _percentile(arr: np.ndarray, q: float) -> float:
@@ -76,6 +77,8 @@ def run_full_route_rollout(
     unstick_advance_m: float = 2.5,
     draw_every: int = 8,
     replan_interval: int = 10,
+    profile: bool = False,
+    profile_sync_gpu: bool = False,
 ) -> RouteRolloutResult:
     """One closed-loop pass over the entire route; tag each step by reproducer ``rec_idx`` area."""
     n = len(tl)
@@ -86,7 +89,8 @@ def run_full_route_rollout(
         png_dir.mkdir(parents=True, exist_ok=True)
 
     cap = max(3 * n, n)
-    timers = Timers()
+    timers = Timers() if profile else None
+    rollout_timers = timers or Timers()
     s = _seed_state(
         tl,
         0,
@@ -96,7 +100,7 @@ def run_full_route_rollout(
         near_miss_thresh,
         goal_reach_m=5.0,
         max_stuck_steps=0,
-        timers=timers,
+        timers=rollout_timers,
         max_steps=cap,
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
@@ -108,7 +112,11 @@ def run_full_route_rollout(
     plan_world = None
 
     while not s.done:
-        pre = _pre_step(s)
+        if timers is not None:
+            with timers("pre_step"):
+                pre = _pre_step(s)
+        else:
+            pre = _pre_step(s)
         if pre is None:
             break
         np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
@@ -125,37 +133,59 @@ def run_full_route_rollout(
             model,
             model_args,
             device,
+            timers=timers,
+            profile_sync_gpu=profile_sync_gpu,
         )
-        if outputs is not None and metric_group is not None:
-            ti = score_turn_indicator_step(outputs, metric_group)
-            if ti["turn_match"] is not None:
-                turn_match = bool(ti["turn_match"])
 
-        centerline_m = None
-        if metric_group in ("straight", "curve"):
-            centerline_m = lateral_offset_from_route_lanes(np_dict["route_lanes"])
+        def _score_step_metrics():
+            nonlocal turn_match
+            if outputs is not None and metric_group is not None:
+                ti = score_turn_indicator_step(outputs, metric_group)
+                if ti["turn_match"] is not None:
+                    turn_match = bool(ti["turn_match"])
+            centerline_m = None
+            if metric_group in ("straight", "curve"):
+                centerline_m = lateral_offset_from_route_lanes(np_dict["route_lanes"])
+            safety = score_safety_step(
+                neighbors_live,
+                s.ego_shape,
+                np_dict,
+                device,
+                margin_m=near_miss_thresh,
+            )
+            return centerline_m, safety
 
-        safety = score_safety_step(
-            neighbors_live,
-            s.ego_shape,
-            np_dict,
-            device,
-            margin_m=near_miss_thresh,
-        )
+        if timers is not None:
+            with timers("score_safety"):
+                centerline_m, safety = _score_step_metrics()
+        else:
+            centerline_m, safety = _score_step_metrics()
 
         png_path = None
         if png_dir is not None and s.k % draw_every == 0:
             out_path = png_dir / f"{s.k:05d}.png"
             nids = tl.neighbor_ids(idx) if slot_uuids is None else slot_uuids
-            _draw_step(
-                np_dict,
-                pred_cur,
-                s.ego_shape,
-                out_path,
-                neighbor_ids=nids,
-                step=s.k,
-                total=cap,
-            )
+            if timers is not None:
+                with timers("draw"):
+                    _draw_step(
+                        np_dict,
+                        pred_cur,
+                        s.ego_shape,
+                        out_path,
+                        neighbor_ids=nids,
+                        step=s.k,
+                        total=cap,
+                    )
+            else:
+                _draw_step(
+                    np_dict,
+                    pred_cur,
+                    s.ego_shape,
+                    out_path,
+                    neighbor_ids=nids,
+                    step=s.k,
+                    total=cap,
+                )
             png_path = out_path
 
         steps.append(
@@ -174,9 +204,12 @@ def run_full_route_rollout(
         )
 
         snaps_before = s.n_snaps
-        _advance_step(s, pred_cur, idx, device, timers, override=override)
+        _advance_step(s, pred_cur, idx, device, rollout_timers, override=override)
         if s.n_snaps > snaps_before:
             plan_world = None
+
+    if profile and timers is not None:
+        timers.merge(rollout_timers)
 
     return RouteRolloutResult(
         route_key=route_key,
@@ -185,6 +218,7 @@ def run_full_route_rollout(
         png_dir=png_dir,
         n_steps_run=int(s.k),
         terminated=s.terminated,
+        timers=timers,
     )
 
 

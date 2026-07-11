@@ -160,6 +160,8 @@ class TrainConfig:
     closed_loop_classification_json: str = ""  # optional legacy single-file override
     closed_loop_classification_json_root: str = ""  # scenario_classification_json/ root
     closed_loop_scenario_dataset_name: str = ""  # optional; inferred from npz path when empty
+    closed_loop_profile: bool = False
+    closed_loop_profile_sync_gpu: bool = False
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)

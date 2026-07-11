@@ -66,6 +66,9 @@ def _closed_loop_replan_step(
     model,
     model_args,
     device: str,
+    *,
+    timers: Timers | None = None,
+    profile_sync_gpu: bool = False,
 ):
     """Run model inference on replan steps; execute cached world plan between replans.
 
@@ -76,29 +79,56 @@ def _closed_loop_replan_step(
     override = None
     outputs = None
     if plan_world is None or offset == 0:
-        data = _to_torch_batch([np_dict], model_args, device)
-        _, outputs = model(data)
+        if timers is not None:
+            with timers("to_torch"):
+                data = _to_torch_batch([np_dict], model_args, device)
+            with timers("model_forward"):
+                _, outputs = model(data)
+                if profile_sync_gpu and device.startswith("cuda"):
+                    torch.cuda.synchronize()
+        else:
+            data = _to_torch_batch([np_dict], model_args, device)
+            _, outputs = model(data)
         pred = outputs["prediction"][0, 0].cpu().numpy()
         plan_world = _ego_pred_to_world(
             pred[:, :2], pred[:, 2:4], live_pose[0], live_pose[1], live_pose[2]
         )
         pred_cur = pred
     else:
-        off = min(offset, len(plan_world[0]) - 1)
-        tx, ty, th = (
-            float(plan_world[0][off, 0]),
-            float(plan_world[0][off, 1]),
-            float(plan_world[1][off]),
-        )
-        spd = float(np.hypot(tx - live_pose[0], ty - live_pose[1]) / DT)
-        override = (np.array([tx, ty, th], dtype=np.float64), spd)
-        pred_cur = _world_plan_to_ego(
-            plan_world[0][off:],
-            plan_world[1][off:],
-            live_pose[0],
-            live_pose[1],
-            live_pose[2],
-        )
+        if timers is not None:
+            with timers("replan_plan_cache"):
+                off = min(offset, len(plan_world[0]) - 1)
+                tx, ty, th = (
+                    float(plan_world[0][off, 0]),
+                    float(plan_world[0][off, 1]),
+                    float(plan_world[1][off]),
+                )
+                spd = float(np.hypot(tx - live_pose[0], ty - live_pose[1]) / DT)
+                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                pred_cur = _world_plan_to_ego(
+                    plan_world[0][off:],
+                    plan_world[1][off:],
+                    live_pose[0],
+                    live_pose[1],
+                    live_pose[2],
+                )
+            timers.add("model_forward_cached", 0.0, 1)
+        else:
+            off = min(offset, len(plan_world[0]) - 1)
+            tx, ty, th = (
+                float(plan_world[0][off, 0]),
+                float(plan_world[0][off, 1]),
+                float(plan_world[1][off]),
+            )
+            spd = float(np.hypot(tx - live_pose[0], ty - live_pose[1]) / DT)
+            override = (np.array([tx, ty, th], dtype=np.float64), spd)
+            pred_cur = _world_plan_to_ego(
+                plan_world[0][off:],
+                plan_world[1][off:],
+                live_pose[0],
+                live_pose[1],
+                live_pose[2],
+            )
     return pred_cur, plan_world, override, outputs
 
 

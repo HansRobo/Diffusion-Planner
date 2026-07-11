@@ -35,6 +35,21 @@ def build_grouped_closed_loop_wandb_log(summary: dict) -> dict:
     log: dict = {"closed_loop/mode": "grouped"}
     log["closed_loop/grouped/elapsed_sec"] = float(summary.get("elapsed_sec", 0.0))
 
+    timing = summary.get("timing")
+    if timing:
+        stages = timing.get("stages") or {}
+        for key, wandb_key in (
+            ("model_forward", "model_forward_total_s"),
+            ("draw", "draw_total_s"),
+            ("timeline_load_npz", "timeline_load_npz_total_s"),
+        ):
+            stage = stages.get(key)
+            if stage:
+                log[f"closed_loop/profile/{wandb_key}"] = float(stage["total_s"])
+        log["closed_loop/profile/model_forward_calls"] = int(timing.get("model_forward_calls", 0))
+        log["closed_loop/profile/total_sim_steps"] = int(timing.get("total_sim_steps", 0))
+        log["closed_loop/profile/model_forward_rate"] = float(timing.get("model_forward_rate", 0.0))
+
     agg = summary.get("grouped_summary") or {}
     _log_scalar_group(log, "closed_loop/grouped/total", agg.get("totals") or {})
 

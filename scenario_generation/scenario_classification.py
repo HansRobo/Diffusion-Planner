@@ -444,7 +444,24 @@ def merge_grouped_eval_summaries(summaries: list[dict]) -> dict:
 
     grouped_summary = aggregate_segment_rows(all_segments)
     base = summaries[0]
-    return {
+    timing = None
+    if any(s.get("timing") for s in summaries):
+        from scenario_generation.perf_timer import Timers
+
+        global_timers = Timers()
+        per_bag: list[dict] = []
+        total_steps = 0
+        for summary in summaries:
+            t = summary.get("timing") or {}
+            total_steps += int(t.get("total_sim_steps", 0))
+            per_bag.extend(t.get("per_bag") or [])
+            for stage, info in (t.get("stages") or {}).items():
+                global_timers.add(stage, float(info["total_s"]), int(info["calls"]))
+        from scenario_generation.grouped_closed_loop_eval import _build_timing_summary
+
+        timing = _build_timing_summary(global_timers, per_bag, total_steps, elapsed_sec)
+
+    merged = {
         "mode": "grouped",
         "classification_json": [m["classification_json"] for m in jobs_meta],
         "classification_jobs": jobs_meta,
@@ -457,3 +474,6 @@ def merge_grouped_eval_summaries(summaries: list[dict]) -> dict:
         "segments": all_segments,
         "video_mp4s": video_mp4s,
     }
+    if timing is not None:
+        merged["timing"] = timing
+    return merged
