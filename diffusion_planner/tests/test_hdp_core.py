@@ -55,6 +55,7 @@ from diffusion_planner.utils.onnx_export import (
     build_dynamic_axes,
 )
 from diffusion_planner.utils.train_utils import (
+    ModelEma,
     atomic_torch_save,
     capture_rng_state,
     compute_grad_stats,
@@ -63,7 +64,6 @@ from diffusion_planner.utils.train_utils import (
     update_epoch_loss_sums,
 )
 from diffusion_planner.validate_model import _multisample_metrics, aggregate_valid_metrics
-from timm.utils import ModelEma
 
 
 def test_hdp_representation_and_normalization_round_trip():
@@ -923,6 +923,8 @@ def test_rl_ema_rate_005_maps_to_timm_decay_095():
     with torch.no_grad():
         model.weight.zero_()
     ema = ModelEma(model, decay=0.95, device="cpu")
+    assert ema.foreach
+    assert ema.ema is ema.module
     with torch.no_grad():
         model.weight.fill_(1.0)
     ema.update(model)

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from timm.utils import ModelEmaV3
 
 
 def atomic_torch_save(obj, path) -> None:
@@ -30,6 +31,27 @@ def set_seed(CUR_SEED):
     torch.manual_seed(CUR_SEED)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+class ModelEma(ModelEmaV3):
+    """Foreach EMA with the legacy ``.ema`` attribute used by our checkpoints."""
+
+    def __init__(self, model, decay=0.9999, device=None):
+        model_device = next(model.parameters()).device
+        requested_device = torch.device(device) if device not in (None, "") else None
+        if requested_device is not None and requested_device.type == model_device.type:
+            if requested_device.index is None or requested_device.index == model_device.index:
+                requested_device = None
+        super().__init__(
+            model,
+            decay=decay,
+            device=requested_device,
+            foreach=requested_device is None,
+        )
+
+    @property
+    def ema(self):
+        return self.module
 
 
 def capture_rng_state() -> dict:
@@ -78,9 +100,7 @@ def restore_rng_state(state: dict) -> None:
     )
     torch.set_rng_state(torch.as_tensor(state["torch"], dtype=torch.uint8, device="cpu"))
     if "cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state(
-            torch.as_tensor(state["cuda"], dtype=torch.uint8, device="cpu")
-        )
+        torch.cuda.set_rng_state(torch.as_tensor(state["cuda"], dtype=torch.uint8, device="cpu"))
 
 
 def compute_grad_stats(parameters, prefix="grad"):

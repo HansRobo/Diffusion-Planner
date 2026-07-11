@@ -32,12 +32,12 @@ from diffusion_planner.utils.lr_schedule import LinearWarmupConstantLR
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import (
+    ModelEma,
     atomic_torch_save,
     gather_rng_states,
     resume_model,
     set_seed,
 )
-from timm.utils import ModelEma
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler

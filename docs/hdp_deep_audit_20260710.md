@@ -247,17 +247,19 @@ same DDP world size so diffusion noise and augmentation continue from the same s
 - bf16 autocast covers model forward only; SDE/noising/loss math remains fp32.
 - Fused AdamW, TF32, DDP static graph, persistent workers, pinned memory, and prefetch are
   enabled where supported.
+- EMA uses timm's foreach implementation while retaining the existing `.ema` checkpoint API;
+  an 18.1M-parameter CPU benchmark reduced update time from 42.1 ms to 12.8 ms with exact
+  one-step numerical parity.
 - Extra-list weighting appends path references in memory instead of writing the previous
   roughly 798 MB combined manifest; giant W&B list artifacts are opt-in.
 - SFT/RL checkpoint ONNX export defaults off because synchronous export makes every other
   rank idle at the next barrier. Strict standalone export remains available.
 - Reward and update timing is sampled on the W&B logging cadence rather than synchronizing
   CUDA every step.
-- RL marks only `decoder.dit` trainable and skips the unused turn-head forward, avoiding
-  unsupervised DDP parameters and unnecessary classifier work.
+- RL marks `decoder.dit` and `decoder.global_route_encoder` trainable and skips the unused
+  turn-head forward, avoiding unsupervised DDP parameters and unnecessary classifier work.
 
-Joint-action RL is supported but group-32 memory scales with 321 action rows. Use it as a
-smaller-batch ablation; ego-only is the intended high-throughput real-vehicle arm.
+The branch has one ego-only action contract; the old joint-action decoder and RL mode are removed.
 
 ## Checkpoint and runtime safety
 
