@@ -36,20 +36,20 @@ def capture_rng_state() -> dict:
     numpy_state = np.random.get_state()
     state = {
         "python": random.getstate(),
-        # Keep checkpoints compatible with torch.load(weights_only=True). A raw
-        # NumPy RNG tuple contains an ndarray that requires an unsafe pickle
-        # global; tensors and scalar primitives are accepted by the safe loader.
+        # Pure primitives work with both distributed.gather_object and
+        # torch.load(weights_only=True); raw NumPy arrays and tensors do not
+        # survive every PyTorch object-gather serialization path.
         "numpy": {
             "bit_generator": numpy_state[0],
-            "state": torch.from_numpy(numpy_state[1].copy()),
+            "state": numpy_state[1].tolist(),
             "pos": int(numpy_state[2]),
             "has_gauss": int(numpy_state[3]),
             "cached_gaussian": float(numpy_state[4]),
         },
-        "torch": torch.get_rng_state(),
+        "torch": torch.get_rng_state().tolist(),
     }
     if torch.cuda.is_available():
-        state["cuda"] = torch.cuda.get_rng_state()
+        state["cuda"] = torch.cuda.get_rng_state().tolist()
     return state
 
 
@@ -70,15 +70,17 @@ def restore_rng_state(state: dict) -> None:
     np.random.set_state(
         (
             numpy_state["bit_generator"],
-            numpy_state["state"].cpu().numpy(),
+            np.asarray(numpy_state["state"], dtype=np.uint32),
             numpy_state["pos"],
             numpy_state["has_gauss"],
             numpy_state["cached_gaussian"],
         )
     )
-    torch.set_rng_state(state["torch"].cpu())
+    torch.set_rng_state(torch.as_tensor(state["torch"], dtype=torch.uint8, device="cpu"))
     if "cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state(state["cuda"].cpu())
+        torch.cuda.set_rng_state(
+            torch.as_tensor(state["cuda"], dtype=torch.uint8, device="cpu")
+        )
 
 
 def compute_grad_stats(parameters, prefix="grad"):

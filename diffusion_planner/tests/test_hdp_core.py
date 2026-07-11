@@ -927,6 +927,11 @@ def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
     np.random.seed(123)
     torch.manual_seed(123)
     rng_state = capture_rng_state()
+    assert not any(
+        torch.is_tensor(value)
+        for group in rng_state.values()
+        for value in (group.values() if isinstance(group, dict) else (group,))
+    )
     expected_random = random.random()
     expected_numpy = np.random.rand()
     expected_torch = torch.rand(())
