@@ -635,6 +635,7 @@ def sample_group(
     inference_inputs["sampled_trajectories"] = sampled
 
     cached_encoding = None
+    cached_global_route_condition = None
     previous_sample_steps = net.decoder._sample_steps
     if sample_steps is not None:
         net.decoder._sample_steps = int(sample_steps)
@@ -647,6 +648,12 @@ def sample_group(
             if scene_norm_inputs is not None:
                 cached_encoding = net.encoder(scene_norm_inputs).repeat_interleave(
                     group_size, dim=0
+                )
+                cached_global_route_condition = net.decoder.global_route_encoder(
+                    scene_norm_inputs["route_lanes"]
+                ).repeat_interleave(group_size, dim=0)
+                inference_inputs["_cached_global_route_condition"] = (
+                    cached_global_route_condition
                 )
                 outputs = net.decoder(cached_encoding, inference_inputs)
             else:
@@ -787,7 +794,7 @@ def _compute_policy_ego_loss_per_sample(
     with torch.autocast(
         device_type="cuda",
         dtype=torch.bfloat16,
-        enabled=getattr(args, "amp_dtype", "off") == "bf16",
+        enabled=getattr(args, "amp_dtype", "off") == "bf16" and device.type == "cuda",
     ):
         _, decoder_output = model(merged_inputs)
     model_output = decoder_output["model_output"].float()  # [B, 1, T, 4]
@@ -861,7 +868,7 @@ def compute_reward_weighted_loss(
     return {
         "loss": loss,
         "reward_weighted_loss": loss.detach(),
-        "ego_diffusion_loss": ego_loss_per_sample.mean().detach(),
+        "ego_reconstruction_loss": ego_loss_per_sample.mean().detach(),
         "ego_hdp_diffusion_loss": loss_terms["ego_hdp_diffusion_loss"],
         "ego_hdp_waypoint_loss": loss_terms["ego_hdp_waypoint_loss"],
         "reward_weight_mean": reward_weights.mean().detach(),

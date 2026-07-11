@@ -23,15 +23,20 @@ from diffusion_planner.utils.data_augmentation_bridge import (
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DistributedEvalSampler
 from diffusion_planner.utils.hdp_compat import require_velocity_normalizer
-from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.lr_schedule import LinearWarmupConstantLR
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
-from diffusion_planner.utils.train_utils import atomic_torch_save, resume_model, set_seed
+from diffusion_planner.utils.train_utils import (
+    atomic_torch_save,
+    gather_rng_states,
+    resume_model,
+    set_seed,
+)
 from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
 
 
 def load_weights_only(path: str, model, device, *, prefer_ema: bool = False):
-    ckpt = torch.load(path, map_location="cpu")
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
     using_ema = bool(
         prefer_ema and isinstance(ckpt, dict) and ckpt.get("ema_state_dict") is not None
     )
@@ -52,16 +57,8 @@ def load_weights_only(path: str, model, device, *, prefer_ema: bool = False):
         state = {key.removeprefix("module."): value for key, value in state.items()}
 
     incompatible = model.load_state_dict(state, strict=False)
-    allowed_unexpected_prefixes = (
-        "decoder.dfp",
-        "module.decoder.dfp",
-    )
     disallowed_missing = list(incompatible.missing_keys)
-    disallowed_unexpected = [
-        key
-        for key in incompatible.unexpected_keys
-        if not key.startswith(allowed_unexpected_prefixes)
-    ]
+    disallowed_unexpected = list(incompatible.unexpected_keys)
 
     print(f"Weights-only init loaded from {path} ({'EMA' if using_ema else 'live'} weights)")
     print(
@@ -270,19 +267,13 @@ def assert_checkpoint_compatible(
             "seed",
             "batch_size",
             "learning_rate",
+            "weight_decay",
             "warm_up_epoch",
             "ego_prediction_horizon",
-            "alpha_planning_loss",
-            "alpha_neighbor_loss",
             "planning_hybrid_loss",
             "hybrid_loss_window",
             "diffusion_supervision_type",
             "diffusion_time_sample_method",
-            "coeff_position_lat_loss",
-            "coeff_position_lon_loss",
-            "coeff_heading_l2_loss",
-            "coeff_velocity",
-            "coeff_timestep",
             "coeff_road_border_loss",
             "road_border_margin",
             "road_border_n_interp",
@@ -514,8 +505,6 @@ def model_training(args: TrainConfig):
     # Reduce CUDA allocator fragmentation for the many small per-step tensors this
     # training loop produces. setdefault so operators can override from the launcher.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
-
     # init ddp
     global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
@@ -550,6 +539,7 @@ def model_training(args: TrainConfig):
         print("------------- {} -------------".format(args.exp_name))
         print("Batch size: {}".format(args.batch_size))
         print("Learning rate: {}".format(args.learning_rate))
+        print("Weight decay: {}".format(args.weight_decay))
         print("Use device: {}".format(args.device))
         print("TF32: {}".format(args.tf32))
 
@@ -696,13 +686,24 @@ def model_training(args: TrainConfig):
         }
     ]
 
-    optimizer = optim.AdamW(params, fused=getattr(args, "fused_optimizer", False) or None)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
+    optimizer = optim.AdamW(
+        params,
+        fused=getattr(args, "fused_optimizer", False) or None,
+        weight_decay=args.weight_decay,
+    )
+    scheduler = LinearWarmupConstantLR(optimizer, train_epochs, args.warm_up_epoch)
 
+    checkpoint_wandb_id = None
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
-        # We always use new wandb run for each training session, so we don't need to load the wandb_id from the model_dict.
-        diffusion_planner, optimizer, scheduler, init_epoch, _, model_ema = resume_model(
+        (
+            diffusion_planner,
+            optimizer,
+            scheduler,
+            init_epoch,
+            checkpoint_wandb_id,
+            model_ema,
+        ) = resume_model(
             args.resume_model_path,
             diffusion_planner,
             optimizer,
@@ -723,17 +724,19 @@ def model_training(args: TrainConfig):
     args._wandb_global_step = int(
         getattr(diffusion_planner, "_resume_global_step", init_epoch * len(train_loader))
     )
+    requested_wandb_id = args.wandb_run_id or checkpoint_wandb_id
+    active_wandb_id = requested_wandb_id
     # logger
     if global_rank == 0 and args.use_wandb:
-        # if wandb_run_id is given, the training will be logged to the existing run instead of creating a new one.
         wandb.init(
             project=args.wandb_project_name,
             name=args.exp_name,
             notes=args.notes,
             resume="allow",
-            id=args.wandb_run_id,
+            id=requested_wandb_id,
             dir=f"{save_path}",
         )
+        active_wandb_id = wandb.run.id
 
         # Strict checkpoint compatibility has already validated every training field.
         # W&B still sees resume_model_path change from None to latest.pth on an in-place
@@ -747,7 +750,7 @@ def model_training(args: TrainConfig):
         # if wandb_run_id is given, the input artifact is assumed to be created externally and will not be executed
         if (
             args.use_wandb
-            and args.wandb_run_id is None
+            and requested_wandb_id is None
             and os.environ.get("WANDB_LOG_DATASET_ARTIFACT", "0") == "1"
         ):
             log_dataset_artifact(
@@ -824,8 +827,8 @@ def model_training(args: TrainConfig):
         if args.use_wandb:
             wandb.log(
                 {
-                    "epoch": 0,
-                    "global_step": 0,
+                    "epoch": init_epoch,
+                    "global_step": args._wandb_global_step,
                     "lr/lr": optimizer.param_groups[0]["lr"],
                     "valid_loss/ego": valid_loss_ego,
                     "valid_loss/neighbors": valid_loss_neighbor,
@@ -859,6 +862,7 @@ def model_training(args: TrainConfig):
         # this epoch before stepping so metrics and resume behavior both remain exact.
         train_lr = optimizer.param_groups[0]["lr"]
         scheduler.step()
+        rng_states = gather_rng_states()
         if global_rank == 0:
             valid_loss_ego = agg["avg_loss_ego"]
             valid_loss_neighbor = agg["avg_loss_neighbor"]
@@ -945,8 +949,8 @@ def model_training(args: TrainConfig):
                 "schedule": scheduler.state_dict(),
                 "loss": valid_loss_ego,
                 "global_step": args._wandb_global_step,
-                # We always use new wandb run for each training session, so we don't need to save the wandb_id in the model_dict.
-                "wandb_id": None,
+                "wandb_id": active_wandb_id,
+                "rng_states": rng_states,
             }
             atomic_torch_save(model_dict, f"{save_path}/latest.pth")
 

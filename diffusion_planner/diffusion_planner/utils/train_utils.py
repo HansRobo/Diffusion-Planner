@@ -32,6 +32,55 @@ def set_seed(CUR_SEED):
     torch.backends.cudnn.benchmark = False
 
 
+def capture_rng_state() -> dict:
+    numpy_state = np.random.get_state()
+    state = {
+        "python": random.getstate(),
+        # Keep checkpoints compatible with torch.load(weights_only=True). A raw
+        # NumPy RNG tuple contains an ndarray that requires an unsafe pickle
+        # global; tensors and scalar primitives are accepted by the safe loader.
+        "numpy": {
+            "bit_generator": numpy_state[0],
+            "state": torch.from_numpy(numpy_state[1].copy()),
+            "pos": int(numpy_state[2]),
+            "has_gauss": int(numpy_state[3]),
+            "cached_gaussian": float(numpy_state[4]),
+        },
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state()
+    return state
+
+
+def gather_rng_states() -> list[dict] | None:
+    """Collect one RNG snapshot per DDP rank; only rank 0 receives the full list."""
+    local_state = capture_rng_state()
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return [local_state]
+    rank = torch.distributed.get_rank()
+    gathered = [None] * torch.distributed.get_world_size() if rank == 0 else None
+    torch.distributed.gather_object(local_state, gathered, dst=0)
+    return gathered
+
+
+def restore_rng_state(state: dict) -> None:
+    random.setstate(state["python"])
+    numpy_state = state["numpy"]
+    np.random.set_state(
+        (
+            numpy_state["bit_generator"],
+            numpy_state["state"].cpu().numpy(),
+            numpy_state["pos"],
+            numpy_state["has_gauss"],
+            numpy_state["cached_gaussian"],
+        )
+    )
+    torch.set_rng_state(state["torch"].cpu())
+    if "cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state(state["cuda"].cpu())
+
+
 def compute_grad_stats(parameters, prefix="grad"):
     """
     Compute gradient statistics over all parameters to monitor
@@ -125,7 +174,7 @@ def resume_model(
     strict_training_state: bool = False,
 ):
     """Restore a checkpoint, optionally requiring every training-state component."""
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location=device, weights_only=True)
 
     if strict_training_state and (not isinstance(ckpt, dict) or "model" not in ckpt):
         raise RuntimeError(f"Strict resume checkpoint has no model state: {path}")
@@ -196,5 +245,24 @@ def resume_model(
                 parameter.requires_grad_(False)
             ema.loaded_from_checkpoint = False
             print("no ema shadow found; initialized EMA from loaded model")
+
+    rng_states = ckpt.get("rng_states") if isinstance(ckpt, dict) else None
+    if rng_states is None and strict_training_state:
+        raise RuntimeError(
+            f"Strict resume checkpoint has no per-rank RNG state: {path}. "
+            "Use it only as a weights initialization or resume from a checkpoint written "
+            "by the current trainer."
+        )
+    if rng_states is not None:
+        distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+        rank = torch.distributed.get_rank() if distributed else 0
+        world_size = torch.distributed.get_world_size() if distributed else 1
+        if len(rng_states) != world_size:
+            raise RuntimeError(
+                f"Checkpoint has RNG states for {len(rng_states)} ranks, current world size is "
+                f"{world_size}; exact resume requires the same DDP world size"
+            )
+        restore_rng_state(rng_states[rank])
+        print("RNG state load done")
 
     return model, optimizer, scheduler, init_epoch, wandb_id, ema

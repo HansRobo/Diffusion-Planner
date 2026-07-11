@@ -2,11 +2,11 @@
 
 This document defines how this branch should be used for HDP experiments in the Tier IV Diffusion Planner codebase.
 
-## Decision: HDP-specialized branch with vanilla compatibility
+## Decision: HDP-only branch
 
-This branch should be treated as HDP-specialized.
-
-It remains possible to run vanilla Diffusion Planner supervised training by disabling HDP flags, but the branch defaults, docs, and experiment workflow are HDP-oriented. This avoids ambiguity when comparing HDP, DFP, quality-fix DP, and original DP runs.
+This branch has one model contract: ego-only HDP with normalized velocity actions,
+x-start supervision, and 80 temporal action tokens. Vanilla waypoint and joint neighbor-action
+heads are not retained as compatibility modes.
 
 ## Local ground truth references
 
@@ -37,10 +37,12 @@ Original Diffusion Planner predicts all-agent future waypoints directly.
 
 This HDP branch keeps the original scene encoder, turn-indicator path, and validation stack, but changes the ego planning target in HDP mode:
 
-- Ego target can be represented as normalized velocity/action-like latent rather than direct waypoint latent.
+- Ego target is represented as a normalized velocity/action latent rather than a direct waypoint latent.
 - The HDP ego prediction is converted back to waypoints through integration for trajectory loss and evaluation.
 - Hybrid loss combines velocity-space diffusion supervision with waypoint-space reconstruction.
-- The default HDP action head is ego-only. The original all-agent neighbor prediction path remains available as an explicit ablation.
+- The HDP action head is ego-only; all 320 neighbor histories remain scene context.
+- Detailed route tokens remain in scene cross-attention, while an official-style ordered route
+  encoder supplies a lightweight global AdaLN condition for every DiT block.
 - Turn indicators and Tier IV validation metrics remain available.
 - Turn-indicator SFT uses equal-weight expert and detached generated-trajectory supervision by default, removing the pure teacher-forcing train/inference mismatch without allowing classification gradients to distort the planned trajectory.
 
@@ -52,7 +54,8 @@ planning_hybrid_loss=0.01
 hybrid_loss_window=10
 diffusion_model_type=x_start
 diffusion_supervision_type=x_start
-diffusion_sample_steps=10
+diffusion_sample_steps=6
+weight_decay=0.01
 ```
 
 ## Checkpoint rules
@@ -66,7 +69,12 @@ Use the right loading mode.
 | Continue the exact same interrupted run | `--resume_model_path` |
 | Start HDP from a vanilla waypoint checkpoint intentionally | `--init_weights_path` only |
 
-Do not use `--resume_model_path` to change representation or action shape. Strict resume requires model, optimizer, scheduler, epoch, and (when enabled) EMA state; it also checks architecture and exact normalization statistics before the new run can overwrite `args.json`. Checkpoints use atomic replacement so interruption cannot leave a partial `latest.pth`.
+Do not use `--resume_model_path` to change representation or action shape. Strict resume requires
+model, optimizer, scheduler, epoch, per-rank RNG state, and (when enabled) EMA state; it also
+requires the same DDP world size and checks architecture plus exact normalization statistics
+before the new run can overwrite `args.json`. Checkpoints use atomic replacement so interruption
+cannot leave a partial `latest.pth`, and store the W&B run ID so automatic recovery continues the
+same run.
 
 The branch has one encoder implementation. It includes valid-point LineEncoder geometry from Tier IV PR
 [#212](https://github.com/tier4/Diffusion-Planner/pull/212) and categorical turn-history
@@ -141,6 +149,8 @@ Implementation notes:
 - Zero-variance and non-finite reward groups are discarded; they do not become unweighted self-distillation samples.
 - Reward scoring uses raw scene tensors before group expansion; only rollout/loss tensors are expanded to `B * num_generations`.
 - Logged futures for all 320 neighbors stay scene-level and are not duplicated across the 32 candidates.
+- EMA rollout sampling runs without autograd. The live global route condition is computed inside
+  the DDP forward once per scene and only its 256-dimensional embedding is repeated per candidate.
 - Rollout sampling uses a fixed temperature instead of a random per-row temperature range.
 - RL starts from the SFT EMA shadow with `--init_weights_path` and `rl_init_use_ema=true`, while optimizer/scheduler/W&B state are fresh. Missing EMA weights produce an explicit live-weight fallback warning.
 - `rl_train_scope=decoder` updates only the DiT trajectory policy and freezes the encoder plus the separate turn-indicator classifier. This matches the released decoder-policy intent without leaving an unsupervised Tier IV-only head in DDP.

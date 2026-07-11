@@ -21,17 +21,22 @@ from diffusion_planner.train import (
     closed_loop_validate,
     load_weights_only,
 )
-from diffusion_planner.train_config import TrainConfig, parse_float_list
+from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DistributedEvalSampler
-from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.lr_schedule import LinearWarmupConstantLR
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
-from diffusion_planner.utils.train_utils import atomic_torch_save, resume_model, set_seed
+from diffusion_planner.utils.train_utils import (
+    atomic_torch_save,
+    gather_rng_states,
+    resume_model,
+    set_seed,
+)
 from timm.utils import ModelEma
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -222,6 +227,12 @@ def get_args():
         help="run stochastic and EPDMS validation every N epochs; deterministic proxy runs each epoch",
     )
     parser.add_argument("--learning_rate", type=float, default=5e-6)
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=_train_config_default("weight_decay"),
+        help="AdamW weight decay; the HDP paper uses 0.01",
+    )
     parser.add_argument("--warm_up_epoch", type=int, default=2)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
@@ -320,17 +331,6 @@ def get_args():
         )
 
     # Loss coefficients (shared with the supervised trainer / loss machinery)
-    parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
-    parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
-    parser.add_argument("--coeff_heading_l2_loss", type=float, default=1.0)
-    parser.add_argument(
-        "--coeff_velocity",
-        type=float,
-        default=_train_config_default("coeff_velocity"),
-        help="per-(m/s) weight for high-speed lon-loss attenuation; 0.05 = legacy behavior",
-    )
-    parser.add_argument("--coeff_timestep", type=parse_float_list, default=[1.0, 1.0, 1.0, 1.0])
-
     parser.add_argument(
         "--coeff_road_border_loss",
         type=float,
@@ -358,9 +358,6 @@ def get_args():
         default=0.5,
         help="per-side neighbor box inflation [m] for bicycles",
     )
-
-    parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
-    parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 
     parser.add_argument(
         "--use_velocity_representation",
@@ -529,8 +526,22 @@ def get_args():
         raise ValueError("--save_utd must be >= 1")
     if args.batch_size < 1:
         raise ValueError("--batch_size must be >= 1")
+    if args.train_epochs < 1:
+        raise ValueError("--train_epochs must be >= 1")
+    if not 0 <= args.warm_up_epoch <= args.train_epochs:
+        raise ValueError("--warm_up_epoch must be between 0 and --train_epochs")
+    if not 0.0 <= args.augment_prob <= 1.0:
+        raise ValueError("--augment_prob must be in [0, 1]")
+    if not 1 <= args.ego_prediction_horizon <= args.future_len:
+        raise ValueError("--ego_prediction_horizon must be in [1, future_len]")
+    if not 1 <= args.hybrid_loss_window <= args.future_len:
+        raise ValueError("--hybrid_loss_window must be in [1, future_len]")
+    if args.planning_hybrid_loss < 0.0:
+        raise ValueError("--planning_hybrid_loss must be >= 0")
     if args.learning_rate <= 0.0:
         raise ValueError("--learning_rate must be > 0")
+    if args.weight_decay < 0.0:
+        raise ValueError("--weight_decay must be >= 0")
     if args.wandb_step_log_interval < 0:
         raise ValueError("--wandb_step_log_interval must be >= 0")
     if args.num_generations < 2:
@@ -620,6 +631,7 @@ def model_training(args):
         print("Rollout sampling temperature: {}".format(args.rl_noise_scale))
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
         print("Learning rate: {}".format(args.learning_rate))
+        print("Weight decay: {}".format(args.weight_decay))
         print("TF32: {}".format(args.tf32))
         print("Fused optimizer: {}".format(args.fused_optimizer))
         print("DDP static graph: {}".format(args.ddp_static_graph))
@@ -759,13 +771,13 @@ def model_training(args):
     params = [{"params": trainable_params, "lr": args.learning_rate}]
     if args.fused_optimizer and args.device == "cuda":
         try:
-            optimizer = optim.AdamW(params, fused=True)
+            optimizer = optim.AdamW(params, fused=True, weight_decay=args.weight_decay)
         except TypeError:
-            optimizer = optim.AdamW(params)
+            optimizer = optim.AdamW(params, weight_decay=args.weight_decay)
             args.fused_optimizer = False
     else:
-        optimizer = optim.AdamW(params)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
+        optimizer = optim.AdamW(params, weight_decay=args.weight_decay)
+    scheduler = LinearWarmupConstantLR(optimizer, train_epochs, args.warm_up_epoch)
 
     if args.resume_model_path is not None:
         model_ema = (
@@ -885,6 +897,7 @@ def model_training(args):
         # written first and scheduler.step() ran afterwards, so strict resume repeated one LR.
         train_lr = optimizer.param_groups[0]["lr"]
         scheduler.step()
+        rng_states = gather_rng_states()
         if global_rank == 0:
             valid_loss_ego = scalar(agg["avg_loss_ego"])
             valid_neighbor_margin = scalar(agg["ego_means"]["ego_neighbor_margin_loss"])
@@ -971,6 +984,7 @@ def model_training(args):
                 "loss": valid_loss_ego,
                 "wandb_id": wandb_id,
                 "global_step": args._wandb_global_step,
+                "rng_states": rng_states,
             }
             atomic_torch_save(model_dict, f"{save_path}/latest.pth")
 
@@ -1024,8 +1038,4 @@ def model_training(args):
 
 
 if __name__ == "__main__":
-    args = get_args()
-
-    assert len(args.coeff_timestep) == 4
-
-    model_training(args)
+    model_training(get_args())

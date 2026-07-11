@@ -1,5 +1,6 @@
 import json
 import math
+import random
 
 import numpy as np
 import pytest
@@ -28,7 +29,11 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.model.diffusion_utils.dpm_solver_pytorch import DPM_Solver, NoiseScheduleVP
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-from diffusion_planner.model.module.decoder import Decoder, compute_training_loss
+from diffusion_planner.model.module.decoder import (
+    Decoder,
+    GlobalRouteEncoder,
+    compute_training_loss,
+)
 from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.train import assert_checkpoint_compatible, load_weights_only
 from diffusion_planner.train_config import TrainConfig
@@ -40,7 +45,7 @@ from diffusion_planner.utils.dataset import (
     DistributedEvalSampler,
     align_legacy_neighbor_futures_on_load,
 )
-from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.lr_schedule import LinearWarmupConstantLR
 from diffusion_planner.utils.masks import neighbor_future_padding_mask
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import (
@@ -49,6 +54,7 @@ from diffusion_planner.utils.onnx_export import (
 )
 from diffusion_planner.utils.train_utils import (
     atomic_torch_save,
+    capture_rng_state,
     compute_grad_stats,
     finalize_epoch_loss_sums,
     resume_model,
@@ -92,11 +98,67 @@ def test_hdp_dit_self_attention_runs_over_future_timesteps():
             torch.rand(2),
             torch.randn(2, 7, 32),
             torch.randn(2, 2),
+            torch.randn(2, 32),
         )
     handle.remove()
 
     assert observed == [(2, 80, 32)]
     assert output.shape == (2, 1, 80, 4)
+
+
+def test_hdp_global_route_encoder_is_batch_safe_and_zero_for_missing_route():
+    encoder = GlobalRouteEncoder(
+        route_num=3,
+        route_len=5,
+        hidden_dim=32,
+        drop_path_rate=0.0,
+    ).eval()
+    routes = torch.zeros(2, 3, 5, 13)
+    routes[1, :, :, :4] = torch.randn(3, 5, 4)
+
+    with torch.no_grad():
+        condition = encoder(routes)
+
+    assert condition.shape == (2, 32)
+    torch.testing.assert_close(condition[0], torch.zeros(32))
+    assert torch.count_nonzero(condition[1]).item() > 0
+
+
+def test_hdp_decoder_repeats_only_global_route_condition_for_rl_groups():
+    args = TrainConfig(
+        exp_name="test",
+        save_dir="/tmp",
+        train_set_list="",
+        valid_set_list="",
+        train_subsample_step=1,
+        hidden_dim=32,
+        decoder_depth=1,
+    )
+    args.state_normalizer = StateNormalizer(
+        [[[10.0, 0.0, 0.0, 0.0]]],
+        [[[20.0, 20.0, 1.0, 1.0]]],
+        [0.0, 0.0, 0.0, 0.0],
+        [0.5, 0.5, 1.0, 1.0],
+    )
+    args.observation_normalizer = ObservationNormalizer({})
+    decoder = Decoder(args).train()
+    scene_batch, group_size = 2, 3
+    candidate_batch = scene_batch * group_size
+    encoding = torch.randn(candidate_batch, 7, 32)
+    route_lanes = torch.randn(scene_batch, 25, 20, 33)
+    inputs = {
+        "route_lanes": route_lanes,
+        "_global_route_repeat_interleave": group_size,
+        "sampled_trajectories": torch.randn(candidate_batch, 1, 80, 4),
+        "diffusion_time": torch.rand(candidate_batch),
+        "ego_current_state": torch.randn(candidate_batch, 10),
+        "_skip_turn_indicator_training": True,
+    }
+
+    output = decoder(encoding, inputs)["model_output"]
+    assert output.shape == (candidate_batch, 1, 80, 4)
+    output.square().mean().backward()
+    assert all(parameter.grad is not None for parameter in decoder.global_route_encoder.parameters())
 
 
 def test_hdp_temporal_position_initialization_matches_navsim_frequency_base():
@@ -144,7 +206,7 @@ def test_dpm_uses_one_diffusion_time_for_the_full_trajectory():
 def test_supervised_lr_warms_up_then_stays_fixed_for_twenty_epochs():
     parameter = torch.nn.Parameter(torch.zeros(()))
     optimizer = torch.optim.AdamW([parameter], lr=2e-4)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, epoch=20, warm_up_epoch=5)
+    scheduler = LinearWarmupConstantLR(optimizer, total_epochs=20, warm_up_epochs=5)
 
     used_lrs = []
     for _ in range(20):
@@ -558,6 +620,7 @@ def test_seeded_multisample_metrics_compute_minade_and_minfde():
             self.decoder = torch.nn.Identity()
             self.decoder._sample_steps = 10
             self.decoder._predicted_neighbor_num = 0
+            self.decoder.global_route_encoder = lambda route: route.new_zeros((route.shape[0], 4))
 
         def forward(self, inputs):
             B = inputs["sampled_trajectories"].shape[0]
@@ -580,7 +643,10 @@ def test_seeded_multisample_metrics_compute_minade_and_minfde():
     gt[..., 2] = 1.0
     metrics = _multisample_metrics(
         FakeModel(),
-        {"ego_current_state": torch.zeros(1, 10)},
+        {
+            "ego_current_state": torch.zeros(1, 10),
+            "route_lanes": torch.zeros(1, 1, 1, 4),
+        },
         torch.zeros(1, 2, 4),
         gt,
         args,
@@ -598,6 +664,7 @@ def test_multisample_metrics_exclude_scenes_without_valid_ground_truth():
             self.decoder = torch.nn.Identity()
             self.decoder._sample_steps = 6
             self.decoder._predicted_neighbor_num = 0
+            self.decoder.global_route_encoder = lambda route: route.new_zeros((route.shape[0], 4))
 
         def forward(self, inputs):
             batch = inputs["sampled_trajectories"].shape[0]
@@ -621,7 +688,10 @@ def test_multisample_metrics_exclude_scenes_without_valid_ground_truth():
     gt[1, :, 2] = 1.0
     metrics = _multisample_metrics(
         FakeModel(),
-        {"ego_current_state": torch.zeros(2, 10)},
+        {
+            "ego_current_state": torch.zeros(2, 10),
+            "route_lanes": torch.zeros(2, 1, 1, 4),
+        },
         torch.zeros(2, 2, 4),
         gt,
         args,
@@ -725,12 +795,9 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
             "use_velocity_representation": True,
             "hybrid_loss_window": 10,
             "planning_hybrid_loss": 0.01,
-            "amp_dtype": "off",
-            "coeff_position_lat_loss": 1.0,
-            "coeff_position_lon_loss": 1.0,
-            "coeff_heading_l2_loss": 1.0,
-            "coeff_velocity": 0.05,
-            "coeff_timestep": [1.0, 1.0, 1.0, 1.0],
+            # CPU tests the guard that must keep CUDA autocast disabled even
+            # when a production config requests bf16.
+            "amp_dtype": "bf16",
             "ego_prediction_horizon": 80,
             "coeff_road_border_loss": 1.0,
             "coeff_neighbor_collision_loss": 0.0,
@@ -760,7 +827,6 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
         args,
     )
     assert torch.isfinite(loss["ego_planning_loss"])
-    assert loss["neighbor_prediction_loss"].item() == 0.0
     assert loss["turn_indicator_accuracy"].item() == 0.0
     assert loss["turn_indicator_generated_accuracy"].item() == 0.0
     assert loss["turn_indicator_expert_accuracy"].item() == 1.0
@@ -857,6 +923,13 @@ def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
     checkpoint_path = tmp_path / "latest.pth"
+    random.seed(123)
+    np.random.seed(123)
+    torch.manual_seed(123)
+    rng_state = capture_rng_state()
+    expected_random = random.random()
+    expected_numpy = np.random.rand()
+    expected_torch = torch.rand(())
     atomic_torch_save(
         {
             "model": model.state_dict(),
@@ -864,6 +937,8 @@ def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
             "schedule": scheduler.state_dict(),
             "epoch": 3,
             "global_step": 47,
+            "wandb_id": "resume-run-id",
+            "rng_states": [rng_state],
         },
         checkpoint_path,
     )
@@ -871,7 +946,10 @@ def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
     restored = torch.nn.Linear(2, 1)
     restored_optimizer = torch.optim.AdamW(restored.parameters(), lr=2e-3)
     restored_scheduler = torch.optim.lr_scheduler.StepLR(restored_optimizer, step_size=1)
-    restored, _, _, epoch, _, _ = resume_model(
+    random.seed(999)
+    np.random.seed(999)
+    torch.manual_seed(999)
+    restored, _, _, epoch, wandb_id, _ = resume_model(
         str(checkpoint_path),
         restored,
         restored_optimizer,
@@ -882,8 +960,39 @@ def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
     )
 
     assert epoch == 3
+    assert wandb_id == "resume-run-id"
+    assert random.random() == expected_random
+    assert np.random.rand() == expected_numpy
+    torch.testing.assert_close(torch.rand(()), expected_torch)
     assert restored._resume_global_step == 47
     assert not list(tmp_path.glob(".latest.pth.tmp.*"))
+
+
+def test_strict_resume_rejects_checkpoint_without_rng_state(tmp_path):
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+    checkpoint_path = tmp_path / "legacy.pth"
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "schedule": scheduler.state_dict(),
+            "epoch": 1,
+        },
+        checkpoint_path,
+    )
+
+    with pytest.raises(RuntimeError, match="no per-rank RNG state"):
+        resume_model(
+            str(checkpoint_path),
+            model,
+            optimizer,
+            scheduler,
+            None,
+            "cpu",
+            strict_training_state=True,
+        )
 
 
 def test_epoch_metric_accumulator_uses_per_metric_counts():
