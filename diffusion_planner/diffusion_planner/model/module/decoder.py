@@ -71,7 +71,9 @@ class GlobalRouteEncoder(nn.Module):
                 f"got {tuple(route_lanes.shape)}"
             )
         if route_lanes.shape[-1] < 4:
-            raise ValueError(f"Route lanes need at least four geometry channels, got {route_lanes.shape[-1]}")
+            raise ValueError(
+                f"Route lanes need at least four geometry channels, got {route_lanes.shape[-1]}"
+            )
 
         # Match the official NuPlan HDP route conditioner: ordered x/y geometry and
         # direction vectors are mixed across the complete route, then pooled once.
@@ -114,9 +116,7 @@ def compute_training_loss(
     gt_future = ego_future[:, None]  # [B, 1, T, 4]
     # bf16 autocast is scoped to the model forward ONLY: noising, SDE schedule math and
     # every loss below stay fp32 (the diffusion-sensitive parts). Off on CPU.
-    use_bf16 = (
-        getattr(args, "amp_dtype", "off") == "bf16" and gt_future.device.type == "cuda"
-    )
+    use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and gt_future.device.type == "cuda"
 
     eps = 1e-3
     t = sample_diffusion_time(
@@ -561,9 +561,5 @@ class Decoder(nn.Module):
 
         # Dispatch to training or inference
         if self.training:
-            return self._forward_training(
-                encoding, inputs, encoding_pooled, global_route_condition
-            )
-        return self._forward_inference(
-            encoding, inputs, encoding_pooled, global_route_condition
-        )
+            return self._forward_training(encoding, inputs, encoding_pooled, global_route_condition)
+        return self._forward_inference(encoding, inputs, encoding_pooled, global_route_condition)
