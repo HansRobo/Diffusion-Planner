@@ -719,7 +719,7 @@ def test_seeded_multisample_metrics_compute_minade_and_minfde():
     torch.testing.assert_close(metrics["multisample_minFDE"], torch.tensor([1.0]))
 
 
-def test_multisample_metrics_exclude_scenes_without_valid_ground_truth():
+def test_multisample_metrics_include_valid_stationary_scenes():
     class FakeModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -760,8 +760,9 @@ def test_multisample_metrics_exclude_scenes_without_valid_ground_truth():
         0,
     )
 
-    assert all(value.shape == (1,) for value in metrics.values())
-    torch.testing.assert_close(metrics["multisample_minADE"], torch.tensor([1.0]))
+    assert all(value.shape == (2,) for value in metrics.values())
+    torch.testing.assert_close(metrics["multisample_minADE"], torch.tensor([0.0, 1.0]))
+    torch.testing.assert_close(metrics["multisample_minFDE"], torch.tensor([0.0, 1.0]))
 
 
 def test_turn_indicator_class_metrics_keep_counts_visible():

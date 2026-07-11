@@ -205,9 +205,7 @@ def _multisample_metrics(
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
             global_route_condition = decoder.global_route_encoder(norm_inputs["route_lanes"])
         repeated_global_route_condition = (
-            global_route_condition[:, None]
-            .expand(B, num_samples, -1)
-            .reshape(B * num_samples, -1)
+            global_route_condition[:, None].expand(B, num_samples, -1).reshape(B * num_samples, -1)
         )
         inference_inputs = {
             "sampled_trajectories": sampled,
@@ -227,36 +225,26 @@ def _multisample_metrics(
     sampled_xy = sampled_xy[:, :, :T]
     gt_xy = gt_xy[:, :T]
 
-    valid = gt_xy.abs().sum(dim=-1) > 1e-6
-    has_valid = valid.any(dim=-1)
     distance = torch.linalg.norm(sampled_xy - gt_xy[:, None], dim=-1)
-    ade = (distance * valid[:, None]).sum(dim=-1) / valid.sum(dim=-1, keepdim=True).clamp_min(1)
-    last_valid = (
-        valid.long() * torch.arange(1, T + 1, device=device, dtype=torch.long)[None]
-    ).argmax(dim=-1)
-    fde = torch.gather(
-        distance,
-        2,
-        last_valid[:, None, None].expand(-1, num_samples, 1),
-    ).squeeze(-1)
+    # Ego futures have a fixed full-horizon contract and no padding mask. A stopped vehicle can
+    # legitimately have x=y=yaw=0, so inferring validity from non-zero xy would drop precisely the
+    # stationary scenes whose behavior the planner must preserve.
+    ade = distance.mean(dim=-1)
+    fde = distance[..., -1]
 
     min_ade = ade.min(dim=1).values
     min_fde = fde.min(dim=1).values
-    endpoints = torch.gather(
-        sampled_xy,
-        2,
-        last_valid[:, None, None, None].expand(-1, num_samples, 1, 2),
-    ).squeeze(2)
+    endpoints = sampled_xy[..., -1, :]
     endpoint_center = endpoints.mean(dim=1, keepdim=True)
     endpoint_divergence = torch.linalg.norm(endpoints - endpoint_center, dim=-1).mean(dim=1)
     return {
-        "multisample_minADE": min_ade[has_valid],
-        "multisample_minFDE": min_fde[has_valid],
+        "multisample_minADE": min_ade,
+        "multisample_minFDE": min_fde,
         "multisample_ADE_score": 100.0
-        * (1.0 - min_ade[has_valid] / MULTISAMPLE_ADE_THRESHOLD_M).clamp(0.0, 1.0),
+        * (1.0 - min_ade / MULTISAMPLE_ADE_THRESHOLD_M).clamp(0.0, 1.0),
         "multisample_FDE_score": 100.0
-        * (1.0 - min_fde[has_valid] / MULTISAMPLE_FDE_THRESHOLD_M).clamp(0.0, 1.0),
-        "multisample_endpoint_divergence": endpoint_divergence[has_valid],
+        * (1.0 - min_fde / MULTISAMPLE_FDE_THRESHOLD_M).clamp(0.0, 1.0),
+        "multisample_endpoint_divergence": endpoint_divergence,
     }
 
 
