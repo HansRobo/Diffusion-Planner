@@ -29,4 +29,38 @@ install -o root -g root -m 0755 "${healthcheck}" /etc/slurm/healthcheck.sh
 systemctl reload slurmd
 
 echo "Installed synchronized Slurm config and node-aware health check."
-echo "The node intentionally remains drained until all unmanaged GPU processes exit."
+
+# The current node02 SFT predates this repair and was launched outside Slurm.
+# Keep the node drained until that process tree exits naturally, then validate
+# the node and return it to service without requiring a second sudo session.
+resume_script=/usr/local/sbin/slurm-node02-resume-when-idle
+cat >"${resume_script}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while :; do
+  gpu_pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null \
+    | sed '/^[[:space:]]*$/d' | sort -u | paste -sd, -)
+  train_pids=$(pgrep -u ubuntu -f 'train_predictor.py|torch.distributed.run' \
+    | sort -u | paste -sd, - || true)
+  if [[ -z "${gpu_pids}" && -z "${train_pids}" ]]; then
+    break
+  fi
+  echo "Waiting for unmanaged training to exit: gpu=${gpu_pids:-none} train=${train_pids:-none}"
+  sleep 30
+done
+/etc/slurm/healthcheck.sh
+scontrol update NodeName=node02 State=RESUME
+echo "node02 passed health checks and was returned to Slurm service"
+EOF
+chmod 0755 "${resume_script}"
+
+systemctl stop slurm-node02-auto-resume.service 2>/dev/null || true
+systemd-run \
+  --unit=slurm-node02-auto-resume \
+  --property=Type=exec \
+  --property=Restart=on-failure \
+  --property=RestartSec=60 \
+  "${resume_script}"
+
+echo "node02 remains drained while the current SFT runs."
+echo "slurm-node02-auto-resume.service will validate and resume it after natural completion."
