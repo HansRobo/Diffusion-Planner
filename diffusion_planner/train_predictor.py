@@ -115,7 +115,11 @@ def get_args(args_list=None):
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
-    parser.add_argument("--ego_history_dropout_rate", type=float, default=0.4)
+    parser.add_argument(
+        "--ego_history_dropout_rate",
+        type=float,
+        default=_train_config_default("ego_history_dropout_rate"),
+    )
     parser.add_argument("--use_turn_indicators", type=boolean, default=True)
     parser.add_argument(
         "--turn_indicator_generated_loss_weight",
@@ -144,7 +148,11 @@ def get_args(args_list=None):
         help="Set for 4 sections [0,20), [20, 40), [40, 60), [60, 80)",
     )
 
-    parser.add_argument("--coeff_road_border_loss", type=float, default=1.0)
+    parser.add_argument(
+        "--coeff_road_border_loss",
+        type=float,
+        default=_train_config_default("coeff_road_border_loss"),
+    )
     parser.add_argument("--road_border_margin", type=float, default=0.25)
     parser.add_argument("--road_border_n_interp", type=int, default=2)
 
@@ -247,16 +255,27 @@ def get_args(args_list=None):
 
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
-    parser.add_argument("--tf32", default=False, type=boolean, help="enable TensorFloat-32 on CUDA")
+    parser.add_argument(
+        "--tf32",
+        default=_train_config_default("tf32"),
+        type=boolean,
+        help="enable TensorFloat-32 on CUDA",
+    )
 
     parser.add_argument("--use_ema", default=True, type=boolean)
 
     # Model
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)
     parser.add_argument("--encoder_fusion_depth", type=int, default=6)
-    parser.add_argument("--decoder_depth", type=int, help="number of decoding layers", default=3)
+    parser.add_argument(
+        "--decoder_depth",
+        type=int,
+        help="number of temporal decoding layers",
+        default=_train_config_default("decoder_depth"),
+    )
     parser.add_argument("--num_heads", type=int, help="number of multi-head", default=8)
     parser.add_argument("--hidden_dim", type=int, help="hidden dimension", default=256)
+    parser.set_defaults(decoder_tokenization="temporal")
     parser.add_argument(
         "--diffusion_model_type",
         type=str,
@@ -267,6 +286,7 @@ def get_args(args_list=None):
         "--predicted_neighbor_num",
         type=int,
         default=_train_config_default("predicted_neighbor_num"),
+        help="must be 0; HDP predicts only the ego trajectory",
     )
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
     parser.add_argument(
@@ -283,7 +303,7 @@ def get_args(args_list=None):
     parser.add_argument(
         "--wandb_project_name",
         type=str,
-        default="Diffusion-Planner",
+        default=_train_config_default("wandb_project_name"),
         help="Weights & Biases project name",
     )
     parser.add_argument(
@@ -364,7 +384,11 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_search_radius", type=float, default=1.5)
     parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
-    parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
+    parser.add_argument(
+        "--closed_loop_unstick_advance_m",
+        type=float,
+        default=_train_config_default("closed_loop_unstick_advance_m"),
+    )
 
     args = parser.parse_args(args_list)
     if args.train_subsample_step < 1:
@@ -375,8 +399,8 @@ def get_args(args_list=None):
         raise ValueError("--save_utd must be >= 1")
     if args.train_epochs < 1:
         raise ValueError("--train_epochs must be >= 1")
-    if args.diffusion_sample_steps < 3:
-        raise ValueError("--diffusion_sample_steps must be >= 3 for the third-order DPM solver")
+    if args.diffusion_sample_steps < 2:
+        raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
         raise ValueError(
             "--multisample_eval_sample_steps must be >= 3 for the third-order DPM solver"
@@ -393,14 +417,12 @@ def get_args(args_list=None):
         raise ValueError("--extra_train_set_repeat must be >= 0")
     if args.extra_train_set_repeat > 0 and not args.extra_train_set_list:
         raise ValueError("--extra_train_set_list is required when repeat is positive")
-    if not 0 <= args.predicted_neighbor_num <= args.agent_num:
-        raise ValueError("--predicted_neighbor_num must be between 0 and --agent_num")
-    if args.use_velocity_representation and (
-        args.diffusion_model_type != "x_start" or args.diffusion_supervision_type != "x_start"
-    ):
-        raise ValueError(
-            "HDP velocity training requires x_start prediction and x_start supervision"
-        )
+    if args.predicted_neighbor_num != 0:
+        raise ValueError("HDP is ego-only; --predicted_neighbor_num must be 0")
+    if not args.use_velocity_representation:
+        raise ValueError("HDP requires --use_velocity_representation true")
+    if args.diffusion_model_type != "x_start" or args.diffusion_supervision_type != "x_start":
+        raise ValueError("HDP requires x_start prediction and x_start supervision")
     return args
 
 

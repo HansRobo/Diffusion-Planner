@@ -172,19 +172,18 @@ def _multisample_metrics(
     if old_sample_steps is not None:
         decoder._sample_steps = sample_steps
 
-    predictions = []
+    sampled_noise = []
     try:
         for sample_idx in range(num_samples):
             generator = torch.Generator(device=device)
             generator.manual_seed(
                 base_seed + ddp.get_rank() * 1_000_003 + batch_step * num_samples + sample_idx
             )
-            inference_inputs = dict(norm_inputs)
-            inference_inputs["sampled_trajectories"] = (
+            sampled_noise.append(
                 torch.randn(
                     B,
                     action_agent_num,
-                    OUTPUT_T + 1,
+                    OUTPUT_T,
                     POSE_DIM,
                     dtype=torch.float32,
                     device=device,
@@ -192,15 +191,32 @@ def _multisample_metrics(
                 )
                 * noise_scale
             )
-            inference_inputs["delay"] = torch.zeros(B, dtype=torch.float32, device=device)
-            inference_inputs["_cached_encoding"] = cached_encoding
+        sampled = torch.stack(sampled_noise, dim=1).reshape(
+            B * num_samples, action_agent_num, OUTPUT_T, POSE_DIM
+        )
+        repeated_encoding = (
+            cached_encoding[:, None]
+            .expand(B, num_samples, *cached_encoding.shape[1:])
+            .reshape(B * num_samples, *cached_encoding.shape[1:])
+        )
+        ego_current_state = (
+            norm_inputs["ego_current_state"][:, None]
+            .expand(B, num_samples, -1)
+            .reshape(B * num_samples, -1)
+        )
+        inference_inputs = {
+            "sampled_trajectories": sampled,
+            "ego_current_state": ego_current_state,
+            "_cached_encoding": repeated_encoding,
+        }
+        use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and device.type == "cuda"
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
             _, outputs = model(inference_inputs)
-            predictions.append(outputs["prediction"][:, 0, :, :2])
+        sampled_xy = outputs["prediction"][:, 0, :, :2].reshape(B, num_samples, OUTPUT_T, 2)
     finally:
         if old_sample_steps is not None:
             decoder._sample_steps = old_sample_steps
 
-    sampled_xy = torch.stack(predictions, dim=1)  # [B, K, T, 2]
     gt_xy = ego_future[..., :2]
     T = min(sampled_xy.shape[2], gt_xy.shape[1])
     sampled_xy = sampled_xy[:, :, :T]
@@ -336,8 +352,6 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     turn_indicator_class_correct = [0.0] * TURN_INDICATOR_OUTPUT_DIM
     turn_indicator_class_total = [0] * TURN_INDICATOR_OUTPUT_DIM
 
-    delay = 0
-
     total_batches = len(val_loader)
     pbar = tqdm(total=total_batches, desc="validate", disable=ddp.get_rank() != 0)
     net = getattr(model, "module", model)
@@ -350,10 +364,8 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         turn_indicator_seq = inputs["turn_indicators"]
 
         inputs["sampled_trajectories"] = torch.zeros(
-            B, action_agent_num, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32, device=device
+            B, action_agent_num, OUTPUT_T, POSE_DIM, dtype=torch.float32, device=device
         )
-        inputs["delay"] = torch.full((B,), delay, dtype=torch.float32, device=device)
-
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
@@ -373,7 +385,9 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         )
         inputs = args.observation_normalizer(inputs)
 
-        encoder_outputs, outputs = model(inputs)
+        use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and str(device).startswith("cuda")
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            encoder_outputs, outputs = model(inputs)
 
         neighbor_current_mask = (
             torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
@@ -553,8 +567,7 @@ def aggregate_valid_metrics(valid_dict, device):
         for index, name in enumerate(TURN_INDICATOR_CLASS_NAMES)
     }
     turn_class_count = {
-        name: int(turn_class_total[index])
-        for index, name in enumerate(TURN_INDICATOR_CLASS_NAMES)
+        name: int(turn_class_total[index]) for index, name in enumerate(TURN_INDICATOR_CLASS_NAMES)
     }
 
     ego_means = {}

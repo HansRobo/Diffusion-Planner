@@ -24,7 +24,7 @@ from diffusion_planner.hdp_rl_utils import (
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.masks import neighbor_future_padding_mask
-from diffusion_planner.utils.train_utils import get_epoch_mean_loss
+from diffusion_planner.utils.train_utils import finalize_epoch_loss_sums, update_epoch_loss_sums
 
 
 def _set_hdp_rl_train_mode(model, args):
@@ -40,7 +40,7 @@ def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
     mask = neighbor_future_padding_mask(neighbor_future_raw)
     neighbors_future = heading_to_cos_sin(neighbor_future_raw)
     neighbors_future[mask] = 0.0
-    return neighbors_future, mask
+    return neighbors_future
 
 
 def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug, profile=False):
@@ -64,27 +64,13 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
         raw_inputs["ego_agent_past"] = heading_to_cos_sin(raw_inputs["ego_agent_past"])
         raw_inputs["goal_pose"] = heading_to_cos_sin(raw_inputs["goal_pose"])
 
-    reward_neighbors_raw, reward_neighbor_mask_raw = _neighbor_future_world(
-        raw_inputs["neighbor_agents_future"]
-    )
-    policy_neighbor_num = int(args.predicted_neighbor_num)
-    neighbors_future_raw = reward_neighbors_raw[:, :policy_neighbor_num]
-    neighbor_future_mask_raw = reward_neighbor_mask_raw[:, :policy_neighbor_num]
+    reward_neighbors_raw = _neighbor_future_world(raw_inputs["neighbor_agents_future"])
     norm_inputs = args.observation_normalizer(raw_inputs)
     if getattr(args, "rl_train_scope", "decoder") == "decoder":
-        decoder_inputs = {
-            "ego_current_state": norm_inputs["ego_current_state"],
-            # The decoder reads only the current neighbor state. Avoid repeating the full
-            # 31-frame history for every rollout candidate.
-            "neighbor_agents_past": norm_inputs["neighbor_agents_past"][
-                :, :policy_neighbor_num, -1:, :
-            ],
-        }
+        decoder_inputs = {"ego_current_state": norm_inputs["ego_current_state"]}
     else:
         decoder_inputs = norm_inputs
     norm_exp = expand_batch(decoder_inputs, n)
-    neighbors_future = neighbors_future_raw.repeat_interleave(n, dim=0)
-    neighbor_future_mask = neighbor_future_mask_raw.repeat_interleave(n, dim=0)
     batch_size = norm_exp["ego_current_state"].shape[0]
     num_scenes = batch_size // n
 
@@ -132,8 +118,6 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
             model,
             norm_exp,
             ego_world,
-            neighbors_future,
-            neighbor_future_mask,
             reward,
             num_scenes,
             n,
@@ -217,7 +201,8 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
 
 
 def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, ema, aug):
-    epoch_loss = []
+    epoch_loss_sums = {}
+    epoch_loss_counts = {}
 
     model.train()
     _set_hdp_rl_train_mode(model, args)
@@ -262,9 +247,9 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
                     "train_step/lr": optimizer.param_groups[0]["lr"],
                 }
             )
-        epoch_loss.append(step_loss)
+        update_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts, step_loss)
 
-    epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
+    epoch_mean_loss = finalize_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts)
 
     if args.ddp:
         epoch_mean_loss = ddp.reduce_and_average_losses(epoch_mean_loss, torch.device(args.device))

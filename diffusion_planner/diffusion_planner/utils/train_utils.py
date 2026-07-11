@@ -53,35 +53,65 @@ def compute_grad_stats(parameters, prefix="grad"):
         dict mapping ``f"{prefix}/<stat>"`` to a python float. Empty dict if
         no parameter has a gradient.
     """
-    grads = [p.grad.detach().flatten() for p in parameters if p.grad is not None]
+    grads = [p.grad.detach() for p in parameters if p.grad is not None]
     if len(grads) == 0:
         return {}
 
-    grads = torch.cat(grads)
+    device = grads[0].device
+    total = torch.zeros((), dtype=torch.float32, device=device)
+    square_total = torch.zeros_like(total)
+    l1 = torch.zeros_like(total)
+    linf = torch.zeros_like(total)
+    count = 0
+    for grad in grads:
+        values = grad.float()
+        total += values.sum()
+        square_total += values.square().sum()
+        l1 += values.abs().sum()
+        linf = torch.maximum(linf, values.abs().amax())
+        count += values.numel()
+
+    mean = total / count
+    variance = (square_total - total.square() / count) / max(count - 1, 1)
+    stats = torch.stack([l1, square_total.sqrt(), linf, mean, variance.clamp_min(0).sqrt()])
+    l1_value, l2_value, linf_value, mean_value, std_value = stats.cpu().tolist()
     return {
-        f"{prefix}/l1_norm": grads.abs().sum().item(),
-        f"{prefix}/l2_norm": grads.norm(2).item(),
-        f"{prefix}/linf_norm": grads.abs().max().item(),
-        f"{prefix}/mean": grads.mean().item(),
-        f"{prefix}/std": grads.std().item(),
+        f"{prefix}/l1_norm": l1_value,
+        f"{prefix}/l2_norm": l2_value,
+        f"{prefix}/linf_norm": linf_value,
+        f"{prefix}/mean": mean_value,
+        f"{prefix}/std": std_value,
     }
 
 
-def get_epoch_mean_loss(epoch_loss):
-    epoch_mean_loss = {}
-    for current_loss in epoch_loss:
-        for key, value in current_loss.items():
-            if key in epoch_mean_loss:
-                epoch_mean_loss[key].append(
-                    value if isinstance(value, (int, float)) else value.item()
-                )
-            else:
-                epoch_mean_loss[key] = [value if isinstance(value, (int, float)) else value.item()]
+def update_epoch_loss_sums(
+    sums: dict[str, torch.Tensor | float],
+    counts: dict[str, int],
+    losses: dict[str, torch.Tensor | float],
+) -> None:
+    """Accumulate detached scalar metrics without retaining one CUDA tensor per step."""
+    for key, value in losses.items():
+        if torch.is_tensor(value):
+            detached = value.detach()
+            if detached.numel() != 1:
+                raise ValueError(f"Epoch metric {key!r} must be scalar, got {detached.shape}")
+            if key not in sums:
+                sums[key] = torch.zeros_like(detached)
+            sums[key].add_(detached)
+        else:
+            sums[key] = float(sums.get(key, 0.0)) + float(value)
+        counts[key] = counts.get(key, 0) + 1
 
-    for key, values in epoch_mean_loss.items():
-        epoch_mean_loss[key] = np.mean(np.array(values))
 
-    return epoch_mean_loss
+def finalize_epoch_loss_sums(
+    sums: dict[str, torch.Tensor | float], counts: dict[str, int]
+) -> dict[str, float]:
+    if not counts:
+        raise ValueError("Cannot average zero training steps")
+    return {
+        key: float((value / counts[key]).item()) if torch.is_tensor(value) else value / counts[key]
+        for key, value in sums.items()
+    }
 
 
 def resume_model(

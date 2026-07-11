@@ -14,16 +14,15 @@ The single supported pipeline is:
                                to the HDP hybrid diffusion loss.
 """
 
-import random
 from dataclasses import dataclass
 
 import torch
 
 from diffusion_planner.dimensions import OUTPUT_T, POSE_DIM
 from diffusion_planner.loss import (
-    clamp_known_prefix,
     hybrid_loss_components,
     inverse_normalize_ego_velocity,
+    normalize_ego_state,
     normalize_ego_velocity,
     sample_diffusion_time,
     vp_supervision_elementwise_loss,
@@ -31,7 +30,6 @@ from diffusion_planner.loss import (
     weighted_waypoint_dpm_loss,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-from diffusion_planner.model.module.decoder import generate_prefix_mask
 from planner_metrics.config import RewardConfig
 from planner_metrics.geometry import _point_to_segments_min_dist
 from planner_metrics.subscores import (
@@ -87,6 +85,18 @@ def _linear_safe_score(
     critical_t = torch.as_tensor(critical, dtype=value.dtype, device=value.device)
     safe_t = torch.as_tensor(safe, dtype=value.dtype, device=value.device)
     return ((value - critical_t) / (safe_t - critical_t).clamp_min(1e-6)).clamp(0.0, 1.0)
+
+
+def _attenuate_rear_only_risk(
+    risk: torch.Tensor,
+    collision_rear: torch.Tensor,
+    collision_active: torch.Tensor,
+    rear_end_penalty: float,
+) -> torch.Tensor:
+    """Apply the paper's rear-end attenuation to the final conservative risk score."""
+    rear_only = collision_rear.bool() & ~collision_active.bool()
+    rear_floor = 1.0 - float(rear_end_penalty)
+    return torch.where(rear_only, risk.clamp_min(rear_floor), risk)
 
 
 def _trajectory_speed(xy: torch.Tensor, dt: float, initial_xy: torch.Tensor | None = None):
@@ -519,6 +529,12 @@ def compute_hdp_reward(
             config,
         )
         risk = torch.stack([terms["ttc"], terms["thw"], occupancy], dim=0).amin(dim=(0, 2))
+        risk = _attenuate_rear_only_risk(
+            risk,
+            terms["collision_rear"],
+            terms["collision_active"],
+            config.rear_end_penalty,
+        )
         lane, expert_off_lane, expert_lane_change = _hdp_lane_score(
             ego_group[scene],
             heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene]),
@@ -618,13 +634,12 @@ def sample_group(
     inference_inputs = dict(norm_inputs)
     # Official HDP-RL samples rollouts with a fixed sampling temperature.
     if noise_scale == 0.0:
-        sampled = torch.zeros(B, action_agent_num, OUTPUT_T + 1, POSE_DIM, device=device)
+        sampled = torch.zeros(B, action_agent_num, OUTPUT_T, POSE_DIM, device=device)
     else:
-        sampled = torch.randn(B, action_agent_num, OUTPUT_T + 1, POSE_DIM, device=device) * float(
+        sampled = torch.randn(B, action_agent_num, OUTPUT_T, POSE_DIM, device=device) * float(
             noise_scale
         )
     inference_inputs["sampled_trajectories"] = sampled
-    inference_inputs["delay"] = torch.zeros(B, dtype=torch.float32, device=device)
 
     cached_encoding = None
     previous_sample_steps = net.decoder._sample_steps
@@ -724,8 +739,6 @@ def _compute_policy_ego_loss_per_sample(
     model,
     norm_inputs: dict[str, torch.Tensor],
     ego_pseudo_gt: torch.Tensor,
-    neighbors_future: torch.Tensor,
-    neighbor_future_mask: torch.Tensor,
     args,
     cached_encoding: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
@@ -748,25 +761,16 @@ def _compute_policy_ego_loss_per_sample(
         )
     ego_target = ego_pseudo_gt.detach()
 
-    B, Pn, T, _ = neighbors_future.shape
-    P = 1 + Pn
+    B, T, _ = ego_target.shape
     device = ego_pseudo_gt.device
 
-    ego_current = norm_inputs["ego_current_state"][:, :4]
-    neighbors_current = norm_inputs["neighbor_agents_past"][:, :Pn, -1, :4]
     # norm_inputs are observation-normalized; convert back to m/s (see decoder.py, same fix).
     _lv_mean, _lv_std = args.observation_normalizer.stats("ego_current_state")
     longitudinal_velocity = norm_inputs["ego_current_state"][:, 4:5] * float(_lv_std[4]) + float(
         _lv_mean[4]
     )
 
-    neighbor_current_mask = torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
-    neighbor_mask = torch.concat(
-        (neighbor_current_mask.unsqueeze(-1), neighbor_future_mask), dim=-1
-    )  # [B, Pn, T+1]
-
-    gt_future = torch.cat([ego_target[:, None, :, :], neighbors_future], dim=1)  # [B, P, T, 4]
-    current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
+    gt_future = ego_target[:, None]  # [B, 1, T, 4]
 
     eps = 1e-3
     t = sample_diffusion_time(
@@ -775,46 +779,30 @@ def _compute_policy_ego_loss_per_sample(
         eps,
         getattr(args, "diffusion_time_sample_method", "uniform"),
     )
-    t = t.view(B, 1, 1, 1).expand(B, P, T + 1, 1)
+    t_broadcast = t.view(B, 1, 1, 1)
     z = torch.randn_like(gt_future)
 
-    max_delay = 5
-    delay = torch.randint(0, max_delay + 1, (B,), device=device)
-    prefix_mask = generate_prefix_mask(delay, P, T + 1)  # [B, P, T+1, 1]
-    mask_coeff = random.uniform(0.0, 1.0)
-    curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=device))
-    t = torch.where(prefix_mask, curr_mask_time, t)
-
-    waypoint_gt = torch.cat(
-        [current_states[:, :, None, :], norm(gt_future)], dim=2
-    )  # [B, P, T+1, 4]
+    waypoint_gt = normalize_ego_state(gt_future, norm)
     all_gt = waypoint_gt.clone()
     if use_velocity:
         ego_velocity_gt = waypoints_to_velocity(ego_target)
-        all_gt[:, 0, 1:, :] = normalize_ego_velocity(ego_velocity_gt, norm)
-    all_gt[:, 1:] = all_gt[:, 1:].masked_fill(neighbor_mask.unsqueeze(-1), 0.0)
+        all_gt[:, 0] = normalize_ego_velocity(ego_velocity_gt, norm)
 
     model_ref = getattr(model, "module", model)
     sde = getattr(model_ref, "sde", None)
     if sde is None:
         sde = VPSDE_linear()
-    t_future = t[..., 1:, :]
     # Same schedule values as marginal_prob(ones_like(...)) without the full-size ones tensor.
-    alpha = sde.marginal_alpha(t_future)
-    std = sde.marginal_prob_std(t_future)
-    x0_target = all_gt[:, :, 1:, :]
-    xT_future = alpha * x0_target + std * z
-    xT = torch.cat([all_gt[:, :, :1, :], xT_future], dim=2)
-    xT = torch.where(prefix_mask, all_gt, xT)
-    xT_future = xT[:, :, 1:, :]
-
+    alpha = sde.marginal_alpha(t_broadcast)
+    std = sde.marginal_prob_std(t_broadcast)
+    x0_target = all_gt
+    xT = alpha * x0_target + std * z
     merged_inputs = {
         **norm_inputs,
         "gt_trajectories": all_gt,
         "turn_indicator_trajectories": waypoint_gt,
         "sampled_trajectories": xT,
         "diffusion_time": t,
-        "prefix_mask": prefix_mask,
         # RL optimizes only the trajectory policy. Avoid an unused turn-head forward and keep
         # that SFT classifier frozen while the DiT policy changes under reward weighting.
         "_skip_turn_indicator_training": True,
@@ -828,22 +816,18 @@ def _compute_policy_ego_loss_per_sample(
         enabled=getattr(args, "amp_dtype", "off") == "bf16",
     ):
         _, decoder_output = model(merged_inputs)
-    model_output = decoder_output["model_output"][:, :, 1:, :].float()  # [B, P, T, 4]
+    model_output = decoder_output["model_output"].float()  # [B, 1, T, 4]
 
-    pred_x_start = sde.transform(f"{model_type}->x_start", model_output, t_future, xT_future)
+    pred_x_start = sde.transform(f"{model_type}->x_start", model_output, t_broadcast, xT)
     supervised_prediction = sde.transform(
-        f"{model_type}->{supervision_type}", model_output, t_future, xT_future
+        f"{model_type}->{supervision_type}", model_output, t_broadcast, xT
     )
 
     if use_velocity:
         # Guarded at function entry: velocity mode implies model_type == supervision_type
         # == "x_start" (mirrors decoder.compute_training_loss).
         ego_diffusion_loss = torch.sum((supervised_prediction[:, 0] - x0_target[:, 0]) ** 2, dim=-1)
-        ego_pred_velocity = clamp_known_prefix(
-            pred_x_start[:, 0],
-            x0_target[:, 0],
-            prefix_mask[:, 0, 1:, 0],
-        )
+        ego_pred_velocity = pred_x_start[:, 0]
         ego_pred_velocity_raw = inverse_normalize_ego_velocity(ego_pred_velocity, norm)
         _, ego_waypoint_loss = hybrid_loss_components(
             ego_pred_velocity,
@@ -853,10 +837,7 @@ def _compute_policy_ego_loss_per_sample(
             W=args.hybrid_loss_window,
         )
         ego_reconstruction = ego_diffusion_loss + args.planning_hybrid_loss * ego_waypoint_loss
-        ego_valid = ~prefix_mask[:, 0, 1 : 1 + args.ego_prediction_horizon, 0]
-        ego_loss_per_sample = ego_reconstruction[:, : args.ego_prediction_horizon].masked_fill(
-            ~ego_valid, 0.0
-        ).sum(dim=-1) / ego_valid.sum(dim=-1).clamp_min(1)
+        ego_loss_per_sample = ego_reconstruction[:, : args.ego_prediction_horizon].mean(dim=-1)
     elif supervision_type == "x_start":
         dpm_loss = weighted_waypoint_dpm_loss(
             pred_x_start,
@@ -873,7 +854,7 @@ def _compute_policy_ego_loss_per_sample(
         ego_waypoint_loss = torch.zeros_like(ego_loss_per_sample)
     else:
         dpm_loss = vp_supervision_elementwise_loss(
-            supervised_prediction, z, std, supervision_type, sde, t_future, xT_future
+            supervised_prediction, z, std, supervision_type, sde, t_broadcast, xT
         )
         ego_loss_per_sample = dpm_loss[:, 0, : args.ego_prediction_horizon].mean(dim=-1)
         ego_diffusion_loss = torch.zeros_like(ego_loss_per_sample)
@@ -890,8 +871,6 @@ def compute_reward_weighted_loss(
     model,
     norm_inputs: dict[str, torch.Tensor],
     ego_pseudo_gt: torch.Tensor,
-    neighbors_future: torch.Tensor,
-    neighbor_future_mask: torch.Tensor,
     reward: torch.Tensor,
     num_scenes: int,
     n: int,
@@ -923,8 +902,6 @@ def compute_reward_weighted_loss(
         model,
         norm_inputs,
         ego_pseudo_gt,
-        neighbors_future,
-        neighbor_future_mask,
         args,
         cached_encoding,
     )

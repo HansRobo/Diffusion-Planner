@@ -146,25 +146,12 @@ Important semantics:
 - The EMA shadow generates candidate actions as the previous policy; the live decoder receives the reward-weighted update, then refreshes EMA.
 - Reward uses SAT collision, continuous TTC, THW, static/stopped-agent/road-border occupancy clearance, leader-conditioned following, lane-center scoring, lane-change/off-lane masking, and rear-end attenuation.
 - Candidate groups with identical or non-finite rewards are discarded before the hybrid loss.
-- `--predicted_neighbor_num 0` is the default ego-only HDP action head. Use `320` only for the retained joint-action ablation. Both modes still encode all 320 neighbor histories and score safety against all logged neighbor futures.
+- `--predicted_neighbor_num` must be `0`. The temporal HDP action head predicts only ego while the encoder and safety reward still consume all logged neighbors.
 - `--align_legacy_neighbor_futures true` fixes the pre-`55eff4f` short-track `t=0` duplication inside each DataLoader worker. It never rewrites or migrates shared NPZ files. Disable it for regenerated data.
 - `--export_onnx_on_save` defaults to `false` for SFT and RL so synchronous CPU export does not leave the other DDP ranks idle. Use the standalone converter for a strict release export.
 - Six-sample minADE/minFDE is an open-loop diagnostic. EPDMS and pseudo-closed-loop metrics drive safety-oriented model selection; final acceptance requires real-vehicle A/B evaluation.
 - Legacy RL alternatives have been removed from this branch; HDP-RL has a single supported reward-weighted hybrid path.
 - SFT trains the turn-indicator head on both the detached model-generated x-start trajectory and the expert trajectory. Their normalized weighted mean preserves loss scale; validation reports generated-path overall, change-only, and per-class metrics.
-
-## Vanilla DP compatibility mode
-
-This branch can still run original DP-style supervised training by disabling HDP-specific options:
-
-```bash
---use_velocity_representation False \
---planning_hybrid_loss 0.0 \
---diffusion_model_type x_start \
---diffusion_supervision_type x_start
-```
-
-This compatibility mode is useful for local comparison, but it is not the branch's primary contract. For clean baseline PRs or production vanilla-DP changes, use the upstream Tier IV main branch.
 
 ## HDP ONNX export
 
@@ -187,17 +174,13 @@ CUDA_VISIBLE_DEVICES="" ../.venv/bin/python ../ros_scripts/torch2onnx.py \
   --opset-version 20
 ```
 
-Expected HDP output shapes depend on the action head:
+Expected HDP output shapes:
 
 ```text
 ego-only prediction: [B, 1, 80, 4]
-joint prediction:    [B, 321, 80, 4]
 turn_indicator_logit: [B, 5]
 ```
 
-The branch smoke test on `epoch0010/best_model.pth` passed PyTorch-vs-ORT validation with
-`prediction` max diff `4.35e-4` and mean diff `1.48e-5`.
-
-A native ego-only EMA export also passed with output `[1,1,80,4]`, prediction max diff
-`1.38e-5`, and mean diff `2.42e-6`. ORT batch 2 with different per-row `delay` values
-produced `[2,1,80,4]` and `[2,5]`, confirming that `delay` shares the dynamic batch axis.
+The temporal full graph passed ONNX checker and ONNX Runtime CPU execution with dynamic
+batch 1 and 2. Its sampled action input and prediction are both 80-step ego-only tensors;
+there is no delay-prefix input.

@@ -7,7 +7,11 @@ from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.masks import neighbor_future_padding_mask
-from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
+from diffusion_planner.utils.train_utils import (
+    compute_grad_stats,
+    finalize_epoch_loss_sums,
+    update_epoch_loss_sums,
+)
 
 
 def compose_supervised_total_loss(loss, args):
@@ -78,7 +82,8 @@ def prepare_neighbor_supervision(
 
 
 def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
-    epoch_loss = []
+    epoch_loss_sums = {}
+    epoch_loss_counts = {}
 
     model.train()
     step_log = getattr(args, "wandb_step_log_interval", 0)
@@ -99,16 +104,16 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     # gradients and calls .item() five times (five device syncs per step). Sample them
     # on the wandb logging cadence instead (or every 100 steps when step logging is off).
     stats_interval = step_log if step_log > 0 else 100
-    needs_neighbor_futures = (
-        int(args.predicted_neighbor_num) > 0 or args.coeff_neighbor_collision_loss > 0
-    )
+    needs_neighbor_futures = args.coeff_neighbor_collision_loss > 0
+    net = ddp.get_model(model, args.ddp)
+    turn_params = list(net.decoder.turn_indicator_predictor.parameters())
+    turn_param_ids = {id(param) for param in turn_params}
+    policy_params = [param for param in net.parameters() if id(param) not in turn_param_ids]
 
     for batch_idx, inputs in enumerate(data_loader, start=1):
         neighbor_future_cpu = inputs.pop("neighbor_agents_future", None)
         if needs_neighbor_futures and neighbor_future_cpu is None:
-            raise KeyError(
-                "neighbor_agents_future is required for joint-action or collision supervision"
-            )
+            raise KeyError("neighbor_agents_future is required for collision supervision")
         inputs = {key: value.to(args.device, non_blocking=True) for key, value in inputs.items()}
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
@@ -128,7 +133,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # heading to cos sin
         ego_future = heading_to_cos_sin(ego_future)
 
-        action_neighbor_num = int(args.predicted_neighbor_num)
+        action_neighbor_num = 0
         neighbors_future, mask, collision_futures = prepare_neighbor_supervision(
             neighbors_future,
             action_neighbor_num,
@@ -161,7 +166,8 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         if (args._wandb_global_step + 1) % stats_interval == 0:
             loss.update(compute_grad_stats(model.parameters()))
 
-        nn.utils.clip_grad_norm_(model.parameters(), 5)
+        nn.utils.clip_grad_norm_(policy_params, 5)
+        nn.utils.clip_grad_norm_(turn_params, 5)
         optimizer.step()
 
         if ema is not None:
@@ -193,11 +199,10 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
         # NOTE: no per-step torch.cuda.synchronize() here — it stalled the whole
         # pipeline every iteration for no correctness benefit (DDP synchronizes via
-        # its allreduce; kernels are stream-ordered). Detach stored values so 35k+
-        # steps of scalars don't keep autograd-graph references alive all epoch.
-        epoch_loss.append({k: (v.detach() if torch.is_tensor(v) else v) for k, v in loss.items()})
+        # its allreduce; kernels are stream-ordered).
+        update_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts, loss)
 
-    epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
+    epoch_mean_loss = finalize_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts)
 
     if args.ddp:
         epoch_mean_loss = ddp.reduce_and_average_losses(epoch_mean_loss, torch.device(args.device))

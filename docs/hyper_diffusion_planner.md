@@ -154,16 +154,12 @@ Implementation notes:
 - Turn-indicator validation logs overall, change-only, and all five per-class accuracies plus class counts; the overall metric is computed from generated trajectories, never teacher-forced trajectories.
 - SFT/RL ONNX export on every save is disabled by default because synchronous export stalls all other DDP ranks at the next barrier. Set `export_onnx_on_save=true` only when needed, or use the strict standalone converter.
 
-### Joint and ego-only action heads
+### Ego-only action head
 
-The encoder always consumes all configured neighbor histories. The action head is selected per run:
-
-```text
-predicted_neighbor_num=0    # default ego-only HDP action head
-predicted_neighbor_num=320  # retained DP joint ego/neighbor-action ablation
-```
-
-In ego-only mode, supervised and RL losses do not predict neighbor futures, but collision and reward evaluation still use every logged neighbor future. Parameter shapes are independent of the number of action tokens, so a joint checkpoint can initialize an ego-only SFT adaptation run. A clean ego-only Base/SFT/RL run remains the unbiased comparison arm.
+This branch has one action-head contract: 80 temporal ego tokens with
+`predicted_neighbor_num=0`. The encoder still consumes all 320 configured neighbor histories,
+and validation/RL safety scoring still uses every logged neighbor future. Neighbor trajectories
+are scene context and reward inputs, not decoder prediction targets.
 
 ### What is faithful and what is DP-native
 
@@ -223,44 +219,22 @@ Precision policy:
 - HDP velocity normalization is decoded inside the traced full graph.
 - The standalone converter validates the full ONNX output against the PyTorch wrapper when
   `ros_scripts/torch2onnx.py` is used.
-- Every full-graph input, including `delay`, has a dynamic batch axis. Native ego-only output is `[B,1,80,4]`; no compatibility rows are padded for the old 321-row ROS consumer.
+- Every full-graph input has a dynamic batch axis. Native output is `[B,1,80,4]`; the model has no delay-prefix or compatibility-row contract.
 
-Smoke validation performed on this branch:
+Smoke validation performed after the temporal-token conversion:
 
 ```text
-checkpoint:
-  outputs/hdp_velocity_hybrid_omega001_base60_fullseq_node01_8gpu_bf16_bs512_rerun3/epoch0010/best_model.pth
-
-command:
-  CUDA_VISIBLE_DEVICES="" .venv/bin/python ros_scripts/torch2onnx.py \
-    outputs/onnx_smoke_hdp_epoch0010 \
-    --output-prefix diffusion_planner_hdp_smoke \
-    --opset-version 20
-
 result:
-  full prediction      max diff = 4.3487548828125e-4, mean diff = 1.4785410712647717e-5
-  turn indicator logit max diff = 8.58306884765625e-6, mean diff = 3.4928320928884204e-6
-  encoder output       max diff = 4.082918167114258e-6, mean diff = 4.0447002902510576e-7
-  ORT provider         CPUExecutionProvider
+  ONNX checker         full / encoder / turn-indicator passed
+  ORT provider         CPUExecutionProvider, dynamic batch 1 and 2 passed
+  full prediction      [B, 1, 80, 4], finite
+  turn indicator       [B, 5], finite
   split decoder        intentionally skipped for HDP velocity checkpoints
 ```
 
-The joint-action checked full graph outputs:
-
-```text
-prediction: [B, 321, 80, 4]
-turn_indicator_logit: [B, 5]
-```
-
-`prediction[:, 0]` is the HDP ego trajectory decoded back to waypoint space. It is not the
-normalized velocity latent.
-
-An ego-only export instead has `sampled_trajectories: [B, 1, 81, 4]` and
-`prediction: [B, 1, 80, 4]`; scene encoder inputs, including 320 neighbor histories, are unchanged.
-
-The 2026-07-11 native ego-only EMA audit measured prediction max/mean PyTorch-ORT
-difference `1.38e-5 / 2.42e-6`. ORT also ran batch 2 with two different per-row delay
-values and returned prediction `[2,1,80,4]` plus turn logits `[2,5]`.
+The full graph takes `sampled_trajectories: [B,1,80,4]`. `prediction[:,0]` is the
+integrated waypoint trajectory, not the normalized velocity latent. Scene encoder inputs,
+including 320 neighbor histories, are unchanged.
 
 For deployment or closed-loop handoff, record:
 

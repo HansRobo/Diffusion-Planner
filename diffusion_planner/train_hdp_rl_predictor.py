@@ -196,7 +196,11 @@ def get_args():
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
-    parser.add_argument("--ego_history_dropout_rate", type=float, default=0.5)
+    parser.add_argument(
+        "--ego_history_dropout_rate",
+        type=float,
+        default=_train_config_default("ego_history_dropout_rate"),
+    )
     parser.add_argument("--use_turn_indicators", type=boolean, default=True)
 
     # ----- HDP-RL-specific -----
@@ -297,7 +301,11 @@ def get_args():
     )
     parser.add_argument("--coeff_timestep", type=parse_float_list, default=[1.0, 1.0, 1.0, 1.0])
 
-    parser.add_argument("--coeff_road_border_loss", type=float, default=1.0)
+    parser.add_argument(
+        "--coeff_road_border_loss",
+        type=float,
+        default=_train_config_default("coeff_road_border_loss"),
+    )
     parser.add_argument("--road_border_margin", type=float, default=0.25)
     parser.add_argument("--road_border_n_interp", type=int, default=2)
 
@@ -365,9 +373,10 @@ def get_args():
     # Model
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)
     parser.add_argument("--encoder_fusion_depth", type=int, default=6)
-    parser.add_argument("--decoder_depth", type=int, default=3)
+    parser.add_argument("--decoder_depth", type=int, default=_train_config_default("decoder_depth"))
     parser.add_argument("--num_heads", type=int, default=8)
     parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.set_defaults(decoder_tokenization="temporal")
     parser.add_argument(
         "--diffusion_model_type",
         type=str,
@@ -378,7 +387,7 @@ def get_args():
         "--predicted_neighbor_num",
         type=int,
         default=0,
-        help="0 for the HDP ego-only action policy (default); 320 keeps the joint-action ablation",
+        help="must be 0; HDP-RL predicts only the ego trajectory",
     )
     parser.add_argument(
         "--resume_model_path",
@@ -499,8 +508,8 @@ def get_args():
         raise ValueError("--num_generations must be >= 2 for HDP-RL group reward normalization")
     if args.rl_rollout_steps < 3:
         raise ValueError("--rl_rollout_steps must be >= 3 for the third-order DPM solver")
-    if args.diffusion_sample_steps < 3:
-        raise ValueError("--diffusion_sample_steps must be >= 3 for the third-order DPM solver")
+    if args.diffusion_sample_steps < 2:
+        raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
         raise ValueError(
             "--multisample_eval_sample_steps must be >= 3 for the third-order DPM solver"
@@ -509,8 +518,8 @@ def get_args():
         raise ValueError("--rl_noise_scale must be >= 0")
     if args.rl_reward_beta <= 0.0:
         raise ValueError("--rl_reward_beta must be > 0")
-    if not 0 <= args.predicted_neighbor_num <= args.agent_num:
-        raise ValueError("--predicted_neighbor_num must be between 0 and --agent_num")
+    if args.predicted_neighbor_num != 0:
+        raise ValueError("HDP-RL is ego-only; --predicted_neighbor_num must be 0")
     if args.rl_full_eval_utd < 1:
         raise ValueError("--rl_full_eval_utd must be >= 1")
     if not 0.0 < args.rl_ema_update_rate <= 1.0:
@@ -791,7 +800,6 @@ def model_training(args):
         wandb_id = None
 
     if global_rank == 0 and args.use_wandb:
-        os.environ["WANDB_MODE"] = "online"
         wandb.init(
             project=args.wandb_project_name,
             name=args.exp_name,
@@ -992,6 +1000,10 @@ def model_training(args):
                     )
 
         train_sampler.set_epoch(epoch + 1)
+
+    if global_rank == 0 and wandb.run is not None:
+        wandb.finish()
+    ddp.cleanup()
 
 
 if __name__ == "__main__":

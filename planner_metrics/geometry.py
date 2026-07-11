@@ -41,7 +41,7 @@ def _build_ego_bbox_corners(
 
     half_length = ego_length / 2.0
     half_width = ego_width / 2.0
-    half_sizes = torch.tensor([half_length, half_width], device=device, dtype=dtype).expand(N, T, 2)
+    half_sizes = torch.stack([half_length, half_width]).to(dtype=dtype).expand(N, T, 2)
 
     corner_signs = torch.tensor(
         [[1.0, 1.0], [1.0, -1.0], [-1.0, -1.0], [-1.0, 1.0]],

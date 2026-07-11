@@ -19,7 +19,7 @@ class Config:
             "hybrid_loss_window": 10,
             "diffusion_supervision_type": getattr(self, "diffusion_model_type", "x_start"),
             "diffusion_time_sample_method": "uniform",
-            "diffusion_sample_steps": 10,
+            "diffusion_sample_steps": 6,
             "rl_reward_normalize": getattr(self, "official_reward_normalize", "group"),
             "rl_reward_beta": getattr(self, "official_reward_beta", 1.0),
             "rl_noise_scale": 0.5,
@@ -27,6 +27,12 @@ class Config:
         for key, value in defaults.items():
             if not hasattr(self, key):
                 setattr(self, key, value)
+        tokenization = getattr(self, "decoder_tokenization", None)
+        if tokenization != "temporal":
+            raise RuntimeError(
+                "This HDP branch requires a temporal-token decoder checkpoint; "
+                f"args.json has decoder_tokenization={tokenization!r}."
+            )
         state_normalizer = getattr(self, "state_normalizer", None)
         if not isinstance(state_normalizer, dict):
             raise RuntimeError("args.json/state_normalizer is required to load Diffusion Planner.")

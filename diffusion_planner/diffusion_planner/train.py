@@ -237,6 +237,7 @@ def assert_checkpoint_compatible(
         "encoder_mixer_depth",
         "encoder_fusion_depth",
         "decoder_depth",
+        "decoder_tokenization",
         "num_heads",
         "hidden_dim",
     )
@@ -316,14 +317,11 @@ def assert_checkpoint_compatible(
             "rl_leader_lateral_margin_m",
         )
         missing_training_fields = [
-            field
-            for field in training_fields
-            if hasattr(args, field) and field not in ckpt_args
+            field for field in training_fields if hasattr(args, field) and field not in ckpt_args
         ]
         if missing_training_fields:
             raise RuntimeError(
-                "Checkpoint args.json is missing strict training fields: "
-                f"{missing_training_fields}"
+                f"Checkpoint args.json is missing strict training fields: {missing_training_fields}"
             )
         training_mismatches = [
             (field, ckpt_args[field], getattr(args, field))
@@ -349,7 +347,7 @@ def assert_checkpoint_compatible(
         raise RuntimeError(
             "Checkpoint action shape mismatch: "
             f"predicted_neighbor_num={checkpoint_neighbors}, current={current_neighbors}. "
-            "Only weights-only initialization may change the ego/joint action shape."
+            "The checkpoint and current run must use the same ego action-head shape."
         )
 
     _assert_normalizers_compatible(
@@ -596,17 +594,13 @@ def model_training(args: TrainConfig):
 
     # prepare dataset
     align_legacy_futures = bool(getattr(args, "align_legacy_neighbor_futures", True))
-    train_needs_neighbor_futures = (
-        int(args.predicted_neighbor_num) > 0 or args.coeff_neighbor_collision_loss > 0
-    )
+    train_needs_neighbor_futures = args.coeff_neighbor_collision_loss > 0
     train_set = DiffusionPlannerData(
         args.train_set_list,
         align_legacy_neighbor_futures=align_legacy_futures,
         extra_data_list=getattr(args, "extra_train_set_list", None),
         extra_data_repeat=getattr(args, "extra_train_set_repeat", 0),
-        extra_data_mask_traffic_lights=getattr(
-            args, "extra_train_set_mask_traffic_lights", False
-        ),
+        extra_data_mask_traffic_lights=getattr(args, "extra_train_set_mask_traffic_lights", False),
         include_neighbor_futures=train_needs_neighbor_futures,
     )
     valid_set = DiffusionPlannerData(
@@ -722,9 +716,7 @@ def model_training(args: TrainConfig):
             f"{optimizer.param_groups[0]['lr']}"
         )
         if init_epoch > train_epochs:
-            raise RuntimeError(
-                f"Cannot resume epoch {init_epoch} with train_epochs={train_epochs}"
-            )
+            raise RuntimeError(f"Cannot resume epoch {init_epoch} with train_epochs={train_epochs}")
 
     else:
         init_epoch = 0
@@ -733,7 +725,6 @@ def model_training(args: TrainConfig):
     )
     # logger
     if global_rank == 0 and args.use_wandb:
-        os.environ["WANDB_MODE"] = "online"
         # if wandb_run_id is given, the training will be logged to the existing run instead of creating a new one.
         wandb.init(
             project=args.wandb_project_name,
@@ -1020,3 +1011,4 @@ def model_training(args: TrainConfig):
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
+    ddp.cleanup()

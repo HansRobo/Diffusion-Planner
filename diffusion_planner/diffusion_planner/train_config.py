@@ -84,7 +84,7 @@ class TrainConfig:
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True
-    ego_history_dropout_rate: float = 0.6
+    ego_history_dropout_rate: float = 0.4
     use_turn_indicators: bool = True
     # The turn head sees generated trajectories at inference. Train it on both the detached
     # model x-start trajectory and the expert trajectory; the normalized combination keeps the
@@ -104,7 +104,9 @@ class TrainConfig:
     # Use default_factory for mutable default values like lists
     coeff_timestep: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 1.0])
 
-    coeff_road_border_loss: float = 1.0
+    # Keep Base diffusion training on the unbiased HDP hybrid objective. Road-border
+    # compliance remains an evaluation signal and is optimized explicitly during RL.
+    coeff_road_border_loss: float = 0.0
     road_border_margin: float = 0.25
     road_border_n_interp: int = 2
 
@@ -135,7 +137,9 @@ class TrainConfig:
     hybrid_loss_window: int = 10
     diffusion_supervision_type: Literal["x_start", "noise", "score", "v"] = "x_start"
     diffusion_time_sample_method: Literal["uniform"] = "uniform"
-    diffusion_sample_steps: int = 10
+    # HDP real-vehicle setup uses six DPM-Solver evaluations. Keep validation and
+    # deployment on the same denoising budget used to judge the trained policy.
+    diffusion_sample_steps: int = 6
 
     # HDP RL objective. The branch intentionally keeps only the official-style
     # reward-weighted RL-Hybrid path.
@@ -187,9 +191,11 @@ class TrainConfig:
     # ---------------------------------------------------------
     encoder_mixer_depth: int = 6
     encoder_fusion_depth: int = 6
-    decoder_depth: int = 3
+    # The HDP real-vehicle decoder uses six temporal DiT blocks.
+    decoder_depth: int = 6
     num_heads: int = 8
     hidden_dim: int = 256
+    decoder_tokenization: Literal["temporal"] = "temporal"
     diffusion_model_type: Literal["x_start", "noise", "score", "v", "flow_matching"] = "x_start"
     predicted_neighbor_num: int = 0
     resume_model_path: Optional[str] = None

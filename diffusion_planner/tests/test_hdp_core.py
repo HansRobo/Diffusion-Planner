@@ -10,6 +10,7 @@ from diffusion_planner.dimensions import (
 )
 from diffusion_planner.hdp_rl_utils import (
     HDPRewardConfig,
+    _attenuate_rear_only_risk,
     _collision_and_leader_terms,
     _hdp_lane_score,
     _occupancy_score,
@@ -19,17 +20,19 @@ from diffusion_planner.hdp_rl_utils import (
 )
 from diffusion_planner.loss import (
     _detached_integral,
-    clamp_known_prefix,
     inverse_normalize_ego_velocity,
     normalize_ego_velocity,
     velocity_to_waypoints,
     waypoints_to_velocity,
 )
+from diffusion_planner.model.diffusion_utils.dpm_solver_pytorch import DPM_Solver, NoiseScheduleVP
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-from diffusion_planner.model.module.decoder import compute_training_loss
+from diffusion_planner.model.module.decoder import Decoder, compute_training_loss
+from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.train import assert_checkpoint_compatible, load_weights_only
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import prepare_neighbor_supervision
+from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.dataset import (
     DiffusionPlannerData,
@@ -44,7 +47,13 @@ from diffusion_planner.utils.onnx_export import (
     build_dummy_inputs,
     build_dynamic_axes,
 )
-from diffusion_planner.utils.train_utils import atomic_torch_save, resume_model
+from diffusion_planner.utils.train_utils import (
+    atomic_torch_save,
+    compute_grad_stats,
+    finalize_epoch_loss_sums,
+    resume_model,
+    update_epoch_loss_sums,
+)
 from diffusion_planner.validate_model import _multisample_metrics, aggregate_valid_metrics
 from timm.utils import ModelEma
 
@@ -71,6 +80,67 @@ def test_hdp_representation_and_normalization_round_trip():
     )
 
 
+def test_hdp_dit_self_attention_runs_over_future_timesteps():
+    model = DiT(depth=1, output_dim=4, hidden_dim=32, heads=4, future_len=80).eval()
+    observed = []
+    handle = model.blocks[0].attn.register_forward_pre_hook(
+        lambda _module, args: observed.append(tuple(args[0].shape))
+    )
+    with torch.no_grad():
+        output = model(
+            torch.randn(2, 1, 80, 4),
+            torch.rand(2),
+            torch.randn(2, 7, 32),
+            torch.randn(2, 2),
+        )
+    handle.remove()
+
+    assert observed == [(2, 80, 32)]
+    assert output.shape == (2, 1, 80, 4)
+
+
+def test_hdp_temporal_position_initialization_matches_navsim_frequency_base():
+    args = TrainConfig(
+        exp_name="test",
+        save_dir="/tmp",
+        train_set_list="",
+        valid_set_list="",
+        train_subsample_step=1,
+        hidden_dim=32,
+        decoder_depth=1,
+    )
+    args.state_normalizer = StateNormalizer(
+        [[[10.0, 0.0, 0.0, 0.0]]],
+        [[[20.0, 20.0, 1.0, 1.0]]],
+        [0.0, 0.0, 0.0, 0.0],
+        [0.5, 0.5, 1.0, 1.0],
+    )
+    args.observation_normalizer = ObservationNormalizer({})
+    position = Decoder(args).dit.action_pos_emb.detach()[0]
+    expected_frequency = torch.exp(-torch.log(torch.tensor(100.0)) * torch.arange(0, 32, 2) / 32)
+    torch.testing.assert_close(position[1, 0::2], torch.sin(expected_frequency))
+    torch.testing.assert_close(position[1, 1::2], torch.cos(expected_frequency))
+
+
+def test_dpm_uses_one_diffusion_time_for_the_full_trajectory():
+    observed_times = []
+
+    def noise_model(x, t):
+        observed_times.append(t.detach().clone())
+        return torch.zeros_like(x)
+
+    solver = DPM_Solver(noise_model, NoiseScheduleVP())
+    solver.sample(
+        torch.randn(1, 1, 4, 4),
+        steps=2,
+        skip_type="logSNR",
+    )
+
+    assert observed_times
+    for time in observed_times:
+        assert time.shape == (1,)
+
+
 def test_supervised_lr_warms_up_then_stays_fixed_for_twenty_epochs():
     parameter = torch.nn.Parameter(torch.zeros(()))
     optimizer = torch.optim.AdamW([parameter], lr=2e-4)
@@ -94,17 +164,6 @@ def test_detached_integral_preserves_forward_and_limits_gradient_window():
     integrated.sum().backward()
     expected = torch.tensor([3.0, 3.0, 3.0, 3.0, 2.0, 1.0], dtype=torch.float64).view(1, 6, 1)
     torch.testing.assert_close(velocity.grad, expected, rtol=0, atol=0)
-
-
-def test_known_delay_prefix_is_clamped_and_has_no_prediction_gradient():
-    prediction = torch.arange(6.0).reshape(1, 3, 2).requires_grad_()
-    target = torch.full_like(prediction, 10.0)
-    clamped = clamp_known_prefix(prediction, target, torch.tensor([[True, False, False]]))
-    clamped.sum().backward()
-
-    torch.testing.assert_close(clamped[:, 0], target[:, 0])
-    torch.testing.assert_close(prediction.grad[:, 0], torch.zeros_like(prediction.grad[:, 0]))
-    torch.testing.assert_close(prediction.grad[:, 1:], torch.ones_like(prediction.grad[:, 1:]))
 
 
 def test_reward_weights_discard_identical_and_nonfinite_groups():
@@ -413,11 +472,11 @@ def test_seeded_multisample_metrics_compute_minade_and_minfde():
             super().__init__()
             self.decoder = torch.nn.Identity()
             self.decoder._sample_steps = 10
-            self.decoder._predicted_neighbor_num = 320
+            self.decoder._predicted_neighbor_num = 0
 
         def forward(self, inputs):
             B = inputs["sampled_trajectories"].shape[0]
-            prediction = torch.zeros(B, 321, 80, 4)
+            prediction = torch.zeros(B, 1, 80, 4)
             prediction[..., 2] = 1.0
             return inputs["_cached_encoding"], {"prediction": prediction}
 
@@ -434,7 +493,14 @@ def test_seeded_multisample_metrics_compute_minade_and_minfde():
     gt = torch.zeros(1, 80, 4)
     gt[..., 0] = 1.0
     gt[..., 2] = 1.0
-    metrics = _multisample_metrics(FakeModel(), {}, torch.zeros(1, 2, 4), gt, args, 0)
+    metrics = _multisample_metrics(
+        FakeModel(),
+        {"ego_current_state": torch.zeros(1, 10)},
+        torch.zeros(1, 2, 4),
+        gt,
+        args,
+        0,
+    )
 
     torch.testing.assert_close(metrics["multisample_minADE"], torch.tensor([1.0]))
     torch.testing.assert_close(metrics["multisample_minFDE"], torch.tensor([1.0]))
@@ -558,9 +624,9 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
 
     dummy = build_dummy_inputs(action_agent_num=1)
     decoder_inputs = build_decoder_inputs(dummy, torch.zeros(1, 4, 8))
-    assert dummy["sampled_trajectories"].shape == (1, 1, 81, 4)
-    assert decoder_inputs["diffusion_time"].shape == (1, 1, 81, 1)
-    assert build_dynamic_axes(["sampled_trajectories", "delay"], ["prediction"])["delay"] == {
+    assert dummy["sampled_trajectories"].shape == (1, 1, 80, 4)
+    assert decoder_inputs["diffusion_time"].shape == (1,)
+    assert build_dynamic_axes(["sampled_trajectories"], ["prediction"])["sampled_trajectories"] == {
         0: "batch"
     }
 
@@ -640,6 +706,7 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
     shorter_horizon.train_epochs = 20
     assert_checkpoint_compatible(str(checkpoint_path), shorter_horizon)
 
+
 def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
     model = torch.nn.Linear(2, 1)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
@@ -672,3 +739,56 @@ def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
     assert epoch == 3
     assert restored._resume_global_step == 47
     assert not list(tmp_path.glob(".latest.pth.tmp.*"))
+
+
+def test_epoch_metric_accumulator_uses_per_metric_counts():
+    sums = {}
+    counts = {}
+    update_epoch_loss_sums(sums, counts, {"loss": torch.tensor(2.0)})
+    update_epoch_loss_sums(
+        sums,
+        counts,
+        {"loss": torch.tensor(4.0), "grad/l2_norm": 12.0},
+    )
+
+    means = finalize_epoch_loss_sums(sums, counts)
+
+    assert means == {"loss": 3.0, "grad/l2_norm": 12.0}
+
+
+def test_risk_reward_applies_rear_end_attenuation_after_conservative_minimum():
+    risk = torch.tensor([0.0, 0.2, 0.4])
+    rear = torch.tensor([True, True, False])
+    active = torch.tensor([False, True, False])
+
+    attenuated = _attenuate_rear_only_risk(risk, rear, active, rear_end_penalty=0.3)
+
+    torch.testing.assert_close(attenuated, torch.tensor([0.7, 0.2, 0.4]))
+
+
+def test_ddp_epoch_reducer_accepts_python_floats(monkeypatch):
+    monkeypatch.setattr(torch.distributed, "barrier", lambda: None)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda tensor, op: tensor.mul_(2))
+
+    reduced = ddp.reduce_and_average_losses(
+        {"python": 3.5, "tensor": torch.tensor(2.0)}, torch.device("cpu")
+    )
+
+    assert reduced == {"python": 3.5, "tensor": 2.0}
+
+
+def test_streaming_gradient_stats_match_concatenated_reference():
+    first = torch.nn.Parameter(torch.zeros(2))
+    second = torch.nn.Parameter(torch.zeros(3))
+    first.grad = torch.tensor([1.0, -2.0])
+    second.grad = torch.tensor([3.0, -4.0, 5.0])
+    reference = torch.cat([first.grad, second.grad])
+
+    stats = compute_grad_stats([first, second])
+
+    assert stats["grad/l1_norm"] == reference.abs().sum().item()
+    assert stats["grad/l2_norm"] == pytest.approx(reference.norm().item())
+    assert stats["grad/linf_norm"] == reference.abs().max().item()
+    assert stats["grad/mean"] == pytest.approx(reference.mean().item())
+    assert stats["grad/std"] == pytest.approx(reference.std().item())
