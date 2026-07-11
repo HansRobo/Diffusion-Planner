@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -35,6 +36,7 @@ from planner_metrics.geometry import (
     _build_ego_bbox_corners,
     _closest_points_between_rects,
 )
+from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
 from scenario_generation.route_timeline import RouteTimeline
@@ -43,6 +45,42 @@ from scenario_generation.tensor_converter import _heading_to_cos_sin
 from scenario_generation.transforms import _rotation_matrix, world_to_ego_frame
 
 DT = 0.1
+
+
+def _credit_window_width_frames(spec: dict | None, fallback: int) -> int:
+    if spec is None:
+        return int(fallback)
+    return int(spec["width_frames"])
+
+
+def _credit_window_gap_frames(spec: dict | None) -> int:
+    if spec is None:
+        return 0
+    return int(spec["gap_frames"])
+
+
+_CREDIT_EVENT_METADATA_KEYS = (
+    "expert_disagreement",
+    "expert_disagreement_step",
+    "expert_disagreement_max_dev",
+    "expert_disagreement_reason",
+    "expert_disagreement_model_end_progress",
+    "expert_disagreement_expert_end_progress",
+    "expert_disagreement_model_end_speed",
+    "expert_disagreement_expert_end_speed",
+    # Propagate the rear-end tag into the credit-window manifest so downstream
+    # (mining / repair filters) can drop a rear-end moving-collision if desired
+    # instead of it being indistinguishable from a genuine forward collision.
+    "rear_end_collision",
+)
+
+
+def _credit_event_metadata(event_row: dict | None) -> dict:
+    if not event_row:
+        return {}
+    return {key: event_row[key] for key in _CREDIT_EVENT_METADATA_KEYS if key in event_row}
+
+
 PAST = INPUT_T + 1  # 31
 
 
@@ -593,6 +631,13 @@ class _SegState:
     saved_collision: bool = False  # recorded-mode latch: at most one saved window per segment
     last_snap_step: int | None = None
     save_out_dir: object = None
+    credit_window: dict | None = None
+    credit_saved: bool = False
+    output_route_key: str | None = None
+    verified_credit_labels: set[str] = field(default_factory=set)
+    verified_credit_first_step: dict[str, int] = field(default_factory=dict)
+    danger_event_selector: OnlineEventSelector | None = None
+    replay_mode: str = "pose"
     # Corrected neighbor context (neighbor_history_mode="sim"): rebuild neighbor_agents_past
     # each step from the SIMULATED shown motion (velocity from shown deltas, frozen->v~0).
     nbr_tracker: object = None
@@ -648,8 +693,10 @@ def _seed_state(
     unstick_teleport_after=300,
     neighbor_history_mode="recorded",
     goal_mode="segment",
+    replay_mode="pose",
+    tracker_mode="mpc",
 ) -> _SegState:
-    from scenario_generation.mpc_tracker import PerfectTracker
+    from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
     # Step cap: defaults to the segment length, but can exceed it so a slow ego
     # (e.g. one that waited out a long red light) can still drive to the segment end.
@@ -671,6 +718,14 @@ def _seed_state(
         goal_xy = _goal_xy_from_npz_goal(tl, start, end - 1)
     else:
         raise ValueError(f"Unknown goal_mode={goal_mode!r}; expected 'segment' or 'route'")
+    ego_shape = np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32)
+    wheelbase = float(ego_shape[0])
+    if tracker_mode == "perfect":
+        tracker = PerfectTracker(dt=DT)
+    elif tracker_mode == "mpc":
+        tracker = MPCTracker(wheelbase=wheelbase, dt=DT)
+    else:
+        raise ValueError(f"Unknown tracker_mode={tracker_mode!r}; expected 'perfect' or 'mpc'")
     return _SegState(
         tl=tl,
         start=start,
@@ -680,7 +735,7 @@ def _seed_state(
         goal_reach_m=goal_reach_m,
         max_stuck_steps=max_stuck_steps,
         cursor=cursor,
-        tracker=PerfectTracker(dt=DT),
+        tracker=tracker,
         live_pose=live_pose,
         ego_hist=ego_hist,
         dyn=dyn,
@@ -693,7 +748,7 @@ def _seed_state(
             if neighbor_history_mode == "sim"
             else None
         ),
-        ego_shape=np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32),
+        ego_shape=ego_shape,
         goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
         collisions=np.zeros(cap, dtype=bool),
@@ -703,6 +758,7 @@ def _seed_state(
         unstick_advance_m=float(unstick_advance_m),
         unstick_radius_mult=float(unstick_radius_mult),
         unstick_teleport_after=int(unstick_teleport_after),
+        replay_mode=str(replay_mode),
         nbr_tracker=nbr_tracker,
     )
 
@@ -722,11 +778,17 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     if float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)) < s.goal_reach_m:
         s.terminated, s.done = "goal", True
         return None
-    idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time)
-    if s.cursor.max_idx_reached > s.prev_max_idx:
-        s.prev_max_idx, s.stuck = s.cursor.max_idx_reached, 0
+    if s.replay_mode == "clock":
+        idx = min(int(s.start + s.k), int(s.end - 1))
+        s.cursor.max_idx_reached = idx
+        s.prev_max_idx = idx
+        s.stuck = 0
     else:
-        s.stuck += 1
+        idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time)
+        if s.cursor.max_idx_reached > s.prev_max_idx:
+            s.prev_max_idx, s.stuck = s.cursor.max_idx_reached, 0
+        else:
+            s.stuck += 1
     if s.max_stuck_steps > 0 and s.stuck >= s.max_stuck_steps:
         s.terminated, s.done = "stuck", True
         return None
@@ -759,13 +821,13 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
 
 
 def _feed_turn_indicator(s: _SegState, outputs) -> None:
-    """Closed-loop turn-signal feedback for the single-segment ``run_segment`` rollout.
+    """Closed-loop turn-signal feedback for the single-segment ``render_segment`` rollout.
 
     Appends the model's predicted turn indicator to ``turn_hist`` (recorded seed scrolls
     out within PAST steps). No-op in recorded mode (``turn_hist`` is None there). Mirrors
     the per-batch feedback in ``run_segments_batched`` so a sim-mode single-segment rollout
-    evolves the turn signal identically instead of holding the seed. (``render_segment`` /
-    ``extract_collision_scenes`` are recorded-only — no ``turn_hist`` — so they don't call it.)"""
+    evolves the turn signal identically instead of holding the seed. (``render_segment`` is
+    recorded-only — no ``turn_hist`` — so it doesn't call it.)"""
     if s.turn_hist is None:
         return
     ti = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
@@ -881,7 +943,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
 
 
 def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers):
-    """Score this step and advance the ego (sequential path: run_segment + extractor)."""
+    """Score this step and advance the ego (sequential render_segment path)."""
     _score_into(s, neighbors_live, device, timers)
     _advance_step(s, pred, idx, device, timers)
 
@@ -908,67 +970,6 @@ def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
     return SegmentResult(
         metrics=metrics, clearances=s.clearances, collisions=s.collisions, timers=timers
     )
-
-
-@torch.no_grad()
-def run_segment(
-    model,
-    model_args,
-    tl: RouteTimeline,
-    start: int,
-    end: int,
-    device: str = "cuda",
-    near_miss_thresh: float = 0.5,
-    search_radius: float = 1.5,
-    warmup_steps: int = 0,
-    goal_reach_m: float = 5.0,
-    max_stuck_steps: int = 0,
-    max_steps: int | None = None,
-    unstick_after: int = 300,
-    unstick_advance_m: float = 5.0,
-    unstick_radius_mult: float = 3.0,
-    unstick_teleport_after: int = 300,
-    neighbor_history_mode: str = "recorded",
-    timers: Timers | None = None,
-) -> SegmentResult:
-    """Single-segment closed-loop reproducer rollout over recorded frames [start, end).
-
-    Unstick is on by default (snap the ego forward onto the recorded GT pose after
-    ``unstick_after`` steps of no progress). The only timeout is the step cap
-    ``max_steps`` (default 3*(end-start)); the hard stuck-cutoff is off.
-    """
-    timers = timers or Timers()
-    s = _seed_state(
-        tl,
-        start,
-        end,
-        search_radius,
-        warmup_steps,
-        near_miss_thresh,
-        goal_reach_m,
-        max_stuck_steps,
-        timers,
-        max_steps=max_steps if max_steps is not None else 3 * (end - start),
-        unstick_after=unstick_after,
-        unstick_advance_m=unstick_advance_m,
-        unstick_radius_mult=unstick_radius_mult,
-        unstick_teleport_after=unstick_teleport_after,
-        neighbor_history_mode=neighbor_history_mode,
-    )
-    while not s.done:
-        with timers("input_build"):
-            pre = _pre_step(s)
-        if pre is None:
-            break
-        np_dict, neighbors_live, idx, _suuid, _wbu = pre
-        with timers("to_torch"):
-            data = _to_torch_batch([np_dict], model_args, device)
-        with timers("model_forward"):
-            _, outputs = model(data)
-            pred = outputs["prediction"][0, 0].cpu().numpy()
-        _feed_turn_indicator(s, outputs)  # closed-loop turn signal (sim mode)
-        _post_step(s, pred, neighbors_live, idx, device, timers)
-    return _finalize(s, timers)
 
 
 # --------------------------------------------------------------------------- #
@@ -1359,6 +1360,8 @@ def render_segment(
     unstick_teleport_after: int = 300,
     interpolate: bool = True,
     neighbor_history_mode: str = "sim",
+    timeline_progress_mode: str = "pose",
+    tracker_mode: str = "mpc",
     goal_mode: str = "segment",
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
@@ -1391,6 +1394,9 @@ def render_segment(
     is rebuilt from the shown simulated motion instead of copied from the recorded
     cursor frame. ``goal_mode="segment"`` terminates at ``end - 1``; ``"route"``
     terminates at the NPZ route goal displayed in the render.
+    ``tracker_mode="mpc"`` uses the bicycle-model MPC tracker for ego advance while
+    keeping the same reproduced perception inputs. This is the default reproducer
+    tracker mode.
     Returns the SegmentResult metrics.
     """
     from pathlib import Path
@@ -1415,6 +1421,8 @@ def render_segment(
         unstick_radius_mult=unstick_radius_mult,
         unstick_teleport_after=unstick_teleport_after,
         neighbor_history_mode=neighbor_history_mode,
+        tracker_mode=tracker_mode,
+        replay_mode=timeline_progress_mode,
         goal_mode=goal_mode,
     )
     # Build per-track interpolation anchors over the frames this render visits.
@@ -1435,8 +1443,11 @@ def render_segment(
         json.dumps(
             {
                 "event": "start",
-                "start": int(start),
-                "end": int(end),
+                "start_frame_id": _frame_id(tl, start),
+                "end_frame_id": _frame_id(tl, max(start, end - 1)),
+                "start_route_index": int(start),
+                "end_route_index": int(end),
+                "goal_frame_id": _frame_id(tl, max(start, end - 1)),
                 "goal_idx": int(end - 1),
                 "goal": [float(s.goal_xy[0]), float(s.goal_xy[1])],
                 "goal_reach_m": float(s.goal_reach_m),
@@ -1477,6 +1488,7 @@ def render_segment(
                     "yaw": round(float(s.live_pose[2]), 4),
                     "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
                     "speed": round(float(s.dyn.speed), 3),
+                    "rec_frame_id": _frame_id(tl, idx),
                     "rec_idx": int(idx),
                     "max_idx_reached": int(s.cursor.max_idx_reached),
                     "stuck": int(s.stuck),
@@ -1555,6 +1567,17 @@ def run_segments_batched(
     route_keys: list[str] | None = None,
     gpu_transform: bool = False,
     neighbor_history_mode: str = "recorded",
+    tracker_mode: str = "mpc",
+    timeline_progress_mode: str = "pose",
+    credit_save_dir=None,
+    credit_windows: list[dict] | None = None,
+    verify_credit_windows: list[dict] | None = None,
+    danger_save_dir=None,
+    danger_scorer=None,
+    realized_event_scorer=None,
+    danger_credit_windows: dict[str, dict[str, int | float]] | None = None,
+    danger_decluster_steps: int = 10,
+    danger_manifest_callback=None,
 ) -> list[SegmentResult]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
@@ -1566,8 +1589,8 @@ def run_segments_batched(
     rolling buffer of its last ``save_pre_steps`` scene snapshots and, on the FIRST
     step within ``save_thresh`` m of a neighbor, dumps that window (+ manifest) to
     ``save_dir/<route>_<start>_<end>/``. The scenes come from THIS run — the same one
-    that detected the collision — so they always match the hit (the legacy two-pass
-    ``extract_collision_scenes`` re-ran the rollout, which is batch-sensitive and so
+    that detected the collision — so they always match the hit (a legacy two-pass
+    extractor, since removed, re-ran the rollout, which is batch-sensitive and so
     could anchor a different/empty window). The buffer is cleared on an unstick
     teleport so a saved window never spans the jump. ``route_keys`` (aligned to
     ``work_units``) names the output dirs; if None it is derived from each timeline.
@@ -1622,16 +1645,31 @@ def run_segments_batched(
                     unstick_radius_mult=unstick_radius_mult,
                     unstick_teleport_after=unstick_teleport_after,
                     neighbor_history_mode=neighbor_history_mode,
+                    tracker_mode=tracker_mode,
+                    replay_mode=timeline_progress_mode,
                 )
                 for (tl, start, end) in chunk
             ]
+            assigned_credit_windows = (
+                credit_windows if credit_windows is not None else verify_credit_windows
+            )
+            if assigned_credit_windows is not None:
+                if len(assigned_credit_windows) != len(work_units):
+                    raise ValueError(
+                        "credit_windows must align one-for-one with work_units: "
+                        f"{len(assigned_credit_windows)} vs {len(work_units)}"
+                    )
+                for off, s in enumerate(states):
+                    s.credit_window = assigned_credit_windows[c0 + off]
+                    if verify_credit_windows is not None:
+                        s.max_steps = max(1, int(s.end - s.start))
             if save_dir is not None:
                 import shutil
                 from collections import deque
-                from pathlib import Path
 
                 for off, s in enumerate(states):
                     key = route_keys[c0 + off] if route_keys else _route_key(s.tl)
+                    s.output_route_key = key
                     s.save_buf = deque(maxlen=save_max_scenes + 1)
                     s.save_out_dir = Path(save_dir) / f"{key}_{s.start}_{s.end}"
                     # Per-episode dirs are tagged by save step (..._tc#####), so a re-mine that
@@ -1647,6 +1685,38 @@ def run_segments_batched(
                         for stale in save_root.iterdir():
                             if stale.is_dir() and stale.name.startswith(stale_prefix):
                                 shutil.rmtree(stale, ignore_errors=True)
+            if credit_save_dir is not None or danger_save_dir is not None:
+                from collections import deque
+
+                for off, s in enumerate(states):
+                    if route_keys:
+                        s.output_route_key = route_keys[c0 + off]
+                    window_span = int(
+                        (s.credit_window or {}).get("credit_width", save_pre_steps)
+                    ) + int((s.credit_window or {}).get("credit_gap", 0))
+                    if danger_credit_windows:
+                        window_span = max(
+                            window_span,
+                            max(
+                                _credit_window_width_frames(spec, save_pre_steps)
+                                + _credit_window_gap_frames(spec)
+                                for spec in danger_credit_windows.values()
+                            ),
+                        )
+                    maxlen = window_span + 1
+                    if verify_credit_windows is None:
+                        maxlen = max(maxlen, save_pre_steps + 1)
+                    existing_maxlen = getattr(s.save_buf, "maxlen", None)
+                    if s.save_buf is None or (
+                        existing_maxlen is not None and existing_maxlen < maxlen
+                    ):
+                        s.save_buf = deque(
+                            list(s.save_buf) if s.save_buf is not None else [],
+                            maxlen=maxlen,
+                        )
+                    s.danger_event_selector = OnlineEventSelector(
+                        decluster_steps=danger_decluster_steps
+                    )
             active = list(states)
             while active:
                 with timers("input_build"):
@@ -1658,7 +1728,14 @@ def run_segments_batched(
                         raw_payloads = [pre for _s, pre in live]
                         with timers("to_torch"):
                             data, nb_list, npd_list = _to_torch_batch_gpu(
-                                raw_payloads, model_args, device, want_np_dicts=save_dir is not None
+                                raw_payloads,
+                                model_args,
+                                device,
+                                want_np_dicts=(
+                                    save_dir is not None
+                                    or credit_save_dir is not None
+                                    or danger_save_dir is not None
+                                ),
                             )
                         built = [
                             (
@@ -1683,7 +1760,10 @@ def run_segments_batched(
                             # Only the segments actually running this tick (built); ones
                             # that terminated in _pre_step won't consume more frames.
                             for s, *_ in built:
-                                nxt = s.cursor.max_idx_reached + 1
+                                if s.replay_mode == "clock":
+                                    nxt = min(int(s.start + s.k + 1), int(s.end - 1))
+                                else:
+                                    nxt = s.cursor.max_idx_reached + 1
                                 pool.submit(s.tl.prefetch, range(nxt, nxt + prefetch_ahead))
                         _, outputs = model(data)
                         preds = outputs["prediction"][:, 0].cpu().numpy()  # (B,80,4)
@@ -1702,15 +1782,239 @@ def run_segments_batched(
                         score_list = score_step_batched(
                             [b[2] for b in built], [b[0].ego_shape for b in built], device
                         )
-                    for (s, _np, nb, idx, suuid, wbu), (cl, col, _M, collider_slot) in zip(
-                        built, score_list
-                    ):
+                    danger_rows = (
+                        danger_scorer(built, preds, data, device)
+                        if danger_scorer is not None
+                        else [None] * len(built)
+                    )
+                    realized_rows = []
+                    for _row_i, (
+                        (_s, np_dict, _nb, _idx, _suuid, _wbu),
+                        (_cl, col, _M, _collider_slot),
+                    ) in enumerate(zip(built, score_list)):
+                        if realized_event_scorer is None:
+                            realized_rows.append(None)
+                            continue
+                        # Paper-faithful Conflict inputs: the model's OPEN-LOOP proposal in
+                        # world xy, the logged expert future (INCLUDING the current pose at
+                        # index 0, so the detector's +1 shift lands on the first future
+                        # step), the real logged expert speeds, and the full recorded expert
+                        # path as the arc-length reference polyline.
+                        pred_row = preds[_row_i]  # (80, 4) ego-frame [x, y, cos, sin]
+                        model_pred_world, _ = _ego_pred_to_world(
+                            pred_row[:, :2],
+                            pred_row[:, 2:4],
+                            float(_s.live_pose[0]),
+                            float(_s.live_pose[1]),
+                            float(_s.live_pose[2]),
+                        )
+                        expert_future_world = None
+                        expert_future_speed = None
+                        ref_polyline_world = None
+                        if hasattr(_s.tl, "poses") and hasattr(_s.tl, "speeds"):
+                            H = int(pred_row.shape[0])
+                            idx_i = int(_idx)
+                            expert_future_world = _s.tl.poses[idx_i : idx_i + 1 + H, :2]
+                            expert_future_speed = _s.tl.speeds[idx_i : idx_i + 1 + H]
+                            ref_polyline_world = _s.tl.poses[:, :2]
+                        realized_rows.append(
+                            realized_event_scorer(
+                                np_dict,
+                                collided=bool(col),
+                                step=_s.k,
+                                model_pred_world=model_pred_world,
+                                expert_future_world=expert_future_world,
+                                expert_future_speed=expert_future_speed,
+                                ref_polyline_world=ref_polyline_world,
+                            )
+                        )
+                    for row_idx, (
+                        (s, _np, nb, idx, suuid, wbu),
+                        (cl, col, _M, collider_slot),
+                    ) in enumerate(zip(built, score_list)):
+                        danger_row = danger_rows[row_idx] if danger_rows else None
+                        realized_row = realized_rows[row_idx] if realized_rows else None
                         s.clearances[s.k] = cl
                         s.collisions[s.k] = col
                         # One-pass save: buffer this step, then dump the window on the
                         # FIRST collision — from THIS run, so the scenes match the hit.
                         if s.save_buf is not None:
                             s.save_buf.append((s.k, idx, s.live_pose.copy(), _np, suuid, wbu))
+                        if (
+                            credit_save_dir is not None
+                            and s.credit_window is not None
+                            and not s.credit_saved
+                            and idx >= int(s.credit_window["offense_index"])
+                        ):
+                            _dump_credit_window(
+                                Path(credit_save_dir)
+                                / (
+                                    f"{s.credit_window['route_key']}_"
+                                    f"{s.credit_window['start_frame']}_"
+                                    f"{s.credit_window['offense_frame']}_credit_"
+                                    f"{s.credit_window['label']}"
+                                ),
+                                s.tl,
+                                model_args,
+                                s.k,
+                                list(s.save_buf),
+                                s.last_snap_step,
+                                int(s.credit_window["credit_width"]),
+                                int(s.credit_window["credit_gap"]),
+                                s.start,
+                                s.end,
+                                str(s.credit_window["label"]),
+                                # Record the AUTHORITATIVE offense frame, not the
+                                # current buffered index: in pose mode the cursor
+                                # can overshoot `offense_index` by >1 frame, so
+                                # buf[-1][1] would misreport the offense frame.
+                                extra_manifest={
+                                    "offense_frame_id": int(s.credit_window["offense_frame"])
+                                },
+                            )
+                            s.credit_saved = True
+                            s.terminated = "credit_window_saved"
+                            s.done = True
+                        if danger_save_dir is not None and s.save_buf is not None:
+                            if verify_credit_windows is not None and s.credit_window is not None:
+                                event_row = realized_row or {"labels": ["clean"], "label": "clean"}
+                                labels = list(event_row.get("labels", []))
+                                if labels and labels != ["clean"]:
+                                    realized_label = str(event_row.get("label") or labels[0])
+                                    spec = (danger_credit_windows or {}).get(realized_label)
+                                    width = _credit_window_width_frames(
+                                        spec,
+                                        int(
+                                            (s.credit_window or {}).get(
+                                                "credit_width", save_pre_steps
+                                            )
+                                        ),
+                                    )
+                                    gap = _credit_window_gap_frames(spec)
+                                    event_dir = Path(danger_save_dir) / (
+                                        f"{s.credit_window['route_key']}_"
+                                        f"{s.credit_window['start_frame']}_"
+                                        f"{_frame_id(s.tl, idx)}_event_{realized_label}"
+                                    )
+                                    manifest = _dump_credit_window(
+                                        event_dir,
+                                        s.tl,
+                                        model_args,
+                                        s.k,
+                                        list(s.save_buf),
+                                        s.last_snap_step,
+                                        width,
+                                        gap,
+                                        s.start,
+                                        s.end,
+                                        realized_label,
+                                        extra_manifest={
+                                            **_credit_event_metadata(event_row),
+                                            # Authoritative offense frame id (not the
+                                            # buf[-1] tick, which can overshoot in pose
+                                            # mode) — overrides _dump_credit_window's
+                                            # buffer-derived default.
+                                            "offense_frame_id": int(
+                                                s.credit_window["offense_frame"]
+                                            ),
+                                            "source_label": str(s.credit_window["label"]),
+                                            "source_anchor_frame": int(
+                                                s.credit_window["frame_index"]
+                                            ),
+                                            "source_anchor_index": int(
+                                                s.credit_window["source_index"]
+                                            ),
+                                            "source_event_start_frame": _frame_id(
+                                                s.tl,
+                                                int(s.credit_window["event_source_start_index"]),
+                                            ),
+                                            "source_event_end_frame": _frame_id(
+                                                s.tl,
+                                                int(s.credit_window["event_source_end_index"]),
+                                            ),
+                                            "source_event_member_count": int(
+                                                s.credit_window["event_member_count"]
+                                            ),
+                                            "source_offense_frame": int(
+                                                s.credit_window["offense_frame"]
+                                            ),
+                                            "realized_label": realized_label,
+                                            "realized_step": int(s.k),
+                                            "realized_frame": _frame_id(s.tl, idx),
+                                            "anchor_horizon_steps": int(
+                                                s.credit_window.get("anchor_horizon_steps", 0)
+                                            ),
+                                            "max_rollout_steps": int(
+                                                s.credit_window.get(
+                                                    "max_rollout_steps",
+                                                    max(1, s.end - s.start),
+                                                )
+                                            ),
+                                        },
+                                    )
+                                    if manifest is not None:
+                                        if danger_manifest_callback is not None:
+                                            danger_manifest_callback(
+                                                event_dir, manifest, realized_label
+                                            )
+                                        s.credit_saved = True
+                                        s.terminated = "verified_danger_window_saved"
+                                        s.done = True
+                            else:
+                                event_labels: list[str] = []
+                                event_row_by_label: dict[str, dict] = {}
+                                for event_row in (danger_row, realized_row):
+                                    if event_row is None:
+                                        continue
+                                    for label in event_row.get("labels", []):
+                                        label = str(label)
+                                        if label != "clean" and label not in event_labels:
+                                            event_labels.append(label)
+                                        if label != "clean" and label not in event_row_by_label:
+                                            event_row_by_label[label] = event_row
+                                if (
+                                    bool(col)
+                                    and realized_event_scorer is not None
+                                    and "moving_collision" not in event_labels
+                                ):
+                                    event_labels.append("moving_collision")
+                                    if realized_row is not None:
+                                        event_row_by_label["moving_collision"] = realized_row
+                                if event_labels:
+                                    selector = s.danger_event_selector or OnlineEventSelector(
+                                        decluster_steps=danger_decluster_steps
+                                    )
+                                    s.danger_event_selector = selector
+                                    for label in selector.update(s.k, event_labels):
+                                        spec = (danger_credit_windows or {}).get(label)
+                                        width = _credit_window_width_frames(spec, save_pre_steps)
+                                        gap = _credit_window_gap_frames(spec)
+                                        event_dir = Path(danger_save_dir) / (
+                                            f"{s.output_route_key or _route_key(s.tl)}_"
+                                            f"{s.start}_{idx}_danger_{label}"
+                                        )
+                                        manifest = _dump_credit_window(
+                                            event_dir,
+                                            s.tl,
+                                            model_args,
+                                            s.k,
+                                            list(s.save_buf),
+                                            s.last_snap_step,
+                                            width,
+                                            gap,
+                                            s.start,
+                                            s.end,
+                                            label,
+                                            extra_manifest=_credit_event_metadata(
+                                                event_row_by_label.get(label)
+                                            ),
+                                        )
+                                        if (
+                                            manifest is not None
+                                            and danger_manifest_callback is not None
+                                        ):
+                                            danger_manifest_callback(event_dir, manifest, label)
+                        if save_dir is not None and s.save_buf is not None:
                             # Per-EPISODE saving. A contact EPISODE runs while clearance <= thresh
                             # and ends when it clears (> thresh) — so a NEW distinct collision needs
                             # collided -> NOT collided -> collided (the clear gap). An episode is
@@ -1801,6 +2105,154 @@ def run_segments_batched(
     finally:
         pool.shutdown(wait=True)
     return results
+
+
+def _dump_credit_window(
+    out_dir,
+    tl: RouteTimeline,
+    model_args,
+    offense_step: int,
+    buf,
+    last_snap_step: int | None,
+    credit_width: int,
+    credit_gap: int,
+    seg_start: int,
+    seg_end: int,
+    label: str,
+    extra_manifest: dict | None = None,
+) -> dict | None:
+    """Write an inclusive R2LPL credit window ending before the offense step.
+
+    This is explicitly separate from collision extraction. It saves
+    ``[offense_step - credit_gap - credit_width, offense_step - credit_gap]`` so repaired
+    targets are generated from an explicitly configured band before the violation.
+    Filenames remain relative to the true offense step.
+    """
+    import json
+    from pathlib import Path
+
+    if credit_width < 0:
+        raise ValueError(f"credit_width must be >= 0, got {credit_width}")
+    if credit_gap < 0:
+        raise ValueError(f"credit_gap must be >= 0, got {credit_gap}")
+    out_dir = Path(out_dir)
+    if out_dir.exists():
+        # Clear BOTH patterns: stale collision*.npz from a crashed prior run (between
+        # _dump_precollision_window and the rename below) would otherwise be renamed
+        # into this fresh credit window and pollute it with extra scenes.
+        for pattern in ("credit*.npz", "collision*.npz"):
+            for stale in out_dir.glob(pattern):
+                stale.unlink()
+        stale_manifest = out_dir / "manifest.json"
+        if stale_manifest.exists():
+            stale_manifest.unlink()
+    window_end_step = int(offense_step) - int(credit_gap)
+    manifest = _dump_precollision_window(
+        out_dir,
+        tl,
+        model_args,
+        window_end_step,
+        buf,
+        last_snap_step,
+        credit_width,
+        float("-inf"),
+        seg_start,
+        seg_end,
+        pre_arc_m=0.0,
+        max_scenes=credit_width + 1,
+        min_post_snap_frames=0,
+        min_pre_frames=0,
+        min_ego_speed=0.0,
+    )
+    if manifest is None:
+        return None
+    for path in out_dir.glob("collision*.npz"):
+        token = int(path.stem.replace("collision", ""))
+        saved_step = window_end_step + token
+        offense_relative = saved_step - int(offense_step)
+        path.rename(out_dir / f"credit{offense_relative:+06d}.npz")
+    manifest["credit_label"] = label
+    manifest["credit_width"] = int(credit_width)
+    manifest["credit_gap"] = int(credit_gap)
+    manifest["offense_step"] = int(offense_step)
+    manifest["credit_window_end_step"] = int(window_end_step)
+    # Default offense frame id = the last buffered tick. Correct for the online
+    # danger path (offense == current step == buf end); mined credit-window
+    # callers pass the authoritative offense_frame_id in extra_manifest to
+    # override it (the buffer tick can overshoot the offense in pose mode).
+    manifest["offense_frame_id"] = _frame_id(tl, int(buf[-1][1]))
+    if extra_manifest:
+        manifest.update(extra_manifest)
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
+def _dump_full_credit_segment(
+    out_dir,
+    tl: RouteTimeline,
+    model_args,
+    buf,
+    last_snap_step: int | None,
+    seg_start: int,
+    seg_end: int,
+    label: str,
+    *,
+    verified_step: int | None = None,
+) -> dict | None:
+    """Write every simulated scene in a preselected credit segment.
+
+    Used for verify-before-save mining: once a target issue is reproduced anywhere in the
+    segment, the whole mined event window becomes the repair set for that event.
+    """
+    import json
+    from pathlib import Path
+
+    if not buf:
+        return None
+    out_dir = Path(out_dir)
+    first_step = int(buf[0][0])
+    last_step = int(buf[-1][0])
+    manifest = _dump_precollision_window(
+        out_dir,
+        tl,
+        model_args,
+        last_step,
+        buf,
+        last_snap_step,
+        last_step - first_step,
+        float("-inf"),
+        seg_start,
+        seg_end,
+        pre_arc_m=0.0,
+        max_scenes=last_step - first_step + 1,
+        min_post_snap_frames=0,
+        min_pre_frames=0,
+        min_ego_speed=0.0,
+    )
+    if manifest is None:
+        return None
+    for path in out_dir.glob("collision*.npz"):
+        path.rename(out_dir / path.name.replace("collision", "credit", 1))
+    manifest["credit_label"] = label
+    manifest["credit_width"] = int(last_step - first_step)
+    manifest["offense_step"] = int(last_step)
+    manifest["offense_frame_id"] = _frame_id(tl, int(buf[-1][1]))
+    manifest["verified_first_step"] = None if verified_step is None else int(verified_step)
+    verified_idx = None
+    if verified_step is not None:
+        verified_idx = next(
+            (i for i, (step, *_rest) in enumerate(buf) if int(step) == int(verified_step)),
+            None,
+        )
+    manifest["verified_first_frame_id"] = (
+        None if verified_idx is None else _frame_id(tl, int(buf[verified_idx][1]))
+    )
+    manifest["window_first_step"] = int(first_step)
+    manifest["window_last_step"] = int(last_step)
+    manifest["window_first_frame_id"] = _frame_id(tl, int(buf[0][1]))
+    manifest["window_last_frame_id"] = _frame_id(tl, int(buf[-1][1]))
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
 
 
 # --------------------------------------------------------------------------- #
@@ -1945,6 +2397,10 @@ def _route_key(tl: RouteTimeline) -> str:
     return route_prefix(Path(tl.npz_paths[0]))
 
 
+def _frame_id(tl: RouteTimeline, idx: int) -> int:
+    return int(tl.frame_indices[int(idx)])
+
+
 def _dump_precollision_window(
     out_dir,
     tl: RouteTimeline,
@@ -2007,6 +2463,7 @@ def _dump_precollision_window(
     poses_by_step = {rec[0]: rec[2] for rec in buf}  # step k -> world pose (for ego_future)
     fut_len = int(model_args.future_len)
     saved: list[int] = []
+    saved_frame_ids: list[int] = []
 
     start_k = _precollision_window_start(
         t_c, pre_steps, last_snap_step, poses_by_step, pre_arc_m, max_scenes
@@ -2084,11 +2541,14 @@ def _dump_precollision_window(
         ).astype(np.float32)
         g = scene["goal_pose"]
         scene["goal_pose"] = np.array([g[0], g[1], math.atan2(g[3], g[2])], dtype=np.float32)
-        # neighbor_agents_future: read out of the SIMULATION's own shown future (the realized
+        # neighbor_agents_future: use the SIMULATION's own shown future first (the realized
         # neighbor world poses at the subsequent rollout steps), UUID-matched and slot-aligned
         # with neighbor_agents_past, expressed in this frame's live-ego frame. This keeps the
         # target consistent with the (sim) past — a held-static neighbor stays static instead
-        # of teleporting to its recorded log. Recorded mode (no tracker) keeps the recorded GT.
+        # of teleporting to its recorded log. When the remaining closed-loop horizon is shorter
+        # than the model's full future horizon, fill ONLY the unsimulated tail from the recorded
+        # future, UUID-matched into the live slot order. Recorded mode (no tracker) keeps the
+        # recorded GT for the full horizon.
         if slot_uuids is not None:
             naf_sim = np.zeros((320, fut_len, 4), dtype=np.float32)
             ex0, ey0, eh0 = float(live_pose[0]), float(live_pose[1]), float(live_pose[2])
@@ -2133,6 +2593,30 @@ def _dump_precollision_window(
                         traj[j] = last
                 if present[0] > 0:  # leading gap before the first shown pose
                     traj[: present[0]] = traj[present[0]]
+            recorded_ids = tl.neighbor_ids(idx)
+            if recorded_ids:
+                with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
+                    naf_rec = (
+                        z["neighbor_agents_future"] if "neighbor_agents_future" in z.files else None
+                    )
+                if naf_rec is not None:
+                    dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
+                    naf_rec_live = _recenter_neighbor_future(naf_rec, dx, dy, dyaw)
+                    rec_slot_by_uuid = {
+                        str(u): slot for slot, u in enumerate(recorded_ids[: naf_rec_live.shape[0]])
+                    }
+                    for slot, u in uuid_slots:
+                        rec_slot = rec_slot_by_uuid.get(str(u))
+                        if rec_slot is None:
+                            continue
+                        traj = naf_sim[slot]
+                        rec_traj = naf_rec_live[rec_slot, :fut_len, :4]
+                        if rec_traj.shape[0] < fut_len:
+                            padded = np.zeros((fut_len, 4), dtype=np.float32)
+                            padded[: rec_traj.shape[0]] = rec_traj
+                            rec_traj = padded
+                        missing = np.abs(traj).sum(axis=1) == 0
+                        traj[missing] = rec_traj[missing]
             scene["neighbor_agents_future"] = naf_sim
         else:
             with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
@@ -2148,146 +2632,52 @@ def _dump_precollision_window(
             ex, ey, eh = _world_pose_to_ego(poses_by_step[fk], live_pose)
             eaf[j - 1] = (ex, ey, math.cos(eh), math.sin(eh))
         scene["ego_agent_future"] = eaf
+        # Logged expert (GT) future for the R2LPL Conflict comparison / GT overlay: the
+        # recorded ego's RELATIVE forward motion from the current cursor, re-anchored to
+        # the live ego (the paper's pseudo-target, get_expert_trajectory_from_scenario_
+        # with_rollout_ego). Starts at the live-ego origin and follows the recorded shape,
+        # so it overlays cleanly with the model plan / repaired target. NOT a training
+        # target — an auxiliary field consumers ignore unless they ask for it.
+        expert_eaf = np.zeros((fut_len, 4), dtype=np.float32)
+        rec0 = tl.poses[idx]
+        Rr = _rotation_matrix(float(rec0[2]))  # world delta -> recorded-ego frame
+        n_expert = 0
+        for j in range(1, fut_len + 1):
+            ridx = idx + j
+            if ridx >= len(tl.poses):
+                break
+            d = Rr @ (tl.poses[ridx][:2] - rec0[:2])
+            dh = float(tl.poses[ridx][2] - rec0[2])
+            expert_eaf[j - 1] = (d[0], d[1], math.cos(dh), math.sin(dh))
+            n_expert = j
+        # HOLD the last valid pose past the recorded route end instead of leaving
+        # (0,0) zero-padding: a zero tail reads as a teleport back to the ego
+        # origin (breaks the GT overlay + collapses the morph's expert projection).
+        if 0 < n_expert < fut_len:
+            expert_eaf[n_expert:] = expert_eaf[n_expert - 1]
+        scene["ego_expert_future"] = expert_eaf
         scene["origin"] = np.array("live")
         token = f"{step_k - t_c:+06d}"
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
         saved.append(int(step_k))
+        saved_frame_ids.append(_frame_id(tl, idx))
 
+    seg_end_inclusive = min(int(seg_end) - 1, len(tl) - 1)
     manifest = {
         "segment": [int(seg_start), int(seg_end)],
-        "collision_step": int(t_c),
+        "segment_route_indices": [int(seg_start), int(seg_end)],
+        "segment_frame_ids": [_frame_id(tl, seg_start), _frame_id(tl, seg_end_inclusive)],
+        # Terminal step of the saved window (== t_c). For the one-pass collision
+        # save this is the actual collision step (window ends AT the collision),
+        # but for R2LPL credit windows it is offense_step - credit_gap (the window
+        # ends credit_gap before the violation), NOT the collision — the wrapper
+        # also records the unambiguous offense_step / credit_window_end_step.
+        "window_end_step": int(t_c),
         "collision_thresh": float(collision_thresh),
         "n_scenes": len(saved),
         "steps_saved": saved,
+        "scene_frame_ids_saved": saved_frame_ids,
         "n_live": len(saved),  # all-live by construction (no recorded backfill)
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
-
-
-def extract_collision_scenes(
-    model,
-    model_args,
-    tl: RouteTimeline,
-    start: int,
-    end: int,
-    out_dir,
-    device: str = "cuda",
-    collision_thresh: float = 0.2,
-    pre_steps: int = 80,
-    search_radius: float = 1.5,
-    warmup_steps: int = 0,
-    unstick_after: int = 300,
-    unstick_advance_m: float = 5.0,
-    unstick_radius_mult: float = 3.0,
-    unstick_teleport_after: int = 300,
-    max_steps: int | None = None,
-    pre_arc_m: float = 1.0,
-    max_scenes: int = 160,
-    min_post_snap_frames: int = 30,
-    min_pre_frames: int = 30,
-) -> dict | None:
-    """Mine the batch of scenes leading up to the FIRST collision in a segment.
-
-    Runs the closed-loop reproducer over [start, end); on the first sim-step T_c
-    whose ego↔any-neighbor OBB clearance <= ``collision_thresh`` (default 0.2 m),
-    saves the ``pre_steps`` (default 80) scenes BEFORE the collision as training
-    NPZs. Each saved scene is a full model-input snapshot centered on the ego at
-    that step, with:
-      * ego_agent_past + ego_current_state (backtracked live history),
-      * neighbor_agents_past (recorded neighbors re-centered),
-      * neighbor_agents_future (recorded GT, re-centered),
-      * the full map (lanes/route/borders/polygons/goal/ego_shape/turn_indicators),
-      * ego_agent_future = the realized live ego path truncated AT the collision
-        (zeros for timesteps after T_c).
-
-    When the collision is early (T_c < pre_steps) the window is SHORTER (all-live): it
-    shares ``_dump_precollision_window``, which no longer backfills recorded frames
-    before the rollout start (splicing the recorded ego/perception onto the live state
-    produced a discontinuous clearance seam) and skips a hit with fewer than
-    ``min_pre_frames`` (default 30) live frames before the contact. Returns a manifest
-    dict, or None if no collision occurred / the window was too short.
-
-    NOTE: this is the legacy SECOND-PASS path — it re-runs the rollout to reconstruct
-    the window, so the collision it finds can differ from the one the miner detected
-    (the closed-loop rollout is sensitive to GPU batch composition). Prefer the
-    ONE-PASS save in ``run_segments_batched`` (``save_dir=...``), which dumps the
-    buffer from the SAME run that detected the collision. Kept for backward compat.
-    """
-    from collections import deque
-    from pathlib import Path
-
-    if max_scenes < pre_steps + 1:
-        # Same invariant the one-pass saver enforces: the window is >= pre_steps frames
-        # plus the collision step, so a smaller cap would silently truncate it.
-        raise ValueError(
-            f"max_scenes ({max_scenes}) must be >= pre_steps + 1 ({pre_steps + 1}); "
-            "otherwise the saved window is silently truncated."
-        )
-    out_dir = Path(out_dir)
-    cap = max_steps if max_steps is not None else 3 * (end - start)
-    timers = Timers()
-    s = _seed_state(
-        tl,
-        start,
-        end,
-        search_radius,
-        warmup_steps,
-        0.5,
-        5.0,
-        0,
-        timers,
-        max_steps=cap,
-        unstick_after=unstick_after,
-        unstick_advance_m=unstick_advance_m,
-        unstick_radius_mult=unstick_radius_mult,
-        unstick_teleport_after=unstick_teleport_after,
-    )
-    # Rolling buffer of the last max_scenes+1 live steps; each: (k, idx, live_pose, np_dict).
-    buf: deque = deque(maxlen=max_scenes + 1)
-    t_c = None
-    # Step right after the most recent unstick snap (None = no snap yet). The pre-collision
-    # window must not cross a snap, or a saved scene's realized ego_future/ego_past would
-    # span the ~5 m teleport.
-    last_snap_step = None
-    while not s.done:
-        k = s.k
-        pre = _pre_step(s)
-        if pre is None:
-            break
-        np_dict, neighbors_live, idx, _suuid, _wbu = pre
-        data = _to_torch_batch([np_dict], model_args, device)
-        _, outputs = model(data)
-        pred = outputs["prediction"][0, 0].cpu().numpy()
-        clr = _min_clearance_any(neighbors_live, s.ego_shape, device)
-        # 6-tuple to match the batched buffer / _dump_precollision_window unpacking; this
-        # legacy extractor path is recorded-mode (no sim tracker) -> slot_uuids/world None.
-        buf.append((k, idx, s.live_pose.copy(), np_dict, None, None))
-        if clr <= collision_thresh:
-            t_c = k
-            break
-        prev_snaps = s.n_snaps
-        _post_step(s, pred, neighbors_live, idx, device, timers)
-        if s.n_snaps > prev_snaps:  # an unstick snap fired advancing k -> s.k
-            last_snap_step = s.k
-    if t_c is None:
-        return None
-
-    # buf's last entry is the collision step t_c (appended before the break), so it
-    # already carries the t_c world pose needed for the late scenes' ego_future.
-    return _dump_precollision_window(
-        out_dir,
-        tl,
-        model_args,
-        t_c,
-        list(buf),
-        last_snap_step,
-        pre_steps,
-        collision_thresh,
-        start,
-        end,
-        pre_arc_m=pre_arc_m,
-        max_scenes=max_scenes,
-        min_post_snap_frames=min_post_snap_frames,
-        min_pre_frames=min_pre_frames,
-    )

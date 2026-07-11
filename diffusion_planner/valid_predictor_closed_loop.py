@@ -51,10 +51,70 @@ from scenario_generation.closed_loop_cli import (  # noqa: E402
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--mode",
-        choices=("full", "grouped"),
-        default="full",
-        help="full: entire routes; grouped: per map-area anchor windows",
+        "--model_path",
+        type=Path,
+        required=True,
+        help="checkpoint .pth; args.json must sit next to it (e.g. epoch0001/best_model.pth)",
+    )
+    p.add_argument(
+        "--npz_root",
+        type=Path,
+        required=True,
+        help="dir tree of route NPZ frames (recursively globbed, grouped into routes). "
+        "Pose JSON sidecars are read from next to each .npz, falling back to this same tree.",
+    )
+    # --- tunable knobs (default to the closed-loop mining config) ---
+    p.add_argument("--seg_len", type=int, default=6000, help="frames per segment (~60s @10Hz)")
+    p.add_argument("--device", type=str, default="cuda", help="'cuda' or 'cpu'")
+    p.add_argument("--near_miss_thresh", type=float, default=0.5, help="near-miss clearance (m)")
+    p.add_argument(
+        "--search_radius", type=float, default=1.5, help="PerceptionReproducer cursor search (m)"
+    )
+    p.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=0,
+        help="steps driven by the recorded GT pose before handing control to the model",
+    )
+    p.add_argument(
+        "--unstick_after",
+        type=int,
+        default=300,
+        help="snap the ego to the GT pose ahead after this many no-progress steps (0=off)",
+    )
+    p.add_argument(
+        "--unstick_advance_m", type=float, default=2.5, help="how far ahead to snap when unsticking"
+    )
+    p.add_argument(
+        "--unstick_radius_mult",
+        type=float,
+        default=3.0,
+        help="when stuck, first widen the cursor search_radius to this x nominal so it reaches "
+        "frames further ahead (model proceeds on its own); restored to nominal once the ego moves. "
+        "<=1 disables this gentle stage (teleport straight away at --unstick_after)",
+    )
+    p.add_argument(
+        "--unstick_teleport_after",
+        type=int,
+        default=300,
+        help="if still stuck this many steps AFTER the radius was widened, fall back to the hard "
+        "teleport onto the GT pose ahead (last resort)",
+    )
+    p.add_argument("--fps", type=int, default=10, help="output video frame rate (10 = realtime)")
+    p.add_argument(
+        "--replan_interval",
+        type=int,
+        default=4,
+        help="re-run the model every N steps (1 = every step). Between inferences the cached plan "
+        "is executed, re-expressed in the current ego frame each step; the ego still steps at 10Hz",
+    )
+    p.add_argument(
+        "--draw_every",
+        type=int,
+        default=8,
+        help="render a PNG only every N steps (1 = every step). PNG rendering (matplotlib) is the "
+        "dominant cost; this throttles it without touching the rollout. Frames are encoded at --fps "
+        "regardless, so the video also plays N x faster (shorter). For real-time use --fps 10/N",
     )
     add_rollout_args(p)
     add_full_route_args(p)

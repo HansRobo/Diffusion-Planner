@@ -336,6 +336,12 @@ def get_args():
         help="frames per segment; large => one route = one segment = one trial",
     )
     parser.add_argument(
+        "--closed_loop_replan_interval",
+        type=int,
+        default=4,
+        help="re-plan every N steps; 1 = forward every step (slow, ~minutes/epoch). 40 default",
+    )
+    parser.add_argument(
         "--closed_loop_draw_every",
         type=int,
         default=4,

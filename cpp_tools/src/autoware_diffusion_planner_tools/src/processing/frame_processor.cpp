@@ -14,6 +14,7 @@
 
 #include "processing/frame_processor.hpp"
 
+#include "io/bag_metadata.hpp"
 #include "io/frame_writer.hpp"
 #include "io/npz_frame_writer.hpp"
 #include "processing/ego_sequence.hpp"
@@ -47,7 +48,7 @@ void process_sequence(
   SequenceData & seq, const int64_t seq_id, const ConverterPaths & paths,
   const ConverterOptions & options,
   const autoware::diffusion_planner::preprocess::LaneSegmentContext & lane_segment_context,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map)
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const BagMetadata & bag_metadata)
 {
   using autoware::diffusion_planner::INPUT_T;
   using autoware::diffusion_planner::INPUT_T_WITH_CURRENT;
@@ -89,7 +90,8 @@ void process_sequence(
               << ")" << std::endl;
     save_route_json(
       paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
-      SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map);
+      SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map, false,
+      bag_metadata);
     return;
   }
 
@@ -100,16 +102,23 @@ void process_sequence(
     save_route_json(
       paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
       SkippingInfo::insufficient_distance(traveled_distance, options.min_distance),
-      timestamp_stats_map);
+      timestamp_stats_map, false, bag_metadata);
     return;
+  }
+
+  bool goal_pose_overwritten = false;
+  {
+    const auto & last_state = seq.data_list.back().kinematic_state;
+    const double last_speed = std::abs(last_state.twist.twist.linear.x);
+    if (last_speed < 0.5) {
+      seq.route.goal_pose = last_state.pose.pose;
+      goal_pose_overwritten = true;
+    }
   }
 
   save_route_json(
     paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
-    SkippingInfo::accepted(), timestamp_stats_map);
-
-  // Replace the goal pose with the last frame's pose
-  seq.route.goal_pose = seq.data_list.back().kinematic_state.pose.pose;
+    SkippingInfo::accepted(), timestamp_stats_map, goal_pose_overwritten, bag_metadata);
 
   // Pack-sequence accumulators: in pack mode every frame is collected here (gap-free) and
   // flushed once after the loop into a single npz + single json array for the sequence.
@@ -283,15 +292,20 @@ void process_sequence(
       no_future_progress_count * options.step};
 
     const frame_processor::FrameFilterParams filter_params{
-      options.static_object_margin,  options.neighbor_margin,   options.road_border_margin,
-      options.collision_time_stride, options.offlane_max_score, options.offlane_time_stride};
+      options.static_object_margin,       options.neighbor_margin,
+      options.road_border_margin,         options.collision_time_stride,
+      options.offlane_max_score,          options.offlane_time_stride,
+      options.red_light_run_radius_m,     options.red_light_run_heading_tol_deg,
+      options.green_stop_heading_tol_deg, options.green_stop_stay_radius_m,
+      options.green_stop_speed_max_mps,   options.green_stop_ahead_m,
+      options.green_stop_lead_fwd_m,      options.green_stop_lead_lat_m};
 
     const std::vector<float> ego_shape = {
       options.ego_wheel_base, options.ego_length, options.ego_width};
 
     const SkippingInfo skipping_info = frame_processor::decide_frame_skip(
-      skip_inputs, ego_future, ego_shape, static_objects, neighbor_future, neighbor_past,
-      line_strings, lanes, filter_params);
+      skip_inputs, ego_future, ego_current, ego_shape, static_objects, neighbor_future,
+      neighbor_past, line_strings, lanes, route_lanes, filter_params);
 
     const bool is_skipped = skipping_info.label != SkippingLabel::NotSkipped;
     if (options.pack_sequence) {
@@ -304,7 +318,7 @@ void process_sequence(
         turn_indicators, ego_shape);
       nlohmann::json frame_json = build_frame_json(
         seq.data_list[i].kinematic_state, seq.data_list[i].timestamp, skipping_info,
-        neighbor_result.neighbor_ids);
+        neighbor_result.neighbor_ids, bag_metadata);
       frame_json["token"] = token;
       sequence_frames_json.push_back(std::move(frame_json));
     } else {
@@ -319,7 +333,7 @@ void process_sequence(
       }
       save_frame_json(
         paths.save_dir, rosbag_dir_name, token, seq.data_list[i].kinematic_state,
-        seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids);
+        seq.data_list[i].timestamp, skipping_info, neighbor_result.neighbor_ids, bag_metadata);
     }
 
     if (i % 100 == 0) {

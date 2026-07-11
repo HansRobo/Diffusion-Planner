@@ -19,12 +19,17 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
-from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
-from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
+from diffusion_planner.validate_model import (
+    aggregate_replan_consistency_metrics,
+    aggregate_valid_metrics,
+    validate_model,
+    validate_replan_consistency,
+)
 
 
 def find_upward(start_file: str, target_name: str) -> Path:
@@ -87,6 +92,14 @@ def mean_epdms_metric(loss_dict):
         result[f"valid_epdms/{metric}_coverage"] = mask.float().mean().item()
         result[f"valid_epdms/{metric}"] = tensor[mask].mean().item() if mask.any() else float("nan")
     return result
+
+
+def wandb_epdms_metrics(epdms_means):
+    return {
+        f"valid_epdms/{key}": value
+        for key, value in epdms_means.items()
+        if not key.endswith("_coverage")
+    }
 
 
 def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
@@ -277,6 +290,7 @@ def model_training(args: TrainConfig):
         print("Batch size: {}".format(args.batch_size))
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
+        print("Deterministic mode: {}".format(args.deterministic))
 
         save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
@@ -297,6 +311,13 @@ def model_training(args: TrainConfig):
 
     # set seed
     set_seed(args.seed + global_rank)
+
+    # Deterministic
+    if args.deterministic:
+        # Set CUBLAS_WORKSPACE_CONFIG to ensure deterministic behavior for cuBLAS operations.
+        # 4096:8 means 24 MiB workspace with more memory, faster
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.use_deterministic_algorithms(True)
 
     # training parameters
     train_epochs = args.train_epochs
@@ -350,12 +371,34 @@ def model_training(args: TrainConfig):
         drop_last=False,
     )
 
+    valid_pair_loader = None
+    if args.enable_replan_consistency_eval:
+        expected_gap = args.replan_consistency_expected_gap or None
+        valid_pair_set = DiffusionPlannerPairData(args.valid_set_list, expected_gap=expected_gap)
+        if len(valid_pair_set) > 0:
+            valid_pair_sampler = DistributedSampler(
+                valid_pair_set,
+                num_replicas=ddp.get_world_size(),
+                rank=global_rank,
+                shuffle=False,
+            )
+            valid_pair_loader = DataLoader(
+                valid_pair_set,
+                sampler=valid_pair_sampler,
+                batch_size=batch_size // ddp.get_world_size(),
+                num_workers=args.num_workers,
+                pin_memory=args.pin_mem,
+                drop_last=False,
+            )
+
     if global_rank == 0:
         print("Dataset Prepared: {} train data\n".format(len(train_set)))
-        if len(train_set) == 0:
-            print("Warning: empty train set — training steps will be skipped (smoke / CL-only run)")
-        if len(valid_set) == 0:
-            print("Warning: empty valid set — validation will be skipped")
+        if args.enable_replan_consistency_eval:
+            print(
+                "Replan consistency validation pairs: {}".format(
+                    0 if valid_pair_loader is None else len(valid_pair_loader.dataset)
+                )
+            )
 
     if args.ddp:
         torch.distributed.barrier()
@@ -435,11 +478,15 @@ def model_training(args: TrainConfig):
 
     valid_dict = validate_model(diffusion_planner, valid_loader, args)
     agg = aggregate_valid_metrics(valid_dict, args.device)
+    replan_agg = {}
+    if valid_pair_loader is not None:
+        replan_dict = validate_replan_consistency(diffusion_planner, valid_pair_loader, args)
+        replan_agg = aggregate_replan_consistency_metrics(replan_dict, args.device)
     if global_rank == 0:
         valid_loss_ego = agg["avg_loss_ego"]
         valid_loss_neighbor = agg["avg_loss_neighbor"]
         mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
-        mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
+        mean_epdms_dict = wandb_epdms_metrics(agg["epdms_means"])
         valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
             "valid_loss/ego_position_lat_loss", 0.0
         )
@@ -458,6 +505,16 @@ def model_training(args: TrainConfig):
             f"{turn_indicator_change_accuracy=:.3f}\n"
             f"{turn_indicator_change_total=:.3f}"
         )
+        if replan_agg.get("replan_consistency_count", 0) > 0:
+            print(
+                "replan_position_consistency={:.3f}\n"
+                "replan_heading_consistency={:.3f}\n"
+                "replan_consistency_count={:d}".format(
+                    replan_agg["replan_position_consistency"],
+                    replan_agg["replan_heading_consistency"],
+                    replan_agg["replan_consistency_count"],
+                )
+            )
 
     # begin training
     for epoch in range(init_epoch, train_epochs):
@@ -485,11 +542,16 @@ def model_training(args: TrainConfig):
 
         valid_dict = validate_model(diffusion_planner, valid_loader, args)
         agg = aggregate_valid_metrics(valid_dict, args.device)
+        replan_agg = {}
+        if valid_pair_loader is not None:
+            replan_dict = validate_replan_consistency(diffusion_planner, valid_pair_loader, args)
+            replan_agg = aggregate_replan_consistency_metrics(replan_dict, args.device)
         if global_rank == 0:
             valid_loss_ego = agg["avg_loss_ego"]
             valid_loss_neighbor = agg["avg_loss_neighbor"]
             mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
-            mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
+            replan_loss_dict = {f"valid_loss/{k}": v for k, v in replan_agg.items()}
+            mean_epdms_dict = wandb_epdms_metrics(agg["epdms_means"])
             valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
                 "valid_loss/ego_position_lat_loss", 0.0
             )
@@ -509,6 +571,16 @@ def model_training(args: TrainConfig):
                 f"{turn_indicator_change_accuracy=:.3f}\n"
                 f"{turn_indicator_change_total=:.3f}"
             )
+            if replan_agg.get("replan_consistency_count", 0) > 0:
+                print(
+                    "replan_position_consistency={:.3f}\n"
+                    "replan_heading_consistency={:.3f}\n"
+                    "replan_consistency_count={:d}".format(
+                        replan_agg["replan_position_consistency"],
+                        replan_agg["replan_heading_consistency"],
+                        replan_agg["replan_consistency_count"],
+                    )
+                )
 
             lr_dict = {"lr": optimizer.param_groups[0]["lr"]}
             wandb.log(
@@ -520,6 +592,7 @@ def model_training(args: TrainConfig):
                     "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
                     "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
                     **mean_ego_loss_dict,
+                    **replan_loss_dict,
                     **mean_epdms_dict,
                 },
                 step=epoch + 1,
@@ -532,6 +605,7 @@ def model_training(args: TrainConfig):
                 "valid_loss_neighbor": valid_loss_neighbor,
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
                 "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
+                **replan_agg,
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }
             data_list.append(curr_data)

@@ -64,7 +64,11 @@ NeighborResult process_neighbor_agents_and_future(
   std::unordered_map<std::string, AgentHistory> id_to_history;
   for (size_t i = 0; i < agent_histories.size(); ++i) {
     const auto object_id = agent_histories[i].get_latest_state().object_id;
-    id_to_history.emplace(object_id, AgentHistory(OUTPUT_T));
+    // Capacity must hold the current state plus OUTPUT_T future states. With only
+    // OUTPUT_T slots, pushing the current state followed by OUTPUT_T future frames
+    // evicts the current state, leaving the last future timestep unfilled (zeros).
+    // The `(t + 1)` offset below skips the current state at index 0.
+    id_to_history.emplace(object_id, AgentHistory(OUTPUT_T + 1));
     id_to_history.at(object_id).update(
       agent_histories[i].get_latest_state().original_info,
       agent_histories[i].get_latest_state().timestamp);
@@ -103,10 +107,11 @@ NeighborResult process_neighbor_agents_and_future(
     for (int64_t t = 0; t < OUTPUT_T; ++t) {
       const int64_t base_idx = agent_idx * OUTPUT_T * NEIGHBOR_FUTURE_DIM + t * NEIGHBOR_FUTURE_DIM;
       for (int64_t d = 0; d < NEIGHBOR_FUTURE_DIM; ++d) {
-        if (t * AGENT_STATE_DIM + d >= arr.size()) {
+        const size_t arr_idx = (t + 1) * AGENT_STATE_DIM + d;
+        if (arr_idx >= arr.size()) {
           break;
         }
-        neighbor_future[base_idx + d] = arr[t * AGENT_STATE_DIM + d];
+        neighbor_future[base_idx + d] = arr[arr_idx];
       }
     }
   }
