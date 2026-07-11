@@ -165,10 +165,10 @@ class StatePerturbation:
         # Production samples carry per-vehicle wheelbase in ego_shape. Keep the historical
         # constructor value as a fallback for lightweight callers and unit tests.
         self._wheel_base = wheel_base
-        lo = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
-        hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
-        self._low = torch.tensor(lo).to(self._device)
-        self._high = torch.tensor(hi).to(self._device)
+        low = [0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0]
+        high = [0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0]
+        self._low = torch.tensor(low, dtype=torch.float32, device=self._device)
+        self._high = torch.tensor(high, dtype=torch.float32, device=self._device)
 
         self.num_refine = num_refine
         self.time_interval = TIME_INTERVAL

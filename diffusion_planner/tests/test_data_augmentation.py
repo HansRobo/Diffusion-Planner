@@ -373,6 +373,20 @@ def test_augment_cos_sin_unit_norm():
     print("  [PASS] augment cos/sin unit norm")
 
 
+def test_augment_state_components_use_independent_noise():
+    """Each state dimension must receive its own uniform perturbation draw."""
+    torch.manual_seed(42)
+    aug = StatePerturbation(augment_prob=1.0)
+    _, new_state = aug.augment(_augment_inputs(32, vx=5.0))
+
+    normalized_y = new_state[:, 1] / 0.75
+    yaw = torch.atan2(new_state[:, 3], new_state[:, 2])
+    normalized_yaw = yaw / 0.2
+    assert not torch.allclose(normalized_y, normalized_yaw), (
+        "lateral and yaw perturbations reused the same random draw"
+    )
+
+
 # ──────────────────── interpolation_future_trajectory ───────────────────────
 
 
