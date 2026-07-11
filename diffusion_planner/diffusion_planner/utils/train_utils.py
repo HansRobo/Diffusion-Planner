@@ -101,51 +101,101 @@ def train_config_defaults_from_args_json(path: str) -> dict[str, Any]:
     return defaults
 
 
-def resume_model(path: str, model, optimizer, scheduler, ema, device):
-    """
-    load ckpt from path
-    """
+def _resume_log(msg: str, *, master_only: bool, is_master: bool) -> None:
+    if not master_only or is_master:
+        print(msg)
+
+
+def _training_is_master() -> bool:
+    try:
+        from diffusion_planner.utils import ddp
+
+        return ddp.get_rank() == 0
+    except Exception:
+        return True
+
+
+def load_model_weights_from_checkpoint(
+    path: str,
+    model,
+    device,
+    *,
+    master_only: bool = True,
+    is_master: bool | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Load model weights from a checkpoint into an **unwrapped** module."""
+    if is_master is None:
+        is_master = _training_is_master()
     ckpt = torch.load(path, map_location=device, weights_only=False)
-
     model.load_state_dict(extract_model_state_dict(ckpt))
-    print("Model load done")
+    _resume_log("Model load done", master_only=master_only, is_master=is_master)
+    try:
+        init_epoch = int(ckpt["epoch"])
+        _resume_log("Step load done", master_only=master_only, is_master=is_master)
+    except (KeyError, TypeError, ValueError):
+        init_epoch = 0
+    return ckpt, init_epoch
 
-    # load optimizer
+
+def resume_optimizer_scheduler_ema(
+    ckpt: dict[str, Any],
+    optimizer,
+    scheduler,
+    ema,
+    *,
+    master_only: bool = True,
+    is_master: bool | None = None,
+) -> tuple[int | None, Any]:
+    """Restore optimizer, LR schedule, and EMA shadow from a loaded checkpoint dict."""
+    if is_master is None:
+        is_master = _training_is_master()
+
     try:
         optimizer.load_state_dict(ckpt["optimizer"])
-        print("Optimizer load done")
-    except:
-        print("no pretrained optimizer found")
+        _resume_log("Optimizer load done", master_only=master_only, is_master=is_master)
+    except Exception:
+        _resume_log("no pretrained optimizer found", master_only=master_only, is_master=is_master)
 
-    # load schedule
     try:
         scheduler.load_state_dict(ckpt["schedule"])
-        print("Schedule load done")
-    except:
-        print("no schedule found,")
+        _resume_log("Schedule load done", master_only=master_only, is_master=is_master)
+    except Exception:
+        _resume_log("no schedule found,", master_only=master_only, is_master=is_master)
 
-    # load step
-    try:
-        init_epoch = ckpt["epoch"]
-        print("Step load done")
-    except:
-        init_epoch = 0
-
-    # Load wandb id
     try:
         wandb_id = ckpt["wandb_id"]
-        print("wandb id load done")
-    except:
+        _resume_log("wandb id load done", master_only=master_only, is_master=is_master)
+    except (KeyError, TypeError):
         wandb_id = None
 
-    try:
-        ema.ema.load_state_dict(strip_module_prefix(ckpt["ema_state_dict"]))
-        ema.ema.eval()
-        for p in ema.ema.parameters():
-            p.requires_grad_(False)
+    if ema is not None:
+        try:
+            ema.ema.load_state_dict(strip_module_prefix(ckpt["ema_state_dict"]))
+            ema.ema.eval()
+            for p in ema.ema.parameters():
+                p.requires_grad_(False)
+            _resume_log("ema load done", master_only=master_only, is_master=is_master)
+        except Exception:
+            _resume_log("no ema shadow found", master_only=master_only, is_master=is_master)
 
-        print("ema load done")
-    except:
-        print("no ema shadow found")
+    return wandb_id
 
+
+def resume_model(path: str, model, optimizer, scheduler, ema, device, *, master_only: bool = True):
+    """
+    Load a full training checkpoint (model + optimizer + schedule + EMA).
+
+    Works for both bare modules and DDP-wrapped models. Prefer loading weights
+    **before** ``DDP(...)`` in new code — see ``model_training`` in ``train.py``.
+    """
+    from diffusion_planner.utils import ddp
+
+    is_master = _training_is_master()
+    net = ddp.unwrap_module(model)
+    ckpt, init_epoch = load_model_weights_from_checkpoint(
+        path, net, device, master_only=master_only, is_master=is_master
+    )
+    wandb_id = resume_optimizer_scheduler_ema(
+        ckpt, optimizer, scheduler, ema, master_only=master_only, is_master=is_master
+    )
     return model, optimizer, scheduler, init_epoch, wandb_id, ema

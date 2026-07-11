@@ -23,7 +23,12 @@ from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
-from diffusion_planner.utils.train_utils import resume_model, set_seed
+from diffusion_planner.utils.train_utils import (
+    load_model_weights_from_checkpoint,
+    resume_model,
+    resume_optimizer_scheduler_ema,
+    set_seed,
+)
 from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
 
 
@@ -149,7 +154,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     if not jobs and ddp_active and rank != 0:
         return
 
-    net = ddp.get_model(model, args.ddp)
+    net = ddp.unwrap_module(model)
     was_training = net.training
     net.eval()
     log = {}
@@ -360,31 +365,47 @@ def model_training(args: TrainConfig):
     if args.ddp:
         torch.distributed.barrier()
 
-    # set up model
+    # set up model — load weights on the bare module, then wrap DDP (same weights on every rank).
+    local_dev = ddp.local_device(args.device, rank)
     diffusion_planner = Diffusion_Planner(args)
-    diffusion_planner = diffusion_planner.to(rank if args.device == "cuda" else args.device)
+    diffusion_planner = diffusion_planner.to(local_dev)
+
+    resume_ckpt = None
+    init_epoch = 0
+    if args.resume_model_path is not None:
+        if global_rank == 0:
+            print(f"Model loaded from {args.resume_model_path}")
+        resume_ckpt, init_epoch = load_model_weights_from_checkpoint(
+            args.resume_model_path,
+            diffusion_planner,
+            local_dev,
+            is_master=(global_rank == 0),
+        )
 
     if args.ddp:
+        torch.distributed.barrier()
         diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
 
     if args.use_ema:
         model_ema = ModelEma(
             diffusion_planner,
             decay=0.999,
-            device=args.device,
+            device=local_dev,
         )
+    else:
+        model_ema = None
 
     if global_rank == 0:
         print(
             "Model Params: {}".format(
-                sum(p.numel() for p in ddp.get_model(diffusion_planner, args.ddp).parameters())
+                sum(p.numel() for p in ddp.unwrap_module(diffusion_planner).parameters())
             )
         )
 
     # optimizer
     params = [
         {
-            "params": ddp.get_model(diffusion_planner, args.ddp).parameters(),
+            "params": ddp.unwrap_module(diffusion_planner).parameters(),
             "lr": args.learning_rate,
         }
     ]
@@ -392,20 +413,18 @@ def model_training(args: TrainConfig):
     optimizer = optim.AdamW(params)
     scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
 
-    if args.resume_model_path is not None:
-        print(f"Model loaded from {args.resume_model_path}")
-        # We always use new wandb run for each training session, so we don't need to load the wandb_id from the model_dict.
-        diffusion_planner, optimizer, scheduler, init_epoch, _, model_ema = resume_model(
-            args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
+    if resume_ckpt is not None:
+        resume_optimizer_scheduler_ema(
+            resume_ckpt,
+            optimizer,
+            scheduler,
+            model_ema,
+            is_master=(global_rank == 0),
         )
-
-        # Override learning rate with the new value
         for param_group in optimizer.param_groups:
             param_group["lr"] = args.learning_rate
-        print(f"Learning rate reset to {args.learning_rate}")
-
-    else:
-        init_epoch = 0
+        if global_rank == 0:
+            print(f"Learning rate reset to {args.learning_rate}")
     # logger
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
@@ -540,7 +559,7 @@ def model_training(args: TrainConfig):
 
             model_dict = {
                 "epoch": epoch + 1,
-                "model": diffusion_planner.state_dict(),
+                "model": ddp.unwrap_module(diffusion_planner).state_dict(),
                 "ema_state_dict": model_ema.ema.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "schedule": scheduler.state_dict(),

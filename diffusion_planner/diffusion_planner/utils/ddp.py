@@ -16,8 +16,9 @@ def ddp_setup_universal(verbose=False, args=None):
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         gpu = int(os.environ["LOCAL_RANK"])
-        os.environ["MASTER_PORT"] = str(getattr(args, "port", "29529"))
-        os.environ["MASTER_ADDR"] = "localhost"
+        # torchrun sets MASTER_ADDR/MASTER_PORT; only fill defaults for manual launches.
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", str(getattr(args, "port", "29529")))
     elif "SLURM_PROCID" in os.environ:
         rank = int(os.environ["SLURM_PROCID"])
         gpu = rank % torch.cuda.device_count()
@@ -37,12 +38,12 @@ def ddp_setup_universal(verbose=False, args=None):
 
     torch.cuda.set_device(gpu)
     dist_backend = "nccl"
-    # I don't know why but this is needed for DDP to work instead of 'env://'
-    dist_url = "file://"
-    file_path = "/tmp/tmp_dist_init"
-    print("| distributed init (rank {}): {}, gpu {}".format(rank, dist_url, gpu), flush=True)
+    # Use env:// (torchrun / SLURM set RANK, WORLD_SIZE, MASTER_*). A shared file store
+    # under /tmp/tmp_dist_init races across runs and can fail with DistStoreError.
+    init_method = "env://"
+    print("| distributed init (rank {}): {}, gpu {}".format(rank, init_method, gpu), flush=True)
     init_process_group(
-        init_method=f"{dist_url}{file_path}",
+        init_method=init_method,
         backend=dist_backend,
         world_size=world_size,
         rank=rank,
@@ -87,6 +88,18 @@ def get_model(model, use_ddp):
         return model.module
     else:
         return model
+
+
+def unwrap_module(model):
+    """Return the inner ``nn.Module`` whether or not it is DDP-wrapped."""
+    return model.module if hasattr(model, "module") else model
+
+
+def local_device(device: str, local_gpu: int) -> torch.device:
+    """Map training ``device`` string to the per-process CUDA device."""
+    if device == "cuda":
+        return torch.device(f"cuda:{local_gpu}")
+    return torch.device(device)
 
 
 def is_dist_avail_and_initialized():
