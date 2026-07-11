@@ -64,7 +64,7 @@ def configure_rl_trainable_parameters(model: torch.nn.Module, scope: str) -> Non
         raise ValueError(f"Unsupported RL train scope: {scope!r}")
     for name, param in model.named_parameters():
         if scope == "decoder":
-            trainable = name.startswith("decoder.dit.")
+            trainable = name.startswith(("decoder.dit.", "decoder.global_route_encoder."))
         else:
             trainable = not name.startswith("decoder.turn_indicator_predictor.")
         param.requires_grad_(trainable)
@@ -436,6 +436,12 @@ def get_args():
     )
 
     parser.add_argument("--use_wandb", default=True, type=boolean)
+    parser.add_argument(
+        "--wandb_run_id",
+        type=str,
+        default=None,
+        help="existing W&B run ID to resume, or a stable ID for a fresh RL run",
+    )
     parser.add_argument(
         "--wandb_project_name",
         type=str,
@@ -835,13 +841,14 @@ def model_training(args):
         init_epoch = 0
         wandb_id = None
 
+    requested_wandb_id = args.wandb_run_id or wandb_id
     if global_rank == 0 and args.use_wandb:
         wandb.init(
             project=args.wandb_project_name,
             name=args.exp_name,
             notes=args.notes,
             resume="allow",
-            id=wandb_id,
+            id=requested_wandb_id,
             dir=f"{save_path}",
         )
         # Strict checkpoint compatibility runs before W&B initialization. An in-place

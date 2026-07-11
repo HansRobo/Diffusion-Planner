@@ -11,6 +11,7 @@ class _TinyPlanner(torch.nn.Module):
         self.encoder = torch.nn.Linear(1, 1)
         self.decoder = torch.nn.Module()
         self.decoder.dit = torch.nn.Linear(1, 1)
+        self.decoder.global_route_encoder = torch.nn.Linear(1, 1)
         self.decoder.turn_indicator_predictor = torch.nn.Linear(1, 1)
 
 
@@ -21,6 +22,9 @@ def test_all_scope_freezes_only_the_unused_turn_head():
 
     assert all(value for name, value in state.items() if name.startswith("encoder."))
     assert all(value for name, value in state.items() if name.startswith("decoder.dit."))
+    assert all(
+        value for name, value in state.items() if name.startswith("decoder.global_route_encoder.")
+    )
     assert not any(
         value
         for name, value in state.items()
@@ -35,6 +39,9 @@ def test_decoder_scope_freezes_encoder_and_turn_head():
 
     assert not any(value for name, value in state.items() if name.startswith("encoder."))
     assert all(value for name, value in state.items() if name.startswith("decoder.dit."))
+    assert all(
+        value for name, value in state.items() if name.startswith("decoder.global_route_encoder.")
+    )
     assert not any(
         value
         for name, value in state.items()
