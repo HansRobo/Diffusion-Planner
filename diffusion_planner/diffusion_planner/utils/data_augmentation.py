@@ -3,6 +3,7 @@ import torch
 
 from diffusion_planner.utils.masks import (
     lane_point_padding_mask,
+    neighbor_future_padding_mask,
     neighbor_past_padding_mask,
     pose_padding_mask,
     static_object_padding_mask,
@@ -140,11 +141,12 @@ class StatePerturbation:
 
     def __init__(
         self,
-        augment_prob: float,
-        num_refine: int,
-        device: torch.device | str,
-        ego_past_noise_std: float,
-        use_smoothing_future_trajectory: bool,
+        augment_prob: float = 0.5,
+        num_refine: int = 20,
+        device: torch.device | str = "cpu",
+        ego_past_noise_std: float = 0.1,
+        use_smoothing_future_trajectory: bool = True,
+        wheel_base: float = 2.75,
     ) -> None:
         """
         Initialize the augmentor,
@@ -158,6 +160,9 @@ class StatePerturbation:
         self._device = torch.device(device)
         self._ego_past_noise_std = ego_past_noise_std
         self._use_smoothing_future_trajectory = use_smoothing_future_trajectory
+        # Production samples carry per-vehicle wheelbase in ego_shape. Keep the historical
+        # constructor value as a fallback for lightweight callers and unit tests.
+        self._wheel_base = wheel_base
         lo = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
         hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
         self._low = torch.tensor(lo).to(self._device)
@@ -191,47 +196,54 @@ class StatePerturbation:
     def __call__(self, inputs, ego_future, neighbors_future):
         aug_flag, aug_ego_current_state = self.augment(inputs)
 
-        # Interpolate future trajectory
+        # Apply the history/state scale before constructing the quintic target so the
+        # observed current velocity and the target's initial boundary condition agree.
+        W = self._ego_past_noise_std
+        scale = torch.normal(
+            mean=1.0,
+            std=W,
+            size=(aug_flag.shape[0], 1, 1),
+            device=inputs["ego_agent_past"].device,
+        ).clamp(1.0 - 2 * W, 1.0 + 2 * W)
+        ego_past_aug = inputs["ego_agent_past"].clone()
+        ego_past_aug[..., :2] *= scale
+        inputs["ego_agent_past"][aug_flag] = ego_past_aug[aug_flag]
+
+        scale_1d = scale.squeeze(-1)
+        aug_ego_current_state[aug_flag, 4:6] *= scale_1d[aug_flag]
+        aug_ego_current_state[aug_flag, 6:8] *= scale_1d[aug_flag]
+        wheel_base = inputs["ego_shape"][:, 0]
+        speed = aug_ego_current_state[:, 4].abs()
+        steering = torch.atan(
+            aug_ego_current_state[:, 9] * wheel_base / speed.clamp_min(0.2)
+        ).clamp(-2 / 3 * np.pi, 2 / 3 * np.pi)
+        steering = torch.where(speed >= 0.2, steering, torch.zeros_like(steering))
+        aug_ego_current_state[aug_flag, 8] = steering[aug_flag]
+
         interpolated_ego_future = self.interpolation_future_trajectory(
             aug_ego_current_state, ego_future
         )
-
         inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
         ego_future[aug_flag] = interpolated_ego_future[aug_flag]
-
-        # Scale past trajectory and current state velocity/acceleration
-        B_aug = aug_flag.sum().item()
-        if B_aug > 0:
-            W = self._ego_past_noise_std
-            scale = torch.normal(mean=1.0, std=W, size=(B_aug, 1, 1)).to(
-                inputs["ego_agent_past"].device
-            )
-            scale = torch.clamp(scale, 1.0 - 2 * W, 1.0 + 2 * W)
-
-            ego_past_aug = inputs["ego_agent_past"][aug_flag].clone()
-            ego_past_aug[..., :2] = ego_past_aug[..., :2] * scale
-            inputs["ego_agent_past"][aug_flag] = ego_past_aug
-
-            scale_1d = scale.squeeze(-1)  # (B_aug, 1)
-            inputs["ego_current_state"][aug_flag, 4:6] *= scale_1d  # vx, vy
-            inputs["ego_current_state"][aug_flag, 6:8] *= scale_1d  # ax, ay
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
     def augment(self, inputs):
         # Only aug current state
         ego_current_state = inputs["ego_current_state"].clone()
-        wheel_base = inputs["ego_shape"][:, 0]  # (B,)
-
         B = ego_current_state.shape[0]
-        aug_flag = (torch.rand(B) < self._augment_prob).bool().to(self._device) & ~(
+        if "ego_shape" in inputs:
+            wheel_base = inputs["ego_shape"][:, 0]  # (B,)
+        else:
+            wheel_base = ego_current_state.new_full((B,), self._wheel_base)
+        aug_flag = (torch.rand(B, device=self._device) < self._augment_prob) & ~(
             abs(ego_current_state[:, 4]) < 2.0
         )
 
-        random_tensor = torch.rand(B, len(self._low)).to(self._device)
+        random_tensor = torch.rand(B, len(self._low), device=self._device)
         scaled_random_tensor = self._low + (self._high - self._low) * random_tensor
 
-        new_state = torch.zeros((B, 9), dtype=torch.float32).to(self._device)
+        new_state = torch.zeros((B, 9), dtype=torch.float32, device=self._device)
         new_state[:, 3:] = ego_current_state[
             :, 4:10
         ]  # x, y, h is 0 because of ego-centric, update vx, vy, ax, ay, steering angle, yaw rate
@@ -288,10 +300,12 @@ class StatePerturbation:
         ego_length = ego_shape[:, 1:2]  # [B, 1]
         ego_width = ego_shape[:, 2:3]  # [B, 1]
 
-        ego_rect = torch.cat(
-            [aug_ego_state[:, :4], ego_length, ego_width],
-            dim=-1,
-        )  # [B, 6]
+        heading = aug_ego_state[:, 2:4]
+        heading = heading / torch.linalg.norm(heading, dim=-1, keepdim=True).clamp_min(1e-6)
+        # Ego poses are rear-axle referenced while collision boxes are center referenced.
+        # Match the convention used by training penalties and planner metrics.
+        ego_center = aug_ego_state[:, :2] + heading * (ego_shape[:, 0:1] * 0.5)
+        ego_rect = torch.cat([ego_center, heading, ego_length, ego_width], dim=-1)
         ego_corners = _rect_corners(ego_rect)  # [B, 4, 2]
 
         collision = torch.zeros(B, dtype=torch.bool, device=device)
@@ -413,17 +427,34 @@ class StatePerturbation:
 
         # ego past
         ego_past_mask = pose_padding_mask(inputs["ego_agent_past"])
+        ego_past_is_heading = inputs["ego_agent_past"].shape[-1] == 3
         inputs["ego_agent_past"][..., :2] = vector_transform(
             inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
         )
-        inputs["ego_agent_past"][..., 2:4] = vector_transform(
-            inputs["ego_agent_past"][..., 2:4], transform_matrix
-        )
+        if ego_past_is_heading:
+            inputs["ego_agent_past"][..., 2] = heading_transform(
+                inputs["ego_agent_past"][..., 2], transform_matrix
+            )
+        else:
+            inputs["ego_agent_past"][..., 2:4] = vector_transform(
+                inputs["ego_agent_past"][..., 2:4], transform_matrix
+            )
         inputs["ego_agent_past"][ego_past_mask] = 0.0
 
         if self._use_smoothing_future_trajectory:
+            smoothing_ego_past = inputs["ego_agent_past"]
+            if ego_past_is_heading:
+                smoothing_ego_past = torch.cat(
+                    [
+                        smoothing_ego_past[..., :2],
+                        torch.cos(smoothing_ego_past[..., 2:3]),
+                        torch.sin(smoothing_ego_past[..., 2:3]),
+                    ],
+                    dim=-1,
+                )
+                smoothing_ego_past[ego_past_mask] = 0.0
             ego_future4d = smoothing_future_trajectory(
-                inputs["ego_agent_past"], inputs["ego_current_state"], ego_future4d
+                smoothing_ego_past, inputs["ego_current_state"], ego_future4d
             )
 
         if ego_future_is_heading:
@@ -454,7 +485,7 @@ class StatePerturbation:
         inputs["neighbor_agents_past"][mask] = 0.0
 
         # neighbor future
-        mask = pose_padding_mask(neighbors_future)
+        mask = neighbor_future_padding_mask(neighbors_future)
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )
@@ -567,34 +598,45 @@ class StatePerturbation:
 
         # state: [x, y, heading, velocity, acceleration, yaw_rate]
 
-        x0, y0, theta0, v0, a0, omega0 = (
+        theta0 = torch.atan2(
+            ego_future_heading[:, int(P / 2), 1] - aug_current_state[:, 1],
+            ego_future_heading[:, int(P / 2), 0] - aug_current_state[:, 0],
+        )
+        a0 = aug_current_state[:, 6] * torch.cos(theta0) + aug_current_state[:, 7] * torch.sin(
+            theta0
+        )
+        x0, y0, v0, omega0 = (
             aug_current_state[:, 0],
             aug_current_state[:, 1],
-            torch.atan2(
-                (ego_future_heading[:, int(P / 2), 1] - aug_current_state[:, 1]),
-                (ego_future_heading[:, int(P / 2), 0] - aug_current_state[:, 0]),
-            ),
             torch.norm(aug_current_state[:, 4:6], dim=-1),
-            torch.norm(aug_current_state[:, 6:8], dim=-1),
             aug_current_state[:, 9],
         )
 
-        xT, yT, thetaT, vT, aT, omegaT = (
-            ego_future_heading[:, P, 0],
-            ego_future_heading[:, P, 1],
-            ego_future_heading[:, P, 2],
-            torch.norm(ego_future_heading[:, P, :2] - ego_future_heading[:, P - 1, :2], dim=-1)
-            / dt,
-            torch.norm(
-                ego_future_heading[:, P, :2]
-                - 2 * ego_future_heading[:, P - 1, :2]
-                + ego_future_heading[:, P - 2, :2],
-                dim=-1,
-            )
-            / dt**2,
-            self.normalize_angle(ego_future_heading[:, P, 2] - ego_future_heading[:, P - 1, 2])
-            / dt,
+        xT = ego_future_heading[:, P, 0]
+        yT = ego_future_heading[:, P, 1]
+        thetaT = ego_future_heading[:, P, 2]
+        terminal_velocity = (
+            3 * ego_future_heading[:, P, :2]
+            - 4 * ego_future_heading[:, P - 1, :2]
+            + ego_future_heading[:, P - 2, :2]
+        ) / (2 * dt)
+        terminal_acceleration = (
+            2 * ego_future_heading[:, P, :2]
+            - 5 * ego_future_heading[:, P - 1, :2]
+            + 4 * ego_future_heading[:, P - 2, :2]
+            - ego_future_heading[:, P - 3, :2]
+        ) / dt**2
+        vT = torch.norm(terminal_velocity, dim=-1)
+        aT = terminal_acceleration[:, 0] * torch.cos(thetaT) + terminal_acceleration[
+            :, 1
+        ] * torch.sin(thetaT)
+        last_heading_delta = self.normalize_angle(
+            ego_future_heading[:, P, 2] - ego_future_heading[:, P - 1, 2]
         )
+        previous_heading_delta = self.normalize_angle(
+            ego_future_heading[:, P - 1, 2] - ego_future_heading[:, P - 2, 2]
+        )
+        omegaT = (3 * last_heading_delta - previous_heading_delta) / (2 * dt)
 
         # Boundary conditions
         sx = torch.stack(

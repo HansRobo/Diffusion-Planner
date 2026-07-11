@@ -65,11 +65,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_inputs_from_npz(npz_path: Path) -> TensorDict:
+def build_inputs_from_npz(npz_path: Path, action_agent_num: int = MAX_NUM_AGENTS) -> TensorDict:
     data = np.load(npz_path, allow_pickle=True)
     inputs = {}
     inputs["sampled_trajectories"] = 0.5 * torch.randn(
-        1, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
+        1, action_agent_num, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
     )
     inputs["ego_agent_past"] = heading_to_cos_sin(
         torch.tensor(data["ego_agent_past"], dtype=torch.float32).unsqueeze(0)
@@ -103,7 +103,8 @@ def build_inputs_from_npz(npz_path: Path) -> TensorDict:
     if goal_pose.shape[-1] == 3:
         goal_pose = heading_to_cos_sin(goal_pose)
     inputs["goal_pose"] = goal_pose
-    inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
+    ego_shape = data["ego_shape"] if "ego_shape" in data else np.array([2.75, 4.34, 1.70])
+    inputs["ego_shape"] = torch.tensor(ego_shape, dtype=torch.float32).reshape(1, 3)
     inputs["turn_indicators"] = torch.tensor(
         data["turn_indicators"], dtype=torch.float32
     ).unsqueeze(0)
@@ -111,10 +112,12 @@ def build_inputs_from_npz(npz_path: Path) -> TensorDict:
     return inputs
 
 
-def load_validation_inputs(eval_npz_path: Path | None) -> TensorDict:
+def load_validation_inputs(
+    eval_npz_path: Path | None, action_agent_num: int = MAX_NUM_AGENTS
+) -> TensorDict:
     if eval_npz_path:
-        return build_inputs_from_npz(eval_npz_path)
-    return build_dummy_inputs()
+        return build_inputs_from_npz(eval_npz_path, action_agent_num)
+    return build_dummy_inputs(action_agent_num)
 
 
 def run_ort_in_subprocess(model_path: Path, np_inputs: NumpyDict) -> list[np.ndarray]:
@@ -152,10 +155,16 @@ np.savez("{output_path}", **{{f"out_{{i}}": o for i, o in enumerate(outputs)}})
 
 def compare(name: str, torch_output: np.ndarray, onnx_output: np.ndarray) -> None:
     abs_diff = np.abs(torch_output - onnx_output)
+    close = np.allclose(torch_output, onnx_output, rtol=1e-03, atol=2e-03)
     print(f"{name}: torch={torch_output.shape}, onnx={onnx_output.shape}")
     print(f"  Max diff: {abs_diff.max()}")
     print(f"  Mean diff: {abs_diff.mean()}")
-    print(f"  Close? {np.allclose(torch_output, onnx_output, rtol=1e-03, atol=1e-05)}")
+    print(f"  Close? {close}")
+    if not close:
+        raise AssertionError(
+            f"ONNX parity failed for {name}: max_abs={abs_diff.max():.6g}, "
+            f"mean_abs={abs_diff.mean():.6g}"
+        )
 
 
 def validate_full_model(
@@ -273,7 +282,9 @@ def convert_model(
 
     print("\nORT validation")
     wrappers = build_wrappers(model)
-    validation_inputs = load_validation_inputs(eval_npz_path)
+    action_agent_num = 1 + model.decoder._predicted_neighbor_num
+    validation_inputs = load_validation_inputs(eval_npz_path, action_agent_num)
+    validation_inputs = model.decoder._observation_normalizer(validation_inputs)
     with torch.no_grad():
         validation_encoding = wrappers.encoder(
             *(validation_inputs[name] for name in ENCODER_INPUT_NAMES)

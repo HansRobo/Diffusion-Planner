@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.layers import DropPath
-from timm.models.layers import Mlp
+from timm.layers import DropPath, Mlp
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.module.mixer import MixerBlock
@@ -19,6 +18,13 @@ CLASS_TYPE_GOAL_POSE = 7
 CLASS_TYPE_EGO_SHAPE = 8
 CLASS_TYPE_TURN_INDICATOR = 9
 CLASS_TYPE_NUM = 10
+
+
+def one_hot_turn_indicators(turn_indicators):
+    """Flatten categorical TurnIndicatorsReport codes into per-timestep one-hot features."""
+    x = turn_indicators.float()
+    classes = torch.arange(TURN_INDICATOR_INPUT_ONE_HOT_DIM, device=x.device, dtype=x.dtype)
+    return (x.unsqueeze(-1) == classes).to(x.dtype).flatten(1)
 
 
 def add_class_type(x, class_type):
@@ -124,7 +130,7 @@ class Encoder(nn.Module):
             hidden_dim=config.hidden_dim,
         )
         self.turn_indicator_encoder = FloatsEncoder(
-            num_float=INPUT_T,
+            num_float=INPUT_T * TURN_INDICATOR_INPUT_ONE_HOT_DIM,
             class_type=CLASS_TYPE_TURN_INDICATOR,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
@@ -208,8 +214,7 @@ class Encoder(nn.Module):
         ego_shape = inputs["ego_shape"]  # (B, D=3)
 
         # turn indicator
-        turn_indicator = inputs["turn_indicators"][:, :-1]  # (B, T)
-        turn_indicator = turn_indicator.float()
+        turn_indicator = one_hot_turn_indicators(inputs["turn_indicators"][:, :-1])
         if not self.use_turn_indicators:
             turn_indicator = torch.zeros_like(turn_indicator)
 
@@ -652,28 +657,37 @@ class LineEncoder(nn.Module):
 
     def forward(self, x):
         """
-        x: B, P, V, D(x, y)
+        x: B, P, V, D (x, y, type one-hot...)
         """
         B, P, V, D = x.shape
-        # diffを取る
-        diff_x = x[:, :, 1:, 0] - x[:, :, :-1, 0]  # (B, P, V-1)
-        diff_y = x[:, :, 1:, 1] - x[:, :, :-1, 1]  # (B, P, V-1)
+        # Judge validity before adding diffs. Type one-hot columns keep a real point at the
+        # normalized origin distinguishable from zero padding.
+        valid_pt = torch.sum(torch.ne(x, 0), dim=-1) != 0  # (B, P, V)
+
+        # Do not create a fake vector from the final valid point to zero padding.
+        pair_valid = (valid_pt[:, :, 1:] & valid_pt[:, :, :-1]).to(x.dtype)
+        diff_x = (x[:, :, 1:, 0] - x[:, :, :-1, 0]) * pair_valid
+        diff_y = (x[:, :, 1:, 1] - x[:, :, :-1, 1]) * pair_valid
         diff_x = torch.cat([diff_x, torch.zeros_like(diff_x[:, :, :1])], dim=2)  # (B, P, V)
         diff_x = diff_x.view(B, P, V, 1)
         diff_y = torch.cat([diff_y, torch.zeros_like(diff_y[:, :, :1])], dim=2)  # (B, P, V)
         diff_y = diff_y.view(B, P, V, 1)
-        x = torch.concat([x, diff_x, diff_y], dim=-1)  # (B, P, V, D+2)
+        # Match LaneEncoder's (x, y, dx, dy, attributes...) feature convention.
+        x = torch.concat([x[..., :2], diff_x, diff_y, x[..., 2:]], dim=-1)
 
-        pos = x[:, :, int(self._line_len / 2), :4].clone()  # x, y, x'-x, y'-y
-        heading = torch.atan2(pos[..., 3], pos[..., 2])
-        pos = torch.stack(
-            [pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1
-        )
+        valid = valid_pt.to(x.dtype).unsqueeze(-1)
+        count = valid.sum(dim=2).clamp(min=1.0)
+        center_xy = (x[..., :2] * valid).sum(dim=2) / count
+        mean_diff = (x[..., 2:4] * valid).sum(dim=2) / count
+        norm = mean_diff.norm(dim=-1, keepdim=True)
+        unit = mean_diff / norm.clamp(min=1e-6)
+        default_dir = torch.zeros_like(unit)
+        default_dir[..., 0] = 1.0
+        unit = torch.where(norm > 1e-6, unit, default_dir)
+        pos = torch.cat([center_xy, unit], dim=-1)
         pos = add_class_type(pos, self._class_type)
 
-        B, P, V, _ = x.shape
-        mask_v = torch.sum(torch.ne(x[..., :4], 0), dim=-1).to(x.device) == 0
-        mask_p = torch.sum(~mask_v, dim=-1) == 0
+        mask_p = ~valid_pt.any(dim=-1)
         valid_indices = ~mask_p.view(-1)
 
         x = x.view(B * P, V, -1)

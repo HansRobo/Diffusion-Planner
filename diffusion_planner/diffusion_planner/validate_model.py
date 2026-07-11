@@ -16,7 +16,7 @@ except Exception as exc:  # optional metric dependency; raised only when enabled
 else:
     _EPDMS_IMPORT_ERROR = None
 
-from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
+from diffusion_planner.dimensions import OUTPUT_T, POSE_DIM, TURN_INDICATOR_OUTPUT_DIM
 from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
@@ -26,9 +26,12 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.masks import pose_padding_mask
+from diffusion_planner.utils.masks import neighbor_future_padding_mask
 
 EPDMS_DT = 0.1
+MULTISAMPLE_ADE_THRESHOLD_M = 4.0
+MULTISAMPLE_FDE_THRESHOLD_M = 8.0
+TURN_INDICATOR_CLASS_NAMES = ("none", "disable", "enable_left", "enable_right", "keep")
 
 
 def _valid_xy(points: np.ndarray) -> np.ndarray:
@@ -142,6 +145,119 @@ def _neighbors_to_epdms_agent_boxes(
     return result
 
 
+@torch.no_grad()
+def _multisample_metrics(
+    model,
+    norm_inputs: dict[str, torch.Tensor],
+    cached_encoding: torch.Tensor,
+    ego_future: torch.Tensor,
+    args,
+    batch_step: int,
+) -> dict[str, torch.Tensor]:
+    """Seeded multi-sample minADE/minFDE open-loop metrics."""
+    num_samples = int(getattr(args, "multisample_eval_num_samples", 0))
+    if num_samples <= 0:
+        return {}
+
+    B = ego_future.shape[0]
+    device = ego_future.device
+    noise_scale = float(getattr(args, "multisample_eval_noise_scale", 0.1))
+    base_seed = int(getattr(args, "multisample_eval_seed", 3407))
+    sample_steps = int(getattr(args, "multisample_eval_sample_steps", 6))
+
+    net = getattr(model, "module", model)
+    decoder = getattr(net, "decoder", None)
+    action_agent_num = 1 + decoder._predicted_neighbor_num
+    old_sample_steps = getattr(decoder, "_sample_steps", None)
+    if old_sample_steps is not None:
+        decoder._sample_steps = sample_steps
+
+    sampled_noise = []
+    try:
+        for sample_idx in range(num_samples):
+            generator = torch.Generator(device=device)
+            generator.manual_seed(
+                base_seed + ddp.get_rank() * 1_000_003 + batch_step * num_samples + sample_idx
+            )
+            sampled_noise.append(
+                torch.randn(
+                    B,
+                    action_agent_num,
+                    OUTPUT_T,
+                    POSE_DIM,
+                    dtype=torch.float32,
+                    device=device,
+                    generator=generator,
+                )
+                * noise_scale
+            )
+        sampled = torch.stack(sampled_noise, dim=1).reshape(
+            B * num_samples, action_agent_num, OUTPUT_T, POSE_DIM
+        )
+        repeated_encoding = (
+            cached_encoding[:, None]
+            .expand(B, num_samples, *cached_encoding.shape[1:])
+            .reshape(B * num_samples, *cached_encoding.shape[1:])
+        )
+        ego_current_state = (
+            norm_inputs["ego_current_state"][:, None]
+            .expand(B, num_samples, -1)
+            .reshape(B * num_samples, -1)
+        )
+        inference_inputs = {
+            "sampled_trajectories": sampled,
+            "ego_current_state": ego_current_state,
+            "_cached_encoding": repeated_encoding,
+        }
+        use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and device.type == "cuda"
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            _, outputs = model(inference_inputs)
+        sampled_xy = outputs["prediction"][:, 0, :, :2].reshape(B, num_samples, OUTPUT_T, 2)
+    finally:
+        if old_sample_steps is not None:
+            decoder._sample_steps = old_sample_steps
+
+    gt_xy = ego_future[..., :2]
+    T = min(sampled_xy.shape[2], gt_xy.shape[1])
+    sampled_xy = sampled_xy[:, :, :T]
+    gt_xy = gt_xy[:, :T]
+
+    valid = gt_xy.abs().sum(dim=-1) > 1e-6
+    no_valid = ~valid.any(dim=-1)
+    if no_valid.any():
+        valid = valid.clone()
+        valid[no_valid] = True
+    distance = torch.linalg.norm(sampled_xy - gt_xy[:, None], dim=-1)
+    ade = (distance * valid[:, None]).sum(dim=-1) / valid.sum(dim=-1, keepdim=True)
+    last_valid = (
+        valid.long() * torch.arange(1, T + 1, device=device, dtype=torch.long)[None]
+    ).argmax(dim=-1)
+    fde = torch.gather(
+        distance,
+        2,
+        last_valid[:, None, None].expand(-1, num_samples, 1),
+    ).squeeze(-1)
+
+    min_ade = ade.min(dim=1).values
+    min_fde = fde.min(dim=1).values
+    endpoints = torch.gather(
+        sampled_xy,
+        2,
+        last_valid[:, None, None, None].expand(-1, num_samples, 1, 2),
+    ).squeeze(2)
+    endpoint_center = endpoints.mean(dim=1, keepdim=True)
+    endpoint_divergence = torch.linalg.norm(endpoints - endpoint_center, dim=-1).mean(dim=1)
+    return {
+        "multisample_minADE": min_ade,
+        "multisample_minFDE": min_fde,
+        "multisample_ADE_score": 100.0
+        * (1.0 - min_ade / MULTISAMPLE_ADE_THRESHOLD_M).clamp(0.0, 1.0),
+        "multisample_FDE_score": 100.0
+        * (1.0 - min_fde / MULTISAMPLE_FDE_THRESHOLD_M).clamp(0.0, 1.0),
+        "multisample_endpoint_divergence": endpoint_divergence,
+    }
+
+
 def _epdms_eval_metrics(
     prediction: torch.Tensor,
     ego_future: torch.Tensor,
@@ -233,16 +349,14 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     turn_indicator_total = 0
     turn_indicator_change_correct = 0.0
     turn_indicator_change_total = 0
+    turn_indicator_class_correct = [0.0] * TURN_INDICATOR_OUTPUT_DIM
+    turn_indicator_class_total = [0] * TURN_INDICATOR_OUTPUT_DIM
 
-    delay = 0
-
-    # Progress is driven by the SLOWEST rank: every `progress_sync_every` batches all
-    # ranks rendezvous on an all-reduce(MIN) of their completed-batch count and rank 0
-    # displays that minimum, so the bar reaches 100% only when every rank is done. The
-    # rendezvous also keeps a fast rank from racing far ahead (bounding memory imbalance).
-    progress_sync_every = 20
     total_batches = len(val_loader)
-    pbar = tqdm(total=total_batches, desc="validate (slowest rank)", disable=ddp.get_rank() != 0)
+    pbar = tqdm(total=total_batches, desc="validate", disable=ddp.get_rank() != 0)
+    net = getattr(model, "module", model)
+    action_neighbor_num = net.decoder._predicted_neighbor_num
+    action_agent_num = 1 + action_neighbor_num
     for step, inputs in enumerate(val_loader):
         inputs = {key: value.to(device) for key, value in inputs.items()}
         B = inputs["ego_current_state"].shape[0]
@@ -250,19 +364,19 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         turn_indicator_seq = inputs["turn_indicators"]
 
         inputs["sampled_trajectories"] = torch.zeros(
-            B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32, device=device
+            B, action_agent_num, OUTPUT_T, POSE_DIM, dtype=torch.float32, device=device
         )
-        inputs["delay"] = torch.full((B,), delay, dtype=torch.float32, device=device)
-
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
         ego_future = inputs["ego_agent_future"]
         ego_future = heading_to_cos_sin(ego_future)  # (B, T, 4)
-        neighbors_future = inputs["neighbor_agents_future"]
-        neighbor_future_mask = pose_padding_mask(neighbors_future)  # (B, Pn, T)
-        neighbors_future = heading_to_cos_sin(neighbors_future)  # (B, Pn, T, 4)
-        neighbors_future[neighbor_future_mask] = 0.0
+        all_neighbors_future = inputs["neighbor_agents_future"]
+        all_neighbor_future_mask = neighbor_future_padding_mask(all_neighbors_future)
+        all_neighbors_future = heading_to_cos_sin(all_neighbors_future)
+        all_neighbors_future[all_neighbor_future_mask] = 0.0
+        neighbors_future = all_neighbors_future[:, :action_neighbor_num]
+        neighbor_future_mask = all_neighbor_future_mask[:, :action_neighbor_num]
 
         B, Pn, T, _ = neighbors_future.shape
         ego_current, neighbors_current = (
@@ -271,7 +385,9 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         )
         inputs = args.observation_normalizer(inputs)
 
-        _, outputs = model(inputs)
+        use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and str(device).startswith("cuda")
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+            encoder_outputs, outputs = model(inputs)
 
         neighbor_current_mask = (
             torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
@@ -292,12 +408,21 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         all_gt[:, 1:][neighbor_mask] = 0.0
 
         prediction = outputs["prediction"]
+        multisample_metrics = _multisample_metrics(
+            model, inputs, encoder_outputs, ego_future, args, step
+        )
+        for key, value in multisample_metrics.items():
+            total_result_dict[key].append(value.cpu())
         turn_indicator_logit = outputs["turn_indicator_logit"]
         turn_indicator = turn_indicator_logit.argmax(dim=-1)
         turn_indicator_gt = make_turn_indicator_gt(turn_indicator_seq)
         correct = (turn_indicator == turn_indicator_gt).long()
         turn_indicator_correct += correct.sum().item()
         turn_indicator_total += correct.numel()
+        for class_index in range(TURN_INDICATOR_OUTPUT_DIM):
+            class_mask = turn_indicator_gt == class_index
+            turn_indicator_class_correct[class_index] += correct[class_mask].sum().item()
+            turn_indicator_class_total[class_index] += class_mask.sum().item()
         change_mask = turn_indicator_seq[:, -1] != turn_indicator_seq[:, -2]
         change_count = change_mask.sum().item()
         if change_count > 0:
@@ -308,6 +433,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             turn_indicators.append(turn_indicator.cpu())
 
         neighbors_future_valid = ~neighbor_future_mask
+        all_neighbors_future_valid = ~all_neighbor_future_mask
         all_gt = all_gt[:, :, 1:, :]  # (B, Pn + 1, T, 4)
         loss_tensor = (prediction - all_gt) ** 2
         loss_ego = loss_tensor[:, 0, :]
@@ -334,8 +460,8 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         denorm_inputs = args.observation_normalizer.inverse(inputs)
         neighbor_penalty = compute_neighbor_collision_penalty(
             ego_edge_points,
-            neighbors_future,
-            neighbors_future_valid,
+            all_neighbors_future,
+            all_neighbors_future_valid,
             denorm_inputs["neighbor_agents_past"],
             margin_vehicle=args.neighbor_collision_margin_vehicle,
             margin_pedestrian=args.neighbor_collision_margin_pedestrian,
@@ -351,23 +477,20 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         )
         total_result_dict["ego_road_border_loss"].append(rb_penalty.cpu())
 
-        if getattr(args, "enable_epdms_eval", False) or getattr(args, "enable_pdms_eval", False):
+        if getattr(args, "enable_epdms_eval", False):
             epdms_dict = _epdms_eval_metrics(
                 prediction,
                 ego_future,
-                neighbors_future,
-                neighbors_future_valid,
+                all_neighbors_future,
+                all_neighbors_future_valid,
                 denorm_inputs,
                 args,
             )
             for key, val in epdms_dict.items():
                 total_result_dict[f"epdms_{key}"].append(val.detach().cpu())
 
-        if (step + 1) % progress_sync_every == 0 or (step + 1) == total_batches:
-            min_done = int(ddp.all_reduce_min(step + 1, device))
-            if ddp.get_rank() == 0:
-                pbar.n = min_done
-                pbar.refresh()
+        if ddp.get_rank() == 0:
+            pbar.update(1)
     pbar.close()
 
     avg_loss_ego = total_loss_ego / total_samples_ego
@@ -398,7 +521,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
         "turn_indicator_change_total": turn_indicator_change_total,
         # Raw per-rank accumulators, kept so callers that run validation on ALL ranks
-        # (DistributedSampler shards) can all-reduce them into globally-correct metrics
+        # (non-padding distributed eval shards) can all-reduce them into global metrics
         # via aggregate_valid_metrics(). validate_model itself stays collective-free so
         # it remains safe to call on rank 0 only (as train.py / HDP-RL do at some sites).
         "_loss_ego_sum": total_loss_ego,
@@ -408,6 +531,8 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         "_turn_correct": turn_indicator_correct,
         "_turn_total": turn_indicator_total,
         "_turn_change_correct": turn_indicator_change_correct,
+        "_turn_class_correct": turn_indicator_class_correct,
+        "_turn_class_total": turn_indicator_class_total,
         **total_result_dict,
     }
 
@@ -420,9 +545,8 @@ def aggregate_valid_metrics(valid_dict, device):
     per-sample tensors in ``valid_dict`` are left untouched (callers still use them
     to save per-data-point files). In single-process runs this is a no-op pass-through.
 
-    Note: with ``DistributedSampler`` the dataset is padded to be divisible by the world
-    size, so up to ``world_size - 1`` samples are duplicated across ranks. These averages
-    therefore carry a negligible padding bias; the per-data-point files are exact.
+    Callers use ``DistributedEvalSampler``, so shards are disjoint and no metric receives
+    duplicate-padding bias when dataset size is not divisible by world size.
     """
     loss_ego_sum = ddp.all_reduce_sum(valid_dict["_loss_ego_sum"], device)
     samples_ego = ddp.all_reduce_sum(valid_dict["_samples_ego"], device)
@@ -432,6 +556,19 @@ def aggregate_valid_metrics(valid_dict, device):
     turn_total = ddp.all_reduce_sum(valid_dict["_turn_total"], device)
     turn_change_correct = ddp.all_reduce_sum(valid_dict["_turn_change_correct"], device)
     turn_change_total = ddp.all_reduce_sum(valid_dict["turn_indicator_change_total"], device)
+    turn_class_correct = [
+        ddp.all_reduce_sum(value, device) for value in valid_dict["_turn_class_correct"]
+    ]
+    turn_class_total = [
+        ddp.all_reduce_sum(value, device) for value in valid_dict["_turn_class_total"]
+    ]
+    turn_class_accuracy = {
+        name: turn_class_correct[index] / max(turn_class_total[index], 1)
+        for index, name in enumerate(TURN_INDICATOR_CLASS_NAMES)
+    }
+    turn_class_count = {
+        name: int(turn_class_total[index]) for index, name in enumerate(TURN_INDICATOR_CLASS_NAMES)
+    }
 
     ego_means = {}
     for key, val in valid_dict.items():
@@ -466,6 +603,14 @@ def aggregate_valid_metrics(valid_dict, device):
         epdms_means[f"{metric}_coverage"] = local_cnt / max(local_total, 1)
         epdms_means[metric] = local_sum / local_cnt if local_cnt > 0 else float("nan")
 
+    multisample_means = {}
+    for key, val in valid_dict.items():
+        if not key.startswith("multisample_"):
+            continue
+        local_sum = ddp.all_reduce_sum(val.float().sum().item(), device)
+        local_cnt = ddp.all_reduce_sum(val.numel(), device)
+        multisample_means[key.removeprefix("multisample_")] = local_sum / max(local_cnt, 1)
+
     return {
         "avg_loss_ego": loss_ego_sum / max(samples_ego, 1),
         "avg_loss_neighbor": loss_nei_sum / max(samples_nei, 1),
@@ -474,6 +619,9 @@ def aggregate_valid_metrics(valid_dict, device):
             (turn_change_correct / turn_change_total) if turn_change_total > 0 else 0.0
         ),
         "turn_indicator_change_total": int(turn_change_total),
+        "turn_indicator_class_accuracy": turn_class_accuracy,
+        "turn_indicator_class_count": turn_class_count,
         "ego_means": ego_means,
         "epdms_means": epdms_means,
+        "multisample_means": multisample_means,
     }

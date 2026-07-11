@@ -45,8 +45,9 @@ def ddp_setup_universal(verbose=False, args=None):
         world_size=world_size,
         rank=rank,
         timeout=timedelta(seconds=1000),
+        device_id=torch.device("cuda", gpu),
     )
-    torch.distributed.barrier()
+    torch.distributed.barrier(device_ids=[gpu])
     if verbose:
         setup_for_distributed(rank == 0)
     return rank, gpu, world_size
@@ -95,6 +96,11 @@ def is_dist_avail_and_initialized():
     return True
 
 
+def cleanup():
+    if is_dist_avail_and_initialized():
+        dist.destroy_process_group()
+
+
 def all_reduce_sum(value, device):
     """Sum a python scalar across all DDP ranks.
 
@@ -125,7 +131,9 @@ def reduce_and_average_losses(loss_dict, device):
     torch.distributed.barrier()
     world_size = dist.get_world_size()
     for key in loss_dict.keys():
-        loss_tensor = torch.tensor([loss_dict[key].item()]).to(device)
+        value = loss_dict[key]
+        scalar = value.item() if torch.is_tensor(value) else float(value)
+        loss_tensor = torch.tensor([scalar], dtype=torch.float64, device=device)
         dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
         loss_dict[key] = loss_tensor.item() / world_size
     return loss_dict

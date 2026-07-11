@@ -28,8 +28,33 @@ def get_args(args_list=None):
 
     # Data
     parser.add_argument("--train_set_list", type=str, required=True)
+    parser.add_argument(
+        "--extra_train_set_list",
+        type=str,
+        action="append",
+        default=None,
+        help="repeatable extra datalist; all listed paths are concatenated in memory",
+    )
+    parser.add_argument(
+        "--extra_train_set_repeat",
+        type=int,
+        default=0,
+        help="append the extra list N times in memory; no combined JSON or NPZ is written",
+    )
+    parser.add_argument(
+        "--extra_train_set_mask_traffic_lights",
+        type=boolean,
+        default=False,
+        help="mask lane traffic-light attributes only for samples from the extra lists",
+    )
     parser.add_argument("--valid_set_list", type=str, required=True)
     parser.add_argument("--train_subsample_step", type=int, default=1)
+    parser.add_argument(
+        "--align_legacy_neighbor_futures",
+        type=boolean,
+        default=_train_config_default("align_legacy_neighbor_futures"),
+        help="shift duplicated t=0 short neighbor tracks in pre-55eff4f Tier IV NPZs",
+    )
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
@@ -90,8 +115,22 @@ def get_args(args_list=None):
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
-    parser.add_argument("--ego_history_dropout_rate", type=float, default=0.4)
+    parser.add_argument(
+        "--ego_history_dropout_rate",
+        type=float,
+        default=_train_config_default("ego_history_dropout_rate"),
+    )
     parser.add_argument("--use_turn_indicators", type=boolean, default=True)
+    parser.add_argument(
+        "--turn_indicator_generated_loss_weight",
+        type=float,
+        default=_train_config_default("turn_indicator_generated_loss_weight"),
+    )
+    parser.add_argument(
+        "--turn_indicator_expert_loss_weight",
+        type=float,
+        default=_train_config_default("turn_indicator_expert_loss_weight"),
+    )
 
     parser.add_argument("--coeff_position_lat_loss", type=float, default=1.0)
     parser.add_argument("--coeff_position_lon_loss", type=float, default=1.0)
@@ -109,7 +148,11 @@ def get_args(args_list=None):
         help="Set for 4 sections [0,20), [20, 40), [40, 60), [60, 80)",
     )
 
-    parser.add_argument("--coeff_road_border_loss", type=float, default=1.0)
+    parser.add_argument(
+        "--coeff_road_border_loss",
+        type=float,
+        default=_train_config_default("coeff_road_border_loss"),
+    )
     parser.add_argument("--road_border_margin", type=float, default=0.25)
     parser.add_argument("--road_border_n_interp", type=int, default=2)
 
@@ -139,11 +182,6 @@ def get_args(args_list=None):
         type=boolean,
     )
     parser.add_argument(
-        "--enable_pdms_eval",
-        default=_train_config_default("enable_pdms_eval"),
-        type=boolean,
-    )
-    parser.add_argument(
         "--epdms_eval_use_agent_boxes",
         default=_train_config_default("epdms_eval_use_agent_boxes"),
         type=boolean,
@@ -152,6 +190,27 @@ def get_args(args_list=None):
         "--epdms_eval_use_road_border",
         default=_train_config_default("epdms_eval_use_road_border"),
         type=boolean,
+    )
+    parser.add_argument(
+        "--multisample_eval_num_samples",
+        type=int,
+        default=_train_config_default("multisample_eval_num_samples"),
+        help="stochastic trajectories for HDP minADE/minFDE; 0 disables the extra pass",
+    )
+    parser.add_argument(
+        "--multisample_eval_noise_scale",
+        type=float,
+        default=_train_config_default("multisample_eval_noise_scale"),
+    )
+    parser.add_argument(
+        "--multisample_eval_sample_steps",
+        type=int,
+        default=_train_config_default("multisample_eval_sample_steps"),
+    )
+    parser.add_argument(
+        "--multisample_eval_seed",
+        type=int,
+        default=_train_config_default("multisample_eval_seed"),
     )
 
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
@@ -196,24 +255,39 @@ def get_args(args_list=None):
 
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
-    parser.add_argument("--tf32", default=False, type=boolean, help="enable TensorFloat-32 on CUDA")
+    parser.add_argument(
+        "--tf32",
+        default=_train_config_default("tf32"),
+        type=boolean,
+        help="enable TensorFloat-32 on CUDA",
+    )
 
     parser.add_argument("--use_ema", default=True, type=boolean)
 
     # Model
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)
     parser.add_argument("--encoder_fusion_depth", type=int, default=6)
-    parser.add_argument("--decoder_depth", type=int, help="number of decoding layers", default=3)
+    parser.add_argument(
+        "--decoder_depth",
+        type=int,
+        help="number of temporal decoding layers",
+        default=_train_config_default("decoder_depth"),
+    )
     parser.add_argument("--num_heads", type=int, help="number of multi-head", default=8)
     parser.add_argument("--hidden_dim", type=int, help="hidden dimension", default=256)
+    parser.set_defaults(decoder_tokenization="temporal")
     parser.add_argument(
         "--diffusion_model_type",
         type=str,
         choices=["x_start", "noise", "score", "v", "flow_matching"],
         default=_train_config_default("diffusion_model_type"),
     )
-    parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
-
+    parser.add_argument(
+        "--predicted_neighbor_num",
+        type=int,
+        default=_train_config_default("predicted_neighbor_num"),
+        help="must be 0; HDP predicts only the ego trajectory",
+    )
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
     parser.add_argument(
         "--init_weights_path",
@@ -229,7 +303,7 @@ def get_args(args_list=None):
     parser.add_argument(
         "--wandb_project_name",
         type=str,
-        default="Diffusion-Planner",
+        default=_train_config_default("wandb_project_name"),
         help="Weights & Biases project name",
     )
     parser.add_argument(
@@ -271,6 +345,12 @@ def get_args(args_list=None):
         default=_train_config_default("ddp_static_graph"),
         help="enable DDP static_graph optimizations (graph must stay identical every step)",
     )
+    parser.add_argument(
+        "--export_onnx_on_save",
+        type=boolean,
+        default=_train_config_default("export_onnx_on_save"),
+        help="export ONNX synchronously at checkpoint cadence; disabled by default to avoid DDP idle time",
+    )
 
     # per-epoch closed-loop validation (rendered rollout + wandb video).
     # Disabled unless --closed_loop_npz_root is given (dir tree of one route's NPZ frames).
@@ -304,9 +384,45 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_search_radius", type=float, default=1.5)
     parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
-    parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
+    parser.add_argument(
+        "--closed_loop_unstick_advance_m",
+        type=float,
+        default=_train_config_default("closed_loop_unstick_advance_m"),
+    )
 
     args = parser.parse_args(args_list)
+    if args.train_subsample_step < 1:
+        raise ValueError("--train_subsample_step must be >= 1")
+    if args.batch_size < 1:
+        raise ValueError("--batch_size must be >= 1")
+    if args.save_utd < 1:
+        raise ValueError("--save_utd must be >= 1")
+    if args.train_epochs < 1:
+        raise ValueError("--train_epochs must be >= 1")
+    if args.diffusion_sample_steps < 2:
+        raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
+    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
+        raise ValueError(
+            "--multisample_eval_sample_steps must be >= 3 for the third-order DPM solver"
+        )
+    if args.learning_rate <= 0.0:
+        raise ValueError("--learning_rate must be > 0")
+    if args.turn_indicator_generated_loss_weight < 0.0:
+        raise ValueError("--turn_indicator_generated_loss_weight must be >= 0")
+    if args.turn_indicator_expert_loss_weight < 0.0:
+        raise ValueError("--turn_indicator_expert_loss_weight must be >= 0")
+    if args.turn_indicator_generated_loss_weight + args.turn_indicator_expert_loss_weight <= 0.0:
+        raise ValueError("at least one turn-indicator loss weight must be positive")
+    if args.extra_train_set_repeat < 0:
+        raise ValueError("--extra_train_set_repeat must be >= 0")
+    if args.extra_train_set_repeat > 0 and not args.extra_train_set_list:
+        raise ValueError("--extra_train_set_list is required when repeat is positive")
+    if args.predicted_neighbor_num != 0:
+        raise ValueError("HDP is ego-only; --predicted_neighbor_num must be 0")
+    if not args.use_velocity_representation:
+        raise ValueError("HDP requires --use_velocity_representation true")
+    if args.diffusion_model_type != "x_start" or args.diffusion_supervision_type != "x_start":
+        raise ValueError("HDP requires x_start prediction and x_start supervision")
     return args
 
 

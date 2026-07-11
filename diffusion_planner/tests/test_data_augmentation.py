@@ -418,6 +418,27 @@ def test_interpolation_endpoint_proximity():
     print("  [PASS] interpolation end-point proximity")
 
 
+def test_interpolation_preserves_signed_longitudinal_acceleration():
+    """A consistent braking parabola must remain unchanged by quintic refinement."""
+    aug = StatePerturbation()
+    dt = 0.1
+    time = torch.arange(1, 81, dtype=torch.float32) * dt
+    speed0 = 10.0
+    acceleration = -2.0
+    ego_future = torch.zeros(1, 80, 3)
+    ego_future[0, :, 0] = speed0 * time + 0.5 * acceleration * time.square()
+    aug_state = _ego_state(1, vx=speed0)
+    aug_state[:, 6] = acceleration
+
+    refined = aug.interpolation_future_trajectory(aug_state, ego_future)
+    torch.testing.assert_close(
+        refined[:, : aug.num_refine, :2],
+        ego_future[:, : aug.num_refine, :2],
+        rtol=0,
+        atol=2e-4,
+    )
+
+
 # ─────────────────────────── centric_transform ──────────────────────────────
 
 
@@ -842,6 +863,19 @@ def test_check_aug_validity_neighbor_far():
     collision = aug._check_aug_validity(ego, inputs)
     assert not collision.item(), "Distant neighbor should not trigger collision"
     print("  [PASS] _check_aug_validity neighbor far")
+
+
+def test_check_aug_validity_uses_rear_axle_pose_for_ego_box():
+    """The ego pose is the rear axle, so its collision box center is forward."""
+    aug = StatePerturbation()
+    ego = _ego_state(1, vx=5.0)
+    ego_shape = torch.tensor([[4.0, 2.0, 2.0]])
+    neighbor = _nbr(1, x=3.0, y=0.0, width=1.0, length=1.0)
+    inputs = _check_inputs(1, neighbor, _lanes(1, []), ego_shape=ego_shape)
+
+    assert aug._check_aug_validity(ego, inputs).item(), (
+        "rear axle at x=0 places the 2 m ego box at x=2, overlapping the neighbor at x=3"
+    )
 
 
 def test_check_aug_validity_all_zero_neighbors_ignored():

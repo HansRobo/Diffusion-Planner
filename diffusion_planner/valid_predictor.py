@@ -7,7 +7,7 @@ import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
-from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.dataset import DiffusionPlannerData, DistributedEvalSampler
 from diffusion_planner.utils.path_key import data_path_to_rel
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.valid_config import ValidConfig
@@ -15,7 +15,7 @@ from diffusion_planner.validate_model import aggregate_valid_metrics, validate_m
 from timm.utils import ModelEma
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 
@@ -48,7 +48,13 @@ def get_args(args_list=None):
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--predicted_neighbor_num", type=int, default=32)
+    parser.add_argument("--predicted_neighbor_num", type=int, default=0)
+    parser.add_argument(
+        "--align_legacy_neighbor_futures",
+        type=boolean,
+        default=_valid_config_default("align_legacy_neighbor_futures"),
+        help="override checkpoint setting; omitted inherits args.json",
+    )
     parser.add_argument("--resume_model_path", type=str, required=True)
     parser.add_argument("--args_json_path", type=str, required=True)
     parser.add_argument("--save_predictions_dir", type=str, default=None)
@@ -57,11 +63,6 @@ def get_args(args_list=None):
     parser.add_argument(
         "--enable_epdms_eval",
         default=_valid_config_default("enable_epdms_eval"),
-        type=boolean,
-    )
-    parser.add_argument(
-        "--enable_pdms_eval",
-        default=_valid_config_default("enable_pdms_eval"),
         type=boolean,
     )
     parser.add_argument(
@@ -74,8 +75,33 @@ def get_args(args_list=None):
         default=_valid_config_default("epdms_eval_use_road_border"),
         type=boolean,
     )
+    parser.add_argument(
+        "--multisample_eval_num_samples",
+        type=int,
+        default=_valid_config_default("multisample_eval_num_samples"),
+    )
+    parser.add_argument(
+        "--multisample_eval_noise_scale",
+        type=float,
+        default=_valid_config_default("multisample_eval_noise_scale"),
+    )
+    parser.add_argument(
+        "--multisample_eval_sample_steps",
+        type=int,
+        default=_valid_config_default("multisample_eval_sample_steps"),
+    )
+    parser.add_argument(
+        "--multisample_eval_seed",
+        type=int,
+        default=_valid_config_default("multisample_eval_seed"),
+    )
 
-    return parser.parse_args(args_list)
+    args = parser.parse_args(args_list)
+    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
+        raise ValueError(
+            "--multisample_eval_sample_steps must be >= 3 for the third-order DPM solver"
+        )
+    return args
 
 
 def run_validation(valid_cfg: ValidConfig):
@@ -89,13 +115,30 @@ def run_validation(valid_cfg: ValidConfig):
     config_obj.device = valid_cfg.device
     config_obj.ddp = valid_cfg.ddp
     config_obj.enable_epdms_eval = valid_cfg.enable_epdms_eval
-    config_obj.enable_pdms_eval = valid_cfg.enable_pdms_eval
     config_obj.epdms_eval_use_agent_boxes = valid_cfg.epdms_eval_use_agent_boxes
     config_obj.epdms_eval_use_road_border = valid_cfg.epdms_eval_use_road_border
+    config_obj.multisample_eval_num_samples = valid_cfg.multisample_eval_num_samples
+    config_obj.multisample_eval_noise_scale = valid_cfg.multisample_eval_noise_scale
+    config_obj.multisample_eval_sample_steps = valid_cfg.multisample_eval_sample_steps
+    config_obj.multisample_eval_seed = valid_cfg.multisample_eval_seed
+    if valid_cfg.align_legacy_neighbor_futures is not None:
+        config_obj.align_legacy_neighbor_futures = valid_cfg.align_legacy_neighbor_futures
+    align_legacy_neighbor_futures = bool(
+        getattr(config_obj, "align_legacy_neighbor_futures", False)
+    )
+    valid_set_list = valid_cfg.valid_set_list or getattr(config_obj, "valid_set_list", None)
+    if not valid_set_list:
+        raise ValueError("--valid_set_list is required when args.json has no valid_set_list")
 
     # init ddp
     global_rank, rank, _ = ddp.ddp_setup_universal(True, valid_cfg)
     print(f"{global_rank=}, {rank=}")
+    world_size = ddp.get_world_size()
+    if valid_cfg.batch_size < world_size or valid_cfg.batch_size % world_size != 0:
+        raise ValueError(
+            f"--batch_size ({valid_cfg.batch_size}) must be a positive multiple of "
+            f"DDP world size ({world_size})"
+        )
 
     if global_rank == 0:
         print(f"Batch size: {valid_cfg.batch_size}")
@@ -105,17 +148,24 @@ def run_validation(valid_cfg: ValidConfig):
     set_seed(valid_cfg.seed + global_rank)
 
     # set up data loaders
-    valid_set = DiffusionPlannerData(valid_cfg.valid_set_list)
-    valid_sampler = DistributedSampler(
-        valid_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=False
+    valid_set = DiffusionPlannerData(
+        valid_set_list,
+        align_legacy_neighbor_futures=align_legacy_neighbor_futures,
+    )
+    if len(valid_set) < world_size:
+        raise ValueError("Validation set must contain at least one sample per DDP rank")
+    valid_sampler = DistributedEvalSampler(
+        valid_set, num_replicas=ddp.get_world_size(), rank=global_rank
     )
     valid_loader = DataLoader(
         valid_set,
         sampler=valid_sampler,
-        batch_size=valid_cfg.batch_size // ddp.get_world_size(),
+        batch_size=valid_cfg.batch_size // world_size,
         num_workers=valid_cfg.num_workers,
         pin_memory=valid_cfg.pin_mem,
         drop_last=False,
+        persistent_workers=valid_cfg.num_workers > 0,
+        prefetch_factor=4 if valid_cfg.num_workers > 0 else None,
     )
 
     if global_rank == 0:
@@ -148,7 +198,7 @@ def run_validation(valid_cfg: ValidConfig):
     print(f"Model loaded from {valid_cfg.resume_model_path}")
     model_ema = ModelEma(diffusion_planner, decay=0.999, device=valid_cfg.device)
 
-    diffusion_planner, _, _, _, _, _ = resume_model(
+    diffusion_planner, _, _, _, _, model_ema = resume_model(
         valid_cfg.resume_model_path,
         diffusion_planner,
         optimizer,
@@ -160,9 +210,9 @@ def run_validation(valid_cfg: ValidConfig):
     if valid_cfg.ddp:
         torch.distributed.barrier()
 
-    valid_dict = validate_model(diffusion_planner, valid_loader, config_obj, return_pred=True)
+    valid_dict = validate_model(model_ema.ema, valid_loader, config_obj, return_pred=True)
 
-    # Per-rank tensors (this rank's DistributedSampler shard, in loader order).
+    # Per-rank tensors (this rank's disjoint eval shard, in loader order).
     loss_ego = valid_dict["loss_ego"]
     predictions = valid_dict["predictions"]
     turn_indicators = valid_dict["turn_indicators"]
@@ -183,12 +233,17 @@ def run_validation(valid_cfg: ValidConfig):
             print(f"{turn_indicator_change_accuracy=:.4f} ({turn_indicator_change_total=:d})")
         else:
             print("turn_indicator_change_accuracy=0.0000 (num_samples=0)")
+        for name, accuracy in agg["turn_indicator_class_accuracy"].items():
+            count = agg["turn_indicator_class_count"][name]
+            print(f"turn_indicator_{name}_accuracy={accuracy:.4f} (num_samples={count})")
         if "ego_neighbor_margin_loss" in agg["ego_means"]:
             print(
                 f"ego_neighbor_margin_loss_mean={agg['ego_means']['ego_neighbor_margin_loss']:.4f}"
             )
         if "ego_road_border_loss" in agg["ego_means"]:
             print(f"ego_road_border_loss_mean={agg['ego_means']['ego_road_border_loss']:.4f}")
+        for key, value in agg["multisample_means"].items():
+            print(f"multisample_{key}={value:.4f}")
 
     # Save results
     if valid_cfg.save_predictions_dir is None:
@@ -205,8 +260,17 @@ def run_validation(valid_cfg: ValidConfig):
             "turn_indicator_accuracy": turn_indicator_accuracy,
             "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
             "turn_indicator_change_total": turn_indicator_change_total,
+            **{
+                f"turn_indicator_{name}_accuracy": value
+                for name, value in agg["turn_indicator_class_accuracy"].items()
+            },
+            **{
+                f"turn_indicator_{name}_count": value
+                for name, value in agg["turn_indicator_class_count"].items()
+            },
             **agg["ego_means"],
             **{f"epdms_{key}": value for key, value in agg["epdms_means"].items()},
+            **{f"multisample_{key}": value for key, value in agg["multisample_means"].items()},
         }
         with open(save_predictions_dir.parent / "valid_dict.json", "w") as f:
             json.dump(valid_dict_to_save, f, indent=4)
@@ -217,12 +281,8 @@ def run_validation(valid_cfg: ValidConfig):
     sampler_indices = list(valid_sampler)
     assert len(sampler_indices) == predictions.shape[0]
 
-    # Progress is driven by the SLOWEST rank (see validate_model): every `save_sync_every`
-    # files all ranks rendezvous on all-reduce(MIN) and rank 0 displays that minimum, so
-    # the bar reaches 100% only when every rank has finished saving its shard.
-    save_sync_every = 200
     n_save = predictions.shape[0]
-    pbar = tqdm(total=n_save, desc="save (slowest rank)", disable=global_rank != 0)
+    pbar = tqdm(total=n_save, desc="save", disable=global_rank != 0)
     for i in range(n_save):
         rel = data_path_to_rel(valid_set.data_list[sampler_indices[i]])
         out_base = save_predictions_dir / rel
@@ -245,11 +305,8 @@ def run_validation(valid_cfg: ValidConfig):
         with open(out_base.with_suffix(".json"), "w") as f:
             json.dump(loss_dict, f, indent=4)
 
-        if (i + 1) % save_sync_every == 0 or (i + 1) == n_save:
-            min_done = int(ddp.all_reduce_min(i + 1, valid_cfg.device))
-            if global_rank == 0:
-                pbar.n = min_done
-                pbar.refresh()
+        if global_rank == 0:
+            pbar.update(1)
     pbar.close()
 
 

@@ -6,8 +6,12 @@ from tqdm import tqdm
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.masks import pose_padding_mask
-from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
+from diffusion_planner.utils.masks import neighbor_future_padding_mask
+from diffusion_planner.utils.train_utils import (
+    compute_grad_stats,
+    finalize_epoch_loss_sums,
+    update_epoch_loss_sums,
+)
 
 
 def compose_supervised_total_loss(loss, args):
@@ -46,8 +50,40 @@ def heading_to_cos_sin(x):
     )
 
 
+def prepare_neighbor_supervision(
+    neighbors_future: torch.Tensor,
+    action_neighbor_num: int,
+    include_collision_futures: bool,
+) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+    """Prepare only the neighbor futures consumed by the configured training losses."""
+    if action_neighbor_num == 0 and not include_collision_futures:
+        batch_size, _, future_len, _ = neighbors_future.shape
+        empty_future = neighbors_future.new_zeros((batch_size, 0, future_len, 4))
+        empty_mask = torch.zeros(
+            (batch_size, 0, future_len), dtype=torch.bool, device=neighbors_future.device
+        )
+        return empty_future, empty_mask, None
+
+    if include_collision_futures:
+        all_neighbor_mask = neighbor_future_padding_mask(neighbors_future)
+        all_neighbors_future = heading_to_cos_sin(neighbors_future)
+        all_neighbors_future[all_neighbor_mask] = 0.0
+        return (
+            all_neighbors_future[:, :action_neighbor_num],
+            all_neighbor_mask[:, :action_neighbor_num],
+            (all_neighbors_future, all_neighbor_mask),
+        )
+
+    action_future = neighbors_future[:, :action_neighbor_num]
+    action_mask = neighbor_future_padding_mask(action_future)
+    action_future = heading_to_cos_sin(action_future)
+    action_future[action_mask] = 0.0
+    return action_future, action_mask, None
+
+
 def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
-    epoch_loss = []
+    epoch_loss_sums = {}
+    epoch_loss_counts = {}
 
     model.train()
     step_log = getattr(args, "wandb_step_log_interval", 0)
@@ -68,14 +104,28 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     # gradients and calls .item() five times (five device syncs per step). Sample them
     # on the wandb logging cadence instead (or every 100 steps when step logging is off).
     stats_interval = step_log if step_log > 0 else 100
+    needs_neighbor_futures = args.coeff_neighbor_collision_loss > 0
+    net = ddp.get_model(model, args.ddp)
+    turn_params = list(net.decoder.turn_indicator_predictor.parameters())
+    turn_param_ids = {id(param) for param in turn_params}
+    policy_params = [param for param in net.parameters() if id(param) not in turn_param_ids]
 
     for batch_idx, inputs in enumerate(data_loader, start=1):
+        neighbor_future_cpu = inputs.pop("neighbor_agents_future", None)
+        if needs_neighbor_futures and neighbor_future_cpu is None:
+            raise KeyError("neighbor_agents_future is required for collision supervision")
         inputs = {key: value.to(args.device, non_blocking=True) for key, value in inputs.items()}
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
         ego_future = inputs["ego_agent_future"]
-        neighbors_future = inputs["neighbor_agents_future"]
+        if neighbor_future_cpu is None:
+            batch_size, future_len = ego_future.shape[:2]
+            neighbors_future = ego_future.new_zeros(
+                (batch_size, 0, future_len, ego_future.shape[-1])
+            )
+        else:
+            neighbors_future = neighbor_future_cpu.to(args.device, non_blocking=True)
         # Normalize to ego-centric
         if aug is not None:
             inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
@@ -83,15 +133,26 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # heading to cos sin
         ego_future = heading_to_cos_sin(ego_future)
 
-        mask = pose_padding_mask(neighbors_future)
-        neighbors_future = heading_to_cos_sin(neighbors_future)
-        neighbors_future[mask] = 0.0
+        action_neighbor_num = 0
+        neighbors_future, mask, collision_futures = prepare_neighbor_supervision(
+            neighbors_future,
+            action_neighbor_num,
+            include_collision_futures=args.coeff_neighbor_collision_loss > 0,
+        )
+        # Future GT is not an encoder input. In ego-only training this also releases the
+        # full 320-agent tensor before normalization and the model forward.
         inputs = args.observation_normalizer(inputs)
 
         # call the model
         optimizer.zero_grad()
 
-        loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
+        loss = compute_training_loss(
+            model,
+            inputs,
+            (ego_future, neighbors_future, mask),
+            args,
+            collision_futures=collision_futures,
+        )
 
         loss["loss"] = compose_supervised_total_loss(loss, args)
 
@@ -105,7 +166,8 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         if (args._wandb_global_step + 1) % stats_interval == 0:
             loss.update(compute_grad_stats(model.parameters()))
 
-        nn.utils.clip_grad_norm_(model.parameters(), 5)
+        nn.utils.clip_grad_norm_(policy_params, 5)
+        nn.utils.clip_grad_norm_(turn_params, 5)
         optimizer.step()
 
         if ema is not None:
@@ -137,11 +199,10 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
         # NOTE: no per-step torch.cuda.synchronize() here — it stalled the whole
         # pipeline every iteration for no correctness benefit (DDP synchronizes via
-        # its allreduce; kernels are stream-ordered). Detach stored values so 35k+
-        # steps of scalars don't keep autograd-graph references alive all epoch.
-        epoch_loss.append({k: (v.detach() if torch.is_tensor(v) else v) for k, v in loss.items()})
+        # its allreduce; kernels are stream-ordered).
+        update_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts, loss)
 
-    epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
+    epoch_mean_loss = finalize_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts)
 
     if args.ddp:
         epoch_mean_loss = ddp.reduce_and_average_losses(epoch_mean_loss, torch.device(args.device))
