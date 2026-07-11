@@ -431,74 +431,96 @@ def mean_epdms_metric(loss_dict):
 
 
 def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
-    """Closed-loop rendered rollout; logs metrics + the rollout video to wandb.
-
-    Drives the ego in CLOSED LOOP over the route NPZ frames under ``args.closed_loop_npz_root``
-    (one route = one trial), renders an MP4 into ``out_dir``, aggregates collision/clearance
-    metrics, and logs both to wandb at ``step=epoch+1``. Called on the checkpoint-save cadence.
-    No-op when ``closed_loop_npz_root`` is unset. Rank-0 only: pass the unwrapped model; it is
-    switched to eval for the rollout (so the diffusion sampler runs and produces ``prediction``)
-    and restored afterwards.
-    """
+    """Run grouped or full-route closed-loop evaluation on checkpoint-save cadence."""
     if not args.closed_loop_npz_root:
         return
-    import math
 
-    from scenario_generation.closed_loop_eval import run_closed_loop_eval
+    from scenario_generation.scenario_classification import resolve_classification_json
+    from scenario_generation.wandb_closed_loop import (
+        build_full_closed_loop_wandb_log,
+        build_grouped_closed_loop_wandb_log,
+    )
+
+    explicit_classification = getattr(args, "closed_loop_classification_json", "")
+    classification_json = resolve_classification_json(
+        args.closed_loop_npz_root,
+        explicit_classification or None,
+        dataset_name=getattr(args, "closed_loop_scenario_dataset_name", "") or None,
+    )
+    if explicit_classification and classification_json is None:
+        raise FileNotFoundError(
+            f"closed-loop classification JSON does not exist: {explicit_classification}"
+        )
 
     net = ddp.get_model(model, args.ddp)
     was_training = net.training
     net.eval()
     try:
-        summary = run_closed_loop_eval(
-            net,
-            args,
-            args.closed_loop_npz_root,
-            out_dir,
-            seg_len=args.closed_loop_seg_len,
-            device=args.device,
-            near_miss_thresh=args.closed_loop_near_miss_thresh,
-            search_radius=args.closed_loop_search_radius,
-            warmup_steps=args.closed_loop_warmup_steps,
-            unstick_after=args.closed_loop_unstick_after,
-            unstick_advance_m=args.closed_loop_unstick_advance_m,
-            fps=args.closed_loop_fps,
-            replan_interval=args.closed_loop_replan_interval,
-            draw_every=args.closed_loop_draw_every,
-            neighbor_history_mode="recorded",
-            verbose=False,
-        )
+        if classification_json is not None:
+            from scenario_generation.grouped_closed_loop_eval import run_grouped_closed_loop_eval
+
+            summary = run_grouped_closed_loop_eval(
+                net,
+                args,
+                args.closed_loop_npz_root,
+                classification_json,
+                os.path.join(out_dir, "grouped"),
+                device=args.device,
+                near_miss_thresh=args.closed_loop_near_miss_thresh,
+                search_radius=args.closed_loop_search_radius,
+                warmup_steps=args.closed_loop_warmup_steps,
+                unstick_after=args.closed_loop_unstick_after,
+                unstick_advance_m=args.closed_loop_unstick_advance_m,
+                draw_every=args.closed_loop_draw_every,
+                fps=float(args.closed_loop_fps),
+                verbose=False,
+            )
+            log = build_grouped_closed_loop_wandb_log(
+                summary,
+                max_videos=getattr(args, "closed_loop_grouped_wandb_max_videos", 24),
+            )
+        else:
+            from scenario_generation.closed_loop_eval import run_closed_loop_eval
+
+            summary = run_closed_loop_eval(
+                net,
+                args,
+                args.closed_loop_npz_root,
+                out_dir,
+                seg_len=args.closed_loop_seg_len,
+                device=args.device,
+                near_miss_thresh=args.closed_loop_near_miss_thresh,
+                search_radius=args.closed_loop_search_radius,
+                warmup_steps=args.closed_loop_warmup_steps,
+                unstick_after=args.closed_loop_unstick_after,
+                unstick_advance_m=args.closed_loop_unstick_advance_m,
+                fps=args.closed_loop_fps,
+                replan_interval=args.closed_loop_replan_interval,
+                draw_every=args.closed_loop_draw_every,
+                neighbor_history_mode="recorded",
+                verbose=False,
+            )
+            log = build_full_closed_loop_wandb_log(summary)
     finally:
         net.train(was_training)
 
-    # Scalar metrics (drop non-finite clearances: a segment with no neighbor reports +inf).
-    scalar_keys = [
-        "collision_segment_rate",
-        "collision_step_rate",
-        "near_miss_segment_rate",
-        "near_miss_step_rate",
-        "global_min_clearance",
-        "mean_segment_min_clearance",
-        "mean_segment_mean_clearance",
-        "total_collision_steps",
-        "total_near_miss_steps",
-        "total_snaps",
-        "total_steps",
-    ]
-    log = {
-        f"closed_loop/{k}": summary[k]
-        for k in scalar_keys
-        if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
-    }
     if getattr(args, "use_wandb", False):
-        for mp4 in summary["video_mp4s"]:
-            log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
         wandb.log(log)
-    print(
-        f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
-        f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
-        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
-    )
+    if classification_json is not None:
+        grouped = summary["grouped_summary"]
+        print(
+            f"grouped closed-loop @epoch {epoch + 1}: "
+            f"{summary['n_episodes']}/{summary['n_episodes_expected']} episodes, "
+            f"{summary['n_bags']}/{summary['n_bags_expected']} bags in "
+            f"{summary['elapsed_sec']:.1f}s, "
+            f"reported={grouped['n_segments_total']}"
+        )
+    else:
+        print(
+            f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
+            f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
+            f"min_clr={summary['global_min_clearance']:.2f}"
+        )
 
 
 def model_training(args: TrainConfig):
