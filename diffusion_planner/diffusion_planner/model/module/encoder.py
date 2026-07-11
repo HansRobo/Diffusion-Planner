@@ -173,20 +173,22 @@ class Encoder(nn.Module):
 
     def forward(self, inputs):
         # ego agent
-        ego = inputs["ego_agent_past"].clone()  # (B, T=INPUT_T + 1, D=4)
+        ego = inputs["ego_agent_past"]  # (B, T=INPUT_T + 1, D=4)
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
-        ego = torch.cat(
-            [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
-            dim=1,
-        )  # Only keep the current + nearest 5 steps of ego history
+        else:
+            recent_ego = ego[:, -6:]
+            ego = F.pad(recent_ego, (0, 0, ego.shape[1] - recent_ego.shape[1], 0))
+        # Only keep the current + nearest 5 steps of ego history.
 
         # agents
-        neighbors = inputs["neighbor_agents_past"].clone()  # (B, N=32, T=21, D=11)
-        neighbors = torch.cat(
-            [torch.zeros_like(neighbors[:, :, :-6]), neighbors[:, :, -6:]],
-            dim=2,
-        )  # Only keep the current + first 5 steps of history
+        neighbors = inputs["neighbor_agents_past"]  # (B, N=32, T=21, D=11)
+        recent_neighbors = neighbors[:, :, -6:]
+        neighbors = F.pad(
+            recent_neighbors,
+            (0, 0, neighbors.shape[2] - recent_neighbors.shape[2], 0),
+        )
+        # Only keep the current + nearest 5 steps of neighbor history.
 
         # static objects
         static = inputs["static_objects"]  # (B, P=5, D=10)

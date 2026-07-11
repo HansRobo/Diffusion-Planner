@@ -73,11 +73,12 @@ class DiffusionPlannerData(Dataset):
 
     def __getitem__(self, idx):
         path = self.data_list[idx]
-        with np.load(path, allow_pickle=True) as archive:
+        with np.load(path, allow_pickle=False) as archive:
             data = {
                 key: archive[key]
                 for key in archive.files
-                if self.include_neighbor_futures or key != "neighbor_agents_future"
+                if key != "version"
+                and (self.include_neighbor_futures or key != "neighbor_agents_future")
             }
         normalized_idx = idx if idx >= 0 else len(self.data_list) + idx
         source_idx = normalized_idx * self._source_index_stride

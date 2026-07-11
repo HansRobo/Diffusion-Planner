@@ -1,8 +1,22 @@
 import torch
+from diffusion_planner.hdp_rl_epoch import _policy_observation_inputs
 from train_hdp_rl_predictor import (
     best_valid_score_from_rows,
     configure_rl_trainable_parameters,
 )
+
+
+def test_all_scope_does_not_expand_reward_only_futures():
+    observations = {
+        "ego_current_state": torch.zeros(2, 10),
+        "lanes": torch.zeros(2, 4, 3),
+        "ego_agent_future": torch.zeros(2, 80, 4),
+        "neighbor_agents_future": torch.zeros(2, 320, 80, 3),
+    }
+
+    policy_inputs = _policy_observation_inputs(observations)
+
+    assert set(policy_inputs) == {"ego_current_state", "lanes"}
 
 
 class _TinyPlanner(torch.nn.Module):
@@ -11,6 +25,7 @@ class _TinyPlanner(torch.nn.Module):
         self.encoder = torch.nn.Linear(1, 1)
         self.decoder = torch.nn.Module()
         self.decoder.dit = torch.nn.Linear(1, 1)
+        self.decoder.global_route_encoder = torch.nn.Linear(1, 1)
         self.decoder.turn_indicator_predictor = torch.nn.Linear(1, 1)
 
 
@@ -21,6 +36,9 @@ def test_all_scope_freezes_only_the_unused_turn_head():
 
     assert all(value for name, value in state.items() if name.startswith("encoder."))
     assert all(value for name, value in state.items() if name.startswith("decoder.dit."))
+    assert all(
+        value for name, value in state.items() if name.startswith("decoder.global_route_encoder.")
+    )
     assert not any(
         value
         for name, value in state.items()
@@ -35,6 +53,9 @@ def test_decoder_scope_freezes_encoder_and_turn_head():
 
     assert not any(value for name, value in state.items() if name.startswith("encoder."))
     assert all(value for name, value in state.items() if name.startswith("decoder.dit."))
+    assert all(
+        value for name, value in state.items() if name.startswith("decoder.global_route_encoder.")
+    )
     assert not any(
         value
         for name, value in state.items()

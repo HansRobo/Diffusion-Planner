@@ -36,7 +36,7 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_p
   --batch_size 512 \
   --learning_rate 2e-4 \
   --warm_up_epoch 5 \
-  --train_epochs 60 \
+  --train_epochs 20 \
   --save_utd 10 \
   --future_len 80 \
   --time_len 31 \
@@ -50,14 +50,15 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_p
   --hybrid_loss_window 10 \
   --turn_indicator_generated_loss_weight 1.0 \
   --turn_indicator_expert_loss_weight 1.0 \
-  --diffusion_sample_steps 10 \
+  --diffusion_sample_steps 6 \
   --enable_epdms_eval True \
   --use_wandb True \
   --wandb_project_name Diffusion-Planner-Temporal \
   --tf32 True \
   --amp_dtype bf16 \
   --fused_optimizer True \
-  --ddp_static_graph True
+  --ddp_static_graph True \
+  --compile_model True
 ```
 
 ## HDP SFT
@@ -80,12 +81,13 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_p
   --use_velocity_representation True \
   --planning_hybrid_loss 0.01 \
   --hybrid_loss_window 10 \
-  --diffusion_sample_steps 10 \
+  --diffusion_sample_steps 6 \
   --enable_epdms_eval True \
   --use_wandb True \
   --wandb_project_name Diffusion-Planner-Temporal \
   --tf32 True \
-  --amp_dtype bf16
+  --amp_dtype bf16 \
+  --compile_model True
 ```
 
 Use `--resume_model_path` only for continuing the same interrupted run. Do not use it for base-to-SFT or SFT-to-RL transfer.
@@ -124,7 +126,7 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_h
   --use_velocity_representation True \
   --planning_hybrid_loss 0.01 \
   --hybrid_loss_window 10 \
-  --diffusion_sample_steps 10 \
+  --diffusion_sample_steps 6 \
   --multisample_eval_num_samples 6 \
   --multisample_eval_sample_steps 6 \
   --rl_full_eval_utd 5 \
@@ -132,10 +134,15 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_h
   --use_wandb True \
   --wandb_project_name Diffusion-Planner-Temporal \
   --tf32 True \
-  --amp_dtype bf16
+  --amp_dtype bf16 \
+  --compile_model True
 ```
 
 Important semantics:
+
+- `--compile_model True` compiles the encoder and decoder in place. Checkpoint keys and ONNX
+  export remain unchanged. Set `TORCHINDUCTOR_CACHE_DIR` to persistent local storage so restarts
+  reuse compiled artifacts.
 
 - `--init_weights_path`: fresh RL run initialized from SFT weights only; by default it selects the SFT EMA shadow.
 - `--resume_model_path`: strict resume of an interrupted RL run, including optimizer/scheduler state.

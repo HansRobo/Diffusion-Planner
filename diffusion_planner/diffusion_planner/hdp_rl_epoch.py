@@ -39,8 +39,17 @@ def _set_hdp_rl_train_mode(model, args):
 def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
     mask = neighbor_future_padding_mask(neighbor_future_raw)
     neighbors_future = heading_to_cos_sin(neighbor_future_raw)
-    neighbors_future[mask] = 0.0
+    neighbors_future.masked_fill_(mask.unsqueeze(-1), 0.0)
     return neighbors_future
+
+
+def _policy_observation_inputs(norm_inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Drop supervision-only futures before candidate batch expansion."""
+    return {
+        key: value
+        for key, value in norm_inputs.items()
+        if key not in {"ego_agent_future", "neighbor_agents_future"}
+    }
 
 
 def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug, profile=False):
@@ -69,7 +78,7 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
     if getattr(args, "rl_train_scope", "decoder") == "decoder":
         decoder_inputs = {"ego_current_state": norm_inputs["ego_current_state"]}
     else:
-        decoder_inputs = norm_inputs
+        decoder_inputs = _policy_observation_inputs(norm_inputs)
     norm_exp = expand_batch(decoder_inputs, n)
     if getattr(args, "rl_train_scope", "decoder") == "decoder":
         # Keep one route tensor per scene. Decoder compresses it inside the DDP forward,
@@ -163,9 +172,10 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
 
     grouped_reward = reward.reshape(num_scenes, n)
     endpoints = ego_world[:, -1, :2].reshape(num_scenes, n, 2)
-    endpoint_diversity = torch.stack(
-        [torch.pdist(scene_endpoints).mean() for scene_endpoints in endpoints]
-    ).mean()
+    endpoint_distances = torch.linalg.vector_norm(
+        endpoints[:, :, None] - endpoints[:, None, :], dim=-1
+    )
+    endpoint_diversity = endpoint_distances.sum() / max(num_scenes * n * (n - 1), 1)
     result = {
         "loss": loss_dict["loss"].detach(),
         "rl_loss": loss_dict["loss"].detach(),

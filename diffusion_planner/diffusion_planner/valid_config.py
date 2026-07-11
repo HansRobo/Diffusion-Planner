@@ -22,6 +22,7 @@ class ValidConfig:
     agent_num: int = 32
     predicted_neighbor_num: int = 0
     ddp: bool = True
+    compile_model: bool = True
     port: str = "22323"
 
     enable_epdms_eval: bool = True

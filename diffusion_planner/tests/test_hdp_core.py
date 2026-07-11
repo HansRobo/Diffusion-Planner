@@ -16,6 +16,7 @@ from diffusion_planner.hdp_rl_utils import (
     _attenuate_rear_only_risk,
     _collision_and_leader_terms,
     _hdp_lane_score,
+    _lane_reward_centerlines,
     _occupancy_score,
     _scene_neighbors,
     compute_reward_weights,
@@ -54,15 +55,16 @@ from diffusion_planner.utils.onnx_export import (
     build_dynamic_axes,
 )
 from diffusion_planner.utils.train_utils import (
+    ModelEma,
     atomic_torch_save,
     capture_rng_state,
+    compile_model_components,
     compute_grad_stats,
     finalize_epoch_loss_sums,
     resume_model,
     update_epoch_loss_sums,
 )
 from diffusion_planner.validate_model import _multisample_metrics, aggregate_valid_metrics
-from timm.utils import ModelEma
 
 
 def test_hdp_representation_and_normalization_round_trip():
@@ -85,6 +87,61 @@ def test_hdp_representation_and_normalization_round_trip():
     torch.testing.assert_close(
         inverse_normalize_ego_velocity(normalized, normalizer), velocity, rtol=0, atol=0
     )
+
+
+def test_state_normalizer_caches_stats_by_kind_device_and_dtype():
+    normalizer = StateNormalizer(
+        [[[10, 0, 0, 0]]],
+        [[[20, 20, 1, 1]]],
+        [0, 0, 0, 0],
+        [0.5, 0.5, 1, 1],
+    )
+
+    state_fp32 = normalizer._mean_std_on(torch.device("cpu"), torch.float32)
+    velocity_fp32 = normalizer.ego_velocity_stats_on(torch.device("cpu"), torch.float32)
+    state_bf16 = normalizer._mean_std_on(torch.device("cpu"), torch.bfloat16)
+
+    assert state_fp32[0] is normalizer._mean_std_on(torch.device("cpu"), torch.float32)[0]
+    assert (
+        velocity_fp32[0] is normalizer.ego_velocity_stats_on(torch.device("cpu"), torch.float32)[0]
+    )
+    assert state_fp32[0] is not velocity_fp32[0]
+    assert state_fp32[0].dtype == torch.float32
+    assert state_bf16[0].dtype == torch.bfloat16
+    data = torch.tensor([[[[0.5, -0.25, 1.0, 0.0]]]], dtype=torch.float32)
+    expected = (data - torch.tensor([0.0, 0.0, 0.0, 0.0])) / torch.tensor([0.5, 0.5, 1.0, 1.0])
+    torch.testing.assert_close(normalize_ego_velocity(data, normalizer), expected)
+
+
+def test_observation_normalizer_preserves_zero_padding_in_both_directions():
+    normalizer = ObservationNormalizer(
+        {"feature": {"mean": torch.tensor([2.0, -3.0]), "std": torch.tensor([2.0, 4.0])}}
+    )
+    data = {"feature": torch.tensor([[[0.0, 0.0], [4.0, 5.0]]])}
+
+    normalized = normalizer(data)
+    restored = normalizer.inverse(normalized)
+
+    torch.testing.assert_close(normalized["feature"][0, 0], torch.zeros(2))
+    torch.testing.assert_close(normalized["feature"][0, 1], torch.tensor([1.0, 2.0]))
+    torch.testing.assert_close(restored["feature"], data["feature"])
+
+
+def test_compile_model_components_preserves_checkpoint_keys():
+    class TinyPlanner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder = torch.nn.Linear(2, 2)
+            self.decoder = torch.nn.Linear(2, 2)
+
+    model = TinyPlanner()
+    keys_before = tuple(model.state_dict())
+
+    compile_model_components(model)
+
+    assert tuple(model.state_dict()) == keys_before
+    assert model.encoder._compiled_call_impl is not None
+    assert model.decoder._compiled_call_impl is not None
 
 
 def test_hdp_dit_self_attention_runs_over_future_timesteps():
@@ -197,7 +254,9 @@ def test_hdp_decoder_repeats_only_global_route_condition_for_rl_groups():
     output = decoder(encoding, inputs)["model_output"]
     assert output.shape == (candidate_batch, 1, 80, 4)
     output.square().mean().backward()
-    assert all(parameter.grad is not None for parameter in decoder.global_route_encoder.parameters())
+    assert all(
+        parameter.grad is not None for parameter in decoder.global_route_encoder.parameters()
+    )
 
 
 def test_hdp_temporal_position_initialization_matches_navsim_frequency_base():
@@ -538,7 +597,16 @@ def test_hdp_neighbor_at_ego_origin_remains_valid():
     raw = torch.zeros(1, 3, 3)
     raw[:, 0, 0] = 1.0
     converted = heading_to_cos_sin_if_needed(raw)
-    torch.testing.assert_close(converted[:, 1:], torch.zeros_like(converted[:, 1:]))
+    torch.testing.assert_close(converted[..., :2], raw[..., :2])
+    torch.testing.assert_close(converted[..., 2], torch.ones_like(converted[..., 2]))
+    torch.testing.assert_close(converted[..., 3], torch.zeros_like(converted[..., 3]))
+
+
+def test_hdp_stationary_ego_future_is_not_treated_as_padding():
+    converted = heading_to_cos_sin_if_needed(torch.zeros(2, 80, 3))
+
+    assert converted[..., 2].eq(1.0).all()
+    assert converted[..., 3].eq(0.0).all()
 
 
 def test_neighbor_future_mask_preserves_internal_zero_pose():
@@ -652,6 +720,26 @@ def test_hdp_lane_reward_masks_centerline_to_centerline_change_without_indicator
     torch.testing.assert_close(lane_score, torch.zeros(1))
 
 
+def test_hdp_lane_reward_prefers_aligned_route_and_falls_back_when_route_is_wrong():
+    x = torch.linspace(0.1, 20.0, 20)
+    lanes = torch.zeros(2, 20, 8)
+    lanes[:, :, 0] = x
+    lanes[1, :, 1] = 3.5
+    lanes[..., 2] = 1.0
+    expert = lanes[0, :, :4].clone()
+
+    aligned_route = lanes[:1].clone()
+    selected, route_used = _lane_reward_centerlines(expert, lanes, aligned_route, HDPRewardConfig())
+    assert route_used
+    torch.testing.assert_close(selected, aligned_route)
+
+    wrong_route = aligned_route.clone()
+    wrong_route[..., 1] = 20.0
+    selected, route_used = _lane_reward_centerlines(expert, lanes, wrong_route, HDPRewardConfig())
+    assert not route_used
+    torch.testing.assert_close(selected, lanes)
+
+
 def test_seeded_multisample_metrics_compute_minade_and_minfde():
     class FakeModel(torch.nn.Module):
         def __init__(self):
@@ -696,7 +784,7 @@ def test_seeded_multisample_metrics_compute_minade_and_minfde():
     torch.testing.assert_close(metrics["multisample_minFDE"], torch.tensor([1.0]))
 
 
-def test_multisample_metrics_exclude_scenes_without_valid_ground_truth():
+def test_multisample_metrics_include_valid_stationary_scenes():
     class FakeModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -737,8 +825,9 @@ def test_multisample_metrics_exclude_scenes_without_valid_ground_truth():
         0,
     )
 
-    assert all(value.shape == (1,) for value in metrics.values())
-    torch.testing.assert_close(metrics["multisample_minADE"], torch.tensor([1.0]))
+    assert all(value.shape == (2,) for value in metrics.values())
+    torch.testing.assert_close(metrics["multisample_minADE"], torch.tensor([0.0, 1.0]))
+    torch.testing.assert_close(metrics["multisample_minFDE"], torch.tensor([0.0, 1.0]))
 
 
 def test_turn_indicator_class_metrics_keep_counts_visible():
@@ -788,6 +877,27 @@ def test_empty_multisample_metrics_aggregate_to_nan_not_false_zero():
     )
 
     assert math.isnan(metrics["multisample_means"]["minADE"])
+
+
+def test_epdms_metric_without_availability_excludes_nonfinite_values():
+    metrics = aggregate_valid_metrics(
+        {
+            "_loss_ego_sum": 0.0,
+            "_samples_ego": 1,
+            "_loss_neighbor_sum": 0.0,
+            "_samples_neighbor": 0,
+            "_turn_correct": 0,
+            "_turn_total": 0,
+            "_turn_change_correct": 0,
+            "turn_indicator_change_total": 0,
+            "_turn_class_correct": [0, 0, 0, 0, 0],
+            "_turn_class_total": [0, 0, 0, 0, 0],
+            "epdms_unmasked_metric": torch.tensor([0.25, float("nan"), 0.75]),
+        },
+        "cpu",
+    )
+
+    assert metrics["epdms_means"]["unmasked_metric"] == pytest.approx(0.5)
 
 
 def test_ego_only_supervised_loss_and_onnx_shapes():
@@ -899,6 +1009,8 @@ def test_rl_ema_rate_005_maps_to_timm_decay_095():
     with torch.no_grad():
         model.weight.zero_()
     ema = ModelEma(model, decay=0.95, device="cpu")
+    assert ema.foreach
+    assert ema.ema is ema.module
     with torch.no_grad():
         model.weight.fill_(1.0)
     ema.update(model)

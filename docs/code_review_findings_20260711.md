@@ -112,10 +112,10 @@
 - 问题：`extra_train_set_mask_traffic_lights` 按路径字符串成员（`path in traffic_light_mask_paths`）判定；同一路径若同时在 base 与 extra 列表中，其 **base 侧样本也被掩码**，违反"仅对 extra 样本掩码"的文档承诺。审计文档记录 node01 base∩extra = 33,913 条重叠（当前 sbatch 用过滤后列表规避了，但 API 陷阱仍在）。
 - 修复方向：按索引区间（extra 段起始下标）而非路径成员判定。
 
-### 18. 多样本评测中无效 GT 样本污染 minADE/minFDE
+### 18. 多样本评测曾错误地从 xy 非零值推断 ego GT 有效性
 - 位置：`diffusion_planner/diffusion_planner/validate_model.py:229`（`valid[no_valid] = True`）
-- 问题：ego future 全无效的样本被伪造为有效，其"minADE"是相对零填充原点的伪距离，直接混入均值。
-- 修复方向：将此类样本从均值中剔除（分子分母都不计）。
+- 最终复核：原发现不成立。ego future 没有 padding mask，数据契约固定为完整 80 帧；合法停车可以表现为全零 `(x,y,yaw)`。从 xy 是否非零推断有效性会系统性漏掉停车场景。
+- 最终修复：严格按论文定义，对全部 80 个 waypoints 计算 ADE，并在第 80 帧计算 FDE。
 
 ### 19. `rl_reward_normalize=batch` 不丢弃同奖励组
 - 位置：`diffusion_planner/diffusion_planner/hdp_rl_utils.py:697`
@@ -200,7 +200,7 @@
 | 15 | 成立 | HDP-only 分支完整删除永远不可达的 split decoder 导出/验证路径，只保留 full/encoder/turn 图。 |
 | 16 | 成立 | supervised/RL 两个循环都在每个 epoch 开始前调用 `sampler.set_epoch(epoch)`，严格 resume 不再复用 epoch-0 shuffle。 |
 | 17 | 成立 | Dataset 用 extra 起始索引和 subsample stride 按 occurrence 判定，不再按路径集合命中，也不分配 958 万项来源列表。base list/NPZ 未修改。 |
-| 18 | 成立 | 无任何有效 GT timestep 的 scene 从所有 multisample 均值分子和分母中排除；新增混合有效/无效 batch 测试；全空集合报告 NaN 而非伪装成 0。 |
+| 18 | 原报告不成立，已纠正 | ego future 是固定 80 帧且无 padding mask；合法停车可为全零。multisample ADE/FDE 现按论文定义覆盖全部 80 帧，并新增静止场景测试。 |
 | 19 | 成立 | “同场景候选奖励全相同则丢弃”现在独立于 normalization mode，group/batch/none 都执行；默认仍是论文的 group normalization。 |
 | 20 | 成立 | `valid_group_fraction` 改为每组 `.any(dim=1)`，不再只读 candidate 0。 |
 | 21 | 成立，但最佳修复不是移动 clamp | endpoint heading/acos 判据随错误的 ego-y lane-change proxy 一起删除，因此 NaN 路径不存在。 |
@@ -221,3 +221,25 @@
 - Ruff import lint、format check、`git diff --check`：通过。
 - 当前 BaseTrain epoch-1 EMA checkpoint：成功加载到精简后的 Decoder，state dict 无缺失/多余 key。
 - ONNX：full/encoder/turn checker 通过；PyTorch/ORT parity 通过；full graph 动态 batch 1/2 通过；真实 validation NPZ 输出 `[1,1,80,4]`，最大差约 `7.6e-6`。
+
+## 第三轮独立全仓复核（同日追加）
+
+在上述 25 项全部完成后，又对训练恢复、DDP、RL all-scope、独立验证、场景闭环和
+ONNX 实机路径做了一轮独立复核，新增并修复：
+
+27. 独立 validation 不再构造 dummy AdamW/EMA 或恢复 optimizer、scheduler、RNG；直接优先加载 EMA 权重，避免额外 GPU 状态和验证随机数被 checkpoint 覆盖。
+28. `scenario_generation.load_model` 原先总是加载 live policy，现默认优先 checkpoint EMA，与训练验证和 ONNX 保持一致；真实 epoch-1 checkpoint 已逐参数确认。
+29. 没有 availability tensor 的 EPDMS 子指标不再把 NaN/Inf 当作分母中的零分样本，而是从分子和分母同时排除。
+30. grouped closed-loop 的两阶段 unstick 参数原先在 CLI 调用链中静默丢失，现完整传至 rollout state。
+31. grouped episode 完成度原先使用整条 route 的全局最大 index，可能把完全跳过的早期 episode 标成完成；现只使用 episode 视频区间内实际访问的 index。near-miss 也不再重复计入负 clearance 的 collision steps。
+32. 直接启动且没有 torchrun/Slurm 环境时，DDP fallback 原先仍保留 `ddp=True` 并在后续 collective 崩溃；现一致回退单进程。显式 `cuda:0` 在多卡 DDP 下也会按 `LOCAL_RANK` 绑定，非 DDP 的 `cuda:N` 仍被保留。
+33. resume 后周期 checkpoint/closed-loop 原先相对 `init_epoch` 重新计数，可能把 epoch 10/20 漂移到 17；SFT/RL 均改为绝对 epoch cadence。
+34. RL `all` scope 原先把 320x80 的 reward-only neighbor future 复制到每个候选，默认 32 generations 时可能 OOM；policy batch 现剔除 ego/neighbor supervision futures，reward 保留每场景原张量。
+35. RL 启动参数新增数学有效性检查（reward 权重、normalization epsilon、时间步长和 shaping 阈值）；仍允许 occupancy source 缺失并通过 source coverage 指标显式记录，不增加用户已拒绝的严格报错模式。
+36. ONNX CLI 不再在 import 时永久关闭 Flash-SDP/MHA fastpath，只在已有的可恢复导出上下文中切换；真实 NPZ 的 full/encoder/turn ORT parity 重新通过，full graph 动态 batch=2 最大差约 `1.9e-5`。
+37. 训练和场景主路径的 NPZ 读取关闭 pickle，并只解压实际消费字段；正式 JT 样本已通过 SceneContext、RouteTimeline 和 ONNX 输入实读。
+38. PyTorch 2.11 在分组件编译边界探测非叶子 encoder 输出时会产生上游 `.grad` 假阳性 warning；过滤范围限定在 Dynamo 内部模块。保留分组件方案，因为 H100 B64 稳态约 185 ms，而整图编译实测约 206 ms（慢约 12%）。
+
+追加验证：根目录 `368 passed, 15 skipped`（`PYTHONWARNINGS=error`）；pre-commit 全通过；
+2xH100 compiled DDP 真实 checkpoint forward/backward 后两 rank 参数 checksum 完全一致；
+EMA 场景推理输出有限且形状为 `[1,1,80,4]`。

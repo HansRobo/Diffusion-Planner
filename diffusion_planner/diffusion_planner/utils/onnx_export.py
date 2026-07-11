@@ -302,7 +302,7 @@ def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusio
     else:
         state_dict = ckpt["model"]
         print("Loading regular model weights")
-    model.load_state_dict({k.replace("module.", ""): v for k, v in state_dict.items()})
+    model.load_state_dict({k.removeprefix("module."): v for k, v in state_dict.items()})
     return model
 
 

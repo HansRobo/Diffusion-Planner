@@ -8,6 +8,7 @@ import torch
 import scenario_generation.replay as replay
 from planner_metrics.config import RewardConfig
 from scenario_generation.reproducer_rollout import _add_static_inputs
+from scenario_generation.simulate import _checkpoint_model_state
 
 
 def test_reproducer_static_inputs_match_temporal_hdp_shape():
@@ -18,6 +19,23 @@ def test_reproducer_static_inputs_match_temporal_hdp_shape():
 
     assert set(data) == {"sampled_trajectories"}
     assert data["sampled_trajectories"].shape == (3, 1, 80, 4)
+
+
+def test_scenario_model_loading_prefers_ema_with_live_fallback():
+    live = {"weight": torch.tensor(1.0)}
+    ema = {"weight": torch.tensor(2.0)}
+
+    selected, kind = _checkpoint_model_state(
+        {"model": live, "ema_state_dict": ema}, prefer_ema=True
+    )
+    assert selected is ema
+    assert kind == "EMA"
+
+    selected, kind = _checkpoint_model_state(
+        {"model": live, "ema_state_dict": None}, prefer_ema=True
+    )
+    assert selected is live
+    assert kind == "live"
 
 
 def test_replay_reward_serializes_scalar_and_per_timestep_subscores(monkeypatch):

@@ -164,6 +164,7 @@ class TrainConfig:
     amp_dtype: Literal["off", "bf16"] = "bf16"
     fused_optimizer: bool = True
     ddp_static_graph: bool = True
+    compile_model: bool = True
     export_onnx_on_save: bool = False
 
     device: str = "cuda"
@@ -214,6 +215,9 @@ class TrainConfig:
     closed_loop_warmup_steps: int = 0
     closed_loop_unstick_after: int = 300
     closed_loop_unstick_advance_m: float = 2.5
+    closed_loop_classification_json: str = ""
+    closed_loop_scenario_dataset_name: str = ""
+    closed_loop_grouped_wandb_max_videos: int = 24
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)

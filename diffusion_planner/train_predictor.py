@@ -332,6 +332,12 @@ def get_args(args_list=None):
         help="enable DDP static_graph optimizations (graph must stay identical every step)",
     )
     parser.add_argument(
+        "--compile_model",
+        type=boolean,
+        default=_train_config_default("compile_model"),
+        help="compile the encoder and decoder with TorchInductor",
+    )
+    parser.add_argument(
         "--export_onnx_on_save",
         type=boolean,
         default=_train_config_default("export_onnx_on_save"),
@@ -375,6 +381,24 @@ def get_args(args_list=None):
         type=float,
         default=_train_config_default("closed_loop_unstick_advance_m"),
     )
+    parser.add_argument(
+        "--closed_loop_classification_json",
+        type=str,
+        default="",
+        help="scenario classification JSON for grouped closed-loop evaluation",
+    )
+    parser.add_argument(
+        "--closed_loop_scenario_dataset_name",
+        type=str,
+        default="",
+        help="dataset-relative name used to auto-resolve a scenario classification JSON",
+    )
+    parser.add_argument(
+        "--closed_loop_grouped_wandb_max_videos",
+        type=int,
+        default=_train_config_default("closed_loop_grouped_wandb_max_videos"),
+        help="maximum grouped episode videos uploaded to W&B per evaluation",
+    )
 
     args = parser.parse_args(args_list)
     if args.train_subsample_step < 1:
@@ -383,6 +407,8 @@ def get_args(args_list=None):
         raise ValueError("--batch_size must be >= 1")
     if args.save_utd < 1:
         raise ValueError("--save_utd must be >= 1")
+    if args.closed_loop_grouped_wandb_max_videos < 0:
+        raise ValueError("--closed_loop_grouped_wandb_max_videos must be >= 0")
     if args.train_epochs < 1:
         raise ValueError("--train_epochs must be >= 1")
     if not 0 <= args.warm_up_epoch <= args.train_epochs:
@@ -397,9 +423,9 @@ def get_args(args_list=None):
         raise ValueError("--planning_hybrid_loss must be >= 0")
     if args.diffusion_sample_steps < 2:
         raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
-    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
+    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
         raise ValueError(
-            "--multisample_eval_sample_steps must be >= 3 for the third-order DPM solver"
+            "--multisample_eval_sample_steps must be >= 2 for the second-order DPM solver"
         )
     if args.learning_rate <= 0.0:
         raise ValueError("--learning_rate must be > 0")

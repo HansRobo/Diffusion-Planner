@@ -1,0 +1,307 @@
+"""Full-route closed-loop rollout with per-step map-area tagging for grouped eval."""
+
+from __future__ import annotations
+
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+import torch
+from diffusion_planner.utils.scene_skip import is_skipped
+
+from scenario_generation.closed_loop_eval import build_mp4
+from scenario_generation.metrics.centerline_deviation import lateral_offset_from_route_lanes
+from scenario_generation.metrics.safety_clearance import score_safety_step
+from scenario_generation.metrics.turn_indicator import score_turn_indicator_step
+from scenario_generation.perf_timer import Timers
+from scenario_generation.reproducer_rollout import (
+    _advance_step,
+    _draw_step,
+    _pre_step,
+    _seed_state,
+    _to_torch_batch,
+)
+from scenario_generation.route_timeline import RouteTimeline
+from scenario_generation.scenario_classification import AreaEpisode, area_at_idx
+
+
+@dataclass
+class StepRecord:
+    k: int
+    rec_idx: int
+    area: str | None
+    centerline_m: float | None = None
+    turn_match: bool | None = None
+    clearance_m: float = float("inf")
+    rb_dist_m: float = float("inf")
+    collision: bool = False
+    neighbor_violation: bool = False
+    rb_violation: bool = False
+    png_path: Path | None = None
+
+
+@dataclass
+class RouteRolloutResult:
+    route_key: str
+    sequence: str
+    steps: list[StepRecord] = field(default_factory=list)
+    png_dir: Path | None = None
+    n_steps_run: int = 0
+    terminated: str = ""
+
+
+def _percentile(arr: np.ndarray, q: float) -> float:
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return float("inf")
+    return float(np.percentile(finite, q))
+
+
+@torch.no_grad()
+def run_full_route_rollout(
+    model,
+    model_args,
+    tl: RouteTimeline,
+    route_key: str,
+    sequence: str,
+    segments: list[AreaEpisode],
+    area_to_metric_group: dict[str, str],
+    png_dir: Path | None,
+    *,
+    device: str = "cuda",
+    near_miss_thresh: float = 0.3,
+    search_radius: float = 1.5,
+    warmup_steps: int = 0,
+    unstick_after: int = 300,
+    unstick_advance_m: float = 2.5,
+    unstick_radius_mult: float = 3.0,
+    unstick_teleport_after: int = 300,
+    draw_every: int = 8,
+) -> RouteRolloutResult:
+    """One closed-loop pass over the entire route; tag each step by reproducer ``rec_idx`` area."""
+    n = len(tl)
+    if n < 2:
+        return RouteRolloutResult(route_key=route_key, sequence=sequence)
+
+    if png_dir is not None:
+        png_dir.mkdir(parents=True, exist_ok=True)
+
+    cap = max(3 * n, n)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        n,
+        search_radius,
+        warmup_steps,
+        near_miss_thresh,
+        goal_reach_m=5.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=cap,
+        unstick_after=unstick_after,
+        unstick_advance_m=unstick_advance_m,
+        unstick_radius_mult=unstick_radius_mult,
+        unstick_teleport_after=unstick_teleport_after,
+        neighbor_history_mode="recorded",
+        goal_mode="route",
+    )
+
+    steps: list[StepRecord] = []
+
+    while not s.done:
+        pre = _pre_step(s)
+        if pre is None:
+            break
+        np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
+        area = area_at_idx(segments, int(idx))
+        metric_group = area_to_metric_group.get(area) if area else None
+
+        turn_match = None
+        data = _to_torch_batch([np_dict], model_args, device)
+        _, outputs = model(data)
+        pred_cur = outputs["prediction"][0, 0].cpu().numpy()
+        if metric_group is not None:
+            ti = score_turn_indicator_step(outputs, metric_group)
+            if ti["turn_match"] is not None:
+                turn_match = bool(ti["turn_match"])
+
+        centerline_m = None
+        if metric_group in ("straight", "curve"):
+            centerline_m = lateral_offset_from_route_lanes(np_dict["route_lanes"])
+
+        safety = score_safety_step(
+            neighbors_live,
+            s.ego_shape,
+            np_dict,
+            device,
+            margin_m=near_miss_thresh,
+        )
+
+        png_path = None
+        if png_dir is not None and s.k % draw_every == 0:
+            out_path = png_dir / f"{s.k:05d}.png"
+            nids = tl.neighbor_ids(idx) if slot_uuids is None else slot_uuids
+            _draw_step(
+                np_dict,
+                pred_cur,
+                s.ego_shape,
+                out_path,
+                neighbor_ids=nids,
+                step=s.k,
+                total=cap,
+            )
+            png_path = out_path
+
+        steps.append(
+            StepRecord(
+                k=int(s.k),
+                rec_idx=int(idx),
+                area=area,
+                centerline_m=centerline_m,
+                turn_match=turn_match,
+                clearance_m=float(safety["clearance_m"]),
+                rb_dist_m=float(safety["rb_dist_m"]),
+                collision=bool(safety["collision"]),
+                neighbor_violation=bool(safety["neighbor_violation"]),
+                rb_violation=bool(safety["rb_violation"]),
+                png_path=png_path,
+            )
+        )
+
+        _advance_step(s, pred_cur, idx, device, timers)
+
+    return RouteRolloutResult(
+        route_key=route_key,
+        sequence=sequence,
+        steps=steps,
+        png_dir=png_dir,
+        n_steps_run=int(s.k),
+        terminated=s.terminated,
+    )
+
+
+def aggregate_area_metrics(
+    steps: list[StepRecord],
+    area_name: str,
+    metric_group: str,
+    route_key: str,
+    bag_name: str,
+    tl: RouteTimeline,
+    *,
+    labeled_ranges: list[list[int]],
+    video_start_idx: int,
+    video_end_idx: int,
+    span_index: int,
+    near_miss_thresh: float = 0.3,
+) -> dict | None:
+    """Aggregate metrics on labeled, non-skipped frames only."""
+    from scenario_generation.scenario_classification import idx_in_labeled_ranges
+
+    area_steps = [
+        st
+        for st in steps
+        if st.area == area_name
+        and idx_in_labeled_ranges(st.rec_idx, labeled_ranges)
+        and not is_skipped(tl.npz_paths[st.rec_idx])
+    ]
+    f_start = int(tl.frame_indices[video_start_idx])
+    f_end = int(tl.frame_indices[min(video_end_idx - 1, len(tl.frame_indices) - 1)])
+
+    cl = np.array(
+        [st.centerline_m for st in area_steps if st.centerline_m is not None],
+        dtype=np.float32,
+    )
+    tm = np.array(
+        [st.turn_match for st in area_steps if st.turn_match is not None],
+        dtype=bool,
+    )
+    clearances = np.array([st.clearance_m for st in area_steps], dtype=np.float32)
+    rb_distances = np.array([st.rb_dist_m for st in area_steps], dtype=np.float32)
+    collisions = [st.collision for st in area_steps]
+    finite_clearance = clearances[np.isfinite(clearances)]
+    finite_rb = rb_distances[np.isfinite(rb_distances)]
+    finite_centerline = cl[np.isfinite(cl)]
+    final_labeled_idx = max(int(end) for _, end in labeled_ranges) - 1
+    episode_indices = [
+        step.rec_idx for step in steps if video_start_idx <= step.rec_idx < video_end_idx
+    ]
+    episode_max_idx = max(episode_indices, default=video_start_idx - 1)
+    episode_reached = bool(episode_indices)
+    reached_end = episode_max_idx >= final_labeled_idx
+    span_length = max(video_end_idx - video_start_idx, 1)
+    span_progress = min(
+        max((episode_max_idx - video_start_idx + 1) / span_length, 0.0),
+        1.0,
+    )
+
+    base = {
+        "metric_group": metric_group,
+        "area_name": area_name,
+        "sequence": route_key,
+        "bag": bag_name,
+        "span_index": span_index,
+        "list_start_idx": video_start_idx,
+        "list_end_idx": video_end_idx,
+        "labeled_ranges": labeled_ranges,
+        "segment": f"[{f_start},{f_end}]",
+        "n_steps_run": len(area_steps),
+        "terminated": "area_span" if area_steps else "unreached",
+        "episode_reached": episode_reached,
+        "episode_completed": reached_end,
+        "episode_progress_fraction": span_progress,
+        "min_clearance": float(finite_clearance.min()) if finite_clearance.size else None,
+        "mean_clearance": float(finite_clearance.mean()) if finite_clearance.size else None,
+        "n_collision_steps": int(sum(collisions)),
+        "n_near_miss_steps": int(np.sum((clearances >= 0.0) & (clearances <= near_miss_thresh))),
+        "n_snaps": 0,
+        "centerline_mean_m": float(finite_centerline.mean()) if finite_centerline.size else None,
+        "centerline_p95_m": _percentile(finite_centerline, 95) if finite_centerline.size else None,
+        "centerline_max_m": float(finite_centerline.max()) if finite_centerline.size else None,
+        "turn_match_rate": float(tm.mean()) if tm.size else None,
+        "neighbor_violation_steps": int(sum(st.neighbor_violation for st in area_steps)),
+        "rb_violation_steps": int(sum(st.rb_violation for st in area_steps)),
+        "collision_steps": int(sum(collisions)),
+        "min_clearance_m": float(finite_clearance.min()) if finite_clearance.size else None,
+        "min_rb_dist_m": float(finite_rb.min()) if finite_rb.size else None,
+        "video_path": "",
+    }
+    return base
+
+
+def build_area_video(
+    rollout: RouteRolloutResult,
+    out_mp4: Path,
+    fps: float,
+    *,
+    video_start_idx: int,
+    video_end_idx: int,
+) -> bool:
+    """Copy PNGs for a continuous video span (includes unlabeled stopping gaps)."""
+    if rollout.png_dir is None:
+        return False
+    video_steps = [
+        st
+        for st in rollout.steps
+        if st.png_path is not None and video_start_idx <= st.rec_idx < video_end_idx
+    ]
+    if not video_steps:
+        return False
+
+    staging = out_mp4.parent / f"_staging_{out_mp4.stem}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    for st in sorted(video_steps, key=lambda x: x.k):
+        if st.png_path and st.png_path.is_file():
+            shutil.copy2(st.png_path, staging / f"{st.png_path.name}")
+
+    if not any(staging.glob("*.png")):
+        shutil.rmtree(staging, ignore_errors=True)
+        return False
+
+    build_mp4(staging, out_mp4, fps)
+    shutil.rmtree(staging, ignore_errors=True)
+    return True

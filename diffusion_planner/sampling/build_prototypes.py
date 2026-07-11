@@ -174,7 +174,8 @@ def load_xy_futures(paths, max_samples, seed):
     feats, T = [], None
     for path in tqdm(paths, desc="Loading ego futures", unit="file"):
         try:
-            ego_future = np.load(path, allow_pickle=True)["ego_agent_future"].astype(np.float32)
+            with np.load(path, allow_pickle=False) as archive:
+                ego_future = archive["ego_agent_future"].astype(np.float32)
         except Exception as e:  # noqa: BLE001 - skip unreadable / malformed files
             tqdm.write(f"  [warn] skipping {path}: {e}")
             continue

@@ -1,10 +1,12 @@
 import json
 import os
 import random
+import warnings
 from pathlib import Path
 
 import numpy as np
 import torch
+from timm.utils import ModelEmaV3
 
 
 def atomic_torch_save(obj, path) -> None:
@@ -30,6 +32,56 @@ def set_seed(CUR_SEED):
     torch.manual_seed(CUR_SEED)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+class ModelEma(ModelEmaV3):
+    """Foreach EMA with the legacy ``.ema`` attribute used by our checkpoints."""
+
+    def __init__(self, model, decay=0.9999, device=None):
+        model_device = next(model.parameters()).device
+        requested_device = torch.device(device) if device not in (None, "") else None
+        if requested_device is not None and requested_device.type == model_device.type:
+            if requested_device.index is None or requested_device.index == model_device.index:
+                requested_device = None
+        super().__init__(
+            model,
+            decay=decay,
+            device=requested_device,
+            foreach=requested_device is None,
+        )
+
+    @property
+    def ema(self):
+        return self.module
+
+
+def compile_model_components(model) -> None:
+    """Compile the HDP encoder and decoder in place without changing state-dict keys."""
+    net = getattr(model, "module", model)
+    # Dynamo's tensor wrapper probes ``.grad`` on the non-leaf encoder output passed into the
+    # separately compiled decoder. PyTorch emits a false-positive warning even though neither
+    # our model nor autograd requests that intermediate gradient buffer. Keep this filter scoped
+    # to Dynamo's probe; genuine non-leaf ``.grad`` access elsewhere must remain visible.
+    warnings.filterwarnings(
+        "ignore",
+        message=r"The \.grad attribute of a Tensor that is not a leaf Tensor is being accessed\..*",
+        category=UserWarning,
+        module=r"torch\.(?:_dynamo\.variables\.builder|_subclasses\.meta_utils)",
+    )
+    with warnings.catch_warnings():
+        # PyTorch 2.11 imports torch.utils.mkldnn while initializing Inductor; that upstream
+        # module still defines ScriptModule helpers and emits this warning even for CUDA compile.
+        warnings.filterwarnings(
+            "ignore",
+            message=r"`torch\.jit\.script_method` is deprecated\..*",
+            category=DeprecationWarning,
+            module=r"torch\.jit\._script",
+        )
+        for name in ("encoder", "decoder"):
+            component = getattr(net, name)
+            if not hasattr(component, "compile"):
+                raise RuntimeError("--compile_model requires torch.nn.Module.compile support")
+            component.compile(mode="default", dynamic=False, fullgraph=False)
 
 
 def capture_rng_state() -> dict:
@@ -78,9 +130,7 @@ def restore_rng_state(state: dict) -> None:
     )
     torch.set_rng_state(torch.as_tensor(state["torch"], dtype=torch.uint8, device="cpu"))
     if "cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state(
-            torch.as_tensor(state["cuda"], dtype=torch.uint8, device="cpu")
-        )
+        torch.cuda.set_rng_state(torch.as_tensor(state["cuda"], dtype=torch.uint8, device="cpu"))
 
 
 def compute_grad_stats(parameters, prefix="grad"):

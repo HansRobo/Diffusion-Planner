@@ -62,9 +62,11 @@ fig, ax = plt.subplots(figsize=(10, 10))
 view_range = 30
 visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[view_range])
 
-# Get augmentation ranges from the aug object
-lo = aug._low.cpu().numpy()[0]  # Extract from tuple
-hi = aug._high.cpu().numpy()[0]  # Extract from tuple
+# Quintic stores flat bounds while the bridge augmentor keeps a singleton batch axis.
+lo = aug._low.detach().cpu().numpy().reshape(-1)
+hi = aug._high.detach().cpu().numpy().reshape(-1)
+if lo.size != 9 or hi.size != 9:
+    raise ValueError(f"Expected 9-state augmentation bounds, got {lo.shape} and {hi.shape}")
 x_min, y_min = lo[0], lo[1]
 x_max, y_max = hi[0], hi[1]
 

@@ -32,12 +32,13 @@ from diffusion_planner.utils.lr_schedule import LinearWarmupConstantLR
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import (
+    ModelEma,
     atomic_torch_save,
+    compile_model_components,
     gather_rng_states,
     resume_model,
     set_seed,
 )
-from timm.utils import ModelEma
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
@@ -64,7 +65,7 @@ def configure_rl_trainable_parameters(model: torch.nn.Module, scope: str) -> Non
         raise ValueError(f"Unsupported RL train scope: {scope!r}")
     for name, param in model.named_parameters():
         if scope == "decoder":
-            trainable = name.startswith("decoder.dit.")
+            trainable = name.startswith(("decoder.dit.", "decoder.global_route_encoder."))
         else:
             trainable = not name.startswith("decoder.turn_indicator_predictor.")
         param.requires_grad_(trainable)
@@ -437,6 +438,12 @@ def get_args():
 
     parser.add_argument("--use_wandb", default=True, type=boolean)
     parser.add_argument(
+        "--wandb_run_id",
+        type=str,
+        default=None,
+        help="existing W&B run ID to resume, or a stable ID for a fresh RL run",
+    )
+    parser.add_argument(
         "--wandb_project_name",
         type=str,
         default="Diffusion-Planner-Temporal",
@@ -463,6 +470,12 @@ def get_args():
         default=_train_config_default("ddp_static_graph"),
         type=boolean,
         help="enable DDP static_graph for lower reducer overhead",
+    )
+    parser.add_argument(
+        "--compile_model",
+        type=boolean,
+        default=_train_config_default("compile_model"),
+        help="compile the encoder and decoder with TorchInductor",
     )
     parser.add_argument("--port", default="22323", type=str)
     parser.add_argument(
@@ -546,30 +559,55 @@ def get_args():
         raise ValueError("--wandb_step_log_interval must be >= 0")
     if args.num_generations < 2:
         raise ValueError("--num_generations must be >= 2 for HDP-RL group reward normalization")
-    if args.rl_rollout_steps < 3:
-        raise ValueError("--rl_rollout_steps must be >= 3 for the third-order DPM solver")
+    if args.rl_rollout_steps < 2:
+        raise ValueError("--rl_rollout_steps must be >= 2 for the second-order DPM solver")
     if args.diffusion_sample_steps < 2:
         raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
-    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 3:
+    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
         raise ValueError(
-            "--multisample_eval_sample_steps must be >= 3 for the third-order DPM solver"
+            "--multisample_eval_sample_steps must be >= 2 for the second-order DPM solver"
         )
     if args.rl_noise_scale < 0.0:
         raise ValueError("--rl_noise_scale must be >= 0")
+    if args.advantage_eps <= 0.0:
+        raise ValueError("--advantage_eps must be > 0")
     if args.rl_reward_beta <= 0.0:
         raise ValueError("--rl_reward_beta must be > 0")
+    reward_weights = (
+        args.rl_reward_w_risk,
+        args.rl_reward_w_follow,
+        args.rl_reward_w_lane,
+    )
+    if any(weight < 0.0 for weight in reward_weights):
+        raise ValueError("RL reward weights must be non-negative")
+    if sum(reward_weights) <= 0.0:
+        raise ValueError("At least one RL reward weight must be positive")
     if args.predicted_neighbor_num != 0:
         raise ValueError("HDP-RL is ego-only; --predicted_neighbor_num must be 0")
     if args.rl_full_eval_utd < 1:
         raise ValueError("--rl_full_eval_utd must be >= 1")
     if not 0.0 < args.rl_ema_update_rate <= 1.0:
         raise ValueError("--rl_ema_update_rate must be in (0, 1]")
+    if args.rl_ttc_critical_s < 0.0:
+        raise ValueError("--rl_ttc_critical_s must be >= 0")
     if args.rl_ttc_safe_s <= args.rl_ttc_critical_s:
         raise ValueError("--rl_ttc_safe_s must be greater than --rl_ttc_critical_s")
+    if args.rl_thw_critical_s < 0.0:
+        raise ValueError("--rl_thw_critical_s must be >= 0")
     if args.rl_thw_safe_s <= args.rl_thw_critical_s:
         raise ValueError("--rl_thw_safe_s must be greater than --rl_thw_critical_s")
+    if args.rl_occupancy_critical_m < 0.0:
+        raise ValueError("--rl_occupancy_critical_m must be >= 0")
     if args.rl_occupancy_safe_m <= args.rl_occupancy_critical_m:
         raise ValueError("--rl_occupancy_safe_m must be greater than --rl_occupancy_critical_m")
+    if args.rl_reward_dt <= 0.0:
+        raise ValueError("--rl_reward_dt must be > 0")
+    if args.rl_occupancy_speed_gain_s < 0.0:
+        raise ValueError("--rl_occupancy_speed_gain_s must be >= 0")
+    if args.rl_lane_half_width_m <= 0.0:
+        raise ValueError("--rl_lane_half_width_m must be > 0")
+    if args.rl_leader_lateral_margin_m < 0.0:
+        raise ValueError("--rl_leader_lateral_margin_m must be >= 0")
     if not args.use_velocity_representation:
         raise ValueError("HDP-RL requires --use_velocity_representation true")
     if args.diffusion_model_type != "x_start" or args.diffusion_supervision_type != "x_start":
@@ -635,6 +673,7 @@ def model_training(args):
         print("TF32: {}".format(args.tf32))
         print("Fused optimizer: {}".format(args.fused_optimizer))
         print("DDP static graph: {}".format(args.ddp_static_graph))
+        print("TorchInductor model compile: {}".format(args.compile_model))
         if not args.use_ema:
             print(
                 "WARNING: --use_ema false removes the stable previous-policy rollout used by "
@@ -753,6 +792,7 @@ def model_training(args):
             diffusion_planner,
             device_ids=[rank],
             find_unused_parameters=False,
+            gradient_as_bucket_view=True,
             static_graph=args.ddp_static_graph,
         )
 
@@ -769,7 +809,7 @@ def model_training(args):
     if not trainable_params:
         raise RuntimeError("No trainable parameters found for RL training")
     params = [{"params": trainable_params, "lr": args.learning_rate}]
-    if args.fused_optimizer and args.device == "cuda":
+    if args.fused_optimizer and torch.device(args.device).type == "cuda":
         try:
             optimizer = optim.AdamW(params, fused=True, weight_decay=args.weight_decay)
         except TypeError:
@@ -835,13 +875,19 @@ def model_training(args):
         init_epoch = 0
         wandb_id = None
 
+    if args.compile_model:
+        compile_model_components(diffusion_planner)
+        if model_ema is not None:
+            compile_model_components(model_ema.ema)
+
+    requested_wandb_id = args.wandb_run_id or wandb_id
     if global_rank == 0 and args.use_wandb:
         wandb.init(
             project=args.wandb_project_name,
             name=args.exp_name,
             notes=args.notes,
             resume="allow",
-            id=wandb_id,
+            id=requested_wandb_id,
             dir=f"{save_path}",
         )
         # Strict checkpoint compatibility runs before W&B initialization. An in-place
@@ -988,7 +1034,8 @@ def model_training(args):
             }
             atomic_torch_save(model_dict, f"{save_path}/latest.pth")
 
-            if (epoch + 1 - init_epoch) % save_utd == 0:
+            # Resume must not shift the configured checkpoint/closed-loop cadence.
+            if (epoch + 1) % save_utd == 0:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
                 atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")

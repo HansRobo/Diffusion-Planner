@@ -34,28 +34,25 @@ def velocity_to_waypoints(velocity: torch.Tensor) -> torch.Tensor:
 
 
 def normalize_ego_state(data: torch.Tensor, normalizer) -> torch.Tensor:
-    mean = normalizer.mean[0].to(device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
-    std = normalizer.std[0].to(device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
+    mean, std = normalizer._mean_std_on(data.device, data.dtype)
+    mean = mean[0].reshape(-1)[: data.shape[-1]]
+    std = std[0].reshape(-1)[: data.shape[-1]]
     shape = (1,) * (data.ndim - 1) + (data.shape[-1],)
     return (data - mean.reshape(shape)) / std.reshape(shape)
 
 
 def inverse_normalize_ego_state(data: torch.Tensor, normalizer) -> torch.Tensor:
-    mean = normalizer.mean[0].to(device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
-    std = normalizer.std[0].to(device=data.device, dtype=data.dtype).reshape(-1)[: data.shape[-1]]
+    mean, std = normalizer._mean_std_on(data.device, data.dtype)
+    mean = mean[0].reshape(-1)[: data.shape[-1]]
+    std = std[0].reshape(-1)[: data.shape[-1]]
     shape = (1,) * (data.ndim - 1) + (data.shape[-1],)
     return data * std.reshape(shape) + mean.reshape(shape)
 
 
 def _ego_velocity_stats(data: torch.Tensor, normalizer) -> tuple[torch.Tensor, torch.Tensor]:
-    if normalizer.ego_velocity_mean is None or normalizer.ego_velocity_std is None:
-        raise RuntimeError("ego_velocity normalization stats are required for HDP velocity mode")
-    mean = normalizer.ego_velocity_mean.to(device=data.device, dtype=data.dtype).reshape(-1)[
-        : data.shape[-1]
-    ]
-    std = normalizer.ego_velocity_std.to(device=data.device, dtype=data.dtype).reshape(-1)[
-        : data.shape[-1]
-    ]
+    mean, std = normalizer.ego_velocity_stats_on(data.device, data.dtype)
+    mean = mean.reshape(-1)[: data.shape[-1]]
+    std = std.reshape(-1)[: data.shape[-1]]
     shape = (1,) * (data.ndim - 1) + (data.shape[-1],)
     return mean.reshape(shape), std.reshape(shape)
 

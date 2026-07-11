@@ -9,13 +9,13 @@
 #SBATCH --gres=gpu:h100:8
 #SBATCH --exclusive
 #SBATCH --requeue
-#SBATCH --output=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512/slurm-%j.out
-#SBATCH --error=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512/slurm-%j.err
+#SBATCH --output=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_recoveryaug_node01_8gpu_bf16_bs512/slurm-%j.out
+#SBATCH --error=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_recoveryaug_node01_8gpu_bf16_bs512/slurm-%j.err
 
 set -euo pipefail
 
 REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
-RUN_NAME=hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512
+RUN_NAME=hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_recoveryaug_node01_8gpu_bf16_bs512
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 WAIT_FOR_RUN=hdp_velocity_hybrid_omega001_sft20_fullseq_plus_unprotected_right_turn_x10_node01_8gpu_bf16_bs512_from_base_ep25
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with --export=ALL,HDP_EXPECTED_COMMIT=<commit>}
@@ -30,7 +30,11 @@ PORT=22631
 MAX_ATTEMPTS=3
 FRESH_WANDB_RUN_ID=${HDP_WANDB_RUN_ID:-hdp-route-base-${SLURM_JOB_ID}}
 
-mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache" "${REPO}/wandb_cache"
+mkdir -p \
+  "${SAVE_DIR}" \
+  "${REPO}/tmp" \
+  "${REPO}/cache/torchinductor" \
+  "${REPO}/wandb_cache"
 HEALTH_LOG=${SAVE_DIR}/health_monitor.log
 TRAIN_LOG=${SAVE_DIR}/train_stdout.log
 
@@ -82,6 +86,7 @@ sleep 30
 export HOME=/home/ubuntu
 export TMPDIR=${REPO}/tmp
 export XDG_CACHE_HOME=${REPO}/cache
+export TORCHINDUCTOR_CACHE_DIR=${REPO}/cache/torchinductor
 export WANDB_DIR=${SAVE_DIR}
 export WANDB_CACHE_DIR=${REPO}/wandb_cache
 export WANDB_ENTITY=advanced-technology-department
@@ -129,6 +134,7 @@ BASE_ARGS=(
   --amp_dtype bf16
   --fused_optimizer True
   --ddp_static_graph True
+  --compile_model True
   --use_data_augment True
   --augment_prob 0.5
   --num_refine 20
