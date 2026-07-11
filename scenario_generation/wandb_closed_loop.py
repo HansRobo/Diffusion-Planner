@@ -61,7 +61,9 @@ def build_grouped_closed_loop_wandb_log(summary: dict) -> dict:
     if rows:
         df = pd.DataFrame(rows)
         cols = [c for c in RESULTS_TABLE_COLUMNS if c in df.columns]
-        extra = [c for c in df.columns if c not in cols and c not in ("labeled_ranges", "metric_group")]
+        extra = [
+            c for c in df.columns if c not in cols and c not in ("labeled_ranges", "metric_group")
+        ]
         log["closed_loop/grouped/results_table"] = wandb.Table(dataframe=df[cols + extra])
 
     for mp4 in summary.get("video_mp4s") or []:

@@ -74,7 +74,10 @@ def get_epoch_mean_loss(epoch_loss):
 
 def strip_module_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
     """Remove DDP ``module.`` prefix from checkpoint keys."""
-    return {k.replace("module.", "", 1) if k.startswith("module.") else k: v for k, v in state_dict.items()}
+    return {
+        k.replace("module.", "", 1) if k.startswith("module.") else k: v
+        for k, v in state_dict.items()
+    }
 
 
 def train_config_defaults_from_args_json(path: str) -> dict[str, Any]:

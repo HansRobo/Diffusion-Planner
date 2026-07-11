@@ -116,9 +116,7 @@ def main() -> int:
         dataset_name=args.scenario_dataset_name or None,
     )
     if not jobs:
-        raise SystemExit(
-            "no classification JSON matched npz_root; set --classification_json_root"
-        )
+        raise SystemExit("no classification JSON matched npz_root; set --classification_json_root")
 
     from scenario_generation.simulate import load_model
 

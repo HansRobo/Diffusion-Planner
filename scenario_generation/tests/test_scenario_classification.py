@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
 from scenario_generation.scenario_classification import (
     area_at_idx,
     discover_classification_eval_jobs,

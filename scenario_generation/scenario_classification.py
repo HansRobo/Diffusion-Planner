@@ -228,11 +228,11 @@ def parse_npz_valid_layout(
 ) -> NpzValidLayout | None:
     """Infer ``{project}/{map}``, valid root, and date(s) from an NPZ path.
 
-  Supported ``npz_root`` shapes::
+    Supported ``npz_root`` shapes::
 
-      .../{project}/{map}/valid
-      .../{project}/{map}/valid/{date}
-      .../{project}/{map}/valid/{date}/{bag}
+        .../{project}/{map}/valid
+        .../{project}/{map}/valid/{date}
+        .../{project}/{map}/valid/{date}/{bag}
     """
     path = Path(npz_root).expanduser()
     if not path.is_absolute():
@@ -259,11 +259,7 @@ def parse_npz_valid_layout(
 
     after_valid = parts[valid_idx + 1 :]
     if not after_valid:
-        dates = sorted(
-            d.name
-            for d in valid_root.iterdir()
-            if d.is_dir() and DATE_RE.match(d.name)
-        )
+        dates = sorted(d.name for d in valid_root.iterdir() if d.is_dir() and DATE_RE.match(d.name))
         return NpzValidLayout(
             dataset_key=dataset_key,
             valid_root=valid_root,
