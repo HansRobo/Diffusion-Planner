@@ -9,13 +9,13 @@
 #SBATCH --gres=gpu:h100:8
 #SBATCH --exclusive
 #SBATCH --requeue
-#SBATCH --output=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512/slurm-%j.out
-#SBATCH --error=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512/slurm-%j.err
+#SBATCH --output=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_recoveryaug_node01_8gpu_bf16_bs512/slurm-%j.out
+#SBATCH --error=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_recoveryaug_node01_8gpu_bf16_bs512/slurm-%j.err
 
 set -euo pipefail
 
 REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
-RUN_NAME=hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_node01_8gpu_bf16_bs512
+RUN_NAME=hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_recoveryaug_node01_8gpu_bf16_bs512
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 WAIT_FOR_RUN=hdp_velocity_hybrid_omega001_sft20_fullseq_plus_unprotected_right_turn_x10_node01_8gpu_bf16_bs512_from_base_ep25
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with --export=ALL,HDP_EXPECTED_COMMIT=<commit>}
