@@ -213,11 +213,11 @@ def _relative_progress_score(
     return ratio, ratio.clamp(0.0, 1.0)
 
 
-def _safety_gated_progress(
-    progress_score: torch.Tensor, safety_score: torch.Tensor
+def _safety_gated_behavior(
+    behavior_score: torch.Tensor, safety_score: torch.Tensor
 ) -> torch.Tensor:
-    """Prevent the DP-native progress term from rewarding a colliding trajectory."""
-    return progress_score * safety_score
+    """Prevent non-risk behavior rewards from preferring a colliding trajectory."""
+    return behavior_score * safety_score
 
 
 def _scene_neighbors(
@@ -1006,16 +1006,19 @@ def compute_hdp_reward(
         risk = torch.stack([terms["ttc"], terms["thw"], occupancy], dim=0).amin(dim=(0, 2))
         progress_ratio = progress_ratios[scene]
         progress_score = progress_scores[scene]
-        progress_reward = _safety_gated_progress(progress_score, terms["safety"])
+        progress_reward = _safety_gated_behavior(progress_score, terms["safety"])
         lane = lane_scores[scene]
         expert_off_lane = expert_off_lanes[scene]
         expert_lane_change = expert_lane_changes[scene]
+        behavior_reward = (
+            args.rl_reward_w_follow * terms["follow"]
+            + args.rl_reward_w_lane * lane
+            + getattr(args, "rl_reward_w_progress", 0.0) * progress_score
+        )
         reward = (
             getattr(args, "rl_reward_w_safety", 0.0) * terms["safety"]
             + args.rl_reward_w_risk * risk
-            + args.rl_reward_w_follow * terms["follow"]
-            + args.rl_reward_w_lane * lane
-            + getattr(args, "rl_reward_w_progress", 0.0) * progress_reward
+            + _safety_gated_behavior(behavior_reward, terms["safety"])
         )
         rewards.append(reward)
         metric_lists["safety"].append(terms["safety"])

@@ -22,7 +22,7 @@ from diffusion_planner.hdp_rl_utils import (
     _occupancy_score,
     _relative_progress_score,
     _road_border_clearance_exact,
-    _safety_gated_progress,
+    _safety_gated_behavior,
     _scene_neighbors,
     _scene_neighbors_batch,
     compute_hdp_reward,
@@ -93,12 +93,12 @@ def test_tuned_hdp_rl_defaults_are_consistent():
     assert fields["rl_early_stop_patience"].default == 0
 
 
-def test_dp_native_progress_is_attenuated_by_collision_safety():
-    progress = torch.ones(3)
+def test_non_risk_behavior_reward_is_attenuated_by_collision_safety():
+    behavior = torch.ones(3)
     safety = torch.tensor([0.0, 0.7, 1.0])
 
     torch.testing.assert_close(
-        _safety_gated_progress(progress, safety),
+        _safety_gated_behavior(behavior, safety),
         torch.tensor([0.0, 0.7, 1.0]),
     )
 
