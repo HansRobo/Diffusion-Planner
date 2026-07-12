@@ -87,6 +87,7 @@ export HOME=/home/ubuntu
 export TMPDIR=${REPO}/tmp
 export XDG_CACHE_HOME=${REPO}/cache
 export TORCHINDUCTOR_CACHE_DIR=${REPO}/cache/torchinductor
+export TORCHINDUCTOR_COMPILE_THREADS=${HDP_COMPILE_THREADS:-$((SLURM_CPUS_PER_TASK / 8))}
 export WANDB_DIR=${SAVE_DIR}
 export WANDB_CACHE_DIR=${REPO}/wandb_cache
 export WANDB_ENTITY=advanced-technology-department
