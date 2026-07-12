@@ -79,6 +79,29 @@ MASTER_ADDR=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
 PORT=$((24000 + SLURM_JOB_ID % 10000))
 
 mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache/torchinductor"
+if [[ -f "${SAVE_DIR}/RL_RUN_OK" && -z "${RESUME_CKPT}" ]]; then
+  echo "RL run is already complete: ${SAVE_DIR}"
+  exit 0
+fi
+if [[ -z "${RESUME_CKPT}" && -f "${SAVE_DIR}/latest.pth" ]]; then
+  completed_epoch=$(
+    "${REPO}/.venv/bin/python" - "${SAVE_DIR}/latest.pth" <<'PY'
+import pathlib
+import sys
+
+import torch
+
+checkpoint = torch.load(pathlib.Path(sys.argv[1]), map_location="cpu", weights_only=True)
+print(int(checkpoint["epoch"]))
+PY
+  )
+  if ((completed_epoch >= TRAIN_EPOCHS)); then
+    echo "RL checkpoint reached epoch ${completed_epoch}/${TRAIN_EPOCHS} but RL_RUN_OK is missing" >&2
+    exit 2
+  fi
+  RESUME_CKPT=${SAVE_DIR}/latest.pth
+  echo "Auto-resuming interrupted RL run from epoch ${completed_epoch}: ${RESUME_CKPT}"
+fi
 rm -f "${SAVE_DIR}/RL_RUN_OK"
 cd "${REPO}"
 EXPECTED_COMMIT_FULL=$(git rev-parse --verify "${EXPECTED_COMMIT}^{commit}")
