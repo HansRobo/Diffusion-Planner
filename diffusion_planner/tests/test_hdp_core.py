@@ -617,6 +617,28 @@ def _collision_terms_for_neighbor_x(neighbor_x: float):
     )
 
 
+def test_hdp_empty_neighbor_reward_preserves_full_metric_contract():
+    time_steps = 4
+    ego = torch.zeros(2, time_steps, 4)
+    ego[..., 0] = torch.arange(1, time_steps + 1)
+    ego[..., 2] = 1.0
+    terms = _collision_and_leader_terms(
+        ego,
+        torch.tensor([2.5, 4.0, 2.0]),
+        torch.zeros(0, time_steps, 4),
+        torch.zeros(0, 2),
+        torch.zeros(0, time_steps, dtype=torch.bool),
+        torch.zeros(0, 2),
+        torch.zeros(0, dtype=torch.bool),
+        HDPRewardConfig(),
+    )
+
+    assert "comfort" in terms
+    assert terms["comfort"].shape == (2,)
+    assert torch.isfinite(terms["comfort"]).all()
+    torch.testing.assert_close(terms["follow"], torch.ones(2))
+
+
 def test_hdp_collision_reward_attenuates_rear_end_only():
     active = _collision_terms_for_neighbor_x(3.0)
     rear = _collision_terms_for_neighbor_x(-1.0)

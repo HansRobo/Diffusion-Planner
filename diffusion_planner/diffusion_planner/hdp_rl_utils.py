@@ -164,6 +164,8 @@ def _collision_and_leader_terms(
     heading = ego_trajs[..., 2:4]
     heading = heading / heading.norm(dim=-1, keepdim=True).clamp_min(1e-6)
     ego_speed = _trajectory_speed(ego_xy, config.dt)
+    acceleration = torch.diff(torch.cat([ego_speed[:, :1], ego_speed], dim=-1), dim=-1) / config.dt
+    comfort_score = _linear_safe_score(6.0 - acceleration.abs(), 0.0, 4.0)
 
     if neighbor_futures.shape[0] == 0:
         ones = torch.ones(C, T, device=device)
@@ -172,6 +174,7 @@ def _collision_and_leader_terms(
             "ttc": ones,
             "thw": ones,
             "follow": torch.ones(C, device=device),
+            "comfort": comfort_score.mean(dim=-1),
             "leader_fraction": torch.zeros(C, device=device),
             "collision_active": torch.zeros(C, device=device),
             "collision_rear": torch.zeros(C, device=device),
@@ -287,9 +290,6 @@ def _collision_and_leader_terms(
         0.0, 1.0
     )
     speed_score = (1.0 - torch.abs(ego_speed - selected_leader_speed) / 5.0).clamp(0.0, 1.0)
-    acceleration = torch.diff(torch.cat([ego_speed[:, :1], ego_speed], dim=-1), dim=-1) / config.dt
-    comfort_score = _linear_safe_score(6.0 - acceleration.abs(), 0.0, 4.0)
-
     aspect_sum = gap_score + spacing_score + speed_score + comfort_score
     aspect_sum = torch.where(leader_present, aspect_sum, torch.full_like(aspect_sum, 4.0))
     follow = aspect_sum.mean(dim=-1) / 4.0
