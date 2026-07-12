@@ -702,6 +702,23 @@ def test_batch_reward_normalization_uses_global_ddp_moments(monkeypatch):
     torch.testing.assert_close(weights, expected)
 
 
+def test_batch_reward_normalization_preserves_small_valid_variance():
+    reward = torch.tensor([7.0, 7.0001, 7.0002, 7.0003])
+
+    weights, valid = compute_reward_weights(
+        reward,
+        num_scenes=1,
+        n=4,
+        normalize="batch",
+        beta=1.0,
+        eps=1e-6,
+    )
+
+    expected = torch.exp((reward.double() - reward.double().mean()) / (reward.double().std() + 1e-6))
+    assert valid.all()
+    torch.testing.assert_close(weights, expected.float())
+
+
 def test_road_border_penalty_keeps_valid_segment_at_ego_origin():
     ego_edge_points = torch.tensor([[[[0.0, 0.2]]]])
     line_strings = torch.zeros(1, 1, 3, 4)

@@ -1286,10 +1286,15 @@ def compute_reward_weights(
         valid_sample = valid_group.expand(-1, n).reshape(-1)
     elif normalize == "batch":
         valid_sample = valid_group.expand(-1, n).reshape(-1)
-        finite_reward = reward[valid_sample]
+        moment_dtype = (
+            torch.float64
+            if reward.dtype in (torch.float16, torch.bfloat16, torch.float32)
+            else reward.dtype
+        )
+        finite_reward = reward[valid_sample].to(moment_dtype)
         moments = torch.stack(
             (
-                valid_sample.sum().to(reward.dtype),
+                valid_sample.sum().to(moment_dtype),
                 finite_reward.sum(),
                 finite_reward.square().sum(),
             )
@@ -1305,7 +1310,7 @@ def compute_reward_weights(
             )
             std = variance.sqrt()
             if torch.isfinite(std) and std > eps:
-                reward_norm = (reward - mean) / (std + eps)
+                reward_norm = ((reward.to(moment_dtype) - mean) / (std + eps)).to(reward.dtype)
             else:
                 reward_norm = torch.zeros_like(reward)
         else:
