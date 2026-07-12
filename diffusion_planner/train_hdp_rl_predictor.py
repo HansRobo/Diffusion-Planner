@@ -239,6 +239,12 @@ def get_args():
         default=_train_config_default("rl_max_valid_loss_regression"),
         help="maximum relative ego validation-loss increase allowed for best-model selection",
     )
+    parser.add_argument(
+        "--rl_best_score_min_delta",
+        type=float,
+        default=_train_config_default("rl_best_score_min_delta"),
+        help="minimum validation-score improvement required to replace the best model",
+    )
     parser.add_argument("--learning_rate", type=float, default=1e-7)
     parser.add_argument(
         "--weight_decay",
@@ -624,6 +630,8 @@ def get_args():
         raise ValueError("--rl_full_eval_utd must be >= 1")
     if args.rl_max_valid_loss_regression < 0.0:
         raise ValueError("--rl_max_valid_loss_regression must be non-negative")
+    if args.rl_best_score_min_delta < 0.0:
+        raise ValueError("--rl_best_score_min_delta must be non-negative")
     if not 0.0 < args.rl_ema_update_rate <= 1.0:
         raise ValueError("--rl_ema_update_rate must be in (0, 1]")
     if args.rl_ttc_critical_s < 0.0:
@@ -1003,6 +1011,9 @@ def model_training(args):
                 json.dump(args_dict, f, indent=4)
             with open(os.path.join(best_dir, "best_model_info.json"), "w", encoding="utf-8") as f:
                 json.dump(baseline_metrics, f, indent=4)
+            if args.use_wandb:
+                wandb.run.summary["source/valid_loss_ego"] = baseline_valid_loss
+                wandb.run.summary["source/valid_epdms_total"] = baseline_epdms
             print(
                 "Source SFT baseline: "
                 f"valid_loss_ego={baseline_valid_loss:.4f}, "
@@ -1161,7 +1172,11 @@ def model_training(args):
                 closed_loop_validate(eval_model, args, epoch, os.path.join(curr_dir, "closed_loop"))
 
             selection_score = valid_epdms_total if valid_epdms_total > 0.0 else -valid_loss_ego
-            if run_full_eval and loss_within_guard and selection_score > best_valid_score:
+            if (
+                run_full_eval
+                and loss_within_guard
+                and selection_score > best_valid_score + args.rl_best_score_min_delta
+            ):
                 curr_dir = os.path.join(save_path, "best_model")
                 os.makedirs(curr_dir, exist_ok=True)
                 atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")

@@ -170,7 +170,7 @@ Implementation notes:
 - Occupancy automatically uses real static boxes, stopped-agent clearance, then road-border clearance as a corpus fallback. Missing sources are neutral and their coverage is logged.
 - Scene encoding is computed once per candidate group. Decoder-only RL repeats only current action-state tensors, not the full 31-frame observation history.
 - Full stochastic/EPDMS validation runs on `rl_full_eval_utd`; the deterministic proxy remains available each epoch.
-- A fresh RL run validates and saves its source SFT policy before the first update. Best-checkpoint selection is based on validation EPDMS when available, falls back to negative ego validation loss, and rejects abnormal validation-loss regressions.
+- A fresh RL run validates and saves its source SFT policy before the first update. Best-checkpoint selection is based on validation EPDMS when available, falls back to negative ego validation loss, rejects abnormal validation-loss regressions, and requires a `0.001` score improvement before replacing the current best.
 - Turn-indicator validation logs overall, change-only, and all five per-class accuracies plus class counts; the overall metric is computed from generated trajectories, never teacher-forced trajectories.
 - SFT/RL ONNX export on every save is disabled by default because synchronous export stalls all other DDP ranks at the next barrier. Set `export_onnx_on_save=true` only when needed, or use the strict standalone converter.
 
