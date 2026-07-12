@@ -1325,6 +1325,9 @@ def model_training(args):
                     args.rl_early_stop_patience > 0
                     and full_evals_without_improvement >= args.rl_early_stop_patience
                 )
+            if improves_best:
+                best_valid_score = selection_score
+            logged_best_valid_score = best_valid_score if math.isfinite(best_valid_score) else None
 
             if args.use_wandb:
                 wandb.log(
@@ -1346,6 +1349,7 @@ def model_training(args):
                         "valid/full_eval": float(run_full_eval),
                         "valid/within_source_loss_guard": float(loss_within_guard),
                         "valid/selection_score": selection_score,
+                        "valid/best_selection_score": logged_best_valid_score,
                         "valid/improves_best": float(improves_best),
                         "valid/full_evals_without_improvement": full_evals_without_improvement,
                         **{
@@ -1377,6 +1381,7 @@ def model_training(args):
                 "valid_within_source_loss_guard": loss_within_guard,
                 "valid_selection_score": selection_score,
                 "valid_improves_best": improves_best,
+                "best_valid_score": logged_best_valid_score,
                 "full_evals_without_improvement": full_evals_without_improvement,
                 **{
                     f"valid_turn_indicator_{key}": value
@@ -1430,8 +1435,6 @@ def model_training(args):
                 atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
-                best_valid_score = selection_score
-                curr_data["best_valid_score"] = best_valid_score
                 with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
                     json.dump(curr_data, f, indent=4)
                 if args.export_onnx_on_save:
