@@ -27,6 +27,10 @@ NUM_GENERATIONS=${HDP_RL_NUM_GENERATIONS:-32}
 BATCH_SIZE=${HDP_RL_BATCH_SIZE:-${NPROC}}
 VALID_BATCH_SIZE=${HDP_RL_VALID_BATCH_SIZE:-512}
 TRAIN_EPOCHS=${HDP_RL_TRAIN_EPOCHS:-1}
+VALIDATE_BEFORE_TRAINING=${HDP_RL_VALIDATE_BEFORE_TRAINING:-True}
+MAX_VALID_LOSS_REGRESSION=${HDP_RL_MAX_VALID_LOSS_REGRESSION:-0.25}
+BEST_SCORE_MIN_DELTA=${HDP_RL_BEST_SCORE_MIN_DELTA:-0.001}
+EARLY_STOP_PATIENCE=${HDP_RL_EARLY_STOP_PATIENCE:-2}
 LEARNING_RATE=${HDP_RL_LEARNING_RATE:-1e-7}
 WEIGHT_DECAY=${HDP_RL_WEIGHT_DECAY:-0.0}
 REWARD_BETA=${HDP_RL_REWARD_BETA:-0.5}
@@ -108,6 +112,10 @@ cd "${REPO}/diffusion_planner"
   --batch_size "${BATCH_SIZE}" \
   --valid_batch_size "${VALID_BATCH_SIZE}" \
   --train_epochs "${TRAIN_EPOCHS}" \
+  --rl_validate_before_training "${VALIDATE_BEFORE_TRAINING}" \
+  --rl_max_valid_loss_regression "${MAX_VALID_LOSS_REGRESSION}" \
+  --rl_best_score_min_delta "${BEST_SCORE_MIN_DELTA}" \
+  --rl_early_stop_patience "${EARLY_STOP_PATIENCE}" \
   --save_utd 1 \
   --rl_full_eval_utd 1 \
   --learning_rate "${LEARNING_RATE}" \
@@ -181,7 +189,8 @@ else:
     initial_live = source["ema_state_dict"]
     initial_shadow = source["ema_state_dict"]
 final_ckpt = torch.load(save_dir / "latest.pth", map_location="cpu", weights_only=True)
-assert final_ckpt["epoch"] == expected_epoch
+completed_epoch = int(final_ckpt["epoch"])
+assert 1 <= completed_epoch <= expected_epoch
 live = final_ckpt["model"]
 shadow = final_ckpt["ema_state_dict"]
 assert live.keys() == initial_live.keys() == initial_shadow.keys() == shadow.keys()
@@ -226,7 +235,7 @@ if optimizer_steps == 1:
 
 with (save_dir / "train_log.tsv").open(newline="", encoding="utf-8") as f:
     rows = list(csv.DictReader(f, delimiter="\t"))
-assert len(rows) == expected_epoch
+assert len(rows) == completed_epoch
 required = (
     "train_reward_mean",
     "train_reward_std",
@@ -243,6 +252,7 @@ assert float(rows[0]["train_valid_group_fraction"]) > 0.0
 
 print(
     "RL_RUN_OK",
+    f"completed_epoch={completed_epoch}/{expected_epoch}",
     f"optimizer_steps={optimizer_steps}",
     f"decoder_tensors_changed={sum(decoder_changed)}",
     f"encoder_tensors_changed={sum(encoder_changed)}",
