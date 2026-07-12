@@ -96,6 +96,33 @@ def _trajectory_speed(xy: torch.Tensor, dt: float, initial_xy: torch.Tensor | No
     return step.norm(dim=-1) / dt
 
 
+def _relative_progress_score(
+    ego_trajs: torch.Tensor,
+    expert_future: torch.Tensor,
+    *,
+    min_reference_m: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return candidate/expert path ratio and a capped anti-stopping score."""
+    candidate_step = torch.diff(
+        torch.cat([torch.zeros_like(ego_trajs[:, :1, :2]), ego_trajs[..., :2]], dim=1),
+        dim=1,
+    )
+    expert_xy = expert_future[..., :2]
+    expert_step = torch.diff(
+        torch.cat([torch.zeros_like(expert_xy[:1]), expert_xy], dim=0),
+        dim=0,
+    )
+    candidate_length = candidate_step.norm(dim=-1).sum(dim=-1)
+    expert_length = expert_step.norm(dim=-1).sum()
+    moving_reference = expert_length >= min_reference_m
+    ratio = torch.where(
+        moving_reference,
+        candidate_length / expert_length.clamp_min(min_reference_m),
+        torch.ones_like(candidate_length),
+    )
+    return ratio, ratio.clamp(0.0, 1.0)
+
+
 def _scene_neighbors(
     neighbors_future: torch.Tensor,
     neighbor_past: torch.Tensor,
@@ -278,6 +305,7 @@ def _collision_and_leader_terms(
         "ttc": ttc_score,
         "thw": thw_score,
         "follow": follow,
+        "comfort": comfort_score.mean(dim=-1),
         "leader_fraction": leader_present.float().mean(dim=-1),
         "collision_active": active_collision.any(dim=(1, 2)).float(),
         "collision_rear": rear_collision.any(dim=(1, 2)).float(),
@@ -553,6 +581,11 @@ def compute_hdp_reward(
             "ttc_zero_fraction",
             "thw_zero_fraction",
             "occupancy_zero_fraction",
+            "progress",
+            "progress_ratio",
+            "underprogress_fraction",
+            "overprogress_fraction",
+            "comfort",
         )
     }
     rewards = []
@@ -597,6 +630,9 @@ def compute_hdp_reward(
         )
         risk = torch.stack([terms["ttc"], terms["thw"], occupancy], dim=0).amin(dim=(0, 2))
         expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])
+        progress_ratio, progress_score = _relative_progress_score(
+            ego_group[scene], expert_future
+        )
         lane_centerlines, lane_route_source = _lane_reward_centerlines(
             expert_future,
             scene_inputs["lanes"][scene],
@@ -626,7 +662,16 @@ def compute_hdp_reward(
         occupancy_min = occupancy.amin(dim=-1)
         metric_lists["risk"].append(risk)
         metric_lists["follow"].append(terms["follow"])
+        metric_lists["comfort"].append(terms["comfort"])
         metric_lists["lane"].append(lane)
+        metric_lists["progress"].append(progress_score)
+        metric_lists["progress_ratio"].append(progress_ratio.clamp_max(2.0))
+        metric_lists["underprogress_fraction"].append(
+            (progress_ratio < 0.8).to(risk.dtype)
+        )
+        metric_lists["overprogress_fraction"].append(
+            (progress_ratio > 1.2).to(risk.dtype)
+        )
         metric_lists["ttc"].append(ttc_min)
         metric_lists["thw"].append(thw_min)
         metric_lists["occupancy"].append(occupancy_min)
@@ -662,11 +707,23 @@ def compute_hdp_reward(
         "ttc_zero_fraction",
         "thw_zero_fraction",
         "occupancy_zero_fraction",
+        "underprogress_fraction",
+        "overprogress_fraction",
     }
     metrics = {
         (f"reward_{key}" if key in fraction_keys else f"reward_{key}_score"): value.mean()
         for key, value in flattened.items()
     }
+    reward_group = torch.stack(rewards)
+    progress_group = torch.stack(metric_lists["progress"])
+    reward_centered = reward_group - reward_group.mean(dim=1, keepdim=True)
+    progress_centered = progress_group - progress_group.mean(dim=1, keepdim=True)
+    denominator = reward_centered.square().sum(dim=1).sqrt() * progress_centered.square().sum(
+        dim=1
+    ).sqrt()
+    correlation = (reward_centered * progress_centered).sum(dim=1) / denominator.clamp_min(1e-6)
+    correlation = torch.where(denominator > 1e-6, correlation, torch.zeros_like(correlation))
+    metrics["reward_progress_correlation"] = correlation.mean()
     return torch.cat(rewards), metrics
 
 

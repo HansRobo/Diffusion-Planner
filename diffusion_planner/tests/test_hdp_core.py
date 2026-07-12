@@ -17,6 +17,7 @@ from diffusion_planner.hdp_rl_utils import (
     _hdp_lane_score,
     _lane_reward_centerlines,
     _occupancy_score,
+    _relative_progress_score,
     _scene_neighbors,
     compute_reward_weights,
     heading_to_cos_sin_if_needed,
@@ -714,6 +715,26 @@ def test_hdp_invalid_road_border_is_not_reported_as_occupancy_source():
 
     torch.testing.assert_close(occupancy, torch.ones_like(occupancy))
     assert not any(sources.values())
+
+
+def test_hdp_relative_progress_is_capped_and_stopped_expert_is_neutral():
+    expert = torch.zeros(4, 4)
+    expert[:, 0] = torch.arange(1.0, 5.0)
+    expert[:, 2] = 1.0
+    candidates = expert.unsqueeze(0).repeat(3, 1, 1)
+    candidates[0, :, 0] *= 0.5
+    candidates[2, :, 0] *= 1.5
+
+    ratio, score = _relative_progress_score(candidates, expert)
+
+    torch.testing.assert_close(ratio, torch.tensor([0.5, 1.0, 1.5]))
+    torch.testing.assert_close(score, torch.tensor([0.5, 1.0, 1.0]))
+
+    stopped = torch.zeros_like(expert)
+    stopped[:, 2] = 1.0
+    ratio, score = _relative_progress_score(candidates, stopped)
+    torch.testing.assert_close(ratio, torch.ones(3))
+    torch.testing.assert_close(score, torch.ones(3))
 
 
 def test_hdp_lane_reward_does_not_mask_a_curved_centerline():
