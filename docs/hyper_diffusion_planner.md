@@ -156,8 +156,8 @@ rl_train_scope=decoder
 The paper EMA update `0.05` is used at policy-iteration boundaries. The lower `beta` and explicit
 progress term are performance-oriented Tier IV adaptations. Real-data and recovery-set ablations
 favored the unanchored objective (`BC=0`); the EMA policy commit remains the drift constraint.
-The DP-native progress contribution is multiplied by the paper safety score, so an active
-collision receives no progress credit and a rear collision keeps the paper's `0.7` attenuation.
+The DP-native progress contribution is multiplied by the paper risk score, so critical TTC,
+THW, or occupancy cannot be traded for progress and rear-end attenuation remains continuous.
 The rollout noise and group size are measured exploration/efficiency choices, while held-out reward always
 uses the public HDP policy's default `0.5` sampling temperature and the paper's 32 candidates so
 all sweeps share one selection distribution. Held-out sampling also uses

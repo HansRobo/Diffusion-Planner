@@ -162,8 +162,8 @@ Important semantics:
 - `--rl_train_scope decoder`: DiT trajectory-policy fine-tuning with one cached scene encoding per candidate group. The separate SFT turn-indicator classifier stays frozen because the RL reward does not supervise it.
 - `--train_subsample_step` defaults to `1`; this branch optimizes for final model quality unless explicitly overridden.
 - The EMA shadow generates candidate actions as the previous policy; the live decoder receives the reward-weighted update, then refreshes EMA.
-- The DP-native progress term is gated by the paper safety score: active collisions receive zero
-  progress credit and rear collisions retain the paper's attenuation.
+- The DP-native progress term is gated by the paper risk score, so critical TTC, THW, or
+  occupancy cannot be traded for progress and rear collisions retain continuous attenuation.
 - Reward uses SAT collision, continuous TTC, THW, static/stopped-agent/road-border occupancy clearance, leader-conditioned following, lane-center scoring, lane-change/off-lane masking, and rear-end attenuation. Logged expert motion determines leader identity while each candidate still determines its gap, speed match, and comfort; this prevents a lateral candidate from earning a neutral following score merely by leaving the leader-association corridor. Road-border occupancy uses exact rectangle-to-segment clearance rather than perimeter-point sampling.
 - Candidate groups with identical or non-finite rewards are discarded before the hybrid loss.
 - `--predicted_neighbor_num` must be `0`. The temporal HDP action head predicts only ego while the encoder and safety reward still consume all logged neighbors.
