@@ -1096,8 +1096,10 @@ def model_training(args):
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
-    ddp.cleanup()
-
-
 if __name__ == "__main__":
-    model_training(get_args())
+    try:
+        model_training(get_args())
+    finally:
+        # TorchElastic terminates sibling ranks as soon as one rank fails. Destroying the
+        # process group on every exit path keeps short RL audits from leaking NCCL resources.
+        ddp.cleanup()
