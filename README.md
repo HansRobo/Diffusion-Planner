@@ -58,8 +58,10 @@ SFT should use the corresponding SFT full-sequence list. Temporal consistency me
 The intended HDP workflow is:
 
 1. Base train from scratch with HDP velocity representation and hybrid loss.
-2. SFT from the base checkpoint using `--init_weights_path`.
-3. HDP-RL from the SFT checkpoint using `train_hdp_rl_predictor.py` and `--init_weights_path`.
+2. SFT from the Base final `latest.pth` using `--init_weights_path`; weights-only init uses
+   the checkpoint EMA policy that Base validation evaluated.
+3. HDP-RL from the SFT final `latest.pth` using `train_hdp_rl_predictor.py` and
+   `--init_weights_path`; RL likewise initializes from the SFT EMA policy.
 
 Do not start RL directly from base unless the experiment is explicitly labeled as an ablation.
 

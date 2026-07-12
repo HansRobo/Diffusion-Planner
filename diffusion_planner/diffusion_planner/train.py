@@ -727,7 +727,14 @@ def model_training(args: TrainConfig):
         )
 
     if args.resume_model_path is None and args.init_weights_path is not None:
-        load_weights_only(args.init_weights_path, diffusion_planner, args.device)
+        # SFT starts from the policy that was actually validated during Base training.
+        # Every HDP training checkpoint carries that policy in its EMA shadow.
+        load_weights_only(
+            args.init_weights_path,
+            diffusion_planner,
+            args.device,
+            prefer_ema=True,
+        )
 
     model_ema = (
         ModelEma(
