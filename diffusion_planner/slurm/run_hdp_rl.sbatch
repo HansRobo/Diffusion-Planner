@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
+REPO=${HDP_RL_REPO:-/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner}
 NNODES=${SLURM_NNODES:-1}
 NPROC_PER_NODE=${HDP_RL_NPROC_PER_NODE:-${HDP_RL_NPROC:-8}}
 WORLD_SIZE=$((NNODES * NPROC_PER_NODE))
@@ -62,6 +62,7 @@ COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-True}
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
 USE_WANDB=${HDP_RL_USE_WANDB:-True}
 WANDB_PROJECT=${HDP_RL_WANDB_PROJECT:-hdp-rl}
+WANDB_RUN_ID=${HDP_RL_WANDB_RUN_ID:-}
 STEP_LOG_INTERVAL=${HDP_RL_STEP_LOG_INTERVAL:-100}
 RUN_NAME=${HDP_RL_RUN_NAME:-hdp_rl_${WORLD_SIZE}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
 SAVE_ROOT=${HDP_RL_SAVE_ROOT:-${REPO}/outputs}
@@ -276,6 +277,9 @@ TRAIN_ARGS=(
   --export_onnx_on_save False \
   --port "${PORT}"
 )
+if [[ -n "${WANDB_RUN_ID}" ]]; then
+  TRAIN_ARGS+=(--wandb_run_id "${WANDB_RUN_ID}")
+fi
 
 # One Slurm task launches one torchrun agent per node. Rank 0 stays on the first
 # allocated host, so checkpoints and W&B files remain in that host's SAVE_DIR while
