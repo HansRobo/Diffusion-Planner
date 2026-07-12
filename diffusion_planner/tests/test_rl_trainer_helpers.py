@@ -3,6 +3,7 @@ from diffusion_planner.hdp_rl_epoch import _policy_observation_inputs
 from train_hdp_rl_predictor import (
     best_valid_score_from_rows,
     configure_rl_trainable_parameters,
+    find_checkpoint_run_artifact,
 )
 
 
@@ -74,3 +75,15 @@ def test_resume_best_score_ignores_nan_and_non_full_eval_rows():
     )
 
     assert score == 0.75
+
+
+def test_find_checkpoint_run_artifact_handles_latest_and_nested_checkpoints(tmp_path):
+    run_dir = tmp_path / "run"
+    nested = run_dir / "epoch0002"
+    nested.mkdir(parents=True)
+    artifact = run_dir / "source_baseline_metrics.json"
+    artifact.write_text("{}", encoding="utf-8")
+
+    assert find_checkpoint_run_artifact(str(run_dir / "latest.pth"), artifact.name) == artifact
+    assert find_checkpoint_run_artifact(str(nested / "best_model.pth"), artifact.name) == artifact
+    assert find_checkpoint_run_artifact(str(nested / "best_model.pth"), "missing.json") is None

@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 import os
+from pathlib import Path
 
 import pandas as pd
 import torch
@@ -91,6 +92,16 @@ def best_valid_score_from_rows(rows: list[dict]) -> float:
         if math.isfinite(score):
             best = max(best, score)
     return best
+
+
+def find_checkpoint_run_artifact(checkpoint_path: str, filename: str) -> Path | None:
+    """Find a run-level artifact next to a latest or nested epoch/best checkpoint."""
+    checkpoint = Path(checkpoint_path)
+    for directory in (checkpoint.parent, checkpoint.parent.parent):
+        candidate = directory / filename
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def get_args():
@@ -1008,19 +1019,43 @@ def model_training(args):
     baseline_valid_loss = float("inf")
     configured_multisample_count = args.multisample_eval_num_samples
     configured_epdms = args.enable_epdms_eval
+    resume_baseline_metrics = None
+    if args.resume_model_path is not None:
+        resume_baseline_metrics = (
+            Path(baseline_metrics_path)
+            if os.path.exists(baseline_metrics_path)
+            else find_checkpoint_run_artifact(
+                args.resume_model_path, "source_baseline_metrics.json"
+            )
+        )
+        if resume_baseline_metrics is None:
+            raise FileNotFoundError(
+                "Strict RL resume requires source_baseline_metrics.json beside the source run"
+            )
     if global_rank == 0 and args.resume_model_path is not None:
-        if os.path.exists(train_log_path):
-            previous_log = pd.read_csv(train_log_path, sep="\t")
+        resume_train_log = (
+            Path(train_log_path)
+            if os.path.exists(train_log_path)
+            else find_checkpoint_run_artifact(args.resume_model_path, "train_log.tsv")
+        )
+        if resume_train_log is not None:
+            previous_log = pd.read_csv(resume_train_log, sep="\t")
             data_list = previous_log.to_dict("records")
             best_valid_score = best_valid_score_from_rows(data_list)
-        if os.path.exists(baseline_metrics_path):
-            with open(baseline_metrics_path, encoding="utf-8") as f:
-                baseline_metrics = json.load(f)
-            baseline_valid_loss = float(baseline_metrics["valid_loss_ego"])
-            best_valid_score = max(
-                best_valid_score,
-                float(baseline_metrics["selection_score"]),
-            )
+            if data_list:
+                raw_patience = data_list[-1].get("full_evals_without_improvement", 0)
+                if pd.notna(raw_patience):
+                    full_evals_without_improvement = int(raw_patience)
+        with open(resume_baseline_metrics, encoding="utf-8") as f:
+            baseline_metrics = json.load(f)
+        baseline_valid_loss = float(baseline_metrics["valid_loss_ego"])
+        best_valid_score = max(
+            best_valid_score,
+            float(baseline_metrics["selection_score"]),
+        )
+        if resume_baseline_metrics != Path(baseline_metrics_path):
+            with open(baseline_metrics_path, "w", encoding="utf-8") as f:
+                json.dump(baseline_metrics, f, indent=4)
 
     if args.resume_model_path is None and args.rl_validate_before_training:
         eval_model = model_ema.ema if model_ema is not None else diffusion_planner

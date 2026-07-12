@@ -156,6 +156,9 @@ Implementation notes:
 - Zero-variance and non-finite reward groups are discarded; they do not become unweighted self-distillation samples.
 - Reward scoring uses raw scene tensors before group expansion; only rollout/loss tensors are expanded to `B * num_generations`.
 - Logged futures for all 320 neighbors stay scene-level and are not duplicated across the 32 candidates.
+- Distributed training pads the shuffled index stream to a complete global batch instead of
+  dropping the tail or compiling a second shape. Every source sample is used at least once and at
+  most `global_batch_size - 1` randomly shuffled samples are repeated per epoch.
 - EMA rollout sampling runs without autograd. The live global route condition is computed inside
   the DDP forward once per scene and only its 256-dimensional embedding is repeated per candidate.
 - Rollout sampling uses a fixed temperature instead of a random per-row temperature range.
@@ -178,8 +181,8 @@ Implementation notes:
 - Occupancy automatically uses real static boxes, stopped-agent clearance, then road-border clearance as a corpus fallback. Missing sources are neutral and their coverage is logged.
 - Scene encoding is computed once per candidate group. Decoder-only RL repeats only current action-state tensors, not the full 31-frame observation history.
 - Full stochastic/EPDMS validation runs on `rl_full_eval_utd`; the deterministic proxy remains available each epoch.
-- A fresh RL run validates and saves its source SFT policy before the first update. Best-checkpoint selection is based on validation EPDMS when available, falls back to negative ego validation loss, rejects abnormal validation-loss regressions, and requires a `0.001` score improvement before replacing the current best.
-- Training stops after two consecutive full evaluations without a meaningful best-score improvement; set `rl_early_stop_patience=0` only for controlled ablations.
+- A fresh RL run validates and saves its source SFT policy before the first update. Best-checkpoint selection is based on validation EPDMS when available, falls back to negative ego validation loss, rejects abnormal validation-loss regressions, and requires a `0.0001` score improvement before replacing the current best.
+- Training stops after five consecutive full evaluations without a meaningful best-score improvement; set `rl_early_stop_patience=0` only for controlled ablations.
 - Turn-indicator validation logs overall, change-only, and all five per-class accuracies plus class counts; the overall metric is computed from generated trajectories, never teacher-forced trajectories.
 - SFT/RL ONNX export on every save is disabled by default because synchronous export stalls all other DDP ranks at the next barrier. Set `export_onnx_on_save=true` only when needed, or use the strict standalone converter.
 

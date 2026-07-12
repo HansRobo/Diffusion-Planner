@@ -164,8 +164,8 @@ class TrainConfig:
     rl_full_eval_utd: int = 5
     rl_validate_before_training: bool = True
     rl_max_valid_loss_regression: float = 0.25
-    rl_best_score_min_delta: float = 0.001
-    rl_early_stop_patience: int = 2
+    rl_best_score_min_delta: float = 0.0001
+    rl_early_stop_patience: int = 5
 
     # ---------------------------------------------------------
     # Throughput knobs. Defaults ON after live verification on 2026-07-07
