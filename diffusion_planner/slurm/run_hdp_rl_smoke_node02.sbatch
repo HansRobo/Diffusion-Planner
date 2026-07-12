@@ -16,9 +16,11 @@ NPROC=${HDP_RL_NPROC:-1}
 TRAIN_LIST=${HDP_RL_TRAIN_LIST:-${REPO}/artifacts/rl_smoke_node02/train_1.json}
 VALID_LIST=${HDP_RL_VALID_LIST:-${REPO}/artifacts/rl_smoke_node02/valid_16.json}
 INIT_CKPT=${HDP_RL_INIT_CKPT:-${REPO}/checkpoints/base_epoch8_best_epdms/best_model.pth}
+RESUME_CKPT=${HDP_RL_RESUME_CKPT:-}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
 NUM_GENERATIONS=${HDP_RL_NUM_GENERATIONS:-32}
 BATCH_SIZE=${HDP_RL_BATCH_SIZE:-${NPROC}}
+TRAIN_EPOCHS=${HDP_RL_TRAIN_EPOCHS:-1}
 COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-False}
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
 USE_WANDB=${HDP_RL_USE_WANDB:-False}
@@ -32,7 +34,16 @@ cd "${REPO}"
 [[ "$(git rev-parse HEAD)" == "${EXPECTED_COMMIT}" ]]
 git diff --quiet
 git diff --cached --quiet
-for path in "${TRAIN_LIST}" "${VALID_LIST}" "${INIT_CKPT}" "${INIT_CKPT%/*}/args.json"; do
+if [[ -n "${RESUME_CKPT}" ]]; then
+  SOURCE_CKPT=${RESUME_CKPT}
+  CKPT_ARGS=(--resume_model_path "${RESUME_CKPT}")
+  VERIFY_MODE=resume
+else
+  SOURCE_CKPT=${INIT_CKPT}
+  CKPT_ARGS=(--init_weights_path "${INIT_CKPT}")
+  VERIFY_MODE=init
+fi
+for path in "${TRAIN_LIST}" "${VALID_LIST}" "${SOURCE_CKPT}" "${SOURCE_CKPT%/*}/args.json"; do
   [[ -r "${path}" ]] || { echo "missing required input: ${path}" >&2; exit 2; }
 done
 
@@ -57,7 +68,7 @@ cd "${REPO}/diffusion_planner"
   --normalization_file_path "${REPO}/diffusion_planner/normalization.json" \
   --num_workers 0 \
   --batch_size "${BATCH_SIZE}" \
-  --train_epochs 1 \
+  --train_epochs "${TRAIN_EPOCHS}" \
   --save_utd 1 \
   --rl_full_eval_utd 1 \
   --learning_rate 5e-6 \
@@ -71,7 +82,7 @@ cd "${REPO}/diffusion_planner"
   --rl_ema_update_rate 0.05 \
   --rl_init_use_ema True \
   --rl_train_scope "${TRAIN_SCOPE}" \
-  --init_weights_path "${INIT_CKPT}" \
+  "${CKPT_ARGS[@]}" \
   --use_data_augment False \
   --enable_epdms_eval True \
   --epdms_eval_use_agent_boxes True \
@@ -103,7 +114,8 @@ cd "${REPO}/diffusion_planner"
   --port "${PORT}" \
   >"${SAVE_DIR}/train_stdout.log" 2>&1
 
-"${REPO}/.venv/bin/python" - "${INIT_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" <<'PY'
+"${REPO}/.venv/bin/python" - \
+  "${SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" "${TRAIN_EPOCHS}" <<'PY'
 import csv
 import math
 import pathlib
@@ -114,12 +126,20 @@ import torch
 initial_path = pathlib.Path(sys.argv[1])
 save_dir = pathlib.Path(sys.argv[2])
 scope = sys.argv[3]
-initial = torch.load(initial_path, map_location="cpu", weights_only=True)["ema_state_dict"]
+mode = sys.argv[4]
+expected_epoch = int(sys.argv[5])
+source = torch.load(initial_path, map_location="cpu", weights_only=True)
+if mode == "resume":
+    initial_live = source["model"]
+    initial_shadow = source["ema_state_dict"]
+else:
+    initial_live = source["ema_state_dict"]
+    initial_shadow = source["ema_state_dict"]
 final_ckpt = torch.load(save_dir / "latest.pth", map_location="cpu", weights_only=True)
-assert final_ckpt["epoch"] == 1
+assert final_ckpt["epoch"] == expected_epoch
 live = final_ckpt["model"]
 shadow = final_ckpt["ema_state_dict"]
-assert live.keys() == initial.keys() == shadow.keys()
+assert live.keys() == initial_live.keys() == initial_shadow.keys() == shadow.keys()
 
 decoder_changed = []
 encoder_changed = []
@@ -128,14 +148,14 @@ ema_relation_error = []
 for key in live:
     if not torch.is_floating_point(live[key]):
         continue
-    changed = not torch.equal(live[key], initial[key])
+    changed = not torch.equal(live[key], initial_live[key])
     bare_key = key.removeprefix("module.")
     if bare_key.startswith("decoder.dit.") or bare_key.startswith(
         "decoder.global_route_encoder."
     ):
         decoder_changed.append(changed)
         if changed:
-            expected = initial[key].float().mul(0.95).add(live[key].float(), alpha=0.05)
+            expected = initial_shadow[key].float().mul(0.95).add(live[key].float(), alpha=0.05)
             ema_relation_error.append((shadow[key].float() - expected).abs().max().item())
     elif bare_key.startswith("encoder."):
         encoder_changed.append(changed)
@@ -150,7 +170,7 @@ assert ema_relation_error and max(ema_relation_error) < 2e-5, max(ema_relation_e
 
 with (save_dir / "train_log.tsv").open(newline="", encoding="utf-8") as f:
     rows = list(csv.DictReader(f, delimiter="\t"))
-assert len(rows) == 1
+assert len(rows) == expected_epoch
 required = (
     "train_reward_mean",
     "train_reward_std",
