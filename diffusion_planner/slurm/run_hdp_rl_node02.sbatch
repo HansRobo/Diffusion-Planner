@@ -25,6 +25,7 @@ RESUME_CKPT=${HDP_RL_RESUME_CKPT:-}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
 NUM_GENERATIONS=${HDP_RL_NUM_GENERATIONS:-32}
 BATCH_SIZE=${HDP_RL_BATCH_SIZE:-${NPROC}}
+VALID_BATCH_SIZE=${HDP_RL_VALID_BATCH_SIZE:-512}
 TRAIN_EPOCHS=${HDP_RL_TRAIN_EPOCHS:-1}
 LEARNING_RATE=${HDP_RL_LEARNING_RATE:-1e-7}
 WEIGHT_DECAY=${HDP_RL_WEIGHT_DECAY:-0.0}
@@ -105,6 +106,7 @@ cd "${REPO}/diffusion_planner"
   --num_workers "${NUM_WORKERS}" \
   --train_subsample_step "${TRAIN_SUBSAMPLE_STEP}" \
   --batch_size "${BATCH_SIZE}" \
+  --valid_batch_size "${VALID_BATCH_SIZE}" \
   --train_epochs "${TRAIN_EPOCHS}" \
   --save_utd 1 \
   --rl_full_eval_utd 1 \

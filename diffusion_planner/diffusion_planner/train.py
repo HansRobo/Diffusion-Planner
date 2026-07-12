@@ -267,6 +267,7 @@ def assert_checkpoint_compatible(
             "use_smoothing_future_trajectory",
             "seed",
             "batch_size",
+            "valid_batch_size",
             "learning_rate",
             "weight_decay",
             "warm_up_epoch",

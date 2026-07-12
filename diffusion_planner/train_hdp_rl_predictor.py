@@ -154,6 +154,12 @@ def get_args():
     # DataLoader
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=8, type=int)
+    parser.add_argument(
+        "--valid_batch_size",
+        default=512,
+        type=int,
+        help="global validation batch size; independent from RL candidate-group batch size",
+    )
     parser.add_argument("--pin-mem", action="store_true")
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
@@ -695,6 +701,11 @@ def model_training(args):
         raise ValueError(
             f"--batch_size ({args.batch_size}) must be divisible by DDP world size ({world_size})"
         )
+    if args.valid_batch_size < world_size or args.valid_batch_size % world_size != 0:
+        raise ValueError(
+            f"--valid_batch_size ({args.valid_batch_size}) must be at least and divisible by "
+            f"DDP world size ({world_size})"
+        )
 
     # Validate the checkpoint sidecar before an in-place resume overwrites args.json.
     if args.resume_model_path is not None:
@@ -714,6 +725,7 @@ def model_training(args):
     if global_rank == 0:
         print("------------- {} -------------".format(args.exp_name))
         print("Scenes per step (batch_size): {}".format(args.batch_size))
+        print("Validation batch size: {}".format(args.valid_batch_size))
         print("Group size (num_generations): {}".format(args.num_generations))
         print("RL objective: HDP reward-weighted hybrid loss")
         print("RL reward: HDP risk/follow/lane with Tier IV occupancy proxies")
@@ -825,7 +837,7 @@ def model_training(args):
     valid_loader = DataLoader(
         valid_set,
         sampler=valid_sampler,
-        batch_size=max(128 // ddp.get_world_size(), 1),
+        batch_size=args.valid_batch_size // ddp.get_world_size(),
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False,
