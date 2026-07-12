@@ -326,6 +326,12 @@ def get_args():
         help="fixed held-out policy sampling temperature, independent of rollout exploration",
     )
     parser.add_argument(
+        "--rl_eval_num_generations",
+        type=int,
+        default=_train_config_default("rl_eval_num_generations"),
+        help="fixed held-out candidate count, independent of the training group size",
+    )
+    parser.add_argument(
         "--rl_rollout_steps",
         type=int,
         default=_train_config_default("rl_rollout_steps"),
@@ -653,6 +659,8 @@ def get_args():
         raise ValueError("--wandb_step_log_interval must be >= 0")
     if args.num_generations < 2:
         raise ValueError("--num_generations must be >= 2 for HDP-RL group reward normalization")
+    if args.rl_eval_num_generations < 1:
+        raise ValueError("--rl_eval_num_generations must be >= 1")
     if args.rl_rollout_steps < 2:
         raise ValueError("--rl_rollout_steps must be >= 2 for the second-order DPM solver")
     if args.rl_updates_per_rollout < 1:
@@ -809,6 +817,7 @@ def model_training(args):
         print("RL init uses SFT EMA: {}".format(args.rl_init_use_ema))
         print("Rollout sampling temperature: {}".format(args.rl_noise_scale))
         print("Held-out policy sampling temperature: {}".format(args.rl_eval_noise_scale))
+        print("Held-out policy candidate count: {}".format(args.rl_eval_num_generations))
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
         print("RL updates per rollout: {}".format(args.rl_updates_per_rollout))
         print("Learning rate: {}".format(args.learning_rate))

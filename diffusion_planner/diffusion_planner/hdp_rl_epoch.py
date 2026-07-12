@@ -353,7 +353,7 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
 @torch.no_grad()
 def validate_hdp_reward_policy(data_loader, model, args):
     """Evaluate the rollout policy reward on a fixed held-out scene distribution."""
-    n = int(args.num_generations)
+    n = int(args.rl_eval_num_generations)
     device = torch.device(args.device)
     # reward sum, candidate count, per-group max sum, scene count, invalid reward count,
     # invalid diagnostic count. Invalid values are reported after the collective so every

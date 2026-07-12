@@ -150,6 +150,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         observation_normalizer=lambda inputs: inputs,
         rl_noise_scale=0.5,
         rl_eval_noise_scale=0.25,
+        rl_eval_num_generations=2,
         amp_dtype="off",
         rl_rollout_steps=6,
         ddp=False,

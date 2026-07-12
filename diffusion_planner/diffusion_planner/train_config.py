@@ -134,6 +134,7 @@ class TrainConfig:
     # Keep policy selection on one fixed distribution while rollout temperature is swept.
     # The public HDP NAVSIM policy samples with temperature 0.5 by default.
     rl_eval_noise_scale: float = 0.5
+    rl_eval_num_generations: int = 32
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
