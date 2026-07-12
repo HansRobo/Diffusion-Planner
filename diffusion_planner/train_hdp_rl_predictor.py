@@ -251,6 +251,12 @@ def get_args():
         default=_train_config_default("rl_best_score_min_delta"),
         help="minimum validation-score improvement required to replace the best model",
     )
+    parser.add_argument(
+        "--rl_early_stop_patience",
+        type=int,
+        default=_train_config_default("rl_early_stop_patience"),
+        help="stop after this many full evaluations without a best-score improvement; 0 disables",
+    )
     parser.add_argument("--learning_rate", type=float, default=1e-7)
     parser.add_argument(
         "--weight_decay",
@@ -646,6 +652,8 @@ def get_args():
         raise ValueError("--rl_max_valid_loss_regression must be non-negative")
     if args.rl_best_score_min_delta < 0.0:
         raise ValueError("--rl_best_score_min_delta must be non-negative")
+    if args.rl_early_stop_patience < 0:
+        raise ValueError("--rl_early_stop_patience must be non-negative")
     if not 0.0 < args.rl_ema_update_rate <= 1.0:
         raise ValueError("--rl_ema_update_rate must be in (0, 1]")
     if args.rl_ttc_critical_s < 0.0:
@@ -982,6 +990,7 @@ def model_training(args):
     baseline_metrics_path = os.path.join(args.save_dir, "source_baseline_metrics.json")
     data_list = []
     best_valid_score = -float("inf")
+    full_evals_without_improvement = 0
     baseline_valid_loss = float("inf")
     configured_multisample_count = args.multisample_eval_num_samples
     configured_epdms = args.enable_epdms_eval
@@ -1046,6 +1055,7 @@ def model_training(args):
             )
 
     for epoch in range(init_epoch, train_epochs):
+        stop_requested = False
         train_sampler.set_epoch(epoch)
         if args.ddp:
             torch.distributed.barrier()
@@ -1111,6 +1121,24 @@ def model_training(args):
                 f"{valid_multisample.get('minFDE', float('nan')):.4f}"
             )
 
+            loss_within_guard = valid_loss_ego <= baseline_valid_loss * (
+                1.0 + args.rl_max_valid_loss_regression
+            )
+            selection_score = valid_epdms_total if valid_epdms_total > 0.0 else -valid_loss_ego
+            improves_best = (
+                run_full_eval
+                and loss_within_guard
+                and selection_score > best_valid_score + args.rl_best_score_min_delta
+            )
+            if run_full_eval:
+                full_evals_without_improvement = (
+                    0 if improves_best else full_evals_without_improvement + 1
+                )
+                stop_requested = (
+                    args.rl_early_stop_patience > 0
+                    and full_evals_without_improvement >= args.rl_early_stop_patience
+                )
+
             if args.use_wandb:
                 wandb.log(
                     {
@@ -1121,6 +1149,9 @@ def model_training(args):
                         "valid/road_border": valid_road_border,
                         "valid/epdms_total": valid_epdms_total,
                         "valid/full_eval": float(run_full_eval),
+                        "valid/within_source_loss_guard": float(loss_within_guard),
+                        "valid/improves_best": float(improves_best),
+                        "valid/full_evals_without_improvement": full_evals_without_improvement,
                         **{
                             f"valid_turn_indicator/{key}": value
                             for key, value in valid_turn_metrics.items()
@@ -1132,9 +1163,6 @@ def model_training(args):
                     }
                 )
 
-            loss_within_guard = valid_loss_ego <= baseline_valid_loss * (
-                1.0 + args.rl_max_valid_loss_regression
-            )
             curr_data = {
                 "epoch": epoch + 1,
                 "train_reward_mean": train_reward if has_reward else None,
@@ -1150,6 +1178,7 @@ def model_training(args):
                 "valid_epdms_total": valid_epdms_total,
                 "valid_full_eval": run_full_eval,
                 "valid_within_source_loss_guard": loss_within_guard,
+                "full_evals_without_improvement": full_evals_without_improvement,
                 **{
                     f"valid_turn_indicator_{key}": value
                     for key, value in valid_turn_metrics.items()
@@ -1196,12 +1225,7 @@ def model_training(args):
                 # to the saved weights and are logged to wandb at step=epoch+1.
                 closed_loop_validate(eval_model, args, epoch, os.path.join(curr_dir, "closed_loop"))
 
-            selection_score = valid_epdms_total if valid_epdms_total > 0.0 else -valid_loss_ego
-            if (
-                run_full_eval
-                and loss_within_guard
-                and selection_score > best_valid_score + args.rl_best_score_min_delta
-            ):
+            if improves_best:
                 curr_dir = os.path.join(save_path, "best_model")
                 os.makedirs(curr_dir, exist_ok=True)
                 atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
@@ -1222,6 +1246,17 @@ def model_training(args):
                         opset_version=20,
                         external_data=False,
                     )
+
+        stop_tensor = torch.tensor(int(stop_requested), device=args.device)
+        if args.ddp:
+            torch.distributed.broadcast(stop_tensor, src=0)
+        if bool(stop_tensor.item()):
+            if global_rank == 0:
+                print(
+                    "RL early stopping: no meaningful full-validation improvement for "
+                    f"{full_evals_without_improvement} evaluations"
+                )
+            break
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()

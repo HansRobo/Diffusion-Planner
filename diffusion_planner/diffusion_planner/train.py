@@ -304,6 +304,7 @@ def assert_checkpoint_compatible(
             "rl_validate_before_training",
             "rl_max_valid_loss_regression",
             "rl_best_score_min_delta",
+            "rl_early_stop_patience",
             "rl_reward_dt",
             "rl_ttc_critical_s",
             "rl_ttc_safe_s",
