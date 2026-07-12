@@ -113,15 +113,19 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_h
   --init_weights_path <HDP_SFT_CHECKPOINT> \
   --rl_init_use_ema True \
   --normalization_file_path ./normalization.json \
+  --learning_rate 1e-7 \
+  --weight_decay 0 \
   --rl_reward_normalize group \
-  --rl_reward_beta 1.0 \
+  --rl_reward_beta 0.5 \
   --rl_reward_w_risk 1.0 \
   --rl_reward_w_follow 3.0 \
   --rl_reward_w_lane 2.5 \
+  --rl_reward_w_progress 3.0 \
+  --rl_bc_weight 1.0 \
   --num_generations 32 \
   --rl_noise_scale 0.5 \
   --rl_rollout_steps 6 \
-  --rl_ema_update_rate 0.05 \
+  --rl_ema_update_rate 0.01 \
   --rl_train_scope decoder \
   --predicted_neighbor_num 0 \
   --use_velocity_representation True \

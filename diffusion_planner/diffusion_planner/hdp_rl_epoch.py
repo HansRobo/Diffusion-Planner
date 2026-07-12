@@ -117,7 +117,7 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
         num_scenes,
         n,
         args.rl_reward_normalize,
-        getattr(args, "rl_reward_beta", 1.0),
+        getattr(args, "rl_reward_beta", 0.5),
         args.advantage_eps,
     )
     global_valid_count, ddp_world_size = distributed_valid_sample_count(

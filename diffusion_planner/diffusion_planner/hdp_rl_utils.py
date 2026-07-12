@@ -976,7 +976,7 @@ def compute_reward_weighted_loss(
             num_scenes,
             n,
             args.rl_reward_normalize,
-            getattr(args, "rl_reward_beta", 1.0),
+            getattr(args, "rl_reward_beta", 0.5),
             args.advantage_eps,
         )
     if global_valid_count is None or ddp_world_size is None:

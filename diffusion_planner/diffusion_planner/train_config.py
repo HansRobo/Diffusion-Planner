@@ -129,7 +129,7 @@ class TrainConfig:
     # HDP RL objective. The branch intentionally keeps only the official-style
     # reward-weighted RL-Hybrid path.
     rl_reward_normalize: Literal["group", "batch", "none"] = "group"
-    rl_reward_beta: float = 1.0
+    rl_reward_beta: float = 0.5
     rl_noise_scale: float = 0.5
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
@@ -140,13 +140,13 @@ class TrainConfig:
     rl_reward_w_lane: float = 2.5
     # Anti-stopping reward, measured as signed endpoint progress relative to the logged expert.
     # Kept independently tunable because the paper reward omits explicit progress.
-    rl_reward_w_progress: float = 0.0
+    rl_reward_w_progress: float = 3.0
     # One expert target per scene costs only 1 / group_size of the candidate update and prevents
     # safety reward optimization from erasing the SFT driving behavior.
-    rl_bc_weight: float = 0.0
-    # Paper table reports EMA=0.05. timm uses the complementary decay coefficient,
-    # so update_rate=0.05 maps to ModelEma(decay=0.95).
-    rl_ema_update_rate: float = 0.05
+    rl_bc_weight: float = 1.0
+    # The paper reports beta=1 and EMA update=0.05. Real-data stability audits use a lower
+    # exponential temperature and slower previous-policy update to prevent SFT policy collapse.
+    rl_ema_update_rate: float = 0.01
     # The paper does not publish the numerical speed-adaptive shaping functions.
     # These checkpointed values are tunable local defaults.
     rl_reward_dt: float = 0.1
@@ -160,6 +160,8 @@ class TrainConfig:
     rl_lane_half_width_m: float = 1.75
     rl_leader_lateral_margin_m: float = 0.75
     rl_full_eval_utd: int = 5
+    rl_validate_before_training: bool = True
+    rl_max_valid_loss_regression: float = 0.25
 
     # ---------------------------------------------------------
     # Throughput knobs. Defaults ON after live verification on 2026-07-07

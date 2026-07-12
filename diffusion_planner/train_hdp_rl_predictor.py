@@ -227,12 +227,24 @@ def get_args():
         default=_train_config_default("rl_full_eval_utd"),
         help="run stochastic and EPDMS validation every N epochs; deterministic proxy runs each epoch",
     )
-    parser.add_argument("--learning_rate", type=float, default=5e-6)
+    parser.add_argument(
+        "--rl_validate_before_training",
+        type=boolean,
+        default=_train_config_default("rl_validate_before_training"),
+        help="validate and preserve the source SFT policy before the first RL update",
+    )
+    parser.add_argument(
+        "--rl_max_valid_loss_regression",
+        type=float,
+        default=_train_config_default("rl_max_valid_loss_regression"),
+        help="maximum relative ego validation-loss increase allowed for best-model selection",
+    )
+    parser.add_argument("--learning_rate", type=float, default=1e-7)
     parser.add_argument(
         "--weight_decay",
         type=float,
-        default=_train_config_default("weight_decay"),
-        help="AdamW weight decay; the HDP paper uses 0.01",
+        default=0.0,
+        help="AdamW weight decay; disabled by default for conservative SFT-to-RL fine-tuning",
     )
     parser.add_argument("--warm_up_epoch", type=int, default=2)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
@@ -322,7 +334,7 @@ def get_args():
         "--rl_ema_update_rate",
         type=float,
         default=_train_config_default("rl_ema_update_rate"),
-        help="EMA previous-policy update rate; 0.05 corresponds to timm decay 0.95",
+        help="EMA previous-policy update rate; 0.01 corresponds to timm decay 0.99",
     )
     for name, help_text in (
         ("rl_reward_dt", "reward trajectory timestep in seconds"),
@@ -610,6 +622,8 @@ def get_args():
         raise ValueError("HDP-RL is ego-only; --predicted_neighbor_num must be 0")
     if args.rl_full_eval_utd < 1:
         raise ValueError("--rl_full_eval_utd must be >= 1")
+    if args.rl_max_valid_loss_regression < 0.0:
+        raise ValueError("--rl_max_valid_loss_regression must be non-negative")
     if not 0.0 < args.rl_ema_update_rate <= 1.0:
         raise ValueError("--rl_ema_update_rate must be in (0, 1]")
     if args.rl_ttc_critical_s < 0.0:
@@ -932,14 +946,68 @@ def model_training(args):
         getattr(diffusion_planner, "_resume_global_step", init_epoch * len(train_loader))
     )
     train_log_path = os.path.join(save_path, "train_log.tsv") if global_rank == 0 else None
+    baseline_metrics_path = os.path.join(save_path, "source_baseline_metrics.json")
     data_list = []
     best_valid_score = -float("inf")
-    if global_rank == 0 and args.resume_model_path is not None and os.path.exists(train_log_path):
-        previous_log = pd.read_csv(train_log_path, sep="\t")
-        data_list = previous_log.to_dict("records")
-        best_valid_score = best_valid_score_from_rows(data_list)
+    baseline_valid_loss = float("inf")
     configured_multisample_count = args.multisample_eval_num_samples
     configured_epdms = args.enable_epdms_eval
+    if global_rank == 0 and args.resume_model_path is not None:
+        if os.path.exists(train_log_path):
+            previous_log = pd.read_csv(train_log_path, sep="\t")
+            data_list = previous_log.to_dict("records")
+            best_valid_score = best_valid_score_from_rows(data_list)
+        if os.path.exists(baseline_metrics_path):
+            with open(baseline_metrics_path, encoding="utf-8") as f:
+                baseline_metrics = json.load(f)
+            baseline_valid_loss = float(baseline_metrics["valid_loss_ego"])
+            best_valid_score = max(
+                best_valid_score,
+                float(baseline_metrics["selection_score"]),
+            )
+
+    if args.resume_model_path is None and args.rl_validate_before_training:
+        eval_model = model_ema.ema if model_ema is not None else diffusion_planner
+        baseline_dict = validate_model(eval_model, valid_loader, args)
+        baseline_agg = aggregate_valid_metrics(baseline_dict, args.device)
+        baseline_valid_loss = scalar(baseline_agg["avg_loss_ego"])
+        baseline_epdms = scalar(baseline_agg["epdms_means"].get("total", 0.0))
+        baseline_selection_score = baseline_epdms if baseline_epdms > 0.0 else -baseline_valid_loss
+        baseline_rng_states = gather_rng_states()
+        if global_rank == 0:
+            best_valid_score = baseline_selection_score
+            baseline_metrics = {
+                "epoch": 0,
+                "valid_loss_ego": baseline_valid_loss,
+                "valid_epdms_total": baseline_epdms,
+                "selection_score": baseline_selection_score,
+                "source_checkpoint": args.init_weights_path,
+            }
+            with open(baseline_metrics_path, "w", encoding="utf-8") as f:
+                json.dump(baseline_metrics, f, indent=4)
+            baseline_checkpoint = {
+                "epoch": 0,
+                "model": diffusion_planner.state_dict(),
+                "ema_state_dict": model_ema.ema.state_dict() if model_ema is not None else None,
+                "optimizer": optimizer.state_dict(),
+                "schedule": scheduler.state_dict(),
+                "loss": baseline_valid_loss,
+                "wandb_id": wandb_id,
+                "global_step": args._wandb_global_step,
+                "rng_states": baseline_rng_states,
+            }
+            best_dir = os.path.join(save_path, "best_model")
+            os.makedirs(best_dir, exist_ok=True)
+            atomic_torch_save(baseline_checkpoint, os.path.join(best_dir, "best_model.pth"))
+            with open(os.path.join(best_dir, "args.json"), "w", encoding="utf-8") as f:
+                json.dump(args_dict, f, indent=4)
+            with open(os.path.join(best_dir, "best_model_info.json"), "w", encoding="utf-8") as f:
+                json.dump(baseline_metrics, f, indent=4)
+            print(
+                "Source SFT baseline: "
+                f"valid_loss_ego={baseline_valid_loss:.4f}, "
+                f"valid_epdms_total={baseline_epdms:.4f}"
+            )
 
     for epoch in range(init_epoch, train_epochs):
         train_sampler.set_epoch(epoch)
@@ -1028,6 +1096,9 @@ def model_training(args):
                     }
                 )
 
+            loss_within_guard = valid_loss_ego <= baseline_valid_loss * (
+                1.0 + args.rl_max_valid_loss_regression
+            )
             curr_data = {
                 "epoch": epoch + 1,
                 "train_reward_mean": train_reward if has_reward else None,
@@ -1042,6 +1113,7 @@ def model_training(args):
                 "valid_road_border": valid_road_border,
                 "valid_epdms_total": valid_epdms_total,
                 "valid_full_eval": run_full_eval,
+                "valid_within_source_loss_guard": loss_within_guard,
                 **{
                     f"valid_turn_indicator_{key}": value
                     for key, value in valid_turn_metrics.items()
@@ -1089,7 +1161,7 @@ def model_training(args):
                 closed_loop_validate(eval_model, args, epoch, os.path.join(curr_dir, "closed_loop"))
 
             selection_score = valid_epdms_total if valid_epdms_total > 0.0 else -valid_loss_ego
-            if run_full_eval and selection_score > best_valid_score:
+            if run_full_eval and loss_within_guard and selection_score > best_valid_score:
                 curr_dir = os.path.join(save_path, "best_model")
                 os.makedirs(curr_dir, exist_ok=True)
                 atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
