@@ -11,6 +11,7 @@ class ValidConfig:
     # --- 上書き・推論用パラメータ ---
     valid_set_list: Optional[str] = None
     save_predictions_dir: Optional[str] = None
+    metrics_output: Optional[str] = None
 
     # --- 実行環境パラメータ ---
     batch_size: int = 32
@@ -32,5 +33,13 @@ class ValidConfig:
     multisample_eval_noise_scale: float = 0.1
     multisample_eval_sample_steps: int = 6
     multisample_eval_seed: int = 3407
+    reward_eval_num_generations: int = 0
+    reward_eval_noise_scale: float = 0.5
+    reward_eval_sample_steps: int = 6
+    reward_eval_w_safety: float = 0.0
+    reward_eval_w_risk: float = 1.0
+    reward_eval_w_follow: float = 3.0
+    reward_eval_w_lane: float = 2.5
+    reward_eval_w_progress: float = 3.0
     # None inherits the exact data-alignment setting saved by training.
     align_legacy_neighbor_futures: Optional[bool] = None

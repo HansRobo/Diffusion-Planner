@@ -1,9 +1,11 @@
 import argparse
+import copy
 import json
 from pathlib import Path
 
 import numpy as np
 import torch
+from diffusion_planner.hdp_rl_epoch import validate_hdp_reward_policy
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import load_weights_only
 from diffusion_planner.utils import ddp
@@ -57,6 +59,12 @@ def get_args(args_list=None):
     parser.add_argument("--resume_model_path", type=str, required=True)
     parser.add_argument("--args_json_path", type=str, required=True)
     parser.add_argument("--save_predictions_dir", type=str, default=None)
+    parser.add_argument(
+        "--metrics_output",
+        type=str,
+        default=None,
+        help="optional aggregate metrics JSON path; does not save per-scene predictions",
+    )
     parser.add_argument("--ddp", default=True, type=boolean)
     parser.add_argument(
         "--compile_model",
@@ -99,12 +107,40 @@ def get_args(args_list=None):
         type=int,
         default=_valid_config_default("multisample_eval_seed"),
     )
+    parser.add_argument(
+        "--reward_eval_num_generations",
+        type=int,
+        default=_valid_config_default("reward_eval_num_generations"),
+        help="HDP reward candidates per scene; 0 disables the additional reward pass",
+    )
+    parser.add_argument(
+        "--reward_eval_noise_scale",
+        type=float,
+        default=_valid_config_default("reward_eval_noise_scale"),
+    )
+    parser.add_argument(
+        "--reward_eval_sample_steps",
+        type=int,
+        default=_valid_config_default("reward_eval_sample_steps"),
+    )
+    for reward_name in ("safety", "risk", "follow", "lane", "progress"):
+        parser.add_argument(
+            f"--reward_eval_w_{reward_name}",
+            type=float,
+            default=_valid_config_default(f"reward_eval_w_{reward_name}"),
+        )
 
     args = parser.parse_args(args_list)
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
         raise ValueError(
             "--multisample_eval_sample_steps must be >= 2 for the second-order DPM solver"
         )
+    if args.reward_eval_num_generations < 0:
+        raise ValueError("--reward_eval_num_generations must be >= 0")
+    if args.reward_eval_num_generations > 0 and args.reward_eval_sample_steps < 2:
+        raise ValueError("--reward_eval_sample_steps must be >= 2 for the second-order DPM solver")
+    if args.reward_eval_noise_scale < 0.0:
+        raise ValueError("--reward_eval_noise_scale must be >= 0")
     return args
 
 
@@ -229,6 +265,19 @@ def run_validation(valid_cfg: ValidConfig):
     turn_indicator_accuracy = agg["turn_indicator_accuracy"]
     turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
     turn_indicator_change_total = agg["turn_indicator_change_total"]
+    reward_metrics = {}
+    if valid_cfg.reward_eval_num_generations > 0:
+        reward_args = copy.copy(config_obj)
+        reward_args.rl_eval_num_generations = valid_cfg.reward_eval_num_generations
+        reward_args.rl_eval_noise_scale = valid_cfg.reward_eval_noise_scale
+        reward_args.diffusion_sample_steps = valid_cfg.reward_eval_sample_steps
+        for reward_name in ("safety", "risk", "follow", "lane", "progress"):
+            setattr(
+                reward_args,
+                f"rl_eval_reward_w_{reward_name}",
+                getattr(valid_cfg, f"reward_eval_w_{reward_name}"),
+            )
+        reward_metrics = validate_hdp_reward_policy(valid_loader, diffusion_planner, reward_args)
 
     if global_rank == 0:
         print(f"{avg_loss_ego=:.4f} {avg_loss_neighbor=:.4f}")
@@ -248,6 +297,34 @@ def run_validation(valid_cfg: ValidConfig):
             print(f"ego_road_border_loss_mean={agg['ego_means']['ego_road_border_loss']:.4f}")
         for key, value in agg["multisample_means"].items():
             print(f"multisample_{key}={value:.4f}")
+        for key, value in reward_metrics.items():
+            print(f"reward_{key}={float(value):.12g}")
+
+    # Aggregate metrics JSON is global; write once from rank 0.
+    valid_dict_to_save = {
+        "avg_loss_ego": avg_loss_ego,
+        "avg_loss_neighbor": avg_loss_neighbor,
+        "turn_indicator_accuracy": turn_indicator_accuracy,
+        "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+        "turn_indicator_change_total": turn_indicator_change_total,
+        **{
+            f"turn_indicator_{name}_accuracy": value
+            for name, value in agg["turn_indicator_class_accuracy"].items()
+        },
+        **{
+            f"turn_indicator_{name}_count": value
+            for name, value in agg["turn_indicator_class_count"].items()
+        },
+        **agg["ego_means"],
+        **{f"epdms_{key}": value for key, value in agg["epdms_means"].items()},
+        **{f"multisample_{key}": value for key, value in agg["multisample_means"].items()},
+        **{f"reward_{key}": float(value) for key, value in reward_metrics.items()},
+    }
+    if global_rank == 0 and valid_cfg.metrics_output is not None:
+        metrics_output = Path(valid_cfg.metrics_output)
+        metrics_output.parent.mkdir(parents=True, exist_ok=True)
+        with open(metrics_output, "w") as f:
+            json.dump(valid_dict_to_save, f, indent=4)
 
     # Save results
     if valid_cfg.save_predictions_dir is None:
@@ -256,26 +333,7 @@ def run_validation(valid_cfg: ValidConfig):
     save_predictions_dir = Path(valid_cfg.save_predictions_dir)
     save_predictions_dir.mkdir(parents=True, exist_ok=True)
 
-    # Aggregate metrics JSON is global; write once from rank 0.
     if global_rank == 0:
-        valid_dict_to_save = {
-            "avg_loss_ego": avg_loss_ego,
-            "avg_loss_neighbor": avg_loss_neighbor,
-            "turn_indicator_accuracy": turn_indicator_accuracy,
-            "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
-            "turn_indicator_change_total": turn_indicator_change_total,
-            **{
-                f"turn_indicator_{name}_accuracy": value
-                for name, value in agg["turn_indicator_class_accuracy"].items()
-            },
-            **{
-                f"turn_indicator_{name}_count": value
-                for name, value in agg["turn_indicator_class_count"].items()
-            },
-            **agg["ego_means"],
-            **{f"epdms_{key}": value for key, value in agg["epdms_means"].items()},
-            **{f"multisample_{key}": value for key, value in agg["multisample_means"].items()},
-        }
         with open(save_predictions_dir.parent / "valid_dict.json", "w") as f:
             json.dump(valid_dict_to_save, f, indent=4)
 
