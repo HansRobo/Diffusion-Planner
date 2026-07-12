@@ -140,6 +140,7 @@ rl_reward_w_progress=3.0
 rl_bc_weight=1.0
 num_generations=32
 rl_noise_scale=0.5
+rl_eval_noise_scale=0.5
 rl_rollout_steps=6
 rl_updates_per_rollout=4
 rl_ema_update_rate=0.05
@@ -150,6 +151,8 @@ rl_train_scope=decoder
 The paper EMA update `0.05` is used at policy-iteration boundaries. The lower `beta`, explicit
 progress term, and one-target-per-scene BC anchor are performance-oriented safeguards from real
 Tier IV data audits; the unanchored configuration caused rapid progress and validation collapse.
+The rollout noise is an exploration knob, while held-out reward always uses the public HDP
+policy's default `0.5` sampling temperature so noise sweeps share one selection distribution.
 
 Implementation notes:
 

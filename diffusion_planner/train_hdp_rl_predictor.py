@@ -306,6 +306,12 @@ def get_args():
         help="rollout sampling temperature used by the HDP RL path",
     )
     parser.add_argument(
+        "--rl_eval_noise_scale",
+        type=float,
+        default=_train_config_default("rl_eval_noise_scale"),
+        help="fixed held-out policy sampling temperature, independent of rollout exploration",
+    )
+    parser.add_argument(
         "--rl_rollout_steps",
         type=int,
         default=_train_config_default("rl_rollout_steps"),
@@ -645,6 +651,8 @@ def get_args():
         )
     if args.rl_noise_scale < 0.0:
         raise ValueError("--rl_noise_scale must be >= 0")
+    if args.rl_eval_noise_scale < 0.0:
+        raise ValueError("--rl_eval_noise_scale must be >= 0")
     if args.advantage_eps <= 0.0:
         raise ValueError("--advantage_eps must be > 0")
     if args.rl_reward_beta <= 0.0:
@@ -786,6 +794,7 @@ def model_training(args):
         print("RL train scope: {}".format(args.rl_train_scope))
         print("RL init uses SFT EMA: {}".format(args.rl_init_use_ema))
         print("Rollout sampling temperature: {}".format(args.rl_noise_scale))
+        print("Held-out policy sampling temperature: {}".format(args.rl_eval_noise_scale))
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
         print("RL updates per rollout: {}".format(args.rl_updates_per_rollout))
         print("Learning rate: {}".format(args.learning_rate))

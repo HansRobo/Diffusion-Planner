@@ -297,6 +297,7 @@ def assert_checkpoint_compatible(
             "rl_reward_normalize",
             "rl_reward_beta",
             "rl_noise_scale",
+            "rl_eval_noise_scale",
             "rl_rollout_steps",
             "rl_updates_per_rollout",
             "rl_reward_w_risk",

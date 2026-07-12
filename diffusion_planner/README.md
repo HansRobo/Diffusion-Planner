@@ -124,6 +124,7 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_h
   --rl_bc_weight 1.0 \
   --num_generations 32 \
   --rl_noise_scale 0.5 \
+  --rl_eval_noise_scale 0.5 \
   --rl_rollout_steps 6 \
   --rl_updates_per_rollout 4 \
   --rl_ema_update_rate 0.05 \
@@ -145,6 +146,9 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_h
 ```
 
 Important semantics:
+
+- `--rl_noise_scale` controls training exploration. `--rl_eval_noise_scale` stays fixed at the
+  public HDP policy default so held-out reward remains comparable across exploration sweeps.
 
 - `--compile_model True` compiles the encoder and decoder in place. Checkpoint keys and ONNX
   export remain unchanged. Set `TORCHINDUCTOR_CACHE_DIR` to persistent local storage so restarts

@@ -131,6 +131,9 @@ class TrainConfig:
     rl_reward_normalize: Literal["group", "batch", "none"] = "group"
     rl_reward_beta: float = 0.5
     rl_noise_scale: float = 0.5
+    # Keep policy selection on one fixed distribution while rollout temperature is swept.
+    # The public HDP NAVSIM policy samples with temperature 0.5 by default.
+    rl_eval_noise_scale: float = 0.5
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6

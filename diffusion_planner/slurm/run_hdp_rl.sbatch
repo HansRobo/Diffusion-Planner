@@ -41,6 +41,7 @@ REWARD_W_PROGRESS=${HDP_RL_REWARD_W_PROGRESS:-3.0}
 BC_WEIGHT=${HDP_RL_BC_WEIGHT:-1.0}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-0.5}
+EVAL_NOISE_SCALE=${HDP_RL_EVAL_NOISE_SCALE:-0.5}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
 UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-4}
 COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-True}
@@ -193,6 +194,7 @@ TRAIN_ARGS=(
   --warm_up_epoch 1 \
   --num_generations "${NUM_GENERATIONS}" \
   --rl_noise_scale "${NOISE_SCALE}" \
+  --rl_eval_noise_scale "${EVAL_NOISE_SCALE}" \
   --rl_rollout_steps "${ROLLOUT_STEPS}" \
   --rl_updates_per_rollout "${UPDATES_PER_ROLLOUT}" \
   --rl_reward_normalize group \

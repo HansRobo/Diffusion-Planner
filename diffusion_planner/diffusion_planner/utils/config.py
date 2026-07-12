@@ -24,6 +24,7 @@ class Config:
             "rl_reward_normalize": getattr(self, "official_reward_normalize", "group"),
             "rl_reward_beta": getattr(self, "official_reward_beta", 1.0),
             "rl_noise_scale": 0.5,
+            "rl_eval_noise_scale": 0.5,
         }
         for key, value in defaults.items():
             if not hasattr(self, key):

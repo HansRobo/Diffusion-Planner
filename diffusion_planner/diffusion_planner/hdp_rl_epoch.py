@@ -384,7 +384,7 @@ def validate_hdp_reward_policy(data_loader, model, args):
             ego_world = sample_group(
                 model,
                 norm_exp,
-                args.rl_noise_scale,
+                args.rl_eval_noise_scale,
                 device,
                 scene_norm_inputs=norm_inputs,
                 group_size=n,
