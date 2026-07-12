@@ -1231,6 +1231,7 @@ def model_training(args):
                         },
                         "valid/full_eval": float(run_full_eval),
                         "valid/within_source_loss_guard": float(loss_within_guard),
+                        "valid/selection_score": selection_score,
                         "valid/improves_best": float(improves_best),
                         "valid/full_evals_without_improvement": full_evals_without_improvement,
                         **{
@@ -1260,6 +1261,8 @@ def model_training(args):
                 **{f"valid_reward_{key}": value for key, value in valid_reward_metrics.items()},
                 "valid_full_eval": run_full_eval,
                 "valid_within_source_loss_guard": loss_within_guard,
+                "valid_selection_score": selection_score,
+                "valid_improves_best": improves_best,
                 "full_evals_without_improvement": full_evals_without_improvement,
                 **{
                     f"valid_turn_indicator_{key}": value
