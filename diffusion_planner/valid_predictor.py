@@ -323,7 +323,10 @@ def main():
     valid_cfg = ValidConfig(**args_dict)
 
     # 3. Execute validation logic
-    run_validation(valid_cfg)
+    try:
+        run_validation(valid_cfg)
+    finally:
+        ddp.cleanup()
 
 
 if __name__ == "__main__":
