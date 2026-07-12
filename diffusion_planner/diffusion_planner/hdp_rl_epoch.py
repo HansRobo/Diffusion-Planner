@@ -496,7 +496,7 @@ def _hdp_rl_step(
         "update_candidate_chunk_size": loss_dict["update_candidate_chunk_size"].detach(),
         "update_chunk_count": loss_dict["update_chunk_count"].detach(),
         "optimizer_step_fraction": reward.new_tensor(float(has_optimizer_update)),
-        "optimizer_steps_per_rollout": reward.new_tensor(float(optimizer_steps)),
+        "optimizer_steps_per_rollout": optimizer_steps,
     }
     if timing_events is not None and has_optimizer_update:
         rollout_s = timing_events[0].elapsed_time(timing_events[1]) / 1000.0
@@ -568,7 +568,7 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
             profile=profile_step,
             rollout_generator=rollout_generator,
         )
-        optimizer_steps = int(step_loss["optimizer_steps_per_rollout"].item())
+        optimizer_steps = int(step_loss["optimizer_steps_per_rollout"])
         previous_global_step = args._wandb_global_step
         args._wandb_global_step += optimizer_steps
         crossed_log_interval = (
