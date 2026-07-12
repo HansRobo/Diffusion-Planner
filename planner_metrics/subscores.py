@@ -885,8 +885,10 @@ def compute_road_border_penalty(
     config: RewardConfig | None = None,
     *,
     return_closest_points: bool = False,
+    clearance_only: bool = False,
 ) -> (
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor, torch.Tensor]
+    torch.Tensor
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int | None], torch.Tensor, torch.Tensor]
     | tuple[
         torch.Tensor,
         torch.Tensor,
@@ -919,12 +921,15 @@ def compute_road_border_penalty(
         - first_crossing_steps: list of N (int | None) — first timestep of crossing
         - cont_penalty: (N,) continuous proximity penalty (linear decay from cont_thresh)
         - per_timestep_min: (N, T) min ego-perimeter-to-border distance per timestep
-        When ``return_closest_points=True``, appends:
+        With ``clearance_only=True``, returns only ``per_timestep_min`` and skips
+        the downstream penalty/category bookkeeping. When ``return_closest_points=True``, appends:
         - ego_closest_pt: (N, T, 2) ego perimeter sample at the min distance
         - border_closest_pt: (N, T, 2) closest point on the winning border segment
     """
     if config is None:
         config = RewardConfig()
+    if clearance_only and return_closest_points:
+        raise ValueError("clearance_only and return_closest_points are mutually exclusive")
 
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
@@ -946,13 +951,13 @@ def compute_road_border_penalty(
         )
 
     if "line_strings" not in data:
-        return _safe_return
+        return _safe_return[-1] if clearance_only else _safe_return
 
     ls = data["line_strings"]
     if ls.dim() == 4:
         ls = ls[0]  # remove batch dim -> (num_ls, pts, D)
     if ls.shape[-1] < 4:
-        return _safe_return
+        return _safe_return[-1] if clearance_only else _safe_return
 
     # Build road border segments from consecutive valid points within each polyline
     border_flag = ls[..., 3]  # (num_ls, pts)
@@ -966,7 +971,7 @@ def compute_road_border_penalty(
     idx = torch.where(valid_pair.reshape(-1))[0]
 
     if idx.shape[0] == 0:
-        return _safe_return
+        return _safe_return[-1] if clearance_only else _safe_return
 
     seg_p1_all = border_xy[:, :-1].reshape(-1, 2)[idx]  # (E, 2)
     seg_p2_all = border_xy[:, 1:].reshape(-1, 2)[idx]  # (E, 2)
@@ -1060,6 +1065,9 @@ def compute_road_border_penalty(
         ego_closest_pt = world_pts[n_idx, t_idx, best_perim]
         border_closest_pt = border_closest_all[n_idx, t_idx, best_perim]
         closest_return = (ego_closest_pt, border_closest_pt)
+
+    if clearance_only:
+        return per_timestep_min
 
     # Thresholds from config
     cross_thresh = config.rb_cross_thresh

@@ -421,7 +421,8 @@ def _occupancy_score(
             ego_shape,
             {"line_strings": line_strings},
             _RL_REWARD_CONFIG,
-        )[-1]
+            clearance_only=True,
+        )
         if torch.isfinite(road_border).any():
             sources["road_border"] = True
             return _linear_safe_score(

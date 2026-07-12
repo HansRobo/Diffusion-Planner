@@ -51,6 +51,14 @@ def test_road_border_penalty_reports_perimeter_to_segment_distance():
     torch.testing.assert_close(gate, torch.ones(1))
     assert crossing_steps == [None]
     torch.testing.assert_close(per_timestep, torch.full((1, 4), 1.5), atol=1e-5, rtol=0)
+    clearance_only = compute_road_border_penalty(
+        ego,
+        torch.tensor([0.0, 2.0, 2.0]),
+        {"line_strings": line_strings},
+        RewardConfig(),
+        clearance_only=True,
+    )
+    torch.testing.assert_close(clearance_only, per_timestep, atol=0, rtol=0)
 
 
 def test_ttc_marks_the_full_horizon_before_a_future_collision():
