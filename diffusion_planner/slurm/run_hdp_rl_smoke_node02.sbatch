@@ -30,6 +30,7 @@ SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 PORT=$((24000 + SLURM_JOB_ID % 10000))
 
 mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache/torchinductor"
+rm -f "${SAVE_DIR}/RL_SMOKE_OK"
 cd "${REPO}"
 [[ "$(git rev-parse HEAD)" == "${EXPECTED_COMMIT}" ]]
 git diff --quiet
@@ -46,6 +47,12 @@ fi
 for path in "${TRAIN_LIST}" "${VALID_LIST}" "${SOURCE_CKPT}" "${SOURCE_CKPT%/*}/args.json"; do
   [[ -r "${path}" ]] || { echo "missing required input: ${path}" >&2; exit 2; }
 done
+VERIFY_SOURCE_CKPT=${SOURCE_CKPT}
+if [[ "${VERIFY_MODE}" == resume ]]; then
+  VERIFY_SOURCE_CKPT=${SAVE_DIR}/.rl_smoke_source_${SLURM_JOB_ID}.pth
+  cp --reflink=auto "${SOURCE_CKPT}" "${VERIFY_SOURCE_CKPT}"
+  trap 'rm -f "${VERIFY_SOURCE_CKPT}"' EXIT
+fi
 
 export HOME=/home/ubuntu
 export TMPDIR=${REPO}/tmp
@@ -115,7 +122,8 @@ cd "${REPO}/diffusion_planner"
   >"${SAVE_DIR}/train_stdout.log" 2>&1
 
 "${REPO}/.venv/bin/python" - \
-  "${SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" "${TRAIN_EPOCHS}" <<'PY'
+  "${VERIFY_SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" \
+  "${TRAIN_EPOCHS}" <<'PY'
 import csv
 import math
 import pathlib
