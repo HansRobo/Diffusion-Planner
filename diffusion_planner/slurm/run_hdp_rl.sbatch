@@ -34,6 +34,7 @@ EARLY_STOP_PATIENCE=${HDP_RL_EARLY_STOP_PATIENCE:-5}
 LEARNING_RATE=${HDP_RL_LEARNING_RATE:-1e-7}
 WEIGHT_DECAY=${HDP_RL_WEIGHT_DECAY:-0.0}
 REWARD_BETA=${HDP_RL_REWARD_BETA:-0.5}
+REWARD_W_SAFETY=${HDP_RL_REWARD_W_SAFETY:-0.0}
 REWARD_W_RISK=${HDP_RL_REWARD_W_RISK:-1.0}
 REWARD_W_FOLLOW=${HDP_RL_REWARD_W_FOLLOW:-3.0}
 REWARD_W_LANE=${HDP_RL_REWARD_W_LANE:-2.5}
@@ -43,6 +44,7 @@ EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-0.5}
 EVAL_NOISE_SCALE=${HDP_RL_EVAL_NOISE_SCALE:-0.5}
 EVAL_NUM_GENERATIONS=${HDP_RL_EVAL_NUM_GENERATIONS:-32}
+EVAL_REWARD_W_SAFETY=${HDP_RL_EVAL_REWARD_W_SAFETY:-0.0}
 EVAL_REWARD_W_RISK=${HDP_RL_EVAL_REWARD_W_RISK:-1.0}
 EVAL_REWARD_W_FOLLOW=${HDP_RL_EVAL_REWARD_W_FOLLOW:-3.0}
 EVAL_REWARD_W_LANE=${HDP_RL_EVAL_REWARD_W_LANE:-2.5}
@@ -216,6 +218,7 @@ TRAIN_ARGS=(
   --rl_noise_scale "${NOISE_SCALE}" \
   --rl_eval_noise_scale "${EVAL_NOISE_SCALE}" \
   --rl_eval_num_generations "${EVAL_NUM_GENERATIONS}" \
+  --rl_eval_reward_w_safety "${EVAL_REWARD_W_SAFETY}" \
   --rl_eval_reward_w_risk "${EVAL_REWARD_W_RISK}" \
   --rl_eval_reward_w_follow "${EVAL_REWARD_W_FOLLOW}" \
   --rl_eval_reward_w_lane "${EVAL_REWARD_W_LANE}" \
@@ -224,6 +227,7 @@ TRAIN_ARGS=(
   --rl_updates_per_rollout "${UPDATES_PER_ROLLOUT}" \
   --rl_reward_normalize group \
   --rl_reward_beta "${REWARD_BETA}" \
+  --rl_reward_w_safety "${REWARD_W_SAFETY}" \
   --rl_reward_w_risk "${REWARD_W_RISK}" \
   --rl_reward_w_follow "${REWARD_W_FOLLOW}" \
   --rl_reward_w_lane "${REWARD_W_LANE}" \

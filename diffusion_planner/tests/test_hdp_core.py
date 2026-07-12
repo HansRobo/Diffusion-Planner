@@ -965,6 +965,22 @@ def test_hdp_reward_full_contract_reports_finite_component_diagnostics():
     } <= metrics.keys()
     assert all(torch.isfinite(value) for value in metrics.values())
 
+    safety_weighted_reward, _ = compute_hdp_reward(
+        candidates,
+        scene_inputs,
+        neighbors,
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(
+            rl_reward_w_safety=3.0,
+            rl_reward_w_risk=1.0,
+            rl_reward_w_follow=3.0,
+            rl_reward_w_lane=2.5,
+            rl_reward_w_progress=3.0,
+        ),
+    )
+    torch.testing.assert_close(safety_weighted_reward, reward + 3.0)
+
     single_reward, single_metrics = compute_hdp_reward(
         candidates[:1],
         scene_inputs,

@@ -412,6 +412,7 @@ def validate_hdp_reward_policy(data_loader, model, args):
     device = torch.device(args.device)
     eval_reward_args = copy.copy(args)
     for name, default in (
+        ("safety", 0.0),
         ("risk", 1.0),
         ("follow", 3.0),
         ("lane", 2.5),

@@ -137,6 +137,7 @@ class TrainConfig:
     rl_eval_num_generations: int = 32
     # Keep checkpoint selection comparable when the optimization reward weights are swept.
     # This is the current real-vehicle objective: paper multi-reward plus anti-stopping progress.
+    rl_eval_reward_w_safety: float = 0.0
     rl_eval_reward_w_risk: float = 1.0
     rl_eval_reward_w_follow: float = 3.0
     rl_eval_reward_w_lane: float = 2.5
@@ -148,6 +149,9 @@ class TrainConfig:
     # One preserves the paper-style on-policy cadence; larger values are a replay efficiency knob.
     rl_updates_per_rollout: int = 4
     rl_init_use_ema: bool = True
+    # Optional direct collision term. Zero preserves the published multi-reward formula; positive
+    # values test whether active=1/rear=0.3 safety prevents progress-risk Pareto regressions.
+    rl_reward_w_safety: float = 0.0
     rl_reward_w_risk: float = 1.0
     rl_reward_w_follow: float = 3.0
     rl_reward_w_lane: float = 2.5

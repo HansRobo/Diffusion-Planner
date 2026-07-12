@@ -1002,7 +1002,8 @@ def compute_hdp_reward(
         expert_off_lane = expert_off_lanes[scene]
         expert_lane_change = expert_lane_changes[scene]
         reward = (
-            args.rl_reward_w_risk * risk
+            getattr(args, "rl_reward_w_safety", 0.0) * terms["safety"]
+            + args.rl_reward_w_risk * risk
             + args.rl_reward_w_follow * terms["follow"]
             + args.rl_reward_w_lane * lane
             + getattr(args, "rl_reward_w_progress", 0.0) * progress_score
@@ -1063,11 +1064,11 @@ def compute_hdp_reward(
     reward_group = torch.stack(rewards)
     component_groups = {
         key: torch.stack(metric_lists[key])
-        for key in ("risk", "follow", "lane", "progress", "leader_fraction")
+        for key in ("safety", "risk", "follow", "lane", "progress", "leader_fraction")
     }
     reward_centered = reward_group - reward_group.mean(dim=1, keepdim=True)
     reward_winner = reward_group.argmax(dim=1, keepdim=True)
-    for key in ("risk", "follow", "lane", "progress"):
+    for key in ("safety", "risk", "follow", "lane", "progress"):
         component = component_groups[key]
         component_centered = component - component.mean(dim=1, keepdim=True)
         component_denominator = (
@@ -1083,7 +1084,7 @@ def compute_hdp_reward(
             torch.zeros_like(component_correlation),
         )
         metrics[f"reward_{key}_correlation"] = component_correlation.mean()
-    for key in ("risk", "follow", "lane", "progress"):
+    for key in ("safety", "risk", "follow", "lane", "progress"):
         component = component_groups[key]
         winner_value = component.gather(1, reward_winner).squeeze(1)
         metrics[f"reward_winner_{key}_advantage"] = (winner_value - component.mean(dim=1)).mean()

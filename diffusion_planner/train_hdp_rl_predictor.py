@@ -343,6 +343,7 @@ def get_args():
         help="fixed held-out candidate count, independent of the training group size",
     )
     for reward_name, help_name in (
+        ("safety", "direct active/rear collision safety"),
         ("risk", "risk/safety"),
         ("follow", "leader-conditioned following"),
         ("lane", "lane keeping"),
@@ -373,6 +374,12 @@ def get_args():
         help="initialize a fresh RL run from the SFT checkpoint EMA weights when available",
     )
     parser.add_argument("--advantage_eps", type=float, default=1e-6)
+    parser.add_argument(
+        "--rl_reward_w_safety",
+        type=float,
+        default=_train_config_default("rl_reward_w_safety"),
+        help="optional direct paper safety-reward weight; zero preserves multi-reward HDP",
+    )
     parser.add_argument(
         "--rl_reward_w_risk",
         type=float,
@@ -694,6 +701,7 @@ def get_args():
     if args.rl_reward_beta <= 0.0:
         raise ValueError("--rl_reward_beta must be > 0")
     reward_weights = (
+        args.rl_reward_w_safety,
         args.rl_reward_w_risk,
         args.rl_reward_w_follow,
         args.rl_reward_w_lane,
@@ -704,6 +712,7 @@ def get_args():
     if sum(reward_weights) <= 0.0:
         raise ValueError("At least one RL reward weight must be positive")
     eval_reward_weights = (
+        args.rl_eval_reward_w_safety,
         args.rl_eval_reward_w_risk,
         args.rl_eval_reward_w_follow,
         args.rl_eval_reward_w_lane,
@@ -833,7 +842,8 @@ def model_training(args):
         print("Validation batch size: {}".format(args.valid_batch_size))
         print("Group size (num_generations): {}".format(args.num_generations))
         print("RL objective: HDP reward-weighted hybrid loss")
-        print("RL reward: HDP risk/follow/lane with Tier IV occupancy proxies")
+        print("RL reward: HDP safety/risk/follow/lane with Tier IV occupancy proxies")
+        print("RL direct safety reward weight: {}".format(args.rl_reward_w_safety))
         print("RL progress reward weight: {}".format(args.rl_reward_w_progress))
         print("RL behavior-cloning anchor weight: {}".format(args.rl_bc_weight))
         print("RL EMA update rate: {}".format(args.rl_ema_update_rate))
@@ -843,8 +853,9 @@ def model_training(args):
         print("Held-out policy sampling temperature: {}".format(args.rl_eval_noise_scale))
         print("Held-out policy candidate count: {}".format(args.rl_eval_num_generations))
         print(
-            "Held-out reward weights (risk/follow/lane/progress): "
-            f"{args.rl_eval_reward_w_risk}/{args.rl_eval_reward_w_follow}/"
+            "Held-out reward weights (safety/risk/follow/lane/progress): "
+            f"{args.rl_eval_reward_w_safety}/{args.rl_eval_reward_w_risk}/"
+            f"{args.rl_eval_reward_w_follow}/"
             f"{args.rl_eval_reward_w_lane}/{args.rl_eval_reward_w_progress}"
         )
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
