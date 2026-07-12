@@ -141,6 +141,7 @@ rl_bc_weight=1.0
 num_generations=32
 rl_noise_scale=0.5
 rl_rollout_steps=6
+rl_updates_per_rollout=4
 rl_ema_update_rate=0.01
 rl_init_use_ema=true
 rl_train_scope=decoder
@@ -158,6 +159,9 @@ Implementation notes:
 - EMA rollout sampling runs without autograd. The live global route condition is computed inside
   the DDP forward once per scene and only its 256-dimensional embedding is repeated per candidate.
 - Rollout sampling uses a fixed temperature instead of a random per-row temperature range.
+- Each sampled and scored group is reused for four independent diffusion-time updates. This
+  replay-style default preserves candidate diversity while amortizing rollout and reward geometry;
+  one update remains available as the strict paper-style cadence.
 - RL starts from the SFT EMA shadow with `--init_weights_path` and `rl_init_use_ema=true`, while optimizer/scheduler/W&B state are fresh. Missing EMA weights produce an explicit live-weight fallback warning.
 - `rl_train_scope=decoder` updates only the DiT trajectory policy and freezes the encoder plus the separate turn-indicator classifier. This matches the released decoder-policy intent without leaving an unsupervised Tier IV-only head in DDP.
 - Encoder modules are kept in eval mode during decoder-only RL so frozen dropout/drop-path does not inject noise.

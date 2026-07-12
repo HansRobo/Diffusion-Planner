@@ -136,7 +136,7 @@ class TrainConfig:
     rl_rollout_steps: int = 6
     # Reuse the sampled/scored candidate group for additional random diffusion-time updates.
     # One preserves the paper-style on-policy cadence; larger values are a replay efficiency knob.
-    rl_updates_per_rollout: int = 1
+    rl_updates_per_rollout: int = 4
     rl_init_use_ema: bool = True
     rl_reward_w_risk: float = 1.0
     rl_reward_w_follow: float = 3.0
