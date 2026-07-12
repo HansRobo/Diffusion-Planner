@@ -164,6 +164,9 @@ The rollout noise and group size are measured exploration/efficiency choices, wh
 uses the public HDP policy's default `0.5` sampling temperature and the paper's 32 candidates so
 all sweeps share one selection distribution. Held-out sampling also uses
 `diffusion_sample_steps`, independently of the training-only `rl_rollout_steps` knob.
+The Slurm launcher caps automatically derived TorchInductor workers at eight per rank so a
+full-node CPU allocation remains available to DataLoader workers. Set
+`HDP_RL_COMPILE_THREADS` explicitly only when profiling another compile budget.
 
 Implementation notes:
 
