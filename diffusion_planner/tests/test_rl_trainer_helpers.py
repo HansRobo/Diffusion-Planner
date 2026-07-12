@@ -16,7 +16,9 @@ from train_hdp_rl_predictor import (
     find_checkpoint_run_artifact,
     finite_scalar_metrics,
     initialize_fresh_rl_policy_and_ema,
+    load_resume_train_rows,
     validate_compiled_candidate_batch,
+    write_train_log_atomic,
 )
 
 
@@ -103,6 +105,29 @@ def test_fresh_rl_initializes_live_and_ema_from_the_same_checkpoint(tmp_path):
     ):
         torch.testing.assert_close(live_value, expected)
         torch.testing.assert_close(shadow_value, expected)
+
+
+def test_resume_train_log_uses_checkpoint_epoch_as_commit_boundary(tmp_path):
+    path = tmp_path / "train_log.tsv"
+    pd_rows = [
+        {"epoch": 1, "valid_reward_mean": 1.0},
+        {"epoch": 2, "valid_reward_mean": 2.0},
+        {"epoch": 3, "valid_reward_mean": 3.0},
+    ]
+    write_train_log_atomic(pd_rows, str(path))
+
+    rows = load_resume_train_rows(path, init_epoch=2)
+
+    assert [row["epoch"] for row in rows] == [1, 2]
+    assert not list(tmp_path.glob(".train_log.tsv.tmp.*"))
+
+
+def test_resume_train_log_rejects_missing_checkpointed_epoch(tmp_path):
+    path = tmp_path / "train_log.tsv"
+    write_train_log_atomic([{"epoch": 1}, {"epoch": 3}], str(path))
+
+    with pytest.raises(ValueError, match="one contiguous log row"):
+        load_resume_train_rows(path, init_epoch=3)
 
 
 def test_compiled_rl_candidate_batch_rejects_corrupted_h100_shape():

@@ -128,6 +128,43 @@ def best_valid_score_from_rows(rows: list[dict]) -> float:
     return best
 
 
+def load_resume_train_rows(path: Path, init_epoch: int) -> list[dict]:
+    """Load only rows committed by the checkpoint and reject gaps in epoch history."""
+    if not path.is_file():
+        if init_epoch == 0:
+            return []
+        raise FileNotFoundError(f"Strict RL resume is missing train_log.tsv: {path}")
+    frame = pd.read_csv(path, sep="\t")
+    if "epoch" not in frame:
+        raise ValueError(f"RL train log has no epoch column: {path}")
+    numeric_epoch = pd.to_numeric(frame["epoch"], errors="coerce")
+    if numeric_epoch.isna().any():
+        raise ValueError(f"RL train log contains a non-numeric epoch: {path}")
+    committed = frame[numeric_epoch <= init_epoch]
+    committed_epochs = pd.to_numeric(committed["epoch"], errors="coerce").tolist()
+    expected_epochs = list(range(1, init_epoch + 1))
+    if committed_epochs != expected_epochs:
+        raise ValueError(
+            "Strict RL resume needs one contiguous log row per checkpointed epoch: "
+            f"expected={expected_epochs}, found={committed_epochs} in {path}"
+        )
+    return committed.to_dict("records")
+
+
+def write_train_log_atomic(rows: list[dict], path: str) -> None:
+    """Atomically replace the small TSV so interruption cannot leave a partial log."""
+    destination = Path(path)
+    temporary = destination.with_name(f".{destination.name}.tmp.{os.getpid()}")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="") as stream:
+            pd.DataFrame(rows).to_csv(stream, index=False, sep="\t")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def find_checkpoint_run_artifact(checkpoint_path: str, filename: str) -> Path | None:
     """Find a run-level artifact next to a latest or nested epoch/best checkpoint."""
     checkpoint = Path(checkpoint_path)
@@ -1170,14 +1207,16 @@ def model_training(args):
             if os.path.exists(train_log_path)
             else find_checkpoint_run_artifact(args.resume_model_path, "train_log.tsv")
         )
-        if resume_train_log is not None:
-            previous_log = pd.read_csv(resume_train_log, sep="\t")
-            data_list = previous_log.to_dict("records")
-            best_valid_score = best_valid_score_from_rows(data_list)
-            if data_list:
-                raw_patience = data_list[-1].get("full_evals_without_improvement", 0)
-                if pd.notna(raw_patience):
-                    full_evals_without_improvement = int(raw_patience)
+        if resume_train_log is None:
+            raise FileNotFoundError(
+                f"Strict RL resume is missing train_log.tsv beside {args.resume_model_path}"
+            )
+        data_list = load_resume_train_rows(resume_train_log, init_epoch)
+        best_valid_score = best_valid_score_from_rows(data_list)
+        if data_list:
+            raw_patience = data_list[-1].get("full_evals_without_improvement", 0)
+            if pd.notna(raw_patience):
+                full_evals_without_improvement = int(raw_patience)
         baseline_metrics = resume_baseline_data
         if bool(baseline_metrics.get("baseline_available", True)):
             baseline_valid_loss = float(baseline_metrics["valid_loss_ego"])
@@ -1418,9 +1457,7 @@ def model_training(args):
                 **{f"valid_multisample_{key}": value for key, value in valid_multisample.items()},
             }
             data_list.append(curr_data)
-            pd.DataFrame(data_list).to_csv(
-                os.path.join(save_path, "train_log.tsv"), index=False, sep="\t"
-            )
+            write_train_log_atomic(data_list, os.path.join(save_path, "train_log.tsv"))
 
             model_dict = {
                 "epoch": epoch + 1,
