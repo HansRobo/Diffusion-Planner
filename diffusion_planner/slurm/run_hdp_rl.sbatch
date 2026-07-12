@@ -34,6 +34,9 @@ EARLY_STOP_PATIENCE=${HDP_RL_EARLY_STOP_PATIENCE:-5}
 LEARNING_RATE=${HDP_RL_LEARNING_RATE:-1e-7}
 WEIGHT_DECAY=${HDP_RL_WEIGHT_DECAY:-0.0}
 REWARD_BETA=${HDP_RL_REWARD_BETA:-0.5}
+REWARD_W_RISK=${HDP_RL_REWARD_W_RISK:-1.0}
+REWARD_W_FOLLOW=${HDP_RL_REWARD_W_FOLLOW:-3.0}
+REWARD_W_LANE=${HDP_RL_REWARD_W_LANE:-2.5}
 REWARD_W_PROGRESS=${HDP_RL_REWARD_W_PROGRESS:-3.0}
 BC_WEIGHT=${HDP_RL_BC_WEIGHT:-1.0}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
@@ -194,6 +197,9 @@ TRAIN_ARGS=(
   --rl_updates_per_rollout "${UPDATES_PER_ROLLOUT}" \
   --rl_reward_normalize group \
   --rl_reward_beta "${REWARD_BETA}" \
+  --rl_reward_w_risk "${REWARD_W_RISK}" \
+  --rl_reward_w_follow "${REWARD_W_FOLLOW}" \
+  --rl_reward_w_lane "${REWARD_W_LANE}" \
   --rl_reward_w_progress "${REWARD_W_PROGRESS}" \
   --rl_bc_weight "${BC_WEIGHT}" \
   --rl_ema_update_rate "${EMA_UPDATE_RATE}" \
