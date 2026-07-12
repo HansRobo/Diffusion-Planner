@@ -147,9 +147,8 @@ class TrainConfig:
     # One expert target per scene costs only 1 / group_size of the candidate update and prevents
     # safety reward optimization from erasing the SFT driving behavior.
     rl_bc_weight: float = 1.0
-    # The paper reports beta=1 and EMA update=0.05. Real-data stability audits use a lower
-    # exponential temperature and slower previous-policy update to prevent SFT policy collapse.
-    rl_ema_update_rate: float = 0.01
+    # Commit the live proposal into the frozen rollout policy once per policy iteration.
+    rl_ema_update_rate: float = 0.05
     # The paper does not publish the numerical speed-adaptive shaping functions.
     # These checkpointed values are tunable local defaults.
     rl_reward_dt: float = 0.1

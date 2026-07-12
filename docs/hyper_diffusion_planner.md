@@ -142,14 +142,14 @@ num_generations=32
 rl_noise_scale=0.5
 rl_rollout_steps=6
 rl_updates_per_rollout=4
-rl_ema_update_rate=0.01
+rl_ema_update_rate=0.05
 rl_init_use_ema=true
 rl_train_scope=decoder
 ```
 
-The paper values `beta=1.0` and EMA update `0.05` remain available as flags. The lower defaults,
-explicit progress term, and one-target-per-scene BC anchor are performance-oriented safeguards from
-real Tier IV data audits; the unanchored paper values caused rapid progress and validation collapse.
+The paper EMA update `0.05` is used at policy-iteration boundaries. The lower `beta`, explicit
+progress term, and one-target-per-scene BC anchor are performance-oriented safeguards from real
+Tier IV data audits; the unanchored configuration caused rapid progress and validation collapse.
 
 Implementation notes:
 
@@ -159,14 +159,18 @@ Implementation notes:
 - EMA rollout sampling runs without autograd. The live global route condition is computed inside
   the DDP forward once per scene and only its 256-dimensional embedding is repeated per candidate.
 - Rollout sampling uses a fixed temperature instead of a random per-row temperature range.
-- Each sampled and scored group is reused for four independent diffusion-time updates. This
-  replay-style default preserves candidate diversity while amortizing rollout and reward geometry;
-  one update remains available as the strict paper-style cadence.
+- Each sampled and scored group is reused for four independent diffusion-time updates while the
+  rollout policy remains frozen for the whole epoch. This amortizes rollout and reward geometry;
+  one update remains available as an ablation.
 - RL starts from the SFT EMA shadow with `--init_weights_path` and `rl_init_use_ema=true`, while optimizer/scheduler/W&B state are fresh. Missing EMA weights produce an explicit live-weight fallback warning.
 - `rl_train_scope=decoder` updates only the DiT trajectory policy and freezes the encoder plus the separate turn-indicator classifier. This matches the released decoder-policy intent without leaving an unsupervised Tier IV-only head in DDP.
 - Encoder modules are kept in eval mode during decoder-only RL so frozen dropout/drop-path does not inject noise.
-- The EMA shadow is the previous rollout policy. The live decoder is updated first and EMA is refreshed afterward with update rate `0.01` (`timm` decay `0.99`).
-- EMA updates use timm's foreach implementation to fuse the per-tensor interpolation kernels while preserving the existing `.ema` checkpoint state.
+- The EMA shadow is the fixed previous policy required by the paper's replay-buffer objective.
+  It is not changed between batches. At the epoch boundary, the live proposal is committed once
+  with update rate `0.05` (`timm` decay `0.95`), live weights are synchronized to the accepted
+  policy, and stale Adam moments are cleared before the next policy iteration.
+- The boundary EMA update uses timm's foreach implementation to fuse the per-tensor interpolation
+  kernels while preserving the existing `.ema` checkpoint state.
 - SFT, RL, and standalone validation compile the encoder and decoder in place by default. The
   state dict stays unchanged, while RL's direct component calls and DPM validation use the same
   compiled modules. Use a persistent `TORCHINDUCTOR_CACHE_DIR` across restarts.
@@ -201,7 +205,11 @@ Faithful to HDP:
 DP-native adaptation:
 
 - The released NAVSIM implementation uses NAVSIM PDM metric caches, Ray scoring, and a replay buffer; it does not expose the real-vehicle reward shaping implementation described in the paper.
-- The public NAVSIM configuration uses group size 10, five rollout steps, a ten-epoch replay refresh, and no active EMA by default. The paper table instead reports group size 32 and EMA update 0.05; the real-vehicle table reports six inference steps. This branch keeps group size 32 and six rollout steps, while using stability-audited beta, EMA, progress, and BC defaults rather than claiming that all released artifacts agree.
+- The public NAVSIM configuration uses group size 10, five rollout steps, a rollout epoch followed
+  by nine replay-training epochs, and no active EMA by default. The paper table instead reports
+  group size 32 and EMA update 0.05; the real-vehicle table reports six inference steps. This branch
+  uses a memory-efficient streaming equivalent: a frozen previous policy supplies every rollout in
+  an epoch, then one EMA policy commit occurs at the boundary.
 - This branch runs on Tier IV NPZ data and computes the HDP reward directly from available geometry and map tensors.
 - Exact NAVSIM PDM cache behavior is not assumed to exist in this repository.
 - Tier IV line strings and polygons use valid-point centroid/direction positional geometry

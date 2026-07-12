@@ -24,7 +24,7 @@ INIT_CKPT=${HDP_RL_INIT_CKPT:-}
 RESUME_CKPT=${HDP_RL_RESUME_CKPT:-}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
 NUM_GENERATIONS=${HDP_RL_NUM_GENERATIONS:-32}
-BATCH_SIZE=${HDP_RL_BATCH_SIZE:-64}
+BATCH_SIZE=${HDP_RL_BATCH_SIZE:-512}
 VALID_BATCH_SIZE=${HDP_RL_VALID_BATCH_SIZE:-512}
 TRAIN_EPOCHS=${HDP_RL_TRAIN_EPOCHS:-1}
 VALIDATE_BEFORE_TRAINING=${HDP_RL_VALIDATE_BEFORE_TRAINING:-True}
@@ -36,7 +36,7 @@ WEIGHT_DECAY=${HDP_RL_WEIGHT_DECAY:-0.0}
 REWARD_BETA=${HDP_RL_REWARD_BETA:-0.5}
 REWARD_W_PROGRESS=${HDP_RL_REWARD_W_PROGRESS:-3.0}
 BC_WEIGHT=${HDP_RL_BC_WEIGHT:-1.0}
-EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.01}
+EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-0.5}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
 UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-4}
@@ -169,7 +169,7 @@ cd "${REPO}/diffusion_planner"
 
 "${REPO}/.venv/bin/python" - \
   "${VERIFY_SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" \
-  "${TRAIN_EPOCHS}" "${EMA_UPDATE_RATE}" <<'PY'
+  "${TRAIN_EPOCHS}" <<'PY'
 import csv
 import math
 import pathlib
@@ -182,7 +182,6 @@ save_dir = pathlib.Path(sys.argv[2])
 scope = sys.argv[3]
 mode = sys.argv[4]
 expected_epoch = int(sys.argv[5])
-ema_update_rate = float(sys.argv[6])
 source = torch.load(initial_path, map_location="cpu", weights_only=True)
 if mode == "resume":
     initial_live = source["model"]
@@ -200,7 +199,7 @@ assert live.keys() == initial_live.keys() == initial_shadow.keys() == shadow.key
 decoder_changed = []
 encoder_changed = []
 turn_changed = []
-ema_relation_error = []
+policy_sync_error = []
 ema_changed = []
 source_global_step = int(source.get("global_step", 0)) if mode == "resume" else 0
 optimizer_steps = int(final_ckpt.get("global_step", 0)) - source_global_step
@@ -215,11 +214,7 @@ for key in live:
     ):
         decoder_changed.append(changed)
         ema_changed.append(not torch.equal(shadow[key], initial_shadow[key]))
-        if changed and optimizer_steps == 1:
-            expected = initial_shadow[key].float().mul(1.0 - ema_update_rate).add(
-                live[key].float(), alpha=ema_update_rate
-            )
-            ema_relation_error.append((shadow[key].float() - expected).abs().max().item())
+        policy_sync_error.append((shadow[key].float() - live[key].float()).abs().max().item())
     elif bare_key.startswith("encoder."):
         encoder_changed.append(changed)
     elif bare_key.startswith("decoder.turn_indicator_predictor."):
@@ -232,8 +227,7 @@ if scope == "decoder":
     assert not any(encoder_changed), "decoder-only RL changed encoder"
 else:
     assert any(encoder_changed), "all-scope RL did not update encoder"
-if optimizer_steps == 1:
-    assert ema_relation_error and max(ema_relation_error) < 2e-5, max(ema_relation_error)
+assert policy_sync_error and max(policy_sync_error) < 2e-5, max(policy_sync_error)
 
 with (save_dir / "train_log.tsv").open(newline="", encoding="utf-8") as f:
     rows = list(csv.DictReader(f, delimiter="\t"))
@@ -258,8 +252,7 @@ print(
     f"optimizer_steps={optimizer_steps}",
     f"decoder_tensors_changed={sum(decoder_changed)}",
     f"encoder_tensors_changed={sum(encoder_changed)}",
-    f"max_ema_relation_error="
-    f"{max(ema_relation_error):.3e}" if ema_relation_error else "multi_step_checked",
+    f"max_policy_sync_error={max(policy_sync_error):.3e}",
 )
 PY
 

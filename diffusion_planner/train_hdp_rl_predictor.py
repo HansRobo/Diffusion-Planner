@@ -362,7 +362,7 @@ def get_args():
         "--rl_ema_update_rate",
         type=float,
         default=_train_config_default("rl_ema_update_rate"),
-        help="EMA previous-policy update rate; 0.01 corresponds to timm decay 0.99",
+        help="epoch-boundary previous-policy update rate; 0.05 corresponds to timm decay 0.95",
     )
     for name, help_text in (
         ("rl_reward_dt", "reward trajectory timestep in seconds"),
@@ -658,6 +658,8 @@ def get_args():
         raise ValueError("--rl_best_score_min_delta must be non-negative")
     if args.rl_early_stop_patience < 0:
         raise ValueError("--rl_early_stop_patience must be non-negative")
+    if not args.use_ema:
+        raise ValueError("HDP-RL requires --use_ema True for the frozen previous-policy snapshot")
     if not 0.0 < args.rl_ema_update_rate <= 1.0:
         raise ValueError("--rl_ema_update_rate must be in (0, 1]")
     if args.rl_ttc_critical_s < 0.0:

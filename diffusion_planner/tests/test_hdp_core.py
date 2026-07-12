@@ -13,6 +13,7 @@ from diffusion_planner.dimensions import (
     TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT,
     TRAFFIC_LIGHT_RED,
 )
+from diffusion_planner.hdp_rl_epoch import commit_ema_policy_update
 from diffusion_planner.hdp_rl_utils import (
     HDPRewardConfig,
     _collision_and_leader_terms,
@@ -1175,6 +1176,26 @@ def test_rl_ema_rate_005_maps_to_timm_decay_095():
         model.weight.fill_(1.0)
     ema.update(model)
     torch.testing.assert_close(ema.ema.weight, torch.full_like(ema.ema.weight, 0.05))
+
+
+def test_rl_policy_commit_updates_once_syncs_live_and_clears_optimizer_state():
+    model = torch.nn.Linear(1, 1, bias=False)
+    with torch.no_grad():
+        model.weight.zero_()
+    ema = ModelEma(model, decay=0.95, device="cpu")
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.1)
+    model(torch.ones(1, 1)).sum().backward()
+    optimizer.step()
+    assert optimizer.state
+    proposal = model.weight.detach().clone()
+
+    relative_l2 = commit_ema_policy_update(model, ema, optimizer, use_ddp=False)
+
+    expected = proposal * 0.05
+    torch.testing.assert_close(model.weight, expected)
+    torch.testing.assert_close(ema.ema.weight, expected)
+    assert relative_l2 > 0
+    assert not optimizer.state
 
 
 def _checkpoint_compat_config(predicted_neighbor_num: int):

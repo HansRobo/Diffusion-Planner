@@ -36,6 +36,26 @@ def _set_hdp_rl_train_mode(model, args):
         encoder.eval()
 
 
+@torch.no_grad()
+def commit_ema_policy_update(model, ema, optimizer, use_ddp: bool):
+    """Commit one conservative policy iteration and reset the live proposal."""
+    live = ddp.get_model(model, use_ddp)
+    old_policy = ddp.get_model(ema.ema, use_ddp)
+    first_param = next(live.parameters())
+    delta_sq = first_param.new_zeros((), dtype=torch.float32)
+    reference_sq = first_param.new_zeros((), dtype=torch.float32)
+    for live_param, old_param in zip(live.parameters(), old_policy.parameters(), strict=True):
+        delta_sq.add_((live_param.detach().float() - old_param.detach().float()).square().sum())
+        reference_sq.add_(old_param.detach().float().square().sum())
+    proposal_relative_l2 = (delta_sq / reference_sq.clamp_min(1e-12)).sqrt()
+
+    ema.update(model)
+    accepted_policy = ddp.get_model(ema.ema, use_ddp)
+    live.load_state_dict(accepted_policy.state_dict())
+    optimizer.state.clear()
+    return proposal_relative_l2
+
+
 def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
     mask = neighbor_future_padding_mask(neighbor_future_raw)
     neighbors_future = heading_to_cos_sin(neighbor_future_raw)
@@ -164,8 +184,6 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
             update_loss["loss"].backward()
             grad_norm = grad_norm + nn.utils.clip_grad_norm_(trainable_params, 5).detach()
             optimizer.step()
-            if ema is not None:
-                ema.update(model)
             for key, value in update_loss.items():
                 loss_sums[key] = loss_sums.get(key, reward.new_zeros(())) + value.detach()
         loss_dict = {key: value / updates_per_rollout for key, value in loss_sums.items()}
@@ -302,6 +320,13 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
         update_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts, step_loss)
 
     epoch_mean_loss = finalize_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts)
+
+    if ema is not None:
+        proposal_relative_l2 = commit_ema_policy_update(model, ema, optimizer, args.ddp)
+        epoch_mean_loss["policy_proposal_relative_l2"] = proposal_relative_l2
+        epoch_mean_loss["policy_accepted_relative_l2"] = (
+            proposal_relative_l2 * float(getattr(args, "rl_ema_update_rate", 0.05))
+        )
 
     if args.ddp:
         epoch_mean_loss = ddp.reduce_and_average_losses(epoch_mean_loss, torch.device(args.device))
