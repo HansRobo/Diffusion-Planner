@@ -283,6 +283,12 @@ def get_args():
         help="DPM-Solver steps used only for RL rollout generation",
     )
     parser.add_argument(
+        "--rl_updates_per_rollout",
+        type=int,
+        default=_train_config_default("rl_updates_per_rollout"),
+        help="optimizer updates that reuse each sampled and scored candidate group",
+    )
+    parser.add_argument(
         "--rl_init_use_ema",
         type=boolean,
         default=_train_config_default("rl_init_use_ema"),
@@ -600,6 +606,8 @@ def get_args():
         raise ValueError("--num_generations must be >= 2 for HDP-RL group reward normalization")
     if args.rl_rollout_steps < 2:
         raise ValueError("--rl_rollout_steps must be >= 2 for the second-order DPM solver")
+    if args.rl_updates_per_rollout < 1:
+        raise ValueError("--rl_updates_per_rollout must be >= 1")
     if args.diffusion_sample_steps < 2:
         raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
@@ -716,6 +724,7 @@ def model_training(args):
         print("RL init uses SFT EMA: {}".format(args.rl_init_use_ema))
         print("Rollout sampling temperature: {}".format(args.rl_noise_scale))
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
+        print("RL updates per rollout: {}".format(args.rl_updates_per_rollout))
         print("Learning rate: {}".format(args.learning_rate))
         print("Weight decay: {}".format(args.weight_decay))
         print("TF32: {}".format(args.tf32))
@@ -951,7 +960,11 @@ def model_training(args):
         torch.distributed.barrier()
 
     args._wandb_global_step = int(
-        getattr(diffusion_planner, "_resume_global_step", init_epoch * len(train_loader))
+        getattr(
+            diffusion_planner,
+            "_resume_global_step",
+            init_epoch * len(train_loader) * args.rl_updates_per_rollout,
+        )
     )
     train_log_path = os.path.join(save_path, "train_log.tsv") if global_rank == 0 else None
     baseline_metrics_path = os.path.join(args.save_dir, "source_baseline_metrics.json")

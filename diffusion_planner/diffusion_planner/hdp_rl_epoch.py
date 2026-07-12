@@ -128,7 +128,6 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
     bc_weight = float(getattr(args, "rl_bc_weight", 0.0))
     has_optimizer_update = has_valid_group or bc_weight > 0.0
 
-    optimizer.zero_grad(set_to_none=True)
     if has_optimizer_update:
         decoder_only = getattr(args, "rl_train_scope", "decoder") == "decoder"
         expert_norm_inputs = (
@@ -139,28 +138,39 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
             if decoder_only
             else _policy_observation_inputs(norm_inputs)
         )
-        loss_dict = compute_reward_weighted_loss(
-            model,
-            norm_exp,
-            ego_world,
-            reward,
-            num_scenes,
-            n,
-            args,
-            cached_encoding=(rollout_encoding if decoder_only else None),
-            reward_weights=reward_weights,
-            valid_sample=valid_sample,
-            global_valid_count=global_valid_count,
-            ddp_world_size=ddp_world_size,
-            expert_norm_inputs=expert_norm_inputs,
-            expert_ego_gt=heading_to_cos_sin(raw_inputs["ego_agent_future"]),
-            expert_cached_encoding=rollout_encoding[::n] if decoder_only else None,
-        )
-        loss_dict["loss"].backward()
-        grad_norm = nn.utils.clip_grad_norm_(trainable_params, 5)
-        optimizer.step()
-        if ema is not None:
-            ema.update(model)
+        loss_sums = {}
+        grad_norm = reward.new_zeros(())
+        updates_per_rollout = int(getattr(args, "rl_updates_per_rollout", 1))
+        expert_ego_gt = heading_to_cos_sin(raw_inputs["ego_agent_future"])
+        for _ in range(updates_per_rollout):
+            optimizer.zero_grad(set_to_none=True)
+            update_loss = compute_reward_weighted_loss(
+                model,
+                norm_exp,
+                ego_world,
+                reward,
+                num_scenes,
+                n,
+                args,
+                cached_encoding=(rollout_encoding if decoder_only else None),
+                reward_weights=reward_weights,
+                valid_sample=valid_sample,
+                global_valid_count=global_valid_count,
+                ddp_world_size=ddp_world_size,
+                expert_norm_inputs=expert_norm_inputs,
+                expert_ego_gt=expert_ego_gt,
+                expert_cached_encoding=rollout_encoding[::n] if decoder_only else None,
+            )
+            update_loss["loss"].backward()
+            grad_norm = grad_norm + nn.utils.clip_grad_norm_(trainable_params, 5).detach()
+            optimizer.step()
+            if ema is not None:
+                ema.update(model)
+            for key, value in update_loss.items():
+                loss_sums[key] = loss_sums.get(key, reward.new_zeros(())) + value.detach()
+        loss_dict = {key: value / updates_per_rollout for key, value in loss_sums.items()}
+        grad_norm = grad_norm / updates_per_rollout
+        optimizer_steps = updates_per_rollout
     else:
         # The paper discards identical-reward groups. Skipping the optimizer as well prevents
         # AdamW weight decay from changing the policy when an entire distributed batch is invalid.
@@ -178,6 +188,7 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
             "reward_weight_min": reward_weights.min(),
             "valid_group_fraction": zero,
         }
+        optimizer_steps = 0
     if timing_events is not None:
         timing_events[3].record()
         timing_events[3].synchronize()
@@ -208,6 +219,7 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
         "reward_weight_min": loss_dict["reward_weight_min"].detach(),
         "valid_group_fraction": loss_dict["valid_group_fraction"].detach(),
         "optimizer_step_fraction": reward.new_tensor(float(has_optimizer_update)),
+        "optimizer_steps_per_rollout": reward.new_tensor(float(optimizer_steps)),
     }
     if timing_events is not None:
         rollout_s = timing_events[0].elapsed_time(timing_events[1]) / 1000.0
@@ -221,6 +233,9 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
                 "time_update_s": update_s,
                 "throughput_scenes_per_s": num_scenes / max(total_s, 1e-9),
                 "throughput_candidates_per_s": batch_size / max(total_s, 1e-9),
+                "throughput_candidate_updates_per_s": batch_size
+                * optimizer_steps
+                / max(total_s, 1e-9),
                 "max_memory_allocated_gb": torch.cuda.max_memory_allocated() / (1024**3),
             }
         )
@@ -247,8 +262,12 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
         raw_inputs = {
             key: value.to(args.device, non_blocking=True) for key, value in raw_inputs.items()
         }
+        requested_updates = int(getattr(args, "rl_updates_per_rollout", 1))
+        next_log_step = args._wandb_global_step + requested_updates
         profile_step = (
-            args.use_wandb and step_log > 0 and (args._wandb_global_step + 1) % step_log == 0
+            args.use_wandb
+            and step_log > 0
+            and next_log_step // step_log > args._wandb_global_step // step_log
         )
         step_loss = _hdp_rl_step(
             raw_inputs,
@@ -260,8 +279,13 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
             aug,
             profile=profile_step,
         )
-        args._wandb_global_step += 1
-        if log_step and args._wandb_global_step % step_log == 0:
+        optimizer_steps = int(step_loss["optimizer_steps_per_rollout"].item())
+        previous_global_step = args._wandb_global_step
+        args._wandb_global_step += optimizer_steps
+        crossed_log_interval = (
+            step_log > 0 and args._wandb_global_step // step_log > previous_global_step // step_log
+        )
+        if log_step and crossed_log_interval:
             wandb.log(
                 {
                     **{
