@@ -213,6 +213,13 @@ def _relative_progress_score(
     return ratio, ratio.clamp(0.0, 1.0)
 
 
+def _safety_gated_progress(
+    progress_score: torch.Tensor, safety_score: torch.Tensor
+) -> torch.Tensor:
+    """Prevent the DP-native progress term from rewarding collision progress."""
+    return progress_score * safety_score
+
+
 def _scene_neighbors(
     neighbors_future: torch.Tensor,
     neighbor_past: torch.Tensor,
@@ -880,6 +887,7 @@ def compute_hdp_reward(
             "thw_zero_fraction",
             "occupancy_zero_fraction",
             "progress",
+            "progress_raw",
             "progress_ratio",
             "underprogress_fraction",
             "overprogress_fraction",
@@ -998,6 +1006,7 @@ def compute_hdp_reward(
         risk = torch.stack([terms["ttc"], terms["thw"], occupancy], dim=0).amin(dim=(0, 2))
         progress_ratio = progress_ratios[scene]
         progress_score = progress_scores[scene]
+        progress_reward = _safety_gated_progress(progress_score, terms["safety"])
         lane = lane_scores[scene]
         expert_off_lane = expert_off_lanes[scene]
         expert_lane_change = expert_lane_changes[scene]
@@ -1006,7 +1015,7 @@ def compute_hdp_reward(
             + args.rl_reward_w_risk * risk
             + args.rl_reward_w_follow * terms["follow"]
             + args.rl_reward_w_lane * lane
-            + getattr(args, "rl_reward_w_progress", 0.0) * progress_score
+            + getattr(args, "rl_reward_w_progress", 0.0) * progress_reward
         )
         rewards.append(reward)
         metric_lists["safety"].append(terms["safety"])
@@ -1017,7 +1026,8 @@ def compute_hdp_reward(
         metric_lists["follow"].append(terms["follow"])
         metric_lists["comfort"].append(terms["comfort"])
         metric_lists["lane"].append(lane)
-        metric_lists["progress"].append(progress_score)
+        metric_lists["progress"].append(progress_reward)
+        metric_lists["progress_raw"].append(progress_score)
         metric_lists["progress_ratio"].append(progress_ratio.clamp_max(2.0))
         metric_lists["underprogress_fraction"].append((progress_ratio < 0.8).to(risk.dtype))
         metric_lists["overprogress_fraction"].append((progress_ratio > 1.2).to(risk.dtype))

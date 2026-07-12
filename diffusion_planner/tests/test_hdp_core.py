@@ -22,6 +22,7 @@ from diffusion_planner.hdp_rl_utils import (
     _occupancy_score,
     _relative_progress_score,
     _road_border_clearance_exact,
+    _safety_gated_progress,
     _scene_neighbors,
     _scene_neighbors_batch,
     compute_hdp_reward,
@@ -89,6 +90,16 @@ def test_tuned_hdp_rl_defaults_are_consistent():
     assert fields["rl_bc_weight"].default == 0.0
     assert fields["rl_reward_beta"].default == 0.5
     assert fields["rl_rollout_steps"].default == 6
+
+
+def test_dp_native_progress_cannot_reward_collision_progress():
+    progress = torch.ones(3)
+    safety = torch.tensor([0.0, 0.7, 1.0])
+
+    torch.testing.assert_close(
+        _safety_gated_progress(progress, safety),
+        torch.tensor([0.0, 0.7, 1.0]),
+    )
 
 
 def test_hdp_representation_and_normalization_round_trip():
@@ -1029,6 +1040,7 @@ def test_hdp_reward_full_contract_reports_finite_component_diagnostics():
         "reward_winner_risk_advantage",
         "reward_risk_group_std",
         "reward_progress_group_range",
+        "reward_progress_raw_score",
         "reward_leader_group_range",
     } <= metrics.keys()
     assert all(torch.isfinite(value) for value in metrics.values())
