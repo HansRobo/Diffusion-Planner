@@ -15,6 +15,7 @@ from train_hdp_rl_predictor import (
     configure_rl_trainable_parameters,
     find_checkpoint_run_artifact,
     finite_scalar_metrics,
+    initialize_fresh_rl_policy_and_ema,
     validate_compiled_candidate_batch,
 )
 
@@ -74,6 +75,34 @@ def test_decoder_scope_freezes_encoder_and_turn_head():
         for name, value in state.items()
         if name.startswith("decoder.turn_indicator_predictor.")
     )
+
+
+def test_fresh_rl_initializes_live_and_ema_from_the_same_checkpoint(tmp_path):
+    source = _TinyPlanner()
+    with torch.no_grad():
+        for index, parameter in enumerate(source.parameters(), start=1):
+            parameter.fill_(float(index))
+    checkpoint = tmp_path / "sft.pth"
+    torch.save({"model": source.state_dict(), "ema_state_dict": source.state_dict()}, checkpoint)
+
+    live = _TinyPlanner()
+    policy_ema = initialize_fresh_rl_policy_and_ema(
+        str(checkpoint),
+        live,
+        "cpu",
+        use_ddp=False,
+        prefer_checkpoint_ema=True,
+        ema_update_rate=0.05,
+    )
+
+    for expected, live_value, shadow_value in zip(
+        source.state_dict().values(),
+        live.state_dict().values(),
+        policy_ema.ema.state_dict().values(),
+        strict=True,
+    ):
+        torch.testing.assert_close(live_value, expected)
+        torch.testing.assert_close(shadow_value, expected)
 
 
 def test_compiled_rl_candidate_batch_rejects_corrupted_h100_shape():

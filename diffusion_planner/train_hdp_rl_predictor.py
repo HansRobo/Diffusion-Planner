@@ -76,6 +76,29 @@ def configure_rl_trainable_parameters(model: torch.nn.Module, scope: str) -> Non
         param.requires_grad_(trainable)
 
 
+def initialize_fresh_rl_policy_and_ema(
+    checkpoint_path: str,
+    model: torch.nn.Module,
+    device: str,
+    *,
+    use_ddp: bool,
+    prefer_checkpoint_ema: bool,
+    ema_update_rate: float,
+) -> ModelEma:
+    """Load the SFT policy before copying it into the previous-policy EMA shadow."""
+    load_weights_only(
+        checkpoint_path,
+        model,
+        device,
+        prefer_ema=prefer_checkpoint_ema,
+    )
+    return ModelEma(
+        ddp.get_model(model, use_ddp),
+        decay=1.0 - ema_update_rate,
+        device=device,
+    )
+
+
 def validate_compiled_candidate_batch(
     local_batch_size: int, num_generations: int, compile_model: bool
 ) -> int:
@@ -1026,12 +1049,12 @@ def model_training(args):
             json.dump(args_dict, f, indent=4)
     scheduler = LinearWarmupConstantLR(optimizer, train_epochs, args.warm_up_epoch)
 
-    model_ema = ModelEma(
-        ddp.get_model(diffusion_planner, args.ddp),
-        decay=1.0 - args.rl_ema_update_rate,
-        device=args.device,
-    )
     if args.resume_model_path is not None:
+        model_ema = ModelEma(
+            ddp.get_model(diffusion_planner, args.ddp),
+            decay=1.0 - args.rl_ema_update_rate,
+            device=args.device,
+        )
         print(f"Model loaded from {args.resume_model_path}")
         diffusion_planner, optimizer, scheduler, init_epoch, wandb_id, model_ema = resume_model(
             args.resume_model_path,
@@ -1048,11 +1071,13 @@ def model_training(args):
         )
     else:
         print(f"Initializing RL weights from {args.init_weights_path}")
-        load_weights_only(
+        model_ema = initialize_fresh_rl_policy_and_ema(
             args.init_weights_path,
             diffusion_planner,
             args.device,
-            prefer_ema=args.rl_init_use_ema,
+            use_ddp=args.ddp,
+            prefer_checkpoint_ema=args.rl_init_use_ema,
+            ema_update_rate=args.rl_ema_update_rate,
         )
         init_epoch = 0
         wandb_id = None
