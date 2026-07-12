@@ -674,6 +674,49 @@ def test_hdp_lane_change_mask_and_neutral_occupancy_fallback():
     assert not any(sources.values())
 
 
+def test_hdp_road_border_occupancy_fallback_is_speed_independent():
+    prediction = torch.zeros(2, 8, 4)
+    prediction[..., 2] = 1.0
+    prediction[1, :, 0] = torch.linspace(0.0, 5.0, 8)
+    line_strings = torch.zeros(1, 2, 4)
+    line_strings[0, :, 0] = torch.tensor([-10.0, 10.0])
+    line_strings[0, :, 1] = 1.3
+    line_strings[0, :, 3] = 1.0
+
+    occupancy, sources = _occupancy_score(
+        prediction,
+        torch.tensor([2.5, 4.0, 2.0]),
+        None,
+        line_strings,
+        torch.full((2, 8), float("inf")),
+        torch.tensor(False),
+        HDPRewardConfig(),
+    )
+
+    assert sources == {"static": False, "stopped": False, "road_border": True}
+    torch.testing.assert_close(occupancy[0], occupancy[1], atol=1e-5, rtol=0.0)
+    torch.testing.assert_close(occupancy.mean(), torch.tensor(0.5), atol=1e-4, rtol=0.0)
+
+
+def test_hdp_invalid_road_border_is_not_reported_as_occupancy_source():
+    prediction = torch.zeros(1, 8, 4)
+    prediction[..., 2] = 1.0
+    line_strings = torch.zeros(1, 2, 4)
+
+    occupancy, sources = _occupancy_score(
+        prediction,
+        torch.tensor([2.5, 4.0, 2.0]),
+        None,
+        line_strings,
+        torch.full((1, 8), float("inf")),
+        torch.tensor(False),
+        HDPRewardConfig(),
+    )
+
+    torch.testing.assert_close(occupancy, torch.ones_like(occupancy))
+    assert not any(sources.values())
+
+
 def test_hdp_lane_reward_does_not_mask_a_curved_centerline():
     theta = torch.linspace(0.0, 0.15, 20)
     radius = 80.0

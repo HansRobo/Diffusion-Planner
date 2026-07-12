@@ -321,7 +321,7 @@ def _occupancy_score(
     stopped_available: torch.Tensor,
     config: HDPRewardConfig,
 ) -> tuple[torch.Tensor, dict[str, bool]]:
-    """Fuse available static boxes, stopped agents and road-border clearance."""
+    """Fuse static boxes/stopped agents, with road border as a weak fallback."""
     C, T, _ = ego_trajs.shape
     device = ego_trajs.device
     source_clearances: list[torch.Tensor] = []
@@ -364,9 +364,26 @@ def _occupancy_score(
         source_clearances.append(stopped_clearance)
         sources["stopped"] = True
 
-    # Road borders are a fallback for the current corpus, not literal occupancy. Avoid the
-    # expensive perimeter-to-segment kernel when a stronger static source already exists.
-    if line_strings is not None and not source_clearances:
+    if source_clearances:
+        clearance = torch.stack(source_clearances, dim=0).amin(dim=0)
+        ego_speed = _trajectory_speed(ego_trajs[..., :2], config.dt)
+        safe_distance = config.occupancy_safe_m + config.occupancy_speed_gain_s * ego_speed
+        critical_distance = (
+            config.occupancy_critical_m + config.occupancy_speed_gain_s * ego_speed
+        )
+        return _linear_safe_score(clearance, critical_distance, safe_distance), sources
+
+    # Road borders are not literal occupancy. Use them only when the scene has at least one
+    # real border segment, and score lateral clearance without the longitudinal speed gain used
+    # for obstacles ahead. The previous coupling made safe high-speed/right-turn GT trajectories
+    # receive zero OCC reward merely for passing near a curb.
+    has_road_border = False
+    if line_strings is not None and line_strings.shape[-1] >= 4:
+        border_point = (line_strings[..., 3] > 0.5) & (
+            line_strings[..., :2].norm(dim=-1) > 1e-3
+        )
+        has_road_border = bool((border_point[..., :-1] & border_point[..., 1:]).any().item())
+    if has_road_border:
         road_border = compute_road_border_penalty(
             ego_trajs,
             ego_shape,
@@ -374,17 +391,14 @@ def _occupancy_score(
             _RL_REWARD_CONFIG,
         )[-1]
         if torch.isfinite(road_border).any():
-            source_clearances.append(road_border)
             sources["road_border"] = True
+            return _linear_safe_score(
+                road_border,
+                0.0,
+                _RL_REWARD_CONFIG.rb_wide_thresh,
+            ), sources
 
-    if not source_clearances:
-        return torch.ones(C, T, device=device), sources
-
-    clearance = torch.stack(source_clearances, dim=0).amin(dim=0)
-    ego_speed = _trajectory_speed(ego_trajs[..., :2], config.dt)
-    safe_distance = config.occupancy_safe_m + config.occupancy_speed_gain_s * ego_speed
-    critical_distance = config.occupancy_critical_m + config.occupancy_speed_gain_s * ego_speed
-    return _linear_safe_score(clearance, critical_distance, safe_distance), sources
+    return torch.ones(C, T, device=device), sources
 
 
 def _run_point_to_segments_dist(
