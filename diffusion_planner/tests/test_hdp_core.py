@@ -21,7 +21,9 @@ from diffusion_planner.hdp_rl_utils import (
     _lane_reward_centerlines,
     _occupancy_score,
     _relative_progress_score,
+    _road_border_clearance_exact,
     _scene_neighbors,
+    compute_hdp_reward,
     compute_reward_weighted_loss,
     compute_reward_weights,
     heading_to_cos_sin_if_needed,
@@ -41,7 +43,11 @@ from diffusion_planner.model.module.decoder import (
     compute_training_loss,
 )
 from diffusion_planner.model.module.dit import DiT
-from diffusion_planner.train import assert_checkpoint_compatible, load_weights_only
+from diffusion_planner.train import (
+    _finite_validation_metrics,
+    assert_checkpoint_compatible,
+    load_weights_only,
+)
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import prepare_neighbor_supervision
 from diffusion_planner.utils import ddp
@@ -631,6 +637,16 @@ def test_batch_aligned_distributed_sampler_reshuffles_padding_each_epoch():
     assert len(epoch_zero) == len(epoch_one) == 12
 
 
+def test_checkpoint_metadata_omits_non_finite_validation_metrics():
+    metrics = _finite_validation_metrics(
+        "valid_epdms",
+        {"total": torch.tensor(0.8), "missing": float("nan"), "overflow": float("inf")},
+    )
+
+    assert metrics == {"valid_epdms/total": pytest.approx(0.8)}
+    json.dumps(metrics, allow_nan=False)
+
+
 def test_augmentation_transforms_goal_pose_with_the_scene():
     augmentor = StatePerturbation(
         augment_prob=0.0,
@@ -698,6 +714,57 @@ def test_hdp_empty_neighbor_reward_preserves_full_metric_contract():
     assert terms["comfort"].shape == (2,)
     assert torch.isfinite(terms["comfort"]).all()
     torch.testing.assert_close(terms["follow"], torch.ones(2))
+
+
+def test_hdp_reward_full_contract_reports_finite_component_diagnostics():
+    time_steps = 4
+    candidates = torch.zeros(2, time_steps, 4)
+    candidates[..., 0] = torch.arange(1.0, time_steps + 1)
+    candidates[..., 2] = 1.0
+    candidates[1, :, 1] = 0.2
+    lanes = torch.zeros(1, 1, time_steps + 1, 8)
+    lanes[0, 0, :, 0] = torch.linspace(0.1, 5.0, time_steps + 1)
+    lanes[..., 2] = 1.0
+    expert = torch.zeros(1, time_steps, 3)
+    expert[..., 0] = torch.arange(1.0, time_steps + 1)
+    scene_inputs = {
+        "ego_shape": torch.tensor([[2.5, 4.0, 2.0]]),
+        "neighbor_agents_past": torch.zeros(1, 1, 2, 11),
+        "ego_agent_future": expert,
+        "lanes": lanes,
+        "route_lanes": lanes.clone(),
+        "line_strings": torch.zeros(1, 1, 2, 4),
+        "static_objects": torch.zeros(1, 1, 10),
+        "turn_indicators": torch.zeros(1, 2, dtype=torch.long),
+    }
+    neighbors = torch.zeros(1, 1, time_steps, 4)
+    reward, metrics = compute_hdp_reward(
+        candidates,
+        scene_inputs,
+        neighbors,
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(
+            rl_reward_w_risk=1.0,
+            rl_reward_w_follow=3.0,
+            rl_reward_w_lane=2.5,
+            rl_reward_w_progress=3.0,
+        ),
+    )
+
+    assert reward.shape == (2,)
+    assert torch.isfinite(reward).all()
+    assert {
+        "reward_risk_correlation",
+        "reward_follow_correlation",
+        "reward_lane_correlation",
+        "reward_progress_correlation",
+        "reward_winner_risk_advantage",
+        "reward_risk_group_std",
+        "reward_progress_group_range",
+        "reward_leader_group_range",
+    } <= metrics.keys()
+    assert all(torch.isfinite(value) for value in metrics.values())
 
 
 def test_hdp_collision_reward_attenuates_rear_end_only():
@@ -878,6 +945,28 @@ def test_hdp_road_border_occupancy_fallback_is_speed_independent():
     assert sources == {"static": False, "stopped": False, "road_border": True}
     torch.testing.assert_close(occupancy[0], occupancy[1], atol=1e-5, rtol=0.0)
     torch.testing.assert_close(occupancy.mean(), torch.tensor(0.5), atol=1e-4, rtol=0.0)
+
+
+def test_hdp_road_border_clearance_is_exact_for_gap_crossing_and_containment():
+    prediction = torch.zeros(1, 1, 4)
+    prediction[..., 2] = 1.0
+    # ego_shape=(wheelbase=2, length=4, width=2) occupies x=[-1, 3], y=[-1, 1].
+    segment_pairs = (
+        ([[5.0, -4.0], [5.0, 4.0]], 2.0),
+        ([[2.0, -4.0], [2.0, 4.0]], 0.0),
+        ([[0.0, -0.2], [0.0, 0.2]], 0.0),
+        ([[0.0, 0.0], [0.0, 4.0]], 0.0),
+    )
+    for segment_pair, expected in segment_pairs:
+        line_strings = torch.zeros(1, 2, 4)
+        line_strings[0, :, :2] = torch.tensor(segment_pair)
+        line_strings[..., 3] = 1.0
+        clearance = _road_border_clearance_exact(
+            prediction,
+            torch.tensor([2.0, 4.0, 2.0]),
+            line_strings,
+        )
+        torch.testing.assert_close(clearance, torch.tensor([[expected]]))
 
 
 def test_hdp_invalid_road_border_is_not_reported_as_occupancy_source():

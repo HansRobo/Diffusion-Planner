@@ -82,6 +82,16 @@ def load_weights_only(path: str, model, device, *, prefer_ema: bool = False):
         )
 
 
+def _finite_validation_metrics(prefix: str, metrics: dict) -> dict[str, float]:
+    """Convert aggregate metrics while omitting unavailable non-finite values."""
+    result = {}
+    for key, value in metrics.items():
+        number = float(value.detach().cpu().item()) if torch.is_tensor(value) else float(value)
+        if math.isfinite(number):
+            result[f"{prefix}/{key}"] = number
+    return result
+
+
 def _checkpoint_args_path(path: str) -> Path | None:
     checkpoint = Path(path)
     candidates = [
@@ -922,10 +932,10 @@ def model_training(args: TrainConfig):
             valid_loss_ego = agg["avg_loss_ego"]
             valid_loss_neighbor = agg["avg_loss_neighbor"]
             mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
-            mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
-            mean_multisample_dict = {
-                f"valid_multisample/{k}": v for k, v in agg["multisample_means"].items()
-            }
+            mean_epdms_dict = _finite_validation_metrics("valid_epdms", agg["epdms_means"])
+            mean_multisample_dict = _finite_validation_metrics(
+                "valid_multisample", agg["multisample_means"]
+            )
             valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
                 "valid_loss/ego_position_lat_loss", 0.0
             )

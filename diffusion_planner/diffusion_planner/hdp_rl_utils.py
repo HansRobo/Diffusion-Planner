@@ -29,10 +29,9 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from planner_metrics.config import RewardConfig
-from planner_metrics.geometry import _point_to_segments_dist
+from planner_metrics.geometry import _build_ego_bbox_corners, _point_to_segments_dist
 from planner_metrics.subscores import (
     compute_ego_neighbor_signed_clearance,
-    compute_road_border_penalty,
 )
 
 _RL_REWARD_CONFIG = RewardConfig()
@@ -83,6 +82,107 @@ def _linear_safe_score(
     critical_t = torch.as_tensor(critical, dtype=value.dtype, device=value.device)
     safe_t = torch.as_tensor(safe, dtype=value.dtype, device=value.device)
     return ((value - critical_t) / (safe_t - critical_t).clamp_min(1e-6)).clamp(0.0, 1.0)
+
+
+def _cross_2d(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
+
+
+def _road_border_clearance_exact(
+    ego_trajs: torch.Tensor,
+    ego_shape: torch.Tensor,
+    line_strings: torch.Tensor | None,
+) -> torch.Tensor:
+    """Exact minimum distance between the ego rectangle and road-border segments."""
+    C, T, _ = ego_trajs.shape
+    no_data = torch.full(
+        (C, T),
+        float("inf"),
+        dtype=ego_trajs.dtype,
+        device=ego_trajs.device,
+    )
+    if line_strings is None or line_strings.shape[-1] < 4:
+        return no_data
+
+    border_xy = line_strings[..., :2]
+    # Channel 3 is the explicit road-border validity/type flag. A coordinate at
+    # the ego origin is legitimate and must not be confused with zero padding.
+    border_point = line_strings[..., 3] > 0.5
+    valid_pair = border_point[..., :-1] & border_point[..., 1:]
+    if not bool(valid_pair.any()):
+        return no_data
+    seg_a = border_xy[..., :-1, :][valid_pair]
+    seg_b = border_xy[..., 1:, :][valid_pair]
+
+    corners = _build_ego_bbox_corners(ego_trajs, ego_shape).reshape(C * T, 4, 2)
+    rect_a = corners
+    rect_b = torch.roll(corners, shifts=-1, dims=1)
+    query_count = corners.shape[0]
+    segment_count = seg_a.shape[0]
+    max_pair_elements = 5_000_000
+    chunk_size = max(1, max_pair_elements // max(segment_count * 4, 1))
+    clearance_chunks = []
+
+    for start in range(0, query_count, chunk_size):
+        end = min(start + chunk_size, query_count)
+        corner = corners[start:end]
+        edge_a = rect_a[start:end]
+        edge_b = rect_b[start:end]
+
+        # Rectangle vertices to road-border segments: [Q, 4, E].
+        border_vec = seg_b - seg_a
+        border_len2 = border_vec.square().sum(dim=-1).clamp_min(1e-12)
+        corner_rel = corner[:, :, None, :] - seg_a[None, None, :, :]
+        corner_t = (
+            (corner_rel * border_vec[None, None]).sum(dim=-1) / border_len2[None, None]
+        ).clamp(0.0, 1.0)
+        corner_foot = seg_a[None, None] + corner_t[..., None] * border_vec[None, None]
+        corner_dist2 = (corner[:, :, None] - corner_foot).square().sum(dim=-1)
+
+        # Border endpoints to rectangle edges: [Q, E, 2 endpoints, 4 edges].
+        edge_vec = edge_b - edge_a
+        edge_len2 = edge_vec.square().sum(dim=-1).clamp_min(1e-12)
+        endpoints = torch.stack((seg_a, seg_b), dim=1)
+        endpoint_rel = endpoints[None, :, :, None, :] - edge_a[:, None, None, :, :]
+        endpoint_t = (
+            (endpoint_rel * edge_vec[:, None, None]).sum(dim=-1) / edge_len2[:, None, None]
+        ).clamp(0.0, 1.0)
+        endpoint_foot = edge_a[:, None, None] + endpoint_t[..., None] * edge_vec[:, None, None]
+        endpoint_dist2 = (endpoints[None, :, :, None] - endpoint_foot).square().sum(dim=-1)
+
+        min_dist2 = torch.minimum(
+            corner_dist2.amin(dim=(1, 2)),
+            endpoint_dist2.amin(dim=(1, 2, 3)),
+        )
+
+        # Endpoint distances alone are non-zero when two segment interiors cross.
+        edge_vec_exp = edge_vec[:, :, None, :]
+        seg_vec_exp = border_vec[None, None, :, :]
+        seg_a_rel = seg_a[None, None] - edge_a[:, :, None]
+        seg_b_rel = seg_b[None, None] - edge_a[:, :, None]
+        edge_a_rel = edge_a[:, :, None] - seg_a[None, None]
+        edge_b_rel = edge_b[:, :, None] - seg_a[None, None]
+        denominator = _cross_2d(edge_vec_exp, seg_vec_exp)
+        non_parallel = denominator.abs() > 1e-8
+        intersects = (
+            non_parallel
+            & (_cross_2d(edge_vec_exp, seg_a_rel) * _cross_2d(edge_vec_exp, seg_b_rel) <= 0)
+            & (_cross_2d(seg_vec_exp, edge_a_rel) * _cross_2d(seg_vec_exp, edge_b_rel) <= 0)
+        ).any(dim=(1, 2))
+
+        # A short border segment may lie entirely inside the ego footprint.
+        edge_to_endpoint = endpoints[None, :, :, None, :] - edge_a[:, None, None, :, :]
+        side = _cross_2d(edge_vec[:, None, None], edge_to_endpoint)
+        endpoint_inside = ((side >= -1e-7).all(dim=-1) | (side <= 1e-7).all(dim=-1)).any(dim=(1, 2))
+        clearance_chunks.append(
+            torch.where(
+                intersects | endpoint_inside,
+                torch.zeros_like(min_dist2),
+                min_dist2.clamp_min(0.0).sqrt(),
+            )
+        )
+
+    return torch.cat(clearance_chunks).reshape(C, T)
 
 
 def _trajectory_speed(xy: torch.Tensor, dt: float, initial_xy: torch.Tensor | None = None):
@@ -369,9 +469,7 @@ def _occupancy_score(
             sources["static"] = True
 
     has_stopped = (
-        bool(stopped_available.item())
-        if stopped_available_flag is None
-        else stopped_available_flag
+        bool(stopped_available.item()) if stopped_available_flag is None else stopped_available_flag
     )
     if has_stopped:
         source_clearances.append(stopped_clearance)
@@ -407,15 +505,13 @@ def _occupancy_score(
     # receive zero OCC reward merely for passing near a curb.
     has_road_border = road_border_available
     if has_road_border is None and line_strings is not None and line_strings.shape[-1] >= 4:
-        border_point = (line_strings[..., 3] > 0.5) & (line_strings[..., :2].norm(dim=-1) > 1e-3)
+        border_point = line_strings[..., 3] > 0.5
         has_road_border = bool((border_point[..., :-1] & border_point[..., 1:]).any().item())
     if has_road_border:
-        road_border = compute_road_border_penalty(
+        road_border = _road_border_clearance_exact(
             ego_trajs,
             ego_shape,
-            {"line_strings": line_strings},
-            _RL_REWARD_CONFIG,
-            clearance_only=True,
+            line_strings,
         )
         if road_border_available is not None or torch.isfinite(road_border).any():
             sources["road_border"] = True
@@ -464,9 +560,7 @@ def _lane_reward_centerlines(
     if route_lanes is None:
         return lanes, False
     if route_aligned is None:
-        route_aligned = bool(
-            _route_alignment(expert_future, route_lanes, config).item()
-        )
+        route_aligned = bool(_route_alignment(expert_future, route_lanes, config).item())
     return (route_lanes, True) if route_aligned else (lanes, False)
 
 
@@ -480,8 +574,10 @@ def _route_alignment(
     route_valid = route_lanes[..., :2].abs().sum(dim=-1) > 1e-6
     has_route = (route_valid[..., :-1] & route_valid[..., 1:]).any()
     route_distance = _nearest_lane_distance(expert_future[..., :2], route_lanes)
-    return has_route & (route_distance.mean() <= config.lane_half_width_m) & (
-        route_distance.max() <= 2.0 * config.lane_half_width_m
+    return (
+        has_route
+        & (route_distance.mean() <= config.lane_half_width_m)
+        & (route_distance.max() <= 2.0 * config.lane_half_width_m)
     )
 
 
@@ -639,25 +735,27 @@ def compute_hdp_reward(
     if line_strings_batch is None or line_strings_batch.shape[-1] < 4:
         road_border_available = torch.zeros(num_scenes, dtype=torch.bool, device=device)
     else:
-        border_point = (line_strings_batch[..., 3] > 0.5) & (
-            line_strings_batch[..., :2].norm(dim=-1) > 1e-3
-        )
+        border_point = line_strings_batch[..., 3] > 0.5
         road_border_available = (border_point[..., :-1] & border_point[..., 1:]).flatten(1).any(1)
     lane_points = scene_inputs["lanes"][..., :2]
     lane_valid = lane_points.abs().sum(dim=-1) > 1e-6
     lane_available = (lane_valid[..., :-1] & lane_valid[..., 1:]).flatten(1).any(1)
     stopped_available = torch.stack([terms["stopped_available"] for terms in scene_terms])
     route_aligned = torch.stack(route_alignment_tensors)
-    availability = torch.stack(
-        (
-            static_available,
-            stopped_available,
-            road_border_available,
-            lane_available,
-            route_aligned,
-        ),
-        dim=1,
-    ).cpu().tolist()
+    availability = (
+        torch.stack(
+            (
+                static_available,
+                stopped_available,
+                road_border_available,
+                lane_available,
+                route_aligned,
+            ),
+            dim=1,
+        )
+        .cpu()
+        .tolist()
+    )
 
     for scene in range(num_scenes):
         ego_shape = scene_inputs["ego_shape"][scene, :3]
@@ -756,15 +854,40 @@ def compute_hdp_reward(
         for key, value in flattened.items()
     }
     reward_group = torch.stack(rewards)
-    progress_group = torch.stack(metric_lists["progress"])
+    component_groups = {
+        key: torch.stack(metric_lists[key])
+        for key in ("risk", "follow", "lane", "progress", "leader_fraction")
+    }
     reward_centered = reward_group - reward_group.mean(dim=1, keepdim=True)
-    progress_centered = progress_group - progress_group.mean(dim=1, keepdim=True)
-    denominator = (
-        reward_centered.square().sum(dim=1).sqrt() * progress_centered.square().sum(dim=1).sqrt()
-    )
-    correlation = (reward_centered * progress_centered).sum(dim=1) / denominator.clamp_min(1e-6)
-    correlation = torch.where(denominator > 1e-6, correlation, torch.zeros_like(correlation))
-    metrics["reward_progress_correlation"] = correlation.mean()
+    reward_winner = reward_group.argmax(dim=1, keepdim=True)
+    for key in ("risk", "follow", "lane", "progress"):
+        component = component_groups[key]
+        component_centered = component - component.mean(dim=1, keepdim=True)
+        component_denominator = (
+            reward_centered.square().sum(dim=1).sqrt()
+            * component_centered.square().sum(dim=1).sqrt()
+        )
+        component_correlation = (reward_centered * component_centered).sum(
+            dim=1
+        ) / component_denominator.clamp_min(1e-6)
+        component_correlation = torch.where(
+            component_denominator > 1e-6,
+            component_correlation,
+            torch.zeros_like(component_correlation),
+        )
+        metrics[f"reward_{key}_correlation"] = component_correlation.mean()
+    for key in ("risk", "follow", "lane", "progress"):
+        component = component_groups[key]
+        winner_value = component.gather(1, reward_winner).squeeze(1)
+        metrics[f"reward_winner_{key}_advantage"] = (winner_value - component.mean(dim=1)).mean()
+        metrics[f"reward_{key}_group_std"] = component.std(dim=1).mean()
+        metrics[f"reward_{key}_group_range"] = (
+            component.max(dim=1).values - component.min(dim=1).values
+        ).mean()
+    leader_group = component_groups["leader_fraction"]
+    metrics["reward_leader_group_range"] = (
+        leader_group.max(dim=1).values - leader_group.min(dim=1).values
+    ).mean()
     return torch.cat(rewards), metrics
 
 
