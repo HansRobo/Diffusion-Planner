@@ -80,6 +80,21 @@ else
   CKPT_ARGS=(--init_weights_path "${INIT_CKPT}")
   VERIFY_MODE=init
 fi
+if [[ "${VERIFY_MODE}" == init ]]; then
+  "${REPO}/.venv/bin/python" - "${SOURCE_CKPT}" <<'PY'
+import pathlib
+import sys
+
+import torch
+
+checkpoint_path = pathlib.Path(sys.argv[1])
+checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+if not isinstance(checkpoint, dict) or checkpoint.get("ema_state_dict") is None:
+    raise RuntimeError(
+        f"fresh HDP-RL requires an SFT checkpoint with EMA weights: {checkpoint_path}"
+    )
+PY
+fi
 EXTRA_ARGS=(--extra_train_set_repeat "${EXTRA_REPEAT}")
 if [[ -n "${EXTRA_LISTS}" ]]; then
   IFS=: read -r -a extra_list_array <<<"${EXTRA_LISTS}"
