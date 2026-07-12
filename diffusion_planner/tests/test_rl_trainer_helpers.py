@@ -11,6 +11,7 @@ from train_hdp_rl_predictor import (
     configure_rl_trainable_parameters,
     find_checkpoint_run_artifact,
     finite_scalar_metrics,
+    validate_compiled_candidate_batch,
 )
 
 
@@ -69,6 +70,13 @@ def test_decoder_scope_freezes_encoder_and_turn_head():
         for name, value in state.items()
         if name.startswith("decoder.turn_indicator_predictor.")
     )
+
+
+def test_compiled_rl_candidate_batch_rejects_corrupted_h100_shape():
+    assert validate_compiled_candidate_batch(64, 32, True) == 2048
+    assert validate_compiled_candidate_batch(128, 32, False) == 4096
+    with pytest.raises(ValueError, match="silently corrupted backward gradients"):
+        validate_compiled_candidate_batch(128, 32, True)
 
 
 def test_resume_best_score_ignores_nan_and_non_full_eval_rows():

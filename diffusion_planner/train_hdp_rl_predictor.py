@@ -76,6 +76,20 @@ def configure_rl_trainable_parameters(model: torch.nn.Module, scope: str) -> Non
         param.requires_grad_(trainable)
 
 
+def validate_compiled_candidate_batch(
+    local_batch_size: int, num_generations: int, compile_model: bool
+) -> int:
+    candidates_per_rank = local_batch_size * num_generations
+    if compile_model and candidates_per_rank > 2048:
+        raise ValueError(
+            "Unsafe compiled RL shape: local_batch_size * num_generations = "
+            f"{candidates_per_rank} exceeds the verified H100 limit 2048. "
+            "This shape produced silently corrupted backward gradients with TorchInductor; "
+            "reduce the group size/increase world size, or disable --compile_model."
+        )
+    return candidates_per_rank
+
+
 def best_valid_score_from_rows(rows: list[dict]) -> float:
     best = -float("inf")
     for row in rows:
@@ -871,6 +885,7 @@ def model_training(args):
         raise ValueError("Validation set must contain at least one sample per DDP rank")
 
     local_batch_size = batch_size // world_size
+    validate_compiled_candidate_batch(local_batch_size, args.num_generations, args.compile_model)
     train_sampler = BatchAlignedDistributedSampler(
         train_set,
         num_replicas=ddp.get_world_size(),
