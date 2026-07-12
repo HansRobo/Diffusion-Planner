@@ -95,6 +95,7 @@ cd "${REPO}/diffusion_planner"
   --ddp_static_graph True \
   --compile_model "${COMPILE_MODEL}" \
   --use_wandb False \
+  --wandb_project_name hdp-rl \
   --wandb_step_log_interval 0 \
   --export_onnx_on_save False \
   --port "${PORT}" \

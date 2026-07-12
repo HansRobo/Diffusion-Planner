@@ -132,7 +132,7 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_h
   --rl_full_eval_utd 5 \
   --enable_epdms_eval True \
   --use_wandb True \
-  --wandb_project_name Diffusion-Planner-Temporal \
+  --wandb_project_name hdp-rl \
   --tf32 True \
   --amp_dtype bf16 \
   --compile_model True

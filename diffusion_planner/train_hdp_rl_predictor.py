@@ -446,7 +446,7 @@ def get_args():
     parser.add_argument(
         "--wandb_project_name",
         type=str,
-        default="Diffusion-Planner-Temporal",
+        default="hdp-rl",
         help="Weights & Biases project name",
     )
     parser.add_argument(
