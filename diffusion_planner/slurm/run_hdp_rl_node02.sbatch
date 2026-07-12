@@ -93,6 +93,7 @@ export XDG_CACHE_HOME=${REPO}/cache
 export TORCHINDUCTOR_CACHE_DIR=${REPO}/cache/torchinductor
 export PYTHONPATH=${REPO}:${REPO}/diffusion_planner
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+unset NCCL_ASYNC_ERROR_HANDLING
 export OMP_NUM_THREADS=1
 export PYTHONWARNINGS=error
 
