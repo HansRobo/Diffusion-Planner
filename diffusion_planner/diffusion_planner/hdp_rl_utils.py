@@ -27,6 +27,7 @@ from diffusion_planner.loss import (
     waypoints_to_velocity,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+from diffusion_planner.utils.masks import lane_point_padding_mask
 from planner_metrics.config import RewardConfig
 from planner_metrics.geometry import _build_ego_bbox_corners, _point_to_segments_dist
 from planner_metrics.subscores import (
@@ -695,7 +696,7 @@ def _nearest_lane_distance(
     lanes: torch.Tensor,
 ) -> torch.Tensor:
     center = lanes[..., :2]
-    valid = center.abs().sum(dim=-1) > 1e-6
+    valid = ~lane_point_padding_mask(lanes)
     valid_pair = (valid[..., :-1] & valid[..., 1:]).reshape(-1)
     seg_start = center[..., :-1, :].reshape(-1, 2)
     seg_end = center[..., 1:, :].reshape(-1, 2)
@@ -726,7 +727,7 @@ def _nearest_lane_distance_batch(
         )
     batch_size = points.shape[0]
     center = lanes[..., :2]
-    point_valid = center.abs().sum(dim=-1) > 1e-6
+    point_valid = ~lane_point_padding_mask(lanes)
     segment_valid = (point_valid[..., :-1] & point_valid[..., 1:]).flatten(1)
     segment_start = center[..., :-1, :].flatten(1, 2)
     segment_end = center[..., 1:, :].flatten(1, 2)
@@ -773,7 +774,7 @@ def _route_alignment(
 ) -> torch.Tensor:
     if route_lanes is None:
         return torch.zeros((), dtype=torch.bool, device=expert_future.device)
-    route_valid = route_lanes[..., :2].abs().sum(dim=-1) > 1e-6
+    route_valid = ~lane_point_padding_mask(route_lanes)
     has_route = (route_valid[..., :-1] & route_valid[..., 1:]).any()
     route_distance = _nearest_lane_distance(expert_future[..., :2], route_lanes)
     return (
@@ -792,7 +793,7 @@ def _hdp_lane_score(
     *,
     lanes_available: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    lane_valid = lanes[..., :2].abs().sum(dim=-1) > 1e-6
+    lane_valid = ~lane_point_padding_mask(lanes)
     has_lanes = (
         bool((lane_valid[..., :-1] & lane_valid[..., 1:]).any())
         if lanes_available is None
@@ -846,8 +847,7 @@ def _batched_lane_and_progress(
     config: HDPRewardConfig,
 ) -> tuple[torch.Tensor, ...]:
     """Compute route selection, lane masks, and progress for a scene batch."""
-    lane_points = lanes[..., :2]
-    lane_point_valid = lane_points.abs().sum(dim=-1) > 1e-6
+    lane_point_valid = ~lane_point_padding_mask(lanes)
     lane_available = (lane_point_valid[..., :-1] & lane_point_valid[..., 1:]).flatten(1).any(1)
     lane_candidate_distance = _nearest_lane_distance_batch(ego_group[..., :2], lanes)
     lane_expert_distance = _nearest_lane_distance_batch(expert_future[..., :2], lanes)
@@ -857,8 +857,7 @@ def _batched_lane_and_progress(
         candidate_distance = lane_candidate_distance
         expert_distance = lane_expert_distance
     else:
-        route_points = route_lanes[..., :2]
-        route_point_valid = route_points.abs().sum(dim=-1) > 1e-6
+        route_point_valid = ~lane_point_padding_mask(route_lanes)
         route_available = (
             (route_point_valid[..., :-1] & route_point_valid[..., 1:]).flatten(1).any(1)
         )

@@ -24,6 +24,7 @@ from diffusion_planner.hdp_rl_utils import (
     _collision_and_leader_terms,
     _hdp_lane_score,
     _lane_reward_centerlines,
+    _nearest_lane_distance,
     _occupancy_score,
     _relative_progress_score,
     _road_border_clearance_exact,
@@ -263,6 +264,17 @@ def test_batched_lane_and_progress_match_scene_loop():
     )
     for actual_value, expected_value in zip(actual, expected, strict=True):
         torch.testing.assert_close(actual_value, expected_value, rtol=0, atol=1e-6)
+
+
+def test_lane_reward_keeps_valid_centerline_endpoint_at_ego_origin():
+    lanes = torch.zeros(1, 2, 8)
+    lanes[0, :, 0] = torch.tensor([0.0, 2.0])
+    lanes[0, :, 2] = 1.0  # direction feature distinguishes the origin from padding
+    query = torch.tensor([[0.0, 0.5]])
+
+    distance = _nearest_lane_distance(query, lanes)
+
+    torch.testing.assert_close(distance, torch.tensor([0.5]))
 
 
 def test_rollout_generator_is_independent_from_global_training_rng():
