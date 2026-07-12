@@ -661,6 +661,10 @@ def get_args():
         raise ValueError("--warm_up_epoch must be between 0 and --train_epochs")
     if not 0.0 <= args.augment_prob <= 1.0:
         raise ValueError("--augment_prob must be in [0, 1]")
+    if not 0.0 <= args.encoder_drop_path_rate < 1.0:
+        raise ValueError("--encoder_drop_path_rate must be in [0, 1)")
+    if not 0.0 <= args.decoder_drop_path_rate < 1.0:
+        raise ValueError("--decoder_drop_path_rate must be in [0, 1)")
     if not 1 <= args.ego_prediction_horizon <= args.future_len:
         raise ValueError("--ego_prediction_horizon must be in [1, future_len]")
     if not 1 <= args.hybrid_loss_window <= args.future_len:

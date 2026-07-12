@@ -62,6 +62,8 @@ UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-1}
 UPDATE_MAX_CANDIDATES=${HDP_RL_UPDATE_MAX_CANDIDATES_PER_RANK:-1024}
 COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-True}
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
+ENCODER_DROP_PATH_RATE=${HDP_RL_ENCODER_DROP_PATH_RATE:-0.1}
+DECODER_DROP_PATH_RATE=${HDP_RL_DECODER_DROP_PATH_RATE:-0.1}
 USE_WANDB=${HDP_RL_USE_WANDB:-True}
 WANDB_PROJECT=${HDP_RL_WANDB_PROJECT:-hdp-rl}
 WANDB_RUN_ID=${HDP_RL_WANDB_RUN_ID:-}
@@ -324,6 +326,8 @@ TRAIN_ARGS=(
   --encoder_mixer_depth 6 \
   --encoder_fusion_depth 6 \
   --decoder_depth 6 \
+  --encoder_drop_path_rate "${ENCODER_DROP_PATH_RATE}" \
+  --decoder_drop_path_rate "${DECODER_DROP_PATH_RATE}" \
   --hidden_dim 256 \
   --num_heads 8 \
   --diffusion_sample_steps 6 \
