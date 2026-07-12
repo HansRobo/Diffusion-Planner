@@ -69,7 +69,7 @@ class SDE(abc.ABC):
 
 class VPSDE_linear(SDE):
     def __init__(self, beta_max=20.0, beta_min=0.1):
-        """
+        r"""
         VP SDE
 
         SDE:
@@ -85,7 +85,7 @@ class VPSDE_linear(SDE):
         return 1.0
 
     def sde(self, x, t):
-        """
+        r"""
         SDE of diffusion process
 
         drift = $-\frac{\beta(t)}{2} x$
