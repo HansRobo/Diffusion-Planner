@@ -218,6 +218,46 @@ def test_batched_lane_and_progress_match_scene_loop():
         torch.testing.assert_close(actual_value, expected_value, rtol=0, atol=1e-6)
 
 
+def test_rollout_generator_is_independent_from_global_training_rng():
+    class EchoModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.decoder = SimpleNamespace(_predicted_neighbor_num=0, _sample_steps=6)
+
+        def forward(self, inputs):
+            return None, {"prediction": inputs["sampled_trajectories"]}
+
+    model = EchoModel()
+    inputs = {"ego_current_state": torch.zeros(2, 10)}
+    first_generator = torch.Generator().manual_seed(123)
+    first = hdp_rl_utils.sample_group(
+        model,
+        inputs,
+        1.5,
+        torch.device("cpu"),
+        generator=first_generator,
+    )
+    torch.randn(10_000)
+    second_generator = torch.Generator().manual_seed(123)
+    second = hdp_rl_utils.sample_group(
+        model,
+        inputs,
+        1.5,
+        torch.device("cpu"),
+        generator=second_generator,
+    )
+    different = hdp_rl_utils.sample_group(
+        model,
+        inputs,
+        1.5,
+        torch.device("cpu"),
+        generator=torch.Generator().manual_seed(124),
+    )
+
+    torch.testing.assert_close(first, second, rtol=0, atol=0)
+    assert not torch.equal(first, different)
+
+
 def test_state_normalizer_caches_stats_by_kind_device_and_dtype():
     normalizer = StateNormalizer(
         [[[10, 0, 0, 0]]],

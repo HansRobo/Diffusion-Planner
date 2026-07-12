@@ -77,7 +77,17 @@ def _policy_observation_inputs(norm_inputs: dict[str, torch.Tensor]) -> dict[str
     }
 
 
-def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug, profile=False):
+def _hdp_rl_step(
+    raw_inputs,
+    model,
+    optimizer,
+    trainable_params,
+    args,
+    ema,
+    aug,
+    profile=False,
+    rollout_generator=None,
+):
     n = args.num_generations
     timing_events = None
     if profile and torch.device(args.device).type == "cuda":
@@ -125,6 +135,7 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
         use_bf16=getattr(args, "amp_dtype", "off") == "bf16",
         sample_steps=getattr(args, "rl_rollout_steps", 6),
         return_encoding=True,
+        generator=rollout_generator,
     )
     if timing_events is not None:
         timing_events[1].record()
@@ -276,7 +287,7 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
     return result
 
 
-def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, ema, aug):
+def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, ema, aug, epoch):
     epoch_loss_sums = {}
     epoch_loss_counts = {}
 
@@ -295,6 +306,8 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
     if device.type == "cuda":
         torch.cuda.synchronize(device)
         torch.cuda.reset_peak_memory_stats(device)
+    rollout_generator = torch.Generator(device=device)
+    rollout_generator.manual_seed(int(args.seed) + int(epoch) * 1_000_003 + ddp.get_rank() * 10_007)
     wall_start = time.perf_counter()
     local_scene_count = 0
 
@@ -319,6 +332,7 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
             ema,
             aug,
             profile=profile_step,
+            rollout_generator=rollout_generator,
         )
         optimizer_steps = int(step_loss["optimizer_steps_per_rollout"].item())
         previous_global_step = args._wandb_global_step

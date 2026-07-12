@@ -1129,6 +1129,7 @@ def sample_group(
     use_bf16: bool = False,
     sample_steps: int | None = None,
     return_encoding: bool = False,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
     """Generate one ego trajectory per (already replicated) row via inference sampling.
 
@@ -1153,9 +1154,14 @@ def sample_group(
     if noise_scale == 0.0:
         sampled = torch.zeros(B, action_agent_num, OUTPUT_T, POSE_DIM, device=device)
     else:
-        sampled = torch.randn(B, action_agent_num, OUTPUT_T, POSE_DIM, device=device) * float(
-            noise_scale
-        )
+        sampled = torch.randn(
+            B,
+            action_agent_num,
+            OUTPUT_T,
+            POSE_DIM,
+            device=device,
+            generator=generator,
+        ) * float(noise_scale)
     inference_inputs["sampled_trajectories"] = sampled
     # RL consumes only trajectories. Avoid pooling the expanded scene encoding and running
     # the frozen auxiliary classifier for every rollout candidate.

@@ -1242,6 +1242,7 @@ def model_training(args):
             args,
             model_ema,
             aug,
+            epoch,
         )
 
         eval_model = model_ema.ema if model_ema is not None else diffusion_planner
