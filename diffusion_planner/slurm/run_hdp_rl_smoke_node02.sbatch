@@ -14,6 +14,7 @@ set -euo pipefail
 REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
 NPROC=${HDP_RL_NPROC:-1}
 NUM_WORKERS=${HDP_RL_NUM_WORKERS:-0}
+TRAIN_SUBSAMPLE_STEP=${HDP_RL_TRAIN_SUBSAMPLE_STEP:-1}
 TRAIN_LIST=${HDP_RL_TRAIN_LIST:-${REPO}/artifacts/rl_smoke_node02/train_1.json}
 VALID_LIST=${HDP_RL_VALID_LIST:-${REPO}/artifacts/rl_smoke_node02/valid_16.json}
 EXTRA_LISTS=${HDP_RL_EXTRA_LISTS:-}
@@ -25,6 +26,12 @@ EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
 NUM_GENERATIONS=${HDP_RL_NUM_GENERATIONS:-32}
 BATCH_SIZE=${HDP_RL_BATCH_SIZE:-${NPROC}}
 TRAIN_EPOCHS=${HDP_RL_TRAIN_EPOCHS:-1}
+LEARNING_RATE=${HDP_RL_LEARNING_RATE:-5e-6}
+WEIGHT_DECAY=${HDP_RL_WEIGHT_DECAY:-0.01}
+REWARD_BETA=${HDP_RL_REWARD_BETA:-1.0}
+EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
+NOISE_SCALE=${HDP_RL_NOISE_SCALE:-0.5}
+ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
 COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-False}
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
 USE_WANDB=${HDP_RL_USE_WANDB:-False}
@@ -89,19 +96,20 @@ cd "${REPO}/diffusion_planner"
   "${EXTRA_ARGS[@]}" \
   --normalization_file_path "${REPO}/diffusion_planner/normalization.json" \
   --num_workers "${NUM_WORKERS}" \
+  --train_subsample_step "${TRAIN_SUBSAMPLE_STEP}" \
   --batch_size "${BATCH_SIZE}" \
   --train_epochs "${TRAIN_EPOCHS}" \
   --save_utd 1 \
   --rl_full_eval_utd 1 \
-  --learning_rate 5e-6 \
-  --weight_decay 0.01 \
+  --learning_rate "${LEARNING_RATE}" \
+  --weight_decay "${WEIGHT_DECAY}" \
   --warm_up_epoch 1 \
   --num_generations "${NUM_GENERATIONS}" \
-  --rl_noise_scale 0.5 \
-  --rl_rollout_steps 6 \
+  --rl_noise_scale "${NOISE_SCALE}" \
+  --rl_rollout_steps "${ROLLOUT_STEPS}" \
   --rl_reward_normalize group \
-  --rl_reward_beta 1.0 \
-  --rl_ema_update_rate 0.05 \
+  --rl_reward_beta "${REWARD_BETA}" \
+  --rl_ema_update_rate "${EMA_UPDATE_RATE}" \
   --rl_init_use_ema True \
   --rl_train_scope "${TRAIN_SCOPE}" \
   "${CKPT_ARGS[@]}" \
@@ -139,7 +147,7 @@ cd "${REPO}/diffusion_planner"
 
 "${REPO}/.venv/bin/python" - \
   "${VERIFY_SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" \
-  "${TRAIN_EPOCHS}" <<'PY'
+  "${TRAIN_EPOCHS}" "${EMA_UPDATE_RATE}" <<'PY'
 import csv
 import math
 import pathlib
@@ -152,6 +160,7 @@ save_dir = pathlib.Path(sys.argv[2])
 scope = sys.argv[3]
 mode = sys.argv[4]
 expected_epoch = int(sys.argv[5])
+ema_update_rate = float(sys.argv[6])
 source = torch.load(initial_path, map_location="cpu", weights_only=True)
 if mode == "resume":
     initial_live = source["model"]
@@ -184,7 +193,9 @@ for key in live:
         decoder_changed.append(changed)
         ema_changed.append(not torch.equal(shadow[key], initial_shadow[key]))
         if changed and optimizer_steps == 1:
-            expected = initial_shadow[key].float().mul(0.95).add(live[key].float(), alpha=0.05)
+            expected = initial_shadow[key].float().mul(1.0 - ema_update_rate).add(
+                live[key].float(), alpha=ema_update_rate
+            )
             ema_relation_error.append((shadow[key].float() - expected).abs().max().item())
     elif bare_key.startswith("encoder."):
         encoder_changed.append(changed)
