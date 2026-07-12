@@ -1013,6 +1013,14 @@ def compute_reward_weighted_loss(
             bool(getattr(args, "ddp", False)),
         )
     has_valid_group = bool(global_valid_count > 0)
+    local_valid_count = valid_sample.sum().to(reward_weights.dtype)
+    reward_weight_mean = reward_weights.sum() / local_valid_count.clamp_min(1.0)
+    reward_weight_max = torch.nan_to_num(
+        reward_weights.masked_fill(~valid_sample, -torch.inf).max(), neginf=0.0
+    )
+    reward_weight_min = torch.nan_to_num(
+        reward_weights.masked_fill(~valid_sample, torch.inf).min(), posinf=0.0
+    )
     bc_weight = float(getattr(args, "rl_bc_weight", 0.0))
     zero = reward.new_zeros(())
     # With a BC anchor, keep the candidate forward in every step so DDP static_graph sees the
@@ -1076,8 +1084,8 @@ def compute_reward_weighted_loss(
         "ego_reconstruction_loss": ego_reconstruction_loss,
         "ego_hdp_diffusion_loss": loss_terms["ego_hdp_diffusion_loss"],
         "ego_hdp_waypoint_loss": loss_terms["ego_hdp_waypoint_loss"],
-        "reward_weight_mean": reward_weights.mean().detach(),
-        "reward_weight_max": reward_weights.max().detach(),
-        "reward_weight_min": reward_weights.min().detach(),
+        "reward_weight_mean": reward_weight_mean.detach(),
+        "reward_weight_max": reward_weight_max.detach(),
+        "reward_weight_min": reward_weight_min.detach(),
         "valid_group_fraction": valid_sample.view(num_scenes, n).any(dim=1).float().mean().detach(),
     }

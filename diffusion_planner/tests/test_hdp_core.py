@@ -399,6 +399,36 @@ def test_hdp_behavior_cloning_anchor_uses_one_expert_target_per_scene(monkeypatc
     torch.testing.assert_close(output["loss"], torch.tensor(6.25))
 
 
+def test_rl_weight_diagnostics_exclude_discarded_groups(monkeypatch):
+    def fake_policy_loss(_model, _inputs, _target, _args, _encoding=None):
+        per_sample = torch.ones(4)
+        return {
+            "ego_loss_per_sample": per_sample,
+            "ego_hdp_diffusion_loss": per_sample.mean(),
+            "ego_hdp_waypoint_loss": per_sample.mean(),
+        }
+
+    monkeypatch.setattr(hdp_rl_utils, "_compute_policy_ego_loss_per_sample", fake_policy_loss)
+    args = SimpleNamespace(rl_bc_weight=0.0, ddp=False)
+    output = compute_reward_weighted_loss(
+        None,
+        {},
+        torch.zeros(4, 80, 4),
+        torch.zeros(4),
+        2,
+        2,
+        args,
+        reward_weights=torch.tensor([0.0, 0.0, 1.0, 3.0]),
+        valid_sample=torch.tensor([False, False, True, True]),
+        global_valid_count=torch.tensor(2.0),
+        ddp_world_size=1,
+    )
+
+    torch.testing.assert_close(output["reward_weight_mean"], torch.tensor(2.0))
+    torch.testing.assert_close(output["reward_weight_max"], torch.tensor(3.0))
+    torch.testing.assert_close(output["reward_weight_min"], torch.tensor(1.0))
+
+
 def test_legacy_short_neighbor_future_alignment_keeps_full_tracks():
     past = np.zeros((2, 3, 11), dtype=np.float32)
     past[:, -1, 2] = 1.0
