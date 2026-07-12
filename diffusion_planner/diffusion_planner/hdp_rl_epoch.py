@@ -8,6 +8,8 @@ The only supported RL path is the HDP reward-weighted hybrid loss:
      exp(beta * normalized_reward).
 """
 
+import copy
+
 import torch
 import wandb
 from torch import nn
@@ -355,6 +357,18 @@ def validate_hdp_reward_policy(data_loader, model, args):
     """Evaluate the rollout policy reward on a fixed held-out scene distribution."""
     n = int(args.rl_eval_num_generations)
     device = torch.device(args.device)
+    eval_reward_args = copy.copy(args)
+    for name, default in (
+        ("risk", 1.0),
+        ("follow", 3.0),
+        ("lane", 2.5),
+        ("progress", 3.0),
+    ):
+        setattr(
+            eval_reward_args,
+            f"rl_reward_w_{name}",
+            float(getattr(args, f"rl_eval_reward_w_{name}", default)),
+        )
     # reward sum, candidate count, per-group max sum, scene count, invalid reward count,
     # invalid diagnostic count. Invalid values are reported after the collective so every
     # rank exits together instead of leaving peers blocked in all_reduce.
@@ -394,7 +408,7 @@ def validate_hdp_reward_policy(data_loader, model, args):
             )
             num_scenes = raw_inputs["ego_current_state"].shape[0]
             reward, reward_metrics = compute_hdp_reward(
-                ego_world, raw_inputs, reward_neighbors, num_scenes, n, args
+                ego_world, raw_inputs, reward_neighbors, num_scenes, n, eval_reward_args
             )
             finite_reward = torch.isfinite(reward)
             safe_reward = torch.where(finite_reward, reward, torch.zeros_like(reward))

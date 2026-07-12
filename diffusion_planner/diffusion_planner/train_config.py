@@ -135,6 +135,12 @@ class TrainConfig:
     # The public HDP NAVSIM policy samples with temperature 0.5 by default.
     rl_eval_noise_scale: float = 0.5
     rl_eval_num_generations: int = 32
+    # Keep checkpoint selection comparable when the optimization reward weights are swept.
+    # This is the current real-vehicle objective: paper multi-reward plus anti-stopping progress.
+    rl_eval_reward_w_risk: float = 1.0
+    rl_eval_reward_w_follow: float = 3.0
+    rl_eval_reward_w_lane: float = 2.5
+    rl_eval_reward_w_progress: float = 3.0
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6

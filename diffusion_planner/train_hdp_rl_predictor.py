@@ -331,6 +331,18 @@ def get_args():
         default=_train_config_default("rl_eval_num_generations"),
         help="fixed held-out candidate count, independent of the training group size",
     )
+    for reward_name, help_name in (
+        ("risk", "risk/safety"),
+        ("follow", "leader-conditioned following"),
+        ("lane", "lane keeping"),
+        ("progress", "anti-stopping progress"),
+    ):
+        parser.add_argument(
+            f"--rl_eval_reward_w_{reward_name}",
+            type=float,
+            default=_train_config_default(f"rl_eval_reward_w_{reward_name}"),
+            help=f"fixed held-out {help_name} weight, independent of optimization weights",
+        )
     parser.add_argument(
         "--rl_rollout_steps",
         type=int,
@@ -689,6 +701,16 @@ def get_args():
         raise ValueError("RL reward weights must be non-negative")
     if sum(reward_weights) <= 0.0:
         raise ValueError("At least one RL reward weight must be positive")
+    eval_reward_weights = (
+        args.rl_eval_reward_w_risk,
+        args.rl_eval_reward_w_follow,
+        args.rl_eval_reward_w_lane,
+        args.rl_eval_reward_w_progress,
+    )
+    if any(weight < 0.0 for weight in eval_reward_weights):
+        raise ValueError("RL held-out reward weights must be non-negative")
+    if sum(eval_reward_weights) <= 0.0:
+        raise ValueError("At least one RL held-out reward weight must be positive")
     if args.rl_bc_weight < 0.0:
         raise ValueError("--rl_bc_weight must be non-negative")
     if args.predicted_neighbor_num != 0:
@@ -818,6 +840,11 @@ def model_training(args):
         print("Rollout sampling temperature: {}".format(args.rl_noise_scale))
         print("Held-out policy sampling temperature: {}".format(args.rl_eval_noise_scale))
         print("Held-out policy candidate count: {}".format(args.rl_eval_num_generations))
+        print(
+            "Held-out reward weights (risk/follow/lane/progress): "
+            f"{args.rl_eval_reward_w_risk}/{args.rl_eval_reward_w_follow}/"
+            f"{args.rl_eval_reward_w_lane}/{args.rl_eval_reward_w_progress}"
+        )
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
         print("RL updates per rollout: {}".format(args.rl_updates_per_rollout))
         print("Learning rate: {}".format(args.learning_rate))

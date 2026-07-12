@@ -121,6 +121,7 @@ def test_finite_scalar_metrics_excludes_invalid_json_values():
 def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     observed_noise_scales = []
     observed_sample_steps = []
+    observed_reward_weights = []
 
     def fake_sample_group(_model, inputs, *_args, **_kwargs):
         observed_noise_scales.append(_args[0])
@@ -129,6 +130,12 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         return torch.zeros(batch, 80, 4)
 
     def fake_reward(_ego, _inputs, _neighbors, num_scenes, n, _args):
+        observed_reward_weights.append(
+            tuple(
+                getattr(_args, f"rl_reward_w_{name}")
+                for name in ("risk", "follow", "lane", "progress")
+            )
+        )
         value = 2.0 if num_scenes == 2 else 10.0
         reward = torch.full((num_scenes * n,), value)
         return reward, {"reward_risk_score": reward.mean()}
@@ -153,6 +160,14 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         rl_noise_scale=0.5,
         rl_eval_noise_scale=0.25,
         rl_eval_num_generations=2,
+        rl_reward_w_risk=9.0,
+        rl_reward_w_follow=8.0,
+        rl_reward_w_lane=7.0,
+        rl_reward_w_progress=6.0,
+        rl_eval_reward_w_risk=1.0,
+        rl_eval_reward_w_follow=3.0,
+        rl_eval_reward_w_lane=2.5,
+        rl_eval_reward_w_progress=3.0,
         amp_dtype="off",
         rl_rollout_steps=6,
         diffusion_sample_steps=5,
@@ -167,3 +182,5 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     assert metrics["risk"].item() == pytest.approx(expected)
     assert observed_noise_scales == [0.25, 0.25]
     assert observed_sample_steps == [5, 5]
+    assert observed_reward_weights == [(1.0, 3.0, 2.5, 3.0)] * 2
+    assert args.rl_reward_w_risk == 9.0
