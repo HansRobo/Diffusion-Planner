@@ -560,6 +560,11 @@ def compute_hdp_reward(
             "occupancy_static_source",
             "occupancy_stopped_source",
             "occupancy_road_border_source",
+            "risk_zero_fraction",
+            "risk_one_fraction",
+            "ttc_zero_fraction",
+            "thw_zero_fraction",
+            "occupancy_zero_fraction",
         )
     }
     rewards = []
@@ -634,12 +639,22 @@ def compute_hdp_reward(
         )
         rewards.append(reward)
         metric_lists["safety"].append(terms["safety"])
+        ttc_min = terms["ttc"].amin(dim=-1)
+        thw_min = terms["thw"].amin(dim=-1)
+        occupancy_min = occupancy.amin(dim=-1)
         metric_lists["risk"].append(risk)
         metric_lists["follow"].append(terms["follow"])
         metric_lists["lane"].append(lane)
-        metric_lists["ttc"].append(terms["ttc"].amin(dim=-1))
-        metric_lists["thw"].append(terms["thw"].amin(dim=-1))
-        metric_lists["occupancy"].append(occupancy.amin(dim=-1))
+        metric_lists["ttc"].append(ttc_min)
+        metric_lists["thw"].append(thw_min)
+        metric_lists["occupancy"].append(occupancy_min)
+        metric_lists["risk_zero_fraction"].append((risk <= 1e-6).to(risk.dtype))
+        metric_lists["risk_one_fraction"].append((risk >= 1.0 - 1e-6).to(risk.dtype))
+        metric_lists["ttc_zero_fraction"].append((ttc_min <= 1e-6).to(risk.dtype))
+        metric_lists["thw_zero_fraction"].append((thw_min <= 1e-6).to(risk.dtype))
+        metric_lists["occupancy_zero_fraction"].append(
+            (occupancy_min <= 1e-6).to(risk.dtype)
+        )
         metric_lists["leader_fraction"].append(terms["leader_fraction"])
         metric_lists["collision_active"].append(terms["collision_active"])
         metric_lists["collision_rear"].append(terms["collision_rear"])
@@ -659,7 +674,17 @@ def compute_hdp_reward(
             )
 
     flattened = {key: torch.cat(values) for key, values in metric_lists.items()}
-    metrics = {f"reward_{key}_score": value.mean() for key, value in flattened.items()}
+    fraction_keys = {
+        "risk_zero_fraction",
+        "risk_one_fraction",
+        "ttc_zero_fraction",
+        "thw_zero_fraction",
+        "occupancy_zero_fraction",
+    }
+    metrics = {
+        (f"reward_{key}" if key in fraction_keys else f"reward_{key}_score"): value.mean()
+        for key, value in flattened.items()
+    }
     return torch.cat(rewards), metrics
 
 

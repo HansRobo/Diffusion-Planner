@@ -13,8 +13,12 @@ set -euo pipefail
 
 REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
 NPROC=${HDP_RL_NPROC:-1}
+NUM_WORKERS=${HDP_RL_NUM_WORKERS:-0}
 TRAIN_LIST=${HDP_RL_TRAIN_LIST:-${REPO}/artifacts/rl_smoke_node02/train_1.json}
 VALID_LIST=${HDP_RL_VALID_LIST:-${REPO}/artifacts/rl_smoke_node02/valid_16.json}
+EXTRA_LISTS=${HDP_RL_EXTRA_LISTS:-}
+EXTRA_REPEAT=${HDP_RL_EXTRA_REPEAT:-0}
+EXTRA_MASK_TRAFFIC_LIGHTS=${HDP_RL_EXTRA_MASK_TRAFFIC_LIGHTS:-False}
 INIT_CKPT=${HDP_RL_INIT_CKPT:-${REPO}/checkpoints/base_epoch8_best_epdms/best_model.pth}
 RESUME_CKPT=${HDP_RL_RESUME_CKPT:-}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
@@ -25,6 +29,7 @@ COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-False}
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
 USE_WANDB=${HDP_RL_USE_WANDB:-False}
 WANDB_PROJECT=${HDP_RL_WANDB_PROJECT:-hdp-rl}
+STEP_LOG_INTERVAL=${HDP_RL_STEP_LOG_INTERVAL:-0}
 RUN_NAME=${HDP_RL_RUN_NAME:-rl_smoke_${NPROC}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 PORT=$((24000 + SLURM_JOB_ID % 10000))
@@ -44,6 +49,15 @@ else
   CKPT_ARGS=(--init_weights_path "${INIT_CKPT}")
   VERIFY_MODE=init
 fi
+EXTRA_ARGS=(--extra_train_set_repeat "${EXTRA_REPEAT}")
+if [[ -n "${EXTRA_LISTS}" ]]; then
+  IFS=: read -r -a extra_list_array <<<"${EXTRA_LISTS}"
+  for extra_list in "${extra_list_array[@]}"; do
+    [[ -r "${extra_list}" ]] || { echo "missing extra list: ${extra_list}" >&2; exit 2; }
+    EXTRA_ARGS+=(--extra_train_set_list "${extra_list}")
+  done
+fi
+EXTRA_ARGS+=(--extra_train_set_mask_traffic_lights "${EXTRA_MASK_TRAFFIC_LIGHTS}")
 for path in "${TRAIN_LIST}" "${VALID_LIST}" "${SOURCE_CKPT}" "${SOURCE_CKPT%/*}/args.json"; do
   [[ -r "${path}" ]] || { echo "missing required input: ${path}" >&2; exit 2; }
 done
@@ -72,8 +86,9 @@ cd "${REPO}/diffusion_planner"
   --save_dir "${SAVE_DIR}" \
   --train_set_list "${TRAIN_LIST}" \
   --valid_set_list "${VALID_LIST}" \
+  "${EXTRA_ARGS[@]}" \
   --normalization_file_path "${REPO}/diffusion_planner/normalization.json" \
-  --num_workers 0 \
+  --num_workers "${NUM_WORKERS}" \
   --batch_size "${BATCH_SIZE}" \
   --train_epochs "${TRAIN_EPOCHS}" \
   --save_utd 1 \
@@ -117,7 +132,7 @@ cd "${REPO}/diffusion_planner"
   --compile_reward_kernels False \
   --use_wandb "${USE_WANDB}" \
   --wandb_project_name "${WANDB_PROJECT}" \
-  --wandb_step_log_interval 0 \
+  --wandb_step_log_interval "${STEP_LOG_INTERVAL}" \
   --export_onnx_on_save False \
   --port "${PORT}" \
   >"${SAVE_DIR}/train_stdout.log" 2>&1
