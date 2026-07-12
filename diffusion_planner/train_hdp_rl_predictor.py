@@ -1080,7 +1080,9 @@ def model_training(args):
         # recovery legitimately changes resume_model_path from None to latest.pth.
         wandb.config.update(
             args_dict,
-            allow_val_change=args.resume_model_path is not None,
+            allow_val_change=(
+                args.resume_model_path is not None or args.wandb_run_id is not None
+            ),
         )
         wandb.define_metric("optimizer_step")
         for metric_prefix in (
