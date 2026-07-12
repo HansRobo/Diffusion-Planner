@@ -615,6 +615,81 @@ def _occupancy_score(
     return torch.ones(C, T, device=device), sources
 
 
+def _batched_occupancy_score(
+    ego_group: torch.Tensor,
+    ego_shapes: torch.Tensor,
+    static_objects: torch.Tensor | None,
+    line_strings: torch.Tensor | None,
+    stopped_clearance: torch.Tensor,
+    stopped_is_rear: torch.Tensor,
+    static_available: torch.Tensor,
+    stopped_available: torch.Tensor,
+    road_border_available: torch.Tensor,
+    config: HDPRewardConfig,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batch the common stopped-agent path and loop only exact geometry sources.
+
+    Returns occupancy ``[B, C, T]`` and source flags ``[B, 3]`` ordered as
+    static/stopped/road-border.
+    """
+    batch_size, candidates, time_steps = ego_group.shape[:3]
+    occupancy = ego_group.new_ones(batch_size, candidates, time_steps)
+    source_flags = torch.stack(
+        (
+            static_available,
+            stopped_available,
+            (~static_available & ~stopped_available & road_border_available),
+        ),
+        dim=1,
+    )
+
+    stopped_only = ~static_available & stopped_available
+    ego_speed = _trajectory_speed(ego_group[..., :2], config.dt)
+    safe_distance = config.occupancy_safe_m + config.occupancy_speed_gain_s * ego_speed
+    critical_distance = config.occupancy_critical_m + config.occupancy_speed_gain_s * ego_speed
+    stopped_score = _linear_safe_score(stopped_clearance, critical_distance, safe_distance)
+    stopped_score = torch.where(
+        stopped_is_rear,
+        1.0 - config.rear_end_penalty * (1.0 - stopped_score),
+        stopped_score,
+    )
+    occupancy = torch.where(stopped_only[:, None, None], stopped_score, occupancy)
+
+    # Static OBB clearance and exact road-border distance have scene-dependent geometry sizes.
+    # Keep their proven implementations and synchronize only the small exceptional index list.
+    exceptional = static_available | (~stopped_available & road_border_available)
+    exceptional_rows = (
+        torch.cat(
+            (
+                exceptional.nonzero().flatten()[:, None],
+                static_available[exceptional, None],
+                stopped_available[exceptional, None],
+                road_border_available[exceptional, None],
+            ),
+            dim=1,
+        )
+        .cpu()
+        .tolist()
+    )
+    for scene, has_static, has_stopped, has_road_border in exceptional_rows:
+        scene_occupancy, _ = _occupancy_score(
+            ego_group[scene],
+            ego_shapes[scene],
+            static_objects[scene] if static_objects is not None else None,
+            line_strings[scene] if line_strings is not None else None,
+            stopped_clearance[scene],
+            stopped_available[scene],
+            config,
+            stopped_is_rear=stopped_is_rear[scene],
+            static_available=bool(has_static),
+            stopped_available_flag=bool(has_stopped),
+            road_border_available=bool(has_road_border),
+        )
+        occupancy[scene] = scene_occupancy
+
+    return occupancy, source_flags
+
+
 def _nearest_lane_distance(
     points: torch.Tensor,
     lanes: torch.Tensor,
@@ -872,40 +947,6 @@ def compute_hdp_reward(
         )
     neighbor_group = neighbors_future
 
-    metric_lists: dict[str, list[torch.Tensor]] = {
-        key: []
-        for key in (
-            "safety",
-            "risk",
-            "follow",
-            "lane",
-            "ttc",
-            "thw",
-            "occupancy",
-            "leader_fraction",
-            "collision_active",
-            "collision_rear",
-            "lane_masked",
-            "lane_change_masked",
-            "lane_route_source",
-            "occupancy_any_source",
-            "occupancy_static_source",
-            "occupancy_stopped_source",
-            "occupancy_road_border_source",
-            "risk_zero_fraction",
-            "risk_one_fraction",
-            "ttc_zero_fraction",
-            "thw_zero_fraction",
-            "occupancy_zero_fraction",
-            "progress",
-            "progress_raw",
-            "progress_ratio",
-            "underprogress_fraction",
-            "overprogress_fraction",
-            "comfort",
-        )
-    }
-    rewards = []
     required = ("ego_shape", "neighbor_agents_past", "ego_agent_future", "lanes")
     missing = [key for key in required if key not in scene_inputs]
     if missing:
@@ -956,10 +997,6 @@ def compute_hdp_reward(
         *packed_neighbors,
         expert_futures_tensor,
     )
-    scene_terms = [
-        {key: value[scene] for key, value in scene_term_tensors.items()}
-        for scene in range(num_scenes)
-    ]
     route_lanes_batch = scene_inputs.get("route_lanes")
     (
         lane_scores,
@@ -993,96 +1030,72 @@ def compute_hdp_reward(
     else:
         border_point = line_strings_batch[..., 3] > 0.5
         road_border_available = (border_point[..., :-1] & border_point[..., 1:]).flatten(1).any(1)
-    stopped_available = torch.stack([terms["stopped_available"] for terms in scene_terms])
-    availability = (
-        torch.stack(
-            (
-                static_available,
-                stopped_available,
-                road_border_available,
-                route_aligned,
-            ),
-            dim=1,
-        )
-        .cpu()
-        .tolist()
+    stopped_available = scene_term_tensors["stopped_available"]
+    occupancy, occupancy_sources = _batched_occupancy_score(
+        ego_group,
+        scene_inputs["ego_shape"][:, :3],
+        static_objects_batch,
+        line_strings_batch,
+        scene_term_tensors["stopped_clearance"],
+        scene_term_tensors["stopped_is_rear"],
+        static_available,
+        stopped_available,
+        road_border_available,
+        config,
     )
+    safety = scene_term_tensors["safety"]
+    risk = torch.stack(
+        (scene_term_tensors["ttc"], scene_term_tensors["thw"], occupancy), dim=0
+    ).amin(dim=(0, 3))
+    progress_reward = _safety_gated_behavior(progress_scores, safety)
+    behavior_reward = (
+        args.rl_reward_w_follow * scene_term_tensors["follow"]
+        + args.rl_reward_w_lane * lane_scores
+        + getattr(args, "rl_reward_w_progress", 0.0) * progress_scores
+    )
+    reward_group = (
+        getattr(args, "rl_reward_w_safety", 0.0) * safety
+        + args.rl_reward_w_risk * risk
+        + _safety_gated_behavior(behavior_reward, safety)
+    )
+    ttc_min = scene_term_tensors["ttc"].amin(dim=-1)
+    thw_min = scene_term_tensors["thw"].amin(dim=-1)
+    occupancy_min = occupancy.amin(dim=-1)
 
-    for scene in range(num_scenes):
-        ego_shape = scene_inputs["ego_shape"][scene, :3]
-        terms = scene_terms[scene]
-        has_static, has_stopped, has_road_border, use_route = availability[scene]
-        occupancy, occupancy_sources = _occupancy_score(
-            ego_group[scene],
-            ego_shape,
-            static_objects_batch[scene] if static_objects_batch is not None else None,
-            line_strings_batch[scene] if line_strings_batch is not None else None,
-            terms["stopped_clearance"],
-            terms["stopped_available"],
-            config,
-            stopped_is_rear=terms["stopped_is_rear"],
-            static_available=has_static,
-            stopped_available_flag=has_stopped,
-            road_border_available=has_road_border,
-        )
-        risk = torch.stack([terms["ttc"], terms["thw"], occupancy], dim=0).amin(dim=(0, 2))
-        progress_ratio = progress_ratios[scene]
-        progress_score = progress_scores[scene]
-        progress_reward = _safety_gated_behavior(progress_score, terms["safety"])
-        lane = lane_scores[scene]
-        expert_off_lane = expert_off_lanes[scene]
-        expert_lane_change = expert_lane_changes[scene]
-        behavior_reward = (
-            args.rl_reward_w_follow * terms["follow"]
-            + args.rl_reward_w_lane * lane
-            + getattr(args, "rl_reward_w_progress", 0.0) * progress_score
-        )
-        reward = (
-            getattr(args, "rl_reward_w_safety", 0.0) * terms["safety"]
-            + args.rl_reward_w_risk * risk
-            + _safety_gated_behavior(behavior_reward, terms["safety"])
-        )
-        rewards.append(reward)
-        metric_lists["safety"].append(terms["safety"])
-        ttc_min = terms["ttc"].amin(dim=-1)
-        thw_min = terms["thw"].amin(dim=-1)
-        occupancy_min = occupancy.amin(dim=-1)
-        metric_lists["risk"].append(risk)
-        metric_lists["follow"].append(terms["follow"])
-        metric_lists["comfort"].append(terms["comfort"])
-        metric_lists["lane"].append(lane)
-        metric_lists["progress"].append(progress_reward)
-        metric_lists["progress_raw"].append(progress_score)
-        metric_lists["progress_ratio"].append(progress_ratio.clamp(-1.0, 2.0))
-        metric_lists["underprogress_fraction"].append((progress_ratio < 0.8).to(risk.dtype))
-        metric_lists["overprogress_fraction"].append((progress_ratio > 1.2).to(risk.dtype))
-        metric_lists["ttc"].append(ttc_min)
-        metric_lists["thw"].append(thw_min)
-        metric_lists["occupancy"].append(occupancy_min)
-        metric_lists["risk_zero_fraction"].append((risk <= 1e-6).to(risk.dtype))
-        metric_lists["risk_one_fraction"].append((risk >= 1.0 - 1e-6).to(risk.dtype))
-        metric_lists["ttc_zero_fraction"].append((ttc_min <= 1e-6).to(risk.dtype))
-        metric_lists["thw_zero_fraction"].append((thw_min <= 1e-6).to(risk.dtype))
-        metric_lists["occupancy_zero_fraction"].append((occupancy_min <= 1e-6).to(risk.dtype))
-        metric_lists["leader_fraction"].append(terms["leader_fraction"])
-        metric_lists["collision_active"].append(terms["collision_active"])
-        metric_lists["collision_rear"].append(terms["collision_rear"])
-        metric_lists["lane_masked"].append(expert_off_lane.to(lane.dtype).expand(n))
-        metric_lists["lane_change_masked"].append(expert_lane_change.to(lane.dtype).expand(n))
-        metric_lists["lane_route_source"].append(lane.new_full((n,), float(use_route)))
-        metric_lists["occupancy_any_source"].append(
-            lane.new_full((n,), float(any(occupancy_sources.values())))
-        )
-        for metric_key, source_key in (
-            ("occupancy_static_source", "static"),
-            ("occupancy_stopped_source", "stopped"),
-            ("occupancy_road_border_source", "road_border"),
-        ):
-            metric_lists[metric_key].append(
-                lane.new_full((n,), float(occupancy_sources[source_key]))
-            )
+    def candidate_flags(value: torch.Tensor) -> torch.Tensor:
+        return value.to(lane_scores.dtype)[:, None].expand(-1, n)
 
-    flattened = {key: torch.cat(values) for key, values in metric_lists.items()}
+    metric_groups = {
+        "safety": safety,
+        "risk": risk,
+        "follow": scene_term_tensors["follow"],
+        "lane": lane_scores,
+        "ttc": ttc_min,
+        "thw": thw_min,
+        "occupancy": occupancy_min,
+        "leader_fraction": scene_term_tensors["leader_fraction"],
+        "collision_active": scene_term_tensors["collision_active"],
+        "collision_rear": scene_term_tensors["collision_rear"],
+        "lane_masked": candidate_flags(expert_off_lanes),
+        "lane_change_masked": candidate_flags(expert_lane_changes),
+        "lane_route_source": candidate_flags(route_aligned),
+        "occupancy_any_source": candidate_flags(occupancy_sources.any(dim=1)),
+        "occupancy_static_source": candidate_flags(occupancy_sources[:, 0]),
+        "occupancy_stopped_source": candidate_flags(occupancy_sources[:, 1]),
+        "occupancy_road_border_source": candidate_flags(occupancy_sources[:, 2]),
+        "risk_zero_fraction": (risk <= 1e-6).to(risk.dtype),
+        "risk_one_fraction": (risk >= 1.0 - 1e-6).to(risk.dtype),
+        "ttc_zero_fraction": (ttc_min <= 1e-6).to(risk.dtype),
+        "thw_zero_fraction": (thw_min <= 1e-6).to(risk.dtype),
+        "occupancy_zero_fraction": (occupancy_min <= 1e-6).to(risk.dtype),
+        "progress": progress_reward,
+        "progress_raw": progress_scores,
+        "progress_ratio": progress_ratios.clamp(-1.0, 2.0),
+        "underprogress_fraction": (progress_ratios < 0.8).to(risk.dtype),
+        "overprogress_fraction": (progress_ratios > 1.2).to(risk.dtype),
+        "comfort": scene_term_tensors["comfort"],
+    }
+    flattened = {key: value.reshape(-1) for key, value in metric_groups.items()}
     fraction_keys = {
         "risk_zero_fraction",
         "risk_one_fraction",
@@ -1096,9 +1109,8 @@ def compute_hdp_reward(
         (f"reward_{key}" if key in fraction_keys else f"reward_{key}_score"): value.mean()
         for key, value in flattened.items()
     }
-    reward_group = torch.stack(rewards)
     component_groups = {
-        key: torch.stack(metric_lists[key])
+        key: metric_groups[key]
         for key in ("safety", "risk", "follow", "lane", "progress", "leader_fraction")
     }
     reward_centered = reward_group - reward_group.mean(dim=1, keepdim=True)
@@ -1133,7 +1145,7 @@ def compute_hdp_reward(
     metrics["reward_leader_group_range"] = (
         leader_group.max(dim=1).values - leader_group.min(dim=1).values
     ).mean()
-    return torch.cat(rewards), metrics
+    return reward_group.reshape(-1), metrics
 
 
 def heading_to_cos_sin_if_needed(trajectory: torch.Tensor) -> torch.Tensor:
@@ -1245,6 +1257,7 @@ def compute_reward_weights(
     normalize: str,
     beta: float,
     eps: float,
+    use_ddp: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if n < 2:
         raise ValueError("HDP-RL requires num_generations >= 2 for group reward normalization.")
@@ -1267,11 +1280,26 @@ def compute_reward_weights(
         valid_sample = valid_group.expand(-1, n).reshape(-1)
     elif normalize == "batch":
         valid_sample = valid_group.expand(-1, n).reshape(-1)
-        if valid_sample.any():
-            finite_reward = reward[valid_sample]
-            std = finite_reward.std()
+        finite_reward = reward[valid_sample]
+        moments = torch.stack(
+            (
+                valid_sample.sum().to(reward.dtype),
+                finite_reward.sum(),
+                finite_reward.square().sum(),
+            )
+        )
+        if use_ddp and torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(moments, op=torch.distributed.ReduceOp.SUM)
+        count, reward_sum, reward_square_sum = moments.unbind()
+        if count > 1:
+            mean = reward_sum / count
+            # Match torch.std's default unbiased estimator while using global DDP moments.
+            variance = ((reward_square_sum - reward_sum.square() / count) / (count - 1)).clamp_min(
+                0
+            )
+            std = variance.sqrt()
             if torch.isfinite(std) and std > eps:
-                reward_norm = (reward - finite_reward.mean()) / (std + eps)
+                reward_norm = (reward - mean) / (std + eps)
             else:
                 reward_norm = torch.zeros_like(reward)
         else:
@@ -1410,6 +1438,7 @@ def compute_reward_weighted_loss(
             args.rl_reward_normalize,
             getattr(args, "rl_reward_beta", 0.5),
             args.advantage_eps,
+            use_ddp=bool(getattr(args, "ddp", False)),
         )
     if global_valid_count is None or ddp_world_size is None:
         global_valid_count, ddp_world_size = distributed_valid_sample_count(

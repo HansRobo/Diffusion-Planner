@@ -352,6 +352,7 @@ def _hdp_rl_step(
         args.rl_reward_normalize,
         getattr(args, "rl_reward_beta", 0.5),
         args.advantage_eps,
+        use_ddp=bool(getattr(args, "ddp", False)),
     )
     global_valid_count, ddp_world_size = distributed_valid_sample_count(
         valid_sample,

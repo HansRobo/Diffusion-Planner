@@ -290,7 +290,8 @@ def compute_road_border_penalty(
         penalty: [B, T] non-negative penalty per timestep.
     """
     line_strings_xy = line_strings[..., :2]  # [B, N, P, 2]
-    road_border_mask = (line_strings[..., 3] > 0.5).any(dim=-1)  # [B, N]
+    border_point = line_strings[..., 3] > 0.5
+    road_border_mask = border_point.any(dim=-1)  # [B, N]
 
     B, T, K, _ = ego_edge_points.shape
     device = ego_edge_points.device
@@ -305,10 +306,9 @@ def compute_road_border_penalty(
     seg_b = line_strings_xy[:, :, 1:, :]
     S = seg_a.shape[2]
 
-    # Segment validity: both endpoints non-zero and line string is road border
-    seg_valid = (
-        (seg_a.abs().sum(-1) > 1e-6) & (seg_b.abs().sum(-1) > 1e-6) & road_border_mask[:, :, None]
-    )  # [B, N, S]
+    # Coordinates at the ego origin are valid map points. Channel 3 is the explicit
+    # per-point road-border flag, so both endpoints must carry that flag.
+    seg_valid = border_point[:, :, :-1] & border_point[:, :, 1:]  # [B, N, S]
 
     # Pre-filter valid line strings to reduce memory
     valid_ls_indices = any_rb.nonzero(as_tuple=True)[0]  # [M]

@@ -13,9 +13,14 @@ from diffusion_planner.dimensions import (
     TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT,
     TRAFFIC_LIGHT_RED,
 )
-from diffusion_planner.hdp_rl_epoch import _grouped_policy_inputs, commit_ema_policy_update
+from diffusion_planner.hdp_rl_epoch import (
+    _backward_reward_weighted_update,
+    _grouped_policy_inputs,
+    commit_ema_policy_update,
+)
 from diffusion_planner.hdp_rl_utils import (
     HDPRewardConfig,
+    _batched_occupancy_score,
     _collision_and_leader_terms,
     _hdp_lane_score,
     _lane_reward_centerlines,
@@ -32,6 +37,7 @@ from diffusion_planner.hdp_rl_utils import (
 )
 from diffusion_planner.loss import (
     _detached_integral,
+    compute_road_border_penalty,
     inverse_normalize_ego_velocity,
     normalize_ego_velocity,
     velocity_to_waypoints,
@@ -659,6 +665,43 @@ def test_reward_weight_ablations_still_discard_groups_without_preferences(normal
     torch.testing.assert_close(weights[:2], torch.zeros(2), rtol=0, atol=0)
 
 
+def test_batch_reward_normalization_uses_global_ddp_moments(monkeypatch):
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+
+    def add_remote_moments(moments, op):
+        assert op == torch.distributed.ReduceOp.SUM
+        moments.add_(torch.tensor([2.0, 24.0, 296.0]))  # remote rewards: [10, 14]
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", add_remote_moments)
+    reward = torch.tensor([0.0, 2.0])
+    weights, valid = compute_reward_weights(
+        reward,
+        num_scenes=1,
+        n=2,
+        normalize="batch",
+        beta=1.0,
+        eps=1e-6,
+        use_ddp=True,
+    )
+
+    global_rewards = torch.tensor([0.0, 2.0, 10.0, 14.0])
+    expected = torch.exp((reward - global_rewards.mean()) / (global_rewards.std() + 1e-6))
+    assert valid.all()
+    torch.testing.assert_close(weights, expected)
+
+
+def test_road_border_penalty_keeps_valid_segment_at_ego_origin():
+    ego_edge_points = torch.tensor([[[[0.0, 0.2]]]])
+    line_strings = torch.zeros(1, 1, 3, 4)
+    line_strings[0, 0, 0, :2] = torch.tensor([0.0, 0.0])
+    line_strings[0, 0, 1, :2] = torch.tensor([2.0, 0.0])
+    line_strings[0, 0, :2, 3] = 1.0
+
+    penalty = compute_road_border_penalty(ego_edge_points, line_strings, margin=1.0)
+
+    torch.testing.assert_close(penalty, torch.tensor([[0.8]]))
+
+
 def test_hdp_behavior_cloning_anchor_uses_one_expert_target_per_scene(monkeypatch):
     def fake_policy_loss(_model, _inputs, target, _args, _encoding=None):
         per_sample = (
@@ -699,6 +742,58 @@ def test_hdp_behavior_cloning_anchor_uses_one_expert_target_per_scene(monkeypatc
     torch.testing.assert_close(output["rl_loss"], torch.tensor(2.5))
     torch.testing.assert_close(output["bc_loss"], torch.tensor(15.0))
     torch.testing.assert_close(output["loss"], torch.tensor(6.25))
+
+
+def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkeypatch):
+    parameter = torch.nn.Parameter(torch.tensor(1.0))
+
+    def fake_policy_loss(_model, _inputs, target, _args, _encoding=None):
+        per_sample = parameter * target[:, 0, 0]
+        return {
+            "ego_loss_per_sample": per_sample,
+            "ego_hdp_diffusion_loss": per_sample.mean().detach(),
+            "ego_hdp_waypoint_loss": per_sample.mean().detach(),
+        }
+
+    monkeypatch.setattr(hdp_rl_utils, "_compute_policy_ego_loss_per_sample", fake_policy_loss)
+    candidate_target = torch.zeros(8, 80, 4)
+    candidate_target[:, 0, 0] = torch.arange(1.0, 9.0)
+    expert_target = torch.zeros(2, 80, 4)
+    expert_target[:, 0, 0] = torch.tensor([10.0, 20.0])
+    common = dict(
+        model=parameter,
+        norm_inputs={"candidate": torch.zeros(8, 1)},
+        ego_world=candidate_target,
+        reward=torch.arange(8.0),
+        reward_weights=torch.ones(8),
+        valid_sample=torch.ones(8, dtype=torch.bool),
+        global_valid_count=torch.tensor(8.0),
+        ddp_world_size=1,
+        num_scenes=2,
+        n=4,
+        cached_encoding=None,
+        expert_norm_inputs={},
+        expert_ego_gt=expert_target,
+        expert_cached_encoding=None,
+    )
+
+    gradients = []
+    losses = []
+    for cap in (0, 4):
+        parameter.grad = None
+        args = SimpleNamespace(
+            rl_update_max_candidates_per_rank=cap,
+            rl_bc_weight=0.25,
+            ddp=False,
+            ddp_static_graph=False,
+        )
+        output = _backward_reward_weighted_update(args=args, **common)
+        gradients.append(parameter.grad.detach().clone())
+        losses.append(output["loss"])
+
+    torch.testing.assert_close(gradients[0], torch.tensor(8.25))
+    torch.testing.assert_close(gradients[1], gradients[0])
+    torch.testing.assert_close(losses[1], losses[0])
 
 
 def test_rl_weight_diagnostics_exclude_discarded_groups(monkeypatch):
@@ -1160,6 +1255,62 @@ def test_hdp_static_occupancy_is_not_attenuated_by_rear_stopped_vehicle():
 
     assert sources["static"] and sources["stopped"]
     torch.testing.assert_close(occupancy, torch.zeros_like(occupancy))
+
+
+def test_batched_occupancy_matches_scene_implementation_for_all_source_paths():
+    batch_size, candidates, horizon = 4, 2, 4
+    config = HDPRewardConfig()
+    ego = torch.zeros(batch_size, candidates, horizon, 4)
+    ego[..., 0] = torch.linspace(0.0, 1.0, horizon)
+    ego[..., 2] = 1.0
+    shapes = torch.tensor([[2.5, 4.0, 2.0]]).expand(batch_size, -1).clone()
+    stopped_clearance = torch.full((batch_size, candidates, horizon), float("inf"))
+    stopped_clearance[1] = torch.tensor([0.0, 0.5, 1.0, 2.0])
+    stopped_clearance[2] = 0.2
+    stopped_is_rear = torch.zeros_like(stopped_clearance, dtype=torch.bool)
+    stopped_is_rear[1, 1] = True
+    static_objects = torch.zeros(batch_size, 1, 10)
+    static_objects[2, 0, :6] = torch.tensor([1.0, 0.0, 1.0, 0.0, 2.0, 4.0])
+    line_strings = torch.zeros(batch_size, 1, 2, 4)
+    line_strings[3, 0, :, :2] = torch.tensor([[-5.0, 2.0], [5.0, 2.0]])
+    line_strings[3, 0, :, 3] = 1.0
+    static_available = torch.tensor([False, False, True, False])
+    stopped_available = torch.tensor([False, True, True, False])
+    road_border_available = torch.tensor([False, False, True, True])
+
+    actual, source_flags = _batched_occupancy_score(
+        ego,
+        shapes,
+        static_objects,
+        line_strings,
+        stopped_clearance,
+        stopped_is_rear,
+        static_available,
+        stopped_available,
+        road_border_available,
+        config,
+    )
+    expected = []
+    expected_sources = []
+    for scene in range(batch_size):
+        occupancy, sources = _occupancy_score(
+            ego[scene],
+            shapes[scene],
+            static_objects[scene],
+            line_strings[scene],
+            stopped_clearance[scene],
+            stopped_available[scene],
+            config,
+            stopped_is_rear=stopped_is_rear[scene],
+            static_available=bool(static_available[scene]),
+            stopped_available_flag=bool(stopped_available[scene]),
+            road_border_available=bool(road_border_available[scene]),
+        )
+        expected.append(occupancy)
+        expected_sources.append([sources["static"], sources["stopped"], sources["road_border"]])
+
+    torch.testing.assert_close(actual, torch.stack(expected), rtol=0, atol=0)
+    assert source_flags.tolist() == expected_sources
 
 
 def test_hdp_neighbor_at_ego_origin_remains_valid():
