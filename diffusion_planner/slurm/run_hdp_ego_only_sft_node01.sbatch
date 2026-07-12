@@ -20,8 +20,8 @@ EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT}
 RUN_NAME=hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsmask_allveh_x10_node01_8gpu_bf16_bs512_from_base20
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 BASE_RUN=${REPO}/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsmask_3veh_x10_recoveryaug_node01_8gpu_bf16_bs512
-INIT_WEIGHTS=${BASE_RUN}/best_epdms_model/best_model.pth
-INIT_ARGS=${BASE_RUN}/best_epdms_model/args.json
+INIT_WEIGHTS=${BASE_RUN}/latest.pth
+INIT_ARGS=${BASE_RUN}/args.json
 TRAIN_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_sft_exclude_unprotected_right_turn_after_entry_all_vehicles.json
 EXTRA_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_unprotected_right_turn_after_entry_all_vehicles.json
 VALID_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_valid_sft_balanced.json
@@ -88,6 +88,8 @@ import json
 import pathlib
 import sys
 
+import torch
+
 args_path = pathlib.Path(sys.argv[1])
 weights_path = pathlib.Path(sys.argv[2])
 args = json.loads(args_path.read_text(encoding="utf-8"))
@@ -106,7 +108,10 @@ for key, value in expected.items():
         raise RuntimeError(f"incompatible Base args: {key}={args.get(key)!r}, expected {value!r}")
 if weights_path.stat().st_size < 100_000_000:
     raise RuntimeError(f"Base checkpoint is unexpectedly small: {weights_path.stat().st_size} bytes")
-print(f"verified Base checkpoint from epoch {json.loads((weights_path.parent / 'best_model_info.json').read_text())['epoch']}")
+checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
+if checkpoint.get("epoch") != 20:
+    raise RuntimeError(f"Base latest.pth is epoch {checkpoint.get('epoch')!r}, expected epoch 20")
+print("verified Base latest.pth from epoch 20")
 PY
 
 export HOME=/home/ubuntu
