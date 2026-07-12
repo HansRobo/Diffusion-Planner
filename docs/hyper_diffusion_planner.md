@@ -191,13 +191,15 @@ Implementation notes:
   multi-node jobs. It starts one `torchrun` agent per allocated host and validates the commit,
   virtualenv, manifests, checkpoint, and extra lists on every host before rendezvous. Multi-node
   runs require a shared `HDP_RL_SAVE_ROOT` rather than node-local `/mnt/nvme` output.
+- New runs persist the code tree, combined data-manifest hash, initialization-checkpoint hash,
+  and Python/CUDA/NCCL environment in `run_provenance.json`. Strict resume refuses a changed code
+  tree, dataset, or runtime environment; a legacy run is anchored on its first new-style resume.
 - EMA rollout sampling runs without autograd. The live global route condition is computed inside
   the DDP forward once per scene and only its 256-dimensional embedding is repeated per candidate.
 - Rollout sampling uses a fixed temperature instead of a random per-row temperature range.
-- Each sampled and scored group is reused for four independent diffusion-time updates while the
-  rollout policy remains frozen for the whole epoch. This amortizes rollout and reward geometry;
-  one update remains available as an ablation.
-- RL starts from the SFT EMA shadow with `--init_weights_path` and `rl_init_use_ema=true`, while optimizer/scheduler/W&B state are fresh. Missing EMA weights produce an explicit live-weight fallback warning.
+- Each sampled and scored group receives one diffusion-time update. Values above one deliberately
+  reuse an action group and are retained only as ablations.
+- RL starts from the SFT EMA shadow with `--init_weights_path` and `rl_init_use_ema=true`, while optimizer/scheduler/W&B state are fresh. The production Slurm launcher rejects a fresh source checkpoint without EMA weights.
 - `rl_train_scope=decoder` updates only the DiT trajectory policy and freezes the encoder plus the separate turn-indicator classifier. This matches the released decoder-policy intent without leaving an unsupervised Tier IV-only head in DDP.
 - Encoder modules are kept in eval mode during decoder-only RL so frozen dropout/drop-path does not inject noise.
 - The EMA shadow is the fixed previous policy required by the paper's replay-buffer objective.
@@ -210,6 +212,10 @@ Implementation notes:
   state dict stays unchanged, while RL's direct component calls and DPM validation use the same
   compiled modules. Use a persistent `TORCHINDUCTOR_CACHE_DIR` across restarts.
 - The single reward path contains SAT collision, continuous TTC, THW, occupancy clearance, leader-conditioned following, lane-center scoring, lane-change/off-lane masking, and rear-end attenuation, using risk/follow/lane weights 1.0/3.0/2.5. The logged expert reference selects the leader independently of each candidate, while candidate motion still controls gap, speed-match, and comfort scores. Rear attenuation is preserved when a stopped replay vehicle is the winning occupancy source, but never attenuates a closer static obstacle. Lane scoring uses the navigation route when it agrees with the logged expert trajectory and otherwise falls back to all visible lane centerlines.
+- Reward scoring batches the common stopped-agent occupancy path and tensorizes metric assembly.
+  Route agreement is decided from the expert first, so candidate distance is computed only against
+  the selected route or lane fallback rather than both. Exact static and road-border geometry is
+  retained for the smaller set of scenes that needs it.
 - Occupancy automatically uses real static boxes, stopped-agent clearance, then exact ego-rectangle-to-road-border-segment clearance as a corpus fallback. Missing sources are neutral and their coverage is logged.
 - Scene encoding is computed once per candidate group. Decoder-only RL repeats only current action-state tensors, not the full 31-frame observation history.
 - Full held-out stochastic-reward/EPDMS validation runs on `rl_full_eval_utd`; the deterministic proxy remains available each epoch. Reward validation uses fixed random candidates and logs every reward component and source-coverage diagnostic, so policy iterations are directly comparable.
