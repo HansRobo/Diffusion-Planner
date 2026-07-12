@@ -1087,7 +1087,9 @@ def compute_hdp_reward(
         component = component_groups[key]
         winner_value = component.gather(1, reward_winner).squeeze(1)
         metrics[f"reward_winner_{key}_advantage"] = (winner_value - component.mean(dim=1)).mean()
-        metrics[f"reward_{key}_group_std"] = component.std(dim=1).mean()
+        metrics[f"reward_{key}_group_std"] = (
+            component.std(dim=1).mean() if n > 1 else component.new_zeros(())
+        )
         metrics[f"reward_{key}_group_range"] = (
             component.max(dim=1).values - component.min(dim=1).values
         ).mean()
