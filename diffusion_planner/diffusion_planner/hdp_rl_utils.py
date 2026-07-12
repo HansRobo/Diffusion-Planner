@@ -87,18 +87,6 @@ def _linear_safe_score(
     return ((value - critical_t) / (safe_t - critical_t).clamp_min(1e-6)).clamp(0.0, 1.0)
 
 
-def _attenuate_rear_only_risk(
-    risk: torch.Tensor,
-    collision_rear: torch.Tensor,
-    collision_active: torch.Tensor,
-    rear_end_penalty: float,
-) -> torch.Tensor:
-    """Apply the paper's rear-end attenuation to the final conservative risk score."""
-    rear_only = collision_rear.bool() & ~collision_active.bool()
-    rear_floor = 1.0 - float(rear_end_penalty)
-    return torch.where(rear_only, risk.clamp_min(rear_floor), risk)
-
-
 def _trajectory_speed(xy: torch.Tensor, dt: float, initial_xy: torch.Tensor | None = None):
     if initial_xy is None:
         first = torch.zeros_like(xy[..., :1, :])
@@ -608,12 +596,6 @@ def compute_hdp_reward(
             config,
         )
         risk = torch.stack([terms["ttc"], terms["thw"], occupancy], dim=0).amin(dim=(0, 2))
-        risk = _attenuate_rear_only_risk(
-            risk,
-            terms["collision_rear"],
-            terms["collision_active"],
-            config.rear_end_penalty,
-        )
         expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])
         lane_centerlines, lane_route_source = _lane_reward_centerlines(
             expert_future,

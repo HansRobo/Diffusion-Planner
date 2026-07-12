@@ -13,7 +13,6 @@ from diffusion_planner.dimensions import (
 )
 from diffusion_planner.hdp_rl_utils import (
     HDPRewardConfig,
-    _attenuate_rear_only_risk,
     _collision_and_leader_terms,
     _hdp_lane_score,
     _lane_reward_centerlines,
@@ -1209,14 +1208,15 @@ def test_epoch_metric_accumulator_uses_per_metric_counts():
     assert means == {"loss": 3.0, "grad/l2_norm": 12.0}
 
 
-def test_risk_reward_applies_rear_end_attenuation_after_conservative_minimum():
-    risk = torch.tensor([0.0, 0.2, 0.4])
-    rear = torch.tensor([True, True, False])
-    active = torch.tensor([False, True, False])
+def test_rear_end_attenuation_does_not_hide_other_risk_sources():
+    active = _collision_terms_for_neighbor_x(3.0)
+    rear = _collision_terms_for_neighbor_x(-1.0)
 
-    attenuated = _attenuate_rear_only_risk(risk, rear, active, rear_end_penalty=0.3)
-
-    torch.testing.assert_close(attenuated, torch.tensor([0.7, 0.2, 0.4]))
+    torch.testing.assert_close(active["ttc"].amin(), torch.tensor(0.0))
+    torch.testing.assert_close(rear["ttc"].amin(), torch.tensor(0.7))
+    occupancy = torch.full_like(rear["ttc"], 0.2)
+    risk = torch.stack([rear["ttc"], rear["thw"], occupancy]).amin()
+    torch.testing.assert_close(risk, torch.tensor(0.2))
 
 
 def test_ddp_epoch_reducer_accepts_python_floats(monkeypatch):
