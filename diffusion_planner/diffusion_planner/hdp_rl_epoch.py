@@ -138,7 +138,7 @@ def _hdp_rl_step(
     # Eq. (AWR) draws actions from the previous policy. The EMA shadow is the stable
     # previous-policy snapshot; the live model receives the reward-weighted update.
     rollout_model = ema.ema if ema is not None else model
-    ego_world, rollout_encoding = sample_group(
+    rollout_result = sample_group(
         rollout_model,
         norm_exp,
         args.rl_noise_scale,
@@ -147,9 +147,14 @@ def _hdp_rl_step(
         group_size=n,
         use_bf16=getattr(args, "amp_dtype", "off") == "bf16",
         sample_steps=getattr(args, "rl_rollout_steps", 6),
-        return_encoding=True,
+        return_encoding=decoder_only,
         generator=rollout_generator,
     )
+    if decoder_only:
+        ego_world, rollout_encoding = rollout_result
+    else:
+        ego_world = rollout_result
+        rollout_encoding = None
     if timing_events is not None:
         timing_events[1].record()
     _set_hdp_rl_train_mode(model, args)
