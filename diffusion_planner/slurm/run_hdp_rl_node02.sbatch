@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=hdp-rl-smoke
+#SBATCH --job-name=hdp-rl
 #SBATCH --partition=gpu
 #SBATCH --nodelist=node02
 #SBATCH --nodes=1
@@ -15,12 +15,12 @@ REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
 NPROC=${HDP_RL_NPROC:-1}
 NUM_WORKERS=${HDP_RL_NUM_WORKERS:-0}
 TRAIN_SUBSAMPLE_STEP=${HDP_RL_TRAIN_SUBSAMPLE_STEP:-1}
-TRAIN_LIST=${HDP_RL_TRAIN_LIST:-${REPO}/artifacts/rl_smoke_node02/train_1.json}
-VALID_LIST=${HDP_RL_VALID_LIST:-${REPO}/artifacts/rl_smoke_node02/valid_16.json}
+TRAIN_LIST=${HDP_RL_TRAIN_LIST:?submit with HDP_RL_TRAIN_LIST=<manifest>}
+VALID_LIST=${HDP_RL_VALID_LIST:?submit with HDP_RL_VALID_LIST=<manifest>}
 EXTRA_LISTS=${HDP_RL_EXTRA_LISTS:-}
 EXTRA_REPEAT=${HDP_RL_EXTRA_REPEAT:-0}
 EXTRA_MASK_TRAFFIC_LIGHTS=${HDP_RL_EXTRA_MASK_TRAFFIC_LIGHTS:-False}
-INIT_CKPT=${HDP_RL_INIT_CKPT:-${REPO}/checkpoints/base_epoch8_best_epdms/best_model.pth}
+INIT_CKPT=${HDP_RL_INIT_CKPT:-}
 RESUME_CKPT=${HDP_RL_RESUME_CKPT:-}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
 NUM_GENERATIONS=${HDP_RL_NUM_GENERATIONS:-32}
@@ -40,12 +40,12 @@ TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
 USE_WANDB=${HDP_RL_USE_WANDB:-False}
 WANDB_PROJECT=${HDP_RL_WANDB_PROJECT:-hdp-rl}
 STEP_LOG_INTERVAL=${HDP_RL_STEP_LOG_INTERVAL:-0}
-RUN_NAME=${HDP_RL_RUN_NAME:-rl_smoke_${NPROC}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
+RUN_NAME=${HDP_RL_RUN_NAME:-hdp_rl_${NPROC}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 PORT=$((24000 + SLURM_JOB_ID % 10000))
 
 mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache/torchinductor"
-rm -f "${SAVE_DIR}/RL_SMOKE_OK"
+rm -f "${SAVE_DIR}/RL_RUN_OK"
 cd "${REPO}"
 [[ "$(git rev-parse HEAD)" == "${EXPECTED_COMMIT}" ]]
 git diff --quiet
@@ -55,6 +55,10 @@ if [[ -n "${RESUME_CKPT}" ]]; then
   CKPT_ARGS=(--resume_model_path "${RESUME_CKPT}")
   VERIFY_MODE=resume
 else
+  [[ -n "${INIT_CKPT}" ]] || {
+    echo "submit a fresh RL run with HDP_RL_INIT_CKPT=<SFT checkpoint>" >&2
+    exit 2
+  }
   SOURCE_CKPT=${INIT_CKPT}
   CKPT_ARGS=(--init_weights_path "${INIT_CKPT}")
   VERIFY_MODE=init
@@ -236,7 +240,7 @@ assert float(rows[0]["train_optimizer_step_fraction"]) > 0.0
 assert float(rows[0]["train_valid_group_fraction"]) > 0.0
 
 print(
-    "RL_SMOKE_OK",
+    "RL_RUN_OK",
     f"optimizer_steps={optimizer_steps}",
     f"decoder_tensors_changed={sum(decoder_changed)}",
     f"encoder_tensors_changed={sum(encoder_changed)}",
@@ -245,4 +249,4 @@ print(
 )
 PY
 
-touch "${SAVE_DIR}/RL_SMOKE_OK"
+touch "${SAVE_DIR}/RL_RUN_OK"
