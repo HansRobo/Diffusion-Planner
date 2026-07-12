@@ -125,14 +125,79 @@ for path in "${TRAIN_LIST}" "${VALID_LIST}" "${SOURCE_CKPT}" "${SOURCE_CKPT%/*}/
   [[ -r "${path}" ]] || { echo "missing required input: ${path}" >&2; exit 2; }
 done
 input_paths=("${TRAIN_LIST}" "${VALID_LIST}" "${SOURCE_CKPT}" "${SOURCE_CKPT%/*}/args.json")
+data_paths=("${TRAIN_LIST}" "${VALID_LIST}" "${REPO}/diffusion_planner/normalization.json")
 if [[ -n "${EXTRA_LISTS}" ]]; then
   input_paths+=("${extra_list_array[@]}")
+  data_paths+=("${extra_list_array[@]}")
 fi
 INPUT_FINGERPRINT=$(sha256sum "${input_paths[@]}" | sha256sum | cut -d ' ' -f 1)
+DATA_FINGERPRINT=$(sha256sum "${data_paths[@]}" | sha256sum | cut -d ' ' -f 1)
+SOURCE_CKPT_SHA256=$(sha256sum "${SOURCE_CKPT}" | cut -d ' ' -f 1)
 PYTHON_ENV_FINGERPRINT=$(
   PYTHONPATH="${REPO}:${REPO}/diffusion_planner" "${REPO}/.venv/bin/python" -c \
     'import numpy, torch; print(torch.__version__, torch.version.cuda, torch.cuda.nccl.version(), numpy.__version__)'
 )
+PROVENANCE_PATH=${SAVE_DIR}/run_provenance.json
+"${REPO}/.venv/bin/python" - \
+  "${PROVENANCE_PATH}" "${VERIFY_MODE}" "${EXPECTED_COMMIT_FULL}" "${EXPECTED_TREE}" \
+  "${DATA_FINGERPRINT}" "${PYTHON_ENV_FINGERPRINT}" "${SOURCE_CKPT}" \
+  "${SOURCE_CKPT_SHA256}" "${data_paths[@]}" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+(
+    provenance_path,
+    mode,
+    commit,
+    tree,
+    data_fingerprint,
+    python_environment,
+    source_checkpoint,
+    source_checkpoint_sha256,
+    *data_paths,
+) = sys.argv[1:]
+path = pathlib.Path(provenance_path)
+current = {
+    "version": 1,
+    "code_commit": commit,
+    "code_tree": tree,
+    "data_fingerprint": data_fingerprint,
+    "python_environment": python_environment,
+    "data_paths": data_paths,
+}
+if path.exists():
+    with path.open(encoding="utf-8") as f:
+        recorded = json.load(f)
+    checked = ("code_tree", "data_fingerprint", "python_environment")
+    mismatches = {
+        key: {"recorded": recorded.get(key), "current": current[key]}
+        for key in checked
+        if recorded.get(key) != current[key]
+    }
+    if mismatches:
+        raise RuntimeError(f"Strict RL resume provenance mismatch: {mismatches}")
+    if mode == "init" and recorded.get("initial_checkpoint_sha256") != source_checkpoint_sha256:
+        raise RuntimeError("Fresh-run retry changed the initialization checkpoint")
+else:
+    current.update(
+        {
+            "created_from_mode": mode,
+            "legacy_resume_anchor": mode == "resume",
+            "initial_checkpoint": source_checkpoint,
+            "initial_checkpoint_sha256": source_checkpoint_sha256,
+        }
+    )
+    temporary = path.with_suffix(f".tmp.{os.getpid()}")
+    with temporary.open("w", encoding="utf-8") as f:
+        json.dump(current, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temporary, path)
+    if mode == "resume":
+        print("Anchored legacy RL resume provenance at the current code/data/environment state")
+PY
 VERIFY_SOURCE_CKPT=${SOURCE_CKPT}
 if [[ "${VERIFY_MODE}" == resume ]]; then
   VERIFY_SOURCE_CKPT=${SAVE_DIR}/.rl_smoke_source_${SLURM_JOB_ID}.pth
