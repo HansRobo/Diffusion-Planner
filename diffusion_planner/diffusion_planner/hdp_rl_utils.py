@@ -93,6 +93,8 @@ def _road_border_clearance_exact(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
     line_strings: torch.Tensor | None,
+    *,
+    valid_segments_known: bool = False,
 ) -> torch.Tensor:
     """Exact minimum distance between the ego rectangle and road-border segments."""
     C, T, _ = ego_trajs.shape
@@ -110,7 +112,7 @@ def _road_border_clearance_exact(
     # the ego origin is legitimate and must not be confused with zero padding.
     border_point = line_strings[..., 3] > 0.5
     valid_pair = border_point[..., :-1] & border_point[..., 1:]
-    if not bool(valid_pair.any()):
+    if not valid_segments_known and not bool(valid_pair.any()):
         return no_data
     seg_a = border_xy[..., :-1, :][valid_pair]
     seg_b = border_xy[..., 1:, :][valid_pair]
@@ -604,6 +606,7 @@ def _occupancy_score(
             ego_trajs,
             ego_shape,
             line_strings,
+            valid_segments_known=road_border_available is True,
         )
         if road_border_available is not None or torch.isfinite(road_border).any():
             sources["road_border"] = True
