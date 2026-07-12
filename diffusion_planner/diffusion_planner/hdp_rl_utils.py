@@ -102,23 +102,16 @@ def _relative_progress_score(
     *,
     min_reference_m: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return candidate/expert path ratio and a capped anti-stopping score."""
-    candidate_step = torch.diff(
-        torch.cat([torch.zeros_like(ego_trajs[:, :1, :2]), ego_trajs[..., :2]], dim=1),
-        dim=1,
-    )
-    expert_xy = expert_future[..., :2]
-    expert_step = torch.diff(
-        torch.cat([torch.zeros_like(expert_xy[:1]), expert_xy], dim=0),
-        dim=0,
-    )
-    candidate_length = candidate_step.norm(dim=-1).sum(dim=-1)
-    expert_length = expert_step.norm(dim=-1).sum()
-    moving_reference = expert_length >= min_reference_m
+    """Return signed route progress relative to the expert endpoint, capped for reward use."""
+    expert_displacement = expert_future[-1, :2]
+    expert_distance = expert_displacement.norm()
+    moving_reference = expert_distance >= min_reference_m
+    expert_direction = expert_displacement / expert_distance.clamp_min(min_reference_m)
+    candidate_progress = (ego_trajs[:, -1, :2] * expert_direction).sum(dim=-1)
     ratio = torch.where(
         moving_reference,
-        candidate_length / expert_length.clamp_min(min_reference_m),
-        torch.ones_like(candidate_length),
+        candidate_progress / expert_distance.clamp_min(min_reference_m),
+        torch.ones_like(candidate_progress),
     )
     return ratio, ratio.clamp(0.0, 1.0)
 
