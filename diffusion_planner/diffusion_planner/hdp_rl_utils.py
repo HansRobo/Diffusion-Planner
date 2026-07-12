@@ -549,7 +549,10 @@ def compute_hdp_reward(
         )
     }
     rewards = []
-    compile_kernels = bool(getattr(args, "compile_model", False))
+    # Valid-neighbor counts vary by scene. Coupling these dynamic geometry kernels to
+    # --compile_model caused a new multi-rank Inductor compile whenever that count changed,
+    # overwhelming the actual GPU update. Keep this an explicit opt-in experiment.
+    compile_kernels = bool(getattr(args, "compile_reward_kernels", False))
 
     required = ("ego_shape", "neighbor_agents_past", "ego_agent_future", "lanes")
     missing = [key for key in required if key not in scene_inputs]

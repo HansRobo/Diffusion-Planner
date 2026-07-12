@@ -114,6 +114,7 @@ cd "${REPO}/diffusion_planner"
   --fused_optimizer True \
   --ddp_static_graph True \
   --compile_model "${COMPILE_MODEL}" \
+  --compile_reward_kernels False \
   --use_wandb "${USE_WANDB}" \
   --wandb_project_name "${WANDB_PROJECT}" \
   --wandb_step_log_interval 0 \
