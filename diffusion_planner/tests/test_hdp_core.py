@@ -732,7 +732,9 @@ def test_road_border_penalty_keeps_valid_segment_at_ego_origin():
 
 
 def test_hdp_behavior_cloning_anchor_uses_one_expert_target_per_scene(monkeypatch):
-    def fake_policy_loss(_model, _inputs, target, _args, _encoding=None):
+    def fake_policy_loss(
+        _model, _inputs, target, _args, _encoding=None, _time=None, _noise=None
+    ):
         per_sample = (
             torch.tensor([1.0, 2.0, 3.0, 4.0])
             if target.shape[0] == 4
@@ -775,8 +777,13 @@ def test_hdp_behavior_cloning_anchor_uses_one_expert_target_per_scene(monkeypatc
 
 def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkeypatch):
     parameter = torch.nn.Parameter(torch.tensor(1.0))
+    captured_draws = []
 
-    def fake_policy_loss(_model, _inputs, target, _args, _encoding=None):
+    def fake_policy_loss(
+        _model, _inputs, target, _args, _encoding=None, diffusion_time=None, diffusion_noise=None
+    ):
+        if diffusion_time is not None:
+            captured_draws.append((diffusion_time.clone(), diffusion_noise.clone()))
         per_sample = parameter * target[:, 0, 0]
         return {
             "ego_loss_per_sample": per_sample,
@@ -808,8 +815,11 @@ def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkey
 
     gradients = []
     losses = []
+    draws_by_cap = []
     for cap in (0, 4):
         parameter.grad = None
+        captured_draws.clear()
+        torch.manual_seed(41)
         args = SimpleNamespace(
             rl_update_max_candidates_per_rank=cap,
             rl_bc_weight=0.25,
@@ -819,14 +829,24 @@ def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkey
         output = _backward_reward_weighted_update(args=args, **common)
         gradients.append(parameter.grad.detach().clone())
         losses.append(output["loss"])
+        draws_by_cap.append(
+            (
+                torch.cat([draw[0] for draw in captured_draws]),
+                torch.cat([draw[1] for draw in captured_draws]),
+            )
+        )
 
     torch.testing.assert_close(gradients[0], torch.tensor(8.25))
     torch.testing.assert_close(gradients[1], gradients[0])
     torch.testing.assert_close(losses[1], losses[0])
+    torch.testing.assert_close(draws_by_cap[1][0], draws_by_cap[0][0])
+    torch.testing.assert_close(draws_by_cap[1][1], draws_by_cap[0][1])
 
 
 def test_rl_weight_diagnostics_exclude_discarded_groups(monkeypatch):
-    def fake_policy_loss(_model, _inputs, _target, _args, _encoding=None):
+    def fake_policy_loss(
+        _model, _inputs, _target, _args, _encoding=None, _time=None, _noise=None
+    ):
         per_sample = torch.ones(4)
         return {
             "ego_loss_per_sample": per_sample,
@@ -2014,6 +2034,7 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         ("rl_eval_reward_w_safety", 1.0),
         ("advantage_eps", 1e-4),
         ("rl_full_eval_utd", 2),
+        ("decoder_drop_path_rate", 0.0),
     ):
         changed = _checkpoint_compat_config(predicted_neighbor_num=1)
         setattr(changed, field, value)

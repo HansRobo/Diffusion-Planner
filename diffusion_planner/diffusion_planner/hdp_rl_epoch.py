@@ -25,6 +25,7 @@ from diffusion_planner.hdp_rl_utils import (
     expand_batch,
     sample_group,
 )
+from diffusion_planner.loss import sample_diffusion_time
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
@@ -154,6 +155,20 @@ def _backward_reward_weighted_update(
     }
     accumulated: dict[str, torch.Tensor] = {}
     total_candidates = float(num_scenes * n)
+    diffusion_time = sample_diffusion_time(
+        num_scenes * n,
+        ego_world.device,
+        1e-3,
+        getattr(args, "diffusion_time_sample_method", "uniform"),
+    )
+    diffusion_noise = torch.randn(
+        num_scenes * n,
+        1,
+        ego_world.shape[-2],
+        ego_world.shape[-1],
+        dtype=ego_world.dtype,
+        device=ego_world.device,
+    )
 
     for chunk_index, (scene_start, scene_stop) in enumerate(ranges):
         candidate_start = scene_start * n
@@ -192,6 +207,8 @@ def _backward_reward_weighted_update(
                 expert_ego_gt=expert_ego_gt if is_last else None,
                 expert_cached_encoding=expert_cached_encoding if is_last else None,
                 include_bc=is_last,
+                policy_diffusion_time=diffusion_time[candidate_start:candidate_stop],
+                policy_diffusion_noise=diffusion_noise[candidate_start:candidate_stop],
             )
             chunk_loss["loss"].backward()
 

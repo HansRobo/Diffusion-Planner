@@ -120,7 +120,9 @@ def test_rl_update_microbatches_preserve_full_group_objective_and_gradient(monke
             super().__init__()
             self.scale = torch.nn.Parameter(torch.tensor(1.5))
 
-    def fake_policy_loss(model, _inputs, target, _args, _encoding=None):
+    def fake_policy_loss(
+        model, _inputs, target, _args, _encoding=None, _time=None, _noise=None
+    ):
         per_sample = model.scale * target[:, 0, 0]
         mean = per_sample.mean()
         return {

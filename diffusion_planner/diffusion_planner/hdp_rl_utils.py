@@ -1359,6 +1359,8 @@ def _compute_policy_ego_loss_per_sample(
     ego_pseudo_gt: torch.Tensor,
     args,
     cached_encoding: torch.Tensor | None = None,
+    diffusion_time: torch.Tensor | None = None,
+    diffusion_noise: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     if not args.use_velocity_representation:
         raise ValueError("HDP RL requires velocity representation")
@@ -1373,14 +1375,25 @@ def _compute_policy_ego_loss_per_sample(
     gt_future = ego_target[:, None]  # [B, 1, T, 4]
 
     eps = 1e-3
-    t = sample_diffusion_time(
-        B,
-        device,
-        eps,
-        getattr(args, "diffusion_time_sample_method", "uniform"),
+    if (diffusion_time is None) != (diffusion_noise is None):
+        raise ValueError("diffusion_time and diffusion_noise must be provided together")
+    t = (
+        sample_diffusion_time(
+            B,
+            device,
+            eps,
+            getattr(args, "diffusion_time_sample_method", "uniform"),
+        )
+        if diffusion_time is None
+        else diffusion_time
     )
     t_broadcast = t.view(B, 1, 1, 1)
-    z = torch.randn_like(gt_future)
+    z = torch.randn_like(gt_future) if diffusion_noise is None else diffusion_noise
+    if t.shape != (B,) or z.shape != gt_future.shape:
+        raise ValueError(
+            f"Invalid pre-sampled diffusion tensors: t={tuple(t.shape)}, z={tuple(z.shape)}, "
+            f"expected {(B,)} and {tuple(gt_future.shape)}"
+        )
 
     ego_velocity_gt = waypoints_to_velocity(ego_target)
     all_gt = normalize_ego_velocity(ego_velocity_gt, norm)[:, None]
@@ -1449,6 +1462,8 @@ def compute_reward_weighted_loss(
     expert_ego_gt: torch.Tensor | None = None,
     expert_cached_encoding: torch.Tensor | None = None,
     include_bc: bool = True,
+    policy_diffusion_time: torch.Tensor | None = None,
+    policy_diffusion_noise: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     if reward_weights is None or valid_sample is None:
         reward_weights, valid_sample = compute_reward_weights(
@@ -1485,6 +1500,8 @@ def compute_reward_weighted_loss(
             ego_pseudo_gt,
             args,
             cached_encoding,
+            policy_diffusion_time,
+            policy_diffusion_noise,
         )
         ego_loss_per_sample = loss_terms["ego_loss_per_sample"]
         if has_valid_group:

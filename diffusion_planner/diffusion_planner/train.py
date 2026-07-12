@@ -279,6 +279,8 @@ def assert_checkpoint_compatible(
             "num_refine",
             "ego_past_noise_std",
             "use_smoothing_future_trajectory",
+            "encoder_drop_path_rate",
+            "decoder_drop_path_rate",
             "seed",
             "batch_size",
             "valid_batch_size",
