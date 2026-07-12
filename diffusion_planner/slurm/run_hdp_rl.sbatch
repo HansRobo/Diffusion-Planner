@@ -154,8 +154,8 @@ srun --kill-on-bad-exit=1 --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-
       exit 2
     }
     visible_gpus=$("${REPO}/.venv/bin/python" -c "import torch; print(torch.cuda.device_count())")
-    [[ "${visible_gpus}" == "${NPROC_PER_NODE}" ]] || {
-      echo "$(hostname -s): expected ${NPROC_PER_NODE} visible GPUs, found ${visible_gpus}" >&2
+    ((visible_gpus >= NPROC_PER_NODE)) || {
+      echo "$(hostname -s): requested ${NPROC_PER_NODE} GPUs, found ${visible_gpus}" >&2
       exit 2
     }
     actual_fingerprint=$(sha256sum "${required[@]}" | sha256sum | cut -d " " -f 1)
