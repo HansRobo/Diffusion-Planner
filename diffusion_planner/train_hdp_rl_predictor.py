@@ -946,7 +946,7 @@ def model_training(args):
         getattr(diffusion_planner, "_resume_global_step", init_epoch * len(train_loader))
     )
     train_log_path = os.path.join(save_path, "train_log.tsv") if global_rank == 0 else None
-    baseline_metrics_path = os.path.join(save_path, "source_baseline_metrics.json")
+    baseline_metrics_path = os.path.join(args.save_dir, "source_baseline_metrics.json")
     data_list = []
     best_valid_score = -float("inf")
     baseline_valid_loss = float("inf")
