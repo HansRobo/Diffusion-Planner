@@ -159,6 +159,10 @@ Implementation notes:
 - Distributed training pads the shuffled index stream to a complete global batch instead of
   dropping the tail or compiling a second shape. Every source sample is used at least once and at
   most `global_batch_size - 1` randomly shuffled samples are repeated per epoch.
+- `diffusion_planner/slurm/run_hdp_rl.sbatch` is the only RL launcher for both one-node and
+  multi-node jobs. It starts one `torchrun` agent per allocated host and validates the commit,
+  virtualenv, manifests, checkpoint, and extra lists on every host before rendezvous. Multi-node
+  runs require a shared `HDP_RL_SAVE_ROOT` rather than node-local `/mnt/nvme` output.
 - EMA rollout sampling runs without autograd. The live global route condition is computed inside
   the DDP forward once per scene and only its 256-dimensional embedding is repeated per candidate.
 - Rollout sampling uses a fixed temperature instead of a random per-row temperature range.
@@ -177,7 +181,7 @@ Implementation notes:
 - SFT, RL, and standalone validation compile the encoder and decoder in place by default. The
   state dict stays unchanged, while RL's direct component calls and DPM validation use the same
   compiled modules. Use a persistent `TORCHINDUCTOR_CACHE_DIR` across restarts.
-- The single reward path contains SAT collision, continuous TTC, THW, occupancy clearance, leader-conditioned following, lane-center scoring, lane-change/off-lane masking, and rear-end attenuation, using risk/follow/lane weights 1.0/3.0/2.5. Lane scoring uses the navigation route when it agrees with the logged expert trajectory and otherwise falls back to all visible lane centerlines.
+- The single reward path contains SAT collision, continuous TTC, THW, occupancy clearance, leader-conditioned following, lane-center scoring, lane-change/off-lane masking, and rear-end attenuation, using risk/follow/lane weights 1.0/3.0/2.5. Rear attenuation is preserved when a stopped replay vehicle is the winning occupancy source, but never attenuates a closer static obstacle. Lane scoring uses the navigation route when it agrees with the logged expert trajectory and otherwise falls back to all visible lane centerlines.
 - Occupancy automatically uses real static boxes, stopped-agent clearance, then road-border clearance as a corpus fallback. Missing sources are neutral and their coverage is logged.
 - Scene encoding is computed once per candidate group. Decoder-only RL repeats only current action-state tensors, not the full 31-frame observation history.
 - Full held-out stochastic-reward/EPDMS validation runs on `rl_full_eval_utd`; the deterministic proxy remains available each epoch. Reward validation uses fixed random candidates and logs every reward component and source-coverage diagnostic, so policy iterations are directly comparable.

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=hdp-rl
 #SBATCH --partition=gpu
-#SBATCH --nodelist=node02
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512G
 #SBATCH --gres=gpu:h100:8
@@ -11,7 +10,9 @@
 set -euo pipefail
 
 REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
-NPROC=${HDP_RL_NPROC:-8}
+NNODES=${SLURM_NNODES:-1}
+NPROC_PER_NODE=${HDP_RL_NPROC_PER_NODE:-${HDP_RL_NPROC:-8}}
+WORLD_SIZE=$((NNODES * NPROC_PER_NODE))
 NUM_WORKERS=${HDP_RL_NUM_WORKERS:-8}
 TRAIN_SUBSAMPLE_STEP=${HDP_RL_TRAIN_SUBSAMPLE_STEP:-1}
 TRAIN_LIST=${HDP_RL_TRAIN_LIST:?submit with HDP_RL_TRAIN_LIST=<manifest>}
@@ -44,15 +45,22 @@ TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
 USE_WANDB=${HDP_RL_USE_WANDB:-True}
 WANDB_PROJECT=${HDP_RL_WANDB_PROJECT:-hdp-rl}
 STEP_LOG_INTERVAL=${HDP_RL_STEP_LOG_INTERVAL:-100}
-RUN_NAME=${HDP_RL_RUN_NAME:-hdp_rl_${NPROC}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
-SAVE_DIR=${REPO}/outputs/${RUN_NAME}
+RUN_NAME=${HDP_RL_RUN_NAME:-hdp_rl_${WORLD_SIZE}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
+SAVE_ROOT=${HDP_RL_SAVE_ROOT:-${REPO}/outputs}
+if ((NNODES > 1)) && [[ "${SAVE_ROOT}" == /mnt/nvme/* ]]; then
+  echo "multi-node RL requires a shared HDP_RL_SAVE_ROOT, not local NVMe: ${SAVE_ROOT}" >&2
+  exit 2
+fi
+SAVE_DIR=${SAVE_ROOT}/${RUN_NAME}
+MASTER_ADDR=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
 PORT=$((24000 + SLURM_JOB_ID % 10000))
 
 mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache/torchinductor"
 rm -f "${SAVE_DIR}/RL_RUN_OK"
 cd "${REPO}"
 EXPECTED_COMMIT_FULL=$(git rev-parse --verify "${EXPECTED_COMMIT}^{commit}")
-[[ "$(git rev-parse HEAD)" == "${EXPECTED_COMMIT_FULL}" ]]
+EXPECTED_TREE=$(git rev-parse "${EXPECTED_COMMIT_FULL}^{tree}")
+[[ "$(git rev-parse HEAD^{tree})" == "${EXPECTED_TREE}" ]]
 git diff --quiet
 git diff --cached --quiet
 if [[ -n "${RESUME_CKPT}" ]]; then
@@ -80,6 +88,11 @@ EXTRA_ARGS+=(--extra_train_set_mask_traffic_lights "${EXTRA_MASK_TRAFFIC_LIGHTS}
 for path in "${TRAIN_LIST}" "${VALID_LIST}" "${SOURCE_CKPT}" "${SOURCE_CKPT%/*}/args.json"; do
   [[ -r "${path}" ]] || { echo "missing required input: ${path}" >&2; exit 2; }
 done
+input_paths=("${TRAIN_LIST}" "${VALID_LIST}" "${SOURCE_CKPT}" "${SOURCE_CKPT%/*}/args.json")
+if [[ -n "${EXTRA_LISTS}" ]]; then
+  input_paths+=("${extra_list_array[@]}")
+fi
+INPUT_FINGERPRINT=$(sha256sum "${input_paths[@]}" | sha256sum | cut -d ' ' -f 1)
 VERIFY_SOURCE_CKPT=${SOURCE_CKPT}
 if [[ "${VERIFY_MODE}" == resume ]]; then
   VERIFY_SOURCE_CKPT=${SAVE_DIR}/.rl_smoke_source_${SLURM_JOB_ID}.pth
@@ -97,11 +110,46 @@ unset NCCL_ASYNC_ERROR_HANDLING
 export OMP_NUM_THREADS=1
 export PYTHONWARNINGS=error
 
-cd "${REPO}/diffusion_planner"
-"${REPO}/.venv/bin/python" -m torch.distributed.run \
-  --nproc_per_node="${NPROC}" \
-  --master_port="${PORT}" \
-  train_hdp_rl_predictor.py \
+export REPO NNODES NPROC_PER_NODE MASTER_ADDR PORT SAVE_DIR
+export EXPECTED_TREE INPUT_FINGERPRINT TRAIN_LIST VALID_LIST SOURCE_CKPT EXTRA_LISTS
+
+# Validate and prepare every allocated host before starting torchrun. This catches an
+# unsynchronized repository, checkpoint, manifest, or virtualenv without stranding the
+# remaining nodes inside rendezvous.
+srun --kill-on-bad-exit=1 --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-node=1 \
+  bash -c '
+    set -euo pipefail
+    cd "${REPO}"
+    [[ "$(git rev-parse HEAD^{tree})" == "${EXPECTED_TREE}" ]]
+    git diff --quiet
+    git diff --cached --quiet
+    required=(
+      "${TRAIN_LIST}"
+      "${VALID_LIST}"
+      "${SOURCE_CKPT}"
+      "${SOURCE_CKPT%/*}/args.json"
+    )
+    if [[ -n "${EXTRA_LISTS}" ]]; then
+      IFS=: read -r -a extra_paths <<<"${EXTRA_LISTS}"
+      required+=("${extra_paths[@]}")
+    fi
+    for path in "${required[@]}"; do
+      [[ -r "${path}" ]] || { echo "$(hostname -s): missing required input: ${path}" >&2; exit 2; }
+    done
+    [[ -x "${REPO}/.venv/bin/python" ]] || {
+      echo "$(hostname -s): missing Python environment: ${REPO}/.venv/bin/python" >&2
+      exit 2
+    }
+    actual_fingerprint=$(sha256sum "${required[@]}" | sha256sum | cut -d " " -f 1)
+    [[ "${actual_fingerprint}" == "${INPUT_FINGERPRINT}" ]] || {
+      echo "$(hostname -s): RL input fingerprint mismatch" >&2
+      exit 2
+    }
+    mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache/torchinductor"
+  '
+
+TRAIN_ARGS=(
+  train_hdp_rl_predictor.py
   --exp_name "${RUN_NAME}" \
   --save_dir "${SAVE_DIR}" \
   --train_set_list "${TRAIN_LIST}" \
@@ -163,8 +211,24 @@ cd "${REPO}/diffusion_planner"
   --wandb_project_name "${WANDB_PROJECT}" \
   --wandb_step_log_interval "${STEP_LOG_INTERVAL}" \
   --export_onnx_on_save False \
-  --port "${PORT}" \
-  >"${SAVE_DIR}/train_stdout.log" 2>&1
+  --port "${PORT}"
+)
+
+# One Slurm task launches one torchrun agent per node. Rank 0 stays on the first
+# allocated host, so checkpoints and W&B files remain in that host's SAVE_DIR while
+# every node keeps its own TorchInductor cache on local NVMe.
+srun --kill-on-bad-exit=1 --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-node=1 \
+  bash -c '
+    set -euo pipefail
+    cd "${REPO}/diffusion_planner"
+    exec "${REPO}/.venv/bin/python" -m torch.distributed.run \
+      --nnodes="${NNODES}" \
+      --nproc_per_node="${NPROC_PER_NODE}" \
+      --node_rank="${SLURM_PROCID}" \
+      --master_addr="${MASTER_ADDR}" \
+      --master_port="${PORT}" \
+      "$@"
+  ' bash "${TRAIN_ARGS[@]}" >"${SAVE_DIR}/train_stdout.log" 2>&1
 
 "${REPO}/.venv/bin/python" - \
   "${VERIFY_SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" \
