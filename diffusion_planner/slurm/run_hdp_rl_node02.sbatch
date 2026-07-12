@@ -7,7 +7,6 @@
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512G
 #SBATCH --gres=gpu:h100:8
-#SBATCH --time=03:00:00
 
 set -euo pipefail
 
@@ -192,6 +191,7 @@ else:
 final_ckpt = torch.load(save_dir / "latest.pth", map_location="cpu", weights_only=True)
 completed_epoch = int(final_ckpt["epoch"])
 assert 1 <= completed_epoch <= expected_epoch
+assert not final_ckpt["optimizer"]["state"], "policy boundary kept stale optimizer moments"
 live = final_ckpt["model"]
 shadow = final_ckpt["ema_state_dict"]
 assert live.keys() == initial_live.keys() == initial_shadow.keys() == shadow.keys()
