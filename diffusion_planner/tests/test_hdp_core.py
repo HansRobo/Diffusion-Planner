@@ -90,6 +90,7 @@ def test_tuned_hdp_rl_defaults_are_consistent():
     assert fields["rl_bc_weight"].default == 0.0
     assert fields["rl_reward_beta"].default == 0.5
     assert fields["rl_rollout_steps"].default == 6
+    assert fields["rl_early_stop_patience"].default == 0
 
 
 def test_dp_native_progress_is_attenuated_by_collision_safety():

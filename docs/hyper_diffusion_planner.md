@@ -203,7 +203,9 @@ Implementation notes:
 - Scene encoding is computed once per candidate group. Decoder-only RL repeats only current action-state tensors, not the full 31-frame observation history.
 - Full held-out stochastic-reward/EPDMS validation runs on `rl_full_eval_utd`; the deterministic proxy remains available each epoch. Reward validation uses fixed random candidates and logs every reward component and source-coverage diagnostic, so policy iterations are directly comparable.
 - A fresh RL run validates and saves its source SFT policy before the first update. Best-checkpoint selection maximizes mean held-out reward, retains deterministic EPDMS as an independent diagnostic, rejects abnormal supervised validation-loss regressions, and requires a `0.0001` reward improvement before replacing the current best. Older runs without reward columns retain the EPDMS/loss fallback when resumed.
-- Training stops after five consecutive full evaluations without a meaningful best-score improvement; set `rl_early_stop_patience=0` only for controlled ablations.
+- Training runs the configured epoch budget by default (`rl_early_stop_patience=0`). A positive
+  patience is available for short sweeps, but formal runs do not stop on the reward proxy while
+  EPDMS or another safety component may still be improving.
 - Turn-indicator validation logs overall, change-only, and all five per-class accuracies plus class counts; the overall metric is computed from generated trajectories, never teacher-forced trajectories.
 - SFT/RL ONNX export on every save is disabled by default because synchronous export stalls all other DDP ranks at the next barrier. Set `export_onnx_on_save=true` only when needed, or use the strict standalone converter.
 
