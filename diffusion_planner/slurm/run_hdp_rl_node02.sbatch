@@ -52,7 +52,8 @@ PORT=$((24000 + SLURM_JOB_ID % 10000))
 mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache/torchinductor"
 rm -f "${SAVE_DIR}/RL_RUN_OK"
 cd "${REPO}"
-[[ "$(git rev-parse HEAD)" == "${EXPECTED_COMMIT}" ]]
+EXPECTED_COMMIT_FULL=$(git rev-parse --verify "${EXPECTED_COMMIT}^{commit}")
+[[ "$(git rev-parse HEAD)" == "${EXPECTED_COMMIT_FULL}" ]]
 git diff --quiet
 git diff --cached --quiet
 if [[ -n "${RESUME_CKPT}" ]]; then
