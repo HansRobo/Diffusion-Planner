@@ -10,7 +10,7 @@ from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
-    hybrid_loss_components,
+    hybrid_waypoint_loss,
     inverse_normalize_ego_velocity,
     make_turn_indicator_gt,
     normalize_ego_state,
@@ -150,9 +150,7 @@ def compute_training_loss(
     ego_diffusion_loss = torch.sum((pred_x_start[:, 0] - all_gt[:, 0]) ** 2, dim=-1)
     ego_pred_velocity = pred_x_start[:, 0]
     ego_pred_velocity_raw = inverse_normalize_ego_velocity(ego_pred_velocity, norm)
-    _, ego_waypoint_loss = hybrid_loss_components(
-        ego_pred_velocity,
-        all_gt[:, 0],
+    ego_waypoint_loss = hybrid_waypoint_loss(
         ego_pred_velocity_raw,
         ego_future,
         W=hybrid_window,
@@ -413,7 +411,7 @@ class Decoder(nn.Module):
             global_route_condition,
         ).reshape(B, P, -1, 4)
         output = {"model_output": model_output}
-        if inputs.get("_skip_turn_indicator_training", False):
+        if inputs.get("_skip_turn_indicator", False):
             return output
 
         gt_trajectories = inputs["gt_trajectories"].reshape(B, P, self._future_len, 4)
@@ -479,11 +477,13 @@ class Decoder(nn.Module):
         x0 = dpm_solver.sample(xT, steps=self._sample_steps, skip_type="logSNR")
 
         x0 = x0.reshape(B, P, self._future_len, 4)
-        ego_trajectory = self._turn_indicator_trajectory_from_latent(x0)
-        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
-        x0 = self._latent_to_prediction(x0)
-
-        return {"prediction": x0, "turn_indicator_logit": turn_indicator_logit}
+        output = {"prediction": self._latent_to_prediction(x0)}
+        if not inputs.get("_skip_turn_indicator", False):
+            ego_trajectory = self._turn_indicator_trajectory_from_latent(x0)
+            output["turn_indicator_logit"] = self._compute_turn_indicator(
+                ego_trajectory, encoding_pooled
+            )
+        return output
 
     def _forward_inference(self, encoding, inputs, encoding_pooled, global_route_condition):
         """Forward pass for inference mode.
@@ -537,7 +537,8 @@ class Decoder(nn.Module):
                 }
 
         """
-        encoding_pooled = self._pool_encoding(encoding)
+        skip_turn_indicator = bool(inputs.get("_skip_turn_indicator", False))
+        encoding_pooled = None if skip_turn_indicator else self._pool_encoding(encoding)
         global_route_condition = inputs.get("_cached_global_route_condition")
         if global_route_condition is None:
             global_route_condition = self.global_route_encoder(inputs["route_lanes"])

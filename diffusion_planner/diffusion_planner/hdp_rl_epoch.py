@@ -9,6 +9,7 @@ The only supported RL path is the HDP reward-weighted hybrid loss:
 """
 
 import copy
+import time
 
 import torch
 import wandb
@@ -290,7 +291,14 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
     if not hasattr(args, "_wandb_global_step"):
         args._wandb_global_step = 0
 
+    device = torch.device(args.device)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    wall_start = time.perf_counter()
+    local_scene_count = 0
+
     for batch_idx, raw_inputs in enumerate(data_loader, start=1):
+        local_scene_count += int(raw_inputs["ego_current_state"].shape[0])
         raw_inputs = {
             key: value.to(args.device, non_blocking=True) for key, value in raw_inputs.items()
         }
@@ -335,6 +343,24 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
         update_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts, step_loss)
 
     epoch_mean_loss = finalize_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts)
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    wall_stats = torch.tensor(
+        [time.perf_counter() - wall_start, float(local_scene_count)],
+        dtype=torch.float64,
+        device=device,
+    )
+    if args.ddp:
+        wall_elapsed = wall_stats[:1].clone()
+        global_scenes = wall_stats[1:].clone()
+        torch.distributed.all_reduce(wall_elapsed, op=torch.distributed.ReduceOp.MAX)
+        torch.distributed.all_reduce(global_scenes, op=torch.distributed.ReduceOp.SUM)
+        wall_stats = torch.cat((wall_elapsed, global_scenes))
+    epoch_mean_loss["wall_time_s"] = wall_stats[0].float()
+    epoch_mean_loss["wall_throughput_global_scenes_per_s"] = (
+        wall_stats[1] / wall_stats[0].clamp_min(1e-9)
+    ).float()
 
     if ema is not None:
         proposal_relative_l2 = commit_ema_policy_update(model, ema, optimizer, args.ddp)

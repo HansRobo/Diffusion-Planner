@@ -20,9 +20,8 @@ import torch
 
 from diffusion_planner.dimensions import OUTPUT_T, POSE_DIM
 from diffusion_planner.loss import (
-    hybrid_loss_components,
+    hybrid_waypoint_loss,
     inverse_normalize_ego_velocity,
-    normalize_ego_state,
     normalize_ego_velocity,
     sample_diffusion_time,
     waypoints_to_velocity,
@@ -986,6 +985,9 @@ def sample_group(
             noise_scale
         )
     inference_inputs["sampled_trajectories"] = sampled
+    # RL consumes only trajectories. Avoid pooling the expanded scene encoding and running
+    # the frozen auxiliary classifier for every rollout candidate.
+    inference_inputs["_skip_turn_indicator"] = True
 
     cached_encoding = None
     cached_global_route_condition = None
@@ -1116,7 +1118,6 @@ def _compute_policy_ego_loss_per_sample(
     t_broadcast = t.view(B, 1, 1, 1)
     z = torch.randn_like(gt_future)
 
-    waypoint_gt = normalize_ego_state(gt_future, norm)
     ego_velocity_gt = waypoints_to_velocity(ego_target)
     all_gt = normalize_ego_velocity(ego_velocity_gt, norm)[:, None]
 
@@ -1131,13 +1132,11 @@ def _compute_policy_ego_loss_per_sample(
     xT = alpha * x0_target + std * z
     merged_inputs = {
         **norm_inputs,
-        "gt_trajectories": all_gt,
-        "turn_indicator_trajectories": waypoint_gt,
         "sampled_trajectories": xT,
         "diffusion_time": t,
         # RL optimizes only the trajectory policy. Avoid an unused turn-head forward and keep
         # that SFT classifier frozen while the DiT policy changes under reward weighting.
-        "_skip_turn_indicator_training": True,
+        "_skip_turn_indicator": True,
     }
     if cached_encoding is not None:
         merged_inputs["_cached_encoding"] = cached_encoding
@@ -1154,9 +1153,7 @@ def _compute_policy_ego_loss_per_sample(
     ego_diffusion_loss = torch.sum((pred_x_start[:, 0] - x0_target[:, 0]) ** 2, dim=-1)
     ego_pred_velocity = pred_x_start[:, 0]
     ego_pred_velocity_raw = inverse_normalize_ego_velocity(ego_pred_velocity, norm)
-    _, ego_waypoint_loss = hybrid_loss_components(
-        ego_pred_velocity,
-        x0_target[:, 0],
+    ego_waypoint_loss = hybrid_waypoint_loss(
         ego_pred_velocity_raw,
         ego_target,
         W=args.hybrid_loss_window,

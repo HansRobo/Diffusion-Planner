@@ -534,6 +534,9 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
         net.train(was_training)
 
     if getattr(args, "use_wandb", False):
+        optimizer_step = getattr(args, "_wandb_global_step", None)
+        if optimizer_step is not None:
+            log["optimizer_step"] = int(optimizer_step)
         wandb.log(log)
     if classification_json is not None:
         grouped = summary["grouped_summary"]

@@ -83,28 +83,21 @@ def _detached_integral(v: torch.Tensor, W: int) -> torch.Tensor:
     T = v.shape[-2]
     W = max(1, min(int(W), T))
 
-    wpt_sg = torch.cumsum(v.detach(), dim=-2)  # [..., T, 2]
-    shift_sg = torch.roll(wpt_sg, shifts=W, dims=-2)
-    shift_sg[..., :W, :] = 0.0
-
     wpt = torch.cumsum(v, dim=-2)  # [..., T, 2]
     shift = torch.roll(wpt, shifts=W, dims=-2)
     shift[..., :W, :] = 0.0
 
-    return wpt + shift_sg - shift
+    return wpt + shift.detach() - shift
 
 
-def hybrid_loss_components(
-    pred_v_norm: torch.Tensor,
-    gt_v_norm: torch.Tensor,
+def hybrid_waypoint_loss(
     pred_v_raw: torch.Tensor,
     gt_waypoints_raw: torch.Tensor,
     W: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    l_v = torch.sum((pred_v_norm - gt_v_norm) ** 2, dim=-1)  # [..., T]
+) -> torch.Tensor:
+    """Waypoint part of HDP hybrid loss; velocity MSE is computed by the caller."""
     pred_pos = _detached_integral(pred_v_raw[..., :2], W)  # [..., T, 2]
-    l_wpt = torch.sum((pred_pos - gt_waypoints_raw[..., :2]) ** 2, dim=-1)  # [..., T]
-    return l_v, l_wpt
+    return torch.sum((pred_pos - gt_waypoints_raw[..., :2]) ** 2, dim=-1)  # [..., T]
 
 
 def make_turn_indicator_gt(

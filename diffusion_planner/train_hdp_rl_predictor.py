@@ -14,7 +14,18 @@ from pathlib import Path
 import pandas as pd
 import torch
 import wandb
-from diffusion_planner.dimensions import *
+from diffusion_planner.dimensions import (
+    INPUT_T,
+    MAX_NUM_NEIGHBORS,
+    NUM_LINE_STRINGS,
+    NUM_POLYGONS,
+    NUM_SEGMENTS_IN_LANE,
+    NUM_SEGMENTS_IN_ROUTE,
+    OUTPUT_T,
+    POINTS_PER_LANELET,
+    POINTS_PER_LINE_STRING,
+    POINTS_PER_POLYGON,
+)
 from diffusion_planner.hdp_rl_epoch import train_hdp_rl_epoch, validate_hdp_reward_policy
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import (
@@ -1076,7 +1087,16 @@ def model_training(args):
             allow_val_change=args.resume_model_path is not None,
         )
         wandb.define_metric("optimizer_step")
-        for metric_prefix in ("train_step/*", "train/*", "valid/*", "valid_epdms/*", "valid_reward/*"):
+        for metric_prefix in (
+            "train_step/*",
+            "train/*",
+            "valid/*",
+            "valid_epdms/*",
+            "valid_reward/*",
+            "valid_turn_indicator/*",
+            "valid_multisample/*",
+            "closed_loop/*",
+        ):
             wandb.define_metric(metric_prefix, step_metric="optimizer_step")
         wandb.define_metric("lr", step_metric="optimizer_step")
         wandb_id = wandb.run.id

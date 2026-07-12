@@ -259,7 +259,7 @@ def test_hdp_decoder_repeats_only_global_route_condition_for_rl_groups():
         "sampled_trajectories": torch.randn(candidate_batch, 1, 80, 4),
         "diffusion_time": torch.rand(candidate_batch),
         "ego_current_state": torch.randn(candidate_batch, 10),
-        "_skip_turn_indicator_training": True,
+        "_skip_turn_indicator": True,
     }
 
     output = decoder(encoding, inputs)["model_output"]
@@ -268,6 +268,47 @@ def test_hdp_decoder_repeats_only_global_route_condition_for_rl_groups():
     assert all(
         parameter.grad is not None for parameter in decoder.global_route_encoder.parameters()
     )
+
+
+def test_hdp_decoder_skips_frozen_turn_head_without_changing_inference_prediction(monkeypatch):
+    args = TrainConfig(
+        exp_name="test",
+        save_dir="/tmp",
+        train_set_list="",
+        valid_set_list="",
+        train_subsample_step=1,
+        hidden_dim=32,
+        decoder_depth=1,
+        diffusion_sample_steps=2,
+    )
+    args.state_normalizer = StateNormalizer(
+        [[[10.0, 0.0, 0.0, 0.0]]],
+        [[[20.0, 20.0, 1.0, 1.0]]],
+        [0.0, 0.0, 0.0, 0.0],
+        [0.5, 0.5, 1.0, 1.0],
+    )
+    args.observation_normalizer = ObservationNormalizer({})
+    decoder = Decoder(args).eval()
+    encoding = torch.randn(2, 7, 32)
+    inputs = {
+        "route_lanes": torch.randn(2, 25, 20, 33),
+        "sampled_trajectories": torch.randn(2, 1, 80, 4),
+        "ego_current_state": torch.randn(2, 10),
+    }
+
+    with torch.no_grad():
+        full = decoder(encoding, inputs)
+
+    def fail_pool(_encoding):
+        raise AssertionError("RL-only inference must not pool the expanded scene encoding")
+
+    monkeypatch.setattr(decoder, "_pool_encoding", fail_pool)
+    with torch.no_grad():
+        skipped = decoder(encoding, {**inputs, "_skip_turn_indicator": True})
+
+    assert "turn_indicator_logit" in full
+    assert "turn_indicator_logit" not in skipped
+    torch.testing.assert_close(skipped["prediction"], full["prediction"], rtol=0, atol=0)
 
 
 def test_hdp_temporal_position_initialization_matches_navsim_frequency_base():
