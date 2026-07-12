@@ -1005,6 +1005,11 @@ def model_training(args):
                 "epoch": epoch + 1,
                 "train_reward_mean": train_reward if has_reward else None,
                 "train_loss": scalar(train_total_loss),
+                **{
+                    f"train_{key}": scalar(value)
+                    for key, value in train_loss.items()
+                    if key not in {"loss", "reward_mean"}
+                },
                 "valid_loss_ego": valid_loss_ego,
                 "valid_neighbor_margin": valid_neighbor_margin,
                 "valid_road_border": valid_road_border,
