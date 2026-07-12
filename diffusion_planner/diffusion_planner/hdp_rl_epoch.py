@@ -321,6 +321,7 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
                         for key, value in step_loss.items()
                     },
                     "train_step/global_step": args._wandb_global_step,
+                    "optimizer_step": args._wandb_global_step,
                     "train_step/batch": batch_idx,
                     "train_step/num_batches": len(data_loader),
                     "train_step/epoch_progress": batch_idx / max(len(data_loader), 1),

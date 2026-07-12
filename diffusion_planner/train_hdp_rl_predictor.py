@@ -1034,6 +1034,10 @@ def model_training(args):
             args_dict,
             allow_val_change=args.resume_model_path is not None,
         )
+        wandb.define_metric("optimizer_step")
+        for metric_prefix in ("train_step/*", "train/*", "valid/*", "valid_epdms/*", "valid_reward/*"):
+            wandb.define_metric(metric_prefix, step_metric="optimizer_step")
+        wandb.define_metric("lr", step_metric="optimizer_step")
         wandb_id = wandb.run.id
 
     if args.ddp:
@@ -1251,6 +1255,7 @@ def model_training(args):
                 wandb.log(
                     {
                         **{f"train/{k}": v for k, v in train_loss.items()},
+                        "optimizer_step": args._wandb_global_step,
                         "lr": train_lr,
                         "valid/ego": valid_loss_ego,
                         "valid/neighbor_margin": valid_neighbor_margin,
