@@ -93,6 +93,10 @@ if [[ -n "${EXTRA_LISTS}" ]]; then
   input_paths+=("${extra_list_array[@]}")
 fi
 INPUT_FINGERPRINT=$(sha256sum "${input_paths[@]}" | sha256sum | cut -d ' ' -f 1)
+PYTHON_ENV_FINGERPRINT=$(
+  PYTHONPATH="${REPO}:${REPO}/diffusion_planner" "${REPO}/.venv/bin/python" -c \
+    'import numpy, torch; print(torch.__version__, torch.version.cuda, torch.cuda.nccl.version(), numpy.__version__)'
+)
 VERIFY_SOURCE_CKPT=${SOURCE_CKPT}
 if [[ "${VERIFY_MODE}" == resume ]]; then
   VERIFY_SOURCE_CKPT=${SAVE_DIR}/.rl_smoke_source_${SLURM_JOB_ID}.pth
@@ -111,7 +115,8 @@ export OMP_NUM_THREADS=1
 export PYTHONWARNINGS=error
 
 export REPO NNODES NPROC_PER_NODE MASTER_ADDR PORT SAVE_DIR
-export EXPECTED_TREE INPUT_FINGERPRINT TRAIN_LIST VALID_LIST SOURCE_CKPT EXTRA_LISTS
+export EXPECTED_TREE INPUT_FINGERPRINT PYTHON_ENV_FINGERPRINT
+export TRAIN_LIST VALID_LIST SOURCE_CKPT EXTRA_LISTS
 
 # Validate and prepare every allocated host before starting torchrun. This catches an
 # unsynchronized repository, checkpoint, manifest, or virtualenv without stranding the
@@ -138,6 +143,19 @@ srun --kill-on-bad-exit=1 --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-
     done
     [[ -x "${REPO}/.venv/bin/python" ]] || {
       echo "$(hostname -s): missing Python environment: ${REPO}/.venv/bin/python" >&2
+      exit 2
+    }
+    actual_python_env=$(
+      PYTHONPATH="${REPO}:${REPO}/diffusion_planner" "${REPO}/.venv/bin/python" -c \
+        "import numpy, torch; print(torch.__version__, torch.version.cuda, torch.cuda.nccl.version(), numpy.__version__)"
+    )
+    [[ "${actual_python_env}" == "${PYTHON_ENV_FINGERPRINT}" ]] || {
+      echo "$(hostname -s): Python/CUDA/NCCL environment mismatch" >&2
+      exit 2
+    }
+    visible_gpus=$("${REPO}/.venv/bin/python" -c "import torch; print(torch.cuda.device_count())")
+    [[ "${visible_gpus}" == "${NPROC_PER_NODE}" ]] || {
+      echo "$(hostname -s): expected ${NPROC_PER_NODE} visible GPUs, found ${visible_gpus}" >&2
       exit 2
     }
     actual_fingerprint=$(sha256sum "${required[@]}" | sha256sum | cut -d " " -f 1)
