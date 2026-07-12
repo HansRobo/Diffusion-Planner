@@ -1020,6 +1020,7 @@ def model_training(args):
     configured_multisample_count = args.multisample_eval_num_samples
     configured_epdms = args.enable_epdms_eval
     resume_baseline_metrics = None
+    resume_baseline_data = None
     if args.resume_model_path is not None:
         resume_baseline_metrics = (
             Path(baseline_metrics_path)
@@ -1032,6 +1033,13 @@ def model_training(args):
             raise FileNotFoundError(
                 "Strict RL resume requires source_baseline_metrics.json beside the source run"
             )
+        with open(resume_baseline_metrics, encoding="utf-8") as f:
+            resume_baseline_data = json.load(f)
+        for key in ("valid_loss_ego", "selection_score"):
+            if key not in resume_baseline_data or not math.isfinite(
+                float(resume_baseline_data[key])
+            ):
+                raise ValueError(f"Invalid {key} in {resume_baseline_metrics}")
     if global_rank == 0 and args.resume_model_path is not None:
         resume_train_log = (
             Path(train_log_path)
@@ -1046,8 +1054,7 @@ def model_training(args):
                 raw_patience = data_list[-1].get("full_evals_without_improvement", 0)
                 if pd.notna(raw_patience):
                     full_evals_without_improvement = int(raw_patience)
-        with open(resume_baseline_metrics, encoding="utf-8") as f:
-            baseline_metrics = json.load(f)
+        baseline_metrics = resume_baseline_data
         baseline_valid_loss = float(baseline_metrics["valid_loss_ego"])
         best_valid_score = max(
             best_valid_score,
