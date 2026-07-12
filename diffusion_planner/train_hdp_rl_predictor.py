@@ -1096,6 +1096,8 @@ def model_training(args):
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
+
+
 if __name__ == "__main__":
     try:
         model_training(get_args())
