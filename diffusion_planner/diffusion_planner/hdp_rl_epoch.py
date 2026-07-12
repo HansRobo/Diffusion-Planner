@@ -324,8 +324,8 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
     if ema is not None:
         proposal_relative_l2 = commit_ema_policy_update(model, ema, optimizer, args.ddp)
         epoch_mean_loss["policy_proposal_relative_l2"] = proposal_relative_l2
-        epoch_mean_loss["policy_accepted_relative_l2"] = (
-            proposal_relative_l2 * float(getattr(args, "rl_ema_update_rate", 0.05))
+        epoch_mean_loss["policy_accepted_relative_l2"] = proposal_relative_l2 * float(
+            getattr(args, "rl_ema_update_rate", 0.05)
         )
 
     if args.ddp:
@@ -337,3 +337,96 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
         print(f"{epoch_mean_loss['reward_max']=:.4f}")
 
     return epoch_mean_loss, epoch_mean_loss["loss"]
+
+
+@torch.no_grad()
+def validate_hdp_reward_policy(data_loader, model, args):
+    """Evaluate the rollout policy reward on a fixed held-out scene distribution."""
+    n = int(args.num_generations)
+    device = torch.device(args.device)
+    # reward sum, candidate count, per-group max sum, scene count, invalid reward count,
+    # invalid diagnostic count. Invalid values are reported after the collective so every
+    # rank exits together instead of leaving peers blocked in all_reduce.
+    totals = torch.zeros(6, dtype=torch.float64, device=device)
+    metric_totals = None
+    metric_keys = None
+    iterator = (
+        tqdm(data_loader, desc="RL-reward-valid", unit="batch")
+        if ddp.get_rank() == 0
+        else data_loader
+    )
+    rng_devices = [torch.cuda.current_device()] if device.type == "cuda" else []
+    with torch.random.fork_rng(devices=rng_devices):
+        seed = int(getattr(args, "seed", 3407)) + 100_003 + ddp.get_rank()
+        torch.manual_seed(seed)
+        for raw_inputs in iterator:
+            raw_inputs = {
+                key: value.to(device, non_blocking=True) for key, value in raw_inputs.items()
+            }
+            raw_inputs["ego_agent_past"] = heading_to_cos_sin(raw_inputs["ego_agent_past"])
+            raw_inputs["goal_pose"] = heading_to_cos_sin(raw_inputs["goal_pose"])
+            reward_neighbors = _neighbor_future_world(raw_inputs["neighbor_agents_future"])
+            norm_inputs = args.observation_normalizer(raw_inputs)
+            decoder_inputs = {"ego_current_state": norm_inputs["ego_current_state"]}
+            norm_exp = expand_batch(decoder_inputs, n)
+            norm_exp["route_lanes"] = norm_inputs["route_lanes"]
+            norm_exp["_global_route_repeat_interleave"] = n
+            ego_world = sample_group(
+                model,
+                norm_exp,
+                args.rl_noise_scale,
+                device,
+                scene_norm_inputs=norm_inputs,
+                group_size=n,
+                use_bf16=getattr(args, "amp_dtype", "off") == "bf16",
+                sample_steps=getattr(args, "rl_rollout_steps", 6),
+            )
+            num_scenes = raw_inputs["ego_current_state"].shape[0]
+            reward, reward_metrics = compute_hdp_reward(
+                ego_world, raw_inputs, reward_neighbors, num_scenes, n, args
+            )
+            finite_reward = torch.isfinite(reward)
+            safe_reward = torch.where(finite_reward, reward, torch.zeros_like(reward))
+            grouped = safe_reward.view(num_scenes, n)
+            candidate_count = reward.numel()
+            totals[0] += safe_reward.double().sum()
+            totals[1] += candidate_count
+            totals[2] += grouped.max(dim=1).values.double().sum()
+            totals[3] += num_scenes
+            totals[4] += (~finite_reward).sum()
+            current_keys = tuple(sorted(reward_metrics))
+            if metric_keys is None:
+                metric_keys = current_keys
+                metric_totals = torch.zeros(len(metric_keys), dtype=torch.float64, device=device)
+            elif current_keys != metric_keys:
+                raise RuntimeError("RL reward metric keys changed between validation batches")
+            for offset, key in enumerate(metric_keys):
+                metric = reward_metrics[key]
+                totals[5] += (~torch.isfinite(metric)).sum()
+                metric_totals[offset] += (
+                    torch.nan_to_num(metric.double(), nan=0.0, posinf=0.0, neginf=0.0)
+                    * candidate_count
+                )
+
+    if metric_totals is None or metric_keys is None:
+        raise ValueError("RL reward validation loader produced no batches")
+    if args.ddp:
+        torch.distributed.all_reduce(totals, op=torch.distributed.ReduceOp.SUM)
+        torch.distributed.all_reduce(metric_totals, op=torch.distributed.ReduceOp.SUM)
+    if totals[4].item() > 0 or totals[5].item() > 0:
+        raise FloatingPointError(
+            "RL reward validation produced non-finite values: "
+            f"rewards={int(totals[4].item())}, diagnostics={int(totals[5].item())}"
+        )
+    candidate_count = totals[1].clamp_min(1.0)
+    scene_count = totals[3].clamp_min(1.0)
+    return {
+        "mean": (totals[0] / candidate_count).float(),
+        "group_max": (totals[2] / scene_count).float(),
+        **{
+            key.removeprefix("reward_").removesuffix("_score"): (
+                metric_totals[offset] / candidate_count
+            ).float()
+            for offset, key in enumerate(metric_keys)
+        },
+    }

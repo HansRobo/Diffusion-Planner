@@ -15,7 +15,7 @@ import pandas as pd
 import torch
 import wandb
 from diffusion_planner.dimensions import *
-from diffusion_planner.hdp_rl_epoch import train_hdp_rl_epoch
+from diffusion_planner.hdp_rl_epoch import train_hdp_rl_epoch, validate_hdp_reward_policy
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import (
     assert_checkpoint_compatible,
@@ -84,11 +84,13 @@ def best_valid_score_from_rows(rows: list[dict]) -> float:
             full_eval = full_eval.strip().lower() in {"1", "true", "yes"}
         if not pd.notna(full_eval) or not bool(full_eval):
             continue
+        raw_reward = row.get("valid_reward_mean", float("nan"))
         raw_epdms = row.get("valid_epdms_total", 0.0)
         raw_ego_loss = row.get("valid_loss_ego", float("inf"))
+        reward = float(raw_reward) if pd.notna(raw_reward) else float("nan")
         epdms = float(raw_epdms) if pd.notna(raw_epdms) else 0.0
         ego_loss = float(raw_ego_loss) if pd.notna(raw_ego_loss) else float("inf")
-        score = epdms if epdms > 0.0 else -ego_loss
+        score = reward if math.isfinite(reward) else (epdms if epdms > 0.0 else -ego_loss)
         if math.isfinite(score):
             best = max(best, score)
     return best
@@ -1068,9 +1070,11 @@ def model_training(args):
         eval_model = model_ema.ema if model_ema is not None else diffusion_planner
         baseline_dict = validate_model(eval_model, valid_loader, args)
         baseline_agg = aggregate_valid_metrics(baseline_dict, args.device)
+        baseline_reward_metrics = validate_hdp_reward_policy(valid_loader, eval_model, args)
         baseline_valid_loss = scalar(baseline_agg["avg_loss_ego"])
         baseline_epdms = scalar(baseline_agg["epdms_means"].get("total", 0.0))
-        baseline_selection_score = baseline_epdms if baseline_epdms > 0.0 else -baseline_valid_loss
+        baseline_reward_mean = scalar(baseline_reward_metrics["mean"])
+        baseline_selection_score = baseline_reward_mean
         baseline_rng_states = gather_rng_states()
         if global_rank == 0:
             best_valid_score = baseline_selection_score
@@ -1078,6 +1082,10 @@ def model_training(args):
                 "epoch": 0,
                 "valid_loss_ego": baseline_valid_loss,
                 "valid_epdms_total": baseline_epdms,
+                **{
+                    f"valid_reward_{key}": scalar(value)
+                    for key, value in baseline_reward_metrics.items()
+                },
                 "selection_score": baseline_selection_score,
                 "source_checkpoint": args.init_weights_path,
             }
@@ -1104,10 +1112,12 @@ def model_training(args):
             if args.use_wandb:
                 wandb.run.summary["source/valid_loss_ego"] = baseline_valid_loss
                 wandb.run.summary["source/valid_epdms_total"] = baseline_epdms
+                wandb.run.summary["source/valid_reward_mean"] = baseline_reward_mean
             print(
                 "Source SFT baseline: "
                 f"valid_loss_ego={baseline_valid_loss:.4f}, "
-                f"valid_epdms_total={baseline_epdms:.4f}"
+                f"valid_epdms_total={baseline_epdms:.4f}, "
+                f"valid_reward_mean={baseline_reward_mean:.4f}"
             )
 
     for epoch in range(init_epoch, train_epochs):
@@ -1136,6 +1146,9 @@ def model_training(args):
             args.multisample_eval_num_samples = configured_multisample_count
             args.enable_epdms_eval = configured_epdms
         agg = aggregate_valid_metrics(valid_dict, args.device)
+        valid_reward_raw = (
+            validate_hdp_reward_policy(valid_loader, eval_model, args) if run_full_eval else {}
+        )
         # Save the scheduler/optimizer state for the *next* epoch. Previously checkpoints were
         # written first and scheduler.step() ran afterwards, so strict resume repeated one LR.
         train_lr = optimizer.param_groups[0]["lr"]
@@ -1146,6 +1159,8 @@ def model_training(args):
             valid_neighbor_margin = scalar(agg["ego_means"]["ego_neighbor_margin_loss"])
             valid_road_border = scalar(agg["ego_means"]["ego_road_border_loss"])
             valid_epdms_total = scalar(agg["epdms_means"].get("total", 0.0))
+            valid_reward_metrics = {key: scalar(value) for key, value in valid_reward_raw.items()}
+            valid_reward_mean = valid_reward_metrics.get("mean", float("nan"))
             valid_multisample = {
                 key: scalar(value) for key, value in agg["multisample_means"].items()
             }
@@ -1171,6 +1186,7 @@ def model_training(args):
                 f"{valid_neighbor_margin=:.4f}\n"
                 f"{valid_road_border=:.4f}\n"
                 f"{valid_epdms_total=:.4f}\n"
+                f"{valid_reward_mean=:.4f}\n"
                 f"valid_multisample_minADE="
                 f"{valid_multisample.get('minADE', float('nan')):.4f}\n"
                 f"valid_multisample_minFDE="
@@ -1180,7 +1196,11 @@ def model_training(args):
             loss_within_guard = valid_loss_ego <= baseline_valid_loss * (
                 1.0 + args.rl_max_valid_loss_regression
             )
-            selection_score = valid_epdms_total if valid_epdms_total > 0.0 else -valid_loss_ego
+            selection_score = (
+                valid_reward_mean
+                if math.isfinite(valid_reward_mean)
+                else (valid_epdms_total if valid_epdms_total > 0.0 else -valid_loss_ego)
+            )
             improves_best = (
                 run_full_eval
                 and loss_within_guard
@@ -1204,6 +1224,10 @@ def model_training(args):
                         "valid/neighbor_margin": valid_neighbor_margin,
                         "valid/road_border": valid_road_border,
                         "valid/epdms_total": valid_epdms_total,
+                        **{
+                            f"valid_reward/{key}": value
+                            for key, value in valid_reward_metrics.items()
+                        },
                         "valid/full_eval": float(run_full_eval),
                         "valid/within_source_loss_guard": float(loss_within_guard),
                         "valid/improves_best": float(improves_best),
@@ -1232,6 +1256,7 @@ def model_training(args):
                 "valid_neighbor_margin": valid_neighbor_margin,
                 "valid_road_border": valid_road_border,
                 "valid_epdms_total": valid_epdms_total,
+                **{f"valid_reward_{key}": value for key, value in valid_reward_metrics.items()},
                 "valid_full_eval": run_full_eval,
                 "valid_within_source_loss_guard": loss_within_guard,
                 "full_evals_without_improvement": full_evals_without_improvement,

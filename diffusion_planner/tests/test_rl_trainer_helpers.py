@@ -1,5 +1,11 @@
+from types import SimpleNamespace
+
+import pytest
 import torch
-from diffusion_planner.hdp_rl_epoch import _policy_observation_inputs
+from diffusion_planner.hdp_rl_epoch import (
+    _policy_observation_inputs,
+    validate_hdp_reward_policy,
+)
 from train_hdp_rl_predictor import (
     best_valid_score_from_rows,
     configure_rl_trainable_parameters,
@@ -71,10 +77,16 @@ def test_resume_best_score_ignores_nan_and_non_full_eval_rows():
             {"valid_full_eval": "False", "valid_epdms_total": 0.98},
             {"valid_full_eval": True, "valid_epdms_total": float("nan"), "valid_loss_ego": 0.4},
             {"valid_full_eval": "true", "valid_epdms_total": 0.75, "valid_loss_ego": 0.5},
+            {
+                "valid_full_eval": True,
+                "valid_reward_mean": 7.2,
+                "valid_epdms_total": 0.99,
+                "valid_loss_ego": 0.3,
+            },
         ]
     )
 
-    assert score == 0.75
+    assert score == 7.2
 
 
 def test_find_checkpoint_run_artifact_handles_latest_and_nested_checkpoints(tmp_path):
@@ -87,3 +99,44 @@ def test_find_checkpoint_run_artifact_handles_latest_and_nested_checkpoints(tmp_
     assert find_checkpoint_run_artifact(str(run_dir / "latest.pth"), artifact.name) == artifact
     assert find_checkpoint_run_artifact(str(nested / "best_model.pth"), artifact.name) == artifact
     assert find_checkpoint_run_artifact(str(nested / "best_model.pth"), "missing.json") is None
+
+
+def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
+    def fake_sample_group(_model, inputs, *_args, **_kwargs):
+        batch = inputs["ego_current_state"].shape[0]
+        return torch.zeros(batch, 80, 4)
+
+    def fake_reward(_ego, _inputs, _neighbors, num_scenes, n, _args):
+        value = 2.0 if num_scenes == 2 else 10.0
+        reward = torch.full((num_scenes * n,), value)
+        return reward, {"reward_risk_score": reward.mean()}
+
+    monkeypatch.setattr("diffusion_planner.hdp_rl_epoch.sample_group", fake_sample_group)
+    monkeypatch.setattr("diffusion_planner.hdp_rl_epoch.compute_hdp_reward", fake_reward)
+
+    def batch(size):
+        return {
+            "ego_agent_past": torch.zeros(size, 2, 3),
+            "goal_pose": torch.zeros(size, 3),
+            "neighbor_agents_future": torch.zeros(size, 1, 80, 3),
+            "ego_current_state": torch.zeros(size, 10),
+            "route_lanes": torch.zeros(size, 1, 1, 12),
+        }
+
+    args = SimpleNamespace(
+        num_generations=2,
+        device="cpu",
+        seed=7,
+        observation_normalizer=lambda inputs: inputs,
+        rl_noise_scale=0.5,
+        amp_dtype="off",
+        rl_rollout_steps=6,
+        ddp=False,
+    )
+
+    metrics = validate_hdp_reward_policy([batch(2), batch(1)], torch.nn.Linear(1, 1), args)
+
+    expected = (2.0 * 4 + 10.0 * 2) / 6
+    assert metrics["mean"].item() == pytest.approx(expected)
+    assert metrics["group_max"].item() == pytest.approx((2.0 * 2 + 10.0) / 3)
+    assert metrics["risk"].item() == pytest.approx(expected)
