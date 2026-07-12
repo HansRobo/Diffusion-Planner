@@ -352,6 +352,15 @@ def get_args():
         help="optimizer updates that reuse each sampled and scored candidate group",
     )
     parser.add_argument(
+        "--rl_update_max_candidates_per_rank",
+        type=int,
+        default=_train_config_default("rl_update_max_candidates_per_rank"),
+        help=(
+            "maximum differentiable candidates per rank; complete scene groups are gradient-"
+            "accumulated into one exact optimizer update (0 disables the cap)"
+        ),
+    )
+    parser.add_argument(
         "--rl_init_use_ema",
         type=boolean,
         default=_train_config_default("rl_init_use_ema"),
@@ -670,6 +679,15 @@ def get_args():
         raise ValueError("--rl_rollout_steps must be >= 2 for the second-order DPM solver")
     if args.rl_updates_per_rollout < 1:
         raise ValueError("--rl_updates_per_rollout must be >= 1")
+    if args.rl_update_max_candidates_per_rank < 0:
+        raise ValueError("--rl_update_max_candidates_per_rank must be >= 0")
+    if (
+        args.rl_update_max_candidates_per_rank > 0
+        and args.rl_update_max_candidates_per_rank < args.num_generations
+    ):
+        raise ValueError(
+            "--rl_update_max_candidates_per_rank must fit one complete generation group"
+        )
     if args.diffusion_sample_steps < 2:
         raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
@@ -844,6 +862,11 @@ def model_training(args):
         )
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
         print("RL updates per rollout: {}".format(args.rl_updates_per_rollout))
+        print(
+            "RL differentiable candidates/rank cap: {}".format(
+                args.rl_update_max_candidates_per_rank or "disabled"
+            )
+        )
         print("Learning rate: {}".format(args.learning_rate))
         print("Weight decay: {}".format(args.weight_decay))
         print("TF32: {}".format(args.tf32))

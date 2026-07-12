@@ -3,8 +3,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 from diffusion_planner.hdp_rl_epoch import (
+    _backward_reward_weighted_update,
     _policy_observation_inputs,
     _reward_eval_scene_chunk_size,
+    _rl_update_scene_chunk_size,
+    _slice_grouped_policy_inputs,
     validate_hdp_reward_policy,
 )
 from train_hdp_rl_predictor import (
@@ -84,6 +87,88 @@ def test_reward_validation_caps_candidate_batch_without_dropping_scenes():
     assert _reward_eval_scene_chunk_size(64, 32) == 32
     assert _reward_eval_scene_chunk_size(17, 32) == 17
     assert _reward_eval_scene_chunk_size(64, 2048) == 1
+
+
+def test_rl_update_chunk_preserves_groups_and_uses_one_static_shape():
+    assert _rl_update_scene_chunk_size(64, 8, 1024) == 64
+    assert _rl_update_scene_chunk_size(64, 32, 1024) == 32
+    assert _rl_update_scene_chunk_size(60, 32, 1024) == 30
+    assert _rl_update_scene_chunk_size(64, 32, 0) == 64
+    with pytest.raises(ValueError, match="non-negative"):
+        _rl_update_scene_chunk_size(64, 32, -1)
+    with pytest.raises(ValueError, match="complete generation group"):
+        _rl_update_scene_chunk_size(64, 32, 16)
+
+
+def test_rl_update_slice_keeps_scene_and_candidate_alignment():
+    inputs = {
+        "scene": torch.arange(6).view(3, 2),
+        "candidate": torch.arange(24).view(12, 2),
+        "flag": 4,
+    }
+
+    sliced = _slice_grouped_policy_inputs(inputs, 1, 3, num_scenes=3, group_size=4)
+
+    torch.testing.assert_close(sliced["scene"], inputs["scene"][1:3])
+    torch.testing.assert_close(sliced["candidate"], inputs["candidate"][4:12])
+    assert sliced["flag"] == 4
+
+
+def test_rl_update_microbatches_preserve_full_group_objective_and_gradient(monkeypatch):
+    class Policy(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.scale = torch.nn.Parameter(torch.tensor(1.5))
+
+    def fake_policy_loss(model, _inputs, target, _args, _encoding=None):
+        per_sample = model.scale * target[:, 0, 0]
+        mean = per_sample.mean()
+        return {
+            "ego_loss_per_sample": per_sample,
+            "ego_hdp_diffusion_loss": mean,
+            "ego_hdp_waypoint_loss": mean,
+        }
+
+    monkeypatch.setattr(
+        "diffusion_planner.hdp_rl_utils._compute_policy_ego_loss_per_sample",
+        fake_policy_loss,
+    )
+    model = Policy()
+    num_scenes, group_size = 4, 2
+    candidates = num_scenes * group_size
+    target = torch.zeros(candidates, 80, 4)
+    target[:, 0, 0] = torch.arange(1.0, candidates + 1.0)
+    weights = torch.tensor([0.5, 1.5, 0.25, 1.75, 1.0, 2.0, 0.75, 1.25])
+    valid = torch.ones(candidates, dtype=torch.bool)
+    args = SimpleNamespace(
+        rl_update_max_candidates_per_rank=4,
+        rl_bc_weight=0.0,
+        ddp=False,
+    )
+
+    result = _backward_reward_weighted_update(
+        model,
+        {"scene": torch.zeros(num_scenes, 1), "candidate": torch.zeros(candidates, 1)},
+        target,
+        torch.zeros(candidates),
+        weights,
+        valid,
+        torch.tensor(float(candidates)),
+        1,
+        num_scenes,
+        group_size,
+        args,
+        None,
+        {},
+        torch.zeros(num_scenes, 80, 4),
+        None,
+    )
+
+    expected_unscaled = (weights * target[:, 0, 0]).sum() / candidates
+    torch.testing.assert_close(result["loss"], model.scale.detach() * expected_unscaled)
+    torch.testing.assert_close(model.scale.grad, expected_unscaled)
+    assert result["update_candidate_chunk_size"].item() == 4
+    assert result["update_chunk_count"].item() == 2
 
 
 def test_resume_best_score_ignores_nan_and_non_full_eval_rows():

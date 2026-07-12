@@ -148,9 +148,14 @@ class TrainConfig:
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
-    # The released official trainer uses one optimizer update per sampled rollout group.
-    # Values above one intentionally reuse actions and are ablations, not the production default.
+    # The released NAVSIM trainer uses diffusion_repeat_size=1 per replay-buffer draw. Our full
+    # 5.6M-scene stream likewise uses one noising/update per draw; values above one intentionally
+    # reuse the same actions immediately and remain ablations.
     rl_updates_per_rollout: int = 1
+    # Keep full reward groups but cap differentiable candidate batches. With 64 scenes/rank,
+    # G=8 remains one 512-candidate update; paper G=32 becomes two accumulated 1024-candidate
+    # forwards feeding one exact optimizer update.
+    rl_update_max_candidates_per_rank: int = 1024
     rl_init_use_ema: bool = True
     # Optional direct collision term. Zero preserves the published multi-reward formula; positive
     # values test whether active=1/rear=0.3 safety prevents progress-risk Pareto regressions.

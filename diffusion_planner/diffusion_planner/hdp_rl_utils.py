@@ -1400,6 +1400,7 @@ def compute_reward_weighted_loss(
     expert_norm_inputs: dict[str, torch.Tensor] | None = None,
     expert_ego_gt: torch.Tensor | None = None,
     expert_cached_encoding: torch.Tensor | None = None,
+    include_bc: bool = True,
 ) -> dict[str, torch.Tensor]:
     if reward_weights is None or valid_sample is None:
         reward_weights, valid_sample = compute_reward_weights(
@@ -1457,7 +1458,7 @@ def compute_reward_weighted_loss(
         ego_reconstruction_loss = zero
 
     bc_loss = zero
-    if bc_weight > 0.0:
+    if bc_weight > 0.0 and include_bc:
         if expert_norm_inputs is None or expert_ego_gt is None:
             raise ValueError("rl_bc_weight > 0 requires expert observations and trajectories")
         expert_terms = _compute_policy_ego_loss_per_sample(

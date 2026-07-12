@@ -8,6 +8,7 @@ The only supported RL path is the HDP reward-weighted hybrid loss:
      exp(beta * normalized_reward).
 """
 
+import contextlib
 import copy
 import time
 
@@ -40,6 +41,173 @@ def _reward_eval_scene_chunk_size(num_scenes: int, num_generations: int) -> int:
         num_scenes,
         max(_RL_EVAL_MAX_CANDIDATES_PER_RANK // num_generations, 1),
     )
+
+
+def _rl_update_scene_chunk_size(
+    num_scenes: int,
+    num_generations: int,
+    max_candidates_per_rank: int,
+) -> int:
+    """Choose one fixed, group-aligned differentiable chunk shape.
+
+    Selecting the largest divisor of the local scene batch below the memory cap avoids a
+    smaller tail shape, so TorchInductor compiles one update graph. Reward normalization still
+    sees the complete candidate group before this split.
+    """
+    if num_scenes <= 0 or num_generations <= 0:
+        raise ValueError("RL update chunking needs positive scene and generation counts")
+    if max_candidates_per_rank < 0:
+        raise ValueError("RL update candidate cap must be non-negative")
+    if max_candidates_per_rank == 0:
+        return num_scenes
+    if max_candidates_per_rank < num_generations:
+        raise ValueError(
+            "RL update candidate cap cannot be smaller than one complete generation group"
+        )
+    scene_limit = max(max_candidates_per_rank // num_generations, 1)
+    if scene_limit >= num_scenes:
+        return num_scenes
+    for candidate in range(scene_limit, 0, -1):
+        if num_scenes % candidate == 0:
+            return candidate
+    return 1
+
+
+def _slice_grouped_policy_inputs(
+    inputs: dict[str, torch.Tensor],
+    scene_start: int,
+    scene_stop: int,
+    num_scenes: int,
+    group_size: int,
+) -> dict[str, torch.Tensor]:
+    """Slice tensors that are either scene-aligned or already candidate-expanded."""
+    candidate_start = scene_start * group_size
+    candidate_stop = scene_stop * group_size
+    candidate_count = num_scenes * group_size
+    sliced = {}
+    for key, value in inputs.items():
+        if not torch.is_tensor(value) or value.ndim == 0:
+            sliced[key] = value
+        elif value.shape[0] == candidate_count:
+            sliced[key] = value[candidate_start:candidate_stop]
+        elif value.shape[0] == num_scenes:
+            sliced[key] = value[scene_start:scene_stop]
+        else:
+            raise ValueError(
+                f"Grouped policy tensor {key!r} has batch {value.shape[0]}, expected "
+                f"{num_scenes} scenes or {candidate_count} candidates"
+            )
+    return sliced
+
+
+def _reward_weight_diagnostics(
+    reward_weights: torch.Tensor,
+    valid_sample: torch.Tensor,
+    num_scenes: int,
+    n: int,
+) -> dict[str, torch.Tensor]:
+    local_valid_count = valid_sample.sum().to(reward_weights.dtype)
+    return {
+        "reward_weight_mean": reward_weights.sum() / local_valid_count.clamp_min(1.0),
+        "reward_weight_max": torch.nan_to_num(
+            reward_weights.masked_fill(~valid_sample, -torch.inf).max(), neginf=0.0
+        ),
+        "reward_weight_min": torch.nan_to_num(
+            reward_weights.masked_fill(~valid_sample, torch.inf).min(), posinf=0.0
+        ),
+        "valid_group_fraction": valid_sample.view(num_scenes, n).any(dim=1).float().mean(),
+    }
+
+
+def _backward_reward_weighted_update(
+    model,
+    norm_inputs: dict[str, torch.Tensor],
+    ego_world: torch.Tensor,
+    reward: torch.Tensor,
+    reward_weights: torch.Tensor,
+    valid_sample: torch.Tensor,
+    global_valid_count: torch.Tensor,
+    ddp_world_size: int,
+    num_scenes: int,
+    n: int,
+    args,
+    cached_encoding: torch.Tensor | None,
+    expert_norm_inputs: dict[str, torch.Tensor],
+    expert_ego_gt: torch.Tensor,
+    expert_cached_encoding: torch.Tensor | None,
+) -> dict[str, torch.Tensor]:
+    """Backpropagate one full-group objective with optional candidate microbatches."""
+    scene_chunk = _rl_update_scene_chunk_size(
+        num_scenes,
+        n,
+        int(getattr(args, "rl_update_max_candidates_per_rank", 0)),
+    )
+    ranges = [
+        (start, min(start + scene_chunk, num_scenes))
+        for start in range(0, num_scenes, scene_chunk)
+    ]
+    objective_keys = {"loss", "rl_loss", "reward_weighted_loss", "bc_loss"}
+    mean_keys = {
+        "ego_reconstruction_loss",
+        "ego_hdp_diffusion_loss",
+        "ego_hdp_waypoint_loss",
+    }
+    accumulated: dict[str, torch.Tensor] = {}
+    total_candidates = float(num_scenes * n)
+
+    for chunk_index, (scene_start, scene_stop) in enumerate(ranges):
+        candidate_start = scene_start * n
+        candidate_stop = scene_stop * n
+        chunk_scenes = scene_stop - scene_start
+        is_last = chunk_index == len(ranges) - 1
+        chunk_inputs = _slice_grouped_policy_inputs(
+            norm_inputs, scene_start, scene_stop, num_scenes, n
+        )
+        chunk_encoding = (
+            None if cached_encoding is None else cached_encoding[candidate_start:candidate_stop]
+        )
+        sync_context = (
+            model.no_sync()
+            if bool(getattr(args, "ddp", False))
+            and not bool(getattr(args, "ddp_static_graph", False))
+            and len(ranges) > 1
+            and not is_last
+            else contextlib.nullcontext()
+        )
+        with sync_context:
+            chunk_loss = compute_reward_weighted_loss(
+                model,
+                chunk_inputs,
+                ego_world[candidate_start:candidate_stop],
+                reward[candidate_start:candidate_stop],
+                chunk_scenes,
+                n,
+                args,
+                cached_encoding=chunk_encoding,
+                reward_weights=reward_weights[candidate_start:candidate_stop],
+                valid_sample=valid_sample[candidate_start:candidate_stop],
+                global_valid_count=global_valid_count,
+                ddp_world_size=ddp_world_size,
+                expert_norm_inputs=expert_norm_inputs if is_last else None,
+                expert_ego_gt=expert_ego_gt if is_last else None,
+                expert_cached_encoding=expert_cached_encoding if is_last else None,
+                include_bc=is_last,
+            )
+            chunk_loss["loss"].backward()
+
+        chunk_fraction = (candidate_stop - candidate_start) / total_candidates
+        for key in objective_keys:
+            accumulated[key] = accumulated.get(key, reward.new_zeros(())) + chunk_loss[key].detach()
+        for key in mean_keys:
+            accumulated[key] = accumulated.get(key, reward.new_zeros(())) + (
+                chunk_loss[key].detach() * chunk_fraction
+            )
+
+    accumulated.update(_reward_weight_diagnostics(reward_weights, valid_sample, num_scenes, n))
+    accumulated["update_scene_chunk_size"] = reward.new_tensor(float(scene_chunk))
+    accumulated["update_candidate_chunk_size"] = reward.new_tensor(float(scene_chunk * n))
+    accumulated["update_chunk_count"] = reward.new_tensor(float(len(ranges)))
+    return accumulated
 
 
 def _set_hdp_rl_train_mode(model, args):
@@ -210,24 +378,23 @@ def _hdp_rl_step(
         expert_ego_gt = heading_to_cos_sin(raw_inputs["ego_agent_future"])
         for _ in range(updates_per_rollout):
             optimizer.zero_grad(set_to_none=True)
-            update_loss = compute_reward_weighted_loss(
+            update_loss = _backward_reward_weighted_update(
                 model,
                 norm_exp,
                 ego_world,
                 reward,
+                reward_weights,
+                valid_sample,
+                global_valid_count,
+                ddp_world_size,
                 num_scenes,
                 n,
                 args,
-                cached_encoding=(rollout_encoding if decoder_only else None),
-                reward_weights=reward_weights,
-                valid_sample=valid_sample,
-                global_valid_count=global_valid_count,
-                ddp_world_size=ddp_world_size,
-                expert_norm_inputs=expert_norm_inputs,
-                expert_ego_gt=expert_ego_gt,
-                expert_cached_encoding=rollout_encoding[::n] if decoder_only else None,
+                rollout_encoding if decoder_only else None,
+                expert_norm_inputs,
+                expert_ego_gt,
+                rollout_encoding[::n] if decoder_only else None,
             )
-            update_loss["loss"].backward()
             update_grad_norm = nn.utils.clip_grad_norm_(trainable_params, 5).detach()
             grad_norm = grad_norm + update_grad_norm
             grad_norm_max = torch.maximum(grad_norm_max, update_grad_norm)
@@ -257,6 +424,9 @@ def _hdp_rl_step(
             "reward_weight_max": reward_weights.max(),
             "reward_weight_min": reward_weights.min(),
             "valid_group_fraction": zero,
+            "update_scene_chunk_size": reward.new_tensor(float(num_scenes)),
+            "update_candidate_chunk_size": reward.new_tensor(float(batch_size)),
+            "update_chunk_count": reward.new_ones(()),
         }
         optimizer_steps = 0
     if timing_events is not None and has_optimizer_update:
@@ -290,6 +460,9 @@ def _hdp_rl_step(
         "reward_weight_max": loss_dict["reward_weight_max"].detach(),
         "reward_weight_min": loss_dict["reward_weight_min"].detach(),
         "valid_group_fraction": loss_dict["valid_group_fraction"].detach(),
+        "update_scene_chunk_size": loss_dict["update_scene_chunk_size"].detach(),
+        "update_candidate_chunk_size": loss_dict["update_candidate_chunk_size"].detach(),
+        "update_chunk_count": loss_dict["update_chunk_count"].detach(),
         "optimizer_step_fraction": reward.new_tensor(float(has_optimizer_update)),
         "optimizer_steps_per_rollout": reward.new_tensor(float(optimizer_steps)),
     }

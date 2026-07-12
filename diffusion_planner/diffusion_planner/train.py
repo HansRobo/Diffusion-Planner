@@ -317,6 +317,7 @@ def assert_checkpoint_compatible(
             "rl_full_eval_utd",
             "rl_rollout_steps",
             "rl_updates_per_rollout",
+            "rl_update_max_candidates_per_rank",
             "rl_reward_w_safety",
             "rl_reward_w_risk",
             "rl_reward_w_follow",

@@ -148,14 +148,19 @@ rl_eval_reward_w_lane=2.5
 rl_eval_reward_w_progress=3.0
 rl_rollout_steps=6
 rl_updates_per_rollout=1
+rl_update_max_candidates_per_rank=1024
 rl_ema_update_rate=0.05
 rl_init_use_ema=true
 rl_train_scope=decoder
 ```
 
-One optimizer update is applied per sampled rollout group, matching the released official
-trainer and avoiding repeated AdamW updates on the same actions. The paper EMA update `0.05` is
-used at policy-iteration boundaries. The lower `beta` and explicit
+One optimizer update is applied per streamed rollout group, matching the released NAVSIM
+trainer's `diffusion_repeat_size=1` for each replay-buffer draw. NAVSIM can draw a buffered action
+again in later epochs; the Tier IV path instead streams all 5.6M scenes once per policy iteration
+and uses measured proposal drift to decide whether another pass is useful. The paper EMA update
+`0.05` is used at policy-iteration boundaries. Candidate microbatching preserves the full reward group and
+one optimizer update while bounding differentiable decoder memory; it does not discard data or
+renormalize subgroups. The lower `beta` and explicit
 progress term are performance-oriented Tier IV adaptations. Real-data and recovery-set ablations
 favored the unanchored objective (`BC=0`); the EMA policy commit remains the drift constraint.
 The non-risk behavior contribution (following, lane keeping, and DP-native progress) is multiplied

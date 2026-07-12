@@ -59,6 +59,7 @@ EVAL_REWARD_W_LANE=${HDP_RL_EVAL_REWARD_W_LANE:-2.5}
 EVAL_REWARD_W_PROGRESS=${HDP_RL_EVAL_REWARD_W_PROGRESS:-3.0}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
 UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-1}
+UPDATE_MAX_CANDIDATES=${HDP_RL_UPDATE_MAX_CANDIDATES_PER_RANK:-1024}
 COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-True}
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
 USE_WANDB=${HDP_RL_USE_WANDB:-True}
@@ -236,6 +237,7 @@ TRAIN_ARGS=(
   --rl_eval_reward_w_progress "${EVAL_REWARD_W_PROGRESS}" \
   --rl_rollout_steps "${ROLLOUT_STEPS}" \
   --rl_updates_per_rollout "${UPDATES_PER_ROLLOUT}" \
+  --rl_update_max_candidates_per_rank "${UPDATE_MAX_CANDIDATES}" \
   --rl_reward_normalize group \
   --rl_reward_beta "${REWARD_BETA}" \
   --rl_reward_w_safety "${REWARD_W_SAFETY}" \
