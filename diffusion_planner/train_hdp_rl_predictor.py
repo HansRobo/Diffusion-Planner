@@ -1276,19 +1276,21 @@ def model_training(args):
             valid_turn_metrics = turn_indicator_metrics(agg)
             has_reward = "reward_mean" in train_loss
             train_reward = scalar(train_loss["reward_mean"]) if has_reward else float("nan")
-            print(
-                f"Epoch {epoch + 1}/{train_epochs}\n"
-                f"{train_reward=:.4f}\n"
-                f"{valid_loss_ego=:.4f}\n"
-                f"{valid_neighbor_margin=:.4f}\n"
-                f"{valid_road_border=:.4f}\n"
-                f"{valid_epdms_total=:.4f}\n"
-                f"{valid_reward_mean=:.4f}\n"
-                f"valid_multisample_minADE="
-                f"{valid_multisample.get('minADE', float('nan')):.4f}\n"
-                f"valid_multisample_minFDE="
-                f"{valid_multisample.get('minFDE', float('nan')):.4f}"
-            )
+            epoch_summary = [
+                f"Epoch {epoch + 1}/{train_epochs}",
+                f"{train_reward=:.4f}",
+                f"{valid_loss_ego=:.4f}",
+                f"{valid_neighbor_margin=:.4f}",
+                f"{valid_road_border=:.4f}",
+                f"{valid_epdms_total=:.4f}",
+            ]
+            if math.isfinite(valid_reward_mean):
+                epoch_summary.append(f"{valid_reward_mean=:.4f}")
+            if "minADE" in valid_multisample:
+                epoch_summary.append(f"valid_multisample_minADE={valid_multisample['minADE']:.4f}")
+            if "minFDE" in valid_multisample:
+                epoch_summary.append(f"valid_multisample_minFDE={valid_multisample['minFDE']:.4f}")
+            print("\n".join(epoch_summary))
 
             loss_within_guard = valid_loss_ego <= baseline_valid_loss * (
                 1.0 + args.rl_max_valid_loss_regression

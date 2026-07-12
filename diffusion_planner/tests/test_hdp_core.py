@@ -148,6 +148,76 @@ def test_batched_neighbor_collision_terms_match_scene_loop():
         torch.testing.assert_close(actual_value, expected_value, rtol=0, atol=1e-6)
 
 
+def test_batched_lane_and_progress_match_scene_loop():
+    torch.manual_seed(23)
+    batch_size, candidates, horizon = 4, 3, 8
+    ego = torch.randn(batch_size, candidates, horizon, 4)
+    ego[..., 2] = 1.0
+    ego[..., 3] = 0.0
+    expert = torch.zeros(batch_size, horizon, 4)
+    expert[..., 0] = torch.linspace(0.5, 8.0, horizon)
+    expert[..., 2] = 1.0
+    lanes = torch.zeros(batch_size, 3, 6, 12)
+    route = torch.zeros(batch_size, 2, 6, 12)
+    x = torch.linspace(0.0, 10.0, 6)
+    for scene in (0, 1, 3):
+        lanes[scene, 0, :, 0] = x
+        lanes[scene, 1, :, 0] = x
+        lanes[scene, 1, :, 1] = 3.5
+    route[0, 0, :, 0] = x
+    route[1, 0, :, 0] = x
+    route[1, 0, :, 1] = 20.0
+    route[3, 0, :, 0] = x
+    expert[1, :, 1] = torch.linspace(0.0, 3.5, horizon)
+    indicators = torch.zeros(batch_size, 5, dtype=torch.long)
+    indicators[1, -1] = 2
+    config = HDPRewardConfig()
+
+    actual = hdp_rl_utils._batched_lane_and_progress(ego, expert, lanes, route, indicators, config)
+    expected_lane = []
+    expected_off_lane = []
+    expected_lane_change = []
+    expected_route = []
+    expected_ratio = []
+    expected_progress = []
+    expected_available = []
+    for scene in range(batch_size):
+        use_route = hdp_rl_utils._route_alignment(expert[scene], route[scene], config)
+        centerlines, _ = _lane_reward_centerlines(
+            expert[scene], lanes[scene], route[scene], config, route_aligned=bool(use_route)
+        )
+        lane_valid = lanes[scene, ..., :2].abs().sum(dim=-1) > 1e-6
+        has_lanes = (lane_valid[..., :-1] & lane_valid[..., 1:]).any()
+        lane, off_lane, lane_change = _hdp_lane_score(
+            ego[scene],
+            expert[scene],
+            centerlines,
+            indicators[scene],
+            config,
+            lanes_available=bool(use_route | has_lanes),
+        )
+        ratio, progress = _relative_progress_score(ego[scene], expert[scene])
+        expected_lane.append(lane)
+        expected_off_lane.append(off_lane)
+        expected_lane_change.append(lane_change)
+        expected_route.append(use_route)
+        expected_ratio.append(ratio)
+        expected_progress.append(progress)
+        expected_available.append(has_lanes)
+
+    expected = (
+        torch.stack(expected_lane),
+        torch.stack(expected_off_lane),
+        torch.stack(expected_lane_change),
+        torch.stack(expected_route),
+        torch.stack(expected_ratio),
+        torch.stack(expected_progress),
+        torch.stack(expected_available),
+    )
+    for actual_value, expected_value in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_value, expected_value, rtol=0, atol=1e-6)
+
+
 def test_state_normalizer_caches_stats_by_kind_device_and_dtype():
     normalizer = StateNormalizer(
         [[[10, 0, 0, 0]]],

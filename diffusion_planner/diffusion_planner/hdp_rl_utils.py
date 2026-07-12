@@ -621,6 +621,42 @@ def _nearest_lane_distance(
     return distance.reshape(points.shape[:-1])
 
 
+def _nearest_lane_distance_batch(
+    points: torch.Tensor,
+    lanes: torch.Tensor,
+) -> torch.Tensor:
+    """Scene-aligned point-to-centerline distance without per-scene kernel launches."""
+    if points.shape[0] != lanes.shape[0]:
+        raise ValueError(
+            "Batched lane distance expects matching scene dimensions, got "
+            f"{points.shape[0]} and {lanes.shape[0]}"
+        )
+    batch_size = points.shape[0]
+    center = lanes[..., :2]
+    point_valid = center.abs().sum(dim=-1) > 1e-6
+    segment_valid = (point_valid[..., :-1] & point_valid[..., 1:]).flatten(1)
+    segment_start = center[..., :-1, :].flatten(1, 2)
+    segment_end = center[..., 1:, :].flatten(1, 2)
+    flat_points = points.reshape(batch_size, -1, 2)
+
+    max_distance_elements = 10_000_000
+    elements_per_query = max(batch_size * segment_start.shape[1], 1)
+    chunk_size = max(1, max_distance_elements // elements_per_query)
+    chunks = []
+    segment = segment_end - segment_start
+    segment_len2 = segment.square().sum(dim=-1).clamp_min(1e-10)
+    for start in range(0, flat_points.shape[1], chunk_size):
+        query = flat_points[:, start : start + chunk_size]
+        relative = query[:, :, None, :] - segment_start[:, None, :, :]
+        projection = ((relative * segment[:, None]).sum(dim=-1) / segment_len2[:, None]).clamp(
+            0.0, 1.0
+        )
+        closest = segment_start[:, None] + projection[..., None] * segment[:, None]
+        distance = (query[:, :, None] - closest).norm(dim=-1)
+        chunks.append(distance.masked_fill(~segment_valid[:, None], float("inf")).amin(dim=-1))
+    return torch.cat(chunks, dim=1).reshape(points.shape[:-1])
+
+
 def _lane_reward_centerlines(
     expert_future: torch.Tensor,
     lanes: torch.Tensor,
@@ -706,6 +742,97 @@ def _hdp_lane_score(
     masked = expert_off_lane | expert_lane_change
     lane_score = torch.where(masked, torch.zeros_like(center_score), center_score).mean(dim=-1)
     return lane_score, expert_off_lane, expert_lane_change
+
+
+def _batched_lane_and_progress(
+    ego_group: torch.Tensor,
+    expert_future: torch.Tensor,
+    lanes: torch.Tensor,
+    route_lanes: torch.Tensor | None,
+    turn_indicators: torch.Tensor | None,
+    config: HDPRewardConfig,
+) -> tuple[torch.Tensor, ...]:
+    """Compute route selection, lane masks, and progress for a scene batch."""
+    lane_points = lanes[..., :2]
+    lane_point_valid = lane_points.abs().sum(dim=-1) > 1e-6
+    lane_available = (lane_point_valid[..., :-1] & lane_point_valid[..., 1:]).flatten(1).any(1)
+    lane_candidate_distance = _nearest_lane_distance_batch(ego_group[..., :2], lanes)
+    lane_expert_distance = _nearest_lane_distance_batch(expert_future[..., :2], lanes)
+
+    if route_lanes is None:
+        route_aligned = torch.zeros_like(lane_available)
+        candidate_distance = lane_candidate_distance
+        expert_distance = lane_expert_distance
+    else:
+        route_points = route_lanes[..., :2]
+        route_point_valid = route_points.abs().sum(dim=-1) > 1e-6
+        route_available = (
+            (route_point_valid[..., :-1] & route_point_valid[..., 1:]).flatten(1).any(1)
+        )
+        route_candidate_distance = _nearest_lane_distance_batch(ego_group[..., :2], route_lanes)
+        route_expert_distance = _nearest_lane_distance_batch(expert_future[..., :2], route_lanes)
+        route_aligned = (
+            route_available
+            & (route_expert_distance.mean(dim=-1) <= config.lane_half_width_m)
+            & (route_expert_distance.amax(dim=-1) <= 2.0 * config.lane_half_width_m)
+        )
+        candidate_distance = torch.where(
+            route_aligned[:, None, None], route_candidate_distance, lane_candidate_distance
+        )
+        expert_distance = torch.where(
+            route_aligned[:, None], route_expert_distance, lane_expert_distance
+        )
+
+    centerline_available = lane_available | route_aligned
+    expert_off_lane = (expert_distance.mean(dim=-1) > config.lane_half_width_m) | (
+        expert_distance.amax(dim=-1) > 2.0 * config.lane_half_width_m
+    )
+    indicator_active = torch.zeros_like(centerline_available)
+    if turn_indicators is not None and turn_indicators.numel() > 0:
+        indicator_active = (turn_indicators[:, -1] == 2) | (turn_indicators[:, -1] == 3)
+    edge_window = min(3, expert_distance.shape[-1])
+    start_distance = expert_distance[:, :edge_window].mean(dim=-1)
+    end_distance = expert_distance[:, -edge_window:].mean(dim=-1)
+    peak_distance = expert_distance.amax(dim=-1)
+    starts_on_lane = start_distance < 0.5 * config.lane_half_width_m
+    centerline_change = (
+        starts_on_lane
+        & (end_distance < 0.5 * config.lane_half_width_m)
+        & (peak_distance > 0.75 * config.lane_half_width_m)
+    )
+    indicated_departure = starts_on_lane & (
+        peak_distance - start_distance > 0.5 * config.lane_half_width_m
+    )
+    expert_lane_change = centerline_change | (indicator_active & indicated_departure)
+    expert_off_lane = torch.where(
+        centerline_available, expert_off_lane, torch.ones_like(expert_off_lane)
+    )
+    expert_lane_change = centerline_available & expert_lane_change
+    lane_masked = expert_off_lane | expert_lane_change
+    center_score = (1.0 - candidate_distance / config.lane_half_width_m).clamp(0.0, 1.0)
+    lane_score = torch.where(
+        lane_masked[:, None, None], torch.zeros_like(center_score), center_score
+    ).mean(dim=-1)
+
+    expert_displacement = expert_future[:, -1, :2]
+    expert_distance_m = expert_displacement.norm(dim=-1)
+    moving_reference = expert_distance_m >= 1.0
+    expert_direction = expert_displacement / expert_distance_m.clamp_min(1.0)[:, None]
+    candidate_progress = (ego_group[:, :, -1, :2] * expert_direction[:, None]).sum(dim=-1)
+    progress_ratio = torch.where(
+        moving_reference[:, None],
+        candidate_progress / expert_distance_m.clamp_min(1.0)[:, None],
+        torch.ones_like(candidate_progress),
+    )
+    return (
+        lane_score,
+        expert_off_lane,
+        expert_lane_change,
+        route_aligned,
+        progress_ratio,
+        progress_ratio.clamp(0.0, 1.0),
+        lane_available,
+    )
 
 
 @torch.no_grad()
@@ -803,17 +930,23 @@ def compute_hdp_reward(
         {key: value[scene] for key, value in scene_term_tensors.items()}
         for scene in range(num_scenes)
     ]
-    expert_futures = list(expert_futures_tensor)
-    route_alignment_tensors = []
     route_lanes_batch = scene_inputs.get("route_lanes")
-    for scene in range(num_scenes):
-        route_alignment_tensors.append(
-            _route_alignment(
-                expert_futures_tensor[scene],
-                route_lanes_batch[scene] if route_lanes_batch is not None else None,
-                config,
-            )
-        )
+    (
+        lane_scores,
+        expert_off_lanes,
+        expert_lane_changes,
+        route_aligned,
+        progress_ratios,
+        progress_scores,
+        _lane_available,
+    ) = _batched_lane_and_progress(
+        ego_group,
+        expert_futures_tensor,
+        scene_inputs["lanes"],
+        route_lanes_batch,
+        scene_inputs.get("turn_indicators"),
+        config,
+    )
 
     device = ego_world.device
     static_objects_batch = scene_inputs.get("static_objects")
@@ -830,18 +963,13 @@ def compute_hdp_reward(
     else:
         border_point = line_strings_batch[..., 3] > 0.5
         road_border_available = (border_point[..., :-1] & border_point[..., 1:]).flatten(1).any(1)
-    lane_points = scene_inputs["lanes"][..., :2]
-    lane_valid = lane_points.abs().sum(dim=-1) > 1e-6
-    lane_available = (lane_valid[..., :-1] & lane_valid[..., 1:]).flatten(1).any(1)
     stopped_available = torch.stack([terms["stopped_available"] for terms in scene_terms])
-    route_aligned = torch.stack(route_alignment_tensors)
     availability = (
         torch.stack(
             (
                 static_available,
                 stopped_available,
                 road_border_available,
-                lane_available,
                 route_aligned,
             ),
             dim=1,
@@ -853,8 +981,7 @@ def compute_hdp_reward(
     for scene in range(num_scenes):
         ego_shape = scene_inputs["ego_shape"][scene, :3]
         terms = scene_terms[scene]
-        expert_future = expert_futures[scene]
-        has_static, has_stopped, has_road_border, has_lanes, use_route = availability[scene]
+        has_static, has_stopped, has_road_border, use_route = availability[scene]
         occupancy, occupancy_sources = _occupancy_score(
             ego_group[scene],
             ego_shape,
@@ -869,24 +996,11 @@ def compute_hdp_reward(
             road_border_available=has_road_border,
         )
         risk = torch.stack([terms["ttc"], terms["thw"], occupancy], dim=0).amin(dim=(0, 2))
-        progress_ratio, progress_score = _relative_progress_score(ego_group[scene], expert_future)
-        lane_centerlines, lane_route_source = _lane_reward_centerlines(
-            expert_future,
-            scene_inputs["lanes"][scene],
-            route_lanes_batch[scene] if route_lanes_batch is not None else None,
-            config,
-            route_aligned=use_route,
-        )
-        lane, expert_off_lane, expert_lane_change = _hdp_lane_score(
-            ego_group[scene],
-            expert_future,
-            lane_centerlines,
-            scene_inputs.get("turn_indicators", None)[scene]
-            if "turn_indicators" in scene_inputs
-            else None,
-            config,
-            lanes_available=(use_route or has_lanes),
-        )
+        progress_ratio = progress_ratios[scene]
+        progress_score = progress_scores[scene]
+        lane = lane_scores[scene]
+        expert_off_lane = expert_off_lanes[scene]
+        expert_lane_change = expert_lane_changes[scene]
         reward = (
             args.rl_reward_w_risk * risk
             + args.rl_reward_w_follow * terms["follow"]
@@ -919,7 +1033,7 @@ def compute_hdp_reward(
         metric_lists["collision_rear"].append(terms["collision_rear"])
         metric_lists["lane_masked"].append(expert_off_lane.to(lane.dtype).expand(n))
         metric_lists["lane_change_masked"].append(expert_lane_change.to(lane.dtype).expand(n))
-        metric_lists["lane_route_source"].append(lane.new_full((n,), float(lane_route_source)))
+        metric_lists["lane_route_source"].append(lane.new_full((n,), float(use_route)))
         metric_lists["occupancy_any_source"].append(
             lane.new_full((n,), float(any(occupancy_sources.values())))
         )
