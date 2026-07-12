@@ -323,6 +323,7 @@ def _collision_and_leader_terms(
             "thw": ones,
             "follow": torch.ones(C, device=device),
             "comfort": comfort_score.mean(dim=-1),
+            "ego_speed": ego_speed,
             "leader_fraction": torch.zeros(C, device=device),
             "collision_active": torch.zeros(C, device=device),
             "collision_rear": torch.zeros(C, device=device),
@@ -497,6 +498,7 @@ def _collision_and_leader_terms(
         "thw": thw_score,
         "follow": follow,
         "comfort": comfort_score.mean(dim=-1),
+        "ego_speed": ego_speed,
         "leader_fraction": leader_present.float().mean(dim=-1),
         "collision_active": active_collision.any(dim=(1, 2)).float(),
         "collision_rear": rear_collision.any(dim=(1, 2)).float(),
@@ -630,6 +632,8 @@ def _batched_occupancy_score(
     stopped_available: torch.Tensor,
     road_border_available: torch.Tensor,
     config: HDPRewardConfig,
+    *,
+    ego_speed: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Batch the common stopped-agent path and loop only exact geometry sources.
 
@@ -648,7 +652,8 @@ def _batched_occupancy_score(
     )
 
     stopped_only = ~static_available & stopped_available
-    ego_speed = _trajectory_speed(ego_group[..., :2], config.dt)
+    if ego_speed is None:
+        ego_speed = _trajectory_speed(ego_group[..., :2], config.dt)
     safe_distance = config.occupancy_safe_m + config.occupancy_speed_gain_s * ego_speed
     critical_distance = config.occupancy_critical_m + config.occupancy_speed_gain_s * ego_speed
     stopped_score = _linear_safe_score(stopped_clearance, critical_distance, safe_distance)
@@ -1051,6 +1056,7 @@ def compute_hdp_reward(
         stopped_available,
         road_border_available,
         config,
+        ego_speed=scene_term_tensors["ego_speed"],
     )
     safety = scene_term_tensors["safety"]
     risk = torch.stack(
