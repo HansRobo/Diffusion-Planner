@@ -1252,6 +1252,27 @@ def test_rl_policy_commit_updates_once_syncs_live_and_clears_optimizer_state():
     assert not optimizer.state
 
 
+def test_rl_policy_commit_drift_ignores_frozen_parameters():
+    model = torch.nn.Sequential(
+        torch.nn.Linear(1, 1, bias=False),
+        torch.nn.Linear(1, 1, bias=False),
+    )
+    with torch.no_grad():
+        model[0].weight.fill_(1000.0)
+        model[1].weight.fill_(2.0)
+    model[0].weight.requires_grad_(False)
+    ema = ModelEma(model, decay=0.95, device="cpu")
+    optimizer = torch.optim.AdamW([model[1].weight], lr=0.1)
+    with torch.no_grad():
+        model[1].weight.fill_(3.0)
+
+    relative_l2 = commit_ema_policy_update(model, ema, optimizer, use_ddp=False)
+
+    # Only the trainable policy changed: ||3 - 2|| / ||2|| = 0.5. The much larger
+    # frozen parameter must not dilute the monitoring signal.
+    torch.testing.assert_close(relative_l2, torch.tensor(0.5))
+
+
 def _checkpoint_compat_config(predicted_neighbor_num: int):
     args = TrainConfig(
         exp_name="test",

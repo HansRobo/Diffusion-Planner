@@ -47,6 +47,8 @@ def commit_ema_policy_update(model, ema, optimizer, use_ddp: bool):
     delta_sq = first_param.new_zeros((), dtype=torch.float32)
     reference_sq = first_param.new_zeros((), dtype=torch.float32)
     for live_param, old_param in zip(live.parameters(), old_policy.parameters(), strict=True):
+        if not live_param.requires_grad:
+            continue
         delta_sq.add_((live_param.detach().float() - old_param.detach().float()).square().sum())
         reference_sq.add_(old_param.detach().float().square().sum())
     proposal_relative_l2 = (delta_sq / reference_sq.clamp_min(1e-12)).sqrt()
