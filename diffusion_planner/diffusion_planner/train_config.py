@@ -155,7 +155,7 @@ class TrainConfig:
     # Keep full reward groups but cap differentiable candidate batches. With 64 scenes/rank,
     # G=8 remains one 512-candidate update; paper G=32 becomes two accumulated 1024-candidate
     # forwards feeding one exact optimizer update.
-    rl_update_max_candidates_per_rank: int = 1024
+    rl_update_max_candidates_per_rank: int = 2048
     rl_init_use_ema: bool = True
     # Optional direct collision term. Zero preserves the published multi-reward formula; positive
     # values test whether active=1/rear=0.3 safety prevents progress-risk Pareto regressions.
