@@ -81,7 +81,6 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
     n = args.num_generations
     timing_events = None
     if profile and torch.device(args.device).type == "cuda":
-        torch.cuda.reset_peak_memory_stats()
         timing_events = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
         timing_events[0].record()
 
@@ -270,6 +269,7 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
                 * optimizer_steps
                 / max(total_s, 1e-9),
                 "max_memory_allocated_gb": torch.cuda.max_memory_allocated() / (1024**3),
+                "max_memory_reserved_gb": torch.cuda.max_memory_reserved() / (1024**3),
             }
         )
     result.update({key: value.detach() for key, value in reward_metrics.items()})
@@ -294,6 +294,7 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
     device = torch.device(args.device)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
     wall_start = time.perf_counter()
     local_scene_count = 0
 
@@ -361,6 +362,16 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
     epoch_mean_loss["wall_throughput_global_scenes_per_s"] = (
         wall_stats[1] / wall_stats[0].clamp_min(1e-9)
     ).float()
+    if device.type == "cuda":
+        memory_peaks = torch.tensor(
+            [torch.cuda.max_memory_allocated(device), torch.cuda.max_memory_reserved(device)],
+            dtype=torch.float64,
+            device=device,
+        ) / (1024**3)
+        if args.ddp:
+            torch.distributed.all_reduce(memory_peaks, op=torch.distributed.ReduceOp.MAX)
+        epoch_mean_loss["max_memory_allocated_gb"] = memory_peaks[0].float()
+        epoch_mean_loss["max_memory_reserved_gb"] = memory_peaks[1].float()
 
     if ema is not None:
         proposal_relative_l2 = commit_ema_policy_update(model, ema, optimizer, args.ddp)
