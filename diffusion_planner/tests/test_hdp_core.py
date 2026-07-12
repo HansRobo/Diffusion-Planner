@@ -191,7 +191,23 @@ def test_batched_lane_and_progress_match_scene_loop():
     route[0, 0, :, 0] = x
     route[1, 0, :, 0] = x
     route[1, 0, :, 1] = 20.0
-    route[3, 0, :, 0] = x
+    curve_theta = torch.linspace(0.2, 1.0, horizon)
+    curve_xy = torch.stack(
+        (10.0 * torch.sin(curve_theta), 10.0 * (1.0 - torch.cos(curve_theta))), dim=-1
+    )
+    expert[3, :, :2] = curve_xy
+    expert[3, :, 2] = curve_theta.cos()
+    expert[3, :, 3] = curve_theta.sin()
+    ego[3, :, :, :2] = curve_xy
+    ego[3, :, :, 1] += torch.tensor([0.0, 0.3, -0.4])[:, None]
+    ego[3, :, :, 2] = curve_theta.cos()
+    ego[3, :, :, 3] = curve_theta.sin()
+    lane_theta = torch.linspace(0.15, 1.05, lanes.shape[2])
+    lane_curve = torch.stack(
+        (10.0 * torch.sin(lane_theta), 10.0 * (1.0 - torch.cos(lane_theta))), dim=-1
+    )
+    lanes[3, 0, :, :2] = lane_curve
+    route[3, 0, :, :2] = lane_curve
     expert[1, :, 1] = torch.linspace(0.0, 3.5, horizon)
     indicators = torch.zeros(batch_size, 5, dtype=torch.long)
     indicators[1, -1] = 2
@@ -995,7 +1011,8 @@ def test_hdp_empty_neighbor_reward_preserves_full_metric_contract():
     torch.testing.assert_close(terms["follow"], torch.ones(2))
 
 
-def test_hdp_reward_full_contract_reports_finite_component_diagnostics():
+def test_hdp_reward_full_contract_reports_finite_component_diagnostics(monkeypatch):
+    monkeypatch.setattr(hdp_rl_utils, "_RL_GEOMETRY_PAIR_STEP_BUDGET", 1)
     time_steps = 4
     candidates = torch.zeros(2, time_steps, 4)
     candidates[..., 0] = torch.arange(1.0, time_steps + 1)
@@ -1236,6 +1253,29 @@ def test_hdp_following_uses_reference_leader_instead_of_candidate_escape():
     )
     assert candidate_association["follow"][1].item() == pytest.approx(1.0)
     assert reference_association["follow"][1] < candidate_association["follow"][1]
+
+
+def test_hdp_thw_uses_bumper_gap_for_stopped_ego_near_moving_leader():
+    time_steps = 4
+    ego = torch.zeros(1, time_steps, 4)
+    ego[..., 2] = 1.0
+    neighbor = torch.zeros(1, time_steps, 4)
+    neighbor[..., 0] = torch.linspace(5.55, 5.70, time_steps)
+    neighbor[..., 2] = 1.0
+    terms = _collision_and_leader_terms(
+        ego,
+        torch.tensor([2.5, 4.0, 2.0]),
+        neighbor,
+        torch.tensor([[2.0, 4.0]]),
+        torch.ones(1, time_steps, dtype=torch.bool),
+        torch.tensor([[5.5, 0.0]]),
+        torch.tensor([True]),
+        HDPRewardConfig(),
+    )
+
+    assert terms["leader_fraction"].item() == pytest.approx(1.0)
+    assert terms["thw"].amin().item() < 0.1
+    assert terms["ttc"].amin().item() == pytest.approx(1.0)
 
 
 def test_hdp_lane_change_mask_and_neutral_occupancy_fallback():
@@ -1770,6 +1810,7 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         else value
         for key, value in vars(checkpoint_args).items()
     }
+    serializable["advantage_eps"] = 1e-6
     (tmp_path / "args.json").write_text(json.dumps(serializable), encoding="utf-8")
     checkpoint_path = tmp_path / "latest.pth"
 
@@ -1786,6 +1827,17 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
     same_shape.turn_indicator_generated_loss_weight = 0.25
     with pytest.raises(RuntimeError, match="training configuration mismatch"):
         assert_checkpoint_compatible(str(checkpoint_path), same_shape)
+
+    for field, value in (
+        ("rl_reward_w_safety", 1.0),
+        ("rl_eval_reward_w_safety", 1.0),
+        ("advantage_eps", 1e-4),
+        ("rl_full_eval_utd", 2),
+    ):
+        changed = _checkpoint_compat_config(predicted_neighbor_num=1)
+        setattr(changed, field, value)
+        with pytest.raises(RuntimeError, match="training configuration mismatch"):
+            assert_checkpoint_compatible(str(checkpoint_path), changed)
 
     shorter_horizon = _checkpoint_compat_config(predicted_neighbor_num=1)
     shorter_horizon.train_epochs = 20
@@ -1845,6 +1897,40 @@ def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
     torch.testing.assert_close(torch.rand(()), expected_torch)
     assert restored._resume_global_step == 47
     assert not list(tmp_path.glob(".latest.pth.tmp.*"))
+
+
+def test_resume_loads_legacy_ddp_prefixed_ema_into_bare_shadow(tmp_path):
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    ema = ModelEma(model, decay=0.9, device="cpu")
+    legacy_ema = {
+        f"module.{key}": torch.full_like(value, 3.0)
+        for key, value in model.state_dict().items()
+    }
+    checkpoint_path = tmp_path / "legacy_ema.pth"
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "epoch": 1,
+            "ema_state_dict": legacy_ema,
+        },
+        checkpoint_path,
+    )
+
+    _, _, _, epoch, _, restored_ema = resume_model(
+        str(checkpoint_path),
+        model,
+        optimizer,
+        None,
+        ema,
+        "cpu",
+    )
+
+    assert epoch == 1
+    assert all(not key.startswith("module.") for key in restored_ema.ema.state_dict())
+    for value in restored_ema.ema.state_dict().values():
+        torch.testing.assert_close(value, torch.full_like(value, 3.0))
 
 
 def test_strict_resume_rejects_checkpoint_without_rng_state(tmp_path):

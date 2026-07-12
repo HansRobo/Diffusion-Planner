@@ -4,6 +4,7 @@ import pytest
 import torch
 from diffusion_planner.hdp_rl_epoch import (
     _policy_observation_inputs,
+    _reward_eval_scene_chunk_size,
     validate_hdp_reward_policy,
 )
 from train_hdp_rl_predictor import (
@@ -79,6 +80,12 @@ def test_compiled_rl_candidate_batch_rejects_corrupted_h100_shape():
         validate_compiled_candidate_batch(128, 32, True)
 
 
+def test_reward_validation_caps_candidate_batch_without_dropping_scenes():
+    assert _reward_eval_scene_chunk_size(64, 32) == 32
+    assert _reward_eval_scene_chunk_size(17, 32) == 17
+    assert _reward_eval_scene_chunk_size(64, 2048) == 1
+
+
 def test_resume_best_score_ignores_nan_and_non_full_eval_rows():
     score = best_valid_score_from_rows(
         [
@@ -96,6 +103,19 @@ def test_resume_best_score_ignores_nan_and_non_full_eval_rows():
     )
 
     assert score == 7.2
+    assert (
+        best_valid_score_from_rows(
+            [
+                {
+                    "valid_full_eval": True,
+                    "valid_reward_mean": float("nan"),
+                    "valid_epdms_total": 0.99,
+                    "valid_loss_ego": 0.1,
+                }
+            ]
+        )
+        == -float("inf")
+    )
 
 
 def test_find_checkpoint_run_artifact_handles_latest_and_nested_checkpoints(tmp_path):

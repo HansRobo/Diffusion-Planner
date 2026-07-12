@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 import os
+from functools import partial
 from pathlib import Path
 
 import pandas as pd
@@ -35,6 +36,7 @@ from diffusion_planner.train import (
 )
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.cli import boolean, dataclass_default
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
@@ -60,20 +62,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from valid_predictor import aggregate_valid_metrics, validate_model
 
-
-def boolean(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0"):
-        return False
-    else:
-        raise argparse.ArgumentTypeError("Boolean value expected.")
-
-
-def _train_config_default(name):
-    return TrainConfig.__dataclass_fields__[name].default
+_train_config_default = partial(dataclass_default, TrainConfig)
 
 
 def configure_rl_trainable_parameters(model: torch.nn.Module, scope: str) -> None:
@@ -110,14 +99,9 @@ def best_valid_score_from_rows(rows: list[dict]) -> float:
         if not pd.notna(full_eval) or not bool(full_eval):
             continue
         raw_reward = row.get("valid_reward_mean", float("nan"))
-        raw_epdms = row.get("valid_epdms_total", 0.0)
-        raw_ego_loss = row.get("valid_loss_ego", float("inf"))
         reward = float(raw_reward) if pd.notna(raw_reward) else float("nan")
-        epdms = float(raw_epdms) if pd.notna(raw_epdms) else 0.0
-        ego_loss = float(raw_ego_loss) if pd.notna(raw_ego_loss) else float("inf")
-        score = reward if math.isfinite(reward) else (epdms if epdms > 0.0 else -ego_loss)
-        if math.isfinite(score):
-            best = max(best, score)
+        if math.isfinite(reward):
+            best = max(best, reward)
     return best
 
 
@@ -883,9 +867,6 @@ def model_training(args):
             for k, v in args_dict.items()
         }
         args_dict["major_version"] = 6
-
-        with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
-            json.dump(args_dict, f, indent=4)
     else:
         save_path = None
 
@@ -1018,12 +999,16 @@ def model_training(args):
             args.fused_optimizer = False
     else:
         optimizer = optim.AdamW(params, weight_decay=args.weight_decay)
+    if global_rank == 0:
+        args_dict["fused_optimizer"] = args.fused_optimizer
+        with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
+            json.dump(args_dict, f, indent=4)
     scheduler = LinearWarmupConstantLR(optimizer, train_epochs, args.warm_up_epoch)
 
     if args.resume_model_path is not None:
         model_ema = (
             ModelEma(
-                diffusion_planner,
+                ddp.get_model(diffusion_planner, args.ddp),
                 decay=1.0 - args.rl_ema_update_rate,
                 device=args.device,
             )
@@ -1054,7 +1039,7 @@ def model_training(args):
         )
         model_ema = (
             ModelEma(
-                diffusion_planner,
+                ddp.get_model(diffusion_planner, args.ddp),
                 decay=1.0 - args.rl_ema_update_rate,
                 device=args.device,
             )
@@ -1066,7 +1051,7 @@ def model_training(args):
     else:
         model_ema = (
             ModelEma(
-                diffusion_planner,
+                ddp.get_model(diffusion_planner, args.ddp),
                 decay=1.0 - args.rl_ema_update_rate,
                 device=args.device,
             )
@@ -1141,16 +1126,21 @@ def model_training(args):
             )
         )
         if resume_baseline_metrics is None:
-            raise FileNotFoundError(
-                "Strict RL resume requires source_baseline_metrics.json beside the source run"
-            )
-        with open(resume_baseline_metrics, encoding="utf-8") as f:
-            resume_baseline_data = json.load(f)
-        for key in ("valid_loss_ego", "selection_score"):
-            if key not in resume_baseline_data or not math.isfinite(
-                float(resume_baseline_data[key])
-            ):
-                raise ValueError(f"Invalid {key} in {resume_baseline_metrics}")
+            if args.rl_validate_before_training:
+                raise FileNotFoundError(
+                    "Strict RL resume requires source_baseline_metrics.json beside the source run"
+                )
+            resume_baseline_data = {"baseline_available": False}
+        else:
+            with open(resume_baseline_metrics, encoding="utf-8") as f:
+                resume_baseline_data = json.load(f)
+        baseline_available = bool(resume_baseline_data.get("baseline_available", True))
+        if baseline_available:
+            for key in ("valid_loss_ego", "selection_score"):
+                if key not in resume_baseline_data or not math.isfinite(
+                    float(resume_baseline_data[key])
+                ):
+                    raise ValueError(f"Invalid {key} in {resume_baseline_metrics}")
     if global_rank == 0 and args.resume_model_path is not None:
         resume_train_log = (
             Path(train_log_path)
@@ -1166,12 +1156,15 @@ def model_training(args):
                 if pd.notna(raw_patience):
                     full_evals_without_improvement = int(raw_patience)
         baseline_metrics = resume_baseline_data
-        baseline_valid_loss = float(baseline_metrics["valid_loss_ego"])
-        best_valid_score = max(
-            best_valid_score,
-            float(baseline_metrics["selection_score"]),
-        )
-        if resume_baseline_metrics != Path(baseline_metrics_path):
+        if bool(baseline_metrics.get("baseline_available", True)):
+            baseline_valid_loss = float(baseline_metrics["valid_loss_ego"])
+            best_valid_score = max(
+                best_valid_score,
+                float(baseline_metrics["selection_score"]),
+            )
+        if resume_baseline_metrics is None or resume_baseline_metrics != Path(
+            baseline_metrics_path
+        ):
             with open(baseline_metrics_path, "w", encoding="utf-8") as f:
                 json.dump(baseline_metrics, f, indent=4)
 
@@ -1179,6 +1172,8 @@ def model_training(args):
         eval_model = model_ema.ema if model_ema is not None else diffusion_planner
         baseline_dict = validate_model(eval_model, valid_loader, args)
         baseline_agg = aggregate_valid_metrics(baseline_dict, args.device)
+        if torch.device(args.device).type == "cuda":
+            torch.cuda.empty_cache()
         baseline_reward_metrics = validate_hdp_reward_policy(valid_loader, eval_model, args)
         baseline_valid_loss = scalar(baseline_agg["avg_loss_ego"])
         baseline_epdms_metrics = finite_scalar_metrics(baseline_agg["epdms_means"])
@@ -1191,6 +1186,7 @@ def model_training(args):
             best_valid_score = baseline_selection_score
             baseline_metrics = {
                 "epoch": 0,
+                "baseline_available": True,
                 "valid_loss_ego": baseline_valid_loss,
                 **{f"valid_epdms_{key}": value for key, value in baseline_epdms_metrics.items()},
                 **{
@@ -1239,6 +1235,15 @@ def model_training(args):
                 f"valid_reward_mean={baseline_reward_mean:.4f}"
             )
 
+    if global_rank == 0 and args.resume_model_path is None and not args.rl_validate_before_training:
+        baseline_metrics = {
+            "epoch": 0,
+            "baseline_available": False,
+            "source_checkpoint": args.init_weights_path,
+        }
+        with open(baseline_metrics_path, "w", encoding="utf-8") as f:
+            json.dump(baseline_metrics, f, indent=4)
+
     for epoch in range(init_epoch, train_epochs):
         stop_requested = False
         train_sampler.set_epoch(epoch)
@@ -1266,6 +1271,8 @@ def model_training(args):
             args.multisample_eval_num_samples = configured_multisample_count
             args.enable_epdms_eval = configured_epdms
         agg = aggregate_valid_metrics(valid_dict, args.device)
+        if run_full_eval and torch.device(args.device).type == "cuda":
+            torch.cuda.empty_cache()
         valid_reward_raw = (
             validate_hdp_reward_policy(valid_loader, eval_model, args) if run_full_eval else {}
         )
@@ -1308,9 +1315,7 @@ def model_training(args):
                 1.0 + args.rl_max_valid_loss_regression
             )
             selection_score = (
-                valid_reward_mean
-                if math.isfinite(valid_reward_mean)
-                else (valid_epdms_total if valid_epdms_total > 0.0 else -valid_loss_ego)
+                valid_reward_mean if math.isfinite(valid_reward_mean) else float("nan")
             )
             improves_best = (
                 run_full_eval

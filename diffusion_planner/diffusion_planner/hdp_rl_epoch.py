@@ -24,10 +24,22 @@ from diffusion_planner.hdp_rl_utils import (
     expand_batch,
     sample_group,
 )
+from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.masks import neighbor_future_padding_mask
 from diffusion_planner.utils.train_utils import finalize_epoch_loss_sums, update_epoch_loss_sums
+
+_RL_EVAL_MAX_CANDIDATES_PER_RANK = 1024
+
+
+def _reward_eval_scene_chunk_size(num_scenes: int, num_generations: int) -> int:
+    if num_scenes <= 0 or num_generations <= 0:
+        raise ValueError("Reward validation needs positive scene and generation counts")
+    return min(
+        num_scenes,
+        max(_RL_EVAL_MAX_CANDIDATES_PER_RANK // num_generations, 1),
+    )
 
 
 def _set_hdp_rl_train_mode(model, args):
@@ -43,7 +55,7 @@ def _set_hdp_rl_train_mode(model, args):
 def commit_ema_policy_update(model, ema, optimizer, use_ddp: bool):
     """Commit one conservative policy iteration and reset the live proposal."""
     live = ddp.get_model(model, use_ddp)
-    old_policy = ddp.get_model(ema.ema, use_ddp)
+    old_policy = ema.ema
     first_param = next(live.parameters())
     delta_sq = first_param.new_zeros((), dtype=torch.float32)
     reference_sq = first_param.new_zeros((), dtype=torch.float32)
@@ -54,8 +66,8 @@ def commit_ema_policy_update(model, ema, optimizer, use_ddp: bool):
         reference_sq.add_(old_param.detach().float().square().sum())
     proposal_relative_l2 = (delta_sq / reference_sq.clamp_min(1e-12)).sqrt()
 
-    ema.update(model)
-    accepted_policy = ddp.get_model(ema.ema, use_ddp)
+    ema.update(live)
+    accepted_policy = ema.ema
     live.load_state_dict(accepted_policy.state_dict())
     optimizer.state.clear()
     return proposal_relative_l2
@@ -247,7 +259,7 @@ def _hdp_rl_step(
             "valid_group_fraction": zero,
         }
         optimizer_steps = 0
-    if timing_events is not None:
+    if timing_events is not None and has_optimizer_update:
         timing_events[3].record()
         timing_events[3].synchronize()
 
@@ -281,7 +293,7 @@ def _hdp_rl_step(
         "optimizer_step_fraction": reward.new_tensor(float(has_optimizer_update)),
         "optimizer_steps_per_rollout": reward.new_tensor(float(optimizer_steps)),
     }
-    if timing_events is not None:
+    if timing_events is not None and has_optimizer_update:
         rollout_s = timing_events[0].elapsed_time(timing_events[1]) / 1000.0
         reward_s = timing_events[1].elapsed_time(timing_events[2]) / 1000.0
         update_s = timing_events[2].elapsed_time(timing_events[3]) / 1000.0
@@ -428,13 +440,8 @@ def validate_hdp_reward_policy(data_loader, model, args):
     n = int(args.rl_eval_num_generations)
     device = torch.device(args.device)
     eval_reward_args = copy.copy(args)
-    for name, default in (
-        ("safety", 0.0),
-        ("risk", 1.0),
-        ("follow", 3.0),
-        ("lane", 2.5),
-        ("progress", 3.0),
-    ):
+    for name in ("safety", "risk", "follow", "lane", "progress"):
+        default = TrainConfig.__dataclass_fields__[f"rl_eval_reward_w_{name}"].default
         setattr(
             eval_reward_args,
             f"rl_reward_w_{name}",
@@ -455,54 +462,63 @@ def validate_hdp_reward_policy(data_loader, model, args):
     with torch.random.fork_rng(devices=rng_devices):
         seed = int(getattr(args, "seed", 3407)) + 100_003 + ddp.get_rank()
         torch.manual_seed(seed)
-        for raw_inputs in iterator:
-            raw_inputs = {
-                key: value.to(device, non_blocking=True) for key, value in raw_inputs.items()
-            }
-            raw_inputs["ego_agent_past"] = heading_to_cos_sin(raw_inputs["ego_agent_past"])
-            raw_inputs["goal_pose"] = heading_to_cos_sin(raw_inputs["goal_pose"])
-            reward_neighbors = _neighbor_future_world(raw_inputs["neighbor_agents_future"])
-            norm_inputs = args.observation_normalizer(raw_inputs)
-            decoder_inputs = {"ego_current_state": norm_inputs["ego_current_state"]}
-            norm_exp = expand_batch(decoder_inputs, n)
-            norm_exp["route_lanes"] = norm_inputs["route_lanes"]
-            norm_exp["_global_route_repeat_interleave"] = n
-            ego_world = sample_group(
-                model,
-                norm_exp,
-                args.rl_eval_noise_scale,
-                device,
-                scene_norm_inputs=norm_inputs,
-                group_size=n,
-                use_bf16=getattr(args, "amp_dtype", "off") == "bf16",
-                sample_steps=args.diffusion_sample_steps,
-            )
-            num_scenes = raw_inputs["ego_current_state"].shape[0]
-            reward, reward_metrics = compute_hdp_reward(
-                ego_world, raw_inputs, reward_neighbors, num_scenes, n, eval_reward_args
-            )
-            finite_reward = torch.isfinite(reward)
-            safe_reward = torch.where(finite_reward, reward, torch.zeros_like(reward))
-            grouped = safe_reward.view(num_scenes, n)
-            candidate_count = reward.numel()
-            totals[0] += safe_reward.double().sum()
-            totals[1] += candidate_count
-            totals[2] += grouped.max(dim=1).values.double().sum()
-            totals[3] += num_scenes
-            totals[4] += (~finite_reward).sum()
-            current_keys = tuple(sorted(reward_metrics))
-            if metric_keys is None:
-                metric_keys = current_keys
-                metric_totals = torch.zeros(len(metric_keys), dtype=torch.float64, device=device)
-            elif current_keys != metric_keys:
-                raise RuntimeError("RL reward metric keys changed between validation batches")
-            for offset, key in enumerate(metric_keys):
-                metric = reward_metrics[key]
-                totals[5] += (~torch.isfinite(metric)).sum()
-                metric_totals[offset] += (
-                    torch.nan_to_num(metric.double(), nan=0.0, posinf=0.0, neginf=0.0)
-                    * candidate_count
+        for raw_batch in iterator:
+            batch_scenes = int(raw_batch["ego_current_state"].shape[0])
+            scene_chunk = _reward_eval_scene_chunk_size(batch_scenes, n)
+            for start in range(0, batch_scenes, scene_chunk):
+                stop = min(start + scene_chunk, batch_scenes)
+                raw_inputs = {
+                    key: value[start:stop].to(device, non_blocking=True)
+                    for key, value in raw_batch.items()
+                }
+                raw_inputs["ego_agent_past"] = heading_to_cos_sin(
+                    raw_inputs["ego_agent_past"]
                 )
+                raw_inputs["goal_pose"] = heading_to_cos_sin(raw_inputs["goal_pose"])
+                reward_neighbors = _neighbor_future_world(raw_inputs["neighbor_agents_future"])
+                norm_inputs = args.observation_normalizer(raw_inputs)
+                decoder_inputs = {"ego_current_state": norm_inputs["ego_current_state"]}
+                norm_exp = expand_batch(decoder_inputs, n)
+                norm_exp["route_lanes"] = norm_inputs["route_lanes"]
+                norm_exp["_global_route_repeat_interleave"] = n
+                ego_world = sample_group(
+                    model,
+                    norm_exp,
+                    args.rl_eval_noise_scale,
+                    device,
+                    scene_norm_inputs=norm_inputs,
+                    group_size=n,
+                    use_bf16=getattr(args, "amp_dtype", "off") == "bf16",
+                    sample_steps=args.diffusion_sample_steps,
+                )
+                num_scenes = stop - start
+                reward, reward_metrics = compute_hdp_reward(
+                    ego_world, raw_inputs, reward_neighbors, num_scenes, n, eval_reward_args
+                )
+                finite_reward = torch.isfinite(reward)
+                safe_reward = torch.where(finite_reward, reward, torch.zeros_like(reward))
+                grouped = safe_reward.view(num_scenes, n)
+                candidate_count = reward.numel()
+                totals[0] += safe_reward.double().sum()
+                totals[1] += candidate_count
+                totals[2] += grouped.max(dim=1).values.double().sum()
+                totals[3] += num_scenes
+                totals[4] += (~finite_reward).sum()
+                current_keys = tuple(sorted(reward_metrics))
+                if metric_keys is None:
+                    metric_keys = current_keys
+                    metric_totals = torch.zeros(
+                        len(metric_keys), dtype=torch.float64, device=device
+                    )
+                elif current_keys != metric_keys:
+                    raise RuntimeError("RL reward metric keys changed between validation batches")
+                for offset, key in enumerate(metric_keys):
+                    metric = reward_metrics[key]
+                    totals[5] += (~torch.isfinite(metric)).sum()
+                    metric_totals[offset] += (
+                        torch.nan_to_num(metric.double(), nan=0.0, posinf=0.0, neginf=0.0)
+                        * candidate_count
+                    )
 
     if metric_totals is None or metric_keys is None:
         raise ValueError("RL reward validation loader produced no batches")

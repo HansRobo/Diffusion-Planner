@@ -147,6 +147,7 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 unset NCCL_ASYNC_ERROR_HANDLING
 export OMP_NUM_THREADS=1
 export PYTHONWARNINGS=error
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 export REPO NNODES NPROC_PER_NODE MASTER_ADDR PORT SAVE_DIR
 export EXPECTED_TREE INPUT_FINGERPRINT PYTHON_ENV_FINGERPRINT
@@ -321,6 +322,16 @@ assert 1 <= completed_epoch <= expected_epoch
 assert not final_ckpt["optimizer"]["state"], "policy boundary kept stale optimizer moments"
 live = final_ckpt["model"]
 shadow = final_ckpt["ema_state_dict"]
+
+def bare_state(state):
+    result = {key.removeprefix("module."): value for key, value in state.items()}
+    assert len(result) == len(state), "state dict has colliding bare/DDP keys"
+    return result
+
+initial_live = bare_state(initial_live)
+initial_shadow = bare_state(initial_shadow)
+live = bare_state(live)
+shadow = bare_state(shadow)
 assert live.keys() == initial_live.keys() == initial_shadow.keys() == shadow.keys()
 
 decoder_changed = []
@@ -335,16 +346,15 @@ for key in live:
     if not torch.is_floating_point(live[key]):
         continue
     changed = not torch.equal(live[key], initial_live[key])
-    bare_key = key.removeprefix("module.")
-    if bare_key.startswith("decoder.dit.") or bare_key.startswith(
+    if key.startswith("decoder.dit.") or key.startswith(
         "decoder.global_route_encoder."
     ):
         decoder_changed.append(changed)
         ema_changed.append(not torch.equal(shadow[key], initial_shadow[key]))
         policy_sync_error.append((shadow[key].float() - live[key].float()).abs().max().item())
-    elif bare_key.startswith("encoder."):
+    elif key.startswith("encoder."):
         encoder_changed.append(changed)
-    elif bare_key.startswith("decoder.turn_indicator_predictor."):
+    elif key.startswith("decoder.turn_indicator_predictor."):
         turn_changed.append(changed)
 
 assert any(decoder_changed), "RL optimizer did not update decoder"
@@ -367,16 +377,28 @@ required = (
     "train_grad_clip_fraction",
     "train_valid_group_fraction",
     "train_optimizer_step_fraction",
-    "valid_reward_mean",
 )
 for key in required:
     value = float(rows[0][key])
     assert math.isfinite(value), (key, value)
 assert float(rows[0]["train_optimizer_step_fraction"]) > 0.0
 assert float(rows[0]["train_valid_group_fraction"]) > 0.0
+full_eval_rows = [
+    row
+    for row in rows
+    if str(row.get("valid_full_eval", "")).strip().lower() in {"1", "true", "yes"}
+    and row.get("valid_reward_mean") not in {None, ""}
+    and math.isfinite(float(row["valid_reward_mean"]))
+]
+assert full_eval_rows, "training produced no finite full-evaluation reward"
 with (save_dir / "source_baseline_metrics.json").open(encoding="utf-8") as f:
     source_metrics = json.load(f)
-assert math.isfinite(float(source_metrics["valid_reward_mean"]))
+if source_metrics.get("baseline_available", True):
+    assert math.isfinite(float(source_metrics["valid_reward_mean"]))
+else:
+    with (save_dir / "args.json").open(encoding="utf-8") as f:
+        run_args = json.load(f)
+    assert run_args["rl_validate_before_training"] is False
 
 print(
     "RL_RUN_OK",

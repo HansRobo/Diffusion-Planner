@@ -170,7 +170,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         optimizer.step()
 
         if ema is not None:
-            ema.update(model)
+            ema.update(net)
         args._wandb_global_step += 1
 
         if log_step and args._wandb_global_step % step_log == 0:

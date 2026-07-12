@@ -59,7 +59,7 @@ The intended HDP workflow is:
 
 1. Base train from scratch with HDP velocity representation and hybrid loss.
 2. SFT from the base checkpoint using `--init_weights_path`.
-3. Official HDP-RL from the SFT checkpoint using `train_grpo_predictor.py` and `--init_weights_path`.
+3. HDP-RL from the SFT checkpoint using `train_hdp_rl_predictor.py` and `--init_weights_path`.
 
 Do not start RL directly from base unless the experiment is explicitly labeled as an ablation.
 

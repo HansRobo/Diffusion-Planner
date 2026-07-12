@@ -215,6 +215,19 @@ def finalize_epoch_loss_sums(
     }
 
 
+def _load_state_dict_with_module_prefix(module, state_dict) -> None:
+    """Load equivalent bare/DDP state dicts without weakening strict key checks."""
+    target_keys = list(module.state_dict())
+    source_keys = list(state_dict)
+    target_prefixed = bool(target_keys and target_keys[0].startswith("module."))
+    source_prefixed = bool(source_keys and source_keys[0].startswith("module."))
+    if target_prefixed and not source_prefixed:
+        state_dict = {f"module.{key}": value for key, value in state_dict.items()}
+    elif source_prefixed and not target_prefixed:
+        state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
+    module.load_state_dict(state_dict)
+
+
 def resume_model(
     path: str,
     model,
@@ -226,14 +239,16 @@ def resume_model(
     strict_training_state: bool = False,
 ):
     """Restore a checkpoint, optionally requiring every training-state component."""
-    ckpt = torch.load(path, map_location=device, weights_only=True)
+    # Loading on CPU avoids transient model + optimizer + EMA double residency on every GPU.
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
 
     if strict_training_state and (not isinstance(ckpt, dict) or "model" not in ckpt):
         raise RuntimeError(f"Strict resume checkpoint has no model state: {path}")
     try:
-        model.load_state_dict(ckpt["model"])
+        model_state = ckpt["model"]
     except (KeyError, TypeError):
-        model.load_state_dict(ckpt)
+        model_state = ckpt
+    _load_state_dict_with_module_prefix(model, model_state)
     print("Model load done")
 
     optimizer_state = ckpt.get("optimizer") if isinstance(ckpt, dict) else None
@@ -282,7 +297,7 @@ def resume_model(
     if ema is not None:
         ema_state = ckpt.get("ema_state_dict") if isinstance(ckpt, dict) else None
         if ema_state is not None:
-            ema.ema.load_state_dict(ema_state)
+            _load_state_dict_with_module_prefix(ema.ema, ema_state)
             ema.ema.eval()
             for parameter in ema.ema.parameters():
                 parameter.requires_grad_(False)
@@ -291,7 +306,7 @@ def resume_model(
         elif strict_training_state:
             raise RuntimeError(f"Strict resume checkpoint has no EMA state: {path}")
         else:
-            ema.ema.load_state_dict(model.state_dict())
+            _load_state_dict_with_module_prefix(ema.ema, model.state_dict())
             ema.ema.eval()
             for parameter in ema.ema.parameters():
                 parameter.requires_grad_(False)

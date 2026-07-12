@@ -309,16 +309,20 @@ def assert_checkpoint_compatible(
             "rl_noise_scale",
             "rl_eval_noise_scale",
             "rl_eval_num_generations",
+            "rl_eval_reward_w_safety",
             "rl_eval_reward_w_risk",
             "rl_eval_reward_w_follow",
             "rl_eval_reward_w_lane",
             "rl_eval_reward_w_progress",
+            "rl_full_eval_utd",
             "rl_rollout_steps",
             "rl_updates_per_rollout",
+            "rl_reward_w_safety",
             "rl_reward_w_risk",
             "rl_reward_w_follow",
             "rl_reward_w_lane",
             "rl_reward_w_progress",
+            "advantage_eps",
             "rl_bc_weight",
             "rl_ema_update_rate",
             "rl_validate_before_training",
@@ -727,7 +731,7 @@ def model_training(args: TrainConfig):
 
     model_ema = (
         ModelEma(
-            diffusion_planner,
+            ddp.get_model(diffusion_planner, args.ddp),
             decay=0.999,
             device=args.device,
         )

@@ -549,11 +549,6 @@ class Decoder(nn.Module):
                 global_route_condition = global_route_condition.repeat_interleave(
                     repeat_interleave, dim=0
                 )
-        elif global_route_condition.shape != (encoding.shape[0], encoding.shape[-1]):
-            raise ValueError(
-                "Cached global route condition must match [batch, hidden_dim], got "
-                f"{tuple(global_route_condition.shape)} for encoding {tuple(encoding.shape)}"
-            )
         if global_route_condition.shape != (encoding.shape[0], encoding.shape[-1]):
             raise ValueError(
                 "Global route condition must match [batch, hidden_dim], got "

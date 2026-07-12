@@ -34,6 +34,7 @@ from planner_metrics.subscores import (
 )
 
 _RL_REWARD_CONFIG = RewardConfig()
+_RL_GEOMETRY_PAIR_STEP_BUDGET = 12_000_000
 
 
 @dataclass(frozen=True)
@@ -461,8 +462,18 @@ def _collision_and_leader_terms(
     selected_leader_speed = torch.where(leader_present, selected_leader_speed, ego_speed)
 
     thw = leader_gap / ego_speed.clamp_min(0.1)
-    thw_score = _linear_safe_score(thw, config.thw_critical_s, config.thw_safe_s)
-    thw_score = torch.where(leader_present & (ego_speed > 0.1), thw_score, 1.0)
+    time_headway_score = _linear_safe_score(thw, config.thw_critical_s, config.thw_safe_s)
+    # THW is undefined at zero speed. Retain a continuous near-contact signal by
+    # falling back to the forward bumper gap, and use the conservative score at
+    # nonzero speed as well so stop-and-go leaders cannot look perfectly safe.
+    safe_gap = config.occupancy_safe_m + config.occupancy_speed_gain_s * ego_speed
+    distance_headway_score = _linear_safe_score(
+        leader_gap,
+        config.occupancy_critical_m,
+        safe_gap,
+    )
+    thw_score = torch.minimum(time_headway_score, distance_headway_score)
+    thw_score = torch.where(leader_present, thw_score, 1.0)
 
     # The four published following aspects. Numerical shaping constants are explicit local
     # assumptions because the paper/release does not provide them.
@@ -928,7 +939,18 @@ def compute_hdp_reward(
             leader_reference=expert_future,
         )
 
-    scene_term_tensors = torch.vmap(collision_terms_for_scene)(
+    pair_steps_per_scene = max(
+        ego_group.shape[1] * packed_neighbors[0].shape[1] * ego_group.shape[2],
+        1,
+    )
+    scene_chunk_size = max(
+        min(_RL_GEOMETRY_PAIR_STEP_BUDGET // pair_steps_per_scene, num_scenes),
+        1,
+    )
+    scene_term_tensors = torch.vmap(
+        collision_terms_for_scene,
+        chunk_size=scene_chunk_size,
+    )(
         ego_group,
         scene_inputs["ego_shape"][:, :3],
         *packed_neighbors,
@@ -1031,7 +1053,7 @@ def compute_hdp_reward(
         metric_lists["lane"].append(lane)
         metric_lists["progress"].append(progress_reward)
         metric_lists["progress_raw"].append(progress_score)
-        metric_lists["progress_ratio"].append(progress_ratio.clamp_max(2.0))
+        metric_lists["progress_ratio"].append(progress_ratio.clamp(-1.0, 2.0))
         metric_lists["underprogress_fraction"].append((progress_ratio < 0.8).to(risk.dtype))
         metric_lists["overprogress_fraction"].append((progress_ratio > 1.2).to(risk.dtype))
         metric_lists["ttc"].append(ttc_min)

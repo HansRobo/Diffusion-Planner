@@ -8,6 +8,8 @@ from pathlib import Path
 import pandas as pd
 import wandb
 
+from scenario_generation.artifact_names import artifact_component
+
 RESULTS_TABLE_COLUMNS = [
     "metric_group",
     "area_name",
@@ -45,13 +47,14 @@ def build_grouped_closed_loop_wandb_log(summary: dict, *, max_videos: int = 24) 
 
     agg = summary.get("grouped_summary") or {}
     for group, stats in (agg.get("by_metric_group") or {}).items():
+        safe_group = artifact_component(group)
         for key, val in stats.items():
             if not _wandb_scalar(val):
                 continue
-            log[f"closed_loop/grouped/metric_group/{group}/{key}"] = val
+            log[f"closed_loop/grouped/metric_group/{safe_group}/{key}"] = val
 
     for area, stats in (agg.get("by_area_name") or {}).items():
-        safe_area = area.replace("/", "_")
+        safe_area = artifact_component(area)
         for key, val in stats.items():
             if not _wandb_scalar(val):
                 continue

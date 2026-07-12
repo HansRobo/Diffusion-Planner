@@ -1,24 +1,13 @@
 import argparse
+from functools import partial
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.train import model_training
 from diffusion_planner.train_config import TrainConfig
+from diffusion_planner.utils.cli import boolean, dataclass_default
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
-
-def boolean(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0"):
-        return False
-    else:
-        raise argparse.ArgumentTypeError("Boolean value expected.")
-
-
-def _train_config_default(name):
-    return TrainConfig.__dataclass_fields__[name].default
+_train_config_default = partial(dataclass_default, TrainConfig)
 
 
 def get_args(args_list=None):

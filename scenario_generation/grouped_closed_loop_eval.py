@@ -11,6 +11,7 @@ from pathlib import Path
 
 import torch
 
+from scenario_generation.artifact_names import artifact_component
 from scenario_generation.metrics.cl_route_by_area import (
     RouteRolloutResult,
     aggregate_area_metrics,
@@ -107,7 +108,7 @@ def run_grouped_closed_loop_eval(
         episodes = episodes_from_entry(entry)
         episodes_by_bag[bag_name] = episodes
         tl = RouteTimeline(paths, sidecar_dir=npz_root)
-        png_dir = out_dir / "rollouts" / bag_name
+        png_dir = out_dir / "rollouts" / artifact_component(bag_name)
         if verbose:
             print(
                 f"Full-route rollout: {bag_name} ({route_key}), "
@@ -178,10 +179,17 @@ def run_grouped_closed_loop_eval(
             if row is None:
                 continue
 
-            video_root = out_dir / "videos" / metric_group / area_name
+            video_root = (
+                out_dir
+                / "videos"
+                / artifact_component(metric_group)
+                / artifact_component(area_name)
+            )
             video_root.mkdir(parents=True, exist_ok=True)
             seg_tag = row["segment"].strip("[]").replace(",", "_").replace(" ", "")
-            mp4 = video_root / f"{bag_name}_{span_index}_{seg_tag}.mp4"
+            mp4 = video_root / (
+                f"{artifact_component(bag_name)}_{span_index}_{artifact_component(seg_tag)}.mp4"
+            )
             if build_area_video(
                 rollout,
                 mp4,
@@ -204,7 +212,9 @@ def run_grouped_closed_loop_eval(
         area_rows = [r for r in all_rows if r["area_name"] == area_name]
         write_metrics_summary(
             aggregate_segment_rows(area_rows),
-            out_dir / "by_area" / f"{area_name}_metrics_summary.json",
+            out_dir
+            / "by_area"
+            / f"{artifact_component(area_name)}_metrics_summary.json",
         )
 
     write_results_table(all_rows, out_dir / "results_table.csv")

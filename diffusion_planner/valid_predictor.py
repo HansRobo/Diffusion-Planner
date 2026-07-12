@@ -1,6 +1,7 @@
 import argparse
 import copy
 import json
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,7 @@ from diffusion_planner.hdp_rl_epoch import validate_hdp_reward_policy
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import load_weights_only
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.cli import boolean, dataclass_default
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DistributedEvalSampler
 from diffusion_planner.utils.path_key import data_path_to_rel
@@ -19,20 +21,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-
-def boolean(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0"):
-        return False
-    else:
-        raise argparse.ArgumentTypeError("Boolean value expected.")
-
-
-def _valid_config_default(name):
-    return ValidConfig.__dataclass_fields__[name].default
+_valid_config_default = partial(dataclass_default, ValidConfig)
 
 
 def get_args(args_list=None):
