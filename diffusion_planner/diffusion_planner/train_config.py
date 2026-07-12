@@ -128,9 +128,12 @@ class TrainConfig:
 
     # HDP RL objective. The branch intentionally keeps only the official-style
     # reward-weighted RL-Hybrid path.
+    num_generations: int = 8
     rl_reward_normalize: Literal["group", "batch", "none"] = "group"
     rl_reward_beta: float = 0.5
-    rl_noise_scale: float = 0.5
+    # Real Tier IV sweeps found that 1.5 supplies useful group diversity with G=8 while the
+    # held-out/deployment comparison remains fixed at the public-policy temperature 0.5.
+    rl_noise_scale: float = 1.5
     # Keep policy selection on one fixed distribution while rollout temperature is swept.
     # The public HDP NAVSIM policy samples with temperature 0.5 by default.
     rl_eval_noise_scale: float = 0.5
@@ -158,9 +161,9 @@ class TrainConfig:
     # Anti-stopping reward, measured as signed endpoint progress relative to the logged expert.
     # Kept independently tunable because the paper reward omits explicit progress.
     rl_reward_w_progress: float = 3.0
-    # One expert target per scene costs only 1 / group_size of the candidate update and prevents
-    # safety reward optimization from erasing the SFT driving behavior.
-    rl_bc_weight: float = 1.0
+    # The EMA policy boundary already limits drift. Real-data and recovery-set ablations found
+    # that an additional expert anchor slows reward learning without improving robustness.
+    rl_bc_weight: float = 0.0
     # Commit the live proposal into the frozen rollout policy once per policy iteration.
     rl_ema_update_rate: float = 0.05
     # The paper does not publish the numerical speed-adaptive shaping functions.

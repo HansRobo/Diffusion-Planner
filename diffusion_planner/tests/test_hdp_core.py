@@ -80,6 +80,17 @@ from diffusion_planner.utils.train_utils import (
 from diffusion_planner.validate_model import _multisample_metrics, aggregate_valid_metrics
 
 
+def test_tuned_hdp_rl_defaults_are_consistent():
+    fields = TrainConfig.__dataclass_fields__
+
+    assert fields["num_generations"].default == 8
+    assert fields["rl_noise_scale"].default == 1.5
+    assert fields["rl_updates_per_rollout"].default == 4
+    assert fields["rl_bc_weight"].default == 0.0
+    assert fields["rl_reward_beta"].default == 0.5
+    assert fields["rl_rollout_steps"].default == 6
+
+
 def test_hdp_representation_and_normalization_round_trip():
     torch.manual_seed(7)
     xy = torch.randn(3, 80, 2).cumsum(dim=-2)

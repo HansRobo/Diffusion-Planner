@@ -321,8 +321,8 @@ def get_args():
     parser.add_argument(
         "--num_generations",
         type=int,
-        default=32,
-        help="N: trajectories sampled per scene (the paper reports 32)",
+        default=_train_config_default("num_generations"),
+        help="training trajectories per scene; Tier IV sweeps favor 8 (paper reports 32)",
     )
     parser.add_argument(
         "--rl_noise_scale",

@@ -120,9 +120,9 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_h
   --rl_reward_w_follow 3.0 \
   --rl_reward_w_lane 2.5 \
   --rl_reward_w_progress 3.0 \
-  --rl_bc_weight 1.0 \
-  --num_generations 32 \
-  --rl_noise_scale 0.5 \
+  --rl_bc_weight 0.0 \
+  --num_generations 8 \
+  --rl_noise_scale 1.5 \
   --rl_eval_noise_scale 0.5 \
   --rl_eval_num_generations 32 \
   --rl_rollout_steps 6 \
@@ -134,7 +134,7 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_h
   --planning_hybrid_loss 0.01 \
   --hybrid_loss_window 10 \
   --diffusion_sample_steps 6 \
-  --multisample_eval_num_samples 6 \
+  --multisample_eval_num_samples 0 \
   --multisample_eval_sample_steps 6 \
   --rl_full_eval_utd 5 \
   --enable_epdms_eval True \
@@ -149,7 +149,8 @@ Important semantics:
 
 - `--rl_noise_scale` and `--num_generations` control training exploration. Their `--rl_eval_*`
   counterparts stay fixed at the public-policy temperature and paper group size so held-out
-  reward remains comparable across sweeps.
+  reward remains comparable across sweeps. The training defaults are the strongest measured
+  Tier IV setting (`G=8`, noise `1.5`), not an assertion that the paper used those values.
 
 - `--compile_model True` compiles the encoder and decoder in place. Checkpoint keys and ONNX
   export remain unchanged. Set `TORCHINDUCTOR_CACHE_DIR` to persistent local storage so restarts

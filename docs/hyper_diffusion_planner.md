@@ -137,9 +137,9 @@ rl_reward_w_risk=1.0
 rl_reward_w_follow=3.0
 rl_reward_w_lane=2.5
 rl_reward_w_progress=3.0
-rl_bc_weight=1.0
-num_generations=32
-rl_noise_scale=0.5
+rl_bc_weight=0.0
+num_generations=8
+rl_noise_scale=1.5
 rl_eval_noise_scale=0.5
 rl_eval_num_generations=32
 rl_eval_reward_w_risk=1.0
@@ -153,10 +153,10 @@ rl_init_use_ema=true
 rl_train_scope=decoder
 ```
 
-The paper EMA update `0.05` is used at policy-iteration boundaries. The lower `beta`, explicit
-progress term, and one-target-per-scene BC anchor are performance-oriented safeguards from real
-Tier IV data audits; the unanchored configuration caused rapid progress and validation collapse.
-The rollout noise and group size are exploration/efficiency knobs, while held-out reward always
+The paper EMA update `0.05` is used at policy-iteration boundaries. The lower `beta` and explicit
+progress term are performance-oriented Tier IV adaptations. Real-data and recovery-set ablations
+favored the unanchored objective (`BC=0`); the EMA policy commit remains the drift constraint.
+The rollout noise and group size are measured exploration/efficiency choices, while held-out reward always
 uses the public HDP policy's default `0.5` sampling temperature and the paper's 32 candidates so
 all sweeps share one selection distribution. Held-out sampling also uses
 `diffusion_sample_steps`, independently of the training-only `rl_rollout_steps` knob.
@@ -165,7 +165,7 @@ Implementation notes:
 
 - Zero-variance and non-finite reward groups are discarded; they do not become unweighted self-distillation samples.
 - Reward scoring uses raw scene tensors before group expansion; only rollout/loss tensors are expanded to `B * num_generations`.
-- Logged futures for all 320 neighbors stay scene-level and are not duplicated across the 32 candidates.
+- Logged futures for all 320 neighbors stay scene-level and are not duplicated across candidates.
 - Distributed training pads the shuffled index stream to a complete global batch instead of
   dropping the tail or compiling a second shape. Every source sample is used at least once and at
   most `global_batch_size - 1` randomly shuffled samples are repeated per epoch. Compiled H100
