@@ -1,5 +1,5 @@
 import numpy as np
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset, DistributedSampler, Sampler
 
 from diffusion_planner.dimensions import (
     TRAFFIC_LIGHT,
@@ -131,3 +131,40 @@ class DistributedEvalSampler(Sampler[int]):
     def __len__(self):
         remaining = len(self.dataset) - self.rank
         return max(0, (remaining + self.num_replicas - 1) // self.num_replicas)
+
+
+class BatchAlignedDistributedSampler(DistributedSampler):
+    """Pad a shuffled distributed epoch to complete global batches.
+
+    ``DistributedSampler`` only aligns the number of samples across ranks. If that
+    per-rank count is not divisible by the local batch size, ``drop_last=True``
+    silently discards samples and ``drop_last=False`` creates a second compiled
+    shape. This sampler adds the minimum shuffled-prefix padding needed for every
+    rank to receive complete local batches. Every source index is therefore used
+    at least once, while at most one global batch minus one is repeated.
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        num_replicas: int,
+        rank: int,
+        local_batch_size: int,
+        shuffle: bool = True,
+        seed: int = 0,
+    ):
+        if local_batch_size <= 0:
+            raise ValueError("local_batch_size must be positive")
+        super().__init__(
+            dataset,
+            num_replicas=num_replicas,
+            rank=rank,
+            shuffle=shuffle,
+            seed=seed,
+            drop_last=False,
+        )
+        global_batch_size = num_replicas * local_batch_size
+        global_batches = (len(dataset) + global_batch_size - 1) // global_batch_size
+        self.num_samples = global_batches * local_batch_size
+        self.total_size = self.num_samples * num_replicas
+        self.padding_size = self.total_size - len(dataset)

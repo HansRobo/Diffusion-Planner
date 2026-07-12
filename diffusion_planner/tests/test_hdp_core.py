@@ -46,6 +46,7 @@ from diffusion_planner.train_epoch import prepare_neighbor_supervision
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.dataset import (
+    BatchAlignedDistributedSampler,
     DiffusionPlannerData,
     DistributedEvalSampler,
     align_legacy_neighbor_futures_on_load,
@@ -568,6 +569,35 @@ def test_distributed_eval_sampler_has_no_duplicates_or_padding():
     flattened = [index for shard in shards for index in shard]
     assert sorted(flattened) == list(range(10))
     assert len(flattened) == len(set(flattened))
+
+
+def test_batch_aligned_distributed_sampler_uses_all_data_with_minimal_padding():
+    samplers = [
+        BatchAlignedDistributedSampler(
+            range(10), num_replicas=3, rank=rank, local_batch_size=2, seed=17
+        )
+        for rank in range(3)
+    ]
+    shards = [list(sampler) for sampler in samplers]
+    flattened = [index for shard in shards for index in shard]
+
+    assert all(len(shard) == 4 and len(shard) % 2 == 0 for shard in shards)
+    assert set(flattened) == set(range(10))
+    assert len(flattened) == 12
+    assert all(sampler.padding_size == 2 for sampler in samplers)
+
+
+def test_batch_aligned_distributed_sampler_reshuffles_padding_each_epoch():
+    sampler = BatchAlignedDistributedSampler(
+        range(10), num_replicas=1, rank=0, local_batch_size=4, seed=17
+    )
+    epoch_zero = list(sampler)
+    sampler.set_epoch(1)
+    epoch_one = list(sampler)
+
+    assert epoch_zero != epoch_one
+    assert set(epoch_zero) == set(epoch_one) == set(range(10))
+    assert len(epoch_zero) == len(epoch_one) == 12
 
 
 def test_augmentation_transforms_goal_pose_with_the_scene():

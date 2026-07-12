@@ -27,7 +27,11 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
-from diffusion_planner.utils.dataset import DiffusionPlannerData, DistributedEvalSampler
+from diffusion_planner.utils.dataset import (
+    BatchAlignedDistributedSampler,
+    DiffusionPlannerData,
+    DistributedEvalSampler,
+)
 from diffusion_planner.utils.lr_schedule import LinearWarmupConstantLR
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
@@ -41,7 +45,7 @@ from diffusion_planner.utils.train_utils import (
 )
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from valid_predictor import aggregate_valid_metrics, validate_model
 
 
@@ -818,24 +822,27 @@ def model_training(args):
     if len(valid_set) < world_size:
         raise ValueError("Validation set must contain at least one sample per DDP rank")
 
-    train_sampler = DistributedSampler(
-        train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
+    local_batch_size = batch_size // world_size
+    train_sampler = BatchAlignedDistributedSampler(
+        train_set,
+        num_replicas=ddp.get_world_size(),
+        rank=global_rank,
+        local_batch_size=local_batch_size,
+        shuffle=True,
+        seed=args.seed,
     )
     train_loader = DataLoader(
         train_set,
         sampler=train_sampler,
-        batch_size=batch_size // world_size,
+        batch_size=local_batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
-        drop_last=True,
+        drop_last=False,
         persistent_workers=args.num_workers > 0,
         prefetch_factor=4 if args.num_workers > 0 else None,
     )
     if len(train_loader) == 0:
-        raise ValueError(
-            "Training loader has zero batches; dataset after subsampling must contain at least "
-            f"one global batch ({batch_size} scenes) when drop_last=True"
-        )
+        raise ValueError("Training loader has zero batches")
 
     # Validation is sharded without duplicate padding and the per-rank
     # metrics are all-reduced via aggregate_valid_metrics.
@@ -854,6 +861,11 @@ def model_training(args):
     )
     if global_rank == 0:
         print("Dataset Prepared: {} train data\n".format(len(train_set)))
+        print(
+            "Batch-aligned sampling: "
+            f"{train_sampler.total_size} samples/epoch "
+            f"({train_sampler.padding_size} shuffled repeats for fixed batch shapes)"
+        )
 
     if args.ddp:
         torch.distributed.barrier()
