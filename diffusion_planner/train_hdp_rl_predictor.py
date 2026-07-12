@@ -643,6 +643,8 @@ def get_args():
     args = parser.parse_args()
     if args.resume_model_path is not None and args.init_weights_path is not None:
         raise ValueError("--resume_model_path and --init_weights_path are mutually exclusive")
+    if args.resume_model_path is None and args.init_weights_path is None:
+        raise ValueError("HDP-RL requires --init_weights_path or --resume_model_path")
     if args.train_subsample_step < 1:
         raise ValueError("--train_subsample_step must be >= 1")
     if args.extra_train_set_repeat < 0:
@@ -873,14 +875,6 @@ def model_training(args):
         print("Fused optimizer: {}".format(args.fused_optimizer))
         print("DDP static graph: {}".format(args.ddp_static_graph))
         print("TorchInductor model compile: {}".format(args.compile_model))
-        if not args.use_ema:
-            print(
-                "WARNING: --use_ema false removes the stable previous-policy rollout used by "
-                "the HDP RL update. This mode is intended only as an ablation."
-            )
-        if args.resume_model_path is None and args.init_weights_path is None:
-            print("WARNING: RL is starting without an imitation-pretrained checkpoint")
-
         save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
 
@@ -1028,16 +1022,12 @@ def model_training(args):
             json.dump(args_dict, f, indent=4)
     scheduler = LinearWarmupConstantLR(optimizer, train_epochs, args.warm_up_epoch)
 
+    model_ema = ModelEma(
+        ddp.get_model(diffusion_planner, args.ddp),
+        decay=1.0 - args.rl_ema_update_rate,
+        device=args.device,
+    )
     if args.resume_model_path is not None:
-        model_ema = (
-            ModelEma(
-                ddp.get_model(diffusion_planner, args.ddp),
-                decay=1.0 - args.rl_ema_update_rate,
-                device=args.device,
-            )
-            if args.use_ema
-            else None
-        )
         print(f"Model loaded from {args.resume_model_path}")
         diffusion_planner, optimizer, scheduler, init_epoch, wandb_id, model_ema = resume_model(
             args.resume_model_path,
@@ -1052,34 +1042,13 @@ def model_training(args):
             f"Strict resume at epoch {init_epoch} with optimizer LR "
             f"{optimizer.param_groups[0]['lr']}"
         )
-    elif args.init_weights_path is not None:
+    else:
         print(f"Initializing RL weights from {args.init_weights_path}")
         load_weights_only(
             args.init_weights_path,
             diffusion_planner,
             args.device,
             prefer_ema=args.rl_init_use_ema,
-        )
-        model_ema = (
-            ModelEma(
-                ddp.get_model(diffusion_planner, args.ddp),
-                decay=1.0 - args.rl_ema_update_rate,
-                device=args.device,
-            )
-            if args.use_ema
-            else None
-        )
-        init_epoch = 0
-        wandb_id = None
-    else:
-        model_ema = (
-            ModelEma(
-                ddp.get_model(diffusion_planner, args.ddp),
-                decay=1.0 - args.rl_ema_update_rate,
-                device=args.device,
-            )
-            if args.use_ema
-            else None
         )
         init_epoch = 0
         wandb_id = None
