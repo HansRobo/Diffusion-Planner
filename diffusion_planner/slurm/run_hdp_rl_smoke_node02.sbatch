@@ -21,6 +21,8 @@ NUM_GENERATIONS=${HDP_RL_NUM_GENERATIONS:-32}
 BATCH_SIZE=${HDP_RL_BATCH_SIZE:-${NPROC}}
 COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-False}
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
+USE_WANDB=${HDP_RL_USE_WANDB:-False}
+WANDB_PROJECT=${HDP_RL_WANDB_PROJECT:-hdp-rl}
 RUN_NAME=${HDP_RL_RUN_NAME:-rl_smoke_${NPROC}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 PORT=$((24000 + SLURM_JOB_ID % 10000))
@@ -94,8 +96,8 @@ cd "${REPO}/diffusion_planner"
   --fused_optimizer True \
   --ddp_static_graph True \
   --compile_model "${COMPILE_MODEL}" \
-  --use_wandb False \
-  --wandb_project_name hdp-rl \
+  --use_wandb "${USE_WANDB}" \
+  --wandb_project_name "${WANDB_PROJECT}" \
   --wandb_step_log_interval 0 \
   --export_onnx_on_save False \
   --port "${PORT}" \
