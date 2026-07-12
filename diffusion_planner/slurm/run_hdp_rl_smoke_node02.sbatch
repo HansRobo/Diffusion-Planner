@@ -154,6 +154,10 @@ decoder_changed = []
 encoder_changed = []
 turn_changed = []
 ema_relation_error = []
+ema_changed = []
+source_global_step = int(source.get("global_step", 0)) if mode == "resume" else 0
+optimizer_steps = int(final_ckpt.get("global_step", 0)) - source_global_step
+assert optimizer_steps >= 1
 for key in live:
     if not torch.is_floating_point(live[key]):
         continue
@@ -163,7 +167,8 @@ for key in live:
         "decoder.global_route_encoder."
     ):
         decoder_changed.append(changed)
-        if changed:
+        ema_changed.append(not torch.equal(shadow[key], initial_shadow[key]))
+        if changed and optimizer_steps == 1:
             expected = initial_shadow[key].float().mul(0.95).add(live[key].float(), alpha=0.05)
             ema_relation_error.append((shadow[key].float() - expected).abs().max().item())
     elif bare_key.startswith("encoder."):
@@ -172,12 +177,14 @@ for key in live:
         turn_changed.append(changed)
 
 assert any(decoder_changed), "RL optimizer did not update decoder"
+assert any(ema_changed), "RL optimizer did not update EMA"
 assert not any(turn_changed), "frozen turn head changed"
 if scope == "decoder":
     assert not any(encoder_changed), "decoder-only RL changed encoder"
 else:
     assert any(encoder_changed), "all-scope RL did not update encoder"
-assert ema_relation_error and max(ema_relation_error) < 2e-5, max(ema_relation_error, default=None)
+if optimizer_steps == 1:
+    assert ema_relation_error and max(ema_relation_error) < 2e-5, max(ema_relation_error)
 
 with (save_dir / "train_log.tsv").open(newline="", encoding="utf-8") as f:
     rows = list(csv.DictReader(f, delimiter="\t"))
@@ -198,9 +205,11 @@ assert float(rows[0]["train_valid_group_fraction"]) > 0.0
 
 print(
     "RL_SMOKE_OK",
+    f"optimizer_steps={optimizer_steps}",
     f"decoder_tensors_changed={sum(decoder_changed)}",
     f"encoder_tensors_changed={sum(encoder_changed)}",
-    f"max_ema_relation_error={max(ema_relation_error):.3e}",
+    f"max_ema_relation_error="
+    f"{max(ema_relation_error):.3e}" if ema_relation_error else "multi_step_checked",
 )
 PY
 
