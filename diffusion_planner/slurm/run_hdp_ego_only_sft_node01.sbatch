@@ -111,7 +111,9 @@ if weights_path.stat().st_size < 100_000_000:
 checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
 if checkpoint.get("epoch") != 20:
     raise RuntimeError(f"Base latest.pth is epoch {checkpoint.get('epoch')!r}, expected epoch 20")
-print("verified Base latest.pth from epoch 20")
+if checkpoint.get("ema_state_dict") is None:
+    raise RuntimeError("Base epoch-20 latest.pth has no EMA policy for SFT initialization")
+print("verified Base epoch-20 latest.pth EMA policy")
 PY
 
 export HOME=/home/ubuntu
@@ -243,7 +245,7 @@ while (( attempt <= MAX_ATTEMPTS )); do
     log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: strict resume from latest.pth"
   else
     START_ARGS=(--wandb_run_id "${WANDB_RUN_ID}")
-    log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: initialize from final Base best with W&B ${WANDB_RUN_ID}"
+    log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: initialize from Base epoch-20 latest EMA with W&B ${WANDB_RUN_ID}"
   fi
 
   set +e
