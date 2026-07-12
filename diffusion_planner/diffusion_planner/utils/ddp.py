@@ -138,12 +138,21 @@ def all_reduce_min(value, device):
 
 
 def reduce_and_average_losses(loss_dict, device):
-    torch.distributed.barrier()
+    if not loss_dict:
+        return loss_dict
     world_size = dist.get_world_size()
-    for key in loss_dict.keys():
+    keys = list(loss_dict)
+    values = []
+    for key in keys:
         value = loss_dict[key]
-        scalar = value.item() if torch.is_tensor(value) else float(value)
-        loss_tensor = torch.tensor([scalar], dtype=torch.float64, device=device)
-        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-        loss_dict[key] = loss_tensor.item() / world_size
+        if torch.is_tensor(value):
+            if value.numel() != 1:
+                raise ValueError(f"Distributed metric {key!r} must be scalar, got {value.shape}")
+            values.append(value.detach().to(device=device, dtype=torch.float64).reshape(()))
+        else:
+            values.append(torch.tensor(float(value), dtype=torch.float64, device=device))
+    packed = torch.stack(values)
+    dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+    averaged = (packed / world_size).cpu().tolist()
+    loss_dict.update(zip(keys, averaged, strict=True))
     return loss_dict
