@@ -325,7 +325,6 @@ def assert_checkpoint_compatible(
             "rl_occupancy_speed_gain_s",
             "rl_lane_half_width_m",
             "rl_leader_lateral_margin_m",
-            "compile_reward_kernels",
         )
         missing_training_fields = [
             field for field in training_fields if hasattr(args, field) and field not in ckpt_args

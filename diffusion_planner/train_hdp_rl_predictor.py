@@ -580,15 +580,6 @@ def get_args():
         default=_train_config_default("compile_model"),
         help="compile the encoder and decoder with TorchInductor",
     )
-    parser.add_argument(
-        "--compile_reward_kernels",
-        type=boolean,
-        default=False,
-        help=(
-            "compile variable-shape reward geometry kernels; experimental because changing "
-            "neighbor counts can trigger expensive recompilation"
-        ),
-    )
     parser.add_argument("--port", default="22323", type=str)
     parser.add_argument(
         "--amp_dtype",
@@ -853,7 +844,6 @@ def model_training(args):
         print("Fused optimizer: {}".format(args.fused_optimizer))
         print("DDP static graph: {}".format(args.ddp_static_graph))
         print("TorchInductor model compile: {}".format(args.compile_model))
-        print("TorchInductor reward-kernel compile: {}".format(args.compile_reward_kernels))
         if not args.use_ema:
             print(
                 "WARNING: --use_ema false removes the stable previous-policy rollout used by "

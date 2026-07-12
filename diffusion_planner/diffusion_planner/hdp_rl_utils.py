@@ -36,8 +36,6 @@ from planner_metrics.subscores import (
 )
 
 _RL_REWARD_CONFIG = RewardConfig()
-_COMPILED_COLLISION_AND_LEADER_TERMS = None
-_COMPILED_POINT_TO_SEGMENTS_DIST = None
 
 
 @dataclass(frozen=True)
@@ -314,20 +312,6 @@ def _collision_and_leader_terms(
     }
 
 
-def _run_collision_and_leader_terms(*args, compile_kernel: bool):
-    if not compile_kernel or args[0].device.type != "cuda":
-        return _collision_and_leader_terms(*args)
-    global _COMPILED_COLLISION_AND_LEADER_TERMS
-    if _COMPILED_COLLISION_AND_LEADER_TERMS is None:
-        _COMPILED_COLLISION_AND_LEADER_TERMS = torch.compile(
-            _collision_and_leader_terms,
-            mode="default",
-            dynamic=True,
-            fullgraph=True,
-        )
-    return _COMPILED_COLLISION_AND_LEADER_TERMS(*args)
-
-
 def _occupancy_score(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
@@ -444,31 +428,9 @@ def _occupancy_score(
     return torch.ones(C, T, device=device), sources
 
 
-def _run_point_to_segments_dist(
-    points: torch.Tensor,
-    seg_start: torch.Tensor,
-    seg_end: torch.Tensor,
-    *,
-    compile_kernel: bool,
-) -> torch.Tensor:
-    if not compile_kernel or points.device.type != "cuda":
-        return _point_to_segments_dist(points, seg_start, seg_end)
-    global _COMPILED_POINT_TO_SEGMENTS_DIST
-    if _COMPILED_POINT_TO_SEGMENTS_DIST is None:
-        _COMPILED_POINT_TO_SEGMENTS_DIST = torch.compile(
-            _point_to_segments_dist,
-            mode="default",
-            dynamic=True,
-            fullgraph=True,
-        )
-    return _COMPILED_POINT_TO_SEGMENTS_DIST(points, seg_start, seg_end)
-
-
 def _nearest_lane_distance(
     points: torch.Tensor,
     lanes: torch.Tensor,
-    *,
-    compile_kernel: bool = False,
 ) -> torch.Tensor:
     center = lanes[..., :2]
     valid = center.abs().sum(dim=-1) > 1e-6
@@ -480,11 +442,10 @@ def _nearest_lane_distance(
     chunk_size = max(1, max_distance_elements // seg_start.shape[0])
     chunks = []
     for start in range(0, flat_points.shape[0], chunk_size):
-        distance = _run_point_to_segments_dist(
+        distance = _point_to_segments_dist(
             flat_points[start : start + chunk_size],
             seg_start,
             seg_end,
-            compile_kernel=compile_kernel,
         )
         chunks.append(distance.masked_fill(~valid_pair[None], float("inf")).amin(dim=-1))
     distance = torch.cat(chunks)
@@ -497,7 +458,6 @@ def _lane_reward_centerlines(
     route_lanes: torch.Tensor | None,
     config: HDPRewardConfig,
     *,
-    compile_kernel: bool = False,
     route_aligned: bool | None = None,
 ) -> tuple[torch.Tensor, bool]:
     """Prefer the navigation route when it agrees with the logged expert trajectory."""
@@ -505,7 +465,7 @@ def _lane_reward_centerlines(
         return lanes, False
     if route_aligned is None:
         route_aligned = bool(
-            _route_alignment(expert_future, route_lanes, config, compile_kernel=compile_kernel).item()
+            _route_alignment(expert_future, route_lanes, config).item()
         )
     return (route_lanes, True) if route_aligned else (lanes, False)
 
@@ -514,16 +474,12 @@ def _route_alignment(
     expert_future: torch.Tensor,
     route_lanes: torch.Tensor | None,
     config: HDPRewardConfig,
-    *,
-    compile_kernel: bool = False,
 ) -> torch.Tensor:
     if route_lanes is None:
         return torch.zeros((), dtype=torch.bool, device=expert_future.device)
     route_valid = route_lanes[..., :2].abs().sum(dim=-1) > 1e-6
     has_route = (route_valid[..., :-1] & route_valid[..., 1:]).any()
-    route_distance = _nearest_lane_distance(
-        expert_future[..., :2], route_lanes, compile_kernel=compile_kernel
-    )
+    route_distance = _nearest_lane_distance(expert_future[..., :2], route_lanes)
     return has_route & (route_distance.mean() <= config.lane_half_width_m) & (
         route_distance.max() <= 2.0 * config.lane_half_width_m
     )
@@ -536,7 +492,6 @@ def _hdp_lane_score(
     turn_indicators: torch.Tensor | None,
     config: HDPRewardConfig,
     *,
-    compile_kernel: bool = False,
     lanes_available: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     lane_valid = lanes[..., :2].abs().sum(dim=-1) > 1e-6
@@ -548,11 +503,11 @@ def _hdp_lane_score(
     if not has_lanes:
         zero = torch.zeros((), dtype=torch.bool, device=ego_trajs.device)
         return torch.zeros(ego_trajs.shape[0], device=ego_trajs.device), ~zero, zero
-    pred_distance = _nearest_lane_distance(ego_trajs[..., :2], lanes, compile_kernel=compile_kernel)
+    pred_distance = _nearest_lane_distance(ego_trajs[..., :2], lanes)
     center_score = (1.0 - pred_distance / config.lane_half_width_m).clamp(0.0, 1.0)
 
     expert_xy = expert_future[..., :2]
-    expert_distance = _nearest_lane_distance(expert_xy, lanes, compile_kernel=compile_kernel)
+    expert_distance = _nearest_lane_distance(expert_xy, lanes)
     expert_off_lane = (expert_distance.mean() > config.lane_half_width_m) | (
         expert_distance.max() > 2.0 * config.lane_half_width_m
     )
@@ -636,11 +591,6 @@ def compute_hdp_reward(
         )
     }
     rewards = []
-    # Valid-neighbor counts vary by scene. Coupling these dynamic geometry kernels to
-    # --compile_model caused a new multi-rank Inductor compile whenever that count changed,
-    # overwhelming the actual GPU update. Keep this an explicit opt-in experiment.
-    compile_kernels = bool(getattr(args, "compile_reward_kernels", False))
-
     required = ("ego_shape", "neighbor_agents_past", "ego_agent_future", "lanes")
     missing = [key for key in required if key not in scene_inputs]
     if missing:
@@ -655,7 +605,7 @@ def compute_hdp_reward(
         nf, neighbor_shapes, neighbor_valid, neighbor_initial, neighbor_is_vehicle = (
             _scene_neighbors(neighbor_group[scene], scene_inputs["neighbor_agents_past"][scene])
         )
-        terms = _run_collision_and_leader_terms(
+        terms = _collision_and_leader_terms(
             ego_group[scene],
             ego_shape,
             nf,
@@ -664,7 +614,6 @@ def compute_hdp_reward(
             neighbor_initial,
             neighbor_is_vehicle,
             config,
-            compile_kernel=compile_kernels,
         )
         expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])
         scene_terms.append(terms)
@@ -674,7 +623,6 @@ def compute_hdp_reward(
                 expert_future,
                 route_lanes_batch[scene] if route_lanes_batch is not None else None,
                 config,
-                compile_kernel=compile_kernels,
             )
         )
 
@@ -736,7 +684,6 @@ def compute_hdp_reward(
             scene_inputs["lanes"][scene],
             route_lanes_batch[scene] if route_lanes_batch is not None else None,
             config,
-            compile_kernel=compile_kernels,
             route_aligned=use_route,
         )
         lane, expert_off_lane, expert_lane_change = _hdp_lane_score(
@@ -747,7 +694,6 @@ def compute_hdp_reward(
             if "turn_indicators" in scene_inputs
             else None,
             config,
-            compile_kernel=compile_kernels,
             lanes_available=(use_route or has_lanes),
         )
         reward = (

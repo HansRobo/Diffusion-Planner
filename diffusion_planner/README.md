@@ -87,8 +87,7 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_p
   --wandb_project_name Diffusion-Planner-Temporal \
   --tf32 True \
   --amp_dtype bf16 \
-  --compile_model True \
-  --compile_reward_kernels False
+  --compile_model True
 ```
 
 Use `--resume_model_path` only for continuing the same interrupted run. Do not use it for base-to-SFT or SFT-to-RL transfer.
@@ -155,9 +154,6 @@ Important semantics:
 - `--compile_model True` compiles the encoder and decoder in place. Checkpoint keys and ONNX
   export remain unchanged. Set `TORCHINDUCTOR_CACHE_DIR` to persistent local storage so restarts
   reuse compiled artifacts.
-- Keep `--compile_reward_kernels False`: valid-neighbor counts vary by scene, so compiling those
-  geometry kernels can trigger expensive shape recompilation and is slower than eager reward code.
-
 - `--init_weights_path`: fresh RL run initialized from SFT weights only; by default it selects the SFT EMA shadow.
 - `--resume_model_path`: strict resume of an interrupted RL run, including optimizer/scheduler state.
 - Checkpoints are written through a same-directory temporary file and atomically replaced; strict resume rejects missing or incompatible optimizer, scheduler, epoch, EMA, architecture, and normalization state.
