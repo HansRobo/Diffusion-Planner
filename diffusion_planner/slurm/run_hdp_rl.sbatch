@@ -320,6 +320,7 @@ required = (
     "train_reward_std",
     "train_reward_group_range",
     "train_grad_norm",
+    "train_grad_clip_fraction",
     "train_valid_group_fraction",
     "train_optimizer_step_fraction",
     "valid_reward_mean",

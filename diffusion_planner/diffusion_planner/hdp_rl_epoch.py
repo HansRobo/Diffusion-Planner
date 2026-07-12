@@ -160,6 +160,8 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
         )
         loss_sums = {}
         grad_norm = reward.new_zeros(())
+        grad_norm_max = reward.new_zeros(())
+        grad_clip_count = reward.new_zeros(())
         updates_per_rollout = int(getattr(args, "rl_updates_per_rollout", 1))
         expert_ego_gt = heading_to_cos_sin(raw_inputs["ego_agent_future"])
         for _ in range(updates_per_rollout):
@@ -182,18 +184,24 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
                 expert_cached_encoding=rollout_encoding[::n] if decoder_only else None,
             )
             update_loss["loss"].backward()
-            grad_norm = grad_norm + nn.utils.clip_grad_norm_(trainable_params, 5).detach()
+            update_grad_norm = nn.utils.clip_grad_norm_(trainable_params, 5).detach()
+            grad_norm = grad_norm + update_grad_norm
+            grad_norm_max = torch.maximum(grad_norm_max, update_grad_norm)
+            grad_clip_count = grad_clip_count + (update_grad_norm > 5).to(reward.dtype)
             optimizer.step()
             for key, value in update_loss.items():
                 loss_sums[key] = loss_sums.get(key, reward.new_zeros(())) + value.detach()
         loss_dict = {key: value / updates_per_rollout for key, value in loss_sums.items()}
         grad_norm = grad_norm / updates_per_rollout
+        grad_clip_fraction = grad_clip_count / updates_per_rollout
         optimizer_steps = updates_per_rollout
     else:
         # The paper discards identical-reward groups. Skipping the optimizer as well prevents
         # AdamW weight decay from changing the policy when an entire distributed batch is invalid.
         zero = reward.new_zeros(())
         grad_norm = zero
+        grad_norm_max = zero
+        grad_clip_fraction = zero
         loss_dict = {
             "loss": zero,
             "rl_loss": zero,
@@ -230,6 +238,8 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
         "reward_max": grouped_reward.max(dim=1).values.mean().detach(),
         "rollout_endpoint_diversity_m": endpoint_diversity.detach(),
         "grad_norm": grad_norm.detach(),
+        "grad_norm_max_per_rollout": grad_norm_max.detach(),
+        "grad_clip_fraction": grad_clip_fraction.detach(),
         "ego_hdp_diffusion_loss": loss_dict["ego_hdp_diffusion_loss"],
         "ego_hdp_waypoint_loss": loss_dict["ego_hdp_waypoint_loss"],
         "reward_weight_mean": loss_dict["reward_weight_mean"].detach(),
