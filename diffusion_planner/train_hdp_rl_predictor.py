@@ -729,6 +729,21 @@ def finite_scalar_metrics(metrics):
     return result
 
 
+def turn_indicator_metrics(agg):
+    return {
+        "accuracy": scalar(agg["turn_indicator_accuracy"]),
+        "change_accuracy": scalar(agg["turn_indicator_change_accuracy"]),
+        "change_total": int(agg["turn_indicator_change_total"]),
+        **{
+            f"{name}_accuracy": scalar(value)
+            for name, value in agg["turn_indicator_class_accuracy"].items()
+        },
+        **{
+            f"{name}_count": int(value) for name, value in agg["turn_indicator_class_count"].items()
+        },
+    }
+
+
 def model_training(args):
     global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
@@ -1083,6 +1098,7 @@ def model_training(args):
         baseline_valid_loss = scalar(baseline_agg["avg_loss_ego"])
         baseline_epdms_metrics = finite_scalar_metrics(baseline_agg["epdms_means"])
         baseline_epdms = baseline_epdms_metrics.get("total", 0.0)
+        baseline_turn_metrics = turn_indicator_metrics(baseline_agg)
         baseline_reward_mean = scalar(baseline_reward_metrics["mean"])
         baseline_selection_score = baseline_reward_mean
         baseline_rng_states = gather_rng_states()
@@ -1095,6 +1111,10 @@ def model_training(args):
                 **{
                     f"valid_reward_{key}": scalar(value)
                     for key, value in baseline_reward_metrics.items()
+                },
+                **{
+                    f"valid_turn_indicator_{key}": value
+                    for key, value in baseline_turn_metrics.items()
                 },
                 "selection_score": baseline_selection_score,
                 "source_checkpoint": args.init_weights_path,
@@ -1125,6 +1145,8 @@ def model_training(args):
                     wandb.run.summary[f"source/valid_epdms/{key}"] = value
                 for key, value in baseline_reward_metrics.items():
                     wandb.run.summary[f"source/valid_reward/{key}"] = scalar(value)
+                for key, value in baseline_turn_metrics.items():
+                    wandb.run.summary[f"source/valid_turn_indicator/{key}"] = value
             print(
                 "Source SFT baseline: "
                 f"valid_loss_ego={baseline_valid_loss:.4f}, "
@@ -1177,19 +1199,7 @@ def model_training(args):
             valid_multisample = {
                 key: scalar(value) for key, value in agg["multisample_means"].items()
             }
-            valid_turn_metrics = {
-                "accuracy": scalar(agg["turn_indicator_accuracy"]),
-                "change_accuracy": scalar(agg["turn_indicator_change_accuracy"]),
-                "change_total": int(agg["turn_indicator_change_total"]),
-                **{
-                    f"{name}_accuracy": scalar(value)
-                    for name, value in agg["turn_indicator_class_accuracy"].items()
-                },
-                **{
-                    f"{name}_count": int(value)
-                    for name, value in agg["turn_indicator_class_count"].items()
-                },
-            }
+            valid_turn_metrics = turn_indicator_metrics(agg)
             has_reward = "reward_mean" in train_loss
             train_reward = scalar(train_loss["reward_mean"]) if has_reward else float("nan")
             print(
