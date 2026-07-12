@@ -154,7 +154,8 @@ progress term, and one-target-per-scene BC anchor are performance-oriented safeg
 Tier IV data audits; the unanchored configuration caused rapid progress and validation collapse.
 The rollout noise and group size are exploration/efficiency knobs, while held-out reward always
 uses the public HDP policy's default `0.5` sampling temperature and the paper's 32 candidates so
-all sweeps share one selection distribution.
+all sweeps share one selection distribution. Held-out sampling also uses
+`diffusion_sample_steps`, independently of the training-only `rl_rollout_steps` knob.
 
 Implementation notes:
 

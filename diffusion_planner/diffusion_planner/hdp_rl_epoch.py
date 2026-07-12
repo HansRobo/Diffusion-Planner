@@ -390,7 +390,7 @@ def validate_hdp_reward_policy(data_loader, model, args):
                 scene_norm_inputs=norm_inputs,
                 group_size=n,
                 use_bf16=getattr(args, "amp_dtype", "off") == "bf16",
-                sample_steps=getattr(args, "rl_rollout_steps", 6),
+                sample_steps=args.diffusion_sample_steps,
             )
             num_scenes = raw_inputs["ego_current_state"].shape[0]
             reward, reward_metrics = compute_hdp_reward(

@@ -120,9 +120,11 @@ def test_finite_scalar_metrics_excludes_invalid_json_values():
 
 def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     observed_noise_scales = []
+    observed_sample_steps = []
 
     def fake_sample_group(_model, inputs, *_args, **_kwargs):
         observed_noise_scales.append(_args[0])
+        observed_sample_steps.append(_kwargs["sample_steps"])
         batch = inputs["ego_current_state"].shape[0]
         return torch.zeros(batch, 80, 4)
 
@@ -153,6 +155,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         rl_eval_num_generations=2,
         amp_dtype="off",
         rl_rollout_steps=6,
+        diffusion_sample_steps=5,
         ddp=False,
     )
 
@@ -163,3 +166,4 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     assert metrics["group_max"].item() == pytest.approx((2.0 * 2 + 10.0) / 3)
     assert metrics["risk"].item() == pytest.approx(expected)
     assert observed_noise_scales == [0.25, 0.25]
+    assert observed_sample_steps == [5, 5]
