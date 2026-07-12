@@ -13,7 +13,7 @@ from diffusion_planner.dimensions import (
     TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT,
     TRAFFIC_LIGHT_RED,
 )
-from diffusion_planner.hdp_rl_epoch import commit_ema_policy_update
+from diffusion_planner.hdp_rl_epoch import _grouped_policy_inputs, commit_ema_policy_update
 from diffusion_planner.hdp_rl_utils import (
     HDPRewardConfig,
     _collision_and_leader_terms,
@@ -36,6 +36,7 @@ from diffusion_planner.loss import (
     velocity_to_waypoints,
     waypoints_to_velocity,
 )
+from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.model.diffusion_utils.dpm_solver_pytorch import DPM_Solver, NoiseScheduleVP
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.module.decoder import (
@@ -426,6 +427,62 @@ def test_hdp_decoder_repeats_only_global_route_condition_for_rl_groups():
     assert all(
         parameter.grad is not None for parameter in decoder.global_route_encoder.parameters()
     )
+
+
+def test_all_scope_rl_keeps_scene_inputs_unexpanded():
+    scene_batch, group_size = 2, 3
+    observations = {
+        "ego_current_state": torch.randn(scene_batch, 10),
+        "ego_agent_past": torch.randn(scene_batch, 21, 4),
+        "route_lanes": torch.randn(scene_batch, 25, 20, 33),
+        "ego_agent_future": torch.randn(scene_batch, 80, 4),
+        "neighbor_agents_future": torch.randn(scene_batch, 32, 80, 11),
+    }
+
+    grouped = _grouped_policy_inputs(observations, group_size, decoder_only=False)
+
+    assert grouped["ego_current_state"].shape[0] == scene_batch * group_size
+    assert grouped["ego_agent_past"].shape[0] == scene_batch
+    assert grouped["route_lanes"].shape[0] == scene_batch
+    assert "ego_agent_future" not in grouped
+    assert "neighbor_agents_future" not in grouped
+    assert grouped["_encoder_repeat_interleave"] == group_size
+    assert grouped["_global_route_repeat_interleave"] == group_size
+
+
+def test_diffusion_planner_repeats_trainable_scene_encoding_with_gradients():
+    class TestEncoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.scale = torch.nn.Parameter(torch.tensor(2.0))
+            self.batch_sizes = []
+
+        def forward(self, inputs):
+            scene = inputs["scene"]
+            self.batch_sizes.append(scene.shape[0])
+            return scene[:, None, None] * self.scale
+
+    class TestDecoder(torch.nn.Module):
+        def forward(self, encoding, inputs):
+            assert encoding.shape[0] == inputs["candidate"].shape[0]
+            return {"value": encoding[:, 0, 0] + inputs["candidate"]}
+
+    planner = Diffusion_Planner.__new__(Diffusion_Planner)
+    torch.nn.Module.__init__(planner)
+    planner.encoder = TestEncoder()
+    planner.decoder = TestDecoder()
+    inputs = {
+        "scene": torch.tensor([1.0, 3.0]),
+        "candidate": torch.zeros(6),
+        "_encoder_repeat_interleave": 3,
+    }
+
+    _, output = planner(inputs)
+    output["value"].sum().backward()
+
+    assert planner.encoder.batch_sizes == [2]
+    assert output["value"].shape == (6,)
+    torch.testing.assert_close(planner.encoder.scale.grad, torch.tensor(12.0))
 
 
 def test_hdp_decoder_skips_frozen_turn_head_without_changing_inference_prediction(monkeypatch):

@@ -1,5 +1,4 @@
 import pytest
-
 from valid_predictor import get_args
 
 

@@ -77,6 +77,27 @@ def _policy_observation_inputs(norm_inputs: dict[str, torch.Tensor]) -> dict[str
     }
 
 
+def _grouped_policy_inputs(
+    norm_inputs: dict[str, torch.Tensor], group_size: int, decoder_only: bool
+) -> dict[str, torch.Tensor]:
+    """Keep one scene observation while expanding candidate-specific decoder inputs."""
+    if decoder_only:
+        grouped = {
+            "ego_current_state": norm_inputs["ego_current_state"].repeat_interleave(
+                group_size, dim=0
+            ),
+            "route_lanes": norm_inputs["route_lanes"],
+        }
+    else:
+        grouped = _policy_observation_inputs(norm_inputs)
+        grouped["ego_current_state"] = norm_inputs["ego_current_state"].repeat_interleave(
+            group_size, dim=0
+        )
+        grouped["_encoder_repeat_interleave"] = group_size
+    grouped["_global_route_repeat_interleave"] = group_size
+    return grouped
+
+
 def _hdp_rl_step(
     raw_inputs,
     model,
@@ -109,16 +130,8 @@ def _hdp_rl_step(
 
     reward_neighbors_raw = _neighbor_future_world(raw_inputs["neighbor_agents_future"])
     norm_inputs = args.observation_normalizer(raw_inputs)
-    if getattr(args, "rl_train_scope", "decoder") == "decoder":
-        decoder_inputs = {"ego_current_state": norm_inputs["ego_current_state"]}
-    else:
-        decoder_inputs = _policy_observation_inputs(norm_inputs)
-    norm_exp = expand_batch(decoder_inputs, n)
-    if getattr(args, "rl_train_scope", "decoder") == "decoder":
-        # Keep one route tensor per scene. Decoder compresses it inside the DDP forward,
-        # then repeats only the small global condition across the candidate group.
-        norm_exp["route_lanes"] = norm_inputs["route_lanes"]
-        norm_exp["_global_route_repeat_interleave"] = n
+    decoder_only = getattr(args, "rl_train_scope", "decoder") == "decoder"
+    norm_exp = _grouped_policy_inputs(norm_inputs, n, decoder_only)
     batch_size = norm_exp["ego_current_state"].shape[0]
     num_scenes = batch_size // n
 
@@ -164,7 +177,6 @@ def _hdp_rl_step(
     has_optimizer_update = has_valid_group or bc_weight > 0.0
 
     if has_optimizer_update:
-        decoder_only = getattr(args, "rl_train_scope", "decoder") == "decoder"
         expert_norm_inputs = (
             {
                 "ego_current_state": norm_inputs["ego_current_state"],
