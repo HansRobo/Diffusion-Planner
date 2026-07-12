@@ -126,7 +126,7 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_h
   --rl_eval_noise_scale 0.5 \
   --rl_eval_num_generations 32 \
   --rl_rollout_steps 6 \
-  --rl_updates_per_rollout 4 \
+  --rl_updates_per_rollout 1 \
   --rl_ema_update_rate 0.05 \
   --rl_train_scope decoder \
   --predicted_neighbor_num 0 \

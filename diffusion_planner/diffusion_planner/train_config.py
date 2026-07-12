@@ -148,9 +148,9 @@ class TrainConfig:
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
-    # Reuse the sampled/scored candidate group for additional random diffusion-time updates.
-    # One preserves the paper-style on-policy cadence; larger values are a replay efficiency knob.
-    rl_updates_per_rollout: int = 4
+    # The released official trainer uses one optimizer update per sampled rollout group.
+    # Values above one intentionally reuse actions and are ablations, not the production default.
+    rl_updates_per_rollout: int = 1
     rl_init_use_ema: bool = True
     # Optional direct collision term. Zero preserves the published multi-reward formula; positive
     # values test whether active=1/rear=0.3 safety prevents progress-risk Pareto regressions.

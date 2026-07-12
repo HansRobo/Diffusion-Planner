@@ -86,7 +86,7 @@ def test_tuned_hdp_rl_defaults_are_consistent():
 
     assert fields["num_generations"].default == 8
     assert fields["rl_noise_scale"].default == 1.5
-    assert fields["rl_updates_per_rollout"].default == 4
+    assert fields["rl_updates_per_rollout"].default == 1
     assert fields["rl_bc_weight"].default == 0.0
     assert fields["rl_reward_beta"].default == 0.5
     assert fields["rl_rollout_steps"].default == 6

@@ -147,13 +147,15 @@ rl_eval_reward_w_follow=3.0
 rl_eval_reward_w_lane=2.5
 rl_eval_reward_w_progress=3.0
 rl_rollout_steps=6
-rl_updates_per_rollout=4
+rl_updates_per_rollout=1
 rl_ema_update_rate=0.05
 rl_init_use_ema=true
 rl_train_scope=decoder
 ```
 
-The paper EMA update `0.05` is used at policy-iteration boundaries. The lower `beta` and explicit
+One optimizer update is applied per sampled rollout group, matching the released official
+trainer and avoiding repeated AdamW updates on the same actions. The paper EMA update `0.05` is
+used at policy-iteration boundaries. The lower `beta` and explicit
 progress term are performance-oriented Tier IV adaptations. Real-data and recovery-set ablations
 favored the unanchored objective (`BC=0`); the EMA policy commit remains the drift constraint.
 The non-risk behavior contribution (following, lane keeping, and DP-native progress) is multiplied
