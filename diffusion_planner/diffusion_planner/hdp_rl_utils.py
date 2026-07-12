@@ -726,6 +726,8 @@ def _nearest_lane_distance_batch(
             f"{points.shape[0]} and {lanes.shape[0]}"
         )
     batch_size = points.shape[0]
+    if batch_size == 0:
+        return points.new_empty(points.shape[:-1])
     center = lanes[..., :2]
     point_valid = ~lane_point_padding_mask(lanes)
     segment_valid = (point_valid[..., :-1] & point_valid[..., 1:]).flatten(1)
@@ -746,8 +748,9 @@ def _nearest_lane_distance_batch(
             0.0, 1.0
         )
         closest = segment_start[:, None] + projection[..., None] * segment[:, None]
-        distance = (query[:, :, None] - closest).norm(dim=-1)
-        chunks.append(distance.masked_fill(~segment_valid[:, None], float("inf")).amin(dim=-1))
+        distance2 = (query[:, :, None] - closest).square().sum(dim=-1)
+        min_distance2 = distance2.masked_fill(~segment_valid[:, None], float("inf")).amin(dim=-1)
+        chunks.append(min_distance2.sqrt())
     return torch.cat(chunks, dim=1).reshape(points.shape[:-1])
 
 
@@ -849,30 +852,34 @@ def _batched_lane_and_progress(
     """Compute route selection, lane masks, and progress for a scene batch."""
     lane_point_valid = ~lane_point_padding_mask(lanes)
     lane_available = (lane_point_valid[..., :-1] & lane_point_valid[..., 1:]).flatten(1).any(1)
-    lane_candidate_distance = _nearest_lane_distance_batch(ego_group[..., :2], lanes)
-    lane_expert_distance = _nearest_lane_distance_batch(expert_future[..., :2], lanes)
 
     if route_lanes is None:
         route_aligned = torch.zeros_like(lane_available)
-        candidate_distance = lane_candidate_distance
-        expert_distance = lane_expert_distance
+        candidate_distance = _nearest_lane_distance_batch(ego_group[..., :2], lanes)
+        expert_distance = _nearest_lane_distance_batch(expert_future[..., :2], lanes)
     else:
         route_point_valid = ~lane_point_padding_mask(route_lanes)
         route_available = (
             (route_point_valid[..., :-1] & route_point_valid[..., 1:]).flatten(1).any(1)
         )
-        route_candidate_distance = _nearest_lane_distance_batch(ego_group[..., :2], route_lanes)
         route_expert_distance = _nearest_lane_distance_batch(expert_future[..., :2], route_lanes)
         route_aligned = (
             route_available
             & (route_expert_distance.mean(dim=-1) <= config.lane_half_width_m)
             & (route_expert_distance.amax(dim=-1) <= 2.0 * config.lane_half_width_m)
         )
-        candidate_distance = torch.where(
-            route_aligned[:, None, None], route_candidate_distance, lane_candidate_distance
+        candidate_distance = ego_group.new_empty(ego_group.shape[:3])
+        candidate_distance[route_aligned] = _nearest_lane_distance_batch(
+            ego_group[route_aligned, ..., :2], route_lanes[route_aligned]
         )
-        expert_distance = torch.where(
-            route_aligned[:, None], route_expert_distance, lane_expert_distance
+        lane_fallback = ~route_aligned
+        candidate_distance[lane_fallback] = _nearest_lane_distance_batch(
+            ego_group[lane_fallback, ..., :2], lanes[lane_fallback]
+        )
+        expert_distance = route_expert_distance.new_empty(route_expert_distance.shape)
+        expert_distance[route_aligned] = route_expert_distance[route_aligned]
+        expert_distance[lane_fallback] = _nearest_lane_distance_batch(
+            expert_future[lane_fallback, ..., :2], lanes[lane_fallback]
         )
 
     centerline_available = lane_available | route_aligned
