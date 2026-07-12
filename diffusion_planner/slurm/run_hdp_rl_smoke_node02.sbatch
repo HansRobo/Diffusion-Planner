@@ -174,6 +174,8 @@ assert any(decoder_changed), "RL optimizer did not update decoder"
 assert not any(turn_changed), "frozen turn head changed"
 if scope == "decoder":
     assert not any(encoder_changed), "decoder-only RL changed encoder"
+else:
+    assert any(encoder_changed), "all-scope RL did not update encoder"
 assert ema_relation_error and max(ema_relation_error) < 2e-5, max(ema_relation_error, default=None)
 
 with (save_dir / "train_log.tsv").open(newline="", encoding="utf-8") as f:
