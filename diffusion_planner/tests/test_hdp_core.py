@@ -1,7 +1,9 @@
 import json
 import math
 import random
+from types import SimpleNamespace
 
+import diffusion_planner.hdp_rl_utils as hdp_rl_utils
 import diffusion_planner.model.module.decoder as decoder_module
 import numpy as np
 import pytest
@@ -19,6 +21,7 @@ from diffusion_planner.hdp_rl_utils import (
     _occupancy_score,
     _relative_progress_score,
     _scene_neighbors,
+    compute_reward_weighted_loss,
     compute_reward_weights,
     heading_to_cos_sin_if_needed,
 )
@@ -350,6 +353,48 @@ def test_reward_weight_ablations_still_discard_groups_without_preferences(normal
     assert not valid[:2].any()
     assert valid[2:].all()
     torch.testing.assert_close(weights[:2], torch.zeros(2), rtol=0, atol=0)
+
+
+def test_hdp_behavior_cloning_anchor_uses_one_expert_target_per_scene(monkeypatch):
+    def fake_policy_loss(_model, _inputs, target, _args, _encoding=None):
+        per_sample = (
+            torch.tensor([1.0, 2.0, 3.0, 4.0])
+            if target.shape[0] == 4
+            else torch.tensor([10.0, 20.0])
+        )
+        return {
+            "ego_loss_per_sample": per_sample,
+            "ego_hdp_diffusion_loss": per_sample.mean(),
+            "ego_hdp_waypoint_loss": per_sample.mean(),
+        }
+
+    monkeypatch.setattr(hdp_rl_utils, "_compute_policy_ego_loss_per_sample", fake_policy_loss)
+    args = SimpleNamespace(
+        rl_reward_normalize="group",
+        rl_reward_beta=1.0,
+        advantage_eps=1e-6,
+        rl_bc_weight=0.25,
+        ddp=False,
+    )
+    output = compute_reward_weighted_loss(
+        None,
+        {},
+        torch.zeros(4, 80, 4),
+        torch.tensor([0.0, 1.0, 0.0, 1.0]),
+        2,
+        2,
+        args,
+        reward_weights=torch.ones(4),
+        valid_sample=torch.ones(4, dtype=torch.bool),
+        global_valid_count=torch.tensor(4.0),
+        ddp_world_size=1,
+        expert_norm_inputs={},
+        expert_ego_gt=torch.zeros(2, 80, 4),
+    )
+
+    torch.testing.assert_close(output["rl_loss"], torch.tensor(2.5))
+    torch.testing.assert_close(output["bc_loss"], torch.tensor(15.0))
+    torch.testing.assert_close(output["loss"], torch.tensor(6.25))
 
 
 def test_legacy_short_neighbor_future_alignment_keeps_full_tracks():

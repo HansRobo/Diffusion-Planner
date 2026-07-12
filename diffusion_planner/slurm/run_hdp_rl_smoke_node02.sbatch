@@ -29,6 +29,8 @@ TRAIN_EPOCHS=${HDP_RL_TRAIN_EPOCHS:-1}
 LEARNING_RATE=${HDP_RL_LEARNING_RATE:-5e-6}
 WEIGHT_DECAY=${HDP_RL_WEIGHT_DECAY:-0.01}
 REWARD_BETA=${HDP_RL_REWARD_BETA:-1.0}
+REWARD_W_PROGRESS=${HDP_RL_REWARD_W_PROGRESS:-0.0}
+BC_WEIGHT=${HDP_RL_BC_WEIGHT:-0.0}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-0.5}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
@@ -109,6 +111,8 @@ cd "${REPO}/diffusion_planner"
   --rl_rollout_steps "${ROLLOUT_STEPS}" \
   --rl_reward_normalize group \
   --rl_reward_beta "${REWARD_BETA}" \
+  --rl_reward_w_progress "${REWARD_W_PROGRESS}" \
+  --rl_bc_weight "${BC_WEIGHT}" \
   --rl_ema_update_rate "${EMA_UPDATE_RATE}" \
   --rl_init_use_ema True \
   --rl_train_scope "${TRAIN_SCOPE}" \

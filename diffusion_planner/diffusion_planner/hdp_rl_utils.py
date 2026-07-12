@@ -377,9 +377,7 @@ def _occupancy_score(
         clearance = torch.stack(source_clearances, dim=0).amin(dim=0)
         ego_speed = _trajectory_speed(ego_trajs[..., :2], config.dt)
         safe_distance = config.occupancy_safe_m + config.occupancy_speed_gain_s * ego_speed
-        critical_distance = (
-            config.occupancy_critical_m + config.occupancy_speed_gain_s * ego_speed
-        )
+        critical_distance = config.occupancy_critical_m + config.occupancy_speed_gain_s * ego_speed
         return _linear_safe_score(clearance, critical_distance, safe_distance), sources
 
     # Road borders are not literal occupancy. Use them only when the scene has at least one
@@ -388,9 +386,7 @@ def _occupancy_score(
     # receive zero OCC reward merely for passing near a curb.
     has_road_border = False
     if line_strings is not None and line_strings.shape[-1] >= 4:
-        border_point = (line_strings[..., 3] > 0.5) & (
-            line_strings[..., :2].norm(dim=-1) > 1e-3
-        )
+        border_point = (line_strings[..., 3] > 0.5) & (line_strings[..., :2].norm(dim=-1) > 1e-3)
         has_road_border = bool((border_point[..., :-1] & border_point[..., 1:]).any().item())
     if has_road_border:
         road_border = compute_road_border_penalty(
@@ -623,9 +619,7 @@ def compute_hdp_reward(
         )
         risk = torch.stack([terms["ttc"], terms["thw"], occupancy], dim=0).amin(dim=(0, 2))
         expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])
-        progress_ratio, progress_score = _relative_progress_score(
-            ego_group[scene], expert_future
-        )
+        progress_ratio, progress_score = _relative_progress_score(ego_group[scene], expert_future)
         lane_centerlines, lane_route_source = _lane_reward_centerlines(
             expert_future,
             scene_inputs["lanes"][scene],
@@ -647,6 +641,7 @@ def compute_hdp_reward(
             args.rl_reward_w_risk * risk
             + args.rl_reward_w_follow * terms["follow"]
             + args.rl_reward_w_lane * lane
+            + getattr(args, "rl_reward_w_progress", 0.0) * progress_score
         )
         rewards.append(reward)
         metric_lists["safety"].append(terms["safety"])
@@ -659,12 +654,8 @@ def compute_hdp_reward(
         metric_lists["lane"].append(lane)
         metric_lists["progress"].append(progress_score)
         metric_lists["progress_ratio"].append(progress_ratio.clamp_max(2.0))
-        metric_lists["underprogress_fraction"].append(
-            (progress_ratio < 0.8).to(risk.dtype)
-        )
-        metric_lists["overprogress_fraction"].append(
-            (progress_ratio > 1.2).to(risk.dtype)
-        )
+        metric_lists["underprogress_fraction"].append((progress_ratio < 0.8).to(risk.dtype))
+        metric_lists["overprogress_fraction"].append((progress_ratio > 1.2).to(risk.dtype))
         metric_lists["ttc"].append(ttc_min)
         metric_lists["thw"].append(thw_min)
         metric_lists["occupancy"].append(occupancy_min)
@@ -672,9 +663,7 @@ def compute_hdp_reward(
         metric_lists["risk_one_fraction"].append((risk >= 1.0 - 1e-6).to(risk.dtype))
         metric_lists["ttc_zero_fraction"].append((ttc_min <= 1e-6).to(risk.dtype))
         metric_lists["thw_zero_fraction"].append((thw_min <= 1e-6).to(risk.dtype))
-        metric_lists["occupancy_zero_fraction"].append(
-            (occupancy_min <= 1e-6).to(risk.dtype)
-        )
+        metric_lists["occupancy_zero_fraction"].append((occupancy_min <= 1e-6).to(risk.dtype))
         metric_lists["leader_fraction"].append(terms["leader_fraction"])
         metric_lists["collision_active"].append(terms["collision_active"])
         metric_lists["collision_rear"].append(terms["collision_rear"])
@@ -711,9 +700,9 @@ def compute_hdp_reward(
     progress_group = torch.stack(metric_lists["progress"])
     reward_centered = reward_group - reward_group.mean(dim=1, keepdim=True)
     progress_centered = progress_group - progress_group.mean(dim=1, keepdim=True)
-    denominator = reward_centered.square().sum(dim=1).sqrt() * progress_centered.square().sum(
-        dim=1
-    ).sqrt()
+    denominator = (
+        reward_centered.square().sum(dim=1).sqrt() * progress_centered.square().sum(dim=1).sqrt()
+    )
     correlation = (reward_centered * progress_centered).sum(dim=1) / denominator.clamp_min(1e-6)
     correlation = torch.where(denominator > 1e-6, correlation, torch.zeros_like(correlation))
     metrics["reward_progress_correlation"] = correlation.mean()
@@ -977,6 +966,9 @@ def compute_reward_weighted_loss(
     valid_sample: torch.Tensor | None = None,
     global_valid_count: torch.Tensor | None = None,
     ddp_world_size: int | None = None,
+    expert_norm_inputs: dict[str, torch.Tensor] | None = None,
+    expert_ego_gt: torch.Tensor | None = None,
+    expert_cached_encoding: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     if reward_weights is None or valid_sample is None:
         reward_weights, valid_sample = compute_reward_weights(
@@ -992,27 +984,68 @@ def compute_reward_weighted_loss(
             valid_sample,
             bool(getattr(args, "ddp", False)),
         )
-    if not bool(global_valid_count > 0):
-        raise ValueError("RL loss requires at least one valid reward group across all DDP ranks")
+    has_valid_group = bool(global_valid_count > 0)
+    bc_weight = float(getattr(args, "rl_bc_weight", 0.0))
+    zero = reward.new_zeros(())
+    # With a BC anchor, keep the candidate forward in every step so DDP static_graph sees the
+    # same graph even in the rare case where every reward group is constant.
+    if has_valid_group or bc_weight > 0.0:
+        loss_terms = _compute_policy_ego_loss_per_sample(
+            model,
+            norm_inputs,
+            ego_pseudo_gt,
+            args,
+            cached_encoding,
+        )
+        ego_loss_per_sample = loss_terms["ego_loss_per_sample"]
+        if has_valid_group:
+            valid_weight = valid_sample.to(ego_loss_per_sample.dtype)
+            numerator = (reward_weights * valid_weight * ego_loss_per_sample).sum()
+            # DDP averages gradients, hence the world-size multiplier converts the per-rank
+            # numerator into a true global valid-sample mean after reducer averaging.
+            rl_loss = (
+                numerator * float(ddp_world_size) / global_valid_count.to(ego_loss_per_sample.dtype)
+            )
+        else:
+            rl_loss = ego_loss_per_sample.sum() * 0.0
+        ego_reconstruction_loss = ego_loss_per_sample.mean().detach()
+    else:
+        loss_terms = {
+            "ego_hdp_diffusion_loss": zero,
+            "ego_hdp_waypoint_loss": zero,
+        }
+        rl_loss = zero
+        ego_reconstruction_loss = zero
 
-    loss_terms = _compute_policy_ego_loss_per_sample(
-        model,
-        norm_inputs,
-        ego_pseudo_gt,
-        args,
-        cached_encoding,
-    )
-    ego_loss_per_sample = loss_terms["ego_loss_per_sample"]
-    valid_weight = valid_sample.to(ego_loss_per_sample.dtype)
-    numerator = (reward_weights * valid_weight * ego_loss_per_sample).sum()
-    # DDP averages gradients, hence the world-size multiplier converts the per-rank numerator
-    # into a true global valid-sample mean after reducer averaging.
-    loss = numerator * float(ddp_world_size) / global_valid_count.to(ego_loss_per_sample.dtype)
+    bc_loss = zero
+    if bc_weight > 0.0:
+        if expert_norm_inputs is None or expert_ego_gt is None:
+            raise ValueError("rl_bc_weight > 0 requires expert observations and trajectories")
+        expert_terms = _compute_policy_ego_loss_per_sample(
+            model,
+            expert_norm_inputs,
+            expert_ego_gt,
+            args,
+            expert_cached_encoding,
+        )
+        expert_per_sample = expert_terms["ego_loss_per_sample"]
+        expert_count = expert_per_sample.new_tensor(float(expert_per_sample.numel()))
+        if (
+            bool(getattr(args, "ddp", False))
+            and torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        ):
+            torch.distributed.all_reduce(expert_count, op=torch.distributed.ReduceOp.SUM)
+        bc_loss = expert_per_sample.sum() * float(ddp_world_size) / expert_count
+
+    loss = rl_loss + bc_weight * bc_loss
 
     return {
         "loss": loss,
-        "reward_weighted_loss": loss.detach(),
-        "ego_reconstruction_loss": ego_loss_per_sample.mean().detach(),
+        "rl_loss": rl_loss.detach(),
+        "reward_weighted_loss": rl_loss.detach(),
+        "bc_loss": bc_loss.detach(),
+        "ego_reconstruction_loss": ego_reconstruction_loss,
         "ego_hdp_diffusion_loss": loss_terms["ego_hdp_diffusion_loss"],
         "ego_hdp_waypoint_loss": loss_terms["ego_hdp_waypoint_loss"],
         "reward_weight_mean": reward_weights.mean().detach(),

@@ -138,6 +138,12 @@ class TrainConfig:
     rl_reward_w_risk: float = 1.0
     rl_reward_w_follow: float = 3.0
     rl_reward_w_lane: float = 2.5
+    # Anti-stopping reward, measured as signed endpoint progress relative to the logged expert.
+    # Kept independently tunable because the paper reward omits explicit progress.
+    rl_reward_w_progress: float = 0.0
+    # One expert target per scene costs only 1 / group_size of the candidate update and prevents
+    # safety reward optimization from erasing the SFT driving behavior.
+    rl_bc_weight: float = 0.0
     # Paper table reports EMA=0.05. timm uses the complementary decay coefficient,
     # so update_rate=0.05 maps to ModelEma(decay=0.95).
     rl_ema_update_rate: float = 0.05

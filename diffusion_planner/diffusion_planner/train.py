@@ -296,6 +296,8 @@ def assert_checkpoint_compatible(
             "rl_reward_w_risk",
             "rl_reward_w_follow",
             "rl_reward_w_lane",
+            "rl_reward_w_progress",
+            "rl_bc_weight",
             "rl_ema_update_rate",
             "rl_reward_dt",
             "rl_ttc_critical_s",

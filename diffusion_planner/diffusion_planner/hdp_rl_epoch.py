@@ -125,9 +125,20 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
         bool(getattr(args, "ddp", False)),
     )
     has_valid_group = bool(global_valid_count > 0)
+    bc_weight = float(getattr(args, "rl_bc_weight", 0.0))
+    has_optimizer_update = has_valid_group or bc_weight > 0.0
 
     optimizer.zero_grad(set_to_none=True)
-    if has_valid_group:
+    if has_optimizer_update:
+        decoder_only = getattr(args, "rl_train_scope", "decoder") == "decoder"
+        expert_norm_inputs = (
+            {
+                "ego_current_state": norm_inputs["ego_current_state"],
+                "route_lanes": norm_inputs["route_lanes"],
+            }
+            if decoder_only
+            else _policy_observation_inputs(norm_inputs)
+        )
         loss_dict = compute_reward_weighted_loss(
             model,
             norm_exp,
@@ -136,15 +147,14 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
             num_scenes,
             n,
             args,
-            cached_encoding=(
-                rollout_encoding
-                if getattr(args, "rl_train_scope", "decoder") == "decoder"
-                else None
-            ),
+            cached_encoding=(rollout_encoding if decoder_only else None),
             reward_weights=reward_weights,
             valid_sample=valid_sample,
             global_valid_count=global_valid_count,
             ddp_world_size=ddp_world_size,
+            expert_norm_inputs=expert_norm_inputs,
+            expert_ego_gt=heading_to_cos_sin(raw_inputs["ego_agent_future"]),
+            expert_cached_encoding=rollout_encoding[::n] if decoder_only else None,
         )
         loss_dict["loss"].backward()
         grad_norm = nn.utils.clip_grad_norm_(trainable_params, 5)
@@ -158,7 +168,9 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
         grad_norm = zero
         loss_dict = {
             "loss": zero,
+            "rl_loss": zero,
             "reward_weighted_loss": zero,
+            "bc_loss": zero,
             "ego_hdp_diffusion_loss": zero,
             "ego_hdp_waypoint_loss": zero,
             "reward_weight_mean": reward_weights.mean(),
@@ -178,7 +190,8 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
     endpoint_diversity = endpoint_distances.sum() / max(num_scenes * n * (n - 1), 1)
     result = {
         "loss": loss_dict["loss"].detach(),
-        "rl_loss": loss_dict["loss"].detach(),
+        "rl_loss": loss_dict["rl_loss"].detach(),
+        "bc_loss": loss_dict["bc_loss"].detach(),
         "reward_weighted_loss": loss_dict["reward_weighted_loss"],
         "reward_mean": reward.mean().detach(),
         "reward_std": grouped_reward.std(dim=1).mean().detach(),
@@ -194,7 +207,7 @@ def _hdp_rl_step(raw_inputs, model, optimizer, trainable_params, args, ema, aug,
         "reward_weight_max": loss_dict["reward_weight_max"].detach(),
         "reward_weight_min": loss_dict["reward_weight_min"].detach(),
         "valid_group_fraction": loss_dict["valid_group_fraction"].detach(),
-        "optimizer_step_fraction": reward.new_tensor(float(has_valid_group)),
+        "optimizer_step_fraction": reward.new_tensor(float(has_optimizer_update)),
     }
     if timing_events is not None:
         rollout_s = timing_events[0].elapsed_time(timing_events[1]) / 1000.0

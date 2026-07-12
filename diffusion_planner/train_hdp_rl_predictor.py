@@ -290,6 +290,18 @@ def get_args():
         help="paper HDP multi-reward weight for lane keeping",
     )
     parser.add_argument(
+        "--rl_reward_w_progress",
+        type=float,
+        default=_train_config_default("rl_reward_w_progress"),
+        help="anti-stopping reward weight for signed progress relative to the logged expert",
+    )
+    parser.add_argument(
+        "--rl_bc_weight",
+        type=float,
+        default=_train_config_default("rl_bc_weight"),
+        help="hybrid imitation-loss weight on one logged expert target per scene",
+    )
+    parser.add_argument(
         "--rl_reward_normalize",
         "--official_reward_normalize",
         dest="rl_reward_normalize",
@@ -586,11 +598,14 @@ def get_args():
         args.rl_reward_w_risk,
         args.rl_reward_w_follow,
         args.rl_reward_w_lane,
+        args.rl_reward_w_progress,
     )
     if any(weight < 0.0 for weight in reward_weights):
         raise ValueError("RL reward weights must be non-negative")
     if sum(reward_weights) <= 0.0:
         raise ValueError("At least one RL reward weight must be positive")
+    if args.rl_bc_weight < 0.0:
+        raise ValueError("--rl_bc_weight must be non-negative")
     if args.predicted_neighbor_num != 0:
         raise ValueError("HDP-RL is ego-only; --predicted_neighbor_num must be 0")
     if args.rl_full_eval_utd < 1:
@@ -672,6 +687,8 @@ def model_training(args):
         print("Group size (num_generations): {}".format(args.num_generations))
         print("RL objective: HDP reward-weighted hybrid loss")
         print("RL reward: HDP risk/follow/lane with Tier IV occupancy proxies")
+        print("RL progress reward weight: {}".format(args.rl_reward_w_progress))
+        print("RL behavior-cloning anchor weight: {}".format(args.rl_bc_weight))
         print("RL EMA update rate: {}".format(args.rl_ema_update_rate))
         print("RL train scope: {}".format(args.rl_train_scope))
         print("RL init uses SFT EMA: {}".format(args.rl_init_use_ema))
@@ -1096,12 +1113,8 @@ def model_training(args):
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
+    ddp.cleanup()
 
 
 if __name__ == "__main__":
-    try:
-        model_training(get_args())
-    finally:
-        # TorchElastic terminates sibling ranks as soon as one rank fails. Destroying the
-        # process group on every exit path keeps short RL audits from leaking NCCL resources.
-        ddp.cleanup()
+    model_training(get_args())
