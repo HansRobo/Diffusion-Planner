@@ -1112,7 +1112,8 @@ def model_training(args):
             if args.use_wandb:
                 wandb.run.summary["source/valid_loss_ego"] = baseline_valid_loss
                 wandb.run.summary["source/valid_epdms_total"] = baseline_epdms
-                wandb.run.summary["source/valid_reward_mean"] = baseline_reward_mean
+                for key, value in baseline_reward_metrics.items():
+                    wandb.run.summary[f"source/valid_reward/{key}"] = scalar(value)
             print(
                 "Source SFT baseline: "
                 f"valid_loss_ego={baseline_valid_loss:.4f}, "

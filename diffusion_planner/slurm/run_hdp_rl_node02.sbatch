@@ -170,6 +170,7 @@ cd "${REPO}/diffusion_planner"
   "${VERIFY_SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" \
   "${TRAIN_EPOCHS}" <<'PY'
 import csv
+import json
 import math
 import pathlib
 import sys
@@ -239,12 +240,16 @@ required = (
     "train_grad_norm",
     "train_valid_group_fraction",
     "train_optimizer_step_fraction",
+    "valid_reward_mean",
 )
 for key in required:
     value = float(rows[0][key])
     assert math.isfinite(value), (key, value)
 assert float(rows[0]["train_optimizer_step_fraction"]) > 0.0
 assert float(rows[0]["train_valid_group_fraction"]) > 0.0
+with (save_dir / "source_baseline_metrics.json").open(encoding="utf-8") as f:
+    source_metrics = json.load(f)
+assert math.isfinite(float(source_metrics["valid_reward_mean"]))
 
 print(
     "RL_RUN_OK",
