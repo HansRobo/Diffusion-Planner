@@ -720,6 +720,15 @@ def scalar(value):
     return float(value)
 
 
+def finite_scalar_metrics(metrics):
+    result = {}
+    for key, value in metrics.items():
+        number = scalar(value)
+        if math.isfinite(number):
+            result[key] = number
+    return result
+
+
 def model_training(args):
     global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
@@ -1072,7 +1081,8 @@ def model_training(args):
         baseline_agg = aggregate_valid_metrics(baseline_dict, args.device)
         baseline_reward_metrics = validate_hdp_reward_policy(valid_loader, eval_model, args)
         baseline_valid_loss = scalar(baseline_agg["avg_loss_ego"])
-        baseline_epdms = scalar(baseline_agg["epdms_means"].get("total", 0.0))
+        baseline_epdms_metrics = finite_scalar_metrics(baseline_agg["epdms_means"])
+        baseline_epdms = baseline_epdms_metrics.get("total", 0.0)
         baseline_reward_mean = scalar(baseline_reward_metrics["mean"])
         baseline_selection_score = baseline_reward_mean
         baseline_rng_states = gather_rng_states()
@@ -1081,7 +1091,7 @@ def model_training(args):
             baseline_metrics = {
                 "epoch": 0,
                 "valid_loss_ego": baseline_valid_loss,
-                "valid_epdms_total": baseline_epdms,
+                **{f"valid_epdms_{key}": value for key, value in baseline_epdms_metrics.items()},
                 **{
                     f"valid_reward_{key}": scalar(value)
                     for key, value in baseline_reward_metrics.items()
@@ -1111,7 +1121,8 @@ def model_training(args):
                 json.dump(baseline_metrics, f, indent=4)
             if args.use_wandb:
                 wandb.run.summary["source/valid_loss_ego"] = baseline_valid_loss
-                wandb.run.summary["source/valid_epdms_total"] = baseline_epdms
+                for key, value in baseline_epdms_metrics.items():
+                    wandb.run.summary[f"source/valid_epdms/{key}"] = value
                 for key, value in baseline_reward_metrics.items():
                     wandb.run.summary[f"source/valid_reward/{key}"] = scalar(value)
             print(
@@ -1159,7 +1170,8 @@ def model_training(args):
             valid_loss_ego = scalar(agg["avg_loss_ego"])
             valid_neighbor_margin = scalar(agg["ego_means"]["ego_neighbor_margin_loss"])
             valid_road_border = scalar(agg["ego_means"]["ego_road_border_loss"])
-            valid_epdms_total = scalar(agg["epdms_means"].get("total", 0.0))
+            valid_epdms_metrics = finite_scalar_metrics(agg["epdms_means"])
+            valid_epdms_total = valid_epdms_metrics.get("total", 0.0)
             valid_reward_metrics = {key: scalar(value) for key, value in valid_reward_raw.items()}
             valid_reward_mean = valid_reward_metrics.get("mean", float("nan"))
             valid_multisample = {
@@ -1224,7 +1236,10 @@ def model_training(args):
                         "valid/ego": valid_loss_ego,
                         "valid/neighbor_margin": valid_neighbor_margin,
                         "valid/road_border": valid_road_border,
-                        "valid/epdms_total": valid_epdms_total,
+                        **{
+                            f"valid_epdms/{key}": value
+                            for key, value in valid_epdms_metrics.items()
+                        },
                         **{
                             f"valid_reward/{key}": value
                             for key, value in valid_reward_metrics.items()
@@ -1257,7 +1272,7 @@ def model_training(args):
                 "valid_loss_ego": valid_loss_ego,
                 "valid_neighbor_margin": valid_neighbor_margin,
                 "valid_road_border": valid_road_border,
-                "valid_epdms_total": valid_epdms_total,
+                **{f"valid_epdms_{key}": value for key, value in valid_epdms_metrics.items()},
                 **{f"valid_reward_{key}": value for key, value in valid_reward_metrics.items()},
                 "valid_full_eval": run_full_eval,
                 "valid_within_source_loss_guard": loss_within_guard,

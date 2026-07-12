@@ -10,6 +10,7 @@ from train_hdp_rl_predictor import (
     best_valid_score_from_rows,
     configure_rl_trainable_parameters,
     find_checkpoint_run_artifact,
+    finite_scalar_metrics,
 )
 
 
@@ -99,6 +100,14 @@ def test_find_checkpoint_run_artifact_handles_latest_and_nested_checkpoints(tmp_
     assert find_checkpoint_run_artifact(str(run_dir / "latest.pth"), artifact.name) == artifact
     assert find_checkpoint_run_artifact(str(nested / "best_model.pth"), artifact.name) == artifact
     assert find_checkpoint_run_artifact(str(nested / "best_model.pth"), "missing.json") is None
+
+
+def test_finite_scalar_metrics_excludes_invalid_json_values():
+    metrics = finite_scalar_metrics(
+        {"finite": torch.tensor(0.75), "nan": float("nan"), "inf": float("inf")}
+    )
+
+    assert metrics == {"finite": 0.75}
 
 
 def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
