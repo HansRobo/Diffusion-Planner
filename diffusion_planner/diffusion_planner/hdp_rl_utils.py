@@ -179,6 +179,7 @@ def _collision_and_leader_terms(
             "collision_active": torch.zeros(C, device=device),
             "collision_rear": torch.zeros(C, device=device),
             "stopped_clearance": torch.full((C, T), float("inf"), device=device),
+            "stopped_is_rear": torch.zeros(C, T, dtype=torch.bool, device=device),
             "stopped_available": torch.tensor(False, device=device),
         }
 
@@ -266,9 +267,14 @@ def _collision_and_leader_terms(
         & (neighbor_speed[:, 1] < _RL_REWARD_CONFIG.sc_neighbor_vel_thresh)
         & (max_displacement < _RL_REWARD_CONFIG.sc_neighbor_disp_thresh)
     )
-    stopped_clearance = clearance.masked_fill(~stopped_mask[None, :, None], float("inf")).amin(
-        dim=1
-    )
+    stopped_clearance, stopped_index = clearance.masked_fill(
+        ~stopped_mask[None, :, None], float("inf")
+    ).min(dim=1)
+    stopped_is_rear = torch.gather(
+        npc_behind,
+        1,
+        stopped_index[:, None, :],
+    ).squeeze(1) & torch.isfinite(stopped_clearance)
     selected_leader_speed = torch.gather(
         neighbor_speed[None].expand(C, -1, -1),
         1,
@@ -303,6 +309,7 @@ def _collision_and_leader_terms(
         "collision_active": active_collision.any(dim=(1, 2)).float(),
         "collision_rear": rear_collision.any(dim=(1, 2)).float(),
         "stopped_clearance": stopped_clearance,
+        "stopped_is_rear": stopped_is_rear,
         "stopped_available": stopped_mask.any(),
     }
 
@@ -329,11 +336,13 @@ def _occupancy_score(
     stopped_clearance: torch.Tensor,
     stopped_available: torch.Tensor,
     config: HDPRewardConfig,
+    stopped_is_rear: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, bool]]:
     """Fuse static boxes/stopped agents, with road border as a weak fallback."""
     C, T, _ = ego_trajs.shape
     device = ego_trajs.device
     source_clearances: list[torch.Tensor] = []
+    source_rear_masks: list[torch.Tensor] = []
     sources = {"static": False, "stopped": False, "road_border": False}
 
     if static_objects is not None:
@@ -367,18 +376,36 @@ def _occupancy_score(
                 .min(dim=1)
                 .values
             )
+            source_rear_masks.append(torch.zeros(C, T, dtype=torch.bool, device=device))
             sources["static"] = True
 
     if bool(stopped_available.item()):
         source_clearances.append(stopped_clearance)
+        source_rear_masks.append(
+            stopped_is_rear
+            if stopped_is_rear is not None
+            else torch.zeros(C, T, dtype=torch.bool, device=device)
+        )
         sources["stopped"] = True
 
     if source_clearances:
-        clearance = torch.stack(source_clearances, dim=0).amin(dim=0)
+        clearance_stack = torch.stack(source_clearances, dim=0)
+        clearance, source_index = clearance_stack.min(dim=0)
+        winning_rear = torch.gather(
+            torch.stack(source_rear_masks, dim=0),
+            0,
+            source_index.unsqueeze(0),
+        ).squeeze(0)
         ego_speed = _trajectory_speed(ego_trajs[..., :2], config.dt)
         safe_distance = config.occupancy_safe_m + config.occupancy_speed_gain_s * ego_speed
         critical_distance = config.occupancy_critical_m + config.occupancy_speed_gain_s * ego_speed
-        return _linear_safe_score(clearance, critical_distance, safe_distance), sources
+        score = _linear_safe_score(clearance, critical_distance, safe_distance)
+        score = torch.where(
+            winning_rear,
+            1.0 - config.rear_end_penalty * (1.0 - score),
+            score,
+        )
+        return score, sources
 
     # Road borders are not literal occupancy. Use them only when the scene has at least one
     # real border segment, and score lateral clearance without the longitudinal speed gain used
@@ -616,6 +643,7 @@ def compute_hdp_reward(
             terms["stopped_clearance"],
             terms["stopped_available"],
             config,
+            stopped_is_rear=terms["stopped_is_rear"],
         )
         risk = torch.stack([terms["ttc"], terms["thw"], occupancy], dim=0).amin(dim=(0, 2))
         expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])

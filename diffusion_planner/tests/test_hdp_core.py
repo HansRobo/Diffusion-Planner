@@ -680,6 +680,60 @@ def test_hdp_collision_reward_attenuates_rear_end_only():
     assert rear["collision_rear"].item() == 1.0
 
 
+def test_hdp_stopped_occupancy_preserves_rear_end_attenuation():
+    config = HDPRewardConfig()
+    ego = torch.zeros(1, 4, 4)
+    ego[..., 2] = 1.0
+    rear = _collision_terms_for_neighbor_x(-1.0)
+    active = _collision_terms_for_neighbor_x(3.0)
+
+    rear_occupancy, _ = _occupancy_score(
+        ego,
+        torch.tensor([2.5, 4.0, 2.0]),
+        None,
+        None,
+        rear["stopped_clearance"],
+        rear["stopped_available"],
+        config,
+        stopped_is_rear=rear["stopped_is_rear"],
+    )
+    active_occupancy, _ = _occupancy_score(
+        ego,
+        torch.tensor([2.5, 4.0, 2.0]),
+        None,
+        None,
+        active["stopped_clearance"],
+        active["stopped_available"],
+        config,
+        stopped_is_rear=active["stopped_is_rear"],
+    )
+
+    torch.testing.assert_close(rear_occupancy, torch.full_like(rear_occupancy, 0.7))
+    torch.testing.assert_close(active_occupancy, torch.zeros_like(active_occupancy))
+
+
+def test_hdp_static_occupancy_is_not_attenuated_by_rear_stopped_vehicle():
+    config = HDPRewardConfig()
+    ego = torch.zeros(1, 4, 4)
+    ego[..., 2] = 1.0
+    rear = _collision_terms_for_neighbor_x(-1.0)
+    static_object = torch.tensor([[0.0, 0.0, 1.0, 0.0, 2.0, 4.0, 0.0, 0.0, 0.0, 0.0]])
+
+    occupancy, sources = _occupancy_score(
+        ego,
+        torch.tensor([2.5, 4.0, 2.0]),
+        static_object,
+        None,
+        rear["stopped_clearance"],
+        rear["stopped_available"],
+        config,
+        stopped_is_rear=rear["stopped_is_rear"],
+    )
+
+    assert sources["static"] and sources["stopped"]
+    torch.testing.assert_close(occupancy, torch.zeros_like(occupancy))
+
+
 def test_hdp_neighbor_at_ego_origin_remains_valid():
     future = torch.zeros(1, 3, 4)
     future[..., 2] = 1.0
