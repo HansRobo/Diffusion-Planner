@@ -977,19 +977,21 @@ def compute_road_border_penalty(
     seg_p2_all = border_xy[:, 1:].reshape(-1, 2)[idx]  # (E, 2)
 
     # Build ego perimeter points (20 per side = 80 total)
-    wb = ego_shape[0].item()
-    length = ego_shape[1].item()
-    width = ego_shape[2].item()
+    wb, length, width = ego_shape[:3].to(device=device, dtype=ego_trajs.dtype)
     ro = (length - wb) / 2
     _PTS_PER_SIDE = 20
-    local_pts = []
-    for j in range(_PTS_PER_SIDE):
-        f = j / (_PTS_PER_SIDE - 1)
-        local_pts.append((-ro + f * length, -width / 2))  # bottom
-        local_pts.append((-ro + f * length, width / 2))  # top
-        local_pts.append((-ro, -width / 2 + f * width))  # left
-        local_pts.append((length - ro, -width / 2 + f * width))  # right
-    local_pts = torch.tensor(local_pts, device=device, dtype=ego_trajs.dtype)  # (80, 2)
+    fraction = torch.linspace(0.0, 1.0, _PTS_PER_SIDE, device=device, dtype=ego_trajs.dtype)
+    length_axis = -ro + fraction * length
+    width_axis = -width / 2 + fraction * width
+    local_pts = torch.stack(
+        (
+            torch.stack((length_axis, (-width / 2).expand_as(length_axis)), dim=-1),
+            torch.stack((length_axis, (width / 2).expand_as(length_axis)), dim=-1),
+            torch.stack((-ro.expand_as(width_axis), width_axis), dim=-1),
+            torch.stack(((length - ro).expand_as(width_axis), width_axis), dim=-1),
+        ),
+        dim=1,
+    ).reshape(-1, 2)
     K_pts = local_pts.shape[0]
 
     # For each trajectory and timestep, transform perimeter to world frame

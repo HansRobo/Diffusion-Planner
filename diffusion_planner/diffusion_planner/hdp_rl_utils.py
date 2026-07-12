@@ -337,6 +337,10 @@ def _occupancy_score(
     stopped_available: torch.Tensor,
     config: HDPRewardConfig,
     stopped_is_rear: torch.Tensor | None = None,
+    *,
+    static_available: bool | None = None,
+    stopped_available_flag: bool | None = None,
+    road_border_available: bool | None = None,
 ) -> tuple[torch.Tensor, dict[str, bool]]:
     """Fuse static boxes/stopped agents, with road border as a weak fallback."""
     C, T, _ = ego_trajs.shape
@@ -349,7 +353,8 @@ def _occupancy_score(
         valid = (static_objects[..., :2].abs().sum(dim=-1) > 1e-6) | (
             static_objects[..., 4:6].abs().sum(dim=-1) > 1e-6
         )
-        if valid.any():
+        has_static = bool(valid.any()) if static_available is None else static_available
+        if has_static:
             objects = static_objects[valid]
             poses = objects[:, None, :4].expand(-1, T, -1).clone()
             heading_norm = poses[..., 2:4].norm(dim=-1, keepdim=True)
@@ -379,7 +384,12 @@ def _occupancy_score(
             source_rear_masks.append(torch.zeros(C, T, dtype=torch.bool, device=device))
             sources["static"] = True
 
-    if bool(stopped_available.item()):
+    has_stopped = (
+        bool(stopped_available.item())
+        if stopped_available_flag is None
+        else stopped_available_flag
+    )
+    if has_stopped:
         source_clearances.append(stopped_clearance)
         source_rear_masks.append(
             stopped_is_rear
@@ -411,8 +421,8 @@ def _occupancy_score(
     # real border segment, and score lateral clearance without the longitudinal speed gain used
     # for obstacles ahead. The previous coupling made safe high-speed/right-turn GT trajectories
     # receive zero OCC reward merely for passing near a curb.
-    has_road_border = False
-    if line_strings is not None and line_strings.shape[-1] >= 4:
+    has_road_border = road_border_available
+    if has_road_border is None and line_strings is not None and line_strings.shape[-1] >= 4:
         border_point = (line_strings[..., 3] > 0.5) & (line_strings[..., :2].norm(dim=-1) > 1e-3)
         has_road_border = bool((border_point[..., :-1] & border_point[..., 1:]).any().item())
     if has_road_border:
@@ -423,7 +433,7 @@ def _occupancy_score(
             _RL_REWARD_CONFIG,
             clearance_only=True,
         )
-        if torch.isfinite(road_border).any():
+        if road_border_available is not None or torch.isfinite(road_border).any():
             sources["road_border"] = True
             return _linear_safe_score(
                 road_border,
@@ -488,21 +498,35 @@ def _lane_reward_centerlines(
     config: HDPRewardConfig,
     *,
     compile_kernel: bool = False,
+    route_aligned: bool | None = None,
 ) -> tuple[torch.Tensor, bool]:
     """Prefer the navigation route when it agrees with the logged expert trajectory."""
     if route_lanes is None:
         return lanes, False
-    route_valid = route_lanes[..., :2].abs().sum(dim=-1) > 1e-6
-    if not (route_valid[..., :-1] & route_valid[..., 1:]).any():
-        return lanes, False
+    if route_aligned is None:
+        route_aligned = bool(
+            _route_alignment(expert_future, route_lanes, config, compile_kernel=compile_kernel).item()
+        )
+    return (route_lanes, True) if route_aligned else (lanes, False)
 
+
+def _route_alignment(
+    expert_future: torch.Tensor,
+    route_lanes: torch.Tensor | None,
+    config: HDPRewardConfig,
+    *,
+    compile_kernel: bool = False,
+) -> torch.Tensor:
+    if route_lanes is None:
+        return torch.zeros((), dtype=torch.bool, device=expert_future.device)
+    route_valid = route_lanes[..., :2].abs().sum(dim=-1) > 1e-6
+    has_route = (route_valid[..., :-1] & route_valid[..., 1:]).any()
     route_distance = _nearest_lane_distance(
         expert_future[..., :2], route_lanes, compile_kernel=compile_kernel
     )
-    route_aligned = (route_distance.mean() <= config.lane_half_width_m) & (
+    return has_route & (route_distance.mean() <= config.lane_half_width_m) & (
         route_distance.max() <= 2.0 * config.lane_half_width_m
     )
-    return (route_lanes, True) if bool(route_aligned.item()) else (lanes, False)
 
 
 def _hdp_lane_score(
@@ -513,9 +537,15 @@ def _hdp_lane_score(
     config: HDPRewardConfig,
     *,
     compile_kernel: bool = False,
+    lanes_available: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     lane_valid = lanes[..., :2].abs().sum(dim=-1) > 1e-6
-    if not (lane_valid[..., :-1] & lane_valid[..., 1:]).any():
+    has_lanes = (
+        bool((lane_valid[..., :-1] & lane_valid[..., 1:]).any())
+        if lanes_available is None
+        else lanes_available
+    )
+    if not has_lanes:
         zero = torch.zeros((), dtype=torch.bool, device=ego_trajs.device)
         return torch.zeros(ego_trajs.shape[0], device=ego_trajs.device), ~zero, zero
     pred_distance = _nearest_lane_distance(ego_trajs[..., :2], lanes, compile_kernel=compile_kernel)
@@ -616,6 +646,10 @@ def compute_hdp_reward(
     if missing:
         raise ValueError(f"HDP reward is missing required scene tensors: {missing}")
 
+    scene_terms = []
+    expert_futures = []
+    route_alignment_tensors = []
+    route_lanes_batch = scene_inputs.get("route_lanes")
     for scene in range(num_scenes):
         ego_shape = scene_inputs["ego_shape"][scene, :3]
         nf, neighbor_shapes, neighbor_valid, neighbor_initial, neighbor_is_vehicle = (
@@ -632,29 +666,78 @@ def compute_hdp_reward(
             config,
             compile_kernel=compile_kernels,
         )
+        expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])
+        scene_terms.append(terms)
+        expert_futures.append(expert_future)
+        route_alignment_tensors.append(
+            _route_alignment(
+                expert_future,
+                route_lanes_batch[scene] if route_lanes_batch is not None else None,
+                config,
+                compile_kernel=compile_kernels,
+            )
+        )
+
+    device = ego_world.device
+    static_objects_batch = scene_inputs.get("static_objects")
+    if static_objects_batch is None:
+        static_available = torch.zeros(num_scenes, dtype=torch.bool, device=device)
+    else:
+        static_available = (
+            (static_objects_batch[..., :2].abs().sum(dim=-1) > 1e-6)
+            | (static_objects_batch[..., 4:6].abs().sum(dim=-1) > 1e-6)
+        ).any(dim=-1)
+    line_strings_batch = scene_inputs.get("line_strings")
+    if line_strings_batch is None or line_strings_batch.shape[-1] < 4:
+        road_border_available = torch.zeros(num_scenes, dtype=torch.bool, device=device)
+    else:
+        border_point = (line_strings_batch[..., 3] > 0.5) & (
+            line_strings_batch[..., :2].norm(dim=-1) > 1e-3
+        )
+        road_border_available = (border_point[..., :-1] & border_point[..., 1:]).flatten(1).any(1)
+    lane_points = scene_inputs["lanes"][..., :2]
+    lane_valid = lane_points.abs().sum(dim=-1) > 1e-6
+    lane_available = (lane_valid[..., :-1] & lane_valid[..., 1:]).flatten(1).any(1)
+    stopped_available = torch.stack([terms["stopped_available"] for terms in scene_terms])
+    route_aligned = torch.stack(route_alignment_tensors)
+    availability = torch.stack(
+        (
+            static_available,
+            stopped_available,
+            road_border_available,
+            lane_available,
+            route_aligned,
+        ),
+        dim=1,
+    ).cpu().tolist()
+
+    for scene in range(num_scenes):
+        ego_shape = scene_inputs["ego_shape"][scene, :3]
+        terms = scene_terms[scene]
+        expert_future = expert_futures[scene]
+        has_static, has_stopped, has_road_border, has_lanes, use_route = availability[scene]
         occupancy, occupancy_sources = _occupancy_score(
             ego_group[scene],
             ego_shape,
-            scene_inputs.get("static_objects", None)[scene]
-            if "static_objects" in scene_inputs
-            else None,
-            scene_inputs.get("line_strings", None)[scene]
-            if "line_strings" in scene_inputs
-            else None,
+            static_objects_batch[scene] if static_objects_batch is not None else None,
+            line_strings_batch[scene] if line_strings_batch is not None else None,
             terms["stopped_clearance"],
             terms["stopped_available"],
             config,
             stopped_is_rear=terms["stopped_is_rear"],
+            static_available=has_static,
+            stopped_available_flag=has_stopped,
+            road_border_available=has_road_border,
         )
         risk = torch.stack([terms["ttc"], terms["thw"], occupancy], dim=0).amin(dim=(0, 2))
-        expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])
         progress_ratio, progress_score = _relative_progress_score(ego_group[scene], expert_future)
         lane_centerlines, lane_route_source = _lane_reward_centerlines(
             expert_future,
             scene_inputs["lanes"][scene],
-            scene_inputs.get("route_lanes", None)[scene] if "route_lanes" in scene_inputs else None,
+            route_lanes_batch[scene] if route_lanes_batch is not None else None,
             config,
             compile_kernel=compile_kernels,
+            route_aligned=use_route,
         )
         lane, expert_off_lane, expert_lane_change = _hdp_lane_score(
             ego_group[scene],
@@ -665,6 +748,7 @@ def compute_hdp_reward(
             else None,
             config,
             compile_kernel=compile_kernels,
+            lanes_available=(use_route or has_lanes),
         )
         reward = (
             args.rl_reward_w_risk * risk
