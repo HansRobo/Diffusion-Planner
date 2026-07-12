@@ -244,6 +244,45 @@ def _scene_neighbors(
     return future, shapes, valid, initial_xy, is_vehicle
 
 
+def _scene_neighbors_batch(
+    neighbors_future: torch.Tensor,
+    neighbor_past: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pack each scene's valid neighbor slots to one batch-local fixed width."""
+    B, N, T, _ = neighbors_future.shape
+    pose_valid = neighbors_future[..., 2:4].norm(dim=-1) > 0.5
+    slot_valid = pose_valid.any(dim=-1)
+    max_neighbors = int(slot_valid.sum(dim=1).max().item()) if B > 0 else 0
+
+    slot_index = torch.arange(N, device=neighbors_future.device).expand(B, -1)
+    packed_index = torch.where(slot_valid, slot_index, N).sort(dim=1).values[:, :max_neighbors]
+    packed_valid = packed_index < N
+    safe_index = packed_index.clamp_max(max(N - 1, 0))
+
+    future = torch.gather(
+        neighbors_future,
+        1,
+        safe_index[:, :, None, None].expand(-1, -1, T, neighbors_future.shape[-1]),
+    )
+    past = torch.gather(
+        neighbor_past,
+        1,
+        safe_index[:, :, None, None].expand(
+            -1, -1, neighbor_past.shape[-2], neighbor_past.shape[-1]
+        ),
+    )
+    future = future.masked_fill(~packed_valid[:, :, None, None], 0.0)
+    past = past.masked_fill(~packed_valid[:, :, None, None], 0.0)
+    valid = (future[..., 2:4].norm(dim=-1) > 0.5) & packed_valid[:, :, None]
+
+    shapes = past[:, :, -1, [6, 7]].abs()
+    fallback = shapes.new_tensor([2.0, 4.5])
+    shapes = torch.where((shapes > 1e-3).all(dim=-1, keepdim=True), shapes, fallback)
+    initial_xy = past[:, :, -1, :2]
+    is_vehicle = (past[:, :, -1, 8:11].argmax(dim=-1) == 0) & packed_valid
+    return future[..., :4], shapes, valid, initial_xy, is_vehicle
+
+
 def _collision_and_leader_terms(
     ego_trajs: torch.Tensor,
     ego_shape: torch.Tensor,
@@ -726,20 +765,26 @@ def compute_hdp_reward(
     if missing:
         raise ValueError(f"HDP reward is missing required scene tensors: {missing}")
 
-    scene_terms = []
-    expert_futures = []
-    route_alignment_tensors = []
-    route_lanes_batch = scene_inputs.get("route_lanes")
-    for scene in range(num_scenes):
-        ego_shape = scene_inputs["ego_shape"][scene, :3]
-        expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])
-        nf, neighbor_shapes, neighbor_valid, neighbor_initial, neighbor_is_vehicle = (
-            _scene_neighbors(neighbor_group[scene], scene_inputs["neighbor_agents_past"][scene])
-        )
-        terms = _collision_and_leader_terms(
-            ego_group[scene],
+    expert_futures_tensor = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"])
+    packed_neighbors = _scene_neighbors_batch(
+        neighbor_group,
+        scene_inputs["neighbor_agents_past"],
+    )
+
+    def collision_terms_for_scene(
+        ego_trajectories,
+        ego_shape,
+        neighbor_futures,
+        neighbor_shapes,
+        neighbor_valid,
+        neighbor_initial,
+        neighbor_is_vehicle,
+        expert_future,
+    ):
+        return _collision_and_leader_terms(
+            ego_trajectories,
             ego_shape,
-            nf,
+            neighbor_futures,
             neighbor_shapes,
             neighbor_valid,
             neighbor_initial,
@@ -747,11 +792,24 @@ def compute_hdp_reward(
             config,
             leader_reference=expert_future,
         )
-        scene_terms.append(terms)
-        expert_futures.append(expert_future)
+
+    scene_term_tensors = torch.vmap(collision_terms_for_scene)(
+        ego_group,
+        scene_inputs["ego_shape"][:, :3],
+        *packed_neighbors,
+        expert_futures_tensor,
+    )
+    scene_terms = [
+        {key: value[scene] for key, value in scene_term_tensors.items()}
+        for scene in range(num_scenes)
+    ]
+    expert_futures = list(expert_futures_tensor)
+    route_alignment_tensors = []
+    route_lanes_batch = scene_inputs.get("route_lanes")
+    for scene in range(num_scenes):
         route_alignment_tensors.append(
             _route_alignment(
-                expert_future,
+                expert_futures_tensor[scene],
                 route_lanes_batch[scene] if route_lanes_batch is not None else None,
                 config,
             )

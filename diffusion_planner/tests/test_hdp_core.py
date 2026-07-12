@@ -23,6 +23,7 @@ from diffusion_planner.hdp_rl_utils import (
     _relative_progress_score,
     _road_border_clearance_exact,
     _scene_neighbors,
+    _scene_neighbors_batch,
     compute_hdp_reward,
     compute_reward_weighted_loss,
     compute_reward_weights,
@@ -98,6 +99,53 @@ def test_hdp_representation_and_normalization_round_trip():
     torch.testing.assert_close(
         inverse_normalize_ego_velocity(normalized, normalizer), velocity, rtol=0, atol=0
     )
+
+
+def test_batched_neighbor_collision_terms_match_scene_loop():
+    torch.manual_seed(19)
+    batch_size, candidates, neighbor_slots, horizon = 3, 2, 5, 8
+    ego = torch.randn(batch_size, candidates, horizon, 4)
+    ego[..., 2] = 1.0
+    ego[..., 3] = 0.0
+    ego_shape = torch.tensor([[2.7, 4.8, 1.9]]).expand(batch_size, -1).clone()
+    future = torch.zeros(batch_size, neighbor_slots, horizon, 4)
+    past = torch.zeros(batch_size, neighbor_slots, 4, 11)
+    for scene, count in enumerate((0, 2, 4)):
+        future[scene, :count, :, :2] = torch.randn(count, horizon, 2) + 8.0
+        future[scene, :count, :, 2] = 1.0
+        past[scene, :count, -1, :2] = future[scene, :count, 0, :2]
+        past[scene, :count, -1, 2] = 1.0
+        past[scene, :count, -1, 6:8] = torch.tensor([2.0, 4.5])
+        past[scene, :count, -1, 8] = 1.0
+    reference = torch.randn(batch_size, horizon, 4)
+    reference[..., 2] = 1.0
+    reference[..., 3] = 0.0
+    config = HDPRewardConfig()
+
+    packed = _scene_neighbors_batch(future, past)
+
+    def batched_fn(ego_scene, shape, nf, ns, nv, ni, vehicle, ref):
+        return _collision_and_leader_terms(
+            ego_scene, shape, nf, ns, nv, ni, vehicle, config, leader_reference=ref
+        )
+
+    actual = torch.vmap(batched_fn)(ego, ego_shape, *packed, reference)
+    expected = []
+    for scene in range(batch_size):
+        scene_neighbors = _scene_neighbors(future[scene], past[scene])
+        expected.append(
+            _collision_and_leader_terms(
+                ego[scene],
+                ego_shape[scene],
+                *scene_neighbors,
+                config,
+                leader_reference=reference[scene],
+            )
+        )
+
+    for key, actual_value in actual.items():
+        expected_value = torch.stack([scene[key] for scene in expected])
+        torch.testing.assert_close(actual_value, expected_value, rtol=0, atol=1e-6)
 
 
 def test_state_normalizer_caches_stats_by_kind_device_and_dtype():
