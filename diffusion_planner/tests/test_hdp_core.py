@@ -16,6 +16,7 @@ from diffusion_planner.dimensions import (
 from diffusion_planner.hdp_rl_epoch import (
     _backward_reward_weighted_update,
     _grouped_policy_inputs,
+    _reward_weight_diagnostics,
     commit_ema_policy_update,
 )
 from diffusion_planner.hdp_rl_utils import (
@@ -873,6 +874,15 @@ def test_rl_weight_diagnostics_exclude_discarded_groups(monkeypatch):
     torch.testing.assert_close(output["reward_weight_mean"], torch.tensor(2.0))
     torch.testing.assert_close(output["reward_weight_max"], torch.tensor(3.0))
     torch.testing.assert_close(output["reward_weight_min"], torch.tensor(1.0))
+
+    diagnostics = _reward_weight_diagnostics(
+        torch.tensor([0.0, 0.0, 1.0, 3.0]),
+        torch.tensor([False, False, True, True]),
+        num_scenes=2,
+        n=2,
+    )
+    torch.testing.assert_close(diagnostics["reward_weight_ess_fraction"], torch.tensor(0.8))
+    torch.testing.assert_close(diagnostics["reward_weight_top1_share"], torch.tensor(0.75))
 
 
 def test_legacy_short_neighbor_future_alignment_keeps_full_tracks():

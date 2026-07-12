@@ -108,6 +108,14 @@ def _reward_weight_diagnostics(
     n: int,
 ) -> dict[str, torch.Tensor]:
     local_valid_count = valid_sample.sum().to(reward_weights.dtype)
+    grouped_weights = reward_weights.view(num_scenes, n)
+    valid_group = valid_sample.view(num_scenes, n).any(dim=1)
+    group_weight_sum = grouped_weights.sum(dim=1)
+    ess_fraction = (
+        group_weight_sum.square() / grouped_weights.square().sum(dim=1).clamp_min(1e-12) / n
+    )
+    top1_share = grouped_weights.max(dim=1).values / group_weight_sum.clamp_min(1e-12)
+    valid_group_count = valid_group.sum().to(reward_weights.dtype).clamp_min(1.0)
     return {
         "reward_weight_mean": reward_weights.sum() / local_valid_count.clamp_min(1.0),
         "reward_weight_max": torch.nan_to_num(
@@ -117,6 +125,8 @@ def _reward_weight_diagnostics(
             reward_weights.masked_fill(~valid_sample, torch.inf).min(), posinf=0.0
         ),
         "valid_group_fraction": valid_sample.view(num_scenes, n).any(dim=1).float().mean(),
+        "reward_weight_ess_fraction": (ess_fraction * valid_group).sum() / valid_group_count,
+        "reward_weight_top1_share": (top1_share * valid_group).sum() / valid_group_count,
     }
 
 
@@ -441,6 +451,8 @@ def _hdp_rl_step(
             "reward_weight_mean": reward_weights.mean(),
             "reward_weight_max": reward_weights.max(),
             "reward_weight_min": reward_weights.min(),
+            "reward_weight_ess_fraction": zero,
+            "reward_weight_top1_share": zero,
             "valid_group_fraction": zero,
             "update_scene_chunk_size": reward.new_tensor(float(num_scenes)),
             "update_candidate_chunk_size": reward.new_tensor(float(batch_size)),
@@ -477,6 +489,8 @@ def _hdp_rl_step(
         "reward_weight_mean": loss_dict["reward_weight_mean"].detach(),
         "reward_weight_max": loss_dict["reward_weight_max"].detach(),
         "reward_weight_min": loss_dict["reward_weight_min"].detach(),
+        "reward_weight_ess_fraction": loss_dict["reward_weight_ess_fraction"].detach(),
+        "reward_weight_top1_share": loss_dict["reward_weight_top1_share"].detach(),
         "valid_group_fraction": loss_dict["valid_group_fraction"].detach(),
         "update_scene_chunk_size": loss_dict["update_scene_chunk_size"].detach(),
         "update_candidate_chunk_size": loss_dict["update_candidate_chunk_size"].detach(),
