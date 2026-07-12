@@ -890,6 +890,41 @@ def test_hdp_following_ignores_non_vehicle_leader():
     torch.testing.assert_close(terms["follow"], torch.tensor([1.0]))
 
 
+def test_hdp_following_uses_reference_leader_instead_of_candidate_escape():
+    time_steps = 4
+    ego = torch.zeros(2, time_steps, 4)
+    ego[..., 0] = torch.arange(1.0, time_steps + 1)
+    ego[..., 2] = 1.0
+    ego[1, :, 1] = 4.0
+    neighbor = torch.zeros(1, time_steps, 4)
+    neighbor[..., 0] = torch.arange(7.0, time_steps + 7.0)
+    neighbor[..., 2] = 1.0
+    common_args = (
+        ego,
+        torch.tensor([2.5, 4.0, 2.0]),
+        neighbor,
+        torch.tensor([[2.0, 4.0]]),
+        torch.ones(1, time_steps, dtype=torch.bool),
+        torch.tensor([[6.0, 0.0]]),
+        torch.tensor([True]),
+        HDPRewardConfig(),
+    )
+
+    candidate_association = _collision_and_leader_terms(*common_args)
+    reference_association = _collision_and_leader_terms(
+        *common_args,
+        leader_reference=ego[0],
+    )
+
+    assert candidate_association["leader_fraction"].tolist() == [1.0, 0.0]
+    torch.testing.assert_close(
+        reference_association["leader_fraction"],
+        torch.ones(2),
+    )
+    assert candidate_association["follow"][1].item() == pytest.approx(1.0)
+    assert reference_association["follow"][1] < candidate_association["follow"][1]
+
+
 def test_hdp_lane_change_mask_and_neutral_occupancy_fallback():
     lanes = torch.zeros(1, 20, 8)
     lanes[0, :, 0] = torch.linspace(0.1, 20.0, 20)

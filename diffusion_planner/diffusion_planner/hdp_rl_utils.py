@@ -254,6 +254,7 @@ def _collision_and_leader_terms(
     neighbor_initial_xy: torch.Tensor,
     neighbor_is_vehicle: torch.Tensor,
     config: HDPRewardConfig,
+    leader_reference: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Compute paper safety, TTC, THW and leader-conditioned following terms."""
     C, T, _ = ego_trajs.shape
@@ -342,15 +343,49 @@ def _collision_and_leader_terms(
     npc_length = neighbor_shapes[:, 1]
     bumper_gap = longitudinal - 0.5 * (ego_length + npc_length[None, :, None])
     lateral_limit = 0.5 * (ego_width + npc_width[None, :, None]) + config.leader_lateral_margin_m
-    leader_candidate = (
-        neighbor_valid[None]
-        & neighbor_is_vehicle[None, :, None]
-        & (longitudinal > 0.0)
-        & (lateral <= lateral_limit)
-    )
-    candidate_gap = bumper_gap.clamp_min(0.0).masked_fill(~leader_candidate, float("inf"))
-    leader_gap, leader_index = candidate_gap.min(dim=1)
-    leader_present = torch.isfinite(leader_gap)
+    if leader_reference is None:
+        leader_candidate = (
+            neighbor_valid[None]
+            & neighbor_is_vehicle[None, :, None]
+            & (longitudinal > 0.0)
+            & (lateral <= lateral_limit)
+        )
+        candidate_gap = bumper_gap.clamp_min(0.0).masked_fill(~leader_candidate, float("inf"))
+        leader_gap, leader_index = candidate_gap.min(dim=1)
+        leader_present = torch.isfinite(leader_gap)
+    else:
+        reference = leader_reference[:T]
+        reference_heading = reference[..., 2:4]
+        reference_heading = reference_heading / reference_heading.norm(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-6)
+        reference_center = reference[..., :2] + 0.5 * ego_shape[0] * reference_heading
+        reference_rel = neighbor_futures[..., :2] - reference_center[None]
+        reference_longitudinal = (reference_rel * reference_heading[None]).sum(dim=-1)
+        reference_lateral = torch.abs(
+            reference_rel[..., 0] * -reference_heading[None, :, 1]
+            + reference_rel[..., 1] * reference_heading[None, :, 0]
+        )
+        reference_candidate = (
+            neighbor_valid
+            & neighbor_is_vehicle[:, None]
+            & (reference_longitudinal > 0.0)
+            & (reference_lateral <= lateral_limit[0])
+        )
+        reference_gap = (
+            reference_longitudinal - 0.5 * (ego_length + npc_length[:, None])
+        ).clamp_min(0.0)
+        reference_gap = reference_gap.masked_fill(~reference_candidate, float("inf"))
+        reference_min_gap, reference_index = reference_gap.min(dim=0)
+        reference_present = torch.isfinite(reference_min_gap)
+        leader_index = reference_index[None].expand(C, -1)
+        leader_present = reference_present[None].expand(C, -1)
+        leader_gap = torch.gather(bumper_gap, 1, leader_index[:, None]).squeeze(1).clamp_min(0.0)
+        leader_gap = torch.where(
+            leader_present,
+            leader_gap,
+            torch.full_like(leader_gap, float("inf")),
+        )
 
     neighbor_speed = _trajectory_speed(
         neighbor_futures[..., :2],
@@ -698,6 +733,7 @@ def compute_hdp_reward(
     route_lanes_batch = scene_inputs.get("route_lanes")
     for scene in range(num_scenes):
         ego_shape = scene_inputs["ego_shape"][scene, :3]
+        expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])
         nf, neighbor_shapes, neighbor_valid, neighbor_initial, neighbor_is_vehicle = (
             _scene_neighbors(neighbor_group[scene], scene_inputs["neighbor_agents_past"][scene])
         )
@@ -710,8 +746,8 @@ def compute_hdp_reward(
             neighbor_initial,
             neighbor_is_vehicle,
             config,
+            leader_reference=expert_future,
         )
-        expert_future = heading_to_cos_sin_if_needed(scene_inputs["ego_agent_future"][scene])
         scene_terms.append(terms)
         expert_futures.append(expert_future)
         route_alignment_tensors.append(
