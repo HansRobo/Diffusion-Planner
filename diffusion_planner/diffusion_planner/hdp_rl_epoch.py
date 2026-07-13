@@ -34,6 +34,25 @@ from diffusion_planner.utils.train_utils import finalize_epoch_loss_sums, update
 
 _RL_EVAL_MAX_CANDIDATES_PER_RANK = 1024
 
+_STEP_GLOBAL_MAX_METRICS = frozenset(
+    {
+        "grad_norm_max_per_rollout",
+        "max_memory_allocated_gb",
+        "max_memory_reserved_gb",
+        "reward_weight_max",
+        "time_reward_s",
+        "time_rollout_s",
+        "time_total_s",
+        "time_update_s",
+    }
+)
+_STEP_GLOBAL_MIN_METRICS = frozenset({"reward_weight_min"})
+_STEP_THROUGHPUT_METRICS = (
+    "throughput_scenes_per_s",
+    "throughput_candidates_per_s",
+    "throughput_candidate_updates_per_s",
+)
+
 
 def _add_stationary_progress_conditionals(
     metrics: dict[str, torch.Tensor | float], *, prefix: str = "reward_"
@@ -80,10 +99,101 @@ def _add_stationary_progress_conditionals(
 def _step_metrics_for_logging(
     step_loss: dict[str, torch.Tensor | float], device: torch.device, use_ddp: bool
 ) -> dict[str, torch.Tensor | float]:
-    """Return detached global step means without mutating training diagnostics."""
+    """Return global step diagnostics without mutating the local training result.
+
+    Quality metrics are rank means because the batch-aligned sampler gives every rank the
+    same number of scenes. Extrema, timings, and throughput need different reductions: averaging
+    local maxima hides outliers, while averaging per-rank throughput under-reports global work.
+    """
     logged = dict(step_loss)
-    if use_ddp:
-        logged = ddp.reduce_and_average_losses(logged, device)
+    if not use_ddp:
+        return _add_stationary_progress_conditionals(logged)
+
+    max_metrics = {key: value for key, value in logged.items() if key in _STEP_GLOBAL_MAX_METRICS}
+    min_metrics = {key: value for key, value in logged.items() if key in _STEP_GLOBAL_MIN_METRICS}
+    mean_metrics = {
+        key: value
+        for key, value in logged.items()
+        if key not in _STEP_GLOBAL_MAX_METRICS
+        and key not in _STEP_GLOBAL_MIN_METRICS
+        and key not in _STEP_THROUGHPUT_METRICS
+    }
+
+    # A rank with no valid group reports zero extrema locally. Exclude that sentinel from the
+    # global min/max; if every rank is invalid the metrics are restored to zero below.
+    local_valid_fraction = float(
+        torch.as_tensor(step_loss.get("valid_group_fraction", 0.0)).detach().cpu()
+    )
+    if local_valid_fraction <= 0.0:
+        if "reward_weight_max" in max_metrics:
+            max_metrics["reward_weight_max"] = -torch.inf
+        if "reward_weight_min" in min_metrics:
+            min_metrics["reward_weight_min"] = torch.inf
+
+    logged = ddp.reduce_and_average_losses(mean_metrics, device)
+    logged.update(ddp.reduce_scalar_metrics(max_metrics, device, torch.distributed.ReduceOp.MAX))
+    logged.update(ddp.reduce_scalar_metrics(min_metrics, device, torch.distributed.ReduceOp.MIN))
+
+    global_valid_fraction = float(logged.get("valid_group_fraction", 0.0))
+    if global_valid_fraction <= 0.0:
+        for key in ("reward_weight_max", "reward_weight_min"):
+            if key in logged:
+                logged[key] = 0.0
+
+    local_total_s = float(torch.as_tensor(step_loss.get("time_total_s", 0.0)).detach().cpu())
+    if local_total_s > 0.0 and all(key in step_loss for key in _STEP_THROUGHPUT_METRICS):
+        local_scene_count = (
+            float(torch.as_tensor(step_loss["throughput_scenes_per_s"]).detach().cpu())
+            * local_total_s
+        )
+        local_candidate_count = (
+            float(torch.as_tensor(step_loss["throughput_candidates_per_s"]).detach().cpu())
+            * local_total_s
+        )
+        local_valid_group_count = local_valid_fraction * local_scene_count
+        local_valid_sample_count = local_valid_fraction * local_candidate_count
+        local_work = {
+            key: float(torch.as_tensor(step_loss[key]).detach().cpu()) * local_total_s
+            for key in _STEP_THROUGHPUT_METRICS
+        }
+        local_work.update(
+            {
+                "_scene_count": local_scene_count,
+                "_valid_group_count": local_valid_group_count,
+                "_valid_sample_count": local_valid_sample_count,
+                "_reward_weight_sum": float(
+                    torch.as_tensor(step_loss.get("reward_weight_mean", 0.0)).detach().cpu()
+                )
+                * local_valid_sample_count,
+                "_reward_weight_ess_sum": float(
+                    torch.as_tensor(step_loss.get("reward_weight_ess_fraction", 0.0)).detach().cpu()
+                )
+                * local_valid_group_count,
+                "_reward_weight_top1_sum": float(
+                    torch.as_tensor(step_loss.get("reward_weight_top1_share", 0.0)).detach().cpu()
+                )
+                * local_valid_group_count,
+            }
+        )
+        global_work = ddp.reduce_scalar_metrics(local_work, device, torch.distributed.ReduceOp.SUM)
+        global_total_s = float(logged["time_total_s"])
+        logged.update(
+            {key: global_work[key] / max(global_total_s, 1e-9) for key in _STEP_THROUGHPUT_METRICS}
+        )
+        global_scene_count = global_work["_scene_count"]
+        global_valid_group_count = global_work["_valid_group_count"]
+        global_valid_sample_count = global_work["_valid_sample_count"]
+        logged["valid_group_fraction"] = global_valid_group_count / max(global_scene_count, 1.0)
+        logged["reward_weight_mean"] = global_work["_reward_weight_sum"] / max(
+            global_valid_sample_count, 1.0
+        )
+        logged["reward_weight_ess_fraction"] = global_work["_reward_weight_ess_sum"] / max(
+            global_valid_group_count, 1.0
+        )
+        logged["reward_weight_top1_share"] = global_work["_reward_weight_top1_sum"] / max(
+            global_valid_group_count, 1.0
+        )
+
     return _add_stationary_progress_conditionals(logged)
 
 
@@ -559,6 +669,7 @@ def _hdp_rl_step(
                 "time_rollout_s": rollout_s,
                 "time_reward_s": reward_s,
                 "time_update_s": update_s,
+                "time_total_s": total_s,
                 "throughput_scenes_per_s": num_scenes / max(total_s, 1e-9),
                 "throughput_candidates_per_s": batch_size / max(total_s, 1e-9),
                 "throughput_candidate_updates_per_s": batch_size

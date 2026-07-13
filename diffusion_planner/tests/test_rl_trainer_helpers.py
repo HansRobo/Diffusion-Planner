@@ -3,6 +3,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 from diffusion_planner.hdp_rl_epoch import (
+    _STEP_GLOBAL_MAX_METRICS,
+    _STEP_GLOBAL_MIN_METRICS,
+    _STEP_THROUGHPUT_METRICS,
     _backward_reward_weighted_update,
     _policy_observation_inputs,
     _reward_eval_scene_chunk_size,
@@ -158,7 +161,15 @@ def test_step_logging_uses_ddp_global_means_without_mutating_local_metrics(monke
         metrics["reward_stationary_progress_group_range_weighted"] = 0.2
         return metrics
 
+    def fake_scalar_reduce(metrics, device, op):
+        assert device == torch.device("cpu")
+        assert op in {torch.distributed.ReduceOp.MAX, torch.distributed.ReduceOp.MIN}
+        return dict(metrics)
+
     monkeypatch.setattr("diffusion_planner.hdp_rl_epoch.ddp.reduce_and_average_losses", fake_reduce)
+    monkeypatch.setattr(
+        "diffusion_planner.hdp_rl_epoch.ddp.reduce_scalar_metrics", fake_scalar_reduce
+    )
 
     logged = _step_metrics_for_logging(local, torch.device("cpu"), use_ddp=True)
 
@@ -174,6 +185,67 @@ def test_step_logging_uses_ddp_global_means_without_mutating_local_metrics(monke
     }
     assert local["reward_mean"].item() == 1.0
     assert local["valid_group_fraction"] == 0.5
+
+
+def test_step_logging_uses_global_extrema_and_true_global_throughput(monkeypatch):
+    local = {
+        "reward_mean": torch.tensor(1.0),
+        "valid_group_fraction": 0.5,
+        "reward_weight_max": 12.0,
+        "reward_weight_min": 0.02,
+        "grad_norm_max_per_rollout": 3.0,
+        "time_rollout_s": 0.2,
+        "time_reward_s": 0.3,
+        "time_update_s": 0.5,
+        "time_total_s": 1.0,
+        "throughput_scenes_per_s": 64.0,
+        "throughput_candidates_per_s": 2048.0,
+        "throughput_candidate_updates_per_s": 4096.0,
+        "max_memory_allocated_gb": 32.0,
+        "max_memory_reserved_gb": 34.0,
+    }
+    calls = []
+
+    def fake_mean(metrics, _device):
+        assert set(metrics).isdisjoint(_STEP_GLOBAL_MAX_METRICS)
+        assert set(metrics).isdisjoint(_STEP_GLOBAL_MIN_METRICS)
+        assert set(metrics).isdisjoint(_STEP_THROUGHPUT_METRICS)
+        return dict(metrics)
+
+    def fake_scalar(metrics, _device, op):
+        calls.append((dict(metrics), op))
+        if op == torch.distributed.ReduceOp.MAX:
+            return {
+                **metrics,
+                "reward_weight_max": 20.0,
+                "grad_norm_max_per_rollout": 4.0,
+                "time_total_s": 1.25,
+                "max_memory_allocated_gb": 36.0,
+                "max_memory_reserved_gb": 38.0,
+            }
+        if op == torch.distributed.ReduceOp.MIN:
+            return {**metrics, "reward_weight_min": 0.01}
+        assert op == torch.distributed.ReduceOp.SUM
+        return {key: value * 8 for key, value in metrics.items()}
+
+    monkeypatch.setattr("diffusion_planner.hdp_rl_epoch.ddp.reduce_and_average_losses", fake_mean)
+    monkeypatch.setattr("diffusion_planner.hdp_rl_epoch.ddp.reduce_scalar_metrics", fake_scalar)
+
+    logged = _step_metrics_for_logging(local, torch.device("cpu"), use_ddp=True)
+
+    assert logged["reward_weight_max"] == 20.0
+    assert logged["reward_weight_min"] == 0.01
+    assert logged["grad_norm_max_per_rollout"] == 4.0
+    assert logged["max_memory_allocated_gb"] == 36.0
+    assert logged["throughput_scenes_per_s"] == pytest.approx(409.6)
+    assert logged["throughput_candidates_per_s"] == pytest.approx(13107.2)
+    assert logged["throughput_candidate_updates_per_s"] == pytest.approx(26214.4)
+    assert [op for _, op in calls] == [
+        torch.distributed.ReduceOp.MAX,
+        torch.distributed.ReduceOp.MIN,
+        torch.distributed.ReduceOp.SUM,
+    ]
+    assert local["time_total_s"] == 1.0
 
 
 def test_rl_update_chunk_preserves_groups_and_uses_one_static_shape():

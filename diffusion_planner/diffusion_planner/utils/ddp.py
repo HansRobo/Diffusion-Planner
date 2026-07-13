@@ -156,3 +156,22 @@ def reduce_and_average_losses(loss_dict, device):
     averaged = (packed / world_size).cpu().tolist()
     loss_dict.update(zip(keys, averaged, strict=True))
     return loss_dict
+
+
+def reduce_scalar_metrics(metric_dict, device, op):
+    """Reduce detached scalar diagnostics with the requested distributed operation."""
+    if not metric_dict:
+        return {}
+    keys = list(metric_dict)
+    values = []
+    for key in keys:
+        value = metric_dict[key]
+        if torch.is_tensor(value):
+            if value.numel() != 1:
+                raise ValueError(f"Distributed metric {key!r} must be scalar, got {value.shape}")
+            values.append(value.detach().to(device=device, dtype=torch.float64).reshape(()))
+        else:
+            values.append(torch.tensor(float(value), dtype=torch.float64, device=device))
+    packed = torch.stack(values)
+    dist.all_reduce(packed, op=op)
+    return dict(zip(keys, packed.cpu().tolist(), strict=True))

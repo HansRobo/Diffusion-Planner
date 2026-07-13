@@ -2685,6 +2685,25 @@ def test_ddp_epoch_reducer_accepts_python_floats(monkeypatch):
     assert reduced == {"python": 3.5, "tensor": 2.0}
 
 
+def test_ddp_scalar_metric_reducer_preserves_requested_operation(monkeypatch):
+    observed = []
+
+    def fake_all_reduce(tensor, op):
+        observed.append(op)
+        tensor.add_(torch.tensor([1.0, 2.0], dtype=tensor.dtype))
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
+
+    reduced = ddp.reduce_scalar_metrics(
+        {"python": 3.5, "tensor": torch.tensor(2.0)},
+        torch.device("cpu"),
+        torch.distributed.ReduceOp.MAX,
+    )
+
+    assert reduced == {"python": 4.5, "tensor": 4.0}
+    assert observed == [torch.distributed.ReduceOp.MAX]
+
+
 def test_streaming_gradient_stats_match_concatenated_reference():
     first = torch.nn.Parameter(torch.zeros(2))
     second = torch.nn.Parameter(torch.zeros(3))
