@@ -473,6 +473,8 @@ def model_training(args: TrainConfig):
         if args.ddp:
             torch.distributed.barrier()
 
+        train_sampler.set_epoch(epoch)
+
         # Adjust learning rate for final 10 epochs
         final_epoch_count = 10
         if epoch >= train_epochs - final_epoch_count:
@@ -623,7 +625,6 @@ def model_training(args: TrainConfig):
                 )
 
         scheduler.step()
-        train_sampler.set_epoch(epoch + 1)
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
