@@ -1229,10 +1229,12 @@ def compute_hdp_reward(
         for key, value in flattened.items()
     }
     stationary_candidate_mask = candidate_flags(stationary_reference)
-    stationary_candidate_count = stationary_candidate_mask.sum().clamp_min(1.0)
-    metrics["reward_stationary_progress_score"] = (
+    # Keep these statistics additive. Callers derive conditional means only after their
+    # candidate/DDP aggregation; averaging per-batch conditional means would overweight
+    # batches that happen to contain very few stopped references.
+    metrics["reward_stationary_progress_weighted"] = (
         progress_scores * stationary_candidate_mask
-    ).sum() / stationary_candidate_count
+    ).mean()
     component_groups = {
         key: metric_groups[key]
         for key in ("safety", "risk", "follow", "lane", "progress", "leader_fraction")
@@ -1269,11 +1271,10 @@ def compute_hdp_reward(
     metrics["reward_leader_group_range"] = (
         leader_group.max(dim=1).values - leader_group.min(dim=1).values
     ).mean()
-    stationary_scene_count = stationary_reference.sum().clamp_min(1)
-    metrics["reward_stationary_progress_group_range"] = (
+    metrics["reward_stationary_progress_group_range_weighted"] = (
         (progress_scores.max(dim=1).values - progress_scores.min(dim=1).values)
         * stationary_reference
-    ).sum() / stationary_scene_count
+    ).mean()
     return reward_group.reshape(-1), metrics
 
 

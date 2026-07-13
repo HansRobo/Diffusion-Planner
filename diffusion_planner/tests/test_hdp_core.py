@@ -1336,8 +1336,10 @@ def test_hdp_reward_stationary_progress_metrics_are_conditioned_on_stationary_sc
         args=SimpleNamespace(**common, rl_stationary_progress_mode="distance"),
     )
     torch.testing.assert_close(metrics["reward_stationary_reference_fraction"], torch.tensor(0.5))
-    torch.testing.assert_close(metrics["reward_stationary_progress_score"], torch.tensor(0.5))
-    torch.testing.assert_close(metrics["reward_stationary_progress_group_range"], torch.tensor(1.0))
+    torch.testing.assert_close(metrics["reward_stationary_progress_weighted"], torch.tensor(0.25))
+    torch.testing.assert_close(
+        metrics["reward_stationary_progress_group_range_weighted"], torch.tensor(0.5)
+    )
 
     _, legacy_metrics = compute_hdp_reward(
         candidates,
@@ -1348,10 +1350,10 @@ def test_hdp_reward_stationary_progress_metrics_are_conditioned_on_stationary_sc
         args=SimpleNamespace(**common, rl_stationary_progress_mode="constant"),
     )
     torch.testing.assert_close(
-        legacy_metrics["reward_stationary_progress_score"], torch.tensor(1.0)
+        legacy_metrics["reward_stationary_progress_weighted"], torch.tensor(0.5)
     )
     torch.testing.assert_close(
-        legacy_metrics["reward_stationary_progress_group_range"], torch.tensor(0.0)
+        legacy_metrics["reward_stationary_progress_group_range_weighted"], torch.tensor(0.0)
     )
 
 

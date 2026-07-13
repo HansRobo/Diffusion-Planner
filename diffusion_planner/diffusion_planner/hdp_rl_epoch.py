@@ -35,14 +35,56 @@ from diffusion_planner.utils.train_utils import finalize_epoch_loss_sums, update
 _RL_EVAL_MAX_CANDIDATES_PER_RANK = 1024
 
 
+def _add_stationary_progress_conditionals(
+    metrics: dict[str, torch.Tensor | float], *, prefix: str = "reward_"
+) -> dict[str, torch.Tensor | float]:
+    """Derive stopped-reference metrics from globally additive numerators."""
+    denominator_key = f"{prefix}stationary_reference_fraction"
+    score_numerator_key = f"{prefix}stationary_progress_weighted"
+    range_numerator_key = f"{prefix}stationary_progress_group_range_weighted"
+    if denominator_key not in metrics:
+        return metrics
+
+    denominator = metrics[denominator_key]
+
+    def conditional(numerator):
+        if torch.is_tensor(denominator) or torch.is_tensor(numerator):
+            reference = denominator if torch.is_tensor(denominator) else numerator
+            denominator_tensor = torch.as_tensor(
+                denominator,
+                device=reference.device,
+                dtype=reference.dtype,
+            )
+            numerator_tensor = torch.as_tensor(
+                numerator,
+                device=reference.device,
+                dtype=reference.dtype,
+            )
+            return torch.where(
+                denominator_tensor > 0,
+                numerator_tensor / denominator_tensor.clamp_min(1e-12),
+                torch.zeros_like(numerator_tensor),
+            )
+        return float(numerator) / float(denominator) if float(denominator) > 0.0 else 0.0
+
+    if score_numerator_key in metrics:
+        score_key = f"{prefix}stationary_progress_score" if prefix else "stationary_progress"
+        metrics[score_key] = conditional(metrics[score_numerator_key])
+    if range_numerator_key in metrics:
+        metrics[f"{prefix}stationary_progress_group_range"] = conditional(
+            metrics[range_numerator_key]
+        )
+    return metrics
+
+
 def _step_metrics_for_logging(
     step_loss: dict[str, torch.Tensor | float], device: torch.device, use_ddp: bool
 ) -> dict[str, torch.Tensor | float]:
     """Return detached global step means without mutating training diagnostics."""
     logged = dict(step_loss)
     if use_ddp:
-        return ddp.reduce_and_average_losses(logged, device)
-    return logged
+        logged = ddp.reduce_and_average_losses(logged, device)
+    return _add_stationary_progress_conditionals(logged)
 
 
 def _reward_eval_scene_chunk_size(num_scenes: int, num_generations: int) -> int:
@@ -642,6 +684,7 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
 
     if args.ddp:
         epoch_mean_loss = ddp.reduce_and_average_losses(epoch_mean_loss, torch.device(args.device))
+    epoch_mean_loss = _add_stationary_progress_conditionals(epoch_mean_loss)
 
     if ddp.get_rank() == 0:
         print(f"{epoch_mean_loss['loss']=:.4f}")
@@ -777,7 +820,7 @@ def validate_hdp_reward_policy(data_loader, model, args):
         )
     candidate_count = totals[1].clamp_min(1.0)
     scene_count = totals[3].clamp_min(1.0)
-    return {
+    result = {
         "mean": (totals[0] / candidate_count).float(),
         "group_max": (totals[2] / scene_count).float(),
         **{
@@ -787,3 +830,4 @@ def validate_hdp_reward_policy(data_loader, model, args):
             for offset, key in enumerate(metric_keys)
         },
     }
+    return _add_stationary_progress_conditionals(result, prefix="")

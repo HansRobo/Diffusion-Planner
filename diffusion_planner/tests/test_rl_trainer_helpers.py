@@ -153,6 +153,9 @@ def test_step_logging_uses_ddp_global_means_without_mutating_local_metrics(monke
         observed.append((dict(metrics), device))
         metrics["reward_mean"] = 2.0
         metrics["valid_group_fraction"] = 0.75
+        metrics["reward_stationary_reference_fraction"] = 0.25
+        metrics["reward_stationary_progress_weighted"] = 0.125
+        metrics["reward_stationary_progress_group_range_weighted"] = 0.2
         return metrics
 
     monkeypatch.setattr("diffusion_planner.hdp_rl_epoch.ddp.reduce_and_average_losses", fake_reduce)
@@ -160,7 +163,15 @@ def test_step_logging_uses_ddp_global_means_without_mutating_local_metrics(monke
     logged = _step_metrics_for_logging(local, torch.device("cpu"), use_ddp=True)
 
     assert observed and observed[0][1] == torch.device("cpu")
-    assert logged == {"reward_mean": 2.0, "valid_group_fraction": 0.75}
+    assert logged == {
+        "reward_mean": 2.0,
+        "valid_group_fraction": 0.75,
+        "reward_stationary_reference_fraction": 0.25,
+        "reward_stationary_progress_weighted": 0.125,
+        "reward_stationary_progress_group_range_weighted": 0.2,
+        "reward_stationary_progress_score": 0.5,
+        "reward_stationary_progress_group_range": 0.8,
+    }
     assert local["reward_mean"].item() == 1.0
     assert local["valid_group_fraction"] == 0.5
 
@@ -417,6 +428,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     observed_behavior_gates = []
     observed_road_border_settings = []
     observed_stationary_settings = []
+    reward_call_count = 0
 
     def fake_sample_group(_model, inputs, *_args, **_kwargs):
         observed_noise_scales.append(_args[0])
@@ -425,6 +437,8 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         return torch.zeros(batch, 80, 4)
 
     def fake_reward(_ego, _inputs, _neighbors, num_scenes, n, _args):
+        nonlocal reward_call_count
+        reward_call_count += 1
         observed_behavior_gates.append(_args.rl_behavior_gate)
         observed_road_border_settings.append(_args.rl_occupancy_use_road_border)
         observed_stationary_settings.append(
@@ -442,7 +456,17 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         )
         value = 2.0 if num_scenes == 2 else 10.0
         reward = torch.full((num_scenes * n,), value)
-        return reward, {"reward_risk_score": reward.mean()}
+        stationary_fraction = 0.25 if reward_call_count == 1 else 1.0
+        stationary_score_weighted = 0.125 if reward_call_count == 1 else 0.8
+        stationary_range_weighted = 0.2 if reward_call_count == 1 else 0.4
+        return reward, {
+            "reward_risk_score": reward.mean(),
+            "reward_stationary_reference_fraction": reward.new_tensor(stationary_fraction),
+            "reward_stationary_progress_weighted": reward.new_tensor(stationary_score_weighted),
+            "reward_stationary_progress_group_range_weighted": reward.new_tensor(
+                stationary_range_weighted
+            ),
+        }
 
     monkeypatch.setattr("diffusion_planner.hdp_rl_epoch.sample_group", fake_sample_group)
     monkeypatch.setattr("diffusion_planner.hdp_rl_epoch.compute_hdp_reward", fake_reward)
@@ -496,6 +520,11 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     assert metrics["mean"].item() == pytest.approx(expected)
     assert metrics["group_max"].item() == pytest.approx((2.0 * 2 + 10.0) / 3)
     assert metrics["risk"].item() == pytest.approx(expected)
+    assert metrics["stationary_reference_fraction"].item() == pytest.approx(0.5)
+    assert metrics["stationary_progress_weighted"].item() == pytest.approx(0.35)
+    assert metrics["stationary_progress"].item() == pytest.approx(0.7)
+    assert metrics["stationary_progress_group_range_weighted"].item() == pytest.approx(4.0 / 15.0)
+    assert metrics["stationary_progress_group_range"].item() == pytest.approx(8.0 / 15.0)
     assert observed_noise_scales == [0.25, 0.25]
     assert observed_sample_steps == [5, 5]
     assert observed_reward_weights == [(0.0, 1.0, 3.0, 2.5, 3.0)] * 2
