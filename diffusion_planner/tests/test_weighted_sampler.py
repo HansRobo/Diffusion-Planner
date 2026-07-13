@@ -239,3 +239,30 @@ class TestEdgeCases:
             )
             assert sampler.cluster_counts == {"cluster_id0": 2, "cluster_id1": 18}
             assert sampler.matched_count == 20
+
+    def test_prefix_mismatched_paths_still_match(self):
+        """Cluster JSON with different path prefix still matches via canonicalization."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [
+                f"data/train/20230101/1200/frame_{i}.npz" for i in range(10)
+            ]
+            clusters = {
+                "cluster_id0": [
+                    f"/mnt/nfs/data/train/20230101/1200/frame_{i}.npz"
+                    for i in range(2)
+                ],
+                "cluster_id1": [
+                    f"/mnt/nfs/data/train/20230101/1200/frame_{i}.npz"
+                    for i in range(2, 10)
+                ],
+            }
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                json.dump(clusters, f)
+
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42
+            )
+            assert sampler.matched_count == 10, (
+                f"Expected all 10 paths to match, got {sampler.matched_count}"
+            )

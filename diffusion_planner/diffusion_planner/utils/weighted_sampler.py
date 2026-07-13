@@ -1,9 +1,11 @@
-import json
 import math
 import warnings
 
 import torch
 from torch.utils.data import Sampler
+
+from diffusion_planner.utils.path_key import data_path_to_rel
+from diffusion_planner.utils.train_utils import openjson
 
 
 class ClusterWeightedDistributedSampler(Sampler):
@@ -39,13 +41,12 @@ class ClusterWeightedDistributedSampler(Sampler):
         )
 
     def _compute_weights(self, cluster_json_path: str) -> tuple[torch.Tensor, dict[str, int], int]:
-        with open(cluster_json_path, "r") as f:
-            clusters = json.load(f)
+        clusters = openjson(cluster_json_path)
 
         path_to_cluster: dict[str, str] = {}
         for cluster_id, paths in clusters.items():
             for p in paths:
-                path_to_cluster[p] = cluster_id
+                path_to_cluster[str(data_path_to_rel(p))] = cluster_id
 
         cluster_counts: dict[str, int] = {}
         for cluster_id, paths in clusters.items():
@@ -57,7 +58,7 @@ class ClusterWeightedDistributedSampler(Sampler):
         matched = 0
         weights = torch.ones(len(self.data_list), dtype=torch.float64)
         for i, path in enumerate(self.data_list):
-            cluster_id = path_to_cluster.get(path)
+            cluster_id = path_to_cluster.get(str(data_path_to_rel(path)))
             if cluster_id is not None:
                 matched += 1
                 weights[i] = 1.0 / (cluster_freq[cluster_id] + 1e-8)
