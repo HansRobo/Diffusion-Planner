@@ -166,11 +166,10 @@ class TestDDP:
 
 
 class TestEdgeCases:
-    def test_missing_paths_get_default_weight(self):
-        """Paths not in any cluster get pre-normalization weight 1.0.
+    def test_missing_paths_get_neutral_weight(self):
+        """Paths not in any cluster get the mean of matched weights (neutral rate).
 
-        After normalization, clustered paths are upweighted relative to
-        unclustered ones, so unmatched paths end up with the lowest weight.
+        After normalization: rare > unmatched > common.
         """
         with tempfile.TemporaryDirectory() as tmp:
             data_list = [f"/data/sample_{i}.npz" for i in range(10)]
@@ -182,9 +181,16 @@ class TestEdgeCases:
             with open(cluster_path, "w") as f:
                 json.dump(clusters, f)
 
-            sampler = ClusterWeightedDistributedSampler(
-                data_list, cluster_path, num_replicas=1, rank=0, seed=42
-            )
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                sampler = ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=1, rank=0, seed=42
+                )
+                matching_warnings = [
+                    x for x in w if "paths matched cluster JSON" in str(x.message)
+                ]
+                assert len(matching_warnings) == 1
+
             assert len(sampler.weights) == 10
             assert sampler.matched_count == 6
 
@@ -192,12 +198,12 @@ class TestEdgeCases:
             common_weight = sampler.weights[3].item()
             unmatched_weight = sampler.weights[7].item()
 
-            assert rare_weight > common_weight > unmatched_weight, (
-                f"Expected rare ({rare_weight:.3f}) > common ({common_weight:.3f}) "
-                f"> unmatched ({unmatched_weight:.3f})"
+            assert rare_weight > unmatched_weight > common_weight, (
+                f"Expected rare ({rare_weight:.3f}) > unmatched ({unmatched_weight:.3f}) "
+                f"> common ({common_weight:.3f})"
             )
             for i in range(6, 10):
-                assert sampler.weights[i].item() == unmatched_weight
+                assert sampler.weights[i].item() == pytest.approx(unmatched_weight)
 
     def test_all_empty_clusters_raises_valueerror(self):
         """All-empty cluster JSON should raise ValueError, not ZeroDivisionError."""

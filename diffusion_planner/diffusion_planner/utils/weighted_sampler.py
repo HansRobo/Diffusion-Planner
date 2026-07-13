@@ -71,11 +71,6 @@ class ClusterWeightedDistributedSampler(Sampler):
                 f"No paths in data_list matched cluster JSON "
                 f"({len(path_to_cluster)} cluster entries). Check path formats."
             )
-        if matched < len(self.data_list) // 2:
-            warnings.warn(
-                f"Only {matched}/{len(self.data_list)} paths matched cluster JSON. "
-                f"Check path formats."
-            )
 
         # Compute frequencies from live counts
         cluster_freq = {cid: count / matched for cid, count in live_counts.items()}
@@ -85,6 +80,17 @@ class ClusterWeightedDistributedSampler(Sampler):
         for i, cid in enumerate(sample_cluster):
             if cid is not None:
                 weights[i] = 1.0 / (cluster_freq[cid] + 1e-8)
+
+        if matched < len(self.data_list):
+            matched_mask = torch.tensor(
+                [c is not None for c in sample_cluster], dtype=torch.bool
+            )
+            mean_matched = weights[matched_mask].mean().item()
+            weights[~matched_mask] = mean_matched
+            warnings.warn(
+                f"{matched}/{len(self.data_list)} paths matched cluster JSON. "
+                f"Unmatched paths assigned neutral weight."
+            )
 
         weights = weights / weights.mean()
         return weights, live_counts, matched
