@@ -240,6 +240,27 @@ class TestEdgeCases:
             assert sampler.cluster_counts == {"cluster_id0": 2, "cluster_id1": 18}
             assert sampler.matched_count == 20
 
+    def test_cluster_counts_reflect_live_data_list(self):
+        """cluster_counts should reflect the live data_list, not raw JSON totals."""
+        with tempfile.TemporaryDirectory() as tmp:
+            all_paths = [f"/data/sample_{i}.npz" for i in range(20)]
+            clusters = {
+                "cluster_id0": all_paths[:10],
+                "cluster_id1": all_paths[10:],
+            }
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                json.dump(clusters, f)
+
+            # data_list only includes 2 from cluster_id0 and 8 from cluster_id1
+            data_list = all_paths[:2] + all_paths[10:18]
+
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42
+            )
+            assert sampler.cluster_counts == {"cluster_id0": 2, "cluster_id1": 8}
+            assert sampler.matched_count == 10
+
     def test_prefix_mismatched_paths_still_match(self):
         """Cluster JSON with different path prefix still matches via canonicalization."""
         with tempfile.TemporaryDirectory() as tmp:

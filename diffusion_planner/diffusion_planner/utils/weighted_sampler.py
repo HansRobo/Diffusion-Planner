@@ -48,20 +48,17 @@ class ClusterWeightedDistributedSampler(Sampler):
             for p in paths:
                 path_to_cluster[str(data_path_to_rel(p))] = cluster_id
 
-        cluster_counts: dict[str, int] = {}
-        for cluster_id, paths in clusters.items():
-            cluster_counts[cluster_id] = len(paths)
-
-        total_in_clusters = sum(cluster_counts.values())
-        cluster_freq = {cid: count / total_in_clusters for cid, count in cluster_counts.items()}
-
+        # First pass: identify cluster membership and count live matches
+        sample_cluster = [None] * len(self.data_list)
+        live_counts: dict[str, int] = {}
         matched = 0
-        weights = torch.ones(len(self.data_list), dtype=torch.float64)
+
         for i, path in enumerate(self.data_list):
-            cluster_id = path_to_cluster.get(str(data_path_to_rel(path)))
-            if cluster_id is not None:
+            cid = path_to_cluster.get(str(data_path_to_rel(path)))
+            if cid is not None:
                 matched += 1
-                weights[i] = 1.0 / (cluster_freq[cluster_id] + 1e-8)
+                sample_cluster[i] = cid
+                live_counts[cid] = live_counts.get(cid, 0) + 1
 
         if matched == 0:
             raise ValueError(
@@ -74,8 +71,17 @@ class ClusterWeightedDistributedSampler(Sampler):
                 f"Check path formats."
             )
 
+        # Compute frequencies from live counts
+        cluster_freq = {cid: count / matched for cid, count in live_counts.items()}
+
+        # Second pass: assign weights using live frequencies
+        weights = torch.ones(len(self.data_list), dtype=torch.float64)
+        for i, cid in enumerate(sample_cluster):
+            if cid is not None:
+                weights[i] = 1.0 / (cluster_freq[cid] + 1e-8)
+
         weights = weights / weights.mean()
-        return weights, cluster_counts, matched
+        return weights, live_counts, matched
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
