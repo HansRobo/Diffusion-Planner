@@ -44,7 +44,12 @@ def _line_strings_to_epdms_border_lines(line_strings: torch.Tensor) -> list[list
         road_border_mask = (sample[..., 3] > 0.5).any(axis=-1)
         for row in sample[road_border_mask]:
             pts = row[:, :2]
-            pts = pts[_valid_xy(pts)]
+            # Channel 3 is the explicit per-point road-border validity flag.
+            # Keep flagged points even when their valid coordinate is exactly
+            # the ego origin; using only ``(x, y) != 0`` drops that legitimate
+            # endpoint and biases border-based validation metrics.
+            point_valid = (row[:, 3] > 0.5) | _valid_xy(pts)
+            pts = pts[point_valid]
             if pts.shape[0] >= 2:
                 sample_lines.append(np.asarray(pts, dtype=np.float64))
         out.append(sample_lines)
@@ -58,7 +63,10 @@ def _lane_tensor_to_polygons(lanes: torch.Tensor) -> list[list[np.ndarray]]:
     for sample in arr:
         sample_polys: list[np.ndarray] = []
         for lane in sample:
-            valid = _valid_xy(lane[..., :2]) & (np.abs(lane[..., :8]).sum(axis=-1) > 1e-6)
+            # Lane tensors use the first eight geometry channels as their
+            # validity mask.  A valid lane point can sit at (0, 0) as long as
+            # its direction or boundary offsets are populated.
+            valid = np.abs(lane[..., :8]).sum(axis=-1) > 1e-6
             if valid.sum() < 2:
                 continue
             center = lane[valid, :2]
@@ -78,7 +86,8 @@ def _lane_tensor_to_centerlines(lanes: torch.Tensor) -> list[list[np.ndarray]]:
         sample_lines: list[np.ndarray] = []
         for lane in sample:
             pts = lane[:, :2]
-            pts = pts[_valid_xy(pts)]
+            valid = np.abs(lane[..., :8]).sum(axis=-1) > 1e-6
+            pts = pts[valid]
             if pts.shape[0] >= 2:
                 sample_lines.append(np.asarray(pts, dtype=np.float64))
         out.append(sample_lines)

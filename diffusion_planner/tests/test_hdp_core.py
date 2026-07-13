@@ -60,6 +60,7 @@ from diffusion_planner.model.module.decoder import (
 from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.model.module.encoder import CLASS_TYPE_LANE, LaneEncoder
 from diffusion_planner.train import (
+    _finite_history_values,
     _finite_validation_metrics,
     assert_checkpoint_compatible,
     load_weights_only,
@@ -1305,6 +1306,18 @@ def test_checkpoint_metadata_omits_non_finite_validation_metrics():
 
     assert metrics == {"valid_epdms/total": pytest.approx(0.8)}
     json.dumps(metrics, allow_nan=False)
+
+
+def test_finite_history_values_ignores_nan_and_malformed_tsv_fields():
+    rows = [
+        {"metric": "nan"},
+        {"metric": "2.5"},
+        {"metric": ""},
+        {"metric": "not-a-number"},
+        {},
+    ]
+
+    assert _finite_history_values(rows, "metric") == [2.5]
 
 
 def test_augmentation_transforms_goal_pose_with_the_scene():

@@ -92,6 +92,20 @@ def _finite_validation_metrics(prefix: str, metrics: dict) -> dict[str, float]:
     return result
 
 
+def _finite_history_values(rows: list[dict], key: str) -> list[float]:
+    """Read finite numeric values from a possibly mixed/legacy TSV column."""
+    values = []
+    for row in rows:
+        raw = row.get(key)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    return values
+
+
 def _checkpoint_args_path(path: str) -> Path | None:
     checkpoint = Path(path)
     candidates = [
@@ -874,19 +888,12 @@ def model_training(args: TrainConfig):
     if global_rank == 0 and args.resume_model_path is not None and os.path.exists(train_log_path):
         with open(train_log_path, newline="", encoding="utf-8") as file:
             data_list = list(csv.DictReader(file, delimiter="\t"))
-        previous_losses = [
-            float(row["valid_loss_ego_position_lat_loss"])
-            for row in data_list
-            if row.get("valid_loss_ego_position_lat_loss") not in (None, "")
-        ]
+        previous_losses = _finite_history_values(
+            data_list, "valid_loss_ego_position_lat_loss"
+        )
         if previous_losses:
             best_loss = min(previous_losses)
-        previous_epdms = [
-            float(row["valid_epdms_total"])
-            for row in data_list
-            if row.get("valid_epdms_total") not in (None, "")
-            and math.isfinite(float(row["valid_epdms_total"]))
-        ]
+        previous_epdms = _finite_history_values(data_list, "valid_epdms_total")
         if previous_epdms:
             best_epdms = max(previous_epdms)
 
