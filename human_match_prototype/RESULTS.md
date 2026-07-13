@@ -41,10 +41,17 @@ By risk category the mismatch rate is:
 | 停止_車両 (stopped vehicle) | 15.6% |
 
 **`maha_pct` is dead on arrival**: 1452/1454 risk frames and 500/500 normal
-frames sit at exactly 100.0 (std 0.06, min 98.44). The shared Mahalanobis fit is
-saturated — essentially every scene lands at/above its max — so the percentile
-carries no discriminative information as currently configured. This is a
-signal/fit problem, not evidence that scenes are typical.
+frames sit at exactly 100.0 (std 0.06, min 98.44). This is a *structural*
+property of per-scene shared-fit Mahalanobis on tight clouds, not a fixable fit
+problem. The LedoitWolf covariance in `typicality.py` is fit per scene on that
+scene's 64 samples (a shared fit, not leave-one-out), so with the sample clouds
+this tight (median `spread_4s` = 0.309 m) the distance normalizes by a tiny
+covariance and even a sub-meter human offset exceeds every in-sample distance —
+the percentile saturates by design. The human genuinely sits outside the tight
+cloud (the same mismatch `min_ade` measures); `maha_pct` = 100 means the scene is
+atypical, not typical. There is no cross-scene/global/per-population fit here that
+could go stale — the only prospective fixes are leave-one-out scoring or a
+non-saturating distance.
 
 ## 2. Do the three signals agree?
 
@@ -61,7 +68,8 @@ Partially. Spearman correlation on the risk set:
   **top-20 sets overlap only 1/20** — they agree on the trend, not on which
   handful of scenes are the single worst. They are complementary, not redundant.
 - `maha_pct` correlates ~0 with both and overlaps 0/20 — but that is a
-  consequence of its saturation, not independent information.
+  consequence of its by-design saturation on tight clouds, not independent
+  information.
 
 ## 3. Are the top mismatches lateral (path choice) or longitudinal (timing)?
 
@@ -92,7 +100,7 @@ accelerates through avoidance and tight-turn situations.
 ## 4. Recommendation: which signal(s) to keep?
 
 **Keep `min_ade_4s` (coverage) as the primary signal; keep `latent_knn_mean` as
-a secondary/complementary OOD flag; drop `maha_pct` until its fit is fixed.**
+a secondary/complementary OOD flag; drop `maha_pct`.**
 
 - **`min_ade_4s` / mismatch rate** is the clear winner: strong risk-vs-normal
   separation, directly interpretable, and via the lat/lon decomposition it tells
@@ -101,9 +109,13 @@ a secondary/complementary OOD flag; drop `maha_pct` until its fit is fixed.**
 - **`latent_knn_mean`** is worth keeping as a cheap, model-internal OOD flag: it
   needs no human future, separates moderately, and its 1/20 top-set overlap with
   coverage means it surfaces a partly different set of scenes worth auditing.
-- **`maha_pct`** should not be used as-is — it is saturated at 100 for both
-  populations. Refit (per-population stats, longer tail, or a non-saturating
-  distance) before drawing any conclusion from it.
+- **`maha_pct`** should not be used — it saturates at 100 for both populations
+  by design (per-scene shared-fit Mahalanobis on tight clouds; see §1). This is
+  not a stale fit that can be refit away: the raw distance runs the wrong way
+  too (risk median `maha_dist` ≈ 2110 vs normal ≈ 5210, with extreme tails), so
+  the typicality signal can't be rescued by skipping the percentile either. If
+  ever revisited, leave-one-out scoring or a non-saturating distance would be the
+  place to start.
 
 ## Caveats
 
@@ -118,8 +130,11 @@ a secondary/complementary OOD flag; drop `maha_pct` until its fit is fixed.**
 - **Fixed seed (0).** All scores and overlays are deterministic at one seed; the
   fixed-seed self-check artifact from Task 5 confirms determinism but this does
   not characterize seed-to-seed variance of the sample cloud.
-- **`maha_pct` saturation** (above) may reflect a stale/mismatched shared fit
-  rather than the metric being fundamentally uninformative.
+- **`maha_pct` saturation** (above) is a structural consequence of per-scene
+  shared-fit Mahalanobis on tight sample clouds, not a stale/mismatched fit — the
+  human legitimately lands outside the tight cloud, so the percentile pins at 100
+  by design. Only leave-one-out scoring or a non-saturating distance could change
+  that.
 - **Some normal frames are near-stationary** (ego parked/stopped; sub-0.02 m
   scale). These trivially "match" and dilute the normal-set spread slightly, but
   do not affect the risk-vs-normal conclusion given the size of the gap.
