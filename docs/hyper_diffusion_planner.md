@@ -137,6 +137,8 @@ rl_reward_w_risk=1.0
 rl_reward_w_follow=3.0
 rl_reward_w_lane=2.5
 rl_reward_w_progress=3.0
+rl_behavior_gate=safety
+rl_occupancy_use_road_border=true
 rl_bc_weight=0.0
 num_generations=8
 rl_noise_scale=1.5
@@ -146,6 +148,8 @@ rl_eval_reward_w_risk=1.0
 rl_eval_reward_w_follow=3.0
 rl_eval_reward_w_lane=2.5
 rl_eval_reward_w_progress=3.0
+rl_eval_behavior_gate=safety
+rl_eval_occupancy_use_road_border=true
 rl_rollout_steps=6
 rl_updates_per_rollout=1
 rl_update_max_candidates_per_rank=2048
@@ -163,10 +167,12 @@ one optimizer update while bounding differentiable decoder memory; it does not d
 renormalize subgroups. The lower `beta` and explicit
 progress term are performance-oriented Tier IV adaptations. Real-data and recovery-set ablations
 favored the unanchored objective (`BC=0`); the EMA policy commit remains the drift constraint.
-The non-risk behavior contribution (following, lane keeping, and DP-native progress) is multiplied
-by collision safety, so an active collision cannot be traded for another behavior score and
-rear-end attenuation remains continuous. The independent paper risk term still scores TTC, THW,
-and occupancy near misses.
+The default non-risk behavior contribution (following, lane keeping, and DP-native progress) is
+multiplied by collision safety, so an active collision cannot be traded for another behavior score
+and rear-end attenuation remains continuous. `rl_behavior_gate=none` with progress weight zero
+recovers the paper's direct multi-reward sum; `risk` is available only as an explicit near-miss
+ablation. Held-out selection has an independent gate and remains fixed across these comparisons.
+The independent paper risk term still scores TTC, THW, and occupancy near misses.
 The rollout noise and group size are measured exploration/efficiency choices, while held-out reward always
 uses the public HDP policy's default `0.5` sampling temperature and the paper's 32 candidates so
 all sweeps share one selection distribution. Held-out sampling also uses
@@ -216,7 +222,12 @@ Implementation notes:
   Route agreement is decided from the expert first, so candidate distance is computed only against
   the selected route or lane fallback rather than both. Exact static and road-border geometry is
   retained for the smaller set of scenes that needs it.
-- Occupancy automatically uses real static boxes, stopped-agent clearance, then exact ego-rectangle-to-road-border-segment clearance as a corpus fallback. Missing sources are neutral and their coverage is logged.
+- Occupancy automatically uses real static boxes, stopped-agent clearance, then exact
+  ego-rectangle-to-road-border-segment clearance as a corpus fallback. Tier IV's current corpus
+  has unpopulated static-object tensors, so `rl_occupancy_use_road_border` can disable only that
+  practical fallback for a controlled quality/throughput ablation. Held-out selection uses the
+  independent `rl_eval_occupancy_use_road_border`; missing sources remain neutral and coverage is
+  logged.
 - Scene encoding is computed once per candidate group. Decoder-only RL repeats only current action-state tensors, not the full 31-frame observation history.
 - Full held-out stochastic-reward/EPDMS validation runs on `rl_full_eval_utd`; the deterministic proxy remains available each epoch. Reward validation uses fixed random candidates and logs every reward component and source-coverage diagnostic, so policy iterations are directly comparable.
 - A fresh RL run validates and saves its source SFT policy before the first update. Best-checkpoint selection maximizes mean held-out reward but accepts a replacement only when risk, collision safety, TTC, THW, occupancy, active/rear collision rates, comfort, and deterministic EPDMS do not regress from the source policy. The absolute safety/EPDMS tolerances default to zero and can be set explicitly with `rl_max_valid_safety_regression` and `rl_max_valid_epdms_regression`. The supervised validation-loss guard remains independent, and a reward improvement of at least `0.0001` is required. `latest.pth` is still written for complete experiment analysis even when an epoch fails a source-policy guard.

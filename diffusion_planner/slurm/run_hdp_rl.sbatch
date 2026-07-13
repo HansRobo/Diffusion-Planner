@@ -50,6 +50,7 @@ REWARD_W_FOLLOW=${HDP_RL_REWARD_W_FOLLOW:-3.0}
 REWARD_W_LANE=${HDP_RL_REWARD_W_LANE:-2.5}
 REWARD_W_PROGRESS=${HDP_RL_REWARD_W_PROGRESS:-3.0}
 BEHAVIOR_GATE=${HDP_RL_BEHAVIOR_GATE:-safety}
+OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_OCCUPANCY_USE_ROAD_BORDER:-True}
 BC_WEIGHT=${HDP_RL_BC_WEIGHT:-0.0}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-1.5}
@@ -61,6 +62,7 @@ EVAL_REWARD_W_FOLLOW=${HDP_RL_EVAL_REWARD_W_FOLLOW:-3.0}
 EVAL_REWARD_W_LANE=${HDP_RL_EVAL_REWARD_W_LANE:-2.5}
 EVAL_REWARD_W_PROGRESS=${HDP_RL_EVAL_REWARD_W_PROGRESS:-3.0}
 EVAL_BEHAVIOR_GATE=${HDP_RL_EVAL_BEHAVIOR_GATE:-safety}
+EVAL_OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_EVAL_OCCUPANCY_USE_ROAD_BORDER:-True}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
 UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-1}
 UPDATE_MAX_CANDIDATES=${HDP_RL_UPDATE_MAX_CANDIDATES_PER_RANK:-2048}
@@ -341,6 +343,7 @@ TRAIN_ARGS=(
   --rl_eval_reward_w_lane "${EVAL_REWARD_W_LANE}" \
   --rl_eval_reward_w_progress "${EVAL_REWARD_W_PROGRESS}" \
   --rl_eval_behavior_gate "${EVAL_BEHAVIOR_GATE}" \
+  --rl_eval_occupancy_use_road_border "${EVAL_OCCUPANCY_USE_ROAD_BORDER}" \
   --rl_rollout_steps "${ROLLOUT_STEPS}" \
   --rl_updates_per_rollout "${UPDATES_PER_ROLLOUT}" \
   --rl_update_max_candidates_per_rank "${UPDATE_MAX_CANDIDATES}" \
@@ -352,6 +355,7 @@ TRAIN_ARGS=(
   --rl_reward_w_lane "${REWARD_W_LANE}" \
   --rl_reward_w_progress "${REWARD_W_PROGRESS}" \
   --rl_behavior_gate "${BEHAVIOR_GATE}" \
+  --rl_occupancy_use_road_border "${OCCUPANCY_USE_ROAD_BORDER}" \
   --rl_bc_weight "${BC_WEIGHT}" \
   --rl_ema_update_rate "${EMA_UPDATE_RATE}" \
   --rl_init_use_ema True \
@@ -411,7 +415,8 @@ srun --kill-on-bad-exit=1 --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-
 
 "${REPO}/.venv/bin/python" - \
   "${VERIFY_SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" \
-  "${TRAIN_EPOCHS}" "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}" <<'PY'
+  "${TRAIN_EPOCHS}" "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}" \
+  "${OCCUPANCY_USE_ROAD_BORDER}" "${EVAL_OCCUPANCY_USE_ROAD_BORDER}" <<'PY'
 import csv
 import json
 import math
@@ -427,6 +432,8 @@ mode = sys.argv[4]
 expected_epoch = int(sys.argv[5])
 expected_behavior_gate = sys.argv[6]
 expected_eval_behavior_gate = sys.argv[7]
+expected_occupancy_use_road_border = sys.argv[8].lower() == "true"
+expected_eval_occupancy_use_road_border = sys.argv[9].lower() == "true"
 source = torch.load(initial_path, map_location="cpu", weights_only=True)
 if mode == "resume":
     initial_live = source["model"]
@@ -491,6 +498,11 @@ with (save_dir / "args.json").open(encoding="utf-8") as f:
     run_args = json.load(f)
 assert run_args["rl_behavior_gate"] == expected_behavior_gate
 assert run_args["rl_eval_behavior_gate"] == expected_eval_behavior_gate
+assert run_args["rl_occupancy_use_road_border"] is expected_occupancy_use_road_border
+assert (
+    run_args["rl_eval_occupancy_use_road_border"]
+    is expected_eval_occupancy_use_road_border
+)
 required = (
     "train_reward_mean",
     "train_reward_std",

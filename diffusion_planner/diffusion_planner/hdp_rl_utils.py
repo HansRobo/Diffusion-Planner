@@ -1082,7 +1082,14 @@ def compute_hdp_reward(
             | (static_objects_batch[..., 4:6].abs().sum(dim=-1) > 1e-6)
         ).any(dim=-1)
     line_strings_batch = scene_inputs.get("line_strings")
-    if line_strings_batch is None or line_strings_batch.shape[-1] < 4:
+    use_road_border_occupancy = bool(
+        getattr(args, "rl_occupancy_use_road_border", True)
+    )
+    if (
+        not use_road_border_occupancy
+        or line_strings_batch is None
+        or line_strings_batch.shape[-1] < 4
+    ):
         road_border_available = torch.zeros(num_scenes, dtype=torch.bool, device=device)
     else:
         border_point = line_strings_batch[..., 3] > 0.5

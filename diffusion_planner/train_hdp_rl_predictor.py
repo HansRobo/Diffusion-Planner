@@ -446,6 +446,12 @@ def get_args():
         help="behavior gate used only by the fixed held-out reward objective",
     )
     parser.add_argument(
+        "--rl_eval_occupancy_use_road_border",
+        type=boolean,
+        default=_train_config_default("rl_eval_occupancy_use_road_border"),
+        help="use HD-map road borders as OCC fallback in the fixed held-out objective",
+    )
+    parser.add_argument(
         "--rl_rollout_steps",
         type=int,
         default=_train_config_default("rl_rollout_steps"),
@@ -508,6 +514,12 @@ def get_args():
         choices=["none", "safety", "risk"],
         default=_train_config_default("rl_behavior_gate"),
         help="gate follow/lane/progress by none (paper), collision safety, or continuous risk",
+    )
+    parser.add_argument(
+        "--rl_occupancy_use_road_border",
+        type=boolean,
+        default=_train_config_default("rl_occupancy_use_road_border"),
+        help="use HD-map road borders as OCC fallback when no static/stopped obstacle exists",
     )
     parser.add_argument(
         "--rl_bc_weight",
@@ -1027,6 +1039,7 @@ def model_training(args):
         print("RL direct safety reward weight: {}".format(args.rl_reward_w_safety))
         print("RL progress reward weight: {}".format(args.rl_reward_w_progress))
         print("RL behavior reward gate: {}".format(args.rl_behavior_gate))
+        print("RL road-border OCC fallback: {}".format(args.rl_occupancy_use_road_border))
         print("RL behavior-cloning anchor weight: {}".format(args.rl_bc_weight))
         print("RL EMA update rate: {}".format(args.rl_ema_update_rate))
         print("RL train scope: {}".format(args.rl_train_scope))
@@ -1041,6 +1054,11 @@ def model_training(args):
             f"{args.rl_eval_reward_w_lane}/{args.rl_eval_reward_w_progress}"
         )
         print("Held-out behavior reward gate: {}".format(args.rl_eval_behavior_gate))
+        print(
+            "Held-out road-border OCC fallback: {}".format(
+                args.rl_eval_occupancy_use_road_border
+            )
+        )
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
         print("RL updates per rollout: {}".format(args.rl_updates_per_rollout))
         print(

@@ -148,6 +148,7 @@ class TrainConfig:
     # Keep held-out policy selection on one safety-aware objective even when the
     # optimization gate is ablated against the exact published reward sum.
     rl_eval_behavior_gate: Literal["none", "safety", "risk"] = "safety"
+    rl_eval_occupancy_use_road_border: bool = True
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
@@ -173,6 +174,10 @@ class TrainConfig:
     # extension that prevents follow/lane/progress from compensating for a collision;
     # ``risk`` also suppresses those terms for near misses.
     rl_behavior_gate: Literal["none", "safety", "risk"] = "safety"
+    # Tier IV data has no populated static-object tensor, so OCC falls back to
+    # stopped actors and, when none exist, HD-map road borders. Keep this ablatable
+    # because road borders are a practical proxy rather than literal occupancy.
+    rl_occupancy_use_road_border: bool = True
     # The EMA policy boundary already limits drift. Real-data and recovery-set ablations found
     # that an additional expert anchor slows reward learning without improving robustness.
     rl_bc_weight: float = 0.0

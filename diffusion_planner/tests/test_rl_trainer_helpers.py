@@ -422,6 +422,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     observed_sample_steps = []
     observed_reward_weights = []
     observed_behavior_gates = []
+    observed_road_border_settings = []
 
     def fake_sample_group(_model, inputs, *_args, **_kwargs):
         observed_noise_scales.append(_args[0])
@@ -431,6 +432,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
 
     def fake_reward(_ego, _inputs, _neighbors, num_scenes, n, _args):
         observed_behavior_gates.append(_args.rl_behavior_gate)
+        observed_road_border_settings.append(_args.rl_occupancy_use_road_border)
         observed_reward_weights.append(
             tuple(
                 getattr(_args, f"rl_reward_w_{name}")
@@ -473,6 +475,8 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         rl_eval_reward_w_progress=3.0,
         rl_behavior_gate="none",
         rl_eval_behavior_gate="risk",
+        rl_occupancy_use_road_border=False,
+        rl_eval_occupancy_use_road_border=True,
         amp_dtype="off",
         rl_rollout_steps=6,
         diffusion_sample_steps=5,
@@ -489,6 +493,8 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     assert observed_sample_steps == [5, 5]
     assert observed_reward_weights == [(0.0, 1.0, 3.0, 2.5, 3.0)] * 2
     assert observed_behavior_gates == ["risk", "risk"]
+    assert observed_road_border_settings == [True, True]
     assert args.rl_reward_w_safety == 5.0
     assert args.rl_reward_w_risk == 9.0
     assert args.rl_behavior_gate == "none"
+    assert args.rl_occupancy_use_road_border is False

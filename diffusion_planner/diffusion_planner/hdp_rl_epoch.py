@@ -667,6 +667,12 @@ def validate_hdp_reward_policy(data_loader, model, args):
         )
     gate_default = TrainConfig.__dataclass_fields__["rl_eval_behavior_gate"].default
     eval_reward_args.rl_behavior_gate = getattr(args, "rl_eval_behavior_gate", gate_default)
+    road_border_default = TrainConfig.__dataclass_fields__[
+        "rl_eval_occupancy_use_road_border"
+    ].default
+    eval_reward_args.rl_occupancy_use_road_border = getattr(
+        args, "rl_eval_occupancy_use_road_border", road_border_default
+    )
     # reward sum, candidate count, per-group max sum, scene count, invalid reward count,
     # invalid diagnostic count. Invalid values are reported after the collective so every
     # rank exits together instead of leaving peers blocked in all_reduce.

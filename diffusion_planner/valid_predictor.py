@@ -123,6 +123,11 @@ def get_args(args_list=None):
         choices=["none", "safety", "risk"],
         default=_valid_config_default("reward_eval_behavior_gate"),
     )
+    parser.add_argument(
+        "--reward_eval_occupancy_use_road_border",
+        type=boolean,
+        default=_valid_config_default("reward_eval_occupancy_use_road_border"),
+    )
 
     args = parser.parse_args(args_list)
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
@@ -266,6 +271,9 @@ def run_validation(valid_cfg: ValidConfig):
         reward_args.rl_eval_noise_scale = valid_cfg.reward_eval_noise_scale
         reward_args.diffusion_sample_steps = valid_cfg.reward_eval_sample_steps
         reward_args.rl_eval_behavior_gate = valid_cfg.reward_eval_behavior_gate
+        reward_args.rl_eval_occupancy_use_road_border = (
+            valid_cfg.reward_eval_occupancy_use_road_border
+        )
         for reward_name in ("safety", "risk", "follow", "lane", "progress"):
             setattr(
                 reward_args,

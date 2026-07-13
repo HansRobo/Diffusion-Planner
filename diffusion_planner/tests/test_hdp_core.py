@@ -103,6 +103,8 @@ def test_tuned_hdp_rl_defaults_are_consistent():
     assert fields["rl_early_stop_patience"].default == 0
     assert fields["rl_behavior_gate"].default == "safety"
     assert fields["rl_eval_behavior_gate"].default == "safety"
+    assert fields["rl_occupancy_use_road_border"].default is True
+    assert fields["rl_eval_occupancy_use_road_border"].default is True
 
 
 def test_non_risk_behavior_reward_is_attenuated_by_collision_safety():
@@ -1291,6 +1293,61 @@ def test_hdp_reward_full_contract_reports_finite_component_diagnostics(monkeypat
     torch.testing.assert_close(single_metrics["reward_risk_group_std"], torch.tensor(0.0))
 
 
+def test_hdp_reward_can_ablate_road_border_occupancy_without_changing_eval_inputs():
+    time_steps = 4
+    candidates = torch.zeros(2, time_steps, 4)
+    candidates[..., 0] = torch.arange(1.0, time_steps + 1)
+    candidates[..., 2] = 1.0
+    lanes = torch.zeros(1, 1, time_steps + 1, 8)
+    lanes[0, 0, :, 0] = torch.linspace(0.1, 5.0, time_steps + 1)
+    lanes[..., 2] = 1.0
+    line_strings = torch.zeros(1, 1, 2, 4)
+    line_strings[0, 0, :, :2] = torch.tensor([[-5.0, 2.0], [5.0, 2.0]])
+    line_strings[..., 3] = 1.0
+    scene_inputs = {
+        "ego_current_state": torch.zeros(1, 10),
+        "ego_shape": torch.tensor([[2.5, 4.0, 2.0]]),
+        "neighbor_agents_past": torch.zeros(1, 1, 2, 11),
+        "ego_agent_future": candidates[:1, :, :3],
+        "lanes": lanes,
+        "route_lanes": lanes.clone(),
+        "line_strings": line_strings,
+        "static_objects": torch.zeros(1, 1, 10),
+    }
+    neighbors = torch.zeros(1, 1, time_steps, 4)
+    common = dict(
+        rl_reward_w_risk=1.0,
+        rl_reward_w_follow=3.0,
+        rl_reward_w_lane=2.5,
+        rl_reward_w_progress=3.0,
+    )
+
+    _, enabled_metrics = compute_hdp_reward(
+        candidates,
+        scene_inputs,
+        neighbors,
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(**common, rl_occupancy_use_road_border=True),
+    )
+    _, disabled_metrics = compute_hdp_reward(
+        candidates,
+        scene_inputs,
+        neighbors,
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(**common, rl_occupancy_use_road_border=False),
+    )
+
+    torch.testing.assert_close(
+        enabled_metrics["reward_occupancy_road_border_source_score"], torch.tensor(1.0)
+    )
+    torch.testing.assert_close(
+        disabled_metrics["reward_occupancy_road_border_source_score"], torch.tensor(0.0)
+    )
+    torch.testing.assert_close(disabled_metrics["reward_occupancy_score"], torch.tensor(1.0))
+
+
 def test_hdp_collision_reward_attenuates_rear_end_only():
     active = _collision_terms_for_neighbor_x(3.0)
     rear = _collision_terms_for_neighbor_x(-1.0)
@@ -2132,6 +2189,8 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         ("rl_eval_reward_w_safety", 1.0),
         ("rl_behavior_gate", "risk"),
         ("rl_eval_behavior_gate", "risk"),
+        ("rl_occupancy_use_road_border", False),
+        ("rl_eval_occupancy_use_road_border", False),
         ("advantage_eps", 1e-4),
         ("rl_full_eval_utd", 2),
         ("decoder_drop_path_rate", 0.0),
