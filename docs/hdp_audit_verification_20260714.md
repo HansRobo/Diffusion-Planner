@@ -68,6 +68,7 @@ disposition table was still valid after later edits.
 | Goal conditioning | An all-zero/missing goal was projected as an unmasked scene token. | Fixed. `GoalPoseEncoder` masks the zero sentinel and zeros its embedding; a valid origin pose with `(cos,sin)=(1,0)` remains active. |
 | Augmentation dtype | Scene-frame rotation matrices were always `float32`, causing mixed-dtype matmul failures for double/other typed callers. | Fixed in both standard and bridge augmentation with `new_tensor`, preserving device and input dtype. |
 | DDP diagnostics | Scalar-metric reduction still trusted rank-local key ordering even though loss reduction had a digest check. | Fixed. Key count/order digest is checked before packing scalar metrics. |
+| DDP empty diagnostics | A rank-local empty metric dictionary could return before the collective while another rank packed non-empty metrics. | Fixed. Empty dictionaries participate in the digest collective whenever DDP is initialized; divergent empty/non-empty sets now raise coherently instead of hanging. |
 | C++ benchmark | The benchmark's current HDP input map omitted the required `delay` vector; runtime transfer uses `.at("delay")`. The linked Autoware runtime may still allocate upstream joint-planner buffers. | Fixed defensively. It supplies a zero scalar delay and now refuses to run if the linked runtime dimensions are not `[1,1,80,4]`, preventing a false benchmark or undersized host copy. The external deployment runtime must be updated separately; deployment is intentionally outside this model/SFT audit. |
 | Fused AdamW fallback | Unsupported fused construction can raise either `TypeError` or `RuntimeError` across PyTorch versions. | Fixed for RL launcher; both exception classes fall back before the effective `fused_optimizer` value is persisted to `args.json`. |
 | RL selection | Legacy score reconstruction could mix reward/EPDMS/loss units. | Rechecked current code: new logs persist only finite full-evaluation reward scores; off-cadence rows are NaN and resume prefers the cumulative accepted score. No code change needed. |
@@ -89,7 +90,7 @@ correctness failure in the default run.
 ## Verification
 
 - Ruff: clean.
-- Full tests: `449 passed, 15 skipped`.
-- Full tests with `PYTHONWARNINGS=error`: `449 passed, 15 skipped`.
+- Full tests: `450 passed, 15 skipped`.
+- Full tests with `PYTHONWARNINGS=error`: `450 passed, 15 skipped`.
 - Node02 direct road-border RL smoke completed with Slurm exit code 0. Node01 formal RL remains
   under monitoring and was not modified by this audit.

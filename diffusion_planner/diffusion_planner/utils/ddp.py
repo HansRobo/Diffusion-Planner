@@ -139,7 +139,7 @@ def all_reduce_min(value, device):
 
 
 def reduce_and_average_losses(loss_dict, device):
-    if not loss_dict:
+    if not loss_dict and (not dist.is_available() or not dist.is_initialized()):
         return loss_dict
     world_size = dist.get_world_size()
     keys = list(loss_dict)
@@ -158,6 +158,8 @@ def reduce_and_average_losses(loss_dict, device):
     dist.all_reduce(key_max, op=dist.ReduceOp.MAX)
     if not torch.equal(key_min, key_max):
         raise RuntimeError("Distributed loss dictionaries have different keys or ordering")
+    if not keys:
+        return loss_dict
     values = []
     for key in keys:
         value = loss_dict[key]
@@ -176,7 +178,7 @@ def reduce_and_average_losses(loss_dict, device):
 
 def reduce_scalar_metrics(metric_dict, device, op):
     """Reduce detached scalar diagnostics with the requested distributed operation."""
-    if not metric_dict:
+    if not metric_dict and (not dist.is_available() or not dist.is_initialized()):
         return {}
     keys = list(metric_dict)
     # Packing relies on identical key order on every rank. Validate the contract
@@ -193,6 +195,8 @@ def reduce_scalar_metrics(metric_dict, device, op):
     dist.all_reduce(key_max, op=dist.ReduceOp.MAX)
     if not torch.equal(key_min, key_max):
         raise RuntimeError("Distributed metric dictionaries have different keys or ordering")
+    if not keys:
+        return {}
     values = []
     for key in keys:
         value = metric_dict[key]

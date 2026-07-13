@@ -2928,6 +2928,18 @@ def test_ddp_scalar_metric_reducer_preserves_requested_operation(monkeypatch):
     ]
 
 
+def test_ddp_empty_scalar_metrics_still_participate_in_key_check(monkeypatch):
+    observed = []
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+
+    def fake_all_reduce(tensor, op):
+        observed.append(op)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
+    assert ddp.reduce_scalar_metrics({}, torch.device("cpu"), torch.distributed.ReduceOp.SUM) == {}
+    assert observed == [torch.distributed.ReduceOp.MIN, torch.distributed.ReduceOp.MAX]
+
+
 def test_streaming_gradient_stats_match_concatenated_reference():
     first = torch.nn.Parameter(torch.zeros(2))
     second = torch.nn.Parameter(torch.zeros(3))
