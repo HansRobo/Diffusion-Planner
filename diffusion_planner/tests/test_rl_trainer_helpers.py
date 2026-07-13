@@ -335,23 +335,29 @@ def test_source_policy_selection_guards_require_safety_and_epdms_non_regression(
         "baseline_available": True,
         "valid_reward_risk": 0.4,
         "valid_reward_safety": 0.98,
+        "valid_reward_collision_safety": 0.985,
+        "valid_reward_red_light": 0.995,
         "valid_reward_ttc": 0.5,
         "valid_reward_thw": 0.8,
         "valid_reward_occupancy": 0.9,
         "valid_reward_comfort": 0.99,
         "valid_reward_collision_active": 0.02,
         "valid_reward_collision_rear": 0.03,
+        "valid_reward_red_light_violation_fraction": 0.005,
         "valid_epdms_total": 0.85,
     }
     improved = {
         "risk": 0.41,
         "safety": 0.99,
+        "collision_safety": 0.99,
+        "red_light": 0.999,
         "ttc": 0.51,
         "thw": 0.81,
         "occupancy": 0.91,
         "comfort": 1.0,
         "collision_active": 0.01,
         "collision_rear": 0.02,
+        "red_light_violation_fraction": 0.001,
     }
     kwargs = {
         "max_safety_regression": 0.0,
@@ -365,12 +371,15 @@ def test_source_policy_selection_guards_require_safety_and_epdms_non_regression(
     for name, regressed in (
         ("risk", 0.39),
         ("safety", 0.97),
+        ("collision_safety", 0.98),
+        ("red_light", 0.99),
         ("ttc", 0.49),
         ("thw", 0.79),
         ("occupancy", 0.89),
         ("comfort", 0.98),
         ("collision_active", 0.03),
         ("collision_rear", 0.04),
+        ("red_light_violation_fraction", 0.006),
     ):
         current = dict(improved)
         current[name] = regressed
@@ -382,12 +391,15 @@ def test_source_policy_selection_guards_honor_tolerance_and_unavailable_baseline
     source = {
         "valid_reward_risk": 0.4,
         "valid_reward_safety": 0.98,
+        "valid_reward_collision_safety": 0.985,
+        "valid_reward_red_light": 0.995,
         "valid_reward_ttc": 0.5,
         "valid_reward_thw": 0.8,
         "valid_reward_occupancy": 0.9,
         "valid_reward_comfort": 0.99,
         "valid_reward_collision_active": 0.02,
         "valid_reward_collision_rear": 0.03,
+        "valid_reward_red_light_violation_fraction": 0.005,
         "valid_epdms_total": 0.85,
     }
     guards = source_policy_selection_guards(
@@ -395,12 +407,15 @@ def test_source_policy_selection_guards_honor_tolerance_and_unavailable_baseline
         {
             "risk": 0.3995,
             "safety": 0.9795,
+            "collision_safety": 0.9845,
+            "red_light": 0.9945,
             "ttc": 0.4995,
             "thw": 0.7995,
             "occupancy": 0.8995,
             "comfort": 0.9895,
             "collision_active": 0.0205,
             "collision_rear": 0.0305,
+            "red_light_violation_fraction": 0.0055,
         },
         0.8495,
         max_safety_regression=0.001,
@@ -428,6 +443,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     observed_behavior_gates = []
     observed_road_border_settings = []
     observed_stationary_settings = []
+    observed_red_light_settings = []
     reward_call_count = 0
 
     def fake_sample_group(_model, inputs, *_args, **_kwargs):
@@ -446,6 +462,12 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
                 _args.rl_stationary_progress_mode,
                 _args.rl_stationary_reference_threshold_m,
                 _args.rl_stationary_progress_tolerance_m,
+            )
+        )
+        observed_red_light_settings.append(
+            (
+                _args.rl_red_light_constraint,
+                _args.rl_red_light_lane_tolerance_m,
             )
         )
         observed_reward_weights.append(
@@ -508,6 +530,10 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         rl_eval_stationary_progress_mode="distance",
         rl_eval_stationary_reference_threshold_m=1.0,
         rl_eval_stationary_progress_tolerance_m=2.0,
+        rl_red_light_constraint=False,
+        rl_red_light_lane_tolerance_m=4.0,
+        rl_eval_red_light_constraint=True,
+        rl_eval_red_light_lane_tolerance_m=2.0,
         amp_dtype="off",
         rl_rollout_steps=6,
         diffusion_sample_steps=5,
@@ -531,6 +557,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     assert observed_behavior_gates == ["risk", "risk"]
     assert observed_road_border_settings == [True, True]
     assert observed_stationary_settings == [("distance", 1.0, 2.0)] * 2
+    assert observed_red_light_settings == [(True, 2.0)] * 2
     assert args.rl_reward_w_safety == 5.0
     assert args.rl_reward_w_risk == 9.0
     assert args.rl_behavior_gate == "none"
@@ -538,3 +565,5 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     assert args.rl_stationary_progress_mode == "constant"
     assert args.rl_stationary_reference_threshold_m == 0.5
     assert args.rl_stationary_progress_tolerance_m == 4.0
+    assert args.rl_red_light_constraint is False
+    assert args.rl_red_light_lane_tolerance_m == 4.0

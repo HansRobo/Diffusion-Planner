@@ -737,6 +737,18 @@ def validate_hdp_reward_policy(data_loader, model, args):
         "rl_eval_stationary_progress_tolerance_m",
         stationary_tolerance_default,
     )
+    red_light_default = TrainConfig.__dataclass_fields__["rl_eval_red_light_constraint"].default
+    eval_reward_args.rl_red_light_constraint = getattr(
+        args, "rl_eval_red_light_constraint", red_light_default
+    )
+    red_light_tolerance_default = TrainConfig.__dataclass_fields__[
+        "rl_eval_red_light_lane_tolerance_m"
+    ].default
+    eval_reward_args.rl_red_light_lane_tolerance_m = getattr(
+        args,
+        "rl_eval_red_light_lane_tolerance_m",
+        red_light_tolerance_default,
+    )
     # reward sum, candidate count, per-group max sum, scene count, invalid reward count,
     # invalid diagnostic count. Invalid values are reported after the collective so every
     # rank exits together instead of leaving peers blocked in all_reduce.

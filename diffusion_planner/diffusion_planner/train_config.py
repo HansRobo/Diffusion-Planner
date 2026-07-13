@@ -155,6 +155,8 @@ class TrainConfig:
     rl_eval_stationary_progress_mode: Literal["constant", "distance"] = "distance"
     rl_eval_stationary_reference_threshold_m: float = 1.0
     rl_eval_stationary_progress_tolerance_m: float = 2.0
+    rl_eval_red_light_constraint: bool = True
+    rl_eval_red_light_lane_tolerance_m: float = 2.0
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
@@ -185,6 +187,7 @@ class TrainConfig:
     # because road borders are a practical proxy rather than literal occupancy.
     rl_occupancy_use_road_border: bool = True
     rl_stationary_progress_mode: Literal["constant", "distance"] = "distance"
+    rl_red_light_constraint: bool = True
     # The EMA policy boundary already limits drift. Real-data and recovery-set ablations found
     # that an additional expert anchor slows reward learning without improving robustness.
     rl_bc_weight: float = 0.0
@@ -204,6 +207,7 @@ class TrainConfig:
     rl_leader_lateral_margin_m: float = 0.75
     rl_stationary_reference_threshold_m: float = 1.0
     rl_stationary_progress_tolerance_m: float = 2.0
+    rl_red_light_lane_tolerance_m: float = 2.0
     rl_full_eval_utd: int = 5
     rl_validate_before_training: bool = True
     rl_max_valid_loss_regression: float = 0.25

@@ -28,6 +28,8 @@ from diffusion_planner.hdp_rl_utils import (
     _lane_reward_centerlines,
     _nearest_lane_distance,
     _occupancy_score,
+    _path_crosses_segments,
+    _red_light_constraint_score,
     _relative_progress_score,
     _road_border_clearance_exact,
     _safety_gated_behavior,
@@ -111,6 +113,10 @@ def test_tuned_hdp_rl_defaults_are_consistent():
     assert fields["rl_eval_stationary_reference_threshold_m"].default == 1.0
     assert fields["rl_stationary_progress_tolerance_m"].default == 2.0
     assert fields["rl_eval_stationary_progress_tolerance_m"].default == 2.0
+    assert fields["rl_red_light_constraint"].default is True
+    assert fields["rl_eval_red_light_constraint"].default is True
+    assert fields["rl_red_light_lane_tolerance_m"].default == 2.0
+    assert fields["rl_eval_red_light_lane_tolerance_m"].default == 2.0
 
 
 def test_non_risk_behavior_reward_is_attenuated_by_collision_safety():
@@ -1830,6 +1836,146 @@ def test_hdp_stationary_progress_configuration_rejects_invalid_values():
         HDPRewardConfig(stationary_progress_tolerance_m=0.0)
     with pytest.raises(ValueError, match="stationary_progress_mode"):
         HDPRewardConfig(stationary_progress_mode="invalid")
+    with pytest.raises(ValueError, match="red_light_lane_tolerance_m"):
+        HDPRewardConfig(red_light_lane_tolerance_m=0.0)
+
+
+def _red_stop_line_inputs():
+    time_steps = 3
+    route_lanes = torch.zeros(1, 1, 6, TRAFFIC_LIGHT_RED + 1)
+    route_lanes[0, 0, :, 0] = torch.linspace(0.1, 10.0, 6)
+    route_lanes[0, 0, :, 2] = 1.0
+    route_lanes[0, 0, :, TRAFFIC_LIGHT_RED] = 1.0
+    line_strings = torch.zeros(1, 1, 2, 4)
+    line_strings[0, 0, :, :2] = torch.tensor([[5.0, -1.0], [5.0, 1.0]])
+    line_strings[0, 0, :, 2] = 1.0
+
+    expert = torch.zeros(1, time_steps, 4)
+    expert[0, :, 0] = torch.tensor([0.25, 0.5, 1.0])
+    expert[..., 2] = 1.0
+    candidates = expert[:, None].repeat(1, 2, 1, 1)
+    candidates[0, 1, :, 0] = torch.tensor([3.0, 4.0, 5.0])
+    ego_shapes = torch.tensor([[2.0, 4.0, 2.0]])
+    return candidates, expert, ego_shapes, route_lanes, line_strings
+
+
+def test_hdp_red_light_constraint_detects_continuous_front_bumper_crossing():
+    candidates, expert, ego_shapes, route_lanes, line_strings = _red_stop_line_inputs()
+
+    score, active, expert_crossing = _red_light_constraint_score(
+        candidates,
+        expert,
+        ego_shapes,
+        route_lanes,
+        line_strings,
+        HDPRewardConfig(),
+    )
+
+    torch.testing.assert_close(score, torch.tensor([[1.0, 0.0]]))
+    torch.testing.assert_close(active, torch.tensor([True]))
+    torch.testing.assert_close(expert_crossing, torch.tensor([False]))
+
+
+def test_hdp_red_light_constraint_gates_risk_safety_and_total_reward():
+    candidates, expert, ego_shapes, route_lanes, line_strings = _red_stop_line_inputs()
+    candidates_flat = candidates.flatten(0, 1)
+    scene_inputs = {
+        "ego_current_state": torch.zeros(1, 10),
+        "ego_shape": ego_shapes,
+        "neighbor_agents_past": torch.zeros(1, 1, 2, 11),
+        "ego_agent_future": expert,
+        "lanes": route_lanes,
+        "route_lanes": route_lanes,
+        "line_strings": line_strings,
+        "static_objects": torch.zeros(1, 1, 10),
+        "turn_indicators": torch.zeros(1, 2, dtype=torch.long),
+    }
+    neighbor_futures = torch.zeros(1, 1, expert.shape[1], 4)
+
+    reward, metrics = compute_hdp_reward(
+        candidates_flat,
+        scene_inputs,
+        neighbor_futures,
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(
+            rl_reward_w_safety=0.0,
+            rl_reward_w_risk=1.0,
+            rl_reward_w_follow=0.0,
+            rl_reward_w_lane=0.0,
+            rl_reward_w_progress=0.0,
+            rl_red_light_constraint=True,
+        ),
+    )
+
+    torch.testing.assert_close(reward, torch.tensor([1.0, 0.0]))
+    torch.testing.assert_close(metrics["reward_collision_safety_score"], torch.tensor(1.0))
+    torch.testing.assert_close(metrics["reward_safety_score"], torch.tensor(0.5))
+    torch.testing.assert_close(metrics["reward_risk_score"], torch.tensor(0.5))
+    torch.testing.assert_close(metrics["reward_red_light_score"], torch.tensor(0.5))
+    torch.testing.assert_close(metrics["reward_red_light_violation_fraction"], torch.tensor(0.5))
+    torch.testing.assert_close(metrics["reward_red_light_group_range"], torch.tensor(1.0))
+
+
+def test_hdp_red_light_constraint_is_neutral_without_red_or_when_expert_crosses():
+    candidates, expert, ego_shapes, route_lanes, line_strings = _red_stop_line_inputs()
+    route_lanes[..., TRAFFIC_LIGHT_RED] = 0.0
+
+    green_score, green_active, green_expert_crossing = _red_light_constraint_score(
+        candidates,
+        expert,
+        ego_shapes,
+        route_lanes,
+        line_strings,
+        HDPRewardConfig(),
+    )
+    torch.testing.assert_close(green_score, torch.ones_like(green_score))
+    torch.testing.assert_close(green_active, torch.tensor([False]))
+    torch.testing.assert_close(green_expert_crossing, torch.tensor([False]))
+
+    route_lanes[..., TRAFFIC_LIGHT_RED] = 1.0
+    expert[0, :, 0] = torch.tensor([3.0, 4.0, 5.0])
+    expert_score, expert_active, expert_crossing = _red_light_constraint_score(
+        candidates,
+        expert,
+        ego_shapes,
+        route_lanes,
+        line_strings,
+        HDPRewardConfig(),
+    )
+    torch.testing.assert_close(expert_score, torch.ones_like(expert_score))
+    torch.testing.assert_close(expert_active, torch.tensor([False]))
+    torch.testing.assert_close(expert_crossing, torch.tensor([True]))
+
+
+def test_hdp_red_light_constraint_rejects_stop_lines_parallel_to_route():
+    candidates, expert, ego_shapes, route_lanes, line_strings = _red_stop_line_inputs()
+    line_strings[0, 0, :, :2] = torch.tensor([[4.0, 0.0], [6.0, 0.0]])
+    candidates[0, 1, :, 0] = torch.tensor([1.0, 2.0, 3.0])
+    candidates[0, 1, :, 1] = torch.tensor([-1.0, -1.0, 1.0])
+
+    score, active, expert_crossing = _red_light_constraint_score(
+        candidates,
+        expert,
+        ego_shapes,
+        route_lanes,
+        line_strings,
+        HDPRewardConfig(),
+    )
+
+    torch.testing.assert_close(score, torch.ones_like(score))
+    torch.testing.assert_close(active, torch.tensor([False]))
+    torch.testing.assert_close(expert_crossing, torch.tensor([False]))
+
+
+def test_hdp_stop_line_crossing_checks_segments_between_sampled_waypoints():
+    path = torch.tensor([[[0.0, 0.0], [10.0, 0.0]]])
+    stop_start = torch.tensor([[5.0, -1.0]])
+    stop_end = torch.tensor([[5.0, 1.0]])
+
+    torch.testing.assert_close(
+        _path_crosses_segments(path, stop_start, stop_end), torch.tensor([True])
+    )
 
 
 def test_hdp_lane_reward_does_not_mask_a_curved_centerline():
@@ -2277,6 +2423,10 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         ("rl_eval_stationary_reference_threshold_m", 0.5),
         ("rl_stationary_progress_tolerance_m", 4.0),
         ("rl_eval_stationary_progress_tolerance_m", 4.0),
+        ("rl_red_light_constraint", False),
+        ("rl_eval_red_light_constraint", False),
+        ("rl_red_light_lane_tolerance_m", 3.0),
+        ("rl_eval_red_light_lane_tolerance_m", 3.0),
         ("advantage_eps", 1e-4),
         ("rl_full_eval_utd", 2),
         ("decoder_drop_path_rate", 0.0),

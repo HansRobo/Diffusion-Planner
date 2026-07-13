@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import torch
 
-from diffusion_planner.dimensions import OUTPUT_T, POSE_DIM
+from diffusion_planner.dimensions import OUTPUT_T, POSE_DIM, TRAFFIC_LIGHT_RED
 from diffusion_planner.loss import (
     hybrid_waypoint_loss,
     inverse_normalize_ego_velocity,
@@ -36,6 +36,7 @@ from planner_metrics.subscores import (
 
 _RL_REWARD_CONFIG = RewardConfig()
 _RL_GEOMETRY_PAIR_STEP_BUDGET = 12_000_000
+_STOP_LINE_ROUTE_COSINE_MAX = 0.5
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class HDPRewardConfig:
     stationary_reference_threshold_m: float = 1.0
     stationary_progress_tolerance_m: float = 2.0
     stationary_progress_mode: str = "distance"
+    red_light_lane_tolerance_m: float = 2.0
     rear_end_penalty: float = 0.3
 
     def __post_init__(self) -> None:
@@ -71,6 +73,8 @@ class HDPRewardConfig:
             raise ValueError(
                 f"Unsupported stationary_progress_mode={self.stationary_progress_mode!r}"
             )
+        if self.red_light_lane_tolerance_m <= 0.0:
+            raise ValueError("red_light_lane_tolerance_m must be > 0")
 
 
 def _hdp_reward_config(args) -> HDPRewardConfig:
@@ -92,6 +96,7 @@ def _hdp_reward_config(args) -> HDPRewardConfig:
             getattr(args, "rl_stationary_progress_tolerance_m", 2.0)
         ),
         stationary_progress_mode=str(getattr(args, "rl_stationary_progress_mode", "distance")),
+        red_light_lane_tolerance_m=float(getattr(args, "rl_red_light_lane_tolerance_m", 2.0)),
     )
 
 
@@ -249,6 +254,137 @@ def _relative_progress_score(
         stationary_score = (1.0 - endpoint_error / stationary_tolerance_m).clamp(0.0, 1.0)
     score = torch.where(moving_reference, ratio.clamp(0.0, 1.0), stationary_score)
     return ratio, score
+
+
+def _path_crosses_segments(
+    path_xy: torch.Tensor,
+    segment_start: torch.Tensor,
+    segment_end: torch.Tensor,
+) -> torch.Tensor:
+    """Return whether each continuous path crosses any finite line segment."""
+    candidate_count = path_xy.shape[0]
+    path_segment_count = max(path_xy.shape[1] - 1, 0)
+    if path_segment_count == 0 or segment_start.shape[0] == 0:
+        return torch.zeros(candidate_count, dtype=torch.bool, device=path_xy.device)
+
+    path_start = path_xy[:, :-1]
+    path_vector = path_xy[:, 1:] - path_start
+    crossed = torch.zeros(candidate_count, dtype=torch.bool, device=path_xy.device)
+    max_pair_elements = 5_000_000
+    segment_chunk = max(
+        1,
+        max_pair_elements // max(candidate_count * path_segment_count, 1),
+    )
+    for start in range(0, segment_start.shape[0], segment_chunk):
+        stop_a = segment_start[start : start + segment_chunk]
+        stop_vector = segment_end[start : start + segment_chunk] - stop_a
+        path_vector_expanded = path_vector[:, :, None]
+        stop_vector_expanded = stop_vector[None, None]
+        denominator = _cross_2d(path_vector_expanded, stop_vector_expanded)
+        offset = stop_a[None, None] - path_start[:, :, None]
+        non_parallel = denominator.abs() > 1e-8
+        safe_denominator = torch.where(non_parallel, denominator, torch.ones_like(denominator))
+        path_fraction = _cross_2d(offset, stop_vector_expanded) / safe_denominator
+        stop_fraction = _cross_2d(offset, path_vector_expanded) / safe_denominator
+        # A touch at the current front-bumper pose is not a new violation. A crossing anywhere
+        # after that pose, including between sampled waypoints, is detected.
+        intersects = (
+            non_parallel
+            & (path_fraction > 1e-4)
+            & (path_fraction <= 1.0 + 1e-6)
+            & (stop_fraction >= -1e-6)
+            & (stop_fraction <= 1.0 + 1e-6)
+        )
+        crossed |= intersects.any(dim=(1, 2))
+    return crossed
+
+
+def _front_bumper_path(trajectories: torch.Tensor, ego_shape: torch.Tensor) -> torch.Tensor:
+    """Convert rear-axle trajectories to a path beginning at the current front bumper."""
+    heading = trajectories[..., 2:4]
+    heading = heading / heading.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    front_offset = 0.5 * (ego_shape[0].abs() + ego_shape[1].abs())
+    future_front = trajectories[..., :2] + front_offset * heading
+    current_front = trajectories.new_zeros((trajectories.shape[0], 1, 2))
+    current_front[..., 0] = front_offset
+    return torch.cat((current_front, future_front), dim=1)
+
+
+def _red_light_constraint_score(
+    ego_group: torch.Tensor,
+    expert_future: torch.Tensor,
+    ego_shapes: torch.Tensor,
+    route_lanes: torch.Tensor | None,
+    line_strings: torch.Tensor | None,
+    config: HDPRewardConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Penalize candidate stop-line crossings that the logged expert does not make."""
+    batch_size, candidate_count = ego_group.shape[:2]
+    scores = ego_group.new_ones((batch_size, candidate_count))
+    active = torch.zeros(batch_size, dtype=torch.bool, device=ego_group.device)
+    expert_crossing = torch.zeros_like(active)
+    if (
+        route_lanes is None
+        or route_lanes.shape[-1] <= TRAFFIC_LIGHT_RED
+        or line_strings is None
+        or line_strings.shape[-1] < 4
+    ):
+        return scores, active, expert_crossing
+
+    route_valid = ~lane_point_padding_mask(route_lanes)
+    red_lane = ((route_lanes[..., TRAFFIC_LIGHT_RED] > 0.5) & route_valid).any(dim=-1)
+    red_scenes = red_lane.any(dim=-1).nonzero(as_tuple=True)[0].cpu().tolist()
+    for scene in red_scenes:
+        red_point_mask = red_lane[scene, :, None] & route_valid[scene]
+        red_points = route_lanes[scene, ..., :2][red_point_mask]
+        red_directions = route_lanes[scene, ..., 2:4][red_point_mask]
+        stop_point = line_strings[scene, ..., 2] > 0.5
+        stop_line = stop_point.any(dim=-1)
+        stop_point = stop_point[stop_line]
+        stop_xy = line_strings[scene, stop_line, :, :2]
+        if stop_xy.shape[0] == 0:
+            continue
+        stop_pair = stop_point[..., :-1] & stop_point[..., 1:]
+
+        point_distance = torch.cdist(stop_xy.flatten(0, 1), red_points)
+        line_distance = point_distance.reshape(
+            stop_xy.shape[0], stop_xy.shape[1], red_points.shape[0]
+        ).masked_fill(~stop_point[..., None], float("inf"))
+        line_associated = line_distance.amin(dim=(1, 2)) <= config.red_light_lane_tolerance_m
+        associated_pair = stop_pair & line_associated[:, None]
+        segment_start = stop_xy[..., :-1, :][associated_pair]
+        segment_end = stop_xy[..., 1:, :][associated_pair]
+        if segment_start.shape[0] > 0:
+            midpoint = 0.5 * (segment_start + segment_end)
+            nearest_red_point = torch.cdist(midpoint, red_points).argmin(dim=-1)
+            route_direction = red_directions[nearest_red_point]
+            route_direction_norm = route_direction.norm(dim=-1, keepdim=True)
+            route_direction = route_direction / route_direction_norm.clamp_min(1e-6)
+            stop_direction = segment_end - segment_start
+            stop_direction = stop_direction / stop_direction.norm(dim=-1, keepdim=True).clamp_min(
+                1e-6
+            )
+            direction_compatible = (route_direction_norm.squeeze(-1) <= 1e-6) | (
+                (stop_direction * route_direction).sum(dim=-1).abs() <= _STOP_LINE_ROUTE_COSINE_MAX
+            )
+            segment_start = segment_start[direction_compatible]
+            segment_end = segment_end[direction_compatible]
+
+        expert_path = _front_bumper_path(expert_future[scene : scene + 1], ego_shapes[scene])
+        scene_expert_crossing = _path_crosses_segments(expert_path, segment_start, segment_end)[0]
+        candidate_path = _front_bumper_path(ego_group[scene], ego_shapes[scene])
+        candidate_crossing = _path_crosses_segments(candidate_path, segment_start, segment_end)
+        scene_active = candidate_crossing.new_tensor(segment_start.shape[0] > 0) & (
+            ~scene_expert_crossing
+        )
+        active[scene] = scene_active
+        expert_crossing[scene] = scene_expert_crossing
+        scores[scene] = torch.where(
+            scene_active,
+            (~candidate_crossing).to(scores.dtype),
+            torch.ones_like(scores[scene]),
+        )
+    return scores, active, expert_crossing
 
 
 def _safety_gated_behavior(
@@ -1154,10 +1290,25 @@ def compute_hdp_reward(
         config,
         ego_speed=scene_term_tensors["ego_speed"],
     )
-    safety = scene_term_tensors["safety"]
+    collision_safety = scene_term_tensors["safety"]
+    if bool(getattr(args, "rl_red_light_constraint", True)):
+        red_light_score, red_light_active, red_light_expert_crossing = _red_light_constraint_score(
+            ego_group,
+            expert_futures_tensor,
+            scene_inputs["ego_shape"][:, :3],
+            route_lanes_batch,
+            line_strings_batch,
+            config,
+        )
+    else:
+        red_light_score = torch.ones_like(collision_safety)
+        red_light_active = torch.zeros(num_scenes, dtype=torch.bool, device=device)
+        red_light_expert_crossing = torch.zeros_like(red_light_active)
+    safety = torch.minimum(collision_safety, red_light_score)
     risk = torch.stack(
         (scene_term_tensors["ttc"], scene_term_tensors["thw"], occupancy), dim=0
     ).amin(dim=(0, 3))
+    risk = torch.minimum(risk, red_light_score)
     behavior_gate_name = getattr(args, "rl_behavior_gate", "safety")
     behavior_gate = _apply_behavior_gate(torch.ones_like(safety), safety, risk, behavior_gate_name)
     progress_reward = progress_scores * behavior_gate
@@ -1183,6 +1334,7 @@ def compute_hdp_reward(
 
     metric_groups = {
         "safety": safety,
+        "collision_safety": collision_safety,
         "risk": risk,
         "follow": scene_term_tensors["follow"],
         "lane": lane_scores,
@@ -1210,6 +1362,12 @@ def compute_hdp_reward(
         "underprogress_fraction": (progress_ratios < 0.8).to(risk.dtype),
         "overprogress_fraction": (progress_ratios > 1.2).to(risk.dtype),
         "stationary_reference_fraction": candidate_flags(stationary_reference),
+        "red_light": red_light_score,
+        "red_light_constraint_active_fraction": candidate_flags(red_light_active),
+        "red_light_expert_crossing_fraction": candidate_flags(red_light_expert_crossing),
+        "red_light_violation_fraction": ((red_light_score < 0.5) & red_light_active[:, None]).to(
+            risk.dtype
+        ),
         "comfort": scene_term_tensors["comfort"],
         "behavior_gate": behavior_gate,
     }
@@ -1223,6 +1381,9 @@ def compute_hdp_reward(
         "underprogress_fraction",
         "overprogress_fraction",
         "stationary_reference_fraction",
+        "red_light_constraint_active_fraction",
+        "red_light_expert_crossing_fraction",
+        "red_light_violation_fraction",
     }
     metrics = {
         (f"reward_{key}" if key in fraction_keys else f"reward_{key}_score"): value.mean()
@@ -1274,6 +1435,9 @@ def compute_hdp_reward(
     metrics["reward_stationary_progress_group_range_weighted"] = (
         (progress_scores.max(dim=1).values - progress_scores.min(dim=1).values)
         * stationary_reference
+    ).mean()
+    metrics["reward_red_light_group_range"] = (
+        red_light_score.max(dim=1).values - red_light_score.min(dim=1).values
     ).mean()
     return reward_group.reshape(-1), metrics
 

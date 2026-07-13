@@ -468,6 +468,18 @@ def get_args():
         help="held-out endpoint error where stopped-reference progress reaches zero",
     )
     parser.add_argument(
+        "--rl_eval_red_light_constraint",
+        type=boolean,
+        default=_train_config_default("rl_eval_red_light_constraint"),
+        help="apply the expert-gated red stop-line constraint in the fixed held-out objective",
+    )
+    parser.add_argument(
+        "--rl_eval_red_light_lane_tolerance_m",
+        type=float,
+        default=_train_config_default("rl_eval_red_light_lane_tolerance_m"),
+        help="held-out maximum distance used to associate a red route lane with a stop line",
+    )
+    parser.add_argument(
         "--rl_rollout_steps",
         type=int,
         default=_train_config_default("rl_rollout_steps"),
@@ -547,6 +559,12 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--rl_red_light_constraint",
+        type=boolean,
+        default=_train_config_default("rl_red_light_constraint"),
+        help="reject red stop-line crossings when the logged expert does not cross",
+    )
+    parser.add_argument(
         "--rl_bc_weight",
         type=float,
         default=_train_config_default("rl_bc_weight"),
@@ -593,6 +611,10 @@ def get_args():
         (
             "rl_stationary_progress_tolerance_m",
             "candidate endpoint error at which stopped-reference progress reaches zero",
+        ),
+        (
+            "rl_red_light_lane_tolerance_m",
+            "maximum distance used to associate a red route lane with a stop line",
         ),
     ):
         parser.add_argument(
@@ -935,6 +957,10 @@ def get_args():
         raise ValueError("--rl_eval_stationary_reference_threshold_m must be > 0")
     if args.rl_eval_stationary_progress_tolerance_m <= 0.0:
         raise ValueError("--rl_eval_stationary_progress_tolerance_m must be > 0")
+    if args.rl_red_light_lane_tolerance_m <= 0.0:
+        raise ValueError("--rl_red_light_lane_tolerance_m must be > 0")
+    if args.rl_eval_red_light_lane_tolerance_m <= 0.0:
+        raise ValueError("--rl_eval_red_light_lane_tolerance_m must be > 0")
     if not args.use_velocity_representation:
         raise ValueError("HDP-RL requires --use_velocity_representation true")
     if args.diffusion_model_type != "x_start" or args.diffusion_supervision_type != "x_start":
@@ -979,8 +1005,17 @@ def source_policy_selection_guards(
     require_epdms,
 ):
     """Return source-relative gates used before accepting an RL best checkpoint."""
-    higher_is_better = ("risk", "safety", "ttc", "thw", "occupancy", "comfort")
-    lower_is_better = ("collision_active", "collision_rear")
+    higher_is_better = (
+        "risk",
+        "safety",
+        "collision_safety",
+        "red_light",
+        "ttc",
+        "thw",
+        "occupancy",
+        "comfort",
+    )
+    lower_is_better = ("collision_active", "collision_rear", "red_light_violation_fraction")
     guard_names = higher_is_better + lower_is_better
     if not source_metrics or not bool(source_metrics.get("baseline_available", True)):
         return {"available": False, **dict.fromkeys((*guard_names, "epdms"), True)}
@@ -1087,6 +1122,10 @@ def model_training(args):
             f"{args.rl_stationary_reference_threshold_m}/"
             f"{args.rl_stationary_progress_tolerance_m}"
         )
+        print(
+            "RL red stop-line constraint (enabled/lane tolerance): "
+            f"{args.rl_red_light_constraint}/{args.rl_red_light_lane_tolerance_m}"
+        )
         print("RL behavior-cloning anchor weight: {}".format(args.rl_bc_weight))
         print("RL EMA update rate: {}".format(args.rl_ema_update_rate))
         print("RL train scope: {}".format(args.rl_train_scope))
@@ -1109,6 +1148,11 @@ def model_training(args):
             f"{args.rl_eval_stationary_progress_mode}/"
             f"{args.rl_eval_stationary_reference_threshold_m}/"
             f"{args.rl_eval_stationary_progress_tolerance_m}"
+        )
+        print(
+            "Held-out red stop-line constraint (enabled/lane tolerance): "
+            f"{args.rl_eval_red_light_constraint}/"
+            f"{args.rl_eval_red_light_lane_tolerance_m}"
         )
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
         print("RL updates per rollout: {}".format(args.rl_updates_per_rollout))

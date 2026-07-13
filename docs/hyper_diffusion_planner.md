@@ -142,6 +142,8 @@ rl_occupancy_use_road_border=true
 rl_stationary_progress_mode=distance
 rl_stationary_reference_threshold_m=1.0
 rl_stationary_progress_tolerance_m=2.0
+rl_red_light_constraint=true
+rl_red_light_lane_tolerance_m=2.0
 rl_bc_weight=0.0
 num_generations=8
 rl_noise_scale=1.5
@@ -156,6 +158,8 @@ rl_eval_occupancy_use_road_border=true
 rl_eval_stationary_progress_mode=distance
 rl_eval_stationary_reference_threshold_m=1.0
 rl_eval_stationary_progress_tolerance_m=2.0
+rl_eval_red_light_constraint=true
+rl_eval_red_light_lane_tolerance_m=2.0
 rl_rollout_steps=6
 rl_updates_per_rollout=1
 rl_update_max_candidates_per_rank=2048
@@ -230,6 +234,10 @@ Implementation notes:
   state dict stays unchanged, while RL's direct component calls and DPM validation use the same
   compiled modules. Use a persistent `TORCHINDUCTOR_CACHE_DIR` across restarts.
 - The single reward path contains SAT collision, continuous TTC, THW, occupancy clearance, leader-conditioned following, lane-center scoring, lane-change/off-lane masking, and rear-end attenuation, using risk/follow/lane weights 1.0/3.0/2.5. The logged expert reference selects the leader independently of each candidate, while candidate motion still controls gap, speed-match, and comfort scores. Rear attenuation is preserved when a stopped replay vehicle is the winning occupancy source, but never attenuates a closer static obstacle. Lane scoring uses the navigation route when it agrees with the logged expert trajectory and otherwise falls back to all visible lane centerlines.
+- A red-light constraint associates red navigation-route points with explicit stop-line geometry and
+  detects continuous front-bumper crossings between waypoints. It is active only when the logged
+  expert future does not cross the same stop line, avoiding a blanket eight-second assumption that
+  the current light stays red. Train and held-out toggles remain independent for paired ablations.
 - Reward scoring batches the common stopped-agent occupancy path and tensorizes metric assembly.
   Route agreement is decided from the expert first, so candidate distance is computed only against
   the selected route or lane fallback rather than both. Exact static and road-border geometry is
@@ -242,7 +250,7 @@ Implementation notes:
   logged.
 - Scene encoding is computed once per candidate group. Decoder-only RL repeats only current action-state tensors, not the full 31-frame observation history.
 - Full held-out stochastic-reward/EPDMS validation runs on `rl_full_eval_utd`; the deterministic proxy remains available each epoch. Reward validation uses fixed random candidates and logs every reward component and source-coverage diagnostic, so policy iterations are directly comparable.
-- A fresh RL run validates and saves its source SFT policy before the first update. Best-checkpoint selection maximizes mean held-out reward but accepts a replacement only when risk, collision safety, TTC, THW, occupancy, active/rear collision rates, comfort, and deterministic EPDMS do not regress from the source policy. The absolute safety/EPDMS tolerances default to zero and can be set explicitly with `rl_max_valid_safety_regression` and `rl_max_valid_epdms_regression`. The supervised validation-loss guard remains independent, and a reward improvement of at least `0.0001` is required. `latest.pth` is still written for complete experiment analysis even when an epoch fails a source-policy guard.
+- A fresh RL run validates and saves its source SFT policy before the first update. Best-checkpoint selection maximizes mean held-out reward but accepts a replacement only when risk, combined safety, collision-only safety, red-light compliance, TTC, THW, occupancy, active/rear collision rates, comfort, and deterministic EPDMS do not regress from the source policy. The absolute safety/EPDMS tolerances default to zero and can be set explicitly with `rl_max_valid_safety_regression` and `rl_max_valid_epdms_regression`. The supervised validation-loss guard remains independent, and a reward improvement of at least `0.0001` is required. `latest.pth` is still written for complete experiment analysis even when an epoch fails a source-policy guard.
 - Training runs the configured epoch budget by default (`rl_early_stop_patience=0`). A positive
   patience is available for short sweeps, but formal runs do not stop on the reward proxy while
   EPDMS or another safety component may still be improving.

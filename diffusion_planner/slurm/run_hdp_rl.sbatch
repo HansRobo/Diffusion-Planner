@@ -54,6 +54,8 @@ OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_OCCUPANCY_USE_ROAD_BORDER:-True}
 STATIONARY_PROGRESS_MODE=${HDP_RL_STATIONARY_PROGRESS_MODE:-distance}
 STATIONARY_REFERENCE_THRESHOLD_M=${HDP_RL_STATIONARY_REFERENCE_THRESHOLD_M:-1.0}
 STATIONARY_PROGRESS_TOLERANCE_M=${HDP_RL_STATIONARY_PROGRESS_TOLERANCE_M:-2.0}
+RED_LIGHT_CONSTRAINT=${HDP_RL_RED_LIGHT_CONSTRAINT:-True}
+RED_LIGHT_LANE_TOLERANCE_M=${HDP_RL_RED_LIGHT_LANE_TOLERANCE_M:-2.0}
 BC_WEIGHT=${HDP_RL_BC_WEIGHT:-0.0}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-1.5}
@@ -69,6 +71,8 @@ EVAL_OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_EVAL_OCCUPANCY_USE_ROAD_BORDER:-True}
 EVAL_STATIONARY_PROGRESS_MODE=${HDP_RL_EVAL_STATIONARY_PROGRESS_MODE:-distance}
 EVAL_STATIONARY_REFERENCE_THRESHOLD_M=${HDP_RL_EVAL_STATIONARY_REFERENCE_THRESHOLD_M:-1.0}
 EVAL_STATIONARY_PROGRESS_TOLERANCE_M=${HDP_RL_EVAL_STATIONARY_PROGRESS_TOLERANCE_M:-2.0}
+EVAL_RED_LIGHT_CONSTRAINT=${HDP_RL_EVAL_RED_LIGHT_CONSTRAINT:-True}
+EVAL_RED_LIGHT_LANE_TOLERANCE_M=${HDP_RL_EVAL_RED_LIGHT_LANE_TOLERANCE_M:-2.0}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
 UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-1}
 UPDATE_MAX_CANDIDATES=${HDP_RL_UPDATE_MAX_CANDIDATES_PER_RANK:-2048}
@@ -362,6 +366,8 @@ TRAIN_ARGS=(
   --rl_eval_stationary_progress_mode "${EVAL_STATIONARY_PROGRESS_MODE}" \
   --rl_eval_stationary_reference_threshold_m "${EVAL_STATIONARY_REFERENCE_THRESHOLD_M}" \
   --rl_eval_stationary_progress_tolerance_m "${EVAL_STATIONARY_PROGRESS_TOLERANCE_M}" \
+  --rl_eval_red_light_constraint "${EVAL_RED_LIGHT_CONSTRAINT}" \
+  --rl_eval_red_light_lane_tolerance_m "${EVAL_RED_LIGHT_LANE_TOLERANCE_M}" \
   --rl_rollout_steps "${ROLLOUT_STEPS}" \
   --rl_updates_per_rollout "${UPDATES_PER_ROLLOUT}" \
   --rl_update_max_candidates_per_rank "${UPDATE_MAX_CANDIDATES}" \
@@ -377,6 +383,8 @@ TRAIN_ARGS=(
   --rl_stationary_progress_mode "${STATIONARY_PROGRESS_MODE}" \
   --rl_stationary_reference_threshold_m "${STATIONARY_REFERENCE_THRESHOLD_M}" \
   --rl_stationary_progress_tolerance_m "${STATIONARY_PROGRESS_TOLERANCE_M}" \
+  --rl_red_light_constraint "${RED_LIGHT_CONSTRAINT}" \
+  --rl_red_light_lane_tolerance_m "${RED_LIGHT_LANE_TOLERANCE_M}" \
   --rl_bc_weight "${BC_WEIGHT}" \
   --rl_ema_update_rate "${EMA_UPDATE_RATE}" \
   --rl_init_use_ema True \
@@ -437,7 +445,8 @@ srun --kill-on-bad-exit=1 --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-
 "${REPO}/.venv/bin/python" - \
   "${VERIFY_SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" \
   "${TRAIN_EPOCHS}" "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}" \
-  "${OCCUPANCY_USE_ROAD_BORDER}" "${EVAL_OCCUPANCY_USE_ROAD_BORDER}" <<'PY'
+  "${OCCUPANCY_USE_ROAD_BORDER}" "${EVAL_OCCUPANCY_USE_ROAD_BORDER}" \
+  "${RED_LIGHT_CONSTRAINT}" "${EVAL_RED_LIGHT_CONSTRAINT}" <<'PY'
 import csv
 import json
 import math
@@ -455,6 +464,8 @@ expected_behavior_gate = sys.argv[6]
 expected_eval_behavior_gate = sys.argv[7]
 expected_occupancy_use_road_border = sys.argv[8].lower() == "true"
 expected_eval_occupancy_use_road_border = sys.argv[9].lower() == "true"
+expected_red_light_constraint = sys.argv[10].lower() == "true"
+expected_eval_red_light_constraint = sys.argv[11].lower() == "true"
 source = torch.load(initial_path, map_location="cpu", weights_only=True)
 if mode == "resume":
     initial_live = source["model"]
@@ -524,10 +535,16 @@ assert (
     run_args["rl_eval_occupancy_use_road_border"]
     is expected_eval_occupancy_use_road_border
 )
+assert run_args["rl_red_light_constraint"] is expected_red_light_constraint
+assert run_args["rl_eval_red_light_constraint"] is expected_eval_red_light_constraint
 required = (
     "train_reward_mean",
     "train_reward_std",
     "train_reward_group_range",
+    "train_reward_collision_safety_score",
+    "train_reward_red_light_score",
+    "train_reward_red_light_constraint_active_fraction",
+    "train_reward_red_light_violation_fraction",
     "train_grad_norm",
     "train_grad_clip_fraction",
     "train_valid_group_fraction",
@@ -546,6 +563,13 @@ full_eval_rows = [
     and math.isfinite(float(row["valid_reward_mean"]))
 ]
 assert full_eval_rows, "training produced no finite full-evaluation reward"
+for key in (
+    "valid_reward_collision_safety",
+    "valid_reward_red_light",
+    "valid_reward_red_light_violation_fraction",
+):
+    value = float(full_eval_rows[-1][key])
+    assert math.isfinite(value), (key, value)
 with (save_dir / "source_baseline_metrics.json").open(encoding="utf-8") as f:
     source_metrics = json.load(f)
 if source_metrics.get("baseline_available", True):
