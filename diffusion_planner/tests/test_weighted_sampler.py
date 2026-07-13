@@ -4,7 +4,6 @@ import warnings
 from pathlib import Path
 
 import pytest
-
 from diffusion_planner.utils.weighted_sampler import ClusterWeightedDistributedSampler
 
 
@@ -131,6 +130,25 @@ class TestDDP:
             )
             assert len(list(s0)) == 11
             assert len(list(s1)) == 11
+
+    def test_tiny_dataset_ddp_equal_shards(self):
+        """Every rank gets equal shard length even when total_size < num_replicas."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(2)]
+            clusters = {"cluster_id0": data_list[:1], "cluster_id1": data_list[1:]}
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                json.dump(clusters, f)
+
+            num_replicas = 8
+            for rank in range(num_replicas):
+                sampler = ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=num_replicas, rank=rank, seed=42
+                )
+                indices = list(sampler)
+                assert len(indices) == sampler.num_samples, (
+                    f"Rank {rank}: got {len(indices)} indices, expected {sampler.num_samples}"
+                )
 
     def test_set_epoch_changes_order(self):
         with tempfile.TemporaryDirectory() as tmp:
