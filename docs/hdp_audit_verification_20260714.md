@@ -94,7 +94,7 @@ correctness failure in the default run.
 ## Verification
 
 - Ruff: clean.
-- Full tests: `453 passed, 15 skipped` before the final audit patches; the final focused HDP/map suite is `108 passed` (the added optimizer regression is included).
-- Full tests with `PYTHONWARNINGS=error`: clean on the pre-patch tree; the same command is rerun after the final commit.
+- Full tests after the final audit patch: `455 passed, 15 skipped`; the focused HDP/map suite is `108 passed`.
+- Full tests with `PYTHONWARNINGS=error`: `455 passed, 15 skipped`.
 - Node02 direct road-border RL smoke completed with Slurm exit code 0. Node01 formal RL remains
   under monitoring and was not modified by this audit.

@@ -774,6 +774,20 @@ def test_supervised_lr_warms_up_then_stays_fixed_for_twenty_epochs():
     assert used_lrs[5:] == pytest.approx([2e-4] * 15)
 
 
+def test_single_warmup_epoch_starts_at_warmup_rate_then_reaches_base_lr():
+    parameter = torch.nn.Parameter(torch.zeros(()))
+    optimizer = torch.optim.AdamW([parameter], lr=2e-4)
+    scheduler = LinearWarmupConstantLR(optimizer, total_epochs=3, warm_up_epochs=1)
+
+    used_lrs = []
+    for _ in range(3):
+        used_lrs.append(optimizer.param_groups[0]["lr"])
+        optimizer.step()
+        scheduler.step()
+
+    assert used_lrs == pytest.approx([2e-5, 2e-4, 2e-4])
+
+
 def test_detached_integral_preserves_forward_and_limits_gradient_window():
     velocity = torch.arange(1, 7, dtype=torch.float64).view(1, 6, 1).requires_grad_()
     integrated = _detached_integral(velocity, W=3)

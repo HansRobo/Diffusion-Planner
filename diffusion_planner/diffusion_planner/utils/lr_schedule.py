@@ -9,8 +9,13 @@ def LinearWarmupConstantLR(optimizer, total_epochs, warm_up_epochs, start_factor
         raise ValueError("warm_up_epochs must be between 0 and total_epochs")
 
     fixed_scheduler = MultiplicativeLR(optimizer, lr_lambda=lambda epoch: 1.0)
-    if warm_up_epochs <= 1:
+    if warm_up_epochs == 0:
         return fixed_scheduler
+
+    if warm_up_epochs == 1:
+        # A one-epoch warmup still spends the first epoch at start_factor and
+        # reaches the base rate on the first scheduler step.
+        return LinearLR(optimizer, start_factor=start_factor, total_iters=1)
 
     warmup_scheduler = LinearLR(
         optimizer, start_factor=start_factor, total_iters=warm_up_epochs - 1
