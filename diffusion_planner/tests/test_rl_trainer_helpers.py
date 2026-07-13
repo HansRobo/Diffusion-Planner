@@ -260,6 +260,29 @@ def test_resume_best_score_ignores_nan_and_non_full_eval_rows():
     )
 
 
+def test_resume_best_score_does_not_promote_guard_rejected_reward():
+    assert (
+        best_valid_score_from_rows(
+            [
+                {
+                    "valid_full_eval": True,
+                    "valid_reward_mean": 7.2,
+                    "valid_improves_best": True,
+                    "best_valid_score": 7.2,
+                },
+                {
+                    "valid_full_eval": True,
+                    "valid_reward_mean": 7.5,
+                    "valid_improves_best": False,
+                    "valid_within_source_risk_guard": False,
+                    "best_valid_score": 7.2,
+                },
+            ]
+        )
+        == 7.2
+    )
+
+
 def test_find_checkpoint_run_artifact_handles_latest_and_nested_checkpoints(tmp_path):
     run_dir = tmp_path / "run"
     nested = run_dir / "epoch0002"

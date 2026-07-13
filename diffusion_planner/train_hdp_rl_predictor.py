@@ -114,6 +114,15 @@ def validate_compiled_candidate_batch(
 
 
 def best_valid_score_from_rows(rows: list[dict]) -> float:
+    # New logs persist the accepted cumulative best. This must take precedence over raw epoch
+    # rewards because a high-reward epoch may have been rejected by a source-policy guard.
+    for row in reversed(rows):
+        raw_best = row.get("best_valid_score", float("nan"))
+        accepted_best = float(raw_best) if pd.notna(raw_best) else float("nan")
+        if math.isfinite(accepted_best):
+            return accepted_best
+
+    # Legacy logs predate the cumulative field and accepted every finite full-eval reward.
     best = -float("inf")
     for row in rows:
         full_eval = row.get("valid_full_eval", False)
