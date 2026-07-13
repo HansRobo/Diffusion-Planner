@@ -77,8 +77,9 @@ def make_npz(tmp_path: Path):
         route_speed_limit = np.full((25, 1), 13.9, dtype=np.float32)
         route_has_speed_limit = np.ones((25, 1), dtype=np.float32)
 
-        goal = np.array([xs[-1], ys[-1], np.cos(headings[-1]), np.sin(headings[-1])],
-                        dtype=np.float32)
+        goal = np.array(
+            [xs[-1], ys[-1], np.cos(headings[-1]), np.sin(headings[-1])], dtype=np.float32
+        )
 
         ego_shape = np.array([2.75, 5.0, 2.0], dtype=np.float32)
 

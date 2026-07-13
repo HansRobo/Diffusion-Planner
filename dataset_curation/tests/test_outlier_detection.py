@@ -33,7 +33,9 @@ def test_isolation_forest_detects_outliers():
     n_flagged = result.sum()
     assert n_flagged > 0, "Should flag at least some outliers"
     last_10_flagged = result.iloc[-10:].sum()
-    assert last_10_flagged > 5, f"Most of the injected outliers should be flagged, got {last_10_flagged}"
+    assert last_10_flagged > 5, (
+        f"Most of the injected outliers should be flagged, got {last_10_flagged}"
+    )
 
 
 def test_lof_returns_series():

@@ -24,6 +24,7 @@ def extract_embeddings(
 ) -> np.ndarray:
     from diffusion_planner.train_config import TrainConfig
     from diffusion_planner.utils.train_utils import openjson
+
     from exploration_policy.utils import get_frozen_encoder, run_frozen_encoder
     from preference_optimization.utils import load_npz_data
 
@@ -82,7 +83,9 @@ def main():
 
     print(f"Extracting embeddings from {len(scene_paths)} scenes...")
     embeddings, valid_paths = extract_embeddings(
-        args.model_path, scene_paths, device=args.device,
+        args.model_path,
+        scene_paths,
+        device=args.device,
     )
     np.save(output_dir / "embeddings.npy", embeddings)
     with open(output_dir / "embedding_paths.json", "w") as f:

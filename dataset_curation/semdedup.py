@@ -53,8 +53,11 @@ def main():
     parser.add_argument("--embeddings", required=True, help="embeddings.npy")
     parser.add_argument("--clustering", required=True, help="clustering_results.parquet")
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--thresholds", default="0.85,0.90,0.95",
-                        help="Comma-separated similarity thresholds to evaluate")
+    parser.add_argument(
+        "--thresholds",
+        default="0.85,0.90,0.95",
+        help="Comma-separated similarity thresholds to evaluate",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -72,8 +75,8 @@ def main():
         n_kept = keep.sum()
         n_removed = len(keep) - n_kept
         print(f"\nThreshold {thresh}:")
-        print(f"  Kept: {n_kept} ({100*n_kept/len(keep):.1f}%)")
-        print(f"  Removed: {n_removed} ({100*n_removed/len(keep):.1f}%)")
+        print(f"  Kept: {n_kept} ({100 * n_kept / len(keep):.1f}%)")
+        print(f"  Removed: {n_removed} ({100 * n_removed / len(keep):.1f}%)")
 
         kept_paths = [p for p, k in zip(paths, keep) if k]
         removed_paths = [p for p, k in zip(paths, keep) if not k]

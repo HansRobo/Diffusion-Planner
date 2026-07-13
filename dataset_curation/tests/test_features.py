@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-
 EXPECTED_FEATURE_NAMES = [
     "ego_speed",
     "ego_accel",

@@ -47,6 +47,7 @@ def _plot_umap(
     features_df=None,
 ) -> None:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -72,7 +73,14 @@ def _plot_umap(
         if idx >= len(axes):
             break
         ax = axes[idx]
-        sc = ax.scatter(coords[:, 0], coords[:, 1], c=vals, s=3, alpha=0.5, cmap="tab20" if name == "cluster_id" else "viridis")
+        sc = ax.scatter(
+            coords[:, 0],
+            coords[:, 1],
+            c=vals,
+            s=3,
+            alpha=0.5,
+            cmap="tab20" if name == "cluster_id" else "viridis",
+        )
         ax.set_title(f"UMAP colored by {name}")
         plt.colorbar(sc, ax=ax)
 
@@ -117,25 +125,28 @@ def main():
     coords = compute_umap(embeddings)
 
     import pandas as pd
+
     features_df = None
     if args.features:
         features_df = pd.read_parquet(args.features)
 
     _plot_umap(coords, labels, output_dir, paths, features_df)
 
-    result = pd.DataFrame({
-        "npz_path": paths,
-        "cluster_id": labels,
-        "umap_x": coords[:, 0],
-        "umap_y": coords[:, 1],
-    })
+    result = pd.DataFrame(
+        {
+            "npz_path": paths,
+            "cluster_id": labels,
+            "umap_x": coords[:, 0],
+            "umap_y": coords[:, 1],
+        }
+    )
     result.to_parquet(output_dir / "clustering_results.parquet", index=False)
     np.save(output_dir / "umap_coords.npy", coords)
 
     print(f"\nCluster distribution:")
     for cid in sorted(set(labels)):
         count = (labels == cid).sum()
-        print(f"  Cluster {cid}: {count} scenes ({100*count/len(labels):.1f}%)")
+        print(f"  Cluster {cid}: {count} scenes ({100 * count / len(labels):.1f}%)")
     print(f"\nResults saved to {output_dir}")
 
 

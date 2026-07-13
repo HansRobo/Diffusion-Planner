@@ -58,12 +58,13 @@ def compute_difficulty_scores(
     return np.array([entropy(p) for p in probs])
 
 
-def _plot_difficulty(df: pd.DataFrame, scores: np.ndarray, labels: pd.Series,
-                     model: lgb.Booster, output_dir: Path) -> None:
+def _plot_difficulty(
+    df: pd.DataFrame, scores: np.ndarray, labels: pd.Series, model: lgb.Booster, output_dir: Path
+) -> None:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 

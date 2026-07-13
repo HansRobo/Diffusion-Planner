@@ -40,22 +40,25 @@ def main():
 
     scores = compute_rarity_scores(embeddings, labels, centroids)
 
-    result = pd.DataFrame({
-        "npz_path": paths,
-        "rarity_score": scores,
-        "cluster_id": labels,
-    })
+    result = pd.DataFrame(
+        {
+            "npz_path": paths,
+            "rarity_score": scores,
+            "cluster_id": labels,
+        }
+    )
     result.to_parquet(output_dir / "rarity_scores.parquet", index=False)
 
     sorted_idx = np.argsort(scores)
-    top_rare = [paths[i] for i in sorted_idx[-args.top_k:]][::-1]
-    top_typical = [paths[i] for i in sorted_idx[:args.top_k]]
+    top_rare = [paths[i] for i in sorted_idx[-args.top_k :]][::-1]
+    top_typical = [paths[i] for i in sorted_idx[: args.top_k]]
     with open(output_dir / f"top{args.top_k}_rarest.json", "w") as f:
         json.dump(top_rare, f, indent=2)
     with open(output_dir / f"top{args.top_k}_typical.json", "w") as f:
         json.dump(top_typical, f, indent=2)
 
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -67,8 +70,12 @@ def main():
 
     if "umap_x" in cluster_df.columns:
         sc = axes[1].scatter(
-            cluster_df["umap_x"], cluster_df["umap_y"],
-            c=scores, s=3, alpha=0.5, cmap="plasma",
+            cluster_df["umap_x"],
+            cluster_df["umap_y"],
+            c=scores,
+            s=3,
+            alpha=0.5,
+            cmap="plasma",
         )
         axes[1].set_title("UMAP colored by rarity score")
         plt.colorbar(sc, ax=axes[1])

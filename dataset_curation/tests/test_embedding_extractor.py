@@ -14,7 +14,7 @@ def test_pool_embedding_mean():
     pooled = _pool_embedding(enc)
     assert pooled.shape == (256,)
     expected = enc[0].mean(dim=0)
-    torch.testing.assert_allclose(pooled, expected)
+    torch.testing.assert_close(pooled, expected)
 
 
 def test_pool_embedding_batch():

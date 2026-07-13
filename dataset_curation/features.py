@@ -52,8 +52,7 @@ def extract_features(npz_path: str) -> dict[str, float]:
     diffs = np.diff(fut_xy, axis=0)
     seg_lengths = np.hypot(diffs[:, 0], diffs[:, 1])
     travel_distance = float(seg_lengths.sum())
-    endpoint_disp = float(np.hypot(fut_xy[-1, 0] - fut_xy[0, 0],
-                                   fut_xy[-1, 1] - fut_xy[0, 1]))
+    endpoint_disp = float(np.hypot(fut_xy[-1, 0] - fut_xy[0, 0], fut_xy[-1, 1] - fut_xy[0, 1]))
     headings = future[:, 2]
     heading_change = float(np.rad2deg(abs(headings[-1] - headings[0])))
     curv = _curvature(fut_xy)
@@ -119,7 +118,9 @@ def extract_features(npz_path: str) -> dict[str, float]:
         "ego_speed": ego_speed,
         "ego_accel": ego_accel,
         "ego_yaw_rate": ego_yaw_rate,
-        "ego_speed_past_mean": float(past_speeds[nonzero_mask].mean()) if nonzero_mask.any() else 0.0,
+        "ego_speed_past_mean": float(past_speeds[nonzero_mask].mean())
+        if nonzero_mask.any()
+        else 0.0,
         "ego_speed_past_std": float(past_speeds[nonzero_mask].std()) if nonzero_mask.any() else 0.0,
         "ego_speed_past_max": float(past_speeds.max()),
         "ego_accel_past_mean": float(np.abs(np.diff(past_speeds)).mean()),
@@ -144,9 +145,7 @@ def extract_features(npz_path: str) -> dict[str, float]:
     }
 
 
-def extract_features_batch(
-    scene_paths: list[str], n_workers: int = 4
-) -> pd.DataFrame:
+def extract_features_batch(scene_paths: list[str], n_workers: int = 4) -> pd.DataFrame:
     if n_workers <= 1:
         rows = {p: extract_features(p) for p in scene_paths}
     else:
@@ -160,6 +159,7 @@ def extract_features_batch(
 
 def _plot_histograms(df: pd.DataFrame, output_dir: Path) -> None:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -180,8 +180,9 @@ def _plot_histograms(df: pd.DataFrame, output_dir: Path) -> None:
 
     corr = df.corr()
     fig2, ax2 = plt.subplots(figsize=(14, 12))
-    sns.heatmap(corr, ax=ax2, cmap="coolwarm", center=0, annot=False,
-                xticklabels=True, yticklabels=True)
+    sns.heatmap(
+        corr, ax=ax2, cmap="coolwarm", center=0, annot=False, xticklabels=True, yticklabels=True
+    )
     ax2.set_title("Feature Correlation Matrix")
     plt.tight_layout()
     fig2.savefig(output_dir / "feature_correlation.png", dpi=150)

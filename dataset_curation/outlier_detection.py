@@ -29,8 +29,11 @@ def detect_outliers(
     return pd.Series(preds == -1, index=df.index, name=f"outlier_{method}")
 
 
-def _plot_outlier_scatter(df: pd.DataFrame, flags: pd.Series, output_dir: Path, method: str) -> None:
+def _plot_outlier_scatter(
+    df: pd.DataFrame, flags: pd.Series, output_dir: Path, method: str
+) -> None:
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -45,10 +48,21 @@ def _plot_outlier_scatter(df: pd.DataFrame, flags: pd.Series, output_dir: Path, 
                 break
             ax = axes[pair_idx]
             normal = ~flags
-            ax.scatter(df.loc[normal, top_features[i]], df.loc[normal, top_features[j]],
-                       s=5, alpha=0.3, label="normal")
-            ax.scatter(df.loc[flags, top_features[i]], df.loc[flags, top_features[j]],
-                       s=20, c="red", alpha=0.8, label="outlier")
+            ax.scatter(
+                df.loc[normal, top_features[i]],
+                df.loc[normal, top_features[j]],
+                s=5,
+                alpha=0.3,
+                label="normal",
+            )
+            ax.scatter(
+                df.loc[flags, top_features[i]],
+                df.loc[flags, top_features[j]],
+                s=20,
+                c="red",
+                alpha=0.8,
+                label="outlier",
+            )
             ax.set_xlabel(top_features[i])
             ax.set_ylabel(top_features[j])
             ax.legend(fontsize=7)
@@ -77,7 +91,7 @@ def main():
         flags = detect_outliers(df, method=method, contamination=args.contamination)
         results[f"outlier_{method}"] = flags
         n_flagged = flags.sum()
-        print(f"{method}: {n_flagged}/{len(df)} flagged ({100*n_flagged/len(df):.1f}%)")
+        print(f"{method}: {n_flagged}/{len(df)} flagged ({100 * n_flagged / len(df):.1f}%)")
         _plot_outlier_scatter(df, flags, output_dir, method)
 
     results["outlier_both"] = results["outlier_isolation_forest"] & results["outlier_lof"]
@@ -88,6 +102,7 @@ def main():
     flagged_paths = results.index[results["outlier_both"]].tolist()
     if flagged_paths:
         import json
+
         with open(output_dir / "outliers_both.json", "w") as f:
             json.dump(flagged_paths[:50], f, indent=2)
         print(f"Top {min(50, len(flagged_paths))} outlier paths saved to outliers_both.json")
