@@ -803,24 +803,23 @@ def prepare_bidirectional_context_torch(
 
     future_segment_xy = torch.cat([current_xy.unsqueeze(0), future_xy], dim=0)
     future_segment_heading = torch.cat([current_heading.unsqueeze(0), future_heading], dim=0)
-    future_time = torch.arange(0.0, (future_len + 1) * dt, dt, dtype=dtype, device=device)
+    # Build by sample count, not a floating stop value: e.g. arange(0, 0.3, 0.1)
+    # can contain four points because 3 * 0.1 is represented slightly above 0.3.
+    future_time = torch.arange(future_len + 1, dtype=dtype, device=device) * dt
 
     past_segment_xy = torch.flip(past_xy, dims=[0])
     past_segment_heading = torch.flip(past_heading, dims=[0])
-    past_time = torch.arange(0.0, past_len * dt, dt, dtype=dtype, device=device)
+    past_time = torch.arange(past_len, dtype=dtype, device=device) * dt
 
     original_full_xy = torch.cat([past_xy[:-1], future_segment_xy], dim=0)
     original_full_heading = torch.cat(
         [past_heading[:-1], current_heading.unsqueeze(0), future_heading],
         dim=0,
     )
-    full_time = torch.arange(
-        -(past_len - 1) * dt,
-        (future_len + 1) * dt,
-        dt,
-        dtype=dtype,
-        device=device,
-    )
+    full_time = (
+        torch.arange(past_len + future_len, dtype=dtype, device=device)
+        - (past_len - 1)
+    ) * dt
 
     future_segment = make_prepared_directed_segment_torch(
         segment_xy=future_segment_xy,
@@ -914,7 +913,7 @@ def assemble_augmented_sample_from_segments_torch(
     future_result: SegmentAugmentationResultTorch,
     past_connect_time_s: float,
     future_recover_time_s: float,
-    wheel_base: float,
+    wheel_base: float | torch.Tensor,
 ) -> AugmentedSampleTorchResult:
     dt = TIME_INTERVAL
     dtype = ego_current_state.dtype
@@ -1120,6 +1119,7 @@ class StatePerturbation:
         heading_offset: torch.Tensor,
         past_connect_time_s: float,
         future_recover_time_s: float,
+        wheel_base: float | torch.Tensor,
     ) -> AugmentedSampleTorchResult:
         """
         Rebuild ego past/current/future around a laterally perturbed current state while keeping
@@ -1158,7 +1158,7 @@ class StatePerturbation:
             future_result=future_result,
             past_connect_time_s=clamped_past_connect_time_s,
             future_recover_time_s=clamped_future_recover_time_s,
-            wheel_base=self._wheel_base,
+            wheel_base=wheel_base,
         )
 
     def _evaluate_constraints(
@@ -1219,6 +1219,7 @@ class StatePerturbation:
         ego_past: torch.Tensor,
         ego_current_state: torch.Tensor,
         ego_future: torch.Tensor,
+        wheel_base: float | torch.Tensor,
         lateral_offset: torch.Tensor,
         heading_offset: torch.Tensor,
         initial_past_connect_time_s: float,
@@ -1303,7 +1304,7 @@ class StatePerturbation:
                 future_result=initial_future_result,
                 past_connect_time_s=initial_past_connect_time_s,
                 future_recover_time_s=initial_future_recover_time_s,
-                wheel_base=self._wheel_base,
+                wheel_base=wheel_base,
             )
 
         future_candidates = generate_time_candidates(
@@ -1324,7 +1325,7 @@ class StatePerturbation:
                     future_result=future_result,
                     past_connect_time_s=initial_past_connect_time_s,
                     future_recover_time_s=candidate_n,
-                    wheel_base=self._wheel_base,
+                    wheel_base=wheel_base,
                 )
 
         past_candidates = generate_time_candidates(
@@ -1351,7 +1352,7 @@ class StatePerturbation:
                         future_result=future_result,
                         past_connect_time_s=candidate_m,
                         future_recover_time_s=candidate_n,
-                        wheel_base=self._wheel_base,
+                        wheel_base=wheel_base,
                     )
 
         return assemble_augmented_sample_from_segments_torch(
@@ -1361,7 +1362,7 @@ class StatePerturbation:
             future_result=initial_future_result,
             past_connect_time_s=initial_past_connect_time_s,
             future_recover_time_s=initial_future_recover_time_s,
-            wheel_base=self._wheel_base,
+            wheel_base=wheel_base,
         )
 
     def augment(self, inputs, ego_future):
@@ -1390,6 +1391,11 @@ class StatePerturbation:
                         ego_past=ego_agent_past[batch_index],
                         ego_current_state=ego_current_state[batch_index],
                         ego_future=ego_future[batch_index],
+                        wheel_base=(
+                            inputs["ego_shape"][batch_index, 0]
+                            if "ego_shape" in inputs
+                            else ego_current_state[batch_index].new_tensor(self._wheel_base)
+                        ),
                         lateral_offset=lateral_offset,
                         heading_offset=heading_offset,
                         initial_past_connect_time_s=self._past_bridge_sec,

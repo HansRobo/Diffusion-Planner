@@ -883,6 +883,22 @@ def validate_hdp_reward_policy(data_loader, model, args):
         "rl_eval_stationary_progress_tolerance_m",
         stationary_tolerance_default,
     )
+    stopped_neighbor_vel_default = TrainConfig.__dataclass_fields__[
+        "rl_eval_stopped_neighbor_vel_thresh"
+    ].default
+    eval_reward_args.rl_stopped_neighbor_vel_thresh = getattr(
+        args,
+        "rl_eval_stopped_neighbor_vel_thresh",
+        stopped_neighbor_vel_default,
+    )
+    stopped_neighbor_disp_default = TrainConfig.__dataclass_fields__[
+        "rl_eval_stopped_neighbor_disp_thresh"
+    ].default
+    eval_reward_args.rl_stopped_neighbor_disp_thresh = getattr(
+        args,
+        "rl_eval_stopped_neighbor_disp_thresh",
+        stopped_neighbor_disp_default,
+    )
     red_light_default = TrainConfig.__dataclass_fields__["rl_eval_red_light_constraint"].default
     eval_reward_args.rl_red_light_constraint = getattr(
         args, "rl_eval_red_light_constraint", red_light_default

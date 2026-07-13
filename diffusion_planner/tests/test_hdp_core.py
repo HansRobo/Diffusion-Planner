@@ -2170,6 +2170,20 @@ def test_hdp_stationary_progress_configuration_rejects_invalid_values():
         HDPRewardConfig(stationary_progress_mode="invalid")
     with pytest.raises(ValueError, match="red_light_lane_tolerance_m"):
         HDPRewardConfig(red_light_lane_tolerance_m=0.0)
+    with pytest.raises(ValueError, match="stopped_neighbor_vel_thresh"):
+        HDPRewardConfig(stopped_neighbor_vel_thresh=-1.0)
+    with pytest.raises(ValueError, match="stopped_neighbor_disp_thresh"):
+        HDPRewardConfig(stopped_neighbor_disp_thresh=-1.0)
+
+
+def test_hdp_reward_config_reads_stationary_neighbor_thresholds_from_args():
+    args = SimpleNamespace(
+        rl_stopped_neighbor_vel_thresh=0.2,
+        rl_stopped_neighbor_disp_thresh=0.8,
+    )
+    config = hdp_rl_utils._hdp_reward_config(args)
+    assert config.stopped_neighbor_vel_thresh == pytest.approx(0.2)
+    assert config.stopped_neighbor_disp_thresh == pytest.approx(0.8)
 
 
 def _red_stop_line_inputs():
@@ -2767,6 +2781,11 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         ("multisample_eval_noise_scale", 0.2),
         ("multisample_eval_sample_steps", 4),
         ("multisample_eval_seed", 7),
+        ("ego_history_dropout_rate", 0.0),
+        ("rl_stopped_neighbor_vel_thresh", 0.2),
+        ("rl_stopped_neighbor_disp_thresh", 0.8),
+        ("rl_eval_stopped_neighbor_vel_thresh", 0.2),
+        ("rl_eval_stopped_neighbor_disp_thresh", 0.8),
         ("advantage_eps", 1e-4),
         ("rl_full_eval_utd", 2),
         ("decoder_drop_path_rate", 0.0),

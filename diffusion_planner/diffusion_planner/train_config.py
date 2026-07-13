@@ -156,6 +156,8 @@ class TrainConfig:
     rl_eval_stationary_progress_mode: Literal["constant", "distance"] = "distance"
     rl_eval_stationary_reference_threshold_m: float = 1.0
     rl_eval_stationary_progress_tolerance_m: float = 2.0
+    rl_eval_stopped_neighbor_vel_thresh: float = 0.1
+    rl_eval_stopped_neighbor_disp_thresh: float = 0.5
     rl_eval_red_light_constraint: bool = True
     rl_eval_red_light_lane_tolerance_m: float = 2.0
     # Keep the RL rollout budget independent from validation/export so it can be profiled
@@ -207,6 +209,10 @@ class TrainConfig:
     rl_occupancy_critical_m: float = 0.25
     rl_occupancy_safe_m: float = 2.0
     rl_occupancy_speed_gain_s: float = 0.10
+    # Logged neighbors below both thresholds are treated as stationary occupancy
+    # references. Keep these values in the checkpoint so reward geometry is reproducible.
+    rl_stopped_neighbor_vel_thresh: float = 0.1
+    rl_stopped_neighbor_disp_thresh: float = 0.5
     rl_lane_half_width_m: float = 1.75
     rl_leader_lateral_margin_m: float = 0.75
     rl_stationary_reference_threshold_m: float = 1.0

@@ -112,10 +112,33 @@ same compatibility check. A resumed RL run therefore cannot silently change vali
 sampling or its policy-selection metric; fresh SFT-to-RL initialization remains weights-only
 and is unaffected.
 
+The exhaustive follow-up found two more real, bounded issues. Static-neighbor occupancy
+classification was still reading `planner_metrics.RewardConfig` globals rather than the HDP
+reward configuration, so a checkpoint could not reproduce a run after those library defaults
+changed. The velocity and displacement thresholds are now explicit train/eval fields, mapped
+into `HDPRewardConfig`, validated, logged, and covered by strict-resume tests; their defaults
+remain `0.1 m/s` and `0.5 m`. The bridge augmentation path also used a single `2.75 m`
+wheelbase for every vehicle. It now takes the per-scene `ego_shape[0]` when available and
+retains `2.75 m` only as the non-dataset fallback, so steering-state augmentation is correct
+for mixed vehicle fleets without changing the current default data.
+
+The same bridge path had a separate floating-point time-axis hazard: `torch.arange` with a
+stop such as `3 * 0.1` can produce one extra sample. Time vectors are now constructed from
+integer sample counts, and a regression test covers the past, future, and full-scene lengths.
+
+This is tracked as a separate bridge-only correctness item rather than folded into the
+wheelbase change: it affects tensor lengths even when all vehicle geometry uses the default.
+
+One further reproducibility omission was confirmed: `ego_history_dropout_rate` affected the
+training distribution but was absent from strict resume compatibility. It is now checked like
+the other training fields. These changes are configuration/geometry fixes, not reward-policy
+retuning, so existing checkpoints remain loadable in weights-only SFT-to-RL initialization;
+resuming a run with an older `args.json` intentionally fails loudly rather than mixing semantics.
+
 ## Verification
 
 - Ruff: clean.
-- Full tests after the final audit patch: `456 passed, 15 skipped`; the focused HDP/map suite is `108 passed`.
+- Full tests after the final audit patch: `458 passed, 15 skipped`; the focused HDP/RL/augmentation suite is `182 passed`.
 - Full tests with `PYTHONWARNINGS=error`: `456 passed, 15 skipped`.
 - Node02 direct road-border RL smoke completed with Slurm exit code 0. Node01 formal RL remains
   under monitoring and was not modified by this audit.

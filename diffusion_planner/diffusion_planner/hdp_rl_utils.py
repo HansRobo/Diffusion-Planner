@@ -28,13 +28,11 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.utils.masks import lane_point_padding_mask
-from planner_metrics.config import RewardConfig
 from planner_metrics.geometry import _build_ego_bbox_corners, _point_to_segments_dist
 from planner_metrics.subscores import (
     compute_ego_neighbor_signed_clearance,
 )
 
-_RL_REWARD_CONFIG = RewardConfig()
 _RL_GEOMETRY_PAIR_STEP_BUDGET = 12_000_000
 _STOP_LINE_ROUTE_COSINE_MAX = 0.5
 
@@ -56,6 +54,8 @@ class HDPRewardConfig:
     occupancy_critical_m: float = 0.25
     occupancy_safe_m: float = 2.0
     occupancy_speed_gain_s: float = 0.10
+    stopped_neighbor_vel_thresh: float = 0.1
+    stopped_neighbor_disp_thresh: float = 0.5
     lane_half_width_m: float = 1.75
     leader_lateral_margin_m: float = 0.75
     stationary_reference_threshold_m: float = 1.0
@@ -77,6 +77,10 @@ class HDPRewardConfig:
             )
         if self.red_light_lane_tolerance_m <= 0.0:
             raise ValueError("red_light_lane_tolerance_m must be > 0")
+        if self.stopped_neighbor_vel_thresh < 0.0:
+            raise ValueError("stopped_neighbor_vel_thresh must be >= 0")
+        if self.stopped_neighbor_disp_thresh < 0.0:
+            raise ValueError("stopped_neighbor_disp_thresh must be >= 0")
         if self.road_border_critical_m < 0.0:
             raise ValueError("road_border_critical_m must be >= 0")
         if self.road_border_safe_m <= self.road_border_critical_m:
@@ -93,6 +97,12 @@ def _hdp_reward_config(args) -> HDPRewardConfig:
         occupancy_critical_m=float(getattr(args, "rl_occupancy_critical_m", 0.25)),
         occupancy_safe_m=float(getattr(args, "rl_occupancy_safe_m", 2.0)),
         occupancy_speed_gain_s=float(getattr(args, "rl_occupancy_speed_gain_s", 0.10)),
+        stopped_neighbor_vel_thresh=float(
+            getattr(args, "rl_stopped_neighbor_vel_thresh", 0.1)
+        ),
+        stopped_neighbor_disp_thresh=float(
+            getattr(args, "rl_stopped_neighbor_disp_thresh", 0.5)
+        ),
         lane_half_width_m=float(getattr(args, "rl_lane_half_width_m", 1.75)),
         leader_lateral_margin_m=float(getattr(args, "rl_leader_lateral_margin_m", 0.75)),
         stationary_reference_threshold_m=float(
@@ -691,8 +701,8 @@ def _collision_and_leader_terms(
     max_displacement = future_displacement.masked_fill(~neighbor_valid, 0.0).max(dim=-1).values
     stopped_mask = (
         both_valid_01
-        & (neighbor_speed[:, 1] < _RL_REWARD_CONFIG.sc_neighbor_vel_thresh)
-        & (max_displacement < _RL_REWARD_CONFIG.sc_neighbor_disp_thresh)
+        & (neighbor_speed[:, 1] < config.stopped_neighbor_vel_thresh)
+        & (max_displacement < config.stopped_neighbor_disp_thresh)
     )
     stopped_clearance, stopped_index = clearance.masked_fill(
         ~stopped_mask[None, :, None], float("inf")

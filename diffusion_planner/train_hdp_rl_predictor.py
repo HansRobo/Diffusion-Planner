@@ -502,6 +502,18 @@ def get_args():
         help="held-out endpoint error where stopped-reference progress reaches zero",
     )
     parser.add_argument(
+        "--rl_eval_stopped_neighbor_vel_thresh",
+        type=float,
+        default=_train_config_default("rl_eval_stopped_neighbor_vel_thresh"),
+        help="held-out stationary-neighbor initial speed threshold",
+    )
+    parser.add_argument(
+        "--rl_eval_stopped_neighbor_disp_thresh",
+        type=float,
+        default=_train_config_default("rl_eval_stopped_neighbor_disp_thresh"),
+        help="held-out stationary-neighbor maximum displacement threshold",
+    )
+    parser.add_argument(
         "--rl_eval_red_light_constraint",
         type=boolean,
         default=_train_config_default("rl_eval_red_light_constraint"),
@@ -651,6 +663,11 @@ def get_args():
         (
             "rl_stationary_progress_tolerance_m",
             "candidate endpoint error at which stopped-reference progress reaches zero",
+        ),
+        ("rl_stopped_neighbor_vel_thresh", "stationary-neighbor initial speed threshold"),
+        (
+            "rl_stopped_neighbor_disp_thresh",
+            "stationary-neighbor maximum displacement threshold",
         ),
         (
             "rl_red_light_lane_tolerance_m",
@@ -993,6 +1010,10 @@ def get_args():
         raise ValueError("--rl_reward_dt must be > 0")
     if args.rl_occupancy_speed_gain_s < 0.0:
         raise ValueError("--rl_occupancy_speed_gain_s must be >= 0")
+    if args.rl_stopped_neighbor_vel_thresh < 0.0:
+        raise ValueError("--rl_stopped_neighbor_vel_thresh must be >= 0")
+    if args.rl_stopped_neighbor_disp_thresh < 0.0:
+        raise ValueError("--rl_stopped_neighbor_disp_thresh must be >= 0")
     if args.rl_lane_half_width_m <= 0.0:
         raise ValueError("--rl_lane_half_width_m must be > 0")
     if args.rl_leader_lateral_margin_m < 0.0:
@@ -1005,6 +1026,10 @@ def get_args():
         raise ValueError("--rl_eval_stationary_reference_threshold_m must be > 0")
     if args.rl_eval_stationary_progress_tolerance_m <= 0.0:
         raise ValueError("--rl_eval_stationary_progress_tolerance_m must be > 0")
+    if args.rl_eval_stopped_neighbor_vel_thresh < 0.0:
+        raise ValueError("--rl_eval_stopped_neighbor_vel_thresh must be >= 0")
+    if args.rl_eval_stopped_neighbor_disp_thresh < 0.0:
+        raise ValueError("--rl_eval_stopped_neighbor_disp_thresh must be >= 0")
     if args.rl_red_light_lane_tolerance_m <= 0.0:
         raise ValueError("--rl_red_light_lane_tolerance_m must be > 0")
     if args.rl_eval_red_light_lane_tolerance_m <= 0.0:
@@ -1189,6 +1214,11 @@ def model_training(args):
             f"{args.rl_stationary_progress_tolerance_m}"
         )
         print(
+            "RL stopped-neighbor occupancy thresholds (velocity/displacement): "
+            f"{args.rl_stopped_neighbor_vel_thresh}/"
+            f"{args.rl_stopped_neighbor_disp_thresh}"
+        )
+        print(
             "RL red stop-line constraint (enabled/lane tolerance): "
             f"{args.rl_red_light_constraint}/{args.rl_red_light_lane_tolerance_m}"
         )
@@ -1215,6 +1245,11 @@ def model_training(args):
             f"{args.rl_eval_stationary_progress_mode}/"
             f"{args.rl_eval_stationary_reference_threshold_m}/"
             f"{args.rl_eval_stationary_progress_tolerance_m}"
+        )
+        print(
+            "Held-out stopped-neighbor occupancy thresholds (velocity/displacement): "
+            f"{args.rl_eval_stopped_neighbor_vel_thresh}/"
+            f"{args.rl_eval_stopped_neighbor_disp_thresh}"
         )
         print(
             "Held-out red stop-line constraint (enabled/lane tolerance): "
