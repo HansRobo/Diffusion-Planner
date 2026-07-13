@@ -367,9 +367,7 @@ def get_args():
         "--rl_max_valid_epdms_regression",
         type=float,
         default=_train_config_default("rl_max_valid_epdms_regression"),
-        help=(
-            "maximum absolute decrease in source-policy EPDMS allowed for best-model selection"
-        ),
+        help=("maximum absolute decrease in source-policy EPDMS allowed for best-model selection"),
     )
     parser.add_argument(
         "--rl_best_score_min_delta",
@@ -452,6 +450,24 @@ def get_args():
         help="use HD-map road borders as OCC fallback in the fixed held-out objective",
     )
     parser.add_argument(
+        "--rl_eval_stationary_progress_mode",
+        choices=["constant", "distance"],
+        default=_train_config_default("rl_eval_stationary_progress_mode"),
+        help="stopped-expert progress scoring used only by the fixed held-out objective",
+    )
+    parser.add_argument(
+        "--rl_eval_stationary_reference_threshold_m",
+        type=float,
+        default=_train_config_default("rl_eval_stationary_reference_threshold_m"),
+        help="held-out maximum expert displacement treated as a stopped reference",
+    )
+    parser.add_argument(
+        "--rl_eval_stationary_progress_tolerance_m",
+        type=float,
+        default=_train_config_default("rl_eval_stationary_progress_tolerance_m"),
+        help="held-out endpoint error where stopped-reference progress reaches zero",
+    )
+    parser.add_argument(
         "--rl_rollout_steps",
         type=int,
         default=_train_config_default("rl_rollout_steps"),
@@ -522,6 +538,15 @@ def get_args():
         help="use HD-map road borders as OCC fallback when no static/stopped obstacle exists",
     )
     parser.add_argument(
+        "--rl_stationary_progress_mode",
+        choices=["constant", "distance"],
+        default=_train_config_default("rl_stationary_progress_mode"),
+        help=(
+            "score a stopped expert as constant (legacy) or by candidate-to-expert endpoint "
+            "distance"
+        ),
+    )
+    parser.add_argument(
         "--rl_bc_weight",
         type=float,
         default=_train_config_default("rl_bc_weight"),
@@ -561,6 +586,14 @@ def get_args():
         ("rl_occupancy_speed_gain_s", "speed gain applied to occupancy thresholds"),
         ("rl_lane_half_width_m", "lane-center reward zero-distance threshold"),
         ("rl_leader_lateral_margin_m", "extra lateral margin for leader association"),
+        (
+            "rl_stationary_reference_threshold_m",
+            "maximum expert endpoint displacement treated as a stopped reference",
+        ),
+        (
+            "rl_stationary_progress_tolerance_m",
+            "candidate endpoint error at which stopped-reference progress reaches zero",
+        ),
     ):
         parser.add_argument(
             f"--{name}",
@@ -894,6 +927,14 @@ def get_args():
         raise ValueError("--rl_lane_half_width_m must be > 0")
     if args.rl_leader_lateral_margin_m < 0.0:
         raise ValueError("--rl_leader_lateral_margin_m must be >= 0")
+    if args.rl_stationary_reference_threshold_m <= 0.0:
+        raise ValueError("--rl_stationary_reference_threshold_m must be > 0")
+    if args.rl_stationary_progress_tolerance_m <= 0.0:
+        raise ValueError("--rl_stationary_progress_tolerance_m must be > 0")
+    if args.rl_eval_stationary_reference_threshold_m <= 0.0:
+        raise ValueError("--rl_eval_stationary_reference_threshold_m must be > 0")
+    if args.rl_eval_stationary_progress_tolerance_m <= 0.0:
+        raise ValueError("--rl_eval_stationary_progress_tolerance_m must be > 0")
     if not args.use_velocity_representation:
         raise ValueError("HDP-RL requires --use_velocity_representation true")
     if args.diffusion_model_type != "x_start" or args.diffusion_supervision_type != "x_start":
@@ -1040,6 +1081,12 @@ def model_training(args):
         print("RL progress reward weight: {}".format(args.rl_reward_w_progress))
         print("RL behavior reward gate: {}".format(args.rl_behavior_gate))
         print("RL road-border OCC fallback: {}".format(args.rl_occupancy_use_road_border))
+        print(
+            "RL stopped-reference progress (mode/threshold/tolerance): "
+            f"{args.rl_stationary_progress_mode}/"
+            f"{args.rl_stationary_reference_threshold_m}/"
+            f"{args.rl_stationary_progress_tolerance_m}"
+        )
         print("RL behavior-cloning anchor weight: {}".format(args.rl_bc_weight))
         print("RL EMA update rate: {}".format(args.rl_ema_update_rate))
         print("RL train scope: {}".format(args.rl_train_scope))
@@ -1055,9 +1102,13 @@ def model_training(args):
         )
         print("Held-out behavior reward gate: {}".format(args.rl_eval_behavior_gate))
         print(
-            "Held-out road-border OCC fallback: {}".format(
-                args.rl_eval_occupancy_use_road_border
-            )
+            "Held-out road-border OCC fallback: {}".format(args.rl_eval_occupancy_use_road_border)
+        )
+        print(
+            "Held-out stopped-reference progress (mode/threshold/tolerance): "
+            f"{args.rl_eval_stationary_progress_mode}/"
+            f"{args.rl_eval_stationary_reference_threshold_m}/"
+            f"{args.rl_eval_stationary_progress_tolerance_m}"
         )
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
         print("RL updates per rollout: {}".format(args.rl_updates_per_rollout))
@@ -1270,9 +1321,7 @@ def model_training(args):
         # recovery legitimately changes resume_model_path from None to latest.pth.
         wandb.config.update(
             args_dict,
-            allow_val_change=(
-                args.resume_model_path is not None or args.wandb_run_id is not None
-            ),
+            allow_val_change=(args.resume_model_path is not None or args.wandb_run_id is not None),
         )
         wandb.define_metric("optimizer_step")
         for metric_prefix in (

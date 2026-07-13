@@ -196,9 +196,7 @@ def test_rl_update_microbatches_preserve_full_group_objective_and_gradient(monke
             super().__init__()
             self.scale = torch.nn.Parameter(torch.tensor(1.5))
 
-    def fake_policy_loss(
-        model, _inputs, target, _args, _encoding=None, _time=None, _noise=None
-    ):
+    def fake_policy_loss(model, _inputs, target, _args, _encoding=None, _time=None, _noise=None):
         per_sample = model.scale * target[:, 0, 0]
         mean = per_sample.mean()
         return {
@@ -266,19 +264,16 @@ def test_resume_best_score_ignores_nan_and_non_full_eval_rows():
     )
 
     assert score == 7.2
-    assert (
-        best_valid_score_from_rows(
-            [
-                {
-                    "valid_full_eval": True,
-                    "valid_reward_mean": float("nan"),
-                    "valid_epdms_total": 0.99,
-                    "valid_loss_ego": 0.1,
-                }
-            ]
-        )
-        == -float("inf")
-    )
+    assert best_valid_score_from_rows(
+        [
+            {
+                "valid_full_eval": True,
+                "valid_reward_mean": float("nan"),
+                "valid_epdms_total": 0.99,
+                "valid_loss_ego": 0.1,
+            }
+        ]
+    ) == -float("inf")
 
 
 def test_resume_best_score_does_not_promote_guard_rejected_reward():
@@ -369,9 +364,7 @@ def test_source_policy_selection_guards_require_safety_and_epdms_non_regression(
         current = dict(improved)
         current[name] = regressed
         assert not source_policy_selection_guards(source, current, 0.86, **kwargs)[name]
-    assert not source_policy_selection_guards(
-        source, improved, 0.84, **kwargs
-    )["epdms"]
+    assert not source_policy_selection_guards(source, improved, 0.84, **kwargs)["epdms"]
 
 
 def test_source_policy_selection_guards_honor_tolerance_and_unavailable_baseline():
@@ -423,6 +416,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     observed_reward_weights = []
     observed_behavior_gates = []
     observed_road_border_settings = []
+    observed_stationary_settings = []
 
     def fake_sample_group(_model, inputs, *_args, **_kwargs):
         observed_noise_scales.append(_args[0])
@@ -433,6 +427,13 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     def fake_reward(_ego, _inputs, _neighbors, num_scenes, n, _args):
         observed_behavior_gates.append(_args.rl_behavior_gate)
         observed_road_border_settings.append(_args.rl_occupancy_use_road_border)
+        observed_stationary_settings.append(
+            (
+                _args.rl_stationary_progress_mode,
+                _args.rl_stationary_reference_threshold_m,
+                _args.rl_stationary_progress_tolerance_m,
+            )
+        )
         observed_reward_weights.append(
             tuple(
                 getattr(_args, f"rl_reward_w_{name}")
@@ -477,6 +478,12 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         rl_eval_behavior_gate="risk",
         rl_occupancy_use_road_border=False,
         rl_eval_occupancy_use_road_border=True,
+        rl_stationary_progress_mode="constant",
+        rl_stationary_reference_threshold_m=0.5,
+        rl_stationary_progress_tolerance_m=4.0,
+        rl_eval_stationary_progress_mode="distance",
+        rl_eval_stationary_reference_threshold_m=1.0,
+        rl_eval_stationary_progress_tolerance_m=2.0,
         amp_dtype="off",
         rl_rollout_steps=6,
         diffusion_sample_steps=5,
@@ -494,7 +501,11 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     assert observed_reward_weights == [(0.0, 1.0, 3.0, 2.5, 3.0)] * 2
     assert observed_behavior_gates == ["risk", "risk"]
     assert observed_road_border_settings == [True, True]
+    assert observed_stationary_settings == [("distance", 1.0, 2.0)] * 2
     assert args.rl_reward_w_safety == 5.0
     assert args.rl_reward_w_risk == 9.0
     assert args.rl_behavior_gate == "none"
     assert args.rl_occupancy_use_road_border is False
+    assert args.rl_stationary_progress_mode == "constant"
+    assert args.rl_stationary_reference_threshold_m == 0.5
+    assert args.rl_stationary_progress_tolerance_m == 4.0

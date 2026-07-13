@@ -51,6 +51,9 @@ REWARD_W_LANE=${HDP_RL_REWARD_W_LANE:-2.5}
 REWARD_W_PROGRESS=${HDP_RL_REWARD_W_PROGRESS:-3.0}
 BEHAVIOR_GATE=${HDP_RL_BEHAVIOR_GATE:-safety}
 OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_OCCUPANCY_USE_ROAD_BORDER:-True}
+STATIONARY_PROGRESS_MODE=${HDP_RL_STATIONARY_PROGRESS_MODE:-distance}
+STATIONARY_REFERENCE_THRESHOLD_M=${HDP_RL_STATIONARY_REFERENCE_THRESHOLD_M:-1.0}
+STATIONARY_PROGRESS_TOLERANCE_M=${HDP_RL_STATIONARY_PROGRESS_TOLERANCE_M:-2.0}
 BC_WEIGHT=${HDP_RL_BC_WEIGHT:-0.0}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-1.5}
@@ -63,6 +66,9 @@ EVAL_REWARD_W_LANE=${HDP_RL_EVAL_REWARD_W_LANE:-2.5}
 EVAL_REWARD_W_PROGRESS=${HDP_RL_EVAL_REWARD_W_PROGRESS:-3.0}
 EVAL_BEHAVIOR_GATE=${HDP_RL_EVAL_BEHAVIOR_GATE:-safety}
 EVAL_OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_EVAL_OCCUPANCY_USE_ROAD_BORDER:-True}
+EVAL_STATIONARY_PROGRESS_MODE=${HDP_RL_EVAL_STATIONARY_PROGRESS_MODE:-distance}
+EVAL_STATIONARY_REFERENCE_THRESHOLD_M=${HDP_RL_EVAL_STATIONARY_REFERENCE_THRESHOLD_M:-1.0}
+EVAL_STATIONARY_PROGRESS_TOLERANCE_M=${HDP_RL_EVAL_STATIONARY_PROGRESS_TOLERANCE_M:-2.0}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
 UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-1}
 UPDATE_MAX_CANDIDATES=${HDP_RL_UPDATE_MAX_CANDIDATES_PER_RANK:-2048}
@@ -81,6 +87,15 @@ for gate_name in "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}"; do
     none | safety | risk) ;;
     *)
       echo "behavior gate must be one of none, safety, or risk; got ${gate_name}" >&2
+      exit 2
+      ;;
+  esac
+done
+for stationary_mode in "${STATIONARY_PROGRESS_MODE}" "${EVAL_STATIONARY_PROGRESS_MODE}"; do
+  case "${stationary_mode}" in
+    constant | distance) ;;
+    *)
+      echo "stationary progress mode must be constant or distance; got ${stationary_mode}" >&2
       exit 2
       ;;
   esac
@@ -344,6 +359,9 @@ TRAIN_ARGS=(
   --rl_eval_reward_w_progress "${EVAL_REWARD_W_PROGRESS}" \
   --rl_eval_behavior_gate "${EVAL_BEHAVIOR_GATE}" \
   --rl_eval_occupancy_use_road_border "${EVAL_OCCUPANCY_USE_ROAD_BORDER}" \
+  --rl_eval_stationary_progress_mode "${EVAL_STATIONARY_PROGRESS_MODE}" \
+  --rl_eval_stationary_reference_threshold_m "${EVAL_STATIONARY_REFERENCE_THRESHOLD_M}" \
+  --rl_eval_stationary_progress_tolerance_m "${EVAL_STATIONARY_PROGRESS_TOLERANCE_M}" \
   --rl_rollout_steps "${ROLLOUT_STEPS}" \
   --rl_updates_per_rollout "${UPDATES_PER_ROLLOUT}" \
   --rl_update_max_candidates_per_rank "${UPDATE_MAX_CANDIDATES}" \
@@ -356,6 +374,9 @@ TRAIN_ARGS=(
   --rl_reward_w_progress "${REWARD_W_PROGRESS}" \
   --rl_behavior_gate "${BEHAVIOR_GATE}" \
   --rl_occupancy_use_road_border "${OCCUPANCY_USE_ROAD_BORDER}" \
+  --rl_stationary_progress_mode "${STATIONARY_PROGRESS_MODE}" \
+  --rl_stationary_reference_threshold_m "${STATIONARY_REFERENCE_THRESHOLD_M}" \
+  --rl_stationary_progress_tolerance_m "${STATIONARY_PROGRESS_TOLERANCE_M}" \
   --rl_bc_weight "${BC_WEIGHT}" \
   --rl_ema_update_rate "${EMA_UPDATE_RATE}" \
   --rl_init_use_ema True \

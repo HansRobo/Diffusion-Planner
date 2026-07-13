@@ -105,6 +105,12 @@ def test_tuned_hdp_rl_defaults_are_consistent():
     assert fields["rl_eval_behavior_gate"].default == "safety"
     assert fields["rl_occupancy_use_road_border"].default is True
     assert fields["rl_eval_occupancy_use_road_border"].default is True
+    assert fields["rl_stationary_progress_mode"].default == "distance"
+    assert fields["rl_eval_stationary_progress_mode"].default == "distance"
+    assert fields["rl_stationary_reference_threshold_m"].default == 1.0
+    assert fields["rl_eval_stationary_reference_threshold_m"].default == 1.0
+    assert fields["rl_stationary_progress_tolerance_m"].default == 2.0
+    assert fields["rl_eval_stationary_progress_tolerance_m"].default == 2.0
 
 
 def test_non_risk_behavior_reward_is_attenuated_by_collision_safety():
@@ -224,6 +230,7 @@ def test_batched_lane_and_progress_match_scene_loop():
     expert[3, :, :2] = curve_xy
     expert[3, :, 2] = curve_theta.cos()
     expert[3, :, 3] = curve_theta.sin()
+    expert[2, :, 0] = 0.0
     ego[3, :, :, :2] = curve_xy
     ego[3, :, :, 1] += torch.tensor([0.0, 0.3, -0.4])[:, None]
     ego[3, :, :, 2] = curve_theta.cos()
@@ -732,7 +739,9 @@ def test_batch_reward_normalization_preserves_small_valid_variance():
         eps=1e-6,
     )
 
-    expected = torch.exp((reward.double() - reward.double().mean()) / (reward.double().std() + 1e-6))
+    expected = torch.exp(
+        (reward.double() - reward.double().mean()) / (reward.double().std() + 1e-6)
+    )
     assert valid.all()
     torch.testing.assert_close(weights, expected.float())
 
@@ -750,9 +759,7 @@ def test_road_border_penalty_keeps_valid_segment_at_ego_origin():
 
 
 def test_hdp_behavior_cloning_anchor_uses_one_expert_target_per_scene(monkeypatch):
-    def fake_policy_loss(
-        _model, _inputs, target, _args, _encoding=None, _time=None, _noise=None
-    ):
+    def fake_policy_loss(_model, _inputs, target, _args, _encoding=None, _time=None, _noise=None):
         per_sample = (
             torch.tensor([1.0, 2.0, 3.0, 4.0])
             if target.shape[0] == 4
@@ -862,9 +869,7 @@ def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkey
 
 
 def test_rl_weight_diagnostics_exclude_discarded_groups(monkeypatch):
-    def fake_policy_loss(
-        _model, _inputs, _target, _args, _encoding=None, _time=None, _noise=None
-    ):
+    def fake_policy_loss(_model, _inputs, _target, _args, _encoding=None, _time=None, _noise=None):
         per_sample = torch.ones(4)
         return {
             "ego_loss_per_sample": per_sample,
@@ -1291,6 +1296,63 @@ def test_hdp_reward_full_contract_reports_finite_component_diagnostics(monkeypat
     assert torch.isfinite(single_reward).all()
     assert all(torch.isfinite(value) for value in single_metrics.values())
     torch.testing.assert_close(single_metrics["reward_risk_group_std"], torch.tensor(0.0))
+
+
+def test_hdp_reward_stationary_progress_metrics_are_conditioned_on_stationary_scenes():
+    time_steps = 4
+    num_scenes, candidates_per_scene = 2, 2
+    candidates = torch.zeros(num_scenes * candidates_per_scene, time_steps, 4)
+    candidates[..., 2] = 1.0
+    candidates[1, :, 0] = torch.linspace(0.5, 2.0, time_steps)
+    candidates[2:, :, 0] = torch.arange(1.0, time_steps + 1.0)
+    expert = torch.zeros(num_scenes, time_steps, 3)
+    expert[1, :, 0] = torch.arange(1.0, time_steps + 1.0)
+    lanes = torch.zeros(num_scenes, 1, time_steps + 1, 8)
+    scene_inputs = {
+        "ego_current_state": torch.zeros(num_scenes, 10),
+        "ego_shape": torch.tensor([[2.5, 4.0, 2.0]]).expand(num_scenes, -1),
+        "neighbor_agents_past": torch.zeros(num_scenes, 1, 2, 11),
+        "ego_agent_future": expert,
+        "lanes": lanes,
+        "route_lanes": lanes.clone(),
+        "line_strings": torch.zeros(num_scenes, 1, 2, 4),
+        "static_objects": torch.zeros(num_scenes, 1, 10),
+        "turn_indicators": torch.zeros(num_scenes, 2, dtype=torch.long),
+    }
+    neighbors = torch.zeros(num_scenes, 1, time_steps, 4)
+    common = dict(
+        rl_reward_w_risk=1.0,
+        rl_reward_w_follow=3.0,
+        rl_reward_w_lane=2.5,
+        rl_reward_w_progress=3.0,
+    )
+
+    _, metrics = compute_hdp_reward(
+        candidates,
+        scene_inputs,
+        neighbors,
+        num_scenes=num_scenes,
+        n=candidates_per_scene,
+        args=SimpleNamespace(**common, rl_stationary_progress_mode="distance"),
+    )
+    torch.testing.assert_close(metrics["reward_stationary_reference_fraction"], torch.tensor(0.5))
+    torch.testing.assert_close(metrics["reward_stationary_progress_score"], torch.tensor(0.5))
+    torch.testing.assert_close(metrics["reward_stationary_progress_group_range"], torch.tensor(1.0))
+
+    _, legacy_metrics = compute_hdp_reward(
+        candidates,
+        scene_inputs,
+        neighbors,
+        num_scenes=num_scenes,
+        n=candidates_per_scene,
+        args=SimpleNamespace(**common, rl_stationary_progress_mode="constant"),
+    )
+    torch.testing.assert_close(
+        legacy_metrics["reward_stationary_progress_score"], torch.tensor(1.0)
+    )
+    torch.testing.assert_close(
+        legacy_metrics["reward_stationary_progress_group_range"], torch.tensor(0.0)
+    )
 
 
 def test_hdp_reward_can_ablate_road_border_occupancy_without_changing_eval_inputs():
@@ -1732,7 +1794,7 @@ def test_hdp_invalid_road_border_is_not_reported_as_occupancy_source():
     assert not any(sources.values())
 
 
-def test_hdp_relative_progress_is_capped_and_stopped_expert_is_neutral():
+def test_hdp_relative_progress_caps_moving_and_preserves_stopped_reference():
     expert = torch.zeros(4, 4)
     expert[:, 0] = torch.arange(1.0, 5.0)
     expert[:, 2] = 1.0
@@ -1747,9 +1809,25 @@ def test_hdp_relative_progress_is_capped_and_stopped_expert_is_neutral():
 
     stopped = torch.zeros_like(expert)
     stopped[:, 2] = 1.0
-    ratio, score = _relative_progress_score(candidates, stopped)
+    stopped_candidates = stopped.unsqueeze(0).repeat(3, 1, 1)
+    stopped_candidates[:, -1, 0] = torch.tensor([0.0, 1.0, 2.0])
+    ratio, score = _relative_progress_score(stopped_candidates, stopped)
     torch.testing.assert_close(ratio, torch.ones(3))
-    torch.testing.assert_close(score, torch.ones(3))
+    torch.testing.assert_close(score, torch.tensor([1.0, 0.5, 0.0]))
+
+    _, legacy_score = _relative_progress_score(
+        stopped_candidates, stopped, stationary_mode="constant"
+    )
+    torch.testing.assert_close(legacy_score, torch.ones(3))
+
+
+def test_hdp_stationary_progress_configuration_rejects_invalid_values():
+    with pytest.raises(ValueError, match="stationary_reference_threshold_m"):
+        HDPRewardConfig(stationary_reference_threshold_m=0.0)
+    with pytest.raises(ValueError, match="stationary_progress_tolerance_m"):
+        HDPRewardConfig(stationary_progress_tolerance_m=0.0)
+    with pytest.raises(ValueError, match="stationary_progress_mode"):
+        HDPRewardConfig(stationary_progress_mode="invalid")
 
 
 def test_hdp_lane_reward_does_not_mask_a_curved_centerline():
@@ -2191,6 +2269,12 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         ("rl_eval_behavior_gate", "risk"),
         ("rl_occupancy_use_road_border", False),
         ("rl_eval_occupancy_use_road_border", False),
+        ("rl_stationary_progress_mode", "constant"),
+        ("rl_eval_stationary_progress_mode", "constant"),
+        ("rl_stationary_reference_threshold_m", 0.5),
+        ("rl_eval_stationary_reference_threshold_m", 0.5),
+        ("rl_stationary_progress_tolerance_m", 4.0),
+        ("rl_eval_stationary_progress_tolerance_m", 4.0),
         ("advantage_eps", 1e-4),
         ("rl_full_eval_utd", 2),
         ("decoder_drop_path_rate", 0.0),
@@ -2281,9 +2365,7 @@ def test_resume_model_allows_checkpoint_without_an_accepted_best_score(tmp_path)
 
     restored = torch.nn.Linear(2, 1)
     restored_optimizer = torch.optim.AdamW(restored.parameters())
-    restored_scheduler = torch.optim.lr_scheduler.LambdaLR(
-        restored_optimizer, lambda _: 1.0
-    )
+    restored_scheduler = torch.optim.lr_scheduler.LambdaLR(restored_optimizer, lambda _: 1.0)
     resume_model(
         str(checkpoint),
         restored,
@@ -2301,8 +2383,7 @@ def test_resume_loads_legacy_ddp_prefixed_ema_into_bare_shadow(tmp_path):
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     ema = ModelEma(model, decay=0.9, device="cpu")
     legacy_ema = {
-        f"module.{key}": torch.full_like(value, 3.0)
-        for key, value in model.state_dict().items()
+        f"module.{key}": torch.full_like(value, 3.0) for key, value in model.state_dict().items()
     }
     checkpoint_path = tmp_path / "legacy_ema.pth"
     torch.save(

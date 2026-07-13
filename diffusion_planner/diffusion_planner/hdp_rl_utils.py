@@ -57,7 +57,20 @@ class HDPRewardConfig:
     occupancy_speed_gain_s: float = 0.10
     lane_half_width_m: float = 1.75
     leader_lateral_margin_m: float = 0.75
+    stationary_reference_threshold_m: float = 1.0
+    stationary_progress_tolerance_m: float = 2.0
+    stationary_progress_mode: str = "distance"
     rear_end_penalty: float = 0.3
+
+    def __post_init__(self) -> None:
+        if self.stationary_reference_threshold_m <= 0.0:
+            raise ValueError("stationary_reference_threshold_m must be > 0")
+        if self.stationary_progress_tolerance_m <= 0.0:
+            raise ValueError("stationary_progress_tolerance_m must be > 0")
+        if self.stationary_progress_mode not in {"constant", "distance"}:
+            raise ValueError(
+                f"Unsupported stationary_progress_mode={self.stationary_progress_mode!r}"
+            )
 
 
 def _hdp_reward_config(args) -> HDPRewardConfig:
@@ -72,6 +85,13 @@ def _hdp_reward_config(args) -> HDPRewardConfig:
         occupancy_speed_gain_s=float(getattr(args, "rl_occupancy_speed_gain_s", 0.10)),
         lane_half_width_m=float(getattr(args, "rl_lane_half_width_m", 1.75)),
         leader_lateral_margin_m=float(getattr(args, "rl_leader_lateral_margin_m", 0.75)),
+        stationary_reference_threshold_m=float(
+            getattr(args, "rl_stationary_reference_threshold_m", 1.0)
+        ),
+        stationary_progress_tolerance_m=float(
+            getattr(args, "rl_stationary_progress_tolerance_m", 2.0)
+        ),
+        stationary_progress_mode=str(getattr(args, "rl_stationary_progress_mode", "distance")),
     )
 
 
@@ -202,8 +222,16 @@ def _relative_progress_score(
     expert_future: torch.Tensor,
     *,
     min_reference_m: float = 1.0,
+    stationary_tolerance_m: float = 2.0,
+    stationary_mode: str = "distance",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return signed route progress relative to the expert endpoint, capped for reward use."""
+    """Return signed route progress and a stopped-reference-aware reward score."""
+    if min_reference_m <= 0.0:
+        raise ValueError("min_reference_m must be > 0")
+    if stationary_tolerance_m <= 0.0:
+        raise ValueError("stationary_tolerance_m must be > 0")
+    if stationary_mode not in {"constant", "distance"}:
+        raise ValueError(f"Unsupported stationary_progress_mode={stationary_mode!r}")
     expert_displacement = expert_future[-1, :2]
     expert_distance = expert_displacement.norm()
     moving_reference = expert_distance >= min_reference_m
@@ -214,7 +242,13 @@ def _relative_progress_score(
         candidate_progress / expert_distance.clamp_min(min_reference_m),
         torch.ones_like(candidate_progress),
     )
-    return ratio, ratio.clamp(0.0, 1.0)
+    if stationary_mode == "constant":
+        stationary_score = torch.ones_like(candidate_progress)
+    elif stationary_mode == "distance":
+        endpoint_error = (ego_trajs[:, -1, :2] - expert_displacement).norm(dim=-1)
+        stationary_score = (1.0 - endpoint_error / stationary_tolerance_m).clamp(0.0, 1.0)
+    score = torch.where(moving_reference, ratio.clamp(0.0, 1.0), stationary_score)
+    return ratio, score
 
 
 def _safety_gated_behavior(
@@ -957,13 +991,27 @@ def _batched_lane_and_progress(
 
     expert_displacement = expert_future[:, -1, :2]
     expert_distance_m = expert_displacement.norm(dim=-1)
-    moving_reference = expert_distance_m >= 1.0
-    expert_direction = expert_displacement / expert_distance_m.clamp_min(1.0)[:, None]
+    moving_reference = expert_distance_m >= config.stationary_reference_threshold_m
+    expert_direction = (
+        expert_displacement
+        / expert_distance_m.clamp_min(config.stationary_reference_threshold_m)[:, None]
+    )
     candidate_progress = (ego_group[:, :, -1, :2] * expert_direction[:, None]).sum(dim=-1)
     progress_ratio = torch.where(
         moving_reference[:, None],
-        candidate_progress / expert_distance_m.clamp_min(1.0)[:, None],
+        candidate_progress
+        / expert_distance_m.clamp_min(config.stationary_reference_threshold_m)[:, None],
         torch.ones_like(candidate_progress),
+    )
+    if config.stationary_progress_mode == "constant":
+        stationary_score = torch.ones_like(candidate_progress)
+    elif config.stationary_progress_mode == "distance":
+        endpoint_error = (ego_group[:, :, -1, :2] - expert_displacement[:, None]).norm(dim=-1)
+        stationary_score = (1.0 - endpoint_error / config.stationary_progress_tolerance_m).clamp(
+            0.0, 1.0
+        )
+    progress_score = torch.where(
+        moving_reference[:, None], progress_ratio.clamp(0.0, 1.0), stationary_score
     )
     return (
         lane_score,
@@ -971,7 +1019,7 @@ def _batched_lane_and_progress(
         expert_lane_change,
         route_aligned,
         progress_ratio,
-        progress_ratio.clamp(0.0, 1.0),
+        progress_score,
         lane_available,
     )
 
@@ -1082,9 +1130,7 @@ def compute_hdp_reward(
             | (static_objects_batch[..., 4:6].abs().sum(dim=-1) > 1e-6)
         ).any(dim=-1)
     line_strings_batch = scene_inputs.get("line_strings")
-    use_road_border_occupancy = bool(
-        getattr(args, "rl_occupancy_use_road_border", True)
-    )
+    use_road_border_occupancy = bool(getattr(args, "rl_occupancy_use_road_border", True))
     if (
         not use_road_border_occupancy
         or line_strings_batch is None
@@ -1128,6 +1174,9 @@ def compute_hdp_reward(
     ttc_min = scene_term_tensors["ttc"].amin(dim=-1)
     thw_min = scene_term_tensors["thw"].amin(dim=-1)
     occupancy_min = occupancy.amin(dim=-1)
+    stationary_reference = (
+        expert_futures_tensor[:, -1, :2].norm(dim=-1) < config.stationary_reference_threshold_m
+    )
 
     def candidate_flags(value: torch.Tensor) -> torch.Tensor:
         return value.to(lane_scores.dtype)[:, None].expand(-1, n)
@@ -1160,6 +1209,7 @@ def compute_hdp_reward(
         "progress_ratio": progress_ratios.clamp(-1.0, 2.0),
         "underprogress_fraction": (progress_ratios < 0.8).to(risk.dtype),
         "overprogress_fraction": (progress_ratios > 1.2).to(risk.dtype),
+        "stationary_reference_fraction": candidate_flags(stationary_reference),
         "comfort": scene_term_tensors["comfort"],
         "behavior_gate": behavior_gate,
     }
@@ -1172,11 +1222,17 @@ def compute_hdp_reward(
         "occupancy_zero_fraction",
         "underprogress_fraction",
         "overprogress_fraction",
+        "stationary_reference_fraction",
     }
     metrics = {
         (f"reward_{key}" if key in fraction_keys else f"reward_{key}_score"): value.mean()
         for key, value in flattened.items()
     }
+    stationary_candidate_mask = candidate_flags(stationary_reference)
+    stationary_candidate_count = stationary_candidate_mask.sum().clamp_min(1.0)
+    metrics["reward_stationary_progress_score"] = (
+        progress_scores * stationary_candidate_mask
+    ).sum() / stationary_candidate_count
     component_groups = {
         key: metric_groups[key]
         for key in ("safety", "risk", "follow", "lane", "progress", "leader_fraction")
@@ -1213,6 +1269,11 @@ def compute_hdp_reward(
     metrics["reward_leader_group_range"] = (
         leader_group.max(dim=1).values - leader_group.min(dim=1).values
     ).mean()
+    stationary_scene_count = stationary_reference.sum().clamp_min(1)
+    metrics["reward_stationary_progress_group_range"] = (
+        (progress_scores.max(dim=1).values - progress_scores.min(dim=1).values)
+        * stationary_reference
+    ).sum() / stationary_scene_count
     return reward_group.reshape(-1), metrics
 
 

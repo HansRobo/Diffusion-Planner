@@ -139,6 +139,9 @@ rl_reward_w_lane=2.5
 rl_reward_w_progress=3.0
 rl_behavior_gate=safety
 rl_occupancy_use_road_border=true
+rl_stationary_progress_mode=distance
+rl_stationary_reference_threshold_m=1.0
+rl_stationary_progress_tolerance_m=2.0
 rl_bc_weight=0.0
 num_generations=8
 rl_noise_scale=1.5
@@ -150,6 +153,9 @@ rl_eval_reward_w_lane=2.5
 rl_eval_reward_w_progress=3.0
 rl_eval_behavior_gate=safety
 rl_eval_occupancy_use_road_border=true
+rl_eval_stationary_progress_mode=distance
+rl_eval_stationary_reference_threshold_m=1.0
+rl_eval_stationary_progress_tolerance_m=2.0
 rl_rollout_steps=6
 rl_updates_per_rollout=1
 rl_update_max_candidates_per_rank=2048
@@ -167,6 +173,12 @@ one optimizer update while bounding differentiable decoder memory; it does not d
 renormalize subgroups. The lower `beta` and explicit
 progress term are performance-oriented Tier IV adaptations. Real-data and recovery-set ablations
 favored the unanchored objective (`BC=0`); the EMA policy commit remains the drift constraint.
+For logged experts whose eight-second endpoint displacement is below 1 m, progress is scored by
+candidate-to-expert endpoint error and reaches zero at 2 m. The old constant score supplied no
+within-group learning signal in these scenes; on a 2,048-scene balanced-validation audit, 13.33%
+of references were stationary and 73.6% of those had a red traffic light on the route. Training
+and held-out stationary parameters are separate so threshold/tolerance ablations cannot change
+the checkpoint-selection metric.
 The default non-risk behavior contribution (following, lane keeping, and DP-native progress) is
 multiplied by collision safety, so an active collision cannot be traded for another behavior score
 and rear-end attenuation remains continuous. `rl_behavior_gate=none` with progress weight zero

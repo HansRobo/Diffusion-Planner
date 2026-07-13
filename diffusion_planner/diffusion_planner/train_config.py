@@ -149,6 +149,12 @@ class TrainConfig:
     # optimization gate is ablated against the exact published reward sum.
     rl_eval_behavior_gate: Literal["none", "safety", "risk"] = "safety"
     rl_eval_occupancy_use_road_border: bool = True
+    # A stopped logged expert is usually waiting at a red light or behind traffic. The legacy
+    # progress proxy assigned every candidate the same full score in those scenes. Keep held-out
+    # evaluation on the distance-aware objective even when the training behavior is ablated.
+    rl_eval_stationary_progress_mode: Literal["constant", "distance"] = "distance"
+    rl_eval_stationary_reference_threshold_m: float = 1.0
+    rl_eval_stationary_progress_tolerance_m: float = 2.0
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
@@ -178,6 +184,7 @@ class TrainConfig:
     # stopped actors and, when none exist, HD-map road borders. Keep this ablatable
     # because road borders are a practical proxy rather than literal occupancy.
     rl_occupancy_use_road_border: bool = True
+    rl_stationary_progress_mode: Literal["constant", "distance"] = "distance"
     # The EMA policy boundary already limits drift. Real-data and recovery-set ablations found
     # that an additional expert anchor slows reward learning without improving robustness.
     rl_bc_weight: float = 0.0
@@ -195,6 +202,8 @@ class TrainConfig:
     rl_occupancy_speed_gain_s: float = 0.10
     rl_lane_half_width_m: float = 1.75
     rl_leader_lateral_margin_m: float = 0.75
+    rl_stationary_reference_threshold_m: float = 1.0
+    rl_stationary_progress_tolerance_m: float = 2.0
     rl_full_eval_utd: int = 5
     rl_validate_before_training: bool = True
     rl_max_valid_loss_regression: float = 0.25

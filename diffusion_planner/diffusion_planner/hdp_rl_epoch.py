@@ -164,8 +164,7 @@ def _backward_reward_weighted_update(
         int(getattr(args, "rl_update_max_candidates_per_rank", 0)),
     )
     ranges = [
-        (start, min(start + scene_chunk, num_scenes))
-        for start in range(0, num_scenes, scene_chunk)
+        (start, min(start + scene_chunk, num_scenes)) for start in range(0, num_scenes, scene_chunk)
     ]
     objective_keys = {"loss", "rl_loss", "reward_weighted_loss", "bc_loss"}
     mean_keys = {
@@ -673,6 +672,28 @@ def validate_hdp_reward_policy(data_loader, model, args):
     eval_reward_args.rl_occupancy_use_road_border = getattr(
         args, "rl_eval_occupancy_use_road_border", road_border_default
     )
+    stationary_default = TrainConfig.__dataclass_fields__[
+        "rl_eval_stationary_progress_mode"
+    ].default
+    eval_reward_args.rl_stationary_progress_mode = getattr(
+        args, "rl_eval_stationary_progress_mode", stationary_default
+    )
+    stationary_threshold_default = TrainConfig.__dataclass_fields__[
+        "rl_eval_stationary_reference_threshold_m"
+    ].default
+    eval_reward_args.rl_stationary_reference_threshold_m = getattr(
+        args,
+        "rl_eval_stationary_reference_threshold_m",
+        stationary_threshold_default,
+    )
+    stationary_tolerance_default = TrainConfig.__dataclass_fields__[
+        "rl_eval_stationary_progress_tolerance_m"
+    ].default
+    eval_reward_args.rl_stationary_progress_tolerance_m = getattr(
+        args,
+        "rl_eval_stationary_progress_tolerance_m",
+        stationary_tolerance_default,
+    )
     # reward sum, candidate count, per-group max sum, scene count, invalid reward count,
     # invalid diagnostic count. Invalid values are reported after the collective so every
     # rank exits together instead of leaving peers blocked in all_reduce.
@@ -697,9 +718,7 @@ def validate_hdp_reward_policy(data_loader, model, args):
                     key: value[start:stop].to(device, non_blocking=True)
                     for key, value in raw_batch.items()
                 }
-                raw_inputs["ego_agent_past"] = heading_to_cos_sin(
-                    raw_inputs["ego_agent_past"]
-                )
+                raw_inputs["ego_agent_past"] = heading_to_cos_sin(raw_inputs["ego_agent_past"])
                 raw_inputs["goal_pose"] = heading_to_cos_sin(raw_inputs["goal_pose"])
                 reward_neighbors = _neighbor_future_world(raw_inputs["neighbor_agents_future"])
                 norm_inputs = args.observation_normalizer(raw_inputs)
