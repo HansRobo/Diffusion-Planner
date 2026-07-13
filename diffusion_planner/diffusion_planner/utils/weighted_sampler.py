@@ -15,9 +15,9 @@ class ClusterWeightedDistributedSampler(Sampler):
     each sample a weight of 1/cluster_frequency. Rare clusters are sampled more often;
     no data is discarded.
 
-    The cluster JSON must contain the exact same path strings as the training
-    data_list JSON. Run cluster.py with the same --data_list file used for
-    --train_set_list to ensure paths match.
+    Paths are canonicalized via ``data_path_to_rel`` before matching, so
+    different prefixes (absolute vs relative, different mount points) are
+    handled automatically.
     """
 
     def __init__(
