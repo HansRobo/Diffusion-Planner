@@ -212,6 +212,25 @@ def find_checkpoint_run_artifact(checkpoint_path: str, filename: str) -> Path | 
     return None
 
 
+def _checkpoint_bool(path: str, key: str, default: bool) -> bool:
+    """Read a boolean option from the source run metadata when available."""
+    args_path = find_checkpoint_run_artifact(path, "args.json")
+    if args_path is None:
+        return default
+    try:
+        with args_path.open(encoding="utf-8") as stream:
+            value = json.load(stream).get(key, default)
+    except (OSError, TypeError, ValueError):
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
 def get_args():
     parser = argparse.ArgumentParser(description="HDP RL training")
     parser.add_argument("--exp_name", type=str, required=True)
@@ -1467,7 +1486,14 @@ def model_training(args):
             )
         )
         if resume_baseline_metrics is None:
-            if args.rl_validate_before_training:
+            # Use the source run's recorded policy rather than the current CLI default.
+            # This keeps automatic recovery valid for runs intentionally created without
+            # a baseline preflight.
+            if _checkpoint_bool(
+                args.resume_model_path,
+                "rl_validate_before_training",
+                args.rl_validate_before_training,
+            ):
                 raise FileNotFoundError(
                     "Strict RL resume requires source_baseline_metrics.json beside the source run"
                 )

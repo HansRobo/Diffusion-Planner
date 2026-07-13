@@ -15,6 +15,7 @@ from diffusion_planner.hdp_rl_epoch import (
     validate_hdp_reward_policy,
 )
 from train_hdp_rl_predictor import (
+    _checkpoint_bool,
     best_valid_score_from_rows,
     configure_rl_trainable_parameters,
     find_checkpoint_run_artifact,
@@ -392,6 +393,18 @@ def test_find_checkpoint_run_artifact_handles_latest_and_nested_checkpoints(tmp_
     assert find_checkpoint_run_artifact(str(run_dir / "latest.pth"), artifact.name) == artifact
     assert find_checkpoint_run_artifact(str(nested / "best_model.pth"), artifact.name) == artifact
     assert find_checkpoint_run_artifact(str(nested / "best_model.pth"), "missing.json") is None
+
+
+def test_checkpoint_bool_uses_recorded_source_value(tmp_path):
+    run_dir = tmp_path / "run"
+    nested = run_dir / "epoch0001"
+    nested.mkdir(parents=True)
+    (run_dir / "args.json").write_text(
+        '{"rl_validate_before_training": false}', encoding="utf-8"
+    )
+
+    assert _checkpoint_bool(str(nested / "latest.pth"), "rl_validate_before_training", True) is False
+    assert _checkpoint_bool(str(nested / "latest.pth"), "missing", True) is True
 
 
 def test_finite_scalar_metrics_excludes_invalid_json_values():

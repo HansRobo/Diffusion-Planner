@@ -24,6 +24,9 @@ outside this audit.
 | Optimizer portability | Supervised training could fail when fused AdamW was requested but unsupported by the active PyTorch/CUDA build. | Fixed. SFT and RL now run a one-element fused AdamW probe before training, fall back to standard AdamW on either construction/step capability failure, and persist the effective setting. |
 | Reward configuration | Road-border occupancy fallback used the planner-metrics global wide threshold instead of the HDP reward configuration. | Fixed. The fallback now uses `rl_road_border_safe_m`, with a regression test for non-default thresholds. |
 | Converter dtype | The direct ROS-bag converter wrote transform-derived `goal_pose` as NumPy `float64`. | Fixed. It is explicitly saved as `float32`, matching the rest of the NPZ schema. |
+| RL resume metadata | Missing baseline sidecars were checked against the current CLI default, so automatic recovery could reject a source run created without baseline validation. | Fixed. Resume reads `rl_validate_before_training` from the source checkpoint metadata before deciding whether the sidecar is required. |
+| Evaluation shape guards | `ego_is_comfortable` used Python `assert` for state/time shape checks. | Fixed. It now raises explicit `ValueError` under all optimization modes. |
+| Dead SDE path | `subVPSDE_exp` was an unreferenced constructor that always raised `NotImplementedError`. | Removed. The HDP branch has one live VP-SDE implementation. |
 
 ## Verified already fixed by earlier rounds
 
@@ -94,7 +97,7 @@ correctness failure in the default run.
 ## Verification
 
 - Ruff: clean.
-- Full tests after the final audit patch: `455 passed, 15 skipped`; the focused HDP/map suite is `108 passed`.
-- Full tests with `PYTHONWARNINGS=error`: `455 passed, 15 skipped`.
+- Full tests after the final audit patch: `456 passed, 15 skipped`; the focused HDP/map suite is `108 passed`.
+- Full tests with `PYTHONWARNINGS=error`: `456 passed, 15 skipped`.
 - Node02 direct road-border RL smoke completed with Slurm exit code 0. Node01 formal RL remains
   under monitoring and was not modified by this audit.

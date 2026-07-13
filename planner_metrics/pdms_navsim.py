@@ -263,8 +263,12 @@ def ego_is_comfortable(
     ``states`` is ``[n_batch, n_time, STATE_SIZE]``; returns ``[n_batch, 6]``.
     """
     n_batch, n_time, n_states = states.shape
-    assert n_time == len(time_point_s)
-    assert n_states == STATE_SIZE
+    if n_time != len(time_point_s):
+        raise ValueError(
+            f"ego_is_comfortable expected {len(time_point_s)} time points, got {n_time}"
+        )
+    if n_states != STATE_SIZE:
+        raise ValueError(f"ego_is_comfortable expected state size {STATE_SIZE}, got {n_states}")
     metric_functions = [
         lambda s, t: _within_bound(
             _extract_ego_acceleration(s, "x"), min_bound=MIN_LON_ACCEL, max_bound=MAX_LON_ACCEL
