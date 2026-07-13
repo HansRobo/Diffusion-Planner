@@ -756,12 +756,15 @@ class GoalPoseEncoder(nn.Module):
         pos = pos.unsqueeze(1)  # (B, 1, D=4)
         pos = add_class_type(pos, CLASS_TYPE_GOAL_POSE)
 
-        mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
+        # A zero goal is the dataset padding sentinel. Do not let a missing goal
+        # become a learned scene token (valid headings always carry cos/sin).
+        mask = torch.all(x == 0, dim=-1).unsqueeze(1)
 
         x = self.channel_pre_project(x)  # (B, C=channels_mlp_dim)
         x = x.unsqueeze(1)  # (B, 1, C=channels_mlp_dim)
 
         x = self.emb_project(self.norm(x))  # (B, 1, hidden_dim)
+        x = x.masked_fill(mask.unsqueeze(-1), 0.0)
 
         return x, mask, pos
 

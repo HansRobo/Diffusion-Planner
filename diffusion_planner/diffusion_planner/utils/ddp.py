@@ -179,6 +179,20 @@ def reduce_scalar_metrics(metric_dict, device, op):
     if not metric_dict:
         return {}
     keys = list(metric_dict)
+    # Packing relies on identical key order on every rank. Validate the contract
+    # before reducing so a rank-divergent diagnostic cannot silently pair values.
+    key_digest = int.from_bytes(
+        hashlib.sha256("\0".join(keys).encode("utf-8")).digest()[:8],
+        byteorder="little",
+        signed=True,
+    )
+    key_meta = torch.tensor([len(keys), key_digest], dtype=torch.int64, device=device)
+    key_min = key_meta.clone()
+    key_max = key_meta.clone()
+    dist.all_reduce(key_min, op=dist.ReduceOp.MIN)
+    dist.all_reduce(key_max, op=dist.ReduceOp.MAX)
+    if not torch.equal(key_min, key_max):
+        raise RuntimeError("Distributed metric dictionaries have different keys or ordering")
     values = []
     for key in keys:
         value = metric_dict[key]

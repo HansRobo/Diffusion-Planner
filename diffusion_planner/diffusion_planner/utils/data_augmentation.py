@@ -298,13 +298,12 @@ class StatePerturbation:
             )
         )
 
-        reshaping_tensor = torch.tensor(
+        reshaping_tensor = processed_input.new_tensor(
             [
                 [1, 0, 0, 1],
                 [0, 1, -1, 0],
-            ],
-            dtype=torch.float32,
-        ).to(processed_input.device)
+            ]
+        )
         return (processed_input @ reshaping_tensor).reshape(-1, 2, 2)
 
     def centric_transform(

@@ -953,6 +953,10 @@ def _nearest_lane_distance(
     seg_start = center[..., :-1, :].reshape(-1, 2)
     seg_end = center[..., 1:, :].reshape(-1, 2)
     flat_points = points.reshape(-1, 2)
+    if seg_start.shape[0] == 0:
+        return torch.full(
+            points.shape[:-1], float("inf"), dtype=points.dtype, device=points.device
+        )
     max_distance_elements = 10_000_000
     chunk_size = max(1, max_distance_elements // seg_start.shape[0])
     chunks = []
@@ -986,6 +990,10 @@ def _nearest_lane_distance_batch(
     segment_start = center[..., :-1, :].flatten(1, 2)
     segment_end = center[..., 1:, :].flatten(1, 2)
     flat_points = points.reshape(batch_size, -1, 2)
+    if segment_start.shape[1] == 0:
+        return torch.full(
+            points.shape[:-1], float("inf"), dtype=points.dtype, device=points.device
+        )
 
     max_distance_elements = 10_000_000
     elements_per_query = max(batch_size * segment_start.shape[1], 1)

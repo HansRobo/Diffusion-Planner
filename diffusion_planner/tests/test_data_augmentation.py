@@ -177,6 +177,17 @@ def test_vector_transform_norm_preserved():
     print("  [PASS] vector_transform norm preserved")
 
 
+def test_transform_matrix_preserves_input_dtype():
+    perturbation = StatePerturbation(
+        augment_prob=0.0,
+        num_refine=3,
+        device="cpu",
+        use_smoothing_future_trajectory=False,
+    )
+    state = _ego_state(1).double()
+    assert perturbation.get_transform_matrix_batch(state).dtype == torch.float64
+
+
 # ──────────────────────────── heading_transform ─────────────────────────────
 
 

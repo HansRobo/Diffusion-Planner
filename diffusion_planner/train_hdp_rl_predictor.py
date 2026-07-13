@@ -1356,7 +1356,10 @@ def model_training(args):
     if args.fused_optimizer and torch.device(args.device).type == "cuda":
         try:
             optimizer = optim.AdamW(params, fused=True, weight_decay=args.weight_decay)
-        except TypeError:
+        # PyTorch releases disagree on whether an unsupported fused kernel is
+        # reported during construction as TypeError or RuntimeError. Fall back
+        # before writing args.json so the effective optimizer is reproducible.
+        except (TypeError, RuntimeError):
             optimizer = optim.AdamW(params, weight_decay=args.weight_decay)
             args.fused_optimizer = False
     else:

@@ -56,10 +56,40 @@ trained SFT/RL checkpoints or alter the fixed deployment contract:
   accepting them would create a partially initialized policy and is unsafe for this HDP-only
   branch.
 
+## Follow-up audit items (same-day second pass)
+
+The follow-up pass rechecked every item in `code_review_findings_20260711.md` and
+`hdp_code_review_20260712.md` against the current tree, rather than assuming the earlier
+disposition table was still valid after later edits.
+
+| Area | Finding | Disposition |
+| --- | --- | --- |
+| RL geometry | Empty lane/route tensors reached point-to-segment `amin` and zero-segment chunk sizing. | Fixed. Single-scene and batched distance helpers return `+inf` with the input shape; unavailable centerlines therefore produce an explicit lane-unavailable result instead of a crash. |
+| Goal conditioning | An all-zero/missing goal was projected as an unmasked scene token. | Fixed. `GoalPoseEncoder` masks the zero sentinel and zeros its embedding; a valid origin pose with `(cos,sin)=(1,0)` remains active. |
+| Augmentation dtype | Scene-frame rotation matrices were always `float32`, causing mixed-dtype matmul failures for double/other typed callers. | Fixed in both standard and bridge augmentation with `new_tensor`, preserving device and input dtype. |
+| DDP diagnostics | Scalar-metric reduction still trusted rank-local key ordering even though loss reduction had a digest check. | Fixed. Key count/order digest is checked before packing scalar metrics. |
+| C++ benchmark | The benchmark's current HDP input map omitted the required `delay` vector; runtime transfer uses `.at("delay")`. | Fixed. It now supplies a zero scalar delay matching the current graph. Speed-limit boolean tensors remain correctly derived from the float speed-limit inputs by the runtime path. |
+| Fused AdamW fallback | Unsupported fused construction can raise either `TypeError` or `RuntimeError` across PyTorch versions. | Fixed for RL launcher; both exception classes fall back before the effective `fused_optimizer` value is persisted to `args.json`. |
+| RL selection | Legacy score reconstruction could mix reward/EPDMS/loss units. | Rechecked current code: new logs persist only finite full-evaluation reward scores; off-cadence rows are NaN and resume prefers the cumulative accepted score. No code change needed. |
+| THW at a stop | A stopped ego's time headway is undefined and could otherwise look safe. | Rechecked current code: THW is combined with a clearance-based distance-headway score, and stopped-neighbor occupancy is independently fused with rear attenuation. This is an explicit shaping choice, not a silent zero-risk bug. |
+| Profile cadence | Profiling is decided before a rollout while logging uses actual optimizer steps. | Confirmed as a profiling-only accounting trade-off when a rollout has zero valid groups; it cannot alter gradients, checkpoints, or reward values, so it remains unchanged. |
+| Area output paths | Grouped closed-loop area names could contain path separators. | Rechecked current code: both video and per-area summary paths pass through `artifact_component`; no unsanitized path remains. |
+| EMA/DDP | EMA could deep-copy a DDP wrapper and rank-0 evaluation could broadcast buffers. | Fixed earlier and rechecked: EMA is constructed from `ddp.get_model(...)` (unwrapped) for SFT and RL. |
+| Resume memory | Full checkpoints could be materialized on every GPU during resume. | Fixed earlier and rechecked: `resume_model` loads with `map_location="cpu"` before copying state. |
+| C++/ONNX shape | Legacy joint sampled shape and delay were still present in benchmark assumptions. | Fixed earlier plus the delay input fix above. Current temporal contract is ego-only `[B,1,80,4]`; no legacy split decoder is exported. |
+| Empty/short map parity | Batched reward and scene-loop reward must agree when a scene has no usable map segments. | Added empty-centerline regression coverage; the existing curved-scene parity test remains passing. |
+
+The earlier audit's design/ablation findings remain deliberately unchanged: turn-head endpoint
+sampling (`0,10,...,70`), no-decay grouping, generated-turn diffusion-time weighting, top-K
+neighbor selection, shortening the 31-frame input contract, exact reward shaping constants,
+rear-axle box-center convention, and strict route-AdaLN checkpoint loading. Each would require
+a fresh Base/SFT benchmark or would change a trained/deployment contract; none is a hidden
+correctness failure in the default run.
+
 ## Verification
 
 - Ruff: clean.
-- Full tests: `446 passed, 15 skipped`.
-- Full tests with `PYTHONWARNINGS=error`: `446 passed, 15 skipped`.
+- Full tests: `449 passed, 15 skipped`.
+- Full tests with `PYTHONWARNINGS=error`: `449 passed, 15 skipped`.
 - Node02 direct road-border RL smoke completed with Slurm exit code 0. Node01 formal RL remains
   under monitoring and was not modified by this audit.

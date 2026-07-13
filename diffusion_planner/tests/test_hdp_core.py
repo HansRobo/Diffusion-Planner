@@ -310,6 +310,19 @@ def test_lane_reward_keeps_valid_centerline_endpoint_at_ego_origin():
     torch.testing.assert_close(distance, torch.tensor([0.5]))
 
 
+def test_lane_distance_returns_infinity_for_empty_centerlines():
+    query = torch.zeros(2, 2)
+    empty_lanes = torch.zeros(0, 5, 8)
+    distance = _nearest_lane_distance(query, empty_lanes)
+    assert torch.isinf(distance).all()
+
+    batch_query = torch.zeros(1, 3, 2)
+    batch_empty_lanes = torch.zeros(1, 0, 5, 8)
+    batch_distance = hdp_rl_utils._nearest_lane_distance_batch(batch_query, batch_empty_lanes)
+    assert batch_distance.shape == (1, 3)
+    assert torch.isinf(batch_distance).all()
+
+
 def test_rollout_generator_is_independent_from_global_training_rng():
     class EchoModel(torch.nn.Module):
         def __init__(self):
@@ -2908,7 +2921,11 @@ def test_ddp_scalar_metric_reducer_preserves_requested_operation(monkeypatch):
     )
 
     assert reduced == {"python": 4.5, "tensor": 4.0}
-    assert observed == [torch.distributed.ReduceOp.MAX]
+    assert observed == [
+        torch.distributed.ReduceOp.MIN,
+        torch.distributed.ReduceOp.MAX,
+        torch.distributed.ReduceOp.MAX,
+    ]
 
 
 def test_streaming_gradient_stats_match_concatenated_reference():

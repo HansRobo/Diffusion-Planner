@@ -20,7 +20,7 @@ from diffusion_planner.dimensions import (
     STATIC_OBJECTS_SHAPE,
     TURN_INDICATOR_INPUT_ONE_HOT_DIM,
 )
-from diffusion_planner.model.module.encoder import Encoder, one_hot_turn_indicators
+from diffusion_planner.model.module.encoder import Encoder, GoalPoseEncoder, one_hot_turn_indicators
 from diffusion_planner.train_config import TrainConfig
 
 
@@ -51,6 +51,16 @@ def test_turn_indicator_one_hot_accepts_integer_input():
     one_hot = output.view(1, 2, TURN_INDICATOR_INPUT_ONE_HOT_DIM)
     assert one_hot[0, 0].tolist() == [0, 1, 0, 0]
     assert one_hot[0, 1].tolist() == [0, 0, 1, 0]
+
+
+def test_goal_pose_encoder_masks_missing_goal_without_masking_origin_heading():
+    encoder = GoalPoseEncoder(drop_path_rate=0.0, hidden_dim=16).eval()
+    goals = torch.tensor([[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]])
+    with torch.no_grad():
+        encoded, mask, _ = encoder(goals)
+    assert mask.tolist() == [[True], [False]]
+    torch.testing.assert_close(encoded[0], torch.zeros_like(encoded[0]))
+    assert torch.count_nonzero(encoded[1]) > 0
 
 
 def _encoder_inputs():
