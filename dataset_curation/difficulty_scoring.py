@@ -63,7 +63,7 @@ def _plot_difficulty(df: pd.DataFrame, scores: np.ndarray, labels: pd.Series,
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import seaborn as sns
+
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
@@ -126,9 +126,10 @@ def main():
 
     top_hard = result.nlargest(50, "difficulty_score")
     top_easy = result.nsmallest(50, "difficulty_score")
-    top_hard.index.tolist()
-    json.dump(top_hard.index.tolist(), open(output_dir / "top50_hardest.json", "w"), indent=2)
-    json.dump(top_easy.index.tolist(), open(output_dir / "top50_easiest.json", "w"), indent=2)
+    with open(output_dir / "top50_hardest.json", "w") as f:
+        json.dump(top_hard.index.tolist(), f, indent=2)
+    with open(output_dir / "top50_easiest.json", "w") as f:
+        json.dump(top_easy.index.tolist(), f, indent=2)
     print(f"\nTop-50 hardest/easiest scene paths saved.")
     print(f"Inspect with: python -m scenario_generation.visualize <path>")
     print(f"\nResults saved to {output_dir}")
