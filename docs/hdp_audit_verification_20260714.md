@@ -133,6 +133,11 @@ Finally, comparisons such as `value < 0` do not reject `NaN`; invalid reward wei
 thresholds could therefore reach the first rollout. The RL CLI and `HDPRewardConfig` now
 reject non-finite reward/shaping values explicitly before model work begins.
 
+The Slurm RL launcher now forwards the train/evaluation stopped-neighbor velocity and
+displacement thresholds explicitly as well. This keeps queued jobs reproducible when those
+fields are overridden through `HDP_RL_*` environment variables; the Python parser remains
+the final finite-value/type validation boundary.
+
 One further reproducibility omission was confirmed: `ego_history_dropout_rate` affected the
 training distribution but was absent from strict resume compatibility. It is now checked like
 the other training fields. These changes are configuration/geometry fixes, not reward-policy
@@ -143,6 +148,6 @@ resuming a run with an older `args.json` intentionally fails loudly rather than 
 
 - Ruff: clean.
 - Full tests after the final audit patch: `458 passed, 15 skipped`; the focused HDP/RL/augmentation suite is `182 passed`.
-- Full tests with `PYTHONWARNINGS=error`: `456 passed, 15 skipped`.
+- Full tests with `PYTHONWARNINGS=error`: `458 passed, 15 skipped`.
 - Node02 direct road-border RL smoke completed with Slurm exit code 0. Node01 formal RL remains
   under monitoring and was not modified by this audit.
