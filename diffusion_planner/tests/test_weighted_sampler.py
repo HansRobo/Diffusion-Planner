@@ -166,6 +166,21 @@ class TestDDP:
 
 
 class TestEdgeCases:
+    def test_multinomial_size_guard(self):
+        """Datasets exceeding torch.multinomial's 2^24 category limit are rejected early."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(5)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            class BigList(list):
+                def __len__(self):
+                    return 2**24 + 1
+
+            with pytest.raises(ValueError, match="2\\^24"):
+                ClusterWeightedDistributedSampler(
+                    BigList(data_list), cluster_path, num_replicas=1, rank=0
+                )
+
     def test_missing_paths_get_neutral_weight(self):
         """Paths not in any cluster get the mean of matched weights (neutral rate).
 

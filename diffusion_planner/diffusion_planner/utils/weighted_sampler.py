@@ -29,6 +29,11 @@ class ClusterWeightedDistributedSampler(Sampler):
         seed: int = 0,
     ):
         self.data_list = data_list
+        if len(data_list) > 2**24:
+            raise ValueError(
+                f"data_list has {len(data_list)} entries, exceeding "
+                f"torch.multinomial's 2^24 ({2**24:,}) category limit on CPU."
+            )
         self.num_replicas = num_replicas
         self.rank = rank
         self.seed = seed
