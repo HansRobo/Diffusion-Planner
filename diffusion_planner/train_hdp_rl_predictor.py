@@ -174,6 +174,20 @@ def write_train_log_atomic(rows: list[dict], path: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def write_json_atomic(value: dict, path: str | Path) -> None:
+    """Atomically replace checkpoint metadata used by strict resume."""
+    destination = Path(path)
+    temporary = destination.with_name(f".{destination.name}.tmp.{os.getpid()}")
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(value, stream, indent=4)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def find_checkpoint_run_artifact(checkpoint_path: str, filename: str) -> Path | None:
     """Find a run-level artifact next to a latest or nested epoch/best checkpoint."""
     checkpoint = Path(checkpoint_path)
@@ -1169,8 +1183,7 @@ def model_training(args):
         optimizer = optim.AdamW(params, weight_decay=args.weight_decay)
     if global_rank == 0:
         args_dict["fused_optimizer"] = args.fused_optimizer
-        with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
-            json.dump(args_dict, f, indent=4)
+        write_json_atomic(args_dict, os.path.join(save_path, "args.json"))
     scheduler = LinearWarmupConstantLR(optimizer, train_epochs, args.warm_up_epoch)
 
     if args.resume_model_path is not None:
@@ -1301,6 +1314,33 @@ def model_training(args):
             )
         data_list = load_resume_train_rows(resume_train_log, init_epoch)
         best_valid_score = best_valid_score_from_rows(data_list)
+        checkpoint_best = float(
+            getattr(diffusion_planner, "_resume_best_valid_score", -float("inf"))
+        )
+        if math.isfinite(checkpoint_best):
+            best_valid_score = max(best_valid_score, checkpoint_best)
+        best_checkpoint_path = Path(save_path) / "best_model" / "best_model.pth"
+        if best_checkpoint_path.is_file():
+            best_checkpoint = torch.load(
+                best_checkpoint_path, map_location="cpu", weights_only=True
+            )
+            artifact_checkpoint_best = best_checkpoint.get("best_valid_score", float("nan"))
+            if artifact_checkpoint_best is not None:
+                artifact_checkpoint_best = float(artifact_checkpoint_best)
+                if math.isfinite(artifact_checkpoint_best):
+                    best_valid_score = max(best_valid_score, artifact_checkpoint_best)
+            del best_checkpoint
+        best_info_path = Path(save_path) / "best_model" / "best_model_info.json"
+        if best_info_path.is_file():
+            with best_info_path.open(encoding="utf-8") as f:
+                best_info = json.load(f)
+            artifact_best = best_info.get(
+                "valid_selection_score", best_info.get("selection_score", float("nan"))
+            )
+            if artifact_best is not None:
+                artifact_best = float(artifact_best)
+                if math.isfinite(artifact_best):
+                    best_valid_score = max(best_valid_score, artifact_best)
         if data_list:
             raw_patience = data_list[-1].get("full_evals_without_improvement", 0)
             if pd.notna(raw_patience):
@@ -1315,8 +1355,7 @@ def model_training(args):
         if resume_baseline_metrics is None or resume_baseline_metrics != Path(
             baseline_metrics_path
         ):
-            with open(baseline_metrics_path, "w", encoding="utf-8") as f:
-                json.dump(baseline_metrics, f, indent=4)
+            write_json_atomic(baseline_metrics, baseline_metrics_path)
 
     if args.resume_model_path is None and args.rl_validate_before_training:
         eval_model = model_ema.ema if model_ema is not None else diffusion_planner
@@ -1350,8 +1389,7 @@ def model_training(args):
                 "selection_score": baseline_selection_score,
                 "source_checkpoint": args.init_weights_path,
             }
-            with open(baseline_metrics_path, "w", encoding="utf-8") as f:
-                json.dump(baseline_metrics, f, indent=4)
+            write_json_atomic(baseline_metrics, baseline_metrics_path)
             baseline_checkpoint = {
                 "epoch": 0,
                 "model": diffusion_planner.state_dict(),
@@ -1361,15 +1399,14 @@ def model_training(args):
                 "loss": baseline_valid_loss,
                 "wandb_id": wandb_id,
                 "global_step": args._wandb_global_step,
+                "best_valid_score": baseline_selection_score,
                 "rng_states": baseline_rng_states,
             }
             best_dir = os.path.join(save_path, "best_model")
             os.makedirs(best_dir, exist_ok=True)
             atomic_torch_save(baseline_checkpoint, os.path.join(best_dir, "best_model.pth"))
-            with open(os.path.join(best_dir, "args.json"), "w", encoding="utf-8") as f:
-                json.dump(args_dict, f, indent=4)
-            with open(os.path.join(best_dir, "best_model_info.json"), "w", encoding="utf-8") as f:
-                json.dump(baseline_metrics, f, indent=4)
+            write_json_atomic(args_dict, os.path.join(best_dir, "args.json"))
+            write_json_atomic(baseline_metrics, os.path.join(best_dir, "best_model_info.json"))
             if args.use_wandb:
                 wandb.run.summary["source/valid_loss_ego"] = baseline_valid_loss
                 for key, value in baseline_epdms_metrics.items():
@@ -1391,8 +1428,7 @@ def model_training(args):
             "baseline_available": False,
             "source_checkpoint": args.init_weights_path,
         }
-        with open(baseline_metrics_path, "w", encoding="utf-8") as f:
-            json.dump(baseline_metrics, f, indent=4)
+        write_json_atomic(baseline_metrics, baseline_metrics_path)
 
     for epoch in range(init_epoch, train_epochs):
         stop_requested = False
@@ -1562,7 +1598,7 @@ def model_training(args):
                 "valid_within_source_policy_guard": source_policy_within_guard,
                 "valid_selection_score": selection_score,
                 "valid_improves_best": improves_best,
-                "best_valid_score": logged_best_valid_score,
+                "best_valid_score": best_valid_score,
                 "full_evals_without_improvement": full_evals_without_improvement,
                 **{
                     f"valid_turn_indicator_{key}": value
@@ -1571,7 +1607,6 @@ def model_training(args):
                 **{f"valid_multisample_{key}": value for key, value in valid_multisample.items()},
             }
             data_list.append(curr_data)
-            write_train_log_atomic(data_list, os.path.join(save_path, "train_log.tsv"))
 
             model_dict = {
                 "epoch": epoch + 1,
@@ -1582,8 +1617,32 @@ def model_training(args):
                 "loss": valid_loss_ego,
                 "wandb_id": wandb_id,
                 "global_step": args._wandb_global_step,
+                "best_valid_score": logged_best_valid_score,
                 "rng_states": rng_states,
             }
+
+            # Save a newly accepted policy before committing the epoch through latest.pth. If
+            # interruption occurs, resume can never observe a committed best score without its
+            # corresponding atomic best checkpoint already being present.
+            if improves_best:
+                curr_dir = os.path.join(save_path, "best_model")
+                os.makedirs(curr_dir, exist_ok=True)
+                atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
+                write_json_atomic(args_dict, os.path.join(curr_dir, "args.json"))
+                write_json_atomic(curr_data, os.path.join(curr_dir, "best_model_info.json"))
+                if args.export_onnx_on_save:
+                    export_checkpoint_onnx_guarded(
+                        config_json_path=os.path.join(save_path, "args.json"),
+                        ckpt_path=f"{curr_dir}/best_model.pth",
+                        output_dir=curr_dir,
+                        output_prefix="diffusion_planner",
+                        use_ema=model_ema is not None,
+                        use_simplify=False,
+                        opset_version=20,
+                        external_data=False,
+                    )
+
+            write_train_log_atomic(data_list, os.path.join(save_path, "train_log.tsv"))
             atomic_torch_save(model_dict, f"{save_path}/latest.pth")
 
             # Resume must not shift the configured checkpoint/closed-loop cadence.
@@ -1591,8 +1650,7 @@ def model_training(args):
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
                 atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
-                with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
-                    json.dump(args_dict, f, indent=4)
+                write_json_atomic(args_dict, os.path.join(curr_dir, "args.json"))
                 if args.export_onnx_on_save:
                     export_checkpoint_onnx_guarded(
                         config_json_path=os.path.join(save_path, "args.json"),
@@ -1607,26 +1665,6 @@ def model_training(args):
                 # Closed-loop validation on the checkpoint-save cadence; videos + metrics land next
                 # to the saved weights and are logged to wandb at step=epoch+1.
                 closed_loop_validate(eval_model, args, epoch, os.path.join(curr_dir, "closed_loop"))
-
-            if improves_best:
-                curr_dir = os.path.join(save_path, "best_model")
-                os.makedirs(curr_dir, exist_ok=True)
-                atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
-                with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
-                    json.dump(args_dict, f, indent=4)
-                with open(os.path.join(curr_dir, "best_model_info.json"), "w") as f:
-                    json.dump(curr_data, f, indent=4)
-                if args.export_onnx_on_save:
-                    export_checkpoint_onnx_guarded(
-                        config_json_path=os.path.join(save_path, "args.json"),
-                        ckpt_path=f"{curr_dir}/best_model.pth",
-                        output_dir=curr_dir,
-                        output_prefix="diffusion_planner",
-                        use_ema=model_ema is not None,
-                        use_simplify=False,
-                        opset_version=20,
-                        external_data=False,
-                    )
 
         stop_tensor = torch.tensor(int(stop_requested), device=args.device)
         if args.ddp:

@@ -2080,6 +2080,7 @@ def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
             "schedule": scheduler.state_dict(),
             "epoch": 3,
             "global_step": 47,
+            "best_valid_score": 7.25,
             "wandb_id": "resume-run-id",
             "rng_states": [rng_state],
         },
@@ -2108,7 +2109,42 @@ def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):
     assert np.random.rand() == expected_numpy
     torch.testing.assert_close(torch.rand(()), expected_torch)
     assert restored._resume_global_step == 47
+    assert restored._resume_best_valid_score == 7.25
     assert not list(tmp_path.glob(".latest.pth.tmp.*"))
+
+
+def test_resume_model_allows_checkpoint_without_an_accepted_best_score(tmp_path):
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+    checkpoint = tmp_path / "latest.pth"
+    atomic_torch_save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "schedule": scheduler.state_dict(),
+            "epoch": 0,
+            "global_step": 0,
+            "best_valid_score": None,
+        },
+        checkpoint,
+    )
+
+    restored = torch.nn.Linear(2, 1)
+    restored_optimizer = torch.optim.AdamW(restored.parameters())
+    restored_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        restored_optimizer, lambda _: 1.0
+    )
+    resume_model(
+        str(checkpoint),
+        restored,
+        restored_optimizer,
+        restored_scheduler,
+        None,
+        "cpu",
+    )
+
+    assert not hasattr(restored, "_resume_best_valid_score")
 
 
 def test_resume_loads_legacy_ddp_prefixed_ema_into_bare_shadow(tmp_path):
