@@ -893,7 +893,10 @@ def main(
                 "route_lanes_speed_limit": route_speed_limit.squeeze(0).numpy(),
                 "route_lanes_has_speed_limit": route_has_speed_limit.squeeze(0).numpy(),
                 "turn_indicators": turn_indicators,
-                "goal_pose": goal_pose_bl,
+                # Keep every floating-point NPZ payload float32, including the
+                # transform-derived goal pose (NumPy matrix operations default to
+                # float64 and would otherwise make direct-parser datasets mixed dtype).
+                "goal_pose": np.asarray(goal_pose_bl, dtype=np.float32),
                 "polygons": polygon_tensor.squeeze(0).numpy(),
                 "line_strings": line_string_tensor.squeeze(0).numpy(),
             }

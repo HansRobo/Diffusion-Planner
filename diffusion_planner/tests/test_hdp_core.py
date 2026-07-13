@@ -85,6 +85,7 @@ from diffusion_planner.utils.onnx_export import (
 from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
+    build_adamw_optimizer,
     capture_rng_state,
     compile_model_components,
     compute_grad_stats,
@@ -92,6 +93,20 @@ from diffusion_planner.utils.train_utils import (
     resume_model,
     update_epoch_loss_sums,
 )
+
+
+def test_adamw_fused_request_falls_back_cleanly_on_cpu():
+    parameter = torch.nn.Parameter(torch.ones(()))
+    optimizer, effective_fused = build_adamw_optimizer(
+        [parameter],
+        learning_rate=1e-3,
+        weight_decay=0.01,
+        fused_requested=True,
+        device="cpu",
+    )
+    assert not effective_fused
+    parameter.sum().backward()
+    optimizer.step()
 from diffusion_planner.validate_model import _multisample_metrics, aggregate_valid_metrics
 
 
@@ -1961,6 +1976,19 @@ def test_hdp_road_border_occupancy_fallback_is_speed_independent():
     assert sources == {"static": False, "stopped": False, "road_border": True}
     torch.testing.assert_close(occupancy[0], occupancy[1], atol=1e-5, rtol=0.0)
     torch.testing.assert_close(occupancy.mean(), torch.tensor(0.5), atol=1e-4, rtol=0.0)
+
+    # The fallback must honor the HDP reward configuration rather than the
+    # unrelated planner_metrics global threshold.
+    configured_occupancy, _ = _occupancy_score(
+        prediction[:1],
+        torch.tensor([2.5, 4.0, 2.0]),
+        None,
+        line_strings,
+        torch.full((1, 8), float("inf")),
+        torch.tensor(False),
+        HDPRewardConfig(road_border_safe_m=1.2),
+    )
+    torch.testing.assert_close(configured_occupancy.mean(), torch.tensor(0.25), atol=1e-4, rtol=0.0)
 
 
 def test_hdp_direct_road_border_reward_is_independent_of_occupancy_source():

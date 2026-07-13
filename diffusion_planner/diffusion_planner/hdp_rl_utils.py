@@ -856,11 +856,11 @@ def _occupancy_score(
         )
         if road_border_available is not None or torch.isfinite(road_border).any():
             sources["road_border"] = True
-            return _linear_safe_score(
-                road_border,
-                0.0,
-                _RL_REWARD_CONFIG.rb_wide_thresh,
-            ), sources
+            # Keep the fallback on the same explicit road-border thresholds as the
+            # direct reward path.  The previous planner_metrics global (normally
+            # equal to 0.60 m) made --rl_road_border_safe_m ineffective whenever
+            # occupancy was sourced from a road border.
+            return _linear_safe_score(road_border, 0.0, config.road_border_safe_m), sources
 
     return torch.ones(C, T, device=device), sources
 

@@ -57,12 +57,12 @@ from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
+    build_adamw_optimizer,
     compile_model_components,
     gather_rng_states,
     resume_model,
     set_seed,
 )
-from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from valid_predictor import aggregate_valid_metrics, validate_model
@@ -1353,19 +1353,18 @@ def model_training(args):
     if not trainable_params:
         raise RuntimeError("No trainable parameters found for RL training")
     params = [{"params": trainable_params, "lr": args.learning_rate}]
-    if args.fused_optimizer and torch.device(args.device).type == "cuda":
-        try:
-            optimizer = optim.AdamW(params, fused=True, weight_decay=args.weight_decay)
-        # PyTorch releases disagree on whether an unsupported fused kernel is
-        # reported during construction as TypeError or RuntimeError. Fall back
-        # before writing args.json so the effective optimizer is reproducible.
-        except (TypeError, RuntimeError):
-            optimizer = optim.AdamW(params, weight_decay=args.weight_decay)
-            args.fused_optimizer = False
-    else:
-        optimizer = optim.AdamW(params, weight_decay=args.weight_decay)
+    optimizer, effective_fused_optimizer = build_adamw_optimizer(
+        trainable_params,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        fused_requested=args.fused_optimizer,
+        device=args.device,
+    )
+    if args.fused_optimizer and not effective_fused_optimizer:
+        print("WARNING: fused AdamW is unavailable; falling back to standard AdamW")
+        args.fused_optimizer = False
     if global_rank == 0:
-        args_dict["fused_optimizer"] = args.fused_optimizer
+        args_dict["fused_optimizer"] = effective_fused_optimizer
         write_json_atomic(args_dict, os.path.join(save_path, "args.json"))
     scheduler = LinearWarmupConstantLR(optimizer, train_epochs, args.warm_up_epoch)
 

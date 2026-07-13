@@ -7,7 +7,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import wandb
-from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
@@ -32,6 +31,7 @@ from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
+    build_adamw_optimizer,
     compile_model_components,
     gather_rng_states,
     resume_model,
@@ -798,11 +798,21 @@ def model_training(args: TrainConfig):
         }
     ]
 
-    optimizer = optim.AdamW(
-        params,
-        fused=getattr(args, "fused_optimizer", False) or None,
+    requested_fused_optimizer = bool(getattr(args, "fused_optimizer", False))
+    optimizer, effective_fused_optimizer = build_adamw_optimizer(
+        params[0]["params"],
+        learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
+        fused_requested=requested_fused_optimizer,
+        device=args.device,
     )
+    if requested_fused_optimizer and not effective_fused_optimizer:
+        print("WARNING: fused AdamW is unavailable; falling back to standard AdamW")
+        args.fused_optimizer = False
+    if global_rank == 0:
+        args_dict["fused_optimizer"] = effective_fused_optimizer
+        with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
+            json.dump(args_dict, f, indent=4)
     scheduler = LinearWarmupConstantLR(optimizer, train_epochs, args.warm_up_epoch)
 
     checkpoint_wandb_id = None

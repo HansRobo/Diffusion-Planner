@@ -21,6 +21,9 @@ outside this audit.
 | Initialization | Route position embeddings used unit-scale random initialization unlike the other embeddings. | Fixed for new training. Existing checkpoints load unchanged; a fresh Base/SFT run is needed to measure the benefit. |
 | Export coverage | ONNX trace dummy turn indicators never sampled input class 3. | Fixed. The trace now samples all four raw input classes. |
 | API hygiene | DPM wrapper used mutable default dictionaries. | Fixed with `None` defaults. |
+| Optimizer portability | Supervised training could fail when fused AdamW was requested but unsupported by the active PyTorch/CUDA build. | Fixed. SFT and RL now run a one-element fused AdamW probe before training, fall back to standard AdamW on either construction/step capability failure, and persist the effective setting. |
+| Reward configuration | Road-border occupancy fallback used the planner-metrics global wide threshold instead of the HDP reward configuration. | Fixed. The fallback now uses `rl_road_border_safe_m`, with a regression test for non-default thresholds. |
+| Converter dtype | The direct ROS-bag converter wrote transform-derived `goal_pose` as NumPy `float64`. | Fixed. It is explicitly saved as `float32`, matching the rest of the NPZ schema. |
 
 ## Verified already fixed by earlier rounds
 
@@ -91,7 +94,7 @@ correctness failure in the default run.
 ## Verification
 
 - Ruff: clean.
-- Full tests: `450 passed, 15 skipped`.
-- Full tests with `PYTHONWARNINGS=error`: `450 passed, 15 skipped`.
+- Full tests: `453 passed, 15 skipped` before the final audit patches; the final focused HDP/map suite is `108 passed` (the added optimizer regression is included).
+- Full tests with `PYTHONWARNINGS=error`: clean on the pre-patch tree; the same command is rerun after the final commit.
 - Node02 direct road-border RL smoke completed with Slurm exit code 0. Node01 formal RL remains
   under monitoring and was not modified by this audit.

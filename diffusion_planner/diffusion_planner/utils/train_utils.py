@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from timm.utils import ModelEmaV3
+from torch import optim
 
 
 def atomic_torch_save(obj, path) -> None:
@@ -53,6 +54,47 @@ class ModelEma(ModelEmaV3):
     @property
     def ema(self):
         return self.module
+
+
+def build_adamw_optimizer(
+    params,
+    *,
+    learning_rate: float,
+    weight_decay: float,
+    fused_requested: bool,
+    device,
+):
+    """Create AdamW and verify fused support before the real training loop.
+
+    Some PyTorch/CUDA combinations accept ``fused=True`` at construction but raise
+    only on the first ``step``.  A one-element probe makes that hardware capability
+    decision at startup, so a multi-day run cannot fail after its first backward.
+    Returns ``(optimizer, effective_fused)``.
+    """
+    device = torch.device(device)
+    if not fused_requested or device.type != "cuda":
+        return (
+            optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay),
+            False,
+        )
+
+    try:
+        probe = torch.ones(1, device=device, requires_grad=True)
+        probe_optimizer = optim.AdamW(
+            [probe], lr=learning_rate, weight_decay=weight_decay, fused=True
+        )
+        probe_optimizer.zero_grad(set_to_none=True)
+        probe.square().sum().backward()
+        probe_optimizer.step()
+        optimizer = optim.AdamW(
+            params, lr=learning_rate, weight_decay=weight_decay, fused=True
+        )
+    except (TypeError, RuntimeError):
+        return (
+            optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay),
+            False,
+        )
+    return optimizer, True
 
 
 def compile_model_components(model) -> None:
