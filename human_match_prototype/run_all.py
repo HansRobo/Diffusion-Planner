@@ -45,7 +45,7 @@ def parse_args():
 def main():
     args = parse_args()
     paths = json.load(open(args.npz_list))
-    if args.limit:
+    if args.limit is not None:
         paths = paths[: args.limit]
     sampler = TrajectorySampler(
         MODEL_DIR / "args.json", MODEL_DIR / "diffusion_planner.onnx", args.device
@@ -71,6 +71,7 @@ def main():
             rows.append(row)
         except Exception:
             skipped += 1
+            print(f"skip {path}")
             traceback.print_exc()
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
