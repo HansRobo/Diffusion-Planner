@@ -17,6 +17,7 @@ from train_hdp_rl_predictor import (
     finite_scalar_metrics,
     initialize_fresh_rl_policy_and_ema,
     load_resume_train_rows,
+    source_policy_selection_guards,
     validate_compiled_candidate_batch,
     write_train_log_atomic,
 )
@@ -277,6 +278,57 @@ def test_finite_scalar_metrics_excludes_invalid_json_values():
     )
 
     assert metrics == {"finite": 0.75}
+
+
+def test_source_policy_selection_guards_require_safety_and_epdms_non_regression():
+    source = {
+        "baseline_available": True,
+        "valid_reward_risk": 0.4,
+        "valid_reward_safety": 0.98,
+        "valid_epdms_total": 0.85,
+    }
+    kwargs = {
+        "max_safety_regression": 0.0,
+        "max_epdms_regression": 0.0,
+        "require_epdms": True,
+    }
+
+    assert source_policy_selection_guards(
+        source, {"risk": 0.41, "safety": 0.99}, 0.86, **kwargs
+    ) == {"available": True, "risk": True, "safety": True, "epdms": True}
+    assert not source_policy_selection_guards(
+        source, {"risk": 0.39, "safety": 0.99}, 0.86, **kwargs
+    )["risk"]
+    assert not source_policy_selection_guards(
+        source, {"risk": 0.41, "safety": 0.97}, 0.86, **kwargs
+    )["safety"]
+    assert not source_policy_selection_guards(
+        source, {"risk": 0.41, "safety": 0.99}, 0.84, **kwargs
+    )["epdms"]
+
+
+def test_source_policy_selection_guards_honor_tolerance_and_unavailable_baseline():
+    source = {
+        "valid_reward_risk": 0.4,
+        "valid_reward_safety": 0.98,
+        "valid_epdms_total": 0.85,
+    }
+    assert source_policy_selection_guards(
+        source,
+        {"risk": 0.3995, "safety": 0.9795},
+        0.8495,
+        max_safety_regression=0.001,
+        max_epdms_regression=0.001,
+        require_epdms=True,
+    ) == {"available": True, "risk": True, "safety": True, "epdms": True}
+    assert source_policy_selection_guards(
+        {"baseline_available": False},
+        {},
+        float("nan"),
+        max_safety_regression=0.0,
+        max_epdms_regression=0.0,
+        require_epdms=True,
+    ) == {"available": False, "risk": True, "safety": True, "epdms": True}
 
 
 def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):

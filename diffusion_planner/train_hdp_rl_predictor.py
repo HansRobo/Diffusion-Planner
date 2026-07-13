@@ -332,6 +332,23 @@ def get_args():
         help="maximum relative ego validation-loss increase allowed for best-model selection",
     )
     parser.add_argument(
+        "--rl_max_valid_safety_regression",
+        type=float,
+        default=_train_config_default("rl_max_valid_safety_regression"),
+        help=(
+            "maximum absolute decrease in source-policy risk and collision-safety scores "
+            "allowed for best-model selection"
+        ),
+    )
+    parser.add_argument(
+        "--rl_max_valid_epdms_regression",
+        type=float,
+        default=_train_config_default("rl_max_valid_epdms_regression"),
+        help=(
+            "maximum absolute decrease in source-policy EPDMS allowed for best-model selection"
+        ),
+    )
+    parser.add_argument(
         "--rl_best_score_min_delta",
         type=float,
         default=_train_config_default("rl_best_score_min_delta"),
@@ -798,6 +815,10 @@ def get_args():
         raise ValueError("--rl_full_eval_utd must be >= 1")
     if args.rl_max_valid_loss_regression < 0.0:
         raise ValueError("--rl_max_valid_loss_regression must be non-negative")
+    if args.rl_max_valid_safety_regression < 0.0:
+        raise ValueError("--rl_max_valid_safety_regression must be non-negative")
+    if args.rl_max_valid_epdms_regression < 0.0:
+        raise ValueError("--rl_max_valid_epdms_regression must be non-negative")
     if args.rl_best_score_min_delta < 0.0:
         raise ValueError("--rl_best_score_min_delta must be non-negative")
     if args.rl_early_stop_patience < 0:
@@ -858,6 +879,53 @@ def finite_scalar_metrics(metrics):
         if math.isfinite(number):
             result[key] = number
     return result
+
+
+def source_policy_selection_guards(
+    source_metrics,
+    valid_reward_metrics,
+    valid_epdms_total,
+    *,
+    max_safety_regression,
+    max_epdms_regression,
+    require_epdms,
+):
+    """Return source-relative gates used before accepting an RL best checkpoint."""
+    if not source_metrics or not bool(source_metrics.get("baseline_available", True)):
+        return {"available": False, "risk": True, "safety": True, "epdms": True}
+
+    required_source = ("valid_reward_risk", "valid_reward_safety")
+    if require_epdms:
+        required_source += ("valid_epdms_total",)
+    missing = [key for key in required_source if key not in source_metrics]
+    if missing:
+        raise ValueError(f"Source-policy metrics are missing required selection guards: {missing}")
+
+    def finite(value):
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return False
+
+    source_risk = source_metrics["valid_reward_risk"]
+    source_safety = source_metrics["valid_reward_safety"]
+    valid_risk = valid_reward_metrics.get("risk")
+    valid_safety = valid_reward_metrics.get("safety")
+    risk_ok = finite(source_risk) and finite(valid_risk) and float(valid_risk) >= float(
+        source_risk
+    ) - max_safety_regression
+    safety_ok = finite(source_safety) and finite(valid_safety) and float(valid_safety) >= float(
+        source_safety
+    ) - max_safety_regression
+    epdms_ok = True
+    if require_epdms:
+        source_epdms = source_metrics["valid_epdms_total"]
+        epdms_ok = (
+            finite(source_epdms)
+            and finite(valid_epdms_total)
+            and float(valid_epdms_total) >= float(source_epdms) - max_epdms_regression
+        )
+    return {"available": True, "risk": risk_ok, "safety": safety_ok, "epdms": epdms_ok}
 
 
 def turn_indicator_metrics(agg):
@@ -1173,6 +1241,7 @@ def model_training(args):
     best_valid_score = -float("inf")
     full_evals_without_improvement = 0
     baseline_valid_loss = float("inf")
+    baseline_metrics = {"baseline_available": False}
     configured_multisample_count = args.multisample_eval_num_samples
     configured_epdms = args.enable_epdms_eval
     resume_baseline_metrics = None
@@ -1376,12 +1445,24 @@ def model_training(args):
             loss_within_guard = valid_loss_ego <= baseline_valid_loss * (
                 1.0 + args.rl_max_valid_loss_regression
             )
+            source_guards = source_policy_selection_guards(
+                baseline_metrics,
+                valid_reward_metrics,
+                valid_epdms_total,
+                max_safety_regression=args.rl_max_valid_safety_regression,
+                max_epdms_regression=args.rl_max_valid_epdms_regression,
+                require_epdms=configured_epdms,
+            )
+            source_policy_within_guard = all(
+                source_guards[key] for key in ("risk", "safety", "epdms")
+            )
             selection_score = (
                 valid_reward_mean if math.isfinite(valid_reward_mean) else float("nan")
             )
             improves_best = (
                 run_full_eval
                 and loss_within_guard
+                and source_policy_within_guard
                 and selection_score > best_valid_score + args.rl_best_score_min_delta
             )
             if run_full_eval:
@@ -1415,6 +1496,11 @@ def model_training(args):
                         },
                         "valid/full_eval": float(run_full_eval),
                         "valid/within_source_loss_guard": float(loss_within_guard),
+                        "valid/source_policy_guard_available": float(source_guards["available"]),
+                        "valid/within_source_risk_guard": float(source_guards["risk"]),
+                        "valid/within_source_safety_guard": float(source_guards["safety"]),
+                        "valid/within_source_epdms_guard": float(source_guards["epdms"]),
+                        "valid/within_source_policy_guard": float(source_policy_within_guard),
                         "valid/selection_score": selection_score,
                         "valid/best_selection_score": logged_best_valid_score,
                         "valid/improves_best": float(improves_best),
@@ -1446,6 +1532,11 @@ def model_training(args):
                 **{f"valid_reward_{key}": value for key, value in valid_reward_metrics.items()},
                 "valid_full_eval": run_full_eval,
                 "valid_within_source_loss_guard": loss_within_guard,
+                "valid_source_policy_guard_available": source_guards["available"],
+                "valid_within_source_risk_guard": source_guards["risk"],
+                "valid_within_source_safety_guard": source_guards["safety"],
+                "valid_within_source_epdms_guard": source_guards["epdms"],
+                "valid_within_source_policy_guard": source_policy_within_guard,
                 "valid_selection_score": selection_score,
                 "valid_improves_best": improves_best,
                 "best_valid_score": logged_best_valid_score,
