@@ -366,6 +366,9 @@ def _backward_reward_weighted_update(
         sync_context = (
             model.no_sync()
             if bool(getattr(args, "ddp", False))
+            # PyTorch 2.11 static-graph DDP asserts in Reducer::expect_autograd_hooks_ when
+            # no_sync spans the first of multiple backwards. Synchronized accumulation is
+            # numerically exact because every preceding partial gradient is already rank-equal.
             and not bool(getattr(args, "ddp_static_graph", False))
             and len(ranges) > 1
             and not is_last
