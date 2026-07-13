@@ -1487,6 +1487,8 @@ def sample_group(
     Returns:
         ego_world: [B*N, T, 4] ego trajectories in the ego-centric world frame
             (x, y, cos_yaw, sin_yaw).
+        When ``return_encoding`` is true, the second result is the unexpanded scene encoding.
+        Candidate expansion is deferred to differentiable update chunks to minimize peak memory.
     """
     was_training = model.training
     model.eval()
@@ -1542,7 +1544,6 @@ def sample_group(
                     scene_norm_inputs["route_lanes"]
                 )
                 predictions = []
-                encoding_chunks = []
                 for scene_start in range(0, scene_count, scene_chunk_size):
                     scene_stop = scene_start + scene_chunk_size
                     candidate_start = scene_start * group_size
@@ -1568,10 +1569,8 @@ def sample_group(
                     ].repeat_interleave(group_size, dim=0)
                     chunk_outputs = net.decoder(chunk_encoding, chunk_inputs)
                     predictions.append(chunk_outputs["prediction"])
-                    if return_encoding:
-                        encoding_chunks.append(chunk_encoding)
                 prediction = torch.cat(predictions, dim=0)
-                cached_encoding = torch.cat(encoding_chunks, dim=0) if return_encoding else None
+                cached_encoding = scene_encoding if return_encoding else None
             else:
                 _, outputs = model(inference_inputs)
                 prediction = outputs["prediction"]

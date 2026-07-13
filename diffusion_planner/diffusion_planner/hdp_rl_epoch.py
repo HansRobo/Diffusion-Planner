@@ -344,6 +344,11 @@ def _backward_reward_weighted_update(
         dtype=ego_world.dtype,
         device=ego_world.device,
     )
+    if cached_encoding is not None and cached_encoding.shape[0] != num_scenes:
+        raise ValueError(
+            "RL cached encoding must remain scene-level, got batch "
+            f"{cached_encoding.shape[0]} for {num_scenes} scenes"
+        )
 
     for chunk_index, (scene_start, scene_stop) in enumerate(ranges):
         candidate_start = scene_start * n
@@ -354,7 +359,9 @@ def _backward_reward_weighted_update(
             norm_inputs, scene_start, scene_stop, num_scenes, n
         )
         chunk_encoding = (
-            None if cached_encoding is None else cached_encoding[candidate_start:candidate_stop]
+            None
+            if cached_encoding is None
+            else cached_encoding[scene_start:scene_stop].repeat_interleave(n, dim=0)
         )
         sync_context = (
             model.no_sync()
@@ -596,7 +603,7 @@ def _hdp_rl_step(
                 rollout_encoding if decoder_only else None,
                 expert_norm_inputs,
                 expert_ego_gt,
-                rollout_encoding[::n] if decoder_only else None,
+                rollout_encoding if decoder_only else None,
             )
             update_grad_norm = nn.utils.clip_grad_norm_(trainable_params, 5).detach()
             grad_norm = grad_norm + update_grad_norm

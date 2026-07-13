@@ -413,6 +413,7 @@ def test_rollout_scene_chunking_preserves_samples_and_candidate_order():
 
     torch.testing.assert_close(chunked, unchunked, rtol=0, atol=0)
     torch.testing.assert_close(chunked_encoding, unchunked_encoding, rtol=0, atol=0)
+    assert chunked_encoding.shape[0] == 2
     assert unchunked_model.decoder.batch_sizes == [8]
     assert chunked_model.decoder.batch_sizes == [4, 4]
     assert unchunked_model.training and chunked_model.training
@@ -879,12 +880,14 @@ def test_hdp_behavior_cloning_anchor_uses_one_expert_target_per_scene(monkeypatc
 def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkeypatch):
     parameter = torch.nn.Parameter(torch.tensor(1.0))
     captured_draws = []
+    captured_candidate_encodings = []
 
     def fake_policy_loss(
         _model, _inputs, target, _args, _encoding=None, diffusion_time=None, diffusion_noise=None
     ):
         if diffusion_time is not None:
             captured_draws.append((diffusion_time.clone(), diffusion_noise.clone()))
+            captured_candidate_encodings.append(_encoding.clone())
         per_sample = parameter * target[:, 0, 0]
         return {
             "ego_loss_per_sample": per_sample,
@@ -908,7 +911,7 @@ def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkey
         ddp_world_size=1,
         num_scenes=2,
         n=4,
-        cached_encoding=None,
+        cached_encoding=torch.tensor([[1.0], [2.0]]),
         expert_norm_inputs={},
         expert_ego_gt=expert_target,
         expert_cached_encoding=None,
@@ -917,9 +920,11 @@ def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkey
     gradients = []
     losses = []
     draws_by_cap = []
+    encodings_by_cap = []
     for cap in (0, 4):
         parameter.grad = None
         captured_draws.clear()
+        captured_candidate_encodings.clear()
         torch.manual_seed(41)
         args = SimpleNamespace(
             rl_update_max_candidates_per_rank=cap,
@@ -936,12 +941,15 @@ def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkey
                 torch.cat([draw[1] for draw in captured_draws]),
             )
         )
+        encodings_by_cap.append(torch.cat(captured_candidate_encodings))
 
     torch.testing.assert_close(gradients[0], torch.tensor(8.25))
     torch.testing.assert_close(gradients[1], gradients[0])
     torch.testing.assert_close(losses[1], losses[0])
     torch.testing.assert_close(draws_by_cap[1][0], draws_by_cap[0][0])
     torch.testing.assert_close(draws_by_cap[1][1], draws_by_cap[0][1])
+    torch.testing.assert_close(encodings_by_cap[1], encodings_by_cap[0])
+    torch.testing.assert_close(encodings_by_cap[0], torch.tensor([[1.0]] * 4 + [[2.0]] * 4))
 
 
 def test_rl_weight_diagnostics_exclude_discarded_groups(monkeypatch):
