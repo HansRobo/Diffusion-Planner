@@ -186,8 +186,8 @@ class TrainConfig:
     rl_full_eval_utd: int = 5
     rl_validate_before_training: bool = True
     rl_max_valid_loss_regression: float = 0.25
-    # Best-policy selection must not buy behavior reward by degrading held-out safety or the
-    # independent EPDMS proxy. These are absolute tolerances because all guarded scores are [0, 1].
+    # Best-policy selection must not buy behavior reward by degrading held-out safety primitives
+    # or the independent EPDMS proxy. These are absolute tolerances because all scores are [0, 1].
     rl_max_valid_safety_regression: float = 0.0
     rl_max_valid_epdms_regression: float = 0.0
     rl_best_score_min_delta: float = 0.0001

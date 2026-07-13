@@ -891,10 +891,13 @@ def source_policy_selection_guards(
     require_epdms,
 ):
     """Return source-relative gates used before accepting an RL best checkpoint."""
+    higher_is_better = ("risk", "safety", "ttc", "thw", "occupancy", "comfort")
+    lower_is_better = ("collision_active", "collision_rear")
+    guard_names = higher_is_better + lower_is_better
     if not source_metrics or not bool(source_metrics.get("baseline_available", True)):
-        return {"available": False, "risk": True, "safety": True, "epdms": True}
+        return {"available": False, **dict.fromkeys((*guard_names, "epdms"), True)}
 
-    required_source = ("valid_reward_risk", "valid_reward_safety")
+    required_source = tuple(f"valid_reward_{name}" for name in guard_names)
     if require_epdms:
         required_source += ("valid_epdms_total",)
     missing = [key for key in required_source if key not in source_metrics]
@@ -907,25 +910,32 @@ def source_policy_selection_guards(
         except (TypeError, ValueError):
             return False
 
-    source_risk = source_metrics["valid_reward_risk"]
-    source_safety = source_metrics["valid_reward_safety"]
-    valid_risk = valid_reward_metrics.get("risk")
-    valid_safety = valid_reward_metrics.get("safety")
-    risk_ok = finite(source_risk) and finite(valid_risk) and float(valid_risk) >= float(
-        source_risk
-    ) - max_safety_regression
-    safety_ok = finite(source_safety) and finite(valid_safety) and float(valid_safety) >= float(
-        source_safety
-    ) - max_safety_regression
-    epdms_ok = True
+    guards = {"available": True}
+    for name in higher_is_better:
+        source = source_metrics[f"valid_reward_{name}"]
+        current = valid_reward_metrics.get(name)
+        guards[name] = (
+            finite(source)
+            and finite(current)
+            and float(current) >= float(source) - max_safety_regression
+        )
+    for name in lower_is_better:
+        source = source_metrics[f"valid_reward_{name}"]
+        current = valid_reward_metrics.get(name)
+        guards[name] = (
+            finite(source)
+            and finite(current)
+            and float(current) <= float(source) + max_safety_regression
+        )
+    guards["epdms"] = True
     if require_epdms:
         source_epdms = source_metrics["valid_epdms_total"]
-        epdms_ok = (
+        guards["epdms"] = (
             finite(source_epdms)
             and finite(valid_epdms_total)
             and float(valid_epdms_total) >= float(source_epdms) - max_epdms_regression
         )
-    return {"available": True, "risk": risk_ok, "safety": safety_ok, "epdms": epdms_ok}
+    return guards
 
 
 def turn_indicator_metrics(agg):
@@ -1454,7 +1464,7 @@ def model_training(args):
                 require_epdms=configured_epdms,
             )
             source_policy_within_guard = all(
-                source_guards[key] for key in ("risk", "safety", "epdms")
+                value for key, value in source_guards.items() if key != "available"
             )
             selection_score = (
                 valid_reward_mean if math.isfinite(valid_reward_mean) else float("nan")
@@ -1497,9 +1507,11 @@ def model_training(args):
                         "valid/full_eval": float(run_full_eval),
                         "valid/within_source_loss_guard": float(loss_within_guard),
                         "valid/source_policy_guard_available": float(source_guards["available"]),
-                        "valid/within_source_risk_guard": float(source_guards["risk"]),
-                        "valid/within_source_safety_guard": float(source_guards["safety"]),
-                        "valid/within_source_epdms_guard": float(source_guards["epdms"]),
+                        **{
+                            f"valid/within_source_{key}_guard": float(value)
+                            for key, value in source_guards.items()
+                            if key != "available"
+                        },
                         "valid/within_source_policy_guard": float(source_policy_within_guard),
                         "valid/selection_score": selection_score,
                         "valid/best_selection_score": logged_best_valid_score,
@@ -1533,9 +1545,11 @@ def model_training(args):
                 "valid_full_eval": run_full_eval,
                 "valid_within_source_loss_guard": loss_within_guard,
                 "valid_source_policy_guard_available": source_guards["available"],
-                "valid_within_source_risk_guard": source_guards["risk"],
-                "valid_within_source_safety_guard": source_guards["safety"],
-                "valid_within_source_epdms_guard": source_guards["epdms"],
+                **{
+                    f"valid_within_source_{key}_guard": value
+                    for key, value in source_guards.items()
+                    if key != "available"
+                },
                 "valid_within_source_policy_guard": source_policy_within_guard,
                 "valid_selection_score": selection_score,
                 "valid_improves_best": improves_best,

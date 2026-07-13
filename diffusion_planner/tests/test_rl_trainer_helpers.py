@@ -285,7 +285,23 @@ def test_source_policy_selection_guards_require_safety_and_epdms_non_regression(
         "baseline_available": True,
         "valid_reward_risk": 0.4,
         "valid_reward_safety": 0.98,
+        "valid_reward_ttc": 0.5,
+        "valid_reward_thw": 0.8,
+        "valid_reward_occupancy": 0.9,
+        "valid_reward_comfort": 0.99,
+        "valid_reward_collision_active": 0.02,
+        "valid_reward_collision_rear": 0.03,
         "valid_epdms_total": 0.85,
+    }
+    improved = {
+        "risk": 0.41,
+        "safety": 0.99,
+        "ttc": 0.51,
+        "thw": 0.81,
+        "occupancy": 0.91,
+        "comfort": 1.0,
+        "collision_active": 0.01,
+        "collision_rear": 0.02,
     }
     kwargs = {
         "max_safety_regression": 0.0,
@@ -293,17 +309,24 @@ def test_source_policy_selection_guards_require_safety_and_epdms_non_regression(
         "require_epdms": True,
     }
 
-    assert source_policy_selection_guards(
-        source, {"risk": 0.41, "safety": 0.99}, 0.86, **kwargs
-    ) == {"available": True, "risk": True, "safety": True, "epdms": True}
+    guards = source_policy_selection_guards(source, improved, 0.86, **kwargs)
+    assert guards["available"]
+    assert all(value for key, value in guards.items() if key != "available")
+    for name, regressed in (
+        ("risk", 0.39),
+        ("safety", 0.97),
+        ("ttc", 0.49),
+        ("thw", 0.79),
+        ("occupancy", 0.89),
+        ("comfort", 0.98),
+        ("collision_active", 0.03),
+        ("collision_rear", 0.04),
+    ):
+        current = dict(improved)
+        current[name] = regressed
+        assert not source_policy_selection_guards(source, current, 0.86, **kwargs)[name]
     assert not source_policy_selection_guards(
-        source, {"risk": 0.39, "safety": 0.99}, 0.86, **kwargs
-    )["risk"]
-    assert not source_policy_selection_guards(
-        source, {"risk": 0.41, "safety": 0.97}, 0.86, **kwargs
-    )["safety"]
-    assert not source_policy_selection_guards(
-        source, {"risk": 0.41, "safety": 0.99}, 0.84, **kwargs
+        source, improved, 0.84, **kwargs
     )["epdms"]
 
 
@@ -311,24 +334,43 @@ def test_source_policy_selection_guards_honor_tolerance_and_unavailable_baseline
     source = {
         "valid_reward_risk": 0.4,
         "valid_reward_safety": 0.98,
+        "valid_reward_ttc": 0.5,
+        "valid_reward_thw": 0.8,
+        "valid_reward_occupancy": 0.9,
+        "valid_reward_comfort": 0.99,
+        "valid_reward_collision_active": 0.02,
+        "valid_reward_collision_rear": 0.03,
         "valid_epdms_total": 0.85,
     }
-    assert source_policy_selection_guards(
+    guards = source_policy_selection_guards(
         source,
-        {"risk": 0.3995, "safety": 0.9795},
+        {
+            "risk": 0.3995,
+            "safety": 0.9795,
+            "ttc": 0.4995,
+            "thw": 0.7995,
+            "occupancy": 0.8995,
+            "comfort": 0.9895,
+            "collision_active": 0.0205,
+            "collision_rear": 0.0305,
+        },
         0.8495,
         max_safety_regression=0.001,
         max_epdms_regression=0.001,
         require_epdms=True,
-    ) == {"available": True, "risk": True, "safety": True, "epdms": True}
-    assert source_policy_selection_guards(
+    )
+    assert guards["available"]
+    assert all(value for key, value in guards.items() if key != "available")
+    unavailable = source_policy_selection_guards(
         {"baseline_available": False},
         {},
         float("nan"),
         max_safety_regression=0.0,
         max_epdms_regression=0.0,
         require_epdms=True,
-    ) == {"available": False, "risk": True, "safety": True, "epdms": True}
+    )
+    assert not unavailable["available"]
+    assert all(value for key, value in unavailable.items() if key != "available")
 
 
 def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
