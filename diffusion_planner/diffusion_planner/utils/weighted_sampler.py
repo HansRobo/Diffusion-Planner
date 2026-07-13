@@ -48,6 +48,12 @@ class ClusterWeightedDistributedSampler(Sampler):
             for p in paths:
                 path_to_cluster[str(data_path_to_rel(p))] = cluster_id
 
+        if not path_to_cluster:
+            raise ValueError(
+                f"Cluster JSON contains no paths "
+                f"({len(clusters)} clusters, all empty). Check cluster JSON."
+            )
+
         # First pass: identify cluster membership and count live matches
         sample_cluster = [None] * len(self.data_list)
         live_counts: dict[str, int] = {}

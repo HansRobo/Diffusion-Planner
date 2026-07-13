@@ -199,6 +199,20 @@ class TestEdgeCases:
             for i in range(6, 10):
                 assert sampler.weights[i].item() == unmatched_weight
 
+    def test_all_empty_clusters_raises_valueerror(self):
+        """All-empty cluster JSON should raise ValueError, not ZeroDivisionError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(5)]
+            clusters = {"cluster_id0": [], "cluster_id1": []}
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                json.dump(clusters, f)
+
+            with pytest.raises(ValueError, match="Cluster JSON contains no paths"):
+                ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=1, rank=0, seed=42
+                )
+
     def test_no_matching_paths_raises_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_list = [f"/data/sample_{i}.npz" for i in range(5)]
