@@ -922,7 +922,7 @@ def test_legacy_short_neighbor_future_alignment_keeps_full_tracks():
     future = np.zeros((2, 4, 3), dtype=np.float32)
     # Legacy short track: current frame is duplicated, followed by t+0.1 and t+0.2.
     future[0, :3, 0] = np.array([5.0, 6.0, 7.0])
-    # Full tracks were already correct because the converter deque evicted its seed.
+    # Most full tracks were already correct because the converter deque evicted its seed.
     future[1, :, 0] = np.array([11.0, 12.0, 13.0, 14.0])
 
     data = {"neighbor_agents_future": future, "neighbor_agents_past": past}
@@ -932,6 +932,40 @@ def test_legacy_short_neighbor_future_alignment_keeps_full_tracks():
     np.testing.assert_allclose(data["neighbor_agents_future"][1], future[1])
     # The source array loaded from the shared NPZ remains untouched.
     np.testing.assert_allclose(future[0, :, 0], [5.0, 6.0, 7.0, 0.0])
+
+
+def test_legacy_full_neighbor_future_alignment_uses_next_scene(tmp_path):
+    source_path = tmp_path / "scene_00000010.npz"
+    next_path = tmp_path / "scene_00000011.npz"
+
+    past = np.zeros((2, 3, 11), dtype=np.float32)
+    past[:, -1, 2] = 1.0
+    past[:, -1, 0] = [5.0, 10.0]
+    future = np.zeros((2, 4, 3), dtype=np.float32)
+    # The first full track retained the legacy current-frame seed at the horizon boundary.
+    future[0, :, 0] = [5.0, 6.0, 7.0, 8.0]
+    # The second track legitimately repeats its current pose at t+0.1.
+    future[1, :, 0] = [10.0, 11.0, 12.0, 13.0]
+
+    next_past = np.zeros_like(past)
+    next_past[:, -1, 2] = 1.0
+    next_past[:, -1, 0] = [6.0, 10.0]
+    np.savez(next_path, neighbor_agents_past=next_past)
+
+    sidecar = {"x": 0.0, "y": 0.0, "qw": 1.0, "qx": 0.0, "qy": 0.0, "qz": 0.0}
+    source_path.with_suffix(".json").write_text(
+        json.dumps({**sidecar, "timestamp": 0}), encoding="utf-8"
+    )
+    next_path.with_suffix(".json").write_text(
+        json.dumps({**sidecar, "timestamp": 100_000_000}), encoding="utf-8"
+    )
+
+    data = {"neighbor_agents_future": future, "neighbor_agents_past": past}
+    align_legacy_neighbor_futures_on_load(data, source_path=str(source_path))
+
+    np.testing.assert_allclose(data["neighbor_agents_future"][0, :, 0], [6.0, 7.0, 8.0, 0.0])
+    np.testing.assert_allclose(data["neighbor_agents_future"][1], future[1])
+    np.testing.assert_allclose(future[0, :, 0], [5.0, 6.0, 7.0, 8.0])
 
 
 def test_extra_dataset_weighting_stays_in_memory(tmp_path):

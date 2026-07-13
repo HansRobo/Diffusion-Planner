@@ -6,33 +6,10 @@ from diffusion_planner.dimensions import (
     TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT,
     TRAFFIC_LIGHT_ONE_HOT_DIM,
 )
+from diffusion_planner.utils.legacy_neighbor_alignment import (
+    align_legacy_neighbor_futures_on_load,
+)
 from diffusion_planner.utils.train_utils import openjson
-
-
-def align_legacy_neighbor_futures_on_load(data: dict, atol: float = 1e-4) -> None:
-    """Fix legacy short-track timing in memory without writing the shared NPZ."""
-    if "neighbor_agents_future" not in data or "neighbor_agents_past" not in data:
-        return
-    future = data["neighbor_agents_future"]
-    past = data["neighbor_agents_past"]
-    if future.ndim != 3 or past.ndim != 3 or future.shape[0] != past.shape[0]:
-        return
-    if future.shape[1] < 2:
-        return
-
-    valid = np.any(future != 0, axis=-1)
-    valid_count = valid.sum(axis=-1)
-    short_track = (valid_count > 0) & (valid_count < future.shape[1])
-    current_valid = np.any(past[:, -1, :8] != 0, axis=-1)
-    first_matches_current = np.max(np.abs(future[:, 0, :2] - past[:, -1, :2]), axis=-1) <= atol
-    needs_shift = short_track & current_valid & valid[:, 0] & first_matches_current
-    if not np.any(needs_shift):
-        return
-
-    aligned = future.copy()
-    aligned[needs_shift, :-1] = future[needs_shift, 1:]
-    aligned[needs_shift, -1] = 0
-    data["neighbor_agents_future"] = aligned
 
 
 class DiffusionPlannerData(Dataset):
@@ -88,7 +65,7 @@ class DiffusionPlannerData(Dataset):
         ):
             self._mask_traffic_lights(data)
         if self.align_legacy_neighbor_futures:
-            align_legacy_neighbor_futures_on_load(data)
+            align_legacy_neighbor_futures_on_load(data, source_path=path)
         for key, value in data.items():
             if (
                 isinstance(value, np.ndarray)

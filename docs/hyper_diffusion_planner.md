@@ -94,7 +94,7 @@ Reasons:
 
 Single-frame lists can still run ordinary supervised training, but they are not sufficient for temporal-consistency evaluation.
 
-The current 2026-06 Tier IV corpus was generated before converter commit `55eff4f` and duplicates the current frame in short neighbor futures. `align_legacy_neighbor_futures=true` detects those short tracks in `Dataset.__getitem__`, reads from the next frame, and zero-pads the tail in worker memory. It never writes, renames, or migrates the shared NPZ. Regenerated corpora should set the flag to `false`; standalone validation inherits the checkpoint setting unless explicitly overridden.
+The current 2026-06 Tier IV corpus was generated before converter commit `55eff4f` and can duplicate the current frame in neighbor futures. `align_legacy_neighbor_futures=true` detects unambiguous short tracks from their padded tail. A rare track that disappears exactly at the 80-step boundary can look full; that case is shifted only when map-coordinate matching proves its second point is the next scene's current state. This preserves legitimate repeated poses. Alignment and tail padding happen in worker memory and never write, rename, or migrate shared NPZ files. Regenerated corpora should set the flag to `false`; standalone validation inherits the checkpoint setting unless explicitly overridden.
 
 Oversampling accepts repeated `extra_train_set_list` flags and one shared
 `extra_train_set_repeat` inside the Dataset. It concatenates the sources and appends

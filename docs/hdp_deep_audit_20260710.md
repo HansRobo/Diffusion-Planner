@@ -170,14 +170,17 @@ constants, including polygons `(10,40,3)` and line strings `(60,20,4)`.
 
 Converter commit `55eff4f` correctly makes future data start at `t+0.1s`. The existing
 2026-06 corpus predates that fix. Every sampled short neighbor track duplicated the
-current frame; full 80-frame tracks were already correct because the old fixed-size deque
-evicted its seed.
+current frame. Most 80-frame tracks were already correct because the old fixed-size deque
+evicted its seed, but a neighbor disappearing exactly at the horizon boundary could leave
+80 nonzero entries while retaining the seed.
 
 No dataset migration is performed. With `align_legacy_neighbor_futures=true`, each
-DataLoader worker detects only affected short tracks in the loaded in-memory dictionary,
-uses `future[1:]`, and zero-pads the tail. The shared NPZ is never opened for writing and
-is never renamed or replaced. The setting is saved in the checkpoint and standalone
-validation inherits it. Regenerated datasets should disable the correction.
+DataLoader worker detects affected short tracks directly. Ambiguous full-length cases are
+shifted only after matching the second point to the next logged scene in map coordinates;
+legitimate repeated poses are left unchanged. The aligned data uses `future[1:]` and a
+zero-padded tail in memory. The shared NPZ is never opened for writing, renamed, or
+replaced. The setting is saved in the checkpoint and standalone validation inherits it.
+Regenerated datasets should disable the correction.
 
 List counts from the audit:
 
