@@ -213,8 +213,10 @@ class TrainConfig:
     rl_max_valid_loss_regression: float = 0.25
     # Best-policy selection must not buy behavior reward by degrading held-out safety primitives
     # or the independent EPDMS proxy. These are absolute tolerances because all scores are [0, 1].
-    rl_max_valid_safety_regression: float = 0.0
-    rl_max_valid_epdms_regression: float = 0.0
+    # Held-out policy metrics are finite-sample estimates. A 0.1 percentage-point
+    # tolerance avoids rejecting an otherwise improved checkpoint on numerical/sample noise.
+    rl_max_valid_safety_regression: float = 0.001
+    rl_max_valid_epdms_regression: float = 0.001
     rl_best_score_min_delta: float = 0.0001
     rl_early_stop_patience: int = 0
 
