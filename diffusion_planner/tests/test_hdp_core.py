@@ -2162,6 +2162,18 @@ def test_hdp_relative_progress_caps_moving_and_preserves_stopped_reference():
 
 
 def test_hdp_stationary_progress_configuration_rejects_invalid_values():
+    with pytest.raises(ValueError, match="dt"):
+        HDPRewardConfig(dt=0.0)
+    with pytest.raises(ValueError, match="ttc_safe_s"):
+        HDPRewardConfig(ttc_safe_s=0.5)
+    with pytest.raises(ValueError, match="thw_safe_s"):
+        HDPRewardConfig(thw_safe_s=0.5)
+    with pytest.raises(ValueError, match="occupancy_safe_m"):
+        HDPRewardConfig(occupancy_safe_m=0.25)
+    with pytest.raises(ValueError, match="lane_half_width_m"):
+        HDPRewardConfig(lane_half_width_m=0.0)
+    with pytest.raises(ValueError, match="rear_end_penalty"):
+        HDPRewardConfig(rear_end_penalty=1.1)
     with pytest.raises(ValueError, match="stationary_reference_threshold_m"):
         HDPRewardConfig(stationary_reference_threshold_m=0.0)
     with pytest.raises(ValueError, match="stationary_progress_tolerance_m"):

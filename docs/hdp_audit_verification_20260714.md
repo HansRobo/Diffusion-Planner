@@ -144,6 +144,11 @@ the other training fields. These changes are configuration/geometry fixes, not r
 retuning, so existing checkpoints remain loadable in weights-only SFT-to-RL initialization;
 resuming a run with an older `args.json` intentionally fails loudly rather than mixing semantics.
 
+The final configuration-boundary pass also rejected non-finite RL temperatures, learning-rate/
+regularization values, `advantage_eps`, dropout probabilities, selection tolerances, and reward
+weights before dataset/model work. `HDPRewardConfig` now enforces the same ordering and positivity
+relations when constructed directly, so tests or future callers cannot bypass the CLI checks.
+
 ## Verification
 
 - Ruff: clean.

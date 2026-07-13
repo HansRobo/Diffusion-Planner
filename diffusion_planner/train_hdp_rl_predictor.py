@@ -895,6 +895,62 @@ def get_args():
         raise ValueError("--batch_size must be >= 1")
     if args.train_epochs < 1:
         raise ValueError("--train_epochs must be >= 1")
+    finite_training_fields = (
+        "augment_prob",
+        "ego_past_noise_std",
+        "learning_rate",
+        "weight_decay",
+        "encoder_drop_path_rate",
+        "decoder_drop_path_rate",
+        "ego_history_dropout_rate",
+        "planning_hybrid_loss",
+        "multisample_eval_noise_scale",
+        "rl_max_valid_loss_regression",
+        "rl_max_valid_safety_regression",
+        "rl_max_valid_epdms_regression",
+        "rl_best_score_min_delta",
+        "rl_noise_scale",
+        "rl_eval_noise_scale",
+        "advantage_eps",
+        "rl_reward_beta",
+        "rl_bc_weight",
+        "rl_ema_update_rate",
+        "rl_reward_dt",
+        "rl_ttc_critical_s",
+        "rl_ttc_safe_s",
+        "rl_thw_critical_s",
+        "rl_thw_safe_s",
+        "rl_occupancy_critical_m",
+        "rl_occupancy_safe_m",
+        "rl_occupancy_speed_gain_s",
+        "rl_stopped_neighbor_vel_thresh",
+        "rl_stopped_neighbor_disp_thresh",
+        "rl_lane_half_width_m",
+        "rl_leader_lateral_margin_m",
+        "rl_stationary_reference_threshold_m",
+        "rl_stationary_progress_tolerance_m",
+        "rl_red_light_lane_tolerance_m",
+        "rl_road_border_critical_m",
+        "rl_road_border_safe_m",
+        "rl_eval_stopped_neighbor_vel_thresh",
+        "rl_eval_stopped_neighbor_disp_thresh",
+        "rl_eval_stationary_reference_threshold_m",
+        "rl_eval_stationary_progress_tolerance_m",
+        "rl_eval_red_light_lane_tolerance_m",
+        *(
+            f"rl_reward_w_{name}"
+            for name in ("safety", "risk", "follow", "lane", "progress", "road_border")
+        ),
+        *(
+            f"rl_eval_reward_w_{name}"
+            for name in ("safety", "risk", "follow", "lane", "progress", "road_border")
+        ),
+    )
+    non_finite_training_fields = [
+        name for name in finite_training_fields if not math.isfinite(float(getattr(args, name)))
+    ]
+    if non_finite_training_fields:
+        raise ValueError(f"HDP-RL fields must be finite: {non_finite_training_fields}")
     if not 0 <= args.warm_up_epoch <= args.train_epochs:
         raise ValueError("--warm_up_epoch must be between 0 and --train_epochs")
     if not 0.0 <= args.augment_prob <= 1.0:
@@ -954,44 +1010,6 @@ def get_args():
         args.rl_reward_w_progress,
         args.rl_reward_w_road_border,
     )
-    finite_reward_fields = (
-        "rl_reward_beta",
-        "rl_reward_dt",
-        "rl_ttc_critical_s",
-        "rl_ttc_safe_s",
-        "rl_thw_critical_s",
-        "rl_thw_safe_s",
-        "rl_occupancy_critical_m",
-        "rl_occupancy_safe_m",
-        "rl_occupancy_speed_gain_s",
-        "rl_stopped_neighbor_vel_thresh",
-        "rl_stopped_neighbor_disp_thresh",
-        "rl_lane_half_width_m",
-        "rl_leader_lateral_margin_m",
-        "rl_stationary_reference_threshold_m",
-        "rl_stationary_progress_tolerance_m",
-        "rl_red_light_lane_tolerance_m",
-        "rl_road_border_critical_m",
-        "rl_road_border_safe_m",
-        "rl_eval_stopped_neighbor_vel_thresh",
-        "rl_eval_stopped_neighbor_disp_thresh",
-        "rl_eval_stationary_reference_threshold_m",
-        "rl_eval_stationary_progress_tolerance_m",
-        "rl_eval_red_light_lane_tolerance_m",
-        *(
-            f"rl_reward_w_{name}"
-            for name in ("safety", "risk", "follow", "lane", "progress", "road_border")
-        ),
-        *(
-            f"rl_eval_reward_w_{name}"
-            for name in ("safety", "risk", "follow", "lane", "progress", "road_border")
-        ),
-    )
-    non_finite_reward_fields = [
-        name for name in finite_reward_fields if not math.isfinite(float(getattr(args, name)))
-    ]
-    if non_finite_reward_fields:
-        raise ValueError(f"RL reward fields must be finite: {non_finite_reward_fields}")
     if any(weight < 0.0 for weight in reward_weights):
         raise ValueError("RL reward weights must be non-negative")
     if sum(reward_weights) <= 0.0:

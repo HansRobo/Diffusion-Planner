@@ -91,6 +91,26 @@ class HDPRewardConfig:
         non_finite = [name for name in finite_fields if not math.isfinite(float(getattr(self, name)))]
         if non_finite:
             raise ValueError(f"HDP reward fields must be finite: {non_finite}")
+        if self.dt <= 0.0:
+            raise ValueError("dt must be > 0")
+        if self.ttc_critical_s < 0.0:
+            raise ValueError("ttc_critical_s must be >= 0")
+        if self.ttc_safe_s <= self.ttc_critical_s:
+            raise ValueError("ttc_safe_s must exceed ttc_critical_s")
+        if self.thw_critical_s < 0.0:
+            raise ValueError("thw_critical_s must be >= 0")
+        if self.thw_safe_s <= self.thw_critical_s:
+            raise ValueError("thw_safe_s must exceed thw_critical_s")
+        if self.occupancy_critical_m < 0.0:
+            raise ValueError("occupancy_critical_m must be >= 0")
+        if self.occupancy_safe_m <= self.occupancy_critical_m:
+            raise ValueError("occupancy_safe_m must exceed occupancy_critical_m")
+        if self.occupancy_speed_gain_s < 0.0:
+            raise ValueError("occupancy_speed_gain_s must be >= 0")
+        if self.lane_half_width_m <= 0.0:
+            raise ValueError("lane_half_width_m must be > 0")
+        if self.leader_lateral_margin_m < 0.0:
+            raise ValueError("leader_lateral_margin_m must be >= 0")
         if self.stationary_reference_threshold_m <= 0.0:
             raise ValueError("stationary_reference_threshold_m must be > 0")
         if self.stationary_progress_tolerance_m <= 0.0:
@@ -105,6 +125,8 @@ class HDPRewardConfig:
             raise ValueError("stopped_neighbor_vel_thresh must be >= 0")
         if self.stopped_neighbor_disp_thresh < 0.0:
             raise ValueError("stopped_neighbor_disp_thresh must be >= 0")
+        if not 0.0 <= self.rear_end_penalty <= 1.0:
+            raise ValueError("rear_end_penalty must be in [0, 1]")
         if self.road_border_critical_m < 0.0:
             raise ValueError("road_border_critical_m must be >= 0")
         if self.road_border_safe_m <= self.road_border_critical_m:
