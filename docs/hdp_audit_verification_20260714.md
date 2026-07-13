@@ -94,6 +94,17 @@ rear-axle box-center convention, and strict route-AdaLN checkpoint loading. Each
 a fresh Base/SFT benchmark or would change a trained/deployment contract; none is a hidden
 correctness failure in the default run.
 
+## Final hygiene pass
+
+Two additional audit details were checked after the second-pass table. The repository README
+still described a vanilla-DP compatibility mode that the current HDP-only `Config` rejects; it
+now states the temporal ego-only/velocity contract explicitly and points pure waypoint/joint
+baselines to upstream `tier4-main`. `planner_metrics.geometry` also contained an unreachable
+first polygon-builder definition shadowed by the vectorized implementation used by the live
+reward path; the shadowed helper was renamed to remove the duplicate binding without changing
+the exported implementation or numerical behavior. The full test, lint, compile, and whitespace
+checks were rerun after these edits.
+
 ## Verification
 
 - Ruff: clean.

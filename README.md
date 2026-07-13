@@ -6,7 +6,9 @@ This branch is the Tier IV integration branch for Hyper Diffusion Planner (HDP).
 
 Primary mode: HDP.
 
-Compatibility mode: original Diffusion Planner supervised training can still be run by disabling the HDP flags, but this branch should not be treated as a clean vanilla-DP branch. Use upstream `tier4-main` for a pure baseline.
+This branch is HDP-only: the temporal ego-only decoder and velocity action contract are
+required. Vanilla Diffusion Planner training is not a supported compatibility mode here;
+use upstream `tier4-main` for a pure waypoint/joint baseline.
 
 The HDP path adds:
 
