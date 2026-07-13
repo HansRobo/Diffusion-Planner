@@ -165,7 +165,7 @@ class TrainConfig:
     # reuse the same actions immediately and remain ablations.
     rl_updates_per_rollout: int = 1
     # Keep full reward groups but cap differentiable candidate batches. With 64 scenes/rank,
-    # G=8 remains one 512-candidate update; paper G=32 becomes two accumulated 1024-candidate
+    # G=32 remains one 2,048-candidate update; G=64 becomes two accumulated 2,048-candidate
     # forwards feeding one exact optimizer update.
     rl_update_max_candidates_per_rank: int = 2048
     rl_init_use_ema: bool = True

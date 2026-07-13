@@ -205,10 +205,11 @@ Implementation notes:
 - Distributed training pads the shuffled index stream to a complete global batch instead of
   dropping the tail or compiling a second shape. Every source sample is used at least once and at
   most `global_batch_size - 1` randomly shuffled samples are repeated per epoch. Compiled H100
-  runs keep
-  `local_batch_size * num_generations <= 2048`; larger compiled candidate batches produced
-  corrupted backward gradients in live tests. Prefer reducing the group size and increasing the
-  scene batch while keeping that product fixed.
+  runs automatically split rollout and differentiable decoder calls at complete scene-group
+  boundaries so each compiled call stays at or below 2,048 candidates. The full candidate set is
+  still scored and group-normalized together. This boundary avoids the corrupted backward
+  gradients observed for larger TorchInductor calls without restricting the total candidates per
+  rank.
 - `diffusion_planner/slurm/run_hdp_rl.sbatch` is the only RL launcher for both one-node and
   multi-node jobs. It starts one `torchrun` agent per allocated host and validates the commit,
   virtualenv, manifests, checkpoint, and extra lists on every host before rendezvous. Multi-node

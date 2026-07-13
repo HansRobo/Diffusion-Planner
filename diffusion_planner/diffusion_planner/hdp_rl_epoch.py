@@ -33,6 +33,10 @@ from diffusion_planner.utils.masks import neighbor_future_padding_mask
 from diffusion_planner.utils.train_utils import finalize_epoch_loss_sums, update_epoch_loss_sums
 
 _RL_EVAL_MAX_CANDIDATES_PER_RANK = 1024
+# Live H100 comparisons found incorrect compiled backward gradients above this batch size.
+# Both rollout and differentiable update calls stay below the verified boundary; the complete
+# candidate group is still scored and normalized together.
+RL_COMPILED_MAX_CANDIDATES_PER_FORWARD = 2048
 
 _STEP_GLOBAL_MAX_METRICS = frozenset(
     {
@@ -502,6 +506,15 @@ def _hdp_rl_step(
     norm_exp = _grouped_policy_inputs(norm_inputs, n, decoder_only)
     batch_size = norm_exp["ego_current_state"].shape[0]
     num_scenes = batch_size // n
+    rollout_scene_chunk = (
+        _rl_update_scene_chunk_size(
+            num_scenes,
+            n,
+            RL_COMPILED_MAX_CANDIDATES_PER_FORWARD,
+        )
+        if bool(getattr(args, "compile_model", False))
+        else num_scenes
+    )
 
     # Eq. (AWR) draws actions from the previous policy. The EMA shadow is the stable
     # previous-policy snapshot; the live model receives the reward-weighted update.
@@ -517,6 +530,7 @@ def _hdp_rl_step(
         sample_steps=getattr(args, "rl_rollout_steps", 6),
         return_encoding=decoder_only,
         generator=rollout_generator,
+        scene_chunk_size=rollout_scene_chunk,
     )
     if decoder_only:
         ego_world, rollout_encoding = rollout_result
@@ -656,6 +670,9 @@ def _hdp_rl_step(
         "update_scene_chunk_size": loss_dict["update_scene_chunk_size"].detach(),
         "update_candidate_chunk_size": loss_dict["update_candidate_chunk_size"].detach(),
         "update_chunk_count": loss_dict["update_chunk_count"].detach(),
+        "rollout_scene_chunk_size": reward.new_tensor(float(rollout_scene_chunk)),
+        "rollout_candidate_chunk_size": reward.new_tensor(float(rollout_scene_chunk * n)),
+        "rollout_chunk_count": reward.new_tensor(float(num_scenes // rollout_scene_chunk)),
         "optimizer_step_fraction": reward.new_tensor(float(has_optimizer_update)),
         "optimizer_steps_per_rollout": optimizer_steps,
     }

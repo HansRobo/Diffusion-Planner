@@ -348,6 +348,76 @@ def test_rollout_generator_is_independent_from_global_training_rng():
     assert not torch.equal(first, different)
 
 
+def test_rollout_scene_chunking_preserves_samples_and_candidate_order():
+    class SceneEncoder(torch.nn.Module):
+        def forward(self, inputs):
+            return inputs["scene_marker"]
+
+    class RouteEncoder(torch.nn.Module):
+        def forward(self, route_lanes):
+            return route_lanes
+
+    class EchoDecoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self._predicted_neighbor_num = 0
+            self._sample_steps = 6
+            self.global_route_encoder = RouteEncoder()
+            self.batch_sizes = []
+
+        def forward(self, encoding, inputs):
+            self.batch_sizes.append(encoding.shape[0])
+            route = inputs["_cached_global_route_condition"]
+            offset = encoding[:, :1, :1].unsqueeze(-1) + route[:, :1, None, None]
+            return {"prediction": inputs["sampled_trajectories"] + offset}
+
+    class Planner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder = SceneEncoder()
+            self.decoder = EchoDecoder()
+
+    scenes = {
+        "ego_current_state": torch.zeros(2, 1),
+        "route_lanes": torch.tensor([[10.0], [20.0]]),
+        "scene_marker": torch.tensor([[[1.0]], [[2.0]]]),
+    }
+    candidates = {
+        "ego_current_state": scenes["ego_current_state"].repeat_interleave(4, dim=0),
+        "route_lanes": scenes["route_lanes"],
+    }
+    unchunked_model = Planner().train()
+    chunked_model = Planner().train()
+
+    unchunked, unchunked_encoding = hdp_rl_utils.sample_group(
+        unchunked_model,
+        candidates,
+        1.5,
+        torch.device("cpu"),
+        scene_norm_inputs=scenes,
+        group_size=4,
+        return_encoding=True,
+        generator=torch.Generator().manual_seed(123),
+    )
+    chunked, chunked_encoding = hdp_rl_utils.sample_group(
+        chunked_model,
+        candidates,
+        1.5,
+        torch.device("cpu"),
+        scene_norm_inputs=scenes,
+        group_size=4,
+        return_encoding=True,
+        generator=torch.Generator().manual_seed(123),
+        scene_chunk_size=1,
+    )
+
+    torch.testing.assert_close(chunked, unchunked, rtol=0, atol=0)
+    torch.testing.assert_close(chunked_encoding, unchunked_encoding, rtol=0, atol=0)
+    assert unchunked_model.decoder.batch_sizes == [8]
+    assert chunked_model.decoder.batch_sizes == [4, 4]
+    assert unchunked_model.training and chunked_model.training
+
+
 def test_state_normalizer_caches_stats_by_kind_device_and_dtype():
     normalizer = StateNormalizer(
         [[[10, 0, 0, 0]]],

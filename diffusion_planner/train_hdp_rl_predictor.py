@@ -27,7 +27,12 @@ from diffusion_planner.dimensions import (
     POINTS_PER_LINE_STRING,
     POINTS_PER_POLYGON,
 )
-from diffusion_planner.hdp_rl_epoch import train_hdp_rl_epoch, validate_hdp_reward_policy
+from diffusion_planner.hdp_rl_epoch import (
+    RL_COMPILED_MAX_CANDIDATES_PER_FORWARD,
+    _rl_update_scene_chunk_size,
+    train_hdp_rl_epoch,
+    validate_hdp_reward_policy,
+)
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import (
     assert_checkpoint_compatible,
@@ -100,15 +105,24 @@ def initialize_fresh_rl_policy_and_ema(
 
 
 def validate_compiled_candidate_batch(
-    local_batch_size: int, num_generations: int, compile_model: bool
+    local_batch_size: int,
+    num_generations: int,
+    compile_model: bool,
+    update_max_candidates_per_rank: int,
 ) -> int:
     candidates_per_rank = local_batch_size * num_generations
-    if compile_model and candidates_per_rank > 2048:
+    update_scene_chunk = _rl_update_scene_chunk_size(
+        local_batch_size,
+        num_generations,
+        update_max_candidates_per_rank,
+    )
+    update_candidates = update_scene_chunk * num_generations
+    if compile_model and update_candidates > RL_COMPILED_MAX_CANDIDATES_PER_FORWARD:
         raise ValueError(
-            "Unsafe compiled RL shape: local_batch_size * num_generations = "
-            f"{candidates_per_rank} exceeds the verified H100 limit 2048. "
-            "This shape produced silently corrupted backward gradients with TorchInductor; "
-            "reduce the group size/increase world size, or disable --compile_model."
+            f"Unsafe compiled RL update chunk {update_candidates} exceeds the verified H100 "
+            f"limit {RL_COMPILED_MAX_CANDIDATES_PER_FORWARD}. This shape produced silently "
+            "corrupted backward gradients with TorchInductor; lower "
+            "--rl_update_max_candidates_per_rank or disable --compile_model."
         )
     return candidates_per_rank
 
@@ -1223,7 +1237,12 @@ def model_training(args):
         raise ValueError("Validation set must contain at least one sample per DDP rank")
 
     local_batch_size = batch_size // world_size
-    validate_compiled_candidate_batch(local_batch_size, args.num_generations, args.compile_model)
+    validate_compiled_candidate_batch(
+        local_batch_size,
+        args.num_generations,
+        args.compile_model,
+        args.rl_update_max_candidates_per_rank,
+    )
     train_sampler = BatchAlignedDistributedSampler(
         train_set,
         num_replicas=ddp.get_world_size(),

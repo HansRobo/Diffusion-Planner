@@ -136,10 +136,10 @@ def test_resume_train_log_rejects_missing_checkpointed_epoch(tmp_path):
 
 
 def test_compiled_rl_candidate_batch_rejects_corrupted_h100_shape():
-    assert validate_compiled_candidate_batch(64, 32, True) == 2048
-    assert validate_compiled_candidate_batch(128, 32, False) == 4096
+    assert validate_compiled_candidate_batch(64, 64, True, 2048) == 4096
+    assert validate_compiled_candidate_batch(128, 32, False, 0) == 4096
     with pytest.raises(ValueError, match="silently corrupted backward gradients"):
-        validate_compiled_candidate_batch(128, 32, True)
+        validate_compiled_candidate_batch(64, 64, True, 0)
 
 
 def test_reward_validation_caps_candidate_batch_without_dropping_scenes():

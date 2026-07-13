@@ -1474,6 +1474,7 @@ def sample_group(
     sample_steps: int | None = None,
     return_encoding: bool = False,
     generator: torch.Generator | None = None,
+    scene_chunk_size: int | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
     """Generate one ego trajectory per (already replicated) row via inference sampling.
 
@@ -1512,7 +1513,6 @@ def sample_group(
     inference_inputs["_skip_turn_indicator"] = True
 
     cached_encoding = None
-    cached_global_route_condition = None
     previous_sample_steps = net.decoder._sample_steps
     if sample_steps is not None:
         net.decoder._sample_steps = int(sample_steps)
@@ -1523,22 +1523,63 @@ def sample_group(
             enabled=use_bf16 and torch.device(device).type == "cuda",
         ):
             if scene_norm_inputs is not None:
-                cached_encoding = net.encoder(scene_norm_inputs).repeat_interleave(
-                    group_size, dim=0
-                )
-                cached_global_route_condition = net.decoder.global_route_encoder(
+                scene_count = scene_norm_inputs["ego_current_state"].shape[0]
+                if B != scene_count * group_size:
+                    raise ValueError(
+                        f"Expanded rollout batch {B} does not match {scene_count} scenes * "
+                        f"group_size {group_size}"
+                    )
+                if scene_chunk_size is None:
+                    scene_chunk_size = scene_count
+                if scene_chunk_size <= 0 or scene_count % scene_chunk_size != 0:
+                    raise ValueError(
+                        "scene_chunk_size must be a positive divisor of the scene batch, got "
+                        f"{scene_chunk_size} for {scene_count} scenes"
+                    )
+
+                scene_encoding = net.encoder(scene_norm_inputs)
+                scene_route_condition = net.decoder.global_route_encoder(
                     scene_norm_inputs["route_lanes"]
-                ).repeat_interleave(group_size, dim=0)
-                inference_inputs["_cached_global_route_condition"] = cached_global_route_condition
-                outputs = net.decoder(cached_encoding, inference_inputs)
+                )
+                predictions = []
+                encoding_chunks = []
+                for scene_start in range(0, scene_count, scene_chunk_size):
+                    scene_stop = scene_start + scene_chunk_size
+                    candidate_start = scene_start * group_size
+                    candidate_stop = scene_stop * group_size
+                    chunk_inputs = {}
+                    for key, value in inference_inputs.items():
+                        if not torch.is_tensor(value) or value.ndim == 0:
+                            chunk_inputs[key] = value
+                        elif value.shape[0] == B:
+                            chunk_inputs[key] = value[candidate_start:candidate_stop]
+                        elif value.shape[0] == scene_count:
+                            chunk_inputs[key] = value[scene_start:scene_stop]
+                        else:
+                            raise ValueError(
+                                f"Rollout tensor {key!r} has batch {value.shape[0]}, expected "
+                                f"{scene_count} scenes or {B} candidates"
+                            )
+                    chunk_encoding = scene_encoding[scene_start:scene_stop].repeat_interleave(
+                        group_size, dim=0
+                    )
+                    chunk_inputs["_cached_global_route_condition"] = scene_route_condition[
+                        scene_start:scene_stop
+                    ].repeat_interleave(group_size, dim=0)
+                    chunk_outputs = net.decoder(chunk_encoding, chunk_inputs)
+                    predictions.append(chunk_outputs["prediction"])
+                    if return_encoding:
+                        encoding_chunks.append(chunk_encoding)
+                prediction = torch.cat(predictions, dim=0)
+                cached_encoding = torch.cat(encoding_chunks, dim=0) if return_encoding else None
             else:
                 _, outputs = model(inference_inputs)
+                prediction = outputs["prediction"]
     finally:
         net.decoder._sample_steps = previous_sample_steps
-    ego_world = outputs["prediction"][:, 0].detach().float()  # [B*N, T, 4]
-
-    if was_training:
-        model.train()
+        if was_training:
+            model.train()
+    ego_world = prediction[:, 0].detach().float()  # [B*N, T, 4]
     if return_encoding:
         return ego_world, cached_encoding
     return ego_world
