@@ -362,7 +362,11 @@ def run_validation(valid_cfg: ValidConfig):
     # path that mirrors the input's directory hierarchy. The relative path is unique per
     # data point, so ranks never collide and the local index is irrelevant.
     sampler_indices = list(valid_sampler)
-    assert len(sampler_indices) == predictions.shape[0]
+    if len(sampler_indices) != predictions.shape[0]:
+        raise RuntimeError(
+            "Validation sampler/prediction count mismatch: "
+            f"{len(sampler_indices)} indices for {predictions.shape[0]} predictions"
+        )
 
     n_save = predictions.shape[0]
     pbar = tqdm(total=n_save, desc="save", disable=global_rank != 0)

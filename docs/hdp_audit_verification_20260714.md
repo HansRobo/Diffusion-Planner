@@ -79,6 +79,7 @@ disposition table was still valid after later edits.
 | Resume memory | Full checkpoints could be materialized on every GPU during resume. | Fixed earlier and rechecked: `resume_model` loads with `map_location="cpu"` before copying state. |
 | C++/ONNX shape | Legacy joint sampled shape and delay were still present in benchmark assumptions. | Fixed earlier plus the delay input fix above. Current temporal contract is ego-only `[B,1,80,4]`; no legacy split decoder is exported. |
 | Empty/short map parity | Batched reward and scene-loop reward must agree when a scene has no usable map segments. | Added empty-centerline regression coverage; the existing curved-scene parity test remains passing. |
+| Runtime guards | Live encoder/solver/validation guards used Python `assert`, which disappears under `python -O`. | Fixed. Public shape, DPM mode, classifier-guidance, solver-step, timestep, and validation-count checks now raise explicit exceptions. |
 
 The earlier audit's design/ablation findings remain deliberately unchanged: turn-head endpoint
 sampling (`0,10,...,70`), no-decay grouping, generated-turn diffusion-time weighting, top-K

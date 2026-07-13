@@ -37,7 +37,8 @@ def add_class_type(x, class_type):
         x: Tensor with class type added at the end
     """
     B, T, D = x.shape
-    assert D == 4, "Input tensor must have 4 features (x, y, cos, sin)"
+    if D != 4:
+        raise ValueError(f"Expected four pose features (x, y, cos, sin), got {D}")
     class_type_tensor = F.one_hot(
         torch.full((B, T), class_type, device=x.device, dtype=torch.long),
         num_classes=CLASS_TYPE_NUM,
@@ -526,9 +527,8 @@ class LaneEncoder(nn.Module):
         tokens_mlp_dim = 64
         channels_mlp_dim = 128
 
-        assert class_type in [CLASS_TYPE_LANE, CLASS_TYPE_ROUTE], (
-            "Invalid class type for LaneEncoder"
-        )
+        if class_type not in [CLASS_TYPE_LANE, CLASS_TYPE_ROUTE]:
+            raise ValueError("Invalid class type for LaneEncoder")
 
         self._lane_len = lane_len
         self._class_type = class_type

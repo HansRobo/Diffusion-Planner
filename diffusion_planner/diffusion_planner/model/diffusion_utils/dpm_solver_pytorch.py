@@ -223,7 +223,8 @@ def model_wrapper(
         if guidance_type == "uncond":
             return noise_pred_fn(x, t_continuous)
         elif guidance_type == "classifier":
-            assert classifier_fn is not None
+            if classifier_fn is None:
+                raise ValueError("classifier guidance requires classifier_fn")
             cond_grad = cond_grad_fn(x, t_continuous)
             sigma_t = noise_schedule.marginal_std(t_continuous)
             noise = noise_pred_fn(x, t_continuous)
@@ -244,8 +245,10 @@ def model_wrapper(
                 noise = noise_pred_fn(x, t_continuous, cond=condition)
                 return noise_uncond + guidance_scale * (noise - noise_uncond)
 
-    assert model_type in ["noise", "x_start", "v", "score"]
-    assert guidance_type in ["uncond", "classifier", "classifier-free"]
+    if model_type not in ["noise", "x_start", "v", "score"]:
+        raise ValueError(f"Unsupported DPM model_type: {model_type}")
+    if guidance_type not in ["uncond", "classifier", "classifier-free"]:
+        raise ValueError(f"Unsupported DPM guidance_type: {guidance_type}")
     return model_fn
 
 
@@ -496,23 +499,26 @@ class DPM_Solver:
 
         t_0 = 1.0 / self.noise_schedule.total_N
         t_T = self.noise_schedule.T
-        assert t_0 > 0 and t_T > 0, (
-            "Time range needs to be greater than 0. For discrete-time DPMs, it needs to be in [1 / N, 1], where N is the length of betas array"
-        )
-        if self.correcting_xt_fn is not None:
-            assert method in ["multistep", "singlestep", "singlestep_fixed"], (
-                "Cannot use adaptive solver when correcting_xt_fn is not None"
+        if t_0 <= 0 or t_T <= 0:
+            raise ValueError(
+                "Time range needs to be greater than 0. For discrete-time DPMs, it needs "
+                "to be in [1 / N, 1], where N is the length of betas array"
             )
+        if self.correcting_xt_fn is not None:
+            if method not in ["multistep", "singlestep", "singlestep_fixed"]:
+                raise ValueError("Cannot use adaptive solver when correcting_xt_fn is not None")
         device = x.device
         if x.ndim != 4:
             raise ValueError(f"DPM-Solver expects [B,P,T,D], got {tuple(x.shape)}")
         batch_size = x.shape[0]
         with torch.no_grad():
-            assert steps >= order
+            if steps < order:
+                raise ValueError(f"DPM-Solver requires at least {order} steps, got {steps}")
             timesteps = self.get_time_steps(
                 skip_type=skip_type, t_T=t_T, t_0=t_0, N=steps, device=device
             )
-            assert timesteps.shape[0] - 1 == steps
+            if timesteps.shape[0] - 1 != steps:
+                raise RuntimeError("DPM-Solver generated an invalid timestep sequence")
             # Init the initial values.
             step = 0
             t = timesteps[step]
