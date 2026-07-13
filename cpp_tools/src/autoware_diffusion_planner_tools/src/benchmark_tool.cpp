@@ -211,6 +211,19 @@ int main(int argc, char ** argv)
   std::cout << "  Runs:   " << runs << "\n";
   std::cout << "------------------------------------------------------\n";
 
+  // SingleStepInference owns host/device buffers using the dimensions from the
+  // linked Autoware runtime. Do not silently copy a [1,1,80,4] HDP tensor into
+  // an upstream joint-planner [1,33,81,4] allocation: refuse until that runtime
+  // is updated to the same ego-only contract.
+  if (
+    SAMPLED_TRAJECTORIES_SHAPE[1] != 1 || SAMPLED_TRAJECTORIES_SHAPE[2] != OUTPUT_T ||
+    OUTPUT_SHAPE[1] != 1 || OUTPUT_SHAPE[2] != OUTPUT_T) {
+    std::cerr
+      << "Linked Autoware TensorRT runtime still exposes non-HDP joint-planner dimensions; "
+         "update its dimensions.hpp/tensorrt_inference.cpp before running this benchmark.\n";
+    return 2;
+  }
+
   // Create inference engine using the actual universe TensorrtInference.
   // All host-side optimizations come from the linked library automatically.
   std::cout << "  Loading engine..." << std::flush;
