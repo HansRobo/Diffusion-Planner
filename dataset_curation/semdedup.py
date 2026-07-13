@@ -77,8 +77,10 @@ def main():
 
         kept_paths = [p for p, k in zip(paths, keep) if k]
         removed_paths = [p for p, k in zip(paths, keep) if not k]
-        json.dump(kept_paths, open(output_dir / f"kept_t{thresh}.json", "w"))
-        json.dump(removed_paths[:100], open(output_dir / f"removed_t{thresh}_sample.json", "w"), indent=2)
+        with open(output_dir / f"kept_t{thresh}.json", "w") as f:
+            json.dump(kept_paths, f)
+        with open(output_dir / f"removed_t{thresh}_sample.json", "w") as f:
+            json.dump(removed_paths[:100], f, indent=2)
 
     print(f"\nResults saved to {output_dir}")
     print("Inspect removed pairs with: python -m scenario_generation.visualize <path1> <path2>")
