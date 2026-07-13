@@ -129,6 +129,10 @@ integer sample counts, and a regression test covers the past, future, and full-s
 This is tracked as a separate bridge-only correctness item rather than folded into the
 wheelbase change: it affects tensor lengths even when all vehicle geometry uses the default.
 
+Finally, comparisons such as `value < 0` do not reject `NaN`; invalid reward weights or
+thresholds could therefore reach the first rollout. The RL CLI and `HDPRewardConfig` now
+reject non-finite reward/shaping values explicitly before model work begins.
+
 One further reproducibility omission was confirmed: `ego_history_dropout_rate` affected the
 training distribution but was absent from strict resume compatibility. It is now checked like
 the other training fields. These changes are configuration/geometry fixes, not reward-policy

@@ -14,6 +14,7 @@ The single supported pipeline is:
                                to the HDP hybrid diffusion loss.
 """
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -67,6 +68,29 @@ class HDPRewardConfig:
     road_border_safe_m: float = 0.60
 
     def __post_init__(self) -> None:
+        finite_fields = (
+            "dt",
+            "ttc_critical_s",
+            "ttc_safe_s",
+            "thw_critical_s",
+            "thw_safe_s",
+            "occupancy_critical_m",
+            "occupancy_safe_m",
+            "occupancy_speed_gain_s",
+            "stopped_neighbor_vel_thresh",
+            "stopped_neighbor_disp_thresh",
+            "lane_half_width_m",
+            "leader_lateral_margin_m",
+            "stationary_reference_threshold_m",
+            "stationary_progress_tolerance_m",
+            "red_light_lane_tolerance_m",
+            "rear_end_penalty",
+            "road_border_critical_m",
+            "road_border_safe_m",
+        )
+        non_finite = [name for name in finite_fields if not math.isfinite(float(getattr(self, name)))]
+        if non_finite:
+            raise ValueError(f"HDP reward fields must be finite: {non_finite}")
         if self.stationary_reference_threshold_m <= 0.0:
             raise ValueError("stationary_reference_threshold_m must be > 0")
         if self.stationary_progress_tolerance_m <= 0.0:

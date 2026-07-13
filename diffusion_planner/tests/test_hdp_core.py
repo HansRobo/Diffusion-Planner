@@ -2174,6 +2174,8 @@ def test_hdp_stationary_progress_configuration_rejects_invalid_values():
         HDPRewardConfig(stopped_neighbor_vel_thresh=-1.0)
     with pytest.raises(ValueError, match="stopped_neighbor_disp_thresh"):
         HDPRewardConfig(stopped_neighbor_disp_thresh=-1.0)
+    with pytest.raises(ValueError, match="finite"):
+        HDPRewardConfig(occupancy_safe_m=float("nan"))
 
 
 def test_hdp_reward_config_reads_stationary_neighbor_thresholds_from_args():
