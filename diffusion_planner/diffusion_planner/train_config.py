@@ -253,6 +253,12 @@ class TrainConfig:
     hidden_dim: int = 256
     decoder_tokenization: Literal["temporal"] = "temporal"
     diffusion_model_type: Literal["x_start"] = "x_start"
+    # Corruption path + sampler family. "vpsde" is the historical HDP diffusion setup
+    # (VP-SDE noising, DPM-Solver++ sampling); "linear_fm" is x0-parameterized flow
+    # matching on the rectified-flow linear path (Euler sampling). The model I/O
+    # contract and every loss are identical across both — see
+    # docs/hdp_flow_matching_proposal_20260714.md.
+    diffusion_path: Literal["vpsde", "linear_fm"] = "vpsde"
     predicted_neighbor_num: int = 0
     resume_model_path: Optional[str] = None
     init_weights_path: Optional[str] = None

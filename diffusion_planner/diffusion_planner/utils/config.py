@@ -16,6 +16,8 @@ class Config:
         defaults = {
             "use_velocity_representation": False,
             "diffusion_model_type": "x_start",
+            # Checkpoints written before flow-matching support are implicitly VP-SDE.
+            "diffusion_path": "vpsde",
             "planning_hybrid_loss": 0.0,
             "hybrid_loss_window": 10,
             "diffusion_supervision_type": getattr(self, "diffusion_model_type", "x_start"),

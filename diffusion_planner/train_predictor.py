@@ -228,6 +228,14 @@ def get_args(args_list=None):
         type=int,
         default=_train_config_default("diffusion_sample_steps"),
     )
+    parser.add_argument(
+        "--diffusion_path",
+        type=str,
+        choices=["vpsde", "linear_fm"],
+        default=_train_config_default("diffusion_path"),
+        help="corruption path + sampler: 'vpsde' (historical HDP diffusion, DPM-Solver++) "
+        "or 'linear_fm' (x0-parameterized flow matching, Euler)",
+    )
 
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
     parser.add_argument(
@@ -410,11 +418,21 @@ def get_args(args_list=None):
         raise ValueError("--hybrid_loss_window must be in [1, future_len]")
     if args.planning_hybrid_loss < 0.0:
         raise ValueError("--planning_hybrid_loss must be >= 0")
-    if args.diffusion_sample_steps < 2:
-        raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
-    if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
+    # The DPM-Solver++ path is second-order and needs >= 2 steps; the flow-matching
+    # Euler sampler is valid from a single step.
+    min_sample_steps = 1 if args.diffusion_path == "linear_fm" else 2
+    if args.diffusion_sample_steps < min_sample_steps:
         raise ValueError(
-            "--multisample_eval_sample_steps must be >= 2 for the second-order DPM solver"
+            f"--diffusion_sample_steps must be >= {min_sample_steps} for "
+            f"diffusion_path={args.diffusion_path!r}"
+        )
+    if (
+        args.multisample_eval_num_samples > 0
+        and args.multisample_eval_sample_steps < min_sample_steps
+    ):
+        raise ValueError(
+            f"--multisample_eval_sample_steps must be >= {min_sample_steps} for "
+            f"diffusion_path={args.diffusion_path!r}"
         )
     if args.learning_rate <= 0.0:
         raise ValueError("--learning_rate must be > 0")

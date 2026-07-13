@@ -192,6 +192,7 @@ def assert_checkpoint_compatible(
     *,
     allow_waypoint_to_velocity_init: bool = False,
     allow_predicted_neighbor_change: bool = False,
+    allow_diffusion_path_change: bool = False,
     strict_training_config: bool = True,
 ) -> None:
     args_path = _checkpoint_args_path(path)
@@ -242,6 +243,27 @@ def assert_checkpoint_compatible(
             "Checkpoint diffusion_model_type mismatch: "
             f"{args_path} has {ckpt_model_type!r}, current run has {current_model_type!r}."
         )
+
+    # Checked explicitly with a legacy default (not via the strict training_fields
+    # list) so checkpoints written before flow-matching support keep resuming: those
+    # args.json files have no diffusion_path key and are implicitly VP-SDE.
+    ckpt_diffusion_path = ckpt_args.get("diffusion_path", "vpsde")
+    current_diffusion_path = getattr(args, "diffusion_path", "vpsde")
+    if ckpt_diffusion_path != current_diffusion_path:
+        if allow_diffusion_path_change:
+            print(
+                "WARNING: loading checkpoint weights across diffusion paths: "
+                f"checkpoint={ckpt_diffusion_path!r}, current={current_diffusion_path!r} "
+                f"({args_path}). The DiT I/O contract is identical, but the x_t marginal "
+                "distribution differs — allowed only for weights-only bootstrap."
+            )
+        else:
+            raise RuntimeError(
+                "Checkpoint diffusion_path mismatch: "
+                f"{args_path} has {ckpt_diffusion_path!r}, current run has "
+                f"{current_diffusion_path!r}. Refusing to reinterpret VP-SDE and "
+                "flow-matching latents silently."
+            )
 
     architecture_fields = (
         "future_len",
@@ -620,6 +642,10 @@ def model_training(args: TrainConfig):
             args,
             allow_waypoint_to_velocity_init=True,
             allow_predicted_neighbor_change=True,
+            # Weights-only warm start of flow-matching training from a VP-SDE Base
+            # checkpoint (or vice versa) is a supported experiment arm: the DiT I/O
+            # contract is identical across paths. Strict resume stays path-exact.
+            allow_diffusion_path_change=True,
             strict_training_config=False,
         )
 

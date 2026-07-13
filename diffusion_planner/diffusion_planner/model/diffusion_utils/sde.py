@@ -67,6 +67,31 @@ class SDE(abc.ABC):
         pass
 
 
+class LinearFlowPath:
+    """Conditional-OT / rectified-flow corruption path: ``x_t = (1 - t) * x0 + t * eps``.
+
+    Not an SDE: this is the straight-line probability path used by flow matching, with
+    the branch's time convention (t=0 data, t=1 noise). It duck-types the schedule
+    surface the trainers consume (``marginal_alpha`` / ``marginal_prob_std`` /
+    ``marginal_prob`` / ``T``) so x0-parameterized flow-matching training reuses the
+    exact VP-SDE noising code path (``x_t = alpha_t * x0 + std_t * z``) unchanged.
+    """
+
+    @property
+    def T(self):
+        return 1.0
+
+    def marginal_alpha(self, t):
+        return 1.0 - t
+
+    def marginal_prob_std(self, t):
+        return t
+
+    def marginal_prob(self, x, t):
+        t = reshape_time(t, x)
+        return (1.0 - t) * x, t
+
+
 class VPSDE_linear(SDE):
     def __init__(self, beta_max=20.0, beta_min=0.1):
         r"""

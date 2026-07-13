@@ -19,7 +19,8 @@ from diffusion_planner.loss import (
     velocity_to_waypoints,
     waypoints_to_velocity,
 )
-from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
+from diffusion_planner.model.diffusion_utils.fm_solver import FMEulerSolver
+from diffusion_planner.model.diffusion_utils.sde import LinearFlowPath, VPSDE_linear
 from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.model.module.mixer import MixerBlock
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
@@ -287,7 +288,14 @@ class Decoder(nn.Module):
         ):
             raise ValueError("HDP requires x_start prediction and x_start supervision")
         self._future_len = config.future_len
-        self._sde = VPSDE_linear()
+        # "vpsde" is the historical HDP diffusion setup; "linear_fm" swaps ONLY the
+        # corruption path and sampler for x0-parameterized flow matching — the DiT
+        # I/O contract, hybrid loss, and turn head are identical in both modes.
+        diffusion_path = getattr(config, "diffusion_path", "vpsde")
+        if diffusion_path not in ("vpsde", "linear_fm"):
+            raise ValueError(f"Unsupported diffusion_path={diffusion_path!r}")
+        self._diffusion_path = diffusion_path
+        self._sde = LinearFlowPath() if diffusion_path == "linear_fm" else VPSDE_linear()
 
         self.dit = DiT(
             depth=config.decoder_depth,
@@ -465,6 +473,20 @@ class Decoder(nn.Module):
 
         xT = sampled_trajectories.reshape(B, P, self._future_len, 4)
 
+        if self._diffusion_path == "linear_fm":
+
+            def fm_model_fn(x, t):
+                return self.dit(
+                    x,
+                    t,
+                    cross_c=encoding,
+                    ego_current_velocity=inputs["ego_current_state"][:, 4:6],
+                    global_condition=global_route_condition,
+                )
+
+            x0 = FMEulerSolver(fm_model_fn).sample(xT, steps=self._sample_steps)
+            return self._finalize_inference(x0, inputs, encoding_pooled)
+
         noise_schedule = dpm.NoiseScheduleVP(
             beta_0=self._sde.beta_min,
             beta_1=self._sde.beta_max,
@@ -486,7 +508,12 @@ class Decoder(nn.Module):
 
         x0 = dpm_solver.sample(xT, steps=self._sample_steps, skip_type="logSNR")
 
-        x0 = x0.reshape(B, P, self._future_len, 4)
+        return self._finalize_inference(
+            x0.reshape(B, P, self._future_len, 4), inputs, encoding_pooled
+        )
+
+    def _finalize_inference(self, x0, inputs, encoding_pooled):
+        """Decode the sampled latent and (optionally) run the turn-indicator head."""
         output = {"prediction": self._latent_to_prediction(x0)}
         if not inputs.get("_skip_turn_indicator", False):
             ego_trajectory = self._turn_indicator_trajectory_from_latent(x0)
