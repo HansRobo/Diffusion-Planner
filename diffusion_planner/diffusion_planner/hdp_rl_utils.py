@@ -213,125 +213,6 @@ def _road_border_clearance_exact(
     return torch.cat(clearance_chunks).reshape(C, T)
 
 
-def _road_border_clearance_exact_batch(
-    ego_group: torch.Tensor,
-    ego_shapes: torch.Tensor,
-    line_strings: torch.Tensor | None,
-) -> torch.Tensor:
-    """Batch exact rectangle-to-border clearance across fixed-shape scene tensors."""
-    batch_size, candidates, time_steps = ego_group.shape[:3]
-    no_data = torch.full(
-        (batch_size, candidates, time_steps),
-        float("inf"),
-        dtype=ego_group.dtype,
-        device=ego_group.device,
-    )
-    if batch_size == 0 or line_strings is None or line_strings.shape[-1] < 4:
-        return no_data
-
-    border_xy = line_strings[..., :2]
-    border_point = line_strings[..., 3] > 0.5
-    valid_segment = (border_point[..., :-1] & border_point[..., 1:]).flatten(1)
-    segment_start = border_xy[..., :-1, :].flatten(1, 2)
-    segment_end = border_xy[..., 1:, :].flatten(1, 2)
-
-    flat_ego = ego_group.flatten(0, 1)
-    flat_shapes = ego_shapes[:, None].expand(-1, candidates, -1).flatten(0, 1)
-    corners = torch.vmap(
-        lambda trajectory, shape: _build_ego_bbox_corners(trajectory[None], shape)[0]
-    )(flat_ego, flat_shapes).reshape(batch_size, candidates * time_steps, 4, 2)
-    rectangle_start = corners
-    rectangle_end = torch.roll(corners, shifts=-1, dims=2)
-    query_count = corners.shape[1]
-    segment_count = segment_start.shape[1]
-    max_pair_elements = 5_000_000
-    chunk_size = max(
-        1,
-        max_pair_elements // max(batch_size * segment_count * 4, 1),
-    )
-    clearance_chunks = []
-    border_vector = segment_end - segment_start
-    border_length2 = border_vector.square().sum(dim=-1).clamp_min(1e-12)
-    endpoints = torch.stack((segment_start, segment_end), dim=2)
-
-    for start in range(0, query_count, chunk_size):
-        end = min(start + chunk_size, query_count)
-        corner = corners[:, start:end]
-        edge_start = rectangle_start[:, start:end]
-        edge_end = rectangle_end[:, start:end]
-
-        corner_relative = corner[:, :, :, None] - segment_start[:, None, None]
-        corner_fraction = (
-            (corner_relative * border_vector[:, None, None]).sum(dim=-1)
-            / border_length2[:, None, None]
-        ).clamp(0.0, 1.0)
-        corner_foot = (
-            segment_start[:, None, None] + corner_fraction[..., None] * border_vector[:, None, None]
-        )
-        corner_distance2 = (corner[:, :, :, None] - corner_foot).square().sum(dim=-1)
-        corner_distance2 = corner_distance2.masked_fill(~valid_segment[:, None, None], float("inf"))
-
-        edge_vector = edge_end - edge_start
-        edge_length2 = edge_vector.square().sum(dim=-1).clamp_min(1e-12)
-        endpoint_relative = endpoints[:, None, :, :, None] - edge_start[:, :, None, None]
-        endpoint_fraction = (
-            (endpoint_relative * edge_vector[:, :, None, None]).sum(dim=-1)
-            / edge_length2[:, :, None, None]
-        ).clamp(0.0, 1.0)
-        endpoint_foot = (
-            edge_start[:, :, None, None]
-            + endpoint_fraction[..., None] * edge_vector[:, :, None, None]
-        )
-        endpoint_distance2 = (endpoints[:, None, :, :, None] - endpoint_foot).square().sum(dim=-1)
-        endpoint_distance2 = endpoint_distance2.masked_fill(
-            ~valid_segment[:, None, :, None, None], float("inf")
-        )
-
-        min_distance2 = torch.minimum(
-            corner_distance2.amin(dim=(2, 3)),
-            endpoint_distance2.amin(dim=(2, 3, 4)),
-        )
-
-        edge_vector_expanded = edge_vector[:, :, :, None]
-        border_vector_expanded = border_vector[:, None, None]
-        segment_start_relative = segment_start[:, None, None] - edge_start[:, :, :, None]
-        segment_end_relative = segment_end[:, None, None] - edge_start[:, :, :, None]
-        edge_start_relative = edge_start[:, :, :, None] - segment_start[:, None, None]
-        edge_end_relative = edge_end[:, :, :, None] - segment_start[:, None, None]
-        denominator = _cross_2d(edge_vector_expanded, border_vector_expanded)
-        non_parallel = denominator.abs() > 1e-8
-        intersects = (
-            non_parallel
-            & (
-                _cross_2d(edge_vector_expanded, segment_start_relative)
-                * _cross_2d(edge_vector_expanded, segment_end_relative)
-                <= 0
-            )
-            & (
-                _cross_2d(border_vector_expanded, edge_start_relative)
-                * _cross_2d(border_vector_expanded, edge_end_relative)
-                <= 0
-            )
-            & valid_segment[:, None, None]
-        ).any(dim=(2, 3))
-
-        edge_to_endpoint = endpoints[:, None, :, :, None] - edge_start[:, :, None, None]
-        side = _cross_2d(edge_vector[:, :, None, None], edge_to_endpoint)
-        endpoint_inside = (
-            ((side >= -1e-7).all(dim=-1) | (side <= 1e-7).all(dim=-1))
-            & valid_segment[:, None, :, None]
-        ).any(dim=(2, 3))
-        clearance_chunks.append(
-            torch.where(
-                intersects | endpoint_inside,
-                torch.zeros_like(min_distance2),
-                min_distance2.clamp_min(0.0).sqrt(),
-            )
-        )
-
-    return torch.cat(clearance_chunks, dim=1).reshape(batch_size, candidates, time_steps)
-
-
 def _trajectory_speed(xy: torch.Tensor, dt: float, initial_xy: torch.Tensor | None = None):
     if initial_xy is None:
         first = torch.zeros_like(xy[..., :1, :])
@@ -958,7 +839,7 @@ def _batched_occupancy_score(
     *,
     ego_speed: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Batch stopped-agent, static-object, and exact road-border occupancy geometry.
+    """Batch the common stopped-agent path and loop only exact geometry sources.
 
     Returns occupancy ``[B, C, T]`` and source flags ``[B, 3]`` ordered as
     static/stopped/road-border.
@@ -974,72 +855,50 @@ def _batched_occupancy_score(
         dim=1,
     )
 
+    stopped_only = ~static_available & stopped_available
     if ego_speed is None:
         ego_speed = _trajectory_speed(ego_group[..., :2], config.dt)
     safe_distance = config.occupancy_safe_m + config.occupancy_speed_gain_s * ego_speed
     critical_distance = config.occupancy_critical_m + config.occupancy_speed_gain_s * ego_speed
-
-    static_clearance = torch.full_like(stopped_clearance, float("inf"))
-    # Static slots exist in every NPZ but are usually all padding. The small availability
-    # synchronization avoids running exact OBB geometry for a dummy scene on every RL step.
-    if static_objects is not None and bool(static_available.any()):
-
-        def static_clearance_for_scene(ego_trajectories, ego_shape, objects):
-            valid = (objects[..., :2].abs().sum(dim=-1) > 1e-6) | (
-                objects[..., 4:6].abs().sum(dim=-1) > 1e-6
-            )
-            poses = objects[:, None, :4].expand(-1, time_steps, -1).clone()
-            heading_norm = poses[..., 2:4].norm(dim=-1, keepdim=True)
-            poses[..., 2:4] = torch.where(
-                heading_norm > 1e-6,
-                poses[..., 2:4] / heading_norm.clamp_min(1e-6),
-                poses.new_tensor([1.0, 0.0]),
-            )
-            shapes = objects[:, [4, 5]].abs()
-            shapes = torch.where(
-                (shapes > 1e-3).all(dim=-1, keepdim=True),
-                shapes,
-                shapes.new_tensor([1.0, 1.0]),
-            )
-            object_valid = valid[:, None].expand(-1, time_steps)
-            return compute_ego_neighbor_signed_clearance(
-                ego_trajectories,
-                ego_shape,
-                poses,
-                shapes,
-                object_valid,
-            ).amin(dim=1)
-
-        selected_static_clearance = torch.vmap(static_clearance_for_scene)(
-            ego_group[static_available],
-            ego_shapes[static_available],
-            static_objects[static_available],
-        )
-        static_clearance[static_available] = selected_static_clearance
-
-    obstacle_available = static_available | stopped_available
-    obstacle_clearance = torch.minimum(static_clearance, stopped_clearance)
-    winning_rear = stopped_is_rear & (stopped_clearance < static_clearance)
-    obstacle_score = _linear_safe_score(obstacle_clearance, critical_distance, safe_distance)
-    obstacle_score = torch.where(
-        winning_rear,
-        1.0 - config.rear_end_penalty * (1.0 - obstacle_score),
-        obstacle_score,
+    stopped_score = _linear_safe_score(stopped_clearance, critical_distance, safe_distance)
+    stopped_score = torch.where(
+        stopped_is_rear,
+        1.0 - config.rear_end_penalty * (1.0 - stopped_score),
+        stopped_score,
     )
-    occupancy = torch.where(obstacle_available[:, None, None], obstacle_score, occupancy)
+    occupancy = torch.where(stopped_only[:, None, None], stopped_score, occupancy)
 
-    road_only = ~obstacle_available & road_border_available
-    if line_strings is not None:
-        road_clearance = _road_border_clearance_exact_batch(
-            ego_group[road_only],
-            ego_shapes[road_only],
-            line_strings[road_only],
+    # Static OBB clearance and exact road-border distance have scene-dependent geometry sizes.
+    # Keep their proven implementations and synchronize only the small exceptional index list.
+    exceptional = static_available | (~stopped_available & road_border_available)
+    exceptional_rows = (
+        torch.cat(
+            (
+                exceptional.nonzero().flatten()[:, None],
+                static_available[exceptional, None],
+                stopped_available[exceptional, None],
+                road_border_available[exceptional, None],
+            ),
+            dim=1,
         )
-        occupancy[road_only] = _linear_safe_score(
-            road_clearance,
-            0.0,
-            _RL_REWARD_CONFIG.rb_wide_thresh,
+        .cpu()
+        .tolist()
+    )
+    for scene, has_static, has_stopped, has_road_border in exceptional_rows:
+        scene_occupancy, _ = _occupancy_score(
+            ego_group[scene],
+            ego_shapes[scene],
+            static_objects[scene] if static_objects is not None else None,
+            line_strings[scene] if line_strings is not None else None,
+            stopped_clearance[scene],
+            stopped_available[scene],
+            config,
+            stopped_is_rear=stopped_is_rear[scene],
+            static_available=bool(has_static),
+            stopped_available_flag=bool(has_stopped),
+            road_border_available=bool(has_road_border),
         )
+        occupancy[scene] = scene_occupancy
 
     return occupancy, source_flags
 

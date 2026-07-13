@@ -182,7 +182,7 @@ def test_vector_transform_norm_preserved():
 
 def test_heading_transform_identity():
     B = 2
-    h = (torch.rand(B, 5) * 2.0 - 1.0) * torch.pi
+    h = torch.randn(B, 5)
     I = torch.eye(2).unsqueeze(0).expand(B, -1, -1).clone()
     out = heading_transform(h, I)
     assert out.shape == h.shape

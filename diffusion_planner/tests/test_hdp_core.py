@@ -32,7 +32,6 @@ from diffusion_planner.hdp_rl_utils import (
     _red_light_constraint_score,
     _relative_progress_score,
     _road_border_clearance_exact,
-    _road_border_clearance_exact_batch,
     _safety_gated_behavior,
     _scene_neighbors,
     _scene_neighbors_batch,
@@ -1839,34 +1838,6 @@ def test_hdp_road_border_clearance_is_exact_for_gap_crossing_and_containment():
             line_strings,
         )
         torch.testing.assert_close(clearance, torch.tensor([[expected]]))
-
-
-def test_batched_road_border_clearance_matches_scene_reference_exactly():
-    batch_size, candidates, horizon = 3, 2, 5
-    ego = torch.zeros(batch_size, candidates, horizon, 4)
-    ego[..., 0] = torch.linspace(0.0, 3.0, horizon)
-    ego[:, 1, :, 1] = 0.75
-    yaw = torch.tensor([0.0, 0.2, -0.4])
-    ego[..., 2] = yaw.cos()[:, None, None]
-    ego[..., 3] = yaw.sin()[:, None, None]
-    shapes = torch.tensor([[2.0, 4.0, 2.0], [2.8, 4.8, 1.8], [2.5, 4.2, 1.9]])
-    line_strings = torch.zeros(batch_size, 3, 4, 4)
-    line_strings[0, 0, :2, :2] = torch.tensor([[5.0, -4.0], [5.0, 4.0]])
-    line_strings[0, 0, :2, 3] = 1.0
-    line_strings[1, 0, :3, :2] = torch.tensor([[-3.0, 2.5], [2.0, 2.5], [6.0, 1.5]])
-    line_strings[1, 0, :3, 3] = 1.0
-    line_strings[1, 1, :2, :2] = torch.tensor([[0.5, -3.0], [0.5, 3.0]])
-    line_strings[1, 1, :2, 3] = 1.0
-
-    actual = _road_border_clearance_exact_batch(ego, shapes, line_strings)
-    expected = torch.stack(
-        [
-            _road_border_clearance_exact(ego[scene], shapes[scene], line_strings[scene])
-            for scene in range(batch_size)
-        ]
-    )
-
-    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
 def test_hdp_invalid_road_border_is_not_reported_as_occupancy_source():
