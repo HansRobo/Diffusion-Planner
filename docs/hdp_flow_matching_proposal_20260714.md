@@ -5,7 +5,7 @@
 velocity latent, hybrid loss) with conditional flow matching (rectified-flow / linear-interpolation
 path), while keeping the scene encoder, latent representation, hybrid objective, turn-indicator head,
 and the RL-hybrid stage structurally unchanged.
-**Status:** Phase 0 implemented on `feature/hdp-flow-matching` (`--diffusion_path linear_fm`); Phase 1 A/B training not yet run.
+**Status:** Phase 0 implemented on `feature/hdp-flow-matching` (`--diffusion_path linear_fm`, plus `logit_normal` / `beta_high_noise` time-sampling ablations); Phase 1 A/B training not yet run.
 
 ---
 
@@ -128,11 +128,26 @@ x_{t'} = (t'/t)·x_t + (1 − t'/t)·x̂0(x_t, t)        (t' < t)
   closed-loop warm-start investigation on the deployment branch; not part of this proposal's scope
   but a follow-up FM enables nicely.
 
-### 4.5 Time sampling
+### 4.5 Time sampling (implemented)
 
-Default `t ~ U[ε_t, 1]` for the controlled A/B. Add `logit_normal(0,1)` as a config option
-(`diffusion_time_sample_method`) — the SD3 report found it consistently better for rectified flow;
-cheap ablation.
+Default `t ~ U[ε_t, 1]` for the controlled A/B. Two paper-grounded alternatives are implemented as
+`diffusion_time_sample_method` options:
+
+- `logit_normal` — SD3 (Esser et al. 2024): `t = sigmoid(z), z ~ N(0, 1)`, mid-trajectory emphasis;
+  their rectified-flow sweep found it consistently better than uniform. Known caveat from follow-up
+  work: it under-samples the trajectory boundaries, which can cap late-training quality — hence an
+  ablation, not the default.
+- `beta_high_noise` — π0-style shifted Beta(1.5, 1) mapped to this branch's t=1=noise convention
+  (π0 samples τ on [0, s], s = 0.999, weighted toward the noisy end; our ε_t floor plays the role of
+  their 1 − s cutoff). π0's rationale transfers directly: for action-chunk models, prediction under
+  high uncertainty is the critical regime.
+
+### 4.6 NFE accounting for fair A/Bs
+
+`diffusion_sample_steps = k` costs **k** decoder forwards in FM mode but **k + 1** in VP-SDE mode
+(DPM-Solver++ adds a denoise-to-zero evaluation). For an equal-compute comparison at the current
+config, evaluate FM at 7 steps against VP-SDE at 6 — or simply include NFE in the Phase 2 sweep
+axes, which subsumes this.
 
 ---
 

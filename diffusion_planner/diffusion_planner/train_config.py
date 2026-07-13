@@ -121,7 +121,10 @@ class TrainConfig:
     planning_hybrid_loss: float = 0.01
     hybrid_loss_window: int = 10
     diffusion_supervision_type: Literal["x_start"] = "x_start"
-    diffusion_time_sample_method: Literal["uniform"] = "uniform"
+    # "uniform" reproduces the historical HDP recipe. "logit_normal" (SD3, mid-
+    # trajectory emphasis) and "beta_high_noise" (pi0-style, noise-end emphasis) are
+    # paper-grounded ablations, primarily intended for the flow-matching path.
+    diffusion_time_sample_method: Literal["uniform", "logit_normal", "beta_high_noise"] = "uniform"
     # HDP real-vehicle setup reports six DPM-Solver integration steps. With the
     # final denoise-to-zero prediction this executes seven decoder forwards.
     diffusion_sample_steps: int = 6

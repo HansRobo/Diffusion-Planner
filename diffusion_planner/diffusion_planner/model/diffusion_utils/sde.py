@@ -85,11 +85,13 @@ class LinearFlowPath:
         return 1.0 - t
 
     def marginal_prob_std(self, t):
-        return t
+        # Fresh tensor: callers treat schedule outputs as scratch values, and the
+        # VP-SDE implementation never aliases its input either.
+        return t.clone()
 
     def marginal_prob(self, x, t):
         t = reshape_time(t, x)
-        return (1.0 - t) * x, t
+        return (1.0 - t) * x, t.clone()
 
 
 class VPSDE_linear(SDE):

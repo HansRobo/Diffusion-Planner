@@ -719,8 +719,10 @@ def get_args():
     parser.add_argument(
         "--diffusion_time_sample_method",
         type=str,
-        choices=["uniform"],
+        choices=["uniform", "logit_normal", "beta_high_noise"],
         default="uniform",
+        help="training-time t distribution: uniform (historical HDP), logit_normal "
+        "(SD3 mid-trajectory emphasis), beta_high_noise (pi0-style noise-end emphasis)",
     )
     parser.add_argument(
         "--diffusion_sample_steps",

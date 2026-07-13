@@ -75,6 +75,18 @@ def sample_diffusion_time(
 ) -> torch.Tensor:
     if method == "uniform":
         return torch.rand(batch_size, device=device) * (1.0 - eps) + eps
+    if method == "logit_normal":
+        # SD3 (Esser et al. 2024) "lognorm(0, 1)": t = sigmoid(z), z ~ N(0, 1).
+        # Concentrates training on the mid-trajectory where the transport is hardest;
+        # their rectified-flow sweep found it consistently better than uniform.
+        return torch.sigmoid(torch.randn(batch_size, device=device)).clamp(eps, 1.0)
+    if method == "beta_high_noise":
+        # pi0-style shifted Beta(1.5, 1) mapped to this branch's t=1=noise convention:
+        # mass toward the high-noise end, on the rationale that predicting actions
+        # under high uncertainty is the critical regime for action-chunk models.
+        # U^(1/alpha) ~ Beta(alpha, 1), so no torch.distributions dependency.
+        beta_sample = torch.rand(batch_size, device=device).pow(1.0 / 1.5)
+        return eps + (1.0 - eps) * beta_sample
     raise ValueError(f"Unsupported diffusion_time_sample_method={method!r}")
 
 

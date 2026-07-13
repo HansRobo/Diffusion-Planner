@@ -8,6 +8,7 @@ import json
 
 import pytest
 import torch
+from diffusion_planner.loss import sample_diffusion_time
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.model.diffusion_utils.fm_solver import FMEulerSolver
 from diffusion_planner.model.diffusion_utils.sde import LinearFlowPath, VPSDE_linear
@@ -50,6 +51,43 @@ def test_linear_flow_path_matches_linear_interpolation_schedule():
     mean, std = path.marginal_prob(x, t)
     torch.testing.assert_close(mean, (1.0 - t).view(3, 1, 1, 1) * x)
     torch.testing.assert_close(std, t.view(3, 1, 1, 1))
+
+
+def test_linear_flow_path_schedule_outputs_do_not_alias_the_time_tensor():
+    path = LinearFlowPath()
+    t = torch.tensor([0.25, 0.5])
+    std = path.marginal_prob_std(t)
+    std.mul_(2.0)
+    torch.testing.assert_close(t, torch.tensor([0.25, 0.5]))
+
+
+def test_logit_normal_time_sampling_concentrates_mid_trajectory():
+    """SD3 (Esser et al. 2024): t = sigmoid(z), z ~ N(0, 1) beats uniform for RF."""
+    torch.manual_seed(0)
+    eps = 1e-3
+    t = sample_diffusion_time(20_000, torch.device("cpu"), eps, "logit_normal")
+    assert t.shape == (20_000,)
+    assert float(t.min()) >= eps and float(t.max()) <= 1.0
+    assert abs(float(t.mean()) - 0.5) < 0.02
+    # Mid-trajectory mass must exceed uniform's 0.5 over (0.25, 0.75).
+    assert float(((t > 0.25) & (t < 0.75)).float().mean()) > 0.6
+
+
+def test_beta_high_noise_time_sampling_emphasizes_the_noise_end():
+    """pi0-style shifted Beta(1.5, 1) mass toward high noise (t -> 1 in our convention)."""
+    torch.manual_seed(0)
+    eps = 1e-3
+    t = sample_diffusion_time(20_000, torch.device("cpu"), eps, "beta_high_noise")
+    assert t.shape == (20_000,)
+    assert float(t.min()) >= eps and float(t.max()) <= 1.0
+    # Beta(1.5, 1) mean is 0.6, mapped onto [eps, 1].
+    assert abs(float(t.mean()) - 0.6) < 0.02
+    assert float((t > 0.5).float().mean()) > 0.55
+
+
+def test_unknown_time_sampling_method_is_rejected():
+    with pytest.raises(ValueError, match="diffusion_time_sample_method"):
+        sample_diffusion_time(4, torch.device("cpu"), 1e-3, "bogus")
 
 
 def test_fm_euler_solver_step_is_interpolation_toward_prediction():
