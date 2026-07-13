@@ -1,3 +1,4 @@
+import hashlib
 import os
 import subprocess
 from datetime import timedelta
@@ -142,6 +143,21 @@ def reduce_and_average_losses(loss_dict, device):
         return loss_dict
     world_size = dist.get_world_size()
     keys = list(loss_dict)
+    # Packing relies on identical key order on every rank. Check that contract
+    # before the all-reduce so a rank-divergent diagnostic cannot silently pair
+    # unrelated scalars. This function runs once per epoch, not in the step hot path.
+    key_digest = int.from_bytes(
+        hashlib.sha256("\0".join(keys).encode("utf-8")).digest()[:8],
+        byteorder="little",
+        signed=True,
+    )
+    key_meta = torch.tensor([len(keys), key_digest], dtype=torch.int64, device=device)
+    key_min = key_meta.clone()
+    key_max = key_meta.clone()
+    dist.all_reduce(key_min, op=dist.ReduceOp.MIN)
+    dist.all_reduce(key_max, op=dist.ReduceOp.MAX)
+    if not torch.equal(key_min, key_max):
+        raise RuntimeError("Distributed loss dictionaries have different keys or ordering")
     values = []
     for key in keys:
         value = loss_dict[key]

@@ -41,6 +41,9 @@ class ValidConfig:
     reward_eval_w_follow: float = 3.0
     reward_eval_w_lane: float = 2.5
     reward_eval_w_progress: float = 3.0
+    reward_eval_w_road_border: float = 0.0
+    reward_eval_road_border_critical_m: float = 0.20
+    reward_eval_road_border_safe_m: float = 0.60
     reward_eval_behavior_gate: Literal["none", "safety", "risk"] = "safety"
     reward_eval_occupancy_use_road_border: bool = True
     # None inherits the exact data-alignment setting saved by training.

@@ -135,8 +135,12 @@ if __name__ == "__main__":
                 continue
             # add batch size axis
             valid_data_dict[key] = torch.tensor(np.expand_dims(value, axis=0))
-        valid_data_dict["ego_agent_past"] = heading_to_cos_sin(valid_data_dict["ego_agent_past"])
-        valid_data_dict["goal_pose"] = heading_to_cos_sin(valid_data_dict["goal_pose"])
+        valid_data_dict["ego_agent_past"] = heading_to_cos_sin(
+            valid_data_dict["ego_agent_past"], preserve_zero_padding=True
+        )
+        valid_data_dict["goal_pose"] = heading_to_cos_sin(
+            valid_data_dict["goal_pose"], preserve_zero_padding=True
+        )
 
         prediction = output_dict["prediction"]  # (1 + P, T, D)
         turn_indicator = int(output_dict["turn_indicator"])  # ()

@@ -58,13 +58,14 @@ from diffusion_planner.model.module.decoder import (
     compute_training_loss,
 )
 from diffusion_planner.model.module.dit import DiT
+from diffusion_planner.model.module.encoder import CLASS_TYPE_LANE, LaneEncoder
 from diffusion_planner.train import (
     _finite_validation_metrics,
     assert_checkpoint_compatible,
     load_weights_only,
 )
 from diffusion_planner.train_config import TrainConfig
-from diffusion_planner.train_epoch import prepare_neighbor_supervision
+from diffusion_planner.train_epoch import heading_to_cos_sin, prepare_neighbor_supervision
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.dataset import (
@@ -1213,6 +1214,38 @@ def test_ego_only_neighbor_supervision_skips_unused_full_future_conversion():
     assert action_future.data_ptr() != raw.data_ptr()
 
 
+def test_heading_conversion_preserves_padding_and_does_not_alias_four_col_input():
+    raw = torch.zeros(1, 2, 3)
+    converted = heading_to_cos_sin(raw, preserve_zero_padding=True)
+    assert converted.eq(0).all()
+
+    stationary = heading_to_cos_sin(raw)
+    assert stationary[..., 2].eq(1.0).all()
+    already_converted = torch.zeros(1, 2, 4)
+    copied = heading_to_cos_sin(already_converted)
+    copied[..., 0] = 3.0
+    assert already_converted[..., 0].eq(0.0).all()
+
+
+def test_lane_encoder_uses_valid_geometry_for_short_lanelet_position():
+    encoder = LaneEncoder(
+        lane_len=20,
+        class_type=CLASS_TYPE_LANE,
+        drop_path_rate=0.0,
+        hidden_dim=16,
+        depth=1,
+    ).eval()
+    lane = torch.zeros(1, 1, 20, 33)
+    lane[0, 0, :2, :4] = torch.tensor([[1.0, 2.0, 0.0, 1.0], [3.0, 4.0, 0.0, 1.0]])
+    speed = torch.zeros(1, 1, 1)
+    has_speed = torch.zeros(1, 1, 1, dtype=torch.bool)
+    with torch.no_grad():
+        _, mask, pos = encoder(lane, speed, has_speed)
+    assert not mask.item()
+    torch.testing.assert_close(pos[0, 0, :2], torch.tensor([2.0, 3.0]))
+    torch.testing.assert_close(pos[0, 0, 2:4], torch.tensor([0.0, 1.0]))
+
+
 def test_distributed_eval_sampler_has_no_duplicates_or_padding():
     shards = [
         list(DistributedEvalSampler(range(10), num_replicas=3, rank=rank)) for rank in range(3)
@@ -1750,6 +1783,13 @@ def test_hdp_stationary_ego_future_is_not_treated_as_padding():
     assert converted[..., 3].eq(0.0).all()
 
 
+def test_hdp_reward_heading_conversion_does_not_alias_four_col_input():
+    raw = torch.zeros(1, 2, 5)
+    converted = heading_to_cos_sin_if_needed(raw)
+    converted[..., 0] = 2.0
+    assert raw[..., 0].eq(0.0).all()
+
+
 def test_neighbor_future_mask_preserves_internal_zero_pose():
     future = torch.zeros(1, 1, 5, 3)
     future[0, 0, 0, 0] = 1.0
@@ -1947,6 +1987,42 @@ def test_hdp_direct_road_border_reward_is_independent_of_occupancy_source():
     torch.testing.assert_close(direct["reward_road_border_available_score"], torch.tensor(1.0))
     assert float(direct["reward_road_border_score"]) < 1.0
     torch.testing.assert_close(disabled["reward_road_border_score"], torch.tensor(1.0))
+
+
+def test_hdp_direct_road_border_does_not_reenable_occupancy_ablation():
+    candidates = torch.zeros(2, 4, 4)
+    candidates[..., 0] = torch.arange(1.0, 5.0)
+    candidates[..., 2] = 1.0
+    lanes = torch.zeros(1, 1, 5, 8)
+    lanes[0, 0, :, 0] = torch.arange(5.0)
+    lanes[..., 2] = 1.0
+    line_strings = torch.zeros(1, 2, 4)
+    line_strings[0, :, :2] = torch.tensor([[-5.0, 2.0], [8.0, 2.0]])
+    line_strings[..., 3] = 1.0
+    scene_inputs = {
+        "ego_current_state": torch.zeros(1, 10),
+        "ego_shape": torch.tensor([[2.0, 4.0, 2.0]]),
+        "neighbor_agents_past": torch.zeros(1, 1, 2, 11),
+        "ego_agent_future": candidates[:1, :, :3],
+        "lanes": lanes,
+        "route_lanes": lanes.clone(),
+        "line_strings": line_strings,
+        "static_objects": torch.zeros(1, 1, 10),
+    }
+    neighbors = torch.zeros(1, 1, 4, 4)
+    args = SimpleNamespace(
+        rl_reward_w_risk=1.0,
+        rl_reward_w_follow=3.0,
+        rl_reward_w_lane=2.5,
+        rl_reward_w_progress=3.0,
+        rl_reward_w_road_border=1.0,
+        rl_occupancy_use_road_border=False,
+    )
+    _, metrics = compute_hdp_reward(candidates, scene_inputs, neighbors, 1, 2, args)
+    torch.testing.assert_close(metrics["reward_road_border_available_score"], torch.tensor(1.0))
+    torch.testing.assert_close(
+        metrics["reward_occupancy_road_border_source_score"], torch.tensor(0.0)
+    )
 
 
 def test_hdp_road_border_clearance_is_exact_for_gap_crossing_and_containment():

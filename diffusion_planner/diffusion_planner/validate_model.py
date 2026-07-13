@@ -212,6 +212,9 @@ def _multisample_metrics(
             "ego_current_state": ego_current_state,
             "_cached_encoding": repeated_encoding,
             "_cached_global_route_condition": repeated_global_route_condition,
+            # Multi-sample metrics only consume the denoised trajectory. Avoid
+            # evaluating the auxiliary classifier once per candidate.
+            "_skip_turn_indicator": True,
         }
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
             _, outputs = model(inference_inputs)
@@ -356,8 +359,12 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         inputs["sampled_trajectories"] = torch.zeros(
             B, action_agent_num, OUTPUT_T, POSE_DIM, dtype=torch.float32, device=device
         )
-        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
+        inputs["ego_agent_past"] = heading_to_cos_sin(
+            inputs["ego_agent_past"], preserve_zero_padding=True
+        )
+        inputs["goal_pose"] = heading_to_cos_sin(
+            inputs["goal_pose"], preserve_zero_padding=True
+        )
 
         ego_future = inputs["ego_agent_future"]
         ego_future = heading_to_cos_sin(ego_future)  # (B, T, 4)

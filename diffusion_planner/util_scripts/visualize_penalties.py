@@ -114,8 +114,12 @@ def process_sample(
             continue
         inputs[key] = torch.tensor(np.expand_dims(value, axis=0))
 
-    inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-    inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
+    inputs["ego_agent_past"] = heading_to_cos_sin(
+        inputs["ego_agent_past"], preserve_zero_padding=True
+    )
+    inputs["goal_pose"] = heading_to_cos_sin(
+        inputs["goal_pose"], preserve_zero_padding=True
+    )
 
     ego_shape = inputs["ego_shape"][0]  # [3]
     ego_traj = torch.tensor(prediction[0])  # [T, 4]
@@ -170,8 +174,12 @@ def process_sample(
         if key in ("map_name", "token"):
             continue
         vis_dict[key] = torch.tensor(np.expand_dims(value, axis=0))
-    vis_dict["ego_agent_past"] = heading_to_cos_sin(vis_dict["ego_agent_past"])
-    vis_dict["goal_pose"] = heading_to_cos_sin(vis_dict["goal_pose"])
+    vis_dict["ego_agent_past"] = heading_to_cos_sin(
+        vis_dict["ego_agent_past"], preserve_zero_padding=True
+    )
+    vis_dict["goal_pose"] = heading_to_cos_sin(
+        vis_dict["goal_pose"], preserve_zero_padding=True
+    )
 
     visualize_inputs(vis_dict, save_path=None, ax=ax_map)
 

@@ -1308,18 +1308,21 @@ def compute_hdp_reward(
     line_strings_batch = scene_inputs.get("line_strings")
     use_road_border_occupancy = bool(getattr(args, "rl_occupancy_use_road_border", True))
     road_border_weight = float(getattr(args, "rl_reward_w_road_border", 0.0))
-    # The direct reward must remain available even when the occupancy fallback is
-    # ablated; both consumers share the same geometry validity mask.
+    # Geometry validity is independent from the occupancy fallback switch. The
+    # direct road-border reward must remain usable when occupancy is ablated, but
+    # that switch must still prevent borders from becoming an implicit occupancy
+    # source.
     use_road_border_geometry = use_road_border_occupancy or road_border_weight > 0.0
     if (
         not use_road_border_geometry
         or line_strings_batch is None
         or line_strings_batch.shape[-1] < 4
     ):
-        road_border_available = torch.zeros(num_scenes, dtype=torch.bool, device=device)
+        line_border_available = torch.zeros(num_scenes, dtype=torch.bool, device=device)
     else:
         border_point = line_strings_batch[..., 3] > 0.5
-        road_border_available = (border_point[..., :-1] & border_point[..., 1:]).flatten(1).any(1)
+        line_border_available = (border_point[..., :-1] & border_point[..., 1:]).flatten(1).any(1)
+    occupancy_road_border_available = line_border_available & use_road_border_occupancy
     stopped_available = scene_term_tensors["stopped_available"]
     occupancy, occupancy_sources = _batched_occupancy_score(
         ego_group,
@@ -1330,7 +1333,7 @@ def compute_hdp_reward(
         scene_term_tensors["stopped_is_rear"],
         static_available,
         stopped_available,
-        road_border_available,
+        occupancy_road_border_available,
         config,
         ego_speed=scene_term_tensors["ego_speed"],
     )
@@ -1340,7 +1343,7 @@ def compute_hdp_reward(
             ego_group,
             scene_inputs["ego_shape"][:, :3],
             line_strings_batch,
-            road_border_available,
+            line_border_available,
         )
         road_border_score_t = _linear_safe_score(
             road_border_clearance,
@@ -1348,7 +1351,7 @@ def compute_hdp_reward(
             config.road_border_safe_m,
         )
         road_border_score_t = torch.where(
-            road_border_available[:, None, None],
+            line_border_available[:, None, None],
             road_border_score_t,
             torch.ones_like(road_border_score_t),
         )
@@ -1415,7 +1418,7 @@ def compute_hdp_reward(
         "thw": thw_min,
         "occupancy": occupancy_min,
         "road_border": road_border_score,
-        "road_border_available": candidate_flags(road_border_available),
+        "road_border_available": candidate_flags(line_border_available),
         "road_border_violation_fraction": (road_border_score <= 0.0).to(risk.dtype),
         "leader_fraction": scene_term_tensors["leader_fraction"],
         "collision_active": scene_term_tensors["collision_active"],
@@ -1529,7 +1532,9 @@ def compute_hdp_reward(
 
 def heading_to_cos_sin_if_needed(trajectory: torch.Tensor) -> torch.Tensor:
     if trajectory.shape[-1] >= 4:
-        return trajectory[..., :4]
+        # Return an owning tensor: reward geometry may mask padded poses in place
+        # and must never mutate the caller's scene batch or a larger feature view.
+        return trajectory[..., :4].clone()
     if trajectory.shape[-1] != 3:
         raise ValueError(f"Expected trajectory last dimension 3 or >=4, got {trajectory.shape}")
     return torch.cat(

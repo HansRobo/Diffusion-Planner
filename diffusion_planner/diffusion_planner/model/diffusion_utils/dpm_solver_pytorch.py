@@ -2,7 +2,7 @@ import torch
 
 
 class NoiseScheduleVP:
-    def __init__(self):
+    def __init__(self, beta_0=0.1, beta_1=20.0):
         """Create a wrapper class for the forward SDE (VP type).
 
         The forward SDE ensures that the condition distribution q_{t|0}(x_t | x_0) = N ( alpha_t * x_0, sigma_t^2 * I ).
@@ -23,22 +23,23 @@ class NoiseScheduleVP:
         schedule are the default settings in Yang Song's ScoreSDE:
 
         Args:
-            beta_min: A `float` number. The smallest beta for the linear schedule.
-            beta_max: A `float` number. The largest beta for the linear schedule.
-            T: A `float` number. The ending time of the forward process.
+            beta_0: A `float` number. The smallest beta for the linear schedule.
+            beta_1: A `float` number. The largest beta for the linear schedule.
 
         ===============================================================
 
         Example:
 
         # For continuous-time DPMs (VPSDE), linear schedule:
-        >>> ns = NoiseScheduleVP(continuous_beta_0=0.1, continuous_beta_1=20.)
+        >>> ns = NoiseScheduleVP(beta_0=0.1, beta_1=20.)
 
         """
+        if beta_0 < 0 or beta_1 <= beta_0:
+            raise ValueError("NoiseScheduleVP requires 0 <= beta_0 < beta_1")
         self.T = 1.0
         self.total_N = 1000
-        self.beta_0 = 0.1
-        self.beta_1 = 20.0
+        self.beta_0 = float(beta_0)
+        self.beta_1 = float(beta_1)
 
     def marginal_log_mean_coeff(self, t):
         """
@@ -83,13 +84,13 @@ def model_wrapper(
     model,
     noise_schedule,
     model_type="noise",
-    model_kwargs={},
+    model_kwargs=None,
     guidance_type="uncond",
     condition=None,
     unconditional_condition=None,
     guidance_scale=1.0,
     classifier_fn=None,
-    classifier_kwargs={},
+    classifier_kwargs=None,
 ):
     """Create a wrapper function for the noise prediction model.
 
@@ -211,6 +212,9 @@ def model_wrapper(
             x_in = x.detach().requires_grad_(True)
             log_prob = classifier_fn(x_in, t_input, condition, **classifier_kwargs)
             return torch.autograd.grad(log_prob.sum(), x_in)[0]
+
+    model_kwargs = {} if model_kwargs is None else model_kwargs
+    classifier_kwargs = {} if classifier_kwargs is None else classifier_kwargs
 
     def model_fn(x, t_continuous):
         """

@@ -81,6 +81,14 @@ class VPSDE_linear(SDE):
         self._beta_min = beta_min
 
     @property
+    def beta_min(self):
+        return self._beta_min
+
+    @property
+    def beta_max(self):
+        return self._beta_max
+
+    @property
     def T(self):
         return 1.0
 

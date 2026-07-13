@@ -69,7 +69,8 @@ def build_inputs_from_npz(npz_path: Path, action_agent_num: int = 1) -> TensorDi
         1, action_agent_num, OUTPUT_T, POSE_DIM, dtype=torch.float32
     )
     inputs["ego_agent_past"] = heading_to_cos_sin(
-        torch.tensor(data["ego_agent_past"], dtype=torch.float32).unsqueeze(0)
+        torch.tensor(data["ego_agent_past"], dtype=torch.float32).unsqueeze(0),
+        preserve_zero_padding=True,
     )
     inputs["ego_current_state"] = torch.tensor(
         data["ego_current_state"], dtype=torch.float32
@@ -97,8 +98,7 @@ def build_inputs_from_npz(npz_path: Path, action_agent_num: int = 1) -> TensorDi
     inputs["polygons"] = torch.tensor(data["polygons"], dtype=torch.float32).unsqueeze(0)
     inputs["line_strings"] = torch.tensor(data["line_strings"], dtype=torch.float32).unsqueeze(0)
     goal_pose = torch.tensor(data["goal_pose"], dtype=torch.float32).unsqueeze(0)
-    if goal_pose.shape[-1] == 3:
-        goal_pose = heading_to_cos_sin(goal_pose)
+    goal_pose = heading_to_cos_sin(goal_pose, preserve_zero_padding=True)
     inputs["goal_pose"] = goal_pose
     ego_shape = data["ego_shape"] if "ego_shape" in data else np.array([2.75, 4.34, 1.70])
     inputs["ego_shape"] = torch.tensor(ego_shape, dtype=torch.float32).reshape(1, 3)

@@ -211,7 +211,8 @@ def compute_training_loss(
     else:
         loss["neighbor_collision_loss"] = torch.tensor(0.0, device=dpm_loss.device)
 
-    assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
+    if not torch.isfinite(dpm_loss).all():
+        raise FloatingPointError(f"diffusion loss is non-finite, z={z}")
 
     turn_indicator_logit = decoder_output["turn_indicator_logit"].float()
     turn_indicator_expert_logit = decoder_output.get(
@@ -250,6 +251,12 @@ def compute_training_loss(
         loss["turn_indicator_accuracy"] = generated_accuracy
         loss["turn_indicator_generated_accuracy"] = generated_accuracy
         loss["turn_indicator_expert_accuracy"] = expert_accuracy
+
+    non_finite_losses = [
+        key for key, value in loss.items() if torch.is_tensor(value) and not torch.isfinite(value).all()
+    ]
+    if non_finite_losses:
+        raise FloatingPointError(f"non-finite training losses: {non_finite_losses}")
 
     return loss
 
@@ -458,7 +465,10 @@ class Decoder(nn.Module):
 
         xT = sampled_trajectories.reshape(B, P, self._future_len, 4)
 
-        noise_schedule = dpm.NoiseScheduleVP()
+        noise_schedule = dpm.NoiseScheduleVP(
+            beta_0=self._sde.beta_min,
+            beta_1=self._sde.beta_max,
+        )
 
         model_fn = dpm.model_wrapper(
             self.dit,

@@ -112,7 +112,7 @@ def get_args(args_list=None):
         type=int,
         default=_valid_config_default("reward_eval_sample_steps"),
     )
-    for reward_name in ("safety", "risk", "follow", "lane", "progress"):
+    for reward_name in ("safety", "risk", "follow", "lane", "progress", "road_border"):
         parser.add_argument(
             f"--reward_eval_w_{reward_name}",
             type=float,
@@ -128,6 +128,16 @@ def get_args(args_list=None):
         type=boolean,
         default=_valid_config_default("reward_eval_occupancy_use_road_border"),
     )
+    parser.add_argument(
+        "--reward_eval_road_border_critical_m",
+        type=float,
+        default=_valid_config_default("reward_eval_road_border_critical_m"),
+    )
+    parser.add_argument(
+        "--reward_eval_road_border_safe_m",
+        type=float,
+        default=_valid_config_default("reward_eval_road_border_safe_m"),
+    )
 
     args = parser.parse_args(args_list)
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
@@ -140,6 +150,12 @@ def get_args(args_list=None):
         raise ValueError("--reward_eval_sample_steps must be >= 2 for the second-order DPM solver")
     if args.reward_eval_noise_scale < 0.0:
         raise ValueError("--reward_eval_noise_scale must be >= 0")
+    if args.reward_eval_road_border_critical_m < 0.0:
+        raise ValueError("--reward_eval_road_border_critical_m must be >= 0")
+    if args.reward_eval_road_border_safe_m <= args.reward_eval_road_border_critical_m:
+        raise ValueError(
+            "--reward_eval_road_border_safe_m must exceed the critical threshold"
+        )
     return args
 
 
@@ -274,12 +290,14 @@ def run_validation(valid_cfg: ValidConfig):
         reward_args.rl_eval_occupancy_use_road_border = (
             valid_cfg.reward_eval_occupancy_use_road_border
         )
-        for reward_name in ("safety", "risk", "follow", "lane", "progress"):
+        for reward_name in ("safety", "risk", "follow", "lane", "progress", "road_border"):
             setattr(
                 reward_args,
                 f"rl_eval_reward_w_{reward_name}",
                 getattr(valid_cfg, f"reward_eval_w_{reward_name}"),
             )
+        reward_args.rl_road_border_critical_m = valid_cfg.reward_eval_road_border_critical_m
+        reward_args.rl_road_border_safe_m = valid_cfg.reward_eval_road_border_safe_m
         reward_metrics = validate_hdp_reward_policy(valid_loader, diffusion_planner, reward_args)
 
     if global_rank == 0:

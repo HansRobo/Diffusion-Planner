@@ -255,7 +255,7 @@ def build_dummy_inputs(action_agent_num: int = 1) -> TensorDict:
     )
     inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
-    inputs["turn_indicators"] = torch.randint(0, 3, (1, INPUT_T + 1), dtype=torch.float32)
+    inputs["turn_indicators"] = torch.randint(0, 4, (1, INPUT_T + 1), dtype=torch.float32)
     return inputs
 
 

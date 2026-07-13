@@ -42,6 +42,23 @@ def test_reward_eval_cli_overrides_protocol_and_output():
     assert args.metrics_output == "metrics.json"
 
 
+def test_reward_eval_cli_exposes_road_border_weight_and_thresholds():
+    args = get_args(
+        _required_args()
+        + [
+            "--reward_eval_w_road_border",
+            "1.5",
+            "--reward_eval_road_border_critical_m",
+            "0.15",
+            "--reward_eval_road_border_safe_m",
+            "0.55",
+        ]
+    )
+    assert args.reward_eval_w_road_border == 1.5
+    assert args.reward_eval_road_border_critical_m == 0.15
+    assert args.reward_eval_road_border_safe_m == 0.55
+
+
 @pytest.mark.parametrize(
     "options, message",
     [

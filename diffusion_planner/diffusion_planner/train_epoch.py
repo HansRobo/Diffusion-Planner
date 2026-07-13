@@ -25,7 +25,7 @@ def compose_supervised_total_loss(loss, args):
     )
 
 
-def heading_to_cos_sin(x):
+def heading_to_cos_sin(x, *, preserve_zero_padding=False):
     """
     Convert heading angle to cosine and sine.
     Args:
@@ -34,19 +34,30 @@ def heading_to_cos_sin(x):
         x: [B, T, 4] where last dimension is (x, y, cos(heading), sin(heading))
 
     Idempotent: a [..., 4] input that is already (x, y, cos, sin) is returned
-    unchanged. This guards against double-conversion (cos(cos)) now that scene-gen
-    emits 4-col futures — callers can hand it either layout safely.
+    unchanged in value. A clone is returned so callers can safely mask it in place
+    without mutating a batch-owned tensor. ``preserve_zero_padding`` must be used
+    for raw padded poses: converting an all-zero (x, y, heading) row otherwise turns
+    it into (0, 0, 1, 0), which is a valid-looking pose to downstream masks.
     """
+    if x.shape[-1] not in (3, 4):
+        raise ValueError(f"Expected pose features with last dimension 3 or 4, got {x.shape}")
+    zero_padding = None
+    if preserve_zero_padding:
+        zero_padding = torch.all(x == 0, dim=-1, keepdim=True)
     if x.shape[-1] == 4:
-        return x
-    return torch.cat(
-        [
-            x[..., :2],
-            x[..., 2:3].cos(),
-            x[..., 2:3].sin(),
-        ],
-        dim=-1,
-    )
+        converted = x.clone()
+    else:
+        converted = torch.cat(
+            [
+                x[..., :2],
+                x[..., 2:3].cos(),
+                x[..., 2:3].sin(),
+            ],
+            dim=-1,
+        )
+    if zero_padding is not None:
+        converted.masked_fill_(zero_padding, 0.0)
+    return converted
 
 
 def prepare_neighbor_supervision(
@@ -114,8 +125,12 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         if needs_neighbor_futures and neighbor_future_cpu is None:
             raise KeyError("neighbor_agents_future is required for collision supervision")
         inputs = {key: value.to(args.device, non_blocking=True) for key, value in inputs.items()}
-        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
+        inputs["ego_agent_past"] = heading_to_cos_sin(
+            inputs["ego_agent_past"], preserve_zero_padding=True
+        )
+        inputs["goal_pose"] = heading_to_cos_sin(
+            inputs["goal_pose"], preserve_zero_padding=True
+        )
 
         ego_future = inputs["ego_agent_future"]
         if neighbor_future_cpu is None:

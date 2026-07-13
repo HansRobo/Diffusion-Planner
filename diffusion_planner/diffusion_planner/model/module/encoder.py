@@ -147,9 +147,13 @@ class Encoder(nn.Module):
         self.pos_emb = nn.Linear(4 + CLASS_TYPE_NUM, config.hidden_dim)
 
         # positional embedding for route
+        # Keep route token positions on the same scale as the other learned
+        # embeddings. A unit-scale random table overwhelms the encoded geometry
+        # at initialization and is not used anywhere else in the encoder.
         self.route_position_embedding = nn.Parameter(
-            torch.randn(1, config.route_num, config.hidden_dim)
+            torch.empty(1, config.route_num, config.hidden_dim)
         )
+        nn.init.normal_(self.route_position_embedding, mean=0.0, std=0.02)
 
         # Initialize transformer layers:
         def _basic_init(m):
@@ -182,7 +186,7 @@ class Encoder(nn.Module):
         # Only keep the current + nearest 5 steps of ego history.
 
         # agents
-        neighbors = inputs["neighbor_agents_past"]  # (B, N=32, T=21, D=11)
+        neighbors = inputs["neighbor_agents_past"]  # (B, N=MAX_NUM_NEIGHBORS, T=INPUT_T+1, D=11)
         recent_neighbors = neighbors[:, :, -6:]
         neighbors = F.pad(
             recent_neighbors,
@@ -194,14 +198,14 @@ class Encoder(nn.Module):
         static = inputs["static_objects"]  # (B, P=5, D=10)
 
         # vector maps
-        lanes = inputs["lanes"]  # (B, P=70, V=20, D=13)
-        lanes_speed_limit = inputs["lanes_speed_limit"]  # (B, P=70, V=20, D=1)
-        lanes_has_speed_limit = inputs["lanes_has_speed_limit"]  # (B, P=70, V=20, D=1)
+        lanes = inputs["lanes"]  # (B, P=NUM_SEGMENTS_IN_LANE, V=POINTS_PER_LANELET, D=13)
+        lanes_speed_limit = inputs["lanes_speed_limit"]  # (B, P=NUM_SEGMENTS_IN_LANE, 1)
+        lanes_has_speed_limit = inputs["lanes_has_speed_limit"]  # (B, P=NUM_SEGMENTS_IN_LANE, 1)
 
         # route
-        route = inputs["route_lanes"]  # (B, P=25, V=20, D=13)
-        route_speed_limit = inputs["route_lanes_speed_limit"]  # (B, P=25, V=20, D=1)
-        route_has_speed_limit = inputs["route_lanes_has_speed_limit"]  # (B, P=25, V=20, D=1)
+        route = inputs["route_lanes"]  # (B, P=NUM_SEGMENTS_IN_ROUTE, V=POINTS_PER_LANELET, D=13)
+        route_speed_limit = inputs["route_lanes_speed_limit"]  # (B, P=NUM_SEGMENTS_IN_ROUTE, 1)
+        route_has_speed_limit = inputs["route_lanes_has_speed_limit"]  # (B, P=NUM_SEGMENTS_IN_ROUTE, 1)
 
         # polygons
         polygons = inputs["polygons"]  # (B, P=10, V=40, D=2)
@@ -380,7 +384,7 @@ class EgoEncoder(nn.Module):
 
     def forward(self, x):
         """
-        x: B, T=21, D=4 (x, y, cos, sin)
+        x: B, T=INPUT_T+1, D=4 (x, y, cos, sin)
         """
         B, T, D = x.shape
         pos = x[:, -1].clone()  # (B, D=4[x, y, cos, sin])
@@ -570,7 +574,12 @@ class LaneEncoder(nn.Module):
         attribute = x[:, :, 0, 8:]
         x = x[..., :8]
 
-        pos = x[:, :, int(self._lane_len / 2), :4].clone()  # x, y, x'-x, y'-y
+        # The midpoint is padding for short lanelets. Pool valid geometry instead
+        # so the token position and heading remain meaningful when fewer than half
+        # of the fixed point slots are populated.
+        valid_point = torch.any(x != 0, dim=-1)
+        valid_count = valid_point.sum(dim=2, keepdim=True).clamp_min(1).to(x.dtype)
+        pos = (x[..., :4] * valid_point.unsqueeze(-1)).sum(dim=2) / valid_count
         heading = torch.atan2(pos[..., 3], pos[..., 2])
         pos = torch.stack(
             [pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1

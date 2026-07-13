@@ -499,16 +499,24 @@ def _hdp_rl_step(
 
     raw_inputs = dict(raw_inputs)
     if aug is not None:
-        raw_inputs["ego_agent_past"] = heading_to_cos_sin(raw_inputs["ego_agent_past"])
-        raw_inputs["goal_pose"] = heading_to_cos_sin(raw_inputs["goal_pose"])
+        raw_inputs["ego_agent_past"] = heading_to_cos_sin(
+            raw_inputs["ego_agent_past"], preserve_zero_padding=True
+        )
+        raw_inputs["goal_pose"] = heading_to_cos_sin(
+            raw_inputs["goal_pose"], preserve_zero_padding=True
+        )
         raw_inputs, ego_future_aug, neighbors_future_aug = aug(
             raw_inputs, raw_inputs["ego_agent_future"], raw_inputs["neighbor_agents_future"]
         )
         raw_inputs["ego_agent_future"] = ego_future_aug
         raw_inputs["neighbor_agents_future"] = neighbors_future_aug
     else:
-        raw_inputs["ego_agent_past"] = heading_to_cos_sin(raw_inputs["ego_agent_past"])
-        raw_inputs["goal_pose"] = heading_to_cos_sin(raw_inputs["goal_pose"])
+        raw_inputs["ego_agent_past"] = heading_to_cos_sin(
+            raw_inputs["ego_agent_past"], preserve_zero_padding=True
+        )
+        raw_inputs["goal_pose"] = heading_to_cos_sin(
+            raw_inputs["goal_pose"], preserve_zero_padding=True
+        )
 
     reward_neighbors_raw = _neighbor_future_world(raw_inputs["neighbor_agents_future"])
     norm_inputs = args.observation_normalizer(raw_inputs)
@@ -911,8 +919,12 @@ def validate_hdp_reward_policy(data_loader, model, args):
                     key: value[start:stop].to(device, non_blocking=True)
                     for key, value in raw_batch.items()
                 }
-                raw_inputs["ego_agent_past"] = heading_to_cos_sin(raw_inputs["ego_agent_past"])
-                raw_inputs["goal_pose"] = heading_to_cos_sin(raw_inputs["goal_pose"])
+                raw_inputs["ego_agent_past"] = heading_to_cos_sin(
+                    raw_inputs["ego_agent_past"], preserve_zero_padding=True
+                )
+                raw_inputs["goal_pose"] = heading_to_cos_sin(
+                    raw_inputs["goal_pose"], preserve_zero_padding=True
+                )
                 reward_neighbors = _neighbor_future_world(raw_inputs["neighbor_agents_future"])
                 norm_inputs = args.observation_normalizer(raw_inputs)
                 decoder_inputs = {"ego_current_state": norm_inputs["ego_current_state"]}

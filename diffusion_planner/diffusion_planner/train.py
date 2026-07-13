@@ -316,6 +316,7 @@ def assert_checkpoint_compatible(
             "rl_eval_reward_w_follow",
             "rl_eval_reward_w_lane",
             "rl_eval_reward_w_progress",
+            "rl_eval_reward_w_road_border",
             "rl_eval_behavior_gate",
             "rl_eval_occupancy_use_road_border",
             "rl_eval_stationary_progress_mode",
@@ -332,6 +333,7 @@ def assert_checkpoint_compatible(
             "rl_reward_w_follow",
             "rl_reward_w_lane",
             "rl_reward_w_progress",
+            "rl_reward_w_road_border",
             "rl_behavior_gate",
             "rl_occupancy_use_road_border",
             "rl_stationary_progress_mode",
@@ -358,6 +360,8 @@ def assert_checkpoint_compatible(
             "rl_stationary_reference_threshold_m",
             "rl_stationary_progress_tolerance_m",
             "rl_red_light_lane_tolerance_m",
+            "rl_road_border_critical_m",
+            "rl_road_border_safe_m",
         )
         missing_training_fields = [
             field for field in training_fields if hasattr(args, field) and field not in ckpt_args
