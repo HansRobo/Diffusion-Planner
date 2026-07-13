@@ -1,7 +1,13 @@
-"""LineEncoder geometry fixes: pos must be computed from valid-point geometry
-(centroid + mean diff direction) instead of the padded center index and the type
-one-hot columns, and the diff at the last-valid-point -> padding boundary must be
-zeroed. See docs/line_string_encoder_issues.md."""
+"""LineEncoder geometry fixes.
+
+Before the fix, pos was taken from the center vertex index — which is padding
+for short elements such as 2-point stop lines — and its heading came from
+atan2 over the type one-hot columns, so it flipped with the element type
+instead of following the geometry. The diff at the last-valid-point -> padding
+boundary was also non-zero (a spurious segment back toward the origin).
+
+pos must instead be computed from valid-point geometry (centroid + summed diff
+direction) and the padding-boundary diff must be zeroed."""
 
 import torch
 from diffusion_planner.dimensions import (
@@ -115,6 +121,29 @@ def test_padding_element_is_masked_and_finite():
     assert torch.all(torch.isfinite(pos))
     # Padding falls back to the deterministic direction (1, 0) at the origin.
     assert torch.allclose(pos[0, 1, :4], torch.tensor([0.0, 0.0, 1.0, 0.0]))
+
+
+def test_origin_point_with_zero_type_is_not_padding():
+    # Legacy D=2 sources zero-pad the type channel, so a real mid-polyline
+    # vertex landing exactly on the normalized origin is an all-zero row.
+    # Padding is always a zero *suffix*, so this row must stay valid: its
+    # diffs to both neighbors are real segments, not padding boundaries.
+    encoder = _make_encoder()
+    x = torch.zeros(1, 1, POINTS_PER_LINE_STRING, POINT_DIM)
+    x[0, 0, 0, :2] = torch.tensor([-0.1, 0.0])
+    # x[0, 0, 1] stays all-zero: a real vertex at the normalized origin.
+    x[0, 0, 2, :2] = torch.tensor([0.1, 0.0])
+
+    features = _capture_mixer_input(encoder, x)
+    assert torch.allclose(features[0, 0, 2:4], torch.tensor([0.1, 0.0]), atol=1e-6)
+    assert torch.allclose(features[0, 1, 2:4], torch.tensor([0.1, 0.0]), atol=1e-6)
+    assert torch.all(features[0, 2, 2:4] == 0)
+
+    with torch.no_grad():
+        _, mask_p, pos = encoder(x)
+    assert mask_p.tolist() == [[False]]
+    # Centroid over 3 valid points (the origin vertex counts), direction +x.
+    assert torch.allclose(pos[0, 0, :4], torch.tensor([0.0, 0.0, 1.0, 0.0]), atol=1e-6)
 
 
 def test_closed_polyline_direction_falls_back_deterministically():
