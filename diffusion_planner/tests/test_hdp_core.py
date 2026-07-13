@@ -1166,6 +1166,29 @@ def test_hdp_empty_neighbor_reward_preserves_full_metric_contract():
     torch.testing.assert_close(terms["follow"], torch.ones(2))
 
 
+def test_hdp_comfort_anchors_first_acceleration_to_current_speed():
+    time_steps = 4
+    ego = torch.zeros(1, time_steps, 4)
+    ego[0, :, 0] = torch.arange(1.0, time_steps + 1.0)
+    ego[..., 2] = 1.0
+    common = (
+        ego,
+        torch.tensor([2.5, 4.0, 2.0]),
+        torch.zeros(0, time_steps, 4),
+        torch.zeros(0, 2),
+        torch.zeros(0, time_steps, dtype=torch.bool),
+        torch.zeros(0, 2),
+        torch.zeros(0, dtype=torch.bool),
+        HDPRewardConfig(),
+    )
+
+    matched = _collision_and_leader_terms(*common, ego_initial_speed=torch.tensor(10.0))
+    abrupt = _collision_and_leader_terms(*common, ego_initial_speed=torch.tensor(0.0))
+
+    torch.testing.assert_close(matched["comfort"], torch.ones(1))
+    torch.testing.assert_close(abrupt["comfort"], torch.tensor([0.75]))
+
+
 def test_hdp_reward_full_contract_reports_finite_component_diagnostics(monkeypatch):
     monkeypatch.setattr(hdp_rl_utils, "_RL_GEOMETRY_PAIR_STEP_BUDGET", 1)
     time_steps = 4
@@ -1179,6 +1202,7 @@ def test_hdp_reward_full_contract_reports_finite_component_diagnostics(monkeypat
     expert = torch.zeros(1, time_steps, 3)
     expert[..., 0] = torch.arange(1.0, time_steps + 1)
     scene_inputs = {
+        "ego_current_state": torch.zeros(1, 10),
         "ego_shape": torch.tensor([[2.5, 4.0, 2.0]]),
         "neighbor_agents_past": torch.zeros(1, 1, 2, 11),
         "ego_agent_future": expert,
@@ -1260,6 +1284,55 @@ def test_hdp_collision_reward_attenuates_rear_end_only():
     torch.testing.assert_close(rear["safety"], torch.tensor([0.7]))
     assert active["collision_active"].item() == 1.0
     assert rear["collision_rear"].item() == 1.0
+
+
+def test_hdp_rear_end_attenuation_persists_when_replay_vehicle_passes_through_ego():
+    time_steps = 4
+    ego = torch.zeros(1, time_steps, 4)
+    ego[..., 2] = 1.0
+    neighbor = torch.zeros(1, time_steps, 4)
+    neighbor[0, :, 0] = torch.tensor([-2.0, -1.0, 1.5, 3.0])
+    neighbor[..., 2] = 1.0
+
+    terms = _collision_and_leader_terms(
+        ego,
+        torch.tensor([2.5, 4.0, 2.0]),
+        neighbor,
+        torch.tensor([[2.0, 4.0]]),
+        torch.ones(1, time_steps, dtype=torch.bool),
+        torch.tensor([[-3.0, 0.0]]),
+        torch.tensor([True]),
+        HDPRewardConfig(),
+    )
+
+    torch.testing.assert_close(terms["safety"], torch.tensor([0.7]))
+    torch.testing.assert_close(terms["ttc"].amin(), torch.tensor(0.7))
+    assert terms["collision_active"].item() == 0.0
+    assert terms["collision_rear"].item() == 1.0
+
+
+def test_hdp_collision_direction_resets_after_separation():
+    time_steps = 4
+    ego = torch.zeros(1, time_steps, 4)
+    ego[..., 2] = 1.0
+    neighbor = torch.zeros(1, time_steps, 4)
+    neighbor[0, :, 0] = torch.tensor([-2.0, -8.0, 1.5, 1.5])
+    neighbor[..., 2] = 1.0
+
+    terms = _collision_and_leader_terms(
+        ego,
+        torch.tensor([2.5, 4.0, 2.0]),
+        neighbor,
+        torch.tensor([[2.0, 4.0]]),
+        torch.ones(1, time_steps, dtype=torch.bool),
+        torch.tensor([[-3.0, 0.0]]),
+        torch.tensor([True]),
+        HDPRewardConfig(),
+    )
+
+    torch.testing.assert_close(terms["safety"], torch.tensor([0.0]))
+    assert terms["collision_active"].item() == 1.0
+    assert terms["collision_rear"].item() == 1.0
 
 
 def test_hdp_stopped_occupancy_preserves_rear_end_attenuation():

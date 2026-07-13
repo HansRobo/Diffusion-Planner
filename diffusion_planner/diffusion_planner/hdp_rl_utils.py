@@ -304,6 +304,7 @@ def _collision_and_leader_terms(
     neighbor_is_vehicle: torch.Tensor,
     config: HDPRewardConfig,
     leader_reference: torch.Tensor | None = None,
+    ego_initial_speed: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Compute paper safety, TTC, THW and leader-conditioned following terms."""
     C, T, _ = ego_trajs.shape
@@ -312,7 +313,11 @@ def _collision_and_leader_terms(
     heading = ego_trajs[..., 2:4]
     heading = heading / heading.norm(dim=-1, keepdim=True).clamp_min(1e-6)
     ego_speed = _trajectory_speed(ego_xy, config.dt)
-    acceleration = torch.diff(torch.cat([ego_speed[:, :1], ego_speed], dim=-1), dim=-1) / config.dt
+    if ego_initial_speed is None:
+        initial_speed = ego_speed[:, :1]
+    else:
+        initial_speed = ego_initial_speed.reshape(1, 1).expand(C, 1)
+    acceleration = torch.diff(torch.cat([initial_speed, ego_speed], dim=-1), dim=-1) / config.dt
     comfort_score = _linear_safe_score(6.0 - acceleration.abs(), 0.0, 4.0)
 
     if neighbor_futures.shape[0] == 0:
@@ -347,8 +352,21 @@ def _collision_and_leader_terms(
         rel_xy[..., 0] * -heading[:, None, :, 1] + rel_xy[..., 1] * heading[:, None, :, 0]
     )
     npc_behind = longitudinal < 0.0
-    rear_collision = collision & npc_behind
-    active_collision = collision & ~npc_behind
+    # Lock the collision direction at first contact for each contiguous event. In a
+    # non-reactive replay, a following vehicle can pass through the ego while still
+    # overlapping; reclassifying that event halfway through would erase the paper's
+    # rear-end attenuation. A later collision after separation starts a new event.
+    previous_collision = torch.cat(
+        [torch.zeros_like(collision[..., :1]), collision[..., :-1]], dim=-1
+    )
+    event_start = collision & ~previous_collision
+    step_index = torch.arange(T, device=device).view(1, 1, T)
+    event_start_index = torch.where(event_start, step_index, -1).cummax(dim=-1).values
+    event_start_index = event_start_index.clamp_min(0)
+    rear_collision_event = collision & torch.gather(npc_behind, -1, event_start_index)
+    rear_collision = collision & rear_collision_event
+    active_collision = collision & ~rear_collision_event
+    npc_rear_for_risk = npc_behind | rear_collision_event
 
     per_step_penalty = torch.where(
         active_collision.any(dim=1),
@@ -374,7 +392,7 @@ def _collision_and_leader_terms(
     )
     per_neighbor_ttc = torch.where(collision, torch.zeros_like(per_neighbor_ttc), per_neighbor_ttc)
     ttc_value, ttc_neighbor = per_neighbor_ttc.min(dim=1)
-    ttc_is_rear = torch.gather(npc_behind, 1, ttc_neighbor[:, None]).squeeze(1)
+    ttc_is_rear = torch.gather(npc_rear_for_risk, 1, ttc_neighbor[:, None]).squeeze(1)
 
     ttc_score = _linear_safe_score(
         ttc_value,
@@ -454,7 +472,7 @@ def _collision_and_leader_terms(
         ~stopped_mask[None, :, None], float("inf")
     ).min(dim=1)
     stopped_is_rear = torch.gather(
-        npc_behind,
+        npc_rear_for_risk,
         1,
         stopped_index[:, None, :],
     ).squeeze(1) & torch.isfinite(stopped_clearance)
@@ -961,7 +979,13 @@ def compute_hdp_reward(
         )
     neighbor_group = neighbors_future
 
-    required = ("ego_shape", "neighbor_agents_past", "ego_agent_future", "lanes")
+    required = (
+        "ego_current_state",
+        "ego_shape",
+        "neighbor_agents_past",
+        "ego_agent_future",
+        "lanes",
+    )
     missing = [key for key in required if key not in scene_inputs]
     if missing:
         raise ValueError(f"HDP reward is missing required scene tensors: {missing}")
@@ -980,6 +1004,7 @@ def compute_hdp_reward(
         neighbor_valid,
         neighbor_initial,
         neighbor_is_vehicle,
+        ego_initial_speed,
         expert_future,
     ):
         return _collision_and_leader_terms(
@@ -992,6 +1017,7 @@ def compute_hdp_reward(
             neighbor_is_vehicle,
             config,
             leader_reference=expert_future,
+            ego_initial_speed=ego_initial_speed,
         )
 
     pair_steps_per_scene = max(
@@ -1009,6 +1035,7 @@ def compute_hdp_reward(
         ego_group,
         scene_inputs["ego_shape"][:, :3],
         *packed_neighbors,
+        scene_inputs["ego_current_state"][:, 4:6].norm(dim=-1),
         expert_futures_tensor,
     )
     route_lanes_batch = scene_inputs.get("route_lanes")
