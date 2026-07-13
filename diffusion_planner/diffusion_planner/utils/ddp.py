@@ -16,8 +16,8 @@ def ddp_setup_universal(verbose=False, args=None):
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         gpu = int(os.environ["LOCAL_RANK"])
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", str(getattr(args, "port", "29529")))
+        os.environ["MASTER_PORT"] = str(getattr(args, "port", "29529"))
+        os.environ["MASTER_ADDR"] = "localhost"
     elif "SLURM_PROCID" in os.environ:
         rank = int(os.environ["SLURM_PROCID"])
         gpu = rank % torch.cuda.device_count()
@@ -37,10 +37,12 @@ def ddp_setup_universal(verbose=False, args=None):
 
     torch.cuda.set_device(gpu)
     dist_backend = "nccl"
-    init_method = "env://"
-    print("| distributed init (rank {}): {}, gpu {}".format(rank, init_method, gpu), flush=True)
+    # I don't know why but this is needed for DDP to work instead of 'env://'
+    dist_url = "file://"
+    file_path = "/tmp/tmp_dist_init"
+    print("| distributed init (rank {}): {}, gpu {}".format(rank, dist_url, gpu), flush=True)
     init_process_group(
-        init_method=init_method,
+        init_method=f"{dist_url}{file_path}",
         backend=dist_backend,
         world_size=world_size,
         rank=rank,
