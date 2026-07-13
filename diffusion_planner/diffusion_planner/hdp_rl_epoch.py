@@ -35,6 +35,16 @@ from diffusion_planner.utils.train_utils import finalize_epoch_loss_sums, update
 _RL_EVAL_MAX_CANDIDATES_PER_RANK = 1024
 
 
+def _step_metrics_for_logging(
+    step_loss: dict[str, torch.Tensor | float], device: torch.device, use_ddp: bool
+) -> dict[str, torch.Tensor | float]:
+    """Return detached global step means without mutating training diagnostics."""
+    logged = dict(step_loss)
+    if use_ddp:
+        return ddp.reduce_and_average_losses(logged, device)
+    return logged
+
+
 def _reward_eval_scene_chunk_size(num_scenes: int, num_generations: int) -> int:
     if num_scenes <= 0 or num_generations <= 0:
         raise ValueError("Reward validation needs positive scene and generation counts")
@@ -532,7 +542,8 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
         data_loader = tqdm(data_loader, desc="HDP-RL", unit="batch")
 
     step_log = getattr(args, "wandb_step_log_interval", 0)
-    log_step = args.use_wandb and step_log > 0 and ddp.get_rank() == 0
+    reduce_step_metrics = args.use_wandb and step_log > 0
+    log_step = reduce_step_metrics and ddp.get_rank() == 0
     if not hasattr(args, "_wandb_global_step"):
         args._wandb_global_step = 0
 
@@ -574,21 +585,23 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
         crossed_log_interval = (
             step_log > 0 and args._wandb_global_step // step_log > previous_global_step // step_log
         )
-        if log_step and crossed_log_interval:
-            wandb.log(
-                {
-                    **{
-                        f"train_step/{key}": (value.item() if torch.is_tensor(value) else value)
-                        for key, value in step_loss.items()
-                    },
-                    "train_step/global_step": args._wandb_global_step,
-                    "optimizer_step": args._wandb_global_step,
-                    "train_step/batch": batch_idx,
-                    "train_step/num_batches": len(data_loader),
-                    "train_step/epoch_progress": batch_idx / max(len(data_loader), 1),
-                    "train_step/lr": optimizer.param_groups[0]["lr"],
-                }
-            )
+        if reduce_step_metrics and crossed_log_interval:
+            logged_step_loss = _step_metrics_for_logging(step_loss, device, args.ddp)
+            if log_step:
+                wandb.log(
+                    {
+                        **{
+                            f"train_step/{key}": (value.item() if torch.is_tensor(value) else value)
+                            for key, value in logged_step_loss.items()
+                        },
+                        "train_step/global_step": args._wandb_global_step,
+                        "optimizer_step": args._wandb_global_step,
+                        "train_step/batch": batch_idx,
+                        "train_step/num_batches": len(data_loader),
+                        "train_step/epoch_progress": batch_idx / max(len(data_loader), 1),
+                        "train_step/lr": optimizer.param_groups[0]["lr"],
+                    }
+                )
         update_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts, step_loss)
 
     epoch_mean_loss = finalize_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts)
@@ -652,6 +665,8 @@ def validate_hdp_reward_policy(data_loader, model, args):
             f"rl_reward_w_{name}",
             float(getattr(args, f"rl_eval_reward_w_{name}", default)),
         )
+    gate_default = TrainConfig.__dataclass_fields__["rl_eval_behavior_gate"].default
+    eval_reward_args.rl_behavior_gate = getattr(args, "rl_eval_behavior_gate", gate_default)
     # reward sum, candidate count, per-group max sum, scene count, invalid reward count,
     # invalid diagnostic count. Invalid values are reported after the collective so every
     # rank exits together instead of leaving peers blocked in all_reduce.

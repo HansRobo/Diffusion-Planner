@@ -118,6 +118,11 @@ def get_args(args_list=None):
             type=float,
             default=_valid_config_default(f"reward_eval_w_{reward_name}"),
         )
+    parser.add_argument(
+        "--reward_eval_behavior_gate",
+        choices=["none", "safety", "risk"],
+        default=_valid_config_default("reward_eval_behavior_gate"),
+    )
 
     args = parser.parse_args(args_list)
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
@@ -260,6 +265,7 @@ def run_validation(valid_cfg: ValidConfig):
         reward_args.rl_eval_num_generations = valid_cfg.reward_eval_num_generations
         reward_args.rl_eval_noise_scale = valid_cfg.reward_eval_noise_scale
         reward_args.diffusion_sample_steps = valid_cfg.reward_eval_sample_steps
+        reward_args.rl_eval_behavior_gate = valid_cfg.reward_eval_behavior_gate
         for reward_name in ("safety", "risk", "follow", "lane", "progress"):
             setattr(
                 reward_args,

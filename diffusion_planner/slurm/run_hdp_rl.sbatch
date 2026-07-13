@@ -49,6 +49,7 @@ REWARD_W_RISK=${HDP_RL_REWARD_W_RISK:-1.0}
 REWARD_W_FOLLOW=${HDP_RL_REWARD_W_FOLLOW:-3.0}
 REWARD_W_LANE=${HDP_RL_REWARD_W_LANE:-2.5}
 REWARD_W_PROGRESS=${HDP_RL_REWARD_W_PROGRESS:-3.0}
+BEHAVIOR_GATE=${HDP_RL_BEHAVIOR_GATE:-safety}
 BC_WEIGHT=${HDP_RL_BC_WEIGHT:-0.0}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-1.5}
@@ -59,6 +60,7 @@ EVAL_REWARD_W_RISK=${HDP_RL_EVAL_REWARD_W_RISK:-1.0}
 EVAL_REWARD_W_FOLLOW=${HDP_RL_EVAL_REWARD_W_FOLLOW:-3.0}
 EVAL_REWARD_W_LANE=${HDP_RL_EVAL_REWARD_W_LANE:-2.5}
 EVAL_REWARD_W_PROGRESS=${HDP_RL_EVAL_REWARD_W_PROGRESS:-3.0}
+EVAL_BEHAVIOR_GATE=${HDP_RL_EVAL_BEHAVIOR_GATE:-safety}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
 UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-1}
 UPDATE_MAX_CANDIDATES=${HDP_RL_UPDATE_MAX_CANDIDATES_PER_RANK:-2048}
@@ -72,6 +74,15 @@ WANDB_RUN_ID=${HDP_RL_WANDB_RUN_ID:-}
 STEP_LOG_INTERVAL=${HDP_RL_STEP_LOG_INTERVAL:-100}
 RUN_NAME=${HDP_RL_RUN_NAME:-hdp_rl_${WORLD_SIZE}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
 SAVE_ROOT=${HDP_RL_SAVE_ROOT:-${REPO}/outputs}
+for gate_name in "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}"; do
+  case "${gate_name}" in
+    none | safety | risk) ;;
+    *)
+      echo "behavior gate must be one of none, safety, or risk; got ${gate_name}" >&2
+      exit 2
+      ;;
+  esac
+done
 if ((NNODES > 1)) && [[ "${SAVE_ROOT}" == /mnt/nvme/* ]]; then
   echo "multi-node RL requires a shared HDP_RL_SAVE_ROOT, not local NVMe: ${SAVE_ROOT}" >&2
   exit 2
@@ -329,6 +340,7 @@ TRAIN_ARGS=(
   --rl_eval_reward_w_follow "${EVAL_REWARD_W_FOLLOW}" \
   --rl_eval_reward_w_lane "${EVAL_REWARD_W_LANE}" \
   --rl_eval_reward_w_progress "${EVAL_REWARD_W_PROGRESS}" \
+  --rl_eval_behavior_gate "${EVAL_BEHAVIOR_GATE}" \
   --rl_rollout_steps "${ROLLOUT_STEPS}" \
   --rl_updates_per_rollout "${UPDATES_PER_ROLLOUT}" \
   --rl_update_max_candidates_per_rank "${UPDATE_MAX_CANDIDATES}" \
@@ -339,6 +351,7 @@ TRAIN_ARGS=(
   --rl_reward_w_follow "${REWARD_W_FOLLOW}" \
   --rl_reward_w_lane "${REWARD_W_LANE}" \
   --rl_reward_w_progress "${REWARD_W_PROGRESS}" \
+  --rl_behavior_gate "${BEHAVIOR_GATE}" \
   --rl_bc_weight "${BC_WEIGHT}" \
   --rl_ema_update_rate "${EMA_UPDATE_RATE}" \
   --rl_init_use_ema True \
@@ -398,7 +411,7 @@ srun --kill-on-bad-exit=1 --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-
 
 "${REPO}/.venv/bin/python" - \
   "${VERIFY_SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" \
-  "${TRAIN_EPOCHS}" <<'PY'
+  "${TRAIN_EPOCHS}" "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}" <<'PY'
 import csv
 import json
 import math
@@ -412,6 +425,8 @@ save_dir = pathlib.Path(sys.argv[2])
 scope = sys.argv[3]
 mode = sys.argv[4]
 expected_epoch = int(sys.argv[5])
+expected_behavior_gate = sys.argv[6]
+expected_eval_behavior_gate = sys.argv[7]
 source = torch.load(initial_path, map_location="cpu", weights_only=True)
 if mode == "resume":
     initial_live = source["model"]
@@ -472,6 +487,10 @@ assert policy_sync_error and max(policy_sync_error) < 2e-5, max(policy_sync_erro
 with (save_dir / "train_log.tsv").open(newline="", encoding="utf-8") as f:
     rows = list(csv.DictReader(f, delimiter="\t"))
 assert len(rows) == completed_epoch
+with (save_dir / "args.json").open(encoding="utf-8") as f:
+    run_args = json.load(f)
+assert run_args["rl_behavior_gate"] == expected_behavior_gate
+assert run_args["rl_eval_behavior_gate"] == expected_eval_behavior_gate
 required = (
     "train_reward_mean",
     "train_reward_std",
@@ -499,8 +518,6 @@ with (save_dir / "source_baseline_metrics.json").open(encoding="utf-8") as f:
 if source_metrics.get("baseline_available", True):
     assert math.isfinite(float(source_metrics["valid_reward_mean"]))
 else:
-    with (save_dir / "args.json").open(encoding="utf-8") as f:
-        run_args = json.load(f)
     assert run_args["rl_validate_before_training"] is False
 
 print(

@@ -21,6 +21,7 @@ from diffusion_planner.hdp_rl_epoch import (
 )
 from diffusion_planner.hdp_rl_utils import (
     HDPRewardConfig,
+    _apply_behavior_gate,
     _batched_occupancy_score,
     _collision_and_leader_terms,
     _hdp_lane_score,
@@ -100,6 +101,8 @@ def test_tuned_hdp_rl_defaults_are_consistent():
     assert fields["rl_reward_beta"].default == 0.5
     assert fields["rl_rollout_steps"].default == 6
     assert fields["rl_early_stop_patience"].default == 0
+    assert fields["rl_behavior_gate"].default == "safety"
+    assert fields["rl_eval_behavior_gate"].default == "safety"
 
 
 def test_non_risk_behavior_reward_is_attenuated_by_collision_safety():
@@ -110,6 +113,18 @@ def test_non_risk_behavior_reward_is_attenuated_by_collision_safety():
         _safety_gated_behavior(behavior, safety),
         torch.tensor([0.0, 0.7, 1.0]),
     )
+
+
+def test_behavior_reward_gate_supports_paper_safety_and_risk_objectives():
+    behavior = torch.ones(3)
+    safety = torch.tensor([0.0, 0.7, 1.0])
+    risk = torch.tensor([0.0, 0.25, 0.8])
+
+    torch.testing.assert_close(_apply_behavior_gate(behavior, safety, risk, "none"), behavior)
+    torch.testing.assert_close(_apply_behavior_gate(behavior, safety, risk, "safety"), safety)
+    torch.testing.assert_close(_apply_behavior_gate(behavior, safety, risk, "risk"), risk)
+    with pytest.raises(ValueError, match="Unsupported rl_behavior_gate"):
+        _apply_behavior_gate(behavior, safety, risk, "invalid")
 
 
 def test_hdp_representation_and_normalization_round_trip():
@@ -2115,6 +2130,8 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
     for field, value in (
         ("rl_reward_w_safety", 1.0),
         ("rl_eval_reward_w_safety", 1.0),
+        ("rl_behavior_gate", "risk"),
+        ("rl_eval_behavior_gate", "risk"),
         ("advantage_eps", 1e-4),
         ("rl_full_eval_utd", 2),
         ("decoder_drop_path_rate", 0.0),

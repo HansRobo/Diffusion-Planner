@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
@@ -41,5 +41,6 @@ class ValidConfig:
     reward_eval_w_follow: float = 3.0
     reward_eval_w_lane: float = 2.5
     reward_eval_w_progress: float = 3.0
+    reward_eval_behavior_gate: Literal["none", "safety", "risk"] = "safety"
     # None inherits the exact data-alignment setting saved by training.
     align_legacy_neighbor_futures: Optional[bool] = None

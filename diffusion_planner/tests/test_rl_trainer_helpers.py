@@ -8,6 +8,7 @@ from diffusion_planner.hdp_rl_epoch import (
     _reward_eval_scene_chunk_size,
     _rl_update_scene_chunk_size,
     _slice_grouped_policy_inputs,
+    _step_metrics_for_logging,
     validate_hdp_reward_policy,
 )
 from train_hdp_rl_predictor import (
@@ -142,6 +143,26 @@ def test_reward_validation_caps_candidate_batch_without_dropping_scenes():
     assert _reward_eval_scene_chunk_size(64, 32) == 32
     assert _reward_eval_scene_chunk_size(17, 32) == 17
     assert _reward_eval_scene_chunk_size(64, 2048) == 1
+
+
+def test_step_logging_uses_ddp_global_means_without_mutating_local_metrics(monkeypatch):
+    local = {"reward_mean": torch.tensor(1.0), "valid_group_fraction": 0.5}
+    observed = []
+
+    def fake_reduce(metrics, device):
+        observed.append((dict(metrics), device))
+        metrics["reward_mean"] = 2.0
+        metrics["valid_group_fraction"] = 0.75
+        return metrics
+
+    monkeypatch.setattr("diffusion_planner.hdp_rl_epoch.ddp.reduce_and_average_losses", fake_reduce)
+
+    logged = _step_metrics_for_logging(local, torch.device("cpu"), use_ddp=True)
+
+    assert observed and observed[0][1] == torch.device("cpu")
+    assert logged == {"reward_mean": 2.0, "valid_group_fraction": 0.75}
+    assert local["reward_mean"].item() == 1.0
+    assert local["valid_group_fraction"] == 0.5
 
 
 def test_rl_update_chunk_preserves_groups_and_uses_one_static_shape():
@@ -400,6 +421,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     observed_noise_scales = []
     observed_sample_steps = []
     observed_reward_weights = []
+    observed_behavior_gates = []
 
     def fake_sample_group(_model, inputs, *_args, **_kwargs):
         observed_noise_scales.append(_args[0])
@@ -408,6 +430,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         return torch.zeros(batch, 80, 4)
 
     def fake_reward(_ego, _inputs, _neighbors, num_scenes, n, _args):
+        observed_behavior_gates.append(_args.rl_behavior_gate)
         observed_reward_weights.append(
             tuple(
                 getattr(_args, f"rl_reward_w_{name}")
@@ -448,6 +471,8 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         rl_eval_reward_w_follow=3.0,
         rl_eval_reward_w_lane=2.5,
         rl_eval_reward_w_progress=3.0,
+        rl_behavior_gate="none",
+        rl_eval_behavior_gate="risk",
         amp_dtype="off",
         rl_rollout_steps=6,
         diffusion_sample_steps=5,
@@ -463,5 +488,7 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     assert observed_noise_scales == [0.25, 0.25]
     assert observed_sample_steps == [5, 5]
     assert observed_reward_weights == [(0.0, 1.0, 3.0, 2.5, 3.0)] * 2
+    assert observed_behavior_gates == ["risk", "risk"]
     assert args.rl_reward_w_safety == 5.0
     assert args.rl_reward_w_risk == 9.0
+    assert args.rl_behavior_gate == "none"

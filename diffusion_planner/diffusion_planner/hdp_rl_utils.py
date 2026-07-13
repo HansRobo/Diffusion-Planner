@@ -224,6 +224,22 @@ def _safety_gated_behavior(
     return behavior_score * safety_score
 
 
+def _apply_behavior_gate(
+    behavior_score: torch.Tensor,
+    safety_score: torch.Tensor,
+    risk_score: torch.Tensor,
+    gate: str,
+) -> torch.Tensor:
+    """Apply the selected real-vehicle reward constraint to behavior terms."""
+    if gate == "none":
+        return behavior_score
+    if gate == "safety":
+        return _safety_gated_behavior(behavior_score, safety_score)
+    if gate == "risk":
+        return behavior_score * risk_score
+    raise ValueError(f"Unsupported rl_behavior_gate={gate!r}")
+
+
 def _scene_neighbors(
     neighbors_future: torch.Tensor,
     neighbor_past: torch.Tensor,
@@ -1089,7 +1105,9 @@ def compute_hdp_reward(
     risk = torch.stack(
         (scene_term_tensors["ttc"], scene_term_tensors["thw"], occupancy), dim=0
     ).amin(dim=(0, 3))
-    progress_reward = _safety_gated_behavior(progress_scores, safety)
+    behavior_gate_name = getattr(args, "rl_behavior_gate", "safety")
+    behavior_gate = _apply_behavior_gate(torch.ones_like(safety), safety, risk, behavior_gate_name)
+    progress_reward = progress_scores * behavior_gate
     behavior_reward = (
         args.rl_reward_w_follow * scene_term_tensors["follow"]
         + args.rl_reward_w_lane * lane_scores
@@ -1098,7 +1116,7 @@ def compute_hdp_reward(
     reward_group = (
         getattr(args, "rl_reward_w_safety", 0.0) * safety
         + args.rl_reward_w_risk * risk
-        + _safety_gated_behavior(behavior_reward, safety)
+        + behavior_reward * behavior_gate
     )
     ttc_min = scene_term_tensors["ttc"].amin(dim=-1)
     thw_min = scene_term_tensors["thw"].amin(dim=-1)
@@ -1136,6 +1154,7 @@ def compute_hdp_reward(
         "underprogress_fraction": (progress_ratios < 0.8).to(risk.dtype),
         "overprogress_fraction": (progress_ratios > 1.2).to(risk.dtype),
         "comfort": scene_term_tensors["comfort"],
+        "behavior_gate": behavior_gate,
     }
     flattened = {key: value.reshape(-1) for key, value in metric_groups.items()}
     fraction_keys = {

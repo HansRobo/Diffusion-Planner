@@ -145,6 +145,9 @@ class TrainConfig:
     rl_eval_reward_w_follow: float = 3.0
     rl_eval_reward_w_lane: float = 2.5
     rl_eval_reward_w_progress: float = 3.0
+    # Keep held-out policy selection on one safety-aware objective even when the
+    # optimization gate is ablated against the exact published reward sum.
+    rl_eval_behavior_gate: Literal["none", "safety", "risk"] = "safety"
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
@@ -157,8 +160,8 @@ class TrainConfig:
     # forwards feeding one exact optimizer update.
     rl_update_max_candidates_per_rank: int = 2048
     rl_init_use_ema: bool = True
-    # Optional direct collision term. Zero preserves the published multi-reward formula; positive
-    # values test whether active=1/rear=0.3 safety prevents progress-risk Pareto regressions.
+    # Optional direct collision term. Zero omits the standalone safety component; positive values
+    # test whether active=1/rear=0.3 safety prevents progress-risk Pareto regressions.
     rl_reward_w_safety: float = 0.0
     rl_reward_w_risk: float = 1.0
     rl_reward_w_follow: float = 3.0
@@ -166,6 +169,10 @@ class TrainConfig:
     # Anti-stopping reward, measured as signed endpoint progress relative to the logged expert.
     # Kept independently tunable because the paper reward omits explicit progress.
     rl_reward_w_progress: float = 3.0
+    # The published multi-reward formula uses no gate. ``safety`` is our real-vehicle
+    # extension that prevents follow/lane/progress from compensating for a collision;
+    # ``risk`` also suppresses those terms for near misses.
+    rl_behavior_gate: Literal["none", "safety", "risk"] = "safety"
     # The EMA policy boundary already limits drift. Real-data and recovery-set ablations found
     # that an additional expert anchor slows reward learning without improving robustness.
     rl_bc_weight: float = 0.0

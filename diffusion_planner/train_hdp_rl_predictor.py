@@ -440,6 +440,12 @@ def get_args():
             help=f"fixed held-out {help_name} weight, independent of optimization weights",
         )
     parser.add_argument(
+        "--rl_eval_behavior_gate",
+        choices=["none", "safety", "risk"],
+        default=_train_config_default("rl_eval_behavior_gate"),
+        help="behavior gate used only by the fixed held-out reward objective",
+    )
+    parser.add_argument(
         "--rl_rollout_steps",
         type=int,
         default=_train_config_default("rl_rollout_steps"),
@@ -471,7 +477,7 @@ def get_args():
         "--rl_reward_w_safety",
         type=float,
         default=_train_config_default("rl_reward_w_safety"),
-        help="optional direct paper safety-reward weight; zero preserves multi-reward HDP",
+        help="optional direct paper safety-reward weight; zero omits the standalone component",
     )
     parser.add_argument(
         "--rl_reward_w_risk",
@@ -496,6 +502,12 @@ def get_args():
         type=float,
         default=_train_config_default("rl_reward_w_progress"),
         help="anti-stopping reward weight for signed progress relative to the logged expert",
+    )
+    parser.add_argument(
+        "--rl_behavior_gate",
+        choices=["none", "safety", "risk"],
+        default=_train_config_default("rl_behavior_gate"),
+        help="gate follow/lane/progress by none (paper), collision safety, or continuous risk",
     )
     parser.add_argument(
         "--rl_bc_weight",
@@ -1014,6 +1026,7 @@ def model_training(args):
         print("RL reward: HDP safety/risk/follow/lane with Tier IV occupancy proxies")
         print("RL direct safety reward weight: {}".format(args.rl_reward_w_safety))
         print("RL progress reward weight: {}".format(args.rl_reward_w_progress))
+        print("RL behavior reward gate: {}".format(args.rl_behavior_gate))
         print("RL behavior-cloning anchor weight: {}".format(args.rl_bc_weight))
         print("RL EMA update rate: {}".format(args.rl_ema_update_rate))
         print("RL train scope: {}".format(args.rl_train_scope))
@@ -1027,6 +1040,7 @@ def model_training(args):
             f"{args.rl_eval_reward_w_follow}/"
             f"{args.rl_eval_reward_w_lane}/{args.rl_eval_reward_w_progress}"
         )
+        print("Held-out behavior reward gate: {}".format(args.rl_eval_behavior_gate))
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
         print("RL updates per rollout: {}".format(args.rl_updates_per_rollout))
         print(
