@@ -1394,9 +1394,11 @@ def render_segment(
     is rebuilt from the shown simulated motion instead of copied from the recorded
     cursor frame. ``goal_mode="segment"`` terminates at ``end - 1``; ``"route"``
     terminates at the NPZ route goal displayed in the render.
-    ``tracker_mode="mpc"`` uses the bicycle-model MPC tracker for ego advance while
-    keeping the same reproduced perception inputs. This is the default reproducer
-    tracker mode.
+    ``tracker_mode="mpc"`` (default) uses the bicycle-model MPC tracker for ego advance while
+    keeping the same reproduced perception inputs. ``tracker_mode="perfect"`` is *complete* perfect
+    tracking: every step (replan ticks included) places the ego DIRECTLY on the model's predicted
+    world pose, so the realized trajectory exactly follows the predicted polyline — no Euler /
+    heading-snap drift and no MPC physical smoothing.
     Returns the SegmentResult metrics.
     """
     from pathlib import Path
@@ -1510,6 +1512,20 @@ def render_segment(
         )
         if outputs is not None:
             _feed_turn_indicator(s, outputs)
+        # Complete perfect tracking (tracker_mode="perfect"): the replan step would otherwise run
+        # PerfectTracker.track, which advances the plan's *distance* along the CURRENT heading and
+        # snaps heading to the reference only AFTERWARD — so on any curve the ego drifts off the
+        # predicted point. Instead place the ego DIRECTLY on the first predicted world pose, exactly
+        # as the in-between steps already do for the cached plan (the "faithful perfect tracking" the
+        # override path implements). Every step then lands on the predicted polyline point.
+        if tracker_mode == "perfect" and override is None:
+            tx, ty, th = (
+                float(plan_world[0][0, 0]),
+                float(plan_world[0][0, 1]),
+                float(plan_world[1][0]),
+            )
+            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+            override = (np.array([tx, ty, th], dtype=np.float64), spd)
         nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)

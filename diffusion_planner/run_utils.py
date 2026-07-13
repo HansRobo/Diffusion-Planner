@@ -12,6 +12,7 @@ NCCL_ENV = {
     "NCCL_IB_DISABLE": "1",
     "NCCL_SOCKET_IFNAME": "lo",
     "NCCL_DEBUG": "INFO",
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
 }
 
 

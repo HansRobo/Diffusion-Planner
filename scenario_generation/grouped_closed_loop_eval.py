@@ -44,6 +44,7 @@ def _rollout_kwargs(
     unstick_advance_m: float,
     draw_every: int,
     replan_interval: int,
+    tracker_mode: str,
     profile: bool,
     profile_sync_gpu: bool,
 ) -> dict[str, Any]:
@@ -56,6 +57,7 @@ def _rollout_kwargs(
         "unstick_advance_m": unstick_advance_m,
         "draw_every": draw_every,
         "replan_interval": replan_interval,
+        "tracker_mode": tracker_mode,
         "profile": profile,
         "profile_sync_gpu": profile_sync_gpu,
     }
@@ -358,6 +360,7 @@ def run_grouped_closed_loop_eval(
     fps: float = 10.0,
     areas: list[str] | None = None,
     replan_interval: int = 10,
+    tracker_mode: str = "mpc",
     verbose: bool = True,
     profile: bool = False,
     profile_sync_gpu: bool = False,
@@ -396,6 +399,7 @@ def run_grouped_closed_loop_eval(
         unstick_advance_m=unstick_advance_m,
         draw_every=draw_every,
         replan_interval=replan_interval,
+        tracker_mode=tracker_mode,
         profile=profile,
         profile_sync_gpu=profile_sync_gpu,
     )

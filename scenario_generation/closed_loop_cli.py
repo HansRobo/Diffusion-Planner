@@ -14,7 +14,14 @@ from pathlib import Path
 
 from scenario_generation.closed_loop_eval import run_closed_loop_eval
 from scenario_generation.grouped_closed_loop_eval import run_grouped_closed_loop_eval
-from scenario_generation.simulate import load_model
+from scenario_generation.simulate import load_model, load_onnx_model
+
+
+def load_checkpoint(model_path: Path, device: str):
+    """Load a torch checkpoint or ONNX export (args.json must sit next to the file)."""
+    if model_path.suffix == ".onnx":
+        return load_onnx_model(model_path, device)
+    return load_model(model_path, device)
 
 
 def add_rollout_args(parser: argparse.ArgumentParser) -> None:
@@ -89,6 +96,12 @@ def add_rollout_args(parser: argparse.ArgumentParser) -> None:
         help="re-run the model every N sim steps (1=every step); between replans execute the "
         "cached world-frame plan open-loop",
     )
+    parser.add_argument(
+        "--tracker_mode",
+        choices=("mpc", "perfect"),
+        default="perfect",
+        help="ego advance: mpc=bicycle MPC tracker; perfect=place ego on predicted polyline",
+    )
 
 
 def add_output_args(parser: argparse.ArgumentParser) -> None:
@@ -148,7 +161,7 @@ def _load_area_mapping(path: Path) -> dict[str, str]:
 
 
 def run_full_route_eval(args: argparse.Namespace) -> dict:
-    model, model_args = load_model(args.model_path, args.device)
+    model, model_args = load_checkpoint(args.model_path, args.device)
     out_dir = args.out_dir
     if out_dir is None:
         out_dir = args.model_path.parent / "closed_loop" / datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -172,6 +185,7 @@ def run_full_route_eval(args: argparse.Namespace) -> dict:
         fps=args.fps,
         draw_every=args.draw_every,
         replan_interval=args.replan_interval,
+        tracker_mode=args.tracker_mode,
         neighbor_history_mode="recorded",
         verbose=True,
     )
@@ -207,7 +221,7 @@ def run_grouped_eval(args: argparse.Namespace) -> int:
             "npz path follows .../{project}/{map}/valid/{date}/..."
         )
 
-    model, model_args = load_model(args.model_path, args.device)
+    model, model_args = load_checkpoint(args.model_path, args.device)
     summaries: list[dict] = []
     for job in jobs:
         job_out = args.out_dir if len(jobs) == 1 else args.out_dir / job.date
@@ -229,6 +243,7 @@ def run_grouped_eval(args: argparse.Namespace) -> int:
             unstick_advance_m=args.unstick_advance_m,
             draw_every=args.draw_every,
             replan_interval=args.replan_interval,
+            tracker_mode=args.tracker_mode,
             fps=args.fps,
             areas=args.areas,
             verbose=True,

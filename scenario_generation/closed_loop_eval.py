@@ -128,6 +128,7 @@ def run_closed_loop_eval(
     replan_interval: int = 10,
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
+    tracker_mode: str = "mpc",
     verbose: bool = True,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
@@ -178,6 +179,7 @@ def run_closed_loop_eval(
                     draw_every=draw_every,
                     neighbor_history_mode=neighbor_history_mode,
                     replan_interval=replan_interval,
+                    tracker_mode=tracker_mode,
                 )
                 row = {"route": key, **metrics}
                 fout.write(json.dumps(row, default=float) + "\n")

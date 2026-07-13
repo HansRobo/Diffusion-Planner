@@ -16,6 +16,7 @@ from scenario_generation.metrics.safety_clearance import score_safety_step
 from scenario_generation.metrics.turn_indicator import score_turn_indicator_step
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import (
+    DT,
     _advance_step,
     _closed_loop_replan_step,
     _draw_step,
@@ -77,6 +78,7 @@ def run_full_route_rollout(
     unstick_advance_m: float = 2.5,
     draw_every: int = 8,
     replan_interval: int = 10,
+    tracker_mode: str = "mpc",
     profile: bool = False,
     profile_sync_gpu: bool = False,
 ) -> RouteRolloutResult:
@@ -106,6 +108,7 @@ def run_full_route_rollout(
         unstick_advance_m=unstick_advance_m,
         neighbor_history_mode="recorded",
         goal_mode="route",
+        tracker_mode=tracker_mode,
     )
 
     steps: list[StepRecord] = []
@@ -136,6 +139,15 @@ def run_full_route_rollout(
             timers=timers,
             profile_sync_gpu=profile_sync_gpu,
         )
+
+        if tracker_mode == "perfect" and override is None:
+            tx, ty, th = (
+                float(plan_world[0][0, 0]),
+                float(plan_world[0][0, 1]),
+                float(plan_world[1][0]),
+            )
+            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+            override = (np.array([tx, ty, th], dtype=np.float64), spd)
 
         def _score_step_metrics():
             nonlocal turn_match
