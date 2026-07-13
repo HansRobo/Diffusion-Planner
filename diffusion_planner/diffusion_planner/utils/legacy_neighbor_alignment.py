@@ -7,6 +7,7 @@ import numpy as np
 _FULL_TRACK_MATCH_TOLERANCE_M = 0.02
 _FULL_TRACK_MATCH_MARGIN_M = 0.04
 _FULL_TRACK_MIN_MOTION_M = 0.05
+_ALIGNED_NEIGHBOR_FUTURE_VERSION = 3
 
 
 def _next_indexed_npz_path(source_path: str) -> Path | None:
@@ -97,6 +98,7 @@ def align_legacy_neighbor_futures_on_load(
     data: dict,
     atol: float = 1e-4,
     source_path: str | None = None,
+    data_version: int | None = None,
 ) -> None:
     """Fix legacy neighbor timing in memory without writing shared data.
 
@@ -105,6 +107,8 @@ def align_legacy_neighbor_futures_on_load(
     the neighbor disappears exactly at the horizon boundary. Those cases are
     shifted only after matching their second point to the next logged scene.
     """
+    if data_version is not None and data_version >= _ALIGNED_NEIGHBOR_FUTURE_VERSION:
+        return
     if "neighbor_agents_future" not in data or "neighbor_agents_past" not in data:
         return
     future = data["neighbor_agents_future"]

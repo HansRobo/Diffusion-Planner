@@ -64,6 +64,8 @@ route_lanes_has_speed_limit bool    (NUM_SEGMENTS_IN_ROUTE, 1)
 turn_indicators             int32   (INPUT_T + 1)
 """
 PAST_TIME_STEPS = INPUT_T + 1
+# Version 3 guarantees that neighbor future index 0 is t+0.1 s, not the current frame.
+DATA_FORMAT_VERSION = 3
 
 # Synthetic clock period for frame assembly (10 Hz), matching the C++ build_sequences.
 CLOCK_PERIOD_NS = 100_000_000
@@ -875,7 +877,7 @@ def main(
             )
 
             curr_data = {
-                "version": 2,
+                "version": DATA_FORMAT_VERSION,
                 "ego_agent_past": np.asarray(ego_past_np, dtype=np.float32),
                 "ego_current_state": ego_tensor.numpy(),
                 "ego_agent_future": np.asarray(ego_future_np, dtype=np.float32),

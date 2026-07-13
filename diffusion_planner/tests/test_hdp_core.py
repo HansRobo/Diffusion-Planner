@@ -968,6 +968,29 @@ def test_legacy_full_neighbor_future_alignment_uses_next_scene(tmp_path):
     np.testing.assert_allclose(future[0, :, 0], [5.0, 6.0, 7.0, 8.0])
 
 
+def test_versioned_aligned_neighbor_future_is_not_shifted_again(tmp_path):
+    sample_path = tmp_path / "aligned.npz"
+    past = np.zeros((1, 3, 11), dtype=np.float32)
+    past[0, -1, 0] = 5.0
+    past[0, -1, 2] = 1.0
+    future = np.zeros((1, 4, 3), dtype=np.float32)
+    # A correctly aligned stationary first future pose can legitimately equal current.
+    future[0, :2, 0] = [5.0, 6.0]
+    np.savez(
+        sample_path,
+        version=np.array([3], dtype=np.uint32),
+        neighbor_agents_past=past,
+        neighbor_agents_future=future,
+    )
+    data_list = tmp_path / "data.json"
+    data_list.write_text(json.dumps([str(sample_path)]), encoding="utf-8")
+
+    sample = DiffusionPlannerData(str(data_list), align_legacy_neighbor_futures=True)[0]
+
+    np.testing.assert_allclose(sample["neighbor_agents_future"], future)
+    assert "version" not in sample
+
+
 def test_extra_dataset_weighting_stays_in_memory(tmp_path):
     base_list = tmp_path / "base.json"
     extra_list = tmp_path / "extra.json"

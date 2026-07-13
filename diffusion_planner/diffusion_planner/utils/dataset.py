@@ -50,7 +50,15 @@ class DiffusionPlannerData(Dataset):
 
     def __getitem__(self, idx):
         path = self.data_list[idx]
+        align_neighbor_futures = (
+            self.align_legacy_neighbor_futures and self.include_neighbor_futures
+        )
         with np.load(path, allow_pickle=False) as archive:
+            data_version = (
+                int(np.asarray(archive["version"]).reshape(-1)[0])
+                if align_neighbor_futures and "version" in archive.files and archive["version"].size
+                else None
+            )
             data = {
                 key: archive[key]
                 for key in archive.files
@@ -64,8 +72,12 @@ class DiffusionPlannerData(Dataset):
             and source_idx >= self._traffic_light_mask_start
         ):
             self._mask_traffic_lights(data)
-        if self.align_legacy_neighbor_futures:
-            align_legacy_neighbor_futures_on_load(data, source_path=path)
+        if align_neighbor_futures:
+            align_legacy_neighbor_futures_on_load(
+                data,
+                source_path=path,
+                data_version=data_version,
+            )
         for key, value in data.items():
             if (
                 isinstance(value, np.ndarray)
