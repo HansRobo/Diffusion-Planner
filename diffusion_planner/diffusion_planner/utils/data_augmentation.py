@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 import torch
 
@@ -108,6 +110,12 @@ class StatePerturbation:
         :param ego_past_noise_std: std of noise applied to ego past trajectory
         :param use_smoothing_future_trajectory: whether to apply smoothing to future trajectory
         """
+        if not math.isfinite(augment_prob) or not 0.0 <= augment_prob <= 1.0:
+            raise ValueError("augment_prob must be finite and in [0, 1]")
+        if not math.isfinite(ego_past_noise_std) or ego_past_noise_std < 0.0:
+            raise ValueError("ego_past_noise_std must be finite and >= 0")
+        if not math.isfinite(wheel_base) or wheel_base <= 0.0:
+            raise ValueError("wheel_base must be finite and > 0")
         if num_refine < 3:
             raise ValueError("num_refine must be >= 3 for the terminal finite differences")
         self._augment_prob = augment_prob

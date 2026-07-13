@@ -1732,6 +1732,8 @@ def sample_group(
         net.decoder._sample_steps = previous_sample_steps
         if was_training:
             model.train()
+    if not torch.isfinite(prediction).all():
+        raise FloatingPointError("Non-finite trajectory returned by HDP rollout sampler")
     ego_world = prediction[:, 0].detach().float()  # [B*N, T, 4]
     if return_encoding:
         return ego_world, cached_encoding
@@ -1747,8 +1749,19 @@ def compute_reward_weights(
     eps: float,
     use_ddp: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if n < 2:
-        raise ValueError("HDP-RL requires num_generations >= 2 for group reward normalization.")
+    if reward.ndim != 1:
+        raise ValueError(f"RL reward tensor must be 1-D, got shape {tuple(reward.shape)}")
+    if not reward.is_floating_point():
+        raise TypeError("RL reward tensor must use a floating-point dtype")
+    if num_scenes < 1 or n < 2 or reward.numel() != num_scenes * n:
+        raise ValueError(
+            "RL reward shape must contain exactly num_scenes complete groups: "
+            f"numel={reward.numel()}, num_scenes={num_scenes}, n={n}"
+        )
+    if not math.isfinite(float(beta)) or beta <= 0.0:
+        raise ValueError("RL reward beta must be finite and > 0")
+    if not math.isfinite(float(eps)) or eps <= 0.0:
+        raise ValueError("RL reward normalization epsilon must be finite and > 0")
     grouped = reward.view(num_scenes, n)
     group_std = grouped.std(dim=1, keepdim=True)
     finite_group = torch.isfinite(grouped).all(dim=1, keepdim=True)
@@ -1803,9 +1816,17 @@ def compute_reward_weights(
     else:
         raise ValueError(f"Unsupported rl_reward_normalize={normalize!r}")
     reward_norm = torch.nan_to_num(reward_norm, nan=0.0, posinf=0.0, neginf=0.0)
-    weights = torch.where(
-        valid_sample, torch.exp(beta * reward_norm), torch.zeros_like(reward_norm)
-    )
+    # Keep the exponential finite even when an ablation uses an unusually large beta or
+    # a malformed reward scale.  The normal configuration is far below this bound; this
+    # only prevents an overflow from being silently converted to a zero weight by
+    # ``nan_to_num`` downstream.
+    if not reward_norm.dtype.is_floating_point:
+        raise TypeError("RL reward normalization requires a floating-point reward tensor")
+    # Leave a small margin because exp(round(log(max_float))) can still round to
+    # infinity at the dtype boundary.
+    max_logit = math.log(torch.finfo(reward_norm.dtype).max) - 1.0
+    logits = (beta * reward_norm).clamp(min=-max_logit, max=max_logit)
+    weights = torch.where(valid_sample, torch.exp(logits), torch.zeros_like(reward_norm))
     return weights.detach(), valid_sample
 
 

@@ -149,10 +149,30 @@ regularization values, `advantage_eps`, dropout probabilities, selection toleran
 weights before dataset/model work. `HDPRewardConfig` now enforces the same ordering and positivity
 relations when constructed directly, so tests or future callers cannot bypass the CLI checks.
 
+## Final boundary and numerical pass
+
+The post-report pass deliberately checked direct Python APIs as well as command-line entrypoints.
+Training and standalone-validation parsers now reject non-finite sampling scales, reward weights,
+loss coefficients, augmentation values, closed-loop thresholds, and invalid generation counts.
+Both normalizer classes reject missing paired statistics, shape mismatches, non-finite means, and
+zero/negative standard deviations before any model is constructed. Standard and bridge
+augmentation constructors apply the same finite/range checks, so unit tests and future callers
+cannot bypass the CLI boundary. Reward-weight computation validates its group shape, floating
+dtype, beta, and epsilon, and clamps the exponent below the dtype overflow boundary; rollout and
+validation raise immediately on non-finite trajectories/rewards/logits. Validation metric and
+per-scene JSON writers recursively map unavailable NaN/Inf values to JSON `null` and use strict
+JSON output.
+
+These changes are defensive only: current HDP defaults, checkpoint tensor shapes, reward formulas,
+and the SFT/RL objective are unchanged.
+
 ## Verification
 
 - Ruff: clean.
-- Full tests after the final audit patch: `458 passed, 15 skipped`; the focused HDP/RL/augmentation suite is `182 passed`.
-- Full tests with `PYTHONWARNINGS=error`: `458 passed, 15 skipped`.
+- Full tests after the final audit patch: `481 passed, 15 skipped`; the focused HDP/RL/augmentation suite is `211 passed`.
+- Full tests with `PYTHONWARNINGS=error`: `481 passed, 15 skipped`.
 - Node02 direct road-border RL smoke completed with Slurm exit code 0. Node01 formal RL remains
   under monitoring and was not modified by this audit.
+- Ruff lint, `git diff --check`, and Python bytecode compilation pass. The repository-wide
+  formatter still reports pre-existing formatting drift in several untouched historical files;
+  no broad mechanical reformat was applied because it would obscure the model audit changes.

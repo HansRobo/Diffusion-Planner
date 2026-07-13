@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -817,8 +818,7 @@ def prepare_bidirectional_context_torch(
         dim=0,
     )
     full_time = (
-        torch.arange(past_len + future_len, dtype=dtype, device=device)
-        - (past_len - 1)
+        torch.arange(past_len + future_len, dtype=dtype, device=device) - (past_len - 1)
     ) * dt
 
     future_segment = make_prepared_directed_segment_torch(
@@ -1026,6 +1026,29 @@ class StatePerturbation:
         :param max_bridge_jerk_mps3: bridge jerk feasibility limit
         :param adaptive_bridge_search: if True, extend M/N to the first feasible candidate
         """
+        finite_nonnegative = {
+            "max_heading_offset_deg": max_heading_offset_deg,
+            "max_lateral_accel_mps2": max_lateral_accel_mps2,
+            "max_bridge_speed_gap_mps": max_bridge_speed_gap_mps,
+            "max_bridge_jerk_mps3": max_bridge_jerk_mps3,
+        }
+        if not math.isfinite(augment_prob) or not 0.0 <= augment_prob <= 1.0:
+            raise ValueError("augment_prob must be finite and in [0, 1]")
+        if not math.isfinite(wheel_base) or wheel_base <= 0.0:
+            raise ValueError("wheel_base must be finite and > 0")
+        if not math.isfinite(past_bridge_sec) or past_bridge_sec <= 0.0:
+            raise ValueError("past_bridge_sec must be finite and > 0")
+        if not math.isfinite(future_bridge_sec) or future_bridge_sec <= 0.0:
+            raise ValueError("future_bridge_sec must be finite and > 0")
+        if not math.isfinite(dense_sample_ds) or dense_sample_ds <= 0.0:
+            raise ValueError("dense_sample_ds must be finite and > 0")
+        invalid_limits = [
+            name
+            for name, value in finite_nonnegative.items()
+            if not math.isfinite(value) or value < 0.0
+        ]
+        if invalid_limits:
+            raise ValueError(f"bridge limits must be finite and >= 0: {invalid_limits}")
         self._augment_prob = augment_prob
         self._device = torch.device(device)
         heading_limit_rad = np.deg2rad(max_heading_offset_deg)

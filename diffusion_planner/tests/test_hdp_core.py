@@ -181,6 +181,32 @@ def test_hdp_representation_and_normalization_round_trip():
     )
 
 
+@pytest.mark.parametrize(
+    "mean, std, message",
+    [
+        ([[0.0, 0.0]], [[1.0]], "shapes differ"),
+        ([[0.0]], [[0.0]], "finite positive"),
+        ([[float("nan")]], [[1.0]], "non-finite"),
+        ([[0.0]], [[float("inf")]], "finite positive"),
+    ],
+)
+def test_state_normalizer_rejects_invalid_statistics(mean, std, message):
+    with pytest.raises(ValueError, match=message):
+        StateNormalizer(mean, std)
+
+
+def test_state_normalizer_requires_velocity_statistics_as_a_pair():
+    with pytest.raises(ValueError, match="provided together"):
+        StateNormalizer([[0.0]], [[1.0]], ego_velocity_mean=[0.0])
+
+
+def test_observation_normalizer_rejects_invalid_statistics():
+    with pytest.raises(ValueError, match="needs mean and std"):
+        ObservationNormalizer({"feature": {"mean": [0.0]}})
+    with pytest.raises(ValueError, match="finite positive"):
+        ObservationNormalizer({"feature": {"mean": [0.0], "std": [0.0]}})
+
+
 def test_batched_neighbor_collision_terms_match_scene_loop():
     torch.manual_seed(19)
     batch_size, candidates, neighbor_slots, horizon = 3, 2, 5, 8
@@ -810,6 +836,29 @@ def test_reward_weights_discard_identical_and_nonfinite_groups():
     torch.testing.assert_close(weights[:4], torch.zeros(4), rtol=0, atol=0)
     torch.testing.assert_close(weights[8:], torch.zeros(4), rtol=0, atol=0)
     assert torch.isfinite(weights).all()
+
+
+def test_reward_weights_remain_finite_for_extreme_temperature():
+    reward = torch.tensor([-1.0, 0.0, 1.0, 2.0])
+    weights, valid = compute_reward_weights(
+        reward, num_scenes=1, n=4, normalize="none", beta=1e30, eps=1e-6
+    )
+    assert valid.all()
+    assert torch.isfinite(weights).all()
+
+
+@pytest.mark.parametrize(
+    "reward, num_scenes, n, beta, eps, message",
+    [
+        (torch.ones(4, 1), 1, 4, 1.0, 1e-6, "1-D"),
+        (torch.ones(3), 1, 4, 1.0, 1e-6, "exactly num_scenes"),
+        (torch.ones(4), 1, 4, float("nan"), 1e-6, "beta"),
+        (torch.ones(4), 1, 4, 1.0, 0.0, "epsilon"),
+    ],
+)
+def test_reward_weight_api_rejects_invalid_contracts(reward, num_scenes, n, beta, eps, message):
+    with pytest.raises(ValueError, match=message):
+        compute_reward_weights(reward, num_scenes, n, "group", beta, eps)
 
 
 @pytest.mark.parametrize("normalize", ["batch", "none"])

@@ -562,6 +562,8 @@ def _hdp_rl_step(
     reward, reward_metrics = compute_hdp_reward(
         ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
     )
+    if not torch.isfinite(reward).all():
+        raise FloatingPointError("Non-finite HDP reward returned for RL rollout")
     if timing_events is not None:
         timing_events[2].record()
 

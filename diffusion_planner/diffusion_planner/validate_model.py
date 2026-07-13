@@ -414,12 +414,18 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         all_gt[:, 1:][neighbor_mask] = 0.0
 
         prediction = outputs["prediction"]
+        turn_indicator_logit = outputs["turn_indicator_logit"]
+        if not torch.isfinite(prediction).all() or not torch.isfinite(turn_indicator_logit).all():
+            raise FloatingPointError(
+                f"Non-finite validation model output at batch {step}: "
+                f"prediction_finite={bool(torch.isfinite(prediction).all())}, "
+                f"turn_logit_finite={bool(torch.isfinite(turn_indicator_logit).all())}"
+            )
         multisample_metrics = _multisample_metrics(
             model, inputs, encoder_outputs, ego_future, args, step
         )
         for key, value in multisample_metrics.items():
             total_result_dict[key].append(value.cpu())
-        turn_indicator_logit = outputs["turn_indicator_logit"]
         turn_indicator = turn_indicator_logit.argmax(dim=-1)
         turn_indicator_gt = make_turn_indicator_gt(turn_indicator_seq)
         correct = (turn_indicator == turn_indicator_gt).long()

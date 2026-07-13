@@ -57,6 +57,9 @@ from diffusion_planner.utils.data_augmentation import (
     vector_transform,
 )
 from diffusion_planner.utils.data_augmentation_bridge import (
+    StatePerturbation as BridgeStatePerturbation,
+)
+from diffusion_planner.utils.data_augmentation_bridge import (
     assemble_augmented_sample_from_segments_torch,
     augment_segment_prepared_torch,
     prepare_bidirectional_context_torch,
@@ -71,6 +74,26 @@ from diffusion_planner.utils.unicycle_accel_curvature import (
 _EGO_SHAPE_DEFAULT = torch.tensor([[2.75, 5.0, 2.0]])
 
 ATOL = 1e-5
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"augment_prob": float("nan")}, "augment_prob"),
+        ({"wheel_base": 0.0}, "wheel_base"),
+        ({"ego_past_noise_std": -1.0}, "ego_past_noise_std"),
+    ],
+)
+def test_state_perturbation_rejects_invalid_constructor_values(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        StatePerturbation(**kwargs)
+
+
+def test_bridge_state_perturbation_rejects_invalid_constructor_values():
+    with pytest.raises(ValueError, match="past_bridge_sec"):
+        BridgeStatePerturbation(past_bridge_sec=0.0)
+    with pytest.raises(ValueError, match="dense_sample_ds"):
+        BridgeStatePerturbation(dense_sample_ds=float("nan"))
 
 
 # ─────────────────────────────── helpers ────────────────────────────────────
@@ -204,9 +227,22 @@ def test_bridge_context_time_axes_have_exact_sample_counts_and_vehicle_wheelbase
         dim=-1,
     )
     current = torch.tensor(
-        [x[past_len], y[past_len], torch.cos(heading[past_len]), torch.sin(heading[past_len]), 5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        [
+            x[past_len],
+            y[past_len],
+            torch.cos(heading[past_len]),
+            torch.sin(heading[past_len]),
+            5.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
     )
-    ego_future = torch.stack([x[past_len + 1 :], y[past_len + 1 :], heading[past_len + 1 :]], dim=-1)
+    ego_future = torch.stack(
+        [x[past_len + 1 :], y[past_len + 1 :], heading[past_len + 1 :]], dim=-1
+    )
     context = prepare_bidirectional_context_torch(ego_past, current, ego_future, 0.05)
     assert context.past_segment.segment_time.shape == (past_len,)
     assert context.future_segment.segment_time.shape == (future_len + 1,)

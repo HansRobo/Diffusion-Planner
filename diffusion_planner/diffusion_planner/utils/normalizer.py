@@ -9,12 +9,37 @@ class StateNormalizer:
     def __init__(self, mean, std, ego_velocity_mean=None, ego_velocity_std=None):
         self.mean = torch.as_tensor(mean)
         self.std = torch.as_tensor(std)
+        self._validate_stats("state", self.mean, self.std)
+        if (ego_velocity_mean is None) != (ego_velocity_std is None):
+            raise ValueError(
+                "ego_velocity_mean and ego_velocity_std must be provided together"
+            )
         self.ego_velocity_mean = (
             torch.as_tensor(ego_velocity_mean) if ego_velocity_mean is not None else None
         )
         self.ego_velocity_std = (
             torch.as_tensor(ego_velocity_std) if ego_velocity_std is not None else None
         )
+        if self.ego_velocity_mean is not None:
+            self._validate_stats(
+                "ego_velocity", self.ego_velocity_mean, self.ego_velocity_std
+            )
+
+    @staticmethod
+    def _validate_stats(name, mean: torch.Tensor, std: torch.Tensor) -> None:
+        if mean.shape != std.shape:
+            raise ValueError(
+                f"{name} normalization mean/std shapes differ: "
+                f"{tuple(mean.shape)} vs {tuple(std.shape)}"
+            )
+        mean_float = mean.detach().to(dtype=torch.float64)
+        std_float = std.detach().to(dtype=torch.float64)
+        if not torch.isfinite(mean_float).all():
+            raise ValueError(f"{name} normalization mean contains non-finite values")
+        if not torch.isfinite(std_float).all() or (std_float <= 0).any():
+            raise ValueError(
+                f"{name} normalization std must contain only finite positive values"
+            )
 
     @classmethod
     def from_json(cls, args):
@@ -90,7 +115,14 @@ class StateNormalizer:
 
 class ObservationNormalizer:
     def __init__(self, normalization_dict):
-        self._normalization_dict = normalization_dict
+        self._normalization_dict = {}
+        for key, stats in normalization_dict.items():
+            if "mean" not in stats or "std" not in stats:
+                raise ValueError(f"Normalization entry {key!r} needs mean and std")
+            mean = torch.as_tensor(stats["mean"])
+            std = torch.as_tensor(stats["std"])
+            StateNormalizer._validate_stats(key, mean, std)
+            self._normalization_dict[key] = {"mean": mean, "std": std}
 
     @classmethod
     def from_json(cls, args):

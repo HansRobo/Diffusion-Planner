@@ -1,6 +1,7 @@
 import argparse
 import copy
 import json
+import math
 from functools import partial
 from pathlib import Path
 
@@ -22,6 +23,31 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 _valid_config_default = partial(dataclass_default, ValidConfig)
+
+
+def _json_safe(value):
+    """Convert metric values to strict-JSON-compatible Python values.
+
+    EPDMS and geometry metrics can legitimately be unavailable for a scene.  Python's
+    ``json`` module otherwise emits non-standard ``NaN``/``Infinity`` tokens, which
+    breaks strict readers and makes downstream filtering ambiguous.
+    """
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if torch.is_tensor(value):
+        value = value.detach().cpu()
+        if value.numel() == 1:
+            return _json_safe(value.item())
+        return _json_safe(value.tolist())
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 def get_args(args_list=None):
@@ -150,8 +176,39 @@ def get_args(args_list=None):
         raise ValueError("--reward_eval_sample_steps must be >= 2 for the second-order DPM solver")
     if args.reward_eval_noise_scale < 0.0:
         raise ValueError("--reward_eval_noise_scale must be >= 0")
+    finite_fields = (
+        "multisample_eval_noise_scale",
+        "reward_eval_noise_scale",
+        "reward_eval_w_safety",
+        "reward_eval_w_risk",
+        "reward_eval_w_follow",
+        "reward_eval_w_lane",
+        "reward_eval_w_progress",
+        "reward_eval_w_road_border",
+        "reward_eval_road_border_critical_m",
+        "reward_eval_road_border_safe_m",
+    )
+    non_finite = [name for name in finite_fields if not math.isfinite(getattr(args, name))]
+    if non_finite:
+        raise ValueError(f"Validation fields must be finite: {non_finite}")
+    if args.multisample_eval_num_samples < 0:
+        raise ValueError("--multisample_eval_num_samples must be >= 0")
+    if args.multisample_eval_noise_scale < 0.0:
+        raise ValueError("--multisample_eval_noise_scale must be >= 0")
     if args.reward_eval_road_border_critical_m < 0.0:
         raise ValueError("--reward_eval_road_border_critical_m must be >= 0")
+    reward_weights = (
+        args.reward_eval_w_safety,
+        args.reward_eval_w_risk,
+        args.reward_eval_w_follow,
+        args.reward_eval_w_lane,
+        args.reward_eval_w_progress,
+        args.reward_eval_w_road_border,
+    )
+    if min(reward_weights) < 0.0:
+        raise ValueError("reward evaluation weights must be >= 0")
+    if args.reward_eval_num_generations > 0 and sum(reward_weights) <= 0.0:
+        raise ValueError("at least one reward evaluation weight must be positive")
     if args.reward_eval_road_border_safe_m <= args.reward_eval_road_border_critical_m:
         raise ValueError(
             "--reward_eval_road_border_safe_m must exceed the critical threshold"
@@ -345,7 +402,7 @@ def run_validation(valid_cfg: ValidConfig):
         metrics_output = Path(valid_cfg.metrics_output)
         metrics_output.parent.mkdir(parents=True, exist_ok=True)
         with open(metrics_output, "w") as f:
-            json.dump(valid_dict_to_save, f, indent=4)
+            json.dump(_json_safe(valid_dict_to_save), f, indent=4, allow_nan=False)
 
     # Save results
     if valid_cfg.save_predictions_dir is None:
@@ -356,7 +413,7 @@ def run_validation(valid_cfg: ValidConfig):
 
     if global_rank == 0:
         with open(save_predictions_dir.parent / "valid_dict.json", "w") as f:
-            json.dump(valid_dict_to_save, f, indent=4)
+            json.dump(_json_safe(valid_dict_to_save), f, indent=4, allow_nan=False)
 
     # Map each prediction (loader order) back to its source data path, and save under a
     # path that mirrors the input's directory hierarchy. The relative path is unique per
@@ -390,7 +447,7 @@ def run_validation(valid_cfg: ValidConfig):
                 continue
             loss_dict[key_metric] = val[i].mean().item()
         with open(out_base.with_suffix(".json"), "w") as f:
-            json.dump(loss_dict, f, indent=4)
+            json.dump(_json_safe(loss_dict), f, indent=4, allow_nan=False)
 
         if global_rank == 0:
             pbar.update(1)

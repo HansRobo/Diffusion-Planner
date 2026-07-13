@@ -1,4 +1,5 @@
 import argparse
+import math
 from functools import partial
 
 from diffusion_planner.dimensions import *
@@ -398,28 +399,77 @@ def get_args(args_list=None):
         raise ValueError("--save_utd must be >= 1")
     if args.closed_loop_grouped_wandb_max_videos < 0:
         raise ValueError("--closed_loop_grouped_wandb_max_videos must be >= 0")
+    finite_fields = (
+        "augment_prob",
+        "ego_past_noise_std",
+        "learning_rate",
+        "weight_decay",
+        "encoder_drop_path_rate",
+        "decoder_drop_path_rate",
+        "ego_history_dropout_rate",
+        "turn_indicator_generated_loss_weight",
+        "turn_indicator_expert_loss_weight",
+        "coeff_road_border_loss",
+        "road_border_margin",
+        "coeff_neighbor_collision_loss",
+        "neighbor_collision_margin_vehicle",
+        "neighbor_collision_margin_pedestrian",
+        "neighbor_collision_margin_bicycle",
+        "multisample_eval_noise_scale",
+        "planning_hybrid_loss",
+        "closed_loop_near_miss_thresh",
+        "closed_loop_search_radius",
+        "closed_loop_unstick_advance_m",
+    )
+    non_finite = [name for name in finite_fields if not math.isfinite(getattr(args, name))]
+    if non_finite:
+        raise ValueError(f"Training fields must be finite: {non_finite}")
     if args.train_epochs < 1:
         raise ValueError("--train_epochs must be >= 1")
     if not 0 <= args.warm_up_epoch <= args.train_epochs:
         raise ValueError("--warm_up_epoch must be between 0 and --train_epochs")
     if not 0.0 <= args.augment_prob <= 1.0:
         raise ValueError("--augment_prob must be in [0, 1]")
+    if args.ego_past_noise_std < 0.0:
+        raise ValueError("--ego_past_noise_std must be >= 0")
+    if not 0.0 <= args.encoder_drop_path_rate < 1.0:
+        raise ValueError("--encoder_drop_path_rate must be in [0, 1)")
+    if not 0.0 <= args.decoder_drop_path_rate < 1.0:
+        raise ValueError("--decoder_drop_path_rate must be in [0, 1)")
+    if not 0.0 <= args.ego_history_dropout_rate < 1.0:
+        raise ValueError("--ego_history_dropout_rate must be in [0, 1)")
     if not 1 <= args.ego_prediction_horizon <= args.future_len:
         raise ValueError("--ego_prediction_horizon must be in [1, future_len]")
     if not 1 <= args.hybrid_loss_window <= args.future_len:
         raise ValueError("--hybrid_loss_window must be in [1, future_len]")
     if args.planning_hybrid_loss < 0.0:
         raise ValueError("--planning_hybrid_loss must be >= 0")
+    if args.coeff_road_border_loss < 0.0 or args.coeff_neighbor_collision_loss < 0.0:
+        raise ValueError("loss coefficients must be >= 0")
+    if args.road_border_margin < 0.0 or args.road_border_n_interp < 0:
+        raise ValueError("road-border margin/interpolation must be non-negative")
+    if min(
+        args.neighbor_collision_margin_vehicle,
+        args.neighbor_collision_margin_pedestrian,
+        args.neighbor_collision_margin_bicycle,
+    ) < 0.0:
+        raise ValueError("neighbor collision margins must be >= 0")
     if args.diffusion_sample_steps < 2:
         raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")
     if args.multisample_eval_num_samples > 0 and args.multisample_eval_sample_steps < 2:
         raise ValueError(
             "--multisample_eval_sample_steps must be >= 2 for the second-order DPM solver"
         )
+    if args.multisample_eval_num_samples < 0:
+        raise ValueError("--multisample_eval_num_samples must be >= 0")
+    if args.multisample_eval_noise_scale < 0.0:
+        raise ValueError("--multisample_eval_noise_scale must be >= 0")
     if args.learning_rate <= 0.0:
         raise ValueError("--learning_rate must be > 0")
     if args.weight_decay < 0.0:
         raise ValueError("--weight_decay must be >= 0")
+    if args.wandb_step_log_interval < 0:
+        raise ValueError("--wandb_step_log_interval must be >= 0")
     if args.turn_indicator_generated_loss_weight < 0.0:
         raise ValueError("--turn_indicator_generated_loss_weight must be >= 0")
     if args.turn_indicator_expert_loss_weight < 0.0:
@@ -430,6 +480,12 @@ def get_args(args_list=None):
         raise ValueError("--extra_train_set_repeat must be >= 0")
     if args.extra_train_set_repeat > 0 and not args.extra_train_set_list:
         raise ValueError("--extra_train_set_list is required when repeat is positive")
+    if args.closed_loop_search_radius <= 0.0:
+        raise ValueError("--closed_loop_search_radius must be > 0")
+    if args.closed_loop_near_miss_thresh < 0.0:
+        raise ValueError("--closed_loop_near_miss_thresh must be >= 0")
+    if args.closed_loop_unstick_advance_m < 0.0:
+        raise ValueError("--closed_loop_unstick_advance_m must be >= 0")
     if args.predicted_neighbor_num != 0:
         raise ValueError("HDP is ego-only; --predicted_neighbor_num must be 0")
     if not args.use_velocity_representation:
