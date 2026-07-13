@@ -145,6 +145,7 @@ class TrainConfig:
     rl_eval_reward_w_follow: float = 3.0
     rl_eval_reward_w_lane: float = 2.5
     rl_eval_reward_w_progress: float = 3.0
+    rl_eval_reward_w_road_border: float = 0.0
     # Keep held-out policy selection on one safety-aware objective even when the
     # optimization gate is ablated against the exact published reward sum.
     rl_eval_behavior_gate: Literal["none", "safety", "risk"] = "safety"
@@ -178,6 +179,9 @@ class TrainConfig:
     # Anti-stopping reward, measured as signed endpoint progress relative to the logged expert.
     # Kept independently tunable because the paper reward omits explicit progress.
     rl_reward_w_progress: float = 3.0
+    # Optional real-vehicle extension: direct ego-footprint clearance to HD-map borders.
+    # Zero preserves the paper-style reward without this extra term.
+    rl_reward_w_road_border: float = 0.0
     # The published multi-reward formula uses no gate. ``safety`` is our real-vehicle
     # extension that prevents follow/lane/progress from compensating for a collision;
     # ``risk`` also suppresses those terms for near misses.
@@ -208,6 +212,8 @@ class TrainConfig:
     rl_stationary_reference_threshold_m: float = 1.0
     rl_stationary_progress_tolerance_m: float = 2.0
     rl_red_light_lane_tolerance_m: float = 2.0
+    rl_road_border_critical_m: float = 0.20
+    rl_road_border_safe_m: float = 0.60
     rl_full_eval_utd: int = 5
     rl_validate_before_training: bool = True
     rl_max_valid_loss_regression: float = 0.25

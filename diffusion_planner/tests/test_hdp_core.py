@@ -23,6 +23,7 @@ from diffusion_planner.hdp_rl_utils import (
     HDPRewardConfig,
     _apply_behavior_gate,
     _batched_occupancy_score,
+    _batched_road_border_clearance,
     _collision_and_leader_terms,
     _hdp_lane_score,
     _lane_reward_centerlines,
@@ -1894,6 +1895,58 @@ def test_hdp_road_border_occupancy_fallback_is_speed_independent():
     assert sources == {"static": False, "stopped": False, "road_border": True}
     torch.testing.assert_close(occupancy[0], occupancy[1], atol=1e-5, rtol=0.0)
     torch.testing.assert_close(occupancy.mean(), torch.tensor(0.5), atol=1e-4, rtol=0.0)
+
+
+def test_hdp_direct_road_border_reward_is_independent_of_occupancy_source():
+    candidates = torch.zeros(2, 4, 4)
+    candidates[..., 0] = torch.arange(1.0, 5.0)
+    candidates[..., 1] = torch.tensor([0.0, 0.6])[:, None]
+    candidates[..., 2] = 1.0
+    lanes = torch.zeros(1, 1, 5, 8)
+    lanes[0, 0, :, 0] = torch.arange(5.0)
+    lanes[..., 2] = 1.0
+    line_strings = torch.zeros(1, 2, 4)
+    line_strings[0, :, :2] = torch.tensor([[-5.0, 2.0], [8.0, 2.0]])
+    line_strings[..., 3] = 1.0
+    static_objects = torch.zeros(1, 1, 10)
+    static_objects[0, 0, :6] = torch.tensor([20.0, 20.0, 1.0, 0.0, 2.0, 4.0])
+    scene_inputs = {
+        "ego_current_state": torch.zeros(1, 10),
+        "ego_shape": torch.tensor([[2.0, 4.0, 2.0]]),
+        "neighbor_agents_past": torch.zeros(1, 1, 2, 11),
+        "ego_agent_future": candidates[:1, :, :3],
+        "lanes": lanes,
+        "route_lanes": lanes.clone(),
+        "line_strings": line_strings,
+        "static_objects": static_objects,
+    }
+    neighbors = torch.zeros(1, 1, 4, 4)
+    common = dict(
+        rl_reward_w_risk=1.0,
+        rl_reward_w_follow=3.0,
+        rl_reward_w_lane=2.5,
+        rl_reward_w_progress=3.0,
+        rl_occupancy_use_road_border=True,
+    )
+    _, direct = compute_hdp_reward(
+        candidates,
+        scene_inputs,
+        neighbors,
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(**common, rl_reward_w_road_border=1.0),
+    )
+    _, disabled = compute_hdp_reward(
+        candidates,
+        scene_inputs,
+        neighbors,
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(**common, rl_reward_w_road_border=0.0),
+    )
+    torch.testing.assert_close(direct["reward_road_border_available_score"], torch.tensor(1.0))
+    assert float(direct["reward_road_border_score"]) < 1.0
+    torch.testing.assert_close(disabled["reward_road_border_score"], torch.tensor(1.0))
 
 
 def test_hdp_road_border_clearance_is_exact_for_gap_crossing_and_containment():

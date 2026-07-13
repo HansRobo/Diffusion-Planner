@@ -444,6 +444,7 @@ def get_args():
         ("follow", "leader-conditioned following"),
         ("lane", "lane keeping"),
         ("progress", "anti-stopping progress"),
+        ("road_border", "direct HD-map road-border clearance"),
     ):
         parser.add_argument(
             f"--rl_eval_reward_w_{reward_name}",
@@ -564,6 +565,12 @@ def get_args():
         help="use HD-map road borders as OCC fallback when no static/stopped obstacle exists",
     )
     parser.add_argument(
+        "--rl_reward_w_road_border",
+        type=float,
+        default=_train_config_default("rl_reward_w_road_border"),
+        help="direct road-border clearance reward weight; zero disables this real-vehicle extension",
+    )
+    parser.add_argument(
         "--rl_stationary_progress_mode",
         choices=["constant", "distance"],
         default=_train_config_default("rl_stationary_progress_mode"),
@@ -630,6 +637,8 @@ def get_args():
             "rl_red_light_lane_tolerance_m",
             "maximum distance used to associate a red route lane with a stop line",
         ),
+        ("rl_road_border_critical_m", "road-border clearance below which the score is zero"),
+        ("rl_road_border_safe_m", "road-border clearance at which the score reaches one"),
     ):
         parser.add_argument(
             f"--{name}",
@@ -907,17 +916,23 @@ def get_args():
         args.rl_reward_w_follow,
         args.rl_reward_w_lane,
         args.rl_reward_w_progress,
+        args.rl_reward_w_road_border,
     )
     if any(weight < 0.0 for weight in reward_weights):
         raise ValueError("RL reward weights must be non-negative")
     if sum(reward_weights) <= 0.0:
         raise ValueError("At least one RL reward weight must be positive")
+    if args.rl_road_border_critical_m < 0.0:
+        raise ValueError("--rl_road_border_critical_m must be >= 0")
+    if args.rl_road_border_safe_m <= args.rl_road_border_critical_m:
+        raise ValueError("--rl_road_border_safe_m must exceed the critical threshold")
     eval_reward_weights = (
         args.rl_eval_reward_w_safety,
         args.rl_eval_reward_w_risk,
         args.rl_eval_reward_w_follow,
         args.rl_eval_reward_w_lane,
         args.rl_eval_reward_w_progress,
+        args.rl_eval_reward_w_road_border,
     )
     if any(weight < 0.0 for weight in eval_reward_weights):
         raise ValueError("RL held-out reward weights must be non-negative")
@@ -1014,9 +1029,12 @@ def source_policy_selection_guards(
     valid_reward_metrics,
     valid_epdms_total,
     *,
+    valid_epdms_metrics=None,
     max_safety_regression,
     max_epdms_regression,
     require_epdms,
+    require_road_border=False,
+    require_dac=False,
 ):
     """Return source-relative gates used before accepting an RL best checkpoint."""
     higher_is_better = (
@@ -1030,6 +1048,8 @@ def source_policy_selection_guards(
         "comfort",
     )
     lower_is_better = ("collision_active", "collision_rear", "red_light_violation_fraction")
+    if require_road_border:
+        higher_is_better = higher_is_better + ("road_border",)
     guard_names = higher_is_better + lower_is_better
     if not source_metrics or not bool(source_metrics.get("baseline_available", True)):
         return {"available": False, **dict.fromkeys((*guard_names, "epdms"), True)}
@@ -1071,6 +1091,14 @@ def source_policy_selection_guards(
             finite(source_epdms)
             and finite(valid_epdms_total)
             and float(valid_epdms_total) >= float(source_epdms) - max_epdms_regression
+        )
+    if require_dac:
+        source_dac = source_metrics.get("valid_epdms_dac")
+        current_dac = (valid_epdms_metrics or {}).get("dac")
+        guards["dac"] = (
+            finite(source_dac)
+            and finite(current_dac)
+            and float(current_dac) >= float(source_dac) - max_epdms_regression
         )
     return guards
 
@@ -1131,6 +1159,11 @@ def model_training(args):
         print("RL behavior reward gate: {}".format(args.rl_behavior_gate))
         print("RL road-border OCC fallback: {}".format(args.rl_occupancy_use_road_border))
         print(
+            "RL direct road-border reward (weight/critical/safe): "
+            f"{args.rl_reward_w_road_border}/{args.rl_road_border_critical_m}/"
+            f"{args.rl_road_border_safe_m}"
+        )
+        print(
             "RL stopped-reference progress (mode/threshold/tolerance): "
             f"{args.rl_stationary_progress_mode}/"
             f"{args.rl_stationary_reference_threshold_m}/"
@@ -1148,10 +1181,11 @@ def model_training(args):
         print("Held-out policy sampling temperature: {}".format(args.rl_eval_noise_scale))
         print("Held-out policy candidate count: {}".format(args.rl_eval_num_generations))
         print(
-            "Held-out reward weights (safety/risk/follow/lane/progress): "
+            "Held-out reward weights (safety/risk/follow/lane/progress/road-border): "
             f"{args.rl_eval_reward_w_safety}/{args.rl_eval_reward_w_risk}/"
             f"{args.rl_eval_reward_w_follow}/"
-            f"{args.rl_eval_reward_w_lane}/{args.rl_eval_reward_w_progress}"
+            f"{args.rl_eval_reward_w_lane}/{args.rl_eval_reward_w_progress}/"
+            f"{args.rl_eval_reward_w_road_border}"
         )
         print("Held-out behavior reward gate: {}".format(args.rl_eval_behavior_gate))
         print(
@@ -1648,9 +1682,12 @@ def model_training(args):
                 baseline_metrics,
                 valid_reward_metrics,
                 valid_epdms_total,
+                valid_epdms_metrics=valid_epdms_metrics,
                 max_safety_regression=args.rl_max_valid_safety_regression,
                 max_epdms_regression=args.rl_max_valid_epdms_regression,
                 require_epdms=configured_epdms,
+                require_road_border=args.rl_eval_reward_w_road_border > 0.0,
+                require_dac=args.rl_eval_reward_w_road_border > 0.0 and configured_epdms,
             )
             source_policy_within_guard = all(
                 value for key, value in source_guards.items() if key != "available"

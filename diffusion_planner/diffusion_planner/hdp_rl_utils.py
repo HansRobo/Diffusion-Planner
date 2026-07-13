@@ -63,6 +63,8 @@ class HDPRewardConfig:
     stationary_progress_mode: str = "distance"
     red_light_lane_tolerance_m: float = 2.0
     rear_end_penalty: float = 0.3
+    road_border_critical_m: float = 0.20
+    road_border_safe_m: float = 0.60
 
     def __post_init__(self) -> None:
         if self.stationary_reference_threshold_m <= 0.0:
@@ -75,6 +77,10 @@ class HDPRewardConfig:
             )
         if self.red_light_lane_tolerance_m <= 0.0:
             raise ValueError("red_light_lane_tolerance_m must be > 0")
+        if self.road_border_critical_m < 0.0:
+            raise ValueError("road_border_critical_m must be >= 0")
+        if self.road_border_safe_m <= self.road_border_critical_m:
+            raise ValueError("road_border_safe_m must exceed road_border_critical_m")
 
 
 def _hdp_reward_config(args) -> HDPRewardConfig:
@@ -97,6 +103,8 @@ def _hdp_reward_config(args) -> HDPRewardConfig:
         ),
         stationary_progress_mode=str(getattr(args, "rl_stationary_progress_mode", "distance")),
         red_light_lane_tolerance_m=float(getattr(args, "rl_red_light_lane_tolerance_m", 2.0)),
+        road_border_critical_m=float(getattr(args, "rl_road_border_critical_m", 0.20)),
+        road_border_safe_m=float(getattr(args, "rl_road_border_safe_m", 0.60)),
     )
 
 
@@ -211,6 +219,38 @@ def _road_border_clearance_exact(
         )
 
     return torch.cat(clearance_chunks).reshape(C, T)
+
+
+def _batched_road_border_clearance(
+    ego_group: torch.Tensor,
+    ego_shapes: torch.Tensor,
+    line_strings: torch.Tensor | None,
+    road_border_available: torch.Tensor,
+) -> torch.Tensor:
+    """Compute exact border clearance only for scenes that contain valid border segments.
+
+    Border geometry has scene-dependent segment counts, so it cannot use the common fully
+    batched path. The returned ``[B, C, T]`` tensor is ``+inf`` for scenes without a valid
+    border, making those scenes neutral when converted to a score.
+    """
+    batch_size, candidates, time_steps = ego_group.shape[:3]
+    clearance = torch.full(
+        (batch_size, candidates, time_steps),
+        float("inf"),
+        dtype=ego_group.dtype,
+        device=ego_group.device,
+    )
+    if line_strings is None or line_strings.shape[-1] < 4 or not bool(road_border_available.any()):
+        return clearance
+    rows = road_border_available.nonzero(as_tuple=False).flatten().cpu().tolist()
+    for scene in rows:
+        clearance[scene] = _road_border_clearance_exact(
+            ego_group[scene],
+            ego_shapes[scene],
+            line_strings[scene],
+            valid_segments_known=True,
+        )
+    return clearance
 
 
 def _trajectory_speed(xy: torch.Tensor, dt: float, initial_xy: torch.Tensor | None = None):
@@ -1267,8 +1307,12 @@ def compute_hdp_reward(
         ).any(dim=-1)
     line_strings_batch = scene_inputs.get("line_strings")
     use_road_border_occupancy = bool(getattr(args, "rl_occupancy_use_road_border", True))
+    road_border_weight = float(getattr(args, "rl_reward_w_road_border", 0.0))
+    # The direct reward must remain available even when the occupancy fallback is
+    # ablated; both consumers share the same geometry validity mask.
+    use_road_border_geometry = use_road_border_occupancy or road_border_weight > 0.0
     if (
-        not use_road_border_occupancy
+        not use_road_border_geometry
         or line_strings_batch is None
         or line_strings_batch.shape[-1] < 4
     ):
@@ -1291,6 +1335,32 @@ def compute_hdp_reward(
         ego_speed=scene_term_tensors["ego_speed"],
     )
     collision_safety = scene_term_tensors["safety"]
+    if road_border_weight > 0.0:
+        road_border_clearance = _batched_road_border_clearance(
+            ego_group,
+            scene_inputs["ego_shape"][:, :3],
+            line_strings_batch,
+            road_border_available,
+        )
+        road_border_score_t = _linear_safe_score(
+            road_border_clearance,
+            config.road_border_critical_m,
+            config.road_border_safe_m,
+        )
+        road_border_score_t = torch.where(
+            road_border_available[:, None, None],
+            road_border_score_t,
+            torch.ones_like(road_border_score_t),
+        )
+        road_border_score = road_border_score_t.amin(dim=-1)
+        # Below the configured clearance margin, behavior rewards must not compensate
+        # for a trajectory that is already unsafe. Nearer-but-safe candidates still
+        # receive a continuous score through road_border_score.
+        road_border_gate = (road_border_score > 0.0).to(collision_safety.dtype)
+    else:
+        road_border_score_t = torch.ones_like(occupancy)
+        road_border_score = torch.ones_like(collision_safety)
+        road_border_gate = torch.ones_like(collision_safety)
     if bool(getattr(args, "rl_red_light_constraint", True)):
         red_light_score, red_light_active, red_light_expert_crossing = _red_light_constraint_score(
             ego_group,
@@ -1305,6 +1375,8 @@ def compute_hdp_reward(
         red_light_active = torch.zeros(num_scenes, dtype=torch.bool, device=device)
         red_light_expert_crossing = torch.zeros_like(red_light_active)
     safety = torch.minimum(collision_safety, red_light_score)
+    if road_border_weight > 0.0:
+        safety = torch.minimum(safety, road_border_gate)
     risk = torch.stack(
         (scene_term_tensors["ttc"], scene_term_tensors["thw"], occupancy), dim=0
     ).amin(dim=(0, 3))
@@ -1321,6 +1393,7 @@ def compute_hdp_reward(
         getattr(args, "rl_reward_w_safety", 0.0) * safety
         + args.rl_reward_w_risk * risk
         + behavior_reward * behavior_gate
+        + road_border_weight * road_border_score
     )
     ttc_min = scene_term_tensors["ttc"].amin(dim=-1)
     thw_min = scene_term_tensors["thw"].amin(dim=-1)
@@ -1341,6 +1414,9 @@ def compute_hdp_reward(
         "ttc": ttc_min,
         "thw": thw_min,
         "occupancy": occupancy_min,
+        "road_border": road_border_score,
+        "road_border_available": candidate_flags(road_border_available),
+        "road_border_violation_fraction": (road_border_score <= 0.0).to(risk.dtype),
         "leader_fraction": scene_term_tensors["leader_fraction"],
         "collision_active": scene_term_tensors["collision_active"],
         "collision_rear": scene_term_tensors["collision_rear"],
@@ -1378,6 +1454,7 @@ def compute_hdp_reward(
         "ttc_zero_fraction",
         "thw_zero_fraction",
         "occupancy_zero_fraction",
+        "road_border_violation_fraction",
         "underprogress_fraction",
         "overprogress_fraction",
         "stationary_reference_fraction",
@@ -1398,11 +1475,19 @@ def compute_hdp_reward(
     ).mean()
     component_groups = {
         key: metric_groups[key]
-        for key in ("safety", "risk", "follow", "lane", "progress", "leader_fraction")
+        for key in (
+            "safety",
+            "risk",
+            "follow",
+            "lane",
+            "progress",
+            "road_border",
+            "leader_fraction",
+        )
     }
     reward_centered = reward_group - reward_group.mean(dim=1, keepdim=True)
     reward_winner = reward_group.argmax(dim=1, keepdim=True)
-    for key in ("safety", "risk", "follow", "lane", "progress"):
+    for key in ("safety", "risk", "follow", "lane", "progress", "road_border"):
         component = component_groups[key]
         component_centered = component - component.mean(dim=1, keepdim=True)
         component_denominator = (
@@ -1418,7 +1503,7 @@ def compute_hdp_reward(
             torch.zeros_like(component_correlation),
         )
         metrics[f"reward_{key}_correlation"] = component_correlation.mean()
-    for key in ("safety", "risk", "follow", "lane", "progress"):
+    for key in ("safety", "risk", "follow", "lane", "progress", "road_border"):
         component = component_groups[key]
         winner_value = component.gather(1, reward_winner).squeeze(1)
         metrics[f"reward_winner_{key}_advantage"] = (winner_value - component.mean(dim=1)).mean()

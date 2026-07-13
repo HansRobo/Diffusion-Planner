@@ -508,6 +508,53 @@ def test_source_policy_selection_guards_honor_tolerance_and_unavailable_baseline
     assert all(value for key, value in unavailable.items() if key != "available")
 
 
+def test_source_policy_selection_guards_require_dac_when_road_border_is_enabled():
+    source = {
+        "baseline_available": True,
+        "valid_reward_risk": 0.4,
+        "valid_reward_safety": 0.98,
+        "valid_reward_collision_safety": 0.985,
+        "valid_reward_red_light": 0.995,
+        "valid_reward_ttc": 0.5,
+        "valid_reward_thw": 0.8,
+        "valid_reward_occupancy": 0.9,
+        "valid_reward_comfort": 0.99,
+        "valid_reward_road_border": 0.8,
+        "valid_reward_collision_active": 0.02,
+        "valid_reward_collision_rear": 0.03,
+        "valid_reward_red_light_violation_fraction": 0.005,
+        "valid_epdms_total": 0.85,
+        "valid_epdms_dac": 0.95,
+    }
+    current = {
+        "risk": 0.4,
+        "safety": 0.98,
+        "collision_safety": 0.985,
+        "red_light": 0.995,
+        "ttc": 0.5,
+        "thw": 0.8,
+        "occupancy": 0.9,
+        "comfort": 0.99,
+        "road_border": 0.8,
+        "collision_active": 0.02,
+        "collision_rear": 0.03,
+        "red_light_violation_fraction": 0.005,
+    }
+    kwargs = dict(
+        valid_epdms_metrics={"dac": 0.9495},
+        max_safety_regression=0.0,
+        max_epdms_regression=0.001,
+        require_epdms=True,
+        require_road_border=True,
+        require_dac=True,
+    )
+    guards = source_policy_selection_guards(source, current, 0.85, **kwargs)
+    assert guards["road_border"]
+    assert guards["dac"]
+    kwargs["valid_epdms_metrics"] = {"dac": 0.948}
+    assert not source_policy_selection_guards(source, current, 0.85, **kwargs)["dac"]
+
+
 def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     observed_noise_scales = []
     observed_sample_steps = []
