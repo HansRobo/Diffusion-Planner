@@ -105,6 +105,13 @@ reward path; the shadowed helper was renamed to remove the duplicate binding wit
 the exported implementation or numerical behavior. The full test, lint, compile, and whitespace
 checks were rerun after these edits.
 
+The strict-resume audit also found a reproducibility gap: reward and safety fields were
+already protected, but the deterministic diffusion step count, stochastic minADE/minFDE
+parameters, and EPDMS enable/source switches were not. These fields now participate in the
+same compatibility check. A resumed RL run therefore cannot silently change validation
+sampling or its policy-selection metric; fresh SFT-to-RL initialization remains weights-only
+and is unaffected.
+
 ## Verification
 
 - Ruff: clean.
