@@ -28,7 +28,7 @@ from diffusion_planner.utils.masks import neighbor_future_padding_mask
 EPDMS_DT = 0.1
 MULTISAMPLE_ADE_THRESHOLD_M = 4.0
 MULTISAMPLE_FDE_THRESHOLD_M = 8.0
-TURN_INDICATOR_CLASS_NAMES = ("none", "disable", "enable_left", "enable_right", "keep")
+TURN_INDICATOR_CLASS_NAMES = ("none", "disable", "enable_left", "enable_right")
 
 
 def _valid_xy(points: np.ndarray) -> np.ndarray:

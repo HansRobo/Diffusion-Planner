@@ -767,10 +767,10 @@ def test_hdp_decoder_skips_frozen_turn_head_without_changing_inference_predictio
     with torch.no_grad():
         full = decoder(encoding, inputs)
 
-    def fail_pool(_encoding):
-        raise AssertionError("RL-only inference must not pool the expanded scene encoding")
+    def fail_head(*_args, **_kwargs):
+        raise AssertionError("RL-only inference must not run the turn-indicator head")
 
-    monkeypatch.setattr(decoder, "_pool_encoding", fail_pool)
+    monkeypatch.setattr(decoder.turn_indicator_predictor, "forward", fail_head)
     with torch.no_grad():
         skipped = decoder(encoding, {**inputs, "_skip_turn_indicator": True})
 
@@ -2536,7 +2536,7 @@ def test_multisample_metrics_include_valid_stationary_scenes():
     torch.testing.assert_close(metrics["multisample_minFDE"], torch.tensor([0.0, 1.0]))
 
 
-def test_turn_indicator_class_metrics_keep_counts_visible():
+def test_turn_indicator_class_metrics_state_counts_visible():
     metrics = aggregate_valid_metrics(
         {
             "_loss_ego_sum": 0.0,
@@ -2547,8 +2547,8 @@ def test_turn_indicator_class_metrics_keep_counts_visible():
             "_turn_total": 5,
             "_turn_change_correct": 2,
             "turn_indicator_change_total": 4,
-            "_turn_class_correct": [0, 0, 1, 1, 1],
-            "_turn_class_total": [0, 1, 1, 2, 1],
+            "_turn_class_correct": [0, 0, 1, 1],
+            "_turn_class_total": [0, 1, 1, 2],
         },
         "cpu",
     )
@@ -2558,7 +2558,6 @@ def test_turn_indicator_class_metrics_keep_counts_visible():
         "disable": 0.0,
         "enable_left": 1.0,
         "enable_right": 0.5,
-        "keep": 1.0,
     }
     assert metrics["turn_indicator_class_count"]["none"] == 0
     assert metrics["turn_indicator_class_count"]["enable_right"] == 2
@@ -2575,8 +2574,8 @@ def test_empty_multisample_metrics_aggregate_to_nan_not_false_zero():
             "_turn_total": 0,
             "_turn_change_correct": 0,
             "turn_indicator_change_total": 0,
-            "_turn_class_correct": [0, 0, 0, 0, 0],
-            "_turn_class_total": [0, 0, 0, 0, 0],
+            "_turn_class_correct": [0, 0, 0, 0],
+            "_turn_class_total": [0, 0, 0, 0],
             "multisample_minADE": torch.empty(0),
         },
         "cpu",
@@ -2596,8 +2595,8 @@ def test_epdms_metric_without_availability_excludes_nonfinite_values():
             "_turn_total": 0,
             "_turn_change_correct": 0,
             "turn_indicator_change_total": 0,
-            "_turn_class_correct": [0, 0, 0, 0, 0],
-            "_turn_class_total": [0, 0, 0, 0, 0],
+            "_turn_class_correct": [0, 0, 0, 0],
+            "_turn_class_total": [0, 0, 0, 0],
             "epdms_unmasked_metric": torch.tensor([0.25, float("nan"), 0.75]),
         },
         "cpu",
@@ -2625,11 +2624,11 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
 
         def forward(self, inputs):
             B = inputs["gt_trajectories"].shape[0]
-            expert_logit = torch.zeros(B, 5)
-            expert_logit[:, 4] = 10.0
+            expert_logit = torch.zeros(B, 4)
+            expert_logit[:, 1] = 10.0  # DISABLE: the state label for an all-ones history
             return {}, {
                 "model_output": inputs["gt_trajectories"],
-                "turn_indicator_logit": torch.zeros(B, 5),
+                "turn_indicator_logit": torch.zeros(B, 4),
                 "turn_indicator_expert_logit": expert_logit,
             }
 

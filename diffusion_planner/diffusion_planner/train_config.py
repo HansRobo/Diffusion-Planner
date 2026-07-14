@@ -88,6 +88,11 @@ class TrainConfig:
     use_ego_history: bool = True
     ego_history_dropout_rate: float = 0.4
     use_turn_indicators: bool = True
+    # Per-sample zeroing of the turn-indicator input token during training. Insurance
+    # against the "human signals -> human turns" causal shortcut: at deployment this
+    # input is the stack's own commanded signal, a feedback loop the policy must not
+    # depend on. Same rationale as ego_history_dropout_rate.
+    turn_indicator_dropout_rate: float = 0.5
     # The turn head sees generated trajectories at inference. Train it on both the detached
     # model x-start trajectory and the expert trajectory; the normalized combination keeps the
     # historical loss scale while removing pure teacher-forcing exposure bias.

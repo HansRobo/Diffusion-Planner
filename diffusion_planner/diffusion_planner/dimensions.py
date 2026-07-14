@@ -42,12 +42,14 @@ INPUT_T = 30
 OUTPUT_T = 80  # Output timestamp number
 POSE_DIM = 4  # x, y, cos(yaw), sin(yaw)
 
+# The turn head classifies the raw TurnIndicatorsReport STATE for the current frame
+# (dense state labels; keep/hysteresis lives in the deployment node, not the model).
+# Output classes therefore mirror the raw input codes one-to-one.
 TURN_INDICATOR_OUTPUT_NONE = 0
 TURN_INDICATOR_OUTPUT_DISABLE = 1
 TURN_INDICATOR_OUTPUT_ENABLE_LEFT = 2
 TURN_INDICATOR_OUTPUT_ENABLE_RIGHT = 3
-TURN_INDICATOR_OUTPUT_KEEP = 4
-TURN_INDICATOR_OUTPUT_DIM = 5
+TURN_INDICATOR_OUTPUT_DIM = 4
 # Raw TurnIndicatorsReport input classes: unset, disable, enable-left, enable-right.
 TURN_INDICATOR_INPUT_ONE_HOT_DIM = 4
 TURN_INDICATOR_LOGIT_SHAPE = (1, TURN_INDICATOR_OUTPUT_DIM)

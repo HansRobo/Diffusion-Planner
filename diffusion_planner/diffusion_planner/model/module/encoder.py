@@ -55,6 +55,12 @@ class Encoder(nn.Module):
         self.use_ego_history = config.use_ego_history
         self.ego_history_dropout_rate = config.ego_history_dropout_rate
         self.use_turn_indicators = config.use_turn_indicators
+        # Per-sample zeroing of the signal-history input (NOT rescaled activation
+        # dropout): training data carries the human's "signal -> maneuver" shortcut,
+        # while deployment feeds back the stack's own commanded signal. Dropping the
+        # whole input teaches the policy to turn from route geometry alone —
+        # the same causal-confusion insurance as ego_history_dropout_rate.
+        self.turn_indicator_dropout_rate = getattr(config, "turn_indicator_dropout_rate", 0.0)
 
         ego_num = 1
         goal_pose_num = 1
@@ -206,7 +212,9 @@ class Encoder(nn.Module):
         # route
         route = inputs["route_lanes"]  # (B, P=NUM_SEGMENTS_IN_ROUTE, V=POINTS_PER_LANELET, D=13)
         route_speed_limit = inputs["route_lanes_speed_limit"]  # (B, P=NUM_SEGMENTS_IN_ROUTE, 1)
-        route_has_speed_limit = inputs["route_lanes_has_speed_limit"]  # (B, P=NUM_SEGMENTS_IN_ROUTE, 1)
+        route_has_speed_limit = inputs[
+            "route_lanes_has_speed_limit"
+        ]  # (B, P=NUM_SEGMENTS_IN_ROUTE, 1)
 
         # polygons
         polygons = inputs["polygons"]  # (B, P=10, V=40, D=2)
@@ -224,6 +232,12 @@ class Encoder(nn.Module):
         turn_indicator = one_hot_turn_indicators(inputs["turn_indicators"][:, :-1])
         if not self.use_turn_indicators:
             turn_indicator = torch.zeros_like(turn_indicator)
+        elif self.training and self.turn_indicator_dropout_rate > 0:
+            keep = (
+                torch.rand(turn_indicator.shape[0], 1, device=turn_indicator.device)
+                >= self.turn_indicator_dropout_rate
+            )
+            turn_indicator = turn_indicator * keep.to(turn_indicator.dtype)
 
         B = neighbors.shape[0]
 

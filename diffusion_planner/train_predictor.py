@@ -118,6 +118,13 @@ def get_args(args_list=None):
     )
     parser.add_argument("--use_turn_indicators", type=boolean, default=True)
     parser.add_argument(
+        "--turn_indicator_dropout_rate",
+        type=float,
+        default=_train_config_default("turn_indicator_dropout_rate"),
+        help="per-sample zeroing of the signal-history input against the "
+        "signal->maneuver causal shortcut (deployment feeds back the stack's own signal)",
+    )
+    parser.add_argument(
         "--turn_indicator_generated_loss_weight",
         type=float,
         default=_train_config_default("turn_indicator_generated_loss_weight"),
@@ -448,11 +455,14 @@ def get_args(args_list=None):
         raise ValueError("loss coefficients must be >= 0")
     if args.road_border_margin < 0.0 or args.road_border_n_interp < 0:
         raise ValueError("road-border margin/interpolation must be non-negative")
-    if min(
-        args.neighbor_collision_margin_vehicle,
-        args.neighbor_collision_margin_pedestrian,
-        args.neighbor_collision_margin_bicycle,
-    ) < 0.0:
+    if (
+        min(
+            args.neighbor_collision_margin_vehicle,
+            args.neighbor_collision_margin_pedestrian,
+            args.neighbor_collision_margin_bicycle,
+        )
+        < 0.0
+    ):
         raise ValueError("neighbor collision margins must be >= 0")
     if args.diffusion_sample_steps < 2:
         raise ValueError("--diffusion_sample_steps must be >= 2 for the second-order DPM solver")

@@ -16,6 +16,7 @@ from diffusion_planner.loss import (
     normalize_ego_state,
     normalize_ego_velocity,
     sample_diffusion_time,
+    turn_indicator_loss_weights,
     velocity_to_waypoints,
     waypoints_to_velocity,
 )
@@ -23,6 +24,65 @@ from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.model.module.mixer import MixerBlock
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+
+
+class TurnIndicatorHead(nn.Module):
+    """Stateless turn-signal state classifier, gradient-isolated from the policy.
+
+    Reads (1) planned-trajectory features, (2) a learned single-query attention
+    probe over the scene tokens, and (3) the global route condition. Scene and
+    route inputs are detached INSIDE the head, so no caller can accidentally leak
+    the auxiliary classification gradient into the encoder or diffusion policy.
+
+    Deliberately stateless: it never sees the vehicle's own signal history, so
+    there is no copy shortcut in training and no self-feedback loop at deployment.
+    "Keep" semantics belong to the deployment node (hysteresis/debounce), not to
+    model memory.
+    """
+
+    def __init__(self, hidden_dim: int, trajectory_dim: int, num_heads: int = 4):
+        super().__init__()
+        self.query_proj = Mlp(
+            in_features=trajectory_dim,
+            hidden_features=hidden_dim,
+            out_features=hidden_dim,
+            act_layer=nn.GELU,
+            drop=0.0,
+        )
+        self.scene_attention = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+        self.classifier = Mlp(
+            in_features=2 * hidden_dim + trajectory_dim,
+            hidden_features=hidden_dim,
+            out_features=TURN_INDICATOR_OUTPUT_DIM,
+            act_layer=nn.GELU,
+            drop=0.0,
+        )
+
+    def forward(
+        self,
+        trajectory_features: torch.Tensor,
+        scene_tokens: torch.Tensor,
+        route_condition: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            trajectory_features: ``[B, trajectory_dim]`` subsampled planned trajectory.
+            scene_tokens: ``[B, N, H]`` encoder tokens (padding rows are exact zeros).
+            route_condition: ``[B, H]`` global route AdaLN condition.
+        """
+        scene_tokens = scene_tokens.detach()
+        route_condition = route_condition.detach()
+        query = self.query_proj(trajectory_features)[:, None]
+        padding_mask = torch.all(scene_tokens == 0, dim=-1)
+        scene_readout = self.scene_attention(
+            query,
+            scene_tokens,
+            scene_tokens,
+            key_padding_mask=padding_mask,
+            need_weights=False,
+        )[0][:, 0]
+        head_input = torch.cat([scene_readout, route_condition, trajectory_features], dim=-1)
+        return self.classifier(head_input)
 
 
 class GlobalRouteEncoder(nn.Module):
@@ -225,9 +285,14 @@ def compute_training_loss(
     expert_turn_indicator_loss = nn.functional.cross_entropy(
         turn_indicator_expert_logit, turn_indicator_gt, reduction="none"
     )
-    turn_indicator_change = inputs["turn_indicators"][:, -2] != inputs["turn_indicators"][:, -1]
-    turn_indicator_coeff = torch.where(turn_indicator_change, 1.0, 0.05)
-    generated_turn_indicator_loss = (generated_turn_indicator_loss * turn_indicator_coeff).mean()
+    turn_indicator_coeff = turn_indicator_loss_weights(inputs["turn_indicators"])
+    # The generated branch consumes x_start predicted at the sampled diffusion time;
+    # near t=1 that trajectory is close to the conditional mean and teaches the head
+    # an input distribution inference never produces. Weight it down continuously.
+    generated_turn_indicator_coeff = turn_indicator_coeff * (1.0 - t)
+    generated_turn_indicator_loss = (
+        generated_turn_indicator_loss * generated_turn_indicator_coeff
+    ).mean()
     expert_turn_indicator_loss = (expert_turn_indicator_loss * turn_indicator_coeff).mean()
     generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
     expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
@@ -253,7 +318,9 @@ def compute_training_loss(
         loss["turn_indicator_expert_accuracy"] = expert_accuracy
 
     non_finite_losses = [
-        key for key, value in loss.items() if torch.is_tensor(value) and not torch.isfinite(value).all()
+        key
+        for key, value in loss.items()
+        if torch.is_tensor(value) and not torch.isfinite(value).all()
     ]
     if non_finite_losses:
         raise FloatingPointError(f"non-finite training losses: {non_finite_losses}")
@@ -297,8 +364,13 @@ class Decoder(nn.Module):
             dropout=dpr,
             future_len=config.future_len,
         )
-        self.turn_indicator_predictor = nn.Linear(
-            2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM
+        # 16 points at 0.5 s spacing including the endpoint, with headings: turn intent
+        # lives in heading change and the trajectory tail, which the historical
+        # xy-only [::10] slice (0.1-7.1 s) could not see.
+        self._turn_trajectory_dim = 4 * (self._future_len // 5)
+        self.turn_indicator_predictor = TurnIndicatorHead(
+            hidden_dim=config.hidden_dim,
+            trajectory_dim=self._turn_trajectory_dim,
         )
         self._state_normalizer: StateNormalizer = config.state_normalizer
         self._observation_normalizer: ObservationNormalizer = config.observation_normalizer
@@ -354,23 +426,23 @@ class Decoder(nn.Module):
     def sde(self):
         return self._sde
 
-    def _compute_turn_indicator(self, ego_trajectory, encoding_pooled):
-        """Compute turn indicator logit from ego trajectory and encoding.
+    def _compute_turn_indicator(self, ego_trajectory, encoding, global_route_condition):
+        """Compute turn-indicator state logits (head detaches scene/route internally).
 
         Args:
-            ego_trajectory: [B, 2 * (T // 10)] flattened ego trajectory positions
-            encoding_pooled: [B, D] pooled encoding
+            ego_trajectory: [B, 4 * (T // 5)] flattened trajectory features
+            encoding: [B, N, D] scene tokens
+            global_route_condition: [B, D] route AdaLN condition
 
         Returns:
             turn_indicator_logit: [B, TURN_INDICATOR_OUTPUT_DIM]
         """
-        turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
-        return self.turn_indicator_predictor(turn_indicator_input)
+        return self.turn_indicator_predictor(ego_trajectory, encoding, global_route_condition)
 
-    def _pool_encoding(self, encoding):
-        encoding_valid = torch.any(encoding != 0, dim=-1)
-        encoding_count = encoding_valid.sum(dim=1).clamp_min(1).unsqueeze(-1)
-        return (encoding * encoding_valid.unsqueeze(-1)).sum(dim=1) / encoding_count
+    def _turn_indicator_features(self, normalized_ego_future):
+        """Subsample [B, 1, T, 4] normalized waypoints to the head's feature vector."""
+        B = normalized_ego_future.shape[0]
+        return normalized_ego_future[:, 0, 4::5, :].reshape(B, self._turn_trajectory_dim)
 
     def _ego_velocity_to_waypoints(self, ego_velocity):
         ego_velocity = inverse_normalize_ego_velocity(ego_velocity, self._state_normalizer)
@@ -380,10 +452,8 @@ class Decoder(nn.Module):
         return normalize_ego_state(ego_future, self._state_normalizer)
 
     def _turn_indicator_trajectory_from_latent(self, latent):
-        B = latent.shape[0]
         ego_future = self._ego_velocity_to_waypoints(latent[:, :1])
-        ego_future = self._normalize_ego_future(ego_future)
-        return ego_future[:, 0, ::10, :2].reshape(B, 2 * (self._future_len // 10))
+        return self._turn_indicator_features(self._normalize_ego_future(ego_future))
 
     def _latent_to_prediction(self, latent):
         return self._ego_velocity_to_waypoints(latent[:, :1])
@@ -393,13 +463,12 @@ class Decoder(nn.Module):
         """Build a detached inference-like trajectory for turn-head supervision."""
         return model_output.detach()
 
-    def _forward_training(self, encoding, inputs, encoding_pooled, global_route_condition):
+    def _forward_training(self, encoding, inputs, global_route_condition):
         """Forward pass for training mode.
 
         Args:
             encoding: [B, N, D] encoded features
             inputs: Dict containing sampled_trajectories, gt_trajectories, diffusion_time, etc.
-            encoding_pooled: [B, D] pooled encoding
 
         Returns:
             Dict containing model_output and turn_indicator_logit
@@ -425,17 +494,19 @@ class Decoder(nn.Module):
         expert_trajectories = inputs.get("turn_indicator_trajectories", gt_trajectories).reshape(
             B, P, self._future_len, 4
         )
-        expert_ego_trajectory = expert_trajectories[:, 0, ::10, :2].reshape(
-            B, 2 * (self._future_len // 10)
+        expert_ego_trajectory = self._turn_indicator_features(expert_trajectories[:, :1])
+        # The head detaches scene tokens and route condition internally, keeping the
+        # deployment head without letting its auxiliary classification loss reshape
+        # the HDP scene condition or diffusion policy.
+        expert_logit = self._compute_turn_indicator(
+            expert_ego_trajectory, encoding, global_route_condition
         )
-        # Keep the deployment head without letting its auxiliary classification loss
-        # reshape the HDP scene condition or diffusion policy.
-        turn_encoding = encoding_pooled.detach()
-        expert_logit = self._compute_turn_indicator(expert_ego_trajectory, turn_encoding)
 
         generated_latent = self._training_x_start_latent(model_output)
         generated_ego_trajectory = self._turn_indicator_trajectory_from_latent(generated_latent)
-        generated_logit = self._compute_turn_indicator(generated_ego_trajectory, turn_encoding)
+        generated_logit = self._compute_turn_indicator(
+            generated_ego_trajectory, encoding, global_route_condition
+        )
 
         output["turn_indicator_logit"] = generated_logit
         output["turn_indicator_expert_logit"] = expert_logit
@@ -445,7 +516,6 @@ class Decoder(nn.Module):
         self,
         encoding,
         inputs,
-        encoding_pooled,
         global_route_condition,
         sampled_trajectories,
     ):
@@ -454,7 +524,6 @@ class Decoder(nn.Module):
         Args:
             encoding: [B, N, D] encoded features
             inputs: Dict containing input data
-            encoding_pooled: [B, D] pooled encoding
             sampled_trajectories: [B, P, T * 4] sampled trajectories
 
         Returns:
@@ -491,17 +560,16 @@ class Decoder(nn.Module):
         if not inputs.get("_skip_turn_indicator", False):
             ego_trajectory = self._turn_indicator_trajectory_from_latent(x0)
             output["turn_indicator_logit"] = self._compute_turn_indicator(
-                ego_trajectory, encoding_pooled
+                ego_trajectory, encoding, global_route_condition
             )
         return output
 
-    def _forward_inference(self, encoding, inputs, encoding_pooled, global_route_condition):
+    def _forward_inference(self, encoding, inputs, global_route_condition):
         """Forward pass for inference mode.
 
         Args:
             encoding: [B, N, D] encoded features
             inputs: Dict containing input data
-            encoding_pooled: [B, D] pooled encoding
 
         Returns:
             Dict containing prediction and turn_indicator_logit
@@ -514,7 +582,6 @@ class Decoder(nn.Module):
         return self._inference_x_start(
             encoding,
             inputs,
-            encoding_pooled,
             global_route_condition,
             sampled_trajectories,
         )
@@ -547,8 +614,6 @@ class Decoder(nn.Module):
                 }
 
         """
-        skip_turn_indicator = bool(inputs.get("_skip_turn_indicator", False))
-        encoding_pooled = None if skip_turn_indicator else self._pool_encoding(encoding)
         global_route_condition = inputs.get("_cached_global_route_condition")
         if global_route_condition is None:
             global_route_condition = self.global_route_encoder(inputs["route_lanes"])
@@ -567,5 +632,5 @@ class Decoder(nn.Module):
 
         # Dispatch to training or inference
         if self.training:
-            return self._forward_training(encoding, inputs, encoding_pooled, global_route_condition)
-        return self._forward_inference(encoding, inputs, encoding_pooled, global_route_condition)
+            return self._forward_training(encoding, inputs, global_route_condition)
+        return self._forward_inference(encoding, inputs, global_route_condition)

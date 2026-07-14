@@ -60,7 +60,7 @@ ENCODER_INPUT_NAMES = [
     "turn_indicators",
 ]
 
-TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0"]
+TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0", "global_route_condition"]
 
 FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit"]
 ENCODER_OUTPUT_NAMES = ["encoding"]
@@ -164,14 +164,20 @@ class TurnIndicatorONNXWrapper(nn.Module):
         super().__init__()
         self.decoder = model.decoder
 
-    def forward(self, encoding: torch.Tensor, final_x0: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        encoding: torch.Tensor,
+        final_x0: torch.Tensor,
+        global_route_condition: torch.Tensor,
+    ) -> torch.Tensor:
         batch_size = encoding.shape[0]
         agent_num = 1 + self.decoder._predicted_neighbor_num
         final_x0 = final_x0.reshape(batch_size, agent_num, self.decoder._future_len, 4)
 
-        encoding_pooled = self.decoder._pool_encoding(encoding)
         ego_trajectory = self.decoder._turn_indicator_trajectory_from_latent(final_x0)
-        return self.decoder._compute_turn_indicator(ego_trajectory, encoding_pooled)
+        return self.decoder._compute_turn_indicator(
+            ego_trajectory, encoding, global_route_condition
+        )
 
 
 class FullONNXWrapper(nn.Module):
@@ -259,10 +265,15 @@ def build_dummy_inputs(action_agent_num: int = 1) -> TensorDict:
     return inputs
 
 
-def build_turn_indicator_inputs(encoding: torch.Tensor, final_x0: torch.Tensor) -> TensorDict:
+def build_turn_indicator_inputs(
+    encoding: torch.Tensor,
+    final_x0: torch.Tensor,
+    global_route_condition: torch.Tensor,
+) -> TensorDict:
     return {
         "encoding": encoding,
         "final_x0": final_x0,
+        "global_route_condition": global_route_condition,
     }
 
 
@@ -444,9 +455,14 @@ def export_model_to_onnx(
     with onnx_export_backends():
         with torch.no_grad():
             encoding = wrappers.encoder(*(export_inputs[name] for name in ENCODER_INPUT_NAMES))
+            global_route_condition = model.decoder.global_route_encoder(
+                export_inputs["route_lanes"]
+            )
 
         final_x0 = build_turn_indicator_final_x0(model, export_inputs)
-        turn_indicator_inputs = build_turn_indicator_inputs(encoding, final_x0)
+        turn_indicator_inputs = build_turn_indicator_inputs(
+            encoding, final_x0, global_route_condition
+        )
 
         export_specs = build_export_specs(
             wrappers,
