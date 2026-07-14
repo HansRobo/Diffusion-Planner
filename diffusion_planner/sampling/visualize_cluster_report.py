@@ -34,6 +34,7 @@ import random
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -163,3 +164,144 @@ def render_cluster_videos(
                     })
 
     return rendered, errors
+
+
+def _render_errors_section(errors: list[dict]) -> str:
+    if not errors:
+        return ""
+    rows = ""
+    for e in errors:
+        rows += f"<tr><td>{e['cluster_id']}</td><td>{e['file']}</td><td>{e['reason']}</td></tr>\n"
+    return f"""
+    <h2>Render Errors</h2>
+    <p>{len(errors)} file(s) failed to render:</p>
+    <table>
+    <tr><th>Cluster</th><th>File</th><th>Reason</th></tr>
+    {rows}
+    </table>
+    """
+
+
+def generate_html_report(
+    stats: list[dict],
+    chart_uri: str,
+    rendered: dict[str, list[str]],
+    errors: list[dict],
+    cluster_json_path: str,
+    output_dir: str,
+) -> str:
+    total = sum(s["count"] for s in stats)
+    n_clusters = len(stats)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    output_path = Path(output_dir) / "report.html"
+
+    # --- stats table rows ---
+    table_rows = ""
+    for s in stats:
+        table_rows += (
+            f"<tr>"
+            f"<td>{s['cluster_id']}</td>"
+            f"<td>{s['count']:,}</td>"
+            f"<td>{s['pct']:.1f}%</td>"
+            f"<td>{s['weight']:.3f}</td>"
+            f"<td>{s['sampling_rate']:.4f}</td>"
+            f"<td>{s['draws_per_epoch']:.1f}</td>"
+            f"<td>{s['repeats_per_sample']:.2f}</td>"
+            f"</tr>\n"
+        )
+
+    # --- per-cluster video galleries ---
+    galleries = ""
+    for s in stats:
+        cid = s["cluster_id"]
+        mp4s = rendered.get(cid, [])
+        video_tags = ""
+        for mp4_path in mp4s:
+            rel = str(Path(mp4_path).relative_to(output_dir))
+            video_tags += (
+                f'<video controls preload="none" width="360">'
+                f'<source src="{rel}" type="video/mp4">'
+                f"</video>\n"
+            )
+        if not mp4s:
+            video_tags = "<p><em>No videos rendered for this cluster.</em></p>"
+        galleries += f"""
+        <div class="cluster-gallery">
+            <h3>{cid} &mdash; {s['count']:,} samples, weight {s['weight']:.3f},
+                ~{s['repeats_per_sample']:.1f}x repeats/sample/epoch</h3>
+            <div class="video-grid">{video_tags}</div>
+        </div>
+        """
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cluster Diagnostic Report</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       max-width: 1400px; margin: 0 auto; padding: 20px; background: #f8f9fa; color: #212529; }}
+h1, h2, h3 {{ color: #1a1a2e; }}
+table {{ border-collapse: collapse; width: 100%; margin: 16px 0; }}
+th, td {{ border: 1px solid #dee2e6; padding: 8px 12px; text-align: right; }}
+th {{ background: #343a40; color: white; }}
+tr:nth-child(even) {{ background: #f1f3f5; }}
+td:first-child, th:first-child {{ text-align: left; }}
+.chart {{ text-align: center; margin: 20px 0; }}
+.chart img {{ max-width: 100%; }}
+.info-box {{ background: #e7f5ff; border-left: 4px solid #339af0; padding: 16px; margin: 20px 0; }}
+.cluster-gallery {{ margin: 24px 0; padding: 16px; background: white; border-radius: 8px;
+                     box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+.video-grid {{ display: flex; flex-wrap: wrap; gap: 12px; }}
+video {{ border-radius: 4px; background: #1a1a1a; }}
+.meta {{ color: #868e96; font-size: 0.9em; }}
+</style>
+</head>
+<body>
+
+<h1>Cluster Diagnostic Report</h1>
+<p class="meta">Generated: {now} | Source: <code>{cluster_json_path}</code> |
+   Total samples: {total:,} | Clusters: {n_clusters}</p>
+
+<h2>Pipeline Overview</h2>
+<p>Ego future trajectories (80 timesteps &times; [x, y, heading]) &rarr;
+   flatten (240-dim) &rarr; Z-score normalization &rarr; PCA (50 components)
+   &rarr; Elbow KMeans &rarr; {n_clusters} clusters</p>
+
+<h2>Cluster Distribution</h2>
+<div class="chart"><img src="{chart_uri}" alt="Cluster size distribution"></div>
+<div style="overflow-x: auto;">
+<table>
+<tr>
+  <th>Cluster ID</th><th>Sample Count</th><th>% of Total</th>
+  <th>Weight</th><th>Sampling Rate</th><th>Draws/Epoch</th>
+  <th>Repeats/Sample</th>
+</tr>
+{table_rows}
+</table>
+</div>
+
+<h2>Sampling Behavior</h2>
+<div class="info-box">
+<p><strong>Does it oversample (repeat)?</strong> Yes. The sampler uses
+   <code>torch.multinomial(weights, total, replacement=True)</code>.
+   Samples from rare clusters appear multiple times per epoch.
+   Samples from common clusters may be skipped in some epochs.</p>
+<p><strong>What happens to unmatched samples?</strong> Samples not in any cluster
+   receive the mean of matched weights (neutral rate). They are neither
+   boosted nor starved. A warning is emitted.</p>
+<p><strong>Total draws per epoch</strong> = <code>len(data_list)</code>
+   ({total:,}), same as vanilla DistributedSampler.</p>
+</div>
+
+<h2>Per-Cluster Video Examples</h2>
+{galleries}
+
+{_render_errors_section(errors)}
+
+</body>
+</html>"""
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html, encoding="utf-8")
+    return str(output_path)

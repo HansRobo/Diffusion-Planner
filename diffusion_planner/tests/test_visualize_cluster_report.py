@@ -28,6 +28,7 @@ from unittest.mock import MagicMock, patch
 
 from visualize_cluster_report import (
     compute_cluster_stats,
+    generate_html_report,
     load_cluster_json,
     render_bar_chart,
     render_cluster_videos,
@@ -180,3 +181,51 @@ class TestRenderClusterVideos:
             assert len(errors) == 1
             assert errors[0]["cluster_id"] == "cluster_id0"
             assert errors[0]["reason"] == "corrupt file"
+
+
+class TestGenerateHtmlReport:
+    def test_creates_report_html(self, tmp_path):
+        stats = [
+            {"cluster_id": "cluster_id0", "count": 90, "pct": 90.0,
+             "weight": 0.56, "sampling_rate": 0.5, "draws_per_epoch": 50,
+             "repeats_per_sample": 0.56},
+            {"cluster_id": "cluster_id1", "count": 10, "pct": 10.0,
+             "weight": 4.5, "sampling_rate": 0.5, "draws_per_epoch": 50,
+             "repeats_per_sample": 5.0},
+        ]
+        chart_uri = "data:image/png;base64,AAAA"
+        rendered = {
+            "cluster_id0": [str(tmp_path / "videos/cluster_id0/a.mp4")],
+            "cluster_id1": [],
+        }
+        errors = [{"cluster_id": "cluster_id1", "file": "b__0", "reason": "corrupt"}]
+        path = generate_html_report(
+            stats, chart_uri, rendered, errors, "/fake/cluster.json", str(tmp_path)
+        )
+        assert Path(path).exists()
+        html = Path(path).read_text()
+        assert "cluster_id0" in html
+        assert "cluster_id1" in html
+        assert "90.0" in html
+        assert 'preload="none"' in html
+        assert "Sampling Behavior" in html
+        assert "corrupt" in html
+
+    def test_video_tags_use_relative_paths(self, tmp_path):
+        stats = [
+            {"cluster_id": "cluster_id0", "count": 1, "pct": 100.0,
+             "weight": 1.0, "sampling_rate": 1.0, "draws_per_epoch": 1,
+             "repeats_per_sample": 1.0},
+        ]
+        vid_path = tmp_path / "videos" / "cluster_id0" / "sample.mp4"
+        vid_path.parent.mkdir(parents=True)
+        vid_path.touch()
+        rendered = {"cluster_id0": [str(vid_path)]}
+        path = generate_html_report(
+            stats, "data:image/png;base64,AAAA", rendered, [],
+            "/fake/cluster.json", str(tmp_path)
+        )
+        html = Path(path).read_text()
+        assert "videos/cluster_id0/sample.mp4" in html
+        # Should NOT contain absolute path
+        assert str(tmp_path) not in html.split('src="')[1].split('"')[0]
