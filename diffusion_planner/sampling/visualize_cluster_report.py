@@ -35,7 +35,9 @@ import random
 import shutil
 import subprocess
 import tempfile
+import warnings
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 import matplotlib
@@ -52,6 +54,8 @@ def load_cluster_json(path: str) -> dict[str, list[str]]:
 def compute_cluster_stats(clusters: dict[str, list[str]]) -> list[dict]:
     sorted_ids = sorted(clusters.keys(), key=lambda x: int(x.replace("cluster_id", "")))
     total = sum(len(v) for v in clusters.values())
+    if total == 0:
+        return []
 
     raw_weights = {}
     for cid in sorted_ids:
@@ -86,7 +90,7 @@ def render_bar_chart(stats: list[dict]) -> str:
     counts = [s["count"] for s in stats]
 
     fig, ax = plt.subplots(figsize=(max(6, len(ids) * 0.6), 4))
-    bars = ax.bar(ids, counts, color="#4C72B0", edgecolor="white", linewidth=0.5)
+    ax.bar(ids, counts, color="#4C72B0", edgecolor="white", linewidth=0.5)
     ax.set_xlabel("Cluster ID")
     ax.set_ylabel("Sample Count")
     ax.set_title("Cluster Size Distribution")
@@ -143,11 +147,16 @@ def render_cluster_videos(
             txt_path = f.name
 
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["render-video-txt", txt_path, str(cluster_dir),
                  "--workers", str(workers)],
                 check=False,
             )
+            if result.returncode != 0:
+                warnings.warn(
+                    f"render-video-txt exited with code {result.returncode} "
+                    f"for {cluster_id}"
+                )
         finally:
             Path(txt_path).unlink(missing_ok=True)
 
@@ -173,7 +182,11 @@ def _render_errors_section(errors: list[dict]) -> str:
         return ""
     rows = ""
     for e in errors:
-        rows += f"<tr><td>{e['cluster_id']}</td><td>{e['file']}</td><td>{e['reason']}</td></tr>\n"
+        rows += (
+            f"<tr><td>{escape(e['cluster_id'])}</td>"
+            f"<td>{escape(e['file'])}</td>"
+            f"<td>{escape(e['reason'])}</td></tr>\n"
+        )
     return f"""
     <h2>Render Errors</h2>
     <p>{len(errors)} file(s) failed to render:</p>
@@ -262,7 +275,7 @@ video {{ border-radius: 4px; background: #1a1a1a; }}
 <body>
 
 <h1>Cluster Diagnostic Report</h1>
-<p class="meta">Generated: {now} | Source: <code>{cluster_json_path}</code> |
+<p class="meta">Generated: {now} | Source: <code>{escape(cluster_json_path)}</code> |
    Total samples: {total:,} | Clusters: {n_clusters}</p>
 
 <h2>Pipeline Overview</h2>
