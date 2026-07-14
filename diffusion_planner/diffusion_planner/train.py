@@ -26,6 +26,10 @@ from diffusion_planner.utils.dataset import (
 )
 from diffusion_planner.utils.hdp_compat import require_velocity_normalizer
 from diffusion_planner.utils.lr_schedule import LinearWarmupConstantLR
+from diffusion_planner.utils.metric_logging import (
+    select_epdms_dashboard_metrics,
+    select_valid_loss_dashboard_metrics,
+)
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import (
@@ -942,8 +946,14 @@ def model_training(args: TrainConfig):
     if global_rank == 0:
         valid_loss_ego = agg["avg_loss_ego"]
         valid_loss_neighbor = agg["avg_loss_neighbor"]
-        mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
-        mean_epdms_dict = {f"valid_epdms/{k}": v for k, v in agg["epdms_means"].items()}
+        mean_ego_loss_dict = {
+            f"valid_loss/{k}": v
+            for k, v in select_valid_loss_dashboard_metrics(agg["ego_means"]).items()
+        }
+        mean_epdms_dict = {
+            f"valid_epdms/{k}": v
+            for k, v in select_epdms_dashboard_metrics(agg["epdms_means"]).items()
+        }
         mean_multisample_dict = {
             f"valid_multisample/{k}": v for k, v in agg["multisample_means"].items()
         }
@@ -959,13 +969,10 @@ def model_training(args: TrainConfig):
         turn_indicator_class_metrics = {
             f"valid_loss/turn_indicator_{name}_accuracy": value
             for name, value in agg["turn_indicator_class_accuracy"].items()
-        } | {
-            f"valid_loss/turn_indicator_{name}_count": value
-            for name, value in agg["turn_indicator_class_count"].items()
+            if agg["turn_indicator_class_count"].get(name, 0) > 0
         }
         print(
             f"{valid_loss_ego=:.3f}\n"
-            f"{valid_loss_neighbor=:.3f}\n"
             f"{valid_loss_ego_position_lat_loss=:.3f}\n"
             f"{valid_loss_ego_position_lon_loss=:.3f}\n"
             f"{turn_indicator_accuracy=:.3f}\n"
@@ -973,13 +980,18 @@ def model_training(args: TrainConfig):
             f"{turn_indicator_change_total=:.3f}"
         )
         if args.use_wandb:
+            neighbor_metric = (
+                {"valid_loss/neighbors": valid_loss_neighbor}
+                if args.predicted_neighbor_num > 0
+                else {}
+            )
             wandb.log(
                 {
                     "epoch": init_epoch,
                     "global_step": args._wandb_global_step,
                     "lr/lr": optimizer.param_groups[0]["lr"],
                     "valid_loss/ego": valid_loss_ego,
-                    "valid_loss/neighbors": valid_loss_neighbor,
+                    **neighbor_metric,
                     "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
                     "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
                     **turn_indicator_class_metrics,
@@ -1014,8 +1026,14 @@ def model_training(args: TrainConfig):
         if global_rank == 0:
             valid_loss_ego = agg["avg_loss_ego"]
             valid_loss_neighbor = agg["avg_loss_neighbor"]
-            mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
-            mean_epdms_dict = _finite_validation_metrics("valid_epdms", agg["epdms_means"])
+            mean_ego_loss_dict = {
+                f"valid_loss/{k}": v
+                for k, v in select_valid_loss_dashboard_metrics(agg["ego_means"]).items()
+            }
+            mean_epdms_dict = {
+                f"valid_epdms/{k}": v
+                for k, v in select_epdms_dashboard_metrics(agg["epdms_means"]).items()
+            }
             mean_multisample_dict = _finite_validation_metrics(
                 "valid_multisample", agg["multisample_means"]
             )
@@ -1031,14 +1049,11 @@ def model_training(args: TrainConfig):
             turn_indicator_class_metrics = {
                 f"valid_loss/turn_indicator_{name}_accuracy": value
                 for name, value in agg["turn_indicator_class_accuracy"].items()
-            } | {
-                f"valid_loss/turn_indicator_{name}_count": value
-                for name, value in agg["turn_indicator_class_count"].items()
+                if agg["turn_indicator_class_count"].get(name, 0) > 0
             }
             print(
                 f"Epoch {epoch + 1}/{train_epochs}\n"
                 f"{valid_loss_ego=:.3f}\n"
-                f"{valid_loss_neighbor=:.3f}\n"
                 f"{valid_loss_ego_position_lat_loss=:.3f}\n"
                 f"{valid_loss_ego_position_lon_loss=:.3f}\n"
                 f"{turn_indicator_accuracy=:.3f}\n"
@@ -1048,6 +1063,11 @@ def model_training(args: TrainConfig):
 
             lr_dict = {"lr": train_lr}
             if args.use_wandb:
+                neighbor_metric = (
+                    {"valid_loss/neighbors": valid_loss_neighbor}
+                    if args.predicted_neighbor_num > 0
+                    else {}
+                )
                 wandb.log(
                     {
                         "epoch": epoch + 1,
@@ -1055,7 +1075,7 @@ def model_training(args: TrainConfig):
                         **{f"train_loss/{k}": v for k, v in train_loss.items()},
                         **{f"lr/{k}": v for k, v in lr_dict.items()},
                         "valid_loss/ego": valid_loss_ego,
-                        "valid_loss/neighbors": valid_loss_neighbor,
+                        **neighbor_metric,
                         "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
                         "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
                         **turn_indicator_class_metrics,
@@ -1069,12 +1089,10 @@ def model_training(args: TrainConfig):
                 "epoch": epoch + 1,
                 "train_loss": train_total_loss,
                 "valid_loss_ego": valid_loss_ego,
-                "valid_loss_neighbor": valid_loss_neighbor,
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
                 "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
                 "valid_turn_indicator_accuracy": turn_indicator_accuracy,
                 "valid_turn_indicator_change_accuracy": turn_indicator_change_accuracy,
-                "valid_turn_indicator_change_total": turn_indicator_change_total,
                 **{
                     key.replace("valid_loss/", "valid_"): value
                     for key, value in turn_indicator_class_metrics.items()
@@ -1082,6 +1100,8 @@ def model_training(args: TrainConfig):
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
                 **{k.replace("/", "_"): v for k, v in mean_multisample_dict.items()},
             }
+            if args.predicted_neighbor_num > 0:
+                curr_data["valid_loss_neighbor"] = valid_loss_neighbor
             data_list.append(curr_data)
             fieldnames = list(dict.fromkeys(key for row in data_list for key in row))
             with open(train_log_path, "w", newline="", encoding="utf-8") as f:

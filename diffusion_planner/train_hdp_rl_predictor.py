@@ -52,6 +52,7 @@ from diffusion_planner.utils.dataset import (
     DistributedEvalSampler,
 )
 from diffusion_planner.utils.lr_schedule import LinearWarmupConstantLR
+from diffusion_planner.utils.metric_logging import select_epdms_dashboard_metrics
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import (
@@ -1214,13 +1215,10 @@ def turn_indicator_metrics(agg):
     return {
         "accuracy": scalar(agg["turn_indicator_accuracy"]),
         "change_accuracy": scalar(agg["turn_indicator_change_accuracy"]),
-        "change_total": int(agg["turn_indicator_change_total"]),
         **{
             f"{name}_accuracy": scalar(value)
             for name, value in agg["turn_indicator_class_accuracy"].items()
-        },
-        **{
-            f"{name}_count": int(value) for name, value in agg["turn_indicator_class_count"].items()
+            if agg["turn_indicator_class_count"].get(name, 0) > 0
         },
     }
 
@@ -1726,7 +1724,7 @@ def model_training(args):
             write_json_atomic(baseline_metrics, os.path.join(best_dir, "best_model_info.json"))
             if args.use_wandb:
                 wandb.run.summary["source/valid_loss_ego"] = baseline_valid_loss
-                for key, value in baseline_epdms_metrics.items():
+                for key, value in select_epdms_dashboard_metrics(baseline_epdms_metrics).items():
                     wandb.run.summary[f"source/valid_epdms/{key}"] = value
                 for key, value in baseline_reward_metrics.items():
                     wandb.run.summary[f"source/valid_reward/{key}"] = scalar(value)
@@ -1789,6 +1787,7 @@ def model_training(args):
             valid_neighbor_margin = scalar(agg["ego_means"]["ego_neighbor_margin_loss"])
             valid_road_border = scalar(agg["ego_means"]["ego_road_border_loss"])
             valid_epdms_metrics = finite_scalar_metrics(agg["epdms_means"])
+            logged_epdms_metrics = select_epdms_dashboard_metrics(valid_epdms_metrics)
             valid_epdms_total = valid_epdms_metrics.get("total", 0.0)
             valid_reward_metrics = {key: scalar(value) for key, value in valid_reward_raw.items()}
             valid_reward_mean = valid_reward_metrics.get("mean", float("nan"))
@@ -1863,7 +1862,7 @@ def model_training(args):
                         "valid/road_border": valid_road_border,
                         **{
                             f"valid_epdms/{key}": value
-                            for key, value in valid_epdms_metrics.items()
+                            for key, value in logged_epdms_metrics.items()
                         },
                         **{
                             f"valid_reward/{key}": value
@@ -1905,7 +1904,7 @@ def model_training(args):
                 "valid_loss_ego": valid_loss_ego,
                 "valid_neighbor_margin": valid_neighbor_margin,
                 "valid_road_border": valid_road_border,
-                **{f"valid_epdms_{key}": value for key, value in valid_epdms_metrics.items()},
+                **{f"valid_epdms_{key}": value for key, value in logged_epdms_metrics.items()},
                 **{f"valid_reward_{key}": value for key, value in valid_reward_metrics.items()},
                 "valid_full_eval": run_full_eval,
                 "valid_within_source_loss_guard": loss_within_guard,
