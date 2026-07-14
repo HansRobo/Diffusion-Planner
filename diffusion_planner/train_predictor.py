@@ -31,12 +31,6 @@ def get_args(args_list=None):
         default=0,
         help="append the extra list N times in memory; no combined JSON or NPZ is written",
     )
-    parser.add_argument(
-        "--extra_train_set_mask_traffic_lights",
-        type=boolean,
-        default=False,
-        help="mask lane traffic-light attributes only for samples from the extra lists",
-    )
     parser.add_argument("--valid_set_list", type=str, required=True)
     parser.add_argument("--train_subsample_step", type=int, default=1)
     parser.add_argument(

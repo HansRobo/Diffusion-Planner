@@ -99,8 +99,8 @@ The current 2026-06 Tier IV corpus was generated before converter commit `55eff4
 Oversampling accepts repeated `extra_train_set_list` flags and one shared
 `extra_train_set_repeat` inside the Dataset. It concatenates the sources and appends
 Python path references in memory instead of materializing a multi-hundred-MB combined
-JSON. Optional extra-only traffic-light masking also happens in worker memory. Dataset-list
-upload to W&B is opt-in through `WANDB_LOG_DATASET_ARTIFACT=1`.
+JSON. Traffic-light features are kept unchanged. Dataset-list upload to W&B is opt-in through
+`WANDB_LOG_DATASET_ARTIFACT=1`.
 
 ## Supervised training stages
 

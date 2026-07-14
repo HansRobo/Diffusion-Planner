@@ -290,7 +290,6 @@ def assert_checkpoint_compatible(
             "train_subsample_step",
             "extra_train_set_list",
             "extra_train_set_repeat",
-            "extra_train_set_mask_traffic_lights",
             "align_legacy_neighbor_futures",
             "use_data_augment",
             "augment_prob",
@@ -705,7 +704,6 @@ def model_training(args: TrainConfig):
         align_legacy_neighbor_futures=align_legacy_futures,
         extra_data_list=getattr(args, "extra_train_set_list", None),
         extra_data_repeat=getattr(args, "extra_train_set_repeat", 0),
-        extra_data_mask_traffic_lights=getattr(args, "extra_train_set_mask_traffic_lights", False),
         include_neighbor_futures=train_needs_neighbor_futures,
     )
     valid_set = DiffusionPlannerData(

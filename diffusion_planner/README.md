@@ -99,10 +99,8 @@ Use `--resume_model_path` only for continuing the same interrupted run. Do not u
 For oversampling without creating a giant combined manifest, pass
 `--extra_train_set_list <LIST>` once per source and `--extra_train_set_repeat <N>`. The
 Dataset concatenates the extra paths and appends their references in memory; it does not
-write either list or any NPZ. The HDP branch keeps
-`--extra_train_set_mask_traffic_lights` set to `False` so traffic signals remain visible in
-the oversampled samples. The switch remains available for isolated ablations and, when
-enabled, affects only extra samples in worker memory. Large W&B dataset-list artifacts
+write either list or any NPZ. Traffic-light features remain unchanged for every sample.
+Large W&B dataset-list artifacts
 are disabled by default and can be explicitly enabled with `WANDB_LOG_DATASET_ARTIFACT=1`.
 
 ## HDP-RL for real-vehicle evaluation

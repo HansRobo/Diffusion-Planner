@@ -98,7 +98,7 @@ continuing the exact same RL run. The production Slurm launcher fingerprints cod
 normalization, checkpoint, and Python/CUDA/NCCL environment before starting distributed training.
 
 Experiments use the same SFT-derived training and validation manifests, including the separate
-unprotected-right-turn list and its traffic-light masking where configured. Manifest paths are not
+unprotected-right-turn list. Traffic-light features are kept unchanged, and manifest paths are not
 rewritten by the RL loader.
 
 ## Selection Guards

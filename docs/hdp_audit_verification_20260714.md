@@ -33,8 +33,8 @@ outside this audit.
 The current tree was rechecked for these items: all temporal HDP inputs use 80 action steps
 (not 81) and no `delay`; replay reward JSON recursively converts non-finite values to JSON
 `null`; RL `all` scope freezes the unused turn head; curved-lane masking uses centerline
-geometry; resume samplers call `set_epoch` before each epoch; extra traffic-light masking is
-occurrence/index based; equal-reward groups are discarded for every normalization mode;
+geometry; resume samplers call `set_epoch` before each epoch; traffic-light masking augmentation
+has been removed; equal-reward groups are discarded for every normalization mode;
 `valid_group_fraction` is group based; lane heading NaN exposure was removed with the old
 ego-frame proxy; pandas NaN resume fields are rejected; EMA and validation use the intended
 checkpoint policy; ONNX and C++ HDP shapes are 80-step ego-only; and planner-metrics reward

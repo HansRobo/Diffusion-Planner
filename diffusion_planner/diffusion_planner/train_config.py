@@ -28,7 +28,6 @@ class TrainConfig:
     train_subsample_step: int
     extra_train_set_list: Optional[str | list[str]] = None
     extra_train_set_repeat: int = 0
-    extra_train_set_mask_traffic_lights: bool = False
 
     # ---------------------------------------------------------
     # Data Dimensions

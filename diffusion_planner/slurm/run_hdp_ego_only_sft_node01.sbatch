@@ -143,7 +143,6 @@ BASE_ARGS=(
   --train_set_list "${TRAIN_LIST}"
   --extra_train_set_list "${EXTRA_LIST}"
   --extra_train_set_repeat 10
-  --extra_train_set_mask_traffic_lights False
   --valid_set_list "${VALID_LIST}"
   --train_subsample_step 1
   --align_legacy_neighbor_futures True

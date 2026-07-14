@@ -10,7 +10,6 @@ import pytest
 import torch
 from diffusion_planner.dimensions import (
     TRAFFIC_LIGHT_GREEN,
-    TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT,
     TRAFFIC_LIGHT_RED,
 )
 from diffusion_planner.hdp_rl_epoch import (
@@ -1246,70 +1245,27 @@ def test_multiple_extra_dataset_lists_share_the_requested_repeat(tmp_path):
     ]
 
 
-def test_extra_dataset_traffic_light_mask_is_in_memory_and_extra_only(tmp_path):
+def test_extra_dataset_keeps_traffic_light_features_unchanged(tmp_path):
+    sample_path = tmp_path / "extra.npz"
     lanes = np.zeros((1, 2, 33), dtype=np.float32)
     route_lanes = np.zeros((1, 2, 33), dtype=np.float32)
-    lanes[0, :, 0] = [1.0, 2.0]
-    route_lanes[0, :, 1] = [1.0, 2.0]
     lanes[..., TRAFFIC_LIGHT_RED] = 1.0
     route_lanes[..., TRAFFIC_LIGHT_GREEN] = 1.0
-
-    base_npz = tmp_path / "base.npz"
-    extra_npz = tmp_path / "extra.npz"
-    for path in (base_npz, extra_npz):
-        np.savez(path, lanes=lanes, route_lanes=route_lanes)
+    np.savez(sample_path, lanes=lanes, route_lanes=route_lanes)
 
     base_list = tmp_path / "base.json"
     extra_list = tmp_path / "extra.json"
-    base_list.write_text(json.dumps([str(base_npz)]), encoding="utf-8")
-    extra_list.write_text(json.dumps([str(extra_npz)]), encoding="utf-8")
+    base_list.write_text(json.dumps([str(sample_path)]), encoding="utf-8")
+    extra_list.write_text(json.dumps([str(sample_path)]), encoding="utf-8")
+
     dataset = DiffusionPlannerData(
         str(base_list),
         extra_data_list=str(extra_list),
         extra_data_repeat=1,
-        extra_data_mask_traffic_lights=True,
     )
-
-    base_sample = dataset[0]
-    extra_sample = dataset[1]
-    assert np.all(base_sample["lanes"][..., TRAFFIC_LIGHT_RED] == 1.0)
-    assert np.all(base_sample["route_lanes"][..., TRAFFIC_LIGHT_GREEN] == 1.0)
-    assert np.all(extra_sample["lanes"][..., TRAFFIC_LIGHT_RED] == 0.0)
-    assert np.all(extra_sample["route_lanes"][..., TRAFFIC_LIGHT_GREEN] == 0.0)
-    assert np.all(extra_sample["lanes"][..., TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT] == 1.0)
-    assert np.all(extra_sample["route_lanes"][..., TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT] == 1.0)
-
-    # Loading the shared source again must recover the original traffic-light labels.
-    with np.load(extra_npz) as source:
-        assert np.all(source["lanes"][..., TRAFFIC_LIGHT_RED] == 1.0)
-        assert np.all(source["route_lanes"][..., TRAFFIC_LIGHT_GREEN] == 1.0)
-
-
-def test_extra_dataset_mask_tracks_occurrence_when_base_and_extra_overlap(tmp_path):
-    lanes = np.zeros((1, 2, 33), dtype=np.float32)
-    lanes[0, :, 0] = [1.0, 2.0]
-    lanes[..., TRAFFIC_LIGHT_RED] = 1.0
-    sample = tmp_path / "overlap.npz"
-    np.savez(sample, lanes=lanes)
-    base_list = tmp_path / "base.json"
-    extra_list = tmp_path / "extra.json"
-    base_list.write_text(json.dumps([str(sample)]), encoding="utf-8")
-    extra_list.write_text(json.dumps([str(sample)]), encoding="utf-8")
-
-    dataset = DiffusionPlannerData(
-        str(base_list),
-        extra_data_list=str(extra_list),
-        extra_data_repeat=2,
-        extra_data_mask_traffic_lights=True,
-    )
-    assert dataset[0]["lanes"][..., TRAFFIC_LIGHT_RED].all()
-    assert not dataset[1]["lanes"][..., TRAFFIC_LIGHT_RED].any()
-    assert not dataset[2]["lanes"][..., TRAFFIC_LIGHT_RED].any()
-
-    dataset.subsample(2)
-    assert dataset.data_list == [str(sample), str(sample)]
-    assert dataset[0]["lanes"][..., TRAFFIC_LIGHT_RED].all()
-    assert not dataset[1]["lanes"][..., TRAFFIC_LIGHT_RED].any()
+    np.testing.assert_array_equal(dataset[0]["lanes"], lanes)
+    np.testing.assert_array_equal(dataset[1]["lanes"], lanes)
+    np.testing.assert_array_equal(dataset[1]["route_lanes"], route_lanes)
 
 
 def test_ego_only_dataset_skips_unused_neighbor_future_npz_payload(tmp_path):

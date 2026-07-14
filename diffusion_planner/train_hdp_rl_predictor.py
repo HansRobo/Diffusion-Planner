@@ -253,11 +253,6 @@ def get_args():
         default=0,
         help="append the extra list N times in memory; no combined JSON or NPZ is written",
     )
-    parser.add_argument(
-        "--extra_train_set_mask_traffic_lights",
-        type=boolean,
-        default=False,
-    )
     parser.add_argument("--valid_set_list", type=str, required=True)
     parser.add_argument(
         "--train_subsample_step",
@@ -1370,7 +1365,6 @@ def model_training(args):
         align_legacy_neighbor_futures=args.align_legacy_neighbor_futures,
         extra_data_list=args.extra_train_set_list,
         extra_data_repeat=args.extra_train_set_repeat,
-        extra_data_mask_traffic_lights=args.extra_train_set_mask_traffic_lights,
     )
     valid_set = DiffusionPlannerData(
         args.valid_set_list,

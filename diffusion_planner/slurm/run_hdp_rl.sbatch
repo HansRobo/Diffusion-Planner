@@ -26,9 +26,6 @@ TRAIN_LIST=${HDP_RL_TRAIN_LIST:?submit with HDP_RL_TRAIN_LIST=<manifest>}
 VALID_LIST=${HDP_RL_VALID_LIST:?submit with HDP_RL_VALID_LIST=<manifest>}
 EXTRA_LISTS=${HDP_RL_EXTRA_LISTS:-}
 EXTRA_REPEAT=${HDP_RL_EXTRA_REPEAT:-0}
-# Keep traffic-light state visible in the oversampled right-turn data. The
-# previous masked configuration remains only in historical run metadata.
-EXTRA_MASK_TRAFFIC_LIGHTS=False
 INIT_CKPT=${HDP_RL_INIT_CKPT:-}
 RESUME_CKPT=${HDP_RL_RESUME_CKPT:-}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
@@ -189,7 +186,6 @@ if [[ -n "${EXTRA_LISTS}" ]]; then
     EXTRA_ARGS+=(--extra_train_set_list "${extra_list}")
   done
 fi
-EXTRA_ARGS+=(--extra_train_set_mask_traffic_lights "${EXTRA_MASK_TRAFFIC_LIGHTS}")
 for path in "${TRAIN_LIST}" "${VALID_LIST}" "${SOURCE_CKPT}" "${SOURCE_CKPT%/*}/args.json"; do
   [[ -r "${path}" ]] || { echo "missing required input: ${path}" >&2; exit 2; }
 done
