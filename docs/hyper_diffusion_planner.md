@@ -77,10 +77,11 @@ cannot leave a partial `latest.pth`, and store the W&B run ID so automatic recov
 same run.
 
 The branch has one encoder implementation. It includes valid-point LineEncoder geometry from Tier IV PR
-[#212](https://github.com/tier4/Diffusion-Planner/pull/212) and categorical turn-history
-encoding from [#210](https://github.com/tier4/Diffusion-Planner/pull/210). There is no
-legacy mode. #210 changes a weight shape, so old Base/SFT checkpoints fail loading instead
-of silently reusing stale encoder features. Train the new ego-only Base from scratch.
+[#212](https://github.com/tier4/Diffusion-Planner/pull/212), the categorical turn-history encoding
+from [#210](https://github.com/tier4/Diffusion-Planner/pull/210), and the polygon/line-string
+type injection and geometry-only Mixer input from [#228](https://github.com/tier4/Diffusion-Planner/pull/228).
+There is no legacy mode. #210 and #228 change parameter shapes, so old Base/SFT checkpoints fail
+loading instead of silently reusing stale encoder features. Train the new ego-only Base from scratch.
 
 ## Data policy
 

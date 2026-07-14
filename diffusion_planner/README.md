@@ -16,11 +16,14 @@ This directory contains the training, validation, and RL entrypoints used by the
 Base training should start from scratch and use the same model/data settings as the comparison runs.
 
 The only encoder implementation in this branch integrates Tier IV PRs
-[#212](https://github.com/tier4/Diffusion-Planner/pull/212) and
-[#210](https://github.com/tier4/Diffusion-Planner/pull/210). Line-string/polygon position
-geometry now comes from valid points, and turn-indicator history is categorical one-hot.
-The changed turn encoder shape prevents old checkpoints from loading. Start the new ego-only
-Base from scratch; there is no legacy encoder mode in this branch.
+[#212](https://github.com/tier4/Diffusion-Planner/pull/212),
+[#210](https://github.com/tier4/Diffusion-Planner/pull/210), and
+[#228](https://github.com/tier4/Diffusion-Planner/pull/228). Line-string/polygon geometry
+is mixed as `[x, y, dx, dy]`, while the categorical polygon/line type is injected after
+pooling; valid-point masking and the local robust heading fallback remain enabled. Turn-
+indicator history is categorical one-hot. These changes alter encoder parameter shapes and
+prevent old checkpoints from loading. Start the new ego-only Base from scratch; there is no
+legacy encoder mode in this branch.
 
 ```bash
 cd /mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/diffusion_planner

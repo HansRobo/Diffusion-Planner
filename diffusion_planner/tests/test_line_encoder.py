@@ -19,7 +19,7 @@ def _make_encoder():
         drop_path_rate=0.0,
         hidden_dim=32,
         depth=1,
-        point_dim=POINT_DIM,
+        num_types=LINE_STRING_TYPE_NUM,
     )
     return encoder.eval()
 
@@ -70,15 +70,25 @@ def test_line_diff_ignores_valid_to_padding_boundary():
     assert torch.all(features[0, 2:] == 0)
 
 
-def test_line_mixer_feature_layout_is_xy_diff_then_type():
+def test_line_mixer_feature_layout_is_xy_diff_without_type_channels():
     encoder = _make_encoder()
     x = _short_line()
     features = _capture_mixer_input(encoder, x)
 
-    assert encoder.channel_pre_project.fc1.in_features == POINT_DIM + 2
-    assert features.shape == (2, POINTS_PER_LINE_STRING, POINT_DIM + 2)
+    assert encoder.channel_pre_project.fc1.in_features == 4
+    assert features.shape == (2, POINTS_PER_LINE_STRING, 4)
     torch.testing.assert_close(features[0, :, :2], x[0, 0, :, :2])
-    torch.testing.assert_close(features[0, :, 4:], x[0, 0, :, 2:])
+    torch.testing.assert_close(features[0, :, 2:], torch.tensor([[0.0, 0.2]] + [[0.0, 0.0]] * (POINTS_PER_LINE_STRING - 1)))
+
+
+def test_line_type_is_injected_after_geometric_pooling():
+    encoder = _make_encoder()
+    assert encoder.type_emb.in_features == LINE_STRING_TYPE_NUM
+    assert encoder.type_emb.out_features == 128
+
+    stop = _capture_mixer_input(encoder, _short_line(STOP_LINE))
+    border = _capture_mixer_input(encoder, _short_line(ROAD_BORDER))
+    torch.testing.assert_close(stop, border)
 
 
 def test_line_padding_element_is_masked_and_finite():
