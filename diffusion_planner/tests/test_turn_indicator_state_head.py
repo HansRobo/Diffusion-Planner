@@ -46,6 +46,12 @@ def _hdp_config(**overrides):
     return args
 
 
+def test_turn_indicator_input_dropout_defaults_off():
+    # Mainline discipline: the paper recipe is the default; the causal-shortcut
+    # insurance dropout is an explicit opt-in (recommended arm value: 0.5).
+    assert TrainConfig.__dataclass_fields__["turn_indicator_dropout_rate"].default == 0.0
+
+
 def test_turn_indicator_output_is_four_state_classes():
     assert TURN_INDICATOR_OUTPUT_DIM == 4
     assert TURN_INDICATOR_CLASS_NAMES == ("none", "disable", "enable_left", "enable_right")
