@@ -24,7 +24,7 @@ from pathlib import Path
 SAMPLING_DIR = Path(__file__).resolve().parent.parent / "sampling"
 sys.path.insert(0, str(SAMPLING_DIR))
 
-from visualize_cluster_report import compute_cluster_stats, load_cluster_json
+from visualize_cluster_report import compute_cluster_stats, load_cluster_json, render_bar_chart
 
 
 class TestLoadClusterJson:
@@ -82,3 +82,19 @@ class TestComputeClusterStats:
         stats = compute_cluster_stats(clusters)
         ids = [s["cluster_id"] for s in stats]
         assert ids == ["cluster_id0", "cluster_id1", "cluster_id2"]
+
+
+class TestRenderBarChart:
+    def test_returns_base64_data_uri(self):
+        stats = [
+            {"cluster_id": "cluster_id0", "count": 90, "pct": 90.0,
+             "weight": 0.5, "sampling_rate": 0.5, "draws_per_epoch": 50,
+             "repeats_per_sample": 0.56},
+            {"cluster_id": "cluster_id1", "count": 10, "pct": 10.0,
+             "weight": 4.5, "sampling_rate": 0.5, "draws_per_epoch": 50,
+             "repeats_per_sample": 5.0},
+        ]
+        result = render_bar_chart(stats)
+        assert result.startswith("data:image/png;base64,")
+        # Should be a reasonable-length base64 string
+        assert len(result) > 100

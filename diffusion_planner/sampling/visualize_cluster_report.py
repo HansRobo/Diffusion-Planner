@@ -27,7 +27,13 @@ statistics, renders BEV video examples per cluster via render-video-txt
 
 from __future__ import annotations
 
+import base64
+import io
 import json
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 def load_cluster_json(path: str) -> dict[str, list[str]]:
@@ -65,3 +71,23 @@ def compute_cluster_stats(clusters: dict[str, list[str]]) -> list[dict]:
             "repeats_per_sample": draws / count if count > 0 else 0.0,
         })
     return stats
+
+
+def render_bar_chart(stats: list[dict]) -> str:
+    ids = [s["cluster_id"].replace("cluster_id", "") for s in stats]
+    counts = [s["count"] for s in stats]
+
+    fig, ax = plt.subplots(figsize=(max(6, len(ids) * 0.6), 4))
+    bars = ax.bar(ids, counts, color="#4C72B0", edgecolor="white", linewidth=0.5)
+    ax.set_xlabel("Cluster ID")
+    ax.set_ylabel("Sample Count")
+    ax.set_title("Cluster Size Distribution")
+    ax.tick_params(axis="x", rotation=45 if len(ids) > 15 else 0)
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    b64 = base64.b64encode(buf.read()).decode("ascii")
+    return f"data:image/png;base64,{b64}"
