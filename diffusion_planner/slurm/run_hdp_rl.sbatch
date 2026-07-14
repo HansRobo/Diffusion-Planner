@@ -361,6 +361,7 @@ TRAIN_ARGS=(
   --rl_full_eval_utd "${FULL_EVAL_UTD}" \
   --learning_rate "${LEARNING_RATE}" \
   --weight_decay "${WEIGHT_DECAY}" \
+  --adamw_no_decay True \
   --warm_up_epoch 1 \
   --num_generations "${NUM_GENERATIONS}" \
   --rl_noise_scale "${NOISE_SCALE}" \

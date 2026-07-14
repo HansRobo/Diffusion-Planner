@@ -32,6 +32,7 @@ from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
     build_adamw_optimizer,
+    build_adamw_param_groups,
     compile_model_components,
     gather_rng_states,
     resume_model,
@@ -300,6 +301,7 @@ def assert_checkpoint_compatible(
             "valid_batch_size",
             "learning_rate",
             "weight_decay",
+            "adamw_no_decay",
             "warm_up_epoch",
             "ego_prediction_horizon",
             "planning_hybrid_loss",
@@ -803,17 +805,17 @@ def model_training(args: TrainConfig):
             )
         )
 
-    # optimizer
-    params = [
-        {
-            "params": ddp.get_model(diffusion_planner, args.ddp).parameters(),
-            "lr": args.learning_rate,
-        }
-    ]
+    # optimizer: keep the no-decay policy explicit in the checkpoint provenance. The
+    # model is unwrapped before grouping so DDP prefixes never affect classification.
+    optimizer_param_groups, optimizer_group_summary = build_adamw_param_groups(
+        ddp.get_model(diffusion_planner, args.ddp),
+        weight_decay=args.weight_decay,
+        no_decay=bool(getattr(args, "adamw_no_decay", True)),
+    )
 
     requested_fused_optimizer = bool(getattr(args, "fused_optimizer", False))
     optimizer, effective_fused_optimizer = build_adamw_optimizer(
-        params[0]["params"],
+        optimizer_param_groups,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         fused_requested=requested_fused_optimizer,
@@ -823,6 +825,20 @@ def model_training(args: TrainConfig):
         print("WARNING: fused AdamW is unavailable; falling back to standard AdamW")
         args.fused_optimizer = False
     if global_rank == 0:
+        print(
+            "AdamW groups: decay_tensors={} ({:,} params), no_decay_tensors={} ({:,} params), "
+            "enabled={}".format(
+                optimizer_group_summary["decay_tensor_count"],
+                optimizer_group_summary["decay_param_count"],
+                optimizer_group_summary["no_decay_tensor_count"],
+                optimizer_group_summary["no_decay_param_count"],
+                optimizer_group_summary["adamw_no_decay"],
+            )
+        )
+        args_dict["optimizer_decay_param_count"] = optimizer_group_summary["decay_param_count"]
+        args_dict["optimizer_no_decay_param_count"] = optimizer_group_summary[
+            "no_decay_param_count"
+        ]
         args_dict["fused_optimizer"] = effective_fused_optimizer
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)

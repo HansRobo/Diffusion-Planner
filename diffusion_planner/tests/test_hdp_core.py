@@ -86,6 +86,7 @@ from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
     build_adamw_optimizer,
+    build_adamw_param_groups,
     capture_rng_state,
     compile_model_components,
     compute_grad_stats,
@@ -107,6 +108,42 @@ def test_adamw_fused_request_falls_back_cleanly_on_cpu():
     assert not effective_fused
     parameter.sum().backward()
     optimizer.step()
+
+
+def test_adamw_no_decay_groups_exempt_norm_bias_and_embeddings():
+    class ToyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4)
+            self.norm = torch.nn.LayerNorm(4)
+            self.embedding = torch.nn.Embedding(3, 4)
+            self.action_pos_emb = torch.nn.Parameter(torch.zeros(1, 2, 4))
+            self.route_position_embedding = torch.nn.Parameter(torch.zeros(1, 2, 4))
+
+    model = ToyModel()
+    groups, summary = build_adamw_param_groups(model, weight_decay=0.01, no_decay=True)
+    grouped = {
+        id(parameter): group["weight_decay"]
+        for group in groups
+        for parameter in group["params"]
+    }
+    assert grouped[id(model.linear.weight)] == 0.01
+    assert grouped[id(model.linear.bias)] == 0.0
+    assert grouped[id(model.norm.weight)] == 0.0
+    assert grouped[id(model.embedding.weight)] == 0.0
+    assert grouped[id(model.action_pos_emb)] == 0.0
+    assert grouped[id(model.route_position_embedding)] == 0.0
+    assert summary["no_decay_param_count"] > 0
+    assert summary["decay_param_count"] == model.linear.weight.numel()
+
+
+def test_adamw_no_decay_can_be_disabled_without_dropping_parameters():
+    model = torch.nn.Sequential(torch.nn.Linear(3, 3), torch.nn.LayerNorm(3))
+    groups, summary = build_adamw_param_groups(model, weight_decay=0.01, no_decay=False)
+    assert len(groups) == 1
+    assert groups[0]["weight_decay"] == 0.01
+    assert summary["no_decay_param_count"] == 0
+    assert summary["decay_param_count"] == sum(p.numel() for p in model.parameters())
 from diffusion_planner.validate_model import _multisample_metrics, aggregate_valid_metrics
 
 

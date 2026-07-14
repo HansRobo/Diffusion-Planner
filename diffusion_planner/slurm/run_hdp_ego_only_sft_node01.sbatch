@@ -9,17 +9,17 @@
 #SBATCH --gres=gpu:h100:8
 #SBATCH --exclusive
 #SBATCH --requeue
-#SBATCH --output=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsvisible_allveh_x10_node01_8gpu_bf16_bs512_from_base20/slurm-%j.out
-#SBATCH --error=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsvisible_allveh_x10_node01_8gpu_bf16_bs512_from_base20/slurm-%j.err
+#SBATCH --output=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsvisible_allveh_x10_adamw_nodecay_node01_8gpu_bf16_bs512_from_base20/slurm-%j.out
+#SBATCH --error=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsvisible_allveh_x10_adamw_nodecay_node01_8gpu_bf16_bs512_from_base20/slurm-%j.err
 
 set -euo pipefail
 
 REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
 SOURCE_REPO=${HDP_SOURCE_REPO:?submit with an immutable HDP_SOURCE_REPO worktree}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT}
-RUN_NAME=hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsvisible_allveh_x10_node01_8gpu_bf16_bs512_from_base20
+RUN_NAME=hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsvisible_allveh_x10_adamw_nodecay_node01_8gpu_bf16_bs512_from_base20
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
-BASE_RUN=${REPO}/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsvisible_3veh_x10_recoveryaug_node01_8gpu_bf16_bs512
+BASE_RUN=${REPO}/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsvisible_3veh_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512
 INIT_WEIGHTS=${BASE_RUN}/latest.pth
 INIT_ARGS=${BASE_RUN}/args.json
 TRAIN_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_sft_exclude_unprotected_right_turn_after_entry_all_vehicles.json
@@ -152,6 +152,7 @@ BASE_ARGS=(
   --batch_size 512
   --learning_rate 1e-4
   --weight_decay 0.01
+  --adamw_no_decay True
   --warm_up_epoch 5
   --train_epochs 20
   --save_utd 5

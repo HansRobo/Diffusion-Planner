@@ -107,6 +107,12 @@ def get_args(args_list=None):
         default=_train_config_default("weight_decay"),
         help="AdamW weight decay; the HDP paper uses 0.01",
     )
+    parser.add_argument(
+        "--adamw_no_decay",
+        type=boolean,
+        default=_train_config_default("adamw_no_decay"),
+        help="exclude norm, bias, embedding, and positional embedding parameters from decay",
+    )
     parser.add_argument("--warm_up_epoch", type=int, default=5)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)

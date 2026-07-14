@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from timm.utils import ModelEmaV3
 from torch import optim
+from torch import nn
 
 
 def atomic_torch_save(obj, path) -> None:
@@ -95,6 +96,68 @@ def build_adamw_optimizer(
             False,
         )
     return optimizer, True
+
+
+def build_adamw_param_groups(model, *, weight_decay: float, no_decay: bool = True):
+    """Build deterministic AdamW decay/no-decay groups for a model.
+
+    Norm scales, biases, embedding tables, and explicit positional embedding tables are
+    excluded from decoupled weight decay.  Everything else remains in the regular decay
+    group.  The returned summary is intentionally serializable so the exact optimizer
+    policy can be recorded in ``args.json`` and checked in run logs.
+    """
+    if weight_decay < 0.0:
+        raise ValueError(f"weight_decay must be >= 0, got {weight_decay}")
+
+    modules = dict(model.named_modules())
+    decay_params = []
+    no_decay_params = []
+    decay_names = []
+    no_decay_names = []
+
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        parent_name, _, leaf_name = name.rpartition(".")
+        parent = modules.get(parent_name)
+        is_embedding = isinstance(parent, nn.Embedding)
+        # PyTorch keeps the various normalization base classes in separate internal
+        # modules; the public class-name check covers LayerNorm/BatchNorm/GroupNorm/
+        # InstanceNorm without depending on a private torch symbol.
+        is_norm = parent is not None and "norm" in parent.__class__.__name__.lower()
+        explicit_embedding = leaf_name in {"action_pos_emb", "route_position_embedding"}
+        exempt = no_decay and (
+            parameter.ndim <= 1
+            or leaf_name == "bias"
+            or is_embedding
+            or is_norm
+            or explicit_embedding
+        )
+        if exempt:
+            no_decay_params.append(parameter)
+            no_decay_names.append(name)
+        else:
+            decay_params.append(parameter)
+            decay_names.append(name)
+
+    if not decay_params and not no_decay_params:
+        raise ValueError("Model has no trainable parameters for AdamW")
+
+    groups = []
+    if decay_params:
+        groups.append({"params": decay_params, "weight_decay": weight_decay})
+    if no_decay_params:
+        groups.append({"params": no_decay_params, "weight_decay": 0.0})
+    summary = {
+        "adamw_no_decay": bool(no_decay),
+        "decay_tensor_count": len(decay_params),
+        "no_decay_tensor_count": len(no_decay_params),
+        "decay_param_count": sum(parameter.numel() for parameter in decay_params),
+        "no_decay_param_count": sum(parameter.numel() for parameter in no_decay_params),
+        "decay_names": decay_names,
+        "no_decay_names": no_decay_names,
+    }
+    return groups, summary
 
 
 def compile_model_components(model) -> None:

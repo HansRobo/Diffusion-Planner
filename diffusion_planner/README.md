@@ -35,6 +35,8 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_p
   --normalization_file_path ./normalization.json \
   --batch_size 512 \
   --learning_rate 2e-4 \
+  --weight_decay 0.01 \
+  --adamw_no_decay True \
   --warm_up_epoch 5 \
   --train_epochs 20 \
   --save_utd 10 \
@@ -72,6 +74,8 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_p
   --train_set_list <FULL_SEQUENCE_SFT_TRAIN_LIST> \
   --valid_set_list <FULL_SEQUENCE_SFT_VALID_LIST> \
   --init_weights_path <HDP_BASE_CHECKPOINT> \
+  --weight_decay 0.01 \
+  --adamw_no_decay True \
   --train_subsample_step 1 \
   --normalization_file_path ./normalization.json \
   --train_epochs 20 \

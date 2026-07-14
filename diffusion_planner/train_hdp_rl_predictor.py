@@ -58,6 +58,7 @@ from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
     build_adamw_optimizer,
+    build_adamw_param_groups,
     compile_model_components,
     gather_rng_states,
     resume_model,
@@ -420,6 +421,12 @@ def get_args():
         type=float,
         default=0.0,
         help="AdamW weight decay; disabled by default for conservative SFT-to-RL fine-tuning",
+    )
+    parser.add_argument(
+        "--adamw_no_decay",
+        type=boolean,
+        default=_train_config_default("adamw_no_decay"),
+        help="exclude norm, bias, embedding, and positional embedding parameters from decay",
     )
     parser.add_argument("--warm_up_epoch", type=int, default=2)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
@@ -1457,14 +1464,13 @@ def model_training(args):
             )
         )
 
-    trainable_params = [
-        p for p in ddp.get_model(diffusion_planner, args.ddp).parameters() if p.requires_grad
-    ]
-    if not trainable_params:
-        raise RuntimeError("No trainable parameters found for RL training")
-    params = [{"params": trainable_params, "lr": args.learning_rate}]
+    optimizer_param_groups, optimizer_group_summary = build_adamw_param_groups(
+        ddp.get_model(diffusion_planner, args.ddp),
+        weight_decay=args.weight_decay,
+        no_decay=bool(getattr(args, "adamw_no_decay", True)),
+    )
     optimizer, effective_fused_optimizer = build_adamw_optimizer(
-        trainable_params,
+        optimizer_param_groups,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         fused_requested=args.fused_optimizer,
@@ -1474,6 +1480,20 @@ def model_training(args):
         print("WARNING: fused AdamW is unavailable; falling back to standard AdamW")
         args.fused_optimizer = False
     if global_rank == 0:
+        print(
+            "AdamW groups: decay_tensors={} ({:,} params), no_decay_tensors={} ({:,} params), "
+            "enabled={}".format(
+                optimizer_group_summary["decay_tensor_count"],
+                optimizer_group_summary["decay_param_count"],
+                optimizer_group_summary["no_decay_tensor_count"],
+                optimizer_group_summary["no_decay_param_count"],
+                optimizer_group_summary["adamw_no_decay"],
+            )
+        )
+        args_dict["optimizer_decay_param_count"] = optimizer_group_summary["decay_param_count"]
+        args_dict["optimizer_no_decay_param_count"] = optimizer_group_summary[
+            "no_decay_param_count"
+        ]
         args_dict["fused_optimizer"] = effective_fused_optimizer
         write_json_atomic(args_dict, os.path.join(save_path, "args.json"))
     scheduler = LinearWarmupConstantLR(optimizer, train_epochs, args.warm_up_epoch)

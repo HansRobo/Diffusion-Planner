@@ -80,6 +80,9 @@ class TrainConfig:
     save_utd: int = 10
     learning_rate: float = 1e-4
     weight_decay: float = 0.01
+    # Exclude normalization/embedding/bias parameters from AdamW decay. This is an
+    # optimizer-policy choice and is protected by strict resume compatibility.
+    adamw_no_decay: bool = True
     warm_up_epoch: int = 5
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
