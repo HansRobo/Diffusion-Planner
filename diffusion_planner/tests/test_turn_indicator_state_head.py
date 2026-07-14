@@ -118,7 +118,9 @@ def test_decoder_turn_features_cover_the_trajectory_endpoint():
 
 def test_decoder_training_emits_four_class_logits_without_policy_gradients():
     torch.manual_seed(0)
-    decoder = Decoder(_hdp_config()).train()
+    decoder = Decoder(
+        _hdp_config(agent_num=4, static_objects_num=2, lane_num=6, polygon_num=2, line_string_num=3)
+    ).train()
     batch = 2
     inputs = {
         "route_lanes": torch.randn(batch, 25, 20, 33),
@@ -128,7 +130,7 @@ def test_decoder_training_emits_four_class_logits_without_policy_gradients():
         "diffusion_time": torch.rand(batch),
         "ego_current_state": torch.randn(batch, 10),
     }
-    output = decoder(torch.randn(batch, 7, 32), inputs)
+    output = decoder(torch.randn(batch, decoder._turn_indicator_token_index + 1, 32), inputs)
     assert output["turn_indicator_logit"].shape == (batch, TURN_INDICATOR_OUTPUT_DIM)
     assert output["turn_indicator_expert_logit"].shape == (batch, TURN_INDICATOR_OUTPUT_DIM)
 
@@ -144,7 +146,9 @@ def test_decoder_training_emits_four_class_logits_without_policy_gradients():
 
 def test_decoder_inference_emits_state_logits():
     torch.manual_seed(0)
-    decoder = Decoder(_hdp_config()).eval()
+    decoder = Decoder(
+        _hdp_config(agent_num=4, static_objects_num=2, lane_num=6, polygon_num=2, line_string_num=3)
+    ).eval()
     batch = 2
     inputs = {
         "route_lanes": torch.randn(batch, 25, 20, 33),
@@ -152,7 +156,7 @@ def test_decoder_inference_emits_state_logits():
         "ego_current_state": torch.randn(batch, 10),
     }
     with torch.no_grad():
-        output = decoder(torch.randn(batch, 7, 32), inputs)
+        output = decoder(torch.randn(batch, decoder._turn_indicator_token_index + 1, 32), inputs)
     assert output["turn_indicator_logit"].shape == (batch, TURN_INDICATOR_OUTPUT_DIM)
 
 
@@ -246,3 +250,53 @@ def test_training_loss_turn_metrics_are_four_class_and_finite():
 def test_turn_indicator_loss_weights_reject_bad_shapes():
     with pytest.raises(ValueError):
         turn_indicator_loss_weights(torch.zeros(31, dtype=torch.long))
+
+
+def test_turn_head_cannot_read_the_signal_history_scene_token():
+    """The scene tokens include the signal-history token; the head must be blind to
+    it (true statelessness), while the policy keeps seeing it."""
+    torch.manual_seed(0)
+    args = _hdp_config(
+        decoder_drop_path_rate=0.0,
+        # The route encoder's MLP dropout follows the ENCODER rate; leaving it on
+        # makes the two train-mode forwards stochastic and the comparison meaningless.
+        encoder_drop_path_rate=0.0,
+        agent_num=4,
+        static_objects_num=2,
+        lane_num=6,
+        polygon_num=2,
+        line_string_num=3,
+    )
+    decoder = Decoder(args).train()
+    batch = 2
+    token_count = decoder._turn_indicator_token_index + 1
+    encoding = torch.randn(batch, token_count, 32)
+    flipped = encoding.clone()
+    flipped[:, decoder._turn_indicator_token_index] += 5.0
+    inputs = {
+        "route_lanes": torch.randn(batch, 25, 20, 33),
+        "sampled_trajectories": torch.randn(batch, 1, 80, 4),
+        "gt_trajectories": torch.randn(batch, 1, 80, 4),
+        "turn_indicator_trajectories": torch.randn(batch, 1, 80, 4),
+        "diffusion_time": torch.rand(batch),
+        "ego_current_state": torch.randn(batch, 10),
+    }
+
+    base = decoder(encoding, inputs)
+    changed = decoder(flipped, inputs)
+
+    # The head must be blind to the signal-history token...
+    torch.testing.assert_close(
+        base["turn_indicator_expert_logit"], changed["turn_indicator_expert_logit"]
+    )
+
+    # ...while its attention probe demonstrably reads other scene tokens (the
+    # blindness above is masking, not a dead probe). The DiT's zero-initialized
+    # adaLN gates make the untrained POLICY input-insensitive, so probe liveness
+    # is the meaningful counter-check here.
+    other = encoding.clone()
+    other[:, 2] += 5.0
+    assert not torch.allclose(
+        decoder(other, inputs)["turn_indicator_expert_logit"],
+        base["turn_indicator_expert_logit"],
+    )

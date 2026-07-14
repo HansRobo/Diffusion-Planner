@@ -356,6 +356,21 @@ class Decoder(nn.Module):
         self._future_len = config.future_len
         self._sde = VPSDE_linear()
 
+        # Scene-token layout, matching Encoder.forward's concatenation order:
+        # ego(1), agents, static, lanes, route, polygons, line_strings, goal,
+        # ego_shape, turn_indicator. The head must be able to hide the
+        # signal-history token from its scene readout.
+        self._turn_indicator_token_index = (
+            1
+            + config.agent_num
+            + config.static_objects_num
+            + config.lane_num
+            + config.route_num
+            + config.polygon_num
+            + config.line_string_num
+            + 2
+        )
+
         self.dit = DiT(
             depth=config.decoder_depth,
             output_dim=4,  # dx, dy, cos, sin per future time token
@@ -437,7 +452,19 @@ class Decoder(nn.Module):
         Returns:
             turn_indicator_logit: [B, TURN_INDICATOR_OUTPUT_DIM]
         """
-        return self.turn_indicator_predictor(ego_trajectory, encoding, global_route_condition)
+        if encoding.shape[1] <= self._turn_indicator_token_index:
+            raise ValueError(
+                f"Turn head needs the full scene-token layout (>= "
+                f"{self._turn_indicator_token_index + 1} tokens), got {encoding.shape[1]}"
+            )
+        # The scene tokens include the signal-history token. Hide it from the head so
+        # the state classifier is truly stateless regardless of the input-dropout
+        # setting: no copy shortcut in training, and no self-feedback through the
+        # stack's own commanded signal at deployment. A zeroed row is excluded by the
+        # head's padding mask. The policy (DiT cross-attention) still sees the token.
+        headless = encoding.clone()
+        headless[:, self._turn_indicator_token_index] = 0.0
+        return self.turn_indicator_predictor(ego_trajectory, headless, global_route_condition)
 
     def _turn_indicator_features(self, normalized_ego_future):
         """Subsample [B, 1, T, 4] normalized waypoints to the head's feature vector."""

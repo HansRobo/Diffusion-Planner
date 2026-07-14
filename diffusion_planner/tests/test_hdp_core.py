@@ -122,9 +122,7 @@ def test_adamw_no_decay_groups_exempt_norm_bias_and_embeddings():
     model = ToyModel()
     groups, summary = build_adamw_param_groups(model, weight_decay=0.01, no_decay=True)
     grouped = {
-        id(parameter): group["weight_decay"]
-        for group in groups
-        for parameter in group["params"]
+        id(parameter): group["weight_decay"] for group in groups for parameter in group["params"]
     }
     assert grouped[id(model.linear.weight)] == 0.01
     assert grouped[id(model.linear.bias)] == 0.0
@@ -143,6 +141,8 @@ def test_adamw_no_decay_can_be_disabled_without_dropping_parameters():
     assert groups[0]["weight_decay"] == 0.01
     assert summary["no_decay_param_count"] == 0
     assert summary["decay_param_count"] == sum(p.numel() for p in model.parameters())
+
+
 from diffusion_planner.validate_model import _multisample_metrics, aggregate_valid_metrics
 
 
@@ -757,7 +757,7 @@ def test_hdp_decoder_skips_frozen_turn_head_without_changing_inference_predictio
     )
     args.observation_normalizer = ObservationNormalizer({})
     decoder = Decoder(args).eval()
-    encoding = torch.randn(2, 7, 32)
+    encoding = torch.randn(2, decoder._turn_indicator_token_index + 1, 32)
     inputs = {
         "route_lanes": torch.randn(2, 25, 20, 33),
         "sampled_trajectories": torch.randn(2, 1, 80, 4),
