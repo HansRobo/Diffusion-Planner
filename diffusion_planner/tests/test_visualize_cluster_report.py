@@ -24,7 +24,16 @@ from pathlib import Path
 SAMPLING_DIR = Path(__file__).resolve().parent.parent / "sampling"
 sys.path.insert(0, str(SAMPLING_DIR))
 
-from visualize_cluster_report import compute_cluster_stats, load_cluster_json, render_bar_chart
+from unittest.mock import MagicMock, patch
+
+from visualize_cluster_report import (
+    compute_cluster_stats,
+    load_cluster_json,
+    render_bar_chart,
+    render_cluster_videos,
+    subsample_cluster_paths,
+)
+
 
 
 class TestLoadClusterJson:
@@ -98,3 +107,76 @@ class TestRenderBarChart:
         assert result.startswith("data:image/png;base64,")
         # Should be a reasonable-length base64 string
         assert len(result) > 100
+
+
+class TestSubsampleClusterPaths:
+    def test_caps_at_max_videos(self):
+        clusters = {
+            "cluster_id0": [f"/a/{i}.npz" for i in range(100)],
+        }
+        result = subsample_cluster_paths(clusters, max_videos=3, seed=42)
+        assert len(result["cluster_id0"]) == 3
+
+    def test_keeps_all_if_under_max(self):
+        clusters = {
+            "cluster_id0": ["/a/0.npz", "/a/1.npz"],
+        }
+        result = subsample_cluster_paths(clusters, max_videos=5, seed=42)
+        assert len(result["cluster_id0"]) == 2
+
+    def test_deterministic_with_seed(self):
+        clusters = {"cluster_id0": [f"/a/{i}.npz" for i in range(50)]}
+        r1 = subsample_cluster_paths(clusters, max_videos=3, seed=42)
+        r2 = subsample_cluster_paths(clusters, max_videos=3, seed=42)
+        assert r1 == r2
+
+    def test_different_seed_different_result(self):
+        clusters = {"cluster_id0": [f"/a/{i}.npz" for i in range(50)]}
+        r1 = subsample_cluster_paths(clusters, max_videos=3, seed=42)
+        r2 = subsample_cluster_paths(clusters, max_videos=3, seed=99)
+        assert r1 != r2
+
+
+class TestRenderClusterVideos:
+    def test_calls_render_video_txt_per_cluster(self, tmp_path):
+        subsampled = {
+            "cluster_id0": ["/a/0.npz", "/a/1.npz"],
+            "cluster_id1": ["/b/0.npz"],
+        }
+        with patch("visualize_cluster_report.shutil.which", return_value="/usr/bin/render-video-txt"), \
+             patch("visualize_cluster_report.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            rendered, errors = render_cluster_videos(subsampled, str(tmp_path), workers=1)
+            assert mock_run.call_count == 2
+
+    def test_creates_cluster_subdirectories(self, tmp_path):
+        subsampled = {
+            "cluster_id0": ["/a/0.npz"],
+        }
+        with patch("visualize_cluster_report.shutil.which", return_value="/usr/bin/render-video-txt"), \
+             patch("visualize_cluster_report.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            rendered, errors = render_cluster_videos(subsampled, str(tmp_path), workers=1)
+            assert (tmp_path / "videos" / "cluster_id0").is_dir()
+
+    def test_checks_render_video_txt_available(self):
+        with patch("visualize_cluster_report.shutil.which", return_value=None):
+            import pytest
+            with pytest.raises(RuntimeError, match="render-video-txt not found"):
+                render_cluster_videos({"cluster_id0": ["/a.npz"]}, "/tmp/out", workers=1)
+
+    def test_collects_errors_from_render_log(self, tmp_path):
+        subsampled = {"cluster_id0": ["/a/0.npz"]}
+        log_content = '{"file": "a__0", "status": "error", "reason": "corrupt file"}\n'
+
+        def fake_run(cmd, **kwargs):
+            log_path = tmp_path / "videos" / "cluster_id0" / "render_log.jsonl"
+            log_path.write_text(log_content)
+            return MagicMock(returncode=0)
+
+        with patch("visualize_cluster_report.shutil.which", return_value="/usr/bin/render-video-txt"), \
+             patch("visualize_cluster_report.subprocess.run", side_effect=fake_run):
+            rendered, errors = render_cluster_videos(subsampled, str(tmp_path), workers=1)
+            assert len(errors) == 1
+            assert errors[0]["cluster_id"] == "cluster_id0"
+            assert errors[0]["reason"] == "corrupt file"
