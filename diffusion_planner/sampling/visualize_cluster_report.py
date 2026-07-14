@@ -27,6 +27,7 @@ statistics, renders BEV video examples per cluster via render-video-txt
 
 from __future__ import annotations
 
+import argparse
 import base64
 import io
 import json
@@ -38,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -305,3 +307,62 @@ video {{ border-radius: 4px; background: #1a1a1a; }}
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
     return str(output_path)
+
+
+def get_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate an HTML diagnostic report for cluster-weighted sampling"
+    )
+    parser.add_argument(
+        "--cluster_json", type=str, required=True,
+        help="Path to the clustering result JSON produced by cluster.py",
+    )
+    parser.add_argument(
+        "--output_dir", type=str, required=True,
+        help="Output directory for report.html and videos/",
+    )
+    parser.add_argument(
+        "--max_videos", type=int, default=3,
+        help="Max BEV video examples to render per cluster (default: 3)",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Parallel video rendering workers (default: 1)",
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = get_args()
+
+    print(f"Loading cluster JSON: {args.cluster_json}")
+    clusters = load_cluster_json(args.cluster_json)
+    total = sum(len(v) for v in clusters.values())
+    print(f"  {len(clusters)} clusters, {total:,} total samples")
+
+    print("Computing cluster statistics...")
+    stats = compute_cluster_stats(clusters)
+
+    print("Rendering bar chart...")
+    chart_uri = render_bar_chart(stats)
+
+    print(f"Subsampling {args.max_videos} videos per cluster...")
+    subsampled = subsample_cluster_paths(clusters, args.max_videos, args.seed)
+    n_videos = sum(len(v) for v in subsampled.values())
+    print(f"  {n_videos} videos to render across {len(subsampled)} clusters")
+
+    print(f"Rendering videos (workers={args.workers})...")
+    rendered, errors = render_cluster_videos(subsampled, args.output_dir, args.workers)
+    if errors:
+        print(f"  {len(errors)} file(s) failed to render")
+
+    print("Generating HTML report...")
+    report_path = generate_html_report(
+        stats, chart_uri, rendered, errors, args.cluster_json, args.output_dir,
+    )
+    print(f"Report saved to {report_path}")
+
+
+if __name__ == "__main__":
+    main()

@@ -29,12 +29,12 @@ from unittest.mock import MagicMock, patch
 from visualize_cluster_report import (
     compute_cluster_stats,
     generate_html_report,
+    get_args,
     load_cluster_json,
     render_bar_chart,
     render_cluster_videos,
     subsample_cluster_paths,
 )
-
 
 
 class TestLoadClusterJson:
@@ -229,3 +229,25 @@ class TestGenerateHtmlReport:
         assert "videos/cluster_id0/sample.mp4" in html
         # Should NOT contain absolute path
         assert str(tmp_path) not in html.split('src="')[1].split('"')[0]
+
+
+class TestGetArgs:
+    def test_required_args(self):
+        from unittest.mock import patch
+        with patch("sys.argv", ["prog", "--cluster_json", "/a.json", "--output_dir", "/out"]):
+            args = get_args()
+            assert args.cluster_json == "/a.json"
+            assert args.output_dir == "/out"
+            assert args.max_videos == 3
+            assert args.workers == 1
+            assert args.seed == 42
+
+    def test_optional_args(self):
+        from unittest.mock import patch
+        with patch("sys.argv", ["prog", "--cluster_json", "/a.json",
+                                "--output_dir", "/out", "--max_videos", "5",
+                                "--workers", "4", "--seed", "99"]):
+            args = get_args()
+            assert args.max_videos == 5
+            assert args.workers == 4
+            assert args.seed == 99
