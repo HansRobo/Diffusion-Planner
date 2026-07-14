@@ -130,31 +130,6 @@ def _row_is_expert_disagreement(row: dict[str, Any]) -> bool:
     return "expert_disagreement" in set(row.get("repair_labels") or [])
 
 
-def _route_xy_from_data(data: dict[str, torch.Tensor]) -> np.ndarray | None:
-    """Concatenate route_lanes (ego frame) into one xy polyline.
-
-    data["route_lanes"] is (1, L, P, C); channels 0:2 are xy. All-zero padding
-    points are dropped and the lanes are concatenated in order.
-    """
-    if "route_lanes" not in data:
-        return None
-    rl = data["route_lanes"].detach().cpu().numpy()
-    if rl.ndim == 4:
-        rl = rl[0]
-    if rl.ndim != 3 or rl.shape[-1] < 2:
-        return None
-    pts: list[np.ndarray] = []
-    for lane in rl:  # (P, C)
-        xy = lane[:, :2].astype(np.float64)
-        valid = np.abs(xy).sum(axis=1) > 1e-6
-        xy = xy[valid]
-        if xy.shape[0] > 0:
-            pts.append(xy)
-    if not pts:
-        return None
-    return np.concatenate(pts, axis=0)
-
-
 def _expert_reference_scoring_data(
     data: dict[str, torch.Tensor],
     *,
@@ -485,6 +460,18 @@ def _passes_global_gates(label_row: dict[str, Any], reward_row) -> bool:
     )
 
 
+def _global_gate_flags(label_row: dict[str, Any], reward_row) -> dict[str, bool]:
+    """Which _passes_global_gates condition(s) failed — diagnosis mirror, keep in sync."""
+    return {
+        "collision": reward_row.collision_step is not None,
+        "rb_crossing": bool(reward_row.rb_crossing),
+        "lane_crossing": bool(reward_row.lane_crossing),
+        "static_crossing": bool(reward_row.static_crossing),
+        "kinematic_violated": bool(reward_row.kinematic_violated),
+        "moving_collision": label_row["moving_collision_step"] is not None,
+    }
+
+
 def _repairs_source_labels(
     source_labels: list[str],
     label_row: dict[str, Any],
@@ -524,6 +511,7 @@ def _best_safe_candidate(
     target_gt_disagreement_thresh: float,
     candidate_trajs: list[torch.Tensor] | torch.Tensor | np.ndarray | None = None,
     reference_traj: torch.Tensor | np.ndarray | None = None,
+    morph_index: int | None = None,
 ) -> tuple[int | None, dict[str, Any]]:
     accepted: list[tuple[float, float, float, int]] = []
     candidate_traj_list = None
@@ -543,18 +531,27 @@ def _best_safe_candidate(
             )
             accepted.append((violation_score, deviation_penalty, float(reward_row.total), idx))
 
+    accepted_indices = {item[3] for item in accepted}
     if not accepted:
         best_total = max(float(r.total) for r in reward_rows)
         best_sc = max(float(getattr(r, "sc_min_dist", -99.0)) for r in reward_rows)
-        return None, {
+        meta = {
             "reason": "no_safe_candidate",
             "best_total": best_total,
             "best_sc_min_dist": best_sc,
         }
+        if morph_index is not None:
+            meta["morph_outcome"] = "gate_rejected"
+            meta["morph_labels"] = list(candidate_rows[morph_index].get("labels", []))
+            meta["morph_gate_flags"] = _global_gate_flags(
+                candidate_rows[morph_index], reward_rows[morph_index]
+            )
+        return None, meta
 
     uses_r2lpl_conflict_selection = "expert_disagreement" in set(
         source_row.get("repair_labels", [])
     )
+    morph_r2lpl_score: float | None = None
     if uses_r2lpl_conflict_selection:
         rule_scores = _normalize_values([item[2] for item in accepted])
         state_class = _r2lpl_state_class(source_row)
@@ -564,6 +561,8 @@ def _best_safe_candidate(
             violation_score, deviation_penalty, _reward_total, idx = item
             expert_score = math.exp(-max(deviation_penalty, 0.0) / 4.0)
             r2lpl_score = rule_weight * rule_score + expert_weight * expert_score
+            if morph_index is not None and idx == morph_index:
+                morph_r2lpl_score = float(r2lpl_score)
             ranked.append((-r2lpl_score, violation_score, deviation_penalty, idx))
         ranked.sort()
         neg_r2lpl_score, violation_score, deviation_penalty, idx = ranked[0]
@@ -600,10 +599,46 @@ def _best_safe_candidate(
     if selected_r2lpl_score is not None:
         meta["selected_r2lpl_score"] = float(selected_r2lpl_score)
         meta["selected_r2lpl_state_class"] = selected_state_class
+    if morph_index is not None:
+        if idx == morph_index:
+            meta["morph_outcome"] = "selected"
+        elif morph_index in accepted_indices:
+            meta["morph_outcome"] = "lost_selection"
+            if morph_r2lpl_score is not None:
+                meta["morph_r2lpl_score"] = morph_r2lpl_score
+        else:
+            meta["morph_outcome"] = "gate_rejected"
+            meta["morph_labels"] = list(candidate_rows[morph_index].get("labels", []))
+            meta["morph_gate_flags"] = _global_gate_flags(
+                candidate_rows[morph_index], reward_rows[morph_index]
+            )
     return idx, meta
 
 
 @torch.no_grad()
+def _preflight_recorded_anchor(rows: list[dict[str, Any]]) -> None:
+    """Fail BEFORE model load / GPU work when --expert_stop_anchor recorded is
+    unusable: every expert_disagreement scene must carry ego_recorded_future.
+
+    Old mined corpora predate the field; without this check the run burns
+    through generation until the first expert scene, hours into a round.
+    """
+    missing = []
+    for row in rows:
+        if not _row_is_expert_disagreement(row):
+            continue
+        with np.load(row["scene_path"]) as z:
+            if "ego_recorded_future" not in z.files:
+                missing.append(str(row["scene_path"]))
+    if missing:
+        raise ValueError(
+            f"--expert_stop_anchor recorded requires 'ego_recorded_future' in mined "
+            f"scenes, missing in {len(missing)} expert_disagreement scene(s), e.g. "
+            f"{missing[0]}. Either re-mine with a reproducer that saves it, or run "
+            f"with --expert_stop_anchor pseudo (no silent fallback)."
+        )
+
+
 def build_repaired_targets(
     *,
     model_path: str,
@@ -617,6 +652,7 @@ def build_repaired_targets(
     min_static_margin: float,
     K: int,
     variant: str,
+    repair_prototypes_path: str | None = None,
     generation_mode: str,
     grpo_noise_scale: float,
     gt_max_speed: float,
@@ -634,6 +670,7 @@ def build_repaired_targets(
     expert_morph_w_max: float = 1.0,
     expert_morph_max_accel: float = 2.0,
     expert_morph_max_jerk: float = 4.0,
+    expert_stop_anchor: str = "recorded",
 ) -> tuple[list[str], list[dict[str, Any]]]:
     rcfg = load_reward_config(reward_config_path)
     _apply_rear_end_collision_mode(
@@ -641,6 +678,12 @@ def build_repaired_targets(
         count_rear_end_collisions=count_rear_end_collisions,
     )
     _validate_static_collision_config(rows, rcfg)
+    if expert_stop_anchor == "recorded":
+        _preflight_recorded_anchor(rows)
+    elif expert_stop_anchor != "pseudo":
+        raise ValueError(
+            f"unknown expert_stop_anchor {expert_stop_anchor!r}; expected 'pseudo' or 'recorded'"
+        )
     thresholds = _load_scene_thresholds(threshold_config_path)
     model, model_args = load_model(model_path, device)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -710,6 +753,7 @@ def build_repaired_targets(
                 gen_chunk_size=K,
                 gt_max_speed=gt_max_speed,
                 generation_variant=variant,
+                prototypes_path=repair_prototypes_path,
                 use_route_cl_guidance=use_route_cl_guidance,
             )
         else:
@@ -731,7 +775,7 @@ def build_repaired_targets(
             args=cls_args,
         )
 
-        # Deterministic plan per scene — only needed to seed the Frenet det->GT
+        # Deterministic plan per scene — only needed to seed the det-path re-timing
         # morph candidate for expert_disagreement scenes.
         want_morph = repair_expert_gt_candidate and any(
             _row_is_expert_disagreement(row) for row in kept_rows
@@ -765,23 +809,38 @@ def build_repaired_targets(
 
             name = _output_name_for_scene(row["scene_path"])
 
-            # Extra Frenet det->GT morph candidate for expert_disagreement scenes.
+            # Extra det-path re-timing morph candidate for expert_disagreement scenes.
             morph_added = False
             morph_index: int | None = None
+            morph_diag: dict[str, Any] | None = None
             if repair_expert_gt_candidate and is_expert:
-                route_xy = _route_xy_from_data(data)
                 expert_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
                 det_traj = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
-                morph = None
-                if route_xy is not None:
-                    morph = build_expert_morph_candidate(
-                        det_traj,
-                        expert_traj,
-                        route_xy,
-                        w_max=expert_morph_w_max,
-                        max_accel=expert_morph_max_accel,
-                        max_jerk=expert_morph_max_jerk,
+                stop_anchor_xy = None
+                if expert_stop_anchor == "recorded":
+                    if "ego_recorded_future" not in data:
+                        raise ValueError(
+                            f"{row['scene_path']}: --expert_stop_anchor recorded requires "
+                            "'ego_recorded_future' in the mined scene (re-mine with a "
+                            "reproducer that saves it, or run with --expert_stop_anchor "
+                            "pseudo; no silent fallback)."
+                        )
+                    recorded = _future_to_4col(data["ego_recorded_future"].detach().cpu().numpy())
+                    stop_anchor_xy = recorded[-1, :2]
+                elif expert_stop_anchor != "pseudo":
+                    raise ValueError(
+                        f"unknown expert_stop_anchor {expert_stop_anchor!r}; "
+                        "expected 'pseudo' or 'recorded'"
                     )
+                morph, morph_diag = build_expert_morph_candidate(
+                    det_traj,
+                    expert_traj,
+                    w_max=expert_morph_w_max,
+                    max_accel=expert_morph_max_accel,
+                    max_jerk=expert_morph_max_jerk,
+                    stop_anchor_xy=stop_anchor_xy,
+                    return_diag=True,
+                )
                 if morph is not None:
                     morph_tensor = torch.from_numpy(np.ascontiguousarray(morph)).to(
                         device=device, dtype=scene_trajs.dtype
@@ -815,11 +874,20 @@ def build_repaired_targets(
                 target_gt_disagreement_thresh=target_gt_disagreement_thresh,
                 candidate_trajs=scene_trajs,
                 reference_traj=reference_traj,
+                morph_index=morph_index if morph_added else None,
             )
             morph_selected = bool(morph_added and best_idx == morph_index)
             if is_expert:
                 meta["expert_morph_added"] = bool(morph_added)
                 meta["expert_morph_selected"] = morph_selected
+                # Synthesis diagnostics: why the morph exists / was rejected before
+                # ever reaching the gates ("stage" == "ok" when synthesized). The
+                # gate/selection outcome ("morph_outcome") comes from
+                # _best_safe_candidate; merge the synthesis stage for the full story.
+                if morph_diag is not None:
+                    meta["expert_morph_diag"] = morph_diag
+                    if not morph_added:
+                        meta["morph_outcome"] = f"not_synthesized:{morph_diag['stage']}"
             if morph_added:
                 print(f"  morph candidate {name}: added=True selected={morph_selected}")
             if best_idx is None:
@@ -895,6 +963,11 @@ def main() -> None:
     ap.add_argument("--K", type=int, default=16)
     ap.add_argument("--variant", default="rl_cl_soft_sweep_stretch")
     ap.add_argument(
+        "--prototypes_path",
+        default=None,
+        help="Prototype library .npy for anchor-slot variants (rsft_v2_anchor)",
+    )
+    ap.add_argument(
         "--generation_mode",
         choices=[_GENERATION_MODE_GRPO_TEMPERATURE, _GENERATION_MODE_GUIDED_VARIANT],
         default=_GENERATION_MODE_GRPO_TEMPERATURE,
@@ -936,13 +1009,13 @@ def main() -> None:
         dest="repair_expert_gt_candidate",
         action="store_true",
         default=True,
-        help="Add a Frenet det->GT morph candidate for expert_disagreement scenes (default on).",
+        help="Add a det-path re-timing morph candidate for expert_disagreement scenes (default on).",
     )
     ap.add_argument(
         "--no_repair_expert_gt_candidate",
         dest="repair_expert_gt_candidate",
         action="store_false",
-        help="Disable the Frenet det->GT morph candidate.",
+        help="Disable the det-path re-timing morph candidate.",
     )
     ap.add_argument(
         "--repair_expert_reference",
@@ -958,6 +1031,19 @@ def main() -> None:
         help="Score expert_disagreement scenes against the realized ego future instead.",
     )
     ap.add_argument("--expert_morph_w_max", type=float, default=1.0)
+    ap.add_argument(
+        "--expert_stop_anchor",
+        choices=["pseudo", "recorded"],
+        default="recorded",
+        help=(
+            "Where a stopped-expert morph stops. 'recorded' (default) = the recorded "
+            "expert's actual stop position projected onto the det path (position "
+            "fidelity; requires ego_recorded_future in the mined scenes; earlier, "
+            "harder stops cost some morph coverage). 'pseudo' = the expert's remaining "
+            "travel distance applied from the ego pose (paper pseudo-target; maximum "
+            "coverage, stops land later than the human's)."
+        ),
+    )
     ap.add_argument("--expert_morph_max_accel", type=float, default=2.0)
     ap.add_argument("--expert_morph_max_jerk", type=float, default=4.0)
     args = ap.parse_args()
@@ -1005,6 +1091,7 @@ def main() -> None:
         min_static_margin=float(args.min_margin),
         K=int(args.K),
         variant=str(args.variant),
+        repair_prototypes_path=args.prototypes_path,
         generation_mode=str(args.generation_mode),
         grpo_noise_scale=float(args.grpo_noise_scale),
         gt_max_speed=float(args.gt_max_speed),
@@ -1022,6 +1109,7 @@ def main() -> None:
         expert_morph_w_max=float(args.expert_morph_w_max),
         expert_morph_max_accel=float(args.expert_morph_max_accel),
         expert_morph_max_jerk=float(args.expert_morph_max_jerk),
+        expert_stop_anchor=str(args.expert_stop_anchor),
     )
 
 

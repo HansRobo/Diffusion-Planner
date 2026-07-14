@@ -589,7 +589,11 @@ class _SegState:
     # each step the MODEL's predicted turn indicator is fed back in (recorded seed phases out
     # within PAST steps, exactly like ego_hist) — so the model context + saved npz never carry
     # the recorded driver's signals, only the sim's own predictions.
-    turn_hist: np.ndarray = None
+    turn_hist: np.ndarray
+    # Most recent turn-indicator class fed into turn_hist. Between replans
+    # (replan_interval > 1) no fresh inference runs, so this value is re-appended each step
+    # (_hold_turn_indicator) to keep the 10 Hz history scrolling with the held signal.
+    last_turn_indicator: int
     # Per-collision-episode save state. An episode runs while clearance <= thresh and ends on
     # clearing; ``last_collision_uuid`` is the colliding UUID of the last SAVED collision (a new
     # episode is distinct only if its UUID differs). ``episode_eligible`` is set once per episode
@@ -720,6 +724,10 @@ def _seed_state(
         raise ValueError(f"Unknown goal_mode={goal_mode!r}; expected 'segment' or 'route'")
     ego_shape = np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32)
     wheelbase = float(ego_shape[0])
+    # Closed-loop turn indicators: seed from the recorded frame, then feed the model's own
+    # prediction back each step (phasing the seed out) — the model context never carries the
+    # recorded driver's signals beyond the seed, only its own predictions.
+    turn_hist = np.asarray(tl.npz(start)["turn_indicators"]).reshape(-1).astype(np.int64)
     if tracker_mode == "perfect":
         tracker = PerfectTracker(dt=DT)
     elif tracker_mode == "mpc":
@@ -739,15 +747,8 @@ def _seed_state(
         live_pose=live_pose,
         ego_hist=ego_hist,
         dyn=dyn,
-        # Closed-loop turn indicators are a SIM-mode feature: seed from the recorded frame,
-        # then feed the model's own prediction back each step (phasing the seed out). In
-        # recorded mode turn_hist stays None so the recorded turn_indicators flow through
-        # unchanged (the _pre_step override is gated on `turn_hist is not None`).
-        turn_hist=(
-            np.asarray(tl.npz(start)["turn_indicators"]).reshape(-1).astype(np.int64)
-            if neighbor_history_mode == "sim"
-            else None
-        ),
+        turn_hist=turn_hist,
+        last_turn_indicator=int(turn_hist[-1]),
         ego_shape=ego_shape,
         goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
@@ -806,17 +807,13 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         base, dxyz, live_past, live_cur, ridx = build_input_raw(
             s.tl, idx, s.live_pose, s.ego_hist, s.dyn
         )
-        if s.turn_hist is not None:
-            base["turn_indicators"] = s.turn_hist[None].astype(
-                np.int64
-            )  # closed-loop, not recorded
+        base["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop
         return (base, dxyz, live_past, live_cur, ridx, sim_nb, slot_uuids, world_by_uuid)
     np_dict, neighbors_live = build_input_np(s.tl, idx, s.live_pose, s.ego_hist, s.dyn)
     if sim_nb is not None:
         np_dict["neighbor_agents_past"] = sim_nb
         neighbors_live = sim_nb[0, :, -1, :].copy()
-    if s.turn_hist is not None:
-        np_dict["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop, not recorded
+    np_dict["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop
     return np_dict, neighbors_live, idx, slot_uuids, world_by_uuid
 
 
@@ -824,14 +821,20 @@ def _feed_turn_indicator(s: _SegState, outputs) -> None:
     """Closed-loop turn-signal feedback for the single-segment ``render_segment`` rollout.
 
     Appends the model's predicted turn indicator to ``turn_hist`` (recorded seed scrolls
-    out within PAST steps). No-op in recorded mode (``turn_hist`` is None there). Mirrors
-    the per-batch feedback in ``run_segments_batched`` so a sim-mode single-segment rollout
-    evolves the turn signal identically instead of holding the seed. (``render_segment`` is
-    recorded-only — no ``turn_hist`` — so it doesn't call it.)"""
-    if s.turn_hist is None:
-        return
+    out within PAST steps) and remembers it as ``last_turn_indicator`` so the in-between
+    replan steps can re-append the same value (see ``_hold_turn_indicator``). Mirrors the
+    per-batch feedback in ``run_segments_batched`` so a single-segment rollout evolves the
+    turn signal identically instead of holding the seed."""
     ti = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
-    s.turn_hist = np.append(s.turn_hist[1:], np.int64(np.asarray(ti).reshape(-1)[0]))
+    s.last_turn_indicator = int(np.asarray(ti).reshape(-1)[0])
+    s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
+
+
+def _hold_turn_indicator(s: _SegState) -> None:
+    """Cached-plan step (``replan_interval`` > 1, no fresh inference): keep the 10 Hz turn
+    history scrolling by re-appending the LAST decoded turn indicator, so the next replan
+    sees the held signal as if the model had re-confirmed it every step."""
+    s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
 def _score_into(s: _SegState, neighbors_live, device, timers):
@@ -931,10 +934,10 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 # The save buffer is cleared on this snap (caller), so no window mixes the jump.
                 if s.nbr_tracker is not None:
                     s.nbr_tracker = SimNeighborTracker(s.tl, tgt, max_rec_advance=1.0)
-                if s.turn_hist is not None:
-                    s.turn_hist = (
-                        np.asarray(s.tl.npz(tgt)["turn_indicators"]).reshape(-1).astype(np.int64)
-                    )
+                s.turn_hist = (
+                    np.asarray(s.tl.npz(tgt)["turn_indicators"]).reshape(-1).astype(np.int64)
+                )
+                s.last_turn_indicator = int(s.turn_hist[-1])
                 s.last_collision_uuid = None  # teleported -> next contact is a fresh collision
                 s.in_episode = False
                 s.prev_max_idx = s.cursor.max_idx_reached
@@ -1367,10 +1370,15 @@ def render_segment(
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
     *,
-    replan_interval: int = 10,
+    replan_interval: int = 1,
     draw_every: int = 1,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
+
+    Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back
+    into the input ``turn_indicators`` history each step (recorded seed phases out within
+    PAST steps). With ``replan_interval`` > 1 the in-between steps re-append the last decoded
+    value so the 10 Hz history keeps scrolling with the held signal.
 
     ``replan_interval``: re-run the model every N steps (1 = every step). Between inferences the
     cached plan keeps being executed — pinned in the world frame and re-expressed in the current
@@ -1512,6 +1520,10 @@ def render_segment(
         )
         if outputs is not None:
             _feed_turn_indicator(s, outputs)
+        else:
+            # Cached-plan step: _closed_loop_replan_step already set override/pred_cur; only
+            # scroll turn_indicators history with the last decoded signal (tier4-main #e88e54c).
+            _hold_turn_indicator(s)
         # Complete perfect tracking (tracker_mode="perfect"): the replan step would otherwise run
         # PerfectTracker.track, which advances the plan's *distance* along the CURRENT heading and
         # snaps heading to the reference only AFTERWARD — so on any curve the ego drifts off the
@@ -1786,13 +1798,7 @@ def run_segments_batched(
                         # Model's predicted turn indicator per segment, decoded with the SAME
                         # C++-style keep-bias logic as the perfect-tracker sim (reused helper),
                         # then fed back into turn_hist below (closed-loop, no recorded leak).
-                        # Only sim-mode segments carry turn_hist; skip the decode (a GPU->CPU
-                        # sync) entirely when none do (e.g. recorded mode).
-                        ti_pred = (
-                            decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
-                            if any(st.turn_hist is not None for st, *_ in built)
-                            else None
-                        )
+                        ti_pred = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
                     # Score ALL segments in one batched OBB pass, then advance each.
                     with timers("score"):
                         score_list = score_step_batched(
@@ -2109,8 +2115,8 @@ def run_segments_batched(
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved
                         # context then carries the sim's own signals, never the recorded ones.
-                        if s.turn_hist is not None and ti_pred is not None:
-                            s.turn_hist = np.append(s.turn_hist[1:], np.int64(ti_pred[i]))
+                        s.last_turn_indicator = int(ti_pred[i])
+                        s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
                         # Clear the buffer on an unstick teleport: pre-jump frames belong
                         # to a different ego path and must never enter a saved window.
                         if s.save_buf is not None and s.n_snaps > prev_snaps:
@@ -2672,6 +2678,22 @@ def _dump_precollision_window(
         if 0 < n_expert < fut_len:
             expert_eaf[n_expert:] = expert_eaf[n_expert - 1]
         scene["ego_expert_future"] = expert_eaf
+        # Recorded expert at its ACTUAL positions, in the live-ego frame (for
+        # overlays/analysis — NOT the repair pseudo-target above). Index 0 is
+        # the recorded ego's CURRENT pose, so the live-vs-recorded divergence
+        # offset is visible; the tail holds the last valid pose like above.
+        recorded_eaf = np.zeros((fut_len, 4), dtype=np.float32)
+        n_recorded = 0
+        for j in range(fut_len):
+            ridx = idx + j
+            if ridx >= len(tl.poses):
+                break
+            rx, ry, rh = _world_pose_to_ego(tl.poses[ridx], live_pose)
+            recorded_eaf[j] = (rx, ry, math.cos(rh), math.sin(rh))
+            n_recorded = j + 1
+        if 0 < n_recorded < fut_len:
+            recorded_eaf[n_recorded:] = recorded_eaf[n_recorded - 1]
+        scene["ego_recorded_future"] = recorded_eaf
         scene["origin"] = np.array("live")
         token = f"{step_k - t_c:+06d}"
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)

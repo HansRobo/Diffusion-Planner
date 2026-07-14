@@ -139,6 +139,10 @@ def run_closed_loop_eval(
     dir + an MP4 (``<route>_<start>_<end>.mp4``) are written. ``segments.jsonl`` and
     ``summary.json`` are written into ``out_dir``.
 
+    Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back into
+    the input history each step, held across cached-plan steps when ``replan_interval`` > 1
+    (see ``render_segment``).
+
     Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-segment MP4),
     ``segments`` (list[row]), and ``elapsed_sec``.
     """

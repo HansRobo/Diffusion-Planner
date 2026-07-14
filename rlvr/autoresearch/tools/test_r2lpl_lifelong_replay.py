@@ -1219,6 +1219,109 @@ def test_replay_memory_preserves_rare_buckets_with_capacity():
     assert len(selected) == 2
 
 
+def test_replay_memory_label_quotas_reserve_capacity():
+    # 20 high-priority rb rows vs 4 low-priority expert rows at capacity 8:
+    # without quotas the expert rows are crowded out beyond the single
+    # rare-bucket pick; a 0.5 expert quota must retain floor(0.5*8)=4 of them.
+    rows = [
+        {
+            "scene_path": f"/tmp/rb_{i}.npz",
+            "label": "road_border_crossing",
+            "route_arc_m": float(i),  # spread over arc bins
+            "variant_kind": "credit",
+            "difficulty": 100.0 + i,
+        }
+        for i in range(20)
+    ]
+    rows += [
+        {
+            "scene_path": f"/tmp/expert_{i}.npz",
+            "label": "expert_disagreement",
+            "route_arc_m": 0.0,
+            "variant_kind": "credit",
+            "difficulty": float(i),
+        }
+        for i in range(4)
+    ]
+
+    baseline = build_memory(
+        rows, {"entries": []}, {}, capacity=8, alpha=1.0, beta=0.0, arc_bin_m=1000.0
+    )
+    n_expert_baseline = sum(1 for r in baseline["entries"] if r["label"] == "expert_disagreement")
+
+    memory = build_memory(
+        rows,
+        {"entries": []},
+        {},
+        capacity=8,
+        alpha=1.0,
+        beta=0.0,
+        arc_bin_m=1000.0,
+        label_quotas={"expert_disagreement": 0.5},
+    )
+    n_expert = sum(1 for r in memory["entries"] if r["label"] == "expert_disagreement")
+    assert len(memory["entries"]) == 8
+    assert n_expert == 4
+    assert n_expert > n_expert_baseline
+    assert memory["label_quotas"] == {"expert_disagreement": 0.5}
+
+
+def test_replay_memory_label_quotas_parse_rejects_bad_spec():
+    from rlvr.autoresearch.tools.lifelong_replay_memory import _parse_label_quotas
+
+    assert _parse_label_quotas(None) == {}
+    assert _parse_label_quotas("a=0.25,b=0.5") == {"a": 0.25, "b": 0.5}
+    with pytest.raises(ValueError):
+        _parse_label_quotas("nofraction")
+    with pytest.raises(ValueError):
+        _parse_label_quotas("a=1.5")
+    with pytest.raises(ValueError):
+        _parse_label_quotas("a=0.7,b=0.7")
+    with pytest.raises(ValueError):
+        _parse_label_quotas("a=0.2,a=0.3")  # duplicate label
+
+
+def test_validate_anchor_config_rejects_empty_section():
+    with pytest.raises(ValueError):
+        round_runner._validate_anchor_config({"anchor": {}})
+    # absent anchor is fine
+    round_runner._validate_anchor_config({})
+
+
+def test_anchor_slice_paths_ratio_and_waits_stratification(tmp_path):
+    normal = [f"/tmp/normal_{i}.npz" for i in range(100)]
+    waits = [f"/tmp/waits_{i}.npz" for i in range(50)]
+    normal_json = tmp_path / "normal.json"
+    waits_json = tmp_path / "waits.json"
+    normal_json.write_text(json.dumps(normal))
+    waits_json.write_text(json.dumps(waits))
+
+    cfg = {
+        "scene_list": str(normal_json),
+        "ratio": 1.6,
+        "waits_scene_list": str(waits_json),
+        "waits_fraction": 0.25,
+        "seed": 7,
+    }
+    picked = round_runner._anchor_slice_paths(cfg, n_focus=10, round_idx=1)
+    assert len(picked) == 16  # ceil(1.6 * 10)
+    n_waits = sum(1 for p in picked if "waits_" in p)
+    assert n_waits == 4  # round(0.25 * 16)
+    assert len(set(picked)) == len(picked)
+    # reproducible per round, redrawn across rounds
+    assert picked == round_runner._anchor_slice_paths(cfg, n_focus=10, round_idx=1)
+    assert picked != round_runner._anchor_slice_paths(cfg, n_focus=10, round_idx=2)
+
+    # disabled when absent; loud on partial config
+    assert round_runner._anchor_slice_paths(None, n_focus=10, round_idx=1) == []
+    with pytest.raises(ValueError):
+        round_runner._anchor_slice_paths({"scene_list": str(normal_json)}, 10, 1)
+    with pytest.raises(ValueError):
+        round_runner._anchor_slice_paths(
+            {"scene_list": str(normal_json), "ratio": 1.0, "waits_fraction": 0.2}, 10, 1
+        )
+
+
 def test_round_runner_checkpoint_policy_prefers_latest_lora(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -1640,7 +1743,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             save_buf=None,
             last_snap_step=None,
             n_snaps=0,
-            turn_hist=None,
+            turn_hist=np.zeros(31, dtype=np.int64),
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
@@ -1755,7 +1858,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             batch = data["dummy"].shape[0]
             return None, {
                 "prediction": torch.zeros((batch, 1, 2, 4), dtype=torch.float32),
-                "turn_indicator_logit": torch.zeros((batch, 2, 3), dtype=torch.float32),
+                "turn_indicator_logit": torch.zeros((batch, 5), dtype=torch.float32),
             }
 
     def _fake_seed_state(
@@ -1789,7 +1892,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             save_buf=None,
             last_snap_step=None,
             n_snaps=0,
-            turn_hist=None,
+            turn_hist=np.zeros(31, dtype=np.int64),
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
@@ -1896,7 +1999,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             batch = data["dummy"].shape[0]
             return None, {
                 "prediction": torch.zeros((batch, 1, 2, 4), dtype=torch.float32),
-                "turn_indicator_logit": torch.zeros((batch, 2, 3), dtype=torch.float32),
+                "turn_indicator_logit": torch.zeros((batch, 5), dtype=torch.float32),
             }
 
     def _fake_seed_state(
@@ -1930,7 +2033,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             save_buf=None,
             last_snap_step=None,
             n_snaps=0,
-            turn_hist=None,
+            turn_hist=np.zeros(31, dtype=np.int64),
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
@@ -3306,22 +3409,19 @@ def test_refresh_repair_returns_empty_when_no_unrepaired_rows(monkeypatch, tmp_p
         raise AssertionError("_run should not be called when there is nothing to re-attempt")
 
     monkeypatch.setattr(round_runner, "_run", _boom)
-    assert (
-        _refresh_repair(cfg, tmp_path / "m.pth", rdir, scope="unrepaired", cycle=0, gpu_ids=[])
-        == []
-    )
+    # Returns the (paths, elapsed) tuple the caller unpacks — a bare [] here
+    # crashed the round loop the first time a refresh found nothing to do.
+    assert _refresh_repair(
+        cfg, tmp_path / "m.pth", rdir, scope="unrepaired", cycle=0, gpu_ids=[]
+    ) == ([], 0.0)
 
 
 # ---------------------------------------------------------------------------
-# Frenet det->GT morph candidate (expert_morph.build_expert_morph_candidate)
+# det-path re-timing morph candidate (expert_morph.build_expert_morph_candidate)
 # ---------------------------------------------------------------------------
 
 _MORPH_T = 80
 _MORPH_DT = 0.1
-
-
-def _straight_route(length_m: float = 60.0, n: int = 200) -> np.ndarray:
-    return np.stack([np.linspace(0.0, length_m, n), np.zeros(n)], axis=1)
 
 
 def _straight_traj(xs: np.ndarray) -> np.ndarray:
@@ -3333,7 +3433,7 @@ def test_expert_morph_takeoff_advances_toward_expert():
     # det ~stationary, expert ramps forward -> morph must advance to ~expert terminal.
     det = _straight_traj(np.zeros(_MORPH_T))
     expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))  # ~4 m/s
-    morph = build_expert_morph_candidate(det, expert, _straight_route())
+    morph = build_expert_morph_candidate(det, expert)
     assert morph is not None
     assert morph.shape == (_MORPH_T, 4)
     # Monotone non-decreasing longitudinal progress (no backward step).
@@ -3349,7 +3449,7 @@ def test_expert_morph_stop_holds_position():
     # the stationary expert (terminal progress well below det's) and stays monotone.
     det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))  # ~4 m/s
     expert = _straight_traj(np.zeros(_MORPH_T))
-    morph = build_expert_morph_candidate(det, expert, _straight_route())
+    morph = build_expert_morph_candidate(det, expert)
     assert morph is not None
     assert np.all(np.diff(morph[:, 0]) >= -1e-4)
     # Pulled back well short of the det terminal progress ("holds position").
@@ -3367,24 +3467,463 @@ def test_expert_morph_rejects_impossible_deceleration():
     Ts = 20
     det = _straight_traj(np.cumsum(np.full(Ts, 2.0)))  # 20 m/s
     expert = _straight_traj(np.zeros(Ts))
-    route = _straight_route(length_m=200.0, n=400)
-    assert build_expert_morph_candidate(det, expert, route) is None
+    assert build_expert_morph_candidate(det, expert) is None
 
 
-def test_expert_morph_rejects_route_too_short():
-    det = _straight_traj(np.zeros(_MORPH_T))
+def test_expert_morph_rejects_diverged_paths():
+    # Expert far off the det path laterally -> no meaningful merge corridor.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))
     expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))
-    short_route = np.array([[0.0, 0.0], [1.0, 0.0]])
-    assert build_expert_morph_candidate(det, expert, short_route) is None
+    expert[:, 1] = 12.0
+    morph, diag = build_expert_morph_candidate(det, expert, return_diag=True)
+    assert morph is None
+    assert diag["stage"] == "paths_diverged"
 
 
 def test_expert_morph_never_reverses():
     # A wiggly blend must still yield a monotone longitudinal signal.
     det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.3)))
     expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.5)))
-    morph = build_expert_morph_candidate(det, expert, _straight_route())
+    morph = build_expert_morph_candidate(det, expert)
     assert morph is not None
     assert np.all(np.diff(morph[:, 0]) >= -1e-4)
+
+
+def test_expert_morph_no_lateral_motion_at_standstill():
+    # det moves forward on a laterally-offset line, expert is stopped on the
+    # centerline: after the morph brakes to a stop, the position must FREEZE —
+    # lateral blending must not keep sliding the point sideways (the
+    # "curls onto itself" artifact: crab-walk at standstill).
+    det_xy_x = np.cumsum(np.full(_MORPH_T, 0.4))  # ~4 m/s
+    det = _straight_traj(det_xy_x)
+    det[:, 1] = 1.5  # det path laterally offset from the expert's stop point
+    expert = _straight_traj(np.zeros(_MORPH_T))  # stopped at origin (d=0)
+    morph = build_expert_morph_candidate(det, expert)
+    assert morph is not None
+    step = np.linalg.norm(np.diff(morph[:, :2], axis=0), axis=-1)
+    stopped = step / _MORPH_DT < 0.1
+    assert stopped.any()
+    t_stop = int(np.argmax(stopped))
+    # once stopped, every subsequent step must stay stopped (no curl / drift)
+    assert np.all(step[t_stop:] / _MORPH_DT < 0.1)
+    tail_drift = np.linalg.norm(morph[-1, :2] - morph[t_stop, :2])
+    assert tail_drift < 0.15
+
+
+def test_expert_morph_passes_reward_kinematic_gate():
+    # The acceptance criterion that used to reject 32/52 real expert-waits
+    # morphs: the reward's own kinematic gate (SG-smoothed yaw-rate vs absolute
+    # cap AND bicycle-model curvature bound). Motion-derived heading must pass
+    # it without scenario tuning — including the hard case: braking to a stop
+    # while the route curves.
+    import torch as _torch
+
+    from planner_metrics.config import RewardConfig
+    from planner_metrics.subscores import compute_kinematic_gate
+
+    # Curved route: straight 20 m then a gentle 90-degree bend.
+    a = np.stack([np.linspace(0.0, 20.0, 80), np.zeros(80)], axis=1)
+    ang = np.linspace(-np.pi / 2, 0.0, 120)
+    b = np.stack([20.0 + 15.0 * np.cos(ang), 15.0 + 15.0 * np.sin(ang)], axis=1)
+    route = np.concatenate([a, b[1:]], axis=0)
+
+    # det: constant 4 m/s along the route; expert: stops early (at ~6 m).
+    s_det = np.cumsum(np.full(_MORPH_T, 0.4))
+    det = _traj_along_polyline(route, s_det)
+    s_exp = np.minimum(np.cumsum(np.full(_MORPH_T, 0.2)), 6.0)
+    expert = _traj_along_polyline(route, s_exp)
+
+    morph = build_expert_morph_candidate(det, expert)
+    assert morph is not None
+    cfg = RewardConfig()
+    gate = compute_kinematic_gate(
+        _torch.from_numpy(morph)[None],
+        cfg,
+        _torch.tensor([3.0, 4.5, 1.9]),
+    )
+    assert float(gate[0]) == 1.0
+
+
+def _traj_along_polyline(route: np.ndarray, s_query: np.ndarray) -> np.ndarray:
+    seg = np.diff(route, axis=0)
+    seg_len = np.linalg.norm(seg, axis=1)
+    s_ref = np.concatenate([[0.0], np.cumsum(seg_len)])
+    xs = np.interp(s_query, s_ref, route[:, 0])
+    ys = np.interp(s_query, s_ref, route[:, 1])
+    th = np.arctan2(
+        np.gradient(ys),
+        np.maximum(np.abs(np.gradient(xs)), 1e-9) * np.sign(np.gradient(xs) + 1e-12),
+    )
+    return np.stack([xs, ys, np.cos(th), np.sin(th)], axis=1).astype(np.float32)
+
+
+def test_expert_morph_stop_anchor_overrides_stop_location():
+    # recorded-anchor semantics: the caller-supplied stop point wins over the
+    # expert's traveled distance. Expert travels to 20 m; anchor at 12 m must
+    # pull the stop to ~12.5 (anchor + overshoot margin).
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))  # 4 m/s
+    s_exp = np.minimum(np.cumsum(np.full(_MORPH_T, 0.4)), 20.0)
+    expert = _straight_traj(s_exp)
+    morph = build_expert_morph_candidate(det, expert, stop_anchor_xy=np.array([12.0, 0.0]))
+    assert morph is not None
+    assert abs(morph[-1, 0] - 12.5) < 1.0
+    # without the anchor the stop lands at the expert's terminal (~20.5 bound)
+    default = build_expert_morph_candidate(det, expert)
+    assert default is not None
+    assert default[-1, 0] > 15.0
+
+
+def test_expert_morph_stop_anchor_floored_by_feasible_stop():
+    # An anchor the ego cannot reach (1 m ahead at 5 m/s) must be floored at
+    # the tracker's shortest feasible stop, not demanded.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.5)))  # 5 m/s
+    expert = _straight_traj(np.zeros(_MORPH_T))
+    morph = build_expert_morph_candidate(det, expert, stop_anchor_xy=np.array([1.0, 0.0]))
+    assert morph is not None
+    step = np.linalg.norm(np.diff(morph[:, :2], axis=0), axis=-1)
+    assert (step / _MORPH_DT < 0.5).any()  # it does stop
+    assert morph[-1, 0] > 1.5  # but beyond the infeasible 1 m anchor
+
+
+def test_expert_morph_lateral_slope_cap_honors_w_max():
+    # The analytic lateral magnitude limit must include w_max: at w_max=2 the
+    # quintic's peak slope doubles, and without the factor the crab-angle
+    # bound is violated.
+    from rlvr.autoresearch.tools.expert_morph import _DEFAULT_LATERAL_SLOPE_CAP
+
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))
+    det[:, 1] = 0.0
+    expert = _straight_traj(np.minimum(np.cumsum(np.full(_MORPH_T, 0.4)), 4.0))
+    expert[:, 1] = 4.0  # large lateral gap, short stop arc
+    morph = build_expert_morph_candidate(det, expert, w_max=2.0)
+    if morph is None:
+        return  # rejected outright is acceptable; the cap claim is about accepted output
+    dd = np.abs(np.diff(morph[:, 1]))
+    ds = (
+        np.linalg.norm(np.diff(morph[:, :2], axis=1), axis=-1)
+        if False
+        else np.abs(np.diff(morph[:, 0]))
+    )
+    moving = ds > 1e-3
+    assert (dd[moving] / ds[moving]).max() <= _DEFAULT_LATERAL_SLOPE_CAP * 1.2 + 1e-6
+
+
+def test_preflight_recorded_anchor_raises_on_missing_field(tmp_path):
+    from rlvr.autoresearch.tools.build_repaired_targets import _preflight_recorded_anchor
+
+    T = 80
+    base = dict(
+        ego_agent_future=np.zeros((T, 3), dtype=np.float32),
+        ego_expert_future=np.zeros((T, 4), dtype=np.float32),
+    )
+    old = tmp_path / "old.npz"
+    np.savez(old, **base)
+    new = tmp_path / "new.npz"
+    np.savez(new, **base, ego_recorded_future=np.zeros((T, 4), dtype=np.float32))
+
+    rows_old = [{"scene_path": str(old), "repair_labels": ["expert_disagreement"]}]
+    rows_new = [{"scene_path": str(new), "repair_labels": ["expert_disagreement"]}]
+    rows_nonexpert = [{"scene_path": str(old), "repair_labels": ["road_border_crossing"]}]
+
+    with pytest.raises(ValueError, match="ego_recorded_future"):
+        _preflight_recorded_anchor(rows_old)
+    _preflight_recorded_anchor(rows_new)  # passes
+    _preflight_recorded_anchor(rows_nonexpert)  # non-expert rows are exempt
+
+
+def test_repair_cmd_forwards_expert_stop_anchor(tmp_path):
+    cfg = {
+        "reward_config": "r.json",
+        "threshold_config": "t.json",
+        "repair_config": {
+            "ego_shape": "4.76,7.24,2.29",
+            "min_margin": 0.3,
+            "expert_stop_anchor": "pseudo",
+        },
+    }
+    cmd = round_runner._repair_cmd(cfg, tmp_path / "m.pth", tmp_path / "c.jsonl", tmp_path)
+    idx = cmd.index("--expert_stop_anchor")
+    assert cmd[idx + 1] == "pseudo"
+    # without the key the flag is omitted (CLI default 'recorded' applies)
+    del cfg["repair_config"]["expert_stop_anchor"]
+    cmd2 = round_runner._repair_cmd(cfg, tmp_path / "m.pth", tmp_path / "c.jsonl", tmp_path)
+    assert "--expert_stop_anchor" not in cmd2
+
+
+def test_expert_morph_return_diag_reports_stage():
+    # ok: diag carries the clamp statistics.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))
+    expert = _straight_traj(np.zeros(_MORPH_T))
+    morph, diag = build_expert_morph_candidate(det, expert, return_diag=True)
+    assert morph is not None
+    assert diag["stage"] == "ok"
+    assert "terminal_err_m" in diag and "clamp_fire_fraction" in diag and "v0_mps" in diag
+
+    # infeasible deceleration: rejection reason + statistics.
+    Ts = 20
+    det_fast = _straight_traj(np.cumsum(np.full(Ts, 2.0)))  # 20 m/s
+    expert_stop = _straight_traj(np.zeros(Ts))
+    morph, diag = build_expert_morph_candidate(det_fast, expert_stop, return_diag=True)
+    assert morph is None
+    assert diag["stage"] == "infeasible_deceleration"
+    assert diag["terminal_err_m"] > 0.0
+
+    # too short horizon.
+    morph, diag = build_expert_morph_candidate(det[:1], expert[:1], return_diag=True)
+    assert morph is None
+    assert diag["stage"] == "too_short_horizon"
+
+    # default (no return_diag) keeps the plain return type.
+    assert build_expert_morph_candidate(det, expert) is not None
+
+
+def _morph_outcome_reward_row(total: float, *, rb_crossing: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(
+        total=total,
+        collision_step=None,
+        rb_crossing=rb_crossing,
+        lane_crossing=False,
+        static_crossing=False,
+        kinematic_violated=False,
+        sc_min_dist=1.0,
+        rb_min_dist=1.0,
+    )
+
+
+def _morph_outcome_candidate_row(labels: list[str]) -> dict:
+    return {"moving_collision_step": None, "expert_disagreement": False, "labels": labels}
+
+
+def test_replay_memory_quota_does_not_double_dip_rare_buckets():
+    # A quota label whose reserved rows already cover its bucket must NOT get a
+    # second row from the rare-bucket pass (that would squeeze the majority
+    # label beyond the quota's promise).
+    rows = [
+        {
+            "scene_path": f"/tmp/rb_{i}.npz",
+            "label": "road_border_crossing",
+            "route_arc_m": 0.0,
+            "variant_kind": "credit",
+            "difficulty": 100.0 + i,
+        }
+        for i in range(6)
+    ]
+    rows += [
+        {
+            "scene_path": f"/tmp/expert_{i}.npz",
+            "label": "expert_disagreement",
+            "route_arc_m": 0.0,
+            "variant_kind": "credit",
+            "difficulty": float(i),
+        }
+        for i in range(3)
+    ]
+    memory = build_memory(
+        rows,
+        {"entries": []},
+        {},
+        capacity=4,
+        alpha=1.0,
+        beta=0.0,
+        arc_bin_m=1000.0,
+        label_quotas={"expert_disagreement": 0.5},
+    )
+    n_expert = sum(1 for r in memory["entries"] if r["label"] == "expert_disagreement")
+    n_rb = sum(1 for r in memory["entries"] if r["label"] == "road_border_crossing")
+    assert n_expert == 2  # exactly the reserve, not reserve + bucket pick
+    assert n_rb == 2
+
+
+def test_replay_memory_label_quotas_rejects_empty_label():
+    from rlvr.autoresearch.tools.lifelong_replay_memory import _parse_label_quotas
+
+    with pytest.raises(ValueError):
+        _parse_label_quotas("=0.5")
+
+
+def test_kinematic_gate_standstill_noise_passes_turn_in_place_fails():
+    # Pins the low-speed conditioning of compute_kinematic_gate: sub-noise yaw
+    # at standstill must PASS (the fixed false positive), while genuine
+    # turning-in-place above the clamped bound must still FAIL.
+    from planner_metrics.config import RewardConfig
+    from planner_metrics.subscores import compute_kinematic_gate
+
+    cfg = RewardConfig()
+    ego_shape = torch.tensor([3.0, 4.5, 1.9])
+    T = 80
+    # Standstill with tiny heading noise (0.002 rad/s scale) on a fixed point.
+    h = np.cumsum(np.full(T, 0.0002))
+    still = np.stack([np.zeros(T), np.zeros(T), np.cos(h), np.sin(h)], axis=1).astype(np.float32)
+    gate = compute_kinematic_gate(torch.from_numpy(still)[None], cfg, ego_shape)
+    assert float(gate[0]) == 1.0
+    # Standstill turning in place well above kappa_max * 0.1 (but below the
+    # absolute max_yaw_rate cap) must still be caught by the curvature check.
+    kappa_max = cfg.kinematic_margin * np.tan(cfg.max_steer) / 3.0
+    yaw_rate = min(3.0 * kappa_max * 0.1, 0.9 * cfg.max_yaw_rate)
+    h2 = np.cumsum(np.full(T, yaw_rate * 0.1))
+    spin = np.stack([np.zeros(T), np.zeros(T), np.cos(h2), np.sin(h2)], axis=1).astype(np.float32)
+    gate2 = compute_kinematic_gate(torch.from_numpy(spin)[None], cfg, ego_shape)
+    assert float(gate2[0]) == 0.0
+
+
+def test_expert_morph_stops_at_expert_location():
+    # The stop-arc cap must stop the morph AT the expert's stop location
+    # (projected onto the det path), not merely after the expert's traveled
+    # distance. Expert stops at x=20 m, well beyond the braking floor from
+    # 4 m/s, so the projection-based cap is the binding constraint.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.4)))  # 4 m/s, 32 m
+    s_exp = np.minimum(np.cumsum(np.full(_MORPH_T, 0.4)), 20.0)
+    expert = _straight_traj(s_exp)
+    morph = build_expert_morph_candidate(det, expert)
+    assert morph is not None
+    assert abs(morph[-1, 0] - 20.5) < 1.0  # expert stop arc + overshoot margin
+
+
+def test_expert_morph_preserves_slow_creep():
+    # Sub-centimetre-step snapping must only affect the standstill TAIL —
+    # a slow queue creep (~0.09 m/s) must not be converted into a full park.
+    det = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.009)))
+    expert = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.009)))
+    morph = build_expert_morph_candidate(det, expert)
+    assert morph is not None
+    assert morph[-1, 0] > 0.5  # creep distance preserved (~0.7 m), not 0
+
+
+def _patience_npz(path, *, red_route: bool, v_profile: np.ndarray) -> None:
+    T = len(v_profile) + 1
+    x = np.concatenate([[0.0], np.cumsum(v_profile * 0.1)])
+    fut = np.stack([x, np.zeros(T), np.zeros(T)], axis=1).astype(np.float32)
+    route = np.zeros((2, 20, 33), dtype=np.float32)
+    route[..., 0] = 1.0  # non-zero xy so lanes read as valid
+    if red_route:
+        route[0, :, 10] = 1.0
+    np.savez(
+        path,
+        route_lanes=route,
+        neighbor_agents_past=np.zeros((4, 31, 11), dtype=np.float32),
+        ego_agent_future=fut,
+    )
+
+
+def test_build_patience_benchmark_synthetic(tmp_path):
+    from rlvr.autoresearch.tools.build_patience_benchmark import build_benchmark
+
+    T = 79
+    # Onset offset: moving at t0, stops mid-horizon (red light on route).
+    onset = np.concatenate([np.full(30, 5.0), np.zeros(T - 30)])
+    _patience_npz(tmp_path / "bag_0000000100.npz", red_route=True, v_profile=onset)
+    # Same event 2 s later: already stopped (same bag, same frame bin).
+    _patience_npz(tmp_path / "bag_0000000120.npz", red_route=True, v_profile=np.zeros(T))
+    # No wait: cruises through (never below the wait speed).
+    _patience_npz(tmp_path / "bag_0000005000.npz", red_route=True, v_profile=np.full(T, 5.0))
+
+    scenes = [
+        str(tmp_path / n)
+        for n in ("bag_0000000100.npz", "bag_0000000120.npz", "bag_0000005000.npz")
+    ]
+    benchmark, pool, stats = build_benchmark(
+        scenes,
+        wait_speed_mps=0.5,
+        min_wait_steps=10,
+        ped_near_m=5.0,
+        event_frame_gap=100,
+        max_scenes=10,
+    )
+    assert stats["pool"] == 2  # the two waiting offsets
+    assert stats["events"] == 1  # deduped to one event
+    assert benchmark == [str(tmp_path / "bag_0000000100.npz")]  # onset preferred
+    assert stats["onset_in_benchmark"] == 1
+
+
+def test_eval_patience_onset_stop_metrics():
+    from rlvr.autoresearch.tools.eval_patience_onset import _stop_metrics
+
+    T = 80
+    stop_at_3s = np.concatenate([np.full(30, 0.5), np.zeros(T - 1 - 30)])
+    xy = np.stack([np.concatenate([[0.0], np.cumsum(stop_at_3s)]), np.zeros(T)], axis=1)
+    m = _stop_metrics(xy, stop_speed=0.5)
+    assert m["stops"] and abs(m["stop_onset_s"] - 3.0) < 0.11
+    never = np.stack([np.arange(T, dtype=float), np.zeros(T)], axis=1)
+    m2 = _stop_metrics(never, stop_speed=0.5)
+    assert not m2["stops"] and m2["stop_onset_s"] is None
+
+
+def test_best_safe_candidate_reports_morph_outcome():
+    source_row = {"repair_labels": ["expert_disagreement"], "expert_disagreement_max_dev": 0.5}
+    T = 20
+    expert = np.zeros((T, 4), dtype=np.float32)
+    mover = np.zeros((T, 4), dtype=np.float32)
+    mover[:, 0] = np.arange(T, dtype=np.float32)  # far from the waiting expert
+    morph = np.zeros((T, 4), dtype=np.float32)  # matches the waiting expert
+
+    # morph accepted + wins (near_log -> expert-closeness dominates).
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [_morph_outcome_candidate_row(["clean"]), _morph_outcome_candidate_row(["clean"])],
+        [_morph_outcome_reward_row(5.0), _morph_outcome_reward_row(0.0)],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, morph],
+        reference_traj=expert,
+        morph_index=1,
+    )
+    assert idx == 1
+    assert meta["morph_outcome"] == "selected"
+
+    # morph accepted but loses -> lost_selection + its r2lpl score recorded.
+    far_off = {"repair_labels": ["expert_disagreement"], "expert_disagreement_max_dev": 9.0}
+    idx, meta = _best_safe_candidate(
+        far_off,  # far_offpolicy -> rule-score weight 1.0, expert weight 0.0
+        [_morph_outcome_candidate_row(["clean"]), _morph_outcome_candidate_row(["clean"])],
+        [_morph_outcome_reward_row(5.0), _morph_outcome_reward_row(0.0)],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, morph],
+        reference_traj=expert,
+        morph_index=1,
+    )
+    assert idx == 0
+    assert meta["morph_outcome"] == "lost_selection"
+    assert "morph_r2lpl_score" in meta
+
+    # morph gate-rejected (rb crossing) while a model candidate is safe.
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [
+            _morph_outcome_candidate_row(["clean"]),
+            _morph_outcome_candidate_row(["road_border_crossing"]),
+        ],
+        [_morph_outcome_reward_row(5.0), _morph_outcome_reward_row(0.0, rb_crossing=True)],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, morph],
+        reference_traj=expert,
+        morph_index=1,
+    )
+    assert idx == 0
+    assert meta["morph_outcome"] == "gate_rejected"
+    assert meta["morph_labels"] == ["road_border_crossing"]
+
+    # every candidate gate-rejected -> no_safe_candidate still reports the morph gate.
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [
+            _morph_outcome_candidate_row(["road_border_crossing"]),
+            _morph_outcome_candidate_row(["road_border_crossing"]),
+        ],
+        [
+            _morph_outcome_reward_row(-5.0, rb_crossing=True),
+            _morph_outcome_reward_row(-9.0, rb_crossing=True),
+        ],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, morph],
+        reference_traj=expert,
+        morph_index=1,
+    )
+    assert idx is None
+    assert meta["reason"] == "no_safe_candidate"
+    assert meta["morph_outcome"] == "gate_rejected"
 
 
 # ---------------------------------------------------------------------------

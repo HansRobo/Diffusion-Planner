@@ -20,6 +20,8 @@ from scenario_generation.reproducer_rollout import (
     _advance_step,
     _closed_loop_replan_step,
     _draw_step,
+    _feed_turn_indicator,
+    _hold_turn_indicator,
     _pre_step,
     _seed_state,
 )
@@ -139,6 +141,10 @@ def run_full_route_rollout(
             timers=timers,
             profile_sync_gpu=profile_sync_gpu,
         )
+        if outputs is not None:
+            _feed_turn_indicator(s, outputs)
+        else:
+            _hold_turn_indicator(s)
 
         if tracker_mode == "perfect" and override is None:
             tx, ty, th = (

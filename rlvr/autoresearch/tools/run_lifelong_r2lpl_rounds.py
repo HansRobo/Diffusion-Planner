@@ -222,6 +222,11 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     rounds = dict(workflow.get("rounds") or {})
     refresh = dict(rounds.get("repair_refresh") or workflow.get("repair_refresh") or {})
     training_section = dict(workflow.get("training") or {})
+    if "anchor" in training_section and not training_section["anchor"]:
+        raise ValueError(
+            "workflow training.anchor is present but empty; remove the section or "
+            "fill in scene_list/ratio"
+        )
 
     scene_list = _contract_scene_list(contract)
     chunk_manifest = _first_non_null(
@@ -288,6 +293,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             "rl_cl_col_sweep",
         ),
         "gt_max_speed": float(_first_non_null(repair.get("gt_max_speed"), 9.0)),
+        "expert_stop_anchor": str(_first_non_null(repair.get("expert_stop_anchor"), "recorded")),
         "scene_batch_size": int(
             _first_non_null(repair.get("generation_batch_size"), repair.get("scene_batch_size"), 8)
         ),
@@ -402,7 +408,12 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             "alpha": float(_first_non_null(replay.get("alpha"), 0.5)),
             "beta": float(_first_non_null(replay.get("beta"), 0.5)),
             "arc_bin_m": float(_first_non_null(replay.get("arc_bin_m"), 25.0)),
+            "label_quotas": replay.get("label_quotas"),
         },
+        # Set only when actually configured — an ever-present empty dict would
+        # make "anchor key present but empty" (a misconfiguration the validator
+        # rejects) indistinguishable from "no anchor".
+        **({"anchor": dict(training_section["anchor"])} if training_section.get("anchor") else {}),
         "training_config": str(training_source)
         if isinstance(training_source, (str, os.PathLike))
         else training_source,
@@ -944,6 +955,118 @@ def _union_scene_lists(current_scenes: list[str], replay_scenes: list[str], out_
     _write_json(out_path, merged)
 
 
+def _anchor_slice_paths(
+    anchor_cfg: dict[str, Any] | None, n_focus: int, round_idx: int
+) -> list[str]:
+    """Real logged normal scenes unioned into a round's train list.
+
+    Training only on repaired+replay scenes leaves the regularizer with no reach
+    outside the failure distribution — competence drifts on everything the
+    rounds never see. The anchor slice counters this with real logged scenes at
+    ``ratio`` : 1 (anchor : focus), optionally stratified so ``waits_fraction``
+    of the anchors come from a waits/interaction list (scenes where the logged
+    ego stops — the slice most eroded by pro-motion post-training).
+
+    Config (``training.anchor`` in the workflow JSON): ``scene_list`` +
+    ``ratio`` are required when the section is present (fail loudly, no silent
+    defaults); ``waits_scene_list``/``waits_fraction`` must be given together;
+    ``seed`` (default 0) is offset by the round index so each round redraws
+    reproducibly.
+    """
+    if not anchor_cfg:
+        return []
+    missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
+    if missing:
+        raise ValueError(f"training.anchor is missing required fields: {missing}")
+    ratio = float(anchor_cfg["ratio"])
+    if ratio <= 0.0:
+        raise ValueError(f"training.anchor.ratio must be > 0: {ratio}")
+    waits_list = anchor_cfg.get("waits_scene_list")
+    waits_fraction = anchor_cfg.get("waits_fraction")
+    if (waits_list is None) != (waits_fraction is None):
+        raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
+
+    import math as _math
+    import random as _random
+
+    n_anchor = int(_math.ceil(ratio * n_focus))
+    if n_anchor < 1:
+        return []
+    rng = _random.Random(int(anchor_cfg.get("seed", 0)) + round_idx)
+
+    def _sample(pool: list[str], n: int) -> list[str]:
+        if n >= len(pool):
+            return list(pool)
+        return rng.sample(pool, n)
+
+    normal_pool = [str(p) for p in _read_json_list(Path(anchor_cfg["scene_list"]))]
+    if not normal_pool:
+        raise ValueError(f"training.anchor.scene_list is empty: {anchor_cfg['scene_list']}")
+    picked: list[str] = []
+    if waits_list is not None:
+        frac = float(waits_fraction)
+        if not 0.0 < frac < 1.0:
+            raise ValueError(f"training.anchor.waits_fraction must be in (0, 1): {frac}")
+        waits_pool = [str(p) for p in _read_json_list(Path(waits_list))]
+        if not waits_pool:
+            raise ValueError(f"training.anchor.waits_scene_list is empty: {waits_list}")
+        n_waits = int(round(frac * n_anchor))
+        picked.extend(_sample(waits_pool, n_waits))
+    picked_set = set(picked)
+    picked.extend(_sample([p for p in normal_pool if p not in picked_set], n_anchor - len(picked)))
+    return picked
+
+
+def _validate_anchor_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on anchor misconfiguration, not hours into round 1.
+
+    Checks the required fields, the paired waits fields, that the referenced
+    scene lists exist and are non-empty, and that the anchor slice is actually
+    consumable: only the base_sft backend unions the anchor into training —
+    with any other backend the slice would be silently dropped, which this
+    rejects loudly instead.
+    """
+    anchor_cfg = cfg.get("anchor")
+    if "anchor" in cfg and not anchor_cfg:
+        raise ValueError(
+            "config has an empty 'anchor' section; remove it or fill in scene_list/ratio"
+        )
+    if not anchor_cfg:
+        # Legacy direct configs may carry the template's nested form; a nested
+        # training.anchor that is NOT lifted would be silently ignored.
+        training_section = cfg.get("training")
+        if isinstance(training_section, dict) and training_section.get("anchor"):
+            raise ValueError(
+                "config has training.anchor but the runner consumes the top-level "
+                "'anchor' key on this config path; move the section to the top level"
+            )
+        return
+    if str(cfg.get("training_backend", "base_sft")) != "base_sft":
+        raise ValueError(
+            "training.anchor is only wired into the base_sft training backend; "
+            "remove the anchor section or use backend 'base_sft'"
+        )
+    missing = [key for key in ("scene_list", "ratio") if not anchor_cfg.get(key)]
+    if missing:
+        raise ValueError(f"training.anchor is missing required fields: {missing}")
+    if float(anchor_cfg["ratio"]) <= 0.0:
+        raise ValueError(f"training.anchor.ratio must be > 0: {anchor_cfg['ratio']}")
+    if (anchor_cfg.get("waits_scene_list") is None) != (anchor_cfg.get("waits_fraction") is None):
+        raise ValueError("training.anchor.waits_scene_list and waits_fraction must be set together")
+    waits_fraction = anchor_cfg.get("waits_fraction")
+    if waits_fraction is not None and not 0.0 < float(waits_fraction) < 1.0:
+        raise ValueError(f"training.anchor.waits_fraction must be in (0, 1): {waits_fraction}")
+    for key in ("scene_list", "waits_scene_list"):
+        value = anchor_cfg.get(key)
+        if value is None:
+            continue
+        path = Path(value)
+        if not path.exists():
+            raise ValueError(f"training.anchor.{key} does not exist: {path}")
+        if not _read_json_list(path):
+            raise ValueError(f"training.anchor.{key} is empty: {path}")
+
+
 def _repair_cmd(
     cfg: dict[str, Any],
     model_path: Path,
@@ -1017,6 +1140,10 @@ def _repair_cmd(
         cmd.extend(["--expert_morph_max_accel", str(repair_cfg["expert_morph_max_accel"])])
     if "expert_morph_max_jerk" in repair_cfg:
         cmd.extend(["--expert_morph_max_jerk", str(repair_cfg["expert_morph_max_jerk"])])
+    if "expert_stop_anchor" in repair_cfg:
+        cmd.extend(["--expert_stop_anchor", str(repair_cfg["expert_stop_anchor"])])
+    if repair_cfg.get("prototypes_path"):
+        cmd.extend(["--prototypes_path", str(repair_cfg["prototypes_path"])])
     if cfg.get("repair_labels"):
         cmd.extend(["--labels", ",".join(cfg["repair_labels"])])
     if bool(cfg.get("enable_conflict_detector", False)):
@@ -1571,7 +1698,7 @@ def _refresh_repair(
         unrepaired_rows = _read_json_list(unrepaired_path) if unrepaired_path.exists() else []
         if not unrepaired_rows:
             _write_jsonl(input_jsonl, [])
-            return []
+            return [], 0.0
         keep_keys = _credit_row_keys(credit_jsonl)
         stripped = [{k: v for k, v in row.items() if k in keep_keys} for row in unrepaired_rows]
         _write_jsonl(input_jsonl, stripped)
@@ -1782,6 +1909,17 @@ def _print_dry_run_plan(
                 f"CUDA_VISIBLE_DEVICES={gpu_id} {' '.join(repair_cmd)}"
             )
     print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
+    anchor_cfg = cfg.get("anchor")
+    if anchor_cfg:
+        print(
+            f"[round {round_idx}] anchor slice: ratio {anchor_cfg['ratio']}:1 from "
+            f"{anchor_cfg['scene_list']}"
+            + (
+                f" (waits {anchor_cfg['waits_fraction']} from {anchor_cfg['waits_scene_list']})"
+                if anchor_cfg.get("waits_scene_list")
+                else ""
+            )
+        )
 
 
 def _derive_event_counts_from_credit_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
@@ -1868,6 +2006,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = _load_config(args.config) if args.config else _config_from_cli_args(args)
+    _validate_anchor_config(cfg)
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -1916,6 +2055,11 @@ def main() -> None:
             "--arc_bin_m",
             str(mem_cfg.get("arc_bin_m", 25.0)),
         ]
+        if mem_cfg.get("label_quotas"):
+            quotas = mem_cfg["label_quotas"]
+            if isinstance(quotas, dict):
+                quotas = ",".join(f"{k}={v}" for k, v in sorted(quotas.items()))
+            memory_cmd.extend(["--label_quotas", str(quotas)])
         if previous_memory is not None:
             memory_cmd.extend(["--previous_memory", str(previous_memory)])
 
@@ -1934,7 +2078,15 @@ def main() -> None:
 
         repaired_paths = [str(p) for p in _read_json_list(repaired_list_json)]
         replay_paths = [str(p) for p in _read_json_list(replay_json)]
-        _union_scene_lists(repaired_paths, replay_paths, train_input_list)
+        anchor_paths = _anchor_slice_paths(
+            cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
+        )
+        if anchor_paths:
+            print(
+                f"[round {round_idx}] anchor slice: {len(anchor_paths)} real scenes "
+                f"({len(repaired_paths)} repaired + {len(replay_paths)} replay)"
+            )
+        _union_scene_lists(repaired_paths, [*replay_paths, *anchor_paths], train_input_list)
         if bool(cfg.get("validate_on_repaired_targets", False)):
             cfg["val_scenes"] = str(train_input_list)
 
