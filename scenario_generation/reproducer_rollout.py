@@ -565,6 +565,8 @@ class SegmentResult:
     clearances: np.ndarray
     collisions: np.ndarray
     timers: Timers = field(default_factory=Timers)
+    steps: list = field(default_factory=list)
+    png_dir: Path | None = None
 
 
 @dataclass
@@ -971,7 +973,10 @@ def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
         "n_snaps": int(s.n_snaps),
     }
     return SegmentResult(
-        metrics=metrics, clearances=s.clearances, collisions=s.collisions, timers=timers
+        metrics=metrics,
+        clearances=s.clearances,
+        collisions=s.collisions,
+        timers=timers,
     )
 
 
@@ -1372,7 +1377,11 @@ def render_segment(
     *,
     replan_interval: int = 1,
     draw_every: int = 1,
-) -> dict:
+    instrument: bool = False,
+    area_episodes: list | None = None,
+    area_to_metric_group: dict[str, str] | None = None,
+    profile_sync_gpu: bool = False,
+) -> dict | SegmentResult:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
     Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back
@@ -1407,9 +1416,16 @@ def render_segment(
     tracking: every step (replan ticks included) places the ego DIRECTLY on the model's predicted
     world pose, so the realized trajectory exactly follows the predicted polyline — no Euler /
     heading-snap drift and no MPC physical smoothing.
-    Returns the SegmentResult metrics.
+    Returns segment metrics dict, or a full :class:`SegmentResult` when ``instrument=True``.
     """
     from pathlib import Path
+
+    if instrument:
+        from scenario_generation.closed_loop_types import StepRecord
+        from scenario_generation.metrics.centerline_deviation import lateral_offset_from_route_lanes
+        from scenario_generation.metrics.safety_clearance import score_safety_step
+        from scenario_generation.metrics.turn_indicator import score_turn_indicator_step
+        from scenario_generation.scenario_classification import area_at_idx
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1444,6 +1460,7 @@ def render_segment(
         else {}
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
+    step_records: list = []
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
     # goal is the recorded GT end pose `poses[end-1]`, which a diverging closed-loop ego may never
@@ -1517,6 +1534,8 @@ def render_segment(
             model,
             model_args,
             device,
+            timers=timers if instrument else None,
+            profile_sync_gpu=profile_sync_gpu,
         )
         if outputs is not None:
             _feed_turn_indicator(s, outputs)
@@ -1541,18 +1560,52 @@ def render_segment(
         nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
+        png_path = None
         if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
+            png_path = out_dir / f"{k:05d}.png"
             _draw_step(
                 np_dict,
                 pred_cur,
                 s.ego_shape,
-                out_dir / f"{k:05d}.png",
+                png_path,
                 neighbor_ids=nids if color_by_uuid else None,
                 step=k,
                 total=cap,
                 title_prefix=title_prefix,
                 distance_label_offset_m=distance_label_offset_m,
                 view_half_m=view_half_m,
+            )
+        if instrument:
+            area = area_at_idx(area_episodes or [], int(idx))
+            metric_group = area_to_metric_group.get(area) if area and area_to_metric_group else None
+            turn_match = None
+            centerline_m = None
+            if outputs is not None and metric_group is not None:
+                ti = score_turn_indicator_step(outputs, metric_group)
+                if ti["turn_match"] is not None:
+                    turn_match = bool(ti["turn_match"])
+            if metric_group in ("straight", "curve"):
+                centerline_m = lateral_offset_from_route_lanes(np_dict["route_lanes"])
+            safety = score_safety_step(
+                neighbors_live,
+                s.ego_shape,
+                np_dict,
+                device,
+                margin_m=near_miss_thresh,
+            )
+            step_records.append(
+                StepRecord(
+                    k=int(k),
+                    rec_idx=int(idx),
+                    area=area,
+                    centerline_m=centerline_m,
+                    turn_match=turn_match,
+                    clearance_m=float(safety["clearance_m"]),
+                    collision=bool(safety["collision"]),
+                    neighbor_violation=bool(safety["neighbor_violation"]),
+                    rb_violation=bool(safety["rb_violation"]),
+                    png_path=png_path,
+                )
             )
         _score_into(s, neighbors_live, device, timers)
         snaps_before = s.n_snaps
@@ -1561,7 +1614,12 @@ def render_segment(
             # Unstick teleport: cached plan is pinned pre-snap — force a fresh inference.
             plan_world = None
     dbg.close()
-    return _finalize(s, timers).metrics
+    result = _finalize(s, timers)
+    if instrument:
+        result.steps = step_records
+        result.png_dir = out_dir
+        return result
+    return result.metrics
 
 
 @torch.no_grad()
