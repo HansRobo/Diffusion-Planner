@@ -595,3 +595,34 @@ class StatePerturbation:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
         else:
             return interpolated
+
+
+class NeighborDropoutAugmentation:
+    """
+    Data augmentation that zeroes out whole neighbor agents to simulate
+    perception misses (missed detections, track drops).
+
+    Each valid neighbor is dropped independently with probability
+    dropout_prob. A dropped neighbor is removed from BOTH the past input and
+    the future prediction target, so the model is never asked to predict an
+    agent it cannot see. Padding rows are already all-zero and are left
+    untouched, matching the all-zero-is-invalid convention used by the
+    encoder and the prediction-loss masks.
+    """
+
+    def __init__(self, dropout_prob: float, device: torch.device | str) -> None:
+        self._dropout_prob = dropout_prob
+        self._device = torch.device(device)
+
+    def __call__(self, inputs, ego_future, neighbors_future):
+        past = inputs["neighbor_agents_past"]  # (B, N, T, D)
+        B, N = past.shape[:2]
+
+        valid = torch.sum(torch.ne(past, 0), dim=(-2, -1)) > 0  # (B, N)
+        drop = valid & (torch.rand(B, N, device=past.device) < self._dropout_prob)
+        keep = (~drop).to(past.dtype).view(B, N, 1, 1)
+
+        inputs["neighbor_agents_past"] = past * keep
+        neighbors_future = neighbors_future * keep
+
+        return inputs, ego_future, neighbors_future
