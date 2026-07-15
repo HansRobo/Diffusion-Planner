@@ -102,6 +102,13 @@ def wandb_epdms_metrics(epdms_means):
     }
 
 
+def _is_grouped_closed_loop_summary(summary: dict) -> bool:
+    """Grouped summaries use ``grouped_summary`` / ``n_episodes``, not ``n_segments``."""
+    if summary.get("mode") == "grouped":
+        return True
+    return summary.get("grouped_summary") is not None
+
+
 def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     """Closed-loop rendered rollout; logs metrics + videos to wandb.
 
@@ -156,7 +163,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
         )
         summary = evaluator.run_distributed() if ddp_active else evaluator.run()
         if rank == 0 and summary:
-            if summary.get("mode") == "grouped":
+            if _is_grouped_closed_loop_summary(summary):
                 log = build_grouped_closed_loop_wandb_log(summary)
                 totals = (summary.get("grouped_summary") or {}).get("totals") or {}
                 print(
