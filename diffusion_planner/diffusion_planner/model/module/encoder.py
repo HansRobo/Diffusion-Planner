@@ -118,11 +118,13 @@ class Encoder(nn.Module):
         )
         self.ego_shape_encoder = FloatsEncoder(
             num_float=3,
+            class_type=CLASS_TYPE_EGO_SHAPE,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
         )
         self.turn_indicator_encoder = FloatsEncoder(
             num_float=INPUT_T,
+            class_type=CLASS_TYPE_TURN_INDICATOR,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
         )
@@ -747,11 +749,12 @@ class GoalPoseEncoder(nn.Module):
 
 
 class FloatsEncoder(nn.Module):
-    def __init__(self, num_float, drop_path_rate, hidden_dim):
+    def __init__(self, num_float, class_type, drop_path_rate, hidden_dim):
         super().__init__()
         channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
+        self._class_type = class_type
 
         self.channel_pre_project = Mlp(
             in_features=num_float,
@@ -784,7 +787,7 @@ class FloatsEncoder(nn.Module):
             dim=-1,
         )
         pos = pos.unsqueeze(1)  # (B, 1, D=4)
-        pos = add_class_type(pos, CLASS_TYPE_EGO_SHAPE)
+        pos = add_class_type(pos, self._class_type)
 
         mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
 
