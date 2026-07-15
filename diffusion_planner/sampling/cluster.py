@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils.pipeline import ElbowKMeansStrategy, cluster_trajectories
+from utils.pipeline import ElbowKMeansStrategy, cluster_trajectories, cluster_trajectories_enriched
 
 
 def load_npz_paths(data_list_json: str) -> list:
@@ -72,6 +72,31 @@ def get_args():
         help="Number of PCA components used to reduce the trajectory feature dimension (default: 50)",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="trajectory",
+        choices=["trajectory", "enriched"],
+        help="Clustering mode: 'trajectory' (ego future only) or 'enriched' (ego + neighbors + state)",
+    )
+    parser.add_argument(
+        "--top_k_neighbors",
+        type=int,
+        default=20,
+        help="Number of nearest neighbors to keep (enriched mode only, default: 20)",
+    )
+    parser.add_argument(
+        "--neighbor_pca_components",
+        type=int,
+        default=50,
+        help="PCA components for neighbor block (enriched mode only, default: 50)",
+    )
+    parser.add_argument(
+        "--temporal_hz",
+        type=int,
+        default=2,
+        help="Temporal downsample rate in hz (enriched mode only, default: 2)",
+    )
     return parser.parse_args()
 
 
@@ -82,7 +107,17 @@ def main():
     print(f"Loaded {len(npz_paths)} NPZ paths from {args.data_list}")
 
     strategy = ElbowKMeansStrategy(k_max=args.k_max, random_state=args.seed)
-    result = cluster_trajectories(npz_paths, strategy, pca_components=args.pca_components)
+    if args.mode == "enriched":
+        result = cluster_trajectories_enriched(
+            npz_paths,
+            strategy,
+            pca_components=args.pca_components,
+            neighbor_pca_components=args.neighbor_pca_components,
+            top_k=args.top_k_neighbors,
+            temporal_hz=args.temporal_hz,
+        )
+    else:
+        result = cluster_trajectories(npz_paths, strategy, pca_components=args.pca_components)
     print(f"Optimal k = {strategy.n_clusters_}")
 
     output_path = Path(args.output)

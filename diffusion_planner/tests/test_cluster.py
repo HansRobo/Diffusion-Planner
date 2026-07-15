@@ -706,6 +706,75 @@ def test_enriched_pipeline_no_duplicates():
     assert len(all_paths) == len(set(all_paths))
 
 
+# ──────────────────────── integration: main enriched ──────────────────────
+
+
+def test_main_enriched_end_to_end():
+    """End-to-end test with --mode enriched."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_enriched_dataset(tmp, n=30)
+        data_list_path = str(Path(tmp) / "data_list.json")
+        with open(data_list_path, "w") as f:
+            json.dump(npz_paths, f)
+
+        output_path = str(Path(tmp) / "result.json")
+        argv = [
+            "cluster.py",
+            "--data_list", data_list_path,
+            "--output", output_path,
+            "--mode", "enriched",
+            "--k_max", "5",
+            "--pca_components", "10",
+            "--neighbor_pca_components", "10",
+            "--top_k_neighbors", "5",
+            "--temporal_hz", "2",
+            "--seed", "42",
+        ]
+        with patch("sys.argv", argv):
+            main()
+
+        assert Path(output_path).exists()
+        with open(output_path) as f:
+            result = json.load(f)
+
+        for key in result:
+            assert key.startswith("cluster_id")
+        all_out = [p for paths in result.values() for p in paths]
+        assert sorted(all_out) == sorted(npz_paths)
+
+
+def test_main_trajectory_mode_unchanged():
+    """--mode trajectory produces identical results to no --mode flag (regression)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_synthetic_dataset(tmp, n=20)
+        data_list_path = str(Path(tmp) / "data_list.json")
+        with open(data_list_path, "w") as f:
+            json.dump(npz_paths, f)
+
+        out_default = str(Path(tmp) / "default.json")
+        out_explicit = str(Path(tmp) / "explicit.json")
+
+        base_argv = [
+            "cluster.py",
+            "--data_list", data_list_path,
+            "--k_max", "5",
+            "--pca_components", "10",
+            "--seed", "42",
+        ]
+
+        with patch("sys.argv", base_argv + ["--output", out_default]):
+            main()
+        with patch("sys.argv", base_argv + ["--output", out_explicit, "--mode", "trajectory"]):
+            main()
+
+        with open(out_default) as f:
+            result_default = json.load(f)
+        with open(out_explicit) as f:
+            result_explicit = json.load(f)
+
+        assert result_default == result_explicit
+
+
 # ──────────────────────────────── runner ────────────────────────────────────
 
 
@@ -751,6 +820,8 @@ ALL_TESTS = [
     test_enriched_pipeline_all_paths_present,
     test_enriched_pipeline_no_valid_files_raises,
     test_enriched_pipeline_no_duplicates,
+    test_main_enriched_end_to_end,
+    test_main_trajectory_mode_unchanged,
 ]
 
 
