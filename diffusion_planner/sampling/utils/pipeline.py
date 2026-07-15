@@ -93,6 +93,55 @@ def extract_features(npz_path: str) -> np.ndarray:
     return ego_future.flatten()
 
 
+def extract_features_enriched(
+    npz_path: str,
+    top_k: int = 20,
+    temporal_hz: int = 2,
+) -> tuple:
+    """Extract ego block and neighbor block feature vectors for enriched clustering.
+
+    Returns:
+        (ego_block, neighbor_block) — two 1-D float arrays.
+    """
+    if 10 % temporal_hz != 0:
+        raise ValueError(f"temporal_hz={temporal_hz} must evenly divide 10")
+
+    data = np.load(npz_path, allow_pickle=True)
+    step = 10 // temporal_hz
+    past_idx = np.arange(0, 31, step)
+    future_idx = np.arange(0, 80, step)
+
+    ego_past = data["ego_agent_past"].astype(float)[past_idx]
+    ego_future = data["ego_agent_future"].astype(float)[future_idx]
+    ego_state = data["ego_current_state"].astype(float)
+
+    nbr_past = data["neighbor_agents_past"].astype(float)
+    nbr_future = data["neighbor_agents_future"].astype(float)
+
+    active_mask = np.any(nbr_past.reshape(nbr_past.shape[0], -1) != 0, axis=1)
+    nbr_pos = nbr_past[:, -1, :2]
+    distances = np.linalg.norm(nbr_pos, axis=1)
+    distances[~active_mask] = np.inf
+
+    sorted_idx = np.argsort(distances)[:top_k]
+    topk_past = nbr_past[sorted_idx][:, past_idx]
+    topk_future = nbr_future[sorted_idx][:, future_idx]
+    topk_dist = distances[sorted_idx].copy()
+    topk_dist[topk_dist == np.inf] = 0.0
+
+    ego_block = np.concatenate([
+        ego_past.flatten(),
+        ego_future.flatten(),
+        ego_state,
+        topk_dist,
+    ])
+    neighbor_block = np.concatenate([
+        topk_past.flatten(),
+        topk_future.flatten(),
+    ])
+    return ego_block, neighbor_block
+
+
 # ──────────────────────────── Pipeline ───────────────────────────────────────
 
 

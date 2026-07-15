@@ -48,6 +48,7 @@ from utils.pipeline import (
     ElbowKMeansStrategy,
     cluster_trajectories,
     extract_features,
+    extract_features_enriched,
 )
 
 # ─────────────────────────────── helpers ────────────────────────────────────
@@ -58,6 +59,33 @@ def _make_npz(path: str, ego_future: np.ndarray | None = None) -> None:
     if ego_future is None:
         ego_future = np.random.randn(80, 3).astype(np.float32)
     np.savez(path, ego_agent_future=ego_future)
+
+
+def _make_enriched_npz(
+    path: str,
+    n_active_neighbors: int = 5,
+    seed: int = 0,
+) -> None:
+    """Write an NPZ file with all fields needed for enriched clustering."""
+    rng = np.random.default_rng(seed)
+    ego_past = rng.standard_normal((31, 4)).astype(np.float32)
+    ego_future = rng.standard_normal((80, 3)).astype(np.float32)
+    ego_state = rng.standard_normal(10).astype(np.float32)
+
+    nbr_past = np.zeros((320, 31, 11), dtype=np.float32)
+    nbr_future = np.zeros((320, 80, 3), dtype=np.float32)
+    for i in range(n_active_neighbors):
+        nbr_past[i] = rng.standard_normal((31, 11)).astype(np.float32)
+        nbr_future[i] = rng.standard_normal((80, 3)).astype(np.float32)
+
+    np.savez(
+        path,
+        ego_agent_past=ego_past,
+        ego_agent_future=ego_future,
+        ego_current_state=ego_state,
+        neighbor_agents_past=nbr_past,
+        neighbor_agents_future=nbr_future,
+    )
 
 
 def _synthetic_clusters(n_per_cluster: int = 10, n_clusters: int = 3, seed: int = 42) -> np.ndarray:
@@ -132,6 +160,99 @@ def test_extract_features_dtype_is_float():
         feat = extract_features(npz_path)
     assert np.issubdtype(feat.dtype, np.floating), f"Expected float dtype, got {feat.dtype}"
     print("  [PASS] extract_features dtype is float")
+
+
+# ─────────────────────── extract_features_enriched ─────────────────────────
+
+
+def test_extract_enriched_shapes_default():
+    """Default 2hz, top_k=20: ego_block=(106,), neighbor_block=(2500,)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path, n_active_neighbors=25)
+        ego, nbr = extract_features_enriched(npz_path, top_k=20, temporal_hz=2)
+    # ego: 7*4 + 16*3 + 10 + 20 = 106
+    assert ego.shape == (106,), f"Expected (106,), got {ego.shape}"
+    # neighbor: 20*(7*11 + 16*3) = 20*(77+48) = 2500
+    assert nbr.shape == (2500,), f"Expected (2500,), got {nbr.shape}"
+
+
+def test_extract_enriched_shapes_10hz():
+    """At 10hz (no downsampling): ego_block=(394,), neighbor_block=(11620,)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path, n_active_neighbors=25)
+        ego, nbr = extract_features_enriched(npz_path, top_k=20, temporal_hz=10)
+    # ego: 31*4 + 80*3 + 10 + 20 = 394
+    assert ego.shape == (394,), f"Expected (394,), got {ego.shape}"
+    # neighbor: 20*(31*11 + 80*3) = 20*(341+240) = 11620
+    assert nbr.shape == (11620,), f"Expected (11620,), got {nbr.shape}"
+
+
+def test_extract_enriched_top_k_selection():
+    """Closest neighbors are selected; farthest are dropped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+
+        nbr_past = np.zeros((320, 31, 11), dtype=np.float32)
+        nbr_future = np.zeros((320, 80, 3), dtype=np.float32)
+        # Place 3 neighbors at known distances (position is in last past timestep, cols 0:2)
+        for i, dist in enumerate([1.0, 5.0, 3.0]):
+            nbr_past[i, :, :] = 0.01  # make all values nonzero (active)
+            nbr_past[i, -1, 0] = dist  # x at t=0
+            nbr_past[i, -1, 1] = 0.0   # y at t=0
+            nbr_future[i, :, :] = float(i + 1)  # distinguishable values
+
+        np.savez(
+            npz_path,
+            ego_agent_past=np.zeros((31, 4), dtype=np.float32),
+            ego_agent_future=np.zeros((80, 3), dtype=np.float32),
+            ego_current_state=np.zeros(10, dtype=np.float32),
+            neighbor_agents_past=nbr_past,
+            neighbor_agents_future=nbr_future,
+        )
+        ego, nbr = extract_features_enriched(npz_path, top_k=2, temporal_hz=10)
+
+    # Top-2 should be neighbor 0 (dist=1) and neighbor 2 (dist=3)
+    # Distances in ego block are the last 2 elements
+    distances = ego[-2:]
+    np.testing.assert_allclose(distances, [1.0, 3.0], atol=1e-6)
+
+
+def test_extract_enriched_fewer_than_k_neighbors():
+    """When fewer active neighbors than top_k, remaining are zero-padded."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path, n_active_neighbors=3)
+        ego, nbr = extract_features_enriched(npz_path, top_k=10, temporal_hz=2)
+    # ego: 7*4 + 16*3 + 10 + 10 = 96
+    assert ego.shape == (96,), f"Expected (96,), got {ego.shape}"
+    # Last 10 elements are distances; only 3 are non-zero
+    distances = ego[-10:]
+    assert np.count_nonzero(distances) == 3, (
+        f"Expected 3 non-zero distances, got {np.count_nonzero(distances)}"
+    )
+
+
+def test_extract_enriched_invalid_temporal_hz():
+    """temporal_hz that doesn't divide 10 raises ValueError."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path)
+        try:
+            extract_features_enriched(npz_path, temporal_hz=3)
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+
+def test_extract_enriched_dtype_is_float():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path)
+        ego, nbr = extract_features_enriched(npz_path)
+    assert np.issubdtype(ego.dtype, np.floating)
+    assert np.issubdtype(nbr.dtype, np.floating)
 
 
 # ──────────────────────────── compute_wcss ──────────────────────────────────
@@ -506,6 +627,12 @@ ALL_TESTS = [
     test_extract_features_values,
     test_extract_features_missing_key,
     test_extract_features_dtype_is_float,
+    test_extract_enriched_shapes_default,
+    test_extract_enriched_shapes_10hz,
+    test_extract_enriched_top_k_selection,
+    test_extract_enriched_fewer_than_k_neighbors,
+    test_extract_enriched_invalid_temporal_hz,
+    test_extract_enriched_dtype_is_float,
     test_compute_wcss_length,
     test_compute_wcss_monotone,
     test_compute_wcss_k1_max_inertia,
