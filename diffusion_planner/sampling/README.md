@@ -9,12 +9,13 @@ By grouping ego future trajectories into clusters, it helps avoid sampling bias 
 
 ```
 sampling/
-├── cluster.py            # CLI entry point — argument parsing and file I/O
-├── sampling.py           # Balanced sampling from cluster result JSON
-├── visualize_cluster.py  # Visualize clustering results as trajectory plots
+├── cluster.py                    # CLI entry point — argument parsing and file I/O
+├── sampling.py                   # Balanced sampling from cluster result JSON
+├── visualize_cluster.py          # Visualize clustering results as trajectory plots
+├── visualize_cluster_report.py   # HTML diagnostic report with BEV videos per cluster
 ├── utils/
-│   ├── elbow.py          # WCSS computation, elbow detection, KMeans fitting
-│   └── pipeline.py       # Feature extraction, ClusteringStrategy interface, and pipeline
+│   ├── elbow.py                  # WCSS computation, elbow detection, KMeans fitting
+│   └── pipeline.py               # Feature extraction, ClusteringStrategy interface, and pipeline
 └── README.md
 ```
 
@@ -25,6 +26,7 @@ sampling/
 | `cluster.py` | CLI entry point. Reads an NPZ file list, runs the clustering pipeline, and writes the result JSON. |
 | `sampling.py` | Reads the cluster result JSON and samples an equal number of files from each cluster (equal to the smallest cluster size). Outputs a JSON list suitable for `train_run.py`. |
 | `visualize_cluster.py` | Reads the result JSON from `cluster.py` and produces a grid of subplots, one per cluster, showing overlaid ego future trajectories. |
+| `visualize_cluster_report.py` | Generates an HTML diagnostic report with cluster stats, sampling weights, and BEV video examples per cluster via clip-review-tool. Supports `--standalone` mode for self-contained shareable HTML with embedded GIFs. |
 | `utils/elbow.py` | Utilities for computing WCSS (within-cluster sum of squares), finding the elbow point, and fitting KMeans. |
 | `utils/pipeline.py` | Feature extraction from NPZ files, the `ClusteringStrategy` abstract interface, the `ElbowKMeansStrategy` concrete implementation, and the `cluster_trajectories` pipeline function. |
 
@@ -108,7 +110,46 @@ python3 train_run.py \
   --resume_model_path /path/to/sft.pth
 ```
 
-### Step 3: Visualization (`visualize_cluster.py`)
+### Step 3: Cluster Diagnostic Report (`visualize_cluster_report.py`)
+
+Generates an HTML diagnostic report with cluster statistics, sampling behavior documentation, and BEV video examples per cluster rendered by [clip-review-tool](https://github.com/tier4/clip-review-tool).
+
+```bash
+# Standard mode: report.html + videos/ directory with MP4s
+python visualize_cluster_report.py \
+    --cluster_json /path/to/cluster_result.json \
+    --output_dir   /path/to/report_output/ \
+    --max_videos 3 --workers 4
+
+# Standalone mode: single self-contained HTML with embedded GIFs
+# Shareable via Slack, Google Drive, email — no extra files needed
+python visualize_cluster_report.py \
+    --cluster_json /path/to/cluster_result.json \
+    --output_dir   /path/to/report_output/ \
+    --max_videos 3 --workers 4 --standalone
+```
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--cluster_json` | ✓ | — | Cluster assignment JSON from `cluster.py` |
+| `--output_dir` | ✓ | — | Output directory for report.html (and videos/ in standard mode) |
+| `--max_videos` | | `3` | Max BEV video examples to render per cluster |
+| `--workers` | | `1` | Parallel video rendering workers |
+| `--seed` | | `42` | Random seed for video subsampling |
+| `--standalone` | | `False` | Embed GIFs (240px, 3fps) as base64 in a single HTML file |
+
+**Prerequisites:**
+- `render-video-txt` on PATH (`pip install -e /path/to/clip-review-tool`)
+- `ffmpeg` on PATH (for video rendering; also used for GIF conversion in standalone mode)
+
+**Report contents:**
+- Pipeline overview (trajectory → PCA → KMeans)
+- Cluster distribution table + bar chart (sorted by sample count)
+- Sampling behavior summary (oversampling, unmatched samples, total draws)
+- Per-cluster BEV video gallery (3 examples each by default)
+- Render error diagnostics
+
+### Step 4: Trajectory Visualization (`visualize_cluster.py`)
 
 ```bash
 python visualize_cluster.py \

@@ -18,11 +18,14 @@ Usage:
     python visualize_cluster_report.py \\
         --cluster_json /path/to/cluster_result.json \\
         --output_dir   /path/to/report_output/ \\
-        [--max_videos 3] [--workers 1] [--seed 42]
+        [--max_videos 3] [--workers 1] [--seed 42] [--standalone]
 
 Reads the cluster assignment JSON from cluster.py, computes sampling
 statistics, renders BEV video examples per cluster via render-video-txt
 (clip-review-tool), and assembles an HTML report.
+
+With --standalone, MP4 videos are converted to GIFs (240px, 3fps) and
+embedded as base64 in the HTML, producing a single shareable file.
 """
 
 from __future__ import annotations
@@ -86,14 +89,15 @@ def compute_cluster_stats(clusters: dict[str, list[str]]) -> list[dict]:
 
 
 def render_bar_chart(stats: list[dict]) -> str:
-    ids = [s["cluster_id"].replace("cluster_id", "") for s in stats]
-    counts = [s["count"] for s in stats]
+    stats_sorted = sorted(stats, key=lambda s: s["count"], reverse=True)
+    ids = [s["cluster_id"].replace("cluster_id", "") for s in stats_sorted]
+    counts = [s["count"] for s in stats_sorted]
 
     fig, ax = plt.subplots(figsize=(max(6, len(ids) * 0.6), 4))
     ax.bar(ids, counts, color="#4C72B0", edgecolor="white", linewidth=0.5)
     ax.set_xlabel("Cluster ID")
     ax.set_ylabel("Sample Count")
-    ax.set_title("Cluster Size Distribution")
+    ax.set_title("Cluster Size Distribution (sorted by count)")
     ax.tick_params(axis="x", rotation=45 if len(ids) > 15 else 0)
     fig.tight_layout()
 
@@ -177,6 +181,21 @@ def render_cluster_videos(
     return rendered, errors
 
 
+def convert_mp4_to_gif(mp4_path: str) -> str:
+    gif_path = str(Path(mp4_path).with_suffix(".gif"))
+    if Path(gif_path).exists():
+        return gif_path
+    result = subprocess.run(
+        ["ffmpeg", "-i", mp4_path,
+         "-vf", "fps=3,scale=240:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
+         "-y", gif_path],
+        capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        warnings.warn(f"ffmpeg failed for {mp4_path}: {result.stderr.decode()[-200:]}")
+    return gif_path
+
+
 def _render_errors_section(errors: list[dict]) -> str:
     if not errors:
         return ""
@@ -204,15 +223,19 @@ def generate_html_report(
     errors: list[dict],
     cluster_json_path: str,
     output_dir: str,
+    standalone: bool = False,
 ) -> str:
     total = sum(s["count"] for s in stats)
     n_clusters = len(stats)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     output_path = Path(output_dir) / "report.html"
 
+    # --- sort by sample count (largest first) for display ---
+    stats_sorted = sorted(stats, key=lambda s: s["count"], reverse=True)
+
     # --- stats table rows ---
     table_rows = ""
-    for s in stats:
+    for s in stats_sorted:
         table_rows += (
             f"<tr>"
             f"<td>{escape(s['cluster_id'])}</td>"
@@ -225,26 +248,37 @@ def generate_html_report(
             f"</tr>\n"
         )
 
-    # --- per-cluster video galleries ---
+    # --- per-cluster video/gif galleries ---
     galleries = ""
-    for s in stats:
+    for s in stats_sorted:
         cid = s["cluster_id"]
         mp4s = rendered.get(cid, [])
-        video_tags = ""
-        for mp4_path in mp4s:
-            rel = str(Path(mp4_path).relative_to(output_dir))
-            video_tags += (
-                f'<video controls preload="none" width="360">'
-                f'<source src="{escape(rel)}" type="video/mp4">'
-                f"</video>\n"
-            )
+        media_tags = ""
+        if standalone:
+            for mp4_path in mp4s:
+                gif_path = convert_mp4_to_gif(mp4_path)
+                if Path(gif_path).exists():
+                    with open(gif_path, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("ascii")
+                    media_tags += (
+                        f'<img src="data:image/gif;base64,{b64}" '
+                        f'style="border-radius:4px;background:#1a1a1a"> '
+                    )
+        else:
+            for mp4_path in mp4s:
+                rel = str(Path(mp4_path).relative_to(output_dir))
+                media_tags += (
+                    f'<video controls preload="none" width="360">'
+                    f'<source src="{escape(rel)}" type="video/mp4">'
+                    f"</video>\n"
+                )
         if not mp4s:
-            video_tags = "<p><em>No videos rendered for this cluster.</em></p>"
+            media_tags = "<p><em>No videos rendered for this cluster.</em></p>"
         galleries += f"""
         <div class="cluster-gallery">
             <h3>{escape(cid)} &mdash; {s['count']:,} samples, weight {s['weight']:.3f},
                 ~{s['repeats_per_sample']:.1f}x repeats/sample/epoch</h3>
-            <div class="video-grid">{video_tags}</div>
+            <div class="video-grid">{media_tags}</div>
         </div>
         """
 
@@ -343,6 +377,10 @@ def get_args() -> argparse.Namespace:
         help="Parallel video rendering workers (default: 1)",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--standalone", action="store_true",
+        help="Produce a single self-contained HTML with embedded GIFs (240px, 3fps)",
+    )
     return parser.parse_args()
 
 
@@ -373,8 +411,13 @@ def main() -> None:
     print("Generating HTML report...")
     report_path = generate_html_report(
         stats, chart_uri, rendered, errors, args.cluster_json, args.output_dir,
+        standalone=args.standalone,
     )
     print(f"Report saved to {report_path}")
+    if args.standalone:
+        import os
+        size_mb = os.path.getsize(report_path) / 1024 / 1024
+        print(f"  Standalone mode: {size_mb:.1f}MB self-contained HTML")
 
 
 if __name__ == "__main__":
