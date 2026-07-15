@@ -595,3 +595,58 @@ class StatePerturbation:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
         else:
             return interpolated
+
+
+class NeighborNoiseAugmentation:
+    """
+    Data augmentation that adds per-frame Gaussian noise to the observed
+    neighbor history to simulate tracking noise in the perception output.
+
+    Only `neighbor_agents_past` is perturbed: position (x, y), velocity
+    (vx, vy) and heading (the (cos, sin) pair is rotated by a small random
+    angle, so it stays a unit vector). The prediction target
+    `neighbors_future` and the ego inputs are left clean. Noise is applied
+    only to valid frames so padding rows stay all-zero.
+    """
+
+    def __init__(
+        self,
+        pos_noise_std: float,
+        vel_noise_std: float,
+        heading_noise_std: float,
+        device: torch.device | str,
+    ) -> None:
+        self._pos_noise_std = pos_noise_std
+        self._vel_noise_std = vel_noise_std
+        self._heading_noise_std = heading_noise_std
+        self._device = torch.device(device)
+
+    def __call__(self, inputs, ego_future, neighbors_future):
+        past = inputs["neighbor_agents_past"]  # (B, N, T, D)
+        B, N, T, _ = past.shape
+        device = past.device
+
+        # A frame is valid when any of its first 8 features is non-zero,
+        # matching the encoder's padding convention.
+        valid = torch.sum(torch.ne(past[..., :8], 0), dim=-1) > 0  # (B, N, T)
+        valid_f = valid.to(past.dtype).unsqueeze(-1)  # (B, N, T, 1)
+
+        noisy = past.clone()
+        noisy[..., 0:2] = (
+            past[..., 0:2] + torch.randn(B, N, T, 2, device=device) * self._pos_noise_std * valid_f
+        )
+        noisy[..., 4:6] = (
+            past[..., 4:6] + torch.randn(B, N, T, 2, device=device) * self._vel_noise_std * valid_f
+        )
+
+        # Rotate (cos, sin) by a small random angle. Padding rows have
+        # cos = sin = 0 and stay zero under rotation.
+        eps = torch.randn(B, N, T, device=device) * self._heading_noise_std
+        cos_e, sin_e = torch.cos(eps), torch.sin(eps)
+        cos_h, sin_h = past[..., 2], past[..., 3]
+        noisy[..., 2] = cos_h * cos_e - sin_h * sin_e
+        noisy[..., 3] = sin_h * cos_e + cos_h * sin_e
+
+        inputs["neighbor_agents_past"] = noisy
+
+        return inputs, ego_future, neighbors_future
