@@ -149,6 +149,34 @@ python visualize_cluster_report.py \
 - Per-cluster BEV video gallery (3 examples each by default)
 - Render error diagnostics
 
+**Sharing the report:**
+
+The standalone HTML file (~30-40MB) can be shared via Slack, Google Drive, email, or any file-sharing tool. To publish to Confluence with inline GIFs:
+
+```bash
+# 1. Generate the report with videos
+python visualize_cluster_report.py \
+    --cluster_json /path/to/cluster_result.json \
+    --output_dir   /path/to/report_output/ \
+    --max_videos 3 --workers 4
+
+# 2. Convert MP4s to GIFs (240px, 3fps)
+find /path/to/report_output/videos -name "*.mp4" -exec sh -c '
+    ffmpeg -i "$1" -vf "fps=3,scale=240:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" -y "${1%.mp4}.gif"
+' _ {} \;
+
+# 3. Create a Confluence page and upload chart + GIFs as attachments
+#    Then reference them in the page body with:
+#    <ac:image ac:width="240"><ri:attachment ri:filename="cluster_id0_sample0.gif" /></ac:image>
+#
+#    See the Confluence REST API docs for creating pages and uploading attachments:
+#    POST /wiki/rest/api/content                          (create page)
+#    POST /wiki/rest/api/content/{pageId}/child/attachment (upload files)
+#    PUT  /wiki/rest/api/content/{pageId}                  (update page body)
+#
+#    Authentication: Basic auth with your Atlassian email + API token.
+```
+
 ### Step 4: Trajectory Visualization (`visualize_cluster.py`)
 
 ```bash
