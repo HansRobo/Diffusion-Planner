@@ -215,7 +215,7 @@ def generate_html_report(
     for s in stats:
         table_rows += (
             f"<tr>"
-            f"<td>{s['cluster_id']}</td>"
+            f"<td>{escape(s['cluster_id'])}</td>"
             f"<td>{s['count']:,}</td>"
             f"<td>{s['pct']:.1f}%</td>"
             f"<td>{s['weight']:.3f}</td>"
@@ -235,14 +235,14 @@ def generate_html_report(
             rel = str(Path(mp4_path).relative_to(output_dir))
             video_tags += (
                 f'<video controls preload="none" width="360">'
-                f'<source src="{rel}" type="video/mp4">'
+                f'<source src="{escape(rel)}" type="video/mp4">'
                 f"</video>\n"
             )
         if not mp4s:
             video_tags = "<p><em>No videos rendered for this cluster.</em></p>"
         galleries += f"""
         <div class="cluster-gallery">
-            <h3>{cid} &mdash; {s['count']:,} samples, weight {s['weight']:.3f},
+            <h3>{escape(cid)} &mdash; {s['count']:,} samples, weight {s['weight']:.3f},
                 ~{s['repeats_per_sample']:.1f}x repeats/sample/epoch</h3>
             <div class="video-grid">{video_tags}</div>
         </div>
