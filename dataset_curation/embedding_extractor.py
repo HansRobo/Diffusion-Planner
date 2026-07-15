@@ -30,7 +30,12 @@ def extract_embeddings(
 
     args_path = Path(model_path).parent / "args.json"
     if args_path.exists():
-        config = TrainConfig(**openjson(str(args_path)))
+        raw = openjson(str(args_path))
+        import dataclasses
+
+        valid_fields = {f.name for f in dataclasses.fields(TrainConfig)}
+        filtered = {k: v for k, v in raw.items() if k in valid_fields}
+        config = TrainConfig(**filtered)
     else:
         config = TrainConfig()
 
