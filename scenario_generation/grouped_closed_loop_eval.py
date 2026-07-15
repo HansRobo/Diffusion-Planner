@@ -799,6 +799,14 @@ class ResolvedClosedLoopEvaluation(ClosedLoopEvaluation):
         )
         return self._delegate
 
+    def run(self) -> dict:
+        """Run delegate workflow; preserve delegate ``mode`` (not ``auto``)."""
+        delegate = self._ensure_delegate()
+        summary = super().run()
+        if self.mode == "auto":
+            summary["mode"] = delegate.mode
+        return summary
+
     def discover_jobs(self) -> list[ClosedLoopJob]:
         return self._ensure_delegate().discover_jobs()
 
