@@ -118,7 +118,7 @@ class GroupedByAreaClosedLoopEvaluation(ClosedLoopEvaluation):
         self.classification_json = Path(classification_json).expanduser().resolve()
         self.allowed_areas: set[str] | None = set(areas) if areas else None
         self._doc: dict | None = None
-        self._area_to_metric: dict[str, str] | None = None
+        self._area_to_metric_map: dict[str, str] | None = None
 
     @classmethod
     def from_checkpoint(
@@ -150,9 +150,9 @@ class GroupedByAreaClosedLoopEvaluation(ClosedLoopEvaluation):
         return self._doc
 
     def _area_to_metric(self) -> dict[str, str]:
-        if self._area_to_metric is None:
-            self._area_to_metric = load_area_metric_groups(self._classification_doc())
-        return self._area_to_metric
+        if self._area_to_metric_map is None:
+            self._area_to_metric_map = load_area_metric_groups(self._classification_doc())
+        return self._area_to_metric_map
 
     def discover_jobs(self) -> list[GroupedBagJob]:
         doc = self._classification_doc()
