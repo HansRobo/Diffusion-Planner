@@ -1,28 +1,17 @@
-"""Reusable closed-loop rollout + render + metric aggregation.
+"""Low-level closed-loop rollout helpers and backward-compatible entry points.
 
-Shared by the standalone CLI (``diffusion_planner/valid_predictor_closed_loop.py``) and the
-per-epoch training validation (``diffusion_planner/diffusion_planner/train.py``): both drive the
-ego in CLOSED LOOP through ``reproducer_rollout.render_segment`` over the route NPZ frames under
-``npz_root``, write a per-step PNG, build one MP4 per segment, and aggregate the per-segment
-metrics into a single summary.
-
-``run_closed_loop_eval`` takes an already-loaded ``(model, model_args)`` (so training can pass its
-live model + ``TrainConfig`` straight in, no checkpoint reload) and returns the summary dict plus
-the per-segment MP4 paths (for wandb upload).
+Prefer :class:`scenario_generation.closed_loop_evaluation.FullRouteClosedLoopEvaluation`
+for new code; ``run_closed_loop_eval`` remains a thin wrapper for ``train.py``.
 """
 
 from __future__ import annotations
 
-import json
 import subprocess
-import time
 from pathlib import Path
 
 import numpy as np
 
-from scenario_generation.perf_timer import Timers
-from scenario_generation.reproducer_rollout import render_segment
-from scenario_generation.route_timeline import RouteTimeline, group_routes
+from scenario_generation.route_timeline import group_routes
 
 
 def enumerate_routes(npz_root: Path) -> dict[str, list[Path]]:
@@ -44,7 +33,6 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
     n_seg_collision = sum(1 for r in rows if r["n_collision_steps"] > 0)
     n_seg_near_miss = sum(1 for r in rows if r["n_near_miss_steps"] > 0)
 
-    # min_clearance is +inf for a segment that never saw a valid neighbor; exclude those.
     finite_min_cl = [r["min_clearance"] for r in rows if np.isfinite(r["min_clearance"])]
     finite_mean_cl = [r["mean_clearance"] for r in rows if np.isfinite(r["mean_clearance"])]
 
@@ -77,12 +65,7 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
 
 
 def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
-    """Encode the PNG sequence in ``png_dir`` to an MP4.
-
-    PNGs are named by step ``k`` and may be sparse (``draw_every`` skips frames), so glob the
-    directory (gap-tolerant, name-sorted) instead of a contiguous ``%05d`` counter. ``fps`` is the
-    raw frame rate, so a sparse sequence plays faster than real time (shorter video).
-    """
+    """Encode the PNG sequence in ``png_dir`` to an MP4."""
     subprocess.run(
         [
             "ffmpeg",
@@ -130,100 +113,41 @@ def run_closed_loop_eval(
     unstick_teleport_after: int = 300,
     tracker_mode: str = "mpc",
     verbose: bool = True,
+    ddp_rank: int = 0,
+    ddp_world_size: int = 1,
 ) -> dict:
-    """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
+    """Backward-compatible wrapper around :class:`FullRouteClosedLoopEvaluation`."""
+    from scenario_generation.closed_loop_evaluation import (
+        ClosedLoopEvalConfig,
+        FullRouteClosedLoopEvaluation,
+        RolloutParams,
+    )
 
-    ``model`` must be an eval-mode Diffusion-Planner (callable ``model(data) -> (_, outputs)`` with
-    ``outputs["prediction"]``); ``model_args`` provides ``observation_normalizer`` /
-    ``predicted_neighbor_num`` / ``future_len`` (a ``Config`` or ``TrainConfig``). Per segment a PNG
-    dir + an MP4 (``<route>_<start>_<end>.mp4``) are written. ``segments.jsonl`` and
-    ``summary.json`` are written into ``out_dir``.
-
-    Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back into
-    the input history each step, held across cached-plan steps when ``replan_interval`` > 1
-    (see ``render_segment``).
-
-    Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-segment MP4),
-    ``segments`` (list[row]), and ``elapsed_sec``.
-    """
-    npz_root = Path(npz_root)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    routes = enumerate_routes(npz_root)
-    route_keys = sorted(routes)
-
-    timers = Timers()
-    rows: list[dict] = []
-    video_mp4s: list[Path] = []
-    t0 = time.perf_counter()
-
-    fout = open(out_dir / "segments.jsonl", "w")
-    try:
-        for ri, key in enumerate(route_keys):
-            tl = RouteTimeline(routes[key], sidecar_dir=npz_root, timers=timers)
-            n_seg_videos = 0
-            for start, end in tl.iter_segments(seg_len):
-                png_dir = out_dir / f"{key}_{start}_{end}"
-                metrics = render_segment(
-                    model,
-                    model_args,
-                    tl,
-                    start,
-                    end,
-                    png_dir,
-                    device=device,
-                    near_miss_thresh=near_miss_thresh,
-                    search_radius=search_radius,
-                    warmup_steps=warmup_steps,
-                    unstick_after=unstick_after,
-                    unstick_advance_m=unstick_advance_m,
-                    unstick_radius_mult=unstick_radius_mult,
-                    unstick_teleport_after=unstick_teleport_after,
-                    draw_every=draw_every,
-                    neighbor_history_mode=neighbor_history_mode,
-                    replan_interval=replan_interval,
-                    tracker_mode=tracker_mode,
-                )
-                row = {"route": key, **metrics}
-                fout.write(json.dumps(row, default=float) + "\n")
-                fout.flush()
-                rows.append(row)
-
-                # A segment that terminates at step 0 (e.g. ego starts within goal_reach_m) draws
-                # no PNG; skip the empty ffmpeg call (its glob would error on an empty dir).
-                if not any(png_dir.glob("*.png")):
-                    if verbose:
-                        print(f"  [{key}] segment [{start},{end}] -> 0 frames, no video")
-                    continue
-                seg_mp4 = out_dir / f"{key}_{start}_{end}.mp4"
-                # Raw fps: with only every draw_every-th frame drawn, the video plays
-                # draw_every x faster than real time. For real time use fps = 10 / draw_every.
-                build_mp4(png_dir, seg_mp4, fps)
-                video_mp4s.append(seg_mp4)
-                n_seg_videos += 1
-                if verbose:
-                    print(
-                        f"  [{key}] segment [{start},{end}] -> {seg_mp4.name}  "
-                        f"coll={metrics['n_collision_steps']} near={metrics['n_near_miss_steps']} "
-                        f"min_clr={metrics['min_clearance']:.3f}"
-                    )
-
-            if verbose:
-                print(f"[{ri + 1}/{len(route_keys)}] {key}: {n_seg_videos} segment video(s)")
-    finally:
-        fout.close()
-
-    summary = aggregate(rows, near_miss_thresh)
-    summary["npz_root"] = str(npz_root)
-    summary["n_routes"] = len(route_keys)
-    summary["elapsed_sec"] = time.perf_counter() - t0
-    summary["video_mp4s"] = video_mp4s
-    summary["segments"] = rows
-
-    with open(out_dir / "summary.json", "w") as f:
-        json.dump(
-            {k: v for k, v in summary.items() if k not in ("video_mp4s", "segments")}, f, indent=4
-        )
-
-    return summary
+    evaluator = FullRouteClosedLoopEvaluation(
+        model,
+        model_args,
+        ClosedLoopEvalConfig(
+            out_dir=Path(out_dir),
+            params=RolloutParams(
+                device=device,
+                near_miss_thresh=near_miss_thresh,
+                search_radius=search_radius,
+                warmup_steps=warmup_steps,
+                unstick_after=unstick_after,
+                unstick_advance_m=unstick_advance_m,
+                unstick_radius_mult=unstick_radius_mult,
+                unstick_teleport_after=unstick_teleport_after,
+                draw_every=draw_every,
+                replan_interval=replan_interval,
+                tracker_mode=tracker_mode,
+                neighbor_history_mode=neighbor_history_mode,
+            ),
+            fps=fps,
+            verbose=verbose,
+        ),
+        npz_root,
+        seg_len=seg_len,
+        ddp_rank=ddp_rank,
+        ddp_world_size=ddp_world_size,
+    )
+    return evaluator.run()
