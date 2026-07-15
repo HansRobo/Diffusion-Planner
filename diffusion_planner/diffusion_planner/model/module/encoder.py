@@ -326,9 +326,8 @@ class SelfAttentionBlock(nn.Module):
         )
 
     def forward(self, x, mask):
-        x = x + self.drop_path(
-            self.attn(self.norm1(x), x, x, key_padding_mask=mask, need_weights=False)[0]
-        )
+        y = self.norm1(x)
+        x = x + self.drop_path(self.attn(y, y, y, key_padding_mask=mask, need_weights=False)[0])
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
