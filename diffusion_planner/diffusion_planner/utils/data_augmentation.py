@@ -1,6 +1,19 @@
 import numpy as np
 import torch
 
+from diffusion_planner.dimensions import (
+    LB_X,
+    LB_Y,
+    LINE_TYPE_LEFT_START,
+    LINE_TYPE_NUM,
+    LINE_TYPE_RIGHT_START,
+    RB_X,
+    RB_Y,
+    TURN_INDICATOR_OUTPUT_ENABLE_LEFT,
+    TURN_INDICATOR_OUTPUT_ENABLE_RIGHT,
+    Y,
+    dY,
+)
 from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
 TIME_INTERVAL = 0.1
@@ -595,3 +608,97 @@ class StatePerturbation:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
         else:
             return interpolated
+
+
+class FlipAugmentation:
+    """
+    Data augmentation that mirrors the whole scene across the ego longitudinal
+    axis (y -> -y) with probability flip_prob per sample.
+
+    Expects ego-centric inputs with `ego_agent_past` / `goal_pose` already in
+    (x, y, cos, sin) form and futures in (x, y, heading) form, i.e. the state
+    they are in right before StatePerturbation in train_epoch. Padding rows are
+    all-zero and stay all-zero under negation and left/right swaps, so no
+    validity masks are needed.
+    """
+
+    def __init__(self, flip_prob: float, device: torch.device | str) -> None:
+        self._flip_prob = flip_prob
+        self._device = torch.device(device)
+
+    @staticmethod
+    def _negate(x, channels, flip):
+        """Negate the given channels of x for flipped samples. flip: (B,) bool."""
+        flipped = x.clone()
+        flipped[..., channels] = -flipped[..., channels]
+        cond = flip.reshape(-1, *([1] * (x.ndim - 1)))
+        return torch.where(cond, flipped, x)
+
+    def _flip_lanes(self, lanes, flip):
+        """
+        Mirror lane segments: negate y components and swap the left/right
+        boundaries and line types. Traffic light one-hot is side-agnostic.
+        """
+        flipped = lanes.clone()
+        flipped[..., Y] = -lanes[..., Y]
+        flipped[..., dY] = -lanes[..., dY]
+        flipped[..., LB_X] = lanes[..., RB_X]
+        flipped[..., LB_Y] = -lanes[..., RB_Y]
+        flipped[..., RB_X] = lanes[..., LB_X]
+        flipped[..., RB_Y] = -lanes[..., LB_Y]
+        left = slice(LINE_TYPE_LEFT_START, LINE_TYPE_LEFT_START + LINE_TYPE_NUM)
+        right = slice(LINE_TYPE_RIGHT_START, LINE_TYPE_RIGHT_START + LINE_TYPE_NUM)
+        flipped[..., left] = lanes[..., right]
+        flipped[..., right] = lanes[..., left]
+        cond = flip.reshape(-1, *([1] * (lanes.ndim - 1)))
+        return torch.where(cond, flipped, lanes)
+
+    def _flip_turn_indicators(self, turn_indicators, flip):
+        left = TURN_INDICATOR_OUTPUT_ENABLE_LEFT
+        right = TURN_INDICATOR_OUTPUT_ENABLE_RIGHT
+        swapped = torch.where(
+            turn_indicators == left,
+            torch.full_like(turn_indicators, right),
+            torch.where(
+                turn_indicators == right,
+                torch.full_like(turn_indicators, left),
+                turn_indicators,
+            ),
+        )
+        return torch.where(flip.reshape(-1, 1), swapped, turn_indicators)
+
+    def __call__(self, inputs, ego_future, neighbors_future):
+        B = ego_future.shape[0]
+        flip = torch.rand(B, device=ego_future.device) < self._flip_prob
+        if not flip.any():
+            return inputs, ego_future, neighbors_future
+
+        # ego_current_state: x, y, cos, sin, vx, vy, ax, ay, steering, yaw_rate
+        inputs["ego_current_state"] = self._negate(
+            inputs["ego_current_state"], [1, 3, 5, 7, 8, 9], flip
+        )
+        # ego_agent_past: x, y, cos, sin
+        inputs["ego_agent_past"] = self._negate(inputs["ego_agent_past"], [1, 3], flip)
+        # goal_pose: x, y, cos, sin
+        inputs["goal_pose"] = self._negate(inputs["goal_pose"], [1, 3], flip)
+        # neighbor_agents_past: x, y, cos, sin, vx, vy, w, l, type(3)
+        inputs["neighbor_agents_past"] = self._negate(
+            inputs["neighbor_agents_past"], [1, 3, 5], flip
+        )
+        # static_objects: x, y, cos, sin, w, l, type(4)
+        inputs["static_objects"] = self._negate(inputs["static_objects"], [1, 3], flip)
+        # polygons / line_strings: x, y, type one-hot...
+        inputs["polygons"] = self._negate(inputs["polygons"], [1], flip)
+        inputs["line_strings"] = self._negate(inputs["line_strings"], [1], flip)
+        # lanes / route_lanes: swap left/right boundaries and line types too
+        inputs["lanes"] = self._flip_lanes(inputs["lanes"], flip)
+        inputs["route_lanes"] = self._flip_lanes(inputs["route_lanes"], flip)
+        # turn indicators: swap ENABLE_LEFT <-> ENABLE_RIGHT
+        inputs["turn_indicators"] = self._flip_turn_indicators(inputs["turn_indicators"], flip)
+
+        # futures: x, y, heading
+        ego_future = self._negate(ego_future, [1, 2], flip)
+        neighbors_future = self._negate(neighbors_future, [1, 2], flip)
+        inputs["ego_agent_future"] = ego_future
+
+        return inputs, ego_future, neighbors_future
