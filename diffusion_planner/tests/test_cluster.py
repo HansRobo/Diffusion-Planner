@@ -167,15 +167,15 @@ def test_extract_features_dtype_is_float():
 
 
 def test_extract_enriched_shapes_default():
-    """Default 2hz, top_k=20: ego_block=(106,), neighbor_block=(2500,)."""
+    """Default 2hz, top_k=20: ego_block=(109,), neighbor_block=(2560,)."""
     with tempfile.TemporaryDirectory() as tmp:
         npz_path = str(Path(tmp) / "sample.npz")
         _make_enriched_npz(npz_path, n_active_neighbors=25)
         ego, nbr = extract_features_enriched(npz_path, top_k=20, temporal_hz=2)
-    # ego: 7*4 + 16*3 + 10 + 20 = 106
-    assert ego.shape == (106,), f"Expected (106,), got {ego.shape}"
-    # neighbor: 20*(7*11 + 16*3) = 20*(77+48) = 2500
-    assert nbr.shape == (2500,), f"Expected (2500,), got {nbr.shape}"
+    # ego: 7*4 + 17*3 + 10 + 20 = 109  (17 future indices: endpoint always included)
+    assert ego.shape == (109,), f"Expected (109,), got {ego.shape}"
+    # neighbor: 20*(7*11 + 17*3) = 20*(77+51) = 2560
+    assert nbr.shape == (2560,), f"Expected (2560,), got {nbr.shape}"
 
 
 def test_extract_enriched_shapes_10hz():
@@ -221,17 +221,20 @@ def test_extract_enriched_top_k_selection():
 
 
 def test_extract_enriched_fewer_than_k_neighbors():
-    """When fewer active neighbors than top_k, remaining are zero-padded."""
+    """When fewer active neighbors than top_k, inactive get sentinel -1.0."""
     with tempfile.TemporaryDirectory() as tmp:
         npz_path = str(Path(tmp) / "sample.npz")
         _make_enriched_npz(npz_path, n_active_neighbors=3)
         ego, nbr = extract_features_enriched(npz_path, top_k=10, temporal_hz=2)
-    # ego: 7*4 + 16*3 + 10 + 10 = 96
-    assert ego.shape == (96,), f"Expected (96,), got {ego.shape}"
-    # Last 10 elements are distances; only 3 are non-zero
+    # ego: 7*4 + 17*3 + 10 + 10 = 99
+    assert ego.shape == (99,), f"Expected (99,), got {ego.shape}"
+    # Last 10 elements are distances; 3 active (>0), 7 inactive (== -1)
     distances = ego[-10:]
-    assert np.count_nonzero(distances) == 3, (
-        f"Expected 3 non-zero distances, got {np.count_nonzero(distances)}"
+    assert np.sum(distances > 0) == 3, (
+        f"Expected 3 positive distances, got {np.sum(distances > 0)}"
+    )
+    assert np.sum(distances == -1.0) == 7, (
+        f"Expected 7 sentinel distances, got {np.sum(distances == -1.0)}"
     )
 
 
@@ -242,6 +245,32 @@ def test_extract_enriched_invalid_temporal_hz():
         _make_enriched_npz(npz_path)
         try:
             extract_features_enriched(npz_path, temporal_hz=3)
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+
+def test_extract_enriched_zero_temporal_hz():
+    """temporal_hz=0 raises ValueError (not ZeroDivisionError)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path)
+        try:
+            extract_features_enriched(npz_path, temporal_hz=0)
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+        except ZeroDivisionError:
+            assert False, "Got ZeroDivisionError instead of ValueError"
+
+
+def test_extract_enriched_negative_temporal_hz():
+    """temporal_hz=-2 raises ValueError."""
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_path = str(Path(tmp) / "sample.npz")
+        _make_enriched_npz(npz_path)
+        try:
+            extract_features_enriched(npz_path, temporal_hz=-2)
             assert False, "Should have raised ValueError"
         except ValueError:
             pass
@@ -790,6 +819,8 @@ ALL_TESTS = [
     test_extract_enriched_top_k_selection,
     test_extract_enriched_fewer_than_k_neighbors,
     test_extract_enriched_invalid_temporal_hz,
+    test_extract_enriched_zero_temporal_hz,
+    test_extract_enriched_negative_temporal_hz,
     test_extract_enriched_dtype_is_float,
     test_compute_wcss_length,
     test_compute_wcss_monotone,

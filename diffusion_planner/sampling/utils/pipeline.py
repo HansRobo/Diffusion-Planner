@@ -103,20 +103,24 @@ def extract_features_enriched(
     Returns:
         (ego_block, neighbor_block) — two 1-D float arrays.
     """
+    if temporal_hz <= 0:
+        raise ValueError(f"temporal_hz={temporal_hz} must be positive")
     if 10 % temporal_hz != 0:
         raise ValueError(f"temporal_hz={temporal_hz} must evenly divide 10")
 
-    data = np.load(npz_path, allow_pickle=True)
-    step = 10 // temporal_hz
-    past_idx = np.arange(0, 31, step)
-    future_idx = np.arange(0, 80, step)
+    with np.load(npz_path, allow_pickle=True) as data:
+        step = 10 // temporal_hz
+        n_past = data["ego_agent_past"].shape[0]
+        n_future = data["ego_agent_future"].shape[0]
+        past_idx = np.arange(0, n_past, step)
+        future_idx = np.unique(np.append(np.arange(0, n_future, step), n_future - 1))
 
-    ego_past = data["ego_agent_past"].astype(float)[past_idx]
-    ego_future = data["ego_agent_future"].astype(float)[future_idx]
-    ego_state = data["ego_current_state"].astype(float)
+        ego_past = data["ego_agent_past"].astype(float)[past_idx]
+        ego_future = data["ego_agent_future"].astype(float)[future_idx]
+        ego_state = data["ego_current_state"].astype(float)
 
-    nbr_past = data["neighbor_agents_past"].astype(float)
-    nbr_future = data["neighbor_agents_future"].astype(float)
+        nbr_past = data["neighbor_agents_past"].astype(float)
+        nbr_future = data["neighbor_agents_future"].astype(float)
 
     active_mask = np.any(nbr_past.reshape(nbr_past.shape[0], -1) != 0, axis=1)
     nbr_pos = nbr_past[:, -1, :2]
@@ -127,7 +131,7 @@ def extract_features_enriched(
     topk_past = nbr_past[sorted_idx][:, past_idx]
     topk_future = nbr_future[sorted_idx][:, future_idx]
     topk_dist = distances[sorted_idx].copy()
-    topk_dist[topk_dist == np.inf] = 0.0
+    topk_dist[topk_dist == np.inf] = -1.0
 
     ego_block = np.concatenate([
         ego_past.flatten(),
