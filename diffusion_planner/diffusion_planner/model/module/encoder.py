@@ -515,10 +515,6 @@ class LaneEncoder(nn.Module):
         tokens_mlp_dim = 64
         channels_mlp_dim = 128
 
-        assert class_type in [CLASS_TYPE_LANE, CLASS_TYPE_ROUTE], (
-            "Invalid class type for LaneEncoder"
-        )
-
         self._lane_len = lane_len
         self._class_type = class_type
 
