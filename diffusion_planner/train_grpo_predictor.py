@@ -521,7 +521,13 @@ def model_training(args):
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
         diffusion_planner, optimizer, scheduler, init_epoch, wandb_id, model_ema = resume_model(
-            args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
+            args.resume_model_path,
+            diffusion_planner,
+            optimizer,
+            scheduler,
+            model_ema,
+            args.device,
+            use_ddp=args.ddp,
         )
         # GRPO restarts the LR schedule from the configured base rate.
         for param_group in optimizer.param_groups:
