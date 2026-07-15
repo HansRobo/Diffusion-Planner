@@ -151,29 +151,30 @@ def compute_safety_score_batch(
 
     # Collision: negative signed distance = overlap
     collision_mask = distances < 0  # (N, N_nb, T)
-
-    # Filter out rear-end collisions: only count if NPC is ahead of or beside
-    # the ego (not approaching from behind). Check via dot product of ego
-    # heading with the ego→NPC displacement vector.
     ego_xy = ego_trajs[:, :, :2]  # (N, T, 2)
-    ego_heading = ego_trajs[:, :, 2:4]  # (N, T, 2) [cos, sin]
-    npc_xy = neighbor_futures[:, :, :2]  # (N_nb, T, 2)
 
-    # ego→NPC vector: (N, N_nb, T, 2)
-    ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)
-    # Dot product with ego heading: positive = NPC ahead/beside, negative = NPC behind
-    dot = (ego_to_npc * ego_heading.unsqueeze(1)).sum(dim=-1)  # (N, N_nb, T)
-    npc_is_behind = dot < 0  # (N, N_nb, T)
+    if config.ignore_rear_end_collisions:
+        # Filter out rear-end collisions: only count if NPC is ahead of or beside
+        # the ego (not approaching from behind). Check via dot product of ego
+        # heading with the ego→NPC displacement vector.
+        ego_heading = ego_trajs[:, :, 2:4]  # (N, T, 2) [cos, sin]
+        npc_xy = neighbor_futures[:, :, :2]  # (N_nb, T, 2)
 
-    # Suppress rear-end collisions: if NPC overlaps ego from behind at any
-    # timestep, exclude that NPC from collision checks at ALL subsequent
-    # timesteps. Without this, a rear-ending NPC that passes the ego gets
-    # detected as a "side/front collision" once it crosses into the forward
-    # hemisphere — a false positive the ego cannot control.
-    rear_overlap = (distances < 0) & npc_is_behind  # (N, N_nb, T)
-    # cummax along time: once True, stays True for all later timesteps
-    ever_rear_ended = rear_overlap.cummax(dim=2).values  # (N, N_nb, T)
-    collision_mask = collision_mask & ~npc_is_behind & ~ever_rear_ended
+        # ego→NPC vector: (N, N_nb, T, 2)
+        ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)
+        # Dot product with ego heading: positive = NPC ahead/beside, negative = NPC behind
+        dot = (ego_to_npc * ego_heading.unsqueeze(1)).sum(dim=-1)  # (N, N_nb, T)
+        npc_is_behind = dot < 0  # (N, N_nb, T)
+
+        # Suppress rear-end collisions: if NPC overlaps ego from behind at any
+        # timestep, exclude that NPC from collision checks at ALL subsequent
+        # timesteps. Without this, a rear-ending NPC that passes the ego gets
+        # detected as a "side/front collision" once it crosses into the forward
+        # hemisphere — a false positive the ego cannot control.
+        rear_overlap = (distances < 0) & npc_is_behind  # (N, N_nb, T)
+        # cummax along time: once True, stays True for all later timesteps
+        ever_rear_ended = rear_overlap.cummax(dim=2).values  # (N, N_nb, T)
+        collision_mask = collision_mask & ~npc_is_behind & ~ever_rear_ended
 
     # Suppress low-speed bbox overlaps: two stopped/slow vehicles queued
     # bumper-to-bumper at a red light or in traffic is not a collision.
@@ -492,10 +493,17 @@ def compute_kinematic_gate(
     abs_violated = yaw_rate > config.max_yaw_rate
 
     # Check 2: bicycle-model curvature cap. κ_max = margin * tan(max_steer) / wheelbase.
+    # Low-speed conditioning: as speed -> 0 the bound collapses to ~0 and the
+    # check compares SG heading noise against SG speed noise (observed firing at
+    # 0.002 rad/s = 0.11 deg/s — physically meaningless; recorded logs only pass
+    # because their standstill poses repeat bit-identically). Clamp the bound's
+    # speed at 0.1 m/s: at standstill the bound becomes kappa_max * 0.1
+    # (~2 deg/s for a car), which still catches genuine turning-in-place while
+    # being immune to numerical noise. Behavior above 0.1 m/s is unchanged.
     if ego_shape is not None:
         wheelbase = float(ego_shape[0])
         kappa_max = config.kinematic_margin * math.tan(config.max_steer) / max(wheelbase, 1e-3)
-        curv_violated = yaw_rate > kappa_max * speed_align
+        curv_violated = yaw_rate > kappa_max * speed_align.clamp_min(0.1)
     else:
         curv_violated = torch.zeros_like(abs_violated)
 

@@ -7,11 +7,16 @@ import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
-from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.path_key import data_path_to_rel
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.valid_config import ValidConfig
-from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
+from diffusion_planner.validate_model import (
+    aggregate_replan_consistency_metrics,
+    aggregate_valid_metrics,
+    validate_model,
+    validate_replan_consistency,
+)
 from timm.utils import ModelEma
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -55,6 +60,22 @@ def get_args(args_list=None):
     parser.add_argument("--ddp", default=True, type=boolean)
     parser.add_argument("--port", default="22323", type=str)
     parser.add_argument(
+        "--enable_temporal_stability_eval",
+        default=_valid_config_default("enable_temporal_stability_eval"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--enable_replan_consistency_eval",
+        default=_valid_config_default("enable_replan_consistency_eval"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--replan_consistency_expected_gap",
+        type=int,
+        default=_valid_config_default("replan_consistency_expected_gap"),
+        help="Expected consecutive-frame gap for replan consistency. 0 = auto per timeline.",
+    )
+    parser.add_argument(
         "--enable_epdms_eval",
         default=_valid_config_default("enable_epdms_eval"),
         type=boolean,
@@ -88,6 +109,9 @@ def run_validation(valid_cfg: ValidConfig):
     # (Note: Depending on the Config class implementation, it is safer to pass DDP and device info here)
     config_obj.device = valid_cfg.device
     config_obj.ddp = valid_cfg.ddp
+    config_obj.enable_temporal_stability_eval = valid_cfg.enable_temporal_stability_eval
+    config_obj.enable_replan_consistency_eval = valid_cfg.enable_replan_consistency_eval
+    config_obj.replan_consistency_expected_gap = valid_cfg.replan_consistency_expected_gap
     config_obj.enable_epdms_eval = valid_cfg.enable_epdms_eval
     config_obj.enable_pdms_eval = valid_cfg.enable_pdms_eval
     config_obj.epdms_eval_use_agent_boxes = valid_cfg.epdms_eval_use_agent_boxes
@@ -117,9 +141,36 @@ def run_validation(valid_cfg: ValidConfig):
         pin_memory=valid_cfg.pin_mem,
         drop_last=False,
     )
+    valid_pair_loader = None
+    if valid_cfg.enable_replan_consistency_eval:
+        expected_gap = valid_cfg.replan_consistency_expected_gap or None
+        valid_pair_set = DiffusionPlannerPairData(
+            valid_cfg.valid_set_list, expected_gap=expected_gap
+        )
+        if len(valid_pair_set) > 0:
+            valid_pair_sampler = DistributedSampler(
+                valid_pair_set,
+                num_replicas=ddp.get_world_size(),
+                rank=global_rank,
+                shuffle=False,
+            )
+            valid_pair_loader = DataLoader(
+                valid_pair_set,
+                sampler=valid_pair_sampler,
+                batch_size=valid_cfg.batch_size // ddp.get_world_size(),
+                num_workers=valid_cfg.num_workers,
+                pin_memory=valid_cfg.pin_mem,
+                drop_last=False,
+            )
 
     if global_rank == 0:
         print("Dataset Prepared: {} valid data\n".format(len(valid_set)))
+        if valid_cfg.enable_replan_consistency_eval:
+            print(
+                "Replan consistency validation pairs: {}".format(
+                    0 if valid_pair_loader is None else len(valid_pair_loader.dataset)
+                )
+            )
 
     if valid_cfg.ddp:
         torch.distributed.barrier()
@@ -161,6 +212,10 @@ def run_validation(valid_cfg: ValidConfig):
         torch.distributed.barrier()
 
     valid_dict = validate_model(diffusion_planner, valid_loader, config_obj, return_pred=True)
+    replan_agg = {}
+    if valid_pair_loader is not None:
+        replan_dict = validate_replan_consistency(diffusion_planner, valid_pair_loader, config_obj)
+        replan_agg = aggregate_replan_consistency_metrics(replan_dict, valid_cfg.device)
 
     # Per-rank tensors (this rank's DistributedSampler shard, in loader order).
     loss_ego = valid_dict["loss_ego"]
@@ -189,6 +244,15 @@ def run_validation(valid_cfg: ValidConfig):
             )
         if "ego_road_border_loss" in agg["ego_means"]:
             print(f"ego_road_border_loss_mean={agg['ego_means']['ego_road_border_loss']:.4f}")
+        if replan_agg.get("replan_consistency_count", 0) > 0:
+            print(
+                "replan_position_consistency={:.4f} replan_heading_consistency={:.4f} "
+                "replan_consistency_count={:d}".format(
+                    replan_agg["replan_position_consistency"],
+                    replan_agg["replan_heading_consistency"],
+                    replan_agg["replan_consistency_count"],
+                )
+            )
 
     # Save results
     if valid_cfg.save_predictions_dir is None:
@@ -206,6 +270,7 @@ def run_validation(valid_cfg: ValidConfig):
             "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
             "turn_indicator_change_total": turn_indicator_change_total,
             **agg["ego_means"],
+            **replan_agg,
             **{f"epdms_{key}": value for key, value in agg["epdms_means"].items()},
         }
         with open(save_predictions_dir.parent / "valid_dict.json", "w") as f:

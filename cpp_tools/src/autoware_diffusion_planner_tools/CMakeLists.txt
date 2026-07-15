@@ -4,6 +4,14 @@ project(autoware_diffusion_planner_tools)
 include(FetchContent)
 
 find_package(autoware_cmake REQUIRED)
+# cnpy is a vendored third-party library (MIT, (c) Carl Rogers); its license
+# header is not the TIER IV Apache notice ament_copyright expects. Exclude it
+# from lint checks so its upstream headers are left untouched. Must be set
+# before autoware_package() registers the ament_lint_auto hooks.
+set(AMENT_LINT_AUTO_FILE_EXCLUDE
+  include/utils/cnpy.hpp
+  src/utils/cnpy.cpp
+)
 autoware_package()
 
 find_package(yaml-cpp REQUIRED)
@@ -11,12 +19,12 @@ find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 find_package(fmt REQUIRED)
 
-FetchContent_Declare(
+fetchcontent_declare(
   cli11
   GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
   GIT_TAG v2.4.2
 )
-FetchContent_MakeAvailable(cli11)
+fetchcontent_makeavailable(cli11)
 
 # Add compile option to suppress deprecation warnings (optional)
 add_compile_options(-Wno-deprecated-declarations)

@@ -110,9 +110,15 @@ def main() -> None:
     args = parse_args()
 
     from scenario_generation.closed_loop_eval import run_closed_loop_eval
-    from scenario_generation.simulate import load_model
+    from scenario_generation.simulate import load_model, load_onnx_model
 
-    model, model_args = load_model(args.model_path, args.device)
+    # Dispatch on the checkpoint suffix: a .onnx is loaded through the onnxruntime adapter
+    # (same (model, model_args) contract), anything else through the torch loader. args.json must
+    # sit next to whichever file is given.
+    if args.model_path.suffix == ".onnx":
+        model, model_args = load_onnx_model(args.model_path, args.device)
+    else:
+        model, model_args = load_model(args.model_path, args.device)
     out_dir = args.model_path.parent / "closed_loop" / datetime.now().strftime("%Y%m%d_%H%M%S")
     print(f"device: {args.device} | model: {args.model_path} | out: {out_dir}")
 
@@ -134,6 +140,7 @@ def main() -> None:
         replan_interval=args.replan_interval,
         draw_every=args.draw_every,
         neighbor_history_mode="recorded",
+        tracker_mode="perfect",
     )
     summary["model_path"] = str(args.model_path)
 
