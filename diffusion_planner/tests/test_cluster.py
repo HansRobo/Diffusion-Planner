@@ -47,6 +47,7 @@ from utils.pipeline import (
     ClusteringStrategy,
     ElbowKMeansStrategy,
     cluster_trajectories,
+    cluster_trajectories_enriched,
     extract_features,
     extract_features_enriched,
 )
@@ -501,6 +502,43 @@ def _make_synthetic_dataset(tmp_dir: str, n: int = 30, seed: int = 0) -> list[st
     return paths
 
 
+def _make_enriched_dataset(tmp_dir: str, n: int = 30, seed: int = 0) -> list:
+    """Create n NPZ files with enriched fields and distinct trajectory patterns."""
+    rng = np.random.default_rng(seed)
+    patterns = [
+        np.column_stack([np.linspace(0, 20, 80), np.zeros(80), np.zeros(80)]),
+        np.column_stack(
+            [np.linspace(0, 10, 80), np.linspace(0, 10, 80), np.linspace(0, np.pi / 2, 80)]
+        ),
+        np.column_stack(
+            [np.linspace(0, 10, 80), np.linspace(0, -10, 80), np.linspace(0, -np.pi / 2, 80)]
+        ),
+    ]
+    paths = []
+    for i in range(n):
+        pattern = patterns[i % 3].copy().astype(np.float32)
+        pattern += rng.normal(0, 0.05, pattern.shape).astype(np.float32)
+
+        n_nbrs = rng.integers(2, 15)
+        nbr_past = np.zeros((320, 31, 11), dtype=np.float32)
+        nbr_future = np.zeros((320, 80, 3), dtype=np.float32)
+        for j in range(n_nbrs):
+            nbr_past[j] = rng.standard_normal((31, 11)).astype(np.float32)
+            nbr_future[j] = rng.standard_normal((80, 3)).astype(np.float32)
+
+        npz_path = str(Path(tmp_dir) / f"sample_{i:04d}.npz")
+        np.savez(
+            npz_path,
+            ego_agent_past=rng.standard_normal((31, 4)).astype(np.float32),
+            ego_agent_future=pattern,
+            ego_current_state=rng.standard_normal(10).astype(np.float32),
+            neighbor_agents_past=nbr_past,
+            neighbor_agents_future=nbr_future,
+        )
+        paths.append(npz_path)
+    return paths
+
+
 def test_main_end_to_end():
     with tempfile.TemporaryDirectory() as tmp:
         npz_paths = _make_synthetic_dataset(tmp, n=30)
@@ -617,6 +655,57 @@ def test_main_output_keys_sorted():
     print("  [PASS] main end-to-end: output keys are sorted")
 
 
+# ─────────────────────── cluster_trajectories_enriched ─────────────────────
+
+
+def test_enriched_pipeline_returns_dict():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_enriched_dataset(tmp, n=30)
+        strategy = ElbowKMeansStrategy(k_max=5, random_state=42)
+        result = cluster_trajectories_enriched(
+            npz_paths, strategy, pca_components=10,
+            neighbor_pca_components=10, top_k=5, temporal_hz=2,
+        )
+    assert isinstance(result, dict)
+    assert isinstance(strategy.n_clusters_, int)
+    for key in result:
+        assert key.startswith("cluster_id")
+
+
+def test_enriched_pipeline_all_paths_present():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_enriched_dataset(tmp, n=20)
+        result = cluster_trajectories_enriched(
+            npz_paths, ElbowKMeansStrategy(k_max=5, random_state=42),
+            pca_components=10, neighbor_pca_components=10, top_k=5, temporal_hz=2,
+        )
+    all_out = [p for paths in result.values() for p in paths]
+    assert sorted(all_out) == sorted(npz_paths)
+
+
+def test_enriched_pipeline_no_valid_files_raises():
+    strategy = ElbowKMeansStrategy(k_max=3)
+    try:
+        cluster_trajectories_enriched(
+            ["/nonexistent/a.npz"], strategy,
+            pca_components=10, neighbor_pca_components=10,
+        )
+        assert False, "Should have raised RuntimeError"
+    except RuntimeError:
+        pass
+
+
+def test_enriched_pipeline_no_duplicates():
+    with tempfile.TemporaryDirectory() as tmp:
+        npz_paths = _make_enriched_dataset(tmp, n=25)
+        result = cluster_trajectories_enriched(
+            npz_paths, ElbowKMeansStrategy(k_max=5, random_state=42),
+            pca_components=10, neighbor_pca_components=10, top_k=5, temporal_hz=2,
+        )
+    all_paths = [p for paths in result.values() for p in paths]
+    assert len(all_paths) == len(set(all_paths))
+
+
 # ──────────────────────────────── runner ────────────────────────────────────
 
 
@@ -658,6 +747,10 @@ ALL_TESTS = [
     test_main_end_to_end,
     test_main_output_no_duplicates,
     test_main_output_keys_sorted,
+    test_enriched_pipeline_returns_dict,
+    test_enriched_pipeline_all_paths_present,
+    test_enriched_pipeline_no_valid_files_raises,
+    test_enriched_pipeline_no_duplicates,
 ]
 
 

@@ -203,3 +203,75 @@ def cluster_trajectories(
     return {
         k: clusters[k] for k in sorted(clusters, key=lambda x: int(x.replace("cluster_id", "")))
     }
+
+
+def cluster_trajectories_enriched(
+    npz_paths: list,
+    strategy: ClusteringStrategy,
+    pca_components: int = 50,
+    neighbor_pca_components: int = 50,
+    top_k: int = 20,
+    temporal_hz: int = 2,
+) -> dict:
+    """Run the enriched two-stage PCA clustering pipeline.
+
+    Stage 1: Z-score ego and neighbor blocks independently, PCA the neighbor block.
+    Stage 2: Concatenate, Z-score, final PCA, then delegate to strategy.
+    """
+    ego_list = []
+    nbr_list = []
+    valid_paths = []
+    for path in tqdm(npz_paths, desc="Extracting enriched features", unit="file"):
+        try:
+            ego, nbr = extract_features_enriched(path, top_k=top_k, temporal_hz=temporal_hz)
+            ego_list.append(ego)
+            nbr_list.append(nbr)
+            valid_paths.append(path)
+        except Exception as e:
+            tqdm.write(f"  [warn] skipping {path}: {e}")
+
+    if not ego_list:
+        raise RuntimeError("No valid NPZ files found.")
+
+    ego_features = np.array(ego_list)
+    nbr_features = np.array(nbr_list)
+
+    ego_mean = ego_features.mean(axis=0)
+    ego_std = ego_features.std(axis=0) + 1e-8
+    ego_norm = (ego_features - ego_mean) / ego_std
+
+    nbr_mean = nbr_features.mean(axis=0)
+    nbr_std = nbr_features.std(axis=0) + 1e-8
+    nbr_norm = (nbr_features - nbr_mean) / nbr_std
+
+    n_nbr = min(neighbor_pca_components, nbr_norm.shape[0], nbr_norm.shape[1])
+    nbr_pca = PCA(n_components=n_nbr, random_state=0)
+    nbr_reduced = nbr_pca.fit_transform(nbr_norm)
+    print(
+        f"Neighbor PCA: {nbr_norm.shape[1]}-dim → {n_nbr}-dim "
+        f"({nbr_pca.explained_variance_ratio_.sum() * 100:.1f}% variance explained)"
+    )
+
+    combined = np.hstack([ego_norm, nbr_reduced])
+    comb_mean = combined.mean(axis=0)
+    comb_std = combined.std(axis=0) + 1e-8
+    combined_norm = (combined - comb_mean) / comb_std
+
+    n_final = min(pca_components, combined_norm.shape[0], combined_norm.shape[1])
+    final_pca = PCA(n_components=n_final, random_state=0)
+    features_pca = final_pca.fit_transform(combined_norm)
+    print(
+        f"Final PCA: {combined_norm.shape[1]}-dim → {n_final}-dim "
+        f"({final_pca.explained_variance_ratio_.sum() * 100:.1f}% variance explained)"
+    )
+
+    labels = strategy.fit_predict(features_pca)
+
+    clusters = defaultdict(list)
+    for path, label in zip(valid_paths, labels):
+        clusters[f"cluster_id{label}"].append(path)
+
+    return {
+        k: clusters[k]
+        for k in sorted(clusters, key=lambda x: int(x.replace("cluster_id", "")))
+    }
