@@ -1,7 +1,7 @@
-"""Low-level closed-loop rollout helpers and backward-compatible entry points.
+"""Low-level closed-loop rollout helpers.
 
-Prefer :class:`scenario_generation.closed_loop_evaluation.FullRouteClosedLoopEvaluation`
-for new code; ``run_closed_loop_eval`` remains a thin wrapper for ``train.py``.
+``run_closed_loop_eval`` is the tier4-main entry point used by ``train.py``.
+New code should use :class:`scenario_generation.closed_loop_evaluation.FullRouteClosedLoopEvaluation`.
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ def run_closed_loop_eval(
     ddp_rank: int = 0,
     ddp_world_size: int = 1,
 ) -> dict:
-    """Backward-compatible wrapper around :class:`FullRouteClosedLoopEvaluation`."""
+    """tier4-main entry point; delegates to :class:`FullRouteClosedLoopEvaluation`."""
     from scenario_generation.closed_loop_evaluation import (
         ClosedLoopEvalConfig,
         FullRouteClosedLoopEvaluation,
@@ -150,4 +150,6 @@ def run_closed_loop_eval(
         ddp_rank=ddp_rank,
         ddp_world_size=ddp_world_size,
     )
+    if ddp_world_size > 1:
+        return evaluator.run_distributed()
     return evaluator.run()

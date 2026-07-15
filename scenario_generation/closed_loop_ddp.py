@@ -1,4 +1,4 @@
-"""DDP sharding helpers for closed-loop evaluation (full-route and grouped)."""
+"""DDP sharding helpers for closed-loop evaluation."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import json
 import os
 from pathlib import Path
 from typing import Any
-
-from scenario_generation.closed_loop_eval import aggregate
 
 
 def shard_items(items: list, rank: int, world_size: int) -> list:
@@ -43,53 +41,6 @@ def write_eval_shard(
     }
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return path
-
-
-def merge_full_route_shards(
-    out_dir: Path | str,
-    world_size: int,
-    *,
-    npz_root: Path | str,
-    near_miss_thresh: float,
-) -> dict:
-    """Merge per-rank full-route shards and write ``segments.jsonl`` + ``summary.json``."""
-    out_dir = Path(out_dir)
-    all_rows: list[dict] = []
-    video_mp4s: list[Path] = []
-    route_keys: list[str] = []
-    elapsed_sec = 0.0
-
-    for rank in range(world_size):
-        path = out_dir / "ddp_shards" / f"rank_{rank:03d}.json"
-        if not path.is_file():
-            continue
-        shard = json.loads(path.read_text(encoding="utf-8"))
-        all_rows.extend(shard.get("rows") or [])
-        video_mp4s.extend(Path(p) for p in shard.get("video_mp4s") or [])
-        elapsed_sec = max(elapsed_sec, float(shard.get("elapsed_sec", 0.0)))
-        route_keys.extend(shard.get("extras", {}).get("route_keys") or [])
-
-    with open(out_dir / "segments.jsonl", "w", encoding="utf-8") as fout:
-        for row in all_rows:
-            fout.write(json.dumps(row, default=float) + "\n")
-
-    summary = aggregate(all_rows, near_miss_thresh)
-    summary["npz_root"] = str(Path(npz_root).resolve())
-    summary["n_routes"] = len(set(route_keys))
-    summary["elapsed_sec"] = elapsed_sec
-    summary["video_mp4s"] = video_mp4s
-    summary["segments"] = all_rows
-    summary["mode"] = "full"
-    summary["ddp_shard"] = True
-    summary["ddp_world_size"] = world_size
-
-    with open(out_dir / "summary.json", "w", encoding="utf-8") as f:
-        json.dump(
-            {k: v for k, v in summary.items() if k not in ("video_mp4s", "segments")},
-            f,
-            indent=4,
-        )
-    return summary
 
 
 def ddp_device_for_rank(fallback: str = "cuda") -> str:

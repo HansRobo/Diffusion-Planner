@@ -17,6 +17,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,15 @@ class JobRunResult:
     rows: list[dict] = field(default_factory=list)
     video_mp4s: list[Path] = field(default_factory=list)
     extras: dict[str, Any] = field(default_factory=dict)
+    elapsed_sec: float = 0.0
+
+
+def resolve_default_out_dir(model_path: Path | str, out_dir: Path | str | None = None) -> Path:
+    """Default output tree: ``<checkpoint_dir>/closed_loop/<timestamp>/``."""
+    if out_dir is not None:
+        return Path(out_dir)
+    model_path = Path(model_path)
+    return model_path.parent / "closed_loop" / datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 class ClosedLoopEvaluation(ABC):
@@ -152,23 +162,61 @@ class ClosedLoopEvaluation(ABC):
             self.print_summary(summary)
         return summary
 
+    def run_distributed(self) -> dict:
+        """Run evaluation; under DDP, barrier then rank-0 ``merge_ddp_shards``."""
+        partial = self.run()
+        if self.ddp_world_size <= 1:
+            return partial
+        try:
+            import torch.distributed as dist
+        except ImportError:
+            return partial
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+        if self.ddp_rank != 0:
+            return {}
+        if partial.get("ddp_shard"):
+            return self.merge_ddp_shards(self.ddp_world_size)
+        return partial
+
     def shard_jobs(self, jobs: list[ClosedLoopJob]) -> list[ClosedLoopJob]:
         return shard_items(jobs, self.ddp_rank, self.ddp_world_size)
 
+    def initial_job_extras(self) -> dict[str, Any]:
+        return {}
+
+    def merge_job_result(self, merged: JobRunResult, partial: JobRunResult) -> None:
+        merged.rows.extend(partial.rows)
+        merged.video_mp4s.extend(partial.video_mp4s)
+        for key, value in partial.extras.items():
+            if key in merged.extras and isinstance(merged.extras[key], list):
+                merged.extras[key].extend(value)
+            elif key in merged.extras and isinstance(merged.extras[key], dict):
+                merged.extras[key].update(value)
+            elif key in merged.extras and isinstance(merged.extras[key], int):
+                merged.extras[key] = int(merged.extras[key]) + int(value)
+            else:
+                merged.extras[key] = value
+
+    def on_job_complete(
+        self,
+        job: ClosedLoopJob,
+        partial: JobRunResult,
+        index: int,
+        total: int,
+    ) -> None:
+        """Hook for per-job progress (subclasses print route/bag summaries here)."""
+
     def execute_jobs(self, jobs: list[ClosedLoopJob]) -> JobRunResult:
-        merged = JobRunResult()
-        for job in jobs:
+        merged = JobRunResult(extras=self.initial_job_extras())
+        for ri, job in enumerate(jobs):
             partial = self.run_job(job)
-            merged.rows.extend(partial.rows)
-            merged.video_mp4s.extend(partial.video_mp4s)
-            for key, value in partial.extras.items():
-                if key in merged.extras and isinstance(merged.extras[key], list):
-                    merged.extras[key].extend(value)
-                elif key in merged.extras and isinstance(merged.extras[key], dict):
-                    merged.extras[key].update(value)
-                else:
-                    merged.extras[key] = value
+            self.merge_job_result(merged, partial)
+            self.on_job_complete(job, partial, ri, len(jobs))
         return merged
+
+    def ddp_shard_extras(self, result: JobRunResult) -> dict[str, Any]:
+        return dict(result.extras)
 
     def finalize_ddp(self, result: JobRunResult, *, elapsed_sec: float) -> dict:
         from scenario_generation.closed_loop_ddp import write_eval_shard
@@ -180,9 +228,12 @@ class ClosedLoopEvaluation(ABC):
             rows=result.rows,
             video_mp4s=result.video_mp4s,
             elapsed_sec=elapsed_sec,
-            extras=result.extras,
+            extras=self.ddp_shard_extras(result),
             profile=self.config.profile,
         )
+        return self.ddp_partial_summary(result, elapsed_sec=elapsed_sec)
+
+    def ddp_partial_summary(self, result: JobRunResult, *, elapsed_sec: float) -> dict:
         return {
             "mode": self.mode,
             "ddp_shard": True,
@@ -191,6 +242,36 @@ class ClosedLoopEvaluation(ABC):
             "n_rows": len(result.rows),
             "elapsed_sec": elapsed_sec,
         }
+
+    def collect_ddp_shards(self, world_size: int) -> JobRunResult:
+        """Load per-rank shard JSON written under ``out_dir/ddp_shards/``."""
+        merged = JobRunResult()
+        for rank in range(world_size):
+            path = self.out_dir / "ddp_shards" / f"rank_{rank:03d}.json"
+            if not path.is_file():
+                continue
+            shard = json.loads(path.read_text(encoding="utf-8"))
+            merged.rows.extend(shard.get("rows") or [])
+            merged.video_mp4s.extend(Path(p) for p in shard.get("video_mp4s") or [])
+            merged.elapsed_sec = max(merged.elapsed_sec, float(shard.get("elapsed_sec", 0.0)))
+            self.merge_job_result(merged, JobRunResult(extras=shard.get("extras") or {}))
+        return merged
+
+    def merge_ddp_shards(self, world_size: int) -> dict:
+        """Rank-0: merge shard files, persist artifacts, and return the final summary."""
+        result = self.collect_ddp_shards(world_size)
+        self.prepare_ddp_merge_artifacts(result)
+        summary = self.build_summary(result, elapsed_sec=result.elapsed_sec)
+        summary["mode"] = self.mode
+        summary["ddp_shard"] = True
+        summary["ddp_world_size"] = world_size
+        self.write_artifacts(summary, result)
+        if self.config.verbose:
+            self.print_summary(summary)
+        return summary
+
+    def prepare_ddp_merge_artifacts(self, result: JobRunResult) -> None:
+        """Hook for mode-specific files written during rank-0 DDP merge."""
 
     @abstractmethod
     def discover_jobs(self) -> list[ClosedLoopJob]:
@@ -284,6 +365,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             for key in sorted(routes)
         ]
 
+    def initial_job_extras(self) -> dict[str, Any]:
+        return {"route_keys": []}
+
     def execute_jobs(self, jobs: list[ClosedLoopJob]) -> JobRunResult:
         """Stream per-segment rows to ``segments.jsonl`` while jobs run."""
         merged = JobRunResult(extras={"route_keys": []})
@@ -295,12 +379,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 merged.rows.extend(partial.rows)
                 merged.video_mp4s.extend(partial.video_mp4s)
                 merged.extras["route_keys"].append(job.route_key)
-                if self.config.verbose:
-                    n_videos = len(partial.video_mp4s)
-                    print(
-                        f"[{ri + 1}/{len(jobs)}] {job.route_key}: "
-                        f"{n_videos} segment video(s)"
-                    )
+                self.on_job_complete(job, partial, ri, len(jobs))
         return merged
 
     def run_job(
@@ -354,10 +433,24 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             extras["timers"] = timers
         return JobRunResult(rows=rows, video_mp4s=video_mp4s, extras=extras)
 
+    def on_job_complete(
+        self,
+        job: ClosedLoopJob,
+        partial: JobRunResult,
+        index: int,
+        total: int,
+    ) -> None:
+        assert isinstance(job, FullRouteRouteJob)
+        if self.config.verbose:
+            print(
+                f"[{index + 1}/{total}] {job.route_key}: "
+                f"{len(partial.video_mp4s)} segment video(s)"
+            )
+
     def build_summary(self, result: JobRunResult, *, elapsed_sec: float) -> dict:
         summary = aggregate(result.rows, self.config.params.near_miss_thresh)
         summary["npz_root"] = str(self.npz_root)
-        summary["n_routes"] = len(result.extras.get("route_keys") or [])
+        summary["n_routes"] = len(set(result.extras.get("route_keys") or []))
         summary["elapsed_sec"] = elapsed_sec
         summary["video_mp4s"] = result.video_mp4s
         summary["segments"] = result.rows
@@ -372,16 +465,28 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             )
 
     def print_summary(self, summary: dict) -> None:
-        from scenario_generation.closed_loop_cli import print_full_route_summary
+        near_miss_thresh = self.config.params.near_miss_thresh
+        n_seg = summary["n_segments"]
+        print(f"\n=== closed-loop validation: {n_seg} segments in {summary['elapsed_sec']:.1f}s ===")
+        print(
+            f"collision: {summary['n_segments_with_collision']}/{n_seg} segments "
+            f"(rate {summary['collision_segment_rate']:.4f}), "
+            f"{summary['total_collision_steps']} steps (rate {summary['collision_step_rate']:.6f})"
+        )
+        print(
+            f"near-miss (<= {near_miss_thresh} m): "
+            f"{summary['n_segments_with_near_miss']}/{n_seg} segments "
+            f"(rate {summary['near_miss_segment_rate']:.4f}), {summary['total_near_miss_steps']} steps"
+        )
+        print(
+            f"global_min_clearance={summary['global_min_clearance']:.3f} m  "
+            f"mean_segment_min_clearance={summary['mean_segment_min_clearance']:.3f} m  "
+            f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m"
+        )
+        print(f"total_snaps={summary['total_snaps']}  terminated={summary['terminated_counts']}")
+        print(f"videos: per-segment <route>_<start>_<end>.mp4 in {self.out_dir}")
 
-        print_full_route_summary(summary, self.config.params.near_miss_thresh, self.out_dir)
-
-
-class ClosedLoopEvalSuite:
-    """Run multiple evaluators (e.g. one per classification date) and collect summaries."""
-
-    def __init__(self, evaluators: list[ClosedLoopEvaluation]) -> None:
-        self.evaluators = evaluators
-
-    def run(self) -> list[dict]:
-        return [ev.run() for ev in self.evaluators]
+    def prepare_ddp_merge_artifacts(self, result: JobRunResult) -> None:
+        with open(self.out_dir / "segments.jsonl", "w", encoding="utf-8") as fout:
+            for row in result.rows:
+                fout.write(json.dumps(row, default=float) + "\n")
