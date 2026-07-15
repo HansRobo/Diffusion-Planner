@@ -1,6 +1,11 @@
 import numpy as np
 import torch
 
+from diffusion_planner.dimensions import (
+    TRAFFIC_LIGHT_GREEN,
+    TRAFFIC_LIGHT_RED,
+    TRAFFIC_LIGHT_WHITE,
+)
 from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
 TIME_INTERVAL = 0.1
@@ -595,3 +600,43 @@ class StatePerturbation:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
         else:
             return interpolated
+
+
+class TrafficLightDropoutAugmentation:
+    """
+    Data augmentation that replaces a known traffic light color
+    (green / yellow / red) with the unknown state to simulate traffic light
+    misdetection in the perception output.
+
+    Each lane with a known color is dropped independently with probability
+    dropout_prob, consistently across its whole polyline. The unknown one-hot
+    (`TRAFFIC_LIGHT_WHITE`) is the same encoding the converter emits when
+    traffic light recognition fails, so the augmented input matches a real
+    failure mode exactly. Lanes without a traffic light and lanes already
+    unknown are left untouched, and padding rows stay all-zero.
+    """
+
+    def __init__(self, dropout_prob: float, device: torch.device | str) -> None:
+        self._dropout_prob = dropout_prob
+        self._device = torch.device(device)
+
+    def _drop_known_colors(self, lanes):
+        """lanes: (B, P, V, D) with the traffic light one-hot at 8..12."""
+        B, P, V, _ = lanes.shape
+
+        valid_pt = torch.sum(torch.ne(lanes[..., :8], 0), dim=-1) > 0  # (B, P, V)
+        color = lanes[..., TRAFFIC_LIGHT_GREEN : TRAFFIC_LIGHT_RED + 1]
+        has_color = torch.sum(torch.ne(color, 0), dim=(-2, -1)) > 0  # (B, P)
+
+        drop = has_color & (torch.rand(B, P, device=lanes.device) < self._dropout_prob)
+
+        dropped = lanes.clone()
+        dropped[..., TRAFFIC_LIGHT_GREEN : TRAFFIC_LIGHT_RED + 1] = 0.0
+        dropped[..., TRAFFIC_LIGHT_WHITE] = valid_pt.to(lanes.dtype)
+
+        return torch.where(drop.view(B, P, 1, 1), dropped, lanes)
+
+    def __call__(self, inputs, ego_future, neighbors_future):
+        inputs["lanes"] = self._drop_known_colors(inputs["lanes"])
+        inputs["route_lanes"] = self._drop_known_colors(inputs["route_lanes"])
+        return inputs, ego_future, neighbors_future
