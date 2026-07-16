@@ -1,6 +1,5 @@
 import pytest
 import torch
-
 from diffusion_planner.train_epoch import heading_to_cos_sin
 
 
