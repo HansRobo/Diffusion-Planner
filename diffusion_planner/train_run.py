@@ -79,6 +79,18 @@ def parse_args() -> argparse.Namespace:
         "runs TWO extra forwards per adjacent frame pair every epoch, so on a full Step-1 list "
         "this roughly doubles validation cost. Set False to skip it.",
     )
+    p.add_argument(
+        "--decoder_type",
+        default="diffusion",
+        choices=["diffusion", "plantf"],
+        help="optional: 'plantf' trains the one-shot multi-modal regression head",
+    )
+    p.add_argument(
+        "--num_modes",
+        type=int,
+        default=6,
+        help="optional: number of ego trajectory modes (decoder_type='plantf' only)",
+    )
     return p.parse_args()
 
 
@@ -109,6 +121,8 @@ def main() -> None:
         optional += ["--wandb_run_id", args.wandb_run_id]
     if args.wandb_project_name:
         optional += ["--wandb_project_name", args.wandb_project_name]
+    if args.decoder_type != "diffusion":
+        optional += ["--decoder_type", args.decoder_type, "--num_modes", str(args.num_modes)]
 
     dist_init_file_path().unlink(missing_ok=True)
 
