@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 import torch
-
 from diffusion_planner.utils import ddp
 
 
