@@ -618,11 +618,14 @@ class NeighborDropoutAugmentation:
         past = inputs["neighbor_agents_past"]  # (B, N, T, D)
         B, N = past.shape[:2]
 
-        valid = torch.sum(torch.ne(past, 0), dim=(-2, -1)) > 0  # (B, N)
+        # Count directly instead of materializing a (B, N, T, D) boolean tensor.
+        valid = torch.count_nonzero(past, dim=(-2, -1)).ne(0)  # (B, N)
         drop = valid & (torch.rand(B, N, device=past.device) < self._dropout_prob)
-        keep = (~drop).to(past.dtype).view(B, N, 1, 1)
+        drop = drop.view(B, N, 1, 1)
 
-        inputs["neighbor_agents_past"] = past * keep
-        neighbors_future = neighbors_future * keep
+        # Training inputs and targets are disposable batch tensors. Mutating them
+        # avoids full-size copies of both neighbor history and future trajectories.
+        past.masked_fill_(drop, 0.0)
+        neighbors_future.masked_fill_(drop, 0.0)
 
         return inputs, ego_future, neighbors_future

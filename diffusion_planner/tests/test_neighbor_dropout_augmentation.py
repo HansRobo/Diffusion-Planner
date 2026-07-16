@@ -23,12 +23,17 @@ def _make_batch(seed=0):
 
 def test_dropout_prob_one_drops_all_valid_neighbors():
     inputs, ego_future, neighbors_future = _make_batch()
+    past_input = inputs["neighbor_agents_past"]
+    future_input = neighbors_future
     orig_ego_current = inputs["ego_current_state"].clone()
     orig_ego_future = ego_future.clone()
 
     aug = NeighborDropoutAugmentation(dropout_prob=1.0, device="cpu")
     inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
 
+    # Disposable training tensors are updated in place to avoid full-size copies.
+    assert inputs["neighbor_agents_past"] is past_input
+    assert neighbors_future is future_input
     assert torch.equal(
         inputs["neighbor_agents_past"], torch.zeros_like(inputs["neighbor_agents_past"])
     )
