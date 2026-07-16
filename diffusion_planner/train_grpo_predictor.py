@@ -287,10 +287,6 @@ def get_args():
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 
-    parser.add_argument("--use_velocity_representation", type=boolean, default=False)
-    parser.add_argument("--hybrid_loss_omega", type=float, default=0.1)
-    parser.add_argument("--hybrid_loss_window", type=int, default=10)
-
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, default="cuda")
 
@@ -302,9 +298,6 @@ def get_args():
     parser.add_argument("--decoder_depth", type=int, default=3)
     parser.add_argument("--num_heads", type=int, default=8)
     parser.add_argument("--hidden_dim", type=int, default=256)
-    parser.add_argument(
-        "--diffusion_model_type", type=str, choices=["x_start", "flow_matching"], default="x_start"
-    )
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument(

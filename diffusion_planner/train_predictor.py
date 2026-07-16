@@ -152,26 +152,6 @@ def get_args(args_list=None):
     parser.add_argument("--alpha_planning_loss", type=float, default=1.0)
     parser.add_argument("--alpha_neighbor_loss", type=float, default=0.1)
 
-    # Velocity representation & hybrid loss (HDP paper, Section IV-B)
-    parser.add_argument(
-        "--use_velocity_representation",
-        type=boolean,
-        default=False,
-        help="Output trajectory as per-frame displacement instead of absolute waypoints",
-    )
-    parser.add_argument(
-        "--hybrid_loss_omega",
-        type=float,
-        default=0.1,
-        help="Weight for waypoint loss term in hybrid loss (omega in the paper)",
-    )
-    parser.add_argument(
-        "--hybrid_loss_window",
-        type=int,
-        default=10,
-        help="Gradient detach window size W for the waypoint loss term",
-    )
-
     parser.add_argument("--guidance_scale", type=float, default=0.5)
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
 
@@ -183,12 +163,6 @@ def get_args(args_list=None):
     parser.add_argument("--decoder_depth", type=int, help="number of decoding layers", default=3)
     parser.add_argument("--num_heads", type=int, help="number of multi-head", default=8)
     parser.add_argument("--hidden_dim", type=int, help="hidden dimension", default=256)
-    parser.add_argument(
-        "--diffusion_model_type",
-        type=str,
-        choices=["x_start", "flow_matching"],
-        default="x_start",
-    )
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)

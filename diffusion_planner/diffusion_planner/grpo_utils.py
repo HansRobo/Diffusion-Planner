@@ -257,14 +257,6 @@ def compute_grpo_loss(
     Returns:
         dict with ``loss`` (scalar, to backprop) plus detached scalar diagnostics.
     """
-    if args.diffusion_model_type != "x_start":
-        raise NotImplementedError(
-            f"GRPO loss only supports diffusion_model_type='x_start', got "
-            f"'{args.diffusion_model_type}'."
-        )
-    if args.use_velocity_representation:
-        raise NotImplementedError("GRPO loss does not support velocity representation.")
-
     norm = args.state_normalizer
     ego_target = ego_pseudo_gt.detach()
 

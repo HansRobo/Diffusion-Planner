@@ -201,8 +201,6 @@ def build_train_args(v):
         v.data_list,
         "--resume_model_path",
         v.resume_model_path,
-        "--diffusion_model_type",
-        "x_start",
         "--num_generations",
         str(v.num_generations),
         "--grpo_noise_scale",
