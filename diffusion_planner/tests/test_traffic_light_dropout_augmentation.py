@@ -105,3 +105,40 @@ def test_yellow_is_also_dropped():
     yellow = inputs["lanes"][:, 0, :, TRAFFIC_LIGHT_YELLOW]
     assert torch.equal(yellow, torch.zeros_like(yellow))
     assert (inputs["lanes"][:, 0, 0, TRAFFIC_LIGHT_WHITE] == 1.0).all()
+
+
+def test_sample_dropout_is_shared_by_lanes_and_route_lanes(monkeypatch):
+    """One per-NPZ-sample decision must apply consistently to both lane tensors."""
+    inputs, ego_future, neighbors_future = _make_batch()
+
+    # The same physical lane can appear at different indices in the surrounding-lane
+    # and route-lane tensors. Make route lane 1 an exact copy of surrounding lane 0.
+    inputs["route_lanes"][:, 1] = inputs["lanes"][:, 0].clone()
+    orig = {key: value.clone() for key, value in inputs.items()}
+
+    def fake_rand(*size, **kwargs):
+        assert size == (B,)
+        # Drop every known light in sample 0 and keep every light in sample 1.
+        return torch.tensor([0.1, 0.9], device=kwargs.get("device"))
+
+    monkeypatch.setattr(torch, "rand", fake_rand)
+
+    aug = TrafficLightDropoutAugmentation(dropout_prob=0.5, device="cpu")
+    inputs, _, _ = aug(inputs, ego_future, neighbors_future)
+
+    traffic_light = slice(TRAFFIC_LIGHT_GREEN, TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT + 1)
+    lane_traffic_light = inputs["lanes"][:, 0, :, traffic_light]
+    route_traffic_light = inputs["route_lanes"][:, 1, :, traffic_light]
+    assert torch.equal(lane_traffic_light, route_traffic_light)
+    assert (lane_traffic_light[0, :-1, TRAFFIC_LIGHT_WHITE - TRAFFIC_LIGHT_GREEN] == 1).all()
+    assert (lane_traffic_light[1, :-1, TRAFFIC_LIGHT_GREEN - TRAFFIC_LIGHT_GREEN] == 1).all()
+
+    # The mask is sample-wide, not limited to the duplicated lane: every other known
+    # green/red lane in sample 0 is unknown, while sample 1 remains unchanged.
+    for key in ["lanes", "route_lanes"]:
+        for lane in [0, 1]:
+            valid = torch.sum(torch.ne(orig[key][0, lane, :, :8], 0), dim=-1) > 0
+            assert torch.equal(
+                inputs[key][0, lane, :, TRAFFIC_LIGHT_WHITE], valid.to(inputs[key].dtype)
+            )
+            assert torch.equal(inputs[key][1, lane], orig[key][1, lane])

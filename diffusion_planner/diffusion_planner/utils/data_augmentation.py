@@ -606,21 +606,31 @@ class TrafficLightDropoutAugmentation:
     """
     Data augmentation that replaces a known traffic light color
     (green / yellow / red) with the unknown state to simulate traffic light
-    misdetection in the perception output.
+    recognition timeout in the perception output.
 
-    Each lane with a known color is dropped independently with probability
-    dropout_prob, consistently across its whole polyline. The unknown one-hot
-    (`TRAFFIC_LIGHT_WHITE`) is the same encoding the converter emits when
-    traffic light recognition fails, so the augmented input matches a real
-    failure mode exactly. Lanes without a traffic light and lanes already
-    unknown are left untouched, and padding rows stay all-zero.
+    A single dropout decision is sampled per training sample (one NPZ frame at
+    one timestamp) and shared by `lanes` and `route_lanes`. When selected,
+    every known traffic light in that sample is changed to unknown. This keeps
+    duplicate lanelets consistent and approximates a whole traffic-light
+    recognition message being unavailable for that frame.
+
+    Decisions are independent between samples, including NPZ frames that are
+    consecutive in the source rosbag, so this does not reproduce the duration
+    of a multi-frame recognition timeout. It also does not model an individual
+    traffic-light group disappearing while other groups remain visible; doing
+    that consistently would require the converter to preserve traffic-light
+    group IDs in both tensors.
+
+    The unknown one-hot (`TRAFFIC_LIGHT_WHITE`) is the same encoding the
+    converter emits when recognition fails. Lanes without a traffic light and
+    lanes already unknown are left untouched, and padding rows stay all-zero.
     """
 
     def __init__(self, dropout_prob: float, device: torch.device | str) -> None:
         self._dropout_prob = dropout_prob
         self._device = torch.device(device)
 
-    def _drop_known_colors(self, lanes):
+    def _drop_known_colors(self, lanes, drop_sample):
         """lanes: (B, P, V, D) with the traffic light one-hot at 8..12."""
         B, P, V, _ = lanes.shape
 
@@ -628,15 +638,28 @@ class TrafficLightDropoutAugmentation:
         color = lanes[..., TRAFFIC_LIGHT_GREEN : TRAFFIC_LIGHT_RED + 1]
         has_color = torch.sum(torch.ne(color, 0), dim=(-2, -1)) > 0  # (B, P)
 
-        drop = has_color & (torch.rand(B, P, device=lanes.device) < self._dropout_prob)
+        drop = has_color & drop_sample.view(B, 1)
 
-        dropped = lanes.clone()
-        dropped[..., TRAFFIC_LIGHT_GREEN : TRAFFIC_LIGHT_RED + 1] = 0.0
-        dropped[..., TRAFFIC_LIGHT_WHITE] = valid_pt.to(lanes.dtype)
+        # Training inputs are disposable batch tensors, so update only the traffic-light
+        # channels in place. Cloning/selecting the full lane tensor here would temporarily
+        # require two additional tensors of shape (B, P, V, D).
+        drop_pt = drop.view(B, P, 1)
+        lanes[..., TRAFFIC_LIGHT_GREEN : TRAFFIC_LIGHT_RED + 1].masked_fill_(
+            drop_pt.unsqueeze(-1), 0.0
+        )
+        white = lanes[..., TRAFFIC_LIGHT_WHITE]
+        white.masked_fill_(drop_pt, 0.0)
+        white.masked_fill_(drop_pt & valid_pt, 1.0)
 
-        return torch.where(drop.view(B, P, 1, 1), dropped, lanes)
+        return lanes
 
     def __call__(self, inputs, ego_future, neighbors_future):
-        inputs["lanes"] = self._drop_known_colors(inputs["lanes"])
-        inputs["route_lanes"] = self._drop_known_colors(inputs["route_lanes"])
+        lanes = inputs["lanes"]
+        # One batch element is one NPZ frame. Sharing this per-sample mask keeps
+        # lanes/route_lanes consistent, but consecutive frames are still sampled
+        # independently. Per-group dropout would require traffic-light group IDs,
+        # which the current NPZ format discards.
+        drop_sample = torch.rand(lanes.shape[0], device=lanes.device) < self._dropout_prob
+        inputs["lanes"] = self._drop_known_colors(lanes, drop_sample)
+        inputs["route_lanes"] = self._drop_known_colors(inputs["route_lanes"], drop_sample)
         return inputs, ego_future, neighbors_future
