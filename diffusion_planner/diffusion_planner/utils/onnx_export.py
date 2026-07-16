@@ -291,6 +291,62 @@ class FullONNXWrapper(nn.Module):
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
 
 
+class PlanTFFullONNXWrapper(FullONNXWrapper):
+    """planTF full graph with the same 17-input contract as the diffusion one.
+
+    The planTF decoder ignores the diffusion-only inputs (sampled_trajectories,
+    ego_current_state, delay) and the legacy exporter prunes unused graph inputs,
+    which would break the deployed Autoware node — it feeds all 17 inputs and both
+    ONNX Runtime and TensorRT reject feeding/binding tensors absent from the graph.
+    A zero-valued residual keeps them anchored. Scalar slices (not full sums) so the
+    dead branch cannot overflow/NaN under reduced-precision runtimes.
+    """
+
+    def forward(
+        self,
+        sampled_trajectories: torch.Tensor,
+        ego_agent_past: torch.Tensor,
+        ego_current_state: torch.Tensor,
+        neighbor_agents_past: torch.Tensor,
+        static_objects: torch.Tensor,
+        lanes: torch.Tensor,
+        lanes_speed_limit: torch.Tensor,
+        lanes_has_speed_limit: torch.Tensor,
+        route_lanes: torch.Tensor,
+        route_lanes_speed_limit: torch.Tensor,
+        route_lanes_has_speed_limit: torch.Tensor,
+        polygons: torch.Tensor,
+        line_strings: torch.Tensor,
+        goal_pose: torch.Tensor,
+        ego_shape: torch.Tensor,
+        turn_indicators: torch.Tensor,
+        delay: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prediction, turn_indicator_logit = super().forward(
+            sampled_trajectories,
+            ego_agent_past,
+            ego_current_state,
+            neighbor_agents_past,
+            static_objects,
+            lanes,
+            lanes_speed_limit,
+            lanes_has_speed_limit,
+            route_lanes,
+            route_lanes_speed_limit,
+            route_lanes_has_speed_limit,
+            polygons,
+            line_strings,
+            goal_pose,
+            ego_shape,
+            turn_indicators,
+            delay,
+        )
+        keep_alive = 0.0 * (
+            sampled_trajectories[:, 0, 0, 0] + ego_current_state[:, 0] + delay[:, 0]
+        )
+        return prediction + keep_alive.view(-1, 1, 1, 1), turn_indicator_logit
+
+
 def build_dummy_inputs() -> TensorDict:
     inputs = {}
     inputs["sampled_trajectories"] = torch.ones(
@@ -369,7 +425,7 @@ def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusio
 def build_wrappers(model: Diffusion_Planner) -> ModelWrappers:
     if isinstance(model.decoder, PlanTFDecoder):
         return ModelWrappers(
-            full=FullONNXWrapper(model).eval(),
+            full=PlanTFFullONNXWrapper(model).eval(),
             encoder=EncoderONNXWrapper(model).eval(),
             decoder=PlanTFDecoderONNXWrapper(model).eval(),
             turn_indicator=None,

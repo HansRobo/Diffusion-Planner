@@ -5,7 +5,10 @@
 > `diffusion_planner/model/module/plantf_decoder.py` の `PlanTFDecoder` /
 > `compute_plantf_training_loss` が使われる。テストは
 > `diffusion_planner/tests/test_plantf_decoder.py`。
-> Phase 3(ミニデータセット学習・A/B 比較・ONNX)以降は未着手。
+> ONNX export(`utils/onnx_export.py` / `ros_scripts/torch2onnx.py`)も実装済み。
+> Phase 3 のミニデータセット学習・A/B 比較は未着手。
+> Autoware ノードとの ONNX 互換性は §8 を参照
+> (full.onnx × `single_step` はノード無変更で互換、multi_step 経路は非対応)。
 
 ## 1. 目的
 
@@ -246,3 +249,104 @@ planTF の agent_predictor は `(T, 2)` (xy のみ) だが、DP の `prediction`
   - `diffusion_planner/model/module/encoder.py`(トークン並び: ego=0, neighbors=1〜)
   - `diffusion_planner/model/module/decoder.py`(既存の拡散デコーダと `compute_training_loss`)
   - `diffusion_planner/train_epoch.py`(損失合成、decoder_type で損失関数を分岐)
+
+## 8. Autoware ノードとの ONNX 互換性調査(2026-07-17)
+
+`autoware_universe/planning/autoware_diffusion_planner`(ROS ノード)のコードを読み、
+`decoder_type=plantf` で export した ONNX がそのままデプロイできるかを調査した。
+ノード側の接続点は以下(パスは autoware_universe リポジトリ内):
+
+- 入出力次元の定義: `include/autoware/diffusion_planner/dimensions.hpp`
+- 推論バックエンド選択: `src/diffusion_planner_core.cpp:126-154`
+  (`model.type` = `single_step` | `multi_step` × `model.backend` = `tensorrt` | `ort_*`)
+- TensorRT single-step: `src/inference/single_step_inference.cpp`
+- ONNX Runtime single-step / multi-step: `src/inference/onnxruntime_inference.cpp`
+- TensorRT multi-step: `src/inference/multi_step_inference.cpp`
+
+### 8.1 結論サマリ
+
+| ONNX / ノード経路 | 互換性 | 備考 |
+|---|---|---|
+| encoder.onnx | **互換** | 拡散版と入出力契約が完全に同一(入力 14 本 → `encoding [B, 564, 256]`) |
+| full.onnx × `single_step`(TRT / ORT) | **互換(対策実装済み)** | 未使用入力 3 本が export 時にグラフから消える問題があり、`PlanTFFullONNXWrapper` で解消(§8.2) |
+| decoder.onnx × `multi_step`(TRT / ORT) | **非互換(設計上)** | multi-step 経路は DPM-Solver ループ前提でグラフ契約が根本的に異なる(§8.3) |
+
+### 8.2 full.onnx × single_step: 未使用入力の削除問題
+
+ノードの single-step 経路は **拡散版 full.onnx の全 17 入力**を feed する:
+
+- ORT 版(`onnxruntime_inference.cpp:92-110`)は `sampled_trajectories`〜`delay` の 15 float +
+  speed limit mask 2 bool を `session_.Run` に渡す。ORT は**グラフに存在しない入力名の feed を
+  `INVALID_ARGUMENT` で拒否**する(手元の ORT で実験確認済み)。
+- TRT 版(`single_step_inference.cpp:121-137, 152-203`)は 17 入力すべてに
+  `setInputShape` / `setTensorAddress` するため、グラフに無いテンソル名でエンジン設定が失敗する。
+
+一方 planTF ヘッドは `sampled_trajectories` / `ego_current_state` / `delay` を一切参照しない
+(§3.2。`ego_current_state` は拡散デコーダの prefix constraint 専用で、エンコーダも使わない)。
+レガシー exporter(`dynamo=False`)は**出力に寄与しない入力をグラフから削除する**ため、
+planTF の full.onnx は入力 14 本になる。小型 config の実モデル export で確認した:
+
+```
+kept inputs : [ego_agent_past, neighbor_agents_past, static_objects, lanes, ..., turn_indicators]  # 14 本
+dropped     : [sampled_trajectories, ego_current_state, delay]
+outputs     : prediction [batch, 321, 80, 4], turn_indicator_logit [batch, 5]
+```
+
+出力側はノードの期待(`OUTPUT_SHAPE {1, 321, 80, 4}` / `TURN_INDICATOR_LOGIT_SHAPE {1, 5}`、
+出力名 `prediction` / `turn_indicator_logit`、denormalize 済み、batch 軸 dynamic)と一致しており、
+**入力契約だけが壊れている**。なお同じ理由で、修正前は `torch2onnx.py` の
+`validate_full_model`(全 17 入力を feed)も planTF チェックポイントで失敗する。
+
+**対応(実装済み)**: export 側で残す(ノード無変更・変更最小)。
+`utils/onnx_export.py` の `PlanTFFullONNXWrapper` が未使用 3 入力をゼロ係数の残差でダミー消費
+(`prediction + 0.0 * (sampled_trajectories[:, 0, 0, 0] + ego_current_state[:, 0] + delay[:, 0])`)
+してグラフに 17 入力を保持する。全和ではなくスカラースライスを使うのは、fp16 等の
+低精度ランタイムで dead branch が overflow → NaN 化して `prediction` を汚染しないため。
+検証済み:
+
+- 小型 config の実モデル export で 17/17 入力が保持される(onnxsim 通過後も)
+- ノードと同じ「全 17 入力を名前で feed」する ORT 実行が成功し、出力は torch と一致
+  (max diff ~1e-6)。keep-alive 残差は fp32 で厳密に 0 なので出力はビット単位で不変
+- 回帰テスト: `tests/test_plantf_decoder.py::test_full_onnx_wrapper_keeps_diffusion_only_inputs`
+
+これにより `torch2onnx.py` の `validate_full_model`(全 17 入力を feed)も planTF
+チェックポイントで通るようになる。
+
+別案としてノード側に「planTF 用入力セット(14 本)」の single-step 経路を追加する手も
+あるが、ノード改修が必要なため採らなかった。
+
+### 8.3 decoder.onnx × multi_step: 設計上の非互換
+
+ノードの multi-step 経路は拡散専用の構造を持つ:
+
+- コンストラクタが encoder / decoder / **turn_indicator の 3 モデルを必須**とする
+  (`onnxruntime_inference.cpp:371-384`)が、planTF export は turn_indicator.onnx を生成しない
+- decoder へ `{encoding, sampled_trajectories, diffusion_time, neighbor_agents_past}` を feed し
+  出力 `model_output` を取り出して **DPM-Solver ループを C++ 側で回す**
+  (`onnxruntime_inference.cpp:432-460`)。planTF の decoder.onnx は
+  `encoding → (prediction, probability, turn_indicator_logit)` の 1 コール契約で全く合わない
+- ループ内の prefix constraint(`apply_prefix_constraint`)や guidance
+  (`src/inference/guidance/`、stop / start / centerline)もデノイズループ前提
+
+planTF の分割グラフを使うには、ノード側に「encoder → decoder 1 コール」の
+one-shot split 推論クラス(`is_denormalized = true` で返す)を新設する必要がある。
+当面は §8.2 の修正を入れた full.onnx × `single_step` でのデプロイが最短経路。
+
+### 8.4 互換でも挙動が変わる点(planTF では機能しないノード機能)
+
+- **delay 補正**: ノードは `delay_step` を計算して `delay` 入力に渡し
+  (`diffusion_planner_core.cpp:473-476`)、拡散デコーダが先頭ステップを prefix constraint で
+  固定する。planTF は `delay` を無視するため、入力を残しても**この補正は no-op** になる
+  (§3.7 の delay 方針どおり。必要なら後処理近似を Phase 4 で検討)
+- **guidance**: multi-step 専用機能のため使用不可
+- **デノイズ過程の可視化**(`denoising_predictions`): 反復が無いため出力されない
+- **モード確率**: full.onnx の出力は `prediction` / `turn_indicator_logit` の 2 本固定で
+  `probability` を含まない(ノードも現状消費しない)。マルチモード候補をノードで使う場合は
+  出力契約の拡張が必要
+
+### 8.5 前提条件
+
+- `predicted_neighbor_num=320`(デフォルト、`MAX_NUM_NEIGHBORS`)で学習すること。
+  `prediction` の agent 軸が `1 + predicted_neighbor_num` になるため、これ以外だと
+  ノードの `OUTPUT_SHAPE {1, 321, 80, 4}` と合わない(拡散版と同じ制約)
+- `num_modes` は full.onnx の出力形状に現れないため自由(グラフ内部で argmax 済み)
