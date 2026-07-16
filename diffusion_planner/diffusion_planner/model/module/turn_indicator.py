@@ -243,6 +243,8 @@ class TurnIndicatorNetwork(nn.Module):
             drop_path_rate=drop_path_rate,
             hidden_dim=hidden_dim,
             depth=mixer_depth,
+            tokens_mlp_dim=32,
+            channels_mlp_dim=64,
         )
         self.route_encoder = LaneEncoder(
             POINTS_PER_LANELET,
@@ -250,6 +252,8 @@ class TurnIndicatorNetwork(nn.Module):
             drop_path_rate=drop_path_rate,
             hidden_dim=hidden_dim,
             depth=mixer_depth,
+            tokens_mlp_dim=32,
+            channels_mlp_dim=64,
         )
 
         # position embedding for key/value tokens encodes x, y, cos, sin, type
