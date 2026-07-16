@@ -1,6 +1,5 @@
 import pytest
 import torch
-
 from diffusion_planner.model.module.encoder import _keep_recent_history
 
 

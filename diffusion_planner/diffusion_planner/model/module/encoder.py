@@ -42,9 +42,7 @@ def _keep_recent_history(history, history_frames):
     """Keep the newest temporal samples and preserve the input width."""
     total_frames = history.shape[-2]
     if history_frames < 1 or history_frames > total_frames:
-        raise ValueError(
-            f"history_frames must be in [1, {total_frames}], got {history_frames}"
-        )
+        raise ValueError(f"history_frames must be in [1, {total_frames}], got {history_frames}")
     recent = history[..., -history_frames:, :]
     return F.pad(recent, (0, 0, total_frames - history_frames, 0))
 
