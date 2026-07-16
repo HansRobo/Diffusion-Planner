@@ -510,10 +510,17 @@ class StaticEncoder(nn.Module):
 
 
 class LaneEncoder(nn.Module):
-    def __init__(self, lane_len, class_type, drop_path_rate, hidden_dim, depth):
+    def __init__(
+        self,
+        lane_len,
+        class_type,
+        drop_path_rate,
+        hidden_dim,
+        depth,
+        tokens_mlp_dim=64,
+        channels_mlp_dim=128,
+    ):
         super().__init__()
-        tokens_mlp_dim = 64
-        channels_mlp_dim = 128
 
         self._lane_len = lane_len
         self._class_type = class_type
