@@ -22,6 +22,7 @@ import torch.nn as nn
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.model.module.plantf_decoder import PlanTFDecoder
 from diffusion_planner.utils.config import Config
 
 FULL_INPUT_NAMES = [
@@ -70,10 +71,15 @@ DECODER_INPUT_NAMES = [
 
 TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0"]
 
+# planTF head: single decoder call, no external denoising loop and no separate
+# turn-indicator graph (the logit is a decoder output).
+PLANTF_DECODER_INPUT_NAMES = ["encoding"]
+
 FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit"]
 ENCODER_OUTPUT_NAMES = ["encoding"]
 DECODER_OUTPUT_NAMES = ["model_output"]
 TURN_INDICATOR_OUTPUT_NAMES = ["turn_indicator_logit"]
+PLANTF_DECODER_OUTPUT_NAMES = ["prediction", "probability", "turn_indicator_logit"]
 
 TensorDict = dict[str, torch.Tensor]
 NumpyDict = dict[str, np.ndarray]
@@ -84,7 +90,8 @@ class ModelWrappers:
     full: nn.Module
     encoder: nn.Module
     decoder: nn.Module
-    turn_indicator: nn.Module
+    # None for the planTF head, whose decoder graph already emits the logit
+    turn_indicator: nn.Module | None
 
 
 @dataclass(frozen=True)
@@ -219,6 +226,21 @@ class TurnIndicatorONNXWrapper(nn.Module):
         return self.decoder._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
 
+class PlanTFDecoderONNXWrapper(nn.Module):
+    """One-shot planTF head: encoder output -> final prediction in a single call.
+
+    There is no external denoising loop; the graph also emits the mode logits
+    and the turn-indicator logit, so no separate turn-indicator graph exists.
+    """
+
+    def __init__(self, model: Diffusion_Planner):
+        super().__init__()
+        self.decoder = model.decoder
+
+    def forward(self, encoding: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.decoder.forward_deploy(encoding)
+
+
 class FullONNXWrapper(nn.Module):
     """Original all-in-one planner export."""
 
@@ -345,6 +367,13 @@ def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusio
 
 
 def build_wrappers(model: Diffusion_Planner) -> ModelWrappers:
+    if isinstance(model.decoder, PlanTFDecoder):
+        return ModelWrappers(
+            full=FullONNXWrapper(model).eval(),
+            encoder=EncoderONNXWrapper(model).eval(),
+            decoder=PlanTFDecoderONNXWrapper(model).eval(),
+            turn_indicator=None,
+        )
     return ModelWrappers(
         full=FullONNXWrapper(model).eval(),
         encoder=EncoderONNXWrapper(model).eval(),
@@ -391,6 +420,39 @@ def build_export_specs(
             input_names=TURN_INDICATOR_INPUT_NAMES,
             output_names=TURN_INDICATOR_OUTPUT_NAMES,
             output_path=turn_indicator_onnx_path,
+        ),
+    ]
+
+
+def build_plantf_export_specs(
+    wrappers: ModelWrappers,
+    inputs: TensorDict,
+    decoder_inputs: TensorDict,
+    full_onnx_path: Path,
+    encoder_onnx_path: Path,
+    decoder_onnx_path: Path,
+) -> list[ExportSpec]:
+    return [
+        ExportSpec(
+            wrapper=wrappers.full,
+            inputs=inputs,
+            input_names=FULL_INPUT_NAMES,
+            output_names=FULL_OUTPUT_NAMES,
+            output_path=full_onnx_path,
+        ),
+        ExportSpec(
+            wrapper=wrappers.encoder,
+            inputs=inputs,
+            input_names=ENCODER_INPUT_NAMES,
+            output_names=ENCODER_OUTPUT_NAMES,
+            output_path=encoder_onnx_path,
+        ),
+        ExportSpec(
+            wrapper=wrappers.decoder,
+            inputs=decoder_inputs,
+            input_names=PLANTF_DECODER_INPUT_NAMES,
+            output_names=PLANTF_DECODER_OUTPUT_NAMES,
+            output_path=decoder_onnx_path,
         ),
     ]
 
@@ -490,26 +552,36 @@ def export_model_to_onnx(
         with torch.no_grad():
             encoding = wrappers.encoder(*(export_inputs[name] for name in ENCODER_INPUT_NAMES))
 
-        decoder_inputs = build_decoder_inputs(export_inputs, encoding)
-        with torch.no_grad():
-            final_x0 = wrappers.decoder(
-                decoder_inputs["encoding"],
-                decoder_inputs["sampled_trajectories"],
-                decoder_inputs["diffusion_time"],
-                decoder_inputs["neighbor_agents_past"],
+        if wrappers.turn_indicator is None:  # planTF head: no denoising loop
+            export_specs = build_plantf_export_specs(
+                wrappers,
+                export_inputs,
+                {"encoding": encoding},
+                full_onnx_path,
+                encoder_onnx_path,
+                decoder_onnx_path,
             )
-        turn_indicator_inputs = build_turn_indicator_inputs(encoding, final_x0)
+        else:
+            decoder_inputs = build_decoder_inputs(export_inputs, encoding)
+            with torch.no_grad():
+                final_x0 = wrappers.decoder(
+                    decoder_inputs["encoding"],
+                    decoder_inputs["sampled_trajectories"],
+                    decoder_inputs["diffusion_time"],
+                    decoder_inputs["neighbor_agents_past"],
+                )
+            turn_indicator_inputs = build_turn_indicator_inputs(encoding, final_x0)
 
-        export_specs = build_export_specs(
-            wrappers,
-            export_inputs,
-            decoder_inputs,
-            turn_indicator_inputs,
-            full_onnx_path,
-            encoder_onnx_path,
-            decoder_onnx_path,
-            turn_indicator_onnx_path,
-        )
+            export_specs = build_export_specs(
+                wrappers,
+                export_inputs,
+                decoder_inputs,
+                turn_indicator_inputs,
+                full_onnx_path,
+                encoder_onnx_path,
+                decoder_onnx_path,
+                turn_indicator_onnx_path,
+            )
         for spec in export_specs:
             export_spec(spec, use_simplify, opset_version, external_data)
 

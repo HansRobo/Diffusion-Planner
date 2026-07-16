@@ -137,6 +137,60 @@ class PlanTFDecoder(nn.Module):
         turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
         return self.turn_indicator_predictor(turn_indicator_input)
 
+    def _decode(self, encoding):
+        """Run both heads on the encoder tokens.
+
+        Returns (trajectory [B, K, T, 4], probability [B, K],
+        neighbor_prediction [B, Pn, T, 4]), all in normalized space.
+        """
+        B = encoding.shape[0]
+        Pn = self._predicted_neighbor_num
+        trajectory, probability = self.trajectory_head(encoding[:, 0])
+        neighbor_prediction = self.neighbor_predictor(encoding[:, 1 : 1 + Pn]).view(
+            B, Pn, self._future_len, 4
+        )
+        return trajectory, probability, neighbor_prediction
+
+    def _best_mode_trajectory(self, trajectory, probability):
+        """Select the argmax-probability mode. gather keeps the batch axis
+        dynamic for ONNX tracing (unlike arange-based indexing)."""
+        index = probability.argmax(dim=-1).view(-1, 1, 1, 1).expand(-1, 1, self._future_len, 4)
+        return trajectory.gather(1, index).squeeze(1)
+
+    @staticmethod
+    def _pool_encoding(encoding):
+        # Pool only valid encoder tokens. The encoder zero-fills masked tokens.
+        encoding_valid = torch.any(encoding != 0, dim=-1)  # [B, N]
+        encoding_count = encoding_valid.sum(dim=1).clamp_min(1).unsqueeze(-1)
+        return (encoding * encoding_valid.unsqueeze(-1)).sum(dim=1) / encoding_count
+
+    def _subsampled_ego_xy(self, ego_trajectory):
+        """Every-10th-step xy, matching gt_trajectories[:, 0, 1::10, :2] used in
+        training (index 1 on the current-state-prepended axis = future step 0)."""
+        return ego_trajectory[:, ::10, :2].reshape(-1, 2 * (self._future_len // 10))
+
+    def forward_deploy(self, encoding):
+        """One-shot deployment path for the split ONNX export.
+
+        Unlike the diffusion decoder there is no external denoising loop, so a
+        single call maps the encoder output to the final prediction. The
+        independent turn-indicator head is excluded (it re-encodes raw map
+        inputs itself and is a training-time auxiliary, not a deploy output).
+
+        Returns:
+            prediction: [B, 1 + Pn, T, 4] best-mode ego + neighbors, denormalized.
+            probability: [B, K] mode logits.
+            turn_indicator_logit: [B, TURN_INDICATOR_OUTPUT_DIM]
+        """
+        trajectory, probability, neighbor_prediction = self._decode(encoding)
+        best_trajectory = self._best_mode_trajectory(trajectory, probability)
+        turn_indicator_logit = self._compute_turn_indicator(
+            self._subsampled_ego_xy(best_trajectory), self._pool_encoding(encoding)
+        )
+        prediction = torch.cat([best_trajectory[:, None], neighbor_prediction], dim=1)
+        prediction = self._state_normalizer.inverse(prediction)
+        return prediction, probability, turn_indicator_logit
+
     def forward(self, encoding, inputs):
         """
         Args:
@@ -158,15 +212,8 @@ class PlanTFDecoder(nn.Module):
         B = encoding.shape[0]
         Pn = self._predicted_neighbor_num
 
-        trajectory, probability = self.trajectory_head(encoding[:, 0])
-        neighbor_prediction = self.neighbor_predictor(encoding[:, 1 : 1 + Pn]).view(
-            B, Pn, self._future_len, 4
-        )
-
-        # Pool only valid encoder tokens. The encoder zero-fills masked tokens.
-        encoding_valid = torch.any(encoding != 0, dim=-1)  # [B, N]
-        encoding_count = encoding_valid.sum(dim=1).clamp_min(1).unsqueeze(-1)
-        encoding_pooled = (encoding * encoding_valid.unsqueeze(-1)).sum(dim=1) / encoding_count
+        trajectory, probability, neighbor_prediction = self._decode(encoding)
+        encoding_pooled = self._pool_encoding(encoding)
 
         outputs = {
             "trajectory": trajectory,
@@ -187,14 +234,10 @@ class PlanTFDecoder(nn.Module):
             )
             return outputs
 
-        best_mode = probability.argmax(dim=-1)
-        best_trajectory = trajectory[torch.arange(B, device=encoding.device), best_mode]
+        best_trajectory = self._best_mode_trajectory(trajectory, probability)
 
-        # gt_trajectories[:, 0, 1::10] in training corresponds to future steps
-        # 0, 10, ... on the current-state-free axis used here.
-        ego_trajectory = best_trajectory[:, ::10, :2].reshape(B, 2 * (self._future_len // 10))
         outputs["turn_indicator_logit"] = self._compute_turn_indicator(
-            ego_trajectory, encoding_pooled
+            self._subsampled_ego_xy(best_trajectory), encoding_pooled
         )
         outputs["independent_turn_indicator_logit"] = self.independent_turn_indicator_predictor(
             best_trajectory, inputs

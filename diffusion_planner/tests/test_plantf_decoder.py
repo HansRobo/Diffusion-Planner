@@ -214,6 +214,23 @@ def test_winner_takes_all_picks_closest_mode():
     assert loss_peaked["mode_cls_loss"] < 1e-5
 
 
+def test_forward_deploy_matches_eval_forward():
+    """The ONNX deploy path must produce the same prediction / probability /
+    turn-indicator logit as the regular eval forward."""
+    torch.manual_seed(0)
+    model = Diffusion_Planner(_config()).eval()
+    inputs = _inputs()
+
+    with torch.no_grad():
+        encoding = model.encoder(inputs)
+        outputs = model.decoder(encoding, inputs)
+        prediction, probability, turn_indicator_logit = model.decoder.forward_deploy(encoding)
+
+    assert torch.allclose(prediction, outputs["prediction"])
+    assert torch.allclose(probability, outputs["probability"])
+    assert torch.allclose(turn_indicator_logit, outputs["turn_indicator_logit"])
+
+
 def test_velocity_representation_rejected():
     config = _config()
     config.use_velocity_representation = True
