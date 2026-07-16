@@ -36,12 +36,16 @@ def _aug(pos=0.2, vel=0.3, heading=0.05):
 def test_noise_perturbs_only_past_pose_and_velocity():
     torch.manual_seed(0)
     inputs, ego_future, neighbors_future = _make_batch()
+    past_input = inputs["neighbor_agents_past"]
     orig = {k: v.clone() for k, v in inputs.items()}
     orig_future = neighbors_future.clone()
     orig_ego_future = ego_future.clone()
 
     inputs, ego_future, neighbors_future = _aug()(inputs, ego_future, neighbors_future)
 
+    # The disposable training input is updated in place to avoid cloning the full
+    # (B, N, T, D) neighbor-history tensor.
+    assert inputs["neighbor_agents_past"] is past_input
     past, orig_past = inputs["neighbor_agents_past"], orig["neighbor_agents_past"]
     valid = orig_past[:, :-2]
     noisy = past[:, :-2]
