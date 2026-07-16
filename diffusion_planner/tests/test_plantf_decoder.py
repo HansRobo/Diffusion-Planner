@@ -16,7 +16,16 @@ from diffusion_planner.model.module.plantf_decoder import (
     compute_plantf_training_loss,
 )
 from diffusion_planner.utils.normalizer import StateNormalizer
-from diffusion_planner.utils.onnx_export import build_dummy_inputs
+from diffusion_planner.utils.onnx_export import (
+    FULL_INPUT_NAMES,
+    FULL_OUTPUT_NAMES,
+    FullONNXWrapper,
+    PlanTFFullONNXWrapper,
+    build_dummy_inputs,
+    build_wrappers,
+    export_onnx,
+    onnx_export_backends,
+)
 
 NUM_MODES = 3
 HIDDEN_DIM = 32
@@ -229,6 +238,43 @@ def test_forward_deploy_matches_eval_forward():
     assert torch.allclose(prediction, outputs["prediction"])
     assert torch.allclose(probability, outputs["probability"])
     assert torch.allclose(turn_indicator_logit, outputs["turn_indicator_logit"])
+
+
+def test_full_onnx_wrapper_keeps_diffusion_only_inputs(tmp_path):
+    """The Autoware node feeds all 17 full-graph inputs by name (ORT and TensorRT
+    both reject names absent from the graph), but the planTF head ignores
+    sampled_trajectories / ego_current_state / delay and the legacy exporter
+    prunes unused graph inputs. The planTF full wrapper must anchor them without
+    changing the outputs."""
+    onnx = pytest.importorskip("onnx")
+    torch.manual_seed(0)
+    model = Diffusion_Planner(_config()).eval()
+    wrappers = build_wrappers(model)
+    assert isinstance(wrappers.full, PlanTFFullONNXWrapper)
+    assert wrappers.turn_indicator is None
+
+    inputs = build_dummy_inputs()
+    args = tuple(inputs[name] for name in FULL_INPUT_NAMES)
+    with torch.no_grad():
+        anchored_prediction, anchored_logit = wrappers.full(*args)
+        plain_prediction, plain_logit = FullONNXWrapper(model).eval()(*args)
+    assert torch.equal(anchored_prediction, plain_prediction)
+    assert torch.equal(anchored_logit, plain_logit)
+
+    full_onnx_path = tmp_path / "full.onnx"
+    with onnx_export_backends(), torch.no_grad():
+        export_onnx(
+            wrappers.full,
+            inputs,
+            FULL_INPUT_NAMES,
+            FULL_OUTPUT_NAMES,
+            full_onnx_path,
+            use_simplify=False,
+            opset_version=17,
+            external_data=False,
+        )
+    graph_inputs = {i.name for i in onnx.load(str(full_onnx_path)).graph.input}
+    assert graph_inputs == set(FULL_INPUT_NAMES)
 
 
 def test_velocity_representation_rejected():
