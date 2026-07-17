@@ -82,4 +82,3 @@ def select_valid_loss_dashboard_metrics(metrics: Mapping[str, object]) -> dict[s
         if number is not None:
             result[key] = number
     return result
-
