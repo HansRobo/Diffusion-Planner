@@ -31,7 +31,10 @@ from rlvr.autoresearch.tools.build_repaired_targets import (
     _row_is_expert_disagreement,
     _validate_static_collision_config,
 )
-from rlvr.autoresearch.tools.expert_morph import build_expert_morph_candidate
+from rlvr.autoresearch.tools.expert_morph import (
+    build_depart_morph_candidate,
+    build_expert_morph_candidate,
+)
 from rlvr.autoresearch.tools.lifelong_replay_memory import build_memory
 from rlvr.autoresearch.tools.mine_credit_window_scenes import (
     _resolve_row,
@@ -3789,6 +3792,31 @@ def test_expert_morph_preserves_slow_creep():
     morph = build_expert_morph_candidate(det, expert)
     assert morph is not None
     assert morph[-1, 0] > 0.5  # creep distance preserved (~0.7 m), not 0
+
+
+def test_depart_morph_synthesizes_departure_from_parked_plan():
+    # The stop morph cannot do this (det path has no road ahead) — the depart
+    # morph sources geometry from the expert path bridged to the ego pose.
+    det = _straight_traj(np.linspace(0.0, 2.0, _MORPH_T))  # parked/creeping plan
+    expert = _straight_traj(6.0 + np.cumsum(np.full(_MORPH_T, 0.45)))  # ahead, ~4.5 m/s
+    morph, diag = build_depart_morph_candidate(det, expert, return_diag=True)
+    assert diag["stage"] == "ok"
+    assert morph.shape == (_MORPH_T, 4)
+    assert abs(morph[0, 0]) < 0.1  # starts at the ego, not at the expert (no teleport)
+    assert np.all(np.diff(morph[:, 0]) >= -1e-4)
+    assert morph[-1, 0] > 10.0  # genuinely departs
+    steps = np.linalg.norm(np.diff(morph[:, :2], axis=0), axis=1)
+    assert steps.max() < 3.0  # accel/jerk-feasible, no jumps
+
+
+def test_depart_morph_bails_on_stationary_or_behind_expert():
+    det = _straight_traj(np.zeros(_MORPH_T))
+    stationary = _straight_traj(np.full(_MORPH_T, 6.0))
+    _, diag = build_depart_morph_candidate(det, stationary, return_diag=True)
+    assert diag["stage"] == "expert_stationary"
+    behind = _straight_traj(-8.0 + np.cumsum(np.full(_MORPH_T, 0.3)))
+    _, diag = build_depart_morph_candidate(det, behind, return_diag=True)
+    assert diag["stage"] == "expert_behind_ego"
 
 
 def _patience_npz(path, *, red_route: bool, v_profile: np.ndarray) -> None:

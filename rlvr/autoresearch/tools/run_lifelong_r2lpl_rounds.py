@@ -332,6 +332,8 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     }
     if repair.get("prototypes_path"):
         repair_cfg["prototypes_path"] = str(repair["prototypes_path"])
+    if repair.get("enable_depart_morph"):
+        repair_cfg["enable_depart_morph"] = bool(repair["enable_depart_morph"])
     missing_repair = [k for k in ("ego_shape", "min_margin") if not repair_cfg.get(k)]
     if missing_repair:
         raise ValueError(
@@ -426,6 +428,11 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "epochs_per_round": int(_first_non_null(rounds.get("epochs_per_round"), 1)),
         "model_path": str(contract["model_path"]),
         "val_scenes": str(val_scenes),
+        "training_normal_scene_list": (
+            str(training_section["normal_scene_list"])
+            if training_section.get("normal_scene_list")
+            else None
+        ),
         "reward_config": str(reward_config),
         "threshold_config": str(threshold_config),
         "credit_window_config": str(credit_window_config),
@@ -1620,6 +1627,8 @@ def _repair_cmd(
         cmd.extend(["--expert_morph_max_jerk", str(repair_cfg["expert_morph_max_jerk"])])
     if "expert_stop_anchor" in repair_cfg:
         cmd.extend(["--expert_stop_anchor", str(repair_cfg["expert_stop_anchor"])])
+    if bool(repair_cfg.get("enable_depart_morph", False)):
+        cmd.append("--enable_depart_morph")
     if repair_cfg.get("prototypes_path"):
         cmd.extend(["--prototypes_path", str(repair_cfg["prototypes_path"])])
     if cfg.get("repair_labels"):
@@ -1835,6 +1844,7 @@ def _base_train_invocation(
         "seed",
         "device",
         "use_ema",
+        "ema_decay",
         "use_ego_history",
         "ego_history_dropout_rate",
         "use_turn_indicators",
@@ -2636,6 +2646,21 @@ def main() -> None:
             round_training_config = _round_training_config(
                 cfg, rdir=rdir, anchor_model_path=model_path
             )
+            # With training.normal_scene_list the rsft round trains a
+            # prob/normal split (repaired = prob, real normals = normal) —
+            # the proven curated-LoRA recipe mixes ~1.6 real scenes per
+            # curated one; repaired-only overfits the adapters to the mined
+            # style. Without it, the legacy combined-list path is kept.
+            normal_list = cfg.get("training_normal_scene_list")
+            if normal_list:
+                scene_args = [
+                    "--prob_scenes",
+                    str(repaired_list_json),
+                    "--normal_scenes",
+                    str(normal_list),
+                ]
+            else:
+                scene_args = ["--train_scenes", str(repaired_list_json)]
             train_cmd = [
                 sys.executable,
                 "-m",
@@ -2646,8 +2671,7 @@ def main() -> None:
                 name,
                 "--model_path",
                 str(model_path),
-                "--train_scenes",
-                str(repaired_list_json),
+                *scene_args,
                 "--replay_scenes",
                 str(replay_json),
                 "--val_scenes",

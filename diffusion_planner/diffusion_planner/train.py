@@ -308,7 +308,7 @@ def model_training(args: TrainConfig):
     if args.use_ema:
         model_ema = ModelEma(
             diffusion_planner,
-            decay=0.999,
+            decay=getattr(args, "ema_decay", 0.999),
             device=args.device,
         )
 

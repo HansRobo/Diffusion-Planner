@@ -32,7 +32,10 @@ from rlvr.autoresearch.tools.eval_det_avoidance import (
     load_model,
     load_npz_data,
 )
-from rlvr.autoresearch.tools.expert_morph import build_expert_morph_candidate
+from rlvr.autoresearch.tools.expert_morph import (
+    build_depart_morph_candidate,
+    build_expert_morph_candidate,
+)
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.deviation import rollout_gt_deviation
 from rlvr.grpo_trainer_batched import (
@@ -671,6 +674,7 @@ def build_repaired_targets(
     expert_morph_max_accel: float = 2.0,
     expert_morph_max_jerk: float = 4.0,
     expert_stop_anchor: str = "recorded",
+    enable_depart_morph: bool = False,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     rcfg = load_reward_config(reward_config_path)
     _apply_rear_end_collision_mode(
@@ -866,6 +870,53 @@ def build_repaired_targets(
                     scene_trajs = torch.cat([scene_trajs, morph_tensor[None]], dim=0)
                     morph_added = True
 
+            # Depart morph for the fail-to-take-off direction: the stop morph
+            # re-times the det plan's own geometry, which cannot synthesize a
+            # departure from a parked plan (no road ahead on a 2 m path) — it
+            # dies as "infeasible_deceleration". The depart morph sources its
+            # geometry from the expert path instead.
+            depart_added = False
+            depart_index: int | None = None
+            depart_diag: dict[str, Any] | None = None
+            if (
+                enable_depart_morph
+                and is_expert
+                and row.get("expert_disagreement_reason") == "model_lagging_expert"
+            ):
+                expert_traj_dep = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
+                det_traj_dep = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
+                depart, depart_diag = build_depart_morph_candidate(
+                    det_traj_dep,
+                    expert_traj_dep,
+                    max_accel=expert_morph_max_accel,
+                    max_jerk=expert_morph_max_jerk,
+                    return_diag=True,
+                )
+                if depart is not None:
+                    depart_tensor = torch.from_numpy(np.ascontiguousarray(depart)).to(
+                        device=device, dtype=scene_trajs.dtype
+                    )
+                    depart_cls = classify_loaded_scene_candidates_batch(
+                        [str(row["scene_path"])],
+                        depart_tensor[None, None],
+                        [data],
+                        rcfg,
+                        moving_collision_thresh=thresholds["moving_collision_thresh"],
+                        moving_near_thresh=thresholds["moving_near_thresh"],
+                        static_near_thresh=thresholds["static_near_thresh"],
+                        rb_near_thresh=thresholds["rb_near_thresh"],
+                        device=device,
+                        args=cls_args,
+                    )
+                    depart_reward_row = compute_reward_batch(
+                        depart_tensor[None], scoring_data, rcfg
+                    )[0]
+                    depart_index = len(candidate_rows)
+                    candidate_rows.append(depart_cls[0][0])
+                    reward_rows.append(depart_reward_row)
+                    scene_trajs = torch.cat([scene_trajs, depart_tensor[None]], dim=0)
+                    depart_added = True
+
             best_idx, meta = _best_safe_candidate(
                 row,
                 candidate_rows,
@@ -877,9 +928,15 @@ def build_repaired_targets(
                 morph_index=morph_index if morph_added else None,
             )
             morph_selected = bool(morph_added and best_idx == morph_index)
+            depart_selected = bool(depart_added and best_idx == depart_index)
             if is_expert:
                 meta["expert_morph_added"] = bool(morph_added)
                 meta["expert_morph_selected"] = morph_selected
+                if row.get("expert_disagreement_reason") == "model_lagging_expert":
+                    meta["expert_depart_added"] = bool(depart_added)
+                    meta["expert_depart_selected"] = depart_selected
+                    if depart_diag is not None:
+                        meta["expert_depart_diag"] = depart_diag
                 # Synthesis diagnostics: why the morph exists / was rejected before
                 # ever reaching the gates ("stage" == "ok" when synthesized). The
                 # gate/selection outcome ("morph_outcome") comes from
@@ -1030,6 +1087,13 @@ def main() -> None:
         action="store_false",
         help="Score expert_disagreement scenes against the realized ego future instead.",
     )
+    ap.add_argument(
+        "--enable_depart_morph",
+        action="store_true",
+        help="Also synthesize a depart-morph candidate (expert-path geometry, "
+        "feasible catch-up timing) for model_lagging_expert scenes — the stop "
+        "morph cannot build a departure from a parked det plan.",
+    )
     ap.add_argument("--expert_morph_w_max", type=float, default=1.0)
     ap.add_argument(
         "--expert_stop_anchor",
@@ -1110,6 +1174,7 @@ def main() -> None:
         expert_morph_max_accel=float(args.expert_morph_max_accel),
         expert_morph_max_jerk=float(args.expert_morph_max_jerk),
         expert_stop_anchor=str(args.expert_stop_anchor),
+        enable_depart_morph=bool(args.enable_depart_morph),
     )
 
 
