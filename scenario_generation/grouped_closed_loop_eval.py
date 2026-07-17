@@ -214,6 +214,7 @@ class GroupedByAreaClosedLoopEvaluation(ClosedLoopEvaluation):
             instrument=True,
             area_episodes=episodes,
             area_to_metric_group=self._area_to_metric(),
+            goal_mode="route",
             **self.config.params.render_kwargs(),
         )
         return BagRolloutResult(

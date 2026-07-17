@@ -61,7 +61,6 @@ class RolloutParams:
             "tracker_mode": self.tracker_mode,
             "profile_sync_gpu": self.profile_sync_gpu,
             "neighbor_history_mode": self.neighbor_history_mode,
-            "goal_mode": "route",
         }
 
 

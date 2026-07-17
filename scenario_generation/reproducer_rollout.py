@@ -1604,6 +1604,7 @@ def render_segment(
                     collision=bool(safety["collision"]),
                     neighbor_violation=bool(safety["neighbor_violation"]),
                     rb_violation=bool(safety["rb_violation"]),
+                    rb_dist_m=float(safety["rb_dist_m"]),
                     png_path=png_path,
                 )
             )

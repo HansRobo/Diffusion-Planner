@@ -62,6 +62,7 @@ def aggregate_episode_metrics(
         dtype=bool,
     )
     clearances = np.array([st.clearance_m for st in area_steps], dtype=np.float32)
+    rb_dists = np.array([st.rb_dist_m for st in area_steps], dtype=np.float32)
     collisions = [st.collision for st in area_steps]
 
     return {
@@ -95,7 +96,9 @@ def aggregate_episode_metrics(
         "min_clearance_m": float(clearances[np.isfinite(clearances)].min())
         if clearances.size
         else float("inf"),
-        "min_rb_dist_m": None,
+        "min_rb_dist_m": float(rb_dists[np.isfinite(rb_dists)].min())
+        if rb_dists.size and np.isfinite(rb_dists).any()
+        else None,
         "video_path": "",
     }
 
