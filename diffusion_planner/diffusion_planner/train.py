@@ -554,11 +554,6 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
-                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
-                # (videos + metrics) land next to the saved weights they correspond to.
-                closed_loop_validate(
-                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
-                )
 
             if valid_loss_ego_position_lat_loss < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")
@@ -581,6 +576,14 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
+
+        if (epoch + 1 - init_epoch) % save_utd == 0:
+            closed_loop_validate(
+                diffusion_planner,
+                args,
+                epoch,
+                os.path.join(save_path, f"epoch{epoch + 1:04d}", "closed_loop"),
+            )
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
