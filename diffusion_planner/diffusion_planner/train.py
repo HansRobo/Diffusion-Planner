@@ -577,6 +577,11 @@ def model_training(args: TrainConfig):
                     external_data=False,
                 )
 
+        # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
+        # (videos + metrics) land next to the saved weights they correspond to.
+        # Must run on every rank (not gated behind `if global_rank == 0`): it calls
+        # dist.barrier() internally under DDP, so if only rank 0 reached it, rank 0
+        # would hang forever waiting for ranks that never call the barrier.
         if (epoch + 1 - init_epoch) % save_utd == 0:
             closed_loop_validate(
                 diffusion_planner,
