@@ -92,6 +92,246 @@ def reward_breakdown_to_json_dict(breakdown: RewardBreakdown) -> dict:
     return {key: _json_safe_value(value) for key, value in asdict(breakdown).items()}
 
 
+def _slice_reward_horizon(
+    data: dict[str, torch.Tensor], horizon: int
+) -> dict[str, torch.Tensor]:
+    """Slice only time-indexed futures for a short HDP/PDM reward horizon."""
+
+    out = dict(data)
+    for key in ("ego_agent_future", "neighbor_agents_future"):
+        value = out.get(key)
+        if isinstance(value, torch.Tensor) and value.dim() >= 3:
+            out[key] = value[..., :horizon, :]
+    return out
+
+
+def _expert_route_progress_ratio(
+    ego_trajs: torch.Tensor,
+    reference_future: torch.Tensor | None,
+) -> torch.Tensor:
+    """GPU-vectorized EP proxy: project predicted endpoints onto expert arc.
+
+    HDP defines EP as accumulated route progress divided by expert progress,
+    not Euclidean distance to a far-away goal.  The T4 cache has no nuPlan
+    route object, but it does retain the logged ego future.  Projecting the
+    candidate start/end onto that polyline gives the same proposal-relative
+    quantity and avoids rewarding a trajectory that merely drives sideways or
+    stops short.  The implementation is batched over AWR candidates.
+    """
+
+    N, T, _ = ego_trajs.shape
+    device = ego_trajs.device
+    if reference_future is None:
+        return torch.ones(N, device=device)
+    ref = reference_future
+    if ref.dim() == 3:
+        ref = ref[0]
+    ref_xy = ref[..., :2].to(device=device, dtype=ego_trajs.dtype)
+    valid = ref_xy.abs().sum(dim=-1) > 0.1
+    ref_xy = ref_xy[valid]
+    if ref_xy.shape[0] < 2:
+        return torch.ones(N, device=device)
+
+    p0 = ref_xy[:-1]
+    seg = ref_xy[1:] - p0
+    seg_len_sq = (seg * seg).sum(dim=-1).clamp_min(1e-6)
+    seg_len = seg_len_sq.sqrt()
+    cumulative = torch.cat(
+        [torch.zeros(1, device=device, dtype=ego_trajs.dtype), seg_len.cumsum(dim=0)[:-1]]
+    )
+
+    def _arc(points: torch.Tensor) -> torch.Tensor:
+        # points [N,2], segments [S,2] -> [N,S]
+        delta = points[:, None, :] - p0[None, :, :]
+        u = (delta * seg[None, :, :]).sum(dim=-1) / seg_len_sq[None, :]
+        u = u.clamp(0.0, 1.0)
+        projection = p0[None, :, :] + u[..., None] * seg[None, :, :]
+        distance_sq = ((points[:, None, :] - projection) ** 2).sum(dim=-1)
+        nearest = distance_sq.argmin(dim=1)
+        return cumulative[nearest] + u[torch.arange(points.shape[0], device=device), nearest] * seg_len[nearest]
+
+    start_arc = _arc(ego_trajs[:, 0, :2])
+    end_arc = _arc(ego_trajs[:, -1, :2])
+    raw_progress = (end_arc - start_arc).clamp_min(0.0)
+    reference_progress = (cumulative[-1] + seg_len[-1]).clamp_min(1e-3)
+    # Match nuPlan's uninformative short-expert branch.
+    return torch.where(
+        reference_progress > 5.0,
+        (raw_progress / reference_progress).clamp(0.0, 1.0),
+        torch.ones(N, device=device),
+    )
+
+
+def _hdp_multi_reward_components(
+    ego_trajs: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    subs: dict,
+    config: RewardConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute the three bounded reward families used by original HDP-RL.
+
+    The released HDP implementation calls the official PDM scorer, while the
+    paper describes its RL signal as risk + car-following + lane robustness.
+    T4 NPZ scenes do not contain nuPlan's scorer objects, so this adapter keeps
+    the same semantics using the data that is actually present:
+
+    * risk: pessimistic TTC / road-border / OBB safety;
+    * follow: leader gap, time gap, speed matching and comfort;
+    * lane: route-centerline proximity, masked for logged lane changes.
+
+    Every return value is in [0, 1].  Missing leaders or missing lane geometry
+    are neutral (1.0), rather than silently becoming a negative training
+    signal.  This is deliberately separate from the legacy signed reward and
+    from the PlannerRFT ``hdp_pdm`` profile.
+    """
+
+    N, T, _ = ego_trajs.shape
+    device = ego_trajs.device
+
+    collision_ok = torch.tensor(
+        [1.0 if step is None else 0.0 for step in subs["collision_step"]],
+        device=device,
+        dtype=ego_trajs.dtype,
+    )
+    # Road-border proximity is a soft occupancy/risk signal; crossing remains
+    # a hard zero.  The near/wide terms are fractions of the horizon.
+    rb_score = (
+        1.0
+        - subs["rb_near_penalty"].to(dtype=ego_trajs.dtype)
+        - subs["rb_wide_penalty"].to(dtype=ego_trajs.dtype)
+    ).clamp(0.0, 1.0)
+    ttc_score = subs["ttc"].to(dtype=ego_trajs.dtype).clamp(0.0, 1.0)
+    risk_score = torch.minimum(ttc_score, rb_score)
+    if bool(getattr(config, "hdp_risk_use_clearance", False)):
+        # ``ttc_min_clearance`` is the minimum signed OBB edge clearance over
+        # the short TTC look-ahead for every base timestep.  Unlike the old
+        # fraction-of-safe-frames TTC score, this gives HDP's risk reward a
+        # useful gradient on near misses before they become collisions.
+        clearance = subs.get("ttc_min_clearance")
+        if isinstance(clearance, torch.Tensor) and clearance.dim() == 2:
+            safe_m = max(float(getattr(config, "hdp_risk_clearance_safe_m", 2.0)), 1e-3)
+            clearance_score = (
+                clearance.to(dtype=ego_trajs.dtype) / safe_m
+            ).clamp(0.0, 1.0).min(dim=-1).values
+            risk_score = torch.minimum(risk_score, clearance_score)
+    risk_score = risk_score * collision_ok
+
+    # ---- car-following reward -------------------------------------------
+    follow_score = torch.ones(N, device=device, dtype=ego_trajs.dtype)
+    nf = data.get("neighbor_agents_future")
+    if isinstance(nf, torch.Tensor):
+        if nf.dim() == 4:
+            nf = nf[0]
+        if nf.dim() == 3 and nf.shape[-1] >= 4 and nf.shape[0] > 0:
+            nf = nf[:, :T, :4]
+            valid = nf[..., :2].abs().sum(dim=-1) > 0.1
+            # A leader is selected from the current +1 frame, in front of the
+            # ego and within a broad lane corridor.  The canonical loader has
+            # already applied the legacy +1 neighbor-future correction.
+            first = nf[:, 0]
+            leader_mask = (
+                valid[:, 0]
+                & (first[:, 0] > 0.5)
+                & (first[:, 1].abs() <= float(config.hdp_leader_lateral_threshold))
+            )
+            if bool(leader_mask.any()):
+                leader_x = first[:, 0].masked_fill(~leader_mask, float("inf"))
+                leader_index = int(leader_x.argmin().item())
+                leader_valid = valid[leader_index]
+                if bool(leader_valid.any()):
+                    leader = nf[leader_index]
+                    ego_xy = ego_trajs[..., :2]
+
+                    # Speed from the generated path.  The first value uses
+                    # the origin-to-waypoint displacement, then finite
+                    # differences match the 10 Hz data convention.
+                    if T > 1:
+                        ego_vel = torch.diff(ego_xy, dim=1) / max(float(config.dt), 1e-3)
+                        ego_vel = torch.cat(
+                            [ego_xy[:, :1] / max(float(config.dt), 1e-3), ego_vel], dim=1
+                        )
+                        lead_vel = torch.diff(leader[:, :2], dim=0) / max(float(config.dt), 1e-3)
+                        lead_vel = torch.cat(
+                            [lead_vel[:1], lead_vel], dim=0
+                        )
+                    else:
+                        ego_vel = ego_xy / max(float(config.dt), 1e-3)
+                        lead_vel = torch.zeros_like(leader[:, :2])
+                    ego_speed = ego_vel.norm(dim=-1).clamp_min(0.0)
+                    lead_speed = lead_vel.norm(dim=-1).unsqueeze(0)
+                    gap = leader[None, :, 0] - ego_xy[..., 0]
+                    desired_gap = 2.0 + 1.5 * ego_speed
+                    desired_time_gap = max(float(config.hdp_desired_time_gap), 0.1)
+                    time_gap = gap / ego_speed.clamp_min(1.0)
+
+                    spacing = torch.exp(
+                        -torch.abs(gap - desired_gap) / (desired_gap + 2.0)
+                    )
+                    time_gap_score = torch.exp(
+                        -torch.abs(time_gap - desired_time_gap) / 1.5
+                    )
+                    speed_match = torch.exp(-torch.abs(ego_speed - lead_speed) / 3.0)
+                    comfort = torch.exp(
+                        subs["comfort"].to(dtype=ego_trajs.dtype).clamp(-50.0, 0.0)
+                        / max(float(config.pdm_comfort_scale), 1e-3)
+                    )
+                    comfort = comfort * torch.exp(
+                        subs["feasibility"].to(dtype=ego_trajs.dtype).clamp(-10.0, 0.0)
+                    )
+                    per_step = torch.stack(
+                        [spacing, time_gap_score, speed_match, comfort[:, None].expand(N, T)],
+                        dim=-1,
+                    ).mean(dim=-1)
+                    follow_score = torch.where(
+                        leader_valid[None, :], per_step, torch.ones_like(per_step)
+                    ).sum(dim=-1) / leader_valid[None, :].to(ego_trajs.dtype).sum().clamp_min(1.0)
+                    follow_score = follow_score.clamp(0.0, 1.0)
+
+    # ---- lane robustness reward ----------------------------------------
+    lane_score = torch.exp(
+        subs["centerline"].to(dtype=ego_trajs.dtype).clamp(-50.0, 0.0)
+        / max(float(config.hdp_lane_score_scale), 1e-3)
+    ).clamp(0.0, 1.0)
+
+    # Paper intent: do not punish an intentional lane change.  This local
+    # primitive detects the logged expert leaving the UNION of nearby lane
+    # polygons; shared boundaries between two legal adjacent lanes are removed
+    # as internal edges.  It is therefore an off-lane / outer-union mask, not a
+    # complete lane-change detector.  A future T4 profile should additionally
+    # consume a validated lane-change sidecar (or indicator/route semantics)
+    # before claiming full parity with the HDP paper's lane-change mask.
+    gt = data.get("ego_agent_future")
+    if isinstance(gt, torch.Tensor):
+        if gt.dim() == 3:
+            gt = gt[0]
+        gt = gt[:T]
+        if gt.dim() == 2 and gt.shape[-1] >= 3:
+            if gt.shape[-1] == 3:
+                gt4 = torch.cat([gt[:, :2], torch.cos(gt[:, 2:3]), torch.sin(gt[:, 2:3])], dim=-1)
+            else:
+                gt4 = gt[:, :4]
+            # Only the lane-departure result is needed for the expert off-lane
+            # mask.  Calling compute_subscores_batch here used to
+            # recompute collision, TTC, border, smoothness, feasibility and
+            # red-light metrics for the logged expert on every scene.  That
+            # was mathematically redundant and dominated full-corpus HDP
+            # rollout time.  Reuse the exact lane geometry primitive instead.
+            expert_shape = data.get("ego_shape")
+            if isinstance(expert_shape, torch.Tensor):
+                if expert_shape.dim() == 2:
+                    expert_shape = expert_shape[0]
+                expert_lane = compute_lane_departure_penalty(
+                    gt4.unsqueeze(0), expert_shape[:3].to(device), data, config=config
+                )
+                expert_lane_steps = expert_lane[3]
+            else:
+                expert_lane_steps = [None]
+            if isinstance(expert_lane_steps, list) and expert_lane_steps and expert_lane_steps[0] is not None:
+                lane_score = torch.ones_like(lane_score)
+
+    return risk_score, follow_score, lane_score
+
+
 @torch.no_grad()
 def compute_reward_batch(
     ego_trajs: torch.Tensor,
@@ -114,7 +354,19 @@ def compute_reward_batch(
     Returns:
         List of N RewardBreakdown instances.
     """
-    return _shape_reward(compute_subscores_batch(ego_trajs, data, config), ego_trajs, data, config)
+    horizon = int(getattr(config, "reward_horizon_steps", 0))
+    if 0 < horizon < ego_trajs.shape[1]:
+        reward_trajs = ego_trajs[:, :horizon]
+        reward_data = _slice_reward_horizon(data, horizon)
+    else:
+        reward_trajs = ego_trajs
+        reward_data = data
+    return _shape_reward(
+        compute_subscores_batch(reward_trajs, reward_data, config),
+        reward_trajs,
+        reward_data,
+        config,
+    )
 
 
 @torch.no_grad()
@@ -354,7 +606,104 @@ def _shape_reward(
 
     _OFFROAD_FLOOR = -50.0
 
-    if config.reward_mode == "survival":
+    if config.reward_profile == "hdp_multi":
+        # Original HDP-RL multi-reward profile: the paper reports a bounded
+        # weighted sum of risk, car-following and lane robustness.  Unlike the
+        # PlannerRFT/PDM profile below, this deliberately does not substitute
+        # an EP/Speed weighted average for HDP's follow/lane rewards.
+        risk_score, follow_score, lane_score = _hdp_multi_reward_components(
+            ego_trajs, data, subs, config
+        )
+        total_hdp_weight = max(
+            float(config.hdp_risk_weight)
+            + float(config.hdp_follow_weight)
+            + float(config.hdp_lane_weight),
+            1e-6,
+        )
+        totals = (
+            float(config.hdp_risk_weight) * risk_score
+            + float(config.hdp_follow_weight) * follow_score
+            + float(config.hdp_lane_weight) * lane_score
+        ) / total_hdp_weight
+        # Keep the local hard kinematic guard below.  Collision/DAC are
+        # already represented continuously in r_risk, matching the HDP paper
+        # multi-reward formulation instead of turning every candidate into a
+        # single -50 terminal label.
+    elif config.reward_profile == "hdp_pdm":
+        # Published HDP/PlannerRFT reward.  The NPZ interface does not carry
+        # nuPlan's full route-progress and speed-limit object, so EP/Speed are
+        # computed from the local logged horizon and route-lane speed-limit
+        # tensor respectively; the terminal Col/DAC checks remain the same
+        # OBB road-border checks used by the open-source PDM port.
+        reference_path = None
+        gt_future = data.get("ego_agent_future")
+        if isinstance(gt_future, torch.Tensor):
+            if gt_future.dim() == 3:
+                gt_future = gt_future[0]
+            gt_xy = gt_future[:, :2]
+            gt_valid = gt_xy.abs().sum(dim=-1) > 0.1
+            if gt_valid.sum() >= 2:
+                reference_path = torch.diff(gt_xy[gt_valid], dim=0).norm(dim=-1).sum()
+        if reference_path is None or float(reference_path.item()) < 1e-3:
+            baseline_ref = data.get("baseline_path_len")
+            if baseline_ref is not None:
+                reference_path = torch.as_tensor(baseline_ref, device=device, dtype=torch.float32).reshape(())
+            else:
+                reference_path = torch.tensor(1.0, device=device)
+
+        # Ego progress (EP): use expert-polyline arc progress, which is the
+        # local-data equivalent of HDP's route-progress numerator.  The old
+        # Euclidean goal-distance proxy can reward a short sideways path or a
+        # stop when the goal pose is far outside the cached scene.
+        ep_score = _expert_route_progress_ratio(ego_trajs, gt_future)
+
+        # Comfort (C): a continuous proxy for nuPlan's all-constraints comfort
+        # indicator.  Smoothness and acceleration feasibility are both <= 0
+        # penalties in the neutral metrics layer.
+        comfort_score = torch.exp(
+            smoothness_scores.clamp(min=-50.0, max=0.0)
+            / max(float(config.pdm_comfort_scale), 1e-3)
+        )
+        comfort_score = comfort_score * torch.exp(feasibility_scores.clamp(min=-10.0, max=0.0))
+        comfort_score = comfort_score.clamp(0.0, 1.0)
+
+        # HDP's released NAVSIM agent uses the PDM scorer.  Its weighted
+        # terms are EP=5, TTC=5, lane-keeping=2 and history comfort=2; the
+        # speed-limit term belongs to other PlannerRFT variants and must not
+        # silently replace lane keeping in an HDP reproduction.  Reuse the
+        # local lane adapter above so the intentional-lane-change exemption is
+        # retained.  Missing oncoming-traffic / traffic-light semantics stay
+        # neutral, just as the data-availability note in the local PDM port
+        # requires.
+        _, _, lane_score = _hdp_multi_reward_components(
+            ego_trajs, data, subs, config
+        )
+        driving_direction_score = torch.ones(N, device=device)
+        pdm_quality = (
+            5.0 * ttc_scores.clamp(0.0, 1.0)
+            + 5.0 * ep_score
+            + 2.0 * lane_score.clamp(0.0, 1.0)
+            + 2.0 * comfort_score
+        ) / 14.0
+
+        # Col×DAC terminal product, with survival credit for the first failure
+        # time when requested (the HDP open-loop scorer's key hard-scene
+        # stabilization).  A road-border cross is DAC=0 regardless of whether
+        # the custom profile's optional rb gate is enabled.
+        pdm_terminal = collision_gate * rb_crossing_gate * driving_direction_score
+        if config.reward_mode == "survival":
+            pdm_survival_frac = torch.ones(N, device=device)
+            for i in range(N):
+                first_terminal = T
+                if collision_steps[i] is not None:
+                    first_terminal = min(first_terminal, collision_steps[i])
+                if rb_crossing_steps[i] is not None:
+                    first_terminal = min(first_terminal, rb_crossing_steps[i])
+                pdm_survival_frac[i] = max(first_terminal, 1) / max(T, 1)
+            totals = pdm_survival_frac * pdm_quality * driving_direction_score
+        else:
+            totals = pdm_terminal * pdm_quality
+    elif config.reward_mode == "survival":
         # PlannerRFT-style survival reward: proportional credit based on how
         # long the trajectory survives before the first terminal event.
         # survival_frac = first_terminal_step / T. A crash at t=60/80 gets 75%
@@ -367,7 +716,16 @@ def _shape_reward(
                 first_terminal = min(first_terminal, collision_steps[i])
             if config.rb_gate_enabled and rb_crossing_steps[i] is not None:
                 first_terminal = min(first_terminal, rb_crossing_steps[i])
-            if config.enable_lane_departure and lane_crossing_steps[i] is not None:
+            # Lane keeping is a diagnostic in the HDP/PDM-aligned profile.  A
+            # legal lane change necessarily crosses a shared lane boundary, so
+            # it must not shorten survival unless the caller explicitly turns
+            # on the lane hard gate.  ``enable_lane_departure`` only controls
+            # whether the geometry is measured/logged.
+            if (
+                config.lane_gate_enabled
+                and config.enable_lane_departure
+                and lane_crossing_steps[i] is not None
+            ):
                 first_terminal = min(first_terminal, lane_crossing_steps[i])
             if (
                 config.static_collision_enabled
@@ -388,10 +746,23 @@ def _shape_reward(
         # Any terminal event → full floor penalty regardless of when it happens.
         totals = safety_product * quality_score + (1.0 - safety_product) * _OFFROAD_FLOOR
 
-    # Kinematic feasibility hard gate: trajectories violating yaw-rate or
-    # bicycle-model curvature bounds get floored. Applied after survival/gate
-    # aggregation so it overrides any otherwise-positive reward.
-    totals = totals * kinematic_gate + (1.0 - kinematic_gate) * _OFFROAD_FLOOR
+    # Kinematic feasibility hard gate.  The released HDP RL path receives the
+    # normalized PDM score in [0, 1] and filters only NaN / out-of-range
+    # proposals (``reward > -1``); a failed proposal therefore contributes a
+    # zero score, not the signed custom-reward floor used by the legacy DP
+    # objective.  Keep that non-negative convention for the HDP/PDM adapter so
+    # group z-normalisation has the same semantics as the reference code.
+    if config.reward_profile in {"hdp_pdm", "hdp_multi"}:
+        # Both published HDP reward families are bounded in [0, 1].  A
+        # kinematic failure is therefore a zero-scoring proposal, just like
+        # the released HDP replay filter's ``reward > -1`` convention; it
+        # must not inherit the legacy -50 custom floor and distort group
+        # normalisation.
+        totals = totals * kinematic_gate
+    else:
+        # Custom / historical profiles retain their explicit floor so existing
+        # rule-based GRPO experiments remain numerically backward compatible.
+        totals = totals * kinematic_gate + (1.0 - kinematic_gate) * _OFFROAD_FLOOR
 
     # Also compute additive total for backward compat in breakdown
     on_road_factor = 1.0 - off_road_fractions

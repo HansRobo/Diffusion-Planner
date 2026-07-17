@@ -108,6 +108,8 @@ def compute_safety_score_batch(
     neighbor_shapes: torch.Tensor,
     neighbor_valid: torch.Tensor,
     config: RewardConfig,
+    *,
+    precomputed_distances: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, list[int | None]]:
     """Batched ego-NPC collision check using oriented bounding boxes.
 
@@ -141,13 +143,15 @@ def compute_safety_score_batch(
     if N_nb == 0:
         return torch.zeros(N, device=device), [None] * N
 
-    distances = compute_ego_neighbor_signed_clearance(
-        ego_trajs,
-        ego_shape,
-        neighbor_futures,
-        neighbor_shapes,
-        neighbor_valid,
-    )
+    distances = precomputed_distances
+    if distances is None:
+        distances = compute_ego_neighbor_signed_clearance(
+            ego_trajs,
+            ego_shape,
+            neighbor_futures,
+            neighbor_shapes,
+            neighbor_valid,
+        )
 
     # Collision: negative signed distance = overlap
     collision_mask = distances < 0  # (N, N_nb, T)
@@ -228,6 +232,8 @@ def compute_ttc_score_batch(
     neighbor_futures: torch.Tensor,
     neighbor_shapes: torch.Tensor,
     neighbor_valid: torch.Tensor,
+    *,
+    precomputed_distances: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor | list[int | None]]:
     """Check if ego would collide with NPCs within TTC_HORIZON seconds.
 
@@ -260,13 +266,15 @@ def compute_ttc_score_batch(
     if N_nb == 0 or T == 0:
         return _safe_empty()
 
-    distances = compute_ego_neighbor_signed_clearance(
-        ego_trajs,
-        ego_shape,
-        neighbor_futures,
-        neighbor_shapes,
-        neighbor_valid,
-    )  # (N, N_nb, T)
+    distances = precomputed_distances
+    if distances is None:
+        distances = compute_ego_neighbor_signed_clearance(
+            ego_trajs,
+            ego_shape,
+            neighbor_futures,
+            neighbor_shapes,
+            neighbor_valid,
+        )  # (N, N_nb, T)
     collision_at_t = (distances < 0).any(dim=1)  # (N, T)
     min_dist_at_t = distances.min(dim=1).values  # (N, T)
 

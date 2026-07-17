@@ -301,6 +301,10 @@ class Decoder(nn.Module):
         self._guidance_scale = config.guidance_scale
         self._model_type = config.diffusion_model_type
         self._use_velocity = config.use_velocity_representation
+        # Keep the original DP default (ten DPM steps), while allowing a
+        # checkpoint-specific sampler count when its args explicitly provide
+        # one.
+        self._sample_steps = max(2, int(getattr(config, "diffusion_sample_steps", 10)))
 
         # Initialize transformer layers:
         def _basic_init(m):
@@ -379,7 +383,15 @@ class Decoder(nn.Module):
 
         gt_trajectories = inputs["gt_trajectories"].reshape(B, P, (1 + self._future_len), 4)
         ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
-        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
+        if inputs.get("_skip_turn_indicator", False):
+            turn_indicator_logit = torch.zeros(
+                B,
+                TURN_INDICATOR_OUTPUT_DIM,
+                dtype=ego_trajectory.dtype,
+                device=ego_trajectory.device,
+            )
+        else:
+            turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
         return {
             "model_output": self.dit(
@@ -506,11 +518,24 @@ class Decoder(nn.Module):
 
         dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, correcting_xt_fn=prefix_constraint)
 
-        x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
+        x0 = dpm_solver.sample(
+            xT,
+            steps=self._sample_steps,
+            prefix_mask=mask,
+            skip_type="logSNR",
+        )
 
         x0 = x0.reshape(B, P, (1 + self._future_len), 4)
         ego_trajectory = x0[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
-        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
+        if inputs.get("_skip_turn_indicator", False):
+            turn_indicator_logit = torch.zeros(
+                B,
+                TURN_INDICATOR_OUTPUT_DIM,
+                dtype=ego_trajectory.dtype,
+                device=ego_trajectory.device,
+            )
+        else:
+            turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
         if self._use_velocity:
             future = velocity_to_waypoints(x0[:, :, 1:, :])
             future = add_current_xy(future, current_states)

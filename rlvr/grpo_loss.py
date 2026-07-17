@@ -35,6 +35,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from preference_optimization.dpo_loss import compute_trajectory_loss as _compute_trajectory_loss_raw
+from diffusion_planner.loss import hybrid_loss, loss_func
 from rlvr.grpo_config import GRPOConfig
 
 
@@ -258,6 +259,13 @@ def compute_batched_trajectory_losses(
     t,
     device,
     neighbor_loss_weight: float = 0.0,
+    cached_encoding: torch.Tensor | None = None,
+    amp_dtype: str = "off",
+    hdp_hybrid_loss_weight: float = 0.0,
+    hdp_hybrid_waypoint_weight: float = 0.1,
+    hdp_hybrid_window: int = 10,
+    use_prefix_mask: bool = True,
+    awr_loss_type: str = "dp_geometry",
 ):
     """Compute diffusion losses for N trajectories in ONE forward pass.
 
@@ -284,6 +292,7 @@ def compute_batched_trajectory_losses(
     N = trajectories_tensor.shape[0]
     P = 1 + model_args.predicted_neighbor_num
     future_len = model_args.future_len
+    T = int(future_len)
     eps = 1e-3
 
     # Expand data to B=N. Supports B=1 (expand) and B=N (pass through).
@@ -297,8 +306,16 @@ def compute_batched_trajectory_losses(
                 batch_data[k] = v.expand(N, *v.shape[1:]).contiguous()
             elif B_scene == N:
                 batch_data[k] = v
+            elif N % B_scene == 0:
+                # A full-corpus trainer may pack several scenes into one
+                # decoder call.  Candidates are laid out scene-major
+                # (scene0 K candidates, scene1 K candidates, ...), matching
+                # repeat_interleave here.
+                batch_data[k] = v.repeat_interleave(N // B_scene, dim=0).contiguous()
             else:
-                raise ValueError(f"data['{k}'] has B={B_scene}, expected 1 or N={N}")
+                raise ValueError(
+                    f"data['{k}'] has B={B_scene}, expected 1, N={N}, or a divisor of N"
+                )
         else:
             batch_data[k] = v
 
@@ -318,9 +335,19 @@ def compute_batched_trajectory_losses(
     # Prefix mask with random delay — matches SFT (decoder.py line 95-100)
     # Forces first `delay` steps to use clean GT, training the model to
     # predict the trajectory conditioned on a clean prefix.
-    max_delay = 5
-    delay = torch.randint(0, max_delay + 1, (N,), device=device)
-    prefix_mask = generate_prefix_mask(delay, P, future_len + 1)  # (N, P, T+1, 1)
+    if use_prefix_mask:
+        max_delay = 5
+        delay = torch.randint(0, max_delay + 1, (N,), device=device)
+        prefix_mask = generate_prefix_mask(delay, P, future_len + 1)  # (N, P, T+1, 1)
+    else:
+        # The released HDP RL step draws a noisy action directly from the
+        # diffusion SDE; it has no SFT teacher-prefix corruption.  Keep the
+        # current state fixed in the trajectory tensor, but expose no future
+        # prefix to the denoiser during the AWR regression.
+        delay = torch.zeros(N, dtype=torch.long, device=device)
+        prefix_mask = torch.zeros(
+            N, P, future_len + 1, 1, dtype=torch.bool, device=device
+        )
     mask_coeff = _random.uniform(0.0, 1.0)
     curr_mask_time = torch.maximum(t_4d * mask_coeff, torch.tensor(eps, device=device))
     t_4d = torch.where(prefix_mask, curr_mask_time, t_4d)
@@ -411,19 +438,130 @@ def compute_batched_trajectory_losses(
     if "delay" not in merged:
         merged["delay"] = delay
 
-    _, outputs = model(merged)
+    # AWR keeps all candidates from one scene together.  Reuse the detached
+    # scene encoding when supplied; only the candidate-specific decoder input
+    # is expanded.  The autocast scope intentionally covers the model forward
+    # only.  Target construction, SDE math and the loss remain fp32.
+    if cached_encoding is not None:
+        if cached_encoding.shape[0] == 1:
+            merged["_cached_encoding"] = cached_encoding.expand(N, *cached_encoding.shape[1:]).contiguous()
+        elif cached_encoding.shape[0] == N:
+            merged["_cached_encoding"] = cached_encoding
+        elif N % cached_encoding.shape[0] == 0:
+            merged["_cached_encoding"] = cached_encoding.repeat_interleave(
+                N // cached_encoding.shape[0], dim=0
+            ).contiguous()
+        else:
+            raise ValueError(
+                "cached_encoding must have batch 1 or match the candidate batch "
+                f"N={N}, got {tuple(cached_encoding.shape)}"
+            )
+    amp_dtype = str(amp_dtype).lower()
+    if amp_dtype in {"bf16", "bfloat16"}:
+        autocast_dtype = torch.bfloat16
+    elif amp_dtype in {"fp16", "float16", "half"}:
+        autocast_dtype = torch.float16
+    else:
+        autocast_dtype = torch.float32
+    use_amp = amp_dtype in {"bf16", "bfloat16", "fp16", "float16", "half"} and device.type == "cuda"
+    with torch.autocast(device_type=device.type, dtype=autocast_dtype, enabled=use_amp):
+        _, outputs = model(merged)
 
     if "model_output" in outputs:
-        full_output = outputs["model_output"][:, :, 1:, :]  # [N, P, T, 4]
+        # The denoiser forward may run under bf16/fp16 autocast.  Keep the
+        # objective itself in fp32: mixing a reduced-precision prediction with
+        # fp32 targets inside mse_loss can dispatch to a dtype-incompatible
+        # backward kernel (notably ``Found dtype Float but expected
+        # BFloat16`` on H100).  Casting here preserves the reduced-precision
+        # matmuls while making the loss and its gradient numerically stable.
+        full_output = outputs["model_output"][:, :, 1:, :].float()  # [N, P, T, 4]
     else:
-        full_output = outputs["prediction"]  # [N, P, T, 4]
+        full_output = outputs["prediction"].float()  # [N, P, T, 4]
 
     full_gt = all_gt[:, :, 1:, :]  # [N, P, T, 4]
 
-    # Ego loss: [N]
+    # Ego loss: [N].  Use the original DP SFT geometry loss rather than a
+    # plain four-channel MSE.  This is important for HDP-style post-training:
+    # the sampled target is still an AWR target, but the regression metric must
+    # preserve the base planner's lateral/longitudinal/heading decomposition,
+    # speed normalisation, and horizon weighting.  A raw MSE over x/y/cos/sin
+    # changes the relative scale of braking, lane offset, and heading errors
+    # and was a major source of drift in the first AWR candidates.
     ego_output = full_output[:, 0]  # [N, T, 4]
     ego_gt = full_gt[:, 0]  # [N, T, 4]
-    per_traj_ego_loss = F.mse_loss(ego_output, ego_gt, reduction="none").mean(dim=(1, 2))
+    loss_type = str(awr_loss_type).lower()
+    if loss_type in {"plain_mse", "mse", "hdp_mse"}:
+        # HDP's released RL step uses a direct mean-squared diffusion action
+        # loss.  Keep this opt-in because original DP SFT normally uses the
+        # geometry-aware decomposition below.
+        ego_horizon = min(T, int(getattr(model_args, "ego_prediction_horizon", T)))
+        per_traj_ego_loss = (ego_output[:, :ego_horizon] - ego_gt[:, :ego_horizon]).pow(2).mean(dim=(1, 2))
+        position_lat_loss = position_lon_loss = heading_l2_loss = None
+    else:
+        loss_terms = loss_func(ego_output, ego_gt)
+        position_lat_loss = loss_terms["position_lat_loss"]
+        position_lon_loss = loss_terms["position_lon_loss"]
+        heading_l2_loss = loss_terms["heading_l2_loss"]
+
+    # Match decoder.compute_training_loss: longitudinal errors are divided by
+    # the current ego speed (with a unit floor), and the original four temporal
+    # blocks receive coeff_timestep.  Keep the values on the model device so
+    # this remains compatible with bf16 forward / fp32 objective math.
+    longitudinal_velocity = batch_data["ego_current_state"][:, 4:5].float()
+    velocity_coeff = float(getattr(model_args, "coeff_velocity", 1.0))
+    velocity_weight = (longitudinal_velocity * velocity_coeff).abs().clamp_min(1.0)
+    if loss_type not in {"plain_mse", "mse", "hdp_mse"}:
+        position_lon_loss = position_lon_loss / velocity_weight
+    timestep_coeff = getattr(model_args, "coeff_timestep", None)
+    if timestep_coeff is None:
+        timestep_coeff = [1.0]
+    if isinstance(timestep_coeff, torch.Tensor):
+        timestep_coeff = timestep_coeff.detach().flatten().tolist()
+    timestep_coeff = [float(value) for value in timestep_coeff]
+    if len(timestep_coeff) > 1 and T % len(timestep_coeff) != 0:
+        raise ValueError(
+            "original DP coeff_timestep must divide the future horizon: "
+            f"T={T}, len={len(timestep_coeff)}"
+        )
+    unit = max(1, T // len(timestep_coeff))
+    if loss_type not in {"plain_mse", "mse", "hdp_mse"}:
+        for index, coefficient in enumerate(timestep_coeff):
+            start = index * unit
+            end = T if index == len(timestep_coeff) - 1 else (index + 1) * unit
+            position_lat_loss[:, start:end] *= coefficient
+            position_lon_loss[:, start:end] *= coefficient
+            heading_l2_loss[:, start:end] *= coefficient
+        per_timestep_ego = (
+            float(getattr(model_args, "coeff_position_lat_loss", 1.0)) * position_lat_loss
+            + float(getattr(model_args, "coeff_position_lon_loss", 1.0)) * position_lon_loss
+            + float(getattr(model_args, "coeff_heading_l2_loss", 1.0)) * heading_l2_loss
+        )
+        ego_horizon = min(T, int(getattr(model_args, "ego_prediction_horizon", T)))
+        per_traj_ego_loss = per_timestep_ego[:, :ego_horizon].mean(dim=-1)
+
+    # Optional HDP-style kinematic auxiliary for the original x-start model.
+    #
+    # HDP's published hybrid loss is defined for a velocity parameterisation:
+    # velocity error + omega * integrated-waypoint error.  The v5 original DP
+    # predicts absolute x-start waypoints, so the faithful equivalent is to
+    # finite-difference the predicted and target waypoint sequences (including
+    # the current state), apply the same detached integral, and add it to the
+    # original DP geometry loss.  This keeps the base loss' lateral/
+    # longitudinal/heading semantics while importing HDP's temporal coupling;
+    # it is disabled by default for an exact SFT-compatible baseline.
+    if hdp_hybrid_loss_weight > 0.0:
+        current_xy = ego_current_norm[:, :2].unsqueeze(1)
+        pred_xy = torch.cat([current_xy, ego_output[..., :2]], dim=1)
+        gt_xy = torch.cat([current_xy, ego_gt[..., :2]], dim=1)
+        pred_delta = torch.diff(pred_xy, dim=1)
+        gt_delta = torch.diff(gt_xy, dim=1)
+        hybrid_position_loss = hybrid_loss(
+            pred_delta,
+            gt_delta,
+            omega=float(hdp_hybrid_waypoint_weight),
+            W=max(1, min(int(hdp_hybrid_window), T)),
+        )
+        per_traj_ego_loss = per_traj_ego_loss + float(hdp_hybrid_loss_weight) * hybrid_position_loss[:, :ego_horizon].mean(dim=-1)
 
     # Neighbor regularization loss: per-trajectory MSE on valid neighbor predictions.
     # This prevents the LoRA from distorting neighbor predictions, which feeds back
@@ -433,13 +571,25 @@ def compute_batched_trajectory_losses(
     if _NEIGHBOR_LOSS_WEIGHT > 0 and P > 1 and neighbor_future_valid is not None:
         neighbor_output = full_output[:, 1 : 1 + nf_pn]  # [N, Pn', T, 4]
         neighbor_gt = full_gt[:, 1 : 1 + nf_pn]  # [N, Pn', T, 4]
-        neighbor_mse = F.mse_loss(neighbor_output, neighbor_gt, reduction="none")  # [N, Pn', T, 4]
-        # Mask invalid neighbors to zero
-        valid_mask = neighbor_future_valid.unsqueeze(-1).expand_as(neighbor_mse)  # [N, Pn', T, 4]
-        neighbor_mse = neighbor_mse * valid_mask.float()
-        # Per-trajectory neighbor loss: [N] — average over valid neighbors, timesteps, dims
-        n_valid_per_traj = valid_mask.float().sum(dim=(1, 2, 3)).clamp(min=1)
-        per_traj_neighbor_loss = neighbor_mse.sum(dim=(1, 2, 3)) / n_valid_per_traj
+        neighbor_terms = loss_func(neighbor_output, neighbor_gt)
+        neighbor_dpm_loss = (
+            float(getattr(model_args, "coeff_position_lat_loss", 1.0))
+            * neighbor_terms["position_lat_loss"]
+            + float(getattr(model_args, "coeff_position_lon_loss", 1.0))
+            * neighbor_terms["position_lon_loss"]
+            + float(getattr(model_args, "coeff_heading_l2_loss", 1.0))
+            * neighbor_terms["heading_l2_loss"]
+        )
+        # Keep the same temporal weighting as the ego branch.  The speed
+        # normalisation is intentionally omitted here because the original DP
+        # neighbor loss is only a regularizer and has no ego-speed target.
+        for index, coefficient in enumerate(timestep_coeff):
+            start = index * unit
+            end = T if index == len(timestep_coeff) - 1 else (index + 1) * unit
+            neighbor_dpm_loss[:, :, start:end] *= coefficient
+        valid_mask = neighbor_future_valid[:, :nf_pn, :T].float()
+        n_valid_per_traj = valid_mask.sum(dim=(1, 2)).clamp_min(1.0)
+        per_traj_neighbor_loss = (neighbor_dpm_loss * valid_mask).sum(dim=(1, 2)) / n_valid_per_traj
         per_traj_loss = per_traj_ego_loss + _NEIGHBOR_LOSS_WEIGHT * per_traj_neighbor_loss
     else:
         per_traj_loss = per_traj_ego_loss

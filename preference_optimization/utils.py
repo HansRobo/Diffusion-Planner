@@ -6,6 +6,21 @@ import numpy as np
 import torch
 from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from diffusion_planner.train_epoch import heading_to_cos_sin
+from diffusion_planner.utils.neighbor_future_alignment import (
+    align_neighbor_future_tensor,
+)
+
+
+# The released v5 Original-DP checkpoint was trained with the legacy X2 body
+# width.  New 20260707 archives carry the updated X2 width, so normalize it at
+# the canonical RL loader boundary until a checkpoint trained on the new body
+# geometry is used.  Do not alter xx1/J6 scenes.
+X2_LEGACY_EGO_WIDTH_M = 2.29156
+_X2_DATASET_COMPONENTS = frozenset({"x2", "x2_dev"})
+
+
+def _uses_legacy_x2_geometry(npz_path: str | Path) -> bool:
+    return bool(_X2_DATASET_COMPONENTS.intersection(Path(npz_path).parts))
 
 
 def load_npz_data(
@@ -41,6 +56,13 @@ def load_npz_data(
         data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
     if "ego_agent_past" in data:
         data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
+    if "neighbor_agents_future" in data:
+        # Current T4 archives are present-frame inclusive. Keep the correction
+        # at the canonical loader boundary so AWR's target, OBB reward, and
+        # visualisers all share the same t=+1 timeline.
+        data["neighbor_agents_future"] = align_neighbor_future_tensor(
+            data["neighbor_agents_future"]
+        )
 
     if "ego_shape" not in data:
         if ego_shape_override is not None:
@@ -53,6 +75,17 @@ def load_npz_data(
             raise ValueError(
                 f"load_npz_data: '{npz_path}' is missing 'ego_shape' (wheel_base, length, width)."
             )
+
+    if _uses_legacy_x2_geometry(npz_path):
+        ego_shape = data["ego_shape"]
+        if ego_shape.ndim != 2 or ego_shape.shape[0] != 1 or ego_shape.shape[1] < 3:
+            raise ValueError(
+                f"load_npz_data: '{npz_path}' has invalid ego_shape "
+                f"{tuple(ego_shape.shape)}; expected [1, >=3]"
+            )
+        ego_shape = ego_shape.clone()
+        ego_shape[0, 2] = X2_LEGACY_EGO_WIDTH_M
+        data["ego_shape"] = ego_shape
 
     # v4 decoder requires delay (always 0 at inference, training uses random delay)
     if "delay" not in data:

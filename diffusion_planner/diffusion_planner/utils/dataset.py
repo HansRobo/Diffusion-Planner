@@ -2,6 +2,9 @@ import numpy as np
 from torch.utils.data import Dataset
 
 from diffusion_planner.utils.train_utils import openjson
+from diffusion_planner.utils.neighbor_future_alignment import (
+    align_neighbor_future_numpy,
+)
 from planner_metrics.temporal_stability import consecutive_frame_pairs
 
 
@@ -16,6 +19,13 @@ class DiffusionPlannerData(Dataset):
         data = np.load(self.data_list[idx], allow_pickle=True)
         data = dict(data)  # npz to dict
         data.pop("version", None)
+        if "neighbor_agents_future" in data:
+            # Keep ordinary DP/SFT and RL loaders on the HDP-compatible
+            # temporal convention. Set DP_NEIGHBOR_FUTURE_OFFSET=0 when a
+            # regenerated archive is already future-only.
+            data["neighbor_agents_future"] = align_neighbor_future_numpy(
+                data["neighbor_agents_future"]
+            )
         return data
 
 

@@ -19,6 +19,7 @@ import torch
 
 from planner_metrics.config import RewardConfig
 from planner_metrics.subscores import (
+    compute_ego_neighbor_signed_clearance,
     ROAD_BORDER_NO_DATA_DISTANCE_M,
     compute_centerline_score_batch,
     compute_feasibility_score_batch,
@@ -168,6 +169,20 @@ def compute_subscores_batch(
             device=device,
         )
 
+    # Safety collision and TTC use the same OBB signed-clearance tensor.  The
+    # old path computed it independently twice for every sampled trajectory
+    # group.  Compute it once and pass the immutable result to both consumers;
+    # all masking/threshold logic remains in the original functions.
+    neighbor_clearance = None
+    if neighbor_futures.shape[0] > 0:
+        neighbor_clearance = compute_ego_neighbor_signed_clearance(
+            ego_trajs,
+            ego_shape,
+            neighbor_futures,
+            neighbor_shapes,
+            neighbor_valid,
+        )
+
     # --- Goal pose ---
     goal_pose = torch.zeros(4, device=device)
     if "goal_pose" in data:
@@ -179,7 +194,13 @@ def compute_subscores_batch(
 
     # --- Batched subscore computation (no shaping) ---
     safety_scores, collision_steps = compute_safety_score_batch(
-        ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid, config
+        ego_trajs,
+        ego_shape,
+        neighbor_futures,
+        neighbor_shapes,
+        neighbor_valid,
+        config,
+        precomputed_distances=neighbor_clearance,
     )
     progress_scores = compute_progress_score_batch(ego_trajs, goal_pose, data)
     smoothness_scores = compute_smoothness_score_batch(ego_trajs, config)
@@ -195,7 +216,12 @@ def compute_subscores_batch(
     )
     red_light_scores = compute_red_light_score_batch(ego_trajs, data, config)
     ttc_result = compute_ttc_score_batch(
-        ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid
+        ego_trajs,
+        ego_shape,
+        neighbor_futures,
+        neighbor_shapes,
+        neighbor_valid,
+        precomputed_distances=neighbor_clearance,
     )
     ttc_scores = ttc_result["score"]
     (

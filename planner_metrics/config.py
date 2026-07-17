@@ -136,6 +136,34 @@ class RewardConfig:
     #   quality score. Prevents gradient death on hard scenes where all trajectories fail.
     reward_mode: str = "gate"
 
+    # Optional RL scoring horizon.  HDP found a moderate 4--6 s horizon more
+    # useful than ranking an 8 s proposal with a very delayed failure.  Zero
+    # keeps the full trajectory (the historical/default behavior).
+    reward_horizon_steps: int = 0
+
+    # ``"hdp_pdm"`` selects the published HDP/PDM-style normalized reward:
+    # Col×DAC×(5*TTC + 5*EP + 2*C + 4*Speed)/16.  The default keeps the
+    # repository's historical signed custom shaping for backwards parity.
+    reward_profile: str = "custom"
+    pdm_comfort_scale: float = 10.0
+    # Original HDP multi-reward post-training profile.  These are the weights
+    # reported in the HDP paper (risk, car-following, lane robustness).  The
+    # local NPZ adapter computes the same bounded [0, 1] reward families from
+    # OBB/TTC, replayed neighbor futures, and route-lane geometry.
+    hdp_risk_weight: float = 1.0
+    hdp_follow_weight: float = 3.0
+    hdp_lane_weight: float = 2.5
+    hdp_lane_score_scale: float = 1.0
+    hdp_leader_lateral_threshold: float = 3.0
+    hdp_desired_time_gap: float = 1.5
+    # Continuous near-miss risk adapter.  HDP defines risk from pessimistic
+    # TTC/THW/OCC scores rather than only a binary collision label.  The local
+    # NPZ scorer exposes the OBB clearance seen within its TTC horizon; this
+    # scale maps a 0 m overlap to 0 and a comfortably separated 2 m clearance
+    # to 1 while preserving the existing binary collision gate.
+    hdp_risk_use_clearance: bool = False
+    hdp_risk_clearance_safe_m: float = 2.0
+
 
 __all__ = [
     "RewardConfig",

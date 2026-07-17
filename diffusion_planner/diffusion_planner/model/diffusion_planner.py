@@ -15,7 +15,19 @@ class Diffusion_Planner(nn.Module):
         return self.decoder.sde
 
     def forward(self, inputs):
-        encoder_outputs = self.encoder(inputs)
+        # AWR samples a complete candidate group from one scene.  The scene
+        # encoder is identical for every candidate, so callers may provide a
+        # detached, scene-level encoding and avoid re-running the expensive
+        # encoder once per candidate.  Keep the old path as the default so
+        # ordinary DP inference remains byte-for-byte compatible.
+        encoder_outputs = inputs.get("_cached_encoding")
+        if encoder_outputs is None:
+            encoder_outputs = self.encoder(inputs)
+            repeat_interleave = int(inputs.get("_encoder_repeat_interleave", 1))
+            if repeat_interleave < 1:
+                raise ValueError("_encoder_repeat_interleave must be >= 1")
+            if repeat_interleave > 1:
+                encoder_outputs = encoder_outputs.repeat_interleave(repeat_interleave, dim=0)
         decoder_outputs = self.decoder(encoder_outputs, inputs)
 
         return encoder_outputs, decoder_outputs
