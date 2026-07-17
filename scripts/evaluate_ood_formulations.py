@@ -54,7 +54,7 @@ def load_data(csv_path: Path):
             rows.append(row)
 
     all_features = EPDMS_FEATURES + ["knn_mean", "ood_residual"]
-    X = np.zeros((len(rows), len(all_features)), dtype=np.float32)
+    X = np.full((len(rows), len(all_features)), np.nan, dtype=np.float32)
     y = np.zeros(len(rows), dtype=np.int32)
     groups = []
     categories = []
@@ -62,7 +62,8 @@ def load_data(csv_path: Path):
     for i, row in enumerate(rows):
         for j, feat in enumerate(all_features):
             val = row.get(feat, "")
-            X[i, j] = float(val) if val else 0.0
+            if val:
+                X[i, j] = float(val)
         y[i] = int(row["label"])
         groups.append(row["bag"])
         categories.append(row["category"])
@@ -82,6 +83,7 @@ def evaluate_fold(X_train, y_train, X_test, y_test, feature_cols):
         "num_leaves": 31,
         "learning_rate": 0.05,
         "is_unbalance": True,
+        "seed": 42,
     }
 
     model = lgb.train(params, dtrain, num_boost_round=200)
@@ -129,11 +131,19 @@ def main():
     print("Loading data...")
     X, y, groups, categories, feature_idx = load_data(args.input)
     print(f"  {X.shape[0]} rows, {X.shape[1]} features")
+    prevalence = y.mean()
+    trivial_f1 = 2 * prevalence / (1 + prevalence)
     print(f"  Positive: {y.sum()}, Negative: {(1-y).sum()}")
+    print(f"  Prevalence: {prevalence:.4f}")
+    print(f"  Chance baselines: AUPRC={prevalence:.4f}, trivial F1={trivial_f1:.4f}")
     print(f"  Unique bags: {len(set(groups))}")
+    nan_counts = np.isnan(X).sum(axis=0)
+    for j, feat in enumerate(EPDMS_FEATURES + ["knn_mean", "ood_residual"]):
+        if nan_counts[j] > 0:
+            print(f"  NaN in {feat}: {nan_counts[j]} ({nan_counts[j]/X.shape[0]*100:.1f}%)")
 
     # 5-fold CV stratified by bag
-    unique_bags = list(set(groups))
+    unique_bags = sorted(set(groups))
     bag_to_int = {b: i for i, b in enumerate(unique_bags)}
     group_ids = np.array([bag_to_int[g] for g in groups])
 
