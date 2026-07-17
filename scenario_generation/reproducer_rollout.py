@@ -1215,6 +1215,7 @@ def _draw_step(
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
+    extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
 ):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
@@ -1262,6 +1263,7 @@ def _draw_step(
         view_half_m=view_half_m,
         route_polylines=_polylines_from_tensor(data["route_lanes"]),
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
+        extra_ego_trajectories=extra_ego_trajectories,
     )
 
 

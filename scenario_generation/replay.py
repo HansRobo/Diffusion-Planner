@@ -1508,6 +1508,7 @@ def save_step_figure(
     sim_time: float = 0.0,
     road_border_polylines: list[np.ndarray] | None = None,
     metrics: dict | None = None,
+    extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
 ) -> None:
     """Render + save the overview PNG for a single replay step.
 
@@ -1686,6 +1687,26 @@ def save_step_figure(
                 width=agent.width,
                 wheelbase=agent.wheelbase if is_ego else None,
             )
+
+    # 3b) Extra ego-frame trajectories (e.g. GT vs model output side by side).
+    # Each entry: (traj[T, >=4] with x, y, cos, sin in the CURRENT ego frame,
+    # matplotlib color, legend label).
+    if extra_ego_trajectories:
+        ex0, ey0 = float(ego.current_position[0]), float(ego.current_position[1])
+        for traj, color, label in extra_ego_trajectories:
+            xy, h = _ego_to_world(traj[:, :2], traj[:, 2:4], ex0, ey0, ego.current_heading)
+            ax.plot(
+                xy[:, 0],
+                xy[:, 1],
+                "-",
+                color=color,
+                lw=2.2,
+                alpha=0.9,
+                zorder=26,
+                label=label,
+            )
+            ax.plot(xy[-1, 0], xy[-1, 1], "o", color=color, ms=5, zorder=26)
+        ax.legend(loc="upper right", fontsize=9, framealpha=0.85)
 
     # 4) Ego goal marker (if within viewport).
     if ego.goal_pose is not None:

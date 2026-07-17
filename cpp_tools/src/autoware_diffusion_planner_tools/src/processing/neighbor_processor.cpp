@@ -38,13 +38,14 @@ NeighborResult process_neighbor_agents_and_future(
   // Build agent histories using AgentData::update_histories
   const int64_t start_idx =
     std::max(static_cast<int64_t>(0), current_idx - INPUT_T_WITH_CURRENT + 1);
+  const bool ignore_unknown_agents = true;
   autoware::diffusion_planner::AgentData agent_data_past;
   for (int64_t t = 0; t < INPUT_T_WITH_CURRENT; ++t) {
     const int64_t frame_idx = start_idx + t;
     if (frame_idx >= static_cast<int64_t>(data_list.size())) {
       break;
     }
-    agent_data_past.update_histories(data_list[frame_idx].tracked_objects);
+    agent_data_past.update_histories(data_list[frame_idx].tracked_objects, ignore_unknown_agents);
   }
   const auto transformed_histories =
     agent_data_past.transformed_and_trimmed_histories(map2bl_matrix, MAX_NUM_NEIGHBORS);
