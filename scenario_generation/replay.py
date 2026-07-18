@@ -1694,7 +1694,7 @@ def save_step_figure(
     if extra_ego_trajectories:
         ex0, ey0 = float(ego.current_position[0]), float(ego.current_position[1])
         for traj, color, label in extra_ego_trajectories:
-            xy, h = _ego_to_world(traj[:, :2], traj[:, 2:4], ex0, ey0, ego.current_heading)
+            xy, _ = _ego_to_world(traj[:, :2], traj[:, 2:4], ex0, ey0, ego.current_heading)
             ax.plot(
                 xy[:, 0],
                 xy[:, 1],

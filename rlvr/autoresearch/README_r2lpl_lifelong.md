@@ -138,7 +138,13 @@ replay list, plus — when `training.anchor` is configured — a seeded slice of
 real logged normal scenes at `ratio` : 1 (anchor : focus), optionally stratified
 with a waits/interaction list; training on repaired+replay only leaves the model
 unanchored off the failure distribution (base_sft backend only; the runner
-rejects the anchor with any other backend). Raw logged anchor scenes carry
+rejects the anchor with any other backend). The ranked-SFT backend's
+counterpart is `training.normal_scene_list`: it switches the round's training
+call to the prob/normal split (repaired scenes = prob, the listed real normal
+scenes = normal), with the mix controlled by the training config's explicit
+`n_prob_scenes` / `n_normal_scenes` (validated at startup; `n_prob_scenes` must
+be at least the expected repaired scenes per round or repairs are subsampled).
+Raw logged anchor scenes carry
 3-col `[x, y, heading]` neighbor futures while repaired scenes are 4-col
 `[x, y, cos, sin]` — a mixed batch cannot collate, so the runner rewrites the
 3-col anchors as 4-col copies under `r2lpl_round_NNN/anchor_scenes_4col/`
@@ -417,6 +423,21 @@ Both anchors are floored at the tracker's shortest feasible stop from the det
 plan's initial speed, so neither can demand the impossible. Pick `recorded` when the
 campaign metric is stop-location fidelity (patience repair); pick `pseudo` when
 repair coverage matters more than where exactly the target stops.
+
+### Depart morph (`repair_generation.enable_depart_morph`)
+
+The re-timing morph covers the fail-to-stop direction only: it re-times the
+model's OWN plan, and a parked plan contains no road ahead to accelerate
+along, so `model_lagging_expert` (fail-to-take-off) scenes die as
+`not_synthesized:infeasible_deceleration`. With
+`repair_generation.enable_depart_morph: true` (CLI `--enable_depart_morph`,
+off by default) a second scripted candidate is synthesized for those scenes
+from the EXPERT path's geometry: a cubic Hermite bridge connects the ego pose
+to the expert path, and the same accel/jerk-limited tracker chases the
+expert's progress schedule starting at the ego (no jump at t=0; full catch-up
+within the horizon is not required). It competes through the same
+gates/reward as every candidate; per-row diagnostics land in
+`expert_depart_added/selected/diag` and `depart_outcome`.
 
 ## Outputs
 

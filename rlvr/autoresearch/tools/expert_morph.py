@@ -386,9 +386,21 @@ def build_expert_morph_candidate(
 # the ego's pose with a Hermite spline, and tracks the expert's progress
 # schedule with the same accel/jerk-limited profile. Full catch-up within the
 # horizon is NOT required — the target only has to actually depart.
+# Reject when the expert path starts farther than this from the ego — the
+# Hermite bridge is only a plausible road approximation over short gaps.
 _DEPART_MAX_GAP_M = 25.0
+# Below this total expert arc there is nothing to depart to (expert stationary).
 _DEPART_MIN_EXPERT_ARC_M = 1.0
+# The feasible profile must actually leave the spot by at least this much,
+# otherwise the candidate is a park with extra steps.
 _DEPART_MIN_PROGRESS_M = 3.0
+# Expert starting behind the ego (longitudinal x below this) is not a
+# departure target — the bridge would point backwards.
+_DEPART_EXPERT_BEHIND_X_M = -1.0
+# Below this gap the bridge is skipped (expert path effectively starts at the
+# ego); above it, the bridge is sampled at this spacing.
+_DEPART_BRIDGE_MIN_GAP_M = 0.5
+_DEPART_BRIDGE_SPACING_M = 0.5
 
 
 def build_depart_morph_candidate(
@@ -421,6 +433,10 @@ def build_depart_morph_candidate(
 
     det = np.asarray(det_traj, dtype=np.float64)
     expert = np.asarray(expert_traj, dtype=np.float64)
+    if det.ndim != 2 or det.shape[1] < 2:
+        raise ValueError(f"det_traj must be (T,>=2), got {det.shape}")
+    if expert.ndim != 2 or expert.shape[1] < 2:
+        raise ValueError(f"expert_traj must be (T,>=2), got {expert.shape}")
     T = int(min(det.shape[0], expert.shape[0]))
     if T < 2:
         return _ret(None, "too_short_horizon")
@@ -445,7 +461,7 @@ def build_depart_morph_candidate(
     gap = float(np.linalg.norm(e0))
     if gap > _DEPART_MAX_GAP_M:
         return _ret(None, "gap_too_large", gap_m=gap)
-    if e0[0] < -1.0:
+    if e0[0] < _DEPART_EXPERT_BEHIND_X_M:
         return _ret(None, "expert_behind_ego", gap_m=gap)
 
     # Expert start tangent from its first real motion step.
@@ -454,11 +470,11 @@ def build_depart_morph_candidate(
     te = steps[int(np.argmax(moving))]
     te = te / max(np.linalg.norm(te), _EPS)
 
-    if gap < 0.5:
+    if gap < _DEPART_BRIDGE_MIN_GAP_M:
         polyline = np.vstack([[0.0, 0.0], expert_xy])
     else:
         # Cubic Hermite bridge origin->expert start; ego-frame heading is +x.
-        n_bridge = max(4, int(gap / 0.5))
+        n_bridge = max(4, int(gap / _DEPART_BRIDGE_SPACING_M))
         u = np.linspace(0.0, 1.0, n_bridge)[:, None]
         h00 = 2 * u**3 - 3 * u**2 + 1
         h10 = u**3 - 2 * u**2 + u

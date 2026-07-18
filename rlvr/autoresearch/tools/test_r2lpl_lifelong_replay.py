@@ -4446,6 +4446,36 @@ def test_replay_capacity_is_required():
     assert round_runner._required_replay_capacity({"capacity": 5000}) == 5000
 
 
+def test_validate_normal_scene_list_config(tmp_path):
+    """normal_scene_list must fail loudly at startup: it is rsft-only (base_sft
+    uses training.anchor) and the prob/normal split it enables needs explicit
+    n_prob_scenes/n_normal_scenes — run_experiment would otherwise only raise
+    after the expensive mine+repair phases."""
+    normals = tmp_path / "normals.json"
+    normals.write_text("[]")
+    tcfg = tmp_path / "train_cfg.json"
+    tcfg.write_text(json.dumps({"ranked_sft_mode": "curated"}))
+    base = {
+        "training_normal_scene_list": str(normals),
+        "training_backend": "rsft",
+        "training_config": str(tcfg),
+    }
+    # No normal_scene_list -> no-op.
+    round_runner._validate_normal_scene_list_config({"training_backend": "base_sft"})
+    with pytest.raises(ValueError, match="ranked-SFT backend"):
+        round_runner._validate_normal_scene_list_config({**base, "training_backend": "base_sft"})
+    with pytest.raises(ValueError, match="does not exist"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(tmp_path / "missing.json")}
+        )
+    with pytest.raises(ValueError, match="n_prob_scenes"):
+        round_runner._validate_normal_scene_list_config(base)
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 1000, "n_normal_scenes": 230})
+    )
+    round_runner._validate_normal_scene_list_config(base)  # valid -> no raise
+
+
 def test_workflow_contract_forwards_prototypes_path_to_repair_cmd(tmp_path):
     """Regression pin: the contract parser used to silently drop
     repair_generation.prototypes_path, so anchor variants generated without

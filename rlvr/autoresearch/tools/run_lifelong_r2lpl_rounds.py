@@ -1097,6 +1097,39 @@ def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
     return out
 
 
+def _validate_normal_scene_list_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on normal_scene_list misconfiguration, not after mining.
+
+    training.normal_scene_list is only wired into the ranked-SFT backend (the
+    base_sft counterpart is training.anchor), and the prob/normal split it
+    enables requires explicit n_prob_scenes / n_normal_scenes in the training
+    config — run_experiment raises otherwise, but only at the train phase,
+    after the expensive mine + repair phases. n_prob_scenes also caps how many
+    repaired scenes train, so it must be sized >= the expected repaired count
+    per round or repairs are silently subsampled.
+    """
+    normal_list = cfg.get("training_normal_scene_list")
+    if not normal_list:
+        return
+    backend = str(cfg.get("training_backend", "base_sft"))
+    if backend == "base_sft":
+        raise ValueError(
+            "training.normal_scene_list is only wired into the ranked-SFT backend; "
+            "for base_sft use training.anchor instead"
+        )
+    if not Path(normal_list).exists():
+        raise ValueError(f"training.normal_scene_list does not exist: {normal_list}")
+    payload = _training_config_payload(cfg["training_config"])
+    missing = [k for k in ("n_prob_scenes", "n_normal_scenes") if k not in payload]
+    if missing:
+        raise ValueError(
+            "training.normal_scene_list enables the prob/normal split, which requires "
+            f"explicit {missing} in the training config (n_prob_scenes must be >= the "
+            "expected repaired scenes per round — smaller values silently subsample "
+            "the repairs)"
+        )
+
+
 def _validate_anchor_config(cfg: dict[str, Any]) -> None:
     """Fail at STARTUP on anchor misconfiguration, not hours into round 1.
 
@@ -2516,6 +2549,7 @@ def main() -> None:
     _validate_anchor_config(cfg)
     _validate_guards_config(cfg)
     _validate_repair_generation_config(cfg)
+    _validate_normal_scene_list_config(cfg)
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -2647,10 +2681,9 @@ def main() -> None:
                 cfg, rdir=rdir, anchor_model_path=model_path
             )
             # With training.normal_scene_list the rsft round trains a
-            # prob/normal split (repaired = prob, real normals = normal) —
-            # the proven curated-LoRA recipe mixes ~1.6 real scenes per
-            # curated one; repaired-only overfits the adapters to the mined
-            # style. Without it, the legacy combined-list path is kept.
+            # prob/normal split (repaired = prob, real normals = normal) so
+            # curated rounds can mix real scenes. Without it, the legacy
+            # combined-list path is kept.
             normal_list = cfg.get("training_normal_scene_list")
             if normal_list:
                 scene_args = [

@@ -779,9 +779,9 @@ def build_repaired_targets(
             args=cls_args,
         )
 
-        # Deterministic plan per scene — only needed to seed the det-path re-timing
-        # morph candidate for expert_disagreement scenes.
-        want_morph = repair_expert_gt_candidate and any(
+        # Deterministic plan per scene — needed to seed the det-path re-timing morph
+        # AND the depart morph (initial speed) for expert_disagreement scenes.
+        want_morph = (repair_expert_gt_candidate or enable_depart_morph) and any(
             _row_is_expert_disagreement(row) for row in kept_rows
         )
         det_trajs = None
@@ -937,6 +937,10 @@ def build_repaired_targets(
                     meta["expert_depart_selected"] = depart_selected
                     if depart_diag is not None:
                         meta["expert_depart_diag"] = depart_diag
+                        if not depart_added:
+                            meta["depart_outcome"] = f"not_synthesized:{depart_diag['stage']}"
+                    if depart_added:
+                        meta["depart_outcome"] = "selected" if depart_selected else "not_selected"
                 # Synthesis diagnostics: why the morph exists / was rejected before
                 # ever reaching the gates ("stage" == "ok" when synthesized). The
                 # gate/selection outcome ("morph_outcome") comes from
@@ -947,6 +951,8 @@ def build_repaired_targets(
                         meta["morph_outcome"] = f"not_synthesized:{morph_diag['stage']}"
             if morph_added:
                 print(f"  morph candidate {name}: added=True selected={morph_selected}")
+            if depart_added:
+                print(f"  depart candidate {name}: added=True selected={depart_selected}")
             if best_idx is None:
                 unrepaired_rows.append({**row, **meta})
                 print(
