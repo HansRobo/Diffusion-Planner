@@ -24,6 +24,18 @@ Run all configured hooks manually with:
 uv run pre-commit run --all-files
 ```
 
+## Autoresearch Control Panel
+
+The autoresearch workflows can be launched from a unified Gradio control panel:
+
+```bash
+source .venv/bin/activate
+python -m control_panel
+```
+
+See `control_panel/README.md` for the workspace layout, asset registry, training/eval tabs,
+PRiSM flow, Perception Reproducer route mining, rendering, and Scene Editor integration.
+
 ## 2. Create dataset
 
 ### 2.1. Prepare rosbags
@@ -76,9 +88,13 @@ python3 ./diffusion_planner/util_scripts/create_train_set_path.py <root_dir_list
 
 ## 3. Train
 
-Edit `train_run.sh` and run
+Run (launches train_predictor.py across all visible GPUs):
 
 ```bash
 cd ./diffusion_planner
-./train_run.sh
+python3 train_run.py \
+    --exp_name <exp_name> \
+    --train_set_list <train.json> \
+    --valid_set_list <valid.json>
+    # optional: --resume_model_path <.pth> --wandb_run_id <id> --wandb_project_name <name>
 ```

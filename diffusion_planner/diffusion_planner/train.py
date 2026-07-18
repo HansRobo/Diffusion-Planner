@@ -19,15 +19,21 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
-from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import (
     ControlNormalizer,
     ObservationNormalizer,
     StateNormalizer,
 )
+from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
-from diffusion_planner.validate_model import validate_model
+from diffusion_planner.validate_model import (
+    aggregate_replan_consistency_metrics,
+    aggregate_valid_metrics,
+    validate_model,
+    validate_replan_consistency,
+)
 
 
 def find_upward(start_file: str, target_name: str) -> Path:
@@ -51,8 +57,11 @@ def log_dataset_artifact(
     valid_path = Path(valid_set_list)
     artifact.add_file(str(train_path), name=train_path.name)
     artifact.add_file(str(valid_path), name=valid_path.name)
-    summary_csv = find_upward(train_set_list, "summary.csv")
-    artifact.add_file(str(summary_csv), name="summary.csv")
+    try:
+        summary_csv = find_upward(train_set_list, "summary.csv")
+        artifact.add_file(str(summary_csv), name="summary.csv")
+    except FileNotFoundError:
+        print("summary.csv not found, skipping.")
     try:
         rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
         artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
@@ -69,6 +78,104 @@ def mean_ego_loss(loss_dict):
     return result
 
 
+def mean_epdms_metric(loss_dict):
+    result = {}
+    for key, val in loss_dict.items():
+        if not key.startswith("epdms_"):
+            continue
+        metric = key.removeprefix("epdms_")
+        tensor = val.float()
+        if metric.endswith("_available"):
+            result[f"valid_epdms/{metric}"] = tensor.mean().item()
+            continue
+        available = loss_dict.get(f"{key}_available")
+        if available is None:
+            result[f"valid_epdms/{metric}"] = tensor.mean().item()
+            continue
+        mask = available.float() > 0.5
+        result[f"valid_epdms/{metric}_coverage"] = mask.float().mean().item()
+        result[f"valid_epdms/{metric}"] = tensor[mask].mean().item() if mask.any() else float("nan")
+    return result
+
+
+def wandb_epdms_metrics(epdms_means):
+    return {
+        f"valid_epdms/{key}": value
+        for key, value in epdms_means.items()
+        if not key.endswith("_coverage")
+    }
+
+
+def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
+    """Closed-loop rendered rollout; logs metrics + the rollout video to wandb.
+
+    Drives the ego in CLOSED LOOP over the route NPZ frames under ``args.closed_loop_npz_root``
+    (one route = one trial), renders an MP4 into ``out_dir``, aggregates collision/clearance
+    metrics, and logs both to wandb at ``step=epoch+1``. Called on the checkpoint-save cadence.
+    No-op when ``closed_loop_npz_root`` is unset. Rank-0 only: pass the unwrapped model; it is
+    switched to eval for the rollout (so the diffusion sampler runs and produces ``prediction``)
+    and restored afterwards.
+    """
+    if not args.closed_loop_npz_root:
+        return
+    import math
+
+    from scenario_generation.closed_loop_eval import run_closed_loop_eval
+
+    net = ddp.get_model(model, args.ddp)
+    was_training = net.training
+    net.eval()
+    try:
+        summary = run_closed_loop_eval(
+            net,
+            args,
+            args.closed_loop_npz_root,
+            out_dir,
+            seg_len=args.closed_loop_seg_len,
+            device=args.device,
+            near_miss_thresh=args.closed_loop_near_miss_thresh,
+            search_radius=args.closed_loop_search_radius,
+            warmup_steps=args.closed_loop_warmup_steps,
+            unstick_after=args.closed_loop_unstick_after,
+            unstick_advance_m=args.closed_loop_unstick_advance_m,
+            fps=args.closed_loop_fps,
+            replan_interval=args.closed_loop_replan_interval,
+            draw_every=args.closed_loop_draw_every,
+            neighbor_history_mode="recorded",
+            verbose=False,
+        )
+    finally:
+        net.train(was_training)
+
+    # Scalar metrics (drop non-finite clearances: a segment with no neighbor reports +inf).
+    scalar_keys = [
+        "collision_segment_rate",
+        "collision_step_rate",
+        "near_miss_segment_rate",
+        "near_miss_step_rate",
+        "global_min_clearance",
+        "mean_segment_min_clearance",
+        "mean_segment_mean_clearance",
+        "total_collision_steps",
+        "total_near_miss_steps",
+        "total_snaps",
+        "total_steps",
+    ]
+    log = {
+        f"closed_loop/{k}": summary[k]
+        for k in scalar_keys
+        if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
+    }
+    for mp4 in summary["video_mp4s"]:
+        log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
+    wandb.log(log, step=epoch + 1)
+    print(
+        f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
+        f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
+        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+    )
+
+
 def model_training(args: TrainConfig):
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
@@ -82,6 +189,7 @@ def model_training(args: TrainConfig):
         print("Batch size: {}".format(args.batch_size))
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
+        print("Deterministic mode: {}".format(args.deterministic))
 
         save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
@@ -104,6 +212,13 @@ def model_training(args: TrainConfig):
 
     # set seed
     set_seed(args.seed + global_rank)
+
+    # Deterministic
+    if args.deterministic:
+        # Set CUBLAS_WORKSPACE_CONFIG to ensure deterministic behavior for cuBLAS operations.
+        # 4096:8 means 24 MiB workspace with more memory, faster
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        torch.use_deterministic_algorithms(True)
 
     # training parameters
     train_epochs = args.train_epochs
@@ -129,6 +244,8 @@ def model_training(args: TrainConfig):
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
 
+    train_set.data_list = train_set.data_list[:: args.train_subsample_step]
+
     train_sampler = DistributedSampler(
         train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
     )
@@ -141,23 +258,48 @@ def model_training(args: TrainConfig):
         drop_last=True,
     )
 
-    # Validation is only performed on rank 0 with full dataset
-    # Other ranks will get a dummy loader (not used)
-    if global_rank == 0:
-        valid_loader = DataLoader(
-            valid_set,
-            batch_size=batch_size // 4,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_mem,
-            drop_last=False,
-            shuffle=False,
-        )
-    else:
-        # Dummy loader for non-main processes (won't be used)
-        valid_loader = None
+    # Validation is sharded across all ranks (DistributedSampler); each rank computes
+    # metrics on its shard and they are all-reduced via aggregate_valid_metrics.
+    valid_sampler = DistributedSampler(
+        valid_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=False
+    )
+    valid_loader = DataLoader(
+        valid_set,
+        sampler=valid_sampler,
+        batch_size=batch_size // ddp.get_world_size(),
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False,
+    )
+
+    valid_pair_loader = None
+    if args.enable_replan_consistency_eval:
+        expected_gap = args.replan_consistency_expected_gap or None
+        valid_pair_set = DiffusionPlannerPairData(args.valid_set_list, expected_gap=expected_gap)
+        if len(valid_pair_set) > 0:
+            valid_pair_sampler = DistributedSampler(
+                valid_pair_set,
+                num_replicas=ddp.get_world_size(),
+                rank=global_rank,
+                shuffle=False,
+            )
+            valid_pair_loader = DataLoader(
+                valid_pair_set,
+                sampler=valid_pair_sampler,
+                batch_size=batch_size // ddp.get_world_size(),
+                num_workers=args.num_workers,
+                pin_memory=args.pin_mem,
+                drop_last=False,
+            )
 
     if global_rank == 0:
         print("Dataset Prepared: {} train data\n".format(len(train_set)))
+        if args.enable_replan_consistency_eval:
+            print(
+                "Replan consistency validation pairs: {}".format(
+                    0 if valid_pair_loader is None else len(valid_pair_loader.dataset)
+                )
+            )
 
     if args.ddp:
         torch.distributed.barrier()
@@ -235,20 +377,26 @@ def model_training(args: TrainConfig):
     data_list = []
     best_loss = float("inf")
 
+    valid_dict = validate_model(diffusion_planner, valid_loader, args)
+    agg = aggregate_valid_metrics(valid_dict, args.device)
+    replan_agg = {}
+    if valid_pair_loader is not None:
+        replan_dict = validate_replan_consistency(diffusion_planner, valid_pair_loader, args)
+        replan_agg = aggregate_replan_consistency_metrics(replan_dict, args.device)
     if global_rank == 0:
-        valid_dict = validate_model(diffusion_planner, valid_loader, args)
-        valid_loss_ego = valid_dict["avg_loss_ego"]
-        valid_loss_neighbor = valid_dict["avg_loss_neighbor"]
-        mean_ego_loss_dict = mean_ego_loss(valid_dict)
+        valid_loss_ego = agg["avg_loss_ego"]
+        valid_loss_neighbor = agg["avg_loss_neighbor"]
+        mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
+        mean_epdms_dict = wandb_epdms_metrics(agg["epdms_means"])
         valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
             "valid_loss/ego_position_lat_loss", 0.0
         )
         valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
             "valid_loss/ego_position_lon_loss", 0.0
         )
-        turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
-        turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
-        turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
+        turn_indicator_accuracy = agg["turn_indicator_accuracy"]
+        turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
+        turn_indicator_change_total = agg["turn_indicator_change_total"]
         print(
             f"{valid_loss_ego=:.3f}\n"
             f"{valid_loss_neighbor=:.3f}\n"
@@ -258,6 +406,16 @@ def model_training(args: TrainConfig):
             f"{turn_indicator_change_accuracy=:.3f}\n"
             f"{turn_indicator_change_total=:.3f}"
         )
+        if replan_agg.get("replan_consistency_count", 0) > 0:
+            print(
+                "replan_position_consistency={:.3f}\n"
+                "replan_heading_consistency={:.3f}\n"
+                "replan_consistency_count={:d}".format(
+                    replan_agg["replan_position_consistency"],
+                    replan_agg["replan_heading_consistency"],
+                    replan_agg["replan_consistency_count"],
+                )
+            )
 
     # begin training
     for epoch in range(init_epoch, train_epochs):
@@ -283,20 +441,27 @@ def model_training(args: TrainConfig):
             train_loader, diffusion_planner, optimizer, args, model_ema, aug
         )
 
+        valid_dict = validate_model(diffusion_planner, valid_loader, args)
+        agg = aggregate_valid_metrics(valid_dict, args.device)
+        replan_agg = {}
+        if valid_pair_loader is not None:
+            replan_dict = validate_replan_consistency(diffusion_planner, valid_pair_loader, args)
+            replan_agg = aggregate_replan_consistency_metrics(replan_dict, args.device)
         if global_rank == 0:
-            valid_dict = validate_model(diffusion_planner, valid_loader, args)
-            valid_loss_ego = valid_dict["avg_loss_ego"]
-            valid_loss_neighbor = valid_dict["avg_loss_neighbor"]
-            mean_ego_loss_dict = mean_ego_loss(valid_dict)
+            valid_loss_ego = agg["avg_loss_ego"]
+            valid_loss_neighbor = agg["avg_loss_neighbor"]
+            mean_ego_loss_dict = {f"valid_loss/{k}": v for k, v in agg["ego_means"].items()}
+            replan_loss_dict = {f"valid_loss/{k}": v for k, v in replan_agg.items()}
+            mean_epdms_dict = wandb_epdms_metrics(agg["epdms_means"])
             valid_loss_ego_position_lat_loss = mean_ego_loss_dict.get(
                 "valid_loss/ego_position_lat_loss", 0.0
             )
             valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
                 "valid_loss/ego_position_lon_loss", 0.0
             )
-            turn_indicator_accuracy = valid_dict["turn_indicator_accuracy"]
-            turn_indicator_change_accuracy = valid_dict["turn_indicator_change_accuracy"]
-            turn_indicator_change_total = valid_dict["turn_indicator_change_total"]
+            turn_indicator_accuracy = agg["turn_indicator_accuracy"]
+            turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
+            turn_indicator_change_total = agg["turn_indicator_change_total"]
             print(
                 f"Epoch {epoch + 1}/{train_epochs}\n"
                 f"{valid_loss_ego=:.3f}\n"
@@ -307,6 +472,16 @@ def model_training(args: TrainConfig):
                 f"{turn_indicator_change_accuracy=:.3f}\n"
                 f"{turn_indicator_change_total=:.3f}"
             )
+            if replan_agg.get("replan_consistency_count", 0) > 0:
+                print(
+                    "replan_position_consistency={:.3f}\n"
+                    "replan_heading_consistency={:.3f}\n"
+                    "replan_consistency_count={:d}".format(
+                        replan_agg["replan_position_consistency"],
+                        replan_agg["replan_heading_consistency"],
+                        replan_agg["replan_consistency_count"],
+                    )
+                )
 
             lr_dict = {"lr": optimizer.param_groups[0]["lr"]}
             wandb.log(
@@ -318,6 +493,8 @@ def model_training(args: TrainConfig):
                     "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
                     "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
                     **mean_ego_loss_dict,
+                    **replan_loss_dict,
+                    **mean_epdms_dict,
                 },
                 step=epoch + 1,
             )
@@ -329,6 +506,8 @@ def model_training(args: TrainConfig):
                 "valid_loss_neighbor": valid_loss_neighbor,
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
                 "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
+                **replan_agg,
+                **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }
             data_list.append(curr_data)
             df = pd.DataFrame(data_list)
@@ -354,6 +533,22 @@ def model_training(args: TrainConfig):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
+                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
+                export_checkpoint_onnx_guarded(
+                    config_json_path=os.path.join(curr_dir, "args.json"),
+                    ckpt_path=f"{curr_dir}/best_model.pth",
+                    output_dir=Path(curr_dir),
+                    output_prefix="diffusion_planner",
+                    use_ema=False,
+                    use_simplify=False,
+                    opset_version=20,
+                    external_data=False,
+                )
+                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
+                # (videos + metrics) land next to the saved weights they correspond to.
+                closed_loop_validate(
+                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
+                )
 
             if valid_loss_ego_position_lat_loss < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")
@@ -365,6 +560,17 @@ def model_training(args: TrainConfig):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
+                # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
+                export_checkpoint_onnx_guarded(
+                    config_json_path=os.path.join(curr_dir, "args.json"),
+                    ckpt_path=f"{curr_dir}/best_model.pth",
+                    output_dir=Path(curr_dir),
+                    output_prefix="diffusion_planner",
+                    use_ema=False,
+                    use_simplify=False,
+                    opset_version=20,
+                    external_data=False,
+                )
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)

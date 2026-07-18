@@ -253,6 +253,11 @@ class GRPOConfig:
     neighbor_reg_anchor: str = "warmstart"
     # Path to the external baseline .pth. REQUIRED when neighbor_reg_anchor=="baseline".
     neighbor_reg_anchor_path: str | None = None
+    # Lifelong replay controls. Applied only by ranked-SFT when scene role metadata
+    # marks a scene as "replay".
+    replay_loss_weight: float = 1.0
+    replay_der_coef: float = 0.0
+    replay_anchor_model_path: str | None = None
 
     # Ranked SFT mode: generate N trajectories, pick best by reward, SFT on it.
     # "none": standard GRPO training (default).
@@ -299,7 +304,7 @@ class GRPOConfig:
     # full SFT loss per scene by normalized improvement — smooth version of selective).
     # In advantage mode, all scenes are kept but each scene's loss is multiplied by
     # improvement/max_improvement. Scenes below selective_threshold get weight 0 via
-    # scene_train_mask. Requires sft_batch_size=1 for exact per-scene weighting.
+    # per-scene loss weights.
     selective_mode: str = "threshold"
     # selective_frozen: if True, scene selection is computed once (first epoch) and reused
     # for all subsequent epochs in the same run. Prevents oscillation where improved scenes
@@ -491,7 +496,10 @@ class GRPOConfig:
     #   }
     schedules: dict = field(default_factory=dict)
 
-    # Early-stop collapse thresholds (run_experiment.py)
+    # Early-stop on safety collapse (run_experiment.py). OFF by default — training runs all
+    # epochs and you pick the best checkpoint yourself. Set early_stop_on_collapse=true to
+    # re-enable the rb/collision-rate kill switch below.
+    early_stop_on_collapse: bool = False
     collapse_rb_threshold: float = 0.3
     collapse_collision_threshold: float = 0.1
 
@@ -725,6 +733,10 @@ class GRPOConfig:
             self.grpo_loss_type = _loss_renames[self.grpo_loss_type]
         if self.exploration_loss_type in _loss_renames:
             self.exploration_loss_type = _loss_renames[self.exploration_loss_type]
+        # Plain supervised fine-tuning on the ego GT (no generation/ranking) is just the curated
+        # codepath (target = each NPZ's ego_agent_future). Accept self-documenting aliases.
+        if self.ranked_sft_mode in ("sft", "gt", "sft_gt", "gt_ego"):
+            self.ranked_sft_mode = "curated"
         # Validate: best_sample_mse is not compatible with PPO (inner_epochs > 1)
         if self.exploration_loss_type == "best_sample_mse" and self.exploration_inner_epochs > 1:
             raise ValueError(

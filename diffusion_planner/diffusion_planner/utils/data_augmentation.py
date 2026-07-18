@@ -399,14 +399,7 @@ class StatePerturbation:
         #     inputs["ego_agent_past"][..., 2:4], transform_matrix
         # )
 
-        ego_past4d = torch.cat(
-            [
-                inputs["ego_agent_past"][..., :2],  # x, y
-                torch.cos(inputs["ego_agent_past"][..., 2:3]),  # cos
-                torch.sin(inputs["ego_agent_past"][..., 2:3]),  # sin
-            ],
-            dim=-1,
-        )
+        ego_past4d = inputs["ego_agent_past"]
         ego_future4d = torch.cat(
             [
                 ego_future[..., :2],  # x, y

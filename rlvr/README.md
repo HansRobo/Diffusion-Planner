@@ -393,7 +393,11 @@ vehicle's bicycle-model constraints:
 - **Absolute yaw rate** must stay below `max_yaw_rate` (default 1.0 rad/s)
 - **Bicycle-model curvature** must stay below `κ_max = kinematic_margin · tan(max_steer) / wheelbase`
   (defaults: `max_steer=0.64` rad, `kinematic_margin=2.5`). Yaw and speed are
-  Savitzky-Golay smoothed before curvature estimation
+  Savitzky-Golay smoothed before curvature estimation. The bound's speed is
+  clamped at 0.1 m/s: below that the check would compare SG heading noise
+  against SG speed noise and gate stopping trajectories on numerics; at
+  standstill the effective bound is `κ_max · 0.1` (genuine turning-in-place is
+  still caught), and behavior above 0.1 m/s is unchanged
 
 Returns a per-trajectory **binary** gate (0 = any timestep violated, 1 = all clean).
 Applied as a hard flooring multiplier on `totals` **after** survival/gate aggregation, so a
@@ -435,7 +439,7 @@ Controlled by per-type checkboxes (GUI) or `SamplerConfig` booleans:
 | Type | Default | Source |
 |------|---------|--------|
 | Centerline following | Enabled | `diffusion_planner/model/guidance/centerline_following.py` |
-| Anchor following | Enabled | `diffusion_planner/model/guidance/anchor_following.py` |
+| Anchor following (path mode: nearest-point Huber to a prototype polyline, time-compensated; build libraries with `build_path_prototypes`) | Enabled | `diffusion_planner/model/guidance/anchor_following.py` |
 | Collision | Disabled | `diffusion_planner/model/guidance/collision.py` |
 | Route following | Disabled | `diffusion_planner/model/guidance/route_following.py` |
 | Lane keeping | Disabled | `diffusion_planner/model/guidance/lane_keeping.py` |

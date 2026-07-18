@@ -39,7 +39,13 @@ def _stack_scene_data(all_data: list[dict], device: torch.device) -> dict[str, t
     for k in all_data[0]:
         vals = [d[k] for d in all_data]
         if isinstance(vals[0], torch.Tensor):
-            batch[k] = torch.cat(vals, dim=0)  # [N, ...]
+            t = torch.cat(vals, dim=0)  # [N, ...]
+            # CUDA can't index/gather uint16/32/64 tensors (e.g. the metadata `version`
+            # field psim/reproducer NPZs carry). It's never used in the model/reward, so
+            # cast to int64 to keep per-scene fancy-indexing (v[batch_idx]) working.
+            if str(t.dtype).startswith("torch.uint") and t.dtype != torch.uint8:
+                t = t.to(torch.int64)
+            batch[k] = t
         else:
             batch[k] = vals[0]
     return batch
@@ -115,6 +121,7 @@ def generate_all_scenes_batched(
     speed_stretch: float = 1.0,
     generation_variant: str = "default",
     use_route_cl_guidance: bool = False,
+    prototypes_path: str | None = None,
 ) -> torch.Tensor:
     """Generate K trajectories for all N scenes in ~5 chunked-batched passes.
 
@@ -127,6 +134,10 @@ def generate_all_scenes_batched(
             Applied to CL-guided trajectories when nonzero.
         lateral_lambda: Maximum lateral offset in metres for lateral guidance.
         lateral_scale: Guidance scale for lateral guidance.
+        prototypes_path: Anchor prototypes .npy for slots carrying an
+            "anchor" field (path-mode anchor_following). Required when the
+            selected variant has anchor slots; a slot requesting an anchor
+            without it raises.
 
     Returns:
         [N, K, T, 4] tensor.
@@ -231,6 +242,25 @@ def generate_all_scenes_batched(
             )
         if cfg_col > 0:
             fns.append(GuidanceConfig("collision", enabled=True, scale=cfg_col))
+        # Optional per-slot anchor guidance (path-mode prototype following)
+        cfg_anchor = cfg.get("anchor")
+        if cfg_anchor is not None:
+            if prototypes_path is None:
+                raise ValueError(
+                    f"generation slot {cfg['label']!r} requests anchor guidance but "
+                    f"prototypes_path is not set in the config"
+                )
+            anchor_params = {k: v for k, v in cfg_anchor.items() if k not in ("index", "scale")}
+            anchor_params["prototypes_path"] = prototypes_path
+            anchor_params["anchor_index"] = cfg_anchor["index"]
+            fns.append(
+                GuidanceConfig(
+                    "anchor_following",
+                    enabled=True,
+                    scale=cfg_anchor.get("scale", 3.0),
+                    params=anchor_params,
+                )
+            )
         comp = GuidanceComposer(GuidanceSetConfig(functions=fns, global_scale=1.0)) if fns else None
         trajs = _chunked_generate(
             model, model_args, norm_batch, n_min, n_max, comp, device, gen_chunk_size
@@ -408,6 +438,7 @@ def train_epoch_batched(
             speed_stretch=spd_stretch,
             generation_variant=config.generation_variant,
             use_route_cl_guidance=getattr(config, "use_route_cl_guidance", False),
+            prototypes_path=getattr(config, "prototypes_path", None),
         )  # [N, K, T, 4]
 
     # Free generation memory before scoring + training

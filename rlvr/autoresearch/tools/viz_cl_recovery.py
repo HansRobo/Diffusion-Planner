@@ -50,7 +50,7 @@ from rlvr.reward import RewardConfig, compute_centerline_score_batch, compute_re
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def draw_scene_base(ax, npz_path):
+def draw_scene_base(ax, npz_path, draw_stopped_neighbors=True):
     """Lane centerlines (grey dashed) + lane boundaries (blue) + road borders (black)
     + route_lanes centerline (bold orange — the scene's planned path, what CL reward scores against)."""
     npz = np.load(npz_path, allow_pickle=True)
@@ -103,7 +103,11 @@ def draw_scene_base(ax, npz_path):
             if mask.sum() >= 2:
                 ax.plot(pts[mask, 0], pts[mask, 1], "-", color="black", lw=1.1, alpha=0.9)
 
-    if "neighbor_agents_past" in npz.files and "neighbor_agents_future" in npz.files:
+    if (
+        draw_stopped_neighbors
+        and "neighbor_agents_past" in npz.files
+        and "neighbor_agents_future" in npz.files
+    ):
         nb_past = npz["neighbor_agents_past"]
         if nb_past.ndim == 4:
             nb_past = nb_past[0]
@@ -264,9 +268,11 @@ def main():
 
     rcfg = load_reward_config(args.config)
     variant = args.generation_variant
+    with open(args.config) as f:
+        _cfg_json = json.load(f)
+    prototypes_path = _cfg_json.get("prototypes_path")
     if variant is None:
-        with open(args.config) as f:
-            variant = json.load(f).get("generation_variant", "default")
+        variant = _cfg_json.get("generation_variant", "default")
     slot_labels = get_generation_config_labels_for_variant(variant, args.K)
 
     with open(args.scenes) as f:
@@ -333,6 +339,7 @@ def main():
             gen_chunk_size=args.K,
             gt_max_speed=gt_v_high,
             generation_variant=variant,
+            prototypes_path=prototypes_path,
         )[0]  # [K, T, 4]
 
         # Score all K trajs — centerline reward is uncapped.

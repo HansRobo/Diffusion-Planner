@@ -483,6 +483,11 @@ def run(
     name: str,
     skip_baseline: bool = False,
     baseline_cache_path: Path | None = None,
+    train_scenes_override: Path | None = None,
+    train_epochs_override: int | None = None,
+    sft_batch_size_override: int | None = None,
+    replay_scenes_path: Path | None = None,
+    scene_roles_json: Path | None = None,
 ):
     # Load baseline cache (precomputed baseline/GT paths per scene)
     # Auto-detect if not specified: look for baseline_cache_val50.json in output dir
@@ -509,24 +514,52 @@ def run(
         config_data = json.load(f)
 
     config_data_raw = dict(config_data)  # save before popping
-    if "n_prob_scenes" not in config_data or "n_normal_scenes" not in config_data:
-        raise ValueError(
-            "Config MUST explicitly set 'n_prob_scenes' and 'n_normal_scenes'. "
-            "Omitting these leads to silent scene duplication bugs. "
-            "Use n_prob_scenes=50, n_normal_scenes=0 for prob-only, "
-            "or n_prob_scenes=50, n_normal_scenes=450 for 500-scene training."
-        )
-    n_prob = config_data.pop("n_prob_scenes")
-    n_normal = config_data.pop("n_normal_scenes")
     curated_normal_path = config_data.pop("curated_normal_path", None)
     prob_scenes_path = config_data.pop("prob_scenes_path", None)
     seed_lora_path = config_data.pop("seed_lora_path", None)
     train_scenes_path = config_data.pop("train_scenes_path", None)
+    # --train_scenes (a single, already-assembled training set) overrides the config field.
+    if train_scenes_override is not None:
+        train_scenes_path = str(train_scenes_override)
+    # When an exact training set is supplied, prob/normal sampling is bypassed entirely, so
+    # n_prob_scenes / n_normal_scenes are not required. Otherwise they MUST be explicit (the
+    # sampler silently duplicates scenes without them).
+    using_exact_train = bool(train_scenes_path and Path(train_scenes_path).exists())
+    if not using_exact_train and (
+        "n_prob_scenes" not in config_data or "n_normal_scenes" not in config_data
+    ):
+        raise ValueError(
+            "Config MUST explicitly set 'n_prob_scenes' and 'n_normal_scenes'. "
+            "Omitting these leads to silent scene duplication bugs. "
+            "Use n_prob_scenes=50, n_normal_scenes=0 for prob-only, "
+            "or n_prob_scenes=50, n_normal_scenes=450 for 500-scene training. "
+            "(Not needed when a single --train_scenes set is supplied.)"
+        )
+    n_prob = config_data.pop("n_prob_scenes", 0)
+    n_normal = config_data.pop("n_normal_scenes", 0)
 
     grpo_config = GRPOConfig()
     for k, v in config_data.items():
         if hasattr(grpo_config, k):
             setattr(grpo_config, k, v)
+    # CLI --train_epochs overrides whatever the config declares.
+    if train_epochs_override is not None:
+        grpo_config.train_epochs = train_epochs_override
+    # CLI --sft_batch_size overrides scenes-per-forward-pass (the main speed knob). The trainer
+    # requires grad_accum_groups to be a multiple of it, so bump grad_accum_groups up to the
+    # nearest valid multiple (>= its current value) when needed, and say so.
+    if sft_batch_size_override is not None:
+        bs = max(1, sft_batch_size_override)
+        grpo_config.sft_batch_size = bs
+        if grpo_config.grad_accum_groups % bs != 0:
+            import math
+
+            new_ga = math.ceil(max(grpo_config.grad_accum_groups, bs) / bs) * bs
+            print(
+                f"  [sft_batch_size={bs}] grad_accum_groups {grpo_config.grad_accum_groups} "
+                f"-> {new_ga} (must be a multiple of the batch size)"
+            )
+            grpo_config.grad_accum_groups = new_ga
     # Re-run __post_init__ to normalize legacy loss type names
     grpo_config.__post_init__()
 
@@ -561,12 +594,37 @@ def run(
         train_paths = create_training_set(prob_100, curated_pool, n_prob, n_normal)
     else:
         train_paths = create_training_set(prob_100, normal_pool, n_prob, n_normal)
+    role_by_path: dict[str, str] = {}
+    if scene_roles_json is not None:
+        with open(scene_roles_json) as f:
+            raw_roles = json.load(f)
+        if isinstance(raw_roles, dict):
+            role_by_path.update({str(k): str(v) for k, v in raw_roles.items()})
+        elif isinstance(raw_roles, list):
+            for item in raw_roles:
+                role_by_path[str(item["scene_path"])] = str(item["role"])
+        else:
+            raise ValueError("--scene_roles_json must contain a dict or list of role records")
+    if replay_scenes_path is not None:
+        with open(replay_scenes_path) as f:
+            replay_paths = json.load(f)
+        if not isinstance(replay_paths, list):
+            raise ValueError(f"{replay_scenes_path} must contain a JSON list")
+        train_paths = list(train_paths) + [str(p) for p in replay_paths]
+        # A scene passed via --replay_scenes IS a replay scene: mark it "replay"
+        # unconditionally so replay-specific training (replay_loss_weight / DER mask)
+        # is applied. setdefault would let a stale --scene_roles_json entry silently
+        # override this and disable the replay behavior.
+        for path in replay_paths:
+            role_by_path[str(path)] = "replay"
+        print(f"Added replay scenes: {len(replay_paths)} from {replay_scenes_path}")
     # Drop converter-flagged skip_for_training frames from everything we train/eval on
     # (default on; reproducer-only frames are not valid supervision). Single chokepoint
     # so every scene source above is covered.
     _sk = grpo_config.skip_filtered_scenes
     _sr = grpo_config.sidecar_root
     train_paths = filter_scene_list(train_paths, sidecar_root=_sr, enabled=_sk, label="train")
+    train_roles = [role_by_path.get(str(path), "current") for path in train_paths]
     prob_eval = filter_scene_list(prob_eval, sidecar_root=_sr, enabled=_sk, label="prob_eval")
     val_50 = filter_scene_list(val_50, sidecar_root=_sr, enabled=_sk, label="val")
     prob_100 = filter_scene_list(prob_100, sidecar_root=_sr, enabled=_sk, label="prob_viz")
@@ -591,6 +649,12 @@ def run(
     grpo_config.to_json(run_dir / "grpo_config.json")
     with open(run_dir / "train_scenes.json", "w") as f:
         json.dump(train_paths, f)
+    with open(run_dir / "scene_roles.json", "w") as f:
+        json.dump(
+            [{"scene_path": p, "role": r} for p, r in zip(train_paths, train_roles)],
+            f,
+            indent=2,
+        )
 
     # Initialize wandb logging (no-op if disabled in config)
     from rlvr.wandb_logger import WandbLogger
@@ -712,6 +776,20 @@ def run(
             _frozen_base_model, _ = load_model(checkpoint_path, DEVICE)
             _frozen_base_model.eval()
             for p in _frozen_base_model.parameters():
+                p.requires_grad_(False)
+        _replay_anchor_model = None
+        if grpo_config.replay_der_coef > 0.0:
+            if not grpo_config.replay_anchor_model_path:
+                raise ValueError(
+                    "replay_der_coef > 0 requires replay_anchor_model_path in the config"
+                )
+            anchor = Path(grpo_config.replay_anchor_model_path)
+            if not anchor.is_file():
+                raise ValueError(f"replay_anchor_model_path does not exist: {anchor}")
+            print(f"Loading replay DER anchor from {anchor}...")
+            _replay_anchor_model, _ = load_model(anchor, DEVICE)
+            _replay_anchor_model.eval()
+            for p in _replay_anchor_model.parameters():
                 p.requires_grad_(False)
 
         # Training reward config uses the configured weights (may boost w_progress
@@ -910,6 +988,8 @@ def run(
                         exploration_optimizer=_explorer_opt,
                         run_dir=run_dir,
                         base_model=_frozen_base_model,
+                        scene_roles=train_roles,
+                        replay_anchor_model=_replay_anchor_model,
                     )
                 else:
                     # Fully batched training: all scenes in ~5 forward passes
@@ -1000,7 +1080,7 @@ def run(
             _n_val = max(val_eval["n_scenes"], 1)
             _rb_cross_rate = val_eval["rb_crossings"] / _n_val
             _collision_rate = val_eval["collision_rate"]
-            if (
+            if grpo_config.early_stop_on_collapse and (
                 _rb_cross_rate > grpo_config.collapse_rb_threshold
                 or _collision_rate > grpo_config.collapse_collision_threshold
             ):
@@ -1057,10 +1137,25 @@ def main():
     parser.add_argument("--name", type=str, required=True, help="Experiment name")
     parser.add_argument("--model_path", type=Path, required=True, help="Path to base model .pth")
     parser.add_argument(
-        "--prob_scenes", type=Path, required=True, help="JSON list of problem scene NPZ paths"
+        "--train_scenes",
+        type=Path,
+        default=None,
+        help="JSON list of training scene NPZ paths (single combined set). When given, this is "
+        "used verbatim as the SFT training set and --prob_scenes/--normal_scenes are not needed.",
     )
     parser.add_argument(
-        "--normal_scenes", type=Path, required=True, help="JSON list of normal scene NPZ paths"
+        "--prob_scenes",
+        type=Path,
+        default=None,
+        help="JSON list of problem scene NPZ paths (advanced: prob/normal split sampling). "
+        "Not needed when --train_scenes is given.",
+    )
+    parser.add_argument(
+        "--normal_scenes",
+        type=Path,
+        default=None,
+        help="JSON list of normal scene NPZ paths (advanced: prob/normal split sampling). "
+        "Not needed when --train_scenes is given.",
     )
     parser.add_argument(
         "--val_scenes", type=Path, required=True, help="JSON list of validation scene NPZ paths"
@@ -1081,17 +1176,51 @@ def main():
         "If not provided, progress ratios are not reported. "
         "Generate with: python -m rlvr.autoresearch.tools.compute_baseline_cache",
     )
+    parser.add_argument(
+        "--train_epochs",
+        type=int,
+        default=None,
+        help="Override the config's train_epochs (otherwise the value from --config is used).",
+    )
+    parser.add_argument(
+        "--sft_batch_size",
+        type=int,
+        default=None,
+        help="Scenes per forward pass in ranked/curated SFT (speed knob; config default is 1 = "
+        "sequential). grad_accum_groups is auto-bumped to a multiple if needed.",
+    )
+    parser.add_argument(
+        "--replay_scenes",
+        type=Path,
+        default=None,
+        help="JSON list of replay scene NPZ paths to append to the current training set.",
+    )
+    parser.add_argument(
+        "--scene_roles_json",
+        type=Path,
+        default=None,
+        help="Optional scene_path->role metadata. Replay scenes are marked automatically.",
+    )
     args = parser.parse_args()
 
     if not args.config.exists():
         print(f"Config not found: {args.config}")
         sys.exit(1)
 
-    # Set module-level paths from CLI args
+    # Either a single --train_scenes set, or the advanced --prob_scenes/--normal_scenes pair.
+    if args.train_scenes is None and (args.prob_scenes is None or args.normal_scenes is None):
+        parser.error(
+            "provide either --train_scenes <list.json> OR both "
+            "--prob_scenes <list.json> and --normal_scenes <list.json>"
+        )
+
+    # Set module-level paths from CLI args. In single-set mode, training comes from
+    # --train_scenes exactly, while deterministic per-epoch eval/checkpoint selection uses the
+    # held-out validation list instead of leaking the training list into prob_eval.
     global BASE_MODEL, PROB_SCENES_PATH, NORMAL_POOL_PATH, VALID_SCENES_PATH, OUTPUT_DIR
     BASE_MODEL = args.model_path
-    PROB_SCENES_PATH = args.prob_scenes
-    NORMAL_POOL_PATH = args.normal_scenes
+    PROB_SCENES_PATH = args.prob_scenes or args.val_scenes
+    NORMAL_POOL_PATH = args.normal_scenes or args.train_scenes
     VALID_SCENES_PATH = args.val_scenes
     OUTPUT_DIR = args.output_dir
 
@@ -1101,6 +1230,11 @@ def main():
             args.name,
             skip_baseline=args.skip_baseline,
             baseline_cache_path=args.baseline_cache,
+            train_scenes_override=args.train_scenes,
+            train_epochs_override=args.train_epochs,
+            sft_batch_size_override=args.sft_batch_size,
+            replay_scenes_path=args.replay_scenes,
+            scene_roles_json=args.scene_roles_json,
         )
     except Exception as e:
         print(f"\n---")

@@ -1,10 +1,30 @@
 cmake_minimum_required(VERSION 3.14)
 project(autoware_diffusion_planner_tools)
 
+include(FetchContent)
+
 find_package(autoware_cmake REQUIRED)
+# cnpy is a vendored third-party library (MIT, (c) Carl Rogers); its license
+# header is not the TIER IV Apache notice ament_copyright expects. Exclude it
+# from lint checks so its upstream headers are left untouched. Must be set
+# before autoware_package() registers the ament_lint_auto hooks.
+set(AMENT_LINT_AUTO_FILE_EXCLUDE
+  include/utils/cnpy.hpp
+  src/utils/cnpy.cpp
+)
 autoware_package()
 
 find_package(yaml-cpp REQUIRED)
+find_package(ZLIB REQUIRED)
+find_package(Threads REQUIRED)
+find_package(fmt REQUIRED)
+
+fetchcontent_declare(
+  cli11
+  GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+  GIT_TAG v2.4.2
+)
+fetchcontent_makeavailable(cli11)
 
 # Add compile option to suppress deprecation warnings (optional)
 add_compile_options(-Wno-deprecated-declarations)
@@ -22,7 +42,10 @@ endif()
 ament_auto_add_executable(data_converter
   src/data_converter.cpp
   src/cli/converter_options.cpp
+  src/conversion/data_converter.cpp
   src/io/frame_writer.cpp
+  src/io/bag_metadata.cpp
+  src/io/npz_frame_writer.cpp
   src/io/projector_factory.cpp
   src/processing/ego_sequence.cpp
   src/processing/frame_processor.cpp
@@ -31,9 +54,30 @@ ament_auto_add_executable(data_converter
   src/processing/sequence_builder.cpp
   src/rosbag/parsed_bag_data.cpp
   src/rosbag/missing_topics.cpp
+  src/utils/cnpy.cpp
 )
 target_include_directories(data_converter PRIVATE include src)
-target_link_libraries(data_converter yaml-cpp)
+target_link_libraries(data_converter yaml-cpp ZLIB::ZLIB CLI11::CLI11 fmt::fmt)
+
+ament_auto_add_executable(parse_rosbag_for_directory_with_map_version
+  src/parse_rosbag_for_directory_with_map_version.cpp
+  src/cli/converter_options.cpp
+  src/conversion/data_converter.cpp
+  src/io/frame_writer.cpp
+  src/io/bag_metadata.cpp
+  src/io/npz_frame_writer.cpp
+  src/io/projector_factory.cpp
+  src/processing/ego_sequence.cpp
+  src/processing/frame_processor.cpp
+  src/processing/frame_skip_decision.cpp
+  src/processing/neighbor_processor.cpp
+  src/processing/sequence_builder.cpp
+  src/rosbag/parsed_bag_data.cpp
+  src/rosbag/missing_topics.cpp
+  src/utils/cnpy.cpp
+)
+target_include_directories(parse_rosbag_for_directory_with_map_version PRIVATE include src)
+target_link_libraries(parse_rosbag_for_directory_with_map_version yaml-cpp ZLIB::ZLIB Threads::Threads CLI11::CLI11 fmt::fmt)
 
 ament_auto_add_executable(inference_tool
   src/inference_tool.cpp
@@ -69,6 +113,7 @@ if(BUILD_TESTING)
   )
   if(TARGET test_converter_options)
     target_include_directories(test_converter_options PRIVATE include src)
+    target_link_libraries(test_converter_options CLI11::CLI11)
   endif()
 
   # processing/frame_filters — header-only pure functions; needs autoware_diffusion_planner dims
@@ -84,6 +129,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_frame_writer
     test/test_frame_writer.cpp
     src/io/frame_writer.cpp
+    src/io/bag_metadata.cpp
   )
   if(TARGET test_frame_writer)
     target_include_directories(test_frame_writer PRIVATE include src)
@@ -116,6 +162,28 @@ if(BUILD_TESTING)
       autoware_planning_msgs
       autoware_vehicle_msgs
       geometry_msgs
+    )
+  endif()
+
+  # io/bag_metadata — self-contained JSON parsing, no ROS message deps
+  ament_add_gtest(test_bag_metadata
+    test/test_bag_metadata.cpp
+    src/io/bag_metadata.cpp
+  )
+  if(TARGET test_bag_metadata)
+    target_include_directories(test_bag_metadata PRIVATE include src)
+  endif()
+
+  # processing/neighbor_processor — future array filling; needs autoware_diffusion_planner
+  ament_add_gtest(test_neighbor_processor
+    test/test_neighbor_processor.cpp
+    src/processing/neighbor_processor.cpp
+  )
+  if(TARGET test_neighbor_processor)
+    target_include_directories(test_neighbor_processor PRIVATE include src)
+    ament_target_dependencies(test_neighbor_processor SYSTEM
+      autoware_perception_msgs
+      autoware_diffusion_planner
     )
   endif()
 endif()

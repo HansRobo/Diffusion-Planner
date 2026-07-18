@@ -18,15 +18,14 @@
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <vector>
+
+namespace CLI
+{
+class App;
+}  // namespace CLI
 
 struct ConverterOptions
 {
-  std::string rosbag_path;
-  std::string vector_map_path;
-  std::string save_dir;
-  std::string rosbag_dir_name;
-
   int64_t step;
   int64_t limit;
   int64_t min_frames;
@@ -39,7 +38,6 @@ struct ConverterOptions
   float ego_length;
   float ego_width;
 
-  std::vector<float> ego_shape;
   bool use_interpolation;
 
   // Collision-free filter (ported from filter_collision_free_npz.py), always applied.
@@ -56,20 +54,68 @@ struct ConverterOptions
   float offlane_max_score;
   int64_t offlane_time_stride;
 
+  // Red-light-run filter. A frame is skipped only when the ego future crosses a
+  // stop line near the entry point of a heading-aligned red route lane.
+  float red_light_run_radius_m;
+  float red_light_run_heading_tol_deg;
+
+  // Green-stop filter. A frame is skipped when ego stays put at a green
+  // heading-aligned route lane and no neighbor is ahead to justify stopping.
+  // Static-object blockers are not checked because this converter currently
+  // writes zero static_objects.
+  float green_stop_heading_tol_deg;
+  float green_stop_stay_radius_m;
+  float green_stop_speed_max_mps;
+  float green_stop_ahead_m;
+  float green_stop_lead_fwd_m;
+  float green_stop_lead_lat_m;
+
   // When true, also write the npz for frame-level skipped frames (collision,
   // off-lane, red/yellow light, vehicle stopped) so they can be visualised with
   // their skip reason. Intended for inspection/testing only; off in production.
   bool write_skipped_npz;
+
+  // Sidecar-only mode: run the identical conversion pipeline (sequence build, neighbor
+  // association, skip decision) but write ONLY the per-frame JSON sidecars (pose +
+  // neighbor_ids + is_skipped), skipping the npz tensor serialization/compression entirely.
+  // Used to (re)generate neighbor_ids sidecars for an existing npz set produced by this same
+  // converter: the slot ordering and skip decision are byte-identical (same code path), so the
+  // emitted sidecars align to those npzs by token — and it is faster than a full re-convert
+  // because it skips the npz write. Off in production (a normal convert already emits sidecars).
+  bool sidecar_only;
+
+  // Pack-sequence mode: write ONE npz and ONE json per sequence instead of one per frame.
+  //   (1) Every frame's tensors are stacked along a leading frame axis into a single
+  //       <rosbag>_sequence_<id>.npz (e.g. ego_agent_past becomes {num_frames, 21, 3}).
+  //   (2) Every frame's per-frame json is collected, in frame order, into a single
+  //       <rosbag>_sequence_<id>.json array.
+  //   (3) write_skipped_npz is forced true in this mode so the packed sequence is gap-free
+  //       (every frame present), which is required by the closed-loop reproducer.
+  // Mutually exclusive with sidecar_only (which writes no npz at all).
+  bool pack_sequence;
+
+  // Build converter defaults shared by all converter entry points.
+  static ConverterOptions default_converter_options();
+
+  // Register the converter-specific CLI options on an existing CLI11 app.
+  void add_converter_options(CLI::App & app);
 };
 
-// Apply a single "--key=value" argument to opts.
-// Returns true if the argument was recognized, false otherwise.
-bool apply_named_arg(ConverterOptions & opts, const std::string & arg);
+struct ConverterPaths
+{
+  std::string rosbag_path;
+  std::string vector_map_path;
+  std::string save_dir;
+
+  std::string get_rosbag_dir_name() const;
+};
+
+// Apply cross-option constraints after parsing. In pack_sequence mode write_skipped_npz is
+// forced true so the packed sequence is gap-free. Call before validate_options.
+void normalize_options(ConverterOptions & opts);
 
 // Validate options after all arguments have been applied.
 // Returns an error message string if invalid, nullopt if valid.
 std::optional<std::string> validate_options(const ConverterOptions & opts);
-
-std::optional<ConverterOptions> parse_arguments(int argc, char ** argv);
 
 #endif  // CLI__CONVERTER_OPTIONS_HPP_

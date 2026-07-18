@@ -125,7 +125,6 @@ DiffusionPlannerParams read_planner_params(const ParamMap & params)
   p.build_only = false;
   p.planning_frequency_hz = get_param<double>(params, "planning_frequency_hz", 10.0);
   p.ignore_neighbors = get_param<bool>(params, "ignore_neighbors", false);
-  p.ignore_unknown_neighbors = get_param<bool>(params, "ignore_unknown_neighbors", false);
   p.traffic_light_group_msg_timeout_seconds =
     get_param<double>(params, "traffic_light_group_msg_timeout_seconds", 0.2);
   p.batch_size = static_cast<int>(get_param<int64_t>(params, "batch_size", 1));
@@ -412,7 +411,6 @@ int main(int argc, char ** argv)
   std::cout << "  plugins_path: " << params.plugins_path << std::endl;
   std::cout << "  planning_frequency_hz: " << params.planning_frequency_hz << std::endl;
   std::cout << "  ignore_neighbors: " << std::boolalpha << params.ignore_neighbors << std::endl;
-  std::cout << "  ignore_unknown_neighbors: " << params.ignore_unknown_neighbors << std::endl;
   std::cout << "  traffic_light_group_msg_timeout_seconds: "
             << params.traffic_light_group_msg_timeout_seconds << std::endl;
   std::cout << "  batch_size: " << params.batch_size << std::endl;
@@ -733,7 +731,7 @@ int main(int argc, char ** argv)
     writer_parser.write_topic(
       planner_output.predicted_objects, frame_time, TOPIC_OUT_PREDICTED_OBJECTS);
     writer_parser.write_topic(
-      planner_output.turn_indicator_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
+      planner_output.turn_indicators_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
 
     // Build ground truth trajectory from future odometry with interpolation
     autoware_planning_msgs::msg::Trajectory gt_trajectory;

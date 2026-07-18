@@ -168,7 +168,8 @@ class Encoder(nn.Module):
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
         ego = torch.cat(
-            [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
+            # [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
+            [ego[:, :6], torch.zeros_like(ego[:, 6:])],
             dim=1,
         )  # Only keep the current + first 5 steps of ego history
 
@@ -304,7 +305,6 @@ class Encoder(nn.Module):
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
         encoder_outputs = self.fusion(encoding_input, encoding_mask.view(B, self.token_num))
-        encoder_outputs = encoder_outputs.masked_fill(encoding_mask.view(B, self.token_num, 1), 0.0)
 
         return encoder_outputs
 

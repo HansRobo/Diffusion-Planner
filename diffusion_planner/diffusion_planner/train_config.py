@@ -29,6 +29,7 @@ class TrainConfig:
     save_dir: str
     train_set_list: str
     valid_set_list: str
+    train_subsample_step: int
 
     # ---------------------------------------------------------
     # Data Dimensions
@@ -80,7 +81,7 @@ class TrainConfig:
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True
-    ego_history_dropout_rate: float = 0.4
+    ego_history_dropout_rate: float = 0.6
     use_turn_indicators: bool = True
 
     # Loss Coefficients
@@ -96,7 +97,18 @@ class TrainConfig:
     road_border_n_interp: int = 2
 
     coeff_neighbor_collision_loss: float = 0.0
-    neighbor_collision_margin: float = 0.25
+    neighbor_collision_margin_vehicle: float = 0.25
+    neighbor_collision_margin_pedestrian: float = 1.0
+    neighbor_collision_margin_bicycle: float = 0.5
+
+    # Validation-only Autoware-aligned EPDMS metrics. train_predictor.py reads
+    # these defaults when constructing argparse, so this remains the single
+    # default source while keeping existing behavior unchanged unless explicitly enabled.
+    enable_epdms_eval: bool = False
+    # Backward-compatible alias for local scripts that used PDMS naming.
+    enable_pdms_eval: bool = False
+    epdms_eval_use_agent_boxes: bool = True
+    epdms_eval_use_road_border: bool = True
 
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1
@@ -140,6 +152,31 @@ class TrainConfig:
     ddp: bool = True
     port: str = "22323"
 
+    # Validation-only temporal stability metrics. Replan consistency requires full-sequence
+    # Step-1 NPZ frames in valid_set_list; the default gap=1 avoids treating skip-N lists
+    # as true frame-to-frame replanning data.
+    enable_temporal_stability_eval: bool = True
+    enable_replan_consistency_eval: bool = True
+    replan_consistency_expected_gap: int = 1
+
+    # ---------------------------------------------------------
+    # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
+    # (``save_utd``). Disabled unless ``closed_loop_npz_root`` is set (dir tree of route NPZ frames,
+    # one route).
+    # ---------------------------------------------------------
+    closed_loop_npz_root: str = ""
+    closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
+    # Re-plan every N steps: replan=1 is a model forward EVERY step (~minutes/epoch over a full
+    # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
+    closed_loop_replan_interval: int = 4
+    closed_loop_draw_every: int = 4  # render 1 of every N steps (matplotlib is the dominant cost)
+    closed_loop_fps: int = 10
+    closed_loop_near_miss_thresh: float = 0.5
+    closed_loop_search_radius: float = 1.5
+    closed_loop_warmup_steps: int = 0
+    closed_loop_unstick_after: int = 300
+    closed_loop_unstick_advance_m: float = 2.5
+
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)
     # ---------------------------------------------------------
@@ -147,3 +184,8 @@ class TrainConfig:
     observation_normalizer: Optional[ObservationNormalizer] = None
     control_normalizer: Optional[ControlNormalizer] = None
     neighbor_control_normalizer: Optional[ControlNormalizer] = None
+
+    # ---------------------------------------------------------
+    # Deterministic
+    # ---------------------------------------------------------
+    deterministic: bool = True
