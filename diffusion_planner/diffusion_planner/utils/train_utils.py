@@ -21,36 +21,46 @@ def set_seed(CUR_SEED):
 
 def compute_grad_stats(parameters, prefix="grad"):
     """
-    Compute gradient statistics over all parameters to monitor
-    vanishing/exploding gradients during training.
+    Compute global-gradient statistics (l1/l2/linf/mean/std) WITHOUT
+    materializing a single concatenated copy of every gradient.
 
-    The statistics are computed on the concatenation of every parameter's
-    gradient (i.e. the global gradient vector):
-        - L1 norm
-        - L2 norm
-        - Linf norm (max absolute value)
-        - mean
-        - standard deviation
-
-    Args:
-        parameters: iterable of model parameters (e.g. ``model.parameters()``).
-        prefix: key prefix for the returned dictionary.
-
-    Returns:
-        dict mapping ``f"{prefix}/<stat>"`` to a python float. Empty dict if
-        no parameter has a gradient.
+    torch.cat([...all grads...]) allocated one huge contiguous block at peak
+    memory (right after backward), which was a primary driver of caching-allocator
+    fragmentation. Here we accumulate the reductions per-parameter instead, and
+    sync to host only once (a single 5-element .tolist()).
     """
-    grads = [p.grad.detach().flatten() for p in parameters if p.grad is not None]
-    if len(grads) == 0:
+    l1 = sq = smax = ssum = None
+    n = 0
+    for p in parameters:
+        if p.grad is None:
+            continue
+        g = p.grad.detach()
+        a = g.abs()
+        g_l1 = a.sum()
+        g_sq = (g * g).sum()
+        g_max = a.max()
+        g_sum = g.sum()
+        l1 = g_l1 if l1 is None else l1 + g_l1
+        sq = g_sq if sq is None else sq + g_sq
+        smax = g_max if smax is None else torch.maximum(smax, g_max)
+        ssum = g_sum if ssum is None else ssum + g_sum
+        n += g.numel()
+
+    if n == 0:
         return {}
 
-    grads = torch.cat(grads)
+    mean = ssum / n
+    var = (sq / n - mean * mean).clamp_min(0)
+    # Single device->host sync for all five scalars.
+    l1_v, l2_v, linf_v, mean_v, std_v = torch.stack(
+        [l1, sq.sqrt(), smax, mean, var.sqrt()]
+    ).tolist()
     return {
-        f"{prefix}/l1_norm": grads.abs().sum().item(),
-        f"{prefix}/l2_norm": grads.norm(2).item(),
-        f"{prefix}/linf_norm": grads.abs().max().item(),
-        f"{prefix}/mean": grads.mean().item(),
-        f"{prefix}/std": grads.std().item(),
+        f"{prefix}/l1_norm": l1_v,
+        f"{prefix}/l2_norm": l2_v,
+        f"{prefix}/linf_norm": linf_v,
+        f"{prefix}/mean": mean_v,
+        f"{prefix}/std": std_v,
     }
 
 

@@ -49,12 +49,10 @@ from typing import Any
 
 import numpy as np
 import torch
+from diffusion_planner.utils.path_key import data_path_to_rel
 
 from planner_metrics.aggregate import compute_subscores_scene_batch
-from planner_metrics.subscores import (
-    compute_ego_neighbor_signed_clearance,
-    compute_safety_score_batch,
-)
+from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.reward import RewardConfig
 
@@ -69,15 +67,22 @@ _ALWAYS_WRITE_LISTS = (
     "moving_collision",
     "moving_near_miss",
     "moving_ttc",
+    "expert_disagreement",
 )
 
 _DEFAULT_THRESHOLD_CONFIG = (
     Path(__file__).resolve().parents[2] / "configs" / "scene_failure_thresholds.json"
 )
 _REQUIRED_THRESHOLD_FIELDS = (
+    "moving_collision_thresh",
     "moving_near_thresh",
     "static_near_thresh",
     "rb_near_thresh",
+    "expert_disagreement_wait_speed_mps",
+    "expert_disagreement_wait_progress_m",
+    "expert_disagreement_forward_progress_gap_m",
+    "expert_disagreement_lag_progress_gap_m",
+    "expert_disagreement_moving_speed_mps",
     "sc_cross_thresh",
     "rb_cross_thresh",
 )
@@ -91,22 +96,29 @@ _THRESHOLD_MATCH_TOL = 1e-9
 _MISSING_SOURCE_SAMPLE_LIMIT = 5
 
 
+def _apply_rear_end_collision_mode(config: RewardConfig, args) -> None:
+    if bool(getattr(args, "count_rear_end_collisions", False)):
+        config.ignore_rear_end_collisions = False
+
+
 def _load_scene_thresholds(path: str | Path) -> dict[str, float]:
     with open(path) as f:
         raw = json.load(f)
     missing = [k for k in _REQUIRED_THRESHOLD_FIELDS if k not in raw]
     if missing:
         raise ValueError(f"Threshold config {path} is missing required fields: {missing}")
-    return {k: float(raw[k]) for k in _REQUIRED_THRESHOLD_FIELDS}
+    out = {k: float(raw[k]) for k in _REQUIRED_THRESHOLD_FIELDS}
+    return out
 
 
 def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
     threshold_config = _load_scene_thresholds(args.threshold_config)
 
     def resolve(name: str) -> float:
-        cli_value = getattr(args, name)
+        cli_value = getattr(args, name, None)
         return float(cli_value) if cli_value is not None else threshold_config[name]
 
+    args.moving_collision_thresh = resolve("moving_collision_thresh")
     args.moving_near_thresh = resolve("moving_near_thresh")
     args.static_near_thresh = resolve("static_near_thresh")
     args.rb_near_thresh = resolve("rb_near_thresh")
@@ -114,14 +126,31 @@ def _apply_scene_thresholds(config: RewardConfig, args) -> dict[str, float]:
     config.rb_cross_thresh = resolve("rb_cross_thresh")
     config.sc_near_thresh = args.static_near_thresh
     config.rb_near_thresh = args.rb_near_thresh
+    args.expert_disagreement_wait_speed_mps = resolve("expert_disagreement_wait_speed_mps")
+    args.expert_disagreement_wait_progress_m = resolve("expert_disagreement_wait_progress_m")
+    args.expert_disagreement_forward_progress_gap_m = resolve(
+        "expert_disagreement_forward_progress_gap_m"
+    )
+    args.expert_disagreement_lag_progress_gap_m = resolve("expert_disagreement_lag_progress_gap_m")
+    args.expert_disagreement_moving_speed_mps = resolve("expert_disagreement_moving_speed_mps")
 
     return {
+        "moving_collision_thresh": float(args.moving_collision_thresh),
         "moving_near_thresh": float(args.moving_near_thresh),
         "static_near_thresh": float(args.static_near_thresh),
         "rb_near_thresh": float(args.rb_near_thresh),
         "static_collision_thresh": float(config.sc_cross_thresh),
         "sc_cross_thresh": float(config.sc_cross_thresh),
         "rb_cross_thresh": float(config.rb_cross_thresh),
+        "expert_disagreement_wait_speed_mps": float(args.expert_disagreement_wait_speed_mps),
+        "expert_disagreement_wait_progress_m": float(args.expert_disagreement_wait_progress_m),
+        "expert_disagreement_forward_progress_gap_m": float(
+            args.expert_disagreement_forward_progress_gap_m
+        ),
+        "expert_disagreement_lag_progress_gap_m": float(
+            args.expert_disagreement_lag_progress_gap_m
+        ),
+        "expert_disagreement_moving_speed_mps": float(args.expert_disagreement_moving_speed_mps),
     }
 
 
@@ -336,6 +365,45 @@ def _gt_trajectory(data: dict[str, torch.Tensor], device: torch.device) -> torch
     return traj[:, :4].to(device).unsqueeze(0)
 
 
+def _conflict_diagnostics(
+    ego_traj: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    args,
+) -> dict[str, Any]:
+    from scenario_generation.conflict_detector import detect_expert_disagreement
+
+    gt = data.get("ego_agent_future")
+    if gt is None:
+        return {
+            "expert_disagreement": False,
+            "expert_disagreement_step": None,
+            "expert_disagreement_max_dev": 0.0,
+        }
+    if gt.dim() == 3:
+        gt = gt[0]
+    gt = _future_heading_to_cos_sin(gt)
+    result = detect_expert_disagreement(
+        ego_traj[0],
+        gt,
+        enabled=bool(args.enable_conflict_detector),
+        wait_speed_mps=float(args.expert_disagreement_wait_speed_mps),
+        wait_progress_m=float(args.expert_disagreement_wait_progress_m),
+        forward_progress_gap_m=float(args.expert_disagreement_forward_progress_gap_m),
+        lag_progress_gap_m=float(args.expert_disagreement_lag_progress_gap_m),
+        moving_speed_mps=float(args.expert_disagreement_moving_speed_mps),
+    )
+    return {
+        "expert_disagreement": result.expert_disagreement,
+        "expert_disagreement_step": result.expert_disagreement_step,
+        "expert_disagreement_max_dev": result.max_deviation,
+        "expert_disagreement_reason": result.reason,
+        "expert_disagreement_model_end_progress": result.model_end_progress,
+        "expert_disagreement_expert_end_progress": result.expert_end_progress,
+        "expert_disagreement_model_end_speed": result.model_end_speed,
+        "expert_disagreement_expert_end_speed": result.expert_end_speed,
+    }
+
+
 def _prediction_path_for_scene(
     predictions_dir: Path,
     scene_path: str,
@@ -391,6 +459,42 @@ def _saved_prediction_trajectory(
             f"{prediction_path} prediction must have non-empty T and >=4 channels, got {tuple(pred.shape)}"
         )
     return pred[:, :4].unsqueeze(0)
+
+
+def _prediction_output_base(save_predictions_dir: Path, scene_path: str | Path) -> Path:
+    return save_predictions_dir / data_path_to_rel(scene_path)
+
+
+def _save_prediction_batch(
+    save_predictions_dir: Path,
+    scene_paths: list[str],
+    predictions: torch.Tensor,
+    turn_indicators: torch.Tensor | None = None,
+) -> list[Path]:
+    if predictions.dim() != 4:
+        raise ValueError(f"predictions must be shaped (B,A,T,4), got {tuple(predictions.shape)}")
+    if predictions.shape[0] != len(scene_paths):
+        raise ValueError(
+            f"predictions batch size {predictions.shape[0]} does not match {len(scene_paths)} scenes"
+        )
+    if turn_indicators is not None and turn_indicators.shape[0] != len(scene_paths):
+        raise ValueError(
+            "turn_indicators batch size does not match scene_paths: "
+            f"{turn_indicators.shape[0]} vs {len(scene_paths)}"
+        )
+
+    out_paths: list[Path] = []
+    save_predictions_dir.mkdir(parents=True, exist_ok=True)
+    for idx, scene_path in enumerate(scene_paths):
+        out_base = _prediction_output_base(save_predictions_dir, scene_path)
+        out_base.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"prediction": predictions[idx].detach().cpu().numpy()}
+        if turn_indicators is not None:
+            payload["turn_indicator"] = turn_indicators[idx].detach().cpu().numpy()
+        out_path = out_base.with_suffix(".npz")
+        np.savez(out_path, **payload)
+        out_paths.append(out_path)
+    return out_paths
 
 
 def _neighbor_inputs(
@@ -493,10 +597,214 @@ def _first_step(steps: list[int | None]) -> int | None:
     return min(values) if values else None
 
 
+def _moving_collision_step_gated(
+    ego_trajs: torch.Tensor,
+    ego_shape: torch.Tensor,
+    neighbor_futures: torch.Tensor,
+    neighbor_shapes: torch.Tensor,
+    neighbor_valid: torch.Tensor,
+    config: RewardConfig,
+    moving_collision_thresh: float,
+) -> int | None:
+    """First moving-collision step using a closest-point DISTANCE threshold.
+
+    A collision is counted when the exact closest-point clearance between the
+    ego and a neighbor OBB is ``<= moving_collision_thresh`` (default 0.2 m) at
+    any timestep — the same distance-band definition the STATIC path uses
+    (``sc_cross_thresh``), so moving and static agree on what "collision" means.
+    Clearance comes from the reward primitive
+    ``compute_ego_neighbor_signed_clearance`` (exact closest point).
+
+    Two gates decide WHICH contacts are the ego's fault (not the threshold):
+    - rear-end suppression (when ``config.ignore_rear_end_collisions`` is set,
+      i.e. ``--count_rear_end_collisions`` is off): a neighbor behind the ego,
+      or one that ever contacted from behind, is excluded thereafter — the ego
+      cannot control a following vehicle. Mirrors ``compute_safety_score_batch``.
+    - low-speed suppression (T >= 2 only): contacts are ignored while the ego is
+      slower than 1 m/s, so queued bumper-to-bumper traffic is not a collision.
+      A single realized pose (T == 1, reproducer danger scorer) carries no ego
+      speed, so this gate is skipped there.
+
+    NOTE (labeling vs reward): the frozen reward's hard collision uses strict
+    OBB overlap (clearance ``< 0``); this labeling/mining detector deliberately
+    uses the 0.2 m distance band instead (accurate closest-point distance, no
+    OBB inflation) so mined events match the static definition.
+    """
+    _N, T, _ = ego_trajs.shape
+    if neighbor_futures.shape[0] == 0:
+        return None
+    distances = compute_ego_neighbor_signed_clearance(
+        ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid
+    )
+    if distances.numel() == 0:
+        return None
+    ego_xy = ego_trajs[:, :, :2]  # (N, T, 2)
+    collision_mask = distances <= moving_collision_thresh  # (N, N_nb, T) within the band
+    if config.ignore_rear_end_collisions:
+        ego_heading = ego_trajs[:, :, 2:4]
+        npc_xy = neighbor_futures[:, :, :2]
+        ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)  # (N, N_nb, T, 2)
+        dot = (ego_to_npc * ego_heading.unsqueeze(1)).sum(dim=-1)  # (N, N_nb, T)
+        npc_is_behind = dot < 0
+        # Once a neighbor contacts from behind, drop it for all later steps too
+        # (it later crosses into the forward hemisphere as it overtakes).
+        rear_contact = collision_mask & npc_is_behind
+        ever_rear = rear_contact.cummax(dim=2).values
+        collision_mask = collision_mask & ~npc_is_behind & ~ever_rear
+    if T >= 2:
+        ego_speed = (torch.diff(ego_xy, dim=1) / config.dt).norm(dim=-1)  # (N, T-1)
+        ego_speed = torch.cat([ego_speed, ego_speed[:, -1:]], dim=1)  # (N, T)
+        collision_mask = collision_mask & (ego_speed > 1.0).unsqueeze(1)
+    collision_by_t = collision_mask.any(dim=1).any(dim=0)
+    if not bool(collision_by_t.any().item()):
+        return None
+    return int(collision_by_t.float().argmax().item())
+
+
+def _moving_collision_all_rear_end(
+    ego_trajs: torch.Tensor,
+    ego_shape: torch.Tensor,
+    neighbor_futures: torch.Tensor,
+    neighbor_shapes: torch.Tensor,
+    neighbor_valid: torch.Tensor,
+    moving_collision_thresh: float,
+) -> bool:
+    """Whether every in-band NPC is behind the ego (a pure rear-end).
+
+    Uses the SAME closest-point distance band (clearance
+    ``<= moving_collision_thresh``) as ``_moving_collision_step_gated`` but
+    ignores rear-end suppression, then asks whether all in-band contacts are
+    rear-ends. Lets a caller DETECT the collision and still tag it so a rear-end
+    can be dropped downstream if desired (rather than silently discarding it at
+    detection time). Only meaningful for a single realized step (T == 1);
+    returns False for empty/no-contact inputs.
+    """
+    if ego_trajs is None or neighbor_futures is None or neighbor_futures.shape[0] == 0:
+        return False
+    distances = compute_ego_neighbor_signed_clearance(
+        ego_trajs, ego_shape, neighbor_futures, neighbor_shapes, neighbor_valid
+    )
+    if distances.numel() == 0:
+        return False
+    overlap = distances <= moving_collision_thresh  # (N, N_nb, T)
+    if not bool(overlap.any().item()):
+        return False
+    ego_xy = ego_trajs[:, :, :2]
+    ego_heading = ego_trajs[:, :, 2:4]
+    npc_xy = neighbor_futures[:, :, :2]
+    ego_to_npc = npc_xy.unsqueeze(0) - ego_xy.unsqueeze(1)
+    dot = (ego_to_npc * ego_heading.unsqueeze(1)).sum(dim=-1)
+    behind = dot < 0
+    # Pure rear-end iff there is no forward-hemisphere (dot >= 0) overlap.
+    forward_overlap = overlap & ~behind
+    return not bool(forward_overlap.any().item())
+
+
+def current_ego_neighbor_clearance(
+    data: dict[str, torch.Tensor],
+    config: RewardConfig,
+    *,
+    device: torch.device,
+    neighbor_kind: str = "any",
+) -> dict[str, Any]:
+    """Shared current-step ego-vs-neighbor OBB clearance for moving/static labels."""
+    if neighbor_kind not in {"any", "moving", "static"}:
+        raise ValueError(f"neighbor_kind must be any, moving, or static; got {neighbor_kind!r}")
+    ego_shape = _ego_shape_from_data(data, device)
+    # Both moving and static need >=2 future frames so _stopped_neighbor_mask can
+    # classify a neighbor as stopped (it returns all-False on a single frame). "any"
+    # ignores the stopped/moving split entirely, so one frame suffices there. When the
+    # snapshot carries fewer future frames than that (a single realized-step t0 gate),
+    # degrade to what's available: motion can't be classified from one pose, so every
+    # neighbor stays active — the conservative choice for a t0 already-collided gate.
+    horizon = 1 if neighbor_kind == "any" else 2
+    nf_future = data.get("neighbor_agents_future")
+    if nf_future is not None and nf_future.dim() >= 2:
+        horizon = max(1, min(horizon, int(nf_future.shape[-2])))
+    neighbor_futures, neighbor_shapes, neighbor_valid = _neighbor_inputs(data, horizon, device)
+    empty = {
+        "distances": torch.zeros(0, 0, 0, device=device),
+        "min_clearance": math.inf,
+        "active_mask": torch.zeros(0, dtype=torch.bool, device=device),
+        "stopped_mask": torch.zeros(0, dtype=torch.bool, device=device),
+        # Built OBB inputs (ego at origin, current neighbor pose) so callers can
+        # reuse the SAME gated collision decision (_moving_collision_step_gated).
+        "ego_now": None,
+        "ego_shape": ego_shape,
+        "neighbors": None,
+        "neighbor_shapes": None,
+        "neighbor_valid": None,
+    }
+    if neighbor_futures.shape[0] == 0:
+        return empty
+
+    stopped_mask = _stopped_neighbor_mask(neighbor_futures, neighbor_valid, config)
+    if neighbor_kind == "moving":
+        active_mask = ~stopped_mask
+    elif neighbor_kind == "static":
+        active_mask = stopped_mask
+    else:
+        active_mask = torch.ones_like(stopped_mask, dtype=torch.bool)
+    if not bool(active_mask.any().item()):
+        return {
+            **empty,
+            "active_mask": active_mask,
+            "stopped_mask": stopped_mask,
+        }
+
+    current_neighbors = neighbor_futures[active_mask, :1, :4].clone()
+    current_valid = neighbor_valid[active_mask, :1].clone()
+    neighbor_past = data.get("neighbor_agents_past")
+    if neighbor_past is not None:
+        if neighbor_past.dim() == 4:
+            neighbor_past = neighbor_past[0]
+        future_all = data.get("neighbor_agents_future")
+        if future_all is not None and future_all.dim() == 4:
+            future_all = future_all[0]
+        if future_all is not None and future_all.shape[1] >= horizon:
+            # Match the horizon window _neighbor_inputs used to select neighbors, so
+            # filtered_past lines up 1:1 with active_mask (else IndexError when a
+            # neighbor is zero at frame 0 but valid within the horizon window).
+            slot_valid = future_all[:, :horizon, :2].abs().sum(dim=(1, 2)) > _NEIGHBOR_COORD_EPS_M
+            filtered_past = neighbor_past[slot_valid]
+        else:
+            filtered_past = neighbor_past
+        current_pose = filtered_past[active_mask, -1, :]
+        if current_pose.shape[-1] >= 4:
+            current_neighbors[:, 0, :4] = current_pose[:, :4].to(device)
+            current_valid = (
+                (current_pose[:, :2].abs().sum(dim=-1) > _NEIGHBOR_COORD_EPS_M)
+                .unsqueeze(1)
+                .to(device)
+            )
+
+    ego_now = torch.tensor([[[0.0, 0.0, 1.0, 0.0]]], dtype=torch.float32, device=device)
+    distances = compute_ego_neighbor_signed_clearance(
+        ego_now,
+        ego_shape,
+        current_neighbors,
+        neighbor_shapes[active_mask],
+        current_valid,
+    )
+    min_clearance = math.inf if distances.numel() == 0 else float(distances.min().item())
+    return {
+        "distances": distances,
+        "min_clearance": min_clearance,
+        "active_mask": active_mask,
+        "stopped_mask": stopped_mask,
+        "ego_now": ego_now,
+        "ego_shape": ego_shape,
+        "neighbors": current_neighbors,
+        "neighbor_shapes": neighbor_shapes[active_mask],
+        "neighbor_valid": current_valid,
+    }
+
+
 def _moving_diagnostics(
     ego_traj: torch.Tensor,
     data: dict[str, torch.Tensor],
     config: RewardConfig,
+    moving_collision_thresh: float,
     moving_near_thresh: float,
     device: torch.device,
 ) -> dict[str, Any]:
@@ -530,16 +838,12 @@ def _moving_diagnostics(
     argmin_m = (flat_idx // T) % M
     argmin_t = flat_idx % T
     min_dist = float(distances.reshape(-1)[flat_idx].item())
-
-    _, moving_collision_steps = compute_safety_score_batch(
-        ego_traj,
-        ego_shape,
-        mf,
-        ms,
-        mv,
-        config,
+    # Collision label uses the reward's gated overlap definition (rear-end /
+    # low-speed suppressed), NOT a raw proximity threshold. moving_min_dist and
+    # moving_near_miss below still report raw clearance for diagnostics.
+    moving_collision_step = _moving_collision_step_gated(
+        ego_traj, ego_shape, mf, ms, mv, config, moving_collision_thresh
     )
-    moving_collision_step = _first_step(moving_collision_steps)
 
     return {
         "moving_neighbor_count": moving_count,
@@ -558,20 +862,24 @@ def classify_loaded_scene(
     data: dict[str, torch.Tensor],
     config: RewardConfig,
     *,
+    moving_collision_thresh: float,
     moving_near_thresh: float,
     static_near_thresh: float,
     rb_near_thresh: float,
     device: torch.device,
+    args=None,
 ) -> dict[str, Any]:
     rows = classify_loaded_scenes_batch(
         [scene_path],
         ego_traj.unsqueeze(0),
         [_prepare_scoring_data(data)],
         config,
+        moving_collision_thresh=moving_collision_thresh,
         moving_near_thresh=moving_near_thresh,
         static_near_thresh=static_near_thresh,
         rb_near_thresh=rb_near_thresh,
         device=device,
+        args=args,
     )
     return rows[0]
 
@@ -585,6 +893,7 @@ def _build_candidate_row(
     bidx: int,
     static_near_thresh: float,
     rb_near_thresh: float,
+    conflict: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     labels: list[str] = []
     rb_crossing = bool(subs["rb_crossing_gate"][bidx, candidate_idx].item() < 0.5)
@@ -616,6 +925,10 @@ def _build_candidate_row(
     if ttc_first_unsafe is not None and moving["moving_collision_step"] is None:
         labels.append("moving_ttc")
 
+    conflict = conflict or {}
+    if conflict.get("expert_disagreement"):
+        labels.append("expert_disagreement")
+
     if not labels:
         labels.append("clean")
 
@@ -643,6 +956,22 @@ def _build_candidate_row(
         "ttc_first_unsafe_step": ttc_first_unsafe,
         "ttc_first_collision_step": subs["ttc_first_collision_steps"][bidx][candidate_idx],
         **moving,
+        "expert_disagreement": bool(conflict.get("expert_disagreement", False)),
+        "expert_disagreement_step": conflict.get("expert_disagreement_step"),
+        "expert_disagreement_max_dev": float(conflict.get("expert_disagreement_max_dev", 0.0)),
+        "expert_disagreement_reason": conflict.get("expert_disagreement_reason", ""),
+        "expert_disagreement_model_end_progress": float(
+            conflict.get("expert_disagreement_model_end_progress", 0.0)
+        ),
+        "expert_disagreement_expert_end_progress": float(
+            conflict.get("expert_disagreement_expert_end_progress", 0.0)
+        ),
+        "expert_disagreement_model_end_speed": float(
+            conflict.get("expert_disagreement_model_end_speed", 0.0)
+        ),
+        "expert_disagreement_expert_end_speed": float(
+            conflict.get("expert_disagreement_expert_end_speed", 0.0)
+        ),
     }
 
 
@@ -652,21 +981,53 @@ def classify_loaded_scenes_batch(
     datas: list[dict[str, torch.Tensor]],
     config: RewardConfig,
     *,
+    moving_collision_thresh: float,
     moving_near_thresh: float,
     static_near_thresh: float,
     rb_near_thresh: float,
     device: torch.device,
+    args=None,
 ) -> list[dict[str, Any]]:
     """Classify a B-scene batch with one scored trajectory per scene."""
+    if ego_trajs.dim() != 4 or ego_trajs.shape[1] != 1:
+        raise ValueError(
+            "classify_loaded_scenes_batch expects exactly one trajectory per scene, "
+            f"ego_trajs shaped (B,1,T,4); got {tuple(ego_trajs.shape)}. "
+            "Use classify_loaded_scene_candidates_batch for N>1 candidates."
+        )
+    rows_per_scene = classify_loaded_scene_candidates_batch(
+        scene_paths,
+        ego_trajs,
+        datas,
+        config,
+        moving_collision_thresh=moving_collision_thresh,
+        moving_near_thresh=moving_near_thresh,
+        static_near_thresh=static_near_thresh,
+        rb_near_thresh=rb_near_thresh,
+        device=device,
+        args=args,
+    )
+    return [rows[0] for rows in rows_per_scene]
+
+
+def classify_loaded_scene_candidates_batch(
+    scene_paths: list[str],
+    ego_trajs: torch.Tensor,
+    datas: list[dict[str, torch.Tensor]],
+    config: RewardConfig,
+    *,
+    moving_collision_thresh: float,
+    moving_near_thresh: float,
+    static_near_thresh: float,
+    rb_near_thresh: float,
+    device: torch.device,
+    args=None,
+) -> list[list[dict[str, Any]]]:
+    """Classify a B-scene batch with N scored trajectories per scene."""
     if ego_trajs.dim() != 4:
         raise ValueError(
-            "classify_loaded_scenes_batch expects ego_trajs shaped (B,N,T,4); "
+            "classify_loaded_scene_candidates_batch expects ego_trajs shaped (B,N,T,4); "
             f"got {tuple(ego_trajs.shape)}"
-        )
-    if ego_trajs.shape[1] != 1:
-        raise ValueError(
-            "dangerous scene classification expects exactly one trajectory per scene; "
-            f"got N={ego_trajs.shape[1]}"
         )
     if len(scene_paths) != ego_trajs.shape[0] or len(datas) != ego_trajs.shape[0]:
         raise ValueError(
@@ -678,29 +1039,36 @@ def classify_loaded_scenes_batch(
     batched_data = _stack_scene_data(prepared_datas)
     subs = compute_subscores_scene_batch(ego_trajs, batched_data, config)
 
-    rows: list[dict[str, Any]] = []
-    B = ego_trajs.shape[0]
+    rows_per_scene: list[list[dict[str, Any]]] = []
+    B, N = ego_trajs.shape[:2]
     for bidx, scene_path in enumerate(scene_paths):
         scene_data = _slice_scene_data(batched_data, bidx, B)
-        moving = _moving_diagnostics(
-            ego_trajs[bidx, 0:1],
-            scene_data,
-            config,
-            moving_near_thresh,
-            device,
-        )
-        rows.append(
-            _build_candidate_row(
+        scene_rows: list[dict[str, Any]] = []
+        for candidate_idx in range(N):
+            traj_1 = ego_trajs[bidx, candidate_idx : candidate_idx + 1]
+            moving = _moving_diagnostics(
+                traj_1,
+                scene_data,
+                config,
+                moving_collision_thresh,
+                moving_near_thresh,
+                device,
+            )
+            conflict = _conflict_diagnostics(traj_1, scene_data, args) if args else {}
+            row = _build_candidate_row(
                 scene_path,
-                0,
+                candidate_idx,
                 subs,
                 moving,
                 bidx=bidx,
                 static_near_thresh=static_near_thresh,
                 rb_near_thresh=rb_near_thresh,
+                conflict=conflict,
             )
-        )
-    return rows
+            row["trajectory_source"] = "generated" if N > 1 else row["trajectory_source"]
+            scene_rows.append(row)
+        rows_per_scene.append(scene_rows)
+    return rows_per_scene
 
 
 def _write_json(path: Path, obj: Any) -> None:
@@ -839,10 +1207,12 @@ def _classify_gt(
                 torch.stack(ego_trajs, dim=0),
                 datas,
                 config,
+                moving_collision_thresh=args.moving_collision_thresh,
                 moving_near_thresh=args.moving_near_thresh,
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
                 device=device,
+                args=args,
             )
             for bi, row in enumerate(batch_rows):
                 row["trajectory_source"] = "gt"
@@ -869,6 +1239,9 @@ def _classify_det(
     from rlvr.autoresearch.tools.eval_det_avoidance import det_inference_batched, load_model
 
     model, model_args = load_model(args.model_path, device)
+    save_predictions_dir = (
+        Path(args.save_predictions_dir).resolve() if args.save_predictions_dir is not None else None
+    )
 
     rows: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
@@ -885,20 +1258,42 @@ def _classify_det(
                 print(f"  [err ] {Path(scene_path).name}: {exc}")
         if not datas:
             continue
-        det_trajs = det_inference_batched(model, model_args, datas, device)
+        if save_predictions_dir is None:
+            det_trajs = det_inference_batched(model, model_args, datas, device)
+            full_predictions = None
+            turn_indicators = None
+        else:
+            det_trajs, full_predictions, turn_indicators = det_inference_batched(
+                model,
+                model_args,
+                datas,
+                device,
+                return_full_prediction=True,
+                return_turn_indicator=True,
+            )
+            saved_prediction_paths = _save_prediction_batch(
+                save_predictions_dir,
+                valid_paths,
+                full_predictions,
+                turn_indicators,
+            )
         try:
             batch_rows = classify_loaded_scenes_batch(
                 valid_paths,
                 det_trajs.unsqueeze(1),
                 datas,
                 config,
+                moving_collision_thresh=args.moving_collision_thresh,
                 moving_near_thresh=args.moving_near_thresh,
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
                 device=device,
+                args=args,
             )
             for bi, row in enumerate(batch_rows):
                 row["trajectory_source"] = "det"
+                if save_predictions_dir is not None:
+                    row["prediction_path"] = str(saved_prediction_paths[bi])
                 rows.append(row)
                 print(
                     f"  [{start + bi:4d}] {Path(row['scene_path']).name}: {','.join(row['labels'])}"
@@ -957,10 +1352,12 @@ def _classify_saved_predictions(
                 torch.stack(ego_trajs, dim=0),
                 datas,
                 config,
+                moving_collision_thresh=args.moving_collision_thresh,
                 moving_near_thresh=args.moving_near_thresh,
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
                 device=device,
+                args=args,
             )
             for bi, row in enumerate(batch_rows):
                 row["trajectory_source"] = "saved_pred"
@@ -1015,10 +1412,12 @@ def _classify_saved_prediction_pairs(
                 torch.stack(ego_trajs, dim=0),
                 datas,
                 config,
+                moving_collision_thresh=args.moving_collision_thresh,
                 moving_near_thresh=args.moving_near_thresh,
                 static_near_thresh=args.static_near_thresh,
                 rb_near_thresh=args.rb_near_thresh,
                 device=device,
+                args=args,
             )
             for bi, row in enumerate(batch_rows):
                 row["trajectory_source"] = "saved_pred"
@@ -1126,6 +1525,14 @@ def main() -> None:
         help="Required when --trajectory saved_pred; valid_predictor saved predictions directory",
     )
     parser.add_argument(
+        "--save_predictions_dir",
+        default=None,
+        help=(
+            "Only for --trajectory det. Save valid_predictor-compatible prediction NPZs "
+            "so later runs can use --trajectory saved_pred without rerunning model inference."
+        ),
+    )
+    parser.add_argument(
         "--prediction_scene_root",
         default=None,
         help=(
@@ -1153,14 +1560,35 @@ def main() -> None:
             f"{_DEFAULT_THRESHOLD_CONFIG}. CLI threshold flags override values in this file."
         ),
     )
+    parser.add_argument("--moving_collision_thresh", type=float, default=None)
     parser.add_argument("--moving_near_thresh", type=float, default=None)
     parser.add_argument("--static_near_thresh", type=float, default=None)
     parser.add_argument("--rb_near_thresh", type=float, default=None)
+    parser.add_argument("--expert_disagreement_wait_speed_mps", type=float, default=None)
+    parser.add_argument("--expert_disagreement_wait_progress_m", type=float, default=None)
+    parser.add_argument("--expert_disagreement_forward_progress_gap_m", type=float, default=None)
+    parser.add_argument("--expert_disagreement_lag_progress_gap_m", type=float, default=None)
+    parser.add_argument("--expert_disagreement_moving_speed_mps", type=float, default=None)
+    parser.add_argument(
+        "--enable_conflict_detector",
+        action="store_true",
+        help="Enable R2LPL-style model-vs-expert conflict labeling.",
+    )
     parser.add_argument("--sc_cross_thresh", type=float, default=None)
     parser.add_argument("--rb_cross_thresh", type=float, default=None)
+    parser.add_argument(
+        "--count_rear_end_collisions",
+        action="store_true",
+        help="Count moving collisions where the ego is struck from behind.",
+    )
     parser.add_argument("--max_scenes", type=int, default=None)
     parser.add_argument("--num_shards", type=int, default=1)
     parser.add_argument("--shard_index", type=int, default=0)
+    parser.add_argument(
+        "--device",
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="torch device for model inference / saved-prediction scoring",
+    )
     parser.add_argument(
         "--merge_output_dirs",
         nargs="+",
@@ -1168,9 +1596,11 @@ def main() -> None:
         help="Merge previously written shard output dirs into --output_dir and exit.",
     )
     args = parser.parse_args()
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.save_predictions_dir is not None and args.trajectory != "det":
+        raise ValueError("--save_predictions_dir is only supported with --trajectory det")
+    device = torch.device(args.device)
     config = load_reward_config(args.config)
+    _apply_rear_end_collision_mode(config, args)
     thresholds = _apply_scene_thresholds(config, args)
     if args.merge_output_dirs is not None:
         _merge_output_dirs(

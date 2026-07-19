@@ -4,6 +4,14 @@ project(autoware_diffusion_planner_tools)
 include(FetchContent)
 
 find_package(autoware_cmake REQUIRED)
+# cnpy is a vendored third-party library (MIT, (c) Carl Rogers); its license
+# header is not the TIER IV Apache notice ament_copyright expects. Exclude it
+# from lint checks so its upstream headers are left untouched. Must be set
+# before autoware_package() registers the ament_lint_auto hooks.
+set(AMENT_LINT_AUTO_FILE_EXCLUDE
+  include/utils/cnpy.hpp
+  src/utils/cnpy.cpp
+)
 autoware_package()
 
 find_package(yaml-cpp REQUIRED)
@@ -11,12 +19,12 @@ find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 find_package(fmt REQUIRED)
 
-FetchContent_Declare(
+fetchcontent_declare(
   cli11
   GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
   GIT_TAG v2.4.2
 )
-FetchContent_MakeAvailable(cli11)
+fetchcontent_makeavailable(cli11)
 
 # Add compile option to suppress deprecation warnings (optional)
 add_compile_options(-Wno-deprecated-declarations)
@@ -36,6 +44,7 @@ ament_auto_add_executable(data_converter
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
   src/io/frame_writer.cpp
+  src/io/bag_metadata.cpp
   src/io/npz_frame_writer.cpp
   src/io/projector_factory.cpp
   src/processing/ego_sequence.cpp
@@ -55,6 +64,7 @@ ament_auto_add_executable(parse_rosbag_for_directory_with_map_version
   src/cli/converter_options.cpp
   src/conversion/data_converter.cpp
   src/io/frame_writer.cpp
+  src/io/bag_metadata.cpp
   src/io/npz_frame_writer.cpp
   src/io/projector_factory.cpp
   src/processing/ego_sequence.cpp
@@ -119,6 +129,7 @@ if(BUILD_TESTING)
   ament_add_gtest(test_frame_writer
     test/test_frame_writer.cpp
     src/io/frame_writer.cpp
+    src/io/bag_metadata.cpp
   )
   if(TARGET test_frame_writer)
     target_include_directories(test_frame_writer PRIVATE include src)
@@ -151,6 +162,28 @@ if(BUILD_TESTING)
       autoware_planning_msgs
       autoware_vehicle_msgs
       geometry_msgs
+    )
+  endif()
+
+  # io/bag_metadata — self-contained JSON parsing, no ROS message deps
+  ament_add_gtest(test_bag_metadata
+    test/test_bag_metadata.cpp
+    src/io/bag_metadata.cpp
+  )
+  if(TARGET test_bag_metadata)
+    target_include_directories(test_bag_metadata PRIVATE include src)
+  endif()
+
+  # processing/neighbor_processor — future array filling; needs autoware_diffusion_planner
+  ament_add_gtest(test_neighbor_processor
+    test/test_neighbor_processor.cpp
+    src/processing/neighbor_processor.cpp
+  )
+  if(TARGET test_neighbor_processor)
+    target_include_directories(test_neighbor_processor PRIVATE include src)
+    ament_target_dependencies(test_neighbor_processor SYSTEM
+      autoware_perception_msgs
+      autoware_diffusion_planner
     )
   endif()
 endif()

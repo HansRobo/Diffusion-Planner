@@ -237,6 +237,22 @@ def get_args(args_list=None):
     # distributed training parameters
     parser.add_argument("--ddp", default=True, type=boolean, help="use ddp or not")
     parser.add_argument("--port", default="22323", type=str, help="port")
+    parser.add_argument(
+        "--enable_temporal_stability_eval",
+        default=_train_config_default("enable_temporal_stability_eval"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--enable_replan_consistency_eval",
+        default=_train_config_default("enable_replan_consistency_eval"),
+        type=boolean,
+    )
+    parser.add_argument(
+        "--replan_consistency_expected_gap",
+        type=int,
+        default=_train_config_default("replan_consistency_expected_gap"),
+        help="Expected consecutive-frame gap for replan consistency. 0 = auto per timeline.",
+    )
 
     # closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence.
     # Disabled unless --closed_loop_npz_root is given (dir tree of one route's NPZ frames).
@@ -248,15 +264,9 @@ def get_args(args_list=None):
         "cadence (save_interval_steps). Empty = disabled. One route per trial.",
     )
     parser.add_argument(
-        "--closed_loop_seg_len",
-        type=int,
-        default=100000,
-        help="frames per segment; large => one route = one segment = one trial",
-    )
-    parser.add_argument(
         "--closed_loop_replan_interval",
         type=int,
-        default=40,
+        default=4,
         help="re-plan every N steps; 1 = forward every step (slow, ~minutes/epoch). 40 default",
     )
     parser.add_argument(
@@ -272,6 +282,13 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
 
+    # Deterministic
+    parser.add_argument(
+        "--deterministic",
+        type=boolean,
+        default=True,
+        help="Set True to run PyTorch GPU kernels in deterministic mode (may be slightly slower).",
+    )
     args = parser.parse_args(args_list)
     return args
 
