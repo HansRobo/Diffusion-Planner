@@ -89,33 +89,7 @@ def get_args(args_list=None):
         help="total number of optimizer steps",
     )
     parser.add_argument("--batch_size", type=int, default=512)
-    parser.add_argument(
-        "--valid_interval_ratio",
-        type=float,
-        default=_train_config_default("valid_interval_ratio"),
-        help="validate + log + save latest.pth every this fraction of train_steps "
-        "(resolved to steps at runtime)",
-    )
-    parser.add_argument(
-        "--save_interval_ratio",
-        type=float,
-        default=_train_config_default("save_interval_ratio"),
-        help="save a checkpoint dir + ONNX + closed-loop every this fraction of train_steps "
-        "(resolved to steps at runtime)",
-    )
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument(
-        "--warm_up_ratio",
-        type=float,
-        default=_train_config_default("warm_up_ratio"),
-        help="linear LR warm-up length as a fraction of train_steps (resolved to steps at runtime)",
-    )
-    parser.add_argument(
-        "--final_phase_ratio",
-        type=float,
-        default=_train_config_default("final_phase_ratio"),
-        help="final-phase LR decay length as a fraction of train_steps (last half at lr*0.01, prior half at lr*0.1)",
-    )
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
