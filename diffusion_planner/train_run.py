@@ -81,8 +81,6 @@ def main() -> None:
         "x_start",
         "--save_dir",
         str(save_path),
-        "--train_steps",
-        "850000",
         "--closed_loop_npz_root",
         str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else "",
         *optional,
