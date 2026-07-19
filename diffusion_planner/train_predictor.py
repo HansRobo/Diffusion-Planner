@@ -235,12 +235,6 @@ def get_args(args_list=None):
         "cadence (save_utd). Empty = disabled. One route per trial.",
     )
     parser.add_argument(
-        "--closed_loop_seg_len",
-        type=int,
-        default=100000,
-        help="frames per segment; large => one route = one segment = one trial",
-    )
-    parser.add_argument(
         "--closed_loop_replan_interval",
         type=int,
         default=4,
