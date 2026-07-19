@@ -72,7 +72,7 @@ class TrainConfig:
     # Step-based training schedule. Reference run 20260503-220950 was 80 epochs over a
     # 5,446,154-sample dataset at batch_size 512 (drop_last) = floor(5446154/512)*80 = 850,960
     # optimizer steps; the defaults below reproduce that total and its per-epoch cadences.
-    train_steps: int = 850000
+    train_steps: int = 8500
     batch_size: int = 512
     # Validation + tsv/wandb logging + latest.pth cadence, as a fraction of train_steps
     # (resolved to steps at runtime).
