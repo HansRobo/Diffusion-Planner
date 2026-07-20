@@ -22,6 +22,7 @@ class StepRecord:
     collision: bool = False
     neighbor_violation: bool = False
     rb_violation: bool = False
+    rb_dist_m: float = float("inf")
     png_path: Path | None = None
 
 

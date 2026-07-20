@@ -34,7 +34,7 @@ def score_safety_step(
         traj[0, 0, 2] = 1.0  # heading +x in ego frame
         data = {
             "line_strings": torch.tensor(
-                np_dict["line_strings"][None], dtype=torch.float32, device=device
+                np_dict["line_strings"], dtype=torch.float32, device=device
             )
         }
         _gate, _near, _wide, _steps, _cont, per_ts_min = compute_road_border_penalty(

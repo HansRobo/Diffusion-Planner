@@ -211,6 +211,7 @@ class GroupedByAreaClosedLoopEvaluation(ClosedLoopEvaluation):
             0,
             n,
             draw_dir,
+            goal_mode="route",
             instrument=True,
             area_episodes=episodes,
             area_to_metric_group=self._area_to_metric(),

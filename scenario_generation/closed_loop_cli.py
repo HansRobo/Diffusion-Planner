@@ -86,7 +86,7 @@ def add_rollout_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--replan_interval",
         type=int,
-        default=10,
+        default=4,
         help="re-run the model every N closed-loop steps (1=every step)",
     )
     parser.add_argument(
