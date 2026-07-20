@@ -41,7 +41,7 @@ class RolloutParams:
     unstick_radius_mult: float = 10.0
     unstick_teleport_after: int = 300
     draw_every: int = 8
-    replan_interval: int = 10
+    replan_interval: int = 4
     tracker_mode: str = "mpc"
     profile_sync_gpu: bool = False
     neighbor_history_mode: str = "recorded"
@@ -61,7 +61,6 @@ class RolloutParams:
             "tracker_mode": self.tracker_mode,
             "profile_sync_gpu": self.profile_sync_gpu,
             "neighbor_history_mode": self.neighbor_history_mode,
-            "goal_mode": "route",
         }
 
 
@@ -404,6 +403,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 start,
                 end,
                 png_dir,
+                goal_mode="segment",
                 **params.render_kwargs(),
             )
             row = {"route": job.route_key, **metrics}

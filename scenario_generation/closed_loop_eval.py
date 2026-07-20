@@ -108,7 +108,7 @@ def run_closed_loop_eval(
     fps: float,
     draw_every: int,
     neighbor_history_mode: str,
-    replan_interval: int = 10,
+    replan_interval: int = 4,
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
     tracker_mode: str = "mpc",
