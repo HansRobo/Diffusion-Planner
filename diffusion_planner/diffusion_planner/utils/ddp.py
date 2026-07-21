@@ -125,6 +125,15 @@ def all_reduce_sum(value, device):
     return t.item()
 
 
+def all_reduce_sum_values(values, device):
+    """Sum a fixed-length numeric sequence with one collective."""
+    if not is_dist_avail_and_initialized():
+        return list(values)
+    packed = torch.as_tensor(values, dtype=torch.float64, device=device)
+    dist.all_reduce(packed, op=dist.ReduceOp.SUM)
+    return packed.cpu().tolist()
+
+
 def all_reduce_min(value, device):
     """Minimum of a python scalar across all DDP ranks.
 

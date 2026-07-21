@@ -3,7 +3,10 @@ import wandb
 from torch import nn
 from tqdm import tqdm
 
-from diffusion_planner.model.module.decoder import compute_training_loss
+from diffusion_planner.model.module.decoder import (
+    compute_training_loss,
+    compute_turn_indicator_head_training_loss,
+)
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.masks import neighbor_future_padding_mask
@@ -15,11 +18,16 @@ from diffusion_planner.utils.train_utils import (
 
 
 def compose_supervised_total_loss(loss, args):
+    """Return the trajectory-policy objective used for optimization and selection.
+
+    The turn-indicator classifier is an auxiliary head with a deliberately detached
+    input path.  Its loss is backpropagated separately below so it can train without
+    inflating or changing the policy loss reported for SFT.
+    """
     return (
         loss["ego_planning_loss"]
         + args.planning_hybrid_loss
         * loss.get("ego_planning_hybrid_loss", torch.zeros_like(loss["ego_planning_loss"]))
-        + loss["turn_indicator_loss"]
         + args.coeff_road_border_loss * loss["road_border_loss"]
         + args.coeff_neighbor_collision_loss * loss["neighbor_collision_loss"]
     )
@@ -35,9 +43,11 @@ def heading_to_cos_sin(x, *, preserve_zero_padding=False):
 
     Idempotent: a [..., 4] input that is already (x, y, cos, sin) is returned
     unchanged in value. A clone is returned so callers can safely mask it in place
-    without mutating a batch-owned tensor. ``preserve_zero_padding`` must be used
-    for raw padded poses: converting an all-zero (x, y, heading) row otherwise turns
-    it into (0, 0, 1, 0), which is a valid-looking pose to downstream masks.
+    without mutating a batch-owned tensor. preserve_zero_padding is only valid
+    when the caller has established that all-zero rows are padding (for example,
+    neighbor futures after their raw-layout mask is computed). Ego history and
+    goal poses are ego-frame values, so (0, 0, 0) can be a valid origin pose and
+    must use the ordinary conversion.
     """
     if x.shape[-1] not in (3, 4):
         raise ValueError(f"Expected pose features with last dimension 3 or 4, got {x.shape}")
@@ -95,7 +105,17 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     epoch_loss_sums = {}
     epoch_loss_counts = {}
 
-    model.train()
+    training_stage = getattr(args, "supervised_training_stage", "joint")
+    if training_stage == "turn_indicator":
+        # Keep the frozen planner deterministic and deployment-aligned. Only the
+        # classifier is returned to train mode (it currently has no dropout, but
+        # making the ownership explicit prevents future layers from inheriting eval).
+        model.eval()
+        ddp.get_model(model, args.ddp).decoder.turn_indicator_predictor.train()
+    else:
+        model.train()
+        if training_stage == "policy":
+            ddp.get_model(model, args.ddp).decoder.turn_indicator_predictor.eval()
     step_log = getattr(args, "wandb_step_log_interval", 0)
     log_step = args.use_wandb and step_log > 0 and ddp.get_rank() == 0
     if not hasattr(args, "_wandb_global_step"):
@@ -116,21 +136,25 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     stats_interval = step_log if step_log > 0 else 100
     needs_neighbor_futures = args.coeff_neighbor_collision_loss > 0
     net = ddp.get_model(model, args.ddp)
-    turn_params = list(net.decoder.turn_indicator_predictor.parameters())
+    turn_params = [
+        param for param in net.decoder.turn_indicator_predictor.parameters() if param.requires_grad
+    ]
     turn_param_ids = {id(param) for param in turn_params}
-    policy_params = [param for param in net.parameters() if id(param) not in turn_param_ids]
+    policy_params = [
+        param
+        for param in net.parameters()
+        if param.requires_grad and id(param) not in turn_param_ids
+    ]
 
     for batch_idx, inputs in enumerate(data_loader, start=1):
         neighbor_future_cpu = inputs.pop("neighbor_agents_future", None)
         if needs_neighbor_futures and neighbor_future_cpu is None:
             raise KeyError("neighbor_agents_future is required for collision supervision")
         inputs = {key: value.to(args.device, non_blocking=True) for key, value in inputs.items()}
-        inputs["ego_agent_past"] = heading_to_cos_sin(
-            inputs["ego_agent_past"], preserve_zero_padding=True
-        )
-        inputs["goal_pose"] = heading_to_cos_sin(
-            inputs["goal_pose"], preserve_zero_padding=True
-        )
+        # Ego history and goal pose are valid ego-frame poses even when their raw
+        # x/y/heading values are all zero. Do not treat an origin pose as padding.
+        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
+        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
         ego_future = inputs["ego_agent_future"]
         if neighbor_future_cpu is None:
@@ -160,18 +184,33 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # call the model
         optimizer.zero_grad()
 
-        loss = compute_training_loss(
-            model,
-            inputs,
-            (ego_future, neighbors_future, mask),
-            args,
-            collision_futures=collision_futures,
-        )
+        if training_stage == "turn_indicator":
+            loss = compute_turn_indicator_head_training_loss(model, inputs, ego_future, args)
+            loss["loss"] = loss["turn_indicator_loss"]
+        else:
+            loss = compute_training_loss(
+                model,
+                inputs,
+                (ego_future, neighbors_future, mask),
+                args,
+                collision_futures=collision_futures,
+            )
+            loss["loss"] = compose_supervised_total_loss(loss, args)
 
-        loss["loss"] = compose_supervised_total_loss(loss, args)
-
-        # loss backward
-        loss["loss"].backward()
+        # The indicator head consumes detached trajectory/scene/route features.  Keep
+        # its auxiliary update separate from the policy objective so the SFT loss and
+        # checkpoint selection measure trajectory quality only.
+        indicator_loss = loss.get("turn_indicator_loss")
+        if (
+            training_stage == "joint"
+            and indicator_loss is not None
+            and indicator_loss.requires_grad
+        ):
+            # Multiple roots keep this as one DDP autograd traversal while the
+            # indicator root remains outside the policy scalar/logged objective.
+            torch.autograd.backward((loss["loss"], indicator_loss))
+        else:
+            loss["loss"].backward()
 
         # Gradient statistics (computed before clipping so that exploding
         # gradients are not masked by clip_grad_norm_). Sampled on the logging
@@ -180,8 +219,10 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         if (args._wandb_global_step + 1) % stats_interval == 0:
             loss.update(compute_grad_stats(model.parameters()))
 
-        nn.utils.clip_grad_norm_(policy_params, 5)
-        nn.utils.clip_grad_norm_(turn_params, 5)
+        if policy_params:
+            nn.utils.clip_grad_norm_(policy_params, 5)
+        if turn_params:
+            nn.utils.clip_grad_norm_(turn_params, 5)
         optimizer.step()
 
         if ema is not None:
@@ -223,6 +264,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
     if ddp.get_rank() == 0:
         print(f"{epoch_mean_loss['loss']=:.4f}")
-        print(f"{epoch_mean_loss['turn_indicator_accuracy']=:.4f}")
+        if "turn_indicator_accuracy" in epoch_mean_loss:
+            print(f"{epoch_mean_loss['turn_indicator_accuracy']=:.4f}")
 
     return epoch_mean_loss, epoch_mean_loss["loss"]

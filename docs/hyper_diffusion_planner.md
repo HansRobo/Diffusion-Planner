@@ -35,7 +35,7 @@ reference/external/Hyper-Diffusion-Planner/HDP-navsim/hdp_navsim/config/agent/dp
 
 Original Diffusion Planner predicts all-agent future waypoints directly.
 
-This HDP branch keeps the original scene encoder, turn-indicator path, and validation stack, but changes the ego planning target in HDP mode:
+This HDP branch keeps the Tier IV scene representation and validation stack, but changes the ego planning target in HDP mode:
 
 - Ego target is represented as a normalized velocity/action latent rather than a direct waypoint latent.
 - The HDP ego prediction is converted back to waypoints through integration for trajectory loss and evaluation.
@@ -43,8 +43,9 @@ This HDP branch keeps the original scene encoder, turn-indicator path, and valid
 - The HDP action head is ego-only; all 320 neighbor histories remain scene context.
 - Detailed route tokens remain in scene cross-attention, while an official-style ordered route
   encoder supplies a lightweight global AdaLN condition for every DiT block.
-- Turn indicators and Tier IV validation metrics remain available.
-- Turn-indicator SFT uses equal-weight expert and detached generated-trajectory supervision by default, removing the pure teacher-forcing train/inference mismatch without allowing classification gradients to distort the planned trajectory.
+- A detached three-state turn-intent head remains available, but turn-indicator
+  history is not a policy input. Its complete design and data audit are in
+  [HDP turn-indicator SFT design](hdp_turn_indicator_sft.md).
 
 The intended HDP supervised setting is:
 
@@ -77,11 +78,12 @@ cannot leave a partial `latest.pth`, and store the W&B run ID so automatic recov
 same run.
 
 The branch has one encoder implementation. It includes valid-point LineEncoder geometry from Tier IV PR
-[#212](https://github.com/tier4/Diffusion-Planner/pull/212), the categorical turn-history encoding
-from [#210](https://github.com/tier4/Diffusion-Planner/pull/210), and the polygon/line-string
+[#212](https://github.com/tier4/Diffusion-Planner/pull/212) and the polygon/line-string
 type injection and geometry-only Mixer input from [#228](https://github.com/tier4/Diffusion-Planner/pull/228).
-There is no legacy mode. #210 and #228 change parameter shapes, so old Base/SFT checkpoints fail
-loading instead of silently reusing stale encoder features. Train the new ego-only Base from scratch.
+There is no legacy encoder mode. The SFT weights-only loader has one explicit
+exception for Base80 migration: it removes the old #210 signal encoder and
+reinitializes the old four-state head while loading every trajectory-policy tensor
+strictly. Exact resume remains strict and never migrates architectures.
 
 ## Data policy
 
@@ -90,6 +92,13 @@ Use fixed full-sequence lists for HDP experiments.
 Reasons:
 
 - HDP uses ego history and temporal behavior as part of the model design.
+- The current SFT encoder uses the newest 21 ego frames (current plus 20 past
+  frames, approximately two seconds at 10 Hz) while retaining only the newest
+  6 neighbor frames because older perception tracks are less reliable. The
+  input tensor remains 31 frames wide and is left-padded after this selection.
+- This is an encoder-contract change: old 6-frame checkpoints must not be resumed
+  or used as the final 21-frame model. The shared NPZ files and manifests are not
+  modified.
 - Temporal stability metrics need consecutive frames.
 - Mixed project/area lists can change the distribution and make comparisons unfair.
 
@@ -103,6 +112,36 @@ Python path references in memory instead of materializing a multi-hundred-MB com
 JSON. Traffic-light features are kept unchanged. Dataset-list upload to W&B is opt-in through
 `WANDB_LOG_DATASET_ARTIFACT=1`.
 
+### `is_skipped` manifest filtering
+
+Converter sidecars can mark gap-filling frames with `is_skipped: true`. The default
+SFT/RL train input is the precomputed shared manifest
+`/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_sft_is_skipped_filtered.json`
+(4,578,036 entries); SFT/RL pass `--filter_skipped False` for this file so every launch
+avoids a multi-million-sidecar scan. The original `path_list_train_sft.json`, NPZs, and
+sidecars remain unchanged. The full-sequence Base list was independently audited and
+dropped zero entries, so the Base launcher also reads it directly. For an explicitly raw
+or alternate list, set `--filter_skipped True` to create a run-local filtered manifest;
+`--skip_filter_sidecar_root` handles corpora whose sidecars are stored separately and
+`--skip_filter_workers` controls the one-time scan parallelism.
+
+### Causal red-light manifest filtering
+
+The current route tensor exposes a red signal but not the future signal transition. A
+logged trajectory that waits and then starts therefore crosses an event the current
+observation cannot predict. Causal red-light filtering is an optional experiment, not
+part of the default SFT/RL data contract. The default launchers use the shared
+`path_list_train_sft_is_skipped_filtered.json` directly and do not add causal extra
+manifests or a runtime loss mask.
+
+When explicitly enabled, the controlled-signal pre-pass writes new lists and metadata
+without modifying NPZ files or the original manifests. It associates every signalized
+route lanelet with the actual forward stop-line geometry, selects the nearest
+unambiguous controlling signal, and removes only the red/stopped/future-moving
+predicate. A nearer green signal therefore keeps valid green-start samples, downstream
+red signals cannot trigger deletion, and full-horizon red-light holds remain supervised.
+Conflicting or unavailable signal associations are retained conservatively.
+
 ## Supervised training stages
 
 ### Stage 1: HDP base
@@ -113,9 +152,22 @@ Base is trained from scratch with HDP flags enabled. Use full-sequence base trai
 Diffusion-Planner-Temporal
 ```
 
-### Stage 2: HDP SFT
+### Stage 2: staged HDP supervised fine-tuning
 
-SFT starts from the base checkpoint with `--init_weights_path`. The SFT run must keep the same HDP representation flags as base.
+Fine-tuning starts from the stopped Base checkpoint with `--init_weights_path` and
+keeps the same HDP representation and exact Base train/extra/validation manifests.
+
+When starting from the current Base80 checkpoint, the signal-history token and old
+head are migrated as described in [HDP turn-indicator SFT design](hdp_turn_indicator_sft.md).
+This requires a new SFT run; do not resume an earlier SFT checkpoint.
+
+The first phase uses `--supervised_training_stage policy`: the new intent head is
+frozen and skipped while the trajectory policy adapts to removal of the signal
+input. The second phase initializes from that phase's latest EMA and uses
+`--supervised_training_stage turn_indicator`: the complete planner is frozen and
+only the three-state head is trained on final DPM and expert trajectories. See
+`diffusion_planner/slurm/run_hdp_staged_sft_node02.sbatch` for the hash-locked
+protocol.
 
 Do not change from velocity representation to waypoint representation between base and SFT.
 
@@ -132,6 +184,8 @@ Use validation metrics consistently across base, SFT, and RL:
 - `valid_loss/*` for supervised losses.
 - `valid_epdms/*` for planning-quality proxy metrics.
 - `valid_multisample/minADE`, `minFDE`, and their thresholded scores for stochastic open-loop diagnostics.
+- `valid_turn_indicator/*` for balanced three-state intent metrics; exact-frame
+  change accuracy is not a supported selection metric.
 - Temporal metrics only when pair/full-sequence loading is available.
 
 The six-trajectory count is not invented by this repository: the paper's Appendix "Open-Loop Metrics" explicitly says it generates six trajectories before computing minADE/minFDE. The seeded zero-noise trajectory remains a lower-variance checkpoint proxy; it is not mislabeled as that six-trajectory protocol.
@@ -164,20 +218,22 @@ Precision policy:
   `ros_scripts/torch2onnx.py` is used.
 - Every full-graph input has a dynamic batch axis. Native output is `[B,1,80,4]`; the model has no delay-prefix or compatibility-row contract.
 
-Smoke validation performed after the temporal-token conversion:
+Required smoke validation for each new SFT checkpoint:
 
 ```text
-result:
+expected result:
   ONNX checker         full / encoder / turn-indicator passed
   ORT provider         CPUExecutionProvider, dynamic batch 1 and 2 passed
   full prediction      [B, 1, 80, 4], finite
-  turn indicator       [B, 5], finite
+  turn indicator       [B, 3], finite
   split decoder        not part of the HDP export surface
 ```
 
-The full graph takes `sampled_trajectories: [B,1,80,4]`. `prediction[:,0]` is the
-integrated waypoint trajectory, not the normalized velocity latent. Scene encoder inputs,
-including 320 neighbor histories, are unchanged.
+The full graph takes `sampled_trajectories: [B,1,80,4]` and does not take signal
+history. `prediction[:,0]` is the
+integrated waypoint trajectory, not the normalized velocity latent. Scene encoder input
+shapes, including 320 neighbor histories, are unchanged; the effective ego-history
+selection is recorded by `ego_history_frames` in `args.json`.
 
 For deployment or closed-loop handoff, record:
 

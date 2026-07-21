@@ -757,7 +757,7 @@ def test_hdp_decoder_skips_frozen_turn_head_without_changing_inference_predictio
     )
     args.observation_normalizer = ObservationNormalizer({})
     decoder = Decoder(args).eval()
-    encoding = torch.randn(2, decoder._turn_indicator_token_index + 1, 32)
+    encoding = torch.randn(2, 16, 32)
     inputs = {
         "route_lanes": torch.randn(2, 25, 20, 33),
         "sampled_trajectories": torch.randn(2, 1, 80, 4),
@@ -1304,8 +1304,12 @@ def test_heading_conversion_preserves_padding_and_does_not_alias_four_col_input(
     converted = heading_to_cos_sin(raw, preserve_zero_padding=True)
     assert converted.eq(0).all()
 
+    # A raw zero pose is also a valid ego-frame origin pose. Callers for ego
+    # history and goal_pose must use the ordinary conversion, not the
+    # padding-preserving opt-in.
     stationary = heading_to_cos_sin(raw)
     assert stationary[..., 2].eq(1.0).all()
+    assert stationary[..., 3].eq(0.0).all()
     already_converted = torch.zeros(1, 2, 4)
     copied = heading_to_cos_sin(already_converted)
     copied[..., 0] = 3.0
@@ -2543,23 +2547,17 @@ def test_turn_indicator_class_metrics_state_counts_visible():
             "_samples_ego": 1,
             "_loss_neighbor_sum": 0.0,
             "_samples_neighbor": 0,
-            "_turn_correct": 3,
-            "_turn_total": 5,
-            "_turn_change_correct": 2,
-            "turn_indicator_change_total": 4,
-            "_turn_class_correct": [0, 0, 1, 1],
-            "_turn_class_total": [0, 1, 1, 2],
+            "_turn_confusion": [0, 1, 0, 0, 1, 0, 0, 1, 1],
         },
         "cpu",
     )
 
     assert metrics["turn_indicator_class_accuracy"] == {
-        "none": 0.0,
         "disable": 0.0,
         "enable_left": 1.0,
         "enable_right": 0.5,
     }
-    assert metrics["turn_indicator_class_count"]["none"] == 0
+    assert metrics["turn_indicator_class_count"]["disable"] == 1
     assert metrics["turn_indicator_class_count"]["enable_right"] == 2
 
 
@@ -2570,12 +2568,7 @@ def test_empty_multisample_metrics_aggregate_to_nan_not_false_zero():
             "_samples_ego": 1,
             "_loss_neighbor_sum": 0.0,
             "_samples_neighbor": 0,
-            "_turn_correct": 0,
-            "_turn_total": 0,
-            "_turn_change_correct": 0,
-            "turn_indicator_change_total": 0,
-            "_turn_class_correct": [0, 0, 0, 0],
-            "_turn_class_total": [0, 0, 0, 0],
+            "_turn_confusion": [0] * 9,
             "multisample_minADE": torch.empty(0),
         },
         "cpu",
@@ -2591,12 +2584,7 @@ def test_epdms_metric_without_availability_excludes_nonfinite_values():
             "_samples_ego": 1,
             "_loss_neighbor_sum": 0.0,
             "_samples_neighbor": 0,
-            "_turn_correct": 0,
-            "_turn_total": 0,
-            "_turn_change_correct": 0,
-            "turn_indicator_change_total": 0,
-            "_turn_class_correct": [0, 0, 0, 0],
-            "_turn_class_total": [0, 0, 0, 0],
+            "_turn_confusion": [0] * 9,
             "epdms_unmasked_metric": torch.tensor([0.25, float("nan"), 0.75]),
         },
         "cpu",
@@ -2624,11 +2612,13 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
 
         def forward(self, inputs):
             B = inputs["gt_trajectories"].shape[0]
-            expert_logit = torch.zeros(B, 4)
-            expert_logit[:, 1] = 10.0  # DISABLE: the state label for an all-ones history
+            expert_logit = torch.zeros(B, 3)
+            expert_logit[:, 0] = 10.0  # DISABLE: dense class 0 for raw report state 1
+            generated_logit = torch.zeros(B, 3)
+            generated_logit[:, 2] = 10.0
             return {}, {
                 "model_output": inputs["gt_trajectories"],
-                "turn_indicator_logit": torch.zeros(B, 4),
+                "turn_indicator_logit": generated_logit,
                 "turn_indicator_expert_logit": expert_logit,
             }
 
@@ -2837,6 +2827,7 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         ("multisample_eval_sample_steps", 4),
         ("multisample_eval_seed", 7),
         ("ego_history_dropout_rate", 0.0),
+        ("supervised_training_stage", "policy"),
         ("rl_stopped_neighbor_vel_thresh", 0.2),
         ("rl_stopped_neighbor_disp_thresh", 0.8),
         ("rl_eval_stopped_neighbor_vel_thresh", 0.2),
@@ -2853,6 +2844,50 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
     shorter_horizon = _checkpoint_compat_config(predicted_neighbor_num=1)
     shorter_horizon.train_epochs = 20
     assert_checkpoint_compatible(str(checkpoint_path), shorter_horizon)
+
+
+def test_checkpoint_indicator_contract_requires_new_metadata_for_exact_resume(tmp_path):
+    current_args = _checkpoint_compat_config(predicted_neighbor_num=0)
+    serializable = {
+        key: value.to_dict()
+        if isinstance(value, (StateNormalizer, ObservationNormalizer))
+        else value
+        for key, value in vars(current_args).items()
+    }
+    serializable.pop("policy_uses_turn_indicator_history")
+    serializable.pop("turn_indicator_output_dim")
+    (tmp_path / "args.json").write_text(json.dumps(serializable), encoding="utf-8")
+    checkpoint_path = tmp_path / "latest.pth"
+
+    with pytest.raises(RuntimeError, match="missing architecture fields"):
+        assert_checkpoint_compatible(str(checkpoint_path), current_args)
+    assert_checkpoint_compatible(
+        str(checkpoint_path),
+        current_args,
+        strict_training_config=False,
+    )
+
+
+def test_checkpoint_indicator_contract_mismatch_is_migration_only(tmp_path):
+    current_args = _checkpoint_compat_config(predicted_neighbor_num=0)
+    serializable = {
+        key: value.to_dict()
+        if isinstance(value, (StateNormalizer, ObservationNormalizer))
+        else value
+        for key, value in vars(current_args).items()
+    }
+    serializable["policy_uses_turn_indicator_history"] = True
+    serializable["turn_indicator_output_dim"] = 4
+    (tmp_path / "args.json").write_text(json.dumps(serializable), encoding="utf-8")
+    checkpoint_path = tmp_path / "latest.pth"
+
+    with pytest.raises(RuntimeError, match="architecture mismatch"):
+        assert_checkpoint_compatible(str(checkpoint_path), current_args)
+    assert_checkpoint_compatible(
+        str(checkpoint_path),
+        current_args,
+        strict_training_config=False,
+    )
 
 
 def test_atomic_checkpoint_save_and_resume_restore_global_step(tmp_path):

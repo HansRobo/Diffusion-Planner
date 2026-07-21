@@ -629,6 +629,30 @@ def test_centric_transform_zero_mask_preserved():
     print("  [PASS] centric_transform zero mask preserved")
 
 
+def test_centric_transform_raw_three_col_origin_is_not_padding():
+    """Raw ego/goal origin poses survive a non-identity scene transform."""
+    aug = StatePerturbation()
+    inputs, ego_future, nbrs_future = _make_inputs(1)
+    inputs["ego_current_state"] = _ego_state(1, x=5.0, vx=0.0)
+    inputs["ego_agent_past"].zero_()
+    inputs["goal_pose"] = torch.zeros(1, 3)
+
+    result_inputs, _, _ = aug.centric_transform(inputs, ego_future, nbrs_future)
+
+    torch.testing.assert_close(
+        result_inputs["ego_agent_past"][0, -1],
+        torch.tensor([-5.0, 0.0, 0.0]),
+        atol=1e-6,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        result_inputs["goal_pose"][0],
+        torch.tensor([-5.0, 0.0, 0.0]),
+        atol=1e-6,
+        rtol=0,
+    )
+
+
 def test_centric_transform_translation():
     """Ego at (5, 3), neighbor at (6, 3) -> neighbor becomes (1, 0) after transform."""
     aug = StatePerturbation()

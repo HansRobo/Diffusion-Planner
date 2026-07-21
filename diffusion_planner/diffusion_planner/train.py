@@ -32,6 +32,7 @@ from diffusion_planner.utils.metric_logging import (
 )
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
+from diffusion_planner.utils.scene_skip import prepare_filtered_manifests
 from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
@@ -43,6 +44,21 @@ from diffusion_planner.utils.train_utils import (
     set_seed,
 )
 from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
+
+
+def configure_supervised_trainable_parameters(model: torch.nn.Module, stage: str) -> None:
+    """Apply the explicit two-stage SFT parameter ownership contract."""
+    if stage not in {"joint", "policy", "turn_indicator"}:
+        raise ValueError(f"Unsupported supervised training stage: {stage!r}")
+    head_prefix = "decoder.turn_indicator_predictor."
+    for name, parameter in model.named_parameters():
+        is_head = name.startswith(head_prefix)
+        if stage == "joint":
+            parameter.requires_grad_(True)
+        elif stage == "policy":
+            parameter.requires_grad_(not is_head)
+        else:
+            parameter.requires_grad_(is_head)
 
 
 def load_weights_only(path: str, model, device, *, prefer_ema: bool = False):
@@ -66,8 +82,33 @@ def load_weights_only(path: str, model, device, *, prefer_ema: bool = False):
     elif state_has_module and not model_has_module:
         state = {key.removeprefix("module."): value for key, value in state.items()}
 
+    model_state = model.state_dict()
+    root = "module." if model_has_module else ""
+    removed_signal_prefix = f"{root}encoder.turn_indicator_encoder."
+    head_prefix = f"{root}decoder.turn_indicator_predictor."
+    removed_signal_keys = [key for key in state if key.startswith(removed_signal_prefix)]
+    head_shape_mismatch = any(
+        key.startswith(head_prefix)
+        and key in model_state
+        and tuple(value.shape) != tuple(model_state[key].shape)
+        for key, value in state.items()
+    )
+    for key in removed_signal_keys:
+        state.pop(key)
+    if head_shape_mismatch:
+        # The decoupled three-state intent head has a new semantic and tensor
+        # contract. Reinitialize it as one unit rather than mixing old four-state
+        # layers with new layers, while preserving strict loading for the policy.
+        for key in [key for key in state if key.startswith(head_prefix)]:
+            state.pop(key)
+
     incompatible = model.load_state_dict(state, strict=False)
-    disallowed_missing = list(incompatible.missing_keys)
+    allowed_missing_prefixes = (head_prefix,) if head_shape_mismatch else ()
+    disallowed_missing = [
+        key
+        for key in incompatible.missing_keys
+        if not any(key.startswith(prefix) for prefix in allowed_missing_prefixes)
+    ]
     disallowed_unexpected = list(incompatible.unexpected_keys)
 
     print(f"Weights-only init loaded from {path} ({'EMA' if using_ema else 'live'} weights)")
@@ -79,6 +120,12 @@ def load_weights_only(path: str, model, device, *, prefer_ema: bool = False):
         print("missing_keys_preview=" + ", ".join(incompatible.missing_keys[:20]))
     if incompatible.unexpected_keys:
         print("unexpected_keys_preview=" + ", ".join(incompatible.unexpected_keys[:20]))
+    if removed_signal_keys or head_shape_mismatch:
+        print(
+            "Turn-indicator checkpoint migration: "
+            f"removed_policy_signal_tensors={len(removed_signal_keys)}, "
+            f"reinitialized_intent_head={head_shape_mismatch}"
+        )
     if disallowed_missing or disallowed_unexpected:
         raise RuntimeError(
             "Init checkpoint is not compatible with the model. "
@@ -264,21 +311,39 @@ def assert_checkpoint_compatible(
         "line_string_num",
         "line_string_len",
         "use_ego_history",
-        "use_turn_indicators",
+        "ego_history_frames",
         "encoder_mixer_depth",
         "encoder_fusion_depth",
         "decoder_depth",
         "decoder_tokenization",
         "num_heads",
         "hidden_dim",
+        "policy_uses_turn_indicator_history",
+        "turn_indicator_output_dim",
     )
+    # Legacy checkpoints predate explicit indicator-architecture provenance.
+    # Permit that migration only for weights-only initialization; exact resume
+    # must prove that the policy input and classifier contracts are identical.
+    indicator_migration_fields = {
+        "policy_uses_turn_indicator_history",
+        "turn_indicator_output_dim",
+    }
     missing_fields = [field for field in architecture_fields if field not in ckpt_args]
-    if missing_fields:
-        raise RuntimeError(f"Checkpoint args.json is missing architecture fields: {missing_fields}")
+    disallowed_missing_fields = [
+        field
+        for field in missing_fields
+        if strict_training_config or field not in indicator_migration_fields
+    ]
+    if disallowed_missing_fields:
+        raise RuntimeError(
+            f"Checkpoint args.json is missing architecture fields: {disallowed_missing_fields}"
+        )
     mismatches = [
         (field, ckpt_args[field], getattr(args, field))
         for field in architecture_fields
-        if ckpt_args[field] != getattr(args, field)
+        if field in ckpt_args
+        and ckpt_args[field] != getattr(args, field)
+        and (strict_training_config or field not in indicator_migration_fields)
     ]
     if mismatches:
         raise RuntimeError(f"Checkpoint architecture mismatch: {mismatches}")
@@ -290,6 +355,9 @@ def assert_checkpoint_compatible(
             "train_subsample_step",
             "extra_train_set_list",
             "extra_train_set_repeat",
+            "filter_skipped",
+            "skip_filter_sidecar_root",
+            "skip_filter_processes",
             "align_legacy_neighbor_futures",
             "use_data_augment",
             "augment_prob",
@@ -321,6 +389,7 @@ def assert_checkpoint_compatible(
             "neighbor_collision_margin_bicycle",
             "turn_indicator_generated_loss_weight",
             "turn_indicator_expert_loss_weight",
+            "supervised_training_stage",
             "use_ema",
             "amp_dtype",
             "tf32",
@@ -628,6 +697,41 @@ def model_training(args: TrainConfig):
             f"DDP world size ({world_size})"
         )
 
+    # Skip-marked NPZs are useful for gap-free replay but are not valid SFT
+    # supervision.  Rank zero builds a run-local filtered manifest once; all
+    # ranks then use the same immutable cached paths.  This keeps filtering out
+    # of the DataLoader hot path and avoids eight duplicate sidecar scans.
+    if int(getattr(args, "skip_filter_workers", 32)) < 1:
+        raise ValueError("skip_filter_workers must be >= 1")
+    if int(getattr(args, "skip_filter_processes", 16)) < 0:
+        raise ValueError("skip_filter_processes must be >= 0")
+    os.makedirs(args.save_dir, exist_ok=True)
+    (
+        args.train_set_list,
+        args.valid_set_list,
+        args.extra_train_set_list,
+        skip_filter_stats,
+    ) = prepare_filtered_manifests(
+        train_set_list=args.train_set_list,
+        valid_set_list=args.valid_set_list,
+        extra_train_set_list=getattr(args, "extra_train_set_list", None),
+        enabled=bool(getattr(args, "filter_skipped", True)),
+        cache_dir=args.save_dir,
+        is_master=global_rank == 0,
+        sidecar_root=getattr(args, "skip_filter_sidecar_root", None),
+        workers=int(getattr(args, "skip_filter_workers", 32)),
+        processes=int(getattr(args, "skip_filter_processes", 16)),
+    )
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    if global_rank == 0 and skip_filter_stats:
+        for stat in skip_filter_stats:
+            print(
+                "Skip-filter manifest: "
+                f"{stat['source_count']} -> {stat['kept_count']} "
+                f"(dropped {stat['dropped_count']}): {stat['destination']}"
+            )
+
     # Check before writing the new run's args.json. On an in-place resume, writing first would
     # overwrite the only sidecar that describes the checkpoint we are about to validate.
     if args.resume_model_path is not None:
@@ -769,6 +873,9 @@ def model_training(args: TrainConfig):
 
     # set up model
     diffusion_planner = Diffusion_Planner(args)
+    configure_supervised_trainable_parameters(
+        diffusion_planner, getattr(args, "supervised_training_stage", "joint")
+    )
     diffusion_planner = diffusion_planner.to(rank if args.device == "cuda" else args.device)
 
     if args.ddp:
@@ -801,9 +908,16 @@ def model_training(args: TrainConfig):
     )
 
     if global_rank == 0:
+        trainable_parameters = sum(
+            p.numel()
+            for p in ddp.get_model(diffusion_planner, args.ddp).parameters()
+            if p.requires_grad
+        )
         print(
-            "Model Params: {}".format(
-                sum(p.numel() for p in ddp.get_model(diffusion_planner, args.ddp).parameters())
+            "Model Params: {} (trainable: {}, stage: {})".format(
+                sum(p.numel() for p in ddp.get_model(diffusion_planner, args.ddp).parameters()),
+                trainable_parameters,
+                getattr(args, "supervised_training_stage", "joint"),
             )
         )
 
@@ -929,9 +1043,7 @@ def model_training(args: TrainConfig):
     if global_rank == 0 and args.resume_model_path is not None and os.path.exists(train_log_path):
         with open(train_log_path, newline="", encoding="utf-8") as file:
             data_list = list(csv.DictReader(file, delimiter="\t"))
-        previous_losses = _finite_history_values(
-            data_list, "valid_loss_ego_position_lat_loss"
-        )
+        previous_losses = _finite_history_values(data_list, "valid_loss_ego_position_lat_loss")
         if previous_losses:
             best_loss = min(previous_losses)
         previous_epdms = _finite_history_values(data_list, "valid_epdms_total")
@@ -962,10 +1074,20 @@ def model_training(args: TrainConfig):
             "valid_loss/ego_position_lon_loss", 0.0
         )
         turn_indicator_accuracy = agg["turn_indicator_accuracy"]
-        turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
-        turn_indicator_change_total = agg["turn_indicator_change_total"]
+        turn_indicator_metrics = {
+            f"valid_turn_indicator/{key.removeprefix('turn_indicator_')}": agg[key]
+            for key in (
+                "turn_indicator_accuracy",
+                "turn_indicator_balanced_accuracy",
+                "turn_indicator_macro_f1",
+                "turn_indicator_active_precision",
+                "turn_indicator_active_recall",
+                "turn_indicator_active_f1",
+                "turn_indicator_direction_accuracy",
+            )
+        }
         turn_indicator_class_metrics = {
-            f"valid_loss/turn_indicator_{name}_accuracy": value
+            f"valid_turn_indicator/{name}_accuracy": value
             for name, value in agg["turn_indicator_class_accuracy"].items()
             if agg["turn_indicator_class_count"].get(name, 0) > 0
         }
@@ -974,8 +1096,8 @@ def model_training(args: TrainConfig):
             f"{valid_loss_ego_position_lat_loss=:.3f}\n"
             f"{valid_loss_ego_position_lon_loss=:.3f}\n"
             f"{turn_indicator_accuracy=:.3f}\n"
-            f"{turn_indicator_change_accuracy=:.3f}\n"
-            f"{turn_indicator_change_total=:.3f}"
+            f"turn_indicator_macro_f1={agg['turn_indicator_macro_f1']:.3f}\n"
+            f"turn_indicator_active_f1={agg['turn_indicator_active_f1']:.3f}"
         )
         if args.use_wandb:
             neighbor_metric = (
@@ -990,8 +1112,7 @@ def model_training(args: TrainConfig):
                     "lr/lr": optimizer.param_groups[0]["lr"],
                     "valid_loss/ego": valid_loss_ego,
                     **neighbor_metric,
-                    "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
-                    "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+                    **turn_indicator_metrics,
                     **turn_indicator_class_metrics,
                     **mean_ego_loss_dict,
                     **mean_epdms_dict,
@@ -1042,10 +1163,20 @@ def model_training(args: TrainConfig):
                 "valid_loss/ego_position_lon_loss", 0.0
             )
             turn_indicator_accuracy = agg["turn_indicator_accuracy"]
-            turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
-            turn_indicator_change_total = agg["turn_indicator_change_total"]
+            turn_indicator_metrics = {
+                f"valid_turn_indicator/{key.removeprefix('turn_indicator_')}": agg[key]
+                for key in (
+                    "turn_indicator_accuracy",
+                    "turn_indicator_balanced_accuracy",
+                    "turn_indicator_macro_f1",
+                    "turn_indicator_active_precision",
+                    "turn_indicator_active_recall",
+                    "turn_indicator_active_f1",
+                    "turn_indicator_direction_accuracy",
+                )
+            }
             turn_indicator_class_metrics = {
-                f"valid_loss/turn_indicator_{name}_accuracy": value
+                f"valid_turn_indicator/{name}_accuracy": value
                 for name, value in agg["turn_indicator_class_accuracy"].items()
                 if agg["turn_indicator_class_count"].get(name, 0) > 0
             }
@@ -1055,8 +1186,8 @@ def model_training(args: TrainConfig):
                 f"{valid_loss_ego_position_lat_loss=:.3f}\n"
                 f"{valid_loss_ego_position_lon_loss=:.3f}\n"
                 f"{turn_indicator_accuracy=:.3f}\n"
-                f"{turn_indicator_change_accuracy=:.3f}\n"
-                f"{turn_indicator_change_total=:.3f}"
+                f"turn_indicator_macro_f1={agg['turn_indicator_macro_f1']:.3f}\n"
+                f"turn_indicator_active_f1={agg['turn_indicator_active_f1']:.3f}"
             )
 
             lr_dict = {"lr": train_lr}
@@ -1074,8 +1205,7 @@ def model_training(args: TrainConfig):
                         **{f"lr/{k}": v for k, v in lr_dict.items()},
                         "valid_loss/ego": valid_loss_ego,
                         **neighbor_metric,
-                        "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
-                        "valid_loss/turn_indicator_change_accuracy": turn_indicator_change_accuracy,
+                        **turn_indicator_metrics,
                         **turn_indicator_class_metrics,
                         **mean_ego_loss_dict,
                         **mean_epdms_dict,
@@ -1090,9 +1220,12 @@ def model_training(args: TrainConfig):
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
                 "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
                 "valid_turn_indicator_accuracy": turn_indicator_accuracy,
-                "valid_turn_indicator_change_accuracy": turn_indicator_change_accuracy,
                 **{
-                    key.replace("valid_loss/", "valid_"): value
+                    key.replace("valid_turn_indicator/", "valid_turn_indicator_"): value
+                    for key, value in turn_indicator_metrics.items()
+                },
+                **{
+                    key.replace("valid_turn_indicator/", "valid_turn_indicator_"): value
                     for key, value in turn_indicator_class_metrics.items()
                 },
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},

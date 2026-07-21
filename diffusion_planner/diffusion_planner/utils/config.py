@@ -27,6 +27,9 @@ class Config:
             "rl_noise_scale": 1.5,
             "rl_eval_noise_scale": 0.5,
             "rl_eval_num_generations": 32,
+            # Preserve inference behavior for pre-window-contract checkpoints
+            # that do not have this explicit field. New runs serialize 21.
+            "ego_history_frames": 6,
         }
         for key, value in defaults.items():
             if not hasattr(self, key):

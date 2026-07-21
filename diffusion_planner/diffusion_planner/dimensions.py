@@ -42,16 +42,14 @@ INPUT_T = 30
 OUTPUT_T = 80  # Output timestamp number
 POSE_DIM = 4  # x, y, cos(yaw), sin(yaw)
 
-# The turn head classifies the raw TurnIndicatorsReport STATE for the current frame
-# (dense state labels; keep/hysteresis lives in the deployment node, not the model).
-# Output classes therefore mirror the raw input codes one-to-one.
-TURN_INDICATOR_OUTPUT_NONE = 0
-TURN_INDICATOR_OUTPUT_DISABLE = 1
-TURN_INDICATOR_OUTPUT_ENABLE_LEFT = 2
-TURN_INDICATOR_OUTPUT_ENABLE_RIGHT = 3
-TURN_INDICATOR_OUTPUT_DIM = 4
-# Raw TurnIndicatorsReport input classes: unset, disable, enable-left, enable-right.
-TURN_INDICATOR_INPUT_ONE_HOT_DIM = 4
+# Internal model classes. Autoware's recorded TurnIndicatorsReport values are
+# 1=DISABLE, 2=ENABLE_LEFT, and 3=ENABLE_RIGHT; class 0 is not a valid driving
+# state and does not occur in the training corpus. Keep the neural contract dense
+# and map raw reports by subtracting one.
+TURN_INDICATOR_OUTPUT_DISABLE = 0
+TURN_INDICATOR_OUTPUT_ENABLE_LEFT = 1
+TURN_INDICATOR_OUTPUT_ENABLE_RIGHT = 2
+TURN_INDICATOR_OUTPUT_DIM = 3
 TURN_INDICATOR_LOGIT_SHAPE = (1, TURN_INDICATOR_OUTPUT_DIM)
 
 SAMPLED_TRAJECTORIES_SHAPE = (1, 1, OUTPUT_T, POSE_DIM)
@@ -67,6 +65,4 @@ ROUTE_LANES_HAS_SPEED_LIMIT_SHAPE = (1, NUM_SEGMENTS_IN_ROUTE, 1)
 ROUTE_LANES_SPEED_LIMIT_SHAPE = (1, NUM_SEGMENTS_IN_ROUTE, 1)
 GOAL_POSE_SHAPE = (1, POSE_DIM)
 EGO_SHAPE_SHAPE = (1, 3)
-TURN_INDICATORS_RAW_SHAPE = (1, INPUT_T + 1)
-TURN_INDICATORS_ENCODER_SHAPE = (1, INPUT_T)
-TURN_INDICATORS_SHAPE = TURN_INDICATORS_RAW_SHAPE
+TURN_INDICATORS_SHAPE = (1, INPUT_T + 1)

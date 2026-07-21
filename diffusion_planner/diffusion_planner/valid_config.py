@@ -12,6 +12,12 @@ class ValidConfig:
     valid_set_list: Optional[str] = None
     save_predictions_dir: Optional[str] = None
     metrics_output: Optional[str] = None
+    # ``None`` inherits the setting saved with the training run.  New runs default
+    # to filtering skip-marked converter frames; an explicit False is available for
+    # auditing an unfiltered list.
+    filter_skipped: Optional[bool] = None
+    skip_filter_sidecar_root: Optional[str] = None
+    skip_filter_workers: int = 32
 
     # --- 実行環境パラメータ ---
     batch_size: int = 32

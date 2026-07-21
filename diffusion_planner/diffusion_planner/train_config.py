@@ -12,6 +12,7 @@ from diffusion_planner.dimensions import (
     POINTS_PER_LANELET,
     POINTS_PER_LINE_STRING,
     POINTS_PER_POLYGON,
+    TURN_INDICATOR_OUTPUT_DIM,
 )
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
@@ -28,11 +29,19 @@ class TrainConfig:
     train_subsample_step: int
     extra_train_set_list: Optional[str | list[str]] = None
     extra_train_set_repeat: int = 0
+    # Converter sidecars mark frames that were written only for gap-free replay.
+    # Training filters those entries once into a run-local manifest cache.
+    filter_skipped: bool = True
+    skip_filter_sidecar_root: Optional[str] = None
+    skip_filter_workers: int = 32
+    skip_filter_processes: int = 16
 
     # ---------------------------------------------------------
     # Data Dimensions
     # ---------------------------------------------------------
     future_len: int = OUTPUT_T
+    # Raw temporal tensor width. Feature encoders may select shorter effective
+    # windows and left-pad them back to this width.
     time_len: int = INPUT_T + 1
     ego_prediction_horizon: int = OUTPUT_T
 
@@ -86,19 +95,23 @@ class TrainConfig:
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True
+    # Current plus the preceding 20 frames (2 seconds at 10 Hz). Neighbor
+    # history remains a separate, shorter six-frame perception window.
+    ego_history_frames: int = 21
     ego_history_dropout_rate: float = 0.4
-    use_turn_indicators: bool = True
-    # Per-sample zeroing of the turn-indicator input token during training. Insurance
-    # against the "human signals -> human turns" causal shortcut: at deployment this
-    # input is the stack's own commanded signal, a feedback loop the policy must not
-    # depend on. Same rationale as ego_history_dropout_rate. Opt-in: the default
-    # keeps the paper recipe; the recommended arm value is 0.5.
-    turn_indicator_dropout_rate: float = 0.0
     # The turn head sees generated trajectories at inference. Train it on both the detached
     # model x-start trajectory and the expert trajectory; the normalized combination keeps the
     # historical loss scale while removing pure teacher-forcing exposure bias.
     turn_indicator_generated_loss_weight: float = 1.0
     turn_indicator_expert_loss_weight: float = 1.0
+    # ``policy`` adapts the planner without evaluating the auxiliary head;
+    # ``turn_indicator`` freezes the planner and trains the head on final DPM samples.
+    supervised_training_stage: Literal["joint", "policy", "turn_indicator"] = "joint"
+    # Architecture provenance, persisted in args.json. These are deliberately
+    # not user-tunable modes: the policy never consumes indicator history and
+    # the detached intent head predicts the three valid Autoware driving states.
+    policy_uses_turn_indicator_history: bool = False
+    turn_indicator_output_dim: int = TURN_INDICATOR_OUTPUT_DIM
 
     # Keep Base diffusion training on the unbiased HDP hybrid objective. Road-border
     # compliance remains an evaluation signal and is optimized explicitly during RL.

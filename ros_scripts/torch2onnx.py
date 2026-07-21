@@ -5,6 +5,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+# A standalone invocation from ``ros_scripts/`` does not automatically put the
+# checkout's Python package (``diffusion_planner/``) ahead of an editable install
+# from another worktree.  Prefer the model/exporter code from this checkout so
+# checkpoints are always loaded with the matching architecture.
+_CHECKOUT_SOURCE = Path(__file__).resolve().parents[1] / "diffusion_planner"
+if _CHECKOUT_SOURCE.is_dir():
+    sys.path.insert(0, str(_CHECKOUT_SOURCE))
+
 import numpy as np
 import torch
 from diffusion_planner.dimensions import *
@@ -68,9 +76,9 @@ def build_inputs_from_npz(npz_path: Path, action_agent_num: int = 1) -> TensorDi
     inputs["sampled_trajectories"] = 0.5 * torch.randn(
         1, action_agent_num, OUTPUT_T, POSE_DIM, dtype=torch.float32
     )
+    # A zero ego-frame pose is a valid stationary origin, not padding.
     inputs["ego_agent_past"] = heading_to_cos_sin(
-        torch.tensor(data["ego_agent_past"], dtype=torch.float32).unsqueeze(0),
-        preserve_zero_padding=True,
+        torch.tensor(data["ego_agent_past"], dtype=torch.float32).unsqueeze(0)
     )
     inputs["ego_current_state"] = torch.tensor(
         data["ego_current_state"], dtype=torch.float32
@@ -98,13 +106,11 @@ def build_inputs_from_npz(npz_path: Path, action_agent_num: int = 1) -> TensorDi
     inputs["polygons"] = torch.tensor(data["polygons"], dtype=torch.float32).unsqueeze(0)
     inputs["line_strings"] = torch.tensor(data["line_strings"], dtype=torch.float32).unsqueeze(0)
     goal_pose = torch.tensor(data["goal_pose"], dtype=torch.float32).unsqueeze(0)
-    goal_pose = heading_to_cos_sin(goal_pose, preserve_zero_padding=True)
+    # The route goal may also coincide with the current origin.
+    goal_pose = heading_to_cos_sin(goal_pose)
     inputs["goal_pose"] = goal_pose
     ego_shape = data["ego_shape"] if "ego_shape" in data else np.array([2.75, 4.34, 1.70])
     inputs["ego_shape"] = torch.tensor(ego_shape, dtype=torch.float32).reshape(1, 3)
-    inputs["turn_indicators"] = torch.tensor(
-        data["turn_indicators"], dtype=torch.float32
-    ).unsqueeze(0)
     return inputs
 
 
@@ -189,18 +195,38 @@ def validate_split_models(
     turn_indicator_onnx_path: Path,
 ) -> None:
     with torch.no_grad():
-        torch_encoding = wrappers.encoder(*(inputs[name] for name in ENCODER_INPUT_NAMES))
+        torch_encoding, torch_global_route_condition = wrappers.encoder(
+            *(inputs[name] for name in ENCODER_INPUT_NAMES)
+        )
     encoder_onnx_inputs = {name: inputs[name].cpu().numpy() for name in ENCODER_INPUT_NAMES}
-    onnx_encoding = run_ort_in_subprocess(encoder_onnx_path, encoder_onnx_inputs)[0]
+    onnx_encoder_outputs = run_ort_in_subprocess(encoder_onnx_path, encoder_onnx_inputs)
+    if len(onnx_encoder_outputs) != 2:
+        raise AssertionError(
+            "Split encoder must output encoding and global_route_condition; "
+            f"got {len(onnx_encoder_outputs)} outputs"
+        )
+    onnx_encoding, onnx_global_route_condition = onnx_encoder_outputs
     compare("encoding", torch_encoding.cpu().numpy(), onnx_encoding)
+    compare(
+        "global_route_condition",
+        torch_global_route_condition.cpu().numpy(),
+        onnx_global_route_condition,
+    )
 
     final_x0 = build_turn_indicator_final_x0(model, inputs)
     with torch.no_grad():
-        torch_turn_indicator = wrappers.turn_indicator(torch_encoding, final_x0)
+        torch_turn_indicator = wrappers.turn_indicator(
+            torch_encoding,
+            final_x0,
+            torch_global_route_condition,
+            inputs["ego_current_state"],
+        )
 
     turn_indicator_onnx_inputs = {
         "encoding": onnx_encoding,
         "final_x0": final_x0.cpu().numpy(),
+        "global_route_condition": onnx_global_route_condition,
+        "ego_current_state": inputs["ego_current_state"].cpu().numpy(),
     }
     onnx_turn_indicator = run_ort_in_subprocess(
         turn_indicator_onnx_path, turn_indicator_onnx_inputs

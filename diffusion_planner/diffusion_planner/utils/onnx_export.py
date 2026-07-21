@@ -40,7 +40,6 @@ FULL_INPUT_NAMES = [
     "line_strings",
     "goal_pose",
     "ego_shape",
-    "turn_indicators",
 ]
 
 ENCODER_INPUT_NAMES = [
@@ -57,13 +56,20 @@ ENCODER_INPUT_NAMES = [
     "line_strings",
     "goal_pose",
     "ego_shape",
-    "turn_indicators",
 ]
 
-TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0", "global_route_condition"]
+TURN_INDICATOR_INPUT_NAMES = [
+    "encoding",
+    "final_x0",
+    "global_route_condition",
+    "ego_current_state",
+]
 
 FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit"]
-ENCODER_OUTPUT_NAMES = ["encoding"]
+# The split turn-indicator graph consumes the same route AdaLN condition as the
+# Python decoder.  Export it from the encoder-side graph so the deployment node
+# does not have to reimplement a learned route encoder.
+ENCODER_OUTPUT_NAMES = ["encoding", "global_route_condition"]
 TURN_INDICATOR_OUTPUT_NAMES = ["turn_indicator_logit"]
 
 TensorDict = dict[str, torch.Tensor]
@@ -116,6 +122,7 @@ class EncoderONNXWrapper(nn.Module):
     def __init__(self, model: Diffusion_Planner):
         super().__init__()
         self.encoder = model.encoder
+        self.global_route_encoder = model.decoder.global_route_encoder
 
     def forward(
         self,
@@ -132,8 +139,7 @@ class EncoderONNXWrapper(nn.Module):
         line_strings: torch.Tensor,
         goal_pose: torch.Tensor,
         ego_shape: torch.Tensor,
-        turn_indicators: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         inputs = {
             "ego_agent_past": ego_agent_past,
             "neighbor_agents_past": neighbor_agents_past,
@@ -148,9 +154,8 @@ class EncoderONNXWrapper(nn.Module):
             "line_strings": line_strings,
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
-            "turn_indicators": turn_indicators,
         }
-        return self.encoder(inputs)
+        return self.encoder(inputs), self.global_route_encoder(route_lanes)
 
 
 class TurnIndicatorONNXWrapper(nn.Module):
@@ -169,6 +174,7 @@ class TurnIndicatorONNXWrapper(nn.Module):
         encoding: torch.Tensor,
         final_x0: torch.Tensor,
         global_route_condition: torch.Tensor,
+        ego_current_state: torch.Tensor,
     ) -> torch.Tensor:
         batch_size = encoding.shape[0]
         agent_num = 1 + self.decoder._predicted_neighbor_num
@@ -176,7 +182,10 @@ class TurnIndicatorONNXWrapper(nn.Module):
 
         ego_trajectory = self.decoder._turn_indicator_trajectory_from_latent(final_x0)
         return self.decoder._compute_turn_indicator(
-            ego_trajectory, encoding, global_route_condition
+            ego_trajectory,
+            encoding,
+            global_route_condition,
+            ego_current_state,
         )
 
 
@@ -204,7 +213,6 @@ class FullONNXWrapper(nn.Module):
         line_strings: torch.Tensor,
         goal_pose: torch.Tensor,
         ego_shape: torch.Tensor,
-        turn_indicators: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         inputs = {
             "sampled_trajectories": sampled_trajectories,
@@ -222,7 +230,6 @@ class FullONNXWrapper(nn.Module):
             "line_strings": line_strings,
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
-            "turn_indicators": turn_indicators,
         }
         _, decoder_outputs = self.model(inputs)
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
@@ -261,7 +268,6 @@ def build_dummy_inputs(action_agent_num: int = 1) -> TensorDict:
     )
     inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
-    inputs["turn_indicators"] = torch.randint(0, 4, (1, INPUT_T + 1), dtype=torch.float32)
     return inputs
 
 
@@ -269,11 +275,13 @@ def build_turn_indicator_inputs(
     encoding: torch.Tensor,
     final_x0: torch.Tensor,
     global_route_condition: torch.Tensor,
+    ego_current_state: torch.Tensor,
 ) -> TensorDict:
     return {
         "encoding": encoding,
         "final_x0": final_x0,
         "global_route_condition": global_route_condition,
+        "ego_current_state": ego_current_state,
     }
 
 
@@ -454,14 +462,16 @@ def export_model_to_onnx(
 
     with onnx_export_backends():
         with torch.no_grad():
-            encoding = wrappers.encoder(*(export_inputs[name] for name in ENCODER_INPUT_NAMES))
-            global_route_condition = model.decoder.global_route_encoder(
-                export_inputs["route_lanes"]
+            encoding, global_route_condition = wrappers.encoder(
+                *(export_inputs[name] for name in ENCODER_INPUT_NAMES)
             )
 
         final_x0 = build_turn_indicator_final_x0(model, export_inputs)
         turn_indicator_inputs = build_turn_indicator_inputs(
-            encoding, final_x0, global_route_condition
+            encoding,
+            final_x0,
+            global_route_condition,
+            export_inputs["ego_current_state"],
         )
 
         export_specs = build_export_specs(

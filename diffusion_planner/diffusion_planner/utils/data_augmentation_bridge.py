@@ -1464,15 +1464,26 @@ class StatePerturbation:
             inputs["ego_current_state"][..., 6:8], transform_matrix
         )
 
-        # ego past
-        ego_past_mask = pose_padding_mask(inputs["ego_agent_past"])
+        # Raw 3-column ego poses use (0, 0, 0) for a valid origin. Only a
+        # converted 4-column tensor can use the all-zero padding sentinel.
+        ego_past_mask = (
+            None
+            if inputs["ego_agent_past"].shape[-1] == 3
+            else pose_padding_mask(inputs["ego_agent_past"])
+        )
         inputs["ego_agent_past"][..., :2] = vector_transform(
             inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
         )
-        inputs["ego_agent_past"][..., 2:4] = vector_transform(
-            inputs["ego_agent_past"][..., 2:4], transform_matrix
-        )
-        inputs["ego_agent_past"][ego_past_mask] = 0.0
+        if inputs["ego_agent_past"].shape[-1] == 3:
+            inputs["ego_agent_past"][..., 2] = heading_transform(
+                inputs["ego_agent_past"][..., 2], transform_matrix
+            )
+        else:
+            inputs["ego_agent_past"][..., 2:4] = vector_transform(
+                inputs["ego_agent_past"][..., 2:4], transform_matrix
+            )
+        if ego_past_mask is not None:
+            inputs["ego_agent_past"][ego_past_mask] = 0.0
 
         # ego future xy
         ego_future[..., :2] = vector_transform(ego_future[..., :2], transform_matrix, center_xy)
@@ -1559,7 +1570,11 @@ class StatePerturbation:
         inputs["static_objects"][mask] = 0.0
 
         if "goal_pose" in inputs:
-            goal_mask = torch.sum(torch.ne(inputs["goal_pose"], 0), dim=-1) == 0
+            goal_mask = (
+                None
+                if inputs["goal_pose"].shape[-1] == 3
+                else torch.sum(torch.ne(inputs["goal_pose"], 0), dim=-1) == 0
+            )
             inputs["goal_pose"][..., :2] = vector_transform(
                 inputs["goal_pose"][..., :2], transform_matrix, center_xy
             )
@@ -1571,6 +1586,7 @@ class StatePerturbation:
                 inputs["goal_pose"][..., 2:4] = vector_transform(
                     inputs["goal_pose"][..., 2:4], transform_matrix
                 )
-            inputs["goal_pose"][goal_mask] = 0.0
+            if goal_mask is not None:
+                inputs["goal_pose"][goal_mask] = 0.0
 
         return inputs, ego_future, neighbors_future

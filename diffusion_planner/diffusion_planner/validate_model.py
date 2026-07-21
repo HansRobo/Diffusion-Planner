@@ -28,7 +28,56 @@ from diffusion_planner.utils.masks import neighbor_future_padding_mask
 EPDMS_DT = 0.1
 MULTISAMPLE_ADE_THRESHOLD_M = 4.0
 MULTISAMPLE_FDE_THRESHOLD_M = 8.0
-TURN_INDICATOR_CLASS_NAMES = ("none", "disable", "enable_left", "enable_right")
+TURN_INDICATOR_CLASS_NAMES = ("disable", "enable_left", "enable_right")
+
+
+def turn_indicator_metrics_from_confusion(confusion: list[int]) -> dict[str, float]:
+    """Compute robust state/activation metrics from a flattened 3x3 matrix."""
+    if len(confusion) != TURN_INDICATOR_OUTPUT_DIM**2:
+        raise ValueError(
+            f"Expected {TURN_INDICATOR_OUTPUT_DIM**2} confusion entries, got {len(confusion)}"
+        )
+    matrix = [
+        confusion[row * TURN_INDICATOR_OUTPUT_DIM : (row + 1) * TURN_INDICATOR_OUTPUT_DIM]
+        for row in range(TURN_INDICATOR_OUTPUT_DIM)
+    ]
+    total = sum(confusion)
+    correct = sum(matrix[index][index] for index in range(TURN_INDICATOR_OUTPUT_DIM))
+    recalls = []
+    f1_scores = []
+    for index in range(TURN_INDICATOR_OUTPUT_DIM):
+        tp = matrix[index][index]
+        actual = sum(matrix[index])
+        predicted = sum(matrix[row][index] for row in range(TURN_INDICATOR_OUTPUT_DIM))
+        recall = tp / actual if actual else 0.0
+        precision = tp / predicted if predicted else 0.0
+        recalls.append(recall)
+        f1_scores.append(
+            2.0 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
+        )
+
+    active_true = sum(sum(matrix[row]) for row in (1, 2))
+    active_predicted = sum(matrix[row][column] for row in range(3) for column in (1, 2))
+    active_detected = sum(matrix[row][column] for row in (1, 2) for column in (1, 2))
+    active_precision = active_detected / active_predicted if active_predicted else 0.0
+    active_recall = active_detected / active_true if active_true else 0.0
+    return {
+        "turn_indicator_accuracy": correct / total if total else 0.0,
+        "turn_indicator_balanced_accuracy": sum(recalls) / len(recalls),
+        "turn_indicator_macro_f1": sum(f1_scores) / len(f1_scores),
+        "turn_indicator_active_precision": active_precision,
+        "turn_indicator_active_recall": active_recall,
+        "turn_indicator_active_f1": (
+            2.0 * active_precision * active_recall / (active_precision + active_recall)
+            if active_precision + active_recall > 0
+            else 0.0
+        ),
+        # Requires both activation and the correct side; unlike active recall,
+        # a LEFT/RIGHT confusion is counted as incorrect.
+        "turn_indicator_direction_accuracy": (
+            (matrix[1][1] + matrix[2][2]) / active_true if active_true else 0.0
+        ),
+    }
 
 
 def _valid_xy(points: np.ndarray) -> np.ndarray:
@@ -344,15 +393,11 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
 
     predictions = []
     turn_indicators = []
+    turn_indicator_logits = []
     loss_ego_list = []
 
     total_result_dict = defaultdict(list)
-    turn_indicator_correct = 0.0
-    turn_indicator_total = 0
-    turn_indicator_change_correct = 0.0
-    turn_indicator_change_total = 0
-    turn_indicator_class_correct = [0.0] * TURN_INDICATOR_OUTPUT_DIM
-    turn_indicator_class_total = [0] * TURN_INDICATOR_OUTPUT_DIM
+    turn_indicator_confusion = [0] * (TURN_INDICATOR_OUTPUT_DIM**2)
 
     total_batches = len(val_loader)
     pbar = tqdm(total=total_batches, desc="validate", disable=ddp.get_rank() != 0)
@@ -368,12 +413,9 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         inputs["sampled_trajectories"] = torch.zeros(
             B, action_agent_num, OUTPUT_T, POSE_DIM, dtype=torch.float32, device=device
         )
-        inputs["ego_agent_past"] = heading_to_cos_sin(
-            inputs["ego_agent_past"], preserve_zero_padding=True
-        )
-        inputs["goal_pose"] = heading_to_cos_sin(
-            inputs["goal_pose"], preserve_zero_padding=True
-        )
+        # Origin-frame ego/goal poses are valid when x=y=heading=0.
+        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
+        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
 
         ego_future = inputs["ego_agent_future"]
         ego_future = heading_to_cos_sin(ego_future)  # (B, T, 4)
@@ -428,21 +470,21 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             total_result_dict[key].append(value.cpu())
         turn_indicator = turn_indicator_logit.argmax(dim=-1)
         turn_indicator_gt = make_turn_indicator_gt(turn_indicator_seq)
-        correct = (turn_indicator == turn_indicator_gt).long()
-        turn_indicator_correct += correct.sum().item()
-        turn_indicator_total += correct.numel()
-        for class_index in range(TURN_INDICATOR_OUTPUT_DIM):
-            class_mask = turn_indicator_gt == class_index
-            turn_indicator_class_correct[class_index] += correct[class_mask].sum().item()
-            turn_indicator_class_total[class_index] += class_mask.sum().item()
-        change_mask = turn_indicator_seq[:, -1] != turn_indicator_seq[:, -2]
-        change_count = change_mask.sum().item()
-        if change_count > 0:
-            turn_indicator_change_correct += correct[change_mask].sum().item()
-            turn_indicator_change_total += change_count
+        batch_confusion = (
+            torch.bincount(
+                turn_indicator_gt * TURN_INDICATOR_OUTPUT_DIM + turn_indicator,
+                minlength=TURN_INDICATOR_OUTPUT_DIM**2,
+            )
+            .cpu()
+            .tolist()
+        )
+        turn_indicator_confusion = [
+            old + int(new) for old, new in zip(turn_indicator_confusion, batch_confusion)
+        ]
         if return_pred:
             predictions.append(prediction.cpu())
             turn_indicators.append(turn_indicator.cpu())
+            turn_indicator_logits.append(turn_indicator_logit.float().cpu())
 
         neighbors_future_valid = ~neighbor_future_mask
         all_neighbors_future_valid = ~all_neighbor_future_mask
@@ -515,23 +557,16 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     if return_pred:
         predictions = torch.cat(predictions, dim=0)
         turn_indicators = torch.cat(turn_indicators, dim=0)
-    turn_indicator_accuracy = (
-        turn_indicator_correct / turn_indicator_total if turn_indicator_total > 0 else 0.0
-    )
-    turn_indicator_change_accuracy = (
-        turn_indicator_change_correct / turn_indicator_change_total
-        if turn_indicator_change_total > 0
-        else 0.0
-    )
+        turn_indicator_logits = torch.cat(turn_indicator_logits, dim=0)
+    turn_metrics = turn_indicator_metrics_from_confusion(turn_indicator_confusion)
     return {
         "avg_loss_ego": avg_loss_ego,
         "avg_loss_neighbor": avg_loss_neighbor,
         "loss_ego": loss_ego,
         "predictions": predictions,
         "turn_indicators": turn_indicators,
-        "turn_indicator_accuracy": turn_indicator_accuracy,
-        "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
-        "turn_indicator_change_total": turn_indicator_change_total,
+        "turn_indicator_logits": turn_indicator_logits,
+        **turn_metrics,
         # Raw per-rank accumulators, kept so callers that run validation on ALL ranks
         # (non-padding distributed eval shards) can all-reduce them into global metrics
         # via aggregate_valid_metrics(). validate_model itself stays collective-free so
@@ -540,11 +575,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         "_samples_ego": total_samples_ego,
         "_loss_neighbor_sum": total_loss_neighbor,
         "_samples_neighbor": total_samples_neighbor,
-        "_turn_correct": turn_indicator_correct,
-        "_turn_total": turn_indicator_total,
-        "_turn_change_correct": turn_indicator_change_correct,
-        "_turn_class_correct": turn_indicator_class_correct,
-        "_turn_class_total": turn_indicator_class_total,
+        "_turn_confusion": turn_indicator_confusion,
         **total_result_dict,
     }
 
@@ -564,16 +595,15 @@ def aggregate_valid_metrics(valid_dict, device):
     samples_ego = ddp.all_reduce_sum(valid_dict["_samples_ego"], device)
     loss_nei_sum = ddp.all_reduce_sum(valid_dict["_loss_neighbor_sum"], device)
     samples_nei = ddp.all_reduce_sum(valid_dict["_samples_neighbor"], device)
-    turn_correct = ddp.all_reduce_sum(valid_dict["_turn_correct"], device)
-    turn_total = ddp.all_reduce_sum(valid_dict["_turn_total"], device)
-    turn_change_correct = ddp.all_reduce_sum(valid_dict["_turn_change_correct"], device)
-    turn_change_total = ddp.all_reduce_sum(valid_dict["turn_indicator_change_total"], device)
-    turn_class_correct = [
-        ddp.all_reduce_sum(value, device) for value in valid_dict["_turn_class_correct"]
+    turn_confusion = [
+        int(value) for value in ddp.all_reduce_sum_values(valid_dict["_turn_confusion"], device)
     ]
-    turn_class_total = [
-        ddp.all_reduce_sum(value, device) for value in valid_dict["_turn_class_total"]
+    turn_matrix = [
+        turn_confusion[row * TURN_INDICATOR_OUTPUT_DIM : (row + 1) * TURN_INDICATOR_OUTPUT_DIM]
+        for row in range(TURN_INDICATOR_OUTPUT_DIM)
     ]
+    turn_class_correct = [turn_matrix[index][index] for index in range(TURN_INDICATOR_OUTPUT_DIM)]
+    turn_class_total = [sum(turn_matrix[index]) for index in range(TURN_INDICATOR_OUTPUT_DIM)]
     turn_class_accuracy = {
         name: turn_class_correct[index] / max(turn_class_total[index], 1)
         for index, name in enumerate(TURN_INDICATOR_CLASS_NAMES)
@@ -631,11 +661,7 @@ def aggregate_valid_metrics(valid_dict, device):
     return {
         "avg_loss_ego": loss_ego_sum / max(samples_ego, 1),
         "avg_loss_neighbor": loss_nei_sum / max(samples_nei, 1),
-        "turn_indicator_accuracy": (turn_correct / turn_total) if turn_total > 0 else 0.0,
-        "turn_indicator_change_accuracy": (
-            (turn_change_correct / turn_change_total) if turn_change_total > 0 else 0.0
-        ),
-        "turn_indicator_change_total": int(turn_change_total),
+        **turn_indicator_metrics_from_confusion(turn_confusion),
         "turn_indicator_class_accuracy": turn_class_accuracy,
         "turn_indicator_class_count": turn_class_count,
         "ego_means": ego_means,

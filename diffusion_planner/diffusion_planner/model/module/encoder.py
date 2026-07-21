@@ -16,15 +16,10 @@ CLASS_TYPE_POLYGON = 5
 CLASS_TYPE_LINE_STRING = 6
 CLASS_TYPE_GOAL_POSE = 7
 CLASS_TYPE_EGO_SHAPE = 8
-CLASS_TYPE_TURN_INDICATOR = 9
+# Preserve the historical class-feature width so Base80 encoder tensors remain
+# checkpoint-compatible. Index 9 is intentionally unused after removing the
+# signal-history token from the trajectory policy.
 CLASS_TYPE_NUM = 10
-
-
-def one_hot_turn_indicators(turn_indicators):
-    """Flatten categorical TurnIndicatorsReport codes into per-timestep one-hot features."""
-    x = turn_indicators.float()
-    classes = torch.arange(TURN_INDICATOR_INPUT_ONE_HOT_DIM, device=x.device, dtype=x.dtype)
-    return (x.unsqueeze(-1) == classes).to(x.dtype).flatten(1)
 
 
 def add_class_type(x, class_type):
@@ -46,26 +41,35 @@ def add_class_type(x, class_type):
     return torch.cat([x, class_type_tensor], dim=-1)
 
 
+def _keep_recent_history(history, history_frames):
+    """Keep newest temporal samples and left-pad back to the input width."""
+    total_frames = history.shape[-2]
+    if history_frames < 1 or history_frames > total_frames:
+        raise ValueError(f"history_frames must be in [1, {total_frames}], got {history_frames}")
+    recent = history[..., -history_frames:, :]
+    return F.pad(recent, (0, 0, total_frames - history_frames, 0))
+
+
 class Encoder(nn.Module):
     def __init__(self, config):
         super().__init__()
 
+        if getattr(config, "policy_uses_turn_indicator_history", False):
+            raise ValueError("The HDP trajectory policy must not consume turn-indicator history")
         self.hidden_dim = config.hidden_dim
 
         self.use_ego_history = config.use_ego_history
+        self.ego_history_frames = int(getattr(config, "ego_history_frames", 21))
+        if not 1 <= self.ego_history_frames <= config.time_len:
+            raise ValueError(
+                f"ego_history_frames must be in [1, time_len={config.time_len}], "
+                f"got {self.ego_history_frames}"
+            )
         self.ego_history_dropout_rate = config.ego_history_dropout_rate
-        self.use_turn_indicators = config.use_turn_indicators
-        # Per-sample zeroing of the signal-history input (NOT rescaled activation
-        # dropout): training data carries the human's "signal -> maneuver" shortcut,
-        # while deployment feeds back the stack's own commanded signal. Dropping the
-        # whole input teaches the policy to turn from route geometry alone —
-        # the same causal-confusion insurance as ego_history_dropout_rate.
-        self.turn_indicator_dropout_rate = getattr(config, "turn_indicator_dropout_rate", 0.0)
 
         ego_num = 1
         goal_pose_num = 1
         ego_shape_num = 1
-        turn_indicator_num = 1
         self.token_num = (
             ego_num
             + config.agent_num
@@ -76,7 +80,6 @@ class Encoder(nn.Module):
             + config.line_string_num
             + goal_pose_num
             + ego_shape_num
-            + turn_indicator_num
         )
 
         self.ego_encoder = EgoEncoder(
@@ -136,13 +139,6 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
         )
-        self.turn_indicator_encoder = FloatsEncoder(
-            num_float=INPUT_T * TURN_INDICATOR_INPUT_ONE_HOT_DIM,
-            class_type=CLASS_TYPE_TURN_INDICATOR,
-            drop_path_rate=config.encoder_drop_path_rate,
-            hidden_dim=config.hidden_dim,
-        )
-
         self.fusion = FusionEncoder(
             hidden_dim=config.hidden_dim,
             num_heads=config.num_heads,
@@ -188,18 +184,13 @@ class Encoder(nn.Module):
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
         else:
-            recent_ego = ego[:, -6:]
-            ego = F.pad(recent_ego, (0, 0, ego.shape[1] - recent_ego.shape[1], 0))
-        # Only keep the current + nearest 5 steps of ego history.
+            ego = _keep_recent_history(ego, self.ego_history_frames)
+        # Keep the current frame plus the configured recent ego window.
 
         # agents
         neighbors = inputs["neighbor_agents_past"]  # (B, N=MAX_NUM_NEIGHBORS, T=INPUT_T+1, D=11)
-        recent_neighbors = neighbors[:, :, -6:]
-        neighbors = F.pad(
-            recent_neighbors,
-            (0, 0, neighbors.shape[2] - recent_neighbors.shape[2], 0),
-        )
-        # Only keep the current + nearest 5 steps of neighbor history.
+        neighbors = _keep_recent_history(neighbors, 6)
+        # Neighbor perception remains limited to the current + nearest 5 steps.
 
         # static objects
         static = inputs["static_objects"]  # (B, P=5, D=10)
@@ -227,17 +218,6 @@ class Encoder(nn.Module):
 
         # ego shape
         ego_shape = inputs["ego_shape"]  # (B, D=3)
-
-        # turn indicator
-        turn_indicator = one_hot_turn_indicators(inputs["turn_indicators"][:, :-1])
-        if not self.use_turn_indicators:
-            turn_indicator = torch.zeros_like(turn_indicator)
-        elif self.training and self.turn_indicator_dropout_rate > 0:
-            keep = (
-                torch.rand(turn_indicator.shape[0], 1, device=turn_indicator.device)
-                >= self.turn_indicator_dropout_rate
-            )
-            turn_indicator = turn_indicator * keep.to(turn_indicator.dtype)
 
         B = neighbors.shape[0]
 
@@ -272,9 +252,6 @@ class Encoder(nn.Module):
 
         encoding_goal_pose, goal_pose_mask, goal_pose_pos = self.goal_pose_encoder(goal_pose)
         encoding_ego_shape, ego_shape_mask, ego_shape_pos = self.ego_shape_encoder(ego_shape)
-        encoding_turn_indicator, turn_indicator_mask, turn_indicator_pos = (
-            self.turn_indicator_encoder(turn_indicator)
-        )
 
         encoding_input = torch.cat(
             [
@@ -287,7 +264,6 @@ class Encoder(nn.Module):
                 encoding_line_string,
                 encoding_goal_pose,
                 encoding_ego_shape,
-                encoding_turn_indicator,
             ],
             dim=1,
         )
@@ -303,7 +279,6 @@ class Encoder(nn.Module):
                 line_string_mask,
                 goal_pose_mask,
                 ego_shape_mask,
-                turn_indicator_mask,
             ],
             dim=1,
         ).view(-1)
@@ -319,7 +294,6 @@ class Encoder(nn.Module):
                 line_string_pos,
                 goal_pose_pos,
                 ego_shape_pos,
-                turn_indicator_pos,
             ],
             dim=1,
         ).view(B * self.token_num, -1)
@@ -354,8 +328,18 @@ class SelfAttentionBlock(nn.Module):
         )
 
     def forward(self, x, mask):
+        # Pre-LN self-attention must use the same normalized representation for
+        # query, key, and value.  Passing raw x as K/V makes the attention scale
+        # depend on the unnormalized scene-token magnitude.
+        normalized_x = self.norm1(x)
         x = x + self.drop_path(
-            self.attn(self.norm1(x), x, x, key_padding_mask=mask, need_weights=False)[0]
+            self.attn(
+                normalized_x,
+                normalized_x,
+                normalized_x,
+                key_padding_mask=mask,
+                need_weights=False,
+            )[0]
         )
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x

@@ -26,6 +26,7 @@ from diffusion_planner.dimensions import (
     POINTS_PER_LANELET,
     POINTS_PER_LINE_STRING,
     POINTS_PER_POLYGON,
+    TURN_INDICATOR_OUTPUT_DIM,
 )
 from diffusion_planner.hdp_rl_epoch import (
     RL_COMPILED_MAX_CANDIDATES_PER_FORWARD,
@@ -55,6 +56,7 @@ from diffusion_planner.utils.lr_schedule import LinearWarmupConstantLR
 from diffusion_planner.utils.metric_logging import select_epdms_dashboard_metrics
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
+from diffusion_planner.utils.scene_skip import prepare_filtered_manifests
 from diffusion_planner.utils.train_utils import (
     ModelEma,
     atomic_torch_save,
@@ -255,6 +257,24 @@ def get_args():
     )
     parser.add_argument("--valid_set_list", type=str, required=True)
     parser.add_argument(
+        "--filter_skipped",
+        type=boolean,
+        default=_train_config_default("filter_skipped"),
+        help="filter sidecar entries with is_skipped=true into a run-local manifest cache",
+    )
+    parser.add_argument(
+        "--skip_filter_sidecar_root",
+        type=str,
+        default=_train_config_default("skip_filter_sidecar_root"),
+        help="optional sidecar root when JSON sidecars are not next to each NPZ",
+    )
+    parser.add_argument(
+        "--skip_filter_workers",
+        type=int,
+        default=_train_config_default("skip_filter_workers"),
+        help="parallel sidecar readers used once while preparing filtered manifests",
+    )
+    parser.add_argument(
         "--train_subsample_step",
         type=int,
         default=1,
@@ -429,11 +449,16 @@ def get_args():
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
     parser.add_argument(
+        "--ego_history_frames",
+        type=int,
+        default=_train_config_default("ego_history_frames"),
+        help="number of most-recent ego frames encoded, including current (default 21)",
+    )
+    parser.add_argument(
         "--ego_history_dropout_rate",
         type=float,
         default=_train_config_default("ego_history_dropout_rate"),
     )
-    parser.add_argument("--use_turn_indicators", type=boolean, default=True)
 
     # ----- HDP-RL-specific -----
     parser.add_argument(
@@ -882,6 +907,9 @@ def get_args():
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=2.5)
 
     args = parser.parse_args()
+    # This metadata is an invariant of the model, not a command-line mode.
+    args.policy_uses_turn_indicator_history = False
+    args.turn_indicator_output_dim = TURN_INDICATOR_OUTPUT_DIM
     if args.resume_model_path is not None and args.init_weights_path is not None:
         raise ValueError("--resume_model_path and --init_weights_path are mutually exclusive")
     if args.resume_model_path is None and args.init_weights_path is None:
@@ -898,6 +926,8 @@ def get_args():
         raise ValueError("--batch_size must be >= 1")
     if args.train_epochs < 1:
         raise ValueError("--train_epochs must be >= 1")
+    if not 1 <= args.ego_history_frames <= args.time_len:
+        raise ValueError("--ego_history_frames must be in [1, time_len]")
     finite_training_fields = (
         "augment_prob",
         "ego_past_noise_std",
@@ -1208,8 +1238,17 @@ def source_policy_selection_guards(
 
 def turn_indicator_metrics(agg):
     return {
-        "accuracy": scalar(agg["turn_indicator_accuracy"]),
-        "change_accuracy": scalar(agg["turn_indicator_change_accuracy"]),
+        key.removeprefix("turn_indicator_"): scalar(agg[key])
+        for key in (
+            "turn_indicator_accuracy",
+            "turn_indicator_balanced_accuracy",
+            "turn_indicator_macro_f1",
+            "turn_indicator_active_precision",
+            "turn_indicator_active_recall",
+            "turn_indicator_active_f1",
+            "turn_indicator_direction_accuracy",
+        )
+    } | {
         **{
             f"{name}_accuracy": scalar(value)
             for name, value in agg["turn_indicator_class_accuracy"].items()
@@ -1231,6 +1270,37 @@ def model_training(args):
             f"--valid_batch_size ({args.valid_batch_size}) must be at least and divisible by "
             f"DDP world size ({world_size})"
         )
+
+    # Use the same one-time, run-local is_skipped filtering as SFT.  The source
+    # manifests and NPZ corpus stay untouched; non-master ranks wait for rank
+    # zero to finish writing the cache before constructing their Dataset.
+    if int(getattr(args, "skip_filter_workers", 32)) < 1:
+        raise ValueError("skip_filter_workers must be >= 1")
+    os.makedirs(args.save_dir, exist_ok=True)
+    (
+        args.train_set_list,
+        args.valid_set_list,
+        args.extra_train_set_list,
+        skip_filter_stats,
+    ) = prepare_filtered_manifests(
+        train_set_list=args.train_set_list,
+        valid_set_list=args.valid_set_list,
+        extra_train_set_list=getattr(args, "extra_train_set_list", None),
+        enabled=bool(getattr(args, "filter_skipped", True)),
+        cache_dir=args.save_dir,
+        is_master=global_rank == 0,
+        sidecar_root=getattr(args, "skip_filter_sidecar_root", None),
+        workers=int(getattr(args, "skip_filter_workers", 32)),
+    )
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    if global_rank == 0 and skip_filter_stats:
+        for stat in skip_filter_stats:
+            print(
+                "Skip-filter manifest: "
+                f"{stat['source_count']} -> {stat['kept_count']} "
+                f"(dropped {stat['dropped_count']}): {stat['destination']}"
+            )
 
     # Validate the checkpoint sidecar before an in-place resume overwrites args.json.
     if args.resume_model_path is not None:

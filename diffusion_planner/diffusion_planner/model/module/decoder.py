@@ -16,7 +16,6 @@ from diffusion_planner.loss import (
     normalize_ego_state,
     normalize_ego_velocity,
     sample_diffusion_time,
-    turn_indicator_loss_weights,
     velocity_to_waypoints,
     waypoints_to_velocity,
 )
@@ -27,12 +26,12 @@ from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNorma
 
 
 class TurnIndicatorHead(nn.Module):
-    """Stateless turn-signal state classifier, gradient-isolated from the policy.
+    """Stateless turn-intent classifier, gradient-isolated from the policy.
 
     Reads (1) planned-trajectory features, (2) a learned single-query attention
-    probe over the scene tokens, and (3) the global route condition. Scene and
-    route inputs are detached INSIDE the head, so no caller can accidentally leak
-    the auxiliary classification gradient into the encoder or diffusion policy.
+    probe over the scene tokens, (3) the global route condition, and (4) current
+    ego dynamics. All upstream model features are detached inside the head, so no
+    caller can leak the auxiliary gradient into the encoder or diffusion policy.
 
     Deliberately stateless: it never sees the vehicle's own signal history, so
     there is no copy shortcut in training and no self-feedback loop at deployment.
@@ -40,10 +39,23 @@ class TurnIndicatorHead(nn.Module):
     model memory.
     """
 
-    def __init__(self, hidden_dim: int, trajectory_dim: int, num_heads: int = 4):
+    def __init__(
+        self,
+        hidden_dim: int,
+        trajectory_dim: int,
+        proprio_dim: int = 6,
+        num_heads: int = 4,
+    ):
         super().__init__()
-        self.query_proj = Mlp(
+        self.trajectory_encoder = Mlp(
             in_features=trajectory_dim,
+            hidden_features=hidden_dim,
+            out_features=hidden_dim,
+            act_layer=nn.GELU,
+            drop=0.0,
+        )
+        self.proprio_encoder = Mlp(
+            in_features=proprio_dim,
             hidden_features=hidden_dim,
             out_features=hidden_dim,
             act_layer=nn.GELU,
@@ -51,8 +63,8 @@ class TurnIndicatorHead(nn.Module):
         )
         self.scene_attention = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
         self.classifier = Mlp(
-            in_features=2 * hidden_dim + trajectory_dim,
-            hidden_features=hidden_dim,
+            in_features=4 * hidden_dim,
+            hidden_features=2 * hidden_dim,
             out_features=TURN_INDICATOR_OUTPUT_DIM,
             act_layer=nn.GELU,
             drop=0.0,
@@ -63,16 +75,22 @@ class TurnIndicatorHead(nn.Module):
         trajectory_features: torch.Tensor,
         scene_tokens: torch.Tensor,
         route_condition: torch.Tensor,
+        proprioception: torch.Tensor,
     ) -> torch.Tensor:
         """
         Args:
             trajectory_features: ``[B, trajectory_dim]`` subsampled planned trajectory.
             scene_tokens: ``[B, N, H]`` encoder tokens (padding rows are exact zeros).
             route_condition: ``[B, H]`` global route AdaLN condition.
+            proprioception: ``[B, 6]`` normalized vx/vy/ax/ay/steering/yaw-rate.
         """
+        trajectory_features = trajectory_features.detach()
         scene_tokens = scene_tokens.detach()
         route_condition = route_condition.detach()
-        query = self.query_proj(trajectory_features)[:, None]
+        proprioception = proprioception.detach()
+        trajectory_embedding = self.trajectory_encoder(trajectory_features)
+        proprio_embedding = self.proprio_encoder(proprioception)
+        query = (trajectory_embedding + proprio_embedding + route_condition)[:, None]
         padding_mask = torch.all(scene_tokens == 0, dim=-1)
         scene_readout = self.scene_attention(
             query,
@@ -81,7 +99,9 @@ class TurnIndicatorHead(nn.Module):
             key_padding_mask=padding_mask,
             need_weights=False,
         )[0][:, 0]
-        head_input = torch.cat([scene_readout, route_condition, trajectory_features], dim=-1)
+        head_input = torch.cat(
+            [scene_readout, route_condition, trajectory_embedding, proprio_embedding], dim=-1
+        )
         return self.classifier(head_input)
 
 
@@ -155,6 +175,11 @@ def compute_training_loss(
     args: Namespace,
     collision_futures: tuple[torch.Tensor, torch.Tensor] | None = None,
 ):
+    training_stage = getattr(args, "supervised_training_stage", "joint")
+    if training_stage not in {"joint", "policy"}:
+        raise ValueError(
+            f"compute_training_loss supports joint/policy stages, got {training_stage!r}"
+        )
     norm = args.state_normalizer
     if not args.use_velocity_representation:
         raise ValueError("HDP training requires velocity representation")
@@ -204,6 +229,8 @@ def compute_training_loss(
         "sampled_trajectories": xT,
         "diffusion_time": t,
     }
+    if training_stage == "policy":
+        merged_inputs["_skip_turn_indicator"] = True
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
         _, decoder_output = model(merged_inputs)
     pred_x_start = decoder_output["model_output"].float()
@@ -217,10 +244,12 @@ def compute_training_loss(
     )
     dpm_loss = ego_diffusion_loss[:, None, :]
 
+    horizon = min(int(args.ego_prediction_horizon), dpm_loss.shape[-1])
+
     loss = {}
-    ego_loss_horizon = dpm_loss[:, 0, : args.ego_prediction_horizon]
+    ego_loss_horizon = dpm_loss[:, 0, :horizon]
+    ego_waypoint_horizon = ego_waypoint_loss[:, :horizon]
     loss["ego_planning_loss"] = ego_loss_horizon.mean()
-    ego_waypoint_horizon = ego_waypoint_loss[:, : args.ego_prediction_horizon]
     loss["ego_planning_hybrid_loss"] = ego_waypoint_horizon.mean()
     loss["ego_hdp_diffusion_loss"] = loss["ego_planning_loss"].detach()
     loss["ego_hdp_waypoint_loss"] = loss["ego_planning_hybrid_loss"].detach()
@@ -252,7 +281,7 @@ def compute_training_loss(
             denorm_inputs["line_strings"],
             margin=args.road_border_margin,
         )  # [B, T]
-        loss["road_border_loss"] = rb_loss.mean()
+        loss["road_border_loss"] = rb_loss[:, :horizon].mean()
     else:
         loss["road_border_loss"] = torch.tensor(0.0, device=dpm_loss.device)
 
@@ -267,12 +296,15 @@ def compute_training_loss(
             margin_pedestrian=args.neighbor_collision_margin_pedestrian,
             margin_bicycle=args.neighbor_collision_margin_bicycle,
         )  # [B, T]
-        loss["neighbor_collision_loss"] = nc_loss.mean()
+        loss["neighbor_collision_loss"] = nc_loss[:, :horizon].mean()
     else:
         loss["neighbor_collision_loss"] = torch.tensor(0.0, device=dpm_loss.device)
 
     if not torch.isfinite(dpm_loss).all():
         raise FloatingPointError(f"diffusion loss is non-finite, z={z}")
+
+    if training_stage == "policy":
+        return loss
 
     turn_indicator_logit = decoder_output["turn_indicator_logit"].float()
     turn_indicator_expert_logit = decoder_output.get(
@@ -285,15 +317,15 @@ def compute_training_loss(
     expert_turn_indicator_loss = nn.functional.cross_entropy(
         turn_indicator_expert_logit, turn_indicator_gt, reduction="none"
     )
-    turn_indicator_coeff = turn_indicator_loss_weights(inputs["turn_indicators"])
     # The generated branch consumes x_start predicted at the sampled diffusion time;
     # near t=1 that trajectory is close to the conditional mean and teaches the head
-    # an input distribution inference never produces. Weight it down continuously.
-    generated_turn_indicator_coeff = turn_indicator_coeff * (1.0 - t)
+    # an input distribution inference never produces. Use a normalized quality
+    # weighting so low-noise examples dominate without shrinking this branch's loss.
+    generated_quality = (1.0 - t).clamp_min(0.0)
     generated_turn_indicator_loss = (
-        generated_turn_indicator_loss * generated_turn_indicator_coeff
-    ).mean()
-    expert_turn_indicator_loss = (expert_turn_indicator_loss * turn_indicator_coeff).mean()
+        generated_turn_indicator_loss * generated_quality
+    ).sum() / generated_quality.sum().clamp_min(1e-6)
+    expert_turn_indicator_loss = expert_turn_indicator_loss.mean()
     generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
     expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
     turn_indicator_loss = (
@@ -328,10 +360,84 @@ def compute_training_loss(
     return loss
 
 
+def compute_turn_indicator_head_training_loss(
+    model: nn.Module,
+    inputs: dict[str, torch.Tensor],
+    ego_future: torch.Tensor,
+    args: Namespace,
+) -> dict[str, torch.Tensor]:
+    """Train only the intent head on exact inference and expert trajectories.
+
+    The caller freezes and evaluates the trajectory policy. Consequently the six-step
+    DPM rollout below builds no policy autograd graph; only the two detached head calls
+    retain gradients. This matches deployment exposure more closely than a one-step
+    random-time x-start proxy.
+    """
+    if getattr(args, "supervised_training_stage", "joint") != "turn_indicator":
+        raise ValueError("head-only loss requires supervised_training_stage='turn_indicator'")
+
+    batch_size = ego_future.shape[0]
+    model_ref = getattr(model, "module", model)
+    decoder = model_ref.decoder
+    if model_ref.training or decoder.training:
+        raise RuntimeError("The frozen trajectory policy must be in eval mode for head training")
+
+    head_inputs = {
+        **inputs,
+        "sampled_trajectories": torch.zeros(
+            batch_size,
+            1 + decoder._predicted_neighbor_num,
+            decoder._future_len,
+            4,
+            dtype=torch.float32,
+            device=ego_future.device,
+        ),
+        "turn_indicator_trajectories": normalize_ego_state(
+            ego_future[:, None], args.state_normalizer
+        ),
+    }
+    use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and ego_future.device.type == "cuda"
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
+        _, decoder_output = model(head_inputs)
+
+    generated_logit = decoder_output["turn_indicator_logit"].float()
+    expert_logit = decoder_output["turn_indicator_expert_logit"].float()
+    target = make_turn_indicator_gt(inputs["turn_indicators"])
+    generated_loss = nn.functional.cross_entropy(generated_logit, target)
+    expert_loss = nn.functional.cross_entropy(expert_logit, target)
+    generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
+    expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
+    total = (generated_weight * generated_loss + expert_weight * expert_loss) / max(
+        generated_weight + expert_weight, 1e-12
+    )
+    if not torch.isfinite(total):
+        raise FloatingPointError("turn-indicator head loss is non-finite")
+
+    with torch.no_grad():
+        generated_accuracy = (generated_logit.argmax(dim=-1) == target).float().mean()
+        expert_accuracy = (expert_logit.argmax(dim=-1) == target).float().mean()
+    return {
+        "turn_indicator_loss": total,
+        "turn_indicator_generated_loss": generated_loss.detach(),
+        "turn_indicator_expert_loss": expert_loss.detach(),
+        "turn_indicator_accuracy": generated_accuracy,
+        "turn_indicator_generated_accuracy": generated_accuracy,
+        "turn_indicator_expert_accuracy": expert_accuracy,
+    }
+
+
 class Decoder(nn.Module):
     def __init__(self, config):
         super().__init__()
 
+        configured_indicator_dim = int(
+            getattr(config, "turn_indicator_output_dim", TURN_INDICATOR_OUTPUT_DIM)
+        )
+        if configured_indicator_dim != TURN_INDICATOR_OUTPUT_DIM:
+            raise ValueError(
+                "HDP turn intent requires exactly "
+                f"{TURN_INDICATOR_OUTPUT_DIM} classes, got {configured_indicator_dim}"
+            )
         if getattr(config, "decoder_tokenization", "temporal") != "temporal":
             raise ValueError("HDP requires decoder_tokenization='temporal'")
         if config.future_len != OUTPUT_T:
@@ -355,21 +461,6 @@ class Decoder(nn.Module):
             raise ValueError("HDP requires x_start prediction and x_start supervision")
         self._future_len = config.future_len
         self._sde = VPSDE_linear()
-
-        # Scene-token layout, matching Encoder.forward's concatenation order:
-        # ego(1), agents, static, lanes, route, polygons, line_strings, goal,
-        # ego_shape, turn_indicator. The head must be able to hide the
-        # signal-history token from its scene readout.
-        self._turn_indicator_token_index = (
-            1
-            + config.agent_num
-            + config.static_objects_num
-            + config.lane_num
-            + config.route_num
-            + config.polygon_num
-            + config.line_string_num
-            + 2
-        )
 
         self.dit = DiT(
             depth=config.decoder_depth,
@@ -441,30 +532,34 @@ class Decoder(nn.Module):
     def sde(self):
         return self._sde
 
-    def _compute_turn_indicator(self, ego_trajectory, encoding, global_route_condition):
+    def _compute_turn_indicator(
+        self,
+        ego_trajectory,
+        encoding,
+        global_route_condition,
+        ego_current_state,
+    ):
         """Compute turn-indicator state logits (head detaches scene/route internally).
 
         Args:
             ego_trajectory: [B, 4 * (T // 5)] flattened trajectory features
             encoding: [B, N, D] scene tokens
             global_route_condition: [B, D] route AdaLN condition
+            ego_current_state: [B, 10] normalized current ego state
 
         Returns:
             turn_indicator_logit: [B, TURN_INDICATOR_OUTPUT_DIM]
         """
-        if encoding.shape[1] <= self._turn_indicator_token_index:
+        if ego_current_state.ndim != 2 or ego_current_state.shape[1] < 10:
             raise ValueError(
-                f"Turn head needs the full scene-token layout (>= "
-                f"{self._turn_indicator_token_index + 1} tokens), got {encoding.shape[1]}"
+                f"ego_current_state must be [B, >=10], got {tuple(ego_current_state.shape)}"
             )
-        # The scene tokens include the signal-history token. Hide it from the head so
-        # the state classifier is truly stateless regardless of the input-dropout
-        # setting: no copy shortcut in training, and no self-feedback through the
-        # stack's own commanded signal at deployment. A zeroed row is excluded by the
-        # head's padding mask. The policy (DiT cross-attention) still sees the token.
-        headless = encoding.clone()
-        headless[:, self._turn_indicator_token_index] = 0.0
-        return self.turn_indicator_predictor(ego_trajectory, headless, global_route_condition)
+        return self.turn_indicator_predictor(
+            ego_trajectory,
+            encoding,
+            global_route_condition,
+            ego_current_state[:, 4:10],
+        )
 
     def _turn_indicator_features(self, normalized_ego_future):
         """Subsample [B, 1, T, 4] normalized waypoints to the head's feature vector."""
@@ -526,13 +621,19 @@ class Decoder(nn.Module):
         # deployment head without letting its auxiliary classification loss reshape
         # the HDP scene condition or diffusion policy.
         expert_logit = self._compute_turn_indicator(
-            expert_ego_trajectory, encoding, global_route_condition
+            expert_ego_trajectory,
+            encoding,
+            global_route_condition,
+            inputs["ego_current_state"],
         )
 
         generated_latent = self._training_x_start_latent(model_output)
         generated_ego_trajectory = self._turn_indicator_trajectory_from_latent(generated_latent)
         generated_logit = self._compute_turn_indicator(
-            generated_ego_trajectory, encoding, global_route_condition
+            generated_ego_trajectory,
+            encoding,
+            global_route_condition,
+            inputs["ego_current_state"],
         )
 
         output["turn_indicator_logit"] = generated_logit
@@ -587,7 +688,10 @@ class Decoder(nn.Module):
         if not inputs.get("_skip_turn_indicator", False):
             ego_trajectory = self._turn_indicator_trajectory_from_latent(x0)
             output["turn_indicator_logit"] = self._compute_turn_indicator(
-                ego_trajectory, encoding, global_route_condition
+                ego_trajectory,
+                encoding,
+                global_route_condition,
+                inputs["ego_current_state"],
             )
         return output
 
@@ -606,12 +710,23 @@ class Decoder(nn.Module):
 
         sampled_trajectories = inputs["sampled_trajectories"].reshape(B, P, self._future_len * 4)
 
-        return self._inference_x_start(
+        output = self._inference_x_start(
             encoding,
             inputs,
             global_route_condition,
             sampled_trajectories,
         )
+        expert_trajectories = inputs.get("turn_indicator_trajectories")
+        if expert_trajectories is not None:
+            expert_trajectories = expert_trajectories.reshape(B, P, self._future_len, 4)
+            expert_features = self._turn_indicator_features(expert_trajectories[:, :1])
+            output["turn_indicator_expert_logit"] = self._compute_turn_indicator(
+                expert_features,
+                encoding,
+                global_route_condition,
+                inputs["ego_current_state"],
+            )
+        return output
 
     def forward(self, encoding, inputs):
         """

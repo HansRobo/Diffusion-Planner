@@ -99,35 +99,24 @@ def hybrid_waypoint_loss(
     return torch.sum((pred_pos - gt_waypoints_raw[..., :2]) ** 2, dim=-1)  # [..., T]
 
 
-# Turn-indicator state loss shaping. Human signal timing already leads the maneuver
-# (signal-on precedes the turn by seconds), so the current-frame state is the label —
-# no transition classes, no exact-frame pathology. The class weights counter the
-# heavy off/unset majority; the onset bonus focuses learning on the second right
-# after a real switch, where any frame in the window teaches the correct new state.
-_TURN_INDICATOR_CLASS_WEIGHTS = (0.1, 0.1, 1.0, 1.0)  # none, disable, left, right
-_TURN_INDICATOR_ONSET_BONUS = 5.0
-_TURN_INDICATOR_ONSET_WINDOW = 10  # frames at 10 Hz = 1 s
-
-
 def make_turn_indicator_gt(
     turn_indicators: torch.Tensor,  # [B, INPUT_T + 1]
 ) -> torch.Tensor:
-    """Return the raw indicator STATE at the current frame as the class label."""
-    return turn_indicators[:, -1].long()
-
-
-def turn_indicator_loss_weights(turn_indicators: torch.Tensor) -> torch.Tensor:
-    """Per-sample CE weights: class weight, boosted right after a state switch."""
+    """Map the current raw Autoware report to dense OFF/LEFT/RIGHT labels."""
     if turn_indicators.ndim != 2:
         raise ValueError(f"turn_indicators must be [B, T], got {tuple(turn_indicators.shape)}")
-    labels = turn_indicators[:, -1].long()
-    class_weights = torch.tensor(
-        _TURN_INDICATOR_CLASS_WEIGHTS, dtype=torch.float32, device=turn_indicators.device
+    raw_values = turn_indicators[:, -1]
+    raw_labels = raw_values.long()
+    invalid = (
+        ~torch.isfinite(raw_values)
+        | (raw_values != raw_labels.to(dtype=raw_values.dtype))
+        | (raw_labels < 1)
+        | (raw_labels > 3)
     )
-    weights = class_weights[labels]
-    changes = turn_indicators[:, 1:] != turn_indicators[:, :-1]
-    recent_change = changes[:, -_TURN_INDICATOR_ONSET_WINDOW:].any(dim=1)
-    return torch.where(recent_change, weights * _TURN_INDICATOR_ONSET_BONUS, weights)
+    if invalid.any():
+        values = torch.unique(raw_values[invalid]).detach().cpu().tolist()
+        raise ValueError(f"Invalid TurnIndicatorsReport values at current frame: {values}")
+    return raw_labels - 1
 
 
 def loss_func(

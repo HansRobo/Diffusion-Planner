@@ -15,6 +15,7 @@ from diffusion_planner.utils.cli import boolean, dataclass_default
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DistributedEvalSampler
 from diffusion_planner.utils.path_key import data_path_to_rel
+from diffusion_planner.utils.scene_skip import prepare_filtered_manifest
 from diffusion_planner.utils.train_utils import compile_model_components, set_seed
 from diffusion_planner.valid_config import ValidConfig
 from diffusion_planner.validate_model import aggregate_valid_metrics, validate_model
@@ -55,6 +56,24 @@ def get_args(args_list=None):
     parser = argparse.ArgumentParser(description="Validation Entrypoint")
 
     parser.add_argument("--valid_set_list", type=str, default=None)
+    parser.add_argument(
+        "--filter_skipped",
+        type=boolean,
+        default=None,
+        help="filter sidecar entries with is_skipped=true; omitted inherits args.json",
+    )
+    parser.add_argument(
+        "--skip_filter_sidecar_root",
+        type=str,
+        default=None,
+        help="optional sidecar root when sidecars are not next to their NPZ",
+    )
+    parser.add_argument(
+        "--skip_filter_workers",
+        type=int,
+        default=32,
+        help="parallel sidecar readers used while preparing the validation manifest",
+    )
     parser.add_argument("--future_len", type=int, default=80)
     parser.add_argument("--agent_num", type=int, default=32)
     parser.add_argument("--num_workers", default=4, type=int)
@@ -210,9 +229,7 @@ def get_args(args_list=None):
     if args.reward_eval_num_generations > 0 and sum(reward_weights) <= 0.0:
         raise ValueError("at least one reward evaluation weight must be positive")
     if args.reward_eval_road_border_safe_m <= args.reward_eval_road_border_critical_m:
-        raise ValueError(
-            "--reward_eval_road_border_safe_m must exceed the critical threshold"
-        )
+        raise ValueError("--reward_eval_road_border_safe_m must exceed the critical threshold")
     return args
 
 
@@ -246,6 +263,18 @@ def run_validation(valid_cfg: ValidConfig):
     valid_set_list = valid_cfg.valid_set_list or getattr(config_obj, "valid_set_list", None)
     if not valid_set_list:
         raise ValueError("--valid_set_list is required when args.json has no valid_set_list")
+    filter_skipped = (
+        bool(getattr(config_obj, "filter_skipped", True))
+        if valid_cfg.filter_skipped is None
+        else bool(valid_cfg.filter_skipped)
+    )
+    sidecar_root = (
+        valid_cfg.skip_filter_sidecar_root
+        if valid_cfg.skip_filter_sidecar_root is not None
+        else getattr(config_obj, "skip_filter_sidecar_root", None)
+    )
+    if valid_cfg.skip_filter_workers < 1:
+        raise ValueError("--skip_filter_workers must be >= 1")
 
     # init ddp
     global_rank, rank, _ = ddp.ddp_setup_universal(True, valid_cfg)
@@ -262,6 +291,27 @@ def run_validation(valid_cfg: ValidConfig):
     if global_rank == 0:
         print(f"Batch size: {valid_cfg.batch_size}")
         print(f"Use device: {valid_cfg.device}")
+
+    # Keep standalone validation on the same manifest semantics as training.  The
+    # cache lives beside args.json, never beside or in the source data tree.
+    valid_set_list, skip_filter_stats = prepare_filtered_manifest(
+        valid_set_list,
+        role="valid",
+        cache_dir=Path(valid_cfg.args_json_path).parent,
+        enabled=filter_skipped,
+        is_master=global_rank == 0,
+        sidecar_root=sidecar_root,
+        workers=valid_cfg.skip_filter_workers,
+    )
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    if global_rank == 0 and skip_filter_stats is not None:
+        print(
+            "Skip-filter validation manifest: "
+            f"{skip_filter_stats['source_count']} -> {skip_filter_stats['kept_count']} "
+            f"(dropped {skip_filter_stats['dropped_count']}): "
+            f"{skip_filter_stats['destination']}"
+        )
 
     # set seed
     set_seed(valid_cfg.seed + global_rank)
@@ -328,6 +378,7 @@ def run_validation(valid_cfg: ValidConfig):
     loss_ego = valid_dict["loss_ego"]
     predictions = valid_dict["predictions"]
     turn_indicators = valid_dict["turn_indicators"]
+    turn_indicator_logits = valid_dict["turn_indicator_logits"]
 
     # Aggregate the scalar metrics across all ranks (collective; every rank calls
     # validate_model above, so every rank reaches here).
@@ -335,8 +386,6 @@ def run_validation(valid_cfg: ValidConfig):
     avg_loss_ego = agg["avg_loss_ego"]
     avg_loss_neighbor = agg["avg_loss_neighbor"]
     turn_indicator_accuracy = agg["turn_indicator_accuracy"]
-    turn_indicator_change_accuracy = agg["turn_indicator_change_accuracy"]
-    turn_indicator_change_total = agg["turn_indicator_change_total"]
     reward_metrics = {}
     if valid_cfg.reward_eval_num_generations > 0:
         reward_args = copy.copy(config_obj)
@@ -360,10 +409,15 @@ def run_validation(valid_cfg: ValidConfig):
     if global_rank == 0:
         print(f"{avg_loss_ego=:.4f} {avg_loss_neighbor=:.4f}")
         print(f"{turn_indicator_accuracy=:.4f}")
-        if turn_indicator_change_total > 0:
-            print(f"{turn_indicator_change_accuracy=:.4f} ({turn_indicator_change_total=:d})")
-        else:
-            print("turn_indicator_change_accuracy=0.0000 (num_samples=0)")
+        for metric in (
+            "turn_indicator_balanced_accuracy",
+            "turn_indicator_macro_f1",
+            "turn_indicator_active_precision",
+            "turn_indicator_active_recall",
+            "turn_indicator_active_f1",
+            "turn_indicator_direction_accuracy",
+        ):
+            print(f"{metric}={agg[metric]:.4f}")
         for name, accuracy in agg["turn_indicator_class_accuracy"].items():
             count = agg["turn_indicator_class_count"][name]
             print(f"turn_indicator_{name}_accuracy={accuracy:.4f} (num_samples={count})")
@@ -382,9 +436,18 @@ def run_validation(valid_cfg: ValidConfig):
     valid_dict_to_save = {
         "avg_loss_ego": avg_loss_ego,
         "avg_loss_neighbor": avg_loss_neighbor,
-        "turn_indicator_accuracy": turn_indicator_accuracy,
-        "turn_indicator_change_accuracy": turn_indicator_change_accuracy,
-        "turn_indicator_change_total": turn_indicator_change_total,
+        **{
+            key: agg[key]
+            for key in (
+                "turn_indicator_accuracy",
+                "turn_indicator_balanced_accuracy",
+                "turn_indicator_macro_f1",
+                "turn_indicator_active_precision",
+                "turn_indicator_active_recall",
+                "turn_indicator_active_f1",
+                "turn_indicator_direction_accuracy",
+            )
+        },
         **{
             f"turn_indicator_{name}_accuracy": value
             for name, value in agg["turn_indicator_class_accuracy"].items()
@@ -435,6 +498,7 @@ def run_validation(valid_cfg: ValidConfig):
             out_base.with_suffix(".npz"),
             prediction=predictions[i].cpu().numpy(),
             turn_indicator=turn_indicators[i].cpu().numpy(),
+            turn_indicator_logits=turn_indicator_logits[i].cpu().numpy(),
         )
         loss_dict = {
             "loss_ego_total": loss_ego[i].mean().item(),

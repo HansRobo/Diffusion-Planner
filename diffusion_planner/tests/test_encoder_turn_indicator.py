@@ -1,3 +1,4 @@
+import pytest
 import torch
 from diffusion_planner.dimensions import (
     EGO_SHAPE_SHAPE,
@@ -18,39 +19,28 @@ from diffusion_planner.dimensions import (
     ROUTE_LANES_SHAPE,
     ROUTE_LANES_SPEED_LIMIT_SHAPE,
     STATIC_OBJECTS_SHAPE,
-    TURN_INDICATOR_INPUT_ONE_HOT_DIM,
 )
-from diffusion_planner.model.module.encoder import Encoder, GoalPoseEncoder, one_hot_turn_indicators
+from diffusion_planner.model.module.encoder import (
+    Encoder,
+    GoalPoseEncoder,
+    _keep_recent_history,
+)
 from diffusion_planner.train_config import TrainConfig
 
 
-def test_turn_indicator_one_hot_maps_report_codes():
-    output = one_hot_turn_indicators(torch.tensor([[0, 1, 2, 3]], dtype=torch.float32))
-    one_hot = output.view(1, 4, TURN_INDICATOR_INPUT_ONE_HOT_DIM)
-    assert one_hot[0].tolist() == [
-        [1, 0, 0, 0],
-        [0, 1, 0, 0],
-        [0, 0, 1, 0],
-        [0, 0, 0, 1],
-    ]
+def test_keep_recent_history_uses_current_plus_twenty_previous_frames():
+    history = torch.arange(31 * 4, dtype=torch.float32).reshape(1, 31, 4)
+    selected = _keep_recent_history(history, 21)
+
+    assert selected.shape == history.shape
+    torch.testing.assert_close(selected[:, :10], torch.zeros(1, 10, 4))
+    torch.testing.assert_close(selected[:, -21:], history[:, -21:])
 
 
-def test_turn_indicator_left_and_right_are_orthogonal():
-    left = one_hot_turn_indicators(torch.tensor([[2.0]]))
-    right = one_hot_turn_indicators(torch.tensor([[3.0]]))
-    assert torch.dot(left.flatten(), right.flatten()).item() == 0.0
-
-
-def test_turn_indicator_out_of_range_codes_become_zero():
-    output = one_hot_turn_indicators(torch.tensor([[4, 7, -1]], dtype=torch.float32))
-    assert torch.all(output == 0)
-
-
-def test_turn_indicator_one_hot_accepts_integer_input():
-    output = one_hot_turn_indicators(torch.tensor([[1, 2]], dtype=torch.int32))
-    one_hot = output.view(1, 2, TURN_INDICATOR_INPUT_ONE_HOT_DIM)
-    assert one_hot[0, 0].tolist() == [0, 1, 0, 0]
-    assert one_hot[0, 1].tolist() == [0, 0, 1, 0]
+def test_keep_recent_history_rejects_longer_window_than_input():
+    history = torch.zeros(1, 6, 4)
+    with pytest.raises(ValueError, match="history_frames must be"):
+        _keep_recent_history(history, 7)
 
 
 def test_goal_pose_encoder_masks_missing_goal_without_masking_origin_heading():
@@ -86,7 +76,7 @@ def _encoder_inputs():
     }
 
 
-def test_encoder_consumes_one_hot_turn_indicators_when_enabled_or_disabled():
+def test_encoder_is_structurally_independent_of_turn_indicator_history():
     config = TrainConfig(
         exp_name="test",
         save_dir="/tmp",
@@ -97,11 +87,11 @@ def test_encoder_consumes_one_hot_turn_indicators_when_enabled_or_disabled():
     encoder = Encoder(config).eval()
     inputs = _encoder_inputs()
 
+    without_signal = {key: value for key, value in inputs.items() if key != "turn_indicators"}
+    flipped_signal = {**inputs, "turn_indicators": 4 - inputs["turn_indicators"]}
     with torch.no_grad():
-        enabled = encoder(inputs)
-    assert enabled.shape == (1, encoder.token_num, config.hidden_dim)
-
-    encoder.use_turn_indicators = False
-    with torch.no_grad():
-        disabled = encoder(inputs)
-    assert disabled.shape == enabled.shape
+        baseline = encoder(without_signal)
+        flipped = encoder(flipped_signal)
+    assert not hasattr(encoder, "turn_indicator_encoder")
+    assert baseline.shape == (1, encoder.token_num, config.hidden_dim)
+    torch.testing.assert_close(flipped, baseline, rtol=0, atol=0)

@@ -19,6 +19,24 @@ def test_reward_eval_is_disabled_by_default():
 
     assert args.reward_eval_num_generations == 0
     assert args.metrics_output is None
+    assert args.filter_skipped is None
+
+
+def test_skip_filter_cli_can_be_overridden():
+    args = get_args(
+        _required_args()
+        + [
+            "--filter_skipped",
+            "False",
+            "--skip_filter_sidecar_root",
+            "/tmp/sidecars",
+            "--skip_filter_workers",
+            "7",
+        ]
+    )
+    assert args.filter_skipped is False
+    assert args.skip_filter_sidecar_root == "/tmp/sidecars"
+    assert args.skip_filter_workers == 7
 
 
 def test_reward_eval_cli_overrides_protocol_and_output():
@@ -94,9 +112,7 @@ def test_validation_cli_rejects_nonfinite_and_negative_sampling_values():
 
 
 def test_metric_json_conversion_is_strict():
-    payload = _json_safe(
-        {"nan": float("nan"), "inf": np.float32(float("inf")), "nested": [np.nan]}
-    )
+    payload = _json_safe({"nan": float("nan"), "inf": np.float32(float("inf")), "nested": [np.nan]})
     assert payload == {"nan": None, "inf": None, "nested": [None]}
     json.dumps(payload, allow_nan=False)
 

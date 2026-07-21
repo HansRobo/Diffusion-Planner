@@ -29,18 +29,18 @@ def get_traffic_light_color(traffic_light):
         # raise ValueError(f"Unknown traffic light state: {traffic_light}")
 
 
-_TURN_INDICATOR_LABELS = {
-    0: "Straight",
+_RAW_TURN_INDICATOR_LABELS = {
     1: "Straight",
     2: "Left",
     3: "Right",
-    4: "Keep",
 }
+_MODEL_TURN_INDICATOR_LABELS = {0: "Straight", 1: "Left", 2: "Right"}
 
 
-def turn_indicator_int_to_str(turn_indicator):
-    """Convert turn indicator integer to string."""
-    label = _TURN_INDICATOR_LABELS.get(int(turn_indicator))
+def turn_indicator_int_to_str(turn_indicator, *, model_output=False):
+    """Convert a raw report or dense model output to a display label."""
+    labels = _MODEL_TURN_INDICATOR_LABELS if model_output else _RAW_TURN_INDICATOR_LABELS
+    label = labels.get(int(turn_indicator))
     if label is None:
         raise ValueError(f"Unknown turn command: {turn_indicator}")
     return label
@@ -408,16 +408,11 @@ def setup_axis(ax, ego_x, ego_y, ego_state, view_range, inputs):
 
     if "turn_indicators" in inputs:
         turn_indicator = inputs["turn_indicators"][0][-1]
-        if inputs["turn_indicators"][0][-2] == turn_indicator:
-            # Same as previous timestep — prefix with "Keep" to indicate sustained signal
-            label = turn_indicator_int_to_str(turn_indicator)
-            turn_indicator_text_gt = label if label == "Keep" else f"Keep {label}"
-        else:
-            turn_indicator_text_gt = turn_indicator_int_to_str(turn_indicator)
+        turn_indicator_text_gt = turn_indicator_int_to_str(turn_indicator)
 
     if "turn_indicator_pred" in inputs:
         turn_indicator_pred = inputs["turn_indicator_pred"]
-        turn_indicator_text_pred = turn_indicator_int_to_str(turn_indicator_pred)
+        turn_indicator_text_pred = turn_indicator_int_to_str(turn_indicator_pred, model_output=True)
 
     ax.text(
         view_range - 1,

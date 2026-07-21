@@ -34,5 +34,15 @@ def test_training_cli_accepts_hdp_defaults():
     args = get_args(_required_args())
     assert args.predicted_neighbor_num == 0
     assert args.future_len == 80
+    assert args.ego_history_frames == 21
     assert args.use_velocity_representation is True
     assert args.diffusion_model_type == "x_start"
+    assert args.policy_uses_turn_indicator_history is False
+    assert args.turn_indicator_output_dim == 3
+    assert args.supervised_training_stage == "joint"
+
+
+def test_training_cli_selects_sequential_supervised_stages():
+    for stage in ("policy", "turn_indicator"):
+        args = get_args(_required_args() + ["--supervised_training_stage", stage])
+        assert args.supervised_training_stage == stage

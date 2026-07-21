@@ -358,9 +358,10 @@ class StatePerturbation:
             ego_future[..., 2:4] = vector_transform(ego_future[..., 2:4], transform_matrix)
             ego_future4d = ego_future
 
-        # ego past
-        ego_past_mask = pose_padding_mask(inputs["ego_agent_past"])
         ego_past_is_heading = inputs["ego_agent_past"].shape[-1] == 3
+        # Raw 3-column ego poses use (0, 0, 0) for a valid origin. Only a
+        # converted 4-column tensor can use the all-zero padding sentinel.
+        ego_past_mask = None if ego_past_is_heading else pose_padding_mask(inputs["ego_agent_past"])
         inputs["ego_agent_past"][..., :2] = vector_transform(
             inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
         )
@@ -372,7 +373,8 @@ class StatePerturbation:
             inputs["ego_agent_past"][..., 2:4] = vector_transform(
                 inputs["ego_agent_past"][..., 2:4], transform_matrix
             )
-        inputs["ego_agent_past"].masked_fill_(ego_past_mask.unsqueeze(-1), 0.0)
+        if ego_past_mask is not None:
+            inputs["ego_agent_past"].masked_fill_(ego_past_mask.unsqueeze(-1), 0.0)
 
         if self._use_smoothing_future_trajectory:
             smoothing_ego_past = inputs["ego_agent_past"]
@@ -385,7 +387,8 @@ class StatePerturbation:
                     ],
                     dim=-1,
                 )
-                smoothing_ego_past.masked_fill_(ego_past_mask.unsqueeze(-1), 0.0)
+                if ego_past_mask is not None:
+                    smoothing_ego_past.masked_fill_(ego_past_mask.unsqueeze(-1), 0.0)
             ego_future4d = smoothing_future_trajectory(
                 smoothing_ego_past,
                 inputs["ego_current_state"],
@@ -485,7 +488,8 @@ class StatePerturbation:
         inputs["static_objects"].masked_fill_(mask.unsqueeze(-1), 0.0)
 
         if "goal_pose" in inputs:
-            goal_mask = torch.all(inputs["goal_pose"] == 0, dim=-1)
+            goal_is_heading = inputs["goal_pose"].shape[-1] == 3
+            goal_mask = None if goal_is_heading else torch.all(inputs["goal_pose"] == 0, dim=-1)
             inputs["goal_pose"][..., :2] = vector_transform(
                 inputs["goal_pose"][..., :2], transform_matrix, center_xy
             )
@@ -497,7 +501,8 @@ class StatePerturbation:
                 inputs["goal_pose"][..., 2:4] = vector_transform(
                     inputs["goal_pose"][..., 2:4], transform_matrix
                 )
-            inputs["goal_pose"].masked_fill_(goal_mask.unsqueeze(-1), 0.0)
+            if goal_mask is not None:
+                inputs["goal_pose"].masked_fill_(goal_mask.unsqueeze(-1), 0.0)
 
         return inputs, ego_future, neighbors_future
 

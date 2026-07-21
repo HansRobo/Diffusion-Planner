@@ -32,6 +32,30 @@ def get_args(args_list=None):
         help="append the extra list N times in memory; no combined JSON or NPZ is written",
     )
     parser.add_argument("--valid_set_list", type=str, required=True)
+    parser.add_argument(
+        "--filter_skipped",
+        type=boolean,
+        default=_train_config_default("filter_skipped"),
+        help="filter sidecar entries with is_skipped=true into a run-local manifest cache",
+    )
+    parser.add_argument(
+        "--skip_filter_sidecar_root",
+        type=str,
+        default=_train_config_default("skip_filter_sidecar_root"),
+        help="optional sidecar root when JSON sidecars are not next to each NPZ",
+    )
+    parser.add_argument(
+        "--skip_filter_workers",
+        type=int,
+        default=_train_config_default("skip_filter_workers"),
+        help="parallel sidecar readers used once while preparing filtered manifests",
+    )
+    parser.add_argument(
+        "--skip_filter_processes",
+        type=int,
+        default=_train_config_default("skip_filter_processes"),
+        help="processes for RDMA sidecar reads; 0 uses the in-process thread pool",
+    )
     parser.add_argument("--train_subsample_step", type=int, default=1)
     parser.add_argument(
         "--align_legacy_neighbor_futures",
@@ -112,17 +136,15 @@ def get_args(args_list=None):
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
     parser.add_argument(
+        "--ego_history_frames",
+        type=int,
+        default=_train_config_default("ego_history_frames"),
+        help="number of most-recent ego frames encoded, including current (default 21)",
+    )
+    parser.add_argument(
         "--ego_history_dropout_rate",
         type=float,
         default=_train_config_default("ego_history_dropout_rate"),
-    )
-    parser.add_argument("--use_turn_indicators", type=boolean, default=True)
-    parser.add_argument(
-        "--turn_indicator_dropout_rate",
-        type=float,
-        default=_train_config_default("turn_indicator_dropout_rate"),
-        help="per-sample zeroing of the signal-history input against the "
-        "signal->maneuver causal shortcut (deployment feeds back the stack's own signal)",
     )
     parser.add_argument(
         "--turn_indicator_generated_loss_weight",
@@ -133,6 +155,12 @@ def get_args(args_list=None):
         "--turn_indicator_expert_loss_weight",
         type=float,
         default=_train_config_default("turn_indicator_expert_loss_weight"),
+    )
+    parser.add_argument(
+        "--supervised_training_stage",
+        choices=("joint", "policy", "turn_indicator"),
+        default=_train_config_default("supervised_training_stage"),
+        help="train the full model jointly, trajectory policy only, or detached intent head only",
     )
 
     parser.add_argument(
@@ -398,6 +426,10 @@ def get_args(args_list=None):
     )
 
     args = parser.parse_args(args_list)
+    # Persist the fixed indicator architecture in args.json so an old four-class,
+    # signal-conditioned checkpoint cannot be mistaken for an exact resume.
+    args.policy_uses_turn_indicator_history = False
+    args.turn_indicator_output_dim = TURN_INDICATOR_OUTPUT_DIM
     if args.train_subsample_step < 1:
         raise ValueError("--train_subsample_step must be >= 1")
     if args.batch_size < 1:
@@ -445,6 +477,8 @@ def get_args(args_list=None):
         raise ValueError("--decoder_drop_path_rate must be in [0, 1)")
     if not 0.0 <= args.ego_history_dropout_rate < 1.0:
         raise ValueError("--ego_history_dropout_rate must be in [0, 1)")
+    if not 1 <= args.ego_history_frames <= args.time_len:
+        raise ValueError("--ego_history_frames must be in [1, time_len]")
     if not 1 <= args.ego_prediction_horizon <= args.future_len:
         raise ValueError("--ego_prediction_horizon must be in [1, future_len]")
     if not 1 <= args.hybrid_loss_window <= args.future_len:
