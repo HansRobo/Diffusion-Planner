@@ -1,6 +1,8 @@
 """FlipAugmentation: mirror the scene across the ego longitudinal axis (y -> -y),
 swapping left/right lane boundaries, line types and turn indicators."""
 
+from unittest.mock import patch
+
 import torch
 from diffusion_planner.dimensions import (
     LB_X,
@@ -164,6 +166,78 @@ def test_flip_prob_zero_is_identity():
         assert torch.equal(inputs[key], val), key
     assert torch.equal(ego_future, orig_ego_future)
     assert torch.equal(neighbors_future, orig_neighbors_future)
+
+
+def test_flip_is_in_place_and_updates_future_entries():
+    inputs, ego_future, neighbors_future = _make_batch()
+    input_refs = {key: value for key, value in inputs.items()}
+
+    aug = FlipAugmentation(flip_prob=1.0, device="cpu")
+    inputs, returned_ego, returned_neighbors = aug(inputs, ego_future, neighbors_future)
+
+    for key, ref in input_refs.items():
+        assert inputs[key] is ref, key
+    assert returned_ego is ego_future
+    assert returned_neighbors is neighbors_future
+    assert inputs["ego_agent_future"] is ego_future
+    assert inputs["neighbor_agents_future"] is neighbors_future
+
+
+def test_mixed_batch_only_flips_selected_samples():
+    inputs, ego_future, neighbors_future = _make_batch()
+    orig_inputs, orig_ego_future, orig_neighbors_future = _clone_batch(
+        inputs, ego_future, neighbors_future
+    )
+
+    aug = FlipAugmentation(flip_prob=0.5, device="cpu")
+    with patch(
+        "diffusion_planner.utils.data_augmentation.torch.rand",
+        return_value=torch.tensor([0.1, 0.9]),
+    ):
+        inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
+
+    assert torch.equal(ego_future[0, :, 1:], -orig_ego_future[0, :, 1:])
+    assert torch.equal(ego_future[1], orig_ego_future[1])
+    assert torch.equal(neighbors_future[0, ..., 1:], -orig_neighbors_future[0, ..., 1:])
+    assert torch.equal(neighbors_future[1], orig_neighbors_future[1])
+    assert torch.equal(inputs["ego_current_state"][1], orig_inputs["ego_current_state"][1])
+
+
+def test_four_component_futures_negate_sin_not_cos():
+    inputs, ego_future, neighbors_future = _make_batch()
+    ego_future = torch.cat(
+        [ego_future[..., :2], ego_future[..., 2:].cos(), ego_future[..., 2:].sin()], dim=-1
+    )
+    neighbors_future = torch.cat(
+        [
+            neighbors_future[..., :2],
+            neighbors_future[..., 2:].cos(),
+            neighbors_future[..., 2:].sin(),
+        ],
+        dim=-1,
+    )
+    orig_ego_future = ego_future.clone()
+    orig_neighbors_future = neighbors_future.clone()
+
+    aug = FlipAugmentation(flip_prob=1.0, device="cpu")
+    inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
+
+    assert torch.equal(ego_future[..., 0], orig_ego_future[..., 0])
+    assert torch.equal(ego_future[..., 1], -orig_ego_future[..., 1])
+    assert torch.equal(ego_future[..., 2], orig_ego_future[..., 2])
+    assert torch.equal(ego_future[..., 3], -orig_ego_future[..., 3])
+    assert torch.equal(neighbors_future[..., 2], orig_neighbors_future[..., 2])
+    assert torch.equal(neighbors_future[..., 3], -orig_neighbors_future[..., 3])
+
+
+def test_invalid_flip_probability_is_rejected():
+    for flip_prob in (-0.1, 1.1):
+        try:
+            FlipAugmentation(flip_prob=flip_prob, device="cpu")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"flip_prob={flip_prob} was accepted")
 
 
 def test_double_flip_is_identity():

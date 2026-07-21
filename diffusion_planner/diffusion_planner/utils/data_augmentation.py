@@ -623,35 +623,41 @@ class FlipAugmentation:
     """
 
     def __init__(self, flip_prob: float, device: torch.device | str) -> None:
+        if not 0.0 <= flip_prob <= 1.0:
+            raise ValueError(f"flip_prob must be in [0, 1], got {flip_prob}")
         self._flip_prob = flip_prob
         self._device = torch.device(device)
 
     @staticmethod
-    def _negate(x, channels, flip):
-        """Negate the given channels of x for flipped samples. flip: (B,) bool."""
-        flipped = x.clone()
-        flipped[..., channels] = -flipped[..., channels]
+    def _negate_(x, channels, flip):
+        """Negate channels in-place for flipped samples without cloning ``x``."""
+        signs = torch.ones((x.shape[0], x.shape[-1]), dtype=x.dtype, device=x.device)
+        sample_sign = 1 - 2 * flip.to(dtype=x.dtype)
+        signs[:, channels] = sample_sign[:, None]
+        x.mul_(signs.reshape(x.shape[0], *([1] * (x.ndim - 2)), x.shape[-1]))
+        return x
+
+    @staticmethod
+    def _swap_slices_(x, left, right, flip):
+        """Conditionally swap equal-width feature slices using bounded temporaries."""
+        left_values = x[..., left]
+        right_values = x[..., right]
+        saved_left = left_values.clone()
         cond = flip.reshape(-1, *([1] * (x.ndim - 1)))
-        return torch.where(cond, flipped, x)
+        left_values.copy_(torch.where(cond, right_values, left_values))
+        right_values.copy_(torch.where(cond, saved_left, right_values))
 
     def _flip_lanes(self, lanes, flip):
         """
         Mirror lane segments: negate y components and swap the left/right
         boundaries and line types. Traffic light one-hot is side-agnostic.
         """
-        flipped = lanes.clone()
-        flipped[..., Y] = -lanes[..., Y]
-        flipped[..., dY] = -lanes[..., dY]
-        flipped[..., LB_X] = lanes[..., RB_X]
-        flipped[..., LB_Y] = -lanes[..., RB_Y]
-        flipped[..., RB_X] = lanes[..., LB_X]
-        flipped[..., RB_Y] = -lanes[..., LB_Y]
+        self._negate_(lanes, [Y, dY, LB_Y, RB_Y], flip)
+        self._swap_slices_(lanes, slice(LB_X, LB_Y + 1), slice(RB_X, RB_Y + 1), flip)
         left = slice(LINE_TYPE_LEFT_START, LINE_TYPE_LEFT_START + LINE_TYPE_NUM)
         right = slice(LINE_TYPE_RIGHT_START, LINE_TYPE_RIGHT_START + LINE_TYPE_NUM)
-        flipped[..., left] = lanes[..., right]
-        flipped[..., right] = lanes[..., left]
-        cond = flip.reshape(-1, *([1] * (lanes.ndim - 1)))
-        return torch.where(cond, flipped, lanes)
+        self._swap_slices_(lanes, left, right, flip)
+        return lanes
 
     def _flip_turn_indicators(self, turn_indicators, flip):
         left = TURN_INDICATOR_OUTPUT_ENABLE_LEFT
@@ -665,40 +671,50 @@ class FlipAugmentation:
                 turn_indicators,
             ),
         )
-        return torch.where(flip.reshape(-1, 1), swapped, turn_indicators)
+        turn_indicators.copy_(torch.where(flip.reshape(-1, 1), swapped, turn_indicators))
+        return turn_indicators
+
+    @staticmethod
+    def _future_flip_channels(future):
+        if future.shape[-1] == 3:  # x, y, heading
+            return [1, 2]
+        if future.shape[-1] == 4:  # x, y, cos, sin
+            return [1, 3]
+        raise ValueError(
+            "future trajectory must end in (x, y, heading) or (x, y, cos, sin), "
+            f"got shape {tuple(future.shape)}"
+        )
 
     def __call__(self, inputs, ego_future, neighbors_future):
-        B = ego_future.shape[0]
-        flip = torch.rand(B, device=ego_future.device) < self._flip_prob
-        if not flip.any():
+        if self._flip_prob == 0.0:
             return inputs, ego_future, neighbors_future
 
+        B = ego_future.shape[0]
+        flip = torch.rand(B, device=ego_future.device) < self._flip_prob
+
         # ego_current_state: x, y, cos, sin, vx, vy, ax, ay, steering, yaw_rate
-        inputs["ego_current_state"] = self._negate(
-            inputs["ego_current_state"], [1, 3, 5, 7, 8, 9], flip
-        )
+        self._negate_(inputs["ego_current_state"], [1, 3, 5, 7, 8, 9], flip)
         # ego_agent_past: x, y, cos, sin
-        inputs["ego_agent_past"] = self._negate(inputs["ego_agent_past"], [1, 3], flip)
+        self._negate_(inputs["ego_agent_past"], [1, 3], flip)
         # goal_pose: x, y, cos, sin
-        inputs["goal_pose"] = self._negate(inputs["goal_pose"], [1, 3], flip)
+        self._negate_(inputs["goal_pose"], [1, 3], flip)
         # neighbor_agents_past: x, y, cos, sin, vx, vy, w, l, type(3)
-        inputs["neighbor_agents_past"] = self._negate(
-            inputs["neighbor_agents_past"], [1, 3, 5], flip
-        )
+        self._negate_(inputs["neighbor_agents_past"], [1, 3, 5], flip)
         # static_objects: x, y, cos, sin, w, l, type(4)
-        inputs["static_objects"] = self._negate(inputs["static_objects"], [1, 3], flip)
+        self._negate_(inputs["static_objects"], [1, 3], flip)
         # polygons / line_strings: x, y, type one-hot...
-        inputs["polygons"] = self._negate(inputs["polygons"], [1], flip)
-        inputs["line_strings"] = self._negate(inputs["line_strings"], [1], flip)
+        self._negate_(inputs["polygons"], [1], flip)
+        self._negate_(inputs["line_strings"], [1], flip)
         # lanes / route_lanes: swap left/right boundaries and line types too
         inputs["lanes"] = self._flip_lanes(inputs["lanes"], flip)
         inputs["route_lanes"] = self._flip_lanes(inputs["route_lanes"], flip)
         # turn indicators: swap ENABLE_LEFT <-> ENABLE_RIGHT
         inputs["turn_indicators"] = self._flip_turn_indicators(inputs["turn_indicators"], flip)
 
-        # futures: x, y, heading
-        ego_future = self._negate(ego_future, [1, 2], flip)
-        neighbors_future = self._negate(neighbors_future, [1, 2], flip)
+        # futures may use either heading or cos/sin representation.
+        self._negate_(ego_future, self._future_flip_channels(ego_future), flip)
+        self._negate_(neighbors_future, self._future_flip_channels(neighbors_future), flip)
         inputs["ego_agent_future"] = ego_future
+        inputs["neighbor_agents_future"] = neighbors_future
 
         return inputs, ego_future, neighbors_future
