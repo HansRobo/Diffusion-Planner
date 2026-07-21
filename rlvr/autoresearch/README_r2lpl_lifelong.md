@@ -142,8 +142,13 @@ rejects the anchor with any other backend). The ranked-SFT backend's
 counterpart is `training.normal_scene_list`: it switches the round's training
 call to the prob/normal split (repaired scenes = prob, the listed real normal
 scenes = normal), with the mix controlled by the training config's explicit
-`n_prob_scenes` / `n_normal_scenes` (validated at startup; `n_prob_scenes` must
-be at least the expected repaired scenes per round or repairs are subsampled).
+`n_prob_scenes` / `n_normal_scenes`. The list must be a non-empty JSON list of
+paths (validated at startup), the normal scenes are homogenized to 4-col
+neighbor futures into `r2lpl_round_NNN/normal_scenes_4col/` with a per-round
+resolved list (same collate incompatibility as the anchor slice below), and
+each round fails before training if `n_prob_scenes` is below that round's
+repaired-scene count — `run_experiment`'s `min(n_prob, len(prob))` sampling
+would otherwise silently drop repairs.
 Raw logged anchor scenes carry
 3-col `[x, y, heading]` neighbor futures while repaired scenes are 4-col
 `[x, y, cos, sin]` — a mixed batch cannot collate, so the runner rewrites the

@@ -4530,11 +4530,12 @@ def test_replay_capacity_is_required():
 
 def test_validate_normal_scene_list_config(tmp_path):
     """normal_scene_list must fail loudly at startup: it is rsft-only (base_sft
-    uses training.anchor) and the prob/normal split it enables needs explicit
-    n_prob_scenes/n_normal_scenes — run_experiment would otherwise only raise
-    after the expensive mine+repair phases."""
+    uses training.anchor), must be a non-empty JSON list of paths, and the
+    prob/normal split it enables needs explicit, sane n_prob_scenes /
+    n_normal_scenes — run_experiment would otherwise only raise (or silently
+    subsample) after the expensive mine+repair phases."""
     normals = tmp_path / "normals.json"
-    normals.write_text("[]")
+    normals.write_text(json.dumps(["/data/normal_0.npz"]))
     tcfg = tmp_path / "train_cfg.json"
     tcfg.write_text(json.dumps({"ranked_sft_mode": "curated"}))
     base = {
@@ -4550,12 +4551,122 @@ def test_validate_normal_scene_list_config(tmp_path):
         round_runner._validate_normal_scene_list_config(
             {**base, "training_normal_scene_list": str(tmp_path / "missing.json")}
         )
+    # Empty or malformed list content fails at startup, not at collate time.
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]")
+    with pytest.raises(ValueError, match="non-empty JSON list"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(empty)}
+        )
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("{not json")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(malformed)}
+        )
+    not_paths = tmp_path / "not_paths.json"
+    not_paths.write_text(json.dumps([1, 2]))
+    with pytest.raises(ValueError, match="non-empty JSON list"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(not_paths)}
+        )
     with pytest.raises(ValueError, match="n_prob_scenes"):
+        round_runner._validate_normal_scene_list_config(base)
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 0, "n_normal_scenes": 230})
+    )
+    with pytest.raises(ValueError, match="positive integer"):
+        round_runner._validate_normal_scene_list_config(base)
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 1000, "n_normal_scenes": -1})
+    )
+    with pytest.raises(ValueError, match="non-negative integer"):
         round_runner._validate_normal_scene_list_config(base)
     tcfg.write_text(
         json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 1000, "n_normal_scenes": 230})
     )
     round_runner._validate_normal_scene_list_config(base)  # valid -> no raise
+
+
+def test_rsft_scene_args_resolves_normals_and_guards_subsampling(tmp_path):
+    """The rsft prob/normal path must (a) homogenize 3-col logged normal scenes
+    to the 4-col schema before handing them to run_experiment (a mixed batch
+    cannot collate — same incompatibility the base_sft anchor slice already
+    handles), and (b) refuse an n_prob_scenes below the repaired count, which
+    run_experiment's min(n_prob, len(prob)) sampling would silently truncate."""
+    base = {
+        "ego_agent_future": np.zeros((80, 3), dtype=np.float32),
+        "turn_indicators": np.zeros(31, dtype=np.int64),
+    }
+    three = dict(base)
+    nf3 = np.zeros((4, 80, 3), dtype=np.float32)
+    nf3[0, :, 0] = np.arange(1, 81)
+    nf3[0, :, 2] = np.pi / 2
+    three["neighbor_agents_future"] = nf3
+    p3 = tmp_path / "logged_normal.npz"
+    np.savez(p3, **three)
+    four = dict(base)
+    four["neighbor_agents_future"] = np.zeros((4, 80, 4), dtype=np.float32)
+    p4 = tmp_path / "converted_normal.npz"
+    np.savez(p4, **four)
+    normals = tmp_path / "normals.json"
+    normals.write_text(json.dumps([str(p3), str(p4)]))
+    repaired_list = tmp_path / "repaired.json"
+    repaired_paths = ["/data/repaired_0.npz", "/data/repaired_1.npz"]
+    repaired_list.write_text(json.dumps(repaired_paths))
+    tcfg = tmp_path / "train_cfg.json"
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 10, "n_normal_scenes": 2})
+    )
+    cfg = {
+        "training_normal_scene_list": str(normals),
+        "training_backend": "rsft",
+        "training_config": str(tcfg),
+    }
+    rdir = tmp_path / "round"
+    rdir.mkdir()
+
+    args = round_runner._rsft_scene_args(
+        cfg,
+        repaired_paths=repaired_paths,
+        repaired_list_json=repaired_list,
+        rdir=rdir,
+        round_idx=1,
+    )
+    assert args[args.index("--prob_scenes") + 1] == str(repaired_list)
+    resolved = Path(args[args.index("--normal_scenes") + 1])
+    assert resolved == rdir / "normal_scenes_resolved.json"
+    resolved_paths = json.loads(resolved.read_text())
+    # 4-col passes through by original path; 3-col was rewritten to a copy.
+    assert resolved_paths[1] == str(p4)
+    assert resolved_paths[0] != str(p3)
+    batch = [dict(np.load(p)) for p in resolved_paths]
+    stacked = torch.stack([torch.from_numpy(b["neighbor_agents_future"]) for b in batch])
+    assert stacked.shape == (2, 4, 80, 4)
+
+    # Undersized n_prob_scenes fails before training instead of silently
+    # dropping repaired scenes.
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 1, "n_normal_scenes": 2})
+    )
+    with pytest.raises(ValueError, match="silently subsample"):
+        round_runner._rsft_scene_args(
+            cfg,
+            repaired_paths=repaired_paths,
+            repaired_list_json=repaired_list,
+            rdir=rdir,
+            round_idx=1,
+        )
+
+    # Without normal_scene_list the legacy combined-list path is kept.
+    args = round_runner._rsft_scene_args(
+        {"training_backend": "rsft", "training_config": str(tcfg)},
+        repaired_paths=repaired_paths,
+        repaired_list_json=repaired_list,
+        rdir=rdir,
+        round_idx=1,
+    )
+    assert args == ["--train_scenes", str(repaired_list)]
 
 
 def test_workflow_contract_forwards_prototypes_path_to_repair_cmd(tmp_path):

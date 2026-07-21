@@ -1119,6 +1119,15 @@ def _validate_normal_scene_list_config(cfg: dict[str, Any]) -> None:
         )
     if not Path(normal_list).exists():
         raise ValueError(f"training.normal_scene_list does not exist: {normal_list}")
+    try:
+        entries = json.loads(Path(normal_list).read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"training.normal_scene_list is not valid JSON: {normal_list}") from exc
+    if not isinstance(entries, list) or not entries or not all(isinstance(e, str) for e in entries):
+        raise ValueError(
+            f"training.normal_scene_list must be a non-empty JSON list of scene "
+            f"paths: {normal_list}"
+        )
     payload = _training_config_payload(cfg["training_config"])
     missing = [k for k in ("n_prob_scenes", "n_normal_scenes") if k not in payload]
     if missing:
@@ -1128,6 +1137,54 @@ def _validate_normal_scene_list_config(cfg: dict[str, Any]) -> None:
             "expected repaired scenes per round — smaller values silently subsample "
             "the repairs)"
         )
+    n_prob = payload["n_prob_scenes"]
+    n_normal = payload["n_normal_scenes"]
+    if not isinstance(n_prob, int) or n_prob < 1:
+        raise ValueError(f"n_prob_scenes must be a positive integer, got {n_prob!r}")
+    if not isinstance(n_normal, int) or n_normal < 0:
+        raise ValueError(f"n_normal_scenes must be a non-negative integer, got {n_normal!r}")
+
+
+def _rsft_scene_args(
+    cfg: dict[str, Any],
+    *,
+    repaired_paths: list[str],
+    repaired_list_json: Path,
+    rdir: Path,
+    round_idx: int,
+) -> list[str]:
+    """Scene args for the ranked-SFT training call of one round.
+
+    With training.normal_scene_list the round trains a prob/normal split
+    (repaired = prob, real normals = normal) so curated rounds can mix real
+    scenes; without it, the legacy combined-list path is kept. The normal
+    scenes are homogenized to 4-col neighbor futures (raw logged scenes may
+    carry 3-col ones, and a mixed batch cannot collate — same incompatibility
+    as the base_sft anchor slice) into a per-round resolved list.
+    """
+    normal_list = cfg.get("training_normal_scene_list")
+    if not normal_list:
+        return ["--train_scenes", str(repaired_list_json)]
+    n_prob = _training_config_payload(cfg["training_config"])["n_prob_scenes"]
+    if n_prob < len(repaired_paths):
+        raise ValueError(
+            f"[round {round_idx}] n_prob_scenes={n_prob} < {len(repaired_paths)} "
+            "repaired scenes: run_experiment would silently subsample the "
+            "repairs (min(n_prob, len(prob)) sampling). Raise n_prob_scenes to "
+            "cover the largest expected repaired count per round."
+        )
+    normal_paths = _ensure_4col_neighbor_futures(
+        [str(p) for p in _read_json_list(Path(normal_list))],
+        rdir / "normal_scenes_4col",
+    )
+    resolved_normals = rdir / "normal_scenes_resolved.json"
+    resolved_normals.write_text(json.dumps(normal_paths, indent=2))
+    return [
+        "--prob_scenes",
+        str(repaired_list_json),
+        "--normal_scenes",
+        str(resolved_normals),
+    ]
 
 
 def _validate_anchor_config(cfg: dict[str, Any]) -> None:
@@ -2680,20 +2737,13 @@ def main() -> None:
             round_training_config = _round_training_config(
                 cfg, rdir=rdir, anchor_model_path=model_path
             )
-            # With training.normal_scene_list the rsft round trains a
-            # prob/normal split (repaired = prob, real normals = normal) so
-            # curated rounds can mix real scenes. Without it, the legacy
-            # combined-list path is kept.
-            normal_list = cfg.get("training_normal_scene_list")
-            if normal_list:
-                scene_args = [
-                    "--prob_scenes",
-                    str(repaired_list_json),
-                    "--normal_scenes",
-                    str(normal_list),
-                ]
-            else:
-                scene_args = ["--train_scenes", str(repaired_list_json)]
+            scene_args = _rsft_scene_args(
+                cfg,
+                repaired_paths=repaired_paths,
+                repaired_list_json=repaired_list_json,
+                rdir=rdir,
+                round_idx=round_idx,
+            )
             train_cmd = [
                 sys.executable,
                 "-m",
