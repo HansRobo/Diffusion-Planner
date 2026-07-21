@@ -821,6 +821,39 @@ def test_dpm_uses_one_diffusion_time_for_the_full_trajectory():
         assert time.shape == (1,)
 
 
+def test_dpm_direct_x_start_path_preserves_bf16_model_values_without_round_trip():
+    predicted_x0 = torch.randn(2, 1, 4, 4, dtype=torch.bfloat16)
+
+    def x_start_model(_x, _t):
+        return predicted_x0
+
+    solver = DPM_Solver(x_start_model, NoiseScheduleVP(), model_type="x_start")
+    x = torch.randn(2, 1, 4, 4, dtype=torch.float32)
+    result = solver.data_prediction_fn(x, torch.full((2,), 1e-3))
+
+    assert result.dtype == x.dtype
+    assert torch.equal(result, predicted_x0.float())
+
+
+def test_dpm_direct_x_start_matches_legacy_noise_round_trip():
+    schedule = NoiseScheduleVP()
+    x = torch.randn(2, 1, 4, 4)
+    predicted_x0 = torch.randn_like(x)
+    time = torch.full((2,), 1e-3)
+    alpha = schedule.marginal_alpha(time).reshape(2, 1, 1, 1)
+    sigma = schedule.marginal_std(time).reshape(2, 1, 1, 1)
+
+    direct_solver = DPM_Solver(lambda _x, _t: predicted_x0, schedule, model_type="x_start")
+    legacy_solver = DPM_Solver(
+        lambda current_x, _t: (current_x - alpha * predicted_x0) / sigma,
+        schedule,
+    )
+
+    direct = direct_solver.data_prediction_fn(x, time)
+    legacy = legacy_solver.data_prediction_fn(x, time)
+    torch.testing.assert_close(direct, legacy, atol=1e-6, rtol=1e-6)
+
+
 def test_supervised_lr_warms_up_then_stays_fixed_for_twenty_epochs():
     parameter = torch.nn.Parameter(torch.zeros(()))
     optimizer = torch.optim.AdamW([parameter], lr=2e-4)

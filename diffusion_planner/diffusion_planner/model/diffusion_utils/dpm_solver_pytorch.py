@@ -258,6 +258,7 @@ class DPM_Solver:
         model_fn,
         noise_schedule,
         correcting_xt_fn=None,
+        model_type="noise",
     ):
         """Construct a DPM-Solver.
 
@@ -271,13 +272,16 @@ class DPM_Solver:
         both x0 and xt.
 
         Args:
-            model_fn: A noise prediction model function which accepts the continuous-time input (t in [epsilon, T]):
+            model_fn: A noise or x-start prediction model function which accepts the
+                continuous-time input (t in [epsilon, T]):
                 ``
                 def model_fn(x, t_continuous):
                     return noise
                 ``
                 The shape of `x` is `(batch_size, **shape)`, and the shape of `t_continuous` is `(batch_size,)`.
             noise_schedule: A noise schedule object, such as NoiseScheduleVP.
+            model_type: The model output consumed by the solver. ``"x_start"`` avoids
+                the redundant x-start -> noise -> x-start conversion.
             correcting_xt_fn: A function with the following format:
                 ```
                 def correcting_xt_fn(xt, t, step):
@@ -293,7 +297,10 @@ class DPM_Solver:
             Burcu Karagol Ayan, S Sara Mahdavi, Rapha Gontijo Lopes, et al. Photorealistic text-to-image diffusion models
             with deep language understanding. arXiv preprint arXiv:2205.11487, 2022b.
         """
+        if model_type not in {"noise", "x_start"}:
+            raise ValueError(f"Unsupported solver model_type: {model_type}")
         self.model = model_fn
+        self.model_type = model_type
         self.noise_schedule = noise_schedule
         self.correcting_xt_fn = correcting_xt_fn
 
@@ -301,8 +308,12 @@ class DPM_Solver:
         """
         Return the data prediction model (with corrector).
         """
-        noise = self.model(x, t)
+        model_output = self.model(x, t)
         x = x.reshape(x.shape[0], x.shape[1], -1, 4)
+        if self.model_type == "x_start":
+            return model_output.reshape(x.shape).to(dtype=x.dtype)
+
+        noise = model_output
         alpha_t, sigma_t = (
             self.noise_schedule.marginal_alpha(t),
             self.noise_schedule.marginal_std(t),

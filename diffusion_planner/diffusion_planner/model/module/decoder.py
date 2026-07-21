@@ -667,19 +667,21 @@ class Decoder(nn.Module):
             beta_1=self._sde.beta_max,
         )
 
-        model_fn = dpm.model_wrapper(
-            self.dit,
+        model_kwargs = {
+            "cross_c": encoding,
+            "ego_current_velocity": inputs["ego_current_state"][:, 4:6],
+            "global_condition": global_route_condition,
+        }
+
+        def x_start_model_fn(x, diffusion_time):
+            x = x.reshape(B, P, self._future_len, 4)
+            return self.dit(x, diffusion_time, **model_kwargs)
+
+        dpm_solver = dpm.DPM_Solver(
+            x_start_model_fn,
             noise_schedule,
             model_type="x_start",
-            model_kwargs={
-                "cross_c": encoding,
-                "ego_current_velocity": inputs["ego_current_state"][:, 4:6],
-                "global_condition": global_route_condition,
-            },
-            guidance_type="uncond",
         )
-
-        dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule)
 
         x0 = dpm_solver.sample(xT, steps=self._sample_steps, skip_type="logSNR")
 
