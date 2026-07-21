@@ -112,14 +112,19 @@ def _is_grouped_closed_loop_summary(summary: dict) -> bool:
 def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     """Closed-loop rendered rollout; logs metrics + videos to wandb.
 
-    Discovery and workflow live in :class:`ResolvedClosedLoopEvaluation`.
+    Discovery and workflow live in :class:`ResolvedClosedLoopEvaluation`. Runs either a single
+    npz_root (``closed_loop_npz_root``) or, when ``closed_loop_sites_root`` is set, one
+    independent evaluation per site directory under it (see :mod:`scenario_generation.
+    site_discovery`) — sites are never merged into one npz_root/rglob, since route grouping is
+    filename-only and ignores directory structure.
     """
-    if not args.closed_loop_npz_root:
+    if not args.closed_loop_npz_root and not args.closed_loop_sites_root:
         return
 
     from scenario_generation.closed_loop_ddp import ddp_device_for_rank
     from scenario_generation.closed_loop_evaluation import RolloutParams
     from scenario_generation.grouped_closed_loop_eval import ResolvedClosedLoopEvaluation
+    from scenario_generation.site_discovery import discover_sites
     from scenario_generation.wandb_closed_loop import (
         build_full_closed_loop_wandb_log,
         build_grouped_closed_loop_wandb_log,
@@ -133,13 +138,13 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     net = ddp.get_model(model, args.ddp)
     was_training = net.training
     net.eval()
-    log: dict = {}
-    try:
+
+    def run_one(npz_root: str, site_out_dir: str, site_label: str) -> dict:
         evaluator = ResolvedClosedLoopEvaluation.from_training(
             net,
             args,
-            out_dir,
-            npz_root=args.closed_loop_npz_root,
+            site_out_dir,
+            npz_root=npz_root,
             params=RolloutParams(
                 device=cl_device,
                 near_miss_thresh=args.closed_loop_near_miss_thresh,
@@ -162,25 +167,48 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
             ddp_world_size=world_size if ddp_active else 1,
         )
         summary = evaluator.run_distributed() if ddp_active else evaluator.run()
-        if rank == 0 and summary:
-            if _is_grouped_closed_loop_summary(summary):
-                log = build_grouped_closed_loop_wandb_log(summary)
-                totals = (summary.get("grouped_summary") or {}).get("totals") or {}
-                print(
-                    f"grouped closed-loop @epoch {epoch + 1}: "
-                    f"{totals.get('n_steps_run', 0)} steps, "
-                    f"coll={totals.get('collision_steps', 0)}, "
-                    f"near_miss={totals.get('n_near_miss_steps', 0)} "
-                    f"in {summary['elapsed_sec']:.1f}s"
-                    + (f" (DDP x{world_size})" if ddp_active else "")
+        if rank != 0 or not summary:
+            return {}
+        if _is_grouped_closed_loop_summary(summary):
+            site_log = build_grouped_closed_loop_wandb_log(summary)
+            totals = (summary.get("grouped_summary") or {}).get("totals") or {}
+            print(
+                f"grouped closed-loop{site_label} @epoch {epoch + 1}: "
+                f"{totals.get('n_steps_run', 0)} steps, "
+                f"coll={totals.get('collision_steps', 0)}, "
+                f"near_miss={totals.get('n_near_miss_steps', 0)} "
+                f"in {summary['elapsed_sec']:.1f}s"
+                + (f" (DDP x{world_size})" if ddp_active else "")
+            )
+        else:
+            site_log = build_full_closed_loop_wandb_log(summary)
+            print(
+                f"closed-loop{site_label} @epoch {epoch + 1}: {summary['n_segments']} seg in "
+                f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
+                f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+            )
+        return site_log
+
+    log: dict = {}
+    try:
+        if args.closed_loop_sites_root:
+            sites = discover_sites(args.closed_loop_sites_root)
+            if rank == 0 and not sites:
+                print(f"closed-loop: no sites found under {args.closed_loop_sites_root}")
+            for site_name, npz_root in sites.items():
+                site_log = run_one(
+                    str(npz_root), os.path.join(out_dir, site_name), f" [{site_name}]"
                 )
-            else:
-                log = build_full_closed_loop_wandb_log(summary)
-                print(
-                    f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
-                    f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
-                    f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+                # "closed_loop/x" -> "closed_loop/<site_name>/x", so each site gets its own
+                # namespaced scalars/videos in the same wandb step instead of overwriting.
+                log.update(
+                    {
+                        key.replace("closed_loop/", f"closed_loop/{site_name}/", 1): val
+                        for key, val in site_log.items()
+                    }
                 )
+        else:
+            log = run_one(args.closed_loop_npz_root, out_dir, "")
     finally:
         net.train(was_training)
 

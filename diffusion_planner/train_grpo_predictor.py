@@ -330,6 +330,14 @@ def get_args():
         "cadence (save_utd). Empty = disabled. One route per trial.",
     )
     parser.add_argument(
+        "--closed_loop_sites_root",
+        type=str,
+        default="",
+        help="alternative to --closed_loop_npz_root: root dir whose direct subdirectories are "
+        "each evaluated as an independent site (own npz_root), wandb-logged under "
+        "closed_loop/<site_name>/... . Takes precedence over --closed_loop_npz_root when set.",
+    )
+    parser.add_argument(
         "--closed_loop_seg_len",
         type=int,
         default=100000,

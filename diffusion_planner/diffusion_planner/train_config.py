@@ -151,8 +151,17 @@ class TrainConfig:
     # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
     # (``save_utd``). Disabled unless ``closed_loop_npz_root`` is set (dir tree of route NPZ frames,
     # one route).
+    #
+    # ``closed_loop_sites_root`` is an alternative to ``closed_loop_npz_root`` for multi-site
+    # validation: each direct subdirectory of the root (e.g. one per {project}/{map}/) is
+    # evaluated as its own independent npz_root, and results are wandb-logged under
+    # "closed_loop/<site_name>/...". Sites are never merged into one npz_root/rglob, since route
+    # grouping is filename-only and ignores directory structure — mixing sites risks silently
+    # merging unrelated routes that happen to share a bag-name prefix. When both are set,
+    # ``closed_loop_sites_root`` takes precedence.
     # ---------------------------------------------------------
     closed_loop_npz_root: str = ""
+    closed_loop_sites_root: str = ""
     closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
     closed_loop_draw_every: int = 4
     closed_loop_fps: int = 10
