@@ -3160,6 +3160,7 @@ def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_pa
             "train_args": {
                 "batch_size": 8,
                 "num_workers": 1,
+                "ema_decay": 0.996,
             },
             "nproc_per_node": 1,
         },
@@ -3185,6 +3186,9 @@ def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_pa
     assert "train_predictor" in cmd
     assert cmd[cmd.index("--train_epochs") + 1] == "7"
     assert cmd[cmd.index("--batch_size") + 1] == "2"
+    # ema_decay must survive the train_args passthrough — 0.999 is too slow
+    # to absorb behavior changes within a short per-round fine-tune.
+    assert cmd[cmd.index("--ema_decay") + 1] == "0.996"
 
 
 def test_torchrun_subprocess_cleanup_removes_stale_file_store(tmp_path, monkeypatch):
@@ -3819,6 +3823,47 @@ def test_depart_morph_bails_on_stationary_or_behind_expert():
     assert diag["stage"] == "expert_behind_ego"
 
 
+def test_depart_morph_rejects_undrivable_geometry():
+    det = _straight_traj(np.zeros(_MORPH_T))
+    # Near-pure-lateral expert offset: no forward-drivable bridge exists, and
+    # a raw chord would emit sideways (crab-motion) headings as supervision.
+    lateral = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.5)) - 0.5)
+    lateral[:, 1] = 0.4
+    _, diag = build_depart_morph_candidate(det, lateral, return_diag=True)
+    assert diag["stage"] == "not_forward_from_ego"
+    # Reversing expert: arc-length heading would flip ~180 deg at the retrace.
+    reversing = _straight_traj(10.0 - np.cumsum(np.full(_MORPH_T, 0.1)))
+    _, diag = build_depart_morph_candidate(det, reversing, return_diag=True)
+    assert diag["stage"] == "path_reversal"
+    # A small forward gap must still synthesize with forward headings (the
+    # bridge, not a raw chord, applies at ANY positive gap).
+    near = _straight_traj(0.3 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    morph, diag = build_depart_morph_candidate(det, near, return_diag=True)
+    assert diag["stage"] == "ok"
+    headings = np.degrees(np.arctan2(morph[:, 3], morph[:, 2]))
+    assert np.abs(headings).max() < 10.0
+
+
+def test_depart_morph_rejects_padded_or_nonfinite_expert():
+    det = _straight_traj(np.zeros(_MORPH_T))
+    # A zero-padded LEADING sample must not read as gap=0 and bypass the
+    # gap/behind gates — the first valid sample defines the expert start.
+    far = _straight_traj(40.0 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    far[0] = 0.0
+    _, diag = build_depart_morph_candidate(det, far, return_diag=True)
+    assert diag["stage"] == "gap_too_large"
+    behind = _straight_traj(-8.0 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    behind[0] = 0.0
+    _, diag = build_depart_morph_candidate(det, behind, return_diag=True)
+    assert diag["stage"] == "expert_behind_ego"
+    # NaN passes every threshold gate (comparisons are False) so it must be
+    # rejected up front, not propagated into the SFT target.
+    nan_expert = _straight_traj(6.0 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    nan_expert[30, 0] = np.nan
+    _, diag = build_depart_morph_candidate(det, nan_expert, return_diag=True)
+    assert diag["stage"] == "non_finite_input"
+
+
 def _patience_npz(path, *, red_route: bool, v_profile: np.ndarray) -> None:
     T = len(v_profile) + 1
     x = np.concatenate([[0.0], np.cumsum(v_profile * 0.1)])
@@ -3954,6 +3999,43 @@ def test_best_safe_candidate_reports_morph_outcome():
     assert idx is None
     assert meta["reason"] == "no_safe_candidate"
     assert meta["morph_outcome"] == "gate_rejected"
+
+
+def test_best_safe_candidate_reports_depart_outcome():
+    # The depart candidate must get the same outcome taxonomy as the stop
+    # morph (selected / lost_selection / gate_rejected), independently keyed.
+    source_row = {"repair_labels": ["expert_disagreement"], "state_class": "stopped"}
+    expert = torch.zeros(4, 4)
+    mover = torch.ones(4, 4)
+    depart = torch.full((4, 4), 2.0)
+
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [
+            _morph_outcome_candidate_row(["clean"]),
+            _morph_outcome_candidate_row(["clean"]),
+            _morph_outcome_candidate_row(["road_border_crossing"]),
+        ],
+        [
+            _morph_outcome_reward_row(5.0),
+            _morph_outcome_reward_row(3.0),
+            _morph_outcome_reward_row(0.0, rb_crossing=True),
+        ],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, depart, expert],
+        reference_traj=expert,
+        morph_index=2,
+        depart_index=1,
+    )
+    assert idx is not None
+    outcome = meta["depart_outcome"]
+    assert outcome == ("selected" if idx == 1 else "lost_selection")
+    if outcome == "lost_selection":
+        assert "depart_r2lpl_score" in meta
+    # Both scripted candidates reported independently.
+    assert meta["morph_outcome"] == "gate_rejected"
+    assert meta["morph_labels"] == ["road_border_crossing"]
 
 
 # ---------------------------------------------------------------------------

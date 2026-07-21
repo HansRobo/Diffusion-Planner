@@ -515,7 +515,15 @@ def _best_safe_candidate(
     candidate_trajs: list[torch.Tensor] | torch.Tensor | np.ndarray | None = None,
     reference_traj: torch.Tensor | np.ndarray | None = None,
     morph_index: int | None = None,
+    depart_index: int | None = None,
 ) -> tuple[int | None, dict[str, Any]]:
+    # Scripted candidates get a per-candidate outcome taxonomy in the meta
+    # (selected / lost_selection / gate_rejected) keyed by their prefix.
+    scripted = {
+        prefix: idx_s
+        for prefix, idx_s in (("morph", morph_index), ("depart", depart_index))
+        if idx_s is not None
+    }
     accepted: list[tuple[float, float, float, int]] = []
     candidate_traj_list = None
     if candidate_trajs is not None:
@@ -543,18 +551,18 @@ def _best_safe_candidate(
             "best_total": best_total,
             "best_sc_min_dist": best_sc,
         }
-        if morph_index is not None:
-            meta["morph_outcome"] = "gate_rejected"
-            meta["morph_labels"] = list(candidate_rows[morph_index].get("labels", []))
-            meta["morph_gate_flags"] = _global_gate_flags(
-                candidate_rows[morph_index], reward_rows[morph_index]
+        for prefix, idx_s in scripted.items():
+            meta[f"{prefix}_outcome"] = "gate_rejected"
+            meta[f"{prefix}_labels"] = list(candidate_rows[idx_s].get("labels", []))
+            meta[f"{prefix}_gate_flags"] = _global_gate_flags(
+                candidate_rows[idx_s], reward_rows[idx_s]
             )
         return None, meta
 
     uses_r2lpl_conflict_selection = "expert_disagreement" in set(
         source_row.get("repair_labels", [])
     )
-    morph_r2lpl_score: float | None = None
+    scripted_r2lpl_scores: dict[str, float] = {}
     if uses_r2lpl_conflict_selection:
         rule_scores = _normalize_values([item[2] for item in accepted])
         state_class = _r2lpl_state_class(source_row)
@@ -564,8 +572,9 @@ def _best_safe_candidate(
             violation_score, deviation_penalty, _reward_total, idx = item
             expert_score = math.exp(-max(deviation_penalty, 0.0) / 4.0)
             r2lpl_score = rule_weight * rule_score + expert_weight * expert_score
-            if morph_index is not None and idx == morph_index:
-                morph_r2lpl_score = float(r2lpl_score)
+            for prefix, idx_s in scripted.items():
+                if idx == idx_s:
+                    scripted_r2lpl_scores[prefix] = float(r2lpl_score)
             ranked.append((-r2lpl_score, violation_score, deviation_penalty, idx))
         ranked.sort()
         neg_r2lpl_score, violation_score, deviation_penalty, idx = ranked[0]
@@ -602,20 +611,59 @@ def _best_safe_candidate(
     if selected_r2lpl_score is not None:
         meta["selected_r2lpl_score"] = float(selected_r2lpl_score)
         meta["selected_r2lpl_state_class"] = selected_state_class
-    if morph_index is not None:
-        if idx == morph_index:
-            meta["morph_outcome"] = "selected"
-        elif morph_index in accepted_indices:
-            meta["morph_outcome"] = "lost_selection"
-            if morph_r2lpl_score is not None:
-                meta["morph_r2lpl_score"] = morph_r2lpl_score
+    for prefix, idx_s in scripted.items():
+        if idx == idx_s:
+            meta[f"{prefix}_outcome"] = "selected"
+        elif idx_s in accepted_indices:
+            meta[f"{prefix}_outcome"] = "lost_selection"
+            if prefix in scripted_r2lpl_scores:
+                meta[f"{prefix}_r2lpl_score"] = scripted_r2lpl_scores[prefix]
         else:
-            meta["morph_outcome"] = "gate_rejected"
-            meta["morph_labels"] = list(candidate_rows[morph_index].get("labels", []))
-            meta["morph_gate_flags"] = _global_gate_flags(
-                candidate_rows[morph_index], reward_rows[morph_index]
+            meta[f"{prefix}_outcome"] = "gate_rejected"
+            meta[f"{prefix}_labels"] = list(candidate_rows[idx_s].get("labels", []))
+            meta[f"{prefix}_gate_flags"] = _global_gate_flags(
+                candidate_rows[idx_s], reward_rows[idx_s]
             )
     return idx, meta
+
+
+def _append_scripted_candidate(
+    traj: np.ndarray,
+    *,
+    scene_path: str,
+    data: dict[str, Any],
+    rcfg,
+    scoring_data,
+    thresholds: dict[str, float],
+    cls_args,
+    device,
+    candidate_rows: list[dict[str, Any]],
+    reward_rows: list,
+    scene_trajs: torch.Tensor,
+) -> tuple[int, torch.Tensor]:
+    """Classify + score a scripted repair candidate and append it to the
+    scene's candidate set in lockstep (rows, rewards, trajs).
+
+    Returns ``(candidate_index, updated_scene_trajs)``.
+    """
+    tensor = torch.from_numpy(np.ascontiguousarray(traj)).to(device=device, dtype=scene_trajs.dtype)
+    cls = classify_loaded_scene_candidates_batch(
+        [scene_path],
+        tensor[None, None],
+        [data],
+        rcfg,
+        moving_collision_thresh=thresholds["moving_collision_thresh"],
+        moving_near_thresh=thresholds["moving_near_thresh"],
+        static_near_thresh=thresholds["static_near_thresh"],
+        rb_near_thresh=thresholds["rb_near_thresh"],
+        device=device,
+        args=cls_args,
+    )
+    reward_row = compute_reward_batch(tensor[None], scoring_data, rcfg)[0]
+    index = len(candidate_rows)
+    candidate_rows.append(cls[0][0])
+    reward_rows.append(reward_row)
+    return index, torch.cat([scene_trajs, tensor[None]], dim=0)
 
 
 @torch.no_grad()
@@ -813,13 +861,25 @@ def build_repaired_targets(
 
             name = _output_name_for_scene(row["scene_path"])
 
+            expert_traj = det_traj = None
+            if is_expert and (repair_expert_gt_candidate or enable_depart_morph):
+                expert_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
+                det_traj = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
+            scripted_kwargs = dict(
+                scene_path=str(row["scene_path"]),
+                data=data,
+                rcfg=rcfg,
+                scoring_data=scoring_data,
+                thresholds=thresholds,
+                cls_args=cls_args,
+                device=device,
+            )
+
             # Extra det-path re-timing morph candidate for expert_disagreement scenes.
             morph_added = False
             morph_index: int | None = None
             morph_diag: dict[str, Any] | None = None
             if repair_expert_gt_candidate and is_expert:
-                expert_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
-                det_traj = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
                 stop_anchor_xy = None
                 if expert_stop_anchor == "recorded":
                     if "ego_recorded_future" not in data:
@@ -846,28 +906,13 @@ def build_repaired_targets(
                     return_diag=True,
                 )
                 if morph is not None:
-                    morph_tensor = torch.from_numpy(np.ascontiguousarray(morph)).to(
-                        device=device, dtype=scene_trajs.dtype
+                    morph_index, scene_trajs = _append_scripted_candidate(
+                        morph,
+                        candidate_rows=candidate_rows,
+                        reward_rows=reward_rows,
+                        scene_trajs=scene_trajs,
+                        **scripted_kwargs,
                     )
-                    morph_cls = classify_loaded_scene_candidates_batch(
-                        [str(row["scene_path"])],
-                        morph_tensor[None, None],
-                        [data],
-                        rcfg,
-                        moving_collision_thresh=thresholds["moving_collision_thresh"],
-                        moving_near_thresh=thresholds["moving_near_thresh"],
-                        static_near_thresh=thresholds["static_near_thresh"],
-                        rb_near_thresh=thresholds["rb_near_thresh"],
-                        device=device,
-                        args=cls_args,
-                    )
-                    morph_reward_row = compute_reward_batch(morph_tensor[None], scoring_data, rcfg)[
-                        0
-                    ]
-                    morph_index = len(candidate_rows)
-                    candidate_rows.append(morph_cls[0][0])
-                    reward_rows.append(morph_reward_row)
-                    scene_trajs = torch.cat([scene_trajs, morph_tensor[None]], dim=0)
                     morph_added = True
 
             # Depart morph for the fail-to-take-off direction: the stop morph
@@ -883,38 +928,21 @@ def build_repaired_targets(
                 and is_expert
                 and row.get("expert_disagreement_reason") == "model_lagging_expert"
             ):
-                expert_traj_dep = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
-                det_traj_dep = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
                 depart, depart_diag = build_depart_morph_candidate(
-                    det_traj_dep,
-                    expert_traj_dep,
+                    det_traj,
+                    expert_traj,
                     max_accel=expert_morph_max_accel,
                     max_jerk=expert_morph_max_jerk,
                     return_diag=True,
                 )
                 if depart is not None:
-                    depart_tensor = torch.from_numpy(np.ascontiguousarray(depart)).to(
-                        device=device, dtype=scene_trajs.dtype
+                    depart_index, scene_trajs = _append_scripted_candidate(
+                        depart,
+                        candidate_rows=candidate_rows,
+                        reward_rows=reward_rows,
+                        scene_trajs=scene_trajs,
+                        **scripted_kwargs,
                     )
-                    depart_cls = classify_loaded_scene_candidates_batch(
-                        [str(row["scene_path"])],
-                        depart_tensor[None, None],
-                        [data],
-                        rcfg,
-                        moving_collision_thresh=thresholds["moving_collision_thresh"],
-                        moving_near_thresh=thresholds["moving_near_thresh"],
-                        static_near_thresh=thresholds["static_near_thresh"],
-                        rb_near_thresh=thresholds["rb_near_thresh"],
-                        device=device,
-                        args=cls_args,
-                    )
-                    depart_reward_row = compute_reward_batch(
-                        depart_tensor[None], scoring_data, rcfg
-                    )[0]
-                    depart_index = len(candidate_rows)
-                    candidate_rows.append(depart_cls[0][0])
-                    reward_rows.append(depart_reward_row)
-                    scene_trajs = torch.cat([scene_trajs, depart_tensor[None]], dim=0)
                     depart_added = True
 
             best_idx, meta = _best_safe_candidate(
@@ -926,6 +954,7 @@ def build_repaired_targets(
                 candidate_trajs=scene_trajs,
                 reference_traj=reference_traj,
                 morph_index=morph_index if morph_added else None,
+                depart_index=depart_index if depart_added else None,
             )
             morph_selected = bool(morph_added and best_idx == morph_index)
             depart_selected = bool(depart_added and best_idx == depart_index)
@@ -939,8 +968,6 @@ def build_repaired_targets(
                         meta["expert_depart_diag"] = depart_diag
                         if not depart_added:
                             meta["depart_outcome"] = f"not_synthesized:{depart_diag['stage']}"
-                    if depart_added:
-                        meta["depart_outcome"] = "selected" if depart_selected else "not_selected"
                 # Synthesis diagnostics: why the morph exists / was rejected before
                 # ever reaching the gates ("stage" == "ok" when synthesized). The
                 # gate/selection outcome ("morph_outcome") comes from

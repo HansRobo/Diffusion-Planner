@@ -150,6 +150,13 @@ Raw logged anchor scenes carry
 3-col anchors as 4-col copies under `r2lpl_round_NNN/anchor_scenes_4col/`
 (zero padding rows preserved) before the union.
 
+For the base_sft backend, `training.train_args.ema_decay` is forwarded to
+`train_predictor --ema_decay`. The default 0.999 (time constant ~1000 steps)
+is tuned for long SFT runs and is too slow for a short per-round fine-tune —
+the EMA checkpoint barely absorbs the round's behavior change. Set it so the
+round's step count spans a few time constants (e.g. 0.996 for rounds of
+several hundred to ~1000 steps).
+
 At a high level:
 
 ```text
@@ -435,9 +442,13 @@ off by default) a second scripted candidate is synthesized for those scenes
 from the EXPERT path's geometry: a cubic Hermite bridge connects the ego pose
 to the expert path, and the same accel/jerk-limited tracker chases the
 expert's progress schedule starting at the ego (no jump at t=0; full catch-up
-within the horizon is not required). It competes through the same
-gates/reward as every candidate; per-row diagnostics land in
-`expert_depart_added/selected/diag` and `depart_outcome`.
+within the horizon is not required). Synthesis rejects undrivable inputs
+(non-finite samples, reversing/doubling-back geometry, near-pure-lateral
+expert offsets, expert behind or beyond the bridge range) with a diagnostic
+stage. It competes through the same gates/reward as every candidate;
+per-row diagnostics land in `expert_depart_added/selected/diag` and
+`depart_outcome` (`selected` / `lost_selection` / `gate_rejected` /
+`not_synthesized:<stage>` — same taxonomy as `morph_outcome`).
 
 ## Outputs
 

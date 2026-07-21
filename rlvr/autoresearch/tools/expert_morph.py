@@ -397,10 +397,17 @@ _DEPART_MIN_PROGRESS_M = 3.0
 # Expert starting behind the ego (longitudinal x below this) is not a
 # departure target — the bridge would point backwards.
 _DEPART_EXPERT_BEHIND_X_M = -1.0
-# Below this gap the bridge is skipped (expert path effectively starts at the
-# ego); above it, the bridge is sampled at this spacing.
-_DEPART_BRIDGE_MIN_GAP_M = 0.5
+# Bridge sample spacing; gaps at numerical zero skip the bridge entirely.
 _DEPART_BRIDGE_SPACING_M = 0.5
+# Consecutive path tangents turning more than 90 deg (dot < 0) mean the
+# polyline doubles back on itself — arc-length heading would flip mid-path,
+# which is not drivable supervision. Checked on segments longer than
+# _DEPART_TANGENT_MIN_SEG_M so near-stationary jitter cannot false-trigger.
+_DEPART_TANGENT_MIN_SEG_M = 0.05
+# The path must leave the ego within this cone of its own heading (+x in the
+# ego frame): a start tangent outside it means the expert offset is mostly
+# lateral and no forward-drivable bridge exists (the output would crab).
+_DEPART_START_CONE_COS = np.cos(np.radians(45.0))
 
 
 def build_depart_morph_candidate(
@@ -442,14 +449,24 @@ def build_depart_morph_candidate(
         return _ret(None, "too_short_horizon")
     det = det[:T]
     expert = expert[:T].copy()
+    if not (np.isfinite(det).all() and np.isfinite(expert).all()):
+        # NaN survives every threshold gate below (comparisons are False), so
+        # it must be rejected up front or it propagates into the SFT target.
+        return _ret(None, "non_finite_input")
 
-    # Hold the last valid pose over zero-padded expert tails (same convention
-    # as build_expert_morph_candidate).
+    # Hold the last valid pose over zero-padded expert tails, and back-fill
+    # zero-padded leading samples from the first valid one (same convention
+    # as build_expert_morph_candidate; a leading pad would otherwise make
+    # gap=0 and bypass the gap/behind gates).
     expert_valid = np.abs(expert[:, :2]).sum(axis=1) > _EPS
     if expert_valid.any() and not expert_valid.all():
-        last_valid = int(np.max(np.flatnonzero(expert_valid)))
+        valid_idx = np.flatnonzero(expert_valid)
+        last_valid = int(valid_idx[-1])
         if last_valid < T - 1:
             expert[last_valid + 1 :] = expert[last_valid]
+        first_valid = int(valid_idx[0])
+        if first_valid > 0:
+            expert[:first_valid] = expert[first_valid]
 
     expert_xy = expert[:, :2]
     v_gt = np.linalg.norm(np.diff(expert_xy, axis=0), axis=1) / dt
@@ -470,10 +487,12 @@ def build_depart_morph_candidate(
     te = steps[int(np.argmax(moving))]
     te = te / max(np.linalg.norm(te), _EPS)
 
-    if gap < _DEPART_BRIDGE_MIN_GAP_M:
+    if gap <= _EPS:
         polyline = np.vstack([[0.0, 0.0], expert_xy])
     else:
         # Cubic Hermite bridge origin->expert start; ego-frame heading is +x.
+        # Used for ANY positive gap: a raw chord would put the path tangent
+        # (= output heading) sideways for laterally offset experts.
         n_bridge = max(4, int(gap / _DEPART_BRIDGE_SPACING_M))
         u = np.linspace(0.0, 1.0, n_bridge)[:, None]
         h00 = 2 * u**3 - 3 * u**2 + 1
@@ -489,6 +508,18 @@ def build_depart_morph_candidate(
     polyline = polyline[keep]
     if polyline.shape[0] < 2:
         return _ret(None, "degenerate_geometry")
+
+    # Reject doubled-back geometry (reversing expert, or a bridge forced
+    # through a near-pure-lateral offset): heading comes from the arc-length
+    # tangent, so a reversal shows up as an instantaneous ~180 deg flip.
+    seg = np.diff(polyline, axis=0)
+    seg = seg[np.linalg.norm(seg, axis=1) > _DEPART_TANGENT_MIN_SEG_M]
+    if seg.shape[0] >= 1:
+        t_unit = seg / np.linalg.norm(seg, axis=1, keepdims=True)
+        if float(t_unit[0, 0]) < _DEPART_START_CONE_COS:
+            return _ret(None, "not_forward_from_ego")
+        if seg.shape[0] >= 2 and float(np.min(np.sum(t_unit[:-1] * t_unit[1:], axis=1))) < 0.0:
+            return _ret(None, "path_reversal")
     s_poly = _cumulative_arc(polyline)
 
     # Demand: chase the expert — at step i the expert sits at (bridge length +

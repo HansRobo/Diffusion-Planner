@@ -84,6 +84,8 @@
       "waits_fraction": 0.25,
       "seed": 0
     },
-    "_comment_normal_scene_list": "Ranked-SFT backend counterpart of 'anchor' (which is base_sft-only): set training.normal_scene_list to a JSON list of real normal scenes to train each round as a prob/normal split (repaired = prob). Requires explicit n_prob_scenes/n_normal_scenes in the training config; n_prob_scenes must be >= the expected repaired scenes per round or repairs are subsampled."
+    "normal_scene_list": null,
+    "_comment_normal_scene_list": "Ranked-SFT backend counterpart of 'anchor' (which is base_sft-only): set training.normal_scene_list to a JSON list of real normal scenes to train each round as a prob/normal split (repaired = prob). Requires explicit n_prob_scenes/n_normal_scenes in the training config; n_prob_scenes must be >= the expected repaired scenes per round or repairs are subsampled.",
+    "_comment_ema_decay": "base_sft backend: training.train_args.ema_decay is forwarded to train_predictor --ema_decay. Default 0.999 (~1000-step time constant) barely absorbs a short per-round fine-tune; set it so the round's step count spans a few time constants (e.g. 0.996 for rounds of several hundred to ~1000 steps)."
   }
 }
