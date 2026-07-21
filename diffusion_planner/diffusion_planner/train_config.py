@@ -105,7 +105,7 @@ class TrainConfig:
     turn_indicator_generated_loss_weight: float = 1.0
     turn_indicator_expert_loss_weight: float = 1.0
     # ``policy`` adapts the planner without evaluating the auxiliary head;
-    # ``turn_indicator`` freezes the planner and trains the head on final DPM samples.
+    # ``turn_indicator`` freezes the planner and trains the head in the mode below.
     supervised_training_stage: Literal["joint", "policy", "turn_indicator"] = "joint"
     # Expert pretraining avoids the expensive DPM rollout while the randomly initialized
     # head learns clean intent features. Deployment fine-tuning then exposes it to the

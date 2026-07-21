@@ -286,9 +286,14 @@ def test_head_stage_uses_final_dpm_trajectory_and_only_updates_head():
     heading = heading / heading.norm(dim=-1, keepdim=True)
     ego_future = torch.cat([torch.randn(batch, 80, 2), heading], dim=-1)
 
-    with patch.object(model.encoder, "forward", wraps=model.encoder.forward) as encoder_forward:
+    with (
+        patch.object(model.encoder, "forward", wraps=model.encoder.forward) as encoder_forward,
+        patch.object(model.decoder.dit, "forward", wraps=model.decoder.dit.forward) as dit_forward,
+    ):
         loss = compute_turn_indicator_head_training_loss(model, inputs, ego_future, args)
     assert encoder_forward.call_count == 1
+    # DPM-Solver++ 2M uses one initial denoise plus one evaluation per configured step.
+    assert dit_forward.call_count == args.diffusion_sample_steps + 1
     assert torch.isfinite(loss["turn_indicator_loss"])
     loss["turn_indicator_loss"].backward()
     assert all(parameter.grad is None for parameter in model.encoder.parameters())
