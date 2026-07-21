@@ -104,6 +104,15 @@ expected = {
     "valid_set_list": valid_list,
     "extra_train_set_repeat": 10,
     "filter_skipped": False,
+    "seed": 3407,
+    "train_subsample_step": 1,
+    "align_legacy_neighbor_futures": True,
+    "use_data_augment": True,
+    "augment_type": "quintic",
+    "augment_prob": 0.5,
+    "num_refine": 20,
+    "ego_past_noise_std": 0.1,
+    "use_smoothing_future_trajectory": True,
     "future_len": 80,
     "time_len": 31,
     "ego_history_frames": 21,
@@ -158,6 +167,7 @@ COMMON_ARGS=(
   --extra_train_set_repeat 10
   --valid_set_list "${VALID_LIST}"
   --filter_skipped False
+  --seed 3407
   --train_subsample_step 1
   --align_legacy_neighbor_futures True
   --normalization_file_path "${NORMALIZATION}"
@@ -178,6 +188,7 @@ COMMON_ARGS=(
   --ddp_static_graph True
   --compile_model True
   --use_data_augment True
+  --augment_type quintic
   --augment_prob 0.5
   --num_refine 20
   --ego_past_noise_std 0.1
