@@ -1,9 +1,20 @@
 # Latent OOD Stage 1.5 — Feature Formulation Evaluation
 
+> **INVALIDATED (2026-07-17):** All results in this document are invalid.
+> Override npz files had all-zero lane/route/polygon tensors due to a
+> coordinate-shift bug in `ros_scripts/extract_map_from_bag.py`, while the
+> normal/training npz had full map data. Embeddings are not comparable
+> across these two populations. Additionally, the v1 +3pt AUPRC lift was
+> an imputation artifact (zero-imputing missing EC subscores); the v2
+> corrected evaluation showed +0.0004 AUPRC — but both v1 and v2 ran on
+> invalid embeddings. The pipeline code and scripts are correct; the input
+> data was broken. H-B (maneuver conditioning) was also never tested due
+> to a separate bug. Pending fix to map extraction and full rerun.
+
 > Date: 2026-07-06
-> Status: Completed (Stage 1.5 evaluation, per `docs/superpowers/specs/2026-07-03-latent-ood-stage1.5-design.md`)
+> Status: ~~Completed~~ INVALIDATED — see banner above
 > Branch: `feat/latent-ood-stage1`
-> Prior results: `docs/experiment_results/2026-07-latent-ood-first-experiment.md` (Stage 1)
+> Prior results: `docs/experiment_results/2026-07-latent-ood-first-experiment.md` (Stage 1, also invalidated)
 
 ## Executive Summary
 

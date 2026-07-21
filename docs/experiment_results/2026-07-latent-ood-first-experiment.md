@@ -1,7 +1,17 @@
 # Latent OOD First Experiment — Results
 
+> **INVALIDATED (2026-07-17):** All results in this document are invalid.
+> Override npz files had all-zero lane/route/polygon tensors due to a
+> coordinate-shift bug in `ros_scripts/extract_map_from_bag.py`, while the
+> normal training bank npz had full map data. The encoder saw fundamentally
+> different inputs for override vs normal scenes. The reported 1.38x
+> enrichment (p<10^-281) was measuring map presence/absence, not scene
+> novelty. The per-category OOD differences and "design spec minimum
+> criteria MET" claim are equally invalid. The pipeline code is correct;
+> the input data was broken. Pending fix to map extraction and full rerun.
+
 > Date: 2026-07-03
-> Status: Completed (Stage 1 offline research tool, §15 of design spec)
+> Status: ~~Completed~~ INVALIDATED — see banner above
 > Design reference: `at-team-tools/lin/diffusion-planner-risk-scene/docs/latent_scene_ood_detector.md` §14
 
 ## Executive Summary
