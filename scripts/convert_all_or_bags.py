@@ -4,21 +4,20 @@
 For each bag listed in `data/bag_map_versions.json` (built by an earlier task
 by reading `/map/vector_map` out of every bag once):
 
-1. Look up (or extract, if not already cached) a lanelet2 `.osm` map for that
+1. Look up (or extract, if not already cached) a lanelet2 `.bin` map for that
    bag's `(area, map_version)` pair. Extraction is delegated to
-   `ros_scripts/extract_map_from_bag.py` as a subprocess -- that script
-   already handles two non-obvious correctness issues (MGRS coordinate-shift
-   for round-tripping a possibly-negative local frame, and a dangling cached
-   lanelet member that makes `lanelet2.io.write()` silently drop lanelets).
-   Do NOT reimplement map extraction inline here -- see that script's
-   docstring for why a naive `lanelet2.io.loadRobust` + `write` does not work.
+   `ros_scripts/extract_map_bin_from_bag.py` as a subprocess -- that script
+   saves the raw binary map in the bag's native coordinate frame (no MGRS
+   shift), so ego-position lane lookups work correctly. It also handles the
+   dangling cached lanelet member that makes `lanelet2.io.write()` silently
+   drop lanelets.
 2. Run `ros_scripts/parse_rosbag.py` as a subprocess against the bag + the
-   matched `.osm`, producing one `.npz` (+ companion `.json`) per valid frame
+   matched `.bin`, producing one `.npz` (+ companion `.json`) per valid frame
    under `data/or_scene_npz/<area>/<category>/<scene>/`.
 
 Maps are cached on disk keyed by `(area, version)`, so bags sharing a map
 version (there are only 5 distinct versions across all 75 bags) reuse the
-same extracted `.osm` -- extraction only runs once per version, not once per
+same extracted `.bin` -- extraction only runs once per version, not once per
 bag.
 
 ## Environment (IMPORTANT -- do not use `uv run python` for this script)
@@ -70,7 +69,7 @@ ORSCENE_ROOT = Path("/mnt/nas/private_workspace/chenglin/ORScene_bags")
 BAG_MAP_VERSIONS_PATH = REPO_ROOT / "data" / "bag_map_versions.json"
 OUTPUT_ROOT = REPO_ROOT / "data" / "or_scene_npz"
 MAP_CACHE_DIR = Path("/home/chenglin/autoware_map/extracted")
-EXTRACT_MAP_SCRIPT = REPO_ROOT / "ros_scripts" / "extract_map_from_bag.py"
+EXTRACT_MAP_SCRIPT = REPO_ROOT / "ros_scripts" / "extract_map_bin_from_bag.py"
 PARSE_SCRIPT = REPO_ROOT / "ros_scripts" / "parse_rosbag.py"
 
 MIN_FREE_GB_DEFAULT = 50.0
@@ -118,34 +117,34 @@ def existing_npz_count(save_dir: Path, bag_stem: str) -> int:
     return len(list(save_dir.glob(f"{bag_stem}_*.npz")))
 
 
-def get_or_create_osm(area: str, version: str, bag_path: Path, cache_dir: Path) -> Path:
-    """Get the cached `.osm` for (area, version), extracting it from `bag_path`
-    via `ros_scripts/extract_map_from_bag.py` if not already cached."""
+def get_or_create_bin(area: str, version: str, bag_path: Path, cache_dir: Path) -> Path:
+    """Get the cached `.bin` for (area, version), extracting it from `bag_path`
+    via `ros_scripts/extract_map_bin_from_bag.py` if not already cached."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    osm_path = cache_dir / f"{area}_v{version}.osm"
-    if osm_path.exists() and osm_path.stat().st_size > 0:
-        return osm_path
+    bin_path = cache_dir / f"{area}_v{version}.bin"
+    if bin_path.exists() and bin_path.stat().st_size > 0:
+        return bin_path
 
     cmd = [
         "python3", str(EXTRACT_MAP_SCRIPT),
         str(bag_path),
-        "--output", str(osm_path),
+        "--output", str(bin_path),
     ]
     print(f"  Extracting map for {area} v{version} from {bag_path.name} ...")
     result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0 or not osm_path.exists() or osm_path.stat().st_size == 0:
+    if result.returncode != 0 or not bin_path.exists() or bin_path.stat().st_size == 0:
         # Clean up a partial/empty file so a later retry doesn't treat it as cached.
-        if osm_path.exists():
-            osm_path.unlink()
+        if bin_path.exists():
+            bin_path.unlink()
         raise RuntimeError(
             f"map extraction failed for {area} v{version} (bag={bag_path}):\n"
             f"{result.stderr[-2000:]}"
         )
-    print(f"  Cached map: {osm_path}")
-    return osm_path
+    print(f"  Cached map: {bin_path}")
+    return bin_path
 
 
-def convert_bag(bag_path: Path, osm_path: Path, save_dir: Path) -> tuple[int, str | None]:
+def convert_bag(bag_path: Path, map_path: Path, save_dir: Path) -> tuple[int, str | None]:
     """Run parse_rosbag.py and return (npz_count_produced_by_this_bag, error_or_None)."""
     save_dir.mkdir(parents=True, exist_ok=True)
     bag_stem = bag_path.stem
@@ -154,7 +153,7 @@ def convert_bag(bag_path: Path, osm_path: Path, save_dir: Path) -> tuple[int, st
 
     cmd = [
         "python3", str(PARSE_SCRIPT),
-        str(bag_path), str(osm_path), str(save_dir),
+        str(bag_path), str(map_path), str(save_dir),
         "--step", "1", "--min_frames", "0",
     ]
     env = os.environ.copy()
@@ -239,8 +238,8 @@ def main() -> None:
             break
 
         try:
-            osm_path = get_or_create_osm(area, version, bag_path, args.map_cache_dir)
-            n_npz, err = convert_bag(bag_path, osm_path, save_dir)
+            bin_path = get_or_create_bin(area, version, bag_path, args.map_cache_dir)
+            n_npz, err = convert_bag(bag_path, bin_path, save_dir)
             if err is not None:
                 print(f"  FAILED (parse_rosbag.py exited nonzero): {err}")
                 n_failed += 1
