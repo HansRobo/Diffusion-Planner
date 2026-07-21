@@ -3844,6 +3844,20 @@ def test_depart_morph_rejects_undrivable_geometry():
     assert np.abs(headings).max() < 10.0
 
 
+def test_depart_morph_preserves_recorded_wait_at_origin():
+    # An expert waiting at the ego-frame origin is written as [0, 0, cos, sin]
+    # (valid unit heading, reproducer_rollout convention) — NOT padding.
+    # Treating those rows as leading padding would back-fill them from the
+    # first moved pose and synthesize motion before the recorded departure.
+    det = _straight_traj(np.zeros(_MORPH_T))
+    xs = np.concatenate([np.zeros(10), np.cumsum(np.full(_MORPH_T - 10, 0.5))])
+    expert = _straight_traj(xs)  # waits 1 s at origin, then departs at ~5 m/s
+    morph, diag = build_depart_morph_candidate(det, expert, return_diag=True)
+    assert diag["stage"] == "ok"
+    assert np.abs(morph[:10, 0]).max() < 0.05  # initial wait preserved
+    assert morph[-1, 0] > 10.0  # then genuinely departs
+
+
 def test_depart_morph_rejects_padded_or_nonfinite_expert():
     det = _straight_traj(np.zeros(_MORPH_T))
     # A zero-padded LEADING sample must not read as gap=0 and bypass the
@@ -4534,8 +4548,10 @@ def test_validate_normal_scene_list_config(tmp_path):
     prob/normal split it enables needs explicit, sane n_prob_scenes /
     n_normal_scenes — run_experiment would otherwise only raise (or silently
     subsample) after the expensive mine+repair phases."""
+    scene = tmp_path / "normal_0.npz"
+    np.savez(scene, neighbor_agents_future=np.zeros((1, 2, 4), dtype=np.float32))
     normals = tmp_path / "normals.json"
-    normals.write_text(json.dumps(["/data/normal_0.npz"]))
+    normals.write_text(json.dumps([str(scene)]))
     tcfg = tmp_path / "train_cfg.json"
     tcfg.write_text(json.dumps({"ranked_sft_mode": "curated"}))
     base = {
@@ -4569,6 +4585,14 @@ def test_validate_normal_scene_list_config(tmp_path):
     with pytest.raises(ValueError, match="non-empty JSON list"):
         round_runner._validate_normal_scene_list_config(
             {**base, "training_normal_scene_list": str(not_paths)}
+        )
+    # A listed scene file that does not exist fails at startup, not in the
+    # 4-col conversion after the mine+repair phases.
+    broken = tmp_path / "broken.json"
+    broken.write_text(json.dumps([str(scene), "/missing/scene.npz"]))
+    with pytest.raises(ValueError, match=r"1/2 missing scene files.*missing/scene\.npz"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(broken)}
         )
     with pytest.raises(ValueError, match="n_prob_scenes"):
         round_runner._validate_normal_scene_list_config(base)

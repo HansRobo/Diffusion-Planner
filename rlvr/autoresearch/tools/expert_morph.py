@@ -455,10 +455,12 @@ def build_depart_morph_candidate(
         return _ret(None, "non_finite_input")
 
     # Hold the last valid pose over zero-padded expert tails, and back-fill
-    # zero-padded leading samples from the first valid one (same convention
-    # as build_expert_morph_candidate; a leading pad would otherwise make
-    # gap=0 and bypass the gap/behind gates).
-    expert_valid = np.abs(expert[:, :2]).sum(axis=1) > _EPS
+    # zero-padded leading samples from the first valid one (a leading pad
+    # would otherwise make gap=0 and bypass the gap/behind gates). Padding is
+    # an ALL-zero row: an expert legitimately waiting at the ego-frame origin
+    # is written as [0, 0, cos, sin] (unit heading), and xy-only validity
+    # would rewrite that recorded wait and change the departure schedule.
+    expert_valid = np.abs(expert).sum(axis=1) > _EPS
     if expert_valid.any() and not expert_valid.all():
         valid_idx = np.flatnonzero(expert_valid)
         last_valid = int(valid_idx[-1])

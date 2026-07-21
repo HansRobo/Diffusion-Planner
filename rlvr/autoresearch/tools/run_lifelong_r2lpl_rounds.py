@@ -1128,6 +1128,14 @@ def _validate_normal_scene_list_config(cfg: dict[str, Any]) -> None:
             f"training.normal_scene_list must be a non-empty JSON list of scene "
             f"paths: {normal_list}"
         )
+    missing_scenes = [e for e in entries if not Path(e).exists()]
+    if missing_scenes:
+        preview = ", ".join(missing_scenes[:3])
+        raise ValueError(
+            f"training.normal_scene_list references {len(missing_scenes)}/{len(entries)} "
+            f"missing scene files (first: {preview}); a broken entry would otherwise "
+            "only fail in the 4-col conversion after the mine+repair phases"
+        )
     payload = _training_config_payload(cfg["training_config"])
     missing = [k for k in ("n_prob_scenes", "n_normal_scenes") if k not in payload]
     if missing:
