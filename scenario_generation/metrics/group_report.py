@@ -66,8 +66,8 @@ def _agg_segment_stats(items: list[dict]) -> dict:
     ]
 
     out: dict = {key: _sum(key) for key in _SUM_KEYS}
-    out["centerline_mean_m"] = _weighted_mean("centerline_mean_m")
-    out["centerline_p95_m"] = _mean("centerline_p95_m")
+    out["centerline_point_dist_mean_m"] = _weighted_mean("centerline_point_dist_mean_m")
+    out["centerline_point_dist_p95_m"] = _mean("centerline_point_dist_p95_m")
     out["turn_match_rate"] = _weighted_mean("turn_match_rate")
     out["min_clearance_m"] = float(min(finite_min_cl)) if finite_min_cl else None
     return out
@@ -84,9 +84,9 @@ RESULTS_TABLE_COLUMNS = [
     "segment",
     "n_steps_run",
     "terminated",
-    "centerline_mean_m",
-    "centerline_p95_m",
-    "centerline_max_m",
+    "centerline_point_dist_mean_m",
+    "centerline_point_dist_p95_m",
+    "centerline_point_dist_max_m",
     "turn_match_rate",
     "neighbor_violation_steps",
     "rb_violation_steps",
