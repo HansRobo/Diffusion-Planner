@@ -41,7 +41,6 @@ FULL_INPUT_NAMES = [
     "goal_pose",
     "ego_shape",
     "turn_indicators",
-    "delay",
 ]
 
 ENCODER_INPUT_NAMES = [
@@ -244,7 +243,6 @@ class FullONNXWrapper(nn.Module):
         goal_pose: torch.Tensor,
         ego_shape: torch.Tensor,
         turn_indicators: torch.Tensor,
-        delay: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         inputs = {
             "sampled_trajectories": sampled_trajectories,
@@ -263,7 +261,6 @@ class FullONNXWrapper(nn.Module):
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
             "turn_indicators": turn_indicators,
-            "delay": delay,
         }
         _, decoder_outputs = self.model(inputs)
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
@@ -303,7 +300,6 @@ def build_dummy_inputs() -> TensorDict:
     inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
     inputs["turn_indicators"] = torch.randint(0, 3, (1, INPUT_T + 1), dtype=torch.float32)
-    inputs["delay"] = torch.zeros(1, 1, dtype=torch.float32)
     return inputs
 
 
@@ -311,7 +307,7 @@ def build_decoder_inputs(inputs: TensorDict, encoding: torch.Tensor) -> TensorDi
     return {
         "encoding": encoding,
         "sampled_trajectories": inputs["sampled_trajectories"],
-        "diffusion_time": torch.ones(1, MAX_NUM_AGENTS, OUTPUT_T + 1, 1, dtype=torch.float32),
+        "diffusion_time": torch.ones(1, dtype=torch.float32),
         "neighbor_agents_past": inputs["neighbor_agents_past"],
     }
 
