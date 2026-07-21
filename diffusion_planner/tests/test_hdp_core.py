@@ -2834,6 +2834,11 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
     with pytest.raises(RuntimeError, match="training configuration mismatch"):
         assert_checkpoint_compatible(str(checkpoint_path), same_shape)
 
+    same_shape = _checkpoint_compat_config(predicted_neighbor_num=1)
+    same_shape.turn_indicator_head_training_mode = "expert"
+    with pytest.raises(RuntimeError, match="training configuration mismatch"):
+        assert_checkpoint_compatible(str(checkpoint_path), same_shape)
+
     for field, value in (
         ("rl_reward_w_safety", 1.0),
         ("rl_eval_reward_w_safety", 1.0),

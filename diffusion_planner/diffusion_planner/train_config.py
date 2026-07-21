@@ -107,6 +107,10 @@ class TrainConfig:
     # ``policy`` adapts the planner without evaluating the auxiliary head;
     # ``turn_indicator`` freezes the planner and trains the head on final DPM samples.
     supervised_training_stage: Literal["joint", "policy", "turn_indicator"] = "joint"
+    # Expert pretraining avoids the expensive DPM rollout while the randomly initialized
+    # head learns clean intent features. Deployment fine-tuning then exposes it to the
+    # exact final DPM trajectory used online.
+    turn_indicator_head_training_mode: Literal["expert", "deployment"] = "deployment"
     # Architecture provenance, persisted in args.json. These are deliberately
     # not user-tunable modes: the policy never consumes indicator history and
     # the detached intent head predicts the three valid Autoware driving states.

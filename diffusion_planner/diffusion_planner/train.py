@@ -390,6 +390,7 @@ def assert_checkpoint_compatible(
             "turn_indicator_generated_loss_weight",
             "turn_indicator_expert_loss_weight",
             "supervised_training_stage",
+            "turn_indicator_head_training_mode",
             "use_ema",
             "amp_dtype",
             "tf32",

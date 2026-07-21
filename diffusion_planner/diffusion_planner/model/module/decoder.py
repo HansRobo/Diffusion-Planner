@@ -366,12 +366,11 @@ def compute_turn_indicator_head_training_loss(
     ego_future: torch.Tensor,
     args: Namespace,
 ) -> dict[str, torch.Tensor]:
-    """Train only the intent head on exact inference and expert trajectories.
+    """Train only the intent head on expert or deployment trajectories.
 
-    The caller freezes and evaluates the trajectory policy. Consequently the six-step
-    DPM rollout below builds no policy autograd graph; only the two detached head calls
-    retain gradients. This matches deployment exposure more closely than a one-step
-    random-time x-start proxy.
+    The caller freezes and evaluates the trajectory policy. Expert mode skips diffusion
+    sampling while the new head learns clean intent features. Deployment mode uses the
+    exact final DPM trajectory and retains gradients only for the detached head calls.
     """
     if getattr(args, "supervised_training_stage", "joint") != "turn_indicator":
         raise ValueError("head-only loss requires supervised_training_stage='turn_indicator'")
@@ -382,48 +381,64 @@ def compute_turn_indicator_head_training_loss(
     if model_ref.training or decoder.training:
         raise RuntimeError("The frozen trajectory policy must be in eval mode for head training")
 
+    training_mode = getattr(args, "turn_indicator_head_training_mode", "deployment")
+    if training_mode not in {"expert", "deployment"}:
+        raise ValueError(f"Unsupported turn-indicator head training mode: {training_mode!r}")
+    normalized_expert = normalize_ego_state(ego_future[:, None], args.state_normalizer)
     head_inputs = {
         **inputs,
-        "sampled_trajectories": torch.zeros(
+        "turn_indicator_trajectories": normalized_expert,
+    }
+    if training_mode == "expert":
+        head_inputs["_turn_indicator_expert_only"] = True
+    else:
+        head_inputs["sampled_trajectories"] = torch.zeros(
             batch_size,
             1 + decoder._predicted_neighbor_num,
             decoder._future_len,
             4,
             dtype=torch.float32,
             device=ego_future.device,
-        ),
-        "turn_indicator_trajectories": normalize_ego_state(
-            ego_future[:, None], args.state_normalizer
-        ),
-    }
+        )
     use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and ego_future.device.type == "cuda"
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
         _, decoder_output = model(head_inputs)
 
-    generated_logit = decoder_output["turn_indicator_logit"].float()
     expert_logit = decoder_output["turn_indicator_expert_logit"].float()
     target = make_turn_indicator_gt(inputs["turn_indicators"])
-    generated_loss = nn.functional.cross_entropy(generated_logit, target)
     expert_loss = nn.functional.cross_entropy(expert_logit, target)
-    generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
-    expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
-    total = (generated_weight * generated_loss + expert_weight * expert_loss) / max(
-        generated_weight + expert_weight, 1e-12
-    )
+    if training_mode == "expert":
+        total = expert_loss
+        generated_logit = None
+        generated_loss = None
+    else:
+        generated_logit = decoder_output["turn_indicator_logit"].float()
+        generated_loss = nn.functional.cross_entropy(generated_logit, target)
+        generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
+        expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
+        total = (generated_weight * generated_loss + expert_weight * expert_loss) / max(
+            generated_weight + expert_weight, 1e-12
+        )
     if not torch.isfinite(total):
         raise FloatingPointError("turn-indicator head loss is non-finite")
 
     with torch.no_grad():
-        generated_accuracy = (generated_logit.argmax(dim=-1) == target).float().mean()
         expert_accuracy = (expert_logit.argmax(dim=-1) == target).float().mean()
-    return {
+        accuracy = (
+            (generated_logit.argmax(dim=-1) == target).float().mean()
+            if generated_logit is not None
+            else expert_accuracy
+        )
+    result = {
         "turn_indicator_loss": total,
-        "turn_indicator_generated_loss": generated_loss.detach(),
         "turn_indicator_expert_loss": expert_loss.detach(),
-        "turn_indicator_accuracy": generated_accuracy,
-        "turn_indicator_generated_accuracy": generated_accuracy,
+        "turn_indicator_accuracy": accuracy,
         "turn_indicator_expert_accuracy": expert_accuracy,
     }
+    if generated_loss is not None:
+        result["turn_indicator_generated_loss"] = generated_loss.detach()
+        result["turn_indicator_generated_accuracy"] = accuracy
+    return result
 
 
 class Decoder(nn.Module):
@@ -730,6 +745,23 @@ class Decoder(nn.Module):
             )
         return output
 
+    def _forward_turn_indicator_expert(self, encoding, inputs, global_route_condition):
+        """Run the detached intent head without evaluating the diffusion policy."""
+        expert_trajectories = inputs.get("turn_indicator_trajectories")
+        if expert_trajectories is None:
+            raise KeyError("turn_indicator_trajectories is required for expert head training")
+        B = encoding.shape[0]
+        expert_trajectories = expert_trajectories.reshape(B, -1, self._future_len, 4)
+        expert_features = self._turn_indicator_features(expert_trajectories[:, :1])
+        return {
+            "turn_indicator_expert_logit": self._compute_turn_indicator(
+                expert_features,
+                encoding,
+                global_route_condition,
+                inputs["ego_current_state"],
+            )
+        }
+
     def forward(self, encoding, inputs):
         """
         Diffusion decoder process.
@@ -772,6 +804,13 @@ class Decoder(nn.Module):
             raise ValueError(
                 "Global route condition must match [batch, hidden_dim], got "
                 f"{tuple(global_route_condition.shape)} for encoding {tuple(encoding.shape)}"
+            )
+
+        if inputs.get("_turn_indicator_expert_only", False):
+            return self._forward_turn_indicator_expert(
+                encoding,
+                inputs,
+                global_route_condition,
             )
 
         # Dispatch to training or inference

@@ -162,6 +162,12 @@ def get_args(args_list=None):
         default=_train_config_default("supervised_training_stage"),
         help="train the full model jointly, trajectory policy only, or detached intent head only",
     )
+    parser.add_argument(
+        "--turn_indicator_head_training_mode",
+        choices=("expert", "deployment"),
+        default=_train_config_default("turn_indicator_head_training_mode"),
+        help="use cheap expert trajectories or exact final-DPM trajectories for head-only training",
+    )
 
     parser.add_argument(
         "--coeff_road_border_loss",

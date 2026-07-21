@@ -40,9 +40,24 @@ def test_training_cli_accepts_hdp_defaults():
     assert args.policy_uses_turn_indicator_history is False
     assert args.turn_indicator_output_dim == 3
     assert args.supervised_training_stage == "joint"
+    assert args.turn_indicator_head_training_mode == "deployment"
 
 
 def test_training_cli_selects_sequential_supervised_stages():
     for stage in ("policy", "turn_indicator"):
         args = get_args(_required_args() + ["--supervised_training_stage", stage])
         assert args.supervised_training_stage == stage
+
+
+@pytest.mark.parametrize("mode", ("expert", "deployment"))
+def test_training_cli_selects_turn_indicator_head_mode(mode):
+    args = get_args(
+        _required_args()
+        + [
+            "--supervised_training_stage",
+            "turn_indicator",
+            "--turn_indicator_head_training_mode",
+            mode,
+        ]
+    )
+    assert args.turn_indicator_head_training_mode == mode

@@ -1,5 +1,7 @@
 """Three-state turn-intent head and temporal output stabilization."""
 
+from unittest.mock import patch
+
 import pytest
 import torch
 from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
@@ -284,8 +286,54 @@ def test_head_stage_uses_final_dpm_trajectory_and_only_updates_head():
     heading = heading / heading.norm(dim=-1, keepdim=True)
     ego_future = torch.cat([torch.randn(batch, 80, 2), heading], dim=-1)
 
-    loss = compute_turn_indicator_head_training_loss(model, inputs, ego_future, args)
+    with patch.object(model.encoder, "forward", wraps=model.encoder.forward) as encoder_forward:
+        loss = compute_turn_indicator_head_training_loss(model, inputs, ego_future, args)
+    assert encoder_forward.call_count == 1
     assert torch.isfinite(loss["turn_indicator_loss"])
+    loss["turn_indicator_loss"].backward()
+    assert all(parameter.grad is None for parameter in model.encoder.parameters())
+    assert all(parameter.grad is None for parameter in model.decoder.dit.parameters())
+    assert all(
+        parameter.grad is None for parameter in model.decoder.global_route_encoder.parameters()
+    )
+    assert any(
+        parameter.grad is not None and parameter.grad.abs().sum() > 0
+        for parameter in model.decoder.turn_indicator_predictor.parameters()
+    )
+
+
+def test_expert_head_stage_skips_diffusion_and_only_updates_head():
+    torch.manual_seed(0)
+    args = _encoder_config(
+        supervised_training_stage="turn_indicator",
+        turn_indicator_head_training_mode="expert",
+        diffusion_sample_steps=2,
+    )
+    model = Diffusion_Planner(args)
+    configure_supervised_trainable_parameters(model, "turn_indicator")
+    model.eval()
+    model.decoder.turn_indicator_predictor.train()
+    batch = 2
+    inputs = _encoder_inputs(batch)
+    inputs["ego_current_state"] = torch.randn(batch, 10)
+    heading = torch.randn(batch, 80, 2)
+    heading = heading / heading.norm(dim=-1, keepdim=True)
+    ego_future = torch.cat([torch.randn(batch, 80, 2), heading], dim=-1)
+
+    with (
+        patch.object(model.encoder, "forward", wraps=model.encoder.forward) as encoder_forward,
+        patch.object(
+            model.decoder.dit,
+            "forward",
+            side_effect=AssertionError("expert head mode must not evaluate DiT"),
+        ),
+    ):
+        loss = compute_turn_indicator_head_training_loss(model, inputs, ego_future, args)
+
+    assert encoder_forward.call_count == 1
+    assert torch.isfinite(loss["turn_indicator_loss"])
+    assert "turn_indicator_generated_loss" not in loss
+    assert "turn_indicator_generated_accuracy" not in loss
     loss["turn_indicator_loss"].backward()
     assert all(parameter.grad is None for parameter in model.encoder.parameters())
     assert all(parameter.grad is None for parameter in model.decoder.dit.parameters())

@@ -25,13 +25,19 @@ ROOT=${HDP_OUTPUT_ROOT:-/mnt/nvme/Diffusion-Planner-hdp-staged-20260721}
 POLICY_EPOCHS=${HDP_POLICY_EPOCHS:-20}
 POLICY_WARMUP=${HDP_POLICY_WARMUP:-2}
 POLICY_LR=${HDP_POLICY_LR:-1e-4}
-HEAD_EPOCHS=${HDP_HEAD_EPOCHS:-5}
-HEAD_WARMUP=${HDP_HEAD_WARMUP:-1}
-HEAD_LR=${HDP_HEAD_LR:-3e-4}
+RUN_POLICY_STAGE=${HDP_RUN_POLICY_STAGE:-True}
+HEAD_EXPERT_EPOCHS=${HDP_HEAD_EXPERT_EPOCHS:-1}
+HEAD_EXPERT_WARMUP=${HDP_HEAD_EXPERT_WARMUP:-0}
+HEAD_EXPERT_LR=${HDP_HEAD_EXPERT_LR:-3e-4}
+HEAD_DEPLOYMENT_EPOCHS=${HDP_HEAD_DEPLOYMENT_EPOCHS:-1}
+HEAD_DEPLOYMENT_WARMUP=${HDP_HEAD_DEPLOYMENT_WARMUP:-0}
+HEAD_DEPLOYMENT_LR=${HDP_HEAD_DEPLOYMENT_LR:-1e-4}
 POLICY_NAME=${HDP_POLICY_NAME:-hdp_no_signal_policy_ft${POLICY_EPOCHS}_base80data_from_epoch${POLICY_INIT_EPOCH}_node02_8gpu_bf16_bs512}
-HEAD_NAME=${HDP_HEAD_NAME:-hdp_turn_indicator_head${HEAD_EPOCHS}_base80data_from_${POLICY_NAME}_node02_8gpu_bf16_bs512}
+HEAD_EXPERT_NAME=${HDP_HEAD_EXPERT_NAME:-hdp_turn_indicator_expert_head${HEAD_EXPERT_EPOCHS}_from_${POLICY_NAME}_node02_8gpu_bf16_bs512}
+HEAD_DEPLOYMENT_NAME=${HDP_HEAD_DEPLOYMENT_NAME:-hdp_turn_indicator_deployment_head${HEAD_DEPLOYMENT_EPOCHS}_from_${HEAD_EXPERT_NAME}_node02_8gpu_bf16_bs512}
 POLICY_DIR=${ROOT}/outputs/${POLICY_NAME}
-HEAD_DIR=${ROOT}/outputs/${HEAD_NAME}
+HEAD_EXPERT_DIR=${ROOT}/outputs/${HEAD_EXPERT_NAME}
+HEAD_DEPLOYMENT_DIR=${ROOT}/outputs/${HEAD_DEPLOYMENT_NAME}
 
 TRAIN_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260707_vehicle_params_with_mirror/path_list_train_concatenated.json
 VALID_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260702_basic_dataset/path_list_valid_sft_balanced.json
@@ -247,27 +253,29 @@ PY
 }
 
 run_stage() {
-  local stage=$1
-  local run_name=$2
-  local save_dir=$3
-  local init_weights=$4
-  local epochs=$5
-  local warmup=$6
-  local learning_rate=$7
-  local save_utd=$8
+  local phase=$1
+  local stage=$2
+  local head_mode=$3
+  local run_name=$4
+  local save_dir=$5
+  local init_weights=$6
+  local epochs=$7
+  local warmup=$8
+  local learning_rate=$9
+  local save_utd=${10}
   local max_attempts=3
   local attempt=1
   local status=1
-  local wandb_id="hdp-${stage}-${SLURM_JOB_ID}"
+  local wandb_id="hdp-${phase}-${SLURM_JOB_ID}"
   local train_log=${save_dir}/train_stdout.log
 
   mkdir -p "${save_dir}"
-  export TORCHINDUCTOR_CACHE_DIR=${ROOT}/cache/torchinductor-${EXPECTED_COMMIT:0:12}-${stage}
+  export TORCHINDUCTOR_CACHE_DIR=${ROOT}/cache/torchinductor-${EXPECTED_COMMIT:0:12}-${phase}
   export TORCHINDUCTOR_COMPILE_THREADS=${HDP_COMPILE_THREADS:-$((SLURM_CPUS_PER_TASK / 8))}
   mkdir -p "${TORCHINDUCTOR_CACHE_DIR}"
 
   if [[ -r "${save_dir}/latest.pth" ]] && [[ "$(checkpoint_epoch "${save_dir}/latest.pth")" == "${epochs}" ]]; then
-    log "${stage}: already complete at epoch ${epochs}; skipping"
+    log "${phase}: already complete at epoch ${epochs}; skipping"
     return 0
   fi
 
@@ -275,10 +283,10 @@ run_stage() {
     local -a start_args
     if [[ -r "${save_dir}/latest.pth" ]]; then
       start_args=(--resume_model_path "${save_dir}/latest.pth")
-      log "${stage}: attempt ${attempt}/${max_attempts}, strict resume"
+      log "${phase}: attempt ${attempt}/${max_attempts}, strict resume"
     else
       start_args=(--init_weights_path "${init_weights}" --wandb_run_id "${wandb_id}")
-      log "${stage}: attempt ${attempt}/${max_attempts}, EMA weights-only initialization"
+      log "${phase}: attempt ${attempt}/${max_attempts}, EMA weights-only initialization"
     fi
 
     set +e
@@ -289,6 +297,7 @@ run_stage() {
       --exp_name "${run_name}" \
       --save_dir "${save_dir}" \
       --supervised_training_stage "${stage}" \
+      --turn_indicator_head_training_mode "${head_mode}" \
       --learning_rate "${learning_rate}" \
       --warm_up_epoch "${warmup}" \
       --train_epochs "${epochs}" \
@@ -300,7 +309,7 @@ run_stage() {
     if (( status == 0 )); then
       break
     fi
-    log "${stage}: attempt ${attempt} exited with status ${status}"
+    log "${phase}: attempt ${attempt} exited with status ${status}"
     attempt=$((attempt + 1))
     sleep 60
   done
@@ -310,23 +319,44 @@ run_stage() {
     return "${status}"
   fi
   if [[ "$(checkpoint_epoch "${save_dir}/latest.pth")" != "${epochs}" ]]; then
-    log "FATAL: ${stage} latest checkpoint did not reach epoch ${epochs}"
+    log "FATAL: ${phase} latest checkpoint did not reach epoch ${epochs}"
     return 20
   fi
   touch "${save_dir}/RUN_COMPLETE"
-  log "${stage}: verified epoch ${epochs} latest checkpoint"
+  log "${phase}: verified epoch ${epochs} latest checkpoint"
 }
 
 cd "${SOURCE_REPO}/diffusion_planner"
 
-# Stage 1: remove signal feedback and adapt only the trajectory planner.
-run_stage policy "${POLICY_NAME}" "${POLICY_DIR}" "${BASE_WEIGHTS}" \
-  "${POLICY_EPOCHS}" "${POLICY_WARMUP}" "${POLICY_LR}" 5
+# Stage 1: remove signal feedback and adapt only the trajectory planner. A dependent
+# head-only job can skip this stage and consume a completed policy checkpoint directly.
+case "${RUN_POLICY_STAGE}" in
+  True|true|1)
+    run_stage policy policy deployment \
+      "${POLICY_NAME}" "${POLICY_DIR}" "${BASE_WEIGHTS}" \
+      "${POLICY_EPOCHS}" "${POLICY_WARMUP}" "${POLICY_LR}" 5
+    ;;
+  False|false|0)
+    POLICY_DIR=${POLICY_INIT_RUN}
+    log "policy: using completed epoch ${POLICY_INIT_EPOCH} checkpoint at ${POLICY_DIR}"
+    ;;
+  *)
+    log "FATAL: HDP_RUN_POLICY_STAGE must be True or False, got ${RUN_POLICY_STAGE}"
+    exit 21
+    ;;
+esac
 
-# Stage 2: preserve the exact policy EMA and train only the three-state intent head.
-# It uses final six-step DPM trajectories, so its neural input matches validation/deployment.
-run_stage turn_indicator "${HEAD_NAME}" "${HEAD_DIR}" "${POLICY_DIR}/latest.pth" \
-  "${HEAD_EPOCHS}" "${HEAD_WARMUP}" "${HEAD_LR}" 1
+# Stage 2: cheaply bootstrap the new head from expert trajectories. This evaluates
+# the frozen encoder once per batch and entirely skips the diffusion policy.
+run_stage turn-expert turn_indicator expert \
+  "${HEAD_EXPERT_NAME}" "${HEAD_EXPERT_DIR}" "${POLICY_DIR}/latest.pth" \
+  "${HEAD_EXPERT_EPOCHS}" "${HEAD_EXPERT_WARMUP}" "${HEAD_EXPERT_LR}" 1
+
+# Stage 3: calibrate on exact final six-step DPM trajectories. The scene encoder is
+# still evaluated only once per batch and its output is reused by every DPM step.
+run_stage turn-deployment turn_indicator deployment \
+  "${HEAD_DEPLOYMENT_NAME}" "${HEAD_DEPLOYMENT_DIR}" "${HEAD_EXPERT_DIR}/latest.pth" \
+  "${HEAD_DEPLOYMENT_EPOCHS}" "${HEAD_DEPLOYMENT_WARMUP}" "${HEAD_DEPLOYMENT_LR}" 1
 
 touch "${ROOT}/RUN_COMPLETE"
 log "All staged SFT training completed"

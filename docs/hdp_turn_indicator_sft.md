@@ -67,20 +67,34 @@ Its loss cannot reshape the scene encoder, AdaLN condition, or diffusion policy.
 The trajectory-policy total loss and checkpoint selection also exclude the head
 loss.
 
-Head-only training combines two equally weighted views:
+Head-only training uses two sequential modes:
 
-- expert future waypoints, which provide a clean intent signal;
-- the detached generated x-start trajectory, which matches inference exposure.
+- `expert`: expert future waypoints provide a clean intent signal without running
+  the diffusion policy;
+- `deployment`: expert waypoints and the detached final DPM x-start trajectory are
+  weighted equally, matching inference exposure after the head has learned a stable
+  representation.
 
 The staged training protocol is:
 
 1. `supervised_training_stage=policy`: initialize from the stopped Base EMA,
    freeze and completely skip the new head, and adapt the trajectory policy after
    removing signal feedback.
-2. `supervised_training_stage=turn_indicator`: initialize from the policy-stage
+2. `supervised_training_stage=turn_indicator` and
+   `turn_indicator_head_training_mode=expert`: initialize from the policy-stage
    latest EMA, freeze the complete planner, keep it in evaluation mode, and train
-   only the head. Generated head inputs come from the final six-step DPM trajectory,
-   not a random-time one-step proxy.
+   only the head for one full epoch. The encoder runs once per batch and DiT is not
+   evaluated.
+3. `supervised_training_stage=turn_indicator` and
+   `turn_indicator_head_training_mode=deployment`: initialize from the expert-head
+   latest EMA and fine-tune for one full epoch. Generated inputs come from the final
+   six-step DPM trajectory, not a random-time one-step proxy. The frozen scene
+   encoding is computed once per batch and reused by all DPM evaluations.
+
+A persistent encoder-feature cache is deliberately not used. The full Base80 data
+would require roughly 1.8 TB even in bf16, and cached features would no longer match
+the random geometric augmentation applied to the current sample. Batch-local reuse
+keeps exact augmented inputs without redundant encoder evaluations.
 
 The joint mode remains available for controlled experiments. In that mode, the
 generated per-sample loss is weighted by `(1-t)` and normalized by the sum of
