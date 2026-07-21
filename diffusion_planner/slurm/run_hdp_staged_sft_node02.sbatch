@@ -16,12 +16,20 @@ set -euo pipefail
 
 SOURCE_REPO=${HDP_SOURCE_REPO:?set HDP_SOURCE_REPO to the immutable source worktree}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?set HDP_EXPECTED_COMMIT}
-BASE_RUN=${HDP_BASE_RUN:?set HDP_BASE_RUN to the stopped Base80 output directory}
+BASE_RUN=${HDP_BASE_RUN:?set HDP_BASE_RUN to the Base80 data-contract run}
 BASE_EPOCH=${HDP_BASE_EPOCH:-72}
+POLICY_INIT_RUN=${HDP_POLICY_INIT_RUN:-${BASE_RUN}}
+POLICY_INIT_EPOCH=${HDP_POLICY_INIT_EPOCH:-${BASE_EPOCH}}
 BASE_REPO=$(dirname "$(dirname "${BASE_RUN}")")
-ROOT=/mnt/nvme/Diffusion-Planner-hdp-staged-20260721
-POLICY_NAME=hdp_no_signal_policy_ft20_base80data_from_base${BASE_EPOCH}_node02_8gpu_bf16_bs512
-HEAD_NAME=hdp_turn_indicator_head5_base80data_from_${POLICY_NAME}_node02_8gpu_bf16_bs512
+ROOT=${HDP_OUTPUT_ROOT:-/mnt/nvme/Diffusion-Planner-hdp-staged-20260721}
+POLICY_EPOCHS=${HDP_POLICY_EPOCHS:-20}
+POLICY_WARMUP=${HDP_POLICY_WARMUP:-2}
+POLICY_LR=${HDP_POLICY_LR:-1e-4}
+HEAD_EPOCHS=${HDP_HEAD_EPOCHS:-5}
+HEAD_WARMUP=${HDP_HEAD_WARMUP:-1}
+HEAD_LR=${HDP_HEAD_LR:-3e-4}
+POLICY_NAME=${HDP_POLICY_NAME:-hdp_no_signal_policy_ft${POLICY_EPOCHS}_base80data_from_epoch${POLICY_INIT_EPOCH}_node02_8gpu_bf16_bs512}
+HEAD_NAME=${HDP_HEAD_NAME:-hdp_turn_indicator_head${HEAD_EPOCHS}_base80data_from_${POLICY_NAME}_node02_8gpu_bf16_bs512}
 POLICY_DIR=${ROOT}/outputs/${POLICY_NAME}
 HEAD_DIR=${ROOT}/outputs/${HEAD_NAME}
 
@@ -33,7 +41,7 @@ EXTRA_2=${EXTRA_ROOT}/path_list_unprotected_right_turn_xx1_is_skipped_filtered.j
 EXTRA_3=${EXTRA_ROOT}/path_list_unprotected_right_turn_xx1_psim_is_skipped_filtered.json
 NORMALIZATION=${SOURCE_REPO}/diffusion_planner/normalization.json
 PYTHON=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/.venv/bin/python
-BASE_WEIGHTS=${BASE_RUN}/latest.pth
+BASE_WEIGHTS=${POLICY_INIT_RUN}/latest.pth
 BASE_ARGS_JSON=${BASE_RUN}/args.json
 PORT=${HDP_MASTER_PORT:-22657}
 
@@ -87,7 +95,7 @@ check_sha256 48c2eb476659241beba8cc4b9795eabf2e44ecb593a4af138fb8a4d7a38abf20 "$
 check_sha256 7bba1ea74a6f90bbb62a4daab9fc4ebd78ed7efa02c7504ef4deb811724b741b "${EXTRA_2}"
 check_sha256 1a85f292129316662d80a8556e3265b22a441d163ebce8ff11ae3f852bfa98d5 "${EXTRA_3}"
 
-"${PYTHON}" - "${BASE_ARGS_JSON}" "${BASE_WEIGHTS}" "${BASE_EPOCH}" \
+"${PYTHON}" - "${BASE_ARGS_JSON}" "${BASE_WEIGHTS}" "${POLICY_INIT_EPOCH}" \
   "${TRAIN_LIST}" "${VALID_LIST}" "${EXTRA_1}" "${EXTRA_2}" "${EXTRA_3}" <<'PY'
 import json
 import pathlib
@@ -140,7 +148,7 @@ if checkpoint.get("epoch") != expected_epoch:
     )
 if checkpoint.get("ema_state_dict") is None:
     raise RuntimeError("Base latest checkpoint has no EMA policy")
-print(f"verified Base epoch {expected_epoch} EMA and exact Base80 data contract")
+print(f"verified policy-init epoch {expected_epoch} EMA and exact Base80 data contract")
 PY
 
 export HOME=/home/ubuntu
@@ -312,11 +320,13 @@ run_stage() {
 cd "${SOURCE_REPO}/diffusion_planner"
 
 # Stage 1: remove signal feedback and adapt only the trajectory planner.
-run_stage policy "${POLICY_NAME}" "${POLICY_DIR}" "${BASE_WEIGHTS}" 20 2 1e-4 5
+run_stage policy "${POLICY_NAME}" "${POLICY_DIR}" "${BASE_WEIGHTS}" \
+  "${POLICY_EPOCHS}" "${POLICY_WARMUP}" "${POLICY_LR}" 5
 
 # Stage 2: preserve the exact policy EMA and train only the three-state intent head.
 # It uses final six-step DPM trajectories, so its neural input matches validation/deployment.
-run_stage turn_indicator "${HEAD_NAME}" "${HEAD_DIR}" "${POLICY_DIR}/latest.pth" 5 1 3e-4 1
+run_stage turn_indicator "${HEAD_NAME}" "${HEAD_DIR}" "${POLICY_DIR}/latest.pth" \
+  "${HEAD_EPOCHS}" "${HEAD_WARMUP}" "${HEAD_LR}" 1
 
 touch "${ROOT}/RUN_COMPLETE"
 log "All staged SFT training completed"
