@@ -54,7 +54,7 @@ def aggregate_episode_metrics(
     f_end = int(tl.frame_indices[min(video_end_idx - 1, len(tl.frame_indices) - 1)])
 
     cl = np.array(
-        [st.centerline_m for st in area_steps if st.centerline_m is not None],
+        [st.centerline_point_dist_m for st in area_steps if st.centerline_point_dist_m is not None],
         dtype=np.float32,
     )
     tm = np.array(
@@ -64,6 +64,8 @@ def aggregate_episode_metrics(
     clearances = np.array([st.clearance_m for st in area_steps], dtype=np.float32)
     collisions = [st.collision for st in area_steps]
     rb_dists = np.array([st.rb_dist_m for st in area_steps], dtype=np.float32)
+    finite_clearances = clearances[np.isfinite(clearances)]
+    finite_cl = cl[np.isfinite(cl)]
 
     return {
         "metric_group": metric_group,
@@ -77,24 +79,23 @@ def aggregate_episode_metrics(
         "segment": f"[{f_start},{f_end}]",
         "n_steps_run": len(area_steps),
         "terminated": "area_span",
-        "min_clearance": float(clearances[np.isfinite(clearances)].min())
-        if clearances.size
-        else float("inf"),
-        "mean_clearance": float(clearances[np.isfinite(clearances)].mean())
-        if clearances.size
+        "min_clearance": float(finite_clearances.min()) if finite_clearances.size else float("inf"),
+        "mean_clearance": float(finite_clearances.mean())
+        if finite_clearances.size
         else float("inf"),
         "n_collision_steps": int(sum(collisions)),
-        "n_near_miss_steps": int(np.sum(clearances <= near_miss_thresh)),
+        "n_near_miss_steps": int(np.sum(finite_clearances <= near_miss_thresh)),
         "n_snaps": 0,
-        "centerline_mean_m": float(cl[np.isfinite(cl)].mean()) if cl.size else None,
-        "centerline_p95_m": _percentile(cl, 95) if cl.size else None,
-        "centerline_max_m": float(cl[np.isfinite(cl)].max()) if cl.size else None,
+        # Stats of nearest centerline *point* distances (not lateral offsets).
+        "centerline_point_dist_mean_m": float(finite_cl.mean()) if finite_cl.size else None,
+        "centerline_point_dist_p95_m": _percentile(cl, 95) if finite_cl.size else None,
+        "centerline_point_dist_max_m": float(finite_cl.max()) if finite_cl.size else None,
         "turn_match_rate": float(tm.mean()) if tm.size else None,
         "neighbor_violation_steps": int(sum(st.neighbor_violation for st in area_steps)),
         "rb_violation_steps": int(sum(st.rb_violation for st in area_steps)),
         "collision_steps": int(sum(collisions)),
-        "min_clearance_m": float(clearances[np.isfinite(clearances)].min())
-        if clearances.size
+        "min_clearance_m": float(finite_clearances.min())
+        if finite_clearances.size
         else float("inf"),
         "min_rb_dist_m": float(rb_dists[np.isfinite(rb_dists)].min())
         if rb_dists.size and np.isfinite(rb_dists).any()

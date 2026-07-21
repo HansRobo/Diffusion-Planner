@@ -11,12 +11,17 @@ from scenario_generation.reproducer_rollout import SegmentResult
 
 @dataclass
 class StepRecord:
-    """One closed-loop sim step with optional per-area metric fields."""
+    """One closed-loop sim step with optional per-area metric fields.
+
+    ``centerline_point_dist_m`` is nearest route_lanes centerline *point*
+    distance in the ego frame (not a lateral / perpendicular offset).
+    """
 
     k: int
     rec_idx: int
     area: str | None
-    centerline_m: float | None = None
+    # Nearest route_lanes centerline *point* distance (m), not lateral offset.
+    centerline_point_dist_m: float | None = None
     turn_match: bool | None = None
     clearance_m: float = float("inf")
     collision: bool = False

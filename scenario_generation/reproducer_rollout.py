@@ -1422,7 +1422,9 @@ def render_segment(
 
     if instrument:
         from scenario_generation.closed_loop_types import StepRecord
-        from scenario_generation.metrics.centerline_deviation import lateral_offset_from_route_lanes
+        from scenario_generation.metrics.centerline_point_distance import (
+            nearest_centerline_point_dist_m,
+        )
         from scenario_generation.metrics.safety_clearance import score_safety_step
         from scenario_generation.metrics.turn_indicator import score_turn_indicator_step
         from scenario_generation.scenario_classification import area_at_idx
@@ -1579,13 +1581,13 @@ def render_segment(
             area = area_at_idx(area_episodes or [], int(idx))
             metric_group = area_to_metric_group.get(area) if area and area_to_metric_group else None
             turn_match = None
-            centerline_m = None
+            centerline_point_dist_m = None
             if outputs is not None and metric_group is not None:
                 ti = score_turn_indicator_step(outputs, metric_group)
                 if ti["turn_match"] is not None:
                     turn_match = bool(ti["turn_match"])
             if metric_group in ("straight", "curve"):
-                centerline_m = lateral_offset_from_route_lanes(np_dict["route_lanes"])
+                centerline_point_dist_m = nearest_centerline_point_dist_m(np_dict["route_lanes"])
             safety = score_safety_step(
                 neighbors_live,
                 s.ego_shape,
@@ -1598,7 +1600,7 @@ def render_segment(
                     k=int(k),
                     rec_idx=int(idx),
                     area=area,
-                    centerline_m=centerline_m,
+                    centerline_point_dist_m=centerline_point_dist_m,
                     turn_match=turn_match,
                     clearance_m=float(safety["clearance_m"]),
                     collision=bool(safety["collision"]),
