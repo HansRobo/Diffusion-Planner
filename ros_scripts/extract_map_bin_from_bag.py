@@ -22,6 +22,7 @@ Usage:
     source external/pilot-auto.x2/install/setup.bash
     python3 ros_scripts/extract_map_bin_from_bag.py <bag_path> --output map.bin
 """
+
 from __future__ import annotations
 
 import argparse
@@ -58,8 +59,9 @@ def read_map_binary(bag_path: Path) -> bytes:
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("bag_path", type=Path)
     parser.add_argument("--output", type=Path, default=Path("lanelet2_map.bin"))
     args = parser.parse_args()

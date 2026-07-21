@@ -52,6 +52,7 @@ Usage:
     # Full batch (all 75 bags). Takes hours; run in the background.
     python3 scripts/convert_all_or_bags.py
 """
+
 from __future__ import annotations
 
 import argparse
@@ -105,7 +106,9 @@ def bag_output_dir(bag_path: Path, area: str) -> tuple[Path, str]:
         raise ValueError(f"Unexpected bag path depth ({len(parts)} parts, expected 5): {bag_path}")
     path_area, category, scene, _uuid, bag_dirname = parts
     if path_area != area:
-        print(f"  WARNING: area mismatch for {bag_path}: path says {path_area!r}, json says {area!r}")
+        print(
+            f"  WARNING: area mismatch for {bag_path}: path says {path_area!r}, json says {area!r}"
+        )
     save_dir = OUTPUT_ROOT / area / category / scene
     bag_stem = Path(bag_dirname).stem  # strips ".db3"
     return save_dir, bag_stem
@@ -126,9 +129,11 @@ def get_or_create_bin(area: str, version: str, bag_path: Path, cache_dir: Path) 
         return bin_path
 
     cmd = [
-        "python3", str(EXTRACT_MAP_SCRIPT),
+        "python3",
+        str(EXTRACT_MAP_SCRIPT),
         str(bag_path),
-        "--output", str(bin_path),
+        "--output",
+        str(bin_path),
     ]
     print(f"  Extracting map for {area} v{version} from {bag_path.name} ...")
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -152,9 +157,15 @@ def convert_bag(bag_path: Path, map_path: Path, save_dir: Path) -> tuple[int, st
     before = existing_npz_count(save_dir, bag_stem)
 
     cmd = [
-        "python3", str(PARSE_SCRIPT),
-        str(bag_path), str(map_path), str(save_dir),
-        "--step", "1", "--min_frames", "0",
+        "python3",
+        str(PARSE_SCRIPT),
+        str(bag_path),
+        str(map_path),
+        str(save_dir),
+        "--step",
+        "1",
+        "--min_frames",
+        "0",
     ]
     env = os.environ.copy()
     # `diffusion_planner.dimensions` and `diffusion_planner_ros.*` are only
@@ -182,10 +193,26 @@ def iter_bags(bag_map: dict[str, tuple[str, str]]):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--max-bags", type=int, default=999, help="Stop after converting this many bags (for smoke testing).")
-    parser.add_argument("--no-skip-existing", action="store_true", help="Reconvert bags even if npz already exist for them.")
-    parser.add_argument("--min-free-gb", type=float, default=MIN_FREE_GB_DEFAULT, help="Abort if free space on the output disk drops below this.")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--max-bags",
+        type=int,
+        default=999,
+        help="Stop after converting this many bags (for smoke testing).",
+    )
+    parser.add_argument(
+        "--no-skip-existing",
+        action="store_true",
+        help="Reconvert bags even if npz already exist for them.",
+    )
+    parser.add_argument(
+        "--min-free-gb",
+        type=float,
+        default=MIN_FREE_GB_DEFAULT,
+        help="Abort if free space on the output disk drops below this.",
+    )
     parser.add_argument("--bag-map-versions", type=Path, default=BAG_MAP_VERSIONS_PATH)
     parser.add_argument("--map-cache-dir", type=Path, default=MAP_CACHE_DIR)
     args = parser.parse_args()
@@ -234,7 +261,9 @@ def main() -> None:
         stat = shutil.disk_usage(REPO_ROOT)
         free_gb = stat.free / (1024**3)
         if free_gb < args.min_free_gb:
-            print(f"ERROR: only {free_gb:.1f}GB free (< --min-free-gb={args.min_free_gb}), stopping.")
+            print(
+                f"ERROR: only {free_gb:.1f}GB free (< --min-free-gb={args.min_free_gb}), stopping."
+            )
             break
 
         try:

@@ -13,6 +13,7 @@ Usage:
       --args_path /opt/autoware/mlmodels/diffusion_planner_for_x2/args.json \
       --top_k 10
 """
+
 from __future__ import annotations
 
 import argparse
@@ -31,7 +32,9 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--query", type=Path, required=True, help="Path to query .npz file")
-    p.add_argument("--bank_dir", type=Path, required=True, help="Pre-built embedding bank directory")
+    p.add_argument(
+        "--bank_dir", type=Path, required=True, help="Pre-built embedding bank directory"
+    )
     p.add_argument("--model_path", type=Path, required=True, help="ONNX model path")
     p.add_argument("--args_path", type=Path, required=True, help="Model args.json path")
     p.add_argument("--top_k", type=int, default=10, help="Number of nearest neighbors")
@@ -73,11 +76,13 @@ def main():
 
     results = []
     for neighbor in neighbors[0]:
-        results.append({
-            "rank": len(results) + 1,
-            "distance": round(neighbor["distance"], 6),
-            "path": neighbor.get("npz_path", f"index_{neighbor['index']}"),
-        })
+        results.append(
+            {
+                "rank": len(results) + 1,
+                "distance": round(neighbor["distance"], 6),
+                "path": neighbor.get("npz_path", f"index_{neighbor['index']}"),
+            }
+        )
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
