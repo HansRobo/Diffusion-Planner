@@ -29,14 +29,14 @@ from scenario_generation.closed_loop_evaluation import (
     RolloutParams,
 )
 from scenario_generation.closed_loop_types import BagRolloutResult
-from scenario_generation.metrics.grouped_by_area import (
-    aggregate_episode_metrics,
-    build_episode_video,
-)
 from scenario_generation.metrics.group_report import (
     aggregate_segment_rows,
     write_metrics_summary,
     write_results_table,
+)
+from scenario_generation.metrics.grouped_by_area import (
+    aggregate_episode_metrics,
+    build_episode_video,
 )
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import SegmentResult, render_segment
@@ -558,9 +558,7 @@ class GroupedMultiDateClosedLoopEvaluation(ClosedLoopEvaluation):
 
         all_bags: list[GroupedBagJob] = []
         for date_job in self._date_jobs:
-            job_out = (
-                self.out_dir if len(self._date_jobs) == 1 else self.out_dir / date_job.date
-            )
+            job_out = self.out_dir if len(self._date_jobs) == 1 else self.out_dir / date_job.date
             if self.config.verbose:
                 print(
                     f"Grouped job: {date_job.dataset_key} {date_job.date} "
@@ -646,9 +644,7 @@ class GroupedMultiDateClosedLoopEvaluation(ClosedLoopEvaluation):
             )
             return
 
-        write_results_table(
-            summary.get("segments") or [], self.out_dir / "results_table.csv"
-        )
+        write_results_table(summary.get("segments") or [], self.out_dir / "results_table.csv")
         write_metrics_summary(
             summary.get("grouped_summary") or {},
             self.out_dir / "metrics_summary.json",
@@ -668,9 +664,7 @@ class GroupedMultiDateClosedLoopEvaluation(ClosedLoopEvaluation):
 
     def print_summary(self, summary: dict) -> None:
         if len(self._date_jobs) <= 1:
-            self._single_json_evaluator(self._date_jobs[0], self.out_dir).print_summary(
-                summary
-            )
+            self._single_json_evaluator(self._date_jobs[0], self.out_dir).print_summary(summary)
             return
         print(
             f"\n=== grouped closed-loop: {summary['n_episodes']} episodes "
