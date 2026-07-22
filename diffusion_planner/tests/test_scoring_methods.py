@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from diffusion_planner.utils.scoring_methods import MahalanobisScorer
+from diffusion_planner.utils.scoring_methods import MahalanobisScorer, SphericalKMeansScorer
 
 
 def _random_l2(n: int, d: int, seed: int = 42) -> np.ndarray:
@@ -90,3 +90,69 @@ class TestMahalanobisSaveLoad:
         loaded = MahalanobisScorer.load(tmp_path / "maha.npz")
         z = torch.randn(2, 8)
         torch.testing.assert_close(scorer.score(z)["mahalanobis"], loaded.score(z)["mahalanobis"])
+
+
+class TestSphericalKMeansFit:
+    def test_fit_produces_centroids(self):
+        emb = _random_l2(200, 16)
+        scorer = SphericalKMeansScorer.fit(emb, k=4)
+        assert scorer.centroids.shape == (4, 16)
+
+    def test_centroids_are_unit_norm(self):
+        emb = _random_l2(200, 16)
+        scorer = SphericalKMeansScorer.fit(emb, k=4)
+        norms = np.linalg.norm(scorer.centroids, axis=1)
+        np.testing.assert_allclose(norms, 1.0, atol=1e-5)
+
+    def test_assignments_cover_all_points(self):
+        emb = _random_l2(200, 16)
+        scorer = SphericalKMeansScorer.fit(emb, k=4)
+        assert scorer.assignments.shape == (200,)
+        assert set(scorer.assignments.tolist()).issubset(range(4))
+
+
+class TestSphericalKMeansScore:
+    def test_returns_expected_keys(self):
+        emb = _random_l2(200, 16)
+        scorer = SphericalKMeansScorer.fit(emb, k=4)
+        result = scorer.score(torch.randn(3, 16))
+        assert "kmeans_dist" in result
+        assert "cluster_id" in result
+        assert "margin" in result
+        assert result["kmeans_dist"].shape == (3,)
+        assert result["cluster_id"].shape == (3,)
+
+    def test_centroid_scores_near_zero(self):
+        emb = _random_l2(200, 16)
+        scorer = SphericalKMeansScorer.fit(emb, k=4)
+        centroid_z = torch.from_numpy(scorer.centroids[:1])
+        result = scorer.score(centroid_z)
+        assert result["kmeans_dist"].item() < 0.01
+
+    def test_1d_input_auto_batched(self):
+        emb = _random_l2(200, 16)
+        scorer = SphericalKMeansScorer.fit(emb, k=4)
+        result = scorer.score(torch.randn(16))
+        assert result["kmeans_dist"].shape == (1,)
+
+
+class TestSphericalKMeansNearest:
+    def test_returns_k_neighbors_from_top2_clusters(self):
+        emb = _random_l2(200, 16)
+        scorer = SphericalKMeansScorer.fit(emb, k=4)
+        results = scorer.nearest(torch.from_numpy(emb[:1]), emb, k=3)
+        assert len(results) == 1
+        assert len(results[0]) == 3
+        assert "distance" in results[0][0]
+        assert "index" in results[0][0]
+
+
+class TestSphericalKMeansSaveLoad:
+    def test_roundtrip(self, tmp_path):
+        emb = _random_l2(200, 16)
+        scorer = SphericalKMeansScorer.fit(emb, k=4)
+        scorer.save(tmp_path / "kmeans.npz")
+
+        loaded = SphericalKMeansScorer.load(tmp_path / "kmeans.npz")
+        z = torch.randn(2, 16)
+        torch.testing.assert_close(scorer.score(z)["kmeans_dist"], loaded.score(z)["kmeans_dist"])
