@@ -56,7 +56,13 @@ def parse_args():
 
 
 def bev_overlay(sampler, npz_path, out_png, num_samples):
-    from src.visualization import PAST_FRAMES, precompute_static, render_frame
+    try:
+        from src.visualization import PAST_FRAMES, precompute_static, render_frame
+    except ImportError:
+        raise ImportError(
+            "clip-review-tool is required for BEV overlays. "
+            "Install with: uv pip install -e ../clip-review-tool"
+        )
 
     data = dict(np.load(npz_path, allow_pickle=True))
     r = sampler.sample(str(npz_path), num_samples=num_samples, seed=0)
@@ -73,7 +79,6 @@ def bev_overlay(sampler, npz_path, out_png, num_samples):
         color="tab:red",
         lw=2.5,
         zorder=36,
-        label="human",
     )
 
     fig.savefig(out_png, dpi=120, facecolor="#1A1A1A", bbox_inches="tight")
