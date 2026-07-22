@@ -178,11 +178,8 @@ def _merge_shards(out_dir: Path, npz_root, near_miss_thresh: float) -> dict:
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len({r["route"] for r in rows})
     summary["video_mp4s"] = sorted(str(p) for p in out_dir.glob("*.mp4"))
-    summary["segments"] = rows
     with open(out_dir / "summary.json", "w") as f:
-        json.dump(
-            {k: v for k, v in summary.items() if k not in ("video_mp4s", "segments")}, f, indent=4
-        )
+        json.dump({k: v for k, v in summary.items() if k != "video_mp4s"}, f, indent=4)
     return summary
 
 
@@ -233,31 +230,54 @@ def main() -> None:
     summary["model_path"] = str(args.model_path)
 
     n_seg = summary["n_segments"]
+    obj = summary["object"]
+    rb = summary["road_border"]
+    red = summary["red_light_violation"]
+    brake = summary["strong_brake"]
+    repro = summary["reproducer"]
     print(f"\n=== closed-loop validation: {n_seg} segments in {summary['elapsed_sec']:.1f}s ===")
     print(
-        f"collision: {summary['collision_segments']}/{n_seg} segments "
-        f"(rate {summary['collision_segment_rate']:.4f}), "
-        f"{summary['collision_steps']} steps (rate {summary['collision_step_rate']:.6f}), "
-        f"{summary['collision_count']} events"
+        f"object collision: {obj['collision_segments']}/{n_seg} segments "
+        f"(rate {obj['collision_segment_rate']:.4f}), "
+        f"{obj['collision_steps']} steps (rate {obj['collision_step_rate']:.6f}), "
+        f"{obj['collision_count']} events"
     )
     print(
-        f"near-miss (<= {args.near_miss_thresh} m): "
-        f"{summary['near_miss_segments']}/{n_seg} segments "
-        f"(rate {summary['near_miss_segment_rate']:.4f}), {summary['near_miss_steps']} steps, "
-        f"{summary['near_miss_count']} events"
+        f"object miss (<= {obj['near_miss_thresh_m']} m): "
+        f"{obj['miss_segments']}/{n_seg} segments "
+        f"(rate {obj['miss_segment_rate']:.4f}), {obj['miss_steps']} steps, "
+        f"{obj['miss_count']} events"
     )
     print(
-        f"strong-brake (<= {args.strong_brake_mps2} m/s^2): "
-        f"{summary['strong_brake_segments']}/{n_seg} segments "
-        f"(rate {summary['strong_brake_segment_rate']:.4f}), {summary['strong_brake_steps']} steps, "
-        f"{summary['strong_brake_count']} events"
+        f"road_border collision: {rb['collision_segments']}/{n_seg} segments, "
+        f"{rb['collision_steps']} steps, {rb['collision_count']} events"
     )
     print(
-        f"global_min_clearance={summary['global_min_clearance']:.3f} m  "
-        f"mean_segment_min_clearance={summary['mean_segment_min_clearance']:.3f} m  "
-        f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m"
+        f"road_border miss (<= {rb['near_miss_thresh_m']} m): "
+        f"{rb['miss_segments']}/{n_seg} segments, {rb['miss_steps']} steps, "
+        f"{rb['miss_count']} events"
     )
-    print(f"snap_count={summary['snap_count']}  terminated={summary['terminated_counts']}")
+    print(
+        f"red_light_violation: {red['segments']}/{n_seg} segments "
+        f"(rate {red['segment_rate']:.4f}), {red['steps']} steps, {red['count']} events"
+    )
+    print(
+        f"strong-brake (<= {brake['thresh_mps2']} m/s^2): "
+        f"{brake['segments']}/{n_seg} segments "
+        f"(rate {brake['segment_rate']:.4f}), {brake['steps']} steps, "
+        f"{brake['count']} events"
+    )
+    print(
+        f"object clearance min/mean/p5="
+        f"{obj['clearance_min_m']:.3f}/{obj['clearance_mean_m']:.3f}/{obj['clearance_p5_m']:.3f} m  "
+        f"road_border clearance min/mean/p5="
+        f"{rb['clearance_min_m']:.3f}/{rb['clearance_mean_m']:.3f}/{rb['clearance_p5_m']:.3f} m"
+    )
+    print(
+        f"reproducer snap_count={repro['snap_count']} expand_count={repro['expand_count']} "
+        f"repeat_step_rate={repro['repeat_step_rate']:.4f}  "
+        f"terminated={summary['terminated_counts']}"
+    )
     print(f"videos: one <route>.mp4 per route in {out_dir}")
 
 

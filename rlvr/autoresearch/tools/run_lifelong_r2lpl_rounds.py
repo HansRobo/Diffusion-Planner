@@ -1638,12 +1638,11 @@ def _run_closed_loop_probe(
     shutil.copy2(summary_path, gdir / "closed_loop_summary.json")
     keep = (
         "n_segments",
-        "collision_segment_rate",
-        "collision_step_rate",
-        "near_miss_segment_rate",
-        "global_min_clearance",
-        "mean_segment_min_clearance",
-        "snap_count",
+        "object",
+        "road_border",
+        "red_light_violation",
+        "strong_brake",
+        "reproducer",
     )
     picked = {k: summary[k] for k in keep if k in summary}
     picked["run_dir"] = str(new_dirs[-1])

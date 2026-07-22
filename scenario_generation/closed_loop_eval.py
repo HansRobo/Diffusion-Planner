@@ -22,10 +22,14 @@ from pathlib import Path
 import numpy as np
 
 from scenario_generation.perf_timer import Timers
+from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# In-memory ``_tdigest`` sketches (stripped before segments.jsonl) let aggregate
+# merge approximate global percentiles without retaining raw samples.
 
 
 def route_label(npz_path: Path, key: str) -> str:
@@ -71,66 +75,172 @@ def resolve_npz_roots(npz_root) -> list[Path]:
     return [npz_root]
 
 
-def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
-    """Aggregate per-segment metric rows into a single closed-loop summary.
+def _event_family_block(
+    rows: list[dict],
+    category: str,
+    *,
+    dual: bool,
+    total_steps: int,
+    n_seg: int,
+    thresh_key: str | None = None,
+    thresh_value: float | None = None,
+) -> dict:
+    """Roll up one nested metric category across segment rows."""
 
-    Naming is unified across event families ({m} in {collision, near_miss, strong_brake}):
-    ``{m}_steps`` (steps in that state), ``{m}_count`` (discrete events = rising edges),
-    ``{m}_segments`` (segments with >=1 such step), plus ``{m}_step_rate`` = steps/total_steps
-    and ``{m}_segment_rate`` = segments/n_segments. ``total_steps`` and ``n_segments`` are the
-    denominators (not event families). Older rows may lack keys, so read via ``.get``.
-    """
+    def _get(row: dict, *keys, default=0):
+        cur: object = row
+        for k in keys:
+            if not isinstance(cur, dict) or k not in cur:
+                return default
+            cur = cur[k]
+        return cur
+
+    out: dict = {}
+    if thresh_key is not None and thresh_value is not None:
+        out[thresh_key] = thresh_value
+
+    if dual:
+        prefixes = ("collision", "miss")
+        for p in prefixes:
+            steps = sum(int(_get(r, category, f"{p}_steps", default=0)) for r in rows)
+            count = sum(int(_get(r, category, f"{p}_count", default=0)) for r in rows)
+            segs = sum(1 for r in rows if int(_get(r, category, f"{p}_steps", default=0)) > 0)
+            out[f"{p}_steps"] = steps
+            out[f"{p}_count"] = count
+            out[f"{p}_segments"] = segs
+            out[f"{p}_step_rate"] = steps / total_steps if total_steps else 0.0
+            out[f"{p}_segment_rate"] = segs / n_seg if n_seg else 0.0
+    else:
+        steps = sum(int(_get(r, category, "steps", default=0)) for r in rows)
+        count = sum(int(_get(r, category, "count", default=0)) for r in rows)
+        segs = sum(1 for r in rows if int(_get(r, category, "steps", default=0)) > 0)
+        out["steps"] = steps
+        out["count"] = count
+        out["segments"] = segs
+        out["step_rate"] = steps / total_steps if total_steps else 0.0
+        out["segment_rate"] = segs / n_seg if n_seg else 0.0
+
+    return out
+
+
+def _pool_clearance(rows: list[dict], category: str) -> dict[str, float]:
+    """Global clearance min/mean/p5 from per-segment stats (+ optional t-digests)."""
+    mins = []
+    means = []
+    weights = []
+    p5s = []
+    digests = []
+    for r in rows:
+        block = r.get(category) or {}
+        mn = block.get("clearance_min_m")
+        mean = block.get("clearance_mean_m")
+        p5 = block.get("clearance_p5_m")
+        digest = block.get(TDIGEST_KEY)
+        n = int(r.get("n_steps_run", 0))
+        if mn is not None and np.isfinite(mn):
+            mins.append(float(mn))
+        if mean is not None and np.isfinite(mean) and n > 0:
+            means.append(float(mean))
+            weights.append(n)
+        if p5 is not None and np.isfinite(p5):
+            p5s.append(float(p5))
+        if digest is not None:
+            digests.append(digest)
+    return {
+        "clearance_min_m": float(min(mins)) if mins else float("inf"),
+        "clearance_mean_m": float(np.average(means, weights=weights)) if means else float("inf"),
+        # Prefer merged t-digest p5; fall back to min of segment p5s (conservative).
+        "clearance_p5_m": (
+            merged_percentile(digests, 5)
+            if digests
+            else (float(min(p5s)) if p5s else float("inf"))
+        ),
+    }
+
+
+def metrics_for_json(metrics: dict) -> dict:
+    """Drop in-memory ``_tdigest`` sketches before writing segments.jsonl."""
+
+    def _strip(obj):
+        if isinstance(obj, dict):
+            return {k: _strip(v) for k, v in obj.items() if not is_tdigest_key(k)}
+        if isinstance(obj, list):
+            return [_strip(x) for x in obj]
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.floating, np.integer)):
+            return obj.item()
+        return obj
+
+    return _strip(metrics)
+
+
+def aggregate(rows: list[dict], near_miss_thresh: float, *, strong_brake_mps2: float = -3.0) -> dict:
+    """Aggregate per-segment nested metric rows into a closed-loop summary."""
     n_seg = len(rows)
-    total_steps = sum(r["n_steps_run"] for r in rows)
-
-    def _sum(key: str) -> int:
-        return sum(int(r.get(key, 0)) for r in rows)
-
-    def _segs(key: str) -> int:
-        return sum(1 for r in rows if int(r.get(key, 0)) > 0)
-
-    # min_clearance is +inf for a segment that never saw a valid neighbor; exclude those.
-    finite_min_cl = [r["min_clearance"] for r in rows if np.isfinite(r["min_clearance"])]
-    finite_mean_cl = [r["mean_clearance"] for r in rows if np.isfinite(r["mean_clearance"])]
+    total_steps = sum(int(r.get("n_steps_run", 0)) for r in rows)
 
     term_counts: dict[str, int] = {}
     for r in rows:
-        term_counts[r["terminated"]] = term_counts.get(r["terminated"], 0) + 1
+        term = r.get("terminated", "unknown")
+        term_counts[term] = term_counts.get(term, 0) + 1
 
-    summary = {
-        "near_miss_thresh": near_miss_thresh,
+    obj = _event_family_block(
+        rows,
+        "object",
+        dual=True,
+        total_steps=total_steps,
+        n_seg=n_seg,
+        thresh_key="near_miss_thresh_m",
+        thresh_value=float(near_miss_thresh),
+    )
+    obj.update(_pool_clearance(rows, "object"))
+
+    rb = _event_family_block(
+        rows,
+        "road_border",
+        dual=True,
+        total_steps=total_steps,
+        n_seg=n_seg,
+        thresh_key="near_miss_thresh_m",
+        thresh_value=float(near_miss_thresh),
+    )
+    rb.update(_pool_clearance(rows, "road_border"))
+
+    red = _event_family_block(
+        rows, "red_light_violation", dual=False, total_steps=total_steps, n_seg=n_seg
+    )
+    brake = _event_family_block(
+        rows,
+        "strong_brake",
+        dual=False,
+        total_steps=total_steps,
+        n_seg=n_seg,
+        thresh_key="thresh_mps2",
+        thresh_value=float(strong_brake_mps2),
+    )
+
+    expand = sum(int((r.get("reproducer") or {}).get("expand_count", 0)) for r in rows)
+    snap = sum(int((r.get("reproducer") or {}).get("snap_count", 0)) for r in rows)
+    normal = sum(int((r.get("reproducer") or {}).get("normal_steps", 0)) for r in rows)
+    repeat = sum(int((r.get("reproducer") or {}).get("repeat_steps", 0)) for r in rows)
+
+    return {
         "n_segments": n_seg,
         "total_steps": total_steps,
+        "object": obj,
+        "road_border": rb,
+        "red_light_violation": red,
+        "strong_brake": brake,
+        "terminated_counts": term_counts,
+        "reproducer": {
+            "expand_count": expand,
+            "snap_count": snap,
+            "normal_steps": normal,
+            "repeat_steps": repeat,
+            "repeat_step_rate": repeat / total_steps if total_steps else 0.0,
+        },
     }
-    # Per-step event families: steps / count / segments (+ step_rate / segment_rate).
-    for m in ("collision", "near_miss", "strong_brake"):
-        steps = _sum(f"{m}_steps")
-        segs = _segs(f"{m}_steps")
-        summary[f"{m}_steps"] = steps
-        summary[f"{m}_count"] = _sum(f"{m}_count")
-        summary[f"{m}_segments"] = segs
-        summary[f"{m}_step_rate"] = steps / total_steps if total_steps else 0.0
-        summary[f"{m}_segment_rate"] = segs / n_seg if n_seg else 0.0
-
-    summary.update(
-        {
-            "global_min_clearance": float(min(finite_min_cl)) if finite_min_cl else float("inf"),
-            "mean_segment_min_clearance": float(np.mean(finite_min_cl))
-            if finite_min_cl
-            else float("inf"),
-            "mean_segment_mean_clearance": float(np.mean(finite_mean_cl))
-            if finite_mean_cl
-            else float("inf"),
-            # Reproducer stuck telemetry (Autoware parity) + snap count.
-            "snap_count": _sum("n_snaps"),
-            "expand_count": _sum("expand_count"),
-            "teleport_count": _sum("teleport_count"),
-            "normal_steps": _sum("normal_steps"),
-            "repeat_steps": _sum("repeat_steps"),
-            "terminated_counts": term_counts,
-        }
-    )
-    return summary
 
 
 def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
@@ -208,8 +318,8 @@ def run_closed_loop_eval(
     the input history each step, held across cached-plan steps when ``replan_interval`` > 1
     (see ``render_segment``).
 
-    Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-route MP4),
-    ``segments`` (list[row]), and ``elapsed_sec``.
+    Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-route MP4)
+    and ``elapsed_sec``.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -269,7 +379,7 @@ def run_closed_loop_eval(
                 strong_brake_mps2=strong_brake_mps2,
             )
             row = {"route": key, **metrics}
-            fout.write(json.dumps(row, default=float) + "\n")
+            fout.write(json.dumps(metrics_for_json(row), default=float) + "\n")
             fout.flush()
             rows.append(row)
 
@@ -285,31 +395,32 @@ def run_closed_loop_eval(
             build_mp4(png_dir, seg_mp4, fps)
             video_mp4s.append(seg_mp4)
             if verbose:
+                obj = metrics.get("object") or {}
+                brake = metrics.get("strong_brake") or {}
                 print(
                     f"[{ri + 1}/{len(route_keys)}] {key} -> {seg_mp4.name}  "
-                    f"coll={metrics['collision_steps']} near={metrics['near_miss_steps']} "
-                    f"brake={metrics['strong_brake_steps']} "
-                    f"min_clr={metrics['min_clearance']:.3f}"
+                    f"obj_coll={obj.get('collision_count', 0)} "
+                    f"obj_miss={obj.get('miss_count', 0)} "
+                    f"brake={brake.get('count', 0)} "
+                    f"min_clr={obj.get('clearance_min_m', float('inf')):.3f}"
                 )
     finally:
         fout.close()
 
-    summary = aggregate(rows, near_miss_thresh)
-    summary["strong_brake_mps2"] = strong_brake_mps2
+    summary = aggregate(rows, near_miss_thresh, strong_brake_mps2=strong_brake_mps2)
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len(route_keys)
     summary["elapsed_sec"] = time.perf_counter() - t0
     summary["video_mp4s"] = video_mp4s
-    summary["segments"] = rows
 
     # A sharded worker leaves the merged summary.json to the parent driver (which aggregates every
     # shard's segments_*.jsonl); it only owns its own segments_{rank}.jsonl, written above.
     if shard is None:
         with open(out_dir / "summary.json", "w") as f:
             json.dump(
-                {k: v for k, v in summary.items() if k not in ("video_mp4s", "segments")},
+                {k: v for k, v in summary.items() if k != "video_mp4s"},
                 f,
-                indent=4,
+                indent=2,
+                default=float,
             )
-
     return summary

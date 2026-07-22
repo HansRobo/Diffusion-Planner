@@ -654,7 +654,13 @@ def test_mine_direct_main_forwards_realized_hard_event_scorer(monkeypatch, tmp_p
     def _fake_run_segments_batched(*args, **kwargs):
         captured["realized_event_scorer"] = kwargs.get("realized_event_scorer")
         captured["danger_scorer"] = kwargs.get("danger_scorer")
-        return [SimpleNamespace(metrics={"collision_steps": 1, "min_clearance": -0.1})]
+        return [
+            SimpleNamespace(
+                metrics={
+                    "object": {"collision_steps": 1, "clearance_min_m": -0.1},
+                }
+            )
+        ]
 
     chunk = Chunk(
         key="chunkA",

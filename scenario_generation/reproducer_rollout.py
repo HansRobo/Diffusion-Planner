@@ -37,6 +37,13 @@ from planner_metrics.geometry import (
     _closest_points_between_rects,
 )
 from scenario_generation.danger_event_selection import OnlineEventSelector
+from scenario_generation.metrics import (
+    StepMetricContext,
+    score_red_light_step,
+    score_road_border_step,
+    strong_brake_mask,
+)
+from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
 from scenario_generation.route_timeline import RouteTimeline
@@ -494,9 +501,6 @@ def score_step_batched(
 @dataclass
 class SegmentResult:
     metrics: dict
-    clearances: np.ndarray
-    collisions: np.ndarray
-    timers: Timers = field(default_factory=Timers)
 
 
 @dataclass
@@ -517,6 +521,8 @@ class _SegState:
     goal_xy: np.ndarray
     clearances: np.ndarray
     collisions: np.ndarray
+    rb_dists: np.ndarray
+    red_light: np.ndarray
     # Closed-loop turn-indicator history (INPUT_T+1,). Seeded from the recorded frame, then
     # each step the MODEL's predicted turn indicator is fed back in (recorded seed phases out
     # within PAST steps, exactly like ego_hist) — so the model context + saved npz never carry
@@ -693,6 +699,8 @@ def _seed_state(
         goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
         collisions=np.zeros(cap, dtype=bool),
+        rb_dists=np.full(cap, np.inf, dtype=np.float32),
+        red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
         strong_brake_mps2=float(strong_brake_mps2),
         prev_max_idx=cursor.max_idx_reached,
@@ -779,12 +787,25 @@ def _hold_turn_indicator(s: _SegState) -> None:
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
-def _score_into(s: _SegState, neighbors_live, device, timers):
-    """Score this step's ego↔neighbor clearance/collision into the segment state."""
+def _score_into(s: _SegState, neighbors_live, device, timers, np_dict: dict | None = None):
+    """Score this step's object / road-border / red-light metrics into the segment state."""
     with timers("score"):
         cl, col, _ = score_step(neighbors_live, s.ego_shape, s.dyn.speed, device)
         s.clearances[s.k] = cl
         s.collisions[s.k] = col
+        if np_dict is not None:
+            ctx = StepMetricContext(
+                np_dict=np_dict,
+                device=device,
+                k=int(s.k),
+                ego_speed_mps=float(s.dyn.speed),
+                live_pose=np.asarray(s.live_pose, dtype=np.float64),
+                ego_hist=np.asarray(s.ego_hist),
+            )
+            rb = score_road_border_step(ctx, near_miss_thresh_m=float(s.near_miss_thresh))
+            s.rb_dists[s.k] = float(rb["rb_dist_m"])
+            red = score_red_light_step(ctx)
+            s.red_light[s.k] = bool(red["red_light_violation"])
 
 
 def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None):
@@ -900,9 +921,9 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.n_snaps += 1
 
 
-def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers):
+def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers, np_dict=None):
     """Score this step and advance the ego (sequential render_segment path)."""
-    _score_into(s, neighbors_live, device, timers)
+    _score_into(s, neighbors_live, device, timers, np_dict=np_dict)
     _advance_step(s, pred, idx, device, timers)
 
 
@@ -933,41 +954,84 @@ def _event_count(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES)
     return count
 
 
-def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
+def _clearance_stats(values: np.ndarray) -> dict:
+    """min / mean / p5 over finite clearance samples; inf when empty.
+
+    p5 (not p95): clearance is a nearness quantity — the dangerous tail is the
+    low end, same spirit as min.
+
+    Also attaches an in-memory ``_tdigest`` (stripped before jsonl) so aggregate
+    can merge an approximate global p5 without retaining raw samples.
+    """
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return {
+            "clearance_min_m": float("inf"),
+            "clearance_mean_m": float("inf"),
+            "clearance_p5_m": float("inf"),
+        }
+    out = {
+        "clearance_min_m": float(finite.min()),
+        "clearance_mean_m": float(finite.mean()),
+        "clearance_p5_m": float(np.percentile(finite, 5)),
+    }
+    digest = tdigest_dict_from_values(finite)
+    if digest is not None:
+        out[TDIGEST_KEY] = digest
+    return out
+
+
+def _finalize(s: _SegState) -> SegmentResult:
     cl = s.clearances[: s.k]
     finite = np.isfinite(cl)
-    valid_cl = cl[finite]
+    rb = s.rb_dists[: s.k]
     accels = s.accels[: s.k] if s.accels is not None else np.zeros(0, dtype=np.float32)
     # Per-step state booleans -> both a step count and a rising-edge event count.
-    coll_mask = s.collisions[: s.k]
-    near_mask = finite & (cl <= s.near_miss_thresh)
-    brake_mask = accels <= s.strong_brake_mps2
-    progress = float(np.linalg.norm(s.live_pose[:2] - s.tl.poses[s.start, :2]))
+    obj_coll = s.collisions[: s.k]
+    obj_miss = finite & (cl <= s.near_miss_thresh)
+    rb_finite = np.isfinite(rb)
+    rb_coll = rb_finite & (rb <= 0.0)
+    rb_miss = rb_finite & (rb <= s.near_miss_thresh)
+    red_mask = s.red_light[: s.k]
+    brake_mask = strong_brake_mask(accels, thresh_mps2=float(s.strong_brake_mps2))
     metrics = {
         "segment": [int(s.start), int(s.end)],
         "n_steps_run": int(s.k),
         "terminated": s.terminated,
-        "min_clearance": float(valid_cl.min()) if valid_cl.size else float("inf"),
-        "mean_clearance": float(valid_cl.mean()) if valid_cl.size else float("inf"),
-        "collision_steps": int(coll_mask.sum()),
-        "collision_count": _event_count(coll_mask),
-        "near_miss_steps": int(near_mask.sum()),
-        "near_miss_count": _event_count(near_mask),
-        "strong_brake_steps": int(brake_mask.sum()),
-        "strong_brake_count": _event_count(brake_mask),
-        "worst_step": int(np.argmin(np.where(finite, cl, np.inf))) if valid_cl.size else -1,
-        "progress_m": progress,
-        "n_snaps": int(s.n_snaps),
-        # Reproducer telemetry. expand/teleport are rollout-owned escalation counts;
-        # normal/repeat step totals come from the cursor.
-        "expand_count": int(s.expand_count),
-        "teleport_count": int(s.teleport_count),
-        "normal_steps": int(s.cursor.normal_steps),
-        "repeat_steps": int(s.cursor.repeat_steps),
+        "object": {
+            "near_miss_thresh_m": float(s.near_miss_thresh),
+            "collision_steps": int(obj_coll.sum()),
+            "collision_count": _event_count(obj_coll),
+            "miss_steps": int(obj_miss.sum()),
+            "miss_count": _event_count(obj_miss),
+            **_clearance_stats(cl),
+        },
+        "road_border": {
+            "near_miss_thresh_m": float(s.near_miss_thresh),
+            "collision_steps": int(rb_coll.sum()),
+            "collision_count": _event_count(rb_coll),
+            "miss_steps": int(rb_miss.sum()),
+            "miss_count": _event_count(rb_miss),
+            **_clearance_stats(rb),
+        },
+        "red_light_violation": {
+            "steps": int(red_mask.sum()),
+            "count": _event_count(red_mask),
+        },
+        "strong_brake": {
+            "thresh_mps2": float(s.strong_brake_mps2),
+            "steps": int(brake_mask.sum()),
+            "count": _event_count(brake_mask),
+        },
+        "reproducer": {
+            # n_snaps kept as control-flow counter; exported as snap_count.
+            "expand_count": int(s.expand_count),
+            "snap_count": int(s.n_snaps),
+            "normal_steps": int(s.cursor.normal_steps),
+            "repeat_steps": int(s.cursor.repeat_steps),
+        },
     }
-    return SegmentResult(
-        metrics=metrics, clearances=s.clearances, collisions=s.collisions, timers=timers
-    )
+    return SegmentResult(metrics=metrics)
 
 
 # --------------------------------------------------------------------------- #
@@ -1581,7 +1645,7 @@ def render_segment(
                 distance_label_offset_m=distance_label_offset_m,
                 view_half_m=view_half_m,
             )
-        _score_into(s, neighbors_live, device, timers)
+        _score_into(s, neighbors_live, device, timers, np_dict=np_dict)
         snaps_before = s.n_snaps
         _advance_step(s, pred_cur, idx, device, timers, override=override)
         if s.n_snaps > snaps_before:
@@ -1590,7 +1654,7 @@ def render_segment(
             # it to force a fresh inference at the snapped pose (else the snap never sticks).
             plan_world = None
     dbg.close()
-    return _finalize(s, timers).metrics
+    return _finalize(s).metrics
 
 
 @torch.no_grad()
@@ -1887,6 +1951,20 @@ def run_segments_batched(
                         realized_row = realized_rows[row_idx] if realized_rows else None
                         s.clearances[s.k] = cl
                         s.collisions[s.k] = col
+                        ctx = StepMetricContext(
+                            np_dict=_np,
+                            device=device,
+                            k=int(s.k),
+                            ego_speed_mps=float(s.dyn.speed),
+                            live_pose=np.asarray(s.live_pose, dtype=np.float64),
+                            ego_hist=np.asarray(s.ego_hist),
+                        )
+                        rb = score_road_border_step(
+                            ctx, near_miss_thresh_m=float(s.near_miss_thresh)
+                        )
+                        s.rb_dists[s.k] = float(rb["rb_dist_m"])
+                        red = score_red_light_step(ctx)
+                        s.red_light[s.k] = bool(red["red_light_violation"])
                         # One-pass save: buffer this step, then dump the window on the
                         # FIRST collision — from THIS run, so the scenes match the hit.
                         if s.save_buf is not None:
@@ -2152,7 +2230,7 @@ def run_segments_batched(
                             s.save_buf.clear()
                             s.last_snap_step = s.k
                 active = [s for s in active if not s.done]
-            results.extend(_finalize(s, timers) for s in states)
+            results.extend(_finalize(s) for s in states)
     finally:
         pool.shutdown(wait=True)
     return results

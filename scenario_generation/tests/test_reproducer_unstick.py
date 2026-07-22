@@ -246,7 +246,7 @@ def test_event_count_rising_edges():
 
 
 def test_finalize_strong_brake_steps_and_count(tmp_path):
-    """``strong_brake_steps`` counts steps with accel <= threshold; ``strong_brake_count`` is
+    """``strong_brake.steps`` counts steps with accel <= threshold; ``strong_brake.count`` is
     the number of discrete braking events (debounced rising edges)."""
     from scenario_generation.reproducer_rollout import _finalize
 
@@ -269,9 +269,9 @@ def test_finalize_strong_brake_steps_and_count(tmp_path):
     # Mask: F T T F F F T  -> steps=3, count=2 after debounce.
     s.k = 7
     s.accels[:7] = np.array([0.0, -4.0, -3.5, 0.0, 0.0, 0.0, -5.0], dtype=np.float32)
-    metrics = _finalize(s, timers).metrics
-    assert metrics["strong_brake_steps"] == 3
-    assert metrics["strong_brake_count"] == 2
+    metrics = _finalize(s).metrics
+    assert metrics["strong_brake"]["steps"] == 3
+    assert metrics["strong_brake"]["count"] == 2
 
 
 def test_index_ahead_by_arc_length(tmp_path):
