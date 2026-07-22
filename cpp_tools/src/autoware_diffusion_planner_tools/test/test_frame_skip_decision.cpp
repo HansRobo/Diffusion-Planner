@@ -23,8 +23,12 @@
 using namespace frame_processor;
 using autoware::diffusion_planner::INPUT_T;
 using autoware::diffusion_planner::MAX_NUM_NEIGHBORS;
+using autoware::diffusion_planner::NUM_SEGMENTS_IN_ROUTE;
 using autoware::diffusion_planner::OUTPUT_T;
+using autoware::diffusion_planner::POINTS_PER_LINE_STRING;
+using autoware::diffusion_planner::POINTS_PER_SEGMENT;
 using autoware::diffusion_planner::POSE_DIM;
+using autoware::diffusion_planner::SEGMENT_POINT_DIM;
 using autoware::diffusion_planner::STATIC_OBJECTS_SHAPE;
 
 // ---------------------------------------------------------------------------
@@ -50,24 +54,29 @@ FrameSkipInputs make_clear_inputs()
 
 FrameFilterParams make_default_filter_params()
 {
-  return FrameFilterParams{0.0f, 0.0f, 0.0f, 5, 6.0f, 1};
+  return FrameFilterParams{0.0f,  0.0f,  0.0f, 5,    6.0f,  1,     5.0f,
+                           30.0f, 45.0f, 2.0f, 1.0f, 40.0f, 30.0f, 2.0f};
 }
 
 // Vectors sized for a valid call with no objects/lanes (all zeros → no collision/offlane).
 struct ZeroVectors
 {
   std::vector<float> ego_future;
+  std::vector<float> ego_current;
   std::vector<float> ego_shape;
   std::vector<float> static_objects;
   std::vector<float> neighbor_future;
   std::vector<float> neighbor_past;
   std::vector<float> line_strings;
   std::vector<float> lanes;
+  std::vector<float> route_lanes;
 
   ZeroVectors()
   {
     using namespace autoware::diffusion_planner;
     ego_future.assign(OUTPUT_T * POSE_DIM, 0.0f);
+    ego_current.assign(10, 0.0f);
+    ego_current[2] = 1.0f;
     ego_shape = {2.75f, 4.34f, 1.70f};
     static_objects.assign(STATIC_OBJECTS_SHAPE[1] * STATIC_OBJECTS_SHAPE[2], 0.0f);
     const int64_t past = INPUT_T + 1;
@@ -77,14 +86,16 @@ struct ZeroVectors
     const int64_t ls_dim = 2 + LINE_STRING_TYPE_NUM;
     line_strings.assign(NUM_LINE_STRINGS * POINTS_PER_LINE_STRING * ls_dim, 0.0f);
     lanes.assign(NUM_SEGMENTS_IN_LANE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM, 0.0f);
+    route_lanes.assign(NUM_SEGMENTS_IN_ROUTE * POINTS_PER_SEGMENT * SEGMENT_POINT_DIM, 0.0f);
   }
 };
 
 SkippingInfo call_decide(const FrameSkipInputs & inputs, const ZeroVectors & vecs)
 {
   return decide_frame_skip(
-    inputs, vecs.ego_future, vecs.ego_shape, vecs.static_objects, vecs.neighbor_future,
-    vecs.neighbor_past, vecs.line_strings, vecs.lanes, make_default_filter_params());
+    inputs, vecs.ego_future, vecs.ego_current, vecs.ego_shape, vecs.static_objects,
+    vecs.neighbor_future, vecs.neighbor_past, vecs.line_strings, vecs.lanes, vecs.route_lanes,
+    make_default_filter_params());
 }
 
 // Fill ego_future with a straight forward trajectory whose per-step speed ramps
@@ -104,6 +115,70 @@ void set_linear_future(std::vector<float> & ego_future, float v_start, float v_e
     const float speed = v_start + (v_end - v_start) * static_cast<float>(j) / (OUTPUT_T - 1);
     x += speed * dt;
   }
+}
+
+void set_stationary_future(std::vector<float> & ego_future, float x = 0.2f, float y = 0.0f)
+{
+  for (int64_t j = 0; j < OUTPUT_T; ++j) {
+    ego_future[j * POSE_DIM + 0] = x;
+    ego_future[j * POSE_DIM + 1] = y;
+    ego_future[j * POSE_DIM + 2] = 1.0f;
+    ego_future[j * POSE_DIM + 3] = 0.0f;
+  }
+}
+
+void set_route_lane_point(
+  std::vector<float> & route_lanes, int64_t segment_idx, int64_t point_idx, float x, float y)
+{
+  const int64_t base = (segment_idx * POINTS_PER_SEGMENT + point_idx) * SEGMENT_POINT_DIM;
+  route_lanes[base + 0] = x;
+  route_lanes[base + 1] = y;
+}
+
+void set_lane_point(
+  std::vector<float> & lanes, int64_t segment_idx, int64_t point_idx, float x, float y)
+{
+  const int64_t base = (segment_idx * POINTS_PER_SEGMENT + point_idx) * SEGMENT_POINT_DIM;
+  lanes[base + 0] = x;
+  lanes[base + 1] = y;
+}
+
+void set_route_lane_red(std::vector<float> & route_lanes, int64_t segment_idx)
+{
+  using autoware::diffusion_planner::TRAFFIC_LIGHT_RED;
+  route_lanes[(segment_idx * POINTS_PER_SEGMENT + 0) * SEGMENT_POINT_DIM + TRAFFIC_LIGHT_RED] =
+    1.0f;
+}
+
+void set_route_lane_green(std::vector<float> & route_lanes, int64_t segment_idx)
+{
+  using autoware::diffusion_planner::TRAFFIC_LIGHT_GREEN;
+  route_lanes[(segment_idx * POINTS_PER_SEGMENT + 0) * SEGMENT_POINT_DIM + TRAFFIC_LIGHT_GREEN] =
+    1.0f;
+}
+
+void set_neighbor_current(std::vector<float> & neighbor_past, float x, float y)
+{
+  constexpr int64_t past = INPUT_T + 1;
+  constexpr int64_t np_dim = 11;
+  const int64_t base = (0 * past + INPUT_T) * np_dim;
+  neighbor_past[base + 0] = x;
+  neighbor_past[base + 1] = y;
+  neighbor_past[base + 2] = 1.0f;
+  neighbor_past[base + 3] = 0.0f;
+}
+
+void set_stop_line_segment(
+  std::vector<float> & line_strings, int64_t line_idx, float ax, float ay, float bx, float by)
+{
+  const int64_t ls_dim = 2 + autoware::diffusion_planner::LINE_STRING_TYPE_NUM;
+  const int64_t base = line_idx * POINTS_PER_LINE_STRING * ls_dim;
+  line_strings[base + 0] = ax;
+  line_strings[base + 1] = ay;
+  line_strings[base + 2] = 1.0f;
+  line_strings[base + ls_dim + 0] = bx;
+  line_strings[base + ls_dim + 1] = by;
+  line_strings[base + ls_dim + 2] = 1.0f;
 }
 
 }  // namespace
@@ -153,7 +228,12 @@ TEST(DecideFrameSkipTest, InvalidCovarianceBeforeOtherChecks)
 TEST(DecideFrameSkipTest, RedOrYellowLightSkip)
 {
   ZeroVectors vecs;
-  vecs.lanes[0] = 1.0f;
+  for (int64_t p = 0; p < 8; ++p) set_lane_point(vecs.lanes, 0, p, static_cast<float>(p), 0.0f);
+  set_linear_future(vecs.ego_future, 5.0f, 5.0f);
+  set_route_lane_red(vecs.route_lanes, 0);
+  set_route_lane_point(vecs.route_lanes, 0, 0, 1.0f, 0.0f);
+  set_route_lane_point(vecs.route_lanes, 0, 1, 8.0f, 0.0f);
+  set_stop_line_segment(vecs.line_strings, 0, 2.25f, -1.0f, 2.25f, 1.0f);
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = true;
@@ -170,8 +250,12 @@ TEST(DecideFrameSkipTest, AcceleratingIntoRedLightSkipsEvenWhenMoving)
   // this — but the GT future clearly accelerates (~0 -> ~9 m/s) into a red/yellow light,
   // so the dedicated AcceleratingAtTrafficLight trigger fires.
   ZeroVectors vecs;
-  vecs.lanes[0] = 1.0f;
+  for (int64_t p = 0; p < 8; ++p) set_lane_point(vecs.lanes, 0, p, static_cast<float>(p), 0.0f);
   set_linear_future(vecs.ego_future, 0.2f, 9.0f);
+  set_route_lane_red(vecs.route_lanes, 0);
+  set_route_lane_point(vecs.route_lanes, 0, 0, 1.0f, 0.0f);
+  set_route_lane_point(vecs.route_lanes, 0, 1, 8.0f, 0.0f);
+  set_stop_line_segment(vecs.line_strings, 0, 2.25f, -1.0f, 2.25f, 1.0f);
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = false;
@@ -187,8 +271,12 @@ TEST(DecideFrameSkipTest, StoppedThenAcceleratingKeepsRedOrYellowLabel)
   // When the ego is fully stopped AND the future accelerates away, the original stopped
   // gate is checked first, so the frame keeps the RedOrYellowLight label (not the new one).
   ZeroVectors vecs;
-  vecs.lanes[0] = 1.0f;
+  for (int64_t p = 0; p < 8; ++p) set_lane_point(vecs.lanes, 0, p, static_cast<float>(p), 0.0f);
   set_linear_future(vecs.ego_future, 0.2f, 9.0f);
+  set_route_lane_red(vecs.route_lanes, 0);
+  set_route_lane_point(vecs.route_lanes, 0, 0, 1.0f, 0.0f);
+  set_route_lane_point(vecs.route_lanes, 0, 1, 8.0f, 0.0f);
+  set_stop_line_segment(vecs.line_strings, 0, 2.25f, -1.0f, 2.25f, 1.0f);
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = true;
@@ -199,14 +287,17 @@ TEST(DecideFrameSkipTest, StoppedThenAcceleratingKeepsRedOrYellowLabel)
   EXPECT_EQ(info.label, SkippingLabel::RedOrYellowLight);
 }
 
-TEST(DecideFrameSkipTest, CreepingIntoRedWhileMovingIsKept)
+TEST(DecideFrameSkipTest, CreepingAcrossRedStopLineIsDetected)
 {
-  // Moving slowly at a near-constant ~1 m/s (a creep, peak < 3 m/s) toward a red light:
-  // neither the stopped gate (is_stop = false) nor the acceleration trigger fires, so the
-  // frame is accepted rather than dropped.
+  // Constant-speed creep does not trip the acceleration trigger, but crossing the stop line
+  // near a heading-aligned red route lane is detected by the red-light-run geometry filter.
   ZeroVectors vecs;
-  vecs.lanes[0] = 1.0f;
+  for (int64_t p = 0; p < 8; ++p) set_lane_point(vecs.lanes, 0, p, static_cast<float>(p), 0.0f);
   set_linear_future(vecs.ego_future, 1.0f, 1.0f);
+  set_route_lane_red(vecs.route_lanes, 0);
+  set_route_lane_point(vecs.route_lanes, 0, 0, 1.0f, 0.0f);
+  set_route_lane_point(vecs.route_lanes, 0, 1, 8.0f, 0.0f);
+  set_stop_line_segment(vecs.line_strings, 0, 2.25f, -1.0f, 2.25f, 1.0f);
 
   FrameSkipInputs inputs = make_clear_inputs();
   inputs.is_stop = false;
@@ -214,7 +305,7 @@ TEST(DecideFrameSkipTest, CreepingIntoRedWhileMovingIsKept)
   inputs.is_future_forward = true;
 
   const SkippingInfo info = call_decide(inputs, vecs);
-  EXPECT_EQ(info.label, SkippingLabel::NotSkipped);
+  EXPECT_EQ(info.label, SkippingLabel::DetectedRedLightRun);
 }
 
 TEST(DecideFrameSkipTest, StoppedAtTrafficLightSkip)
@@ -232,6 +323,38 @@ TEST(DecideFrameSkipTest, StoppedAtTrafficLightSkip)
 
   const SkippingInfo info = call_decide(inputs, vecs);
   EXPECT_EQ(info.label, SkippingLabel::StoppedAtTrafficLight);
+}
+
+TEST(DecideFrameSkipTest, GreenStopSkipBeforeNoFutureProgress)
+{
+  ZeroVectors vecs;
+  for (int64_t p = 0; p < 8; ++p) set_lane_point(vecs.lanes, 0, p, static_cast<float>(p), 0.0f);
+  set_stationary_future(vecs.ego_future);
+  set_route_lane_green(vecs.route_lanes, 0);
+  set_route_lane_point(vecs.route_lanes, 0, 0, 8.0f, 0.0f);
+  set_route_lane_point(vecs.route_lanes, 0, 1, 20.0f, 0.0f);
+
+  FrameSkipInputs inputs = make_clear_inputs();
+  inputs.no_future_progress_x_step = 31;
+
+  const SkippingInfo info = call_decide(inputs, vecs);
+  EXPECT_EQ(info.label, SkippingLabel::GreenStop);
+}
+
+TEST(DecideFrameSkipTest, GreenStopNeighborAheadIsKept)
+{
+  ZeroVectors vecs;
+  for (int64_t p = 0; p < 8; ++p) set_lane_point(vecs.lanes, 0, p, static_cast<float>(p), 0.0f);
+  set_stationary_future(vecs.ego_future);
+  set_route_lane_green(vecs.route_lanes, 0);
+  set_route_lane_point(vecs.route_lanes, 0, 0, 8.0f, 0.0f);
+  set_route_lane_point(vecs.route_lanes, 0, 1, 20.0f, 0.0f);
+  set_neighbor_current(vecs.neighbor_past, 12.0f, 0.5f);
+
+  const FrameSkipInputs inputs = make_clear_inputs();
+
+  const SkippingInfo info = call_decide(inputs, vecs);
+  EXPECT_EQ(info.label, SkippingLabel::NotSkipped);
 }
 
 TEST(DecideFrameSkipTest, NoFutureProgressSkip)
@@ -270,4 +393,26 @@ TEST(DecideFrameSkipTest, OffLaneSkipWhenNoCenterline)
 
   const SkippingInfo info = call_decide(inputs, vecs);
   EXPECT_EQ(info.label, SkippingLabel::OffLane);
+}
+
+TEST(DecideFrameSkipTest, PerpendicularRedLaneDoesNotCauseFalsePositive)
+{
+  ZeroVectors vecs;
+  for (int64_t p = 0; p < POINTS_PER_SEGMENT; ++p) {
+    set_lane_point(vecs.lanes, 0, p, static_cast<float>(2 * p), 0.0f);
+  }
+  set_linear_future(vecs.ego_future, 5.0f, 5.0f);
+  set_route_lane_red(vecs.route_lanes, 0);
+  set_route_lane_point(vecs.route_lanes, 0, 0, 2.0f, 0.0f);
+  set_route_lane_point(vecs.route_lanes, 0, 1, 2.0f, 8.0f);
+  set_stop_line_segment(vecs.line_strings, 0, 2.25f, -1.0f, 2.25f, 1.0f);
+
+  FrameSkipInputs inputs = make_clear_inputs();
+  inputs.is_stop = true;
+  // Keep the legacy boolean red/yellow gate off so this isolates the geometry detector.
+  inputs.is_red_or_yellow = false;
+  inputs.is_future_forward = true;
+
+  const SkippingInfo info = call_decide(inputs, vecs);
+  EXPECT_EQ(info.label, SkippingLabel::NotSkipped);
 }

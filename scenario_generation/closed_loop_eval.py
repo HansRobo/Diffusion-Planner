@@ -128,6 +128,7 @@ def run_closed_loop_eval(
     neighbor_history_mode: str,
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
+    tracker_mode: str = "mpc",
     verbose: bool = True,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
@@ -137,6 +138,10 @@ def run_closed_loop_eval(
     ``predicted_neighbor_num`` / ``future_len`` (a ``Config`` or ``TrainConfig``). Per segment a PNG
     dir + an MP4 (``<route>_<start>_<end>.mp4``) are written. ``segments.jsonl`` and
     ``summary.json`` are written into ``out_dir``.
+
+    Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back into
+    the input history each step, held across cached-plan steps when ``replan_interval`` > 1
+    (see ``render_segment``).
 
     Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-segment MP4),
     ``segments`` (list[row]), and ``elapsed_sec``.
@@ -178,6 +183,7 @@ def run_closed_loop_eval(
                     replan_interval=replan_interval,
                     draw_every=draw_every,
                     neighbor_history_mode=neighbor_history_mode,
+                    tracker_mode=tracker_mode,
                 )
                 row = {"route": key, **metrics}
                 fout.write(json.dumps(row, default=float) + "\n")

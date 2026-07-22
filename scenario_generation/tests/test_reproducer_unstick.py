@@ -34,7 +34,12 @@ def _make_route(tmp_path):
     past[:, 0] = (np.arange(31) - 30) * STEP_M  # ramp of past x positions
     for i in range(N_FRAMES):
         p = tmp_path / f"route_{i:010d}.npz"
-        np.savez_compressed(p, ego_agent_past=past, ego_shape=EGO_SHAPE)
+        np.savez_compressed(
+            p,
+            ego_agent_past=past,
+            ego_shape=EGO_SHAPE,
+            turn_indicators=np.zeros(31, dtype=np.int64),
+        )
         sidecar = {
             "timestamp": float(i),
             "x": float(i * STEP_M),

@@ -72,6 +72,32 @@ void ConverterOptions::add_converter_options(CLI::App & app)
     "--offlane_time_stride", offlane_time_stride,
     "Time stride used when checking the off-lane filter.");
   app.add_option(
+    "--red_light_run_radius_m", red_light_run_radius_m,
+    "Maximum distance in meters from a stop-line crossing point to a heading-aligned red "
+    "route-lane entry for red-light-run skipping.");
+  app.add_option(
+    "--red_light_run_heading_tol_deg", red_light_run_heading_tol_deg,
+    "Maximum heading difference in degrees between ego future and a red route lane when "
+    "matching the ego's own signal.");
+  app.add_option(
+    "--green_stop_heading_tol_deg", green_stop_heading_tol_deg,
+    "Maximum heading difference in degrees between ego heading and a green route lane.");
+  app.add_option(
+    "--green_stop_stay_radius_m", green_stop_stay_radius_m,
+    "Maximum future spatial extent in meters for a green-stop stationary window.");
+  app.add_option(
+    "--green_stop_speed_max_mps", green_stop_speed_max_mps,
+    "Maximum current ego speed in m/s for green-stop stationary detection.");
+  app.add_option(
+    "--green_stop_ahead_m", green_stop_ahead_m,
+    "Maximum forward distance in meters to a heading-aligned green route-lane entry.");
+  app.add_option(
+    "--green_stop_lead_fwd_m", green_stop_lead_fwd_m,
+    "Forward extent in meters of the green-stop lead-neighbor corridor.");
+  app.add_option(
+    "--green_stop_lead_lat_m", green_stop_lead_lat_m,
+    "Half-width in meters of the green-stop lead-neighbor corridor.");
+  app.add_option(
     "--write_skipped_npz", write_skipped_npz,
     "Also write npz files for skipped frames when non-zero. "
     "Intended for inspection.");
@@ -80,6 +106,11 @@ void ConverterOptions::add_converter_options(CLI::App & app)
     "Write ONLY the per-frame JSON sidecars (pose + neighbor_ids + is_skipped), skipping all "
     "npz output. Same pipeline/slot-ordering as a full convert, so the sidecars align to an "
     "existing npz set from this converter; faster than re-converting (no npz write).");
+  app.add_flag(
+    "--pack_sequence", pack_sequence,
+    "Write ONE npz and ONE json per sequence (frames stacked along a leading frame axis) "
+    "instead of one file per frame. Forces write_skipped_npz on so the packed sequence is "
+    "gap-free. Mutually exclusive with --sidecar_only.");
 }
 
 std::string ConverterPaths::get_rosbag_dir_name() const
@@ -112,18 +143,68 @@ ConverterOptions ConverterOptions::default_converter_options()
   options.offlane_max_score = 6.0f;
   options.offlane_time_stride = 1;
 
+  // Red-light-run detector defaults match the integrated python heuristic.
+  options.red_light_run_radius_m = 12.0f;
+  options.red_light_run_heading_tol_deg = 45.0f;
+
+  // Green-stop detector defaults match Sakayori's npz_cleansing reference.
+  options.green_stop_heading_tol_deg = 45.0f;
+  options.green_stop_stay_radius_m = 2.0f;
+  options.green_stop_speed_max_mps = 1.0f;
+  options.green_stop_ahead_m = 40.0f;
+  options.green_stop_lead_fwd_m = 30.0f;
+  options.green_stop_lead_lat_m = 2.0f;
+
   // Inspection-only: production keeps this off so skipped frames write no npz.
   options.write_skipped_npz = false;
   // Full conversion by default (write npz); --sidecar_only flips to sidecar-only output.
   options.sidecar_only = false;
+  // One file per frame by default; --pack_sequence packs a whole sequence into one npz/json.
+  options.pack_sequence = false;
   options.use_interpolation = static_cast<bool>(options.interpolation);
   return options;
+}
+
+void normalize_options(ConverterOptions & opts)
+{
+  if (opts.pack_sequence) {
+    // Requirement (3): a packed sequence must be gap-free, so every frame is written.
+    opts.write_skipped_npz = true;
+  }
 }
 
 std::optional<std::string> validate_options(const ConverterOptions & opts)
 {
   if (opts.ego_wheel_base < 0.0 || opts.ego_length < 0.0 || opts.ego_width < 0.0) {
     return "Ego vehicle dimensions must be non-negative.";
+  }
+  if (opts.pack_sequence && opts.sidecar_only) {
+    return "--pack_sequence and --sidecar_only are mutually exclusive "
+           "(pack_sequence writes one npz per sequence; sidecar_only writes no npz).";
+  }
+  if (opts.red_light_run_radius_m < 0.0f) {
+    return "red_light_run_radius_m must be non-negative.";
+  }
+  if (opts.red_light_run_heading_tol_deg < 0.0f) {
+    return "red_light_run_heading_tol_deg must be non-negative.";
+  }
+  if (opts.green_stop_heading_tol_deg < 0.0f) {
+    return "green_stop_heading_tol_deg must be non-negative.";
+  }
+  if (opts.green_stop_stay_radius_m < 0.0f) {
+    return "green_stop_stay_radius_m must be non-negative.";
+  }
+  if (opts.green_stop_speed_max_mps < 0.0f) {
+    return "green_stop_speed_max_mps must be non-negative.";
+  }
+  if (opts.green_stop_ahead_m < 0.0f) {
+    return "green_stop_ahead_m must be non-negative.";
+  }
+  if (opts.green_stop_lead_fwd_m < 0.0f) {
+    return "green_stop_lead_fwd_m must be non-negative.";
+  }
+  if (opts.green_stop_lead_lat_m < 0.0f) {
+    return "green_stop_lead_lat_m must be non-negative.";
   }
   return std::nullopt;
 }

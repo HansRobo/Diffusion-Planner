@@ -36,7 +36,8 @@ inline double to_millisecond(const int64_t timestamp_ns)
 
 nlohmann::json build_frame_json(
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
-  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids)
+  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids,
+  const BagMetadata & bag_metadata)
 {
   std::vector<int> incomplete_types;
   for (const auto & t : skipping_info.incomplete_data_types) {
@@ -63,13 +64,15 @@ nlohmann::json build_frame_json(
   // Perception track UUIDs aligned 1:1 with the neighbor_past slots (for the
   // reproducer's cross-frame association / interpolation).
   j["neighbor_ids"] = neighbor_ids;
+  write_bag_metadata(j, bag_metadata);
   return j;
 }
 
 nlohmann::json build_route_json(
   const int64_t num_frames, const double traveled_distance_m, const int64_t start_timestamp,
   const int64_t end_timestamp, const SkippingInfo & skipping_info,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map)
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten,
+  const BagMetadata & bag_metadata)
 {
   std::vector<int> missing_types;
   for (const auto & t : skipping_info.missing_topic_types) {
@@ -78,6 +81,7 @@ nlohmann::json build_route_json(
 
   nlohmann::json j;
   j["is_skipped"] = (skipping_info.label != SkippingLabel::NotSkipped);
+  j["goal_pose_overwritten"] = goal_pose_overwritten;
   j["num_frames"] = num_frames;
   j["traveled_distance_m"] = traveled_distance_m;
   j["start_timestamp"] = start_timestamp;
@@ -112,6 +116,7 @@ nlohmann::json build_route_json(
       {"rosbag_diff_stats", rosbag_diff_stats_json}};
   }
   j["timestamp_stats"] = timestamp_stats_json;
+  write_bag_metadata(j, bag_metadata);
   return j;
 }
 
@@ -122,14 +127,15 @@ nlohmann::json build_route_json(
 void save_frame_json(
   const std::string & output_path, const std::string & rosbag_dir_name, const std::string & token,
   const nav_msgs::msg::Odometry & kinematic_state, const int64_t timestamp,
-  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids)
+  const SkippingInfo & skipping_info, const std::vector<std::string> & neighbor_ids,
+  const BagMetadata & bag_metadata)
 {
   namespace fs = std::filesystem;
 
   fs::create_directories(output_path);
 
   const nlohmann::json j =
-    build_frame_json(kinematic_state, timestamp, skipping_info, neighbor_ids);
+    build_frame_json(kinematic_state, timestamp, skipping_info, neighbor_ids, bag_metadata);
 
   const std::string json_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".json";
   std::ofstream json_file(json_filename);
@@ -145,7 +151,8 @@ void save_route_json(
   const std::string & output_path, const std::string & rosbag_dir_name,
   const std::string & identifier, const int64_t num_frames, const double traveled_distance_m,
   const int64_t start_timestamp, const int64_t end_timestamp, const SkippingInfo & skipping_info,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map)
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten,
+  const BagMetadata & bag_metadata)
 {
   namespace fs = std::filesystem;
 
@@ -154,7 +161,7 @@ void save_route_json(
 
   const nlohmann::json j = build_route_json(
     num_frames, traveled_distance_m, start_timestamp, end_timestamp, skipping_info,
-    timestamp_stats_map);
+    timestamp_stats_map, goal_pose_overwritten, bag_metadata);
 
   const std::string json_filename = routes_dir + "/" + rosbag_dir_name + "_" + identifier + ".json";
   std::ofstream json_file(json_filename);
@@ -172,5 +179,24 @@ void save_route_json(
   json_file.close();
   if (!json_file) {
     std::cerr << "Failed to close route JSON file: " << json_filename << std::endl;
+  }
+}
+
+void save_sequence_frames_json(
+  const std::string & output_path, const std::string & rosbag_dir_name,
+  const std::string & sequence_id, const nlohmann::json & frames)
+{
+  namespace fs = std::filesystem;
+
+  fs::create_directories(output_path);
+
+  const std::string json_filename =
+    output_path + "/" + rosbag_dir_name + "_" + sequence_id + ".json";
+  std::ofstream json_file(json_filename);
+  if (json_file.is_open()) {
+    json_file << std::setw(2) << frames << std::endl;
+    json_file.close();
+  } else {
+    std::cerr << "Failed to open sequence JSON file for writing: " << json_filename << std::endl;
   }
 }

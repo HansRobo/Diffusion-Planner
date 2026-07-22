@@ -23,3 +23,11 @@ class ValidConfig:
     predicted_neighbor_num: int = 32
     ddp: bool = True
     port: str = "22323"
+
+    enable_temporal_stability_eval: bool = True
+    enable_replan_consistency_eval: bool = True
+    replan_consistency_expected_gap: int = 1
+    enable_epdms_eval: bool = True
+    enable_pdms_eval: bool = False
+    epdms_eval_use_agent_boxes: bool = True
+    epdms_eval_use_road_border: bool = True

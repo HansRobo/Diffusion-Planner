@@ -97,6 +97,15 @@ class TrainConfig:
     neighbor_collision_margin_pedestrian: float = 1.0
     neighbor_collision_margin_bicycle: float = 0.5
 
+    # Validation-only Autoware-aligned EPDMS metrics. train_predictor.py reads
+    # these defaults when constructing argparse, so this remains the single
+    # default source while keeping existing behavior unchanged unless explicitly enabled.
+    enable_epdms_eval: bool = False
+    # Backward-compatible alias for local scripts that used PDMS naming.
+    enable_pdms_eval: bool = False
+    epdms_eval_use_agent_boxes: bool = True
+    epdms_eval_use_road_border: bool = True
+
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1
 
@@ -131,6 +140,13 @@ class TrainConfig:
     ddp: bool = True
     port: str = "22323"
 
+    # Validation-only temporal stability metrics. Replan consistency requires full-sequence
+    # Step-1 NPZ frames in valid_set_list; the default gap=1 avoids treating skip-N lists
+    # as true frame-to-frame replanning data.
+    enable_temporal_stability_eval: bool = True
+    enable_replan_consistency_eval: bool = True
+    replan_consistency_expected_gap: int = 1
+
     # ---------------------------------------------------------
     # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
     # (``save_utd``). Disabled unless ``closed_loop_npz_root`` is set (dir tree of route NPZ frames,
@@ -140,7 +156,7 @@ class TrainConfig:
     closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
     # Re-plan every N steps: replan=1 is a model forward EVERY step (~minutes/epoch over a full
     # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
-    closed_loop_replan_interval: int = 40
+    closed_loop_replan_interval: int = 4
     closed_loop_draw_every: int = 4  # render 1 of every N steps (matplotlib is the dominant cost)
     closed_loop_fps: int = 10
     closed_loop_near_miss_thresh: float = 0.5
@@ -154,3 +170,8 @@ class TrainConfig:
     # ---------------------------------------------------------
     state_normalizer: Optional[StateNormalizer] = None
     observation_normalizer: Optional[ObservationNormalizer] = None
+
+    # ---------------------------------------------------------
+    # Deterministic
+    # ---------------------------------------------------------
+    deterministic: bool = True

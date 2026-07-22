@@ -618,6 +618,7 @@ def k_predict(
     noise_range: tuple[float, float],
     gt_max_speed: float,
     use_route_cl: bool,
+    prototypes_path: str | None = None,
 ) -> np.ndarray:
     """Generate K trajectories using the training variant. Returns [K, T, 4]."""
     device = next(model.parameters()).device
@@ -634,6 +635,7 @@ def k_predict(
             gen_chunk_size=K,
             gt_max_speed=gt_max_speed,
             generation_variant=variant,
+            prototypes_path=prototypes_path,
             use_route_cl_guidance=use_route_cl,
         )
     return trajs[0].detach().cpu().numpy()  # [K, T, 4]
@@ -840,6 +842,7 @@ def main():
     with open(args.config) as f:
         cfg_json = json.load(f)
     variant = cfg_json.get("generation_variant", "default")
+    prototypes_path = cfg_json.get("prototypes_path")
     use_route_cl = bool(cfg_json.get("use_route_cl_guidance", False))
     slot_labels = get_generation_config_labels_for_variant(variant, args.K)
 
@@ -942,6 +945,7 @@ def main():
                     noise_range=(args.noise_min, args.noise_max),
                     gt_max_speed=v_high,
                     use_route_cl=use_route_cl,
+                    prototypes_path=prototypes_path,
                 )  # [K, T, 4]
 
                 k_t79 = []

@@ -102,7 +102,7 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
-            point_dim=2 + POLYGON_TYPE_NUM,
+            num_types=POLYGON_TYPE_NUM,
         )
         self.line_string_encoder = LineEncoder(
             config.line_string_len,
@@ -110,7 +110,7 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
-            point_dim=2 + LINE_STRING_TYPE_NUM,
+            num_types=LINE_STRING_TYPE_NUM,
         )
         self.goal_pose_encoder = GoalPoseEncoder(
             drop_path_rate=config.encoder_drop_path_rate,
@@ -118,11 +118,13 @@ class Encoder(nn.Module):
         )
         self.ego_shape_encoder = FloatsEncoder(
             num_float=3,
+            class_type=CLASS_TYPE_EGO_SHAPE,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
         )
         self.turn_indicator_encoder = FloatsEncoder(
             num_float=INPUT_T,
+            class_type=CLASS_TYPE_TURN_INDICATOR,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
         )
@@ -168,8 +170,8 @@ class Encoder(nn.Module):
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
         ego = torch.cat(
-            [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
-            # [ego[:, :6], torch.zeros_like(ego[:, 6:])],
+            # [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
+            [ego[:, :6], torch.zeros_like(ego[:, 6:])],
             dim=1,
         )  # Only keep the current + first 5 steps of ego history
 
@@ -326,9 +328,8 @@ class SelfAttentionBlock(nn.Module):
         )
 
     def forward(self, x, mask):
-        x = x + self.drop_path(
-            self.attn(self.norm1(x), x, x, key_padding_mask=mask, need_weights=False)[0]
-        )
+        y = self.norm1(x)
+        x = x + self.drop_path(self.attn(y, y, y, key_padding_mask=mask, need_weights=False)[0])
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -509,14 +510,17 @@ class StaticEncoder(nn.Module):
 
 
 class LaneEncoder(nn.Module):
-    def __init__(self, lane_len, class_type, drop_path_rate, hidden_dim, depth):
+    def __init__(
+        self,
+        lane_len,
+        class_type,
+        drop_path_rate,
+        hidden_dim,
+        depth,
+        tokens_mlp_dim=64,
+        channels_mlp_dim=128,
+    ):
         super().__init__()
-        tokens_mlp_dim = 64
-        channels_mlp_dim = 128
-
-        assert class_type in [CLASS_TYPE_LANE, CLASS_TYPE_ROUTE], (
-            "Invalid class type for LaneEncoder"
-        )
 
         self._lane_len = lane_len
         self._class_type = class_type
@@ -570,8 +574,7 @@ class LaneEncoder(nn.Module):
         pos = add_class_type(pos, self._class_type)
 
         B, P, V, _ = x.shape
-        mask_v = torch.sum(torch.ne(x[..., :8], 0), dim=-1).to(x.device) == 0
-        mask_p = torch.sum(~mask_v, dim=-1) == 0
+        mask_p = torch.sum(torch.ne(x[..., :8], 0), dim=(-2, -1)) == 0
         valid_indices = ~mask_p.view(-1)
 
         x = x.view(B * P, V, -1)
@@ -613,7 +616,7 @@ class LaneEncoder(nn.Module):
 
 
 class LineEncoder(nn.Module):
-    def __init__(self, line_len, class_type, drop_path_rate, hidden_dim, depth, point_dim=2):
+    def __init__(self, line_len, class_type, drop_path_rate, hidden_dim, depth, num_types):
         super().__init__()
         self._class_type = class_type
         tokens_mlp_dim = 64
@@ -621,8 +624,11 @@ class LineEncoder(nn.Module):
 
         self._line_len = line_len
 
+        # type one-hot is fed via an embedding, not through the Mlp/Mixer
+        self.type_emb = nn.Linear(num_types, channels_mlp_dim)
+
         self.channel_pre_project = Mlp(
-            in_features=point_dim + 2,  # point_dim (x, y, type_one_hot...) + dx + dy
+            in_features=4,  # x, y, dx, dy
             hidden_features=channels_mlp_dim,
             out_features=channels_mlp_dim,
             act_layer=nn.GELU,
@@ -651,50 +657,54 @@ class LineEncoder(nn.Module):
 
     def forward(self, x):
         """
-        x: B, P, V, D(x, y)
+        x: B, P, V, D (x, y, type_one_hot...)
         """
         B, P, V, D = x.shape
-        # diffを取る
-        diff_x = x[:, :, 1:, 0] - x[:, :, :-1, 0]  # (B, P, V-1)
-        diff_y = x[:, :, 1:, 1] - x[:, :, :-1, 1]  # (B, P, V-1)
+
+        # Mask before splitting: an element is empty only if every coord/type is 0.
+        mask_p = torch.sum(torch.ne(x, 0), dim=(-2, -1)) == 0
+        valid_indices = ~mask_p.view(-1)
+
+        # Split coordinates and type one-hot. The type is constant within an element,
+        # so a single representative point is enough.
+        coords = x[..., :2]  # (B, P, V, 2)
+        type_one_hot = x[:, :, 0, 2:]  # (B, P, num_types)
+
+        diff_x = coords[:, :, 1:, 0] - coords[:, :, :-1, 0]  # (B, P, V-1)
+        diff_y = coords[:, :, 1:, 1] - coords[:, :, :-1, 1]  # (B, P, V-1)
         diff_x = torch.cat([diff_x, torch.zeros_like(diff_x[:, :, :1])], dim=2)  # (B, P, V)
         diff_x = diff_x.view(B, P, V, 1)
         diff_y = torch.cat([diff_y, torch.zeros_like(diff_y[:, :, :1])], dim=2)  # (B, P, V)
         diff_y = diff_y.view(B, P, V, 1)
-        x = torch.concat([x, diff_x, diff_y], dim=-1)  # (B, P, V, D+2)
+        feat = torch.concat([coords, diff_x, diff_y], dim=-1)  # (B, P, V, 4): x, y, dx, dy
 
-        pos = x[:, :, int(self._line_len / 2), :4].clone()  # x, y, x'-x, y'-y
+        pos = feat[:, :, int(self._line_len / 2), :4].clone()  # x, y, x'-x, y'-y
         heading = torch.atan2(pos[..., 3], pos[..., 2])
         pos = torch.stack(
             [pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1
         )
         pos = add_class_type(pos, self._class_type)
 
-        B, P, V, _ = x.shape
-        mask_v = torch.sum(torch.ne(x[..., :4], 0), dim=-1).to(x.device) == 0
-        mask_p = torch.sum(~mask_v, dim=-1) == 0
-        valid_indices = ~mask_p.view(-1)
+        feat = feat.view(B * P, V, -1)
 
-        x = x.view(B * P, V, -1)
-
-        # Use torch.where instead of indexing to maintain fixed size
-        x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
-
-        x = self.channel_pre_project(x)
-        x = x.permute(0, 2, 1)
-        x = self.token_pre_project(x)
-        x = x.permute(0, 2, 1)
+        feat = self.channel_pre_project(feat)
+        feat = feat.permute(0, 2, 1)
+        feat = self.token_pre_project(feat)
+        feat = feat.permute(0, 2, 1)
         for block in self.blocks:
-            x = block(x)
+            feat = block(feat)
 
-        x = torch.mean(x, dim=1)
+        feat = torch.mean(feat, dim=1)
 
-        x = self.emb_project(self.norm(x))
+        # Inject type information via embedding instead of through the Mlp/Mixer.
+        feat = feat + self.type_emb(type_one_hot.view(B * P, -1))
+
+        feat = self.emb_project(self.norm(feat))
 
         # Apply mask to zero out invalid positions
-        x = x * valid_indices.float().unsqueeze(-1)
+        feat = feat * valid_indices.float().unsqueeze(-1)
 
-        return x.view(B, P, -1), mask_p.reshape(B, -1), pos.view(B, P, -1)
+        return feat.view(B, P, -1), mask_p.reshape(B, -1), pos.view(B, P, -1)
 
 
 class GoalPoseEncoder(nn.Module):
@@ -741,11 +751,12 @@ class GoalPoseEncoder(nn.Module):
 
 
 class FloatsEncoder(nn.Module):
-    def __init__(self, num_float, drop_path_rate, hidden_dim):
+    def __init__(self, num_float, class_type, drop_path_rate, hidden_dim):
         super().__init__()
         channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
+        self._class_type = class_type
 
         self.channel_pre_project = Mlp(
             in_features=num_float,
@@ -778,7 +789,7 @@ class FloatsEncoder(nn.Module):
             dim=-1,
         )
         pos = pos.unsqueeze(1)  # (B, 1, D=4)
-        pos = add_class_type(pos, CLASS_TYPE_EGO_SHAPE)
+        pos = add_class_type(pos, self._class_type)
 
         mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
 

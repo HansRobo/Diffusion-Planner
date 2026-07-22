@@ -1,11 +1,21 @@
 import argparse
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
 from tqdm import tqdm
+
+try:
+    from planner_metrics.pdms_proxy import add_synthetic_epdms, pdms_proxy
+except Exception as exc:  # optional metric dependency; raised only when enabled
+    add_synthetic_epdms = None
+    pdms_proxy = None
+    _EPDMS_IMPORT_ERROR = exc
+else:
+    _EPDMS_IMPORT_ERROR = None
 
 from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
 from diffusion_planner.loss import (
@@ -17,6 +27,250 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
+from planner_metrics.temporal_stability import (
+    compute_curvature_rate_batch,
+    compute_mean_abs_jerk_batch,
+    compute_replan_consistency_batch,
+    inter_frame_transform,
+)
+
+
+@dataclass
+class _PreparedValidationBatch:
+    inputs: dict[str, torch.Tensor]
+    ego_future: torch.Tensor
+    neighbors_future: torch.Tensor
+    neighbor_future_mask: torch.Tensor
+    ego_current: torch.Tensor
+    neighbors_current: torch.Tensor
+    turn_indicator_seq: torch.Tensor
+
+
+def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValidationBatch:
+    inputs = {key: value.to(device) for key, value in inputs.items()}
+    batch_size = inputs["ego_current_state"].shape[0]
+    turn_indicator_seq = inputs["turn_indicators"]
+    inputs["sampled_trajectories"] = torch.zeros(
+        batch_size,
+        MAX_NUM_AGENTS,
+        OUTPUT_T + 1,
+        POSE_DIM,
+        dtype=torch.float32,
+        device=device,
+    )
+    inputs["delay"] = torch.full((batch_size,), delay, dtype=torch.float32, device=device)
+    inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
+    inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
+    ego_future = heading_to_cos_sin(inputs["ego_agent_future"])
+    neighbors_future = inputs["neighbor_agents_future"]
+    neighbor_future_mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
+    neighbors_future = heading_to_cos_sin(neighbors_future)
+    neighbors_future[neighbor_future_mask] = 0.0
+    _, predicted_neighbor_num, _, _ = neighbors_future.shape
+    ego_current = inputs["ego_current_state"][:, :4]
+    neighbors_current = inputs["neighbor_agents_past"][:, :predicted_neighbor_num, -1, :4]
+    inputs = args.observation_normalizer(inputs)
+    return _PreparedValidationBatch(
+        inputs=inputs,
+        ego_future=ego_future,
+        neighbors_future=neighbors_future,
+        neighbor_future_mask=neighbor_future_mask,
+        ego_current=ego_current,
+        neighbors_current=neighbors_current,
+        turn_indicator_seq=turn_indicator_seq,
+    )
+
+
+def _predict_ego_for_temporal_metrics(model, inputs, args, device, delay=0):
+    batch = _prepare_validation_inputs(inputs, args, device, delay)
+    _, outputs = model(batch.inputs)
+    return outputs["prediction"][:, 0], batch.ego_future
+
+
+EPDMS_DT = 0.1
+
+
+def _valid_xy(points: np.ndarray) -> np.ndarray:
+    return np.abs(points[..., :2]).sum(axis=-1) > 1e-6
+
+
+def _line_strings_to_epdms_border_lines(line_strings: torch.Tensor) -> list[list[np.ndarray]]:
+    """Extract road-border polylines from DP line_strings."""
+    arr = line_strings.detach().cpu().numpy()
+    out: list[list[np.ndarray]] = []
+    for sample in arr:
+        sample_lines: list[np.ndarray] = []
+        road_border_mask = (sample[..., 3] > 0.5).any(axis=-1)
+        for row in sample[road_border_mask]:
+            pts = row[:, :2]
+            pts = pts[_valid_xy(pts)]
+            if pts.shape[0] >= 2:
+                sample_lines.append(np.asarray(pts, dtype=np.float64))
+        out.append(sample_lines)
+    return out
+
+
+def _lane_tensor_to_polygons(lanes: torch.Tensor) -> list[list[np.ndarray]]:
+    """Convert DP lane tensors to ego-frame lane polygons."""
+    arr = lanes.detach().cpu().numpy()
+    out: list[list[np.ndarray]] = []
+    for sample in arr:
+        sample_polys: list[np.ndarray] = []
+        for lane in sample:
+            valid = _valid_xy(lane[..., :2]) & (np.abs(lane[..., :8]).sum(axis=-1) > 1e-6)
+            if valid.sum() < 2:
+                continue
+            center = lane[valid, :2]
+            left = center + lane[valid, 4:6]
+            right = center + lane[valid, 6:8]
+            ring = np.concatenate([left, right[::-1]], axis=0)
+            if ring.shape[0] >= 3:
+                sample_polys.append(np.asarray(ring, dtype=np.float64))
+        out.append(sample_polys)
+    return out
+
+
+def _lane_tensor_to_centerlines(lanes: torch.Tensor) -> list[list[np.ndarray]]:
+    arr = lanes.detach().cpu().numpy()
+    out: list[list[np.ndarray]] = []
+    for sample in arr:
+        sample_lines: list[np.ndarray] = []
+        for lane in sample:
+            pts = lane[:, :2]
+            pts = pts[_valid_xy(pts)]
+            if pts.shape[0] >= 2:
+                sample_lines.append(np.asarray(pts, dtype=np.float64))
+        out.append(sample_lines)
+    return out
+
+
+def _polygons_to_rings(polygons: torch.Tensor) -> list[list[np.ndarray]]:
+    arr = polygons.detach().cpu().numpy()
+    out: list[list[np.ndarray]] = []
+    for sample in arr:
+        sample_rings: list[np.ndarray] = []
+        for poly in sample:
+            pts = poly[:, :2]
+            pts = pts[_valid_xy(pts)]
+            if pts.shape[0] >= 3:
+                sample_rings.append(np.asarray(pts, dtype=np.float64))
+        out.append(sample_rings)
+    return out
+
+
+def _neighbors_to_epdms_agent_boxes(
+    neighbors_future: torch.Tensor,
+    neighbors_future_valid: torch.Tensor,
+    neighbor_agents_past: torch.Tensor,
+    dt: float,
+) -> list[list[np.ndarray]]:
+    """Convert DP neighbor GT futures to [N, 9] per-timestep boxes."""
+    nf = neighbors_future.detach().cpu().numpy()
+    valid = neighbors_future_valid.detach().cpu().numpy().astype(bool)
+    past = neighbor_agents_past.detach().cpu().numpy()
+    B, Pn, T, _ = nf.shape
+    result: list[list[np.ndarray]] = []
+    for b in range(B):
+        width = past[b, :Pn, -1, 6] if past.shape[-1] > 6 else np.full(Pn, 2.0)
+        length = past[b, :Pn, -1, 7] if past.shape[-1] > 7 else np.full(Pn, 4.5)
+        width = np.where(np.abs(width) > 1e-3, np.abs(width), 2.0)
+        length = np.where(np.abs(length) > 1e-3, np.abs(length), 4.5)
+        pos = nf[b, :, :, :2]
+        vx = np.zeros((Pn, T), dtype=np.float64)
+        vy = np.zeros((Pn, T), dtype=np.float64)
+        if T >= 2:
+            vx[:, 1:] = (pos[:, 1:, 0] - pos[:, :-1, 0]) / dt
+            vy[:, 1:] = (pos[:, 1:, 1] - pos[:, :-1, 1]) / dt
+            vx[:, 0] = vx[:, 1]
+            vy[:, 0] = vy[:, 1]
+        sample_boxes: list[np.ndarray] = []
+        for t in range(T):
+            idx = np.where(valid[b, :, t])[0]
+            boxes = np.zeros((idx.shape[0], 9), dtype=np.float64)
+            if idx.shape[0] > 0:
+                boxes[:, 0] = nf[b, idx, t, 0]
+                boxes[:, 1] = nf[b, idx, t, 1]
+                boxes[:, 3] = width[idx]
+                boxes[:, 4] = length[idx]
+                boxes[:, 5] = 1.5
+                boxes[:, 6] = np.arctan2(nf[b, idx, t, 3], nf[b, idx, t, 2])
+                boxes[:, 7] = vx[idx, t]
+                boxes[:, 8] = vy[idx, t]
+            sample_boxes.append(boxes)
+        result.append(sample_boxes)
+    return result
+
+
+def _epdms_eval_metrics(
+    prediction: torch.Tensor,
+    ego_future: torch.Tensor,
+    neighbors_future: torch.Tensor,
+    neighbors_future_valid: torch.Tensor,
+    denorm_inputs: dict[str, torch.Tensor],
+    args,
+) -> dict[str, torch.Tensor]:
+    if pdms_proxy is None or add_synthetic_epdms is None:
+        raise RuntimeError(
+            "EPDMS eval is enabled, but planner_metrics.pdms_proxy could not be imported: "
+            f"{_EPDMS_IMPORT_ERROR!r}"
+        )
+
+    ego_pred = prediction[:, 0]
+    ego_dims = denorm_inputs["ego_shape"].detach().cpu().numpy()
+
+    border_lines = None
+    if getattr(args, "epdms_eval_use_road_border", True) and "line_strings" in denorm_inputs:
+        border_lines = _line_strings_to_epdms_border_lines(denorm_inputs["line_strings"])
+
+    agent_boxes = None
+    if getattr(args, "epdms_eval_use_agent_boxes", True):
+        agent_boxes = _neighbors_to_epdms_agent_boxes(
+            neighbors_future,
+            neighbors_future_valid,
+            denorm_inputs["neighbor_agents_past"],
+            EPDMS_DT,
+        )
+
+    lane_rings = (
+        _lane_tensor_to_polygons(denorm_inputs["lanes"]) if "lanes" in denorm_inputs else None
+    )
+    route_polys = (
+        _lane_tensor_to_polygons(denorm_inputs["route_lanes"])
+        if "route_lanes" in denorm_inputs
+        else None
+    )
+    route_centerlines = (
+        _lane_tensor_to_centerlines(denorm_inputs["route_lanes"])
+        if "route_lanes" in denorm_inputs
+        else None
+    )
+    intersection_rings = (
+        _polygons_to_rings(denorm_inputs["polygons"]) if "polygons" in denorm_inputs else None
+    )
+
+    kwargs = dict(
+        agent_boxes_per_t=agent_boxes,
+        ego_dims=ego_dims,
+        border_lines=border_lines,
+        route_polys=route_polys,
+        lane_rings=lane_rings,
+        intersection_rings=intersection_rings,
+        route_centerlines=route_centerlines,
+        dt=EPDMS_DT,
+    )
+    agent = pdms_proxy(ego_pred, ego_future, add_aggregation=False, **kwargs)
+    human = pdms_proxy(
+        ego_future,
+        ego_future,
+        add_aggregation=False,
+        self_reference_progress=True,
+        **kwargs,
+    )
+    add_synthetic_epdms(agent, human)
+    return {
+        key: value if torch.is_tensor(value) else torch.as_tensor(value, device=ego_pred.device)
+        for key, value in agent.items()
+    }
 
 
 @torch.no_grad()
@@ -49,34 +303,15 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     total_batches = len(val_loader)
     pbar = tqdm(total=total_batches, desc="validate (slowest rank)", disable=ddp.get_rank() != 0)
     for step, inputs in enumerate(val_loader):
-        inputs = {key: value.to(device) for key, value in inputs.items()}
-        B = inputs["ego_current_state"].shape[0]
-
-        turn_indicator_seq = inputs["turn_indicators"]
-
-        inputs["sampled_trajectories"] = torch.zeros(
-            B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32
-        )
-        inputs["delay"] = torch.full((B,), delay, dtype=torch.float32, device=device)
-
-        inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-        inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
-
-        ego_future = inputs["ego_agent_future"]
-        ego_future = heading_to_cos_sin(ego_future)  # (B, T, 4)
-        neighbors_future = inputs["neighbor_agents_future"]
-        neighbor_future_mask = (
-            torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
-        )  # (B, Pn, T)
-        neighbors_future = heading_to_cos_sin(neighbors_future)  # (B, Pn, T, 4)
-        neighbors_future[neighbor_future_mask] = 0.0
-
+        prepared = _prepare_validation_inputs(inputs, args, device, delay)
+        inputs = prepared.inputs
+        ego_future = prepared.ego_future
+        neighbors_future = prepared.neighbors_future
+        neighbor_future_mask = prepared.neighbor_future_mask
+        ego_current = prepared.ego_current
+        neighbors_current = prepared.neighbors_current
+        turn_indicator_seq = prepared.turn_indicator_seq
         B, Pn, T, _ = neighbors_future.shape
-        ego_current, neighbors_current = (
-            inputs["ego_current_state"][:, :4],
-            inputs["neighbor_agents_past"][:, :Pn, -1, :4],
-        )
-        inputs = args.observation_normalizer(inputs)
 
         _, outputs = model(inputs)
 
@@ -133,6 +368,16 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             # val : (B, Pn + 1, T)
             total_result_dict[f"ego_{key}"].append(val[:, 0, :].cpu())  # (B, T)
 
+        if getattr(args, "enable_temporal_stability_eval", False) or getattr(
+            args, "enable_replan_consistency_eval", False
+        ):
+            total_result_dict["ego_mean_abs_jerk"].append(
+                compute_mean_abs_jerk_batch(prediction[:, 0]).cpu()
+            )
+            total_result_dict["ego_curvature_rate"].append(
+                compute_curvature_rate_batch(prediction[:, 0]).cpu()
+            )
+
         # Compute ego edge points for penalty metrics
         ego_edge_points = compute_ego_edge_points(
             prediction[:, 0], inputs["ego_shape"], n_interp=args.road_border_n_interp
@@ -157,6 +402,18 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             margin=args.road_border_margin,
         )
         total_result_dict["ego_road_border_loss"].append(rb_penalty.cpu())
+
+        if getattr(args, "enable_epdms_eval", False) or getattr(args, "enable_pdms_eval", False):
+            epdms_dict = _epdms_eval_metrics(
+                prediction,
+                ego_future,
+                neighbors_future,
+                neighbors_future_valid,
+                denorm_inputs,
+                args,
+            )
+            for key, val in epdms_dict.items():
+                total_result_dict[f"epdms_{key}"].append(val.detach().cpu())
 
         if (step + 1) % progress_sync_every == 0 or (step + 1) == total_batches:
             min_done = int(ddp.all_reduce_min(step + 1, device))
@@ -207,6 +464,73 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     }
 
 
+@torch.no_grad()
+def validate_replan_consistency(model, pair_loader, args) -> dict[str, float]:
+    device = args.device
+    model.eval()
+    position_sum = 0.0
+    heading_sum = 0.0
+    overlap_sum = 0.0
+    sample_count = 0
+
+    progress_sync_every = 20
+    total_batches = len(pair_loader)
+    pbar = tqdm(
+        total=total_batches,
+        desc="validate replan consistency (slowest rank)",
+        disable=ddp.get_rank() != 0,
+    )
+    for step, batch in enumerate(pair_loader):
+        pred_a, future_a = _predict_ego_for_temporal_metrics(model, batch["current"], args, device)
+        pred_b, _ = _predict_ego_for_temporal_metrics(model, batch["next"], args, device)
+        frame_gap = batch["frame_gap"].to(device=device, dtype=torch.long)
+        valid_gap = (
+            (frame_gap > 0) & (frame_gap < pred_a.shape[1]) & (frame_gap <= future_a.shape[1])
+        )
+
+        for gap in torch.unique(frame_gap[valid_gap]).detach().cpu().tolist():
+            gap_mask = frame_gap == int(gap)
+            rel_pos, rel_heading = inter_frame_transform(future_a[gap_mask], int(gap))
+            result = compute_replan_consistency_batch(
+                pred_a[gap_mask], pred_b[gap_mask], int(gap), rel_pos, rel_heading
+            )
+            count = int(gap_mask.sum().item())
+            position_sum += result["position_jump"].sum().item()
+            heading_sum += result["heading_jump"].sum().item()
+            overlap_sum += float(result["overlap_len"]) * count
+            sample_count += count
+
+        if (step + 1) % progress_sync_every == 0 or (step + 1) == total_batches:
+            min_done = int(ddp.all_reduce_min(step + 1, device))
+            if ddp.get_rank() == 0:
+                pbar.n = min_done
+                pbar.refresh()
+    pbar.close()
+
+    return {
+        "_replan_position_sum": position_sum,
+        "_replan_heading_sum": heading_sum,
+        "_replan_overlap_sum": overlap_sum,
+        "_replan_sample_count": sample_count,
+    }
+
+
+def aggregate_replan_consistency_metrics(valid_dict, device):
+    sample_count = ddp.all_reduce_sum(valid_dict["_replan_sample_count"], device)
+    if sample_count <= 0:
+        return {"replan_consistency_count": 0}
+
+    position_sum = ddp.all_reduce_sum(valid_dict["_replan_position_sum"], device)
+    heading_sum = ddp.all_reduce_sum(valid_dict["_replan_heading_sum"], device)
+    overlap_sum = ddp.all_reduce_sum(valid_dict["_replan_overlap_sum"], device)
+    return {
+        "replan_position_consistency": position_sum / sample_count,
+        "replan_heading_consistency": heading_sum / sample_count,
+        "replan_overlap_len": overlap_sum / sample_count,
+        "replan_consistency_count": int(sample_count),
+    }
+
+
 def aggregate_valid_metrics(valid_dict, device):
     """All-reduce the scalar validation metrics across DDP ranks.
 
@@ -235,6 +559,32 @@ def aggregate_valid_metrics(valid_dict, device):
             local_cnt = ddp.all_reduce_sum(val.numel(), device)
             ego_means[key] = local_sum / max(local_cnt, 1)
 
+    epdms_means = {}
+    for key, val in valid_dict.items():
+        if not key.startswith("epdms_"):
+            continue
+        metric = key.removeprefix("epdms_")
+        tensor = val.float()
+        if metric.endswith("_available"):
+            local_sum = ddp.all_reduce_sum(tensor.sum().item(), device)
+            local_cnt = ddp.all_reduce_sum(tensor.numel(), device)
+            epdms_means[metric] = local_sum / max(local_cnt, 1)
+            continue
+
+        available = valid_dict.get(f"{key}_available")
+        if available is None:
+            local_sum = ddp.all_reduce_sum(torch.nan_to_num(tensor).sum().item(), device)
+            local_cnt = ddp.all_reduce_sum(tensor.numel(), device)
+            epdms_means[metric] = local_sum / max(local_cnt, 1)
+            continue
+
+        mask = available.float() > 0.5
+        local_sum = ddp.all_reduce_sum(tensor[mask].sum().item() if mask.any() else 0.0, device)
+        local_cnt = ddp.all_reduce_sum(mask.sum().item(), device)
+        local_total = ddp.all_reduce_sum(mask.numel(), device)
+        epdms_means[f"{metric}_coverage"] = local_cnt / max(local_total, 1)
+        epdms_means[metric] = local_sum / local_cnt if local_cnt > 0 else float("nan")
+
     return {
         "avg_loss_ego": loss_ego_sum / max(samples_ego, 1),
         "avg_loss_neighbor": loss_nei_sum / max(samples_nei, 1),
@@ -244,4 +594,5 @@ def aggregate_valid_metrics(valid_dict, device):
         ),
         "turn_indicator_change_total": int(turn_change_total),
         "ego_means": ego_means,
+        "epdms_means": epdms_means,
     }

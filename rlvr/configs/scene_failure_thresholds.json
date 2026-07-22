@@ -1,8 +1,14 @@
 {
   "_comment": "Default thresholds for rlvr.autoresearch.tools.classify_scene_failures scene mining.",
+  "moving_collision_thresh": 0.2,
   "moving_near_thresh": 0.7,
   "static_near_thresh": 0.5,
   "rb_near_thresh": 0.2,
+  "expert_disagreement_wait_speed_mps": 0.5,
+  "expert_disagreement_wait_progress_m": 1.0,
+  "expert_disagreement_forward_progress_gap_m": 2.0,
+  "expert_disagreement_lag_progress_gap_m": 3.0,
+  "expert_disagreement_moving_speed_mps": 1.0,
   "sc_cross_thresh": 0.2,
   "rb_cross_thresh": 0.2
 }
