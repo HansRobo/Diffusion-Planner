@@ -121,6 +121,117 @@ def run_checks(orig: dict, aug: dict, sl_aug: dict, truncate_m: float) -> list[s
     return failures
 
 
+def _valid_segment_points(route: torch.Tensor, seg: int) -> torch.Tensor:
+    """Valid (non-padding) xy points of one route segment. route: [B, P, V, D]."""
+    pts = route[0, seg]
+    valid = pts[..., :_GEOM_DIM].abs().sum(-1) > 0
+    return pts[valid][:, :2]
+
+
+def render_truncation(orig, truncated, budget_m, status, npz_name, out_path):
+    """Original vs truncated on the scene render.
+
+    On the left panel the segments that the truncation removes are overdrawn in
+    red (with their start arc-length), the kept ones in green, so the exact
+    difference is visible even when the cut lies outside the view window.
+    """
+    route_o = orig["route_lanes"]
+    valid_o = (route_o.abs().sum(dim=(2, 3)) > 0)[0]
+    kept = (truncated["route_lanes"].abs().sum(dim=(2, 3)) > 0)[0]
+    cum_before = segment_start_distances(route_o)[0]
+    n_orig, n_kept = int(valid_o.sum()), int(kept.sum())
+
+    fig, axes = plt.subplots(1, 2, figsize=(20, 9))
+    visualize_inputs(copy.deepcopy(orig), ax=axes[0])
+    visualize_inputs(copy.deepcopy(truncated), ax=axes[1])
+    for seg in torch.where(valid_o)[0].tolist():
+        xy = _valid_segment_points(route_o, seg)
+        is_kept = bool(kept[seg])
+        color = "tab:green" if is_kept else "tab:red"
+        axes[0].plot(xy[:, 0], xy[:, 1], color=color, lw=3.5, alpha=0.6, zorder=20)
+        axes[0].annotate(
+            f"{cum_before[seg]:.0f}m",
+            xy=(float(xy[0, 0]), float(xy[0, 1])),
+            fontsize=9,
+            color=color,
+            fontweight="bold",
+            zorder=21,
+        )
+        if is_kept:
+            axes[1].plot(xy[:, 0], xy[:, 1], color="tab:green", lw=3.5, alpha=0.6, zorder=20)
+    axes[0].set_title(
+        f"original ({n_orig} route segments)  "
+        f"green=kept / red=dropped by {budget_m:.0f}m budget (label: start arc length)"
+    )
+    axes[1].set_title(f"after truncation @ {budget_m:.0f}m ({n_kept} route segments)")
+    fig.suptitle(
+        f"route tail truncation   {npz_name}   [{status}]",
+        color="red" if "NG" in status else "green",
+    )
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=90, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _render_speed_limit_panel(ax, inputs, title):
+    """Draw lane / route centerlines colored by their speed limit.
+
+    Blue->red colormap = limit value; gray dashed = unknown (has_speed_limit
+    False). Route segments are thicker and annotated with the value in m/s.
+    """
+    cmap = plt.get_cmap("coolwarm")
+    vmax = max(
+        float(inputs["lanes_speed_limit"].max()),
+        float(inputs["route_lanes_speed_limit"].max()),
+        1.0,
+    )
+    for key, lw in (("lanes", 1.5), ("route_lanes", 4.0)):
+        tensor = inputs[key]
+        limit = inputs[f"{key}_speed_limit"][0, :, 0]
+        has = inputs[f"{key}_has_speed_limit"][0, :, 0]
+        valid = (tensor.abs().sum(dim=(2, 3)) > 0)[0]
+        for seg in torch.where(valid)[0].tolist():
+            xy = _valid_segment_points(tensor, seg)
+            if bool(has[seg]):
+                color = cmap(float(limit[seg]) / vmax)
+                ax.plot(xy[:, 0], xy[:, 1], color=color, lw=lw, zorder=10)
+            else:
+                ax.plot(xy[:, 0], xy[:, 1], color="gray", lw=lw, ls="--", alpha=0.7, zorder=10)
+            if key == "route_lanes":
+                mid = xy[len(xy) // 2]
+                label = f"{float(limit[seg]):.1f}m/s" if bool(has[seg]) else "unknown"
+                ax.annotate(
+                    label,
+                    xy=(float(mid[0]), float(mid[1])),
+                    fontsize=9,
+                    fontweight="bold",
+                    color="black" if bool(has[seg]) else "dimgray",
+                    zorder=11,
+                )
+    ax.plot(0, 0, marker="*", color="black", markersize=12, zorder=12)  # ego
+    n_known = int(
+        inputs["lanes_has_speed_limit"].sum() + inputs["route_lanes_has_speed_limit"].sum()
+    )
+    ax.set_title(f"{title} (known speed limits: {n_known})")
+    ax.set_aspect("equal")
+    ax.set_xlim(-80, 80)
+    ax.set_ylim(-80, 80)
+    ax.grid(alpha=0.3)
+
+
+def render_speed_limit(orig, sl_dropped, status, npz_name, out_path):
+    fig, axes = plt.subplots(1, 2, figsize=(20, 9))
+    _render_speed_limit_panel(axes[0], orig, "original: color = speed limit, dashed gray = unknown")
+    _render_speed_limit_panel(axes[1], sl_dropped, "after unknown dropout (lanes + route together)")
+    fig.suptitle(
+        f"speed-limit unknown dropout   {npz_name}   [{status}]",
+        color="red" if "NG" in status else "green",
+    )
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=90, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("npz_paths", type=Path, nargs="+")
@@ -156,18 +267,13 @@ def main():
         print(f"{npz_path.name}: {status} (route segments {n_orig} -> {n_kept})")
         any_fail |= bool(failures)
 
-        # Side-by-side render. visualize_inputs mutates its dict -> pass copies.
-        fig, axes = plt.subplots(1, 2, figsize=(20, 9))
-        visualize_inputs(copy.deepcopy(orig), ax=axes[0])
-        axes[0].set_title(f"original ({n_orig} route segments)")
-        visualize_inputs(copy.deepcopy(truncated), ax=axes[1])
-        axes[1].set_title(f"truncated @ {args.truncate_m:.0f}m ({n_kept} route segments)")
-        fig.suptitle(f"{npz_path.name}   [{status}]", color="red" if failures else "green")
-        out = args.out_dir / f"{npz_path.stem}_route_aug_check.png"
-        plt.tight_layout()
-        plt.savefig(out, dpi=90, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  -> {out}")
+        # One before/after figure per augmentation type.
+        out_trunc = args.out_dir / f"{npz_path.stem}_truncation_check.png"
+        render_truncation(orig, truncated, args.truncate_m, status, npz_path.name, out_trunc)
+        print(f"  -> {out_trunc}")
+        out_sl = args.out_dir / f"{npz_path.stem}_speed_limit_check.png"
+        render_speed_limit(orig, sl_dropped, status, npz_path.name, out_sl)
+        print(f"  -> {out_sl}")
 
     sys.exit(1 if any_fail else 0)
 
