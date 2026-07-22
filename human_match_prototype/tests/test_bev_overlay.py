@@ -49,4 +49,4 @@ def test_bev_overlay_produces_png(tmp_path):
 
     assert out_png.exists()
     assert out_png.stat().st_size > 1000  # non-trivial PNG
-    sampler.sample.assert_called_once_with(str(npz_path), num_samples=4, seed=0)
+    sampler.sample.assert_called_once_with(str(npz_path), num_samples=4, seed=0, temperature=0.5)

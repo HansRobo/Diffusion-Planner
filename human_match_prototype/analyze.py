@@ -55,7 +55,7 @@ def parse_args():
     return p.parse_args()
 
 
-def bev_overlay(sampler, npz_path, out_png, num_samples):
+def bev_overlay(sampler, npz_path, out_png, num_samples, temperature=0.5):
     try:
         from src.visualization import PAST_FRAMES, precompute_static, render_frame
     except ImportError:
@@ -65,14 +65,16 @@ def bev_overlay(sampler, npz_path, out_png, num_samples):
         )
 
     data = dict(np.load(npz_path, allow_pickle=True))
-    r = sampler.sample(str(npz_path), num_samples=num_samples, seed=0)
+    r = sampler.sample(str(npz_path), num_samples=num_samples, seed=0, temperature=temperature)
 
-    fig, ax = plt.subplots(figsize=(10, 10))
+    fig, ax = plt.subplots(figsize=(14, 14))
     static = precompute_static(data)
+    static["view_half"] = static["view_half"] * 0.7
+
     render_frame(fig, ax, data, static, t=PAST_FRAMES - 1, filename=Path(npz_path).name)
 
     for s in r.ego_samples:
-        ax.plot(s[:, 0], s[:, 1], color="#E040FB", alpha=0.3, lw=0.3, zorder=40)
+        ax.plot(s[:, 0], s[:, 1], color="#E040FB", alpha=0.3, lw=0.5, zorder=40)
 
     fig.savefig(out_png, dpi=120, facecolor="#1A1A1A", bbox_inches="tight")
     plt.close(fig)

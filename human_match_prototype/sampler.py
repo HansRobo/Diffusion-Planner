@@ -8,7 +8,6 @@ import numpy as np
 import onnxruntime as ort
 import torch
 import torch.nn.functional as F
-
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.encoder_inference import (
     ENCODER_OUTPUT_NAME,
@@ -67,11 +66,11 @@ class TrajectorySampler:
         )
         self._input_names = {i.name for i in self.session.get_inputs()}
 
-    def _build_batch(self, data, num_samples: int, seed: int) -> dict:
+    def _build_batch(self, data, num_samples: int, seed: int, temperature: float = 0.5) -> dict:
         g = torch.Generator().manual_seed(seed)
         n_agents = data["neighbor_agents_past"].shape[0] + 1  # 320 + ego = 321
         inputs = {
-            "sampled_trajectories": 0.5
+            "sampled_trajectories": temperature
             * torch.randn(num_samples, n_agents, 81, 4, generator=g, dtype=torch.float32)
         }
         inputs["ego_agent_past"] = _heading_to_cos_sin(
@@ -102,9 +101,7 @@ class TrajectorySampler:
         ort_inputs = {}
         for key, val in inputs.items():
             arr = val.cpu().numpy()
-            ort_inputs[key] = (
-                arr.astype(np.bool_) if key in BOOL_KEYS else arr.astype(np.float32)
-            )
+            ort_inputs[key] = arr.astype(np.bool_) if key in BOOL_KEYS else arr.astype(np.float32)
         ort_inputs["delay"] = np.zeros((1, 1), dtype=np.float32)
         missing = self._input_names - set(ort_inputs)
         if missing:
@@ -112,10 +109,10 @@ class TrajectorySampler:
         return ort_inputs
 
     def sample(
-        self, npz_path: str | Path, num_samples: int = 64, seed: int = 0
+        self, npz_path: str | Path, num_samples: int = 64, seed: int = 0, temperature: float = 0.5
     ) -> SampleResult:
         data = np.load(npz_path, allow_pickle=True)
-        ort_inputs = self._build_batch(data, num_samples, seed)
+        ort_inputs = self._build_batch(data, num_samples, seed, temperature)
         pred, enc = self.session.run(["prediction", ENCODER_OUTPUT_NAME], ort_inputs)
         ego = pred[:, 0]  # (N, 80, 4) denormalized ego-frame [x, y, cos, sin]
         yaw = np.arctan2(ego[..., 3], ego[..., 2])[..., None]
