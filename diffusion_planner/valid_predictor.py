@@ -300,6 +300,8 @@ def run_validation(valid_cfg: ValidConfig):
             print(f"ego_road_border_loss_mean={agg['ego_means']['ego_road_border_loss']:.4f}")
         for key, value in agg["plantf_means"].items():
             print(f"plantf_{key}={value:.4f}")
+        for key, value in agg["traj_means"].items():
+            print(f"traj_{key}={value:.4f}")
         if replan_agg.get("replan_consistency_count", 0) > 0:
             print(
                 "replan_position_consistency={:.4f} replan_heading_consistency={:.4f} "
@@ -327,6 +329,7 @@ def run_validation(valid_cfg: ValidConfig):
             "turn_indicator_change_total": turn_indicator_change_total,
             **agg["ego_means"],
             **{f"plantf_{key}": value for key, value in agg["plantf_means"].items()},
+            **{f"traj_{key}": value for key, value in agg["traj_means"].items()},
             **replan_agg,
             **{f"epdms_{key}": value for key, value in agg["epdms_means"].items()},
         }

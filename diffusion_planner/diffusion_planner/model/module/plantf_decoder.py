@@ -320,12 +320,17 @@ def compute_plantf_training_loss(
     position_lat_loss = loss_dict["position_lat_loss"]  # [B, P, T]
     position_lon_loss = loss_dict["position_lon_loss"]  # [B, P, T]
 
-    # velocity weight
-    velocity_weight = longitudinal_velocity * args.coeff_velocity
-    velocity_weight = torch.abs(velocity_weight)
-    velocity_weight = torch.clamp_min(velocity_weight, 1.0)
-    velocity_weight = velocity_weight.unsqueeze(-1)  # [B, 1, 1]
-    position_lon_loss = position_lon_loss / velocity_weight
+    # Velocity weighting divides the longitudinal error by up to the current
+    # speed, which is what the diffusion head uses. For the one-shot regression
+    # head this down-weights the forward-progress signal by ~|v| at speed and
+    # pushes the optimum toward the (stop-heavy) marginal mean trajectory
+    # (docs/plantf_dead_mode_improvement.md), so it is off by default here.
+    if getattr(args, "plantf_use_lon_velocity_weight", False):
+        velocity_weight = longitudinal_velocity * args.coeff_velocity
+        velocity_weight = torch.abs(velocity_weight)
+        velocity_weight = torch.clamp_min(velocity_weight, 1.0)
+        velocity_weight = velocity_weight.unsqueeze(-1)  # [B, 1, 1]
+        position_lon_loss = position_lon_loss / velocity_weight
 
     # timestep weight
     timestep_weight = args.coeff_timestep
@@ -355,6 +360,14 @@ def compute_plantf_training_loss(
 
     loss["ego_planning_loss"] = traj_loss[:, 0, : args.ego_prediction_horizon].mean()
     loss["mode_cls_loss"] = F.cross_entropy(probability, best_mode)
+
+    # Endpoint (FDE) loss in metres: a direct forward-progress signal that the
+    # per-timestep decomposition dilutes over 80 steps. Computed on the WTA
+    # best mode, rescaled from the normalized space so the coefficient has a
+    # metre interpretation.
+    ego_std_xy_grad = norm.std[0][..., :2].to(trajectory.device)  # [1, 2]
+    endpoint_diff = (best_trajectory[:, -1, :2] - ego_gt[:, -1, :2]) * ego_std_xy_grad
+    loss["endpoint_fde_loss"] = endpoint_diff.norm(dim=-1).mean()
 
     # Compute ego edge points for penalty losses (best mode only)
     need_ego_edge = args.coeff_road_border_loss > 0 or args.coeff_neighbor_collision_loss > 0

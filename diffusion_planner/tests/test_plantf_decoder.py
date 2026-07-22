@@ -278,6 +278,63 @@ def test_full_onnx_wrapper_keeps_diffusion_only_inputs(tmp_path):
     assert graph_inputs == set(FULL_INPUT_NAMES)
 
 
+def test_endpoint_fde_loss_and_velocity_weight_flag():
+    """The planTF loss must emit a metre-scale endpoint FDE term, and the
+    longitudinal velocity down-weighting must be opt-in (off by default it
+    suppresses the forward-progress signal; see
+    docs/plantf_dead_mode_improvement.md)."""
+    torch.manual_seed(0)
+    config = _config()
+    model = Diffusion_Planner(config).train()
+    inputs = _inputs()
+    # Large current longitudinal velocity so the weighting, if enabled, bites.
+    inputs["ego_current_state"][:, 4] = 15.0
+
+    B, Pn = 2, MAX_NUM_NEIGHBORS
+    futures = (
+        torch.randn(B, OUTPUT_T, POSE_DIM),
+        torch.randn(B, Pn, OUTPUT_T, POSE_DIM),
+        torch.zeros(B, Pn, OUTPUT_T, dtype=torch.bool),
+    )
+
+    torch.manual_seed(1)
+    loss_default = compute_plantf_training_loss(model, inputs, futures, _loss_args(config))
+    assert "endpoint_fde_loss" in loss_default
+    assert torch.isfinite(loss_default["endpoint_fde_loss"])
+    assert float(loss_default["endpoint_fde_loss"]) > 0.0
+
+    weighted_args = _loss_args(config)
+    weighted_args.plantf_use_lon_velocity_weight = True
+    torch.manual_seed(1)
+    loss_weighted = compute_plantf_training_loss(model, inputs, futures, weighted_args)
+    # Dividing the lon term by |v|=15 must strictly shrink the ego loss.
+    assert float(loss_weighted["ego_planning_loss"]) < float(loss_default["ego_planning_loss"])
+
+
+def test_trajectory_progress_metrics_expose_stationary_collapse():
+    """A near-stationary oscillating prediction must score ~0 progress and a
+    large second-difference, with the GT-progress bins masking correctly."""
+    from diffusion_planner.validate_model import compute_trajectory_progress_metrics
+
+    T = OUTPUT_T
+    t = torch.arange(T, dtype=torch.float32)
+    gt = torch.zeros(2, T, POSE_DIM)
+    gt[0, :, 0] = (t + 1) * 0.2  # straight 16m advance -> "move" bin
+    gt[1, :, 0] = (t + 1) * 0.01  # crawl 0.8m -> "stop" bin
+    pred = torch.zeros(2, T, POSE_DIM)
+    pred[0, :, 0] = 0.3 * (t % 2)  # dango: oscillates within 0.3m
+
+    m = compute_trajectory_progress_metrics(pred, gt)
+    assert float(m["traj_gt_endpoint_m"][0]) == pytest.approx(16.0)
+    assert float(m["traj_endpoint_progress_ratio"][0]) < 0.05
+    assert float(m["traj_length_ratio"][0]) > 1.0  # long path, no progress
+    assert float(m["traj_second_diff_m"][0]) > 0.5  # jagged
+    # Bin masks: sample 0 is "move", sample 1 is "stop".
+    assert m["traj_fde_m_move_available"].tolist() == [1.0, 0.0]
+    assert m["traj_fde_m_stop_available"].tolist() == [0.0, 1.0]
+    assert m["traj_fde_m_slow_available"].tolist() == [0.0, 0.0]
+
+
 def test_output_heads_are_zero_initialized():
     """Every mode must start at the normalized-space mean (zero output), not
     Xavier noise: under winner-takes-all training rarely-winning modes keep
