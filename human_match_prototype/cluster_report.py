@@ -178,7 +178,7 @@ def main():
     chart_png = out / "mismatch_by_cluster.png"
     bar_chart(agg, base, chart_png)
 
-    from human_match_prototype.analyze import overlay
+    from human_match_prototype.analyze import bev_overlay
     from human_match_prototype.sampler import TrajectorySampler
 
     sampler = TrajectorySampler(MODEL_DIR / "args.json", MODEL_DIR / "diffusion_planner.onnx")
@@ -189,7 +189,7 @@ def main():
         worst = df[df.category == cluster].nlargest(3, "min_ade_4s")
         for _, row in worst.iterrows():
             png = overlay_dir / f"{cluster}_{Path(row.npz_path).stem}.png"
-            overlay(sampler, row.npz_path, png, args.num_samples)
+            bev_overlay(sampler, row.npz_path, png, args.num_samples)
             overlay_pngs.append(png)
 
     render_html(agg_all, chart_png, overlay_pngs, out / "report.html")

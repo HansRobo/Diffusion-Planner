@@ -14,6 +14,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 from human_match_prototype.sampler import TrajectorySampler
@@ -54,23 +55,28 @@ def parse_args():
     return p.parse_args()
 
 
-def overlay(sampler, npz_path, out_png, num_samples):
-    r = sampler.sample(npz_path, num_samples=num_samples, seed=0)
-    fig, ax = plt.subplots(figsize=(7, 7))
+def bev_overlay(sampler, npz_path, out_png, num_samples):
+    from src.visualization import PAST_FRAMES, precompute_static, render_frame
+
+    data = dict(np.load(npz_path, allow_pickle=True))
+    r = sampler.sample(str(npz_path), num_samples=num_samples, seed=0)
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    static = precompute_static(data)
+    render_frame(fig, ax, data, static, t=PAST_FRAMES, filename=Path(npz_path).name)
+
     for s in r.ego_samples:
-        ax.plot(s[:, 0], s[:, 1], color="tab:blue", alpha=0.25, lw=1)
+        ax.plot(s[:, 0], s[:, 1], color="#2196F3", alpha=0.25, lw=1, zorder=35)
     ax.plot(
         r.human_future[:, 0],
         r.human_future[:, 1],
         color="tab:red",
-        lw=2,
+        lw=2.5,
+        zorder=36,
         label="human",
     )
-    ax.plot(0, 0, "k^", ms=10, label="ego")
-    ax.set_aspect("equal")
-    ax.legend()
-    ax.set_title(Path(npz_path).name)
-    fig.savefig(out_png, dpi=120)
+
+    fig.savefig(out_png, dpi=120, facecolor="#1A1A1A", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -115,10 +121,10 @@ def main():
     worst = orr.sort_values("min_ade_4s", ascending=False).head(args.plots)
     for _, row in worst.iterrows():
         name = Path(row.npz_path).stem
-        overlay(sampler, row.npz_path, plot_dir / f"mismatch_{name}.png", args.num_samples)
+        bev_overlay(sampler, row.npz_path, plot_dir / f"mismatch_{name}.png", args.num_samples)
     for _, row in nor.sample(4, random_state=0).iterrows():
         name = Path(row.npz_path).stem
-        overlay(sampler, row.npz_path, plot_dir / f"normal_{name}.png", args.num_samples)
+        bev_overlay(sampler, row.npz_path, plot_dir / f"normal_{name}.png", args.num_samples)
     lines.append(f"\nOverlay PNGs: {plot_dir}")
 
     (out / "summary.md").write_text("\n".join(lines))
