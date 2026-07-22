@@ -12,11 +12,13 @@ from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.onnx_export import (
     ENCODER_INPUT_NAMES,
     FULL_INPUT_NAMES,
+    INDEPENDENT_TURN_INDICATOR_INPUT_NAMES,
     ModelWrappers,
     NumpyDict,
     TensorDict,
     build_decoder_inputs,
     build_dummy_inputs,
+    build_independent_turn_indicator_inputs,
     build_wrappers,
     export_model_to_onnx,
     load_model,
@@ -185,6 +187,7 @@ def validate_split_models(
     encoder_onnx_path: Path,
     decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
+    independent_turn_indicator_onnx_path: Path,
 ) -> None:
     with torch.no_grad():
         torch_encoding = wrappers.encoder(*(inputs[name] for name in ENCODER_INPUT_NAMES))
@@ -195,6 +198,15 @@ def validate_split_models(
             decoder_inputs["neighbor_agents_past"],
         )
         torch_turn_indicator = wrappers.turn_indicator(torch_encoding, torch_model_output)
+        independent_turn_indicator_inputs = build_independent_turn_indicator_inputs(
+            inputs, torch_model_output
+        )
+        torch_independent_turn_indicator = wrappers.independent_turn_indicator(
+            *(
+                independent_turn_indicator_inputs[name]
+                for name in INDEPENDENT_TURN_INDICATOR_INPUT_NAMES
+            )
+        )
 
     encoder_onnx_inputs = {name: inputs[name].cpu().numpy() for name in ENCODER_INPUT_NAMES}
     onnx_encoding = run_ort_in_subprocess(encoder_onnx_path, encoder_onnx_inputs)[0]
@@ -218,6 +230,20 @@ def validate_split_models(
     )[0]
     compare("turn_indicator_logit", torch_turn_indicator.cpu().numpy(), onnx_turn_indicator)
 
+    independent_turn_indicator_onnx_inputs = {
+        name: independent_turn_indicator_inputs[name].cpu().numpy()
+        for name in INDEPENDENT_TURN_INDICATOR_INPUT_NAMES
+    }
+    independent_turn_indicator_onnx_inputs["final_x0"] = onnx_model_output
+    onnx_independent_turn_indicator = run_ort_in_subprocess(
+        independent_turn_indicator_onnx_path, independent_turn_indicator_onnx_inputs
+    )[0]
+    compare(
+        "independent_turn_indicator_logit",
+        torch_independent_turn_indicator.cpu().numpy(),
+        onnx_independent_turn_indicator,
+    )
+
 
 def convert_model(
     config_json_path: str,
@@ -226,6 +252,7 @@ def convert_model(
     encoder_onnx_path: Path,
     decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
+    independent_turn_indicator_onnx_path: Path,
     eval_npz_path: Path | None,
     use_ema: bool,
     use_simplify: bool,
@@ -239,6 +266,7 @@ def convert_model(
     print(f"Encoder output: {encoder_onnx_path}")
     print(f"Decoder output: {decoder_onnx_path}")
     print(f"Turn indicator output: {turn_indicator_onnx_path}")
+    print(f"Independent turn indicator output: {independent_turn_indicator_onnx_path}")
     print(f"Using EMA: {use_ema}")
     print("ONNX exporter: legacy")
     print(f"ONNX opset version: {opset_version}")
@@ -257,6 +285,7 @@ def convert_model(
         encoder_onnx_path,
         decoder_onnx_path,
         turn_indicator_onnx_path,
+        independent_turn_indicator_onnx_path,
         use_simplify,
         opset_version,
         external_data,
@@ -279,6 +308,7 @@ def convert_model(
         encoder_onnx_path,
         decoder_onnx_path,
         turn_indicator_onnx_path,
+        independent_turn_indicator_onnx_path,
     )
 
     print(
@@ -286,7 +316,8 @@ def convert_model(
         f"\n  {full_onnx_path}"
         f"\n  {encoder_onnx_path}"
         f"\n  {decoder_onnx_path}"
-        f"\n  {turn_indicator_onnx_path}\n"
+        f"\n  {turn_indicator_onnx_path}"
+        f"\n  {independent_turn_indicator_onnx_path}\n"
     )
 
 
@@ -312,6 +343,9 @@ if __name__ == "__main__":
         encoder_onnx_file = pth_dir / f"{args.output_prefix}_encoder.onnx"
         decoder_onnx_file = pth_dir / f"{args.output_prefix}_decoder.onnx"
         turn_indicator_onnx_file = pth_dir / f"{args.output_prefix}_turn_indicator.onnx"
+        independent_turn_indicator_onnx_file = (
+            pth_dir / f"{args.output_prefix}_independent_turn_indicator.onnx"
+        )
 
         print(f"\n{'#' * 80}")
         print(f"Processing: {pth_file.relative_to(root_dir)}")
@@ -328,6 +362,7 @@ if __name__ == "__main__":
             encoder_onnx_path=encoder_onnx_file,
             decoder_onnx_path=decoder_onnx_file,
             turn_indicator_onnx_path=turn_indicator_onnx_file,
+            independent_turn_indicator_onnx_path=independent_turn_indicator_onnx_file,
             eval_npz_path=args.eval_npz,
             use_ema=args.use_ema,
             use_simplify=args.use_simplify,
