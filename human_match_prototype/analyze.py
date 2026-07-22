@@ -55,7 +55,7 @@ def parse_args():
     return p.parse_args()
 
 
-def bev_overlay(sampler, npz_path, out_png, num_samples, temperature=0.5):
+def bev_overlay(sampler, npz_path, out_png, num_samples, temperature=0.5, training_humans=None):
     try:
         from src.visualization import PAST_FRAMES, precompute_static, render_frame
     except ImportError:
@@ -75,6 +75,10 @@ def bev_overlay(sampler, npz_path, out_png, num_samples, temperature=0.5):
 
     for s in r.ego_samples:
         ax.plot(s[:, 0], s[:, 1], color="#E040FB", alpha=0.3, lw=0.5, zorder=40)
+
+    if training_humans:
+        for th in training_humans:
+            ax.plot(th[:, 0], th[:, 1], color="#FFA726", alpha=0.4, lw=1.0, zorder=35)
 
     fig.savefig(out_png, dpi=120, facecolor="#1A1A1A", bbox_inches="tight")
     plt.close(fig)

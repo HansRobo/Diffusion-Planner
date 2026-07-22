@@ -50,3 +50,13 @@ def test_bev_overlay_produces_png(tmp_path):
     assert out_png.exists()
     assert out_png.stat().st_size > 1000  # non-trivial PNG
     sampler.sample.assert_called_once_with(str(npz_path), num_samples=4, seed=0, temperature=0.5)
+
+
+def test_bev_overlay_accepts_training_humans():
+    """bev_overlay should accept training_humans kwarg without error."""
+    import inspect
+
+    from human_match_prototype.analyze import bev_overlay
+
+    sig = inspect.signature(bev_overlay)
+    assert "training_humans" in sig.parameters
