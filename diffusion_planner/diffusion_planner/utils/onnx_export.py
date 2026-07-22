@@ -58,6 +58,17 @@ ENCODER_INPUT_NAMES = [
     "ego_shape",
 ]
 
+# One evaluation of the temporal HDP x-start denoiser. The scene and global
+# route condition are produced once by the split encoder and reused by the
+# external DPM loop.
+DECODER_INPUT_NAMES = [
+    "encoding",
+    "sampled_trajectories",
+    "diffusion_time",
+    "ego_current_state",
+    "global_route_condition",
+]
+
 TURN_INDICATOR_INPUT_NAMES = [
     "encoding",
     "final_x0",
@@ -70,6 +81,7 @@ FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit"]
 # Python decoder.  Export it from the encoder-side graph so the deployment node
 # does not have to reimplement a learned route encoder.
 ENCODER_OUTPUT_NAMES = ["encoding", "global_route_condition"]
+DECODER_OUTPUT_NAMES = ["model_output"]
 TURN_INDICATOR_OUTPUT_NAMES = ["turn_indicator_logit"]
 
 TensorDict = dict[str, torch.Tensor]
@@ -124,6 +136,7 @@ def validate_hdp_export_contract(config: Config) -> None:
 class ModelWrappers:
     full: nn.Module
     encoder: nn.Module
+    decoder: nn.Module
     turn_indicator: nn.Module
 
 
@@ -200,6 +213,41 @@ class EncoderONNXWrapper(nn.Module):
             "ego_shape": ego_shape,
         }
         return self.encoder(inputs), self.global_route_encoder(route_lanes)
+
+
+class DecoderONNXWrapper(nn.Module):
+    """One temporal HDP denoiser evaluation for an external DPM loop.
+
+    This is the split counterpart of the all-in-one graph. It exposes exactly
+    the ``x_start`` DiT call used by :class:`DPM_Solver`, while keeping scene and
+    route encoding outside the per-step loop. HDP is ego-only, so this graph has
+    no legacy neighbor-future or prefix-delay inputs.
+    """
+
+    def __init__(self, model: Diffusion_Planner):
+        super().__init__()
+        self.decoder = model.decoder
+
+    def forward(
+        self,
+        encoding: torch.Tensor,
+        sampled_trajectories: torch.Tensor,
+        diffusion_time: torch.Tensor,
+        ego_current_state: torch.Tensor,
+        global_route_condition: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size = encoding.shape[0]
+        sampled_trajectories = sampled_trajectories.reshape(
+            batch_size, 1, self.decoder._future_len, 4
+        )
+        diffusion_time = diffusion_time.reshape(batch_size)
+        return self.decoder.dit(
+            sampled_trajectories,
+            diffusion_time,
+            encoding,
+            ego_current_state[:, 4:6],
+            global_route_condition,
+        )
 
 
 class TurnIndicatorONNXWrapper(nn.Module):
@@ -329,6 +377,22 @@ def build_turn_indicator_inputs(
     }
 
 
+def build_decoder_inputs(
+    inputs: TensorDict,
+    encoding: torch.Tensor,
+    global_route_condition: torch.Tensor,
+) -> TensorDict:
+    """Build a trace input for one temporal HDP DiT evaluation."""
+    batch_size = inputs["sampled_trajectories"].shape[0]
+    return {
+        "encoding": encoding,
+        "sampled_trajectories": inputs["sampled_trajectories"],
+        "diffusion_time": torch.ones(batch_size, dtype=torch.float32, device=encoding.device),
+        "ego_current_state": inputs["ego_current_state"],
+        "global_route_condition": global_route_condition,
+    }
+
+
 def build_turn_indicator_final_x0(model: Diffusion_Planner, inputs: TensorDict) -> torch.Tensor:
     """Build a trace-only latent input for the turn-indicator graph.
 
@@ -374,6 +438,7 @@ def build_wrappers(model: Diffusion_Planner) -> ModelWrappers:
     return ModelWrappers(
         full=FullONNXWrapper(model).eval(),
         encoder=EncoderONNXWrapper(model).eval(),
+        decoder=DecoderONNXWrapper(model).eval(),
         turn_indicator=TurnIndicatorONNXWrapper(model).eval(),
     )
 
@@ -381,9 +446,11 @@ def build_wrappers(model: Diffusion_Planner) -> ModelWrappers:
 def build_export_specs(
     wrappers: ModelWrappers,
     inputs: TensorDict,
+    decoder_inputs: TensorDict,
     turn_indicator_inputs: TensorDict,
     full_onnx_path: Path,
     encoder_onnx_path: Path,
+    decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
 ) -> list[ExportSpec]:
     return [
@@ -400,6 +467,13 @@ def build_export_specs(
             input_names=ENCODER_INPUT_NAMES,
             output_names=ENCODER_OUTPUT_NAMES,
             output_path=encoder_onnx_path,
+        ),
+        ExportSpec(
+            wrapper=wrappers.decoder,
+            inputs=decoder_inputs,
+            input_names=DECODER_INPUT_NAMES,
+            output_names=DECODER_OUTPUT_NAMES,
+            output_path=decoder_onnx_path,
         ),
         ExportSpec(
             wrapper=wrappers.turn_indicator,
@@ -554,7 +628,8 @@ def export_model_to_onnx(
 ) -> None:
     """Export ONNX graphs for ``model``.
 
-    HDP exports full / encoder / turn_indicator graphs; the full graph is deployable.
+    HDP exports full / encoder / decoder / turn_indicator graphs; the full graph is
+    deployable and the split decoder is one mathematically equivalent DPM denoiser call.
 
     No ORT validation is performed; the caller is responsible for that (the standalone CLI does,
     the training loop skips it). The SDPA / MHA backends are forced only for the duration of the
@@ -562,6 +637,9 @@ def export_model_to_onnx(
     """
     wrappers = build_wrappers(model)
     export_inputs = build_dummy_inputs(1 + model.decoder._predicted_neighbor_num)
+    decoder_onnx_path = turn_indicator_onnx_path.with_name(
+        f"{turn_indicator_onnx_path.stem.removesuffix('_turn_indicator')}_decoder.onnx"
+    )
 
     with onnx_export_backends():
         with torch.no_grad():
@@ -569,6 +647,11 @@ def export_model_to_onnx(
                 *(export_inputs[name] for name in ENCODER_INPUT_NAMES)
             )
 
+        decoder_inputs = build_decoder_inputs(
+            export_inputs,
+            encoding,
+            global_route_condition,
+        )
         final_x0 = build_turn_indicator_final_x0(model, export_inputs)
         turn_indicator_inputs = build_turn_indicator_inputs(
             encoding,
@@ -580,9 +663,11 @@ def export_model_to_onnx(
         export_specs = build_export_specs(
             wrappers,
             export_inputs,
+            decoder_inputs,
             turn_indicator_inputs,
             full_onnx_path,
             encoder_onnx_path,
+            decoder_onnx_path,
             turn_indicator_onnx_path,
         )
         for spec in export_specs:

@@ -18,6 +18,7 @@ import torch
 from diffusion_planner.dimensions import *
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.onnx_export import (
+    DECODER_INPUT_NAMES,
     ENCODER_INPUT_NAMES,
     FULL_INPUT_NAMES,
     ModelWrappers,
@@ -192,6 +193,7 @@ def validate_split_models(
     model,
     inputs: TensorDict,
     encoder_onnx_path: Path,
+    decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
 ) -> None:
     with torch.no_grad():
@@ -212,6 +214,23 @@ def validate_split_models(
         torch_global_route_condition.cpu().numpy(),
         onnx_global_route_condition,
     )
+
+    decoder_inputs = {
+        "encoding": torch_encoding,
+        "sampled_trajectories": inputs["sampled_trajectories"],
+        "diffusion_time": torch.ones(
+            torch_encoding.shape[0], dtype=torch.float32, device=torch_encoding.device
+        ),
+        "ego_current_state": inputs["ego_current_state"],
+        "global_route_condition": torch_global_route_condition,
+    }
+    with torch.no_grad():
+        torch_model_output = wrappers.decoder(
+            *(decoder_inputs[name] for name in DECODER_INPUT_NAMES)
+        )
+    decoder_onnx_inputs = {name: decoder_inputs[name].cpu().numpy() for name in DECODER_INPUT_NAMES}
+    onnx_model_output = run_ort_in_subprocess(decoder_onnx_path, decoder_onnx_inputs)[0]
+    compare("model_output", torch_model_output.cpu().numpy(), onnx_model_output)
 
     final_x0 = build_turn_indicator_final_x0(model, inputs)
     with torch.no_grad():
@@ -239,6 +258,7 @@ def convert_model(
     ckpt_path: str,
     full_onnx_path: Path,
     encoder_onnx_path: Path,
+    decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
     eval_npz_path: Path | None,
     use_ema: bool,
@@ -251,6 +271,7 @@ def convert_model(
     print(f"Config: {config_json_path}")
     print(f"Full output: {full_onnx_path}")
     print(f"Encoder output: {encoder_onnx_path}")
+    print(f"Decoder output: {decoder_onnx_path}")
     print(f"Turn indicator output: {turn_indicator_onnx_path}")
     print(f"Using EMA: {use_ema}")
     print("ONNX exporter: legacy")
@@ -285,10 +306,16 @@ def convert_model(
         model,
         validation_inputs,
         encoder_onnx_path,
+        decoder_onnx_path,
         turn_indicator_onnx_path,
     )
 
-    exported_paths = [full_onnx_path, encoder_onnx_path, turn_indicator_onnx_path]
+    exported_paths = [
+        full_onnx_path,
+        encoder_onnx_path,
+        decoder_onnx_path,
+        turn_indicator_onnx_path,
+    ]
     print("\nSuccessfully converted to ONNX:" + "".join(f"\n  {p}" for p in exported_paths) + "\n")
 
 
@@ -312,6 +339,7 @@ if __name__ == "__main__":
         config_file = pth_dir / "args.json"
         full_onnx_file = pth_dir / f"{args.output_prefix}.onnx"
         encoder_onnx_file = pth_dir / f"{args.output_prefix}_encoder.onnx"
+        decoder_onnx_file = pth_dir / f"{args.output_prefix}_decoder.onnx"
         turn_indicator_onnx_file = pth_dir / f"{args.output_prefix}_turn_indicator.onnx"
 
         print(f"\n{'#' * 80}")
@@ -327,6 +355,7 @@ if __name__ == "__main__":
             ckpt_path=str(pth_file),
             full_onnx_path=full_onnx_file,
             encoder_onnx_path=encoder_onnx_file,
+            decoder_onnx_path=decoder_onnx_file,
             turn_indicator_onnx_path=turn_indicator_onnx_file,
             eval_npz_path=args.eval_npz,
             use_ema=args.use_ema,
