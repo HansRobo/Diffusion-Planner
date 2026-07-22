@@ -124,7 +124,7 @@ def main():
 
     import lanelet2
 
-    from diffusion_planner.util_scripts.search_scenes import build_index
+    from human_match_prototype.sidecar import build_index
 
     npz_paths = sorted(str(p) for p in Path(args.data_root).rglob("*.npz"))
     print(f"Found {len(npz_paths)} NPZ files under {args.data_root}")

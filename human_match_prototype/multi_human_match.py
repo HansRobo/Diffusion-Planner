@@ -20,6 +20,7 @@ from human_match_prototype.coord_transform import (
     transform_trajectory,
 )
 from human_match_prototype.metrics import multi_human_metrics
+from human_match_prototype.sidecar import read_sidecar
 
 
 @dataclass
@@ -142,8 +143,6 @@ def run_multi_human(
     model_dir: str = "/opt/autoware/mlmodels/diffusion_planner_for_x2",
 ) -> None:
     import lanelet2
-
-    from diffusion_planner.util_scripts.search_scenes import read_sidecar
 
     index, _ = load_lanelet_index(index_path)
     lookup = build_lanelet_lookup(index)
