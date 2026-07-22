@@ -74,7 +74,7 @@ def get_args(args_list=None):
     )
     parser.add_argument(
         "--use_smoothing_future_trajectory",
-        default=True,
+        default=False,
         type=boolean,
         help="whether to apply smoothing to future trajectory",
     )

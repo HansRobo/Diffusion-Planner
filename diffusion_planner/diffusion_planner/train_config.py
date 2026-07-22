@@ -64,7 +64,7 @@ class TrainConfig:
     augment_type: Literal["quintic", "bridge"] = "quintic"
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
-    use_smoothing_future_trajectory: bool = True
+    use_smoothing_future_trajectory: bool = False
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True
