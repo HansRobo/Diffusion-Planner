@@ -83,6 +83,8 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         )
         if "mode_cls_loss" in loss:
             loss["loss"] = loss["loss"] + args.alpha_mode_cls_loss * loss["mode_cls_loss"]
+        if "endpoint_fde_loss" in loss:
+            loss["loss"] = loss["loss"] + args.coeff_endpoint_fde_loss * loss["endpoint_fde_loss"]
 
         # loss backward
         loss["loss"].backward()

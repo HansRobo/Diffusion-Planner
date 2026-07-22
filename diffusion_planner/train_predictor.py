@@ -157,6 +157,19 @@ def get_args(args_list=None):
         default=1.0,
         help="mode classification loss weight (decoder_type='plantf' only)",
     )
+    parser.add_argument(
+        "--coeff_endpoint_fde_loss",
+        type=float,
+        default=1.0,
+        help="endpoint FDE loss weight in metres (decoder_type='plantf' only)",
+    )
+    parser.add_argument(
+        "--plantf_use_lon_velocity_weight",
+        type=boolean,
+        default=False,
+        help="re-enable the diffusion-style longitudinal velocity down-weighting "
+        "for the planTF head (off by default; it suppresses forward progress)",
+    )
 
     # Velocity representation & hybrid loss (HDP paper, Section IV-B)
     parser.add_argument(

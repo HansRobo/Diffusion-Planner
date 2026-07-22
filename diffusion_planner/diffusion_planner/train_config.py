@@ -110,6 +110,12 @@ class TrainConfig:
     alpha_neighbor_loss: float = 0.1
     # Mode classification loss weight (decoder_type="plantf" only)
     alpha_mode_cls_loss: float = 1.0
+    # planTF-only loss shaping (docs/plantf_dead_mode_improvement.md): the
+    # endpoint FDE loss is a direct forward-progress signal, and the
+    # longitudinal velocity down-weighting is disabled by default because it
+    # suppresses that signal for the one-shot regression head.
+    coeff_endpoint_fde_loss: float = 1.0
+    plantf_use_lon_velocity_weight: bool = False
 
     # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False

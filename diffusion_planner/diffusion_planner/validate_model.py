@@ -95,6 +95,74 @@ def compute_plantf_mode_metrics(
     return metrics
 
 
+_PROGRESS_BINS = (("stop", 0.0, 2.0), ("slow", 2.0, 10.0), ("move", 10.0, float("inf")))
+_PROGRESS_DT = 0.1
+
+
+def compute_trajectory_progress_metrics(
+    prediction_ego: torch.Tensor,
+    ego_future: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Per-sample forward-progress / smoothness metrics for the ego prediction.
+
+    Motivated by the planTF "dango" collapse (docs/plantf_dead_mode_improvement.md):
+    a near-stationary oscillating prediction can hide inside an averaged
+    position loss, especially on stop-heavy data. These metrics expose it
+    directly, and each one is additionally reported binned by the GT endpoint
+    distance (``stop`` < 2m, ``slow`` 2-10m, ``move`` >= 10m) using the
+    ``_available`` masking convention, so stopped scenes cannot mask a moving
+    scene failure.
+
+    Args:
+        prediction_ego: [B, T, 4] denormalized ego prediction (ego-centric metres).
+        ego_future: [B, T, 4] ground-truth ego future (ego-centric metres).
+
+    Returns:
+        Dict of per-sample [B] tensors, keys prefixed with ``traj_``.
+    """
+    pred_xy = prediction_ego[..., :2]
+    gt_xy = ego_future[..., :2]
+
+    pred_end = pred_xy[:, -1].norm(dim=-1)  # [B] endpoint distance from ego
+    gt_end = gt_xy[:, -1].norm(dim=-1)
+    pred_len = (pred_xy[:, 1:] - pred_xy[:, :-1]).norm(dim=-1).sum(dim=-1)  # [B]
+    gt_len = (gt_xy[:, 1:] - gt_xy[:, :-1]).norm(dim=-1).sum(dim=-1)
+    fde = (pred_xy[:, -1] - gt_xy[:, -1]).norm(dim=-1)
+
+    # Mean second difference of the predicted positions: a straight
+    # constant-speed trajectory scores 0; a jagged / oscillating one is large.
+    second_diff = pred_xy[:, 2:] - 2.0 * pred_xy[:, 1:-1] + pred_xy[:, :-2]
+    roughness = second_diff.norm(dim=-1).mean(dim=-1)
+
+    pred_speed = (pred_xy[:, 1:] - pred_xy[:, :-1]).norm(dim=-1) / _PROGRESS_DT  # [B, T-1]
+    gt_speed = (gt_xy[:, 1:] - gt_xy[:, :-1]).norm(dim=-1) / _PROGRESS_DT
+    speed_mae = (pred_speed - gt_speed).abs().mean(dim=-1)
+
+    # Ratios are clamped on the GT side so stopped scenes (GT ~ 0m) do not blow up.
+    metrics = {
+        "traj_endpoint_m": pred_end,
+        "traj_gt_endpoint_m": gt_end,
+        "traj_endpoint_progress_ratio": pred_end / gt_end.clamp_min(1.0),
+        "traj_length_ratio": pred_len / gt_len.clamp_min(1.0),
+        "traj_fde_m": fde,
+        "traj_second_diff_m": roughness,
+        "traj_speed_mae_mps": speed_mae,
+    }
+    binned = (
+        "endpoint_progress_ratio",
+        "length_ratio",
+        "fde_m",
+        "second_diff_m",
+        "speed_mae_mps",
+    )
+    for bin_name, lo, hi in _PROGRESS_BINS:
+        mask = ((gt_end >= lo) & (gt_end < hi)).float()
+        for base in binned:
+            metrics[f"traj_{base}_{bin_name}"] = metrics[f"traj_{base}"]
+            metrics[f"traj_{base}_{bin_name}_available"] = mask
+    return metrics
+
+
 def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValidationBatch:
     inputs = {key: value.to(device) for key, value in inputs.items()}
     batch_size = inputs["ego_current_state"].shape[0]
@@ -392,6 +460,9 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             )
             for key, val in mode_metrics.items():
                 total_result_dict[key].append(val.cpu())
+        progress_metrics = compute_trajectory_progress_metrics(prediction[:, 0], ego_future)
+        for key, val in progress_metrics.items():
+            total_result_dict[key].append(val.cpu())
         turn_indicator_logit = outputs["turn_indicator_logit"]
         turn_indicator = turn_indicator_logit.argmax(dim=-1)
         turn_indicator_gt = make_turn_indicator_gt(turn_indicator_seq)
@@ -651,6 +722,27 @@ def aggregate_valid_metrics(valid_dict, device):
         local_cnt = ddp.all_reduce_sum(val.numel(), device)
         plantf_means[key.removeprefix("plantf_")] = local_sum / max(local_cnt, 1)
 
+    # Forward-progress metrics; same `_available` masking convention as epdms
+    # so GT-progress-binned means only average the samples inside each bin.
+    traj_means = {}
+    for key, val in valid_dict.items():
+        if not key.startswith("traj_"):
+            continue
+        metric = key.removeprefix("traj_")
+        tensor = val.float()
+        if metric.endswith("_available"):
+            continue
+        available = valid_dict.get(f"{key}_available")
+        if available is None:
+            local_sum = ddp.all_reduce_sum(tensor.sum().item(), device)
+            local_cnt = ddp.all_reduce_sum(tensor.numel(), device)
+            traj_means[metric] = local_sum / max(local_cnt, 1)
+            continue
+        mask = available.float() > 0.5
+        local_sum = ddp.all_reduce_sum(tensor[mask].sum().item() if mask.any() else 0.0, device)
+        local_cnt = ddp.all_reduce_sum(mask.sum().item(), device)
+        traj_means[metric] = local_sum / local_cnt if local_cnt > 0 else float("nan")
+
     return {
         "avg_loss_ego": loss_ego_sum / max(samples_ego, 1),
         "avg_loss_neighbor": loss_nei_sum / max(samples_nei, 1),
@@ -662,4 +754,5 @@ def aggregate_valid_metrics(valid_dict, device):
         "ego_means": ego_means,
         "epdms_means": epdms_means,
         "plantf_means": plantf_means,
+        "traj_means": traj_means,
     }
