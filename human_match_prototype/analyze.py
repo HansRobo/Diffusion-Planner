@@ -72,14 +72,7 @@ def bev_overlay(sampler, npz_path, out_png, num_samples):
     render_frame(fig, ax, data, static, t=PAST_FRAMES - 1, filename=Path(npz_path).name)
 
     for s in r.ego_samples:
-        ax.plot(s[:, 0], s[:, 1], color="#2196F3", alpha=0.25, lw=1, zorder=35)
-    ax.plot(
-        r.human_future[:, 0],
-        r.human_future[:, 1],
-        color="tab:red",
-        lw=2.5,
-        zorder=36,
-    )
+        ax.plot(s[:, 0], s[:, 1], color="#E040FB", alpha=0.3, lw=0.3, zorder=40)
 
     fig.savefig(out_png, dpi=120, facecolor="#1A1A1A", bbox_inches="tight")
     plt.close(fig)

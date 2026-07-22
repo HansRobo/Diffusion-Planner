@@ -164,7 +164,7 @@ def main():
     p.add_argument("--or_csv", required=True)
     p.add_argument("--normal_csv", required=True)
     p.add_argument("--output_dir", required=True)
-    p.add_argument("--num_samples", type=int, default=64)
+    p.add_argument("--num_samples", type=int, default=50)
     args = p.parse_args()
 
     out = Path(args.output_dir)
