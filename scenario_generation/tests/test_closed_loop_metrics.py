@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -171,8 +173,41 @@ def test_aggregate_nested_keeps_tdigest_in_json():
     assert summary["red_light_violation"]["count"] == 1
     assert summary["reproducer"]["expand_count"] == 1
     assert abs(summary["reproducer"]["repeat_step_rate"] - 0.25) < 1e-9
+    # Human-readable segments.jsonl strips digests; in-memory rows keep them.
     cleaned = metrics_for_json(rows[0])
-    assert TDIGEST_KEY in cleaned["object"]
+    assert TDIGEST_KEY not in cleaned["object"]
+    assert TDIGEST_KEY in rows[0]["object"]
+
+
+def test_tdigest_sidecar_roundtrip(tmp_path):
+    """Digests leave segments.jsonl but survive via tdigests sidecar for shard merge."""
+    from scenario_generation.closed_loop_eval import (
+        attach_tdigest_sidecars,
+        load_segment_rows_with_tdigests,
+        metrics_for_json,
+        tdigest_sidecar_row,
+    )
+    from scenario_generation.metrics.tdigest import TDIGEST_KEY
+
+    row = _segment_row()
+    row["route"] = "r0"
+    human = metrics_for_json(row)
+    assert TDIGEST_KEY not in human["object"]
+    side = tdigest_sidecar_row(row)
+    assert side is not None and side["route"] == "r0"
+    assert "object" in side and "road_border" in side
+
+    (tmp_path / "segments_0.jsonl").write_text(json.dumps(human) + "\n")
+    (tmp_path / "tdigests_0.jsonl").write_text(json.dumps(side) + "\n")
+    loaded = load_segment_rows_with_tdigests(tmp_path)
+    assert len(loaded) == 1
+    assert TDIGEST_KEY in loaded[0]["object"]
+    assert loaded[0]["object"][TDIGEST_KEY] == row["object"][TDIGEST_KEY]
+
+    # attach helper is idempotent on already-stripped rows
+    stripped = [human]
+    attach_tdigest_sidecars(stripped, [side])
+    assert stripped[0]["object"][TDIGEST_KEY] == row["object"][TDIGEST_KEY]
 
 
 def test_aggregate_missing_category_fails():
@@ -180,6 +215,39 @@ def test_aggregate_missing_category_fails():
     del bad["object"]
     with pytest.raises(KeyError, match="object"):
         aggregate([bad], near_miss_thresh=0.5, strong_brake_mps2=-4.0)
+
+
+def test_merge_shards_defers_summary_write(tmp_path):
+    """Multi-GPU parent must add elapsed_sec before writing summary.json."""
+    import importlib.util
+    from pathlib import Path
+
+    from scenario_generation.closed_loop_eval import metrics_for_json, tdigest_sidecar_row
+
+    script = (
+        Path(__file__).resolve().parents[2] / "diffusion_planner" / "valid_predictor_closed_loop.py"
+    )
+    spec = importlib.util.spec_from_file_location("valid_predictor_closed_loop", script)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    row = _segment_row()
+    row["route"] = "r0"
+    (tmp_path / "segments_0.jsonl").write_text(json.dumps(metrics_for_json(row)) + "\n")
+    side = tdigest_sidecar_row(row)
+    assert side is not None
+    (tmp_path / "tdigests_0.jsonl").write_text(json.dumps(side) + "\n")
+    summary = mod._merge_shards(tmp_path, tmp_path, 0.5, strong_brake_mps2=-4.0)
+    assert not (tmp_path / "summary.json").exists()
+    summary["elapsed_sec"] = 1.25
+    summary["model_path"] = "/tmp/model.pth"
+    mod._write_summary(tmp_path, summary)
+    written = json.loads((tmp_path / "summary.json").read_text())
+    assert written["elapsed_sec"] == 1.25
+    assert written["model_path"] == "/tmp/model.pth"
+    assert written["strong_brake"]["thresh_mps2"] == -4.0
+    assert np.isfinite(written["object"]["clearance_p5_m"])
 
 
 def test_event_count_debounce_unchanged():

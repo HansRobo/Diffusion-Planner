@@ -13,6 +13,8 @@ each route is rolled out whole with ``render_segment`` (one GPU forward per tick
 returns the route metrics AND writes a per-step PNG of the live-ego scene. Every run therefore
 always produces video: one MP4 per route (``<route>.mp4``). Per-route metrics are streamed to
 ``segments.jsonl`` and aggregated into ``summary.json`` (both next to the checkpoint).
+Clearance t-digest sketches used for multi-GPU p5 merge are written beside them as
+``tdigests.jsonl`` / ``tdigests_{rank}.jsonl`` so ``segments.jsonl`` stays human-readable.
 
 Only ``--model_path`` and ``--npz_root`` are required; all outputs are written next to
 the checkpoint (``<model_path dir>/closed_loop/``) and the rollout knobs default to the
@@ -35,6 +37,16 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+
+
+def _negative_mps2(value: str) -> float:
+    """argparse type: strong-brake threshold must be negative (accel <= thresh)."""
+    v = float(value)
+    if v > 0.0:
+        raise argparse.ArgumentTypeError(
+            f"strong_brake_mps2 must be <= 0 (got {v}); a positive threshold matches nearly every step"
+        )
+    return v
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--near_miss_thresh", type=float, default=0.5, help="near-miss clearance (m)")
     p.add_argument(
         "--strong_brake_mps2",
-        type=float,
+        type=_negative_mps2,
         default=-4.0,
         help="strong-brake threshold (m/s^2, negative); a step counts when tangential accel <= this",
     )
@@ -168,21 +180,20 @@ def _run_shard(rank, num_workers, gpu_ids, model_path, npz_root, out_dir, knobs)
 def _merge_shards(
     out_dir: Path, npz_root, near_miss_thresh: float, *, strong_brake_mps2: float
 ) -> dict:
-    """Aggregate every worker's segments_{rank}.jsonl into one summary and write summary.json
-    (the videos already live in the shared out_dir, route keys being globally unique)."""
-    from scenario_generation.closed_loop_eval import aggregate
+    """Aggregate every worker's segments_{rank}.jsonl (+ tdigests sidecars) into one summary."""
+    from scenario_generation.closed_loop_eval import aggregate, load_segment_rows_with_tdigests
 
-    rows: list[dict] = []
-    for f in sorted(out_dir.glob("segments_*.jsonl")):
-        rows += [json.loads(ln) for ln in f.read_text().splitlines() if ln.strip()]
-
+    rows = load_segment_rows_with_tdigests(out_dir)
     summary = aggregate(rows, near_miss_thresh, strong_brake_mps2=strong_brake_mps2)
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len({r["route"] for r in rows})
     summary["video_mp4s"] = sorted(str(p) for p in out_dir.glob("*.mp4"))
+    return summary
+
+
+def _write_summary(out_dir: Path, summary: dict) -> None:
     with open(out_dir / "summary.json", "w") as f:
         json.dump({k: v for k, v in summary.items() if k != "video_mp4s"}, f, indent=4)
-    return summary
 
 
 def main() -> None:
@@ -235,6 +246,8 @@ def main() -> None:
         summary["elapsed_sec"] = time.perf_counter() - t0
 
     summary["model_path"] = str(args.model_path)
+    if nproc > 1:
+        _write_summary(out_dir, summary)
 
     from scenario_generation.closed_loop_eval import format_summary_lines
 

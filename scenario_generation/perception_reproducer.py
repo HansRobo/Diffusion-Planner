@@ -40,11 +40,12 @@ DEFAULT_COOL_DOWN_SEC = 80.0  # -c ; must exceed the ego's max stopping time
 _SPEED_GAP_RATIO = 2.0
 _SPEED_GAP_MIN_REC = 3.0  # m/s
 
-# Heading gate (rad): a candidate recorded frame is only eligible if its recorded ego
-# yaw is within +/- this of the live ego yaw. Stops the xy-only KDTree from grabbing a
-# future opposite-heading frame (U-turn / self-crossing route) that would re-center the
-# scene rotated ~180 deg. 90 deg is lenient enough for normal curves/junctions.
-DEFAULT_YAW_GATE_RAD = np.pi / 2.0
+# Heading gate (rad): always on. A candidate recorded frame is only eligible if its
+# recorded ego yaw is within +/- this of the live ego yaw. Stops the xy-only KDTree
+# from grabbing a future opposite-heading frame (U-turn / self-crossing route) that
+# would re-center the scene rotated ~180 deg. 90 deg is lenient enough for normal
+# curves/junctions. Not configurable — production paths always pass ``sim_yaw``.
+YAW_GATE_RAD = np.pi / 2.0
 
 
 def _wrap_to_pi(a: float) -> float:
@@ -59,7 +60,6 @@ class PerceptionReproducer:
         search_radius: float = DEFAULT_SEARCH_RADIUS_M,
         cool_down_sec: float = DEFAULT_COOL_DOWN_SEC,
         timers: Timers | None = None,
-        yaw_gate: float | None = DEFAULT_YAW_GATE_RAD,
     ) -> None:
         self.tl = timeline
         self.search_radius = float(search_radius)
@@ -67,8 +67,6 @@ class PerceptionReproducer:
             search_radius
         )  # nominal radius to restore after unsticking
         self.cool_down_sec = float(cool_down_sec)
-        # Heading gate (rad, ``None`` to disable) — see DEFAULT_YAW_GATE_RAD.
-        self.yaw_gate = None if yaw_gate is None else float(yaw_gate)
         self.timers = timers or Timers()
         # Cumulative route-level telemetry: how long the cursor spent advancing vs
         # republishing. Persist across ``reset`` (only ``__init__`` clears them) so a
@@ -133,8 +131,9 @@ class PerceptionReproducer:
             sim_xy: (2,) live ego world position.
             sim_speed: live ego speed (m/s) — for the speed-gap guard.
             sim_time: elapsed sim time (s) — drives the cool-down TTL.
-            sim_yaw: live ego heading (rad); only used when ``yaw_gate`` is set, to reject
-                candidate frames whose recorded heading is > ``yaw_gate`` from the live ego.
+            sim_yaw: live ego heading (rad). When provided, applies the always-on heading
+                gate (``YAW_GATE_RAD``) to reject opposite-heading candidates. Production
+                pose-mode always passes this; omit only in tests that don't care about yaw.
         """
         with self.timers("cursor_step"):
             sim_xy = np.asarray(sim_xy, dtype=np.float64)[:2]
@@ -146,12 +145,14 @@ class PerceptionReproducer:
             )
             if self.search_radius <= 0.0:
                 # Degenerate mode: nearest recorded frame, but still never rewind
-                # once this cursor has reached a later recorded frame. Always advances,
-                # so it is never in the ``repeat`` state.
+                # once this cursor has reached a later recorded frame. First pick of an
+                # index is ``normal``; republishing the same index (ego not moving) is
+                # ``repeat`` so unstick can escalate.
                 idx = max(self.tl.nearest(sim_xy), self.max_idx_reached)
+                repeat = self.state_run_steps > 0 and idx == self._last_idx
                 self._last_idx = idx
                 self.max_idx_reached = max(self.max_idx_reached, idx)
-                self._update_base_state(repeat=False)
+                self._update_base_state(repeat=repeat)
                 return idx
 
             if moved > self.search_radius or not self._queue:
@@ -166,17 +167,16 @@ class PerceptionReproducer:
                 cooling = {i for i, _ in self._cool_down}
                 # Chronological order == ascending frame index (frame_indices is sorted).
                 cand = [i for i in nearby if i >= self.max_idx_reached and i not in cooling]
-                if self.yaw_gate is not None and sim_yaw is not None and cand:
-                    # Drop candidates whose recorded heading is > yaw_gate off the live ego
-                    # (the future U-turn / self-crossing frames). If EVERY forward candidate
-                    # is wrong-heading, we intentionally leave the queue empty -> ``repeat``
-                    # (hold the last good, correct-heading frame) rather than fall back to a
-                    # wrong-heading pick: repeating is the safe stand-in while the ego drives
-                    # itself to where correct-heading frames reappear.
+                if sim_yaw is not None and cand:
+                    # Always-on heading gate: drop candidates whose recorded heading is >
+                    # YAW_GATE_RAD off the live ego (future U-turn / self-crossing frames).
+                    # If EVERY forward candidate is wrong-heading, leave the queue empty ->
+                    # ``repeat`` (hold the last good, correct-heading frame) rather than fall
+                    # back to a wrong-heading pick.
                     cand = [
                         i
                         for i in cand
-                        if abs(_wrap_to_pi(self.tl.poses[i, 2] - sim_yaw)) <= self.yaw_gate
+                        if abs(_wrap_to_pi(self.tl.poses[i, 2] - sim_yaw)) <= YAW_GATE_RAD
                     ]
                 self._queue = deque(sorted(cand))
 

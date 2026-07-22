@@ -299,8 +299,12 @@ class RouteTimeline:
         """
         n = len(self)
         start_idx = int(max(0, min(start_idx, n - 1)))
-        if distance_m <= 0.0 or start_idx + 1 >= n:
+        if start_idx + 1 >= n:
             return start_idx
+        # Always advance at least one frame so an unstick teleport cannot re-land on the
+        # same anchor (distance_m <= 0 would otherwise return start_idx unchanged).
+        if distance_m <= 0.0:
+            return start_idx + 1
         accumulated = 0.0
         for i in range(start_idx, n - 1):
             accumulated += float(np.linalg.norm(self.poses[i + 1, :2] - self.poses[i, :2]))

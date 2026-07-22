@@ -21,15 +21,15 @@ from pathlib import Path
 
 import numpy as np
 
-from scenario_generation.metrics.tdigest import TDIGEST_KEY, merged_percentile
+from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-# ``_tdigest`` sketches stay in segments.jsonl so multi-GPU shard merge can pool
-# an approximate global p5 without retaining raw clearance samples.
+# Clearance t-digests live in a sidecar ``tdigests.jsonl`` / ``tdigests_{rank}.jsonl``
+# (not in the human-readable ``segments*.jsonl``) so multi-GPU merge can still pool p5.
 
 
 def route_label(npz_path: Path, key: str) -> str:
@@ -158,11 +158,11 @@ def _pool_clearance(rows: list[dict], category: str) -> dict[str, float]:
 
 
 def metrics_for_json(metrics: dict) -> dict:
-    """Numpy → JSON-friendly types; keep ``_tdigest`` for cross-shard p5 merge."""
+    """Numpy → JSON-friendly types; strip ``_tdigest`` (written to a sidecar instead)."""
 
     def _clean(obj):
         if isinstance(obj, dict):
-            return {k: _clean(v) for k, v in obj.items()}
+            return {k: _clean(v) for k, v in obj.items() if not is_tdigest_key(k)}
         if isinstance(obj, list):
             return [_clean(x) for x in obj]
         if isinstance(obj, np.ndarray):
@@ -172,6 +172,62 @@ def metrics_for_json(metrics: dict) -> dict:
         return obj
 
     return _clean(metrics)
+
+
+def tdigest_sidecar_row(metrics: dict) -> dict | None:
+    """Extract ``route`` + per-category ``_tdigest`` blobs for the digests sidecar file.
+
+    Returns ``None`` when the row has no digests (nothing to persist for shard merge).
+    """
+    out: dict = {}
+    if "route" in metrics:
+        out["route"] = metrics["route"]
+    for key, val in metrics.items():
+        if not isinstance(val, dict):
+            continue
+        digest = val.get(TDIGEST_KEY)
+        if digest is not None:
+            out[key] = digest
+    # Only ``route`` (and no digests) is not worth writing.
+    return out if len(out) > (1 if "route" in out else 0) else None
+
+
+def attach_tdigest_sidecars(rows: list[dict], sidecar_rows: list[dict]) -> None:
+    """Mutate ``rows`` in place: attach sidecar digests under each category's ``_tdigest``."""
+    by_route = {r["route"]: r for r in sidecar_rows if "route" in r}
+    for row in rows:
+        side = by_route.get(row.get("route"))
+        if side is None:
+            continue
+        for cat, digest in side.items():
+            if cat == "route":
+                continue
+            block = row.get(cat)
+            if isinstance(block, dict):
+                block[TDIGEST_KEY] = digest
+
+
+def load_segment_rows_with_tdigests(
+    out_dir: Path, *, shard_glob: str = "segments_*.jsonl"
+) -> list[dict]:
+    """Load human-readable segment rows and reattach digests from ``tdigests_*.jsonl`` sidecars."""
+    rows: list[dict] = []
+    for f in sorted(Path(out_dir).glob(shard_glob)):
+        # Skip any accidental non-segment match (e.g. if naming ever collides).
+        if "tdigest" in f.name:
+            continue
+        rows += [json.loads(ln) for ln in f.read_text().splitlines() if ln.strip()]
+
+    sidecar_rows: list[dict] = []
+    for f in sorted(Path(out_dir).glob("tdigests_*.jsonl")):
+        sidecar_rows += [json.loads(ln) for ln in f.read_text().splitlines() if ln.strip()]
+    # Sequential runs use tdigests.jsonl (no rank suffix).
+    plain = Path(out_dir) / "tdigests.jsonl"
+    if plain.is_file():
+        sidecar_rows += [json.loads(ln) for ln in plain.read_text().splitlines() if ln.strip()]
+
+    attach_tdigest_sidecars(rows, sidecar_rows)
+    return rows
 
 
 def format_summary_lines(summary: dict) -> list[str]:
@@ -352,7 +408,8 @@ def run_closed_loop_eval(
     ``outputs["prediction"]``); ``model_args`` provides ``observation_normalizer`` /
     ``predicted_neighbor_num`` / ``future_len`` (a ``Config`` or ``TrainConfig``). Each route is
     rolled out whole (no sub-segmenting) into one PNG dir + one MP4 (``<route>.mp4``).
-    ``segments.jsonl`` (one row per route) and ``summary.json`` are written into ``out_dir``.
+    ``segments.jsonl`` (one row per route, human-readable), ``tdigests.jsonl`` (clearance
+    sketches for shard merge), and ``summary.json`` are written into ``out_dir``.
 
     Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back into
     the input history each step, held across cached-plan steps when ``replan_interval`` > 1
@@ -391,7 +448,9 @@ def run_closed_loop_eval(
     t0 = time.perf_counter()
 
     segments_name = "segments.jsonl" if shard is None else f"segments_{shard[0]}.jsonl"
+    digests_name = "tdigests.jsonl" if shard is None else f"tdigests_{shard[0]}.jsonl"
     fout = open(out_dir / segments_name, "w")
+    fdigest = open(out_dir / digests_name, "w")
     try:
         for ri, key in enumerate(route_keys):
             tl = RouteTimeline(routes[key], sidecar_dir=route_sidecar_dir[key], timers=timers)
@@ -419,8 +478,14 @@ def run_closed_loop_eval(
                 strong_brake_mps2=strong_brake_mps2,
             )
             row = {"route": key, **metrics}
+            # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so
+            # multi-GPU parents can still merge approximate global clearance p5.
             fout.write(json.dumps(metrics_for_json(row), default=float) + "\n")
             fout.flush()
+            side = tdigest_sidecar_row(row)
+            if side is not None:
+                fdigest.write(json.dumps(side, default=float) + "\n")
+                fdigest.flush()
             rows.append(row)
 
             # A route that terminates at step 0 (e.g. ego starts within goal_reach_m) draws no PNG;
@@ -446,7 +511,9 @@ def run_closed_loop_eval(
                 )
     finally:
         fout.close()
+        fdigest.close()
 
+    # In-memory ``rows`` still carry digests for this process's aggregate.
     summary = aggregate(rows, near_miss_thresh, strong_brake_mps2=strong_brake_mps2)
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len(route_keys)

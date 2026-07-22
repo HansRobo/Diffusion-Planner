@@ -9,7 +9,8 @@ from __future__ import annotations
 import numpy as np
 from tdigest import TDigest
 
-# In-memory metric key (and ``_tdigest_*`` prefixes) stripped before segments.jsonl.
+# In-memory metric key; stripped from human-readable segments.jsonl and written to
+# a ``tdigests*.jsonl`` sidecar for multi-GPU clearance-p5 merge.
 TDIGEST_KEY = "_tdigest"
 
 

@@ -1,7 +1,9 @@
 """Tests for the reproducer's unstick escalation and the cursor's normal/repeat state.
 
-Stuck definition: a tick is "stuck" only when the reproducer is in ``repeat`` AND the ego
-speed is <= the rollout's ``STUCK_SPEED_MPS`` (0.5).
+Stuck definition:
+- pose mode: stuck only when the reproducer is in ``repeat`` AND ego speed <=
+  ``STUCK_SPEED_MPS`` (0.5).
+- clock mode: speed-only (bag frames always advance by wall time; no ``repeat``).
 
 The cursor exposes only normal/repeat; the stuck counting and the widen/teleport actions (and their counts) live in the rollout.
 Tests that drive the rollout call ``_advance_step``/``_post_step`` directly (bypassing
@@ -180,8 +182,8 @@ def test_unstick_widens_radius_before_teleporting(tmp_path):
 
 
 def test_stuck_requires_repeat_not_just_stopped(tmp_path):
-    """New (Autoware) stuck definition: a stopped ego whose reproducer is NOT repeating
-    must NOT accumulate stuck steps, so no widen/teleport ever fires."""
+    """Pose mode: a stopped ego whose reproducer is NOT repeating must NOT accumulate
+    stuck steps, so no widen/teleport ever fires."""
     from scenario_generation.reproducer_rollout import _advance_step
 
     tl = _make_route(tmp_path)
@@ -201,6 +203,7 @@ def test_stuck_requires_repeat_not_just_stopped(tmp_path):
         unstick_advance_m=0.05,
         unstick_radius_mult=3.0,
         unstick_teleport_after=5,
+        replay_mode="pose",
     )
     pred = np.zeros((80, 4), dtype=np.float32)
     # Stopped (speed ~0.1 <= 0.5) but reproducer advancing (not repeat) -> never stuck.
@@ -209,6 +212,74 @@ def test_stuck_requires_repeat_not_just_stopped(tmp_path):
         _advance_step(s, pred, idx=i, device="cpu", timers=timers)
     assert s.ego_stuck == 0
     assert s.expand_count == 0 and s.snap_count == 0
+
+
+def test_clock_mode_unstick_is_speed_only(tmp_path):
+    """Clock mode has no cursor.step / repeat; a stopped ego must still escalate to teleport."""
+    from scenario_generation.reproducer_rollout import _advance_step
+
+    tl = _make_route(tmp_path)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        N_FRAMES,
+        search_radius=1.5,
+        warmup_steps=1000,
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+        unstick_after=3,
+        unstick_advance_m=0.05,
+        unstick_radius_mult=1.0,  # skip widen; teleport at unstick_after
+        unstick_teleport_after=5,
+        replay_mode="clock",
+    )
+    pred = np.zeros((80, 4), dtype=np.float32)
+    # last_was_repeat stays False (clock never sets it); speed-only gate must still fire.
+    assert s.cursor.last_was_repeat is False
+    for i in range(3):
+        _advance_step(s, pred, idx=i, device="cpu", timers=timers)
+    assert s.snap_count == 1
+
+
+def test_clock_pre_step_counts_normal_steps(tmp_path, monkeypatch):
+    """Each clock tick updates cursor normal_steps even though cursor.step is bypassed."""
+    from scenario_generation import reproducer_rollout as rr
+
+    tl = _make_route(tmp_path)
+    timers = Timers()
+    s = _seed_state(
+        tl,
+        0,
+        N_FRAMES,
+        search_radius=1.5,
+        warmup_steps=0,
+        near_miss_thresh=0.5,
+        goal_reach_m=0.0,
+        max_stuck_steps=0,
+        timers=timers,
+        max_steps=1000,
+        replay_mode="clock",
+        neighbor_history_mode="recorded",
+    )
+    # Fixture npz lacks full model-input keys; stub the build so we only exercise the
+    # clock frame-index + counter path.
+    monkeypatch.setattr(
+        rr,
+        "build_input_np",
+        lambda *a, **k: ({"turn_indicators": np.zeros((1, 31), dtype=np.int64)}, np.zeros((1, 11))),
+    )
+    n = 5
+    for _ in range(n):
+        out = rr._pre_step(s)
+        assert out is not None
+        s.k += 1  # mimic advance so start+k walks forward
+    assert s.cursor.normal_steps == n
+    assert s.cursor.repeat_steps == 0
+    assert s.cursor.normal_steps + s.cursor.repeat_steps == n
 
 
 def test_step_sets_repeat_state_and_counters(tmp_path):
@@ -280,14 +351,15 @@ def test_index_ahead_by_arc_length(tmp_path):
     # 0.025 m of arc at 0.01 m spacing -> 3 frames ahead (0.01+0.01+0.01 >= 0.025).
     assert tl.index_ahead_by_arc_length(0, 0.025) == 3
     assert tl.index_ahead_by_arc_length(10, 0.025) == 13
-    # distance <= 0 returns the start index; unreachable distance clamps to the last frame.
-    assert tl.index_ahead_by_arc_length(10, 0.0) == 10
+    # distance <= 0 still advances >=1 frame (avoids re-teleporting onto the same anchor).
+    assert tl.index_ahead_by_arc_length(10, 0.0) == 11
     assert tl.index_ahead_by_arc_length(0, 1e9) == len(tl) - 1
+    assert tl.index_ahead_by_arc_length(len(tl) - 1, 0.0) == len(tl) - 1
 
 
 def test_yaw_gate_rejects_opposite_heading_future_frame(tmp_path):
-    """On a self-crossing route the xy-only cursor can grab a FUTURE opposite-heading
-    frame; the optional ``yaw_gate`` rejects it and repeats the last same-heading frame."""
+    """On a self-crossing route an xy-only cursor would grab a FUTURE opposite-heading
+    frame; the always-on heading gate rejects it and repeats the last same-heading frame."""
     from scenario_generation.perception_reproducer import PerceptionReproducer
 
     # 0: origin heading +x; 1: far ahead (outside the 1.5 m radius, ignored);
@@ -295,17 +367,10 @@ def test_yaw_gate_rejects_opposite_heading_future_frame(tmp_path):
     tl = _make_route_xyyaw(tmp_path, [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (0.05, 0.0, np.pi)])
     origin = np.array([0.0, 0.0])
 
-    # With the gate disabled the xy-only cursor grabs the opposite-heading future frame (2).
-    cur = PerceptionReproducer(tl, search_radius=1.5, yaw_gate=None)
-    assert cur.step(origin, 0.0, 0.0, sim_yaw=0.0) == 0
-    assert cur.step(origin, 0.0, 0.1, sim_yaw=0.0) == 2  # wrong-heading pick (the bug)
-
-    # The default gate rejects that frame -> repeat the last good same-heading frame.
-    cur_g = PerceptionReproducer(tl, search_radius=1.5)
-    assert cur_g.step(origin, 0.0, 0.0, sim_yaw=0.0) == 0
-    assert cur_g.step(origin, 0.0, 0.1, sim_yaw=0.0) == 0  # gated -> repeat, not frame 2
-    assert cur_g.last_was_repeat is True
-    # (step0 == 0 above also confirms the gate ADMITS a same-heading frame, no false block.)
+    cur = PerceptionReproducer(tl, search_radius=1.5)
+    assert cur.step(origin, 0.0, 0.0, sim_yaw=0.0) == 0  # same-heading admitted
+    assert cur.step(origin, 0.0, 0.1, sim_yaw=0.0) == 0  # gated -> repeat, not frame 2
+    assert cur.last_was_repeat is True
 
 
 def test_perception_reproducer_widen_and_restore(tmp_path):

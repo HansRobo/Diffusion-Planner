@@ -45,9 +45,9 @@ from scenario_generation.tensor_converter import _heading_to_cos_sin
 from scenario_generation.transforms import _rotation_matrix, world_to_ego_frame
 
 DT = 0.1
-# Stuck gate: a tick counts as "stuck" only when the reproducer is republishing (repeat)
-# AND the live ego is (near-)stopped below this speed. Mirrors the Autoware reproducer's
-# ego-stopped gate (there 0.1; 0.5 here by product decision).
+# Stuck speed gate (m/s): ego must be at or below this to accumulate stuck steps.
+# Pose mode also requires the reproducer to be in ``repeat`` (Autoware-aligned); clock
+# mode is speed-only because bag frames always advance by wall time (no ``repeat``).
 STUCK_SPEED_MPS = 0.5
 # Falling-edge debounce for ``*_count`` metrics: once an event starts, fewer than this many
 # consecutive False steps do not end it (threshold flicker does not re-count).
@@ -573,6 +573,7 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         s.cursor.max_idx_reached = idx
         s.prev_max_idx = idx
         s.stuck = 0
+        s.cursor._update_base_state(repeat=False)
     else:
         idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time, sim_yaw=float(s.live_pose[2]))
         if s.cursor.max_idx_reached > s.prev_max_idx:
@@ -714,14 +715,18 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
             s.accels[s.k] = s.dyn.accel
         s.k += 1
 
-        # Unstick (two-stage): if the reproducer has been STUCK for too long, FIRST widen the
+        # Unstick (two-stage): if the ego has been STUCK for too long, FIRST widen the
         # cursor search radius so it reaches recorded frames further ahead (phantom blocker
         # clears -> the model proceeds on its own, no teleport). Only if it is STILL stuck
         # after a further grace window do we fall back to the hard snap onto the recorded GT
-        # pose ahead. "Stuck" is the Autoware definition: the reproducer is in ``repeat`` AND
-        # the ego is (near-)stopped (speed <= STUCK_SPEED_MPS) — not merely stopped. The
-        # cursor exposes only normal/repeat; the stuck counting and the widen/teleport actions
-        # (and their counts) are owned here by the rollout.
+        # pose ahead.
+        #
+        # Stuck definition depends on timeline progress mode:
+        # - pose: reproducer in ``repeat`` AND ego (near-)stopped. A
+        #   stopped ego whose cursor is still advancing (e.g. waiting at a light while the
+        #   bag keeps playing nearby frames) is NOT stuck.
+        # - clock: bag frames always advance by wall time (no cursor.step / no ``repeat``),
+        #   so stuck is speed-only — otherwise unstick would never fire on the R2LPL default.
         if s.unstick_after > 0:
             cur = s.cursor
             if s.dyn.speed > STUCK_SPEED_MPS:
@@ -729,12 +734,13 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 # frame selection returns to the nominal search_radius.
                 s.ego_stuck = 0
                 cur.restore_radius()
-            elif not cur.last_was_repeat:
-                # Stopped but the reproducer is still advancing (normal, not repeat): not
-                # stuck. Clear the counter; keep any widened radius until the ego moves again.
+            elif s.replay_mode != "clock" and not cur.last_was_repeat:
+                # Pose mode: stopped but the reproducer is still advancing (normal, not
+                # repeat) -> not stuck. Clear the counter; keep any widened radius until
+                # the ego moves again.
                 s.ego_stuck = 0
             else:
-                # Stopped AND reproducer stuck in repeat -> accumulate.
+                # Clock: stopped. Pose: stopped AND reproducer in repeat.
                 s.ego_stuck += 1
             widen_on = s.unstick_radius_mult > 1.0
             # Stage 1 (gentle): widen once, exactly when the stuck count first crosses the
@@ -813,8 +819,8 @@ def _clearance_stats(values: np.ndarray) -> dict:
     p5 (not p95): clearance is a nearness quantity — the dangerous tail is the
     low end, same spirit as min.
 
-    Also attaches ``_tdigest`` (kept in segments.jsonl) so aggregate / shard merge
-    can pool an approximate global p5 without retaining raw samples.
+    Also attaches ``_tdigest`` in memory so in-process aggregate can pool an approximate
+    global p5; the digest is written to a ``tdigests*.jsonl`` sidecar (not segments.jsonl).
     """
     finite = values[np.isfinite(values)]
     if finite.size == 0:
@@ -1540,6 +1546,7 @@ def run_segments_batched(
     neighbor_history_mode: str = "recorded",
     tracker_mode: str = "mpc",
     timeline_progress_mode: str = "pose",
+    strong_brake_mps2: float = -4.0,
     credit_save_dir=None,
     credit_windows: list[dict] | None = None,
     verify_credit_windows: list[dict] | None = None,
@@ -1618,6 +1625,7 @@ def run_segments_batched(
                     neighbor_history_mode=neighbor_history_mode,
                     tracker_mode=tracker_mode,
                     replay_mode=timeline_progress_mode,
+                    strong_brake_mps2=strong_brake_mps2,
                 )
                 for (tl, start, end) in chunk
             ]
