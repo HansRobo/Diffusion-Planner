@@ -24,6 +24,9 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
+from diffusion_planner.utils.data_augmentation_bridge_fast import (
+    StatePerturbation as FastBridgeStatePerturbation,
+)
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.neighbor_db import NeighborPatternDB
@@ -99,7 +102,7 @@ def get_args():
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, default=0.5, help="augmentation probability")
     parser.add_argument(
-        "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
+        "--augment_type", type=str, choices=["quintic", "bridge", "bridge_fast"], default="quintic"
     )
     parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
@@ -445,6 +448,8 @@ def model_training(args):
     if args.use_data_augment:
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        elif args.augment_type == "bridge_fast":
+            aug = FastBridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
         else:
             aug = StatePerturbation(
                 augment_prob=args.augment_prob,
