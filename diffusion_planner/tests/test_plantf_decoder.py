@@ -278,6 +278,21 @@ def test_full_onnx_wrapper_keeps_diffusion_only_inputs(tmp_path):
     assert graph_inputs == set(FULL_INPUT_NAMES)
 
 
+def test_output_heads_are_zero_initialized():
+    """Every mode must start at the normalized-space mean (zero output), not
+    Xavier noise: under winner-takes-all training rarely-winning modes keep
+    their initialization, and argmax(pi) can select them at inference. See
+    docs/plantf_dead_mode_improvement.md."""
+    torch.manual_seed(0)
+    decoder = Diffusion_Planner(_config()).decoder
+    encoding = torch.randn(2, 1 + MAX_NUM_NEIGHBORS + 5, HIDDEN_DIM)
+
+    trajectory, probability, neighbor_prediction = decoder._decode(encoding)
+    assert torch.all(trajectory == 0.0)
+    assert torch.all(probability == 0.0)
+    assert torch.all(neighbor_prediction == 0.0)
+
+
 def test_velocity_representation_rejected():
     config = _config()
     config.use_velocity_representation = True

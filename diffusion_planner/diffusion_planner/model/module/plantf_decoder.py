@@ -125,6 +125,17 @@ class PlanTFDecoder(nn.Module):
 
         self.apply(_basic_init)
 
+        # Zero-out the output layers (same convention as Decoder.dit.final_layer).
+        # Under winner-takes-all training, rarely-winning modes receive almost no
+        # regression gradient; with Xavier output weights they keep emitting
+        # white-noise trajectories, which the argmax(pi) mode selection can pick
+        # at inference (randomly jagged outputs). Zero-init makes every mode
+        # start at the normalized-space mean — a smooth prior trajectory — so an
+        # undertrained mode degrades gracefully instead of into noise.
+        for head in (self.trajectory_head.loc, self.trajectory_head.pi, self.neighbor_predictor):
+            nn.init.constant_(head[-1].weight, 0)
+            nn.init.constant_(head[-1].bias, 0)
+
         self.independent_turn_indicator_predictor = TurnIndicatorNetwork(
             hidden_dim=config.hidden_dim // 2,
             num_heads=config.num_heads // 2,
