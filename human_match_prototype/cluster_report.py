@@ -36,22 +36,26 @@ _BASELINE_COLORS = {  # status hues, distinct from the series blue
 
 
 def aggregate(df: pd.DataFrame) -> pd.DataFrame:
+    has_multi = "n_humans" in df.columns
     rows = []
     for cat, g in df.groupby("category"):
-        rows.append(
-            {
-                "cluster": cat,
-                "n": len(g),
-                "mismatch_rate_4s": g["mismatch_4s"].mean(),
-                "median_min_ade_4s": g["min_ade_4s"].median(),
-                "p90_min_ade_4s": g["min_ade_4s"].quantile(0.9),
-                "median_frac_close_4s": g["frac_close_4s"].median(),
-                "median_lon_err_4s": g["best_lon_err_4s"].median(),
-                "median_lat_err_4s": g["best_lat_err_4s"].median(),
-                "median_spread_4s": g["spread_4s"].median(),
-                "median_latent_knn": g["latent_knn_mean"].median(),
-            }
-        )
+        row = {
+            "cluster": cat,
+            "n": len(g),
+            "mismatch_rate_4s": g["mismatch_4s"].mean(),
+            "median_min_ade_4s": g["min_ade_4s"].median(),
+            "p90_min_ade_4s": g["min_ade_4s"].quantile(0.9),
+            "median_frac_close_4s": g["frac_close_4s"].median(),
+            "median_lon_err_4s": g["best_lon_err_4s"].median(),
+            "median_lat_err_4s": g["best_lat_err_4s"].median(),
+            "median_spread_4s": g["spread_4s"].median(),
+            "median_latent_knn": g["latent_knn_mean"].median(),
+        }
+        if has_multi:
+            row["median_n_humans"] = g["n_humans"].median()
+            row["median_dp_human_coverage_4s"] = g["dp_human_coverage_4s"].median()
+            row["frac_insufficient_data"] = (g["n_humans"] < 5).mean()
+        rows.append(row)
     out = pd.DataFrame(rows).sort_values("mismatch_rate_4s", ascending=False)
     return out.reset_index(drop=True)
 
