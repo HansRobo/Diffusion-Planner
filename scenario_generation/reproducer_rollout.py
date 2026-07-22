@@ -540,7 +540,7 @@ class _SegState:
     # at or below ``strong_brake_mps2`` (negative). Allocated by ``_seed_state`` (like
     # ``clearances``); stays None for manually-built states that never step.
     accels: np.ndarray | None = None
-    strong_brake_mps2: float = -3.0
+    strong_brake_mps2: float = -4.0
     last_collision_uuid: object = None
     in_episode: bool = False
     episode_eligible: bool = False
@@ -570,7 +570,6 @@ class _SegState:
     unstick_teleport_after: int = 300
     ego_stuck: int = 0  # consecutive stuck steps (repeat AND ego <= STUCK_SPEED_MPS)
     expand_count: int = 0  # stage-1 radius-widen events this segment
-    teleport_count: int = 0  # stage-2 teleport events this segment
     n_snaps: int = 0
     # One-pass collision-scene save (set when run_segments_batched gets save_dir).
     # save_buf rolls the last save_max_scenes+1 (k, idx, live_pose, np_dict) snapshots
@@ -644,7 +643,7 @@ def _seed_state(
     goal_mode="segment",
     replay_mode="pose",
     tracker_mode="mpc",
-    strong_brake_mps2=-3.0,
+    strong_brake_mps2=-4.0,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
@@ -917,7 +916,6 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.in_episode = False
                 s.prev_max_idx = cur.max_idx_reached
                 s.ego_stuck = 0
-                s.teleport_count += 1
                 s.n_snaps += 1
 
 
@@ -1430,7 +1428,7 @@ def render_segment(
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
-    strong_brake_mps2: float = -3.0,
+    strong_brake_mps2: float = -4.0,
     *,
     replan_interval: int = 1,
     draw_every: int = 1,
@@ -1572,7 +1570,6 @@ def render_segment(
                     "state": s.cursor.state,
                     "state_run_steps": int(s.cursor.state_run_steps),
                     "expand_count": int(s.expand_count),
-                    "teleport_count": int(s.teleport_count),
                     "n_snaps": int(s.n_snaps),
                 }
             )

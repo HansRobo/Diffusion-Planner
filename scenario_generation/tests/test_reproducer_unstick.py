@@ -120,7 +120,7 @@ def test_unstick_jump_ego_past_uses_recorded_npz_history(tmp_path):
         pytest.fail("unstick never fired on the synthetic stalled route")
 
     # The teleport must have been counted on the rollout as an observable event.
-    assert s.teleport_count == 1
+    assert s.n_snaps == 1
 
     # The snap copied a recorded GT pose into live_pose; find which frame.
     matches = np.where(np.all(np.isclose(tl.poses, s.live_pose), axis=1))[0]
@@ -177,7 +177,6 @@ def test_unstick_widens_radius_before_teleporting(tmp_path):
     _advance_step(s, pred, idx=after + teleport_after - 1, device="cpu", timers=timers)
     assert s.n_snaps == 1, "still-stuck ego must teleport after the grace window"
     assert s.cursor.search_radius == base_r, "teleport restores the nominal search_radius"
-    assert s.teleport_count == 1, "the teleport must be counted as an event"
 
 
 def test_stuck_requires_repeat_not_just_stopped(tmp_path):
@@ -263,12 +262,12 @@ def test_finalize_strong_brake_steps_and_count(tmp_path):
         max_stuck_steps=0,
         timers=timers,
         max_steps=1000,
-        strong_brake_mps2=-3.0,
+        strong_brake_mps2=-4.0,
     )
     # Two braking bursts separated by 3 non-brake frames (>= clear_frames) -> 2 events.
     # Mask: F T T F F F T  -> steps=3, count=2 after debounce.
     s.k = 7
-    s.accels[:7] = np.array([0.0, -4.0, -3.5, 0.0, 0.0, 0.0, -5.0], dtype=np.float32)
+    s.accels[:7] = np.array([0.0, -5.0, -4.5, 0.0, 0.0, 0.0, -6.0], dtype=np.float32)
     metrics = _finalize(s).metrics
     assert metrics["strong_brake"]["steps"] == 3
     assert metrics["strong_brake"]["count"] == 2

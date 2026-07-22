@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--strong_brake_mps2",
         type=float,
-        default=-3.0,
+        default=-4.0,
         help="strong-brake threshold (m/s^2, negative); a step counts when tangential accel <= this",
     )
     p.add_argument(

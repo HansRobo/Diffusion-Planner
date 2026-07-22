@@ -87,9 +87,9 @@ def test_road_border_step_near_border_counts_miss():
 def test_strong_brake_step_and_mask():
     from scenario_generation.metrics.strong_brake import score_strong_brake_step, strong_brake_mask
 
-    assert score_strong_brake_step(ego_accel_mps2=-4.0, thresh_mps2=-3.0)["strong_brake"]
-    assert not score_strong_brake_step(ego_accel_mps2=-2.0, thresh_mps2=-3.0)["strong_brake"]
-    mask = strong_brake_mask(np.array([0.0, -4.0, -3.0, -2.9], dtype=np.float32), thresh_mps2=-3.0)
+    assert score_strong_brake_step(ego_accel_mps2=-5.0, thresh_mps2=-4.0)["strong_brake"]
+    assert not score_strong_brake_step(ego_accel_mps2=-3.0, thresh_mps2=-4.0)["strong_brake"]
+    mask = strong_brake_mask(np.array([0.0, -5.0, -4.0, -3.9], dtype=np.float32), thresh_mps2=-4.0)
     assert mask.tolist() == [False, True, True, False]
 
 
@@ -126,7 +126,7 @@ def test_aggregate_nested_and_strips_private_series():
                 TDIGEST_KEY: tdigest_dict_from_values(rb_vals),
             },
             "red_light_violation": {"steps": 1, "count": 1},
-            "strong_brake": {"thresh_mps2": -3.0, "steps": 0, "count": 0},
+            "strong_brake": {"thresh_mps2": -4.0, "steps": 0, "count": 0},
             "reproducer": {
                 "expand_count": 1,
                 "snap_count": 0,
@@ -135,7 +135,7 @@ def test_aggregate_nested_and_strips_private_series():
             },
         }
     ]
-    summary = aggregate(rows, near_miss_thresh=0.5, strong_brake_mps2=-3.0)
+    summary = aggregate(rows, near_miss_thresh=0.5, strong_brake_mps2=-4.0)
     assert summary["object"]["collision_steps"] == 1
     assert summary["object"]["miss_count"] == 1
     assert abs(summary["object"]["clearance_min_m"] - 0.1) < 1e-6

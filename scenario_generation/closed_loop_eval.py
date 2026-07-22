@@ -174,7 +174,7 @@ def metrics_for_json(metrics: dict) -> dict:
 
 
 def aggregate(
-    rows: list[dict], near_miss_thresh: float, *, strong_brake_mps2: float = -3.0
+    rows: list[dict], near_miss_thresh: float, *, strong_brake_mps2: float = -4.0
 ) -> dict:
     """Aggregate per-segment nested metric rows into a closed-loop summary."""
     n_seg = len(rows)
@@ -295,7 +295,7 @@ def run_closed_loop_eval(
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
     tracker_mode: str = "mpc",
-    strong_brake_mps2: float = -3.0,
+    strong_brake_mps2: float = -4.0,
     verbose: bool = True,
     shard: tuple[int, int] | None = None,
 ) -> dict:
