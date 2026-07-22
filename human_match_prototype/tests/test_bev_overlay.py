@@ -1,10 +1,9 @@
 """Smoke test: bev_overlay produces a non-empty PNG without crashing."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 
 def _fake_npz():

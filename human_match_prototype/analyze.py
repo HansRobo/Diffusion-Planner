@@ -63,7 +63,7 @@ def bev_overlay(sampler, npz_path, out_png, num_samples):
 
     fig, ax = plt.subplots(figsize=(10, 10))
     static = precompute_static(data)
-    render_frame(fig, ax, data, static, t=PAST_FRAMES, filename=Path(npz_path).name)
+    render_frame(fig, ax, data, static, t=PAST_FRAMES - 1, filename=Path(npz_path).name)
 
     for s in r.ego_samples:
         ax.plot(s[:, 0], s[:, 1], color="#2196F3", alpha=0.25, lw=1, zorder=35)
