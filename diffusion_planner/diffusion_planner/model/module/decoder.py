@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 
 import diffusion_planner.model.diffusion_utils.dpm_solver_pytorch as dpm
-from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
 from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
@@ -264,15 +263,6 @@ def compute_training_loss(
     turn_indicator_loss = (turn_indicator_loss * turn_indicator_coeff).mean()
     loss["turn_indicator_loss"] = turn_indicator_loss
 
-    independent_turn_indicator_logit = decoder_output["independent_turn_indicator_logit"]
-    independent_turn_indicator_loss = nn.functional.cross_entropy(
-        independent_turn_indicator_logit, turn_indicator_gt, reduction="none"
-    )
-    independent_turn_indicator_loss = (
-        independent_turn_indicator_loss * turn_indicator_coeff
-    ).mean()
-    loss["independent_turn_indicator_loss"] = independent_turn_indicator_loss
-
     with torch.no_grad():
         turn_indicator_accuracy = (
             (turn_indicator_logit.argmax(dim=-1) == turn_indicator_gt).float().mean()
@@ -296,9 +286,6 @@ class Decoder(nn.Module):
             hidden_dim=config.hidden_dim,
             heads=config.num_heads,
             dropout=dpr,
-        )
-        self.turn_indicator_predictor = nn.Linear(
-            2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM
         )
         self._state_normalizer: StateNormalizer = config.state_normalizer
         self._observation_normalizer: ObservationNormalizer = config.observation_normalizer
@@ -329,10 +316,10 @@ class Decoder(nn.Module):
         nn.init.constant_(self.dit.final_layer.proj[-1].weight, 0)
         nn.init.constant_(self.dit.final_layer.proj[-1].bias, 0)
 
-        # Keep the turn-indicator predictor parameter- and feature-independent
+        # The turn-indicator predictor is parameter- and feature-independent
         # from the diffusion encoder and denoising network.
         # Halve the encoder hyperparameters to keep this auxiliary predictor light.
-        self.independent_turn_indicator_predictor = TurnIndicatorNetwork(
+        self.turn_indicator_predictor = TurnIndicatorNetwork(
             hidden_dim=config.hidden_dim // 2,
             num_heads=config.num_heads // 2,
             mixer_depth=config.encoder_mixer_depth // 2,
@@ -364,31 +351,17 @@ class Decoder(nn.Module):
 
         return current_states, neighbor_current_mask, ego_current, neighbors_current
 
-    def _compute_turn_indicator(self, ego_trajectory, encoding_pooled):
-        """Compute turn indicator logit from ego trajectory and encoding.
-
-        Args:
-            ego_trajectory: [B, 2 * (T // 10)] flattened ego trajectory positions
-            encoding_pooled: [B, D] pooled encoding
-
-        Returns:
-            turn_indicator_logit: [B, TURN_INDICATOR_OUTPUT_DIM]
-        """
-        turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
-        return self.turn_indicator_predictor(turn_indicator_input)
-
-    def _compute_independent_turn_indicator(self, ego_trajectory, inputs):
+    def _compute_turn_indicator(self, ego_trajectory, inputs):
         """Compute turn-indicator logits without diffusion-network features."""
-        return self.independent_turn_indicator_predictor(ego_trajectory, inputs)
+        return self.turn_indicator_predictor(ego_trajectory, inputs)
 
-    def _forward_training(self, encoding, inputs, neighbor_current_mask, encoding_pooled):
+    def _forward_training(self, encoding, inputs, neighbor_current_mask):
         """Forward pass for training mode.
 
         Args:
             encoding: [B, N, D] encoded features
             inputs: Dict containing sampled_trajectories, gt_trajectories, diffusion_time, etc.
             neighbor_current_mask: [B, Pn] mask for invalid neighbors
-            encoding_pooled: [B, D] pooled encoding
 
         Returns:
             Dict containing model_output and turn_indicator_logit
@@ -402,11 +375,7 @@ class Decoder(nn.Module):
         diffusion_time = inputs["diffusion_time"]
 
         gt_trajectories = inputs["gt_trajectories"].reshape(B, P, (1 + self._future_len), 4)
-        ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
-        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
-        independent_turn_indicator_logit = self._compute_independent_turn_indicator(
-            gt_trajectories[:, 0, 1:], inputs
-        )
+        turn_indicator_logit = self._compute_turn_indicator(gt_trajectories[:, 0, 1:], inputs)
 
         return {
             "model_output": self.dit(
@@ -416,7 +385,6 @@ class Decoder(nn.Module):
                 neighbor_current_mask,
             ).reshape(B, P, -1, 4),
             "turn_indicator_logit": turn_indicator_logit,
-            "independent_turn_indicator_logit": independent_turn_indicator_logit,
         }
 
     def _inference_flow_matching(
@@ -425,7 +393,6 @@ class Decoder(nn.Module):
         inputs,
         current_states,
         neighbor_current_mask,
-        encoding_pooled,
         sampled_trajectories,
     ):
         """Inference using Flow Matching approach.
@@ -434,7 +401,6 @@ class Decoder(nn.Module):
             encoding: [B, N, D] encoded features
             inputs: Dict containing input data
             neighbor_current_mask: [B, Pn] mask for invalid neighbors
-            encoding_pooled: [B, D] pooled encoding
             sampled_trajectories: [B, P, (1 + T) * 4] sampled trajectories
 
         Returns:
@@ -454,11 +420,7 @@ class Decoder(nn.Module):
         # x = heun_integration(func, x, NUM_STEP)
         # x = rk4_integration(func, x, NUM_STEP)
         x = x.reshape(B, P, (1 + self._future_len), 4)
-        ego_trajectory = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
-        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
-        independent_turn_indicator_logit = self._compute_independent_turn_indicator(
-            x[:, 0, 1:], inputs
-        )
+        turn_indicator_logit = self._compute_turn_indicator(x[:, 0, 1:], inputs)
         if self._use_velocity:
             future = velocity_to_waypoints(x[:, :, 1:, :])
             future = add_current_xy(future, current_states)
@@ -468,7 +430,6 @@ class Decoder(nn.Module):
         return {
             "prediction": x,
             "turn_indicator_logit": turn_indicator_logit,
-            "independent_turn_indicator_logit": independent_turn_indicator_logit,
         }
 
     def _inference_x_start(
@@ -477,7 +438,6 @@ class Decoder(nn.Module):
         inputs,
         current_states,
         neighbor_current_mask,
-        encoding_pooled,
         sampled_trajectories,
     ):
         """Inference using X-Start (DPM Solver) approach.
@@ -487,7 +447,6 @@ class Decoder(nn.Module):
             inputs: Dict containing input data
             current_states: [B, P, 4] current states
             neighbor_current_mask: [B, Pn] mask for invalid neighbors
-            encoding_pooled: [B, D] pooled encoding
             sampled_trajectories: [B, P, (1 + T) * 4] sampled trajectories
 
         Returns:
@@ -544,11 +503,7 @@ class Decoder(nn.Module):
         x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
 
         x0 = x0.reshape(B, P, (1 + self._future_len), 4)
-        ego_trajectory = x0[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
-        turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
-        independent_turn_indicator_logit = self._compute_independent_turn_indicator(
-            x0[:, 0, 1:], inputs
-        )
+        turn_indicator_logit = self._compute_turn_indicator(x0[:, 0, 1:], inputs)
         if self._use_velocity:
             future = velocity_to_waypoints(x0[:, :, 1:, :])
             future = add_current_xy(future, current_states)
@@ -558,12 +513,9 @@ class Decoder(nn.Module):
         return {
             "prediction": x0,
             "turn_indicator_logit": turn_indicator_logit,
-            "independent_turn_indicator_logit": independent_turn_indicator_logit,
         }
 
-    def _forward_inference(
-        self, encoding, inputs, current_states, neighbor_current_mask, encoding_pooled
-    ):
+    def _forward_inference(self, encoding, inputs, current_states, neighbor_current_mask):
         """Forward pass for inference mode.
 
         Args:
@@ -571,7 +523,6 @@ class Decoder(nn.Module):
             inputs: Dict containing input data
             current_states: [B, P, 4] current states
             neighbor_current_mask: [B, Pn] mask for invalid neighbors
-            encoding_pooled: [B, D] pooled encoding
 
         Returns:
             Dict containing prediction and turn_indicator_logit
@@ -589,7 +540,6 @@ class Decoder(nn.Module):
                 inputs,
                 current_states,
                 neighbor_current_mask,
-                encoding_pooled,
                 sampled_trajectories,
             )
         elif self._model_type == "x_start":
@@ -598,7 +548,6 @@ class Decoder(nn.Module):
                 inputs,
                 current_states,
                 neighbor_current_mask,
-                encoding_pooled,
                 sampled_trajectories,
             )
         else:
@@ -641,15 +590,8 @@ class Decoder(nn.Module):
         B, P, _ = current_states.shape
         assert P == (1 + self._predicted_neighbor_num)
 
-        # Pool only valid encoder tokens. The encoder zero-fills masked tokens.
-        encoding_valid = torch.any(encoding != 0, dim=-1)  # [B, N]
-        encoding_count = encoding_valid.sum(dim=1).clamp_min(1).unsqueeze(-1)
-        encoding_pooled = (encoding * encoding_valid.unsqueeze(-1)).sum(dim=1) / encoding_count
-
         # Dispatch to training or inference
         if self.training:
-            return self._forward_training(encoding, inputs, neighbor_current_mask, encoding_pooled)
+            return self._forward_training(encoding, inputs, neighbor_current_mask)
         else:
-            return self._forward_inference(
-                encoding, inputs, current_states, neighbor_current_mask, encoding_pooled
-            )
+            return self._forward_inference(encoding, inputs, current_states, neighbor_current_mask)
