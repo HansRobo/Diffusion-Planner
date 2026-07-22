@@ -23,6 +23,7 @@ from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlann
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
+from diffusion_planner.utils.route_augmentation import RouteAugmentation
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.validate_model import (
     aggregate_replan_consistency_metrics,
@@ -234,6 +235,17 @@ def model_training(args: TrainConfig):
     else:
         aug = None
 
+    if args.use_route_augment:
+        route_aug = RouteAugmentation(
+            device=args.device,
+            truncation_prob=args.route_truncation_prob,
+            truncation_min_m=args.route_truncation_min_m,
+            truncation_max_m=args.route_truncation_max_m,
+            speed_limit_unknown_prob=args.speed_limit_unknown_prob,
+        )
+    else:
+        route_aug = None
+
     # prepare dataset
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
@@ -432,7 +444,7 @@ def model_training(args: TrainConfig):
 
         # training step
         train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug
+            train_loader, diffusion_planner, optimizer, args, model_ema, aug, route_aug
         )
 
         valid_dict = validate_model(diffusion_planner, valid_loader, args)
