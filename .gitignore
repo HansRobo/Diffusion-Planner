@@ -11,6 +11,9 @@ sample*
 
 */.agents/
 docs/superpowers/
+docs/experiments/
+scripts/convert_all_or_bags.py
+ros_scripts/extract_map_from_bag.py
 
 rlvr/configs/autoresearch/
 CLAUDE.md
