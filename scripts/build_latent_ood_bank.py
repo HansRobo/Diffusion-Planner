@@ -51,6 +51,17 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--device", type=str, default="cuda")
+    p.add_argument(
+        "--kmeans_k", type=int, default=32, help="Number of clusters for spherical K-means"
+    )
+    p.add_argument("--gmm_k", type=int, default=16, help="Number of components for GMM")
+    p.add_argument("--gmm_covariance_type", type=str, default="diag", help="GMM covariance type")
+    p.add_argument(
+        "--mahalanobis_eps",
+        type=float,
+        default=1e-5,
+        help="Regularization epsilon for Mahalanobis",
+    )
     return p.parse_args()
 
 
@@ -69,7 +80,7 @@ def extract_embeddings(
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Extracting embeddings"):
-            z = encoder.encode_batch(batch)
+            z = encoder.encode_batch(batch, normalize=False)
             embeddings.append(z.cpu().numpy())
 
             for i in range(z.shape[0]):
@@ -102,6 +113,11 @@ def main():
     )
     print(f"  Extracted {embeddings.shape[0]} embeddings in {time.time() - t0:.1f}s")
 
+    # L2 normalize for kNN/Mahalanobis/K-means
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-8)
+    embeddings_l2 = (embeddings / norms).astype(np.float32)
+
     metadata = {
         "model_path": str(args.model_path),
         "args_path": str(args.args_path),
@@ -109,12 +125,19 @@ def main():
         "embedding_dim": int(embeddings.shape[1]),
         "pooling": "mean_all_tokens_after_encoder_mask_zeroing",
         "num_embeddings": int(embeddings.shape[0]),
-        "l2_normalized": True,
+        "l2_normalized": False,
+        "bank_format_version": 2,
         "git_sha": git_sha(),
         "train_list": str(args.train_list),
     }
 
-    scorer = LatentOODScorer.build(embeddings, records, metadata, device=args.device)
+    # Save raw + L2 embeddings
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    np.save(args.output_dir / "embeddings.npy", embeddings)
+    np.save(args.output_dir / "embeddings_l2.npy", embeddings_l2)
+
+    # kNN scorer (uses L2-normalized)
+    scorer = LatentOODScorer.build(embeddings_l2, records, metadata, device=args.device)
 
     if args.val_list:
         print(f"Calibrating on validation set {args.val_list}")
@@ -132,6 +155,26 @@ def main():
 
     print(f"Saving bank to {args.output_dir}")
     scorer.save(args.output_dir)
+
+    # Fit additional scoring methods
+    from diffusion_planner.utils.scoring_methods import (
+        GMMScorer,
+        MahalanobisScorer,
+        SphericalKMeansScorer,
+    )
+
+    print("Fitting Mahalanobis...")
+    maha = MahalanobisScorer.fit(embeddings_l2, eps=args.mahalanobis_eps)
+    maha.save(args.output_dir / "mahalanobis.npz")
+
+    print(f"Fitting Spherical K-means (k={args.kmeans_k})...")
+    skmeans = SphericalKMeansScorer.fit(embeddings_l2, k=args.kmeans_k)
+    skmeans.save(args.output_dir / "kmeans.npz")
+
+    print(f"Fitting GMM (k={args.gmm_k}, cov={args.gmm_covariance_type})...")
+    gmm = GMMScorer.fit(embeddings, k=args.gmm_k, covariance_type=args.gmm_covariance_type)
+    gmm.save(args.output_dir / "gmm.npz", args.output_dir / "zscore_params.npz")
+
     print("Done.")
 
 

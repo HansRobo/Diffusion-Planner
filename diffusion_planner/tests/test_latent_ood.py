@@ -10,7 +10,7 @@ def _make_bank(n: int = 100, d: int = 32, seed: int = 42):
     rng = np.random.RandomState(seed)
     embeddings = rng.randn(n, d).astype(np.float32)
     records = [{"row": i, "npz_path": f"/data/train/{i}.npz"} for i in range(n)]
-    metadata = {"model_path": "/mock/model.pth", "embedding_dim": d}
+    metadata = {"model_path": "/mock/model.pth", "embedding_dim": d, "bank_format_version": 2}
     return embeddings, records, metadata
 
 
@@ -122,3 +122,19 @@ class TestSaveLoad:
         loaded = LatentOODScorer.load(tmp_path / "bank")
         result = loaded.score(torch.randn(1, 4))
         assert "percentile" not in result
+
+    def test_rejects_v1_bank(self, tmp_path):
+        import json
+
+        bank_dir = tmp_path / "v1_bank"
+        bank_dir.mkdir()
+        # Write a v1 metadata (no bank_format_version key)
+        with open(bank_dir / "metadata.json", "w") as f:
+            json.dump({"model_path": "/mock/model.pth", "embedding_dim": 4}, f)
+        np.save(bank_dir / "embeddings_l2.npy", np.zeros((5, 4), dtype=np.float32))
+        with open(bank_dir / "paths.jsonl", "w") as f:
+            for i in range(5):
+                f.write(json.dumps({"row": i}) + "\n")
+
+        with pytest.raises(ValueError, match="format version 1"):
+            LatentOODScorer.load(bank_dir)

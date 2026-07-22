@@ -133,7 +133,7 @@ class LatentOODScorer:
     def save(self, bank_dir: str | Path) -> None:
         d = Path(bank_dir)
         d.mkdir(parents=True, exist_ok=True)
-        np.save(d / "embeddings.npy", self._embeddings)
+        np.save(d / "embeddings_l2.npy", self._embeddings)
         with open(d / "metadata.json", "w") as f:
             json.dump(self._metadata, f, indent=2)
         with open(d / "paths.jsonl", "w") as f:
@@ -146,9 +146,18 @@ class LatentOODScorer:
     @classmethod
     def load(cls, bank_dir: str | Path, device: str = "cpu") -> LatentOODScorer:
         d = Path(bank_dir)
-        embeddings = np.load(d / "embeddings.npy")
         with open(d / "metadata.json") as f:
             metadata = json.load(f)
+
+        fmt_ver = metadata.get("bank_format_version", 1)
+        if fmt_ver < 2:
+            raise ValueError(
+                f"Bank at {d} is format version {fmt_ver}. "
+                "Version 2 is required (raw + L2 embeddings). "
+                "Rebuild the bank with the updated build_latent_ood_bank.py."
+            )
+
+        embeddings = np.load(d / "embeddings_l2.npy")
         records: list[dict] = []
         with open(d / "paths.jsonl") as f:
             for line in f:
