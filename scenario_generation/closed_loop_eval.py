@@ -21,8 +21,8 @@ from pathlib import Path
 
 import numpy as np
 
-from scenario_generation.perf_timer import Timers
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
+from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
@@ -151,9 +151,7 @@ def _pool_clearance(rows: list[dict], category: str) -> dict[str, float]:
         "clearance_mean_m": float(np.average(means, weights=weights)) if means else float("inf"),
         # Prefer merged t-digest p5; fall back to min of segment p5s (conservative).
         "clearance_p5_m": (
-            merged_percentile(digests, 5)
-            if digests
-            else (float(min(p5s)) if p5s else float("inf"))
+            merged_percentile(digests, 5) if digests else (float(min(p5s)) if p5s else float("inf"))
         ),
     }
 
@@ -175,7 +173,9 @@ def metrics_for_json(metrics: dict) -> dict:
     return _strip(metrics)
 
 
-def aggregate(rows: list[dict], near_miss_thresh: float, *, strong_brake_mps2: float = -3.0) -> dict:
+def aggregate(
+    rows: list[dict], near_miss_thresh: float, *, strong_brake_mps2: float = -3.0
+) -> dict:
     """Aggregate per-segment nested metric rows into a closed-loop summary."""
     n_seg = len(rows)
     total_steps = sum(int(r.get("n_steps_run", 0)) for r in rows)

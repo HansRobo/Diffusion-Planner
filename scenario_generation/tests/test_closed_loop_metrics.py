@@ -89,9 +89,7 @@ def test_strong_brake_step_and_mask():
 
     assert score_strong_brake_step(ego_accel_mps2=-4.0, thresh_mps2=-3.0)["strong_brake"]
     assert not score_strong_brake_step(ego_accel_mps2=-2.0, thresh_mps2=-3.0)["strong_brake"]
-    mask = strong_brake_mask(
-        np.array([0.0, -4.0, -3.0, -2.9], dtype=np.float32), thresh_mps2=-3.0
-    )
+    mask = strong_brake_mask(np.array([0.0, -4.0, -3.0, -2.9], dtype=np.float32), thresh_mps2=-3.0)
     assert mask.tolist() == [False, True, True, False]
 
 
