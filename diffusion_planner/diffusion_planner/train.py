@@ -142,6 +142,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
             replan_interval=args.closed_loop_replan_interval,
             draw_every=args.closed_loop_draw_every,
             neighbor_history_mode="recorded",
+            ego_prediction_from_control=args.closed_loop_ego_prediction_from_control,
             verbose=False,
         )
     finally:

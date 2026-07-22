@@ -176,6 +176,10 @@ class TrainConfig:
     closed_loop_warmup_steps: int = 0
     closed_loop_unstick_after: int = 300
     closed_loop_unstick_advance_m: float = 2.5
+    # trajectory_and_control models: reconstruct the ego trajectory from the control (accel,
+    # curvature) head via the unicycle model (kinematically consistent, no lateral slip) instead of
+    # the pose head. No-op for pure-trajectory / pure-control models.
+    closed_loop_ego_prediction_from_control: bool = True
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)

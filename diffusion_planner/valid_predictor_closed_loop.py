@@ -87,6 +87,15 @@ def parse_args() -> argparse.Namespace:
         help="if still stuck this many steps AFTER the radius was widened, fall back to the hard "
         "teleport onto the GT pose ahead (last resort)",
     )
+    p.add_argument(
+        "--ego_prediction_from_control",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="trajectory_and_control models: reconstruct the closed-loop ego trajectory from the "
+        "control (accel, curvature) head via the unicycle model (no lateral slip) instead of the "
+        "pose head. No-op for pure-trajectory / pure-control models. Disable with "
+        "--no-ego_prediction_from_control.",
+    )
     p.add_argument("--fps", type=int, default=10, help="output video frame rate (10 = realtime)")
     p.add_argument(
         "--replan_interval",
@@ -140,6 +149,7 @@ def main() -> None:
         replan_interval=args.replan_interval,
         draw_every=args.draw_every,
         neighbor_history_mode="recorded",
+        ego_prediction_from_control=args.ego_prediction_from_control,
         tracker_mode="perfect",
     )
     summary["model_path"] = str(args.model_path)

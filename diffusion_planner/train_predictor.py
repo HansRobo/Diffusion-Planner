@@ -290,6 +290,14 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
+    parser.add_argument(
+        "--closed_loop_ego_prediction_from_control",
+        type=boolean,
+        default=_train_config_default("closed_loop_ego_prediction_from_control"),
+        help="trajectory_and_control models: reconstruct the closed-loop ego trajectory from the "
+        "control (accel, curvature) head via the unicycle model (no lateral slip) instead of the "
+        "pose head. No-op for pure-trajectory / pure-control models.",
+    )
 
     # Deterministic
     parser.add_argument(
