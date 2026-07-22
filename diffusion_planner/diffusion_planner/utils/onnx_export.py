@@ -70,10 +70,25 @@ DECODER_INPUT_NAMES = [
 
 TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0"]
 
+# The independent turn-indicator head does not consume any encoder/DiT features;
+# it predicts directly from the (denoised) ego future trajectory and the raw
+# map / turn-indicator-history inputs.
+INDEPENDENT_TURN_INDICATOR_INPUT_NAMES = [
+    "final_x0",
+    "lanes",
+    "lanes_speed_limit",
+    "lanes_has_speed_limit",
+    "route_lanes",
+    "route_lanes_speed_limit",
+    "route_lanes_has_speed_limit",
+    "turn_indicators",
+]
+
 FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit"]
 ENCODER_OUTPUT_NAMES = ["encoding"]
 DECODER_OUTPUT_NAMES = ["model_output"]
 TURN_INDICATOR_OUTPUT_NAMES = ["turn_indicator_logit"]
+INDEPENDENT_TURN_INDICATOR_OUTPUT_NAMES = ["independent_turn_indicator_logit"]
 
 TensorDict = dict[str, torch.Tensor]
 NumpyDict = dict[str, np.ndarray]
@@ -85,6 +100,7 @@ class ModelWrappers:
     encoder: nn.Module
     decoder: nn.Module
     turn_indicator: nn.Module
+    independent_turn_indicator: nn.Module
 
 
 @dataclass(frozen=True)
@@ -219,6 +235,48 @@ class TurnIndicatorONNXWrapper(nn.Module):
         return self.decoder._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
 
+class IndependentTurnIndicatorONNXWrapper(nn.Module):
+    """Diffusion-independent turn-indicator head evaluated after the denoising loop.
+
+    Unlike :class:`TurnIndicatorONNXWrapper`, this head does not consume the encoder
+    output. It predicts the turn-indicator logit directly from the (denoised) ego future
+    trajectory and the raw map / turn-indicator-history inputs.
+    """
+
+    def __init__(self, model: Diffusion_Planner):
+        super().__init__()
+        self.decoder = model.decoder
+
+    def forward(
+        self,
+        final_x0: torch.Tensor,
+        lanes: torch.Tensor,
+        lanes_speed_limit: torch.Tensor,
+        lanes_has_speed_limit: torch.Tensor,
+        route_lanes: torch.Tensor,
+        route_lanes_speed_limit: torch.Tensor,
+        route_lanes_has_speed_limit: torch.Tensor,
+        turn_indicators: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size = final_x0.shape[0]
+        agent_num = 1 + self.decoder._predicted_neighbor_num
+        final_x0 = final_x0.reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
+
+        # The independent predictor conditions on the ego future trajectory
+        # (drop the current-state step at index 0), mirroring the decoder.
+        ego_trajectory = final_x0[:, 0, 1:]
+        inputs = {
+            "lanes": lanes,
+            "lanes_speed_limit": lanes_speed_limit,
+            "lanes_has_speed_limit": lanes_has_speed_limit,
+            "route_lanes": route_lanes,
+            "route_lanes_speed_limit": route_lanes_speed_limit,
+            "route_lanes_has_speed_limit": route_lanes_has_speed_limit,
+            "turn_indicators": turn_indicators,
+        }
+        return self.decoder._compute_independent_turn_indicator(ego_trajectory, inputs)
+
+
 class FullONNXWrapper(nn.Module):
     """Original all-in-one planner export."""
 
@@ -323,6 +381,21 @@ def build_turn_indicator_inputs(encoding: torch.Tensor, final_x0: torch.Tensor) 
     }
 
 
+def build_independent_turn_indicator_inputs(
+    inputs: TensorDict, final_x0: torch.Tensor
+) -> TensorDict:
+    return {
+        "final_x0": final_x0,
+        "lanes": inputs["lanes"],
+        "lanes_speed_limit": inputs["lanes_speed_limit"],
+        "lanes_has_speed_limit": inputs["lanes_has_speed_limit"],
+        "route_lanes": inputs["route_lanes"],
+        "route_lanes_speed_limit": inputs["route_lanes_speed_limit"],
+        "route_lanes_has_speed_limit": inputs["route_lanes_has_speed_limit"],
+        "turn_indicators": inputs["turn_indicators"],
+    }
+
+
 def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusion_Planner:
     config_obj = Config(config_json_path)
     model = Diffusion_Planner(config_obj)
@@ -350,6 +423,7 @@ def build_wrappers(model: Diffusion_Planner) -> ModelWrappers:
         encoder=EncoderONNXWrapper(model).eval(),
         decoder=DecoderONNXWrapper(model).eval(),
         turn_indicator=TurnIndicatorONNXWrapper(model).eval(),
+        independent_turn_indicator=IndependentTurnIndicatorONNXWrapper(model).eval(),
     )
 
 
@@ -358,10 +432,12 @@ def build_export_specs(
     inputs: TensorDict,
     decoder_inputs: TensorDict,
     turn_indicator_inputs: TensorDict,
+    independent_turn_indicator_inputs: TensorDict,
     full_onnx_path: Path,
     encoder_onnx_path: Path,
     decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
+    independent_turn_indicator_onnx_path: Path,
 ) -> list[ExportSpec]:
     return [
         ExportSpec(
@@ -391,6 +467,13 @@ def build_export_specs(
             input_names=TURN_INDICATOR_INPUT_NAMES,
             output_names=TURN_INDICATOR_OUTPUT_NAMES,
             output_path=turn_indicator_onnx_path,
+        ),
+        ExportSpec(
+            wrapper=wrappers.independent_turn_indicator,
+            inputs=independent_turn_indicator_inputs,
+            input_names=INDEPENDENT_TURN_INDICATOR_INPUT_NAMES,
+            output_names=INDEPENDENT_TURN_INDICATOR_OUTPUT_NAMES,
+            output_path=independent_turn_indicator_onnx_path,
         ),
     ]
 
@@ -473,11 +556,13 @@ def export_model_to_onnx(
     encoder_onnx_path: Path,
     decoder_onnx_path: Path,
     turn_indicator_onnx_path: Path,
+    independent_turn_indicator_onnx_path: Path,
     use_simplify: bool,
     opset_version: int,
     external_data: bool,
 ) -> None:
-    """Export the four ONNX graphs (full / encoder / decoder / turn_indicator) for ``model``.
+    """Export the five ONNX graphs (full / encoder / decoder / turn_indicator /
+    independent_turn_indicator) for ``model``.
 
     No ORT validation is performed; the caller is responsible for that (the standalone CLI does,
     the training loop skips it). The SDPA / MHA backends are forced only for the duration of the
@@ -499,16 +584,21 @@ def export_model_to_onnx(
                 decoder_inputs["neighbor_agents_past"],
             )
         turn_indicator_inputs = build_turn_indicator_inputs(encoding, final_x0)
+        independent_turn_indicator_inputs = build_independent_turn_indicator_inputs(
+            export_inputs, final_x0
+        )
 
         export_specs = build_export_specs(
             wrappers,
             export_inputs,
             decoder_inputs,
             turn_indicator_inputs,
+            independent_turn_indicator_inputs,
             full_onnx_path,
             encoder_onnx_path,
             decoder_onnx_path,
             turn_indicator_onnx_path,
+            independent_turn_indicator_onnx_path,
         )
         for spec in export_specs:
             export_spec(spec, use_simplify, opset_version, external_data)
@@ -543,6 +633,7 @@ def export_checkpoint_onnx(
         output_dir / f"{output_prefix}_encoder.onnx",
         output_dir / f"{output_prefix}_decoder.onnx",
         output_dir / f"{output_prefix}_turn_indicator.onnx",
+        output_dir / f"{output_prefix}_independent_turn_indicator.onnx",
         use_simplify,
         opset_version,
         external_data,
