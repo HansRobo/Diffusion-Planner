@@ -217,7 +217,13 @@ def retrieve_neighbors(
             json.dump([qpath], f)
         ds = DiffusionPlannerData(str(query_list_path))
         sample = ds[0]
-        batch = {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else v for k, v in sample.items()}
+        batch = {}
+        for k, v in sample.items():
+            if isinstance(v, np.ndarray):
+                v = torch.from_numpy(v)
+            if isinstance(v, torch.Tensor):
+                v = v.unsqueeze(0)
+            batch[k] = v
 
         with torch.no_grad():
             z_raw = encoder.encode_batch(batch, normalize=False)
@@ -380,7 +386,7 @@ def main():
         query_paths = [npz_paths[i] for i in idxs]
 
     viz_path = args.viz_module_path or (
-        Path(__file__).resolve().parent.parent / "clip-review-tool" / "src"
+        Path(__file__).resolve().parent.parent.parent / "clip-review-tool" / "src"
     )
 
     # Load bank records for npz_path resolution
