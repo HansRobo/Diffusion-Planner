@@ -11,9 +11,6 @@ import argparse
 import base64
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import pandas as pd
 
 COVERAGE_HIGH_THRESHOLD = 0.5
@@ -35,6 +32,15 @@ def _b64(png_path: Path) -> str:
 
 
 def render_location_report(rows: list[dict], overlay_pngs: list[Path], out_html: Path) -> None:
+    if not rows:
+        out_html.write_text(
+            '<!DOCTYPE html>\n<html><head><meta charset="utf-8">'
+            "<title>Multi-human location report</title></head><body>"
+            "<h1>Multi-human trajectory comparison report</h1>"
+            "<p>No mismatches found.</p></body></html>"
+        )
+        return
+
     cols = [
         "npz_path",
         "n_humans",

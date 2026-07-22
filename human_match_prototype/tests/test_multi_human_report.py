@@ -1,4 +1,6 @@
-from human_match_prototype.multi_human_report import diagnose_mismatch
+from pathlib import Path
+
+from human_match_prototype.multi_human_report import diagnose_mismatch, render_location_report
 
 
 def test_diagnose_planner_deficiency():
@@ -19,3 +21,10 @@ def test_diagnose_insufficient_data():
 def test_diagnose_no_mismatch():
     row = {"mismatch_4s": 0.0, "dp_human_coverage_4s": 0.9, "n_humans": 20}
     assert diagnose_mismatch(row) == "no_mismatch"
+
+
+def test_render_location_report_empty_rows(tmp_path):
+    out_html = tmp_path / "report.html"
+    render_location_report([], [], out_html)
+    content = out_html.read_text()
+    assert "No mismatches found" in content
