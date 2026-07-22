@@ -91,6 +91,14 @@ def parse_args() -> argparse.Namespace:
         help="if still stuck this many steps AFTER the radius was widened, fall back to the hard "
         "teleport onto the GT pose ahead (last resort)",
     )
+    p.add_argument(
+        "--unstick_offroute_m",
+        type=float,
+        default=100.0,
+        help="if the ego drifts more than this many metres from the nearest point of the recorded "
+        "GT trajectory (e.g. it turned down the wrong street), snap it back onto that nearest "
+        "recorded frame (same hard reset as the stuck teleport). 0 disables",
+    )
     p.add_argument("--fps", type=int, default=10, help="output video frame rate (10 = realtime)")
     p.add_argument(
         "--replan_interval",
@@ -131,6 +139,7 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         unstick_advance_m=args.unstick_advance_m,
         unstick_radius_mult=args.unstick_radius_mult,
         unstick_teleport_after=args.unstick_teleport_after,
+        unstick_offroute_m=args.unstick_offroute_m,
         fps=args.fps,
         replan_interval=args.replan_interval,
         draw_every=args.draw_every,

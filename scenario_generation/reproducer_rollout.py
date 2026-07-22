@@ -551,6 +551,12 @@ class _SegState:
     unstick_radius_mult: float = 3.0
     unstick_teleport_after: int = 300
     ego_stuck: int = 0
+    # Off-route recovery (independent of the no-progress logic above): if the live ego drifts
+    # more than ``unstick_offroute_m`` from the CLOSEST point of the recorded GT trajectory
+    # (e.g. the model turned down the wrong street and kept going), snap it straight back onto
+    # that nearest recorded frame — the same hard reset as the stuck teleport, just triggered by
+    # spatial divergence instead of no-progress. 0 disables.
+    unstick_offroute_m: float = 0.0
     n_snaps: int = 0
     # One-pass collision-scene save (set when run_segments_batched gets save_dir).
     # save_buf rolls the last save_max_scenes+1 (k, idx, live_pose, np_dict) snapshots
@@ -620,6 +626,7 @@ def _seed_state(
     unstick_advance_m=5.0,
     unstick_radius_mult=3.0,
     unstick_teleport_after=300,
+    unstick_offroute_m=0.0,
     neighbor_history_mode="recorded",
     goal_mode="segment",
     replay_mode="pose",
@@ -684,6 +691,7 @@ def _seed_state(
         unstick_advance_m=float(unstick_advance_m),
         unstick_radius_mult=float(unstick_radius_mult),
         unstick_teleport_after=int(unstick_teleport_after),
+        unstick_offroute_m=float(unstick_offroute_m),
         replay_mode=str(replay_mode),
         nbr_tracker=nbr_tracker,
     )
@@ -770,6 +778,32 @@ def _score_into(s: _SegState, neighbors_live, device, timers):
         s.collisions[s.k] = col
 
 
+def _snap_to_frame(s: _SegState, tgt: int) -> None:
+    """Hard-snap (teleport) the ego onto recorded GT frame ``tgt`` and reset every piece of sim
+    machinery to a fresh start there.
+
+    Shared by the no-progress unstick teleport and the off-route recovery so both leave IDENTICAL
+    state: the live ego (pose/history/dynamics) is rebuilt from the recorded frame, the cursor is
+    reset (nominal radius — a teleport is a fresh start), the sim neighbor tracker and closed-loop
+    turn history are re-seeded from that frame (so post-snap context isn't stale), the
+    collision-episode latches are cleared (the next contact is a fresh collision), and ``n_snaps``
+    is bumped. The caller keys off the ``n_snaps`` increase to invalidate the cached plan and clear
+    the save buffer, so no cached plan drags the ego back and no saved window straddles the jump.
+    """
+    s.live_pose, s.ego_hist, s.dyn = _ego_state_from_frame(s.tl, tgt)
+    s.cursor.reset(tgt)
+    s.cursor.restore_radius()  # teleport is a fresh start -> nominal radius
+    if s.nbr_tracker is not None:
+        s.nbr_tracker = SimNeighborTracker(s.tl, tgt, max_rec_advance=1.0)
+    s.turn_hist = np.asarray(s.tl.npz(tgt)["turn_indicators"]).reshape(-1).astype(np.int64)
+    s.last_turn_indicator = int(s.turn_hist[-1])
+    s.last_collision_uuid = None  # teleported -> next contact is a fresh collision
+    s.in_episode = False
+    s.prev_max_idx = s.cursor.max_idx_reached
+    s.ego_stuck = 0
+    s.n_snaps += 1
+
+
 def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None):
     """Advance the ego one step (perfect tracking of the prediction) + unstick.
 
@@ -841,6 +875,8 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
             # (legacy behavior).
             teleport_at = s.unstick_after + (s.unstick_teleport_after if widen_on else 0)
             if s.ego_stuck >= teleport_at:
+                # Snap forward onto the recorded GT pose ~unstick_advance_m ahead of the
+                # furthest frame reached so far (the hard last-resort reset).
                 n = len(s.tl)
                 tgt = min(max(s.cursor.max_idx_reached, 0) + 1, n - 1)
                 while tgt < n - 1 and (
@@ -848,26 +884,19 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                     < s.unstick_advance_m
                 ):
                     tgt += 1
-                s.live_pose, s.ego_hist, s.dyn = _ego_state_from_frame(s.tl, tgt)
-                s.cursor.reset(tgt)
-                s.cursor.restore_radius()  # teleport is a fresh start -> nominal radius
-                # Re-seed the sim machinery at the teleport target so post-snap recording is
-                # correct, not stale: the neighbor tracker's rec_t is capped at 1.0/step, so
-                # without this it would lag many steps behind the jumped ego (stale neighbors);
-                # turn_hist would carry pre-snap predictions for a different ego path. Both
-                # restart from the recorded state at tgt and phase out again (like rollout start).
-                # The save buffer is cleared on this snap (caller), so no window mixes the jump.
-                if s.nbr_tracker is not None:
-                    s.nbr_tracker = SimNeighborTracker(s.tl, tgt, max_rec_advance=1.0)
-                s.turn_hist = (
-                    np.asarray(s.tl.npz(tgt)["turn_indicators"]).reshape(-1).astype(np.int64)
-                )
-                s.last_turn_indicator = int(s.turn_hist[-1])
-                s.last_collision_uuid = None  # teleported -> next contact is a fresh collision
-                s.in_episode = False
-                s.prev_max_idx = s.cursor.max_idx_reached
-                s.ego_stuck = 0
-                s.n_snaps += 1
+                _snap_to_frame(s, tgt)
+
+        # Off-route recovery: independent of the no-progress logic above. If the live ego has
+        # drifted more than ``unstick_offroute_m`` from the CLOSEST point of the recorded GT
+        # trajectory (e.g. the model turned down the wrong street and kept driving), snap it back
+        # onto that nearest recorded frame — the same hard reset as the stuck teleport, only
+        # triggered by spatial divergence rather than no-progress. Skipped during warmup, where the
+        # ego is driven directly along the GT poses and is on-route by construction.
+        if s.unstick_offroute_m > 0 and s.k > s.warmup_steps:
+            d2 = np.sum((s.tl.poses[:, :2] - s.live_pose[:2]) ** 2, axis=1)
+            nearest = int(np.argmin(d2))
+            if float(d2[nearest]) > s.unstick_offroute_m**2:
+                _snap_to_frame(s, nearest)
 
 
 def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers):
@@ -1288,6 +1317,7 @@ def render_segment(
     unstick_advance_m: float = 5.0,
     unstick_radius_mult: float = 3.0,
     unstick_teleport_after: int = 300,
+    unstick_offroute_m: float = 100.0,
     interpolate: bool = True,
     neighbor_history_mode: str = "sim",
     timeline_progress_mode: str = "pose",
@@ -1320,7 +1350,9 @@ def render_segment(
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
     on: after ``unstick_after`` (~30 s) of no progress the ego is snapped onto the
-    recorded GT pose ~``unstick_advance_m`` ahead.
+    recorded GT pose ~``unstick_advance_m`` ahead. ``unstick_offroute_m`` adds a
+    spatial recovery: if the ego drifts more than that from the nearest point of the
+    recorded GT trajectory it is snapped back onto that nearest frame (0 disables).
 
     ``interpolate``: smooth stale recorded neighbor positions by linearly
     interpolating each track between its real detections (uses the sidecar track
@@ -1358,6 +1390,7 @@ def render_segment(
         unstick_advance_m=unstick_advance_m,
         unstick_radius_mult=unstick_radius_mult,
         unstick_teleport_after=unstick_teleport_after,
+        unstick_offroute_m=unstick_offroute_m,
         neighbor_history_mode=neighbor_history_mode,
         tracker_mode=tracker_mode,
         replay_mode=timeline_progress_mode,
