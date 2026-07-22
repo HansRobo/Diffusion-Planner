@@ -72,15 +72,22 @@ def resolve_npz_roots(npz_root) -> list[Path]:
 
 
 def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
-    """Aggregate per-segment metric rows into a single closed-loop summary."""
+    """Aggregate per-segment metric rows into a single closed-loop summary.
+
+    Naming is unified across event families ({m} in {collision, near_miss, strong_brake}):
+    ``{m}_steps`` (steps in that state), ``{m}_count`` (discrete events = rising edges),
+    ``{m}_segments`` (segments with >=1 such step), plus ``{m}_step_rate`` = steps/total_steps
+    and ``{m}_segment_rate`` = segments/n_segments. ``total_steps`` and ``n_segments`` are the
+    denominators (not event families). Older rows may lack keys, so read via ``.get``.
+    """
     n_seg = len(rows)
     total_steps = sum(r["n_steps_run"] for r in rows)
-    total_collision_steps = sum(r["n_collision_steps"] for r in rows)
-    total_near_miss_steps = sum(r["n_near_miss_steps"] for r in rows)
-    total_snaps = sum(r["n_snaps"] for r in rows)
 
-    n_seg_collision = sum(1 for r in rows if r["n_collision_steps"] > 0)
-    n_seg_near_miss = sum(1 for r in rows if r["n_near_miss_steps"] > 0)
+    def _sum(key: str) -> int:
+        return sum(int(r.get(key, 0)) for r in rows)
+
+    def _segs(key: str) -> int:
+        return sum(1 for r in rows if int(r.get(key, 0)) > 0)
 
     # min_clearance is +inf for a segment that never saw a valid neighbor; exclude those.
     finite_min_cl = [r["min_clearance"] for r in rows if np.isfinite(r["min_clearance"])]
@@ -90,28 +97,40 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
     for r in rows:
         term_counts[r["terminated"]] = term_counts.get(r["terminated"], 0) + 1
 
-    return {
+    summary = {
         "near_miss_thresh": near_miss_thresh,
         "n_segments": n_seg,
         "total_steps": total_steps,
-        "n_segments_with_collision": n_seg_collision,
-        "collision_segment_rate": n_seg_collision / n_seg if n_seg else 0.0,
-        "total_collision_steps": total_collision_steps,
-        "collision_step_rate": total_collision_steps / total_steps if total_steps else 0.0,
-        "n_segments_with_near_miss": n_seg_near_miss,
-        "near_miss_segment_rate": n_seg_near_miss / n_seg if n_seg else 0.0,
-        "total_near_miss_steps": total_near_miss_steps,
-        "near_miss_step_rate": total_near_miss_steps / total_steps if total_steps else 0.0,
-        "global_min_clearance": float(min(finite_min_cl)) if finite_min_cl else float("inf"),
-        "mean_segment_min_clearance": float(np.mean(finite_min_cl))
-        if finite_min_cl
-        else float("inf"),
-        "mean_segment_mean_clearance": float(np.mean(finite_mean_cl))
-        if finite_mean_cl
-        else float("inf"),
-        "total_snaps": total_snaps,
-        "terminated_counts": term_counts,
     }
+    # Per-step event families: steps / count / segments (+ step_rate / segment_rate).
+    for m in ("collision", "near_miss", "strong_brake"):
+        steps = _sum(f"{m}_steps")
+        segs = _segs(f"{m}_steps")
+        summary[f"{m}_steps"] = steps
+        summary[f"{m}_count"] = _sum(f"{m}_count")
+        summary[f"{m}_segments"] = segs
+        summary[f"{m}_step_rate"] = steps / total_steps if total_steps else 0.0
+        summary[f"{m}_segment_rate"] = segs / n_seg if n_seg else 0.0
+
+    summary.update(
+        {
+            "global_min_clearance": float(min(finite_min_cl)) if finite_min_cl else float("inf"),
+            "mean_segment_min_clearance": float(np.mean(finite_min_cl))
+            if finite_min_cl
+            else float("inf"),
+            "mean_segment_mean_clearance": float(np.mean(finite_mean_cl))
+            if finite_mean_cl
+            else float("inf"),
+            # Reproducer stuck telemetry (Autoware parity) + snap count.
+            "snap_count": _sum("n_snaps"),
+            "expand_count": _sum("expand_count"),
+            "teleport_count": _sum("teleport_count"),
+            "normal_steps": _sum("normal_steps"),
+            "repeat_steps": _sum("repeat_steps"),
+            "terminated_counts": term_counts,
+        }
+    )
+    return summary
 
 
 def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
@@ -166,6 +185,7 @@ def run_closed_loop_eval(
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
     tracker_mode: str = "mpc",
+    strong_brake_mps2: float = -3.0,
     verbose: bool = True,
     shard: tuple[int, int] | None = None,
 ) -> dict:
@@ -246,6 +266,7 @@ def run_closed_loop_eval(
                 draw_every=draw_every,
                 neighbor_history_mode=neighbor_history_mode,
                 tracker_mode=tracker_mode,
+                strong_brake_mps2=strong_brake_mps2,
             )
             row = {"route": key, **metrics}
             fout.write(json.dumps(row, default=float) + "\n")
@@ -266,13 +287,15 @@ def run_closed_loop_eval(
             if verbose:
                 print(
                     f"[{ri + 1}/{len(route_keys)}] {key} -> {seg_mp4.name}  "
-                    f"coll={metrics['n_collision_steps']} near={metrics['n_near_miss_steps']} "
+                    f"coll={metrics['collision_steps']} near={metrics['near_miss_steps']} "
+                    f"brake={metrics['strong_brake_steps']} "
                     f"min_clr={metrics['min_clearance']:.3f}"
                 )
     finally:
         fout.close()
 
     summary = aggregate(rows, near_miss_thresh)
+    summary["strong_brake_mps2"] = strong_brake_mps2
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len(route_keys)
     summary["elapsed_sec"] = time.perf_counter() - t0

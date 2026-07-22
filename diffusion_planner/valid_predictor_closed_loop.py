@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="cuda", help="'cuda' or 'cpu'")
     p.add_argument("--near_miss_thresh", type=float, default=0.5, help="near-miss clearance (m)")
     p.add_argument(
+        "--strong_brake_mps2",
+        type=float,
+        default=-3.0,
+        help="strong-brake threshold (m/s^2, negative); a step counts when tangential accel <= this",
+    )
+    p.add_argument(
         "--search_radius", type=float, default=1.5, help="PerceptionReproducer cursor search (m)"
     )
     p.add_argument(
@@ -136,6 +142,7 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
         draw_every=args.draw_every,
         neighbor_history_mode="recorded",
         tracker_mode="perfect",
+        strong_brake_mps2=args.strong_brake_mps2,
     )
 
 
@@ -228,21 +235,29 @@ def main() -> None:
     n_seg = summary["n_segments"]
     print(f"\n=== closed-loop validation: {n_seg} segments in {summary['elapsed_sec']:.1f}s ===")
     print(
-        f"collision: {summary['n_segments_with_collision']}/{n_seg} segments "
+        f"collision: {summary['collision_segments']}/{n_seg} segments "
         f"(rate {summary['collision_segment_rate']:.4f}), "
-        f"{summary['total_collision_steps']} steps (rate {summary['collision_step_rate']:.6f})"
+        f"{summary['collision_steps']} steps (rate {summary['collision_step_rate']:.6f}), "
+        f"{summary['collision_count']} events"
     )
     print(
         f"near-miss (<= {args.near_miss_thresh} m): "
-        f"{summary['n_segments_with_near_miss']}/{n_seg} segments "
-        f"(rate {summary['near_miss_segment_rate']:.4f}), {summary['total_near_miss_steps']} steps"
+        f"{summary['near_miss_segments']}/{n_seg} segments "
+        f"(rate {summary['near_miss_segment_rate']:.4f}), {summary['near_miss_steps']} steps, "
+        f"{summary['near_miss_count']} events"
+    )
+    print(
+        f"strong-brake (<= {args.strong_brake_mps2} m/s^2): "
+        f"{summary['strong_brake_segments']}/{n_seg} segments "
+        f"(rate {summary['strong_brake_segment_rate']:.4f}), {summary['strong_brake_steps']} steps, "
+        f"{summary['strong_brake_count']} events"
     )
     print(
         f"global_min_clearance={summary['global_min_clearance']:.3f} m  "
         f"mean_segment_min_clearance={summary['mean_segment_min_clearance']:.3f} m  "
         f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m"
     )
-    print(f"total_snaps={summary['total_snaps']}  terminated={summary['terminated_counts']}")
+    print(f"snap_count={summary['snap_count']}  terminated={summary['terminated_counts']}")
     print(f"videos: one <route>.mp4 per route in {out_dir}")
 
 

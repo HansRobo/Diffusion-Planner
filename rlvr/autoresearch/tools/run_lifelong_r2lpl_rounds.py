@@ -1643,7 +1643,7 @@ def _run_closed_loop_probe(
         "near_miss_segment_rate",
         "global_min_clearance",
         "mean_segment_min_clearance",
-        "total_snaps",
+        "snap_count",
     )
     picked = {k: summary[k] for k in keep if k in summary}
     picked["run_dir"] = str(new_dirs[-1])

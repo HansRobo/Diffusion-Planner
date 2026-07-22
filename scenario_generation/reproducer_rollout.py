@@ -45,6 +45,13 @@ from scenario_generation.tensor_converter import _heading_to_cos_sin
 from scenario_generation.transforms import _rotation_matrix, world_to_ego_frame
 
 DT = 0.1
+# Stuck gate: a tick counts as "stuck" only when the reproducer is republishing (repeat)
+# AND the live ego is (near-)stopped below this speed. Mirrors the Autoware reproducer's
+# ego-stopped gate (there 0.1; 0.5 here by product decision).
+STUCK_SPEED_MPS = 0.5
+# Falling-edge debounce for ``*_count`` metrics: once an event starts, fewer than this many
+# consecutive False steps do not end it (threshold flicker does not re-count).
+EVENT_COUNT_CLEAR_FRAMES = 3
 
 
 def _credit_window_width_frames(spec: dict | None, fallback: int) -> int:
@@ -523,6 +530,11 @@ class _SegState:
     # clearing; ``last_collision_uuid`` is the colliding UUID of the last SAVED collision (a new
     # episode is distinct only if its UUID differs). ``episode_eligible`` is set once per episode
     # (distinct?), ``episode_saved`` latches after the episode's one window is written.
+    # Per-step realized tangential accel (m/s^2); a step is a "strong brake" when it drops
+    # at or below ``strong_brake_mps2`` (negative). Allocated by ``_seed_state`` (like
+    # ``clearances``); stays None for manually-built states that never step.
+    accels: np.ndarray | None = None
+    strong_brake_mps2: float = -3.0
     last_collision_uuid: object = None
     in_episode: bool = False
     episode_eligible: bool = False
@@ -550,7 +562,9 @@ class _SegState:
     unstick_advance_m: float = 5.0
     unstick_radius_mult: float = 3.0
     unstick_teleport_after: int = 300
-    ego_stuck: int = 0
+    ego_stuck: int = 0  # consecutive stuck steps (repeat AND ego <= STUCK_SPEED_MPS)
+    expand_count: int = 0  # stage-1 radius-widen events this segment
+    teleport_count: int = 0  # stage-2 teleport events this segment
     n_snaps: int = 0
     # One-pass collision-scene save (set when run_segments_batched gets save_dir).
     # save_buf rolls the last save_max_scenes+1 (k, idx, live_pose, np_dict) snapshots
@@ -624,6 +638,7 @@ def _seed_state(
     goal_mode="segment",
     replay_mode="pose",
     tracker_mode="mpc",
+    strong_brake_mps2=-3.0,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
@@ -678,6 +693,8 @@ def _seed_state(
         goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
         collisions=np.zeros(cap, dtype=bool),
+        accels=np.zeros(cap, dtype=np.float32),
+        strong_brake_mps2=float(strong_brake_mps2),
         prev_max_idx=cursor.max_idx_reached,
         max_steps=cap,
         unstick_after=int(unstick_after),
@@ -710,7 +727,7 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         s.prev_max_idx = idx
         s.stuck = 0
     else:
-        idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time)
+        idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time, sim_yaw=float(s.live_pose[2]))
         if s.cursor.max_idx_reached > s.prev_max_idx:
             s.prev_max_idx, s.stuck = s.cursor.max_idx_reached, 0
         else:
@@ -816,41 +833,53 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
         s.live_pose = new_pose
         s.ego_hist = np.vstack([s.ego_hist[1:], s.live_pose[None]])
         s.sim_time += DT
+        # Record this step's realized accel (aligned with clearances[k], written pre-increment)
+        # for the strong-brake metric; guard states built without an accels buffer.
+        if s.accels is not None and s.k < s.accels.shape[0]:
+            s.accels[s.k] = s.dyn.accel
         s.k += 1
 
-        # Unstick (two-stage): if the ego has been (near-)stopped for too long (e.g. it
-        # halted at a yellow light and won't proceed), FIRST widen the cursor search radius
-        # so it reaches recorded frames further ahead (phantom blocker clears -> the model
-        # proceeds on its own, no teleport). Only if it is STILL stuck after a further grace
-        # window do we fall back to the hard snap onto the recorded GT pose ahead.
+        # Unstick (two-stage): if the reproducer has been STUCK for too long, FIRST widen the
+        # cursor search radius so it reaches recorded frames further ahead (phantom blocker
+        # clears -> the model proceeds on its own, no teleport). Only if it is STILL stuck
+        # after a further grace window do we fall back to the hard snap onto the recorded GT
+        # pose ahead. "Stuck" is the Autoware definition: the reproducer is in ``repeat`` AND
+        # the ego is (near-)stopped (speed <= STUCK_SPEED_MPS) — not merely stopped. The
+        # cursor exposes only normal/repeat; the stuck counting and the widen/teleport actions
+        # (and their counts) are owned here by the rollout.
         if s.unstick_after > 0:
-            if s.dyn.speed >= 0.5:
+            cur = s.cursor
+            if s.dyn.speed > STUCK_SPEED_MPS:
                 # Moving again: clear the counter and undo any temporary cursor widening so
                 # frame selection returns to the nominal search_radius.
                 s.ego_stuck = 0
-                s.cursor.restore_radius()
+                cur.restore_radius()
+            elif not cur.last_was_repeat:
+                # Stopped but the reproducer is still advancing (normal, not repeat): not
+                # stuck. Clear the counter; keep any widened radius until the ego moves again.
+                s.ego_stuck = 0
             else:
+                # Stopped AND reproducer stuck in repeat -> accumulate.
                 s.ego_stuck += 1
             widen_on = s.unstick_radius_mult > 1.0
             # Stage 1 (gentle): widen once, exactly when the stuck count first crosses the
             # threshold (so it isn't re-applied every subsequent stuck step).
             if widen_on and s.ego_stuck == s.unstick_after:
-                s.cursor.widen(s.unstick_radius_mult)
+                cur.widen(s.unstick_radius_mult)
+                s.expand_count += 1
             # Stage 2 (last resort): teleport. With widening on this is deferred by
             # ``unstick_teleport_after`` extra steps; with it off it fires at ``unstick_after``
             # (legacy behavior).
             teleport_at = s.unstick_after + (s.unstick_teleport_after if widen_on else 0)
             if s.ego_stuck >= teleport_at:
-                n = len(s.tl)
-                tgt = min(max(s.cursor.max_idx_reached, 0) + 1, n - 1)
-                while tgt < n - 1 and (
-                    float(np.linalg.norm(s.tl.poses[tgt, :2] - s.live_pose[:2]))
-                    < s.unstick_advance_m
-                ):
-                    tgt += 1
+                # Target chosen by BAG ARC LENGTH ahead of the current bag anchor (never
+                # rewind), mirroring Autoware's find_perturb_index_along_bag.
+                tgt = s.tl.index_ahead_by_arc_length(
+                    max(cur.max_idx_reached, 0), s.unstick_advance_m
+                )
                 s.live_pose, s.ego_hist, s.dyn = _ego_state_from_frame(s.tl, tgt)
-                s.cursor.reset(tgt)
-                s.cursor.restore_radius()  # teleport is a fresh start -> nominal radius
+                cur.reset(tgt)
+                cur.restore_radius()  # teleport is a fresh start -> nominal radius
                 # Re-seed the sim machinery at the teleport target so post-snap recording is
                 # correct, not stale: the neighbor tracker's rec_t is capped at 1.0/step, so
                 # without this it would lag many steps behind the jumped ego (stale neighbors);
@@ -865,8 +894,9 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.last_turn_indicator = int(s.turn_hist[-1])
                 s.last_collision_uuid = None  # teleported -> next contact is a fresh collision
                 s.in_episode = False
-                s.prev_max_idx = s.cursor.max_idx_reached
+                s.prev_max_idx = cur.max_idx_reached
                 s.ego_stuck = 0
+                s.teleport_count += 1
                 s.n_snaps += 1
 
 
@@ -876,8 +906,42 @@ def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, time
     _advance_step(s, pred, idx, device, timers)
 
 
+def _event_count(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES) -> int:
+    """Rising-edge event count with falling-edge debounce.
+
+    Entering True from outside an event increments the count. While in an event, a False
+    gap shorter than ``clear_frames`` keeps the latch (no re-count on the next True); only
+    ``clear_frames`` consecutive Falses release it so a later True is a new event. Used for
+    collision / near-miss / strong-brake ``*_count`` (``*_steps`` stay raw).
+    """
+    if mask.size == 0:
+        return 0
+    count = 0
+    in_event = False
+    false_run = 0
+    for v in mask.astype(bool):
+        if v:
+            if not in_event:
+                count += 1
+                in_event = True
+            false_run = 0
+        elif in_event:
+            false_run += 1
+            if false_run >= clear_frames:
+                in_event = False
+                false_run = 0
+    return count
+
+
 def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
-    valid_cl = s.clearances[: s.k][np.isfinite(s.clearances[: s.k])]
+    cl = s.clearances[: s.k]
+    finite = np.isfinite(cl)
+    valid_cl = cl[finite]
+    accels = s.accels[: s.k] if s.accels is not None else np.zeros(0, dtype=np.float32)
+    # Per-step state booleans -> both a step count and a rising-edge event count.
+    coll_mask = s.collisions[: s.k]
+    near_mask = finite & (cl <= s.near_miss_thresh)
+    brake_mask = accels <= s.strong_brake_mps2
     progress = float(np.linalg.norm(s.live_pose[:2] - s.tl.poses[s.start, :2]))
     metrics = {
         "segment": [int(s.start), int(s.end)],
@@ -885,15 +949,21 @@ def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
         "terminated": s.terminated,
         "min_clearance": float(valid_cl.min()) if valid_cl.size else float("inf"),
         "mean_clearance": float(valid_cl.mean()) if valid_cl.size else float("inf"),
-        "n_collision_steps": int(s.collisions[: s.k].sum()),
-        "n_near_miss_steps": int(np.sum(valid_cl <= s.near_miss_thresh)),
-        "worst_step": int(
-            np.argmin(np.where(np.isfinite(s.clearances[: s.k]), s.clearances[: s.k], np.inf))
-        )
-        if valid_cl.size
-        else -1,
+        "collision_steps": int(coll_mask.sum()),
+        "collision_count": _event_count(coll_mask),
+        "near_miss_steps": int(near_mask.sum()),
+        "near_miss_count": _event_count(near_mask),
+        "strong_brake_steps": int(brake_mask.sum()),
+        "strong_brake_count": _event_count(brake_mask),
+        "worst_step": int(np.argmin(np.where(finite, cl, np.inf))) if valid_cl.size else -1,
         "progress_m": progress,
         "n_snaps": int(s.n_snaps),
+        # Reproducer telemetry. expand/teleport are rollout-owned escalation counts;
+        # normal/repeat step totals come from the cursor.
+        "expand_count": int(s.expand_count),
+        "teleport_count": int(s.teleport_count),
+        "normal_steps": int(s.cursor.normal_steps),
+        "repeat_steps": int(s.cursor.repeat_steps),
     }
     return SegmentResult(
         metrics=metrics, clearances=s.clearances, collisions=s.collisions, timers=timers
@@ -1296,6 +1366,7 @@ def render_segment(
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
+    strong_brake_mps2: float = -3.0,
     *,
     replan_interval: int = 1,
     draw_every: int = 1,
@@ -1362,6 +1433,7 @@ def render_segment(
         tracker_mode=tracker_mode,
         replay_mode=timeline_progress_mode,
         goal_mode=goal_mode,
+        strong_brake_mps2=strong_brake_mps2,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
@@ -1431,6 +1503,12 @@ def render_segment(
                     "max_idx_reached": int(s.cursor.max_idx_reached),
                     "stuck": int(s.stuck),
                     "ego_stuck": int(s.ego_stuck),
+                    # Cursor's own state (normal/repeat) + the rollout's escalation counts
+                    # (an expand/teleport this tick shows as a *_count delta on the next line).
+                    "state": s.cursor.state,
+                    "state_run_steps": int(s.cursor.state_run_steps),
+                    "expand_count": int(s.expand_count),
+                    "teleport_count": int(s.teleport_count),
                     "n_snaps": int(s.n_snaps),
                 }
             )

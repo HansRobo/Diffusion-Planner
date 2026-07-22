@@ -325,7 +325,7 @@ def main() -> None:
 
     def _keep(row: dict) -> None:
         nonlocal seq
-        key = (row["n_collision_steps"], -row["min_clearance"], seq)
+        key = (row["collision_steps"], -row["min_clearance"], seq)
         seq += 1
         heapq.heappush(heap, (key, row))
         if len(heap) > top_k:
@@ -412,8 +412,8 @@ def main() -> None:
     print("top hits (collisions desc, clearance asc):")
     for r in hits[:10]:
         print(
-            f"  {r['route']} {r['segment']}  collisions={r['n_collision_steps']:3d}  "
-            f"min_clr={r['min_clearance']:.2f}  near_miss={r['n_near_miss_steps']:3d}  "
+            f"  {r['route']} {r['segment']}  collisions={r['collision_steps']:3d}  "
+            f"min_clr={r['min_clearance']:.2f}  near_miss={r['near_miss_steps']:3d}  "
             f"term={r['terminated']}"
         )
     print("\n" + timers.report(n_seg))
@@ -432,7 +432,7 @@ def main() -> None:
         )
         run_tag = render_tag(args.model_path, args.lora_path)
         for r in hits[: args.dump_hits]:
-            if r["n_collision_steps"] == 0 and r["n_near_miss_steps"] == 0:
+            if r["collision_steps"] == 0 and r["near_miss_steps"] == 0:
                 continue  # nothing interesting to render
             s0, e0 = r["segment"]
             tl = RouteTimeline(routes[r["route"]], sidecar_dir=args.sidecar_root)
