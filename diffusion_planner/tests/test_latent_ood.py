@@ -3,7 +3,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-
 from diffusion_planner.utils.latent_ood import LatentOODScorer
 
 

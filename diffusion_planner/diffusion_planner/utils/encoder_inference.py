@@ -18,6 +18,7 @@ via onnxruntime.
 available again from a future training run) and runs the equivalent PyTorch
 encoder path, so callers don't need to know which backend is in use.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -139,8 +140,7 @@ class EncoderInference:
     def encode_batch(self, batch: dict) -> torch.Tensor:
         """Run the encoder on a batch, return [B, hidden_dim] L2-normalized embeddings."""
         batch = {
-            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
+            k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()
         }
         if "ego_agent_past" in batch:
             batch["ego_agent_past"] = self._heading_to_cos_sin(batch["ego_agent_past"])

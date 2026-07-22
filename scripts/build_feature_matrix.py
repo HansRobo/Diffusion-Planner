@@ -13,6 +13,7 @@ Usage:
       --or_transitions /path/to/override_transitions.json \
       --output data/feature_matrix.csv
 """
+
 from __future__ import annotations
 
 import argparse
@@ -63,12 +64,14 @@ def load_ood_scores(jsonl_path: Path) -> list[dict]:
             else:
                 ts_sec = None
 
-            entries.append({
-                "npz_path": npz_path,
-                "bag_name": bag_name,
-                "ts_sec": ts_sec,
-                "knn_mean": e["knn_mean"],
-            })
+            entries.append(
+                {
+                    "npz_path": npz_path,
+                    "bag_name": bag_name,
+                    "ts_sec": ts_sec,
+                    "knn_mean": e["knn_mean"],
+                }
+            )
     return entries
 
 
@@ -113,7 +116,7 @@ def extract_session_from_normal_path(npz_path: str) -> str:
     # Find 'train' in the path, session is train/<date>/<time>
     for i, part in enumerate(parts):
         if part in ("train", "valid") and i + 2 < len(parts):
-            return f"normal_{parts[i+1]}_{parts[i+2]}"
+            return f"normal_{parts[i + 1]}_{parts[i + 2]}"
     # Fallback: use parent directory name
     return f"normal_{Path(npz_path).parent.name}"
 
@@ -124,8 +127,12 @@ def main():
     parser.add_argument("--ood_normal", type=Path, required=True)
     parser.add_argument("--epdms_csv", type=Path, required=True)
     parser.add_argument("--or_transitions", type=Path, required=True)
-    parser.add_argument("--maneuver_npz_paths", type=Path, default=None,
-                        help="JSON with maneuver group -> npz path lists")
+    parser.add_argument(
+        "--maneuver_npz_paths",
+        type=Path,
+        default=None,
+        help="JSON with maneuver group -> npz path lists",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -165,9 +172,19 @@ def main():
 
     # Join override OOD with EPDMS
     EPDMS_COLS = ["nc", "dac", "ddc", "tlc", "ttc", "lk", "hc", "ec", "ep", "epdms"]
-    OUTPUT_COLS = ["bag", "ts_sec", "category", "maneuver_type", "label",
-                   *EPDMS_COLS, "knn_mean", "ood_residual", "is_override",
-                   "ade_full", "fde_full"]
+    OUTPUT_COLS = [
+        "bag",
+        "ts_sec",
+        "category",
+        "maneuver_type",
+        "label",
+        *EPDMS_COLS,
+        "knn_mean",
+        "ood_residual",
+        "is_override",
+        "ade_full",
+        "fde_full",
+    ]
 
     rows = []
     matched = 0
@@ -198,7 +215,9 @@ def main():
         maneuver = CATEGORY_TO_MANEUVER.get(category, "other")
         or_times = or_trans.get(bag, [])
         label = 1 if is_in_or_window(ts, or_times) else 0
-        ood_residual = ood_entry["knn_mean"] - maneuver_medians.get(maneuver, maneuver_medians.get("straight", 0))
+        ood_residual = ood_entry["knn_mean"] - maneuver_medians.get(
+            maneuver, maneuver_medians.get("straight", 0)
+        )
 
         row = {
             "bag": bag,
@@ -233,7 +252,9 @@ def main():
     # Add normal frames (label=0, is_override=0)
     for ood_entry in normal_ood:
         maneuver = normal_maneuver.get(ood_entry["npz_path"], "straight")
-        ood_residual = ood_entry["knn_mean"] - maneuver_medians.get(maneuver, maneuver_medians.get("straight", 0))
+        ood_residual = ood_entry["knn_mean"] - maneuver_medians.get(
+            maneuver, maneuver_medians.get("straight", 0)
+        )
         session_bag = extract_session_from_normal_path(ood_entry["npz_path"])
 
         row = {

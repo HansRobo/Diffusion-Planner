@@ -12,6 +12,7 @@ Usage:
         [--num_workers 4] \
         [--device cuda]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,19 +31,32 @@ from tqdm import tqdm
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model_path", type=Path, required=True, help="Path to model (.pth checkpoint or .onnx)")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--model_path", type=Path, required=True, help="Path to model (.pth checkpoint or .onnx)"
+    )
     p.add_argument("--args_path", type=Path, required=True, help="Path to training args.json")
-    p.add_argument("--train_list", type=Path, required=True, help="JSON list of training .npz paths")
+    p.add_argument(
+        "--train_list", type=Path, required=True, help="JSON list of training .npz paths"
+    )
     p.add_argument("--output_dir", type=Path, required=True, help="Output bank directory")
-    p.add_argument("--val_list", type=Path, default=None, help="Optional JSON list of validation .npz for calibration")
+    p.add_argument(
+        "--val_list",
+        type=Path,
+        default=None,
+        help="Optional JSON list of validation .npz for calibration",
+    )
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--device", type=str, default="cuda")
     return p.parse_args()
 
 
-def extract_embeddings(encoder: EncoderInference, data_list: Path, batch_size: int, num_workers: int):
+def extract_embeddings(
+    encoder: EncoderInference, data_list: Path, batch_size: int, num_workers: int
+):
     dataset = DiffusionPlannerData(str(data_list))
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
 
@@ -104,9 +118,7 @@ def main():
 
     if args.val_list:
         print(f"Calibrating on validation set {args.val_list}")
-        val_emb, _ = extract_embeddings(
-            encoder, args.val_list, args.batch_size, args.num_workers
-        )
+        val_emb, _ = extract_embeddings(encoder, args.val_list, args.batch_size, args.num_workers)
         val_z = torch.from_numpy(val_emb).to(args.device)
         val_scores = []
         for i in tqdm(range(0, val_z.shape[0], args.batch_size), desc="Scoring validation"):

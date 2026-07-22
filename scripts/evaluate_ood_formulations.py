@@ -14,6 +14,7 @@ Usage:
       --input data/feature_matrix.csv \
       --output_dir data/evaluation_results
 """
+
 from __future__ import annotations
 
 import argparse
@@ -133,14 +134,14 @@ def main():
     print(f"  {X.shape[0]} rows, {X.shape[1]} features")
     prevalence = y.mean()
     trivial_f1 = 2 * prevalence / (1 + prevalence)
-    print(f"  Positive: {y.sum()}, Negative: {(1-y).sum()}")
+    print(f"  Positive: {y.sum()}, Negative: {(1 - y).sum()}")
     print(f"  Prevalence: {prevalence:.4f}")
     print(f"  Chance baselines: AUPRC={prevalence:.4f}, trivial F1={trivial_f1:.4f}")
     print(f"  Unique bags: {len(set(groups))}")
     nan_counts = np.isnan(X).sum(axis=0)
     for j, feat in enumerate(EPDMS_FEATURES + ["knn_mean", "ood_residual"]):
         if nan_counts[j] > 0:
-            print(f"  NaN in {feat}: {nan_counts[j]} ({nan_counts[j]/X.shape[0]*100:.1f}%)")
+            print(f"  NaN in {feat}: {nan_counts[j]} ({nan_counts[j] / X.shape[0] * 100:.1f}%)")
 
     # 5-fold CV stratified by bag
     unique_bags = sorted(set(groups))
@@ -157,7 +158,7 @@ def main():
         fold_metrics = []
         fold_predictions = []
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Evaluating: {fs_name}")
         print(f"  Features: {fs_features}")
 
@@ -203,7 +204,9 @@ def main():
                 continue
             cat_metrics = compute_metrics(all_y_test[mask], all_y_pred[mask])
             cat_results[cat] = cat_metrics
-            print(f"    {cat:<25} AUPRC={cat_metrics['auprc']:.4f}, F1={cat_metrics['best_f1']:.4f}, n={mask.sum()}")
+            print(
+                f"    {cat:<25} AUPRC={cat_metrics['auprc']:.4f}, F1={cat_metrics['best_f1']:.4f}, n={mask.sum()}"
+            )
 
         results[fs_name]["per_category"] = cat_results
 
@@ -213,13 +216,15 @@ def main():
     print(f"\nSaved: {args.output_dir / 'evaluation_results.json'}")
 
     # Comparison table
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"{'Feature Set':<30} {'AUPRC':>10} {'F1':>10} {'R@P50':>10} {'R@P70':>10}")
-    print(f"{'-'*80}")
+    print(f"{'-' * 80}")
     for fs_name in FEATURE_SETS:
         r = results[fs_name]
-        print(f"{fs_name:<30} {r['auprc']:>10.4f} {r['best_f1']:>10.4f} "
-              f"{r['recall_at_p50']:>10.4f} {r['recall_at_p70']:>10.4f}")
+        print(
+            f"{fs_name:<30} {r['auprc']:>10.4f} {r['best_f1']:>10.4f} "
+            f"{r['recall_at_p50']:>10.4f} {r['recall_at_p70']:>10.4f}"
+        )
 
     # Feature importance plot
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
@@ -243,8 +248,14 @@ def main():
     ax.set_ylabel("AUPRC")
     ax.set_title("Override Detection: AUPRC by Feature Set (5-fold CV)")
     for bar, val in zip(bars, auprcs):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                f"{val:.3f}", ha="center", va="bottom", fontsize=10)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f"{val:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+        )
     plt.xticks(rotation=15, ha="right")
     plt.tight_layout()
     fig.savefig(args.output_dir / "auprc_comparison.png", dpi=150, bbox_inches="tight")

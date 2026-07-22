@@ -12,6 +12,7 @@ Usage:
         [--batch_size 64] \
         [--device cuda]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -29,13 +30,19 @@ from tqdm import tqdm
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model_path", type=Path, required=True, help="Path to model (.pth checkpoint or .onnx)")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--model_path", type=Path, required=True, help="Path to model (.pth checkpoint or .onnx)"
+    )
     p.add_argument("--args_path", type=Path, required=True)
     p.add_argument("--eval_list", type=Path, required=True, help="JSON list of eval .npz paths")
     p.add_argument("--bank_dir", type=Path, required=True, help="Pre-built bank directory")
     p.add_argument("--output", type=Path, required=True, help="Output JSONL path")
-    p.add_argument("--top_k_neighbors", type=int, default=5, help="Number of nearest neighbors to include")
+    p.add_argument(
+        "--top_k_neighbors", type=int, default=5, help="Number of nearest neighbors to include"
+    )
     p.add_argument("--knn_k", type=int, default=10, help="k for kNN scoring")
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=4)
@@ -57,7 +64,9 @@ def main():
         npz_paths = json.load(f)
 
     dataset = DiffusionPlannerData(str(args.eval_list))
-    loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True)
+    loader = DataLoader(
+        dataset, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True
+    )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     idx = 0
@@ -94,7 +103,9 @@ def main():
                 total_scored += 1
 
     elapsed = time.time() - t0
-    print(f"\nScored {total_scored} frames in {elapsed:.1f}s ({total_scored / elapsed:.0f} frames/s)")
+    print(
+        f"\nScored {total_scored} frames in {elapsed:.1f}s ({total_scored / elapsed:.0f} frames/s)"
+    )
     if any(level_counts.values()):
         print(f"  normal={level_counts[0]}, warning={level_counts[1]}, high={level_counts[2]}")
     print(f"Output: {args.output}")

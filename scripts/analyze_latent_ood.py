@@ -8,6 +8,7 @@ Usage:
         [--top_n 200] \
         [--compare /path/to/other_scores.jsonl]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,13 +24,21 @@ import numpy as np
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--scores", type=Path, required=True, help="JSONL from score_latent_ood.py")
-    p.add_argument("--output_dir", type=Path, required=True, help="Output directory for plots and CSVs")
-    p.add_argument("--top_n", type=int, default=200, help="Number of top-OOD frames for review list")
+    p.add_argument(
+        "--output_dir", type=Path, required=True, help="Output directory for plots and CSVs"
+    )
+    p.add_argument(
+        "--top_n", type=int, default=200, help="Number of top-OOD frames for review list"
+    )
     p.add_argument("--compare", type=Path, default=None, help="Second JSONL for overlay comparison")
     p.add_argument("--label", type=str, default="eval", help="Label for the primary score set")
-    p.add_argument("--compare_label", type=str, default="compare", help="Label for the comparison set")
+    p.add_argument(
+        "--compare_label", type=str, default="compare", help="Label for the comparison set"
+    )
     return p.parse_args()
 
 
@@ -43,8 +52,13 @@ def load_scores(path: Path) -> list[dict]:
     return entries
 
 
-def plot_score_distribution(scores: np.ndarray, label: str, compare: np.ndarray | None,
-                            compare_label: str, output_path: Path):
+def plot_score_distribution(
+    scores: np.ndarray,
+    label: str,
+    compare: np.ndarray | None,
+    compare_label: str,
+    output_path: Path,
+):
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     ax = axes[0]
@@ -89,8 +103,14 @@ def plot_level_breakdown(entries: list[dict], output_path: Path):
     vals = [counts[l] for l in labels]
     bars = ax.bar(labels, vals, color=[colors.get(l, "#9E9E9E") for l in labels])
     for bar, val in zip(bars, vals):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                str(val), ha="center", va="bottom", fontsize=10)
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            str(val),
+            ha="center",
+            va="bottom",
+            fontsize=10,
+        )
     ax.set_ylabel("Count")
     ax.set_title("OOD Level Breakdown")
     plt.tight_layout()
@@ -104,20 +124,32 @@ def write_top_ood_csv(entries: list[dict], top_n: int, output_path: Path):
     top = sorted_entries[:top_n]
     with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["rank", "npz_path", "knn_mean", "knn_min", "percentile",
-                          "level", "nearest_1_path", "nearest_1_dist"])
+        writer.writerow(
+            [
+                "rank",
+                "npz_path",
+                "knn_mean",
+                "knn_min",
+                "percentile",
+                "level",
+                "nearest_1_path",
+                "nearest_1_dist",
+            ]
+        )
         for i, e in enumerate(top, 1):
             nearest = e.get("nearest", [{}])
-            writer.writerow([
-                i,
-                e.get("npz_path", ""),
-                f"{e.get('knn_mean', 0):.6f}",
-                f"{e.get('knn_min', 0):.6f}",
-                f"{e.get('percentile', -1):.1f}",
-                e.get("level", "unknown"),
-                nearest[0].get("npz_path", "") if nearest else "",
-                f"{nearest[0].get('distance', 0):.6f}" if nearest else "",
-            ])
+            writer.writerow(
+                [
+                    i,
+                    e.get("npz_path", ""),
+                    f"{e.get('knn_mean', 0):.6f}",
+                    f"{e.get('knn_min', 0):.6f}",
+                    f"{e.get('percentile', -1):.1f}",
+                    e.get("level", "unknown"),
+                    nearest[0].get("npz_path", "") if nearest else "",
+                    f"{nearest[0].get('distance', 0):.6f}" if nearest else "",
+                ]
+            )
     print(f"  Saved: {output_path} ({len(top)} entries)")
 
 
@@ -129,8 +161,10 @@ def main():
     entries = load_scores(args.scores)
     scores = np.array([e["knn_mean"] for e in entries], dtype=np.float32)
     print(f"  {len(entries)} frames")
-    print(f"  knn_mean: min={scores.min():.4f} median={np.median(scores):.4f} "
-          f"p95={np.percentile(scores, 95):.4f} p99={np.percentile(scores, 99):.4f} max={scores.max():.4f}")
+    print(
+        f"  knn_mean: min={scores.min():.4f} median={np.median(scores):.4f} "
+        f"p95={np.percentile(scores, 95):.4f} p99={np.percentile(scores, 99):.4f} max={scores.max():.4f}"
+    )
 
     compare_scores = None
     if args.compare:
@@ -140,8 +174,13 @@ def main():
         print(f"  {len(cmp_entries)} frames")
 
     print("Generating plots...")
-    plot_score_distribution(scores, args.label, compare_scores, args.compare_label,
-                            args.output_dir / "ood_score_distribution.png")
+    plot_score_distribution(
+        scores,
+        args.label,
+        compare_scores,
+        args.compare_label,
+        args.output_dir / "ood_score_distribution.png",
+    )
 
     if any("level" in e for e in entries):
         plot_level_breakdown(entries, args.output_dir / "ood_level_breakdown.png")

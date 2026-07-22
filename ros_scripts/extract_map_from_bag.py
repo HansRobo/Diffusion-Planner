@@ -54,6 +54,7 @@ elements only) before writing, which drops the stale cached member while
 preserving geometry and regulatory-element associations (e.g. traffic
 lights) exactly.
 """
+
 import argparse
 from pathlib import Path
 
@@ -159,8 +160,10 @@ def main():
 
     shift_x = -min_x + MARGIN_M
     shift_y = -min_y + MARGIN_M
-    print(f"Applying shift ({shift_x:.1f}, {shift_y:.1f}) to keep all points >= 0 "
-          f"and well inside [0, 100000) for a single MGRS grid square.")
+    print(
+        f"Applying shift ({shift_x:.1f}, {shift_y:.1f}) to keep all points >= 0 "
+        f"and well inside [0, 100000) for a single MGRS grid square."
+    )
 
     for point in lanelet_map.pointLayer:
         point.x += shift_x
@@ -174,8 +177,7 @@ def main():
         # lanelet2 raises after writing if some relations reference
         # primitives missing from the (bin-deserialized) map -- the file is
         # still written; log and continue.
-        print(f"WARNING: lanelet2 reported errors while writing (file still "
-              f"written): {e}")
+        print(f"WARNING: lanelet2 reported errors while writing (file still written): {e}")
 
     print(f"Saved OSM map to {args.output}")
     print(

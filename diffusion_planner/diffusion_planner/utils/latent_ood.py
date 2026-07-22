@@ -68,9 +68,7 @@ class LatentOODScorer:
             self._bank_tensor = torch.from_numpy(self._embeddings).to(self._device)
         return self._bank_tensor
 
-    def _knn_distances(
-        self, z: torch.Tensor, k: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _knn_distances(self, z: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
         z = F.normalize(z.float(), dim=-1)
         if z.ndim == 1:
             z = z.unsqueeze(0)
@@ -80,9 +78,7 @@ class LatentOODScorer:
         dists = torch.sqrt(torch.clamp(2.0 - 2.0 * cos_sim, min=0.0))
         return torch.topk(dists, k, dim=-1, largest=False)
 
-    def score(
-        self, scene_embedding: torch.Tensor, k: int = 10
-    ) -> dict[str, torch.Tensor]:
+    def score(self, scene_embedding: torch.Tensor, k: int = 10) -> dict[str, torch.Tensor]:
         topk_dists, _ = self._knn_distances(scene_embedding, k)
         result: dict[str, torch.Tensor] = {
             "knn_mean": topk_dists.mean(dim=-1),
@@ -90,9 +86,7 @@ class LatentOODScorer:
             "knn_kth": topk_dists[:, -1],
         }
         if self._calibration:
-            quantiles = torch.tensor(
-                self._calibration["quantiles"], dtype=torch.float32
-            )
+            quantiles = torch.tensor(self._calibration["quantiles"], dtype=torch.float32)
             percentiles = torch.searchsorted(quantiles, result["knn_mean"].cpu())
             percentiles = percentiles.clamp(max=100).float().to(result["knn_mean"].device)
             result["percentile"] = percentiles
@@ -105,9 +99,7 @@ class LatentOODScorer:
             result["level"] = levels
         return result
 
-    def nearest(
-        self, scene_embedding: torch.Tensor, k: int = 5
-    ) -> list[list[dict]]:
+    def nearest(self, scene_embedding: torch.Tensor, k: int = 5) -> list[list[dict]]:
         topk_dists, topk_idx = self._knn_distances(scene_embedding, k)
         z = F.normalize(scene_embedding.float(), dim=-1)
         if z.ndim == 1:

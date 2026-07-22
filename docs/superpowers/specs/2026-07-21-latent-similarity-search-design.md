@@ -1,8 +1,8 @@
 # Latent Similarity Search Tool — Design Spec
 
-**Date:** 2026-07-21  
-**Author:** Cheng (Dio) Lin  
-**Goal:** Prove that encoder embeddings can find similar scenes between problem data and training data  
+**Date:** 2026-07-21
+**Author:** Cheng (Dio) Lin
+**Goal:** Prove that encoder embeddings can find similar scenes between problem data and training data
 **Users:** Lin (demo), Kawahara-san (DevOps, scaling)
 
 ---
