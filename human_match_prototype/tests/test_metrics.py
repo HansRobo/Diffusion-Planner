@@ -1,5 +1,6 @@
 # human_match_prototype/tests/test_metrics.py
 import numpy as np
+
 from human_match_prototype.metrics import coverage_metrics, derive_speed
 
 
@@ -40,3 +41,65 @@ def test_longitudinal_error_dominates_for_speed_mismatch():
 def test_derive_speed():
     v = derive_speed(straight(5.0)[:, :2])
     assert np.allclose(v, 5.0, atol=1e-6)
+
+
+from human_match_prototype.metrics import multi_human_metrics
+
+
+def test_multi_human_perfect_coverage():
+    """All humans identical to planner samples -> full coverage."""
+    base = straight(5.0)
+    humans = [base.copy() for _ in range(10)]
+    samples = np.stack([base.copy() for _ in range(8)])
+    m = multi_human_metrics(humans, samples, base)
+    assert m["n_humans"] == 10
+    assert m["dp_human_coverage_4s"] == 1.0
+    assert m["human_dp_coverage_4s"] == 1.0
+    assert m["human_spread_4s"] < 0.01
+
+
+def test_multi_human_no_coverage():
+    """Humans far from planner samples -> zero coverage."""
+    base = straight(5.0)
+    shifted = straight(5.0)
+    shifted[:, 1] += 50.0
+    humans = [shifted.copy() for _ in range(5)]
+    samples = np.stack([base.copy() for _ in range(8)])
+    m = multi_human_metrics(humans, samples, base)
+    assert m["dp_human_coverage_4s"] == 0.0
+    assert m["human_dp_coverage_4s"] == 0.0
+
+
+def test_multi_human_partial_coverage():
+    """Some humans close, some far."""
+    base = straight(5.0)
+    close = base.copy()
+    close[:, 0] += 0.1
+    far = base.copy()
+    far[:, 1] += 50.0
+    humans = [close, far]
+    samples = np.stack([base.copy() for _ in range(4)])
+    m = multi_human_metrics(humans, samples, base)
+    assert m["n_humans"] == 2
+    assert m["dp_human_coverage_4s"] == 0.5
+    assert m["human_dp_coverage_4s"] == 1.0
+
+
+def test_multi_human_typicality_typical():
+    """Test human is at the centroid of training humans."""
+    base = straight(5.0)
+    humans = [base.copy() for _ in range(20)]
+    for i, h in enumerate(humans):
+        h[:, 0] += (i - 10) * 0.1
+    samples = np.stack([base.copy()])
+    m = multi_human_metrics(humans, samples, base)
+    assert m["test_human_typicality_4s"] < 0.5
+
+
+def test_multi_human_empty():
+    """No matched humans -> NaN metrics."""
+    base = straight(5.0)
+    samples = np.stack([base.copy()])
+    m = multi_human_metrics([], samples, base)
+    assert m["n_humans"] == 0
+    assert np.isnan(m["dp_human_coverage_4s"])

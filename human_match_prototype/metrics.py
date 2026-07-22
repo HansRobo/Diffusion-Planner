@@ -1,5 +1,6 @@
 # human_match_prototype/metrics.py
 """Coverage metrics: is the human future covered by the planner sample cloud?"""
+
 import numpy as np
 
 DT = 0.1
@@ -44,9 +45,7 @@ def coverage_metrics(human: np.ndarray, samples: np.ndarray) -> dict[str, float]
         out[f"frac_close_{name}"] = float((ade < thr).mean())
         out[f"mismatch_{name}"] = float((ade >= thr).all())
         ends = s_xy[:, T - 1]
-        out[f"spread_{name}"] = float(
-            np.linalg.norm(ends - ends.mean(axis=0), axis=-1).mean()
-        )
+        out[f"spread_{name}"] = float(np.linalg.norm(ends - ends.mean(axis=0), axis=-1).mean())
         best = int(ade.argmin())
         lon, lat = _frenet_errors(h_xy[:T], s_xy[best, :T])
         out[f"best_lon_err_{name}"] = lon
@@ -58,4 +57,82 @@ def coverage_metrics(human: np.ndarray, samples: np.ndarray) -> dict[str, float]
         out[f"best_speed_err_{name}"] = float(
             np.abs(derive_speed(s_xy[best, :T]) - derive_speed(h_xy[:T])).mean()
         )
+    return out
+
+
+def multi_human_metrics(
+    human_futures: list[np.ndarray],
+    dp_samples: np.ndarray,
+    test_human: np.ndarray,
+) -> dict[str, float]:
+    """Compare DP sample cloud against multiple matched human trajectories.
+
+    human_futures: list of (80, 3) [x, y, yaw] in test-ego coords.
+    dp_samples: (N, 80, 3) planner samples.
+    test_human: (80, 3) the test frame's own human trajectory.
+    """
+    out: dict[str, float] = {"n_humans": len(human_futures)}
+    if not human_futures:
+        for name in HORIZONS:
+            for key in (
+                "human_spread",
+                "dp_human_coverage",
+                "human_dp_coverage",
+                "human_consensus",
+                "test_human_typicality",
+            ):
+                out[f"{key}_{name}"] = float("nan")
+        return out
+
+    h_stack = np.stack(human_futures)  # (M, 80, 3)
+    s_xy = dp_samples[:, :, :2]  # (N, 80, 2)
+
+    for name, T in HORIZONS.items():
+        thr = CLOSE_ADE_THRESHOLDS[name]
+        h_xy = h_stack[:, :T, :2]  # (M, T, 2)
+
+        # human_spread: mean distance of endpoints from centroid
+        h_ends = h_xy[:, T - 1]  # (M, 2)
+        centroid = h_ends.mean(axis=0)
+        out[f"human_spread_{name}"] = float(np.linalg.norm(h_ends - centroid, axis=-1).mean())
+
+        # dp_human_coverage: fraction of humans covered by at least one DP sample
+        covered_humans = 0
+        for h in h_xy:
+            ade_per_sample = np.linalg.norm(s_xy[:, :T] - h[None, :, :], axis=-1).mean(
+                axis=1
+            )  # (N,)
+            if ade_per_sample.min() < thr:
+                covered_humans += 1
+        out[f"dp_human_coverage_{name}"] = covered_humans / len(human_futures)
+
+        # human_dp_coverage: fraction of DP samples close to at least one human
+        covered_samples = 0
+        for s in s_xy:
+            ade_per_human = np.linalg.norm(h_xy - s[None, :T, :], axis=-1).mean(axis=1)  # (M,)
+            if ade_per_human.min() < thr:
+                covered_samples += 1
+        out[f"human_dp_coverage_{name}"] = covered_samples / len(dp_samples)
+
+        # human_consensus: low spread indicates consensus
+        out[f"human_consensus_{name}"] = float(out[f"human_spread_{name}"] < 3.0)
+
+        # test_human_typicality: Mahalanobis CDF of test human endpoint
+        test_end = test_human[:T, :2][-1]  # (2,)
+        if len(human_futures) >= 3:
+            cov = np.cov(h_ends.T)
+            if np.linalg.det(cov) > 1e-12:
+                inv_cov = np.linalg.inv(cov)
+                diff_test = test_end - centroid
+                test_d = float(np.sqrt(diff_test @ inv_cov @ diff_test))
+                human_diffs = h_ends - centroid
+                human_dists = np.array([float(np.sqrt(d @ inv_cov @ d)) for d in human_diffs])
+                out[f"test_human_typicality_{name}"] = float((human_dists < test_d).mean())
+            else:
+                test_d_eucl = np.linalg.norm(test_end - centroid)
+                human_eucl = np.linalg.norm(h_ends - centroid, axis=-1)
+                out[f"test_human_typicality_{name}"] = float((human_eucl < test_d_eucl).mean())
+        else:
+            out[f"test_human_typicality_{name}"] = float("nan")
+
     return out
