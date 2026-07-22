@@ -242,6 +242,9 @@ def model_training(args: TrainConfig):
             truncation_min_m=args.route_truncation_min_m,
             truncation_max_m=args.route_truncation_max_m,
             speed_limit_unknown_prob=args.speed_limit_unknown_prob,
+            geometry_noise_prob=args.route_geometry_noise_prob,
+            geometry_noise_std_m=args.route_geometry_noise_std_m,
+            head_trim_prob=args.route_head_trim_prob,
         )
     else:
         route_aug = None

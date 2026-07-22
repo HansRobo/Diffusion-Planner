@@ -122,3 +122,61 @@ def test_speed_limit_unknown_prob_zero_is_identity():
     out = aug(inputs)
     for k in expected:
         assert torch.equal(out[k], expected[k]), k
+
+
+def test_head_trim_shifts_segments_forward():
+    inputs = _make_route_inputs(num_valid=4, seg_len_m=50.0)
+    expected_seg1 = inputs["route_lanes"][0, 1].clone()
+    aug = RouteAugmentation(device="cpu", head_trim_prob=1.0)
+    out = aug(inputs)
+
+    # Old segment 1 is now at slot 0; one fewer valid segment; freed slot zeroed.
+    assert torch.equal(out["route_lanes"][0, 0], expected_seg1)
+    kept = out["route_lanes"].abs().sum(dim=(2, 3)) > 0
+    assert kept[0, :3].all() and not kept[0, 3:].any()
+    # Speed-limit tensors shift in lockstep.
+    assert out["route_lanes_has_speed_limit"][0, :3].all()
+    assert not out["route_lanes_has_speed_limit"][0, 3:].any()
+
+
+def test_head_trim_skipped_when_route_too_short():
+    # 2 valid segments < 3 -> trimming would leave too little intent; no-op.
+    inputs = _make_route_inputs(num_valid=2, seg_len_m=50.0)
+    expected = {k: v.clone() for k, v in inputs.items()}
+    aug = RouteAugmentation(device="cpu", head_trim_prob=1.0)
+    out = aug(inputs)
+    for k in expected:
+        assert torch.equal(out[k], expected[k]), k
+
+
+def test_geometry_noise_is_constant_lateral_offset_per_segment():
+    inputs = _make_route_inputs(num_valid=3, seg_len_m=50.0)
+    orig_route = inputs["route_lanes"].clone()
+    torch.manual_seed(0)
+    aug = RouteAugmentation(device="cpu", geometry_noise_prob=1.0, geometry_noise_std_m=1.0)
+    out = aug(inputs)
+    route = out["route_lanes"]
+
+    moved = 0
+    for seg in range(3):
+        delta = route[0, seg, :, :2] - orig_route[0, seg, :, :2]  # [V, 2]
+        # Constant within the segment.
+        assert torch.allclose(delta, delta[0].expand_as(delta), atol=1e-6)
+        # Purely lateral: route runs along +x, so dx == 0 and only y moves.
+        assert torch.allclose(delta[:, 0], torch.zeros_like(delta[:, 0]), atol=1e-6)
+        moved += int(delta[0].norm() > 1e-3)
+    assert moved == 3  # std=1.0 makes a zero draw practically impossible
+
+    # Direction channels and everything beyond xy stay bit-identical.
+    assert torch.equal(route[..., 2:], orig_route[..., 2:])
+    # Padding rows stay all-zero.
+    assert torch.all(route[0, 3:] == 0.0)
+
+
+def test_geometry_noise_leaves_other_tensors_untouched():
+    inputs = _make_route_inputs(num_valid=3, seg_len_m=50.0)
+    expected = {k: v.clone() for k, v in inputs.items() if k != "route_lanes"}
+    aug = RouteAugmentation(device="cpu", geometry_noise_prob=1.0, geometry_noise_std_m=1.0)
+    out = aug(inputs)
+    for k in expected:
+        assert torch.equal(out[k], expected[k]), k

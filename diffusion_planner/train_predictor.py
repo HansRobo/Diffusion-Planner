@@ -104,6 +104,24 @@ def get_args(args_list=None):
         default=0.1,
         help="per-scene probability of dropping speed limits to unknown (lanes + route)",
     )
+    parser.add_argument(
+        "--route_geometry_noise_prob",
+        type=float,
+        default=0.5,
+        help="per-sample probability of lateral route geometry noise",
+    )
+    parser.add_argument(
+        "--route_geometry_noise_std_m",
+        type=float,
+        default=0.15,
+        help="std [m] of the per-segment constant lateral route offset",
+    )
+    parser.add_argument(
+        "--route_head_trim_prob",
+        type=float,
+        default=0.1,
+        help="per-sample probability of dropping the first route segment (shifted forward)",
+    )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")

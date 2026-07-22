@@ -121,6 +121,56 @@ def run_checks(orig: dict, aug: dict, sl_aug: dict, truncate_m: float) -> list[s
     return failures
 
 
+def run_checks_medium(orig: dict, jittered: dict, trimmed: dict) -> list[str]:
+    """Checks for the medium-priority augmentations (geometry noise, head trim)."""
+    failures = []
+
+    def check(name, cond):
+        if not cond:
+            failures.append(name)
+
+    route_o = orig["route_lanes"]
+    valid_o = (route_o.abs().sum(dim=(2, 3)) > 0)[0]
+    n_valid = int(valid_o.sum())
+
+    # Geometry noise: constant per-segment offset, perpendicular to the segment
+    # direction; direction channels and all other tensors bit-identical.
+    route_j = jittered["route_lanes"]
+    for seg in torch.where(valid_o)[0].tolist():
+        pts_valid = route_o[0, seg, :, :_GEOM_DIM].abs().sum(-1) > 0
+        delta = (route_j[0, seg, :, :2] - route_o[0, seg, :, :2])[pts_valid]
+        # float32 rounding on coordinates hundreds of meters out leaves ~1e-4
+        # jitter on the recovered offset; anything below 1cm is "constant".
+        check(
+            f"noise constant within segment {seg}",
+            torch.allclose(delta, delta[0].expand_as(delta), atol=1e-2),
+        )
+        mean_dir = route_o[0, seg, pts_valid, 2:4].sum(0)
+        unit = mean_dir / mean_dir.norm().clamp_min(1e-6)
+        check(f"noise lateral in segment {seg}", bool(abs(float(delta[0] @ unit)) < 1e-2))
+    check("noise keeps dx/dy+attrs", torch.equal(route_j[..., 2:], route_o[..., 2:]))
+    for key in orig:
+        if key == "route_lanes":
+            continue
+        check(f"noise leaves {key} untouched", torch.equal(jittered[key], orig[key]))
+
+    # Head trim: with >= 3 valid segments every route tensor shifts one slot
+    # forward (freed slot zeroed); otherwise it is a strict no-op.
+    for key in ("route_lanes", "route_lanes_speed_limit", "route_lanes_has_speed_limit"):
+        t_o, t_t = orig[key], trimmed[key]
+        if n_valid >= 3:
+            expected = torch.cat([t_o[:, 1:], torch.zeros_like(t_o[:, :1])], dim=1)
+            check(f"trim shifts {key}", torch.equal(t_t, expected))
+        else:
+            check(f"trim no-op {key}", torch.equal(t_t, t_o))
+    for key in orig:
+        if key.startswith("route_lanes"):
+            continue
+        check(f"trim leaves {key} untouched", torch.equal(trimmed[key], orig[key]))
+
+    return failures
+
+
 def _valid_segment_points(route: torch.Tensor, seg: int) -> torch.Tensor:
     """Valid (non-padding) xy points of one route segment. route: [B, P, V, D]."""
     pts = route[0, seg]
@@ -243,6 +293,108 @@ def render_speed_limit(orig, sl_dropped, status, npz_name, out_path):
     plt.close(fig)
 
 
+def render_geometry_noise(orig, jittered, std_m, status, npz_name, out_path):
+    """Original (black dashed) vs jittered (orange) route centerline overlay.
+
+    Left: whole route. Right: zoom on the first segment where the lateral
+    shift is readable. Per-segment offsets are annotated in meters.
+    """
+    route_o = orig["route_lanes"]
+    route_j = jittered["route_lanes"]
+    valid_o = (route_o.abs().sum(dim=(2, 3)) > 0)[0]
+    segs = torch.where(valid_o)[0].tolist()
+
+    fig, axes = plt.subplots(1, 2, figsize=(20, 9))
+    for ax, title_segs in ((axes[0], segs), (axes[1], segs[:1])):
+        for seg in title_segs:
+            xy_o = _valid_segment_points(route_o, seg)
+            xy_j = _valid_segment_points(route_j, seg)
+            offset = float((xy_j[0] - xy_o[0]).norm())
+            ax.plot(
+                xy_o[:, 0], xy_o[:, 1], "k--", lw=2, label="original" if seg == segs[0] else None
+            )
+            ax.plot(
+                xy_j[:, 0],
+                xy_j[:, 1],
+                color="tab:orange",
+                lw=2,
+                label="jittered" if seg == segs[0] else None,
+            )
+            mid = xy_j[len(xy_j) // 2]
+            ax.annotate(
+                f"{offset:.2f}m",
+                xy=(float(mid[0]), float(mid[1])),
+                fontsize=10,
+                color="tab:orange",
+                fontweight="bold",
+            )
+        ax.plot(0, 0, marker="*", color="black", markersize=12)
+        ax.set_aspect("equal")
+        ax.grid(alpha=0.3)
+        ax.legend(loc="upper right")
+    axes[0].set_title(f"whole route: constant lateral offset per segment (std={std_m}m)")
+    first = _valid_segment_points(route_o, segs[0])
+    c = first.mean(0)
+    axes[1].set_xlim(float(c[0]) - 30, float(c[0]) + 30)
+    axes[1].set_ylim(float(c[1]) - 30, float(c[1]) + 30)
+    axes[1].set_title("zoom: first segment (label: offset magnitude)")
+    fig.suptitle(
+        f"route geometry noise   {npz_name}   [{status}]",
+        color="red" if "NG" in status else "green",
+    )
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=90, bbox_inches="tight")
+    plt.close(fig)
+
+
+def render_head_trim(orig, trimmed, status, npz_name, out_path):
+    """Original vs head-trimmed route with slot indices, on the scene render."""
+    route_o = orig["route_lanes"]
+    route_t = trimmed["route_lanes"]
+    valid_o = (route_o.abs().sum(dim=(2, 3)) > 0)[0]
+    valid_t = (route_t.abs().sum(dim=(2, 3)) > 0)[0]
+    n_orig, n_kept = int(valid_o.sum()), int(valid_t.sum())
+    trimmed_applied = n_kept < n_orig
+
+    fig, axes = plt.subplots(1, 2, figsize=(20, 9))
+    visualize_inputs(copy.deepcopy(orig), ax=axes[0])
+    visualize_inputs(copy.deepcopy(trimmed), ax=axes[1])
+    for seg in torch.where(valid_o)[0].tolist():
+        xy = _valid_segment_points(route_o, seg)
+        dropped = trimmed_applied and seg == 0
+        color = "tab:red" if dropped else "tab:green"
+        axes[0].plot(xy[:, 0], xy[:, 1], color=color, lw=3.5, alpha=0.6, zorder=20)
+        axes[0].annotate(
+            f"slot{seg}",
+            xy=(float(xy[0, 0]), float(xy[0, 1])),
+            fontsize=9,
+            color=color,
+            fontweight="bold",
+            zorder=21,
+        )
+    for seg in torch.where(valid_t)[0].tolist():
+        xy = _valid_segment_points(route_t, seg)
+        axes[1].plot(xy[:, 0], xy[:, 1], color="tab:green", lw=3.5, alpha=0.6, zorder=20)
+        axes[1].annotate(
+            f"slot{seg}",
+            xy=(float(xy[0, 0]), float(xy[0, 1])),
+            fontsize=9,
+            color="tab:green",
+            fontweight="bold",
+            zorder=21,
+        )
+    note = "red = trimmed first segment" if trimmed_applied else "no-op (fewer than 3 segments)"
+    axes[0].set_title(f"original ({n_orig} route segments)  {note}")
+    axes[1].set_title(f"after head trim ({n_kept} route segments, shifted to slot 0)")
+    fig.suptitle(
+        f"route head trim   {npz_name}   [{status}]",
+        color="red" if "NG" in status else "green",
+    )
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=90, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("npz_paths", type=Path, nargs="+")
@@ -252,6 +404,13 @@ def main():
         type=float,
         default=100.0,
         help="deterministic truncation budget (min == max) in meters",
+    )
+    parser.add_argument(
+        "--geom_noise_std",
+        type=float,
+        default=0.5,
+        help="lateral noise std [m] for the visualization (larger than the "
+        "training default so the shift is visible)",
     )
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -264,14 +423,21 @@ def main():
         speed_limit_unknown_prob=0.0,
     )
     sl_only_aug = RouteAugmentation(device="cpu", truncation_prob=0.0, speed_limit_unknown_prob=1.0)
+    noise_aug = RouteAugmentation(
+        device="cpu", geometry_noise_prob=1.0, geometry_noise_std_m=args.geom_noise_std
+    )
+    trim_aug = RouteAugmentation(device="cpu", head_trim_prob=1.0)
 
     any_fail = False
     for npz_path in args.npz_paths:
         orig = load_inputs(npz_path)
         truncated = trunc_aug(copy.deepcopy(orig))
         sl_dropped = sl_only_aug(copy.deepcopy(orig))
+        jittered = noise_aug(copy.deepcopy(orig))
+        trimmed = trim_aug(copy.deepcopy(orig))
 
         failures = run_checks(orig, truncated, sl_dropped, args.truncate_m)
+        failures += run_checks_medium(orig, jittered, trimmed)
         n_orig = int((orig["route_lanes"].abs().sum(dim=(2, 3)) > 0).sum())
         n_kept = int((truncated["route_lanes"].abs().sum(dim=(2, 3)) > 0).sum())
         status = "OK" if not failures else "NG: " + ", ".join(failures)
@@ -279,12 +445,29 @@ def main():
         any_fail |= bool(failures)
 
         # One before/after figure per augmentation type.
-        out_trunc = args.out_dir / f"{npz_path.stem}_truncation_check.png"
-        render_truncation(orig, truncated, args.truncate_m, status, npz_path.name, out_trunc)
-        print(f"  -> {out_trunc}")
-        out_sl = args.out_dir / f"{npz_path.stem}_speed_limit_check.png"
-        render_speed_limit(orig, sl_dropped, status, npz_path.name, out_sl)
-        print(f"  -> {out_sl}")
+        renders = (
+            (
+                "truncation",
+                lambda out: render_truncation(
+                    orig, truncated, args.truncate_m, status, npz_path.name, out
+                ),
+            ),
+            (
+                "speed_limit",
+                lambda out: render_speed_limit(orig, sl_dropped, status, npz_path.name, out),
+            ),
+            (
+                "geometry_noise",
+                lambda out: render_geometry_noise(
+                    orig, jittered, args.geom_noise_std, status, npz_path.name, out
+                ),
+            ),
+            ("head_trim", lambda out: render_head_trim(orig, trimmed, status, npz_path.name, out)),
+        )
+        for name, render in renders:
+            out = args.out_dir / f"{npz_path.stem}_{name}_check.png"
+            render(out)
+            print(f"  -> {out}")
 
     sys.exit(1 if any_fail else 0)
 
