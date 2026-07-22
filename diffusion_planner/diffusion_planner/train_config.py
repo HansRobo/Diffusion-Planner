@@ -70,6 +70,17 @@ class TrainConfig:
     route_geometry_noise_prob: float = 0.5
     route_geometry_noise_std_m: float = 0.15
     route_head_trim_prob: float = 0.1
+    # Lane dropout augmentation (docs/lane_augmentation_design.md)
+    use_lane_augment: bool = False
+    lane_truncation_prob: float = 0.5
+    lane_truncation_min_m: float = 50.0
+    lane_truncation_max_m: float = 100.0
+    lane_dropout_prob: float = 0.5
+    lane_dropout_ratio: float = 0.1
+    lane_geometry_noise_prob: float = 0.5
+    lane_geometry_noise_std_m: float = 0.15
+    lane_width_jitter_prob: float = 0.0
+    lane_width_jitter_std: float = 0.05
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True

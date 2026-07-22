@@ -20,6 +20,7 @@ from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
+from diffusion_planner.utils.lane_augmentation import LaneAugmentation
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
@@ -249,6 +250,22 @@ def model_training(args: TrainConfig):
     else:
         route_aug = None
 
+    if args.use_lane_augment:
+        lane_aug = LaneAugmentation(
+            device=args.device,
+            truncation_prob=args.lane_truncation_prob,
+            truncation_min_m=args.lane_truncation_min_m,
+            truncation_max_m=args.lane_truncation_max_m,
+            dropout_prob=args.lane_dropout_prob,
+            dropout_ratio=args.lane_dropout_ratio,
+            geometry_noise_prob=args.lane_geometry_noise_prob,
+            geometry_noise_std_m=args.lane_geometry_noise_std_m,
+            width_jitter_prob=args.lane_width_jitter_prob,
+            width_jitter_std=args.lane_width_jitter_std,
+        )
+    else:
+        lane_aug = None
+
     # prepare dataset
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
@@ -447,7 +464,7 @@ def model_training(args: TrainConfig):
 
         # training step
         train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug, route_aug
+            train_loader, diffusion_planner, optimizer, args, model_ema, aug, route_aug, lane_aug
         )
 
         valid_dict = validate_model(diffusion_planner, valid_loader, args)

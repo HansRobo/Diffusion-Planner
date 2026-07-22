@@ -5,6 +5,7 @@ from tqdm import tqdm
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.lane_augmentation import LaneAugmentation
 from diffusion_planner.utils.route_augmentation import RouteAugmentation
 from diffusion_planner.utils.train_utils import compute_grad_stats, get_epoch_mean_loss
 
@@ -41,6 +42,7 @@ def train_epoch(
     ema,
     aug: StatePerturbation = None,
     route_aug: RouteAugmentation = None,
+    lane_aug: LaneAugmentation = None,
 ):
     epoch_loss = []
 
@@ -59,8 +61,13 @@ def train_epoch(
 
         ego_future = inputs["ego_agent_future"]
         neighbors_future = inputs["neighbor_agents_future"]
-        # Route / speed-limit dropout runs before the state perturbation so the
-        # perturbation's collision checks see the augmented map.
+        # Lane augmentation must run before the route augmentation: its route
+        # protection mask matches lanes to route rows by exact equality, which
+        # only holds while the route tensors are still unmodified. Both run
+        # before the state perturbation so its collision checks see the
+        # augmented map.
+        if lane_aug is not None:
+            inputs = lane_aug(inputs)
         if route_aug is not None:
             inputs = route_aug(inputs)
         # Normalize to ego-centric

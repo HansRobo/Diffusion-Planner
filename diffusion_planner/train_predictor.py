@@ -122,6 +122,66 @@ def get_args(args_list=None):
         default=0.1,
         help="per-sample probability of dropping the first route segment (shifted forward)",
     )
+    parser.add_argument(
+        "--use_lane_augment",
+        default=False,
+        type=boolean,
+        help="enable lane truncation / dropout / geometry noise / width jitter augmentation",
+    )
+    parser.add_argument(
+        "--lane_truncation_prob",
+        type=float,
+        default=0.5,
+        help="per-sample probability of truncating far lanes",
+    )
+    parser.add_argument(
+        "--lane_truncation_min_m",
+        type=float,
+        default=50.0,
+        help="minimum kept lane radius [m]",
+    )
+    parser.add_argument(
+        "--lane_truncation_max_m",
+        type=float,
+        default=100.0,
+        help="maximum kept lane radius [m]",
+    )
+    parser.add_argument(
+        "--lane_dropout_prob",
+        type=float,
+        default=0.5,
+        help="per-sample probability of applying non-route lane dropout",
+    )
+    parser.add_argument(
+        "--lane_dropout_ratio",
+        type=float,
+        default=0.1,
+        help="per-lane drop ratio when lane dropout is applied",
+    )
+    parser.add_argument(
+        "--lane_geometry_noise_prob",
+        type=float,
+        default=0.5,
+        help="per-sample probability of lateral lane geometry noise (non-route lanes)",
+    )
+    parser.add_argument(
+        "--lane_geometry_noise_std_m",
+        type=float,
+        default=0.15,
+        help="std [m] of the per-segment constant lateral lane offset",
+    )
+    parser.add_argument(
+        "--lane_width_jitter_prob",
+        type=float,
+        default=0.0,
+        help="per-sample probability of lane boundary width jitter (non-route lanes)",
+    )
+    parser.add_argument(
+        "--lane_width_jitter_std",
+        type=float,
+        default=0.05,
+        help="std of the per-side boundary offset scale (clipped to [0.85, 1.15])",
+    )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")
