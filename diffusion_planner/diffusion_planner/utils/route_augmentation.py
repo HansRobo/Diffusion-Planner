@@ -90,13 +90,14 @@ class RouteAugmentation:
         seg_valid = route[..., :_GEOM_DIM].abs().sum(dim=(2, 3)) > 0  # [B, P]
         n_valid = seg_valid.sum(dim=1)  # [B]
         apply = (torch.rand(B, device=route.device) < self._head_trim_prob) & (n_valid >= 3)
-        if not bool(apply.any()):
-            return
         for key in _ROUTE_KEYS:
             t = inputs[key]
-            shifted = torch.cat([t[:, 1:], torch.zeros_like(t[:, :1])], dim=1)
-            view = apply.view(B, *([1] * (t.dim() - 1)))
-            inputs[key] = torch.where(view, shifted, t)
+            # In-place masked shift: the advanced-indexing gather materializes
+            # only the selected rows, so the transient allocation scales with
+            # the applied subset instead of the whole batch, and an all-False
+            # mask degenerates to an empty copy (no host sync needed to skip).
+            t[apply, :-1] = t[apply, 1:]
+            t[apply, -1] = 0
 
     def _truncate_route_tail(self, inputs: dict[str, torch.Tensor]) -> None:
         """Zero out route segments starting beyond a sampled arc-length budget.
@@ -161,10 +162,10 @@ class RouteAugmentation:
         Scene-wide (not per-segment) so the same lanelet never carries a limit
         in ``lanes`` while missing it in ``route_lanes``.
         """
-        B = inputs["route_lanes"].shape[0]
-        scene = torch.rand(B, device=self._device) < self._speed_limit_unknown_prob  # [B]
-        if not bool(scene.any()):
-            return
+        route = inputs["route_lanes"]
+        # Mask on the tensors' own device: an all-False mask makes the fills
+        # no-ops, so no host-device sync is spent on an early-out check.
+        scene = torch.rand(route.shape[0], device=route.device) < self._speed_limit_unknown_prob
         for prefix in ("lanes", "route_lanes"):
             inputs[f"{prefix}_speed_limit"][scene] = 0.0
             inputs[f"{prefix}_has_speed_limit"][scene] = False
