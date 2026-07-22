@@ -2,7 +2,7 @@
 
 Runs a checkpoint closed-loop over recorded routes (ego driven by the planner +
 PerfectTracker; neighbors replayed from the log via the autoware-style cursor),
-scores every step with a raw all-neighbor OBB overlap check (``score_step`` —
+scores every step with a raw all-neighbor OBB overlap check (``score_object_step`` —
 collision = the ego box overlaps ANY neighbor box, moving or static, including
 rear-end hits; no stopped-only / ego-speed / direction gates), and writes a ranked
 index of the segments where the model collides or nearly collides.
@@ -373,7 +373,7 @@ def main() -> None:
             danger_decluster_steps=args.danger_decluster_steps,
         )
         for key, res in zip(buf_keys, res_list):
-            row = {"route": key, **res.metrics}
+            row = {"route": key, **res}
             fout.write(json.dumps(row, default=float) + "\n")
             _keep(row)
             n_seg += 1

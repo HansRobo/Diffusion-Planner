@@ -728,7 +728,7 @@ def main() -> None:
             unstick_advance_m=args.unstick_advance_m,
         )
         for chunk, result in zip(kept_chunks, results):
-            row = {**_chunk_row(chunk), **result.metrics}
+            row = {**_chunk_row(chunk), **result}
             fout.write(json.dumps(row, sort_keys=True, default=float) + "\n")
             n_simulated += 1
         fout.flush()

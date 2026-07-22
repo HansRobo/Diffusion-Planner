@@ -27,18 +27,11 @@ from pathlib import Path
 import numpy as np
 import torch
 from diffusion_planner.dimensions import INPUT_T, POSE_DIM
-from diffusion_planner.model.guidance.collision import (
-    batch_signed_distance_rect,
-    center_rect_to_points,
-)
 
-from planner_metrics.geometry import (
-    _build_ego_bbox_corners,
-    _closest_points_between_rects,
-)
 from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.metrics import (
-    StepMetricContext,
+    score_object_step,
+    score_object_step_batched,
     score_red_light_step,
     score_road_border_step,
     strong_brake_mask,
@@ -348,161 +341,8 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
 
 
 # --------------------------------------------------------------------------- #
-# scoring (canonical OBB)
-# --------------------------------------------------------------------------- #
-def _ego_neighbor_obb(neighbors_live: np.ndarray, ego_shape: np.ndarray, device: str):
-    """Build ego corners (at origin) + valid-neighbor corners; return (ego_b, npc_corners, M).
-
-    Canonical OBB geometry (``_build_ego_bbox_corners`` + ``center_rect_to_points``).
-    Returns (None, None, 0) if there are no valid neighbors.
-    """
-    valid = np.abs(neighbors_live[:, :6]).sum(axis=1) > 0
-    if not valid.any():
-        return None, None, 0
-    nb = neighbors_live[valid]
-    M = nb.shape[0]
-    et = torch.zeros((1, 1, 4), dtype=torch.float32, device=device)
-    et[0, 0, 2] = 1.0
-    ego_c = _build_ego_bbox_corners(
-        et, torch.tensor(ego_shape[:3], dtype=torch.float32, device=device)
-    )[:, :1].reshape(1, 4, 2)
-    rects = torch.tensor(
-        np.stack([nb[:, 0], nb[:, 1], nb[:, 2], nb[:, 3], nb[:, 7], nb[:, 6]], axis=-1),
-        dtype=torch.float32,
-        device=device,
-    )  # x, y, cos, sin, length, width
-    return ego_c.expand(M, 4, 2), center_rect_to_points(rects), M
-
-
-def score_step(
-    neighbors_live: np.ndarray,
-    ego_shape: np.ndarray,
-    ego_speed: float,
-    device: str,
-) -> tuple[float, bool, int]:
-    """Min ego-neighbor clearance (m), collision flag, and #valid neighbors.
-
-    RAW oriented-bounding-box check against EVERY valid neighbor — moving and
-    static alike, with NO direction/rear-end or ego-speed gating. Collision =
-    the ego box overlaps any neighbor box (canonical ``batch_signed_distance_rect``
-    < 0); clearance = exact closest-point distance to the nearest neighbor
-    (``_closest_points_between_rects``). This deliberately differs from the
-    avoidance reward's ``compute_static_collision_penalty``, which only scores
-    *stopped* neighbors and filters out rear-end hits — for mining we want to
-    catch collisions with moving neighbors AND the ego being struck from behind.
-
-    neighbors_live: (320, 11) in live-ego frame [x,y,cos,sin,vx,vy,w,l,type...].
-    ``ego_speed`` is unused (kept for signature stability); collisions are counted
-    regardless of ego speed.
-    """
-    ego_b, npc_corners, M = _ego_neighbor_obb(neighbors_live, ego_shape, device)
-    if M == 0:
-        return float("inf"), False, 0
-    p1, p2 = _closest_points_between_rects(ego_b, npc_corners)
-    clr = (p1 - p2).norm(dim=-1)  # exact closest-point distance per neighbor
-    signed = batch_signed_distance_rect(ego_b, npc_corners)  # < 0 => overlap
-    return float(clr.min()), bool((signed < 0).any()), M
-
-
-def score_step_batched(
-    neighbors_list: list[np.ndarray],
-    ego_shapes: list[np.ndarray],
-    device: str,
-) -> list[tuple[float, bool, int, int]]:
-    """``score_step`` for many segments at once: ONE batched OBB pass over all pairs.
-
-    The OBB primitives (``_closest_points_between_rects`` / ``batch_signed_distance_rect``)
-    are per-pair independent, so we concatenate every segment's (ego, neighbor) box
-    pairs into one big batch, run the geometry once, then slice the result back per
-    segment. The (min_clearance, collision, n_valid) values are bit-identical to calling
-    ``score_step`` per segment (no cross-segment interaction), but this collapses N tiny
-    GPU launches per tick into one — including the box construction: ONE host->device
-    transfer + ONE ``center_rect_to_points`` for every neighbor across all segments (ego
-    corners built once when shapes match, else per segment and repeat-interleaved).
-    Returns a list aligned to the inputs:
-    (min_clearance, collision, n_valid_neighbors, collider_slot), where ``collider_slot``
-    is the ORIGINAL neighbor index (same order as the input ``neighbors_list`` rows, i.e.
-    the build()/slot_uuids order) achieving ``min_clearance`` — or -1 when no valid
-    neighbor. Callers use it to identify the actually-colliding agent (the OBB-closest one,
-    which can differ from the centroid-nearest slot 0)."""
-    valids = [np.abs(nb[:, :6]).sum(axis=1) > 0 for nb in neighbors_list]
-    counts = [int(v.sum()) for v in valids]
-    if sum(counts) == 0:
-        return [(float("inf"), False, 0, -1) for _ in neighbors_list]
-
-    # All valid neighbors across all segments -> one transfer -> one corner build.
-    nb_all = np.concatenate(
-        [nb[v] for nb, v in zip(neighbors_list, valids) if v.any()], axis=0
-    )  # (K, 11)
-    rects = torch.tensor(
-        np.stack(
-            [nb_all[:, 0], nb_all[:, 1], nb_all[:, 2], nb_all[:, 3], nb_all[:, 7], nb_all[:, 6]],
-            axis=-1,
-        ),
-        dtype=torch.float32,
-        device=device,
-    )  # (K, 6) x, y, cos, sin, length, width
-    npc_all = center_rect_to_points(rects)  # (K, 4, 2)
-
-    # Ego box at origin (heading +x), one per segment, repeated per its neighbors.
-    # K from the CPU list (avoids a per-tick GPU->CPU sync that int(counts_t.sum()) forces).
-    K = sum(counts)
-    et = torch.zeros((len(neighbors_list), 1, 4), dtype=torch.float32, device=device)
-    et[:, 0, 2] = 1.0
-    if all(np.array_equal(ego_shapes[0], sh) for sh in ego_shapes):
-        ego1 = _build_ego_bbox_corners(
-            et[:1], torch.tensor(ego_shapes[0][:3], dtype=torch.float32, device=device)
-        ).reshape(1, 4, 2)
-        ego_all = ego1.expand(K, 4, 2)
-    else:
-        ego_each = torch.stack(
-            [
-                _build_ego_bbox_corners(
-                    et[i : i + 1], torch.tensor(sh[:3], dtype=torch.float32, device=device)
-                ).reshape(4, 2)
-                for i, sh in enumerate(ego_shapes)
-            ],
-            dim=0,
-        )  # (B, 4, 2)
-        counts_t = torch.tensor(counts, device=device)
-        ego_all = ego_each.repeat_interleave(counts_t, dim=0)  # (K, 4, 2)
-
-    p1, p2 = _closest_points_between_rects(ego_all, npc_all)
-    # Move both result vectors to host ONCE, then slice/reduce per segment in numpy — avoids
-    # the per-segment GPU->CPU syncs that min()/any()/argmin() would each force. min/argmin are
-    # pure selection, so the per-segment values stay bit-identical to the on-device reduction.
-    clr_all = (p1 - p2).norm(dim=-1).cpu().numpy()  # (K,)
-    signed_neg = (batch_signed_distance_rect(ego_all, npc_all) < 0).cpu().numpy()  # (K,)
-    out: list[tuple[float, bool, int, int]] = []
-    off = 0
-    for seg_i, m in enumerate(counts):
-        if m == 0:
-            out.append((float("inf"), False, 0, -1))
-        else:
-            seg_clr = clr_all[off : off + m]
-            amin = int(seg_clr.argmin())  # index within this segment's VALID subset
-            # Map the valid-subset argmin back to the original neighbor slot (build() order).
-            collider_slot = int(np.flatnonzero(valids[seg_i])[amin])
-            out.append(
-                (
-                    float(seg_clr.min()),
-                    bool(signed_neg[off : off + m].any()),
-                    m,
-                    collider_slot,
-                )
-            )
-            off += m
-    return out
-
-
-# --------------------------------------------------------------------------- #
 # rollout — per-segment state so many segments can run in lock-step on the GPU
 # --------------------------------------------------------------------------- #
-@dataclass
-class SegmentResult:
-    metrics: dict
-
-
 @dataclass
 class _SegState:
     tl: RouteTimeline
@@ -570,7 +410,7 @@ class _SegState:
     unstick_teleport_after: int = 300
     ego_stuck: int = 0  # consecutive stuck steps (repeat AND ego <= STUCK_SPEED_MPS)
     expand_count: int = 0  # stage-1 radius-widen events this segment
-    n_snaps: int = 0
+    snap_count: int = 0
     # One-pass collision-scene save (set when run_segments_batched gets save_dir).
     # save_buf rolls the last save_max_scenes+1 (k, idx, live_pose, np_dict) snapshots
     # (deep enough for the min-movement window extension); it is CLEARED on an unstick
@@ -786,24 +626,39 @@ def _hold_turn_indicator(s: _SegState) -> None:
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
-def _score_into(s: _SegState, neighbors_live, device, timers, np_dict: dict | None = None):
-    """Score this step's object / road-border / red-light metrics into the segment state."""
+def _score_into(
+    s: _SegState,
+    neighbors_live,
+    device,
+    timers,
+    np_dict: dict | None = None,
+    *,
+    object_cl: float | None = None,
+    object_col: bool | None = None,
+):
+    """Score this step's object / road-border / red-light metrics into the segment state.
+
+    When ``object_cl`` / ``object_col`` are provided (batched path already scored
+    neighbors), reuse them instead of calling ``score_object_step`` again.
+    """
     with timers("score"):
-        cl, col, _ = score_step(neighbors_live, s.ego_shape, s.dyn.speed, device)
-        s.clearances[s.k] = cl
-        s.collisions[s.k] = col
+        if object_cl is not None and object_col is not None:
+            s.clearances[s.k] = object_cl
+            s.collisions[s.k] = object_col
+        else:
+            cl, col, _ = score_object_step(neighbors_live, s.ego_shape, device)
+            s.clearances[s.k] = cl
+            s.collisions[s.k] = col
         if np_dict is not None:
-            ctx = StepMetricContext(
-                np_dict=np_dict,
+            rb = score_road_border_step(np_dict, device=device)
+            s.rb_dists[s.k] = float(rb["rb_dist_m"])
+            red = score_red_light_step(
+                np_dict,
                 device=device,
-                k=int(s.k),
                 ego_speed_mps=float(s.dyn.speed),
                 live_pose=np.asarray(s.live_pose, dtype=np.float64),
                 ego_hist=np.asarray(s.ego_hist),
             )
-            rb = score_road_border_step(ctx, near_miss_thresh_m=float(s.near_miss_thresh))
-            s.rb_dists[s.k] = float(rb["rb_dist_m"])
-            red = score_red_light_step(ctx)
             s.red_light[s.k] = bool(red["red_light_violation"])
 
 
@@ -916,7 +771,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.in_episode = False
                 s.prev_max_idx = cur.max_idx_reached
                 s.ego_stuck = 0
-                s.n_snaps += 1
+                s.snap_count += 1
 
 
 def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers, np_dict=None):
@@ -958,8 +813,8 @@ def _clearance_stats(values: np.ndarray) -> dict:
     p5 (not p95): clearance is a nearness quantity — the dangerous tail is the
     low end, same spirit as min.
 
-    Also attaches an in-memory ``_tdigest`` (stripped before jsonl) so aggregate
-    can merge an approximate global p5 without retaining raw samples.
+    Also attaches ``_tdigest`` (kept in segments.jsonl) so aggregate / shard merge
+    can pool an approximate global p5 without retaining raw samples.
     """
     finite = values[np.isfinite(values)]
     if finite.size == 0:
@@ -979,7 +834,7 @@ def _clearance_stats(values: np.ndarray) -> dict:
     return out
 
 
-def _finalize(s: _SegState) -> SegmentResult:
+def _finalize(s: _SegState) -> dict:
     cl = s.clearances[: s.k]
     finite = np.isfinite(cl)
     rb = s.rb_dists[: s.k]
@@ -992,12 +847,12 @@ def _finalize(s: _SegState) -> SegmentResult:
     rb_miss = rb_finite & (rb <= s.near_miss_thresh)
     red_mask = s.red_light[: s.k]
     brake_mask = strong_brake_mask(accels, thresh_mps2=float(s.strong_brake_mps2))
-    metrics = {
+    return {
         "segment": [int(s.start), int(s.end)],
         "n_steps_run": int(s.k),
         "terminated": s.terminated,
         "object": {
-            "near_miss_thresh_m": float(s.near_miss_thresh),
+            "miss_thresh_m": float(s.near_miss_thresh),
             "collision_steps": int(obj_coll.sum()),
             "collision_count": _event_count(obj_coll),
             "miss_steps": int(obj_miss.sum()),
@@ -1005,7 +860,7 @@ def _finalize(s: _SegState) -> SegmentResult:
             **_clearance_stats(cl),
         },
         "road_border": {
-            "near_miss_thresh_m": float(s.near_miss_thresh),
+            "miss_thresh_m": float(s.near_miss_thresh),
             "collision_steps": int(rb_coll.sum()),
             "collision_count": _event_count(rb_coll),
             "miss_steps": int(rb_miss.sum()),
@@ -1022,14 +877,12 @@ def _finalize(s: _SegState) -> SegmentResult:
             "count": _event_count(brake_mask),
         },
         "reproducer": {
-            # n_snaps kept as control-flow counter; exported as snap_count.
             "expand_count": int(s.expand_count),
-            "snap_count": int(s.n_snaps),
+            "snap_count": int(s.snap_count),
             "normal_steps": int(s.cursor.normal_steps),
             "repeat_steps": int(s.cursor.repeat_steps),
         },
     }
-    return SegmentResult(metrics=metrics)
 
 
 # --------------------------------------------------------------------------- #
@@ -1468,7 +1321,7 @@ def render_segment(
     tracking: every step (replan ticks included) places the ego DIRECTLY on the model's predicted
     world pose, so the realized trajectory exactly follows the predicted polyline — no Euler /
     heading-snap drift and no MPC physical smoothing.
-    Returns the SegmentResult metrics.
+    Returns the segment metrics dict.
     """
     from pathlib import Path
 
@@ -1543,7 +1396,7 @@ def render_segment(
                         "ego": [float(s.live_pose[0]), float(s.live_pose[1])],
                         "dist_goal": float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)),
                         "max_idx_reached": int(s.cursor.max_idx_reached),
-                        "n_snaps": int(s.n_snaps),
+                        "snap_count": int(s.snap_count),
                     }
                 )
                 + "\n"
@@ -1570,7 +1423,7 @@ def render_segment(
                     "state": s.cursor.state,
                     "state_run_steps": int(s.cursor.state_run_steps),
                     "expand_count": int(s.expand_count),
-                    "n_snaps": int(s.n_snaps),
+                    "snap_count": int(s.snap_count),
                 }
             )
             + "\n"
@@ -1643,15 +1496,15 @@ def render_segment(
                 view_half_m=view_half_m,
             )
         _score_into(s, neighbors_live, device, timers, np_dict=np_dict)
-        snaps_before = s.n_snaps
+        snaps_before = s.snap_count
         _advance_step(s, pred_cur, idx, device, timers, override=override)
-        if s.n_snaps > snaps_before:
+        if s.snap_count > snaps_before:
             # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
             # world location, so executing it next step would drag the ego right back. Invalidate
             # it to force a fresh inference at the snapped pose (else the snap never sticks).
             plan_world = None
     dbg.close()
-    return _finalize(s).metrics
+    return _finalize(s)
 
 
 @torch.no_grad()
@@ -1696,7 +1549,7 @@ def run_segments_batched(
     danger_credit_windows: dict[str, dict[str, int | float]] | None = None,
     danger_decluster_steps: int = 10,
     danger_manifest_callback=None,
-) -> list[SegmentResult]:
+) -> list[dict]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
     work_units: list of (RouteTimeline, start, end). Processed in chunks of
@@ -1741,7 +1594,7 @@ def run_segments_batched(
             f"save_max_scenes ({save_max_scenes}) must be >= save_pre_steps + 1 "
             f"({save_pre_steps + 1}); otherwise the saved window is silently truncated."
         )
-    results: list[SegmentResult] = []
+    results: list[dict] = []
     pool = ThreadPoolExecutor(max_workers=max(1, n_build_threads))
     try:
         for c0 in range(0, len(work_units), batch_size):
@@ -1891,7 +1744,7 @@ def run_segments_batched(
                         ti_pred = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
                     # Score ALL segments in one batched OBB pass, then advance each.
                     with timers("score"):
-                        score_list = score_step_batched(
+                        score_list = score_object_step_batched(
                             [b[2] for b in built], [b[0].ego_shape for b in built], device
                         )
                     danger_rows = (
@@ -1946,22 +1799,15 @@ def run_segments_batched(
                     ) in enumerate(zip(built, score_list)):
                         danger_row = danger_rows[row_idx] if danger_rows else None
                         realized_row = realized_rows[row_idx] if realized_rows else None
-                        s.clearances[s.k] = cl
-                        s.collisions[s.k] = col
-                        ctx = StepMetricContext(
+                        _score_into(
+                            s,
+                            nb,
+                            device,
+                            timers,
                             np_dict=_np,
-                            device=device,
-                            k=int(s.k),
-                            ego_speed_mps=float(s.dyn.speed),
-                            live_pose=np.asarray(s.live_pose, dtype=np.float64),
-                            ego_hist=np.asarray(s.ego_hist),
+                            object_cl=float(cl),
+                            object_col=bool(col),
                         )
-                        rb = score_road_border_step(
-                            ctx, near_miss_thresh_m=float(s.near_miss_thresh)
-                        )
-                        s.rb_dists[s.k] = float(rb["rb_dist_m"])
-                        red = score_red_light_step(ctx)
-                        s.red_light[s.k] = bool(red["red_light_violation"])
                         # One-pass save: buffer this step, then dump the window on the
                         # FIRST collision — from THIS run, so the scenes match the hit.
                         if s.save_buf is not None:
@@ -2152,7 +1998,7 @@ def run_segments_batched(
                             # may have <80 clear steps before it, but a slightly-later step in the
                             # same episode often has a clean 80-step approach), then stop for that
                             # episode. The colliding vehicle is the OBB-CLOSEST neighbor at contact
-                            # (score_step_batched returns its slot, which can differ from the
+                            # (score_object_step_batched returns its slot, which can differ from the
                             # centroid-nearest slot 0 for long/rotated boxes), so its UUID is
                             # suuid[collider_slot]. Each save -> its own per-episode dir tagged by
                             # the save step. Gates (t0-clean / ego-moved / min-pre-frames) still
@@ -2214,7 +2060,7 @@ def run_segments_batched(
                                         s.saved_collision = True  # recorded-mode one-save latch
                                         s.last_collision_uuid = colliding_uuid
                     for i, (s, _np, nb, idx, _suuid, _wbu) in enumerate(built):
-                        prev_snaps = s.n_snaps
+                        prev_snaps = s.snap_count
                         _advance_step(s, preds[i], idx, device, timers)
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved
@@ -2223,7 +2069,7 @@ def run_segments_batched(
                         s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
                         # Clear the buffer on an unstick teleport: pre-jump frames belong
                         # to a different ego path and must never enter a saved window.
-                        if s.save_buf is not None and s.n_snaps > prev_snaps:
+                        if s.save_buf is not None and s.snap_count > prev_snaps:
                             s.save_buf.clear()
                             s.last_snap_step = s.k
                 active = [s for s in active if not s.done]
@@ -2389,13 +2235,9 @@ def _min_clearance_any(neighbors_live: np.ndarray, ego_shape: np.ndarray, device
 
     Raw distance to the nearest neighbor of any kind (moving or static, any
     direction) — the collision trigger for extraction ("<= thresh m to a
-    neighbor"). Same all-neighbor geometry score_step uses.
+    neighbor"). Same all-neighbor geometry ``score_object_step`` uses.
     """
-    ego_b, npc_corners, M = _ego_neighbor_obb(neighbors_live, ego_shape, device)
-    if M == 0:
-        return float("inf")
-    p1, p2 = _closest_points_between_rects(ego_b, npc_corners)
-    return float((p1 - p2).norm(dim=-1).min())
+    return score_object_step(neighbors_live, ego_shape, device)[0]
 
 
 def _future_to_4col(arr: np.ndarray) -> np.ndarray:

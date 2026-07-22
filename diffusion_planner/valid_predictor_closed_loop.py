@@ -6,7 +6,7 @@ CLOSED LOOP through ``scenario_generation``: each tick the model predicts the eg
 trajectory, ``PerfectTracker`` advances the ego one step along it, the recorded
 neighbors are replayed from the log via the Perception-Reproducer cursor, and the
 realized ego footprint is scored against those neighbors with the canonical OBB
-(``score_step`` -> collision / near-miss / min clearance).
+(``score_object_step`` -> collision / near-miss / min clearance).
 
 A *route* = one bag-prefix group of consecutive 10 Hz NPZ frames (``RouteTimeline``);
 each route is rolled out whole with ``render_segment`` (one GPU forward per tick), which BOTH
@@ -165,7 +165,9 @@ def _run_shard(rank, num_workers, gpu_ids, model_path, npz_root, out_dir, knobs)
     )
 
 
-def _merge_shards(out_dir: Path, npz_root, near_miss_thresh: float) -> dict:
+def _merge_shards(
+    out_dir: Path, npz_root, near_miss_thresh: float, *, strong_brake_mps2: float
+) -> dict:
     """Aggregate every worker's segments_{rank}.jsonl into one summary and write summary.json
     (the videos already live in the shared out_dir, route keys being globally unique)."""
     from scenario_generation.closed_loop_eval import aggregate
@@ -174,7 +176,7 @@ def _merge_shards(out_dir: Path, npz_root, near_miss_thresh: float) -> dict:
     for f in sorted(out_dir.glob("segments_*.jsonl")):
         rows += [json.loads(ln) for ln in f.read_text().splitlines() if ln.strip()]
 
-    summary = aggregate(rows, near_miss_thresh)
+    summary = aggregate(rows, near_miss_thresh, strong_brake_mps2=strong_brake_mps2)
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len({r["route"] for r in rows})
     summary["video_mp4s"] = sorted(str(p) for p in out_dir.glob("*.mp4"))
@@ -224,60 +226,22 @@ def main() -> None:
             nprocs=nproc,
             join=True,
         )
-        summary = _merge_shards(out_dir, args.npz_root, args.near_miss_thresh)
+        summary = _merge_shards(
+            out_dir,
+            args.npz_root,
+            args.near_miss_thresh,
+            strong_brake_mps2=args.strong_brake_mps2,
+        )
         summary["elapsed_sec"] = time.perf_counter() - t0
 
     summary["model_path"] = str(args.model_path)
 
+    from scenario_generation.closed_loop_eval import format_summary_lines
+
     n_seg = summary["n_segments"]
-    obj = summary["object"]
-    rb = summary["road_border"]
-    red = summary["red_light_violation"]
-    brake = summary["strong_brake"]
-    repro = summary["reproducer"]
     print(f"\n=== closed-loop validation: {n_seg} segments in {summary['elapsed_sec']:.1f}s ===")
-    print(
-        f"object collision: {obj['collision_segments']}/{n_seg} segments "
-        f"(rate {obj['collision_segment_rate']:.4f}), "
-        f"{obj['collision_steps']} steps (rate {obj['collision_step_rate']:.6f}), "
-        f"{obj['collision_count']} events"
-    )
-    print(
-        f"object miss (<= {obj['near_miss_thresh_m']} m): "
-        f"{obj['miss_segments']}/{n_seg} segments "
-        f"(rate {obj['miss_segment_rate']:.4f}), {obj['miss_steps']} steps, "
-        f"{obj['miss_count']} events"
-    )
-    print(
-        f"road_border collision: {rb['collision_segments']}/{n_seg} segments, "
-        f"{rb['collision_steps']} steps, {rb['collision_count']} events"
-    )
-    print(
-        f"road_border miss (<= {rb['near_miss_thresh_m']} m): "
-        f"{rb['miss_segments']}/{n_seg} segments, {rb['miss_steps']} steps, "
-        f"{rb['miss_count']} events"
-    )
-    print(
-        f"red_light_violation: {red['segments']}/{n_seg} segments "
-        f"(rate {red['segment_rate']:.4f}), {red['steps']} steps, {red['count']} events"
-    )
-    print(
-        f"strong-brake (<= {brake['thresh_mps2']} m/s^2): "
-        f"{brake['segments']}/{n_seg} segments "
-        f"(rate {brake['segment_rate']:.4f}), {brake['steps']} steps, "
-        f"{brake['count']} events"
-    )
-    print(
-        f"object clearance min/mean/p5="
-        f"{obj['clearance_min_m']:.3f}/{obj['clearance_mean_m']:.3f}/{obj['clearance_p5_m']:.3f} m  "
-        f"road_border clearance min/mean/p5="
-        f"{rb['clearance_min_m']:.3f}/{rb['clearance_mean_m']:.3f}/{rb['clearance_p5_m']:.3f} m"
-    )
-    print(
-        f"reproducer snap_count={repro['snap_count']} expand_count={repro['expand_count']} "
-        f"repeat_step_rate={repro['repeat_step_rate']:.4f}  "
-        f"terminated={summary['terminated_counts']}"
-    )
+    for line in format_summary_lines(summary):
+        print(line)
     print(f"videos: one <route>.mp4 per route in {out_dir}")
 
 

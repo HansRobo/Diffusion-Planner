@@ -114,13 +114,13 @@ def test_unstick_jump_ego_past_uses_recorded_npz_history(tmp_path):
         ego_hist_before = s.ego_hist.copy()
         s.cursor.last_was_repeat = True  # stuck repeating (see module docstring)
         _post_step(s, pred, neighbors, idx=i, device="cpu", timers=timers)
-        if s.n_snaps > 0:
+        if s.snap_count > 0:
             break
     else:
         pytest.fail("unstick never fired on the synthetic stalled route")
 
     # The teleport must have been counted on the rollout as an observable event.
-    assert s.n_snaps == 1
+    assert s.snap_count == 1
 
     # The snap copied a recorded GT pose into live_pose; find which frame.
     matches = np.where(np.all(np.isclose(tl.poses, s.live_pose), axis=1))[0]
@@ -169,13 +169,13 @@ def test_unstick_widens_radius_before_teleporting(tmp_path):
         s.cursor.last_was_repeat = True  # stuck repeating (see module docstring)
         _advance_step(s, pred, idx=i, device="cpu", timers=timers)
     assert s.cursor.search_radius == base_r * mult, "stuck ego must widen the cursor radius"
-    assert s.n_snaps == 0, "teleport must be deferred while only the radius has been widened"
+    assert s.snap_count == 0, "teleport must be deferred while only the radius has been widened"
     assert s.expand_count == 1, "stage-1 widen must be counted as an expand event"
 
     # One more stuck step crosses unstick_after + unstick_teleport_after -> the teleport fires,
     # and a fresh start restores the nominal radius.
     _advance_step(s, pred, idx=after + teleport_after - 1, device="cpu", timers=timers)
-    assert s.n_snaps == 1, "still-stuck ego must teleport after the grace window"
+    assert s.snap_count == 1, "still-stuck ego must teleport after the grace window"
     assert s.cursor.search_radius == base_r, "teleport restores the nominal search_radius"
 
 
@@ -208,7 +208,7 @@ def test_stuck_requires_repeat_not_just_stopped(tmp_path):
         s.cursor.last_was_repeat = False
         _advance_step(s, pred, idx=i, device="cpu", timers=timers)
     assert s.ego_stuck == 0
-    assert s.expand_count == 0 and s.n_snaps == 0
+    assert s.expand_count == 0 and s.snap_count == 0
 
 
 def test_step_sets_repeat_state_and_counters(tmp_path):
@@ -268,7 +268,7 @@ def test_finalize_strong_brake_steps_and_count(tmp_path):
     # Mask: F T T F F F T  -> steps=3, count=2 after debounce.
     s.k = 7
     s.accels[:7] = np.array([0.0, -5.0, -4.5, 0.0, 0.0, 0.0, -6.0], dtype=np.float32)
-    metrics = _finalize(s).metrics
+    metrics = _finalize(s)
     assert metrics["strong_brake"]["steps"] == 3
     assert metrics["strong_brake"]["count"] == 2
 

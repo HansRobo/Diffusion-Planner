@@ -170,13 +170,14 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     for mp4 in summary["video_mp4s"]:
         log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
     wandb.log(log, step=epoch + 1)
-    obj = summary["object"]
+    from scenario_generation.closed_loop_eval import format_summary_lines
+
     print(
         f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
-        f"{summary['elapsed_sec']:.1f}s  "
-        f"obj_coll_seg_rate={obj['collision_segment_rate']:.3f}  "
-        f"min_clr={obj['clearance_min_m']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+        f"{summary['elapsed_sec']:.1f}s  -> {len(summary['video_mp4s'])} video(s)"
     )
+    for line in format_summary_lines(summary):
+        print(f"  {line}")
 
 
 def model_training(args: TrainConfig):
