@@ -72,7 +72,7 @@ def multi_human_metrics(
     test_human: (80, 3) the test frame's own human trajectory.
     """
     out: dict[str, float] = {"n_humans": len(human_futures)}
-    if not human_futures:
+    if not human_futures or len(dp_samples) == 0:
         for name in HORIZONS:
             for key in (
                 "human_spread",

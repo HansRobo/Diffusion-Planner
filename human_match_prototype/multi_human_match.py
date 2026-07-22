@@ -3,7 +3,6 @@
 import argparse
 import fcntl
 import hashlib
-import json
 import math
 import subprocess
 from collections import defaultdict
@@ -162,13 +161,13 @@ def run_multi_human(
         npz_path = row["npz_path"]
         test_sidecar = read_sidecar(npz_path)
         if test_sidecar is None:
-            multi_rows.append({"n_humans": 0})
+            multi_rows.append(multi_human_metrics([], np.empty((0, 80, 3)), np.empty((80, 3))))
             continue
 
         point = lanelet2.core.BasicPoint2d(test_sidecar["x"], test_sidecar["y"])
         nearest = lanelet2.geometry.findNearest(ll_layer, point, 1)
         if not nearest:
-            multi_rows.append({"n_humans": 0})
+            multi_rows.append(multi_human_metrics([], np.empty((0, 80, 3)), np.empty((80, 3))))
             continue
         test_ll_id = nearest[0][1].id
 
@@ -211,9 +210,7 @@ def run_multi_human(
         from human_match_prototype.sampler import TrajectorySampler
 
         if not hasattr(run_multi_human, "_sampler"):
-            from pathlib import Path as _P
-
-            _model = _P("/opt/autoware/mlmodels/diffusion_planner_for_x2")
+            _model = Path("/opt/autoware/mlmodels/diffusion_planner_for_x2")
             run_multi_human._sampler = TrajectorySampler(
                 str(_model / "args.json"), str(_model / "diffusion_planner.onnx")
             )
