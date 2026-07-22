@@ -26,6 +26,7 @@ from diffusion_planner.utils.onnx_export import (
     export_onnx,
     onnx_export_backends,
 )
+from diffusion_planner.validate_model import compute_plantf_mode_metrics
 
 NUM_MODES = 3
 HIDDEN_DIM = 32
@@ -282,3 +283,33 @@ def test_velocity_representation_rejected():
     config.use_velocity_representation = True
     with pytest.raises(NotImplementedError):
         Diffusion_Planner(config)
+
+
+def test_mode_metrics_separate_candidate_quality_from_mode_selection():
+    """A good oracle candidate with the wrong selected mode must have low
+    minADE but worse top-1 ADE and zero mode-selection accuracy."""
+    normalizer = StateNormalizer(
+        mean=torch.zeros(1, 1, POSE_DIM),
+        std=torch.full((1, 1, POSE_DIM), 2.0),
+    )
+    ego_future = torch.zeros(2, OUTPUT_T, POSE_DIM)
+    trajectory_world = torch.zeros(2, NUM_MODES, OUTPUT_T, POSE_DIM)
+
+    # sample 0: mode 1 is exact but the logits select mode 0, one metre away
+    trajectory_world[0, 0, :, 0] = 1.0
+    # sample 1: mode 2 is exact and selected
+    trajectory_world[1, 0, :, 0] = 3.0
+    trajectory_world[1, 1, :, 0] = 2.0
+    probability = torch.tensor([[10.0, 0.0, 0.0], [0.0, 0.0, 10.0]])
+    trajectory_norm = normalizer(trajectory_world)
+
+    metrics = compute_plantf_mode_metrics(trajectory_norm, probability, ego_future, normalizer)
+
+    assert torch.allclose(metrics["plantf_min_ade_k"], torch.zeros(2))
+    assert torch.allclose(metrics["plantf_min_fde_k"], torch.zeros(2))
+    assert torch.allclose(metrics["plantf_top1_ade"], torch.tensor([1.0, 0.0]))
+    assert torch.allclose(metrics["plantf_top1_fde"], torch.tensor([1.0, 0.0]))
+    assert torch.equal(metrics["plantf_mode_accuracy"], torch.tensor([0.0, 1.0]))
+    assert torch.equal(metrics["plantf_mode_usage_0"], torch.tensor([1.0, 0.0]))
+    assert torch.equal(metrics["plantf_mode_usage_2"], torch.tensor([0.0, 1.0]))
+    assert torch.equal(metrics["plantf_miss_rate_2m"], torch.zeros(2))
