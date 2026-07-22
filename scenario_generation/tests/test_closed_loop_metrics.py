@@ -109,8 +109,13 @@ def test_road_border_step_near_border_counts_miss():
 
 
 def test_strong_brake_mask():
-    mask = strong_brake_mask(np.array([0.0, -5.0, -4.0, -3.9], dtype=np.float32), thresh_mps2=-4.0)
-    assert mask.tolist() == [False, True, True, False]
+    # Isolated spike (-5) does not count; only the 2nd frame of a consecutive pair does.
+    # Uses an explicit thresh (not the default) so the fixture values stay readable.
+    mask = strong_brake_mask(
+        np.array([0.0, -5.0, -4.0, -3.9, -6.0, -5.0], dtype=np.float32),
+        thresh_mps2=-4.0,
+    )
+    assert mask.tolist() == [False, False, True, False, False, True]
 
 
 def _segment_row(**overrides) -> dict:
@@ -145,7 +150,12 @@ def _segment_row(**overrides) -> dict:
             TDIGEST_KEY: tdigest_dict_from_values(rb_vals),
         },
         "red_light_violation": {"steps": 1, "count": 1},
-        "strong_brake": {"thresh_mps2": -4.0, "steps": 0, "count": 0},
+        "strong_brake": {
+            "thresh_mps2": -2.5,
+            "strongest_mps2": float("inf"),
+            "steps": 0,
+            "count": 0,
+        },
         "reproducer": {
             "expand_count": 1,
             "snap_count": 0,
@@ -161,7 +171,7 @@ def test_aggregate_nested_keeps_tdigest_in_json():
     from scenario_generation.metrics.tdigest import TDIGEST_KEY
 
     rows = [_segment_row()]
-    summary = aggregate(rows, near_miss_thresh=0.5, strong_brake_mps2=-4.0)
+    summary = aggregate(rows, near_miss_thresh=0.5, strong_brake_mps2=-2.5)
     assert summary["object"]["collision_steps"] == 1
     assert summary["object"]["miss_count"] == 1
     assert summary["object"]["miss_thresh_m"] == 0.5
@@ -173,6 +183,7 @@ def test_aggregate_nested_keeps_tdigest_in_json():
     assert summary["red_light_violation"]["count"] == 1
     assert summary["reproducer"]["expand_count"] == 1
     assert abs(summary["reproducer"]["repeat_step_rate"] - 0.25) < 1e-9
+    assert summary["strong_brake"]["strongest_mps2"] == float("inf")
     # Human-readable segments.jsonl strips digests; in-memory rows keep them.
     cleaned = metrics_for_json(rows[0])
     assert TDIGEST_KEY not in cleaned["object"]
@@ -214,7 +225,7 @@ def test_aggregate_missing_category_fails():
     bad = _segment_row()
     del bad["object"]
     with pytest.raises(KeyError, match="object"):
-        aggregate([bad], near_miss_thresh=0.5, strong_brake_mps2=-4.0)
+        aggregate([bad], near_miss_thresh=0.5, strong_brake_mps2=-2.5)
 
 
 def test_merge_shards_defers_summary_write(tmp_path):
@@ -238,7 +249,7 @@ def test_merge_shards_defers_summary_write(tmp_path):
     side = tdigest_sidecar_row(row)
     assert side is not None
     (tmp_path / "tdigests_0.jsonl").write_text(json.dumps(side) + "\n")
-    summary = mod._merge_shards(tmp_path, tmp_path, 0.5, strong_brake_mps2=-4.0)
+    summary = mod._merge_shards(tmp_path, tmp_path, 0.5, strong_brake_mps2=-2.5)
     assert not (tmp_path / "summary.json").exists()
     summary["elapsed_sec"] = 1.25
     summary["model_path"] = "/tmp/model.pth"
@@ -246,7 +257,7 @@ def test_merge_shards_defers_summary_write(tmp_path):
     written = json.loads((tmp_path / "summary.json").read_text())
     assert written["elapsed_sec"] == 1.25
     assert written["model_path"] == "/tmp/model.pth"
-    assert written["strong_brake"]["thresh_mps2"] == -4.0
+    assert written["strong_brake"]["thresh_mps2"] == -2.5
     assert np.isfinite(written["object"]["clearance_p5_m"])
 
 

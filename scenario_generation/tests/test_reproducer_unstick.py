@@ -316,8 +316,8 @@ def test_event_count_rising_edges():
 
 
 def test_finalize_strong_brake_steps_and_count(tmp_path):
-    """``strong_brake.steps`` counts steps with accel <= threshold; ``strong_brake.count`` is
-    the number of discrete braking events (debounced rising edges)."""
+    """``strong_brake.steps`` needs two consecutive over-threshold frames;
+    ``strong_brake.count`` is the number of discrete braking events (debounced rising edges)."""
     from scenario_generation.reproducer_rollout import _finalize
 
     tl = _make_route(tmp_path)
@@ -333,15 +333,17 @@ def test_finalize_strong_brake_steps_and_count(tmp_path):
         max_stuck_steps=0,
         timers=timers,
         max_steps=1000,
-        strong_brake_mps2=-4.0,
+        strong_brake_mps2=-2.5,
     )
-    # Two braking bursts separated by 3 non-brake frames (>= clear_frames) -> 2 events.
-    # Mask: F T T F F F T  -> steps=3, count=2 after debounce.
+    # Raw over-thresh: F T T F F F T  — consecutive mask: F F T F F F F
+    # One sustained pair -> steps=1, count=1. Trailing single-frame spike ignored.
     s.k = 7
     s.accels[:7] = np.array([0.0, -5.0, -4.5, 0.0, 0.0, 0.0, -6.0], dtype=np.float32)
     metrics = _finalize(s)
-    assert metrics["strong_brake"]["steps"] == 3
-    assert metrics["strong_brake"]["count"] == 2
+    assert metrics["strong_brake"]["steps"] == 1
+    assert metrics["strong_brake"]["count"] == 1
+    # Mask keeps only the 2nd frame of the consecutive pair (-4.5); lone -6.0 spike excluded.
+    assert abs(metrics["strong_brake"]["strongest_mps2"] - (-4.5)) < 1e-6
 
 
 def test_index_ahead_by_arc_length(tmp_path):
@@ -358,8 +360,9 @@ def test_index_ahead_by_arc_length(tmp_path):
 
 
 def test_yaw_gate_rejects_opposite_heading_future_frame(tmp_path):
-    """On a self-crossing route an xy-only cursor would grab a FUTURE opposite-heading
-    frame; the always-on heading gate rejects it and repeats the last same-heading frame."""
+    """On a self-crossing route an xy-only cursor can grab a FUTURE opposite-heading
+    frame; with ``yaw_gate`` on (default) it is rejected and the last same-heading
+    frame is repeated. ``yaw_gate=False`` restores the ungated pick."""
     from scenario_generation.perception_reproducer import PerceptionReproducer
 
     # 0: origin heading +x; 1: far ahead (outside the 1.5 m radius, ignored);
@@ -367,7 +370,14 @@ def test_yaw_gate_rejects_opposite_heading_future_frame(tmp_path):
     tl = _make_route_xyyaw(tmp_path, [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (0.05, 0.0, np.pi)])
     origin = np.array([0.0, 0.0])
 
+    # Gate off: xy-only cursor grabs the opposite-heading future frame (2).
+    cur_off = PerceptionReproducer(tl, search_radius=1.5, yaw_gate=False)
+    assert cur_off.step(origin, 0.0, 0.0, sim_yaw=0.0) == 0
+    assert cur_off.step(origin, 0.0, 0.1, sim_yaw=0.0) == 2
+
+    # Gate on (default): reject that frame -> repeat the last good same-heading frame.
     cur = PerceptionReproducer(tl, search_radius=1.5)
+    assert cur.yaw_gate is True
     assert cur.step(origin, 0.0, 0.0, sim_yaw=0.0) == 0  # same-heading admitted
     assert cur.step(origin, 0.0, 0.1, sim_yaw=0.0) == 0  # gated -> repeat, not frame 2
     assert cur.last_was_repeat is True

@@ -73,11 +73,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--strong_brake_mps2",
         type=_negative_mps2,
-        default=-4.0,
-        help="strong-brake threshold (m/s^2, negative); a step counts when tangential accel <= this",
+        default=-2.5,
+        help="strong-brake threshold (m/s^2, negative); a step counts when this and the previous frame both have tangential accel <= this",
     )
     p.add_argument(
         "--search_radius", type=float, default=1.5, help="PerceptionReproducer cursor search (m)"
+    )
+    p.add_argument(
+        "--yaw_gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="reject opposite-heading recorded frames near U-turns / self-crossings "
+        "(threshold fixed at pi/2; --no-yaw_gate disables)",
     )
     p.add_argument(
         "--warmup_steps",
@@ -144,6 +151,7 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
     return dict(
         near_miss_thresh=args.near_miss_thresh,
         search_radius=args.search_radius,
+        yaw_gate=args.yaw_gate,
         warmup_steps=args.warmup_steps,
         unstick_after=args.unstick_after,
         unstick_advance_m=args.unstick_advance_m,

@@ -257,7 +257,7 @@ def format_summary_lines(summary: dict) -> list[str]:
         f"strong-brake (<= {brake['thresh_mps2']} m/s^2): "
         f"{brake['segments']}/{n_seg} segments "
         f"(rate {brake['segment_rate']:.4f}), {brake['steps']} steps, "
-        f"{brake['count']} events",
+        f"{brake['count']} events, strongest_mps2={brake['strongest_mps2']:.3f}",
         f"object clearance min/mean/p5="
         f"{obj['clearance_min_m']:.3f}/{obj['clearance_mean_m']:.3f}/{obj['clearance_p5_m']:.3f} m  "
         f"road_border clearance min/mean/p5="
@@ -270,7 +270,7 @@ def format_summary_lines(summary: dict) -> list[str]:
 
 
 def aggregate(
-    rows: list[dict], near_miss_thresh: float, *, strong_brake_mps2: float = -4.0
+    rows: list[dict], near_miss_thresh: float, *, strong_brake_mps2: float = -2.5
 ) -> dict:
     """Aggregate per-segment nested metric rows into a closed-loop summary."""
     n_seg = len(rows)
@@ -315,6 +315,9 @@ def aggregate(
         thresh_key="thresh_mps2",
         thresh_value=float(strong_brake_mps2),
     )
+    # Strongest consecutive-pair accel across segments (mask-filtered; +inf if none).
+    strongest = [float(_require_block(r, "strong_brake")["strongest_mps2"]) for r in rows]
+    brake["strongest_mps2"] = min(strongest) if strongest else float("inf")
 
     expand = sum(int(_require_block(r, "reproducer")["expand_count"]) for r in rows)
     snap = sum(int(_require_block(r, "reproducer")["snap_count"]) for r in rows)
@@ -391,7 +394,8 @@ def run_closed_loop_eval(
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
     tracker_mode: str = "mpc",
-    strong_brake_mps2: float = -4.0,
+    strong_brake_mps2: float = -2.5,
+    yaw_gate: bool = True,
     verbose: bool = True,
     shard: tuple[int, int] | None = None,
 ) -> dict:
@@ -476,6 +480,7 @@ def run_closed_loop_eval(
                 neighbor_history_mode=neighbor_history_mode,
                 tracker_mode=tracker_mode,
                 strong_brake_mps2=strong_brake_mps2,
+                yaw_gate=yaw_gate,
             )
             row = {"route": key, **metrics}
             # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so

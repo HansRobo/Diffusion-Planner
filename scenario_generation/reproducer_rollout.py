@@ -380,7 +380,7 @@ class _SegState:
     # at or below ``strong_brake_mps2`` (negative). Allocated by ``_seed_state`` (like
     # ``clearances``); stays None for manually-built states that never step.
     accels: np.ndarray | None = None
-    strong_brake_mps2: float = -4.0
+    strong_brake_mps2: float = -2.5
     last_collision_uuid: object = None
     in_episode: bool = False
     episode_eligible: bool = False
@@ -483,7 +483,8 @@ def _seed_state(
     goal_mode="segment",
     replay_mode="pose",
     tracker_mode="mpc",
-    strong_brake_mps2=-4.0,
+    strong_brake_mps2=-2.5,
+    yaw_gate: bool = True,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
@@ -491,7 +492,7 @@ def _seed_state(
     # (e.g. one that waited out a long red light) can still drive to the segment end.
     cap = int(max_steps) if max_steps is not None else (end - start)
 
-    cursor = PerceptionReproducer(tl, search_radius=search_radius, timers=timers)
+    cursor = PerceptionReproducer(tl, search_radius=search_radius, timers=timers, yaw_gate=yaw_gate)
     cursor.reset(start)
     live_pose, ego_hist, dyn = _ego_state_from_frame(tl, start)
     # Corrected neighbor context: one timeline sample per 0.1 s sim step (real time on a
@@ -879,6 +880,11 @@ def _finalize(s: _SegState) -> dict:
         },
         "strong_brake": {
             "thresh_mps2": float(s.strong_brake_mps2),
+            # Strongest over-threshold accel after the 2-frame consecutive mask
+            # (single-frame tracker/replan spikes are excluded).
+            "strongest_mps2": (
+                float(accels[brake_mask].min()) if brake_mask.any() else float("inf")
+            ),
             "steps": int(brake_mask.sum()),
             "count": _event_count(brake_mask),
         },
@@ -1287,7 +1293,8 @@ def render_segment(
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
-    strong_brake_mps2: float = -4.0,
+    strong_brake_mps2: float = -2.5,
+    yaw_gate: bool = True,
     *,
     replan_interval: int = 1,
     draw_every: int = 1,
@@ -1355,6 +1362,7 @@ def render_segment(
         replay_mode=timeline_progress_mode,
         goal_mode=goal_mode,
         strong_brake_mps2=strong_brake_mps2,
+        yaw_gate=yaw_gate,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
@@ -1546,7 +1554,8 @@ def run_segments_batched(
     neighbor_history_mode: str = "recorded",
     tracker_mode: str = "mpc",
     timeline_progress_mode: str = "pose",
-    strong_brake_mps2: float = -4.0,
+    strong_brake_mps2: float = -2.5,
+    yaw_gate: bool = True,
     credit_save_dir=None,
     credit_windows: list[dict] | None = None,
     verify_credit_windows: list[dict] | None = None,
@@ -1626,6 +1635,7 @@ def run_segments_batched(
                     tracker_mode=tracker_mode,
                     replay_mode=timeline_progress_mode,
                     strong_brake_mps2=strong_brake_mps2,
+                    yaw_gate=yaw_gate,
                 )
                 for (tl, start, end) in chunk
             ]
