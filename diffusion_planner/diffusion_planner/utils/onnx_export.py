@@ -76,6 +76,50 @@ TensorDict = dict[str, torch.Tensor]
 NumpyDict = dict[str, np.ndarray]
 
 
+def validate_hdp_export_contract(config: Config) -> None:
+    """Reject legacy signal-conditioned checkpoints before ONNX tracing.
+
+    The velocity-based HDP deployed by the ROS node has no turn-indicator
+    history input.  Older Python checkouts still expose ``turn_indicators``
+    and can otherwise fail late during tracing (or, worse, export a graph
+    with a silently different input protocol).
+    """
+    if "turn_indicators" in FULL_INPUT_NAMES or "turn_indicators" in ENCODER_INPUT_NAMES:
+        raise RuntimeError(
+            "Invalid HDP exporter contract: turn_indicators must not be an ONNX input"
+        )
+    if not bool(getattr(config, "use_velocity_representation", False)):
+        raise RuntimeError(
+            "This exporter only supports the velocity-based HDP deployment contract; "
+            "refusing to export a waypoint-latent checkpoint."
+        )
+    if getattr(config, "decoder_tokenization", None) != "temporal":
+        raise RuntimeError(
+            "This exporter requires decoder_tokenization='temporal' for the HDP Node."
+        )
+    if int(getattr(config, "predicted_neighbor_num", 0)) != 0:
+        raise RuntimeError("This exporter requires ego-only output (predicted_neighbor_num=0).")
+    if int(getattr(config, "time_len", INPUT_T + 1)) != INPUT_T + 1:
+        raise RuntimeError(
+            f"This exporter requires time_len={INPUT_T + 1} for the Node input grid."
+        )
+    if int(getattr(config, "future_len", OUTPUT_T)) != OUTPUT_T:
+        raise RuntimeError(
+            f"This exporter requires future_len={OUTPUT_T} for the Node output horizon."
+        )
+    if getattr(config, "policy_uses_turn_indicator_history", False):
+        raise RuntimeError(
+            "This checkpoint declares policy_uses_turn_indicator_history=True; "
+            "it is incompatible with the deployed ego-only HDP input contract."
+        )
+    output_dim = int(getattr(config, "turn_indicator_output_dim", TURN_INDICATOR_OUTPUT_DIM))
+    if output_dim != TURN_INDICATOR_OUTPUT_DIM:
+        raise RuntimeError(
+            "HDP turn-indicator export requires exactly "
+            f"{TURN_INDICATOR_OUTPUT_DIM} logits, got {output_dim}"
+        )
+
+
 @dataclass(frozen=True)
 class ModelWrappers:
     full: nn.Module
@@ -306,6 +350,7 @@ def build_turn_indicator_final_x0(model: Diffusion_Planner, inputs: TensorDict) 
 
 def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusion_Planner:
     config_obj = Config(config_json_path)
+    validate_hdp_export_contract(config_obj)
     model = Diffusion_Planner(config_obj)
     model.eval()
     model.encoder.eval()
@@ -374,6 +419,53 @@ def build_dynamic_axes(
     return dynamic_axes
 
 
+def _repair_onnx_output_shapes(
+    output_path: Path,
+    output_names: list[str],
+    reference_outputs: tuple[torch.Tensor, ...],
+) -> None:
+    """Write concrete non-batch output dimensions after legacy ONNX tracing.
+
+    The legacy exporter can emit ``0`` for a non-batch dimension when that dimension
+    flows through a reshape using a symbolic batch size.  ORT executes such a graph
+    leniently, but consumers that inspect the graph contract (notably C++ runtimes)
+    can reject it.  The wrapper was evaluated with the same trace inputs, so its
+    output tensors provide the authoritative dimensions; only axis 0 remains dynamic.
+    """
+    try:
+        import onnx
+    except ImportError:
+        warnings.warn(
+            "onnx is not installed; cannot repair exported output shape metadata",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return
+
+    if len(output_names) != len(reference_outputs):
+        raise RuntimeError(
+            f"ONNX output contract has {len(output_names)} names but "
+            f"{len(reference_outputs)} reference tensors"
+        )
+    model = onnx.load(str(output_path))
+    graph_outputs = {value.name: value for value in model.graph.output}
+    for name, reference in zip(output_names, reference_outputs):
+        if name not in graph_outputs:
+            raise RuntimeError(f"Exported ONNX output {name!r} is missing")
+        if not torch.is_tensor(reference) or reference.ndim == 0:
+            raise RuntimeError(f"ONNX output {name!r} must be a non-scalar tensor")
+        shape = graph_outputs[name].type.tensor_type.shape
+        shape.ClearField("dim")
+        for axis, size in enumerate(reference.shape):
+            dimension = shape.dim.add()
+            if axis == 0:
+                dimension.dim_param = "batch"
+            else:
+                dimension.dim_value = int(size)
+    onnx.checker.check_model(model)
+    onnx.save(model, str(output_path))
+
+
 def export_onnx(
     wrapper: nn.Module,
     inputs: TensorDict,
@@ -403,6 +495,17 @@ def export_onnx(
             str(output_path),
             **export_kwargs,
         )
+
+    # Evaluate the wrapper once after tracing to repair output metadata that the
+    # legacy exporter occasionally loses through symbolic reshapes. This does not
+    # alter graph computation, only its declared non-batch dimensions.
+    with torch.no_grad():
+        traced_outputs = wrapper(*torch_input_tuple)
+    if torch.is_tensor(traced_outputs):
+        traced_outputs = (traced_outputs,)
+    else:
+        traced_outputs = tuple(traced_outputs)
+    _repair_onnx_output_shapes(output_path, output_names, traced_outputs)
 
     if use_simplify:
         try:
