@@ -31,7 +31,10 @@ from rlvr.autoresearch.tools.build_repaired_targets import (
     _row_is_expert_disagreement,
     _validate_static_collision_config,
 )
-from rlvr.autoresearch.tools.expert_morph import build_expert_morph_candidate
+from rlvr.autoresearch.tools.expert_morph import (
+    build_depart_morph_candidate,
+    build_expert_morph_candidate,
+)
 from rlvr.autoresearch.tools.lifelong_replay_memory import build_memory
 from rlvr.autoresearch.tools.mine_credit_window_scenes import (
     _resolve_row,
@@ -3157,6 +3160,7 @@ def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_pa
             "train_args": {
                 "batch_size": 8,
                 "num_workers": 1,
+                "ema_decay": 0.996,
             },
             "nproc_per_node": 1,
         },
@@ -3182,6 +3186,9 @@ def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_pa
     assert "train_predictor" in cmd
     assert cmd[cmd.index("--train_epochs") + 1] == "7"
     assert cmd[cmd.index("--batch_size") + 1] == "2"
+    # ema_decay must survive the train_args passthrough — 0.999 is too slow
+    # to absorb behavior changes within a short per-round fine-tune.
+    assert cmd[cmd.index("--ema_decay") + 1] == "0.996"
 
 
 def test_torchrun_subprocess_cleanup_removes_stale_file_store(tmp_path, monkeypatch):
@@ -3791,6 +3798,86 @@ def test_expert_morph_preserves_slow_creep():
     assert morph[-1, 0] > 0.5  # creep distance preserved (~0.7 m), not 0
 
 
+def test_depart_morph_synthesizes_departure_from_parked_plan():
+    # The stop morph cannot do this (det path has no road ahead) — the depart
+    # morph sources geometry from the expert path bridged to the ego pose.
+    det = _straight_traj(np.linspace(0.0, 2.0, _MORPH_T))  # parked/creeping plan
+    expert = _straight_traj(6.0 + np.cumsum(np.full(_MORPH_T, 0.45)))  # ahead, ~4.5 m/s
+    morph, diag = build_depart_morph_candidate(det, expert, return_diag=True)
+    assert diag["stage"] == "ok"
+    assert morph.shape == (_MORPH_T, 4)
+    assert abs(morph[0, 0]) < 0.1  # starts at the ego, not at the expert (no teleport)
+    assert np.all(np.diff(morph[:, 0]) >= -1e-4)
+    assert morph[-1, 0] > 10.0  # genuinely departs
+    steps = np.linalg.norm(np.diff(morph[:, :2], axis=0), axis=1)
+    assert steps.max() < 3.0  # accel/jerk-feasible, no jumps
+
+
+def test_depart_morph_bails_on_stationary_or_behind_expert():
+    det = _straight_traj(np.zeros(_MORPH_T))
+    stationary = _straight_traj(np.full(_MORPH_T, 6.0))
+    _, diag = build_depart_morph_candidate(det, stationary, return_diag=True)
+    assert diag["stage"] == "expert_stationary"
+    behind = _straight_traj(-8.0 + np.cumsum(np.full(_MORPH_T, 0.3)))
+    _, diag = build_depart_morph_candidate(det, behind, return_diag=True)
+    assert diag["stage"] == "expert_behind_ego"
+
+
+def test_depart_morph_rejects_undrivable_geometry():
+    det = _straight_traj(np.zeros(_MORPH_T))
+    # Near-pure-lateral expert offset: no forward-drivable bridge exists, and
+    # a raw chord would emit sideways (crab-motion) headings as supervision.
+    lateral = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.5)) - 0.5)
+    lateral[:, 1] = 0.4
+    _, diag = build_depart_morph_candidate(det, lateral, return_diag=True)
+    assert diag["stage"] == "not_forward_from_ego"
+    # Reversing expert: arc-length heading would flip ~180 deg at the retrace.
+    reversing = _straight_traj(10.0 - np.cumsum(np.full(_MORPH_T, 0.1)))
+    _, diag = build_depart_morph_candidate(det, reversing, return_diag=True)
+    assert diag["stage"] == "path_reversal"
+    # A small forward gap must still synthesize with forward headings (the
+    # bridge, not a raw chord, applies at ANY positive gap).
+    near = _straight_traj(0.3 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    morph, diag = build_depart_morph_candidate(det, near, return_diag=True)
+    assert diag["stage"] == "ok"
+    headings = np.degrees(np.arctan2(morph[:, 3], morph[:, 2]))
+    assert np.abs(headings).max() < 10.0
+
+
+def test_depart_morph_preserves_recorded_wait_at_origin():
+    # An expert waiting at the ego-frame origin is written as [0, 0, cos, sin]
+    # (valid unit heading, reproducer_rollout convention) — NOT padding.
+    # Treating those rows as leading padding would back-fill them from the
+    # first moved pose and synthesize motion before the recorded departure.
+    det = _straight_traj(np.zeros(_MORPH_T))
+    xs = np.concatenate([np.zeros(10), np.cumsum(np.full(_MORPH_T - 10, 0.5))])
+    expert = _straight_traj(xs)  # waits 1 s at origin, then departs at ~5 m/s
+    morph, diag = build_depart_morph_candidate(det, expert, return_diag=True)
+    assert diag["stage"] == "ok"
+    assert np.abs(morph[:10, 0]).max() < 0.05  # initial wait preserved
+    assert morph[-1, 0] > 10.0  # then genuinely departs
+
+
+def test_depart_morph_rejects_padded_or_nonfinite_expert():
+    det = _straight_traj(np.zeros(_MORPH_T))
+    # A zero-padded LEADING sample must not read as gap=0 and bypass the
+    # gap/behind gates — the first valid sample defines the expert start.
+    far = _straight_traj(40.0 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    far[0] = 0.0
+    _, diag = build_depart_morph_candidate(det, far, return_diag=True)
+    assert diag["stage"] == "gap_too_large"
+    behind = _straight_traj(-8.0 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    behind[0] = 0.0
+    _, diag = build_depart_morph_candidate(det, behind, return_diag=True)
+    assert diag["stage"] == "expert_behind_ego"
+    # NaN passes every threshold gate (comparisons are False) so it must be
+    # rejected up front, not propagated into the SFT target.
+    nan_expert = _straight_traj(6.0 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    nan_expert[30, 0] = np.nan
+    _, diag = build_depart_morph_candidate(det, nan_expert, return_diag=True)
+    assert diag["stage"] == "non_finite_input"
+
+
 def _patience_npz(path, *, red_route: bool, v_profile: np.ndarray) -> None:
     T = len(v_profile) + 1
     x = np.concatenate([[0.0], np.cumsum(v_profile * 0.1)])
@@ -3926,6 +4013,43 @@ def test_best_safe_candidate_reports_morph_outcome():
     assert idx is None
     assert meta["reason"] == "no_safe_candidate"
     assert meta["morph_outcome"] == "gate_rejected"
+
+
+def test_best_safe_candidate_reports_depart_outcome():
+    # The depart candidate must get the same outcome taxonomy as the stop
+    # morph (selected / lost_selection / gate_rejected), independently keyed.
+    source_row = {"repair_labels": ["expert_disagreement"], "state_class": "stopped"}
+    expert = torch.zeros(4, 4)
+    mover = torch.ones(4, 4)
+    depart = torch.full((4, 4), 2.0)
+
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [
+            _morph_outcome_candidate_row(["clean"]),
+            _morph_outcome_candidate_row(["clean"]),
+            _morph_outcome_candidate_row(["road_border_crossing"]),
+        ],
+        [
+            _morph_outcome_reward_row(5.0),
+            _morph_outcome_reward_row(3.0),
+            _morph_outcome_reward_row(0.0, rb_crossing=True),
+        ],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, depart, expert],
+        reference_traj=expert,
+        morph_index=2,
+        depart_index=1,
+    )
+    assert idx is not None
+    outcome = meta["depart_outcome"]
+    assert outcome == ("selected" if idx == 1 else "lost_selection")
+    if outcome == "lost_selection":
+        assert "depart_r2lpl_score" in meta
+    # Both scripted candidates reported independently.
+    assert meta["morph_outcome"] == "gate_rejected"
+    assert meta["morph_labels"] == ["road_border_crossing"]
 
 
 # ---------------------------------------------------------------------------
@@ -4416,6 +4540,157 @@ def test_replay_capacity_is_required():
     with pytest.raises(ValueError, match=">= 1"):
         round_runner._required_replay_capacity({"capacity": 0})
     assert round_runner._required_replay_capacity({"capacity": 5000}) == 5000
+
+
+def test_validate_normal_scene_list_config(tmp_path):
+    """normal_scene_list must fail loudly at startup: it is rsft-only (base_sft
+    uses training.anchor), must be a non-empty JSON list of paths, and the
+    prob/normal split it enables needs explicit, sane n_prob_scenes /
+    n_normal_scenes — run_experiment would otherwise only raise (or silently
+    subsample) after the expensive mine+repair phases."""
+    scene = tmp_path / "normal_0.npz"
+    np.savez(scene, neighbor_agents_future=np.zeros((1, 2, 4), dtype=np.float32))
+    normals = tmp_path / "normals.json"
+    normals.write_text(json.dumps([str(scene)]))
+    tcfg = tmp_path / "train_cfg.json"
+    tcfg.write_text(json.dumps({"ranked_sft_mode": "curated"}))
+    base = {
+        "training_normal_scene_list": str(normals),
+        "training_backend": "rsft",
+        "training_config": str(tcfg),
+    }
+    # No normal_scene_list -> no-op.
+    round_runner._validate_normal_scene_list_config({"training_backend": "base_sft"})
+    with pytest.raises(ValueError, match="ranked-SFT backend"):
+        round_runner._validate_normal_scene_list_config({**base, "training_backend": "base_sft"})
+    with pytest.raises(ValueError, match="does not exist"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(tmp_path / "missing.json")}
+        )
+    # Empty or malformed list content fails at startup, not at collate time.
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]")
+    with pytest.raises(ValueError, match="non-empty JSON list"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(empty)}
+        )
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("{not json")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(malformed)}
+        )
+    not_paths = tmp_path / "not_paths.json"
+    not_paths.write_text(json.dumps([1, 2]))
+    with pytest.raises(ValueError, match="non-empty JSON list"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(not_paths)}
+        )
+    # A listed scene file that does not exist fails at startup, not in the
+    # 4-col conversion after the mine+repair phases.
+    broken = tmp_path / "broken.json"
+    broken.write_text(json.dumps([str(scene), "/missing/scene.npz"]))
+    with pytest.raises(ValueError, match=r"1/2 missing scene files.*missing/scene\.npz"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(broken)}
+        )
+    with pytest.raises(ValueError, match="n_prob_scenes"):
+        round_runner._validate_normal_scene_list_config(base)
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 0, "n_normal_scenes": 230})
+    )
+    with pytest.raises(ValueError, match="positive integer"):
+        round_runner._validate_normal_scene_list_config(base)
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 1000, "n_normal_scenes": -1})
+    )
+    with pytest.raises(ValueError, match="non-negative integer"):
+        round_runner._validate_normal_scene_list_config(base)
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 1000, "n_normal_scenes": 230})
+    )
+    round_runner._validate_normal_scene_list_config(base)  # valid -> no raise
+
+
+def test_rsft_scene_args_resolves_normals_and_guards_subsampling(tmp_path):
+    """The rsft prob/normal path must (a) homogenize 3-col logged normal scenes
+    to the 4-col schema before handing them to run_experiment (a mixed batch
+    cannot collate — same incompatibility the base_sft anchor slice already
+    handles), and (b) refuse an n_prob_scenes below the repaired count, which
+    run_experiment's min(n_prob, len(prob)) sampling would silently truncate."""
+    base = {
+        "ego_agent_future": np.zeros((80, 3), dtype=np.float32),
+        "turn_indicators": np.zeros(31, dtype=np.int64),
+    }
+    three = dict(base)
+    nf3 = np.zeros((4, 80, 3), dtype=np.float32)
+    nf3[0, :, 0] = np.arange(1, 81)
+    nf3[0, :, 2] = np.pi / 2
+    three["neighbor_agents_future"] = nf3
+    p3 = tmp_path / "logged_normal.npz"
+    np.savez(p3, **three)
+    four = dict(base)
+    four["neighbor_agents_future"] = np.zeros((4, 80, 4), dtype=np.float32)
+    p4 = tmp_path / "converted_normal.npz"
+    np.savez(p4, **four)
+    normals = tmp_path / "normals.json"
+    normals.write_text(json.dumps([str(p3), str(p4)]))
+    repaired_list = tmp_path / "repaired.json"
+    repaired_paths = ["/data/repaired_0.npz", "/data/repaired_1.npz"]
+    repaired_list.write_text(json.dumps(repaired_paths))
+    tcfg = tmp_path / "train_cfg.json"
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 10, "n_normal_scenes": 2})
+    )
+    cfg = {
+        "training_normal_scene_list": str(normals),
+        "training_backend": "rsft",
+        "training_config": str(tcfg),
+    }
+    rdir = tmp_path / "round"
+    rdir.mkdir()
+
+    args = round_runner._rsft_scene_args(
+        cfg,
+        repaired_paths=repaired_paths,
+        repaired_list_json=repaired_list,
+        rdir=rdir,
+        round_idx=1,
+    )
+    assert args[args.index("--prob_scenes") + 1] == str(repaired_list)
+    resolved = Path(args[args.index("--normal_scenes") + 1])
+    assert resolved == rdir / "normal_scenes_resolved.json"
+    resolved_paths = json.loads(resolved.read_text())
+    # 4-col passes through by original path; 3-col was rewritten to a copy.
+    assert resolved_paths[1] == str(p4)
+    assert resolved_paths[0] != str(p3)
+    batch = [dict(np.load(p)) for p in resolved_paths]
+    stacked = torch.stack([torch.from_numpy(b["neighbor_agents_future"]) for b in batch])
+    assert stacked.shape == (2, 4, 80, 4)
+
+    # Undersized n_prob_scenes fails before training instead of silently
+    # dropping repaired scenes.
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 1, "n_normal_scenes": 2})
+    )
+    with pytest.raises(ValueError, match="silently subsample"):
+        round_runner._rsft_scene_args(
+            cfg,
+            repaired_paths=repaired_paths,
+            repaired_list_json=repaired_list,
+            rdir=rdir,
+            round_idx=1,
+        )
+
+    # Without normal_scene_list the legacy combined-list path is kept.
+    args = round_runner._rsft_scene_args(
+        {"training_backend": "rsft", "training_config": str(tcfg)},
+        repaired_paths=repaired_paths,
+        repaired_list_json=repaired_list,
+        rdir=rdir,
+        round_idx=1,
+    )
+    assert args == ["--train_scenes", str(repaired_list)]
 
 
 def test_workflow_contract_forwards_prototypes_path_to_repair_cmd(tmp_path):

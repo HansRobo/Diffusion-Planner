@@ -117,6 +117,9 @@ class TrainConfig:
     guidance_scale: float = 0.5
     device: str = "cuda"
     use_ema: bool = True
+    # ModelEma decay; 0.999 needs ~3000 steps to absorb a behavior change —
+    # lower for short fine-tune rounds (e.g. 0.996 for ~800-step rounds).
+    ema_decay: float = 0.999
 
     # ---------------------------------------------------------
     # Model Architecture

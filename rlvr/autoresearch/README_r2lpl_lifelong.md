@@ -138,11 +138,29 @@ replay list, plus — when `training.anchor` is configured — a seeded slice of
 real logged normal scenes at `ratio` : 1 (anchor : focus), optionally stratified
 with a waits/interaction list; training on repaired+replay only leaves the model
 unanchored off the failure distribution (base_sft backend only; the runner
-rejects the anchor with any other backend). Raw logged anchor scenes carry
+rejects the anchor with any other backend). The ranked-SFT backend's
+counterpart is `training.normal_scene_list`: it switches the round's training
+call to the prob/normal split (repaired scenes = prob, the listed real normal
+scenes = normal), with the mix controlled by the training config's explicit
+`n_prob_scenes` / `n_normal_scenes`. The list must be a non-empty JSON list of
+paths (validated at startup), the normal scenes are homogenized to 4-col
+neighbor futures into `r2lpl_round_NNN/normal_scenes_4col/` with a per-round
+resolved list (same collate incompatibility as the anchor slice below), and
+each round fails before training if `n_prob_scenes` is below that round's
+repaired-scene count — `run_experiment`'s `min(n_prob, len(prob))` sampling
+would otherwise silently drop repairs.
+Raw logged anchor scenes carry
 3-col `[x, y, heading]` neighbor futures while repaired scenes are 4-col
 `[x, y, cos, sin]` — a mixed batch cannot collate, so the runner rewrites the
 3-col anchors as 4-col copies under `r2lpl_round_NNN/anchor_scenes_4col/`
 (zero padding rows preserved) before the union.
+
+For the base_sft backend, `training.train_args.ema_decay` is forwarded to
+`train_predictor --ema_decay`. The default 0.999 (time constant ~1000 steps)
+is tuned for long SFT runs and is too slow for a short per-round fine-tune —
+the EMA checkpoint barely absorbs the round's behavior change. Set it so the
+round's step count spans a few time constants (e.g. 0.996 for rounds of
+several hundred to ~1000 steps).
 
 At a high level:
 
@@ -417,6 +435,25 @@ Both anchors are floored at the tracker's shortest feasible stop from the det
 plan's initial speed, so neither can demand the impossible. Pick `recorded` when the
 campaign metric is stop-location fidelity (patience repair); pick `pseudo` when
 repair coverage matters more than where exactly the target stops.
+
+### Depart morph (`repair_generation.enable_depart_morph`)
+
+The re-timing morph covers the fail-to-stop direction only: it re-times the
+model's OWN plan, and a parked plan contains no road ahead to accelerate
+along, so `model_lagging_expert` (fail-to-take-off) scenes die as
+`not_synthesized:infeasible_deceleration`. With
+`repair_generation.enable_depart_morph: true` (CLI `--enable_depart_morph`,
+off by default) a second scripted candidate is synthesized for those scenes
+from the EXPERT path's geometry: a cubic Hermite bridge connects the ego pose
+to the expert path, and the same accel/jerk-limited tracker chases the
+expert's progress schedule starting at the ego (no jump at t=0; full catch-up
+within the horizon is not required). Synthesis rejects undrivable inputs
+(non-finite samples, reversing/doubling-back geometry, near-pure-lateral
+expert offsets, expert behind or beyond the bridge range) with a diagnostic
+stage. It competes through the same gates/reward as every candidate;
+per-row diagnostics land in `expert_depart_added/selected/diag` and
+`depart_outcome` (`selected` / `lost_selection` / `gate_rejected` /
+`not_synthesized:<stage>` — same taxonomy as `morph_outcome`).
 
 ## Outputs
 

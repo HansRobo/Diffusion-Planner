@@ -176,6 +176,14 @@ def get_args(args_list=None):
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
 
     parser.add_argument("--use_ema", default=True, type=boolean)
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.999,
+        help="ModelEma decay; 0.999 (default) needs ~3000 steps to absorb a "
+        "behavior change — lower for short fine-tune rounds (e.g. 0.996 for "
+        "~800-step rounds).",
+    )
 
     # Model
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)

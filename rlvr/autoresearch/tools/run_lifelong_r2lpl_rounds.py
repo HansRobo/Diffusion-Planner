@@ -332,6 +332,8 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     }
     if repair.get("prototypes_path"):
         repair_cfg["prototypes_path"] = str(repair["prototypes_path"])
+    if repair.get("enable_depart_morph"):
+        repair_cfg["enable_depart_morph"] = bool(repair["enable_depart_morph"])
     missing_repair = [k for k in ("ego_shape", "min_margin") if not repair_cfg.get(k)]
     if missing_repair:
         raise ValueError(
@@ -426,6 +428,11 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "epochs_per_round": int(_first_non_null(rounds.get("epochs_per_round"), 1)),
         "model_path": str(contract["model_path"]),
         "val_scenes": str(val_scenes),
+        "training_normal_scene_list": (
+            str(training_section["normal_scene_list"])
+            if training_section.get("normal_scene_list")
+            else None
+        ),
         "reward_config": str(reward_config),
         "threshold_config": str(threshold_config),
         "credit_window_config": str(credit_window_config),
@@ -1090,6 +1097,104 @@ def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
     return out
 
 
+def _validate_normal_scene_list_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on normal_scene_list misconfiguration, not after mining.
+
+    training.normal_scene_list is only wired into the ranked-SFT backend (the
+    base_sft counterpart is training.anchor), and the prob/normal split it
+    enables requires explicit n_prob_scenes / n_normal_scenes in the training
+    config — run_experiment raises otherwise, but only at the train phase,
+    after the expensive mine + repair phases. n_prob_scenes also caps how many
+    repaired scenes train, so it must be sized >= the expected repaired count
+    per round or repairs are silently subsampled.
+    """
+    normal_list = cfg.get("training_normal_scene_list")
+    if not normal_list:
+        return
+    backend = str(cfg.get("training_backend", "base_sft"))
+    if backend == "base_sft":
+        raise ValueError(
+            "training.normal_scene_list is only wired into the ranked-SFT backend; "
+            "for base_sft use training.anchor instead"
+        )
+    if not Path(normal_list).exists():
+        raise ValueError(f"training.normal_scene_list does not exist: {normal_list}")
+    try:
+        entries = json.loads(Path(normal_list).read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"training.normal_scene_list is not valid JSON: {normal_list}") from exc
+    if not isinstance(entries, list) or not entries or not all(isinstance(e, str) for e in entries):
+        raise ValueError(
+            f"training.normal_scene_list must be a non-empty JSON list of scene "
+            f"paths: {normal_list}"
+        )
+    missing_scenes = [e for e in entries if not Path(e).exists()]
+    if missing_scenes:
+        preview = ", ".join(missing_scenes[:3])
+        raise ValueError(
+            f"training.normal_scene_list references {len(missing_scenes)}/{len(entries)} "
+            f"missing scene files (first: {preview}); a broken entry would otherwise "
+            "only fail in the 4-col conversion after the mine+repair phases"
+        )
+    payload = _training_config_payload(cfg["training_config"])
+    missing = [k for k in ("n_prob_scenes", "n_normal_scenes") if k not in payload]
+    if missing:
+        raise ValueError(
+            "training.normal_scene_list enables the prob/normal split, which requires "
+            f"explicit {missing} in the training config (n_prob_scenes must be >= the "
+            "expected repaired scenes per round — smaller values silently subsample "
+            "the repairs)"
+        )
+    n_prob = payload["n_prob_scenes"]
+    n_normal = payload["n_normal_scenes"]
+    if not isinstance(n_prob, int) or n_prob < 1:
+        raise ValueError(f"n_prob_scenes must be a positive integer, got {n_prob!r}")
+    if not isinstance(n_normal, int) or n_normal < 0:
+        raise ValueError(f"n_normal_scenes must be a non-negative integer, got {n_normal!r}")
+
+
+def _rsft_scene_args(
+    cfg: dict[str, Any],
+    *,
+    repaired_paths: list[str],
+    repaired_list_json: Path,
+    rdir: Path,
+    round_idx: int,
+) -> list[str]:
+    """Scene args for the ranked-SFT training call of one round.
+
+    With training.normal_scene_list the round trains a prob/normal split
+    (repaired = prob, real normals = normal) so curated rounds can mix real
+    scenes; without it, the legacy combined-list path is kept. The normal
+    scenes are homogenized to 4-col neighbor futures (raw logged scenes may
+    carry 3-col ones, and a mixed batch cannot collate — same incompatibility
+    as the base_sft anchor slice) into a per-round resolved list.
+    """
+    normal_list = cfg.get("training_normal_scene_list")
+    if not normal_list:
+        return ["--train_scenes", str(repaired_list_json)]
+    n_prob = _training_config_payload(cfg["training_config"])["n_prob_scenes"]
+    if n_prob < len(repaired_paths):
+        raise ValueError(
+            f"[round {round_idx}] n_prob_scenes={n_prob} < {len(repaired_paths)} "
+            "repaired scenes: run_experiment would silently subsample the "
+            "repairs (min(n_prob, len(prob)) sampling). Raise n_prob_scenes to "
+            "cover the largest expected repaired count per round."
+        )
+    normal_paths = _ensure_4col_neighbor_futures(
+        [str(p) for p in _read_json_list(Path(normal_list))],
+        rdir / "normal_scenes_4col",
+    )
+    resolved_normals = rdir / "normal_scenes_resolved.json"
+    resolved_normals.write_text(json.dumps(normal_paths, indent=2))
+    return [
+        "--prob_scenes",
+        str(repaired_list_json),
+        "--normal_scenes",
+        str(resolved_normals),
+    ]
+
+
 def _validate_anchor_config(cfg: dict[str, Any]) -> None:
     """Fail at STARTUP on anchor misconfiguration, not hours into round 1.
 
@@ -1620,6 +1725,8 @@ def _repair_cmd(
         cmd.extend(["--expert_morph_max_jerk", str(repair_cfg["expert_morph_max_jerk"])])
     if "expert_stop_anchor" in repair_cfg:
         cmd.extend(["--expert_stop_anchor", str(repair_cfg["expert_stop_anchor"])])
+    if bool(repair_cfg.get("enable_depart_morph", False)):
+        cmd.append("--enable_depart_morph")
     if repair_cfg.get("prototypes_path"):
         cmd.extend(["--prototypes_path", str(repair_cfg["prototypes_path"])])
     if cfg.get("repair_labels"):
@@ -1835,6 +1942,7 @@ def _base_train_invocation(
         "seed",
         "device",
         "use_ema",
+        "ema_decay",
         "use_ego_history",
         "ego_history_dropout_rate",
         "use_turn_indicators",
@@ -2506,6 +2614,7 @@ def main() -> None:
     _validate_anchor_config(cfg)
     _validate_guards_config(cfg)
     _validate_repair_generation_config(cfg)
+    _validate_normal_scene_list_config(cfg)
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -2636,6 +2745,13 @@ def main() -> None:
             round_training_config = _round_training_config(
                 cfg, rdir=rdir, anchor_model_path=model_path
             )
+            scene_args = _rsft_scene_args(
+                cfg,
+                repaired_paths=repaired_paths,
+                repaired_list_json=repaired_list_json,
+                rdir=rdir,
+                round_idx=round_idx,
+            )
             train_cmd = [
                 sys.executable,
                 "-m",
@@ -2646,8 +2762,7 @@ def main() -> None:
                 name,
                 "--model_path",
                 str(model_path),
-                "--train_scenes",
-                str(repaired_list_json),
+                *scene_args,
                 "--replay_scenes",
                 str(replay_json),
                 "--val_scenes",
