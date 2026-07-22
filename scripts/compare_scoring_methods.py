@@ -57,6 +57,11 @@ def parse_args():
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--viz_module_path", type=Path, default=None)
+    p.add_argument(
+        "--skip_viz",
+        action="store_true",
+        help="Skip BEV retrieval visualization (use when clip-review-tool is unavailable)",
+    )
     return p.parse_args()
 
 
@@ -375,48 +380,51 @@ def main():
     corr_matrix, corr_labels = compute_rank_correlation(records, args.output_dir)
     compute_outlier_agreement(records, args.output_dir)
 
-    # Select query scenes
-    with open(args.eval_list) as f:
-        npz_paths = json.load(f)
-    if args.query_npz:
-        query_paths = args.query_npz
+    if not args.skip_viz:
+        # Select query scenes
+        with open(args.eval_list) as f:
+            npz_paths = json.load(f)
+        if args.query_npz:
+            query_paths = args.query_npz
+        else:
+            rng = np.random.RandomState(args.seed)
+            idxs = rng.choice(len(npz_paths), size=2, replace=False)
+            query_paths = [npz_paths[i] for i in idxs]
+
+        viz_path = args.viz_module_path or (
+            Path(__file__).resolve().parent.parent.parent / "clip-review-tool" / "src"
+        )
+
+        # Load bank records for npz_path resolution
+        bank_records = []
+        with open(args.bank_dir / "paths.jsonl") as f:
+            for line in f:
+                if line.strip():
+                    bank_records.append(json.loads(line.strip()))
+
+        retrieval = retrieve_neighbors(
+            query_paths,
+            encoder,
+            (knn_s, maha_s, kmeans_s, gmm_s),
+            emb_l2,
+            emb_raw,
+            bank_records,
+            args.device,
+            args.output_dir,
+            viz_path,
+        )
+
+        generate_html_report(
+            records,
+            corr_matrix,
+            corr_labels,
+            retrieval,
+            bank_records,
+            args.output_dir,
+            viz_path,
+        )
     else:
-        rng = np.random.RandomState(args.seed)
-        idxs = rng.choice(len(npz_paths), size=2, replace=False)
-        query_paths = [npz_paths[i] for i in idxs]
-
-    viz_path = args.viz_module_path or (
-        Path(__file__).resolve().parent.parent.parent / "clip-review-tool" / "src"
-    )
-
-    # Load bank records for npz_path resolution
-    bank_records = []
-    with open(args.bank_dir / "paths.jsonl") as f:
-        for line in f:
-            if line.strip():
-                bank_records.append(json.loads(line.strip()))
-
-    retrieval = retrieve_neighbors(
-        query_paths,
-        encoder,
-        (knn_s, maha_s, kmeans_s, gmm_s),
-        emb_l2,
-        emb_raw,
-        bank_records,
-        args.device,
-        args.output_dir,
-        viz_path,
-    )
-
-    generate_html_report(
-        records,
-        corr_matrix,
-        corr_labels,
-        retrieval,
-        bank_records,
-        args.output_dir,
-        viz_path,
-    )
+        print("Skipping BEV visualization (--skip_viz)")
 
 
 if __name__ == "__main__":
