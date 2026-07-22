@@ -137,8 +137,13 @@ class EncoderInference:
             return x
         return torch.cat([x[..., :2], x[..., 2:3].cos(), x[..., 2:3].sin()], dim=-1)
 
-    def encode_batch(self, batch: dict) -> torch.Tensor:
-        """Run the encoder on a batch, return [B, hidden_dim] L2-normalized embeddings."""
+    def encode_batch(self, batch: dict, normalize: bool = True) -> torch.Tensor:
+        """Run the encoder on a batch, return [B, hidden_dim] embeddings.
+
+        Args:
+            normalize: If True (default), L2-normalize the output. Set False to
+                get raw mean-pooled vectors for methods that need their own preprocessing.
+        """
         batch = {
             k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()
         }
@@ -155,7 +160,8 @@ class EncoderInference:
                 encoding = self._torch_model.encoder(batch)
 
         z = encoding.mean(dim=1)
-        z = F.normalize(z, dim=-1)
+        if normalize:
+            z = F.normalize(z, dim=-1)
         return z
 
     def _encode_onnx(self, batch: dict) -> torch.Tensor:
