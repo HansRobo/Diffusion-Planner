@@ -57,7 +57,13 @@ def _seg_points(tensor: torch.Tensor, seg: int) -> torch.Tensor:
 
 
 def _protection_mask(inputs: dict) -> torch.Tensor:
-    return LaneAugmentation(device="cpu")._route_protection_mask(inputs)[0]
+    lanes = inputs["lanes"]
+    valid_pt = lanes[..., :_GEOM_DIM].abs().sum(-1) > 0
+    dist = torch.where(
+        valid_pt, lanes[..., :2].norm(dim=-1), torch.full(valid_pt.shape, float("inf"))
+    )
+    aug = LaneAugmentation(device="cpu")
+    return aug._route_protection_mask(inputs, valid_pt, dist.amin(dim=2))[0]
 
 
 def run_checks(orig, dropped, truncated, jittered, widened, radius_m) -> list[str]:

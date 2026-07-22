@@ -66,20 +66,43 @@ class LaneAugmentation:
 
     @torch.no_grad()
     def __call__(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        protected = self._route_protection_mask(inputs)  # [B, L]
+        if not (
+            (self._dropout_prob > 0.0 and self._dropout_ratio > 0.0)
+            or self._truncation_prob > 0.0
+            or self._geometry_noise_prob > 0.0
+            or self._width_jitter_prob > 0.0
+        ):
+            return inputs
+
+        # The per-point validity mask and the per-lane ego distance are shared
+        # by several components; computing them once avoids repeated full
+        # passes over the large lanes tensor (~190 MB at batch 512).
+        # ``valid_pt`` is kept current by ``_zero_lanes`` when rows are removed.
+        lanes = inputs["lanes"]
+        valid_pt = lanes[..., :_GEOM_DIM].abs().sum(-1) > 0  # [B, L, V]
+        dist = torch.where(
+            valid_pt,
+            lanes[..., :2].norm(dim=-1),
+            torch.full(valid_pt.shape, float("inf"), device=lanes.device, dtype=lanes.dtype),
+        )
+        min_dist = dist.amin(dim=2)  # [B, L]; padding rows -> inf
+
+        protected = self._route_protection_mask(inputs, valid_pt, min_dist)  # [B, L]
         # Row-removing components first; the noise components then only touch
         # the surviving rows.
         if self._dropout_prob > 0.0 and self._dropout_ratio > 0.0:
-            self._drop_lanes(inputs, protected)
+            self._drop_lanes(inputs, protected, valid_pt)
         if self._truncation_prob > 0.0:
-            self._truncate_far_lanes(inputs, protected)
+            self._truncate_far_lanes(inputs, protected, valid_pt, min_dist)
         if self._geometry_noise_prob > 0.0:
-            self._jitter_lane_geometry(inputs, protected)
+            self._jitter_lane_geometry(inputs, protected, valid_pt)
         if self._width_jitter_prob > 0.0:
             self._jitter_lane_width(inputs, protected)
         return inputs
 
-    def _route_protection_mask(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
+    def _route_protection_mask(
+        self, inputs: dict[str, torch.Tensor], valid_pt: torch.Tensor, min_dist: torch.Tensor
+    ) -> torch.Tensor:
         """Boolean [B, L] mask of lanes that are copies of route lanelets.
 
         The conversion pipeline writes the same lanelet bit-identically into
@@ -91,7 +114,7 @@ class LaneAugmentation:
         lanes = inputs["lanes"]  # [B, L, V, D]
         route = inputs["route_lanes"]  # [B, R, V, D]
 
-        lanes_valid = lanes[..., :_GEOM_DIM].abs().sum(dim=(2, 3)) > 0  # [B, L]
+        lanes_valid = valid_pt.any(-1)  # [B, L]
         route_valid = route[..., :_GEOM_DIM].abs().sum(dim=(2, 3)) > 0  # [B, R]
 
         eq = (lanes[:, :, None, 0, :2] == route[:, None, :, 0, :2]).all(-1)  # [B, L, R]
@@ -100,27 +123,35 @@ class LaneAugmentation:
         # Route-less fallback: protect the nearest valid lane (ego is at the
         # origin of the ego-centric frame).
         no_route = ~protected.any(dim=1)  # [B]
-        valid_pt = lanes[..., :_GEOM_DIM].abs().sum(-1) > 0  # [B, L, V]
-        dist = lanes[..., :2].norm(dim=-1)  # [B, L, V]
-        dist = torch.where(valid_pt, dist, torch.full_like(dist, float("inf")))
-        nearest = dist.amin(dim=2).argmin(dim=1)  # [B]
+        nearest = min_dist.argmin(dim=1)  # [B]
         fallback = F.one_hot(nearest, lanes.shape[1]).bool() & no_route[:, None] & lanes_valid
         return protected | fallback
 
-    def _zero_lanes(self, inputs: dict[str, torch.Tensor], drop: torch.Tensor) -> None:
+    def _zero_lanes(
+        self, inputs: dict[str, torch.Tensor], drop: torch.Tensor, valid_pt: torch.Tensor
+    ) -> None:
         inputs["lanes"][drop] = 0.0
         inputs["lanes_speed_limit"][drop] = 0.0
         inputs["lanes_has_speed_limit"][drop] = False
+        valid_pt[drop] = False  # keep the shared mask current for later stages
 
-    def _drop_lanes(self, inputs: dict[str, torch.Tensor], protected: torch.Tensor) -> None:
+    def _drop_lanes(
+        self, inputs: dict[str, torch.Tensor], protected: torch.Tensor, valid_pt: torch.Tensor
+    ) -> None:
         """Independently drop non-route lanes, simulating missing lanelets."""
         lanes = inputs["lanes"]
         B, L = lanes.shape[:2]
         scene = torch.rand(B, 1, device=lanes.device) < self._dropout_prob
         drop = (torch.rand(B, L, device=lanes.device) < self._dropout_ratio) & scene & ~protected
-        self._zero_lanes(inputs, drop)
+        self._zero_lanes(inputs, drop, valid_pt)
 
-    def _truncate_far_lanes(self, inputs: dict[str, torch.Tensor], protected: torch.Tensor) -> None:
+    def _truncate_far_lanes(
+        self,
+        inputs: dict[str, torch.Tensor],
+        protected: torch.Tensor,
+        valid_pt: torch.Tensor,
+        min_dist: torch.Tensor,
+    ) -> None:
         """Zero lanes whose nearest valid point lies beyond a sampled radius.
 
         Simulates smaller map crops / map edges than the deployment-time
@@ -130,11 +161,6 @@ class LaneAugmentation:
         lanes = inputs["lanes"]
         B = lanes.shape[0]
 
-        valid_pt = lanes[..., :_GEOM_DIM].abs().sum(-1) > 0  # [B, L, V]
-        dist = lanes[..., :2].norm(dim=-1)  # [B, L, V]
-        dist = torch.where(valid_pt, dist, torch.full_like(dist, float("inf")))
-        min_dist = dist.amin(dim=2)  # [B, L]; padding rows -> inf
-
         radius = self._truncation_min_m + (
             self._truncation_max_m - self._truncation_min_m
         ) * torch.rand(B, 1, device=lanes.device)
@@ -142,10 +168,10 @@ class LaneAugmentation:
 
         # Padding rows (inf distance) land in `drop`; re-zeroing zeros is a no-op.
         drop = (min_dist > radius) & apply & ~protected
-        self._zero_lanes(inputs, drop)
+        self._zero_lanes(inputs, drop, valid_pt)
 
     def _jitter_lane_geometry(
-        self, inputs: dict[str, torch.Tensor], protected: torch.Tensor
+        self, inputs: dict[str, torch.Tensor], protected: torch.Tensor, valid_pt: torch.Tensor
     ) -> None:
         """Constant per-segment lateral offset of non-route lane centerlines.
 
@@ -157,7 +183,6 @@ class LaneAugmentation:
         lanes = inputs["lanes"]  # [B, L, V, D]
         B, L = lanes.shape[:2]
 
-        valid_pt = lanes[..., :_GEOM_DIM].abs().sum(-1) > 0  # [B, L, V]
         mean_dir = (lanes[..., 2:4] * valid_pt.unsqueeze(-1)).sum(dim=2)  # [B, L, 2]
         unit = mean_dir / mean_dir.norm(dim=-1, keepdim=True).clamp_min(1e-6)
         normal = torch.stack([-unit[..., 1], unit[..., 0]], dim=-1)  # [B, L, 2]
