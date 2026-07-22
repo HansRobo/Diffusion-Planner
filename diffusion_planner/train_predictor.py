@@ -200,7 +200,7 @@ def get_args(args_list=None):
     parser.add_argument(
         "--coeff_control_traj_loss",
         type=float,
-        default=0.3,
+        default=0.4,
         help="Weight for control-to-trajectory sliding-window loss",
     )
 
