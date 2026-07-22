@@ -6,6 +6,7 @@ import faiss
 import numpy as np
 import torch
 import torch.nn.functional as F
+from sklearn.mixture import GaussianMixture
 
 
 class MahalanobisScorer:
@@ -198,3 +199,169 @@ class SphericalKMeansScorer:
             assignments=data["assignments"],
             k=int(data["k"]),
         )
+
+
+class GMMScorer:
+    def __init__(
+        self,
+        weights: np.ndarray,
+        means: np.ndarray,
+        covariances: np.ndarray,
+        covariance_type: str,
+        scaler_mean: np.ndarray,
+        scaler_std: np.ndarray,
+        assignments: np.ndarray,
+        n_components: int,
+    ):
+        self.weights = weights
+        self.means = means
+        self.covariances = covariances
+        self.covariance_type = covariance_type
+        self.scaler_mean = scaler_mean
+        self.scaler_std = scaler_std
+        self.assignments = assignments
+        self.n_components = n_components
+        self._gmm = self._rebuild_gmm()
+
+    def _rebuild_gmm(self) -> GaussianMixture:
+        gmm = GaussianMixture(
+            n_components=self.n_components,
+            covariance_type=self.covariance_type,
+        )
+        gmm.weights_ = self.weights
+        gmm.means_ = self.means
+        gmm.covariances_ = self.covariances
+        gmm.precisions_cholesky_ = _compute_precision_cholesky(
+            self.covariances, self.covariance_type
+        )
+        return gmm
+
+    @classmethod
+    def fit(
+        cls,
+        embeddings_raw: np.ndarray,
+        k: int = 16,
+        covariance_type: str = "diag",
+    ) -> GMMScorer:
+        mean = embeddings_raw.mean(axis=0)
+        std = embeddings_raw.std(axis=0)
+        std = np.maximum(std, 1e-8)
+        standardized = ((embeddings_raw - mean) / std).astype(np.float32)
+
+        gmm = GaussianMixture(
+            n_components=k,
+            covariance_type=covariance_type,
+            random_state=42,
+            max_iter=200,
+        )
+        gmm.fit(standardized)
+
+        assignments = gmm.predict(standardized)
+
+        return cls(
+            weights=gmm.weights_.astype(np.float32),
+            means=gmm.means_.astype(np.float32),
+            covariances=gmm.covariances_.astype(np.float32),
+            covariance_type=covariance_type,
+            scaler_mean=mean.astype(np.float32),
+            scaler_std=std.astype(np.float32),
+            assignments=assignments.astype(np.int32),
+            n_components=k,
+        )
+
+    def _standardize(self, z: np.ndarray) -> np.ndarray:
+        return ((z - self.scaler_mean) / self.scaler_std).astype(np.float32)
+
+    def score(self, z: torch.Tensor) -> dict[str, torch.Tensor]:
+        if z.ndim == 1:
+            z = z.unsqueeze(0)
+        z_np = self._standardize(z.float().cpu().numpy())
+        nll = -self._gmm.score_samples(z_np)
+        probs = self._gmm.predict_proba(z_np)
+        component_id = probs.argmax(axis=1)
+        component_prob = probs.max(axis=1)
+
+        return {
+            "gmm_nll": torch.from_numpy(nll.astype(np.float32)),
+            "component_id": torch.from_numpy(component_id.astype(np.int64)),
+            "component_prob": torch.from_numpy(component_prob.astype(np.float32)),
+        }
+
+    def nearest(self, z: torch.Tensor, embeddings_raw: np.ndarray, k: int = 5) -> list[list[dict]]:
+        if z.ndim == 1:
+            z = z.unsqueeze(0)
+        z_np = self._standardize(z.float().cpu().numpy())
+        bank_std = self._standardize(embeddings_raw)
+
+        probs = self._gmm.predict_proba(z_np)
+
+        results = []
+        for b in range(z_np.shape[0]):
+            top2 = np.argsort(probs[b])[-2:]
+            mask = np.isin(self.assignments, top2)
+            candidate_idx = np.where(mask)[0]
+
+            if len(candidate_idx) == 0:
+                results.append([])
+                continue
+
+            dists = np.linalg.norm(bank_std[candidate_idx] - z_np[b], axis=1)
+            actual_k = min(k, len(candidate_idx))
+            topk_local = np.argpartition(dists, actual_k)[:actual_k]
+            topk_local = topk_local[np.argsort(dists[topk_local])]
+
+            neighbors = []
+            for i in range(actual_k):
+                neighbors.append(
+                    {
+                        "distance": float(dists[topk_local[i]]),
+                        "index": int(candidate_idx[topk_local[i]]),
+                    }
+                )
+            results.append(neighbors)
+        return results
+
+    def save(self, path: Path, scaler_path: Path) -> None:
+        np.savez(
+            path,
+            weights=self.weights,
+            means=self.means,
+            covariances=self.covariances,
+            covariance_type=self.covariance_type,
+            assignments=self.assignments,
+            n_components=self.n_components,
+        )
+        np.savez(scaler_path, mean=self.scaler_mean, std=self.scaler_std)
+
+    @classmethod
+    def load(cls, path: Path, scaler_path: Path) -> GMMScorer:
+        data = np.load(path, allow_pickle=True)
+        scaler = np.load(scaler_path)
+        return cls(
+            weights=data["weights"],
+            means=data["means"],
+            covariances=data["covariances"],
+            covariance_type=str(data["covariance_type"]),
+            scaler_mean=scaler["mean"],
+            scaler_std=scaler["std"],
+            assignments=data["assignments"],
+            n_components=int(data["n_components"]),
+        )
+
+
+def _compute_precision_cholesky(covariances: np.ndarray, cov_type: str) -> np.ndarray:
+    if cov_type == "diag":
+        return 1.0 / np.sqrt(covariances)
+    elif cov_type == "full":
+        n = covariances.shape[0]
+        prec_chol = np.empty_like(covariances)
+        for k in range(n):
+            cov_chol = np.linalg.cholesky(covariances[k])
+            prec_chol[k] = np.linalg.inv(cov_chol).T
+        return prec_chol
+    elif cov_type == "spherical":
+        return 1.0 / np.sqrt(covariances)
+    elif cov_type == "tied":
+        cov_chol = np.linalg.cholesky(covariances)
+        return np.linalg.inv(cov_chol).T
+    raise ValueError(f"Unknown covariance_type: {cov_type}")

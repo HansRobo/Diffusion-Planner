@@ -3,7 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from diffusion_planner.utils.scoring_methods import MahalanobisScorer, SphericalKMeansScorer
+from diffusion_planner.utils.scoring_methods import (
+    GMMScorer,
+    MahalanobisScorer,
+    SphericalKMeansScorer,
+)
 
 
 def _random_l2(n: int, d: int, seed: int = 42) -> np.ndarray:
@@ -156,3 +160,70 @@ class TestSphericalKMeansSaveLoad:
         loaded = SphericalKMeansScorer.load(tmp_path / "kmeans.npz")
         z = torch.randn(2, 16)
         torch.testing.assert_close(scorer.score(z)["kmeans_dist"], loaded.score(z)["kmeans_dist"])
+
+
+class TestGMMFit:
+    def test_fit_stores_params(self):
+        rng = np.random.RandomState(42)
+        emb = rng.randn(200, 16).astype(np.float32)
+        scorer = GMMScorer.fit(emb, k=4)
+        assert scorer.n_components == 4
+        assert scorer.scaler_mean.shape == (16,)
+        assert scorer.scaler_std.shape == (16,)
+
+    def test_assignments_cover_all_points(self):
+        rng = np.random.RandomState(42)
+        emb = rng.randn(200, 16).astype(np.float32)
+        scorer = GMMScorer.fit(emb, k=4)
+        assert scorer.assignments.shape == (200,)
+
+
+class TestGMMScore:
+    def test_returns_expected_keys(self):
+        rng = np.random.RandomState(42)
+        emb = rng.randn(200, 16).astype(np.float32)
+        scorer = GMMScorer.fit(emb, k=4)
+        result = scorer.score(torch.randn(3, 16))
+        assert "gmm_nll" in result
+        assert "component_id" in result
+        assert "component_prob" in result
+        assert result["gmm_nll"].shape == (3,)
+
+    def test_inlier_lower_nll_than_outlier(self):
+        rng = np.random.RandomState(42)
+        cluster = rng.randn(200, 8).astype(np.float32) * 0.5
+        scorer = GMMScorer.fit(cluster, k=2)
+        inlier = torch.zeros(1, 8)
+        outlier = torch.ones(1, 8) * 100
+        assert scorer.score(inlier)["gmm_nll"].item() < scorer.score(outlier)["gmm_nll"].item()
+
+    def test_1d_input_auto_batched(self):
+        rng = np.random.RandomState(42)
+        emb = rng.randn(200, 8).astype(np.float32)
+        scorer = GMMScorer.fit(emb, k=2)
+        result = scorer.score(torch.randn(8))
+        assert result["gmm_nll"].shape == (1,)
+
+
+class TestGMMNearest:
+    def test_returns_k_neighbors(self):
+        rng = np.random.RandomState(42)
+        emb = rng.randn(200, 16).astype(np.float32)
+        scorer = GMMScorer.fit(emb, k=4)
+        results = scorer.nearest(torch.from_numpy(emb[:1]), emb, k=3)
+        assert len(results) == 1
+        assert len(results[0]) == 3
+        assert "distance" in results[0][0]
+        assert "index" in results[0][0]
+
+
+class TestGMMSaveLoad:
+    def test_roundtrip(self, tmp_path):
+        rng = np.random.RandomState(42)
+        emb = rng.randn(200, 8).astype(np.float32)
+        scorer = GMMScorer.fit(emb, k=4)
+        scorer.save(tmp_path / "gmm.npz", tmp_path / "zscore.npz")
+
+        loaded = GMMScorer.load(tmp_path / "gmm.npz", tmp_path / "zscore.npz")
+        z = torch.randn(2, 8)
+        torch.testing.assert_close(scorer.score(z)["gmm_nll"], loaded.score(z)["gmm_nll"])
