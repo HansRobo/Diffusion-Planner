@@ -21,8 +21,8 @@ from human_match_prototype.metrics import coverage_metrics
 from human_match_prototype.sampler import TrajectorySampler
 from human_match_prototype.typicality import typicality
 
-MODEL_DIR = Path("/opt/autoware/mlmodels/diffusion_planner_for_x2")
-BANK_DIR = "data/latent_ood_bank_5k"
+DEFAULT_MODEL_DIR = Path("/opt/autoware/mlmodels/diffusion_planner_for_x2")
+DEFAULT_BANK_DIR = "data/latent_ood_bank_5k"
 
 
 def parse_args():
@@ -34,6 +34,17 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument(
+        "--model_dir",
+        type=Path,
+        default=None,
+        help=f"ONNX model directory (default: {DEFAULT_MODEL_DIR})",
+    )
+    p.add_argument(
+        "--bank_dir",
+        default=None,
+        help=f"Latent OOD bank directory (default: {DEFAULT_BANK_DIR})",
+    )
+    p.add_argument(
         "--self_check",
         action="store_true",
         help="Replace the human with planner sample 0, scored against samples 1..N "
@@ -44,13 +55,15 @@ def parse_args():
 
 def main():
     args = parse_args()
+    model_dir = args.model_dir or DEFAULT_MODEL_DIR
+    bank_dir = args.bank_dir or DEFAULT_BANK_DIR
     paths = json.load(open(args.npz_list))
     if args.limit is not None:
         paths = paths[: args.limit]
     sampler = TrajectorySampler(
-        MODEL_DIR / "args.json", MODEL_DIR / "diffusion_planner.onnx", args.device
+        model_dir / "args.json", model_dir / "diffusion_planner.onnx", args.device
     )
-    latent = LatentOODScorer.load(BANK_DIR, device=args.device)
+    latent = LatentOODScorer.load(bank_dir, device=args.device)
 
     rows, skipped = [], 0
     for path in tqdm(paths):

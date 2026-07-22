@@ -139,17 +139,17 @@ def run_multi_human(
     max_distance_m: float = 30.0,
     max_per_lanelet: int = 200,
     fetch_dest: str = "data/human_match/multi_human_mirror",
+    model_dir: str = "/opt/autoware/mlmodels/diffusion_planner_for_x2",
 ) -> None:
     import lanelet2
-    from autoware_lanelet2_extension_python.projection import MGRSProjector
 
     from diffusion_planner.util_scripts.search_scenes import read_sidecar
 
     index, _ = load_lanelet_index(index_path)
     lookup = build_lanelet_lookup(index)
 
-    projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
-    lanelet_map = lanelet2.io.load(map_path, projection)
+    projection = lanelet2.projection.UtmProjector(lanelet2.io.Origin(35.6491, 139.753))
+    lanelet_map, _ = lanelet2.io.loadRobust(map_path, projection)
     ll_layer = lanelet_map.laneletLayer
 
     df = pd.read_csv(scores_csv)
@@ -210,7 +210,7 @@ def run_multi_human(
         from human_match_prototype.sampler import TrajectorySampler
 
         if not hasattr(run_multi_human, "_sampler"):
-            _model = Path("/opt/autoware/mlmodels/diffusion_planner_for_x2")
+            _model = Path(model_dir)
             run_multi_human._sampler = TrajectorySampler(
                 str(_model / "args.json"), str(_model / "diffusion_planner.onnx")
             )
@@ -233,6 +233,11 @@ def parse_args_cli():
     p.add_argument("--bwlimit", type=int, default=10000)
     p.add_argument("--max_per_lanelet", type=int, default=200)
     p.add_argument("--fetch_dest", default="data/human_match/multi_human_mirror")
+    p.add_argument(
+        "--model_dir",
+        default="/opt/autoware/mlmodels/diffusion_planner_for_x2",
+        help="ONNX model directory for DP sampling",
+    )
     return p.parse_args()
 
 
@@ -247,4 +252,5 @@ if __name__ == "__main__":
         bwlimit=args.bwlimit,
         max_per_lanelet=args.max_per_lanelet,
         fetch_dest=args.fetch_dest,
+        model_dir=args.model_dir,
     )

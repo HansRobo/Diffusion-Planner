@@ -123,7 +123,6 @@ def main():
     args = parse_args()
 
     import lanelet2
-    from autoware_lanelet2_extension_python.projection import MGRSProjector
 
     from diffusion_planner.util_scripts.search_scenes import build_index
 
@@ -133,8 +132,8 @@ def main():
     index = build_index(npz_paths, workers=args.workers)
     print(f"Built spatial index: {len(index)} scenes with valid sidecars")
 
-    projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
-    lanelet_map = lanelet2.io.load(args.map, projection)
+    projection = lanelet2.projection.UtmProjector(lanelet2.io.Origin(35.6491, 139.753))
+    lanelet_map, _ = lanelet2.io.loadRobust(args.map, projection)
     print(f"Loaded lanelet2 map: {len(list(lanelet_map.laneletLayer))} lanelets")
 
     index = add_lanelet_ids(index, lanelet_map.laneletLayer, rate_limit=args.rate_limit)
