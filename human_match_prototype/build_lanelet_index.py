@@ -66,16 +66,17 @@ def save_lanelet_index(index: list[dict], path: str, map_hash: str) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    table = pa.table(
-        {
-            "npz_path": [r["npz_path"] for r in index],
-            "x": [r["x"] for r in index],
-            "y": [r["y"] for r in index],
-            "heading_deg": [r["heading_deg"] for r in index],
-            "timestamp": [r["timestamp"] for r in index],
-            "lanelet_id": [r["lanelet_id"] for r in index],
-        }
-    )
+    columns = {
+        "npz_path": [r["npz_path"] for r in index],
+        "x": [r["x"] for r in index],
+        "y": [r["y"] for r in index],
+        "heading_deg": [r["heading_deg"] for r in index],
+        "timestamp": [r["timestamp"] for r in index],
+        "lanelet_id": [r["lanelet_id"] for r in index],
+    }
+    if index and "map_version_id" in index[0]:
+        columns["map_version_id"] = [r.get("map_version_id") for r in index]
+    table = pa.table(columns)
     metadata = table.schema.metadata or {}
     metadata[b"map_hash"] = map_hash.encode()
     table = table.replace_schema_metadata(metadata)
@@ -88,6 +89,7 @@ def load_lanelet_index(path: str) -> tuple[list[dict], str]:
     table = pq.read_table(path)
     map_hash = (table.schema.metadata or {}).get(b"map_hash", b"").decode()
     df = table.to_pydict()
+    has_map_version = "map_version_id" in df
     index = [
         {
             "npz_path": df["npz_path"][i],
@@ -96,6 +98,7 @@ def load_lanelet_index(path: str) -> tuple[list[dict], str]:
             "heading_deg": df["heading_deg"][i],
             "timestamp": df["timestamp"][i],
             "lanelet_id": df["lanelet_id"][i],
+            **({"map_version_id": df["map_version_id"][i]} if has_map_version else {}),
         }
         for i in range(len(df["npz_path"]))
     ]
