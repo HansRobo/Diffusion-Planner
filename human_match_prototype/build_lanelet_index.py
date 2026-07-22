@@ -13,6 +13,7 @@ Usage:
 import argparse
 import hashlib
 import time
+import warnings
 from pathlib import Path
 
 from tqdm import tqdm
@@ -50,6 +51,12 @@ def add_lanelet_ids(index: list[dict], lanelet_layer, rate_limit: float = 0.0) -
             entry_copy = dict(entry)
             entry_copy["lanelet_id"] = ll.id
             result.append(entry_copy)
+        else:
+            warnings.warn(
+                f"No lanelet match for {entry.get('npz_path', '?')} "
+                f"at ({entry['x']}, {entry['y']}); entry dropped",
+                stacklevel=2,
+            )
         if rate_limit > 0:
             time.sleep(rate_limit)
     return result
