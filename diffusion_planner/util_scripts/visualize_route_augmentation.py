@@ -144,6 +144,17 @@ def render_truncation(orig, truncated, budget_m, status, npz_name, out_path):
     fig, axes = plt.subplots(1, 2, figsize=(20, 9))
     visualize_inputs(copy.deepcopy(orig), ax=axes[0])
     visualize_inputs(copy.deepcopy(truncated), ax=axes[1])
+
+    # Widen the view (visualize_inputs defaults to +-60m around ego) so the
+    # whole original route, including the truncated tail, is inside the frame.
+    all_xy = torch.cat(
+        [_valid_segment_points(route_o, s) for s in torch.where(valid_o)[0].tolist()]
+    )
+    center = (all_xy.amin(0) + all_xy.amax(0)) / 2
+    half = float((all_xy.amax(0) - all_xy.amin(0)).max()) / 2 + 25.0
+    for ax in axes:
+        ax.set_xlim(float(center[0]) - half, float(center[0]) + half)
+        ax.set_ylim(float(center[1]) - half, float(center[1]) + half)
     for seg in torch.where(valid_o)[0].tolist():
         xy = _valid_segment_points(route_o, seg)
         is_kept = bool(kept[seg])
