@@ -9,10 +9,11 @@ realized ego footprint is scored against those neighbors with the canonical OBB
 (``score_step`` -> collision / near-miss / min clearance).
 
 A *route* = one bag-prefix group of consecutive 10 Hz NPZ frames (``RouteTimeline``);
-each route is rolled out whole with ``render_segment`` (one GPU forward per tick), which BOTH
-returns the route metrics AND writes a per-step PNG of the live-ego scene. Every run therefore
-always produces video: one MP4 per route (``<route>.mp4``). Per-route metrics are streamed to
-``segments.jsonl`` and aggregated into ``summary.json`` (both next to the checkpoint).
+each route is sliced into ``--seg_len`` segments and rolled out with ``render_segment``
+(one GPU forward per tick), which BOTH returns the segment metrics AND writes a per-step
+PNG of the live-ego scene. Every run therefore always produces video: one MP4 per segment
+(``<route>_<start>_<end>.mp4``). Per-segment metrics are streamed to ``segments.jsonl`` and
+aggregated into ``summary.json`` (both next to the checkpoint).
 
 Only ``--model_path`` and ``--npz_root`` are required; all outputs are written next to
 the checkpoint (``<model_path dir>/closed_loop/``) and the rollout knobs default to the
@@ -56,6 +57,7 @@ def parse_args() -> argparse.Namespace:
         "sidecars are read from next to each .npz, falling back to its own source tree.",
     )
     # --- tunable knobs (default to the closed-loop mining config) ---
+    p.add_argument("--seg_len", type=int, default=6000, help="frames per segment (~60s @10Hz)")
     p.add_argument("--device", type=str, default="cuda", help="'cuda' or 'cpu'")
     p.add_argument("--near_miss_thresh", type=float, default=0.5, help="near-miss clearance (m)")
     p.add_argument(
@@ -124,6 +126,7 @@ def _eval_knobs(args: argparse.Namespace) -> dict:
     """The rollout tunables forwarded to run_closed_loop_eval (everything except model/npz/out/
     device/shard), gathered once so the sequential and per-worker calls stay in lockstep."""
     return dict(
+        seg_len=args.seg_len,
         near_miss_thresh=args.near_miss_thresh,
         search_radius=args.search_radius,
         warmup_steps=args.warmup_steps,
@@ -243,7 +246,7 @@ def main() -> None:
         f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m"
     )
     print(f"total_snaps={summary['total_snaps']}  terminated={summary['terminated_counts']}")
-    print(f"videos: one <route>.mp4 per route in {out_dir}")
+    print(f"videos: per-segment <route>_<start>_<end>.mp4 in {out_dir}")
 
 
 if __name__ == "__main__":

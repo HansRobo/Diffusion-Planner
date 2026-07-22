@@ -127,6 +127,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
             args,
             args.closed_loop_npz_root,
             out_dir,
+            seg_len=args.closed_loop_seg_len,
             device=args.device,
             near_miss_thresh=args.closed_loop_near_miss_thresh,
             search_radius=args.closed_loop_search_radius,

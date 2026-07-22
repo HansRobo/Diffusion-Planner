@@ -153,6 +153,7 @@ def run_closed_loop_eval(
     npz_root,
     out_dir,
     *,
+    seg_len: int,
     device: str,
     near_miss_thresh: float,
     search_radius: float,
@@ -175,20 +176,20 @@ def run_closed_loop_eval(
     list (``route_keys[rank::world_size]``) and writes its rows to ``segments_{rank}.jsonl`` instead
     of the merged ``segments.jsonl``/``summary.json`` -- the route-level multi-GPU parallel driver in
     ``valid_predictor_closed_loop.py`` spawns one such call per worker (route keys are globally
-    unique, so all shards share ``out_dir`` for the per-route PNG dirs and MP4s without collision).
+    unique, so all shards share ``out_dir`` for the per-segment PNG dirs and MP4s without collision).
     The returned summary is then per-shard; the parent merges the ``segments_*.jsonl`` rows.
 
     ``model`` must be an eval-mode Diffusion-Planner (callable ``model(data) -> (_, outputs)`` with
     ``outputs["prediction"]``); ``model_args`` provides ``observation_normalizer`` /
-    ``predicted_neighbor_num`` / ``future_len`` (a ``Config`` or ``TrainConfig``). Each route is
-    rolled out whole (no sub-segmenting) into one PNG dir + one MP4 (``<route>.mp4``).
-    ``segments.jsonl`` (one row per route) and ``summary.json`` are written into ``out_dir``.
+    ``predicted_neighbor_num`` / ``future_len`` (a ``Config`` or ``TrainConfig``). Per segment a PNG
+    dir + an MP4 (``<route>_<start>_<end>.mp4``) are written. ``segments.jsonl`` and
+    ``summary.json`` are written into ``out_dir``.
 
     Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back into
     the input history each step, held across cached-plan steps when ``replan_interval`` > 1
     (see ``render_segment``).
 
-    Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-route MP4),
+    Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-segment MP4),
     ``segments`` (list[row]), and ``elapsed_sec``.
     """
     out_dir = Path(out_dir)
@@ -225,50 +226,55 @@ def run_closed_loop_eval(
     try:
         for ri, key in enumerate(route_keys):
             tl = RouteTimeline(routes[key], sidecar_dir=route_sidecar_dir[key], timers=timers)
-            # One route = one whole-route rollout = one <key>.mp4 (no sub-segmenting).
-            png_dir = out_dir / key
-            metrics = render_segment(
-                model,
-                model_args,
-                tl,
-                0,
-                len(tl),
-                png_dir,
-                device=device,
-                near_miss_thresh=near_miss_thresh,
-                search_radius=search_radius,
-                warmup_steps=warmup_steps,
-                unstick_after=unstick_after,
-                unstick_advance_m=unstick_advance_m,
-                unstick_radius_mult=unstick_radius_mult,
-                unstick_teleport_after=unstick_teleport_after,
-                replan_interval=replan_interval,
-                draw_every=draw_every,
-                neighbor_history_mode=neighbor_history_mode,
-                tracker_mode=tracker_mode,
-            )
-            row = {"route": key, **metrics}
-            fout.write(json.dumps(row, default=float) + "\n")
-            fout.flush()
-            rows.append(row)
-
-            # A route that terminates at step 0 (e.g. ego starts within goal_reach_m) draws no PNG;
-            # skip the empty ffmpeg call (its glob would error on an empty dir).
-            if not any(png_dir.glob("*.png")):
-                if verbose:
-                    print(f"[{ri + 1}/{len(route_keys)}] {key} -> 0 frames, no video")
-                continue
-            seg_mp4 = out_dir / f"{key}.mp4"
-            # Raw fps: with only every draw_every-th frame drawn, the video plays
-            # draw_every x faster than real time. For real time use fps = 10 / draw_every.
-            build_mp4(png_dir, seg_mp4, fps)
-            video_mp4s.append(seg_mp4)
-            if verbose:
-                print(
-                    f"[{ri + 1}/{len(route_keys)}] {key} -> {seg_mp4.name}  "
-                    f"coll={metrics['n_collision_steps']} near={metrics['n_near_miss_steps']} "
-                    f"min_clr={metrics['min_clearance']:.3f}"
+            n_seg_videos = 0
+            for start, end in tl.iter_segments(seg_len):
+                png_dir = out_dir / f"{key}_{start}_{end}"
+                metrics = render_segment(
+                    model,
+                    model_args,
+                    tl,
+                    start,
+                    end,
+                    png_dir,
+                    device=device,
+                    near_miss_thresh=near_miss_thresh,
+                    search_radius=search_radius,
+                    warmup_steps=warmup_steps,
+                    unstick_after=unstick_after,
+                    unstick_advance_m=unstick_advance_m,
+                    unstick_radius_mult=unstick_radius_mult,
+                    unstick_teleport_after=unstick_teleport_after,
+                    replan_interval=replan_interval,
+                    draw_every=draw_every,
+                    neighbor_history_mode=neighbor_history_mode,
+                    tracker_mode=tracker_mode,
                 )
+                row = {"route": key, **metrics}
+                fout.write(json.dumps(row, default=float) + "\n")
+                fout.flush()
+                rows.append(row)
+
+                # A segment that terminates at step 0 (e.g. ego starts within goal_reach_m) draws
+                # no PNG; skip the empty ffmpeg call (its glob would error on an empty dir).
+                if not any(png_dir.glob("*.png")):
+                    if verbose:
+                        print(f"  [{key}] segment [{start},{end}] -> 0 frames, no video")
+                    continue
+                seg_mp4 = out_dir / f"{key}_{start}_{end}.mp4"
+                # Raw fps: with only every draw_every-th frame drawn, the video plays
+                # draw_every x faster than real time. For real time use fps = 10 / draw_every.
+                build_mp4(png_dir, seg_mp4, fps)
+                video_mp4s.append(seg_mp4)
+                n_seg_videos += 1
+                if verbose:
+                    print(
+                        f"  [{key}] segment [{start},{end}] -> {seg_mp4.name}  "
+                        f"coll={metrics['n_collision_steps']} near={metrics['n_near_miss_steps']} "
+                        f"min_clr={metrics['min_clearance']:.3f}"
+                    )
+
+            if verbose:
+                print(f"[{ri + 1}/{len(route_keys)}] {key}: {n_seg_videos} segment video(s)")
     finally:
         fout.close()
 
