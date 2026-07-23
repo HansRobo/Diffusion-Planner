@@ -41,6 +41,8 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
     model.train()
 
+    device_type = "cuda" if "cuda" in str(args.device) else "cpu"
+
     if args.ddp:
         torch.cuda.synchronize()
 
@@ -69,7 +71,9 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         # call the model
         optimizer.zero_grad()
 
-        loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
+        # bf16 keeps the fp32 exponent range, so no GradScaler is needed.
+        with torch.autocast(device_type, dtype=torch.bfloat16, enabled=args.use_amp):
+            loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
 
         loss["loss"] = (
             args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]

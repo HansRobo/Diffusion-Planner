@@ -184,6 +184,16 @@ def get_args(args_list=None):
         "behavior change — lower for short fine-tune rounds (e.g. 0.996 for "
         "~800-step rounds).",
     )
+    parser.add_argument(
+        "--compile_model",
+        action="store_true",
+        help="Compile the model with torch.compile before training",
+    )
+    parser.add_argument(
+        "--use_amp",
+        action="store_true",
+        help="Train with Automatic Mixed Precision (bf16 autocast)",
+    )
 
     # Model
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)
