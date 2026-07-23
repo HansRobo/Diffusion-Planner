@@ -37,6 +37,26 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
     finite_min_cl = [r["min_clearance"] for r in rows if np.isfinite(r["min_clearance"])]
     finite_mean_cl = [r["mean_clearance"] for r in rows if np.isfinite(r["mean_clearance"])]
 
+    # Graded (non-saturating) headline metrics — see closed_loop_eval design notes: these
+    # improve smoothly as the model trains, unlike the binary *_segment_rate / worst-moment
+    # *_min_clearance keys (still computed below for continuity, but no longer displayed).
+    total_collision_events = sum(r.get("n_collision_events", 0) for r in rows)
+    total_curb_hits = sum(r.get("n_curb_hits", 0) for r in rows)
+    completions = [r["route_completion"] for r in rows if "route_completion" in r]
+    # gt-deviation pooled across all steps (weight each segment's mean by its step count, which
+    # equals that segment's gt-deviation sample count), so long routes aren't under-weighted.
+    dev_num = sum(
+        r["mean_gt_deviation_m"] * r["n_steps_run"]
+        for r in rows
+        if np.isfinite(r.get("mean_gt_deviation_m", float("inf")))
+    )
+    dev_den = sum(
+        r["n_steps_run"]
+        for r in rows
+        if np.isfinite(r.get("mean_gt_deviation_m", float("inf")))
+    )
+    mean_clearance = float(np.mean(finite_mean_cl)) if finite_mean_cl else float("inf")
+
     term_counts: dict[str, int] = {}
     for r in rows:
         term_counts[r["terminated"]] = term_counts.get(r["terminated"], 0) + 1
@@ -45,24 +65,29 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
         "near_miss_thresh": near_miss_thresh,
         "n_segments": n_seg,
         "total_steps": total_steps,
-        "n_segments_with_collision": n_seg_collision,
-        "collision_segment_rate": n_seg_collision / n_seg if n_seg else 0.0,
+        # --- displayed (graded) ---
+        "mean_route_completion": float(np.mean(completions)) if completions else 0.0,
+        "mean_clearance": mean_clearance,
+        "mean_gt_deviation_m": float(dev_num / dev_den) if dev_den else float("inf"),
+        "total_collision_events": total_collision_events,
+        "total_curb_hits": total_curb_hits,
         "total_collision_steps": total_collision_steps,
         "collision_step_rate": total_collision_steps / total_steps if total_steps else 0.0,
-        "n_segments_with_near_miss": n_seg_near_miss,
-        "near_miss_segment_rate": n_seg_near_miss / n_seg if n_seg else 0.0,
         "total_near_miss_steps": total_near_miss_steps,
         "near_miss_step_rate": total_near_miss_steps / total_steps if total_steps else 0.0,
+        "total_snaps": total_snaps,
+        "n_segments_diverged": n_seg_diverged,
+        # --- kept for continuity / episode table, NOT displayed as headline (saturating) ---
+        "n_segments_with_collision": n_seg_collision,
+        "collision_segment_rate": n_seg_collision / n_seg if n_seg else 0.0,
+        "n_segments_with_near_miss": n_seg_near_miss,
+        "near_miss_segment_rate": n_seg_near_miss / n_seg if n_seg else 0.0,
+        "diverged_segment_rate": n_seg_diverged / n_seg if n_seg else 0.0,
         "global_min_clearance": float(min(finite_min_cl)) if finite_min_cl else float("inf"),
         "mean_segment_min_clearance": float(np.mean(finite_min_cl))
         if finite_min_cl
         else float("inf"),
-        "mean_segment_mean_clearance": float(np.mean(finite_mean_cl))
-        if finite_mean_cl
-        else float("inf"),
-        "total_snaps": total_snaps,
-        "n_segments_diverged": n_seg_diverged,
-        "diverged_segment_rate": n_seg_diverged / n_seg if n_seg else 0.0,
+        "mean_segment_mean_clearance": mean_clearance,
         "terminated_counts": term_counts,
     }
 

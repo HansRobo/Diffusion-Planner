@@ -648,6 +648,12 @@ class _SegState:
     # Corrected neighbor context (neighbor_history_mode="sim"): rebuild neighbor_agents_past
     # each step from the SIMULATED shown motion (velocity from shown deltas, frozen->v~0).
     nbr_tracker: object = None
+    # Running sum/count of per-step GT-pose deviation (m), for the mean_gt_deviation_m metric
+    # (average distance from the recorded expert path — a graded tracking-quality signal that,
+    # unlike the saturating segment-rates, improves smoothly as the model trains). Accumulated
+    # only in render_segment's loop (where gt_deviation is computed); 0 count -> reported inf.
+    gt_dev_sum: float = 0.0
+    gt_dev_count: int = 0
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -963,17 +969,44 @@ def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, time
     _advance_step(s, pred, idx, device, timers)
 
 
+def _count_events(mask: np.ndarray) -> int:
+    """Number of distinct True-runs in a boolean per-step mask (rising edges) — i.e. how many
+    separate TIMES the condition occurred, not how many steps it held. This is the "回数"
+    (event count) the collision/curb metrics report: 45 consecutive collision steps clustered
+    at one spot is 1 event, not 45."""
+    if mask.size == 0:
+        return 0
+    return int(mask[0]) + int(np.sum(mask[1:] & ~mask[:-1]))
+
+
 def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
     valid_cl = s.clearances[: s.k][np.isfinite(s.clearances[: s.k])]
     progress = float(np.linalg.norm(s.live_pose[:2] - s.tl.poses[s.start, :2]))
+    # Route completion: fraction of the recorded route the ego actually advanced through
+    # (furthest recorded frame reached, normalized by route length). Graded 0->1, so an
+    # undertrained model that diverges early scores low and improves smoothly with training —
+    # the headline "getting better" signal that the binary segment-rates can't show.
+    route_span = max(int(s.end) - 1 - int(s.start), 1)
+    route_completion = float(
+        np.clip((int(s.cursor.max_idx_reached) - int(s.start)) / route_span, 0.0, 1.0)
+    )
+    collided = s.collisions[: s.k]
+    rb = s.rb_dists[: s.k]
+    curb_mask = np.isfinite(rb) & (rb <= s.near_miss_thresh)
     metrics = {
         "segment": [int(s.start), int(s.end)],
         "n_steps_run": int(s.k),
         "terminated": s.terminated,
+        "route_completion": route_completion,
         "min_clearance": float(valid_cl.min()) if valid_cl.size else float("inf"),
         "mean_clearance": float(valid_cl.mean()) if valid_cl.size else float("inf"),
-        "n_collision_steps": int(s.collisions[: s.k].sum()),
+        "mean_gt_deviation_m": float(s.gt_dev_sum / s.gt_dev_count)
+        if s.gt_dev_count
+        else float("inf"),
+        "n_collision_steps": int(collided.sum()),
+        "n_collision_events": _count_events(collided),
         "n_near_miss_steps": int(np.sum(valid_cl <= s.near_miss_thresh)),
+        "n_curb_hits": _count_events(curb_mask),
         "worst_step": int(
             np.argmin(np.where(np.isfinite(s.clearances[: s.k]), s.clearances[: s.k], np.inf))
         )
@@ -1542,6 +1575,8 @@ def render_segment(
         # cutting the render short. GT deviation is measured against the recorded pose at the
         # cursor's current frame (same `idx` the goal/progress checks use).
         gt_deviation_m = float(np.linalg.norm(s.live_pose[:2] - tl.poses[idx, :2]))
+        s.gt_dev_sum += gt_deviation_m
+        s.gt_dev_count += 1
         if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
             deviation_streak += 1
         else:

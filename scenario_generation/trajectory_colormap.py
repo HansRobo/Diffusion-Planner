@@ -149,7 +149,13 @@ def render_trajectory_colormap(
     segments = np.concatenate([xy[:-1, None, :], xy[1:, None, :]], axis=1)
     seg_risk = (risk[:-1] + risk[1:]) / 2.0
 
-    fig, ax = plt.subplots(figsize=(6, 6), dpi=dpi, facecolor="white")
+    # Fixed figure size + fixed axes positions (NOT plt.subplots + bbox_inches="tight"): every
+    # metric's PNG must come out at IDENTICAL pixel dimensions, else W&B's gallery panel (which
+    # stacks a site's 5 metric images in one panel) warns "Images sizes do not match" and lays
+    # them out wrong. The colorbar area on the right is always reserved; binary metrics
+    # (collision/near_miss) simply leave it blank instead of shrinking the plot.
+    fig = plt.figure(figsize=(6.4, 4.8), dpi=dpi, facecolor="white")
+    ax = fig.add_axes([0.06, 0.03, 0.70, 0.84])
     ax.set_facecolor("white")
     lc = LineCollection(segments, cmap="turbo", linewidths=4, capstyle="round")
     lc.set_array(seg_risk)
@@ -169,16 +175,21 @@ def render_trajectory_colormap(
     # without having to trace the (often subtle) color gradient along the line.
     ax.scatter(xy[0, 0], xy[0, 1], c="black", s=60, zorder=5, edgecolors="white")
     ax.scatter(xy[-1, 0], xy[-1, 1], c="black", marker="s", s=60, zorder=5, edgecolors="white")
-    # Anchored to the LEFT of the point (offset + ha both negative-ward) so the label never
-    # grows rightward into the colorbar, regardless of where start/end happen to fall.
+    # Anchored to the RIGHT of the point (grows inward/rightward) so a start/end at the far-left
+    # edge of the path doesn't push its label off the figure and get clipped. Vertically, a point
+    # in the upper half of the trajectory gets its label placed BELOW instead of above — otherwise
+    # a point near the very top of the plot pushes the label up into the title text above the axes
+    # (a tall, narrow trajectory puts its topmost point close enough to the title for this to bite).
+    y_mid = (xy[:, 1].min() + xy[:, 1].max()) / 2.0
     for label, point in (("start", xy[0]), ("end", xy[-1])):
+        upper_half = point[1] > y_mid
         ax.annotate(
             label,
             point,
-            xytext=(-8, 8),
+            xytext=(7, -7 if upper_half else 7),
             textcoords="offset points",
-            ha="right",
-            va="bottom",
+            ha="left",
+            va="top" if upper_half else "bottom",
             color="black",
             fontsize=9,
             fontweight="bold",
@@ -195,7 +206,8 @@ def render_trajectory_colormap(
         ax.set_title(f"{title}\nmetric: {metric}", color="black", fontsize=10)
 
     if metric not in _BINARY_METRICS:
-        cbar = fig.colorbar(lc, ax=ax, fraction=0.04, pad=0.02)
+        cax = fig.add_axes([0.80, 0.12, 0.025, 0.68])  # fixed colorbar slot (reserved always)
+        cbar = fig.colorbar(lc, cax=cax)
         cbar.set_ticks(tick_positions)
         cbar.set_ticklabels(tick_labels)
         cbar.ax.yaxis.set_tick_params(color="black")
@@ -207,7 +219,7 @@ def render_trajectory_colormap(
 
     out_png = Path(out_png)
     out_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_png, facecolor="white", bbox_inches="tight")
+    fig.savefig(out_png, facecolor="white")  # no bbox_inches -> uniform dimensions across metrics
     plt.close(fig)
     return out_png
 

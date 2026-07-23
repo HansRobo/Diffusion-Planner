@@ -193,12 +193,18 @@ def _log_to_wandb(
     """
     import wandb
 
-    from scenario_generation.wandb_closed_loop import build_full_closed_loop_wandb_log, build_sites_aggregate_log
+    from scenario_generation.wandb_closed_loop import (
+        build_combined_episode_table,
+        build_full_closed_loop_wandb_log,
+        build_sites_aggregate_log,
+        resolve_report_link,
+    )
 
     run = wandb.init(project=args.wandb_project, name=args.wandb_run_name)
     try:
         log: dict = {}
         site_summaries: dict[str, dict] = {}
+        episode_data: list = []  # (site, rows, out_dir) for the ONE combined table
         for site_name in site_names:
             r = merged.get(site_name) or {}
             summary = r.get("summary")
@@ -211,25 +217,26 @@ def _log_to_wandb(
                 with segments_path.open(encoding="utf-8") as f:
                     rows = [json.loads(line) for line in f if line.strip()]
             summary_with_rows = {**summary, "segments": rows}
-            site_log = build_full_closed_loop_wandb_log(
-                summary_with_rows,
-                out_dir=site_out_dir,
-                site=site_name,
-                video_pick=args.wandb_video_pick,
-                colormap_metrics=tuple(args.wandb_colormap_metrics),
-                near_miss_thresh=summary.get("near_miss_thresh", 0.5),
-                report_base_url=args.report_base_url,
-            )
+            # build_full returns final section-based keys (closed_loop_scores/... etc.) — merge as-is.
             log.update(
-                {key.replace("closed_loop/", f"closed_loop/{site_name}/", 1): val for key, val in site_log.items()}
+                build_full_closed_loop_wandb_log(
+                    summary_with_rows,
+                    out_dir=site_out_dir,
+                    site=site_name,
+                    video_pick=args.wandb_video_pick,
+                    colormap_metrics=tuple(args.wandb_colormap_metrics),
+                    near_miss_thresh=summary.get("near_miss_thresh", 0.5),
+                    report_base_url=args.report_base_url,
+                )
             )
             site_summaries[site_name] = summary_with_rows
+            episode_data.append((site_name, rows, site_out_dir))
+        if episode_data:
+            log["closed_loop_episodes/all"] = build_combined_episode_table(episode_data)
         if len(site_summaries) > 1:
             log.update(build_sites_aggregate_log(site_summaries))
         if report_path is not None:
-            from scenario_generation.wandb_closed_loop import resolve_report_link
-
-            log["closed_loop/report_path"] = resolve_report_link(args.out_root, args.report_base_url)
+            log["closed_loop_links/report"] = resolve_report_link(args.out_root, args.report_base_url)
         wandb.log(log)
         print(f"wandb: logged {len(site_summaries)} site(s) to run {run.id}")
     finally:

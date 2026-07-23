@@ -23,6 +23,7 @@ dependencies = [
     "torch",
     "tqdm",
     "wandb",
+    "wandb-workspaces",
 ]
 
 [build-system]

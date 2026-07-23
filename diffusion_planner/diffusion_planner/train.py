@@ -126,6 +126,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     from scenario_generation.grouped_closed_loop_eval import ResolvedClosedLoopEvaluation
     from scenario_generation.site_discovery import discover_sites
     from scenario_generation.wandb_closed_loop import (
+        build_combined_episode_table,
         build_full_closed_loop_wandb_log,
         build_grouped_closed_loop_wandb_log,
         build_sites_aggregate_log,
@@ -210,24 +211,38 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
             if rank == 0 and not sites:
                 print(f"closed-loop: no sites found under {args.closed_loop_sites_root}")
             site_summaries: dict[str, dict] = {}
+            episode_data: list = []  # (site, rows, out_dir) for the ONE combined table
             for site_name, npz_root in sites.items():
-                site_log, summary = run_one(str(npz_root), os.path.join(out_dir, site_name), site_name)
-                # "closed_loop/x" -> "closed_loop/<site_name>/x", so each site gets its own
-                # namespaced scalars/videos in the same wandb step instead of overwriting.
-                log.update(
-                    {
-                        key.replace("closed_loop/", f"closed_loop/{site_name}/", 1): val
-                        for key, val in site_log.items()
-                    }
-                )
-                if summary and not _is_grouped_closed_loop_summary(summary):
-                    site_summaries[site_name] = summary
-            # Cross-site micro/macro aggregate (see build_sites_aggregate_log) — unprefixed,
-            # under closed_loop/_all_{micro,macro}/*, alongside the per-site keys above.
+                site_out_dir = os.path.join(out_dir, site_name)
+                site_log, summary = run_one(str(npz_root), site_out_dir, site_name)
+                if summary and _is_grouped_closed_loop_summary(summary):
+                    # Grouped mode keeps its own legacy "closed_loop/grouped/..." keys; namespace
+                    # them per site so multiple sites don't overwrite each other.
+                    log.update(
+                        {
+                            key.replace("closed_loop/", f"closed_loop/{site_name}/", 1): val
+                            for key, val in site_log.items()
+                        }
+                    )
+                else:
+                    # Full mode: build_full already returns final section-based keys
+                    # (closed_loop_scores/... etc.), so no rewrite — just merge.
+                    log.update(site_log)
+                    if summary:
+                        site_summaries[site_name] = summary
+                        episode_data.append((site_name, summary.get("segments") or [], site_out_dir))
+            # One combined, filterable/groupable episode table across all sites.
+            if episode_data:
+                log["closed_loop_episodes/all"] = build_combined_episode_table(episode_data)
+            # Cross-site pooled rollup under closed_loop_overview/*.
             if len(site_summaries) > 1:
                 log.update(build_sites_aggregate_log(site_summaries))
         else:
-            log, _summary = run_one(args.closed_loop_npz_root, out_dir, None)
+            log, summary = run_one(args.closed_loop_npz_root, out_dir, None)
+            if summary and not _is_grouped_closed_loop_summary(summary):
+                log["closed_loop_episodes/all"] = build_combined_episode_table(
+                    [("main", summary.get("segments") or [], out_dir)]
+                )
     finally:
         net.train(was_training)
 

@@ -56,12 +56,11 @@ def collect_site_data(
                 "site": site_name,
                 "n_segments": s.get("n_segments", 0),
                 "total_steps": s.get("total_steps", 0),
-                "collision_segment_rate": s.get("collision_segment_rate", 0.0),
-                "total_collision_steps": s.get("total_collision_steps", 0),
-                "near_miss_segment_rate": s.get("near_miss_segment_rate", 0.0),
-                "total_near_miss_steps": s.get("total_near_miss_steps", 0),
-                "diverged_segment_rate": s.get("diverged_segment_rate", 0.0),
-                "global_min_clearance": s.get("global_min_clearance", float("inf")),
+                "route_completion": s.get("mean_route_completion", 0.0),
+                "total_collision_events": s.get("total_collision_events", 0),
+                "total_curb_hits": s.get("total_curb_hits", 0),
+                "total_snaps": s.get("total_snaps", 0),
+                "n_segments_diverged": s.get("n_segments_diverged", 0),
             }
         )
         if not segments_path.is_file():
@@ -76,8 +75,6 @@ def collect_site_data(
                 stem = f"{r['route']}_{start}_{end}"
                 video_name = f"{stem}.mp4"
                 video_path = site_dir / video_name
-                min_cl = r.get("min_clearance")
-                mean_cl = r.get("mean_clearance")
 
                 # Skip metrics already rendered on a prior call for this out_root (report
                 # rebuilds are common — e.g. re-running --only_sites) rather than re-drawing
@@ -110,12 +107,11 @@ def collect_site_data(
                         "segment": f"[{start},{end}]",
                         "n_steps_run": r.get("n_steps_run", 0),
                         "terminated": r.get("terminated", ""),
-                        "min_clearance": round(min_cl, 4) if min_cl not in (None, float("inf")) else None,
-                        "mean_clearance": round(mean_cl, 3) if mean_cl not in (None, float("inf")) else None,
-                        "n_collision_steps": r.get("n_collision_steps", 0),
-                        "n_near_miss_steps": r.get("n_near_miss_steps", 0),
-                        "progress_m": round(r.get("progress_m", 0.0), 1),
+                        "route_completion": round(r.get("route_completion", 0.0), 3),
+                        "n_collision_events": r.get("n_collision_events", 0),
+                        "n_curb_hits": r.get("n_curb_hits", 0),
                         "n_snaps": r.get("n_snaps", 0),
+                        "progress_m": round(r.get("progress_m", 0.0), 1),
                         "video_path": f"{site_name}/{video_name}" if video_path.is_file() else None,
                         "colormap_paths": colormap_paths,
                     }
@@ -168,7 +164,7 @@ _TEMPLATE = """<!DOCTYPE html>
 
 <h2>拠点別サマリ</h2>
 <table id="summaryTable">
-<tr><th>拠点</th><th>segments</th><th>total_steps</th><th>collision_segment_rate</th><th>collision_steps</th><th>near_miss_segment_rate</th><th>near_miss_steps</th><th>diverged_segment_rate</th><th>global_min_clearance(m)</th></tr>
+<tr><th>拠点</th><th>segments</th><th>走破率(route_completion)</th><th>衝突回数(collision)</th><th>縁石ヒット回数(curb)</th><th>stuck回数(snaps)</th><th>diverged数</th></tr>
 </table>
 
 <h2>エピソード一覧</h2>
@@ -177,8 +173,9 @@ _TEMPLATE = """<!DOCTYPE html>
   <select id="siteFilter"><option value="">拠点: すべて</option></select>
   <select id="sortSel">
     <option value="default">並び順: デフォルト</option>
-    <option value="collision_desc">collision_steps 降順</option>
-    <option value="clearance_asc">min_clearance 昇順(危険な順)</option>
+    <option value="completion_asc">走破率 昇順(悪い順)</option>
+    <option value="collision_desc">衝突回数 降順</option>
+    <option value="curb_desc">縁石ヒット回数 降順</option>
   </select>
   <span class="count" id="count"></span>
 </div>
@@ -200,13 +197,11 @@ for (const s of SUMMARY) {
   tr.innerHTML = `
     <td style="color:${c};font-weight:700">${s.site}</td>
     <td>${s.n_segments}</td>
-    <td>${s.total_steps}</td>
-    <td>${(s.collision_segment_rate*100).toFixed(0)}%</td>
-    <td>${s.total_collision_steps}</td>
-    <td>${(s.near_miss_segment_rate*100).toFixed(0)}%</td>
-    <td>${s.total_near_miss_steps}</td>
-    <td>${((s.diverged_segment_rate||0)*100).toFixed(0)}%</td>
-    <td>${isFinite(s.global_min_clearance) ? s.global_min_clearance.toFixed(4) : '—'}</td>`;
+    <td>${(s.route_completion*100).toFixed(0)}%</td>
+    <td>${s.total_collision_events}</td>
+    <td>${s.total_curb_hits}</td>
+    <td>${s.total_snaps}</td>
+    <td>${s.n_segments_diverged}</td>`;
   summaryTable.appendChild(tr);
 }
 
@@ -225,8 +220,8 @@ function num(v) { const n = parseFloat(v); return (v === null || isNaN(n)) ? nul
 function card(item) {
   const div = document.createElement('div');
   div.className = 'card';
-  const coll = item.n_collision_steps || 0, nearMiss = item.n_near_miss_steps || 0;
-  const clearance = item.min_clearance !== null ? item.min_clearance.toFixed(4)+'m' : '—';
+  const coll = item.n_collision_events || 0, curb = item.n_curb_hits || 0, snaps = item.n_snaps || 0;
+  const completion = ((item.route_completion || 0)*100).toFixed(0)+'%';
   const c = siteColor[item.site] || '#888';
   const videoTag = item.video_path
     ? `<video controls muted preload="metadata" src="${item.video_path}"></video>`
@@ -241,7 +236,7 @@ function card(item) {
       <div class="colormap-controls">
         <select class="metricSel">${opts}</select>
       </div>
-      <img class="colormap" src="${item.colormap_paths[preferred]}" loading="lazy" onclick="window.open(this.src,'_blank')" alt="trajectory colormap">`;
+      <img class="colormap" src="${item.colormap_paths[preferred]}" loading="lazy" onclick="window.open(this.src,'_blank')" alt="trajectory overlay">`;
   }
 
   div.innerHTML = `
@@ -252,10 +247,11 @@ function card(item) {
       <span class="tag" style="background:${c}">${item.site}</span>
       <span class="tag" style="background:#888">${item.segment}</span>
       <div class="metrics">
+        <span>走破率: <b>${completion}</b></span>
+        <span class="${coll>0?'flag':''}">衝突: <b>${coll}</b></span>
+        <span class="${curb>0?'flag':''}">縁石: <b>${curb}</b></span>
+        <span class="${snaps>0?'flag':''}">stuck: <b>${snaps}</b></span>
         <span>steps: <b>${item.n_steps_run}</b></span>
-        <span class="${coll>0?'flag':''}">collision: <b>${coll}</b></span>
-        <span class="${nearMiss>0?'flag':''}">near_miss: <b>${nearMiss}</b></span>
-        <span>min_clearance: <b>${clearance}</b></span>
         <span>progress: <b>${item.progress_m}m</b></span>
         <span class="${item.terminated==='diverged'?'flag':''}">terminated: <b>${item.terminated}</b></span>
       </div>
@@ -277,8 +273,9 @@ function render() {
     return (!q || hay.includes(q)) && (!s || i.site === s);
   });
   const mode = sortEl.value;
-  if (mode === 'collision_desc') filtered.sort((a,b) => (b.n_collision_steps||0)-(a.n_collision_steps||0));
-  else if (mode === 'clearance_asc') filtered.sort((a,b) => (num(a.min_clearance)??1e9)-(num(b.min_clearance)??1e9));
+  if (mode === 'collision_desc') filtered.sort((a,b) => (b.n_collision_events||0)-(a.n_collision_events||0));
+  else if (mode === 'curb_desc') filtered.sort((a,b) => (b.n_curb_hits||0)-(a.n_curb_hits||0));
+  else if (mode === 'completion_asc') filtered.sort((a,b) => (a.route_completion??1)-(b.route_completion??1));
   grid.innerHTML = '';
   filtered.forEach(i => grid.appendChild(card(i)));
   countEl.textContent = `${filtered.length} / ${ITEMS.length} episodes`;

@@ -11,14 +11,8 @@ import wandb
 from scenario_generation.metrics.group_report import WANDB_EXCLUDED_SCALAR_KEYS
 from scenario_generation.trajectory_colormap import METRIC_CHOICES, render_trajectory_colormaps
 
-# Full-route summary keys aggregated across sites by build_sites_aggregate_log — the
-# "rate" pairs each have a numerator ("n_segments_with_collision" etc.) used for the
-# micro (pooled) aggregate, and the rate itself used for the macro (per-site mean) one.
-_SITE_RATE_FIELDS = (
-    ("collision_segment_rate", "n_segments_with_collision"),
-    ("near_miss_segment_rate", "n_segments_with_near_miss"),
-    ("diverged_segment_rate", "n_segments_diverged"),
-)
+# Per-site summary count keys summed across sites by build_sites_aggregate_log for the overview.
+_OVERVIEW_SUM_KEYS = ("total_collision_events", "total_curb_hits", "total_snaps", "n_segments_diverged")
 
 RESULTS_TABLE_COLUMNS = [
     "area_name",
@@ -131,14 +125,33 @@ EPISODE_TABLE_COLUMNS = [
     "segment",
     "n_steps_run",
     "terminated",
-    "min_clearance",
-    "mean_clearance",
-    "n_collision_steps",
-    "n_near_miss_steps",
-    "progress_m",
+    "route_completion",
+    "n_collision_events",
+    "n_curb_hits",
     "n_snaps",
+    "progress_m",
     "video_path",
 ]
+
+
+def _episode_row(table: wandb.Table, site: str, r: dict, out_dir: str | Path | None) -> None:
+    seg = r.get("segment")
+    seg_str = f"[{seg[0]},{seg[1]}]" if seg else ""
+    video_path = str(_segment_paths(out_dir, r)[1]) if out_dir is not None else ""
+    comp = r.get("route_completion")
+    table.add_data(
+        site,
+        r.get("route", ""),
+        seg_str,
+        int(r.get("n_steps_run", 0)),
+        r.get("terminated", ""),
+        float(comp) if comp is not None and math.isfinite(comp) else None,
+        int(r.get("n_collision_events", 0)),
+        int(r.get("n_curb_hits", 0)),
+        int(r.get("n_snaps", 0)),
+        float(r.get("progress_m", 0.0)),
+        video_path,
+    )
 
 
 def build_episode_table(
@@ -155,27 +168,22 @@ def build_episode_table(
     """
     table = wandb.Table(columns=EPISODE_TABLE_COLUMNS)
     for r in rows:
-        seg = r.get("segment")
-        seg_str = f"[{seg[0]},{seg[1]}]" if seg else ""
-        video_path = ""
-        if out_dir is not None:
-            video_path = str(_segment_paths(out_dir, r)[1])
-        min_cl = r.get("min_clearance")
-        mean_cl = r.get("mean_clearance")
-        table.add_data(
-            site or "",
-            r.get("route", ""),
-            seg_str,
-            int(r.get("n_steps_run", 0)),
-            r.get("terminated", ""),
-            float(min_cl) if min_cl is not None and math.isfinite(min_cl) else None,
-            float(mean_cl) if mean_cl is not None and math.isfinite(mean_cl) else None,
-            int(r.get("n_collision_steps", 0)),
-            int(r.get("n_near_miss_steps", 0)),
-            float(r.get("progress_m", 0.0)),
-            int(r.get("n_snaps", 0)),
-            video_path,
-        )
+        _episode_row(table, site or "", r, out_dir)
+    return table
+
+
+def build_combined_episode_table(
+    site_episodes: list[tuple[str, list[dict], str | Path | None]],
+) -> wandb.Table:
+    """ONE episode table across every site (``site`` column filled per row), so the W&B UI's
+    native sort/filter/group-by works across the whole run — group by ``site``, sort by
+    ``n_collision_steps`` desc, etc. — in a single interactive panel instead of one table
+    per site. ``site_episodes`` is ``[(site_name, rows, out_dir), ...]``.
+    """
+    table = wandb.Table(columns=EPISODE_TABLE_COLUMNS)
+    for site, rows, out_dir in site_episodes:
+        for r in rows:
+            _episode_row(table, site, r, out_dir)
     return table
 
 
@@ -194,13 +202,10 @@ def resolve_report_link(out_dir: str | Path, report_base_url: str | None = None)
 
 
 def build_sites_aggregate_log(summaries: dict[str, dict]) -> dict:
-    """Cross-site aggregate scalars from each site's full-route summary dict.
-
-    Two aggregates, both logged (they answer different questions):
-    - ``closed_loop/_all_micro/*``: pooled across all segments (``Σ.../Σ...``) — weighted by
-      how much data each site has; answers "what fraction of all exposure was bad".
-    - ``closed_loop/_all_macro/*``: simple mean of each site's own rate — every site counts
-      equally regardless of size; answers "how consistently safe is the model across sites".
+    """Cross-site rollup under ``closed_loop_overview/`` (the at-a-glance block): the segment-
+    weighted mean route-completion (so long routes aren't under-weighted), plus the plain
+    cross-site SUM of each event count. Deliberately just the small non-saturating set — no
+    segment-rates / min-clearances / means (those stay in each site's summary.json only).
     """
     log: dict = {}
     if not summaries:
@@ -208,34 +213,39 @@ def build_sites_aggregate_log(summaries: dict[str, dict]) -> dict:
     values = list(summaries.values())
     n_sites = len(values)
     total_segments = sum(int(s.get("n_segments", 0)) for s in values)
-    total_steps = sum(int(s.get("total_steps", 0)) for s in values)
 
-    log["closed_loop/_all_micro/n_sites"] = n_sites
-    log["closed_loop/_all_micro/n_segments"] = total_segments
-    log["closed_loop/_all_macro/n_sites"] = n_sites
+    log["closed_loop_overview/n_sites"] = n_sites
+    log["closed_loop_overview/n_segments"] = total_segments
 
-    for rate_key, count_key in _SITE_RATE_FIELDS:
-        total_count = sum(int(s.get(count_key, 0)) for s in values)
-        log[f"closed_loop/_all_micro/{rate_key}"] = (
-            total_count / total_segments if total_segments else 0.0
-        )
-        log[f"closed_loop/_all_macro/{rate_key}"] = (
-            sum(float(s.get(rate_key, 0.0)) for s in values) / n_sites if n_sites else 0.0
-        )
-
-    total_collision_steps = sum(int(s.get("total_collision_steps", 0)) for s in values)
-    log["closed_loop/_all_micro/collision_step_rate"] = (
-        total_collision_steps / total_steps if total_steps else 0.0
+    comp_num = sum(
+        float(s.get("mean_route_completion", 0.0)) * int(s.get("n_segments", 0)) for s in values
     )
-    finite_min_cl = [
-        float(s["global_min_clearance"])
-        for s in values
-        if math.isfinite(s.get("global_min_clearance", float("inf")))
-    ]
-    log["closed_loop/_all_micro/global_min_clearance"] = (
-        min(finite_min_cl) if finite_min_cl else float("inf")
+    log["closed_loop_overview/route_completion"] = (
+        comp_num / total_segments if total_segments else 0.0
     )
+
+    for key in _OVERVIEW_SUM_KEYS:
+        log[f"closed_loop_overview/{key}"] = sum(int(s.get(key, 0)) for s in values)
+
     return {k: v for k, v in log.items() if _wandb_scalar(v) or isinstance(v, int)}
+
+
+# Per-site scalar trends worth a line chart over epochs — the deliberately small, non-saturating
+# set: route_completion (↑, the headline "getting better" signal) plus event COUNTS (↓). The
+# saturating segment-rates and worst-moment min-clearances, and the mean_* metrics, are NOT
+# shown (still in summary.json / episode table for reference) — they either pin to 0/1 on a
+# hard site or were judged not worth the panel by the user.
+_SCORE_KEYS = (
+    "mean_route_completion",
+    "total_collision_events",
+    "total_curb_hits",
+    "total_snaps",
+)
+
+
+def _site_label(site: str | None) -> str:
+    """W&B-key-safe site token; ``None`` (single-npz_root mode) -> ``"main"``."""
+    return (site or "main").replace("/", "_")
 
 
 def build_full_closed_loop_wandb_log(
@@ -248,41 +258,33 @@ def build_full_closed_loop_wandb_log(
     near_miss_thresh: float = 0.5,
     report_base_url: str | None = None,
 ) -> dict:
-    """Full-route closed-loop wandb payload: scalars, one representative video + one
-    trajectory-colormap image per metric in ``colormap_metrics`` (not all routes — see module
-    docstring; still just ONE episode, so uploading every metric for it stays cheap), an
-    episode table (numeric only, for W&B-side sort/filter), and a link to where the full
-    report (all videos + HTML gallery) lives.
+    """Per-site full-route closed-loop wandb payload, keyed into role-based sections so the
+    workspace stays navigable (one collapsible section each) instead of one flat ``closed_loop``
+    blob of 100+ panels:
+
+    - ``closed_loop_scores/{metric}/{site}`` — scalar trends (metric-first so the same metric's
+      sites sort adjacently; the W&B panel-search box filters by either metric or site token).
+    - ``closed_loop_media/{site}`` — ONE gallery panel holding every ``colormap_metrics`` image
+      for the representative episode (captioned by metric), mirroring the HTML report's
+      per-card metric dropdown; ``closed_loop_media/{site}__video`` — that episode's video.
+    - ``closed_loop_links/{site}`` — where the full report (all videos + HTML) lives.
+
+    The per-episode table is built once across ALL sites by :func:`build_combined_episode_table`
+    at the caller (so it's a single filterable/groupable panel), not here.
     """
-    scalar_keys = [
-        "collision_segment_rate",
-        "collision_step_rate",
-        "near_miss_segment_rate",
-        "near_miss_step_rate",
-        "diverged_segment_rate",
-        "global_min_clearance",
-        "mean_segment_min_clearance",
-        "mean_segment_mean_clearance",
-        "total_collision_steps",
-        "total_near_miss_steps",
-        "total_snaps",
-        "total_steps",
-        "n_segments",
-        "n_segments_diverged",
-    ]
-    log = {"closed_loop/mode": "full"}
-    for key in scalar_keys:
+    label = _site_label(site)
+    log: dict = {}
+    for key in _SCORE_KEYS:
         val = summary.get(key)
         if _wandb_scalar(val):
-            log[f"closed_loop/{key}"] = val
+            log[f"closed_loop_scores/{key}/{label}"] = val
 
     rows = summary.get("segments") or []
-    effective_out_dir = out_dir if out_dir is not None else summary.get("npz_root")
     rep = pick_representative_row(rows, mode=video_pick)
     if rep is not None and out_dir is not None:
         png_dir, mp4_path = _segment_paths(out_dir, rep)
         if mp4_path.is_file():
-            log[f"closed_loop/video/{mp4_path.stem}"] = wandb.Video(str(mp4_path), format="mp4")
+            log[f"closed_loop_media/{label}__video"] = wandb.Video(str(mp4_path), format="mp4")
         try:
             rendered = render_trajectory_colormaps(
                 png_dir,
@@ -295,17 +297,19 @@ def build_full_closed_loop_wandb_log(
         except Exception as e:  # pragma: no cover - rendering must never break training
             print(f"closed_loop: trajectory colormap failed for {mp4_path.stem}: {e}")
             rendered = {}
-        for metric, png_path in rendered.items():
-            log[f"closed_loop/traj_colormap/{metric}/{mp4_path.stem}"] = wandb.Image(
-                str(png_path), caption=f"metric={metric}"
-            )
+        # One gallery panel per site: a list of images under a single key (captioned by metric)
+        # -> the metric becomes an in-panel selector, not N separate panels. Ordered by the
+        # requested colormap_metrics so the gallery is stable across epochs/sites.
+        gallery = [
+            wandb.Image(str(rendered[m]), caption=m) for m in colormap_metrics if m in rendered
+        ]
+        if gallery:
+            log[f"closed_loop_media/{label}"] = gallery
 
-    if rows:
-        log["closed_loop/episodes_table"] = build_episode_table(rows, out_dir=out_dir, site=site)
     if out_dir is not None:
-        log["closed_loop/report_path"] = resolve_report_link(out_dir, report_base_url)
-    elif effective_out_dir:
-        log["closed_loop/report_path"] = str(effective_out_dir)
+        log[f"closed_loop_links/{label}"] = resolve_report_link(out_dir, report_base_url)
+    elif summary.get("npz_root"):
+        log[f"closed_loop_links/{label}"] = str(summary["npz_root"])
     return log
 
 
