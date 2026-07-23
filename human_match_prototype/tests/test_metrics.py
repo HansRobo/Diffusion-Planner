@@ -43,61 +43,79 @@ def test_derive_speed():
     assert np.allclose(v, 5.0, atol=1e-6)
 
 
-from human_match_prototype.metrics import multi_human_metrics
+from human_match_prototype.metrics import extract_features, multi_human_metrics
 
 
-def test_multi_human_perfect_coverage():
-    """All humans identical to planner samples -> full coverage."""
+def test_extract_features():
+    """Extract 5D features from a trajectory."""
+    traj = straight(5.0, yaw=0.3)  # (80, 3)
+    feat = extract_features(traj, T=40, dt=0.1)
+    assert feat.shape == (5,)
+    # x, y = endpoint at t=40
+    assert abs(feat[0] - traj[39, 0]) < 1e-6
+    assert abs(feat[1] - traj[39, 1]) < 1e-6
+    # cos_h, sin_h from yaw
+    assert abs(feat[2] - np.cos(traj[39, 2])) < 1e-6
+    assert abs(feat[3] - np.sin(traj[39, 2])) < 1e-6
+    # speed > 0
+    assert feat[4] > 0
+
+
+def test_distributional_identical():
+    """Identical distributions -> all metrics near zero."""
     base = straight(5.0)
-    humans = [base.copy() for _ in range(10)]
-    samples = np.stack([base.copy() for _ in range(8)])
+    humans = [base.copy() for _ in range(30)]
+    samples = np.stack([base.copy() for _ in range(30)])
     m = multi_human_metrics(humans, samples, base)
-    assert m["n_humans"] == 10
-    assert m["dp_human_coverage_4s"] == 1.0
-    assert m["human_dp_coverage_4s"] == 1.0
-    assert m["human_spread_4s"] < 0.01
+    assert m["n_humans"] == 30
+    assert m["energy_dist_4s"] < 0.1
+    assert m["mmd_4s"] < 0.1
+    assert m["sinkhorn_4s"] < 0.1
+    assert m["sliced_w_4s"] < 0.1
+    assert m["fid_4s"] < 0.1
 
 
-def test_multi_human_no_coverage():
-    """Humans with different trajectory shape -> zero coverage."""
+def test_distributional_different():
+    """Different distributions -> all metrics significantly positive."""
     base = straight(5.0)
-    # Different direction (90 deg) — shape differs after origin normalization
-    turning = straight(5.0, yaw=1.5)
-    humans = [turning.copy() for _ in range(5)]
-    samples = np.stack([base.copy() for _ in range(8)])
+    turned = straight(5.0, yaw=1.0)
+    humans = [turned.copy() for _ in range(30)]
+    samples = np.stack([base.copy() for _ in range(30)])
     m = multi_human_metrics(humans, samples, base)
-    assert m["dp_human_coverage_4s"] == 0.0
-    assert m["human_dp_coverage_4s"] == 0.0
+    assert m["energy_dist_4s"] > 1.0
+    assert m["mmd_4s"] > 0.1
+    assert m["sinkhorn_4s"] > 1.0
+    assert m["sliced_w_4s"] > 1.0
+    assert m["fid_4s"] > 1.0
 
 
-def test_multi_human_partial_coverage():
-    """Some humans same shape as planner, some different shape."""
+def test_distributional_diagnosis():
+    """Diagnosis quantities are populated."""
     base = straight(5.0)
-    close = straight(5.1)  # slightly different speed, same direction
-    turning = straight(5.0, yaw=1.5)  # different direction
-    humans = [close, turning]
-    samples = np.stack([base.copy() for _ in range(4)])
+    humans = [straight(5.0 + i * 0.1) for i in range(30)]
+    samples = np.stack([base.copy() for _ in range(20)])
     m = multi_human_metrics(humans, samples, base)
-    assert m["n_humans"] == 2
-    assert m["dp_human_coverage_4s"] == 0.5
-    assert m["human_dp_coverage_4s"] == 1.0
+    assert "human_outlier_4s" in m
+    assert "planner_energy_score_4s" in m
+    assert not np.isnan(m["human_outlier_4s"])
+    assert not np.isnan(m["planner_energy_score_4s"])
 
 
-def test_multi_human_typicality_typical():
-    """Test human is at the centroid of training humans."""
-    base = straight(5.0)
-    humans = [base.copy() for _ in range(20)]
-    for i, h in enumerate(humans):
-        h[:, 0] += (i - 10) * 0.1
-    samples = np.stack([base.copy()])
-    m = multi_human_metrics(humans, samples, base)
-    assert m["test_human_typicality_4s"] < 0.5
-
-
-def test_multi_human_empty():
+def test_distributional_empty():
     """No matched humans -> NaN metrics."""
     base = straight(5.0)
     samples = np.stack([base.copy()])
     m = multi_human_metrics([], samples, base)
     assert m["n_humans"] == 0
-    assert np.isnan(m["dp_human_coverage_4s"])
+    assert np.isnan(m["energy_dist_4s"])
+    assert np.isnan(m["mmd_4s"])
+
+
+def test_mmd_diagnostic_split():
+    """MMD split into position/heading/speed components."""
+    base = straight(5.0)
+    humans = [straight(5.0, yaw=0.5 + i * 0.01) for i in range(30)]
+    samples = np.stack([base.copy() for _ in range(30)])
+    m = multi_human_metrics(humans, samples, base)
+    # Heading component should dominate since only yaw differs
+    assert m["mmd_heading_4s"] > m["mmd_speed_4s"]

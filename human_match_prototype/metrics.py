@@ -60,87 +60,194 @@ def coverage_metrics(human: np.ndarray, samples: np.ndarray) -> dict[str, float]
     return out
 
 
+def extract_features(traj: np.ndarray, T: int, dt: float = DT) -> np.ndarray:
+    """Extract 5D feature vector from a single trajectory at horizon T.
+
+    Returns: (5,) array [x, y, cos_heading, sin_heading, speed].
+    """
+    endpoint = traj[T - 1]  # [x, y, yaw]
+    speed = np.linalg.norm(traj[T - 1, :2] - traj[T - 2, :2]) / dt if T >= 2 else 0.0
+    return np.array(
+        [
+            endpoint[0],
+            endpoint[1],
+            np.cos(endpoint[2]),
+            np.sin(endpoint[2]),
+            speed,
+        ]
+    )
+
+
+def _energy_distance(P: np.ndarray, Q: np.ndarray) -> float:
+    """Unbiased energy distance between two sample sets. P: (n, d), Q: (m, d)."""
+    from scipy.spatial.distance import cdist
+
+    n, m = len(P), len(Q)
+    if n < 2 or m < 2:
+        return float("nan")
+    pq = cdist(P, Q).mean()
+    pp = cdist(P, P).sum() / (n * (n - 1))
+    qq = cdist(Q, Q).sum() / (m * (m - 1))
+    return float(2 * pq - pp - qq)
+
+
+def _mmd_rbf(P: np.ndarray, Q: np.ndarray, bandwidth: float | None = None) -> float:
+    """MMD with RBF kernel. Median heuristic for bandwidth if not given."""
+    from scipy.spatial.distance import cdist
+
+    n, m = len(P), len(Q)
+    if n < 2 or m < 2:
+        return float("nan")
+    if bandwidth is None:
+        pooled = np.vstack([P, Q])
+        dists = cdist(pooled, pooled)
+        nonzero = dists[dists > 0]
+        bandwidth = float(np.median(nonzero)) if len(nonzero) > 0 else 1.0
+    if bandwidth < 1e-12:
+        bandwidth = 1.0
+    gamma = 1.0 / (2 * bandwidth**2)
+
+    kpp = np.exp(-gamma * cdist(P, P) ** 2)
+    kqq = np.exp(-gamma * cdist(Q, Q) ** 2)
+    kpq = np.exp(-gamma * cdist(P, Q) ** 2)
+
+    np.fill_diagonal(kpp, 0)
+    np.fill_diagonal(kqq, 0)
+    mmd = kpp.sum() / (n * (n - 1)) + kqq.sum() / (m * (m - 1)) - 2 * kpq.mean()
+    return float(max(mmd, 0.0))
+
+
+def _mmd_rbf_subset(P: np.ndarray, Q: np.ndarray, indices: list[int], bandwidth: float) -> float:
+    """MMD on a subset of feature dimensions."""
+    return _mmd_rbf(P[:, indices], Q[:, indices], bandwidth)
+
+
+def _frechet_distance(P: np.ndarray, Q: np.ndarray) -> float:
+    """Frechet distance between two sample sets assuming Gaussian."""
+    from sklearn.covariance import LedoitWolf
+
+    if len(P) < 3 or len(Q) < 3:
+        return float("nan")
+    mu_p, mu_q = P.mean(axis=0), Q.mean(axis=0)
+    try:
+        cov_p = LedoitWolf().fit(P).covariance_
+        cov_q = LedoitWolf().fit(Q).covariance_
+    except Exception:
+        return float("nan")
+    from scipy.linalg import sqrtm
+
+    diff = mu_p - mu_q
+    covmean = sqrtm(cov_p @ cov_q)
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    return float(diff @ diff + np.trace(cov_p + cov_q - 2 * covmean))
+
+
+def _human_outlier_score(test_feat: np.ndarray, human_feats: np.ndarray, k: int = 5) -> float:
+    """k-NN distance of test feature to human cloud."""
+    if len(human_feats) < k:
+        return float("nan")
+    dists = np.linalg.norm(human_feats - test_feat, axis=-1)
+    return float(np.sort(dists)[:k].mean())
+
+
+def _planner_energy_score(test_feat: np.ndarray, planner_feats: np.ndarray) -> float:
+    """Energy score: E||P - y|| - 0.5 * E||P - P'||."""
+    n = len(planner_feats)
+    if n < 2:
+        return float("nan")
+    py = np.linalg.norm(planner_feats - test_feat, axis=-1).mean()
+    from scipy.spatial.distance import cdist
+
+    pp = cdist(planner_feats, planner_feats).sum() / (n * (n - 1))
+    return float(py - 0.5 * pp)
+
+
 def multi_human_metrics(
     human_futures: list[np.ndarray],
     dp_samples: np.ndarray,
     test_human: np.ndarray,
 ) -> dict[str, float]:
-    """Compare DP sample cloud against multiple matched human trajectories.
+    """Compare DP sample distribution against human trajectory distribution.
 
     human_futures: list of (80, 3) [x, y, yaw] in test-ego coords.
     dp_samples: (N, 80, 3) planner samples.
     test_human: (80, 3) the test frame's own human trajectory.
     """
+    import ot
+
+    nan_keys = [
+        "energy_dist",
+        "mmd",
+        "mmd_position",
+        "mmd_heading",
+        "mmd_speed",
+        "sinkhorn",
+        "sliced_w",
+        "fid",
+        "human_outlier",
+        "planner_energy_score",
+    ]
     out: dict[str, float] = {"n_humans": len(human_futures)}
     if not human_futures or len(dp_samples) == 0:
         for name in HORIZONS:
-            for key in (
-                "human_spread",
-                "dp_human_coverage",
-                "human_dp_coverage",
-                "human_consensus",
-                "test_human_typicality",
-            ):
+            for key in nan_keys:
                 out[f"{key}_{name}"] = float("nan")
         return out
 
-    h_stack = np.stack(human_futures)  # (M, 80, 3)
-    s_xy = dp_samples[:, :, :2]  # (N, 80, 2)
-
-    # Normalize all trajectories to start at origin so we compare shapes, not positions.
-    # Training humans come from different ego positions on the same lanelet.
-    h_origins = h_stack[:, 0:1, :2]  # (M, 1, 2)
-    h_norm = h_stack[:, :, :2] - h_origins  # (M, 80, 2)
-    s_origins = s_xy[:, 0:1, :]  # (N, 1, 2)
-    s_norm = s_xy - s_origins  # (N, 80, 2)
-    test_origin = test_human[0:1, :2]  # (1, 2)
-    test_norm = test_human[:, :2] - test_origin  # (80, 2)
-
     for name, T in HORIZONS.items():
-        thr = CLOSE_ADE_THRESHOLDS[name]
-        h_xy = h_norm[:, :T]  # (M, T, 2) — origin-normalized
-        s_xy_t = s_norm[:, :T]  # (N, T, 2) — origin-normalized
+        h_feats = np.array([extract_features(h, T) for h in human_futures])  # (M, 5)
+        s_feats = np.array([extract_features(s, T) for s in dp_samples])  # (N, 5)
+        t_feat = extract_features(test_human, T)  # (5,)
 
-        # human_spread: mean distance of endpoints from centroid (on normalized trajs)
-        h_ends = h_xy[:, T - 1]  # (M, 2)
-        centroid = h_ends.mean(axis=0)
-        out[f"human_spread_{name}"] = float(np.linalg.norm(h_ends - centroid, axis=-1).mean())
+        # 1. Energy Distance
+        out[f"energy_dist_{name}"] = _energy_distance(s_feats, h_feats)
 
-        # dp_human_coverage: fraction of humans covered by at least one DP sample
-        covered_humans = 0
-        for h in h_xy:
-            ade_per_sample = np.linalg.norm(s_xy_t - h[None, :, :], axis=-1).mean(axis=1)
-            if ade_per_sample.min() < thr:
-                covered_humans += 1
-        out[f"dp_human_coverage_{name}"] = covered_humans / len(human_futures)
+        # 2. MMD + diagnostic split
+        pooled = np.vstack([s_feats, h_feats])
+        from scipy.spatial.distance import cdist
 
-        # human_dp_coverage: fraction of DP samples close to at least one human
-        covered_samples = 0
-        for s in s_xy_t:
-            ade_per_human = np.linalg.norm(h_xy - s[None, :, :], axis=-1).mean(axis=1)
-            if ade_per_human.min() < thr:
-                covered_samples += 1
-        out[f"human_dp_coverage_{name}"] = covered_samples / len(dp_samples)
+        all_dists = cdist(pooled, pooled)
+        nonzero = all_dists[all_dists > 0]
+        bw = float(np.median(nonzero)) if len(nonzero) > 0 else 1.0
+        if bw < 1e-12:
+            bw = 1.0
+        out[f"mmd_{name}"] = _mmd_rbf(s_feats, h_feats, bw)
+        out[f"mmd_position_{name}"] = _mmd_rbf_subset(s_feats, h_feats, [0, 1], bw)
+        out[f"mmd_heading_{name}"] = _mmd_rbf_subset(s_feats, h_feats, [2, 3], bw)
+        out[f"mmd_speed_{name}"] = _mmd_rbf_subset(s_feats, h_feats, [4], bw)
 
-        # human_consensus: low spread indicates consensus
-        out[f"human_consensus_{name}"] = float(out[f"human_spread_{name}"] < 3.0)
+        # 3. Sinkhorn Divergence
+        try:
+            s64 = s_feats.astype(np.float64)
+            h64 = h_feats.astype(np.float64)
+            sink = ot.bregman.empirical_sinkhorn_divergence(
+                s64,
+                h64,
+                reg=1.0,
+                metric="euclidean",
+            )
+            out[f"sinkhorn_{name}"] = float(max(sink, 0.0))
+        except Exception:
+            out[f"sinkhorn_{name}"] = float("nan")
 
-        # test_human_typicality: Mahalanobis CDF of test human endpoint
-        test_end = test_norm[T - 1]  # (2,) — origin-normalized
-        if len(human_futures) >= 3:
-            cov = np.cov(h_ends.T)
-            if np.linalg.det(cov) > 1e-12:
-                inv_cov = np.linalg.inv(cov)
-                diff_test = test_end - centroid
-                test_d = float(np.sqrt(diff_test @ inv_cov @ diff_test))
-                human_diffs = h_ends - centroid
-                human_dists = np.array([float(np.sqrt(d @ inv_cov @ d)) for d in human_diffs])
-                out[f"test_human_typicality_{name}"] = float((human_dists < test_d).mean())
-            else:
-                test_d_eucl = np.linalg.norm(test_end - centroid)
-                human_eucl = np.linalg.norm(h_ends - centroid, axis=-1)
-                out[f"test_human_typicality_{name}"] = float((human_eucl < test_d_eucl).mean())
-        else:
-            out[f"test_human_typicality_{name}"] = float("nan")
+        # 4. Sliced Wasserstein
+        try:
+            out[f"sliced_w_{name}"] = float(
+                ot.sliced.sliced_wasserstein_distance(
+                    s_feats.astype(np.float64),
+                    h_feats.astype(np.float64),
+                    n_projections=256,
+                )
+            )
+        except Exception:
+            out[f"sliced_w_{name}"] = float("nan")
+
+        # 5. FID
+        out[f"fid_{name}"] = _frechet_distance(s_feats, h_feats)
+
+        # 6. Diagnosis
+        out[f"human_outlier_{name}"] = _human_outlier_score(t_feat, h_feats)
+        out[f"planner_energy_score_{name}"] = _planner_energy_score(t_feat, s_feats)
 
     return out

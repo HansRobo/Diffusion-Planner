@@ -65,7 +65,7 @@ def find_matches(
     lanelet_lookup: dict[int, list[dict]],
     test_lanelet_id: int,
     max_heading_diff_deg: float = 45.0,
-    max_distance_m: float = 30.0,
+    max_distance_m: float = 5.0,
     max_per_lanelet: int = 200,
     seed_key: str = "",
 ) -> list[dict]:
@@ -124,7 +124,23 @@ def fetch_npzs(npz_paths: list[str], dest: Path, host: str, bwlimit: int = 10000
                 f"{host}:/",
                 str(dest),
             ]
-            subprocess.run(cmd, check=True)
+            import time as _time
+
+            for attempt in range(5):
+                result = subprocess.run(cmd)
+                if result.returncode == 0:
+                    break
+                if attempt < 4:
+                    wait = 2**attempt * 5  # 5, 10, 20, 40s
+                    print(
+                        f"rsync error (code {result.returncode}), retry {attempt + 1}/4 in {wait}s"
+                    )
+                    _time.sleep(wait)
+                else:
+                    print(
+                        f"rsync failed after 5 attempts (code {result.returncode}), skipping batch"
+                    )
+                    break
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -137,7 +153,7 @@ def run_multi_human(
     host: str = "sakurab",
     bwlimit: int = 10000,
     max_heading_diff_deg: float = 45.0,
-    max_distance_m: float = 30.0,
+    max_distance_m: float = 5.0,
     max_per_lanelet: int = 200,
     fetch_dest: str = "data/human_match/multi_human_mirror",
     model_dir: str = "/opt/autoware/mlmodels/diffusion_planner_for_x2",
