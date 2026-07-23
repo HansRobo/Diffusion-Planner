@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 
@@ -64,6 +66,14 @@ class NoiseScheduleVP:
         """
         log_mean_coeff = self.marginal_log_mean_coeff(t)
         log_std = 0.5 * torch.log(1.0 - torch.exp(2.0 * log_mean_coeff))
+        return log_mean_coeff - log_std
+
+    def marginal_lambda_float(self, t: float) -> float:
+        """
+        Same as `marginal_lambda` but for a Python float `t`, returning a Python float.
+        """
+        log_mean_coeff = self.marginal_log_mean_coeff(t)
+        log_std = 0.5 * math.log(1.0 - math.exp(2.0 * log_mean_coeff))
         return log_mean_coeff - log_std
 
     def inverse_lambda(self, lamb):
@@ -325,11 +335,12 @@ class DPM_Solver:
             A pytorch tensor of the time steps, with the shape (N + 1,).
         """
         if skip_type == "logSNR":
-            lambda_T = self.noise_schedule.marginal_lambda(torch.tensor(t_T).to(device))
-            lambda_0 = self.noise_schedule.marginal_lambda(torch.tensor(t_0).to(device))
-            logSNR_steps = torch.linspace(lambda_T.cpu().item(), lambda_0.cpu().item(), N + 1).to(
-                device
-            )
+            # t_T and t_0 are Python floats, so compute the lambda endpoints with
+            # plain math. Going through GPU tensors + `.item()` would force a
+            # GPU->CPU sync and a torch.compile graph break.
+            lambda_T = self.noise_schedule.marginal_lambda_float(t_T)
+            lambda_0 = self.noise_schedule.marginal_lambda_float(t_0)
+            logSNR_steps = torch.linspace(lambda_T, lambda_0, N + 1, device=device)
             return self.noise_schedule.inverse_lambda(logSNR_steps)
         elif skip_type == "time_uniform":
             return torch.linspace(t_T, t_0, N + 1).to(device)
