@@ -449,3 +449,7 @@ def test_mode_metrics_separate_candidate_quality_from_mode_selection():
     assert torch.equal(metrics["plantf_mode_usage_0"], torch.tensor([1.0, 0.0]))
     assert torch.equal(metrics["plantf_mode_usage_2"], torch.tensor([0.0, 1.0]))
     assert torch.equal(metrics["plantf_miss_rate_2m"], torch.zeros(2))
+    # oracle (best-ADE) mode is 1 for sample 0 and 2 for sample 1 — distinct from
+    # the selected mode, which is the whole point of tracking it separately.
+    assert torch.equal(metrics["plantf_oracle_usage_1"], torch.tensor([1.0, 0.0]))
+    assert torch.equal(metrics["plantf_oracle_usage_2"], torch.tensor([0.0, 1.0]))
