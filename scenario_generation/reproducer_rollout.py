@@ -442,6 +442,10 @@ class _SegState:
     # sustain threshold. route_arc_s caches tl.poses cumulative arc length (lazy).
     realized_lag_streak: int = 0
     route_arc_s: object = None
+    # Closed-loop viz: per-step live ego xy (world) + post-teleport snap positions for the
+    # route metric map. Allocated only on the render_segment path.
+    live_xy: np.ndarray | None = None
+    snap_xy: list = field(default_factory=list)
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -792,12 +796,40 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.prev_max_idx = cur.max_idx_reached
                 s.ego_stuck = 0
                 s.snap_count += 1
+                # Post-teleport pose for the route metric map (yellow star).
+                s.snap_xy.append(
+                    np.array([float(s.live_pose[0]), float(s.live_pose[1])], dtype=np.float64)
+                )
 
 
 def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers, np_dict=None):
     """Score this step and advance the ego (sequential render_segment path)."""
     _score_into(s, neighbors_live, device, timers, np_dict=np_dict)
     _advance_step(s, pred, idx, device, timers)
+
+
+def _event_onsets(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES) -> list[int]:
+    """Rising-edge onset indices with the same falling-edge debounce as ``_event_count``.
+
+    Returns the step indices where a new event starts. ``len(result) == _event_count(mask)``.
+    """
+    if mask.size == 0:
+        return []
+    onsets: list[int] = []
+    in_event = False
+    false_run = 0
+    for i, v in enumerate(mask.astype(bool)):
+        if v:
+            if not in_event:
+                onsets.append(i)
+                in_event = True
+            false_run = 0
+        elif in_event:
+            false_run += 1
+            if false_run >= clear_frames:
+                in_event = False
+                false_run = 0
+    return onsets
 
 
 def _event_count(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES) -> int:
@@ -808,23 +840,7 @@ def _event_count(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES)
     ``clear_frames`` consecutive Falses release it so a later True is a new event. Used for
     collision / near-miss / strong-brake ``*_count`` (``*_steps`` stay raw).
     """
-    if mask.size == 0:
-        return 0
-    count = 0
-    in_event = False
-    false_run = 0
-    for v in mask.astype(bool):
-        if v:
-            if not in_event:
-                count += 1
-                in_event = True
-            false_run = 0
-        elif in_event:
-            false_run += 1
-            if false_run >= clear_frames:
-                in_event = False
-                false_run = 0
-    return count
+    return len(_event_onsets(mask, clear_frames=clear_frames))
 
 
 def _clearance_stats(values: np.ndarray) -> dict:
@@ -1228,6 +1244,7 @@ def _draw_step(
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
+    reproducer_ego: tuple[float, float, float] | None = None,
 ):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
@@ -1241,6 +1258,9 @@ def _draw_step(
     ``neighbor_ids``: per-slot track UUIDs from the sidecar. When given, neighbor
     agents are renamed to their UUID so the sim's own ``_stable_color`` keeps one
     color per track across frames (vs the flickering distance-sorted slot colors).
+
+    ``reproducer_ego``: optional ``(x, y, heading)`` of the recorded cursor ego in
+    the live-ego frame, drawn as a hollow outline matching the live ego color.
     """
     from pathlib import Path
 
@@ -1276,6 +1296,7 @@ def _draw_step(
         route_polylines=_polylines_from_tensor(data["route_lanes"]),
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
         extra_ego_trajectories=extra_ego_trajectories,
+        reproducer_ego=reproducer_ego,
     )
 
 
@@ -1379,6 +1400,7 @@ def render_segment(
         strong_brake_mps2=strong_brake_mps2,
         yaw_gate=yaw_gate,
     )
+    s.live_xy = np.full((cap, 2), np.nan, dtype=np.float64)
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
     # margin covers any overrun without scanning the whole route.
@@ -1432,6 +1454,9 @@ def render_segment(
             )
             break
         np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
+        if s.live_xy is not None and k < s.live_xy.shape[0]:
+            s.live_xy[k, 0] = float(s.live_pose[0])
+            s.live_xy[k, 1] = float(s.live_pose[1])
         # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
         # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
         dbg.write(
@@ -1512,6 +1537,7 @@ def render_segment(
         if interpolate and nids and interp:
             _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
         if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
+            repro_xyh = _world_pose_to_ego(tl.poses[idx], s.live_pose)
             _draw_step(
                 np_dict,
                 pred_cur,
@@ -1523,6 +1549,7 @@ def render_segment(
                 title_prefix=title_prefix,
                 distance_label_offset_m=distance_label_offset_m,
                 view_half_m=view_half_m,
+                reproducer_ego=repro_xyh,
             )
         _score_into(s, neighbors_live, device, timers, np_dict=np_dict)
         snaps_before = s.snap_count
@@ -1533,7 +1560,30 @@ def render_segment(
             # it to force a fresh inference at the snapped pose (else the snap never sticks).
             plan_world = None
     dbg.close()
-    return _finalize(s)
+    metrics = _finalize(s)
+    # Whole-route metric map next to the PNG dir / sibling of the MP4.
+    if s.live_xy is not None and s.k > 0:
+        from scenario_generation.closed_loop_metric_map import write_route_metric_map
+
+        write_route_metric_map(
+            out_path=out_dir.parent / f"{out_dir.name}_metrics_map.png",
+            live_xy=s.live_xy[: s.k],
+            gt_xy=tl.poses[start:end, :2],
+            clearances=s.clearances[: s.k],
+            collisions=s.collisions[: s.k],
+            rb_dists=s.rb_dists[: s.k],
+            red_light=s.red_light[: s.k],
+            accels=s.accels[: s.k] if s.accels is not None else np.zeros(s.k, dtype=np.float32),
+            near_miss_thresh=float(s.near_miss_thresh),
+            strong_brake_mps2=float(s.strong_brake_mps2),
+            snap_xy=s.snap_xy,
+            title=out_dir.name,
+            metrics=metrics,
+            tl=tl,
+            start=start,
+            end=end,
+        )
+    return metrics
 
 
 @torch.no_grad()

@@ -6,8 +6,10 @@ requires-python = ">=3.10,<3.11"
 dependencies = [
     "diffusion-planner",
     "gradio",
+    "kaleido",
     "matplotlib",
     "numpy>=1.26,<2",
+    "plotly",
     "rlvr",
     "scene-search",
     "scipy",
