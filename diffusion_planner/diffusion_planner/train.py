@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 import wandb
 from timm.utils import ModelEma
-from torch import optim
+from torch import nn, optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
@@ -368,12 +368,23 @@ def model_training(args: TrainConfig):
             )
         )
 
-    # optimizer
+    # optimizer: weight decay on matmul weights only; biases and
+    # LayerNorm/BatchNorm/GroupNorm/Embedding params are excluded (standard
+    # transformer practice, matches original planTF). The previous single group
+    # relied on torch AdamW's default wd=0.01 applied to ALL params.
+    decay_params, no_decay_params = [], []
+    _no_decay_modules = (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d, nn.GroupNorm, nn.Embedding)
+    for module in ddp.get_model(diffusion_planner, args.ddp).modules():
+        for param_name, param in module.named_parameters(recurse=False):
+            if not param.requires_grad:
+                continue
+            if param_name.endswith("bias") or isinstance(module, _no_decay_modules):
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
     params = [
-        {
-            "params": ddp.get_model(diffusion_planner, args.ddp).parameters(),
-            "lr": args.learning_rate,
-        }
+        {"params": decay_params, "lr": args.learning_rate, "weight_decay": args.weight_decay},
+        {"params": no_decay_params, "lr": args.learning_rate, "weight_decay": 0.0},
     ]
 
     optimizer = optim.AdamW(params)

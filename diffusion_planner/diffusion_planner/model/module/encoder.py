@@ -48,6 +48,21 @@ class Encoder(nn.Module):
         self.ego_history_dropout_rate = config.ego_history_dropout_rate
         self.use_turn_indicators = config.use_turn_indicators
 
+        # A2: current-ego-state token (ego_current_state[:, 4:10] =
+        # vx, vy, ax, ay, steer, yaw_rate). C1: consecutive-frame xy deltas.
+        # See docs/plantf_original_comparison_and_roadmap.md.
+        self.plantf_ego_state_token = getattr(config, "plantf_ego_state_token", False)
+        self.plantf_ego_state_dropout = getattr(config, "plantf_ego_state_dropout", 0.75)
+        self.plantf_input_delta = getattr(config, "plantf_input_delta", False)
+        self._ego_state_slice = slice(4, 10)
+        if self.plantf_ego_state_token:
+            ego_state_dim = self._ego_state_slice.stop - self._ego_state_slice.start
+            self.ego_state_emb = nn.Sequential(
+                nn.Linear(ego_state_dim, config.hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(config.hidden_dim, config.hidden_dim),
+            )
+
         ego_num = 1
         goal_pose_num = 1
         ego_shape_num = 1
@@ -164,11 +179,24 @@ class Encoder(nn.Module):
         nn.init.normal_(self.lane_encoder.speed_limit_emb.weight, std=0.02)
         nn.init.normal_(self.lane_encoder.attribute_emb.weight, std=0.02)
 
+    def _to_xy_delta(self, x: torch.Tensor, time_dim: int) -> torch.Tensor:
+        """C1: replace absolute xy (channels 0,1) with consecutive-frame deltas
+        along ``time_dim`` (first timestep -> zero delta); other channels
+        unchanged. Padding rows are all-zero so their deltas stay zero."""
+        xy = x[..., :2]
+        delta = xy - torch.roll(xy, shifts=1, dims=time_dim)
+        idx = [slice(None)] * x.dim()
+        idx[time_dim] = slice(0, 1)
+        delta[tuple(idx)] = 0.0
+        return torch.cat([delta, x[..., 2:]], dim=-1)
+
     def forward(self, inputs):
         # ego agent
         ego = inputs["ego_agent_past"].clone()  # (B, T=INPUT_T + 1, D=4)
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
+        if self.plantf_input_delta:
+            ego = self._to_xy_delta(ego, time_dim=1)  # C1
         ego = torch.cat(
             # [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
             [ego[:, :6], torch.zeros_like(ego[:, 6:])],
@@ -177,6 +205,8 @@ class Encoder(nn.Module):
 
         # agents
         neighbors = inputs["neighbor_agents_past"].clone()  # (B, N=32, T=21, D=11)
+        if self.plantf_input_delta:
+            neighbors = self._to_xy_delta(neighbors, time_dim=2)  # C1
         neighbors = torch.cat(
             [torch.zeros_like(neighbors[:, :, :-6]), neighbors[:, :, -6:]],
             dim=2,
@@ -221,6 +251,19 @@ class Encoder(nn.Module):
             encoding_ego = F.dropout(
                 encoding_ego, p=self.ego_history_dropout_rate, training=self.training
             )
+
+        if self.plantf_ego_state_token:
+            # A2: replace the ego token with an embedding of the current motion
+            # state (normalized; observation_normalizer runs before the encoder),
+            # anchoring the prediction to the current motion. Keep ego_mask/ego_pos
+            # from the history encoder (ego is always valid at the current pose).
+            ego_state = inputs["ego_current_state"][:, self._ego_state_slice]  # (B, 6)
+            if self.training and self.plantf_ego_state_dropout > 0:
+                keep = (torch.rand_like(ego_state) >= self.plantf_ego_state_dropout).to(
+                    ego_state.dtype
+                )
+                ego_state = ego_state * keep
+            encoding_ego = self.ego_state_emb(ego_state).unsqueeze(1)  # (B, 1, hidden)
 
         encoding_neighbors, neighbors_mask, neighbor_pos = self.neighbor_encoder(neighbors)
         encoding_static, static_mask, static_pos = self.static_encoder(static)
