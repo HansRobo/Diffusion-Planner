@@ -1,4 +1,3 @@
-import random
 from argparse import Namespace
 from functools import partial
 
@@ -25,30 +24,6 @@ from diffusion_planner.model.flow_matching_utils.ode_solver import (
 from diffusion_planner.model.module.dit import DiT
 from diffusion_planner.model.module.turn_indicator import TurnIndicatorNetwork
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
-
-
-def generate_prefix_mask(delay: torch.Tensor, num_agents: int, max_len: int) -> torch.Tensor:
-    """Generates a prefix mask based on a delay tensor.
-
-    Args:
-        delay: A 1D tensor of shape (B,) with delay values.
-        num_agents: The number of agents (P).
-        max_len: The maximum length of the sequence (T+1 or T_plus_1).
-
-    Returns:
-        A 4D boolean tensor of shape (B, num_agents, max_len, 1) where mask[i, :, j, 0] is True if j <= delay[i].
-    """
-    # Create steps tensor (1, 1, max_len, 1)
-    steps = torch.arange(max_len, device=delay.device).view(1, 1, -1, 1)
-    # Reshape delay to (B, 1, 1, 1) for broadcasting
-    reshaped_delay = delay.reshape(delay.shape[0], 1, 1, 1)
-    # Perform the comparison, result is (B, 1, max_len, 1)
-    mask = steps <= reshaped_delay
-    ego_mask = mask.expand(-1, 1, -1, -1)
-    neighbor_mask = torch.zeros(
-        (delay.shape[0], num_agents - 1, max_len, 1), dtype=torch.bool, device=delay.device
-    )
-    return torch.cat([ego_mask, neighbor_mask], dim=1)
 
 
 def replace_current_state(x: torch.Tensor, current_states: torch.Tensor) -> torch.Tensor:
@@ -100,13 +75,6 @@ def compute_training_loss(
     t = t.expand(B, P, T + 1, 1)
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
 
-    max_delay = 5
-    delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
-    prefix_mask = generate_prefix_mask(delay, 1 + Pn, T + 1)  # (B, P, T+1, 1)
-    mask_coeff = random.uniform(0.0, 1.0)
-    curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=gt_future.device))
-    t = torch.where(prefix_mask, curr_mask_time, t)
-
     if use_velocity:
         full_traj = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, T+1, 4]
         gt_velocity = waypoints_to_velocity(full_traj)  # [B, P, T, 4]
@@ -121,14 +89,12 @@ def compute_training_loss(
         xT = mean + std * z
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
-        xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, 1 + T, 4]
 
         merged_inputs = {
             **inputs,
             "gt_trajectories": all_gt,
             "sampled_trajectories": xT,
             "diffusion_time": t,
-            "prefix_mask": prefix_mask,
         }
         _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
@@ -185,7 +151,6 @@ def compute_training_loss(
             "gt_trajectories": all_gt,
             "sampled_trajectories": xT,
             "diffusion_time": t,
-            "prefix_mask": prefix_mask,
         }
         _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, 4]
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
@@ -459,11 +424,6 @@ class Decoder(nn.Module):
         action_prefix = replace_current_state(action_prefix, current_states)
         xT = action_prefix.reshape(B, P, (1 + self._future_len) * 4)
 
-        B, P, T_plus_1, D = action_prefix.shape
-
-        delay = inputs["delay"].to(device=action_prefix.device)
-        mask = generate_prefix_mask(delay, P, T_plus_1)  # (B, P, T_plus_1, 1)
-
         def prefix_constraint(xt, t, step):
             xt = xt.reshape(B, P, 1 + self._future_len, 4)
             xt = replace_current_state(xt, current_states)
@@ -500,7 +460,7 @@ class Decoder(nn.Module):
 
         dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, correcting_xt_fn=prefix_constraint)
 
-        x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
+        x0 = dpm_solver.sample(xT, steps=10, skip_type="logSNR")
 
         x0 = x0.reshape(B, P, (1 + self._future_len), 4)
         turn_indicator_logit = self._compute_turn_indicator(x0[:, 0, 1:], inputs)
@@ -566,7 +526,6 @@ class Decoder(nn.Module):
                     "neighbor_agent_past": past and current neighbor states,
 
                     "sampled_trajectories": sampled current-future ego & neighbor states,        [B, P, 1 + self._future_len, 4]
-                    "delay": number of initial steps to keep fixed (>=0),
                     [training-only] "diffusion_time": timestep of diffusion process $t \in [0, 1]$,              [B]
                     ...
                 }
