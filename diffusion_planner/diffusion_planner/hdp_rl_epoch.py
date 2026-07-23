@@ -747,7 +747,226 @@ def _hdp_rl_step(
     return result
 
 
+@torch.no_grad()
+def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, rollout_generator):
+    """Rollout + reward + frozen weights for one batch — the mining half of a step."""
+    n = args.num_generations
+    raw_inputs = dict(raw_inputs)
+    raw_inputs["ego_agent_past"] = heading_to_cos_sin(raw_inputs["ego_agent_past"])
+    raw_inputs["goal_pose"] = heading_to_cos_sin(raw_inputs["goal_pose"])
+    if aug is not None:
+        raw_inputs, ego_future_aug, neighbors_future_aug = aug(
+            raw_inputs, raw_inputs["ego_agent_future"], raw_inputs["neighbor_agents_future"]
+        )
+        raw_inputs["ego_agent_future"] = ego_future_aug
+        raw_inputs["neighbor_agents_future"] = neighbors_future_aug
+    reward_neighbors_raw = _neighbor_future_world(raw_inputs["neighbor_agents_future"])
+    norm_inputs = args.observation_normalizer(raw_inputs)
+    norm_exp = _grouped_policy_inputs(norm_inputs, n, decoder_only=True)
+    num_scenes = norm_exp["ego_current_state"].shape[0] // n
+    rollout_model = ema.ema if ema is not None else model
+    ego_world, encoding = sample_group(
+        rollout_model,
+        norm_exp,
+        args.rl_noise_scale,
+        args.device,
+        scene_norm_inputs=norm_inputs,
+        group_size=n,
+        use_bf16=getattr(args, "amp_dtype", "off") == "bf16",
+        sample_steps=getattr(args, "rl_rollout_steps", 6),
+        return_encoding=True,
+        generator=rollout_generator,
+    )
+    ego_speed = raw_inputs["ego_current_state"][:, 4:6].norm(dim=-1)
+    ego_world, aug_metrics = augment_rollout_candidates(
+        ego_world, ego_speed, num_scenes, n, args, generator=rollout_generator
+    )
+    if getattr(args, "rl_reward_source", "native") == "pdm_port":
+        reward, reward_metrics = compute_pdm_port_reward(
+            ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
+        )
+    else:
+        reward, reward_metrics = compute_hdp_reward(
+            ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
+        )
+    if not torch.isfinite(reward).all():
+        raise FloatingPointError("Non-finite HDP reward returned while mining replay")
+    reward_metrics.update(aug_metrics)
+    gate_mask, gate_metrics = first_waypoint_candidate_gate(
+        ego_world, ego_speed, num_scenes, n, args
+    )
+    reward_metrics.update(gate_metrics)
+    reward_weights, valid_sample = compute_reward_weights(
+        reward,
+        num_scenes,
+        n,
+        args.rl_reward_normalize,
+        getattr(args, "rl_reward_beta", 0.5),
+        args.advantage_eps,
+        use_ddp=bool(getattr(args, "ddp", False)),
+        candidate_valid_mask=gate_mask,
+    )
+    shard = {
+        "ego_world": ego_world,
+        "reward": reward,
+        "reward_weights": reward_weights,
+        "valid_sample": valid_sample,
+        "ego_current_state": norm_inputs["ego_current_state"],
+        "route_lanes": norm_inputs["route_lanes"],
+        "encoding": encoding,
+    }
+    metrics = {
+        "reward_mean": reward.mean().detach(),
+        "reward_max": reward.view(num_scenes, n).max(dim=1).values.mean().detach(),
+        "valid_group_fraction": valid_sample.view(num_scenes, n)
+        .any(dim=1)
+        .float()
+        .mean()
+        .detach(),
+        **{key: value.detach().mean() for key, value in reward_metrics.items()},
+    }
+    return shard, metrics, num_scenes
+
+
+def _replay_update_from_shard(shard, model, optimizer, trainable_params, args):
+    """One optimizer step from a frozen mined shard (weights never recomputed)."""
+    n = args.num_generations
+    num_scenes = shard["ego_current_state"].shape[0]
+    norm_exp = {
+        "ego_current_state": shard["ego_current_state"].repeat_interleave(n, dim=0),
+        "route_lanes": shard["route_lanes"],
+        "_global_route_repeat_interleave": n,
+    }
+    valid_sample = shard["valid_sample"].bool()
+    global_valid_count, ddp_world_size = distributed_valid_sample_count(
+        valid_sample, bool(getattr(args, "ddp", False))
+    )
+    if not bool(global_valid_count > 0):
+        return None
+    optimizer.zero_grad(set_to_none=True)
+    update_loss = _backward_reward_weighted_update(
+        model,
+        norm_exp,
+        shard["ego_world"],
+        shard["reward"],
+        shard["reward_weights"],
+        valid_sample,
+        global_valid_count,
+        ddp_world_size,
+        num_scenes,
+        n,
+        args,
+        shard["encoding"],
+        expert_norm_inputs=None,
+        expert_ego_gt=None,
+        expert_cached_encoding=None,
+    )
+    grad_norm = nn.utils.clip_grad_norm_(trainable_params, 5).detach()
+    optimizer.step()
+    update_loss["grad_norm"] = grad_norm
+    return update_loss
+
+
+def _train_cycle_epoch(data_loader, model, optimizer, trainable_params, args, ema, aug, epoch):
+    """One epoch of the mine/replay relay (the source repository's state machine)."""
+    from diffusion_planner.hdp_rl_replay import (
+        CycleReplayReader,
+        CycleReplayWriter,
+        cleanup_previous_cycle,
+        cycle_index,
+        is_mine_epoch,
+    )
+
+    interval = int(args.rl_rollout_interval)
+    replay_root = args.rl_replay_dir
+    rank = ddp.get_rank()
+    device = torch.device(args.device)
+    cycle = cycle_index(epoch, interval)
+    epoch_loss_sums: dict = {}
+    epoch_loss_counts: dict = {}
+    model.train()
+    _set_hdp_rl_train_mode(model, args)
+    rollout_generator = torch.Generator(device=device)
+    rollout_generator.manual_seed(int(args.seed) + int(epoch) * 1_000_003 + rank * 10_007)
+    wall_start = time.perf_counter()
+
+    if is_mine_epoch(epoch, interval):
+        cleanup_previous_cycle(replay_root, cycle, rank)
+        if bool(getattr(args, "ddp", False)):
+            torch.distributed.barrier()
+        writer = CycleReplayWriter(replay_root, cycle, rank, args)
+        iterator = (
+            tqdm(data_loader, desc=f"HDP-RL mine c{cycle}", unit="batch")
+            if rank == 0
+            else data_loader
+        )
+        for raw_inputs in iterator:
+            raw_inputs = {
+                key: value.to(args.device, non_blocking=True)
+                for key, value in raw_inputs.items()
+            }
+            shard, metrics, _ = _mine_groups_from_batch(
+                raw_inputs, model, args, ema, aug, rollout_generator
+            )
+            writer.append(shard)
+            metrics["loss"] = shard["reward"].new_zeros(())
+            update_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts, metrics)
+        writer.finalize(bool(getattr(args, "ddp", False)))
+        optimizer_steps = 0.0
+    else:
+        reader = CycleReplayReader(replay_root, cycle, rank, args)
+        shards = reader.epoch_shards(seed=int(args.seed) + epoch * 9_973 + rank)
+        iterator = (
+            tqdm(shards, desc=f"HDP-RL replay e{epoch}", unit="shard") if rank == 0 else shards
+        )
+        optimizer_steps = 0.0
+        for path in iterator:
+            shard = CycleReplayReader.load(path, device)
+            update_loss = _replay_update_from_shard(
+                shard, model, optimizer, trainable_params, args
+            )
+            if update_loss is None:
+                continue
+            optimizer_steps += 1.0
+            update_loss["reward_mean"] = shard["reward"].mean().detach()
+            update_loss["reward_max"] = (
+                shard["reward"].view(-1, args.num_generations).max(dim=1).values.mean().detach()
+            )
+            args._wandb_global_step = getattr(args, "_wandb_global_step", 0) + 1
+            update_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts, update_loss)
+
+    epoch_mean_loss = finalize_epoch_loss_sums(epoch_loss_sums, epoch_loss_counts)
+    epoch_mean_loss.setdefault("loss", torch.zeros((), device=device))
+    epoch_mean_loss.setdefault("reward_mean", torch.zeros((), device=device))
+    epoch_mean_loss.setdefault("reward_max", torch.zeros((), device=device))
+    epoch_mean_loss["optimizer_steps_per_epoch"] = torch.tensor(
+        optimizer_steps, device=device
+    )
+    epoch_mean_loss["wall_time_s"] = torch.tensor(
+        time.perf_counter() - wall_start, device=device
+    ).float()
+    # Policy iteration: the behavior policy stays frozen through mining and is
+    # committed only after a replay epoch actually trained a proposal.
+    if ema is not None and not is_mine_epoch(epoch, interval):
+        proposal_relative_l2 = commit_ema_policy_update(model, ema, optimizer, args.ddp)
+        epoch_mean_loss["policy_proposal_relative_l2"] = proposal_relative_l2
+    if args.ddp:
+        epoch_mean_loss = ddp.reduce_and_average_losses(epoch_mean_loss, device)
+    epoch_mean_loss = _add_stationary_progress_conditionals(epoch_mean_loss)
+    if rank == 0:
+        phase = "mine" if is_mine_epoch(epoch, interval) else "replay"
+        print(
+            f"cycle {cycle} {phase}: loss={float(epoch_mean_loss['loss']):.4f} "
+            f"reward_mean={float(epoch_mean_loss['reward_mean']):.4f}"
+        )
+    return epoch_mean_loss, epoch_mean_loss["loss"]
+
+
 def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, ema, aug, epoch):
+    if int(getattr(args, "rl_rollout_interval", 0) or 0) > 0:
+        return _train_cycle_epoch(
+            data_loader, model, optimizer, trainable_params, args, ema, aug, epoch
+        )
     epoch_loss_sums = {}
     epoch_loss_counts = {}
 

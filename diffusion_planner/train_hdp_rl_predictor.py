@@ -681,6 +681,18 @@ def get_args():
         help="anchor only scenes with an active reward group; broad anchoring was negative",
     )
     parser.add_argument(
+        "--rl_rollout_interval",
+        type=int,
+        default=_train_config_default("rl_rollout_interval"),
+        help="mine/replay cycle length (10 = 1 mining + 9 replay epochs); 0 = online loop",
+    )
+    parser.add_argument(
+        "--rl_replay_dir",
+        type=str,
+        default=_train_config_default("rl_replay_dir"),
+        help="local-NVMe directory for the frozen per-cycle replay shards",
+    )
+    parser.add_argument(
         "--rl_reward_source",
         choices=["native", "pdm_port"],
         default=_train_config_default("rl_reward_source"),
@@ -1257,6 +1269,22 @@ def get_args():
         raise ValueError(
             "--rl_selection_metric deterministic requires --rl_eval_deterministic true"
         )
+    if args.rl_rollout_interval < 0:
+        raise ValueError("--rl_rollout_interval must be >= 0")
+    if args.rl_rollout_interval > 0:
+        if not args.rl_replay_dir:
+            raise ValueError("cycle mode requires --rl_replay_dir on local NVMe")
+        if args.rl_rollout_interval < 2:
+            raise ValueError("--rl_rollout_interval must be >= 2 (mine + at least one replay)")
+        if getattr(args, "rl_train_scope", "decoder") != "decoder":
+            raise ValueError("cycle mode caches decoder context; requires --rl_train_scope decoder")
+        if args.rl_bc_weight != 0.0:
+            raise ValueError("cycle mode does not store expert anchors; requires --rl_bc_weight 0")
+        if args.rl_updates_per_rollout != 1:
+            raise ValueError(
+                "cycle mode's replay epochs are the rollout amortization; "
+                "set --rl_updates_per_rollout 1"
+            )
     if not 0.0 <= args.rl_candidate_aug_prob <= 1.0:
         raise ValueError("--rl_candidate_aug_prob must be in [0, 1]")
     if args.rl_candidate_aug_prob > 0.0:

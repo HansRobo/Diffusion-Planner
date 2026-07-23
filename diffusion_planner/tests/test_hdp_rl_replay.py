@@ -1,0 +1,136 @@
+"""Tests for the 100-epoch mine/replay relay state machine."""
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+from diffusion_planner.hdp_rl_replay import (
+    CycleReplayReader,
+    CycleReplayWriter,
+    cleanup_previous_cycle,
+    cycle_index,
+    is_mine_epoch,
+)
+
+from diffusion_planner import hdp_rl_epoch
+
+
+def _args(**overrides):
+    defaults = dict(
+        num_generations=4,
+        rl_reward_source="native",
+        rl_reward_aggregation="weighted_sum",
+        rl_reward_horizon_steps=0,
+        rl_reward_normalize="group",
+        rl_reward_beta=1.0,
+        rl_reward_w_safety=0.0,
+        rl_reward_w_risk=1.0,
+        rl_reward_w_follow=3.0,
+        rl_reward_w_lane=2.5,
+        rl_reward_w_progress=3.0,
+        rl_reward_w_road_border=0.0,
+        rl_behavior_gate="safety",
+        rl_pdm_red_light_gate=True,
+        rl_first_waypoint_gate=True,
+        rl_candidate_aug_prob=0.0,
+        rl_candidate_aug_std=0.5,
+        rl_candidate_aug_stretch=0.0,
+        rl_noise_scale=1.5,
+        rl_rollout_steps=6,
+        ddp=False,
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _shard(num_scenes=2, n=4, T=8):
+    reward = torch.arange(float(num_scenes * n))
+    return {
+        "ego_world": torch.randn(num_scenes * n, T, 4),
+        "reward": reward,
+        "reward_weights": torch.rand(num_scenes * n),
+        "valid_sample": torch.ones(num_scenes * n, dtype=torch.bool),
+        "ego_current_state": torch.randn(num_scenes, 10),
+        "route_lanes": torch.randn(num_scenes, 2, 3, 33),
+        "encoding": torch.randn(num_scenes, 5, 16),
+    }
+
+
+def test_relay_schedule_is_ten_cycles_of_ten():
+    mine_epochs = [e for e in range(1, 101) if is_mine_epoch(e, 10)]
+    assert mine_epochs == [1, 11, 21, 31, 41, 51, 61, 71, 81, 91]
+    assert [cycle_index(e, 10) for e in mine_epochs] == list(range(10))
+    assert cycle_index(100, 10) == 9  # the last replay epoch trains cycle 9's cache
+
+
+def test_writer_reader_roundtrip_preserves_frozen_weights(tmp_path):
+    args = _args()
+    writer = CycleReplayWriter(tmp_path, cycle=0, rank=0, args=args)
+    shard = _shard()
+    writer.append(shard)
+    writer.finalize(use_ddp=False)
+    reader = CycleReplayReader(tmp_path, cycle=0, rank=0, args=args)
+    shards = reader.epoch_shards(seed=1)
+    assert len(shards) == 1
+    loaded = CycleReplayReader.load(shards[0], torch.device("cpu"))
+    torch.testing.assert_close(loaded["reward_weights"], shard["reward_weights"])
+    torch.testing.assert_close(loaded["ego_world"], shard["ego_world"])
+    assert loaded["valid_sample"].dtype in (torch.bool, torch.float32)
+
+
+def test_reader_fails_closed_on_contract_mismatch(tmp_path):
+    writer = CycleReplayWriter(tmp_path, cycle=0, rank=0, args=_args())
+    writer.append(_shard())
+    writer.finalize(use_ddp=False)
+    with pytest.raises(RuntimeError, match="contract mismatch"):
+        CycleReplayReader(tmp_path, cycle=0, rank=0, args=_args(rl_reward_beta=2.0))
+    with pytest.raises(RuntimeError, match="incomplete"):
+        CycleReplayReader(tmp_path, cycle=1, rank=0, args=_args())
+
+
+def test_writer_refuses_completed_cycle_and_cleanup_is_scoped(tmp_path):
+    args = _args()
+    writer = CycleReplayWriter(tmp_path, cycle=0, rank=0, args=args)
+    writer.append(_shard())
+    writer.finalize(use_ddp=False)
+    with pytest.raises(RuntimeError, match="completed replay cycle"):
+        CycleReplayWriter(tmp_path, cycle=0, rank=0, args=args)
+    cleanup_previous_cycle(tmp_path, cycle=1, rank=0)
+    assert not (tmp_path / "cycle_000").exists()
+
+
+def test_replay_update_uses_frozen_weights_and_skips_invalid(monkeypatch):
+    captured = {}
+
+    def fake_update(model, norm_exp, ego_world, reward, weights, valid, *rest, **kwargs):
+        captured["weights"] = weights.clone()
+        captured["norm_exp_batch"] = norm_exp["ego_current_state"].shape[0]
+        return {"loss": torch.zeros(())}
+
+    monkeypatch.setattr(hdp_rl_epoch, "_backward_reward_weighted_update", fake_update)
+
+    class _Opt:
+        def zero_grad(self, set_to_none=False):
+            pass
+
+        def step(self):
+            captured["stepped"] = True
+
+    shard = _shard(num_scenes=2, n=4)
+    args = _args()
+    result = hdp_rl_epoch._replay_update_from_shard(
+        shard, torch.nn.Linear(1, 1), _Opt(), [torch.nn.Parameter(torch.zeros(1))], args
+    )
+    assert result is not None and captured["stepped"]
+    torch.testing.assert_close(captured["weights"], shard["reward_weights"])
+    assert captured["norm_exp_batch"] == 8  # scenes x group size
+
+    shard["valid_sample"] = torch.zeros(8, dtype=torch.bool)
+    captured.clear()
+    assert (
+        hdp_rl_epoch._replay_update_from_shard(
+            shard, torch.nn.Linear(1, 1), _Opt(), [], args
+        )
+        is None
+    )
+    assert "stepped" not in captured  # discarded batch must not touch the optimizer

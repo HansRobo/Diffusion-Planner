@@ -212,6 +212,12 @@ class TrainConfig:
     # G=32 remains one 2,048-candidate update; G=64 becomes two accumulated 2,048-candidate
     # forwards feeding one exact optimizer update.
     rl_update_max_candidates_per_rank: int = 2048
+    # 100-epoch relay state machine (the source repository's schedule): epochs
+    # 1, 1+interval, ... are rollout-only mining passes that freeze a per-rank
+    # disk replay cache; the remaining epochs train exclusively from it with
+    # weights/validity frozen at mine time. 0 keeps the online loop.
+    rl_rollout_interval: int = 0
+    rl_replay_dir: Optional[str] = None
     rl_init_use_ema: bool = True
     # Optional direct collision term. Zero omits the standalone safety component; positive values
     # test whether active=1/rear=0.3 safety prevents progress-risk Pareto regressions.

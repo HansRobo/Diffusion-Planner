@@ -81,6 +81,10 @@ SELECTION_METRIC=${HDP_RL_SELECTION_METRIC:-deterministic}
 EVAL_DETERMINISTIC=${HDP_RL_EVAL_DETERMINISTIC:-True}
 # HDP rollout-candidate augmentation (velocity-safe ramped form). Off by default;
 # the recommended exploration arm sets CANDIDATE_AUG_PROB=1.0.
+# Formal 100-epoch relay: HDP_RL_TRAIN_EPOCHS=100 HDP_RL_ROLLOUT_INTERVAL=10
+# HDP_RL_UPDATES_PER_ROLLOUT=1. Interval 0 keeps the online loop.
+ROLLOUT_INTERVAL=${HDP_RL_ROLLOUT_INTERVAL:-0}
+REPLAY_DIR=${HDP_RL_REPLAY_DIR:-${REPO}/outputs/rl_replay_${SLURM_JOB_ID:-manual}}
 REWARD_SOURCE=${HDP_RL_REWARD_SOURCE:-native}
 PDM_RED_LIGHT_GATE=${HDP_RL_PDM_RED_LIGHT_GATE:-True}
 CANDIDATE_AUG_PROB=${HDP_RL_CANDIDATE_AUG_PROB:-0.0}
@@ -447,6 +451,8 @@ TRAIN_ARGS=(
   --rl_first_waypoint_gate "${FIRST_WAYPOINT_GATE}" \
   --rl_selection_metric "${SELECTION_METRIC}" \
   --rl_eval_deterministic "${EVAL_DETERMINISTIC}" \
+  --rl_rollout_interval "${ROLLOUT_INTERVAL}" \
+  --rl_replay_dir "${REPLAY_DIR}" \
   --rl_reward_source "${REWARD_SOURCE}" \
   --rl_pdm_red_light_gate "${PDM_RED_LIGHT_GATE}" \
   --rl_candidate_aug_prob "${CANDIDATE_AUG_PROB}" \
