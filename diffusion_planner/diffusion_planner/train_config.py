@@ -111,16 +111,14 @@ class TrainConfig:
     alpha_neighbor_loss: float = 0.1
     # Mode classification loss weight (decoder_type="plantf" only)
     alpha_mode_cls_loss: float = 1.0
-    # planTF-only loss shaping (docs/plantf_dead_mode_improvement.md). The
-    # longitudinal velocity down-weighting is disabled by default because it
-    # suppresses forward progress for the one-shot regression head. The
-    # endpoint loss is OFF by default: forward progress is already taught by
-    # the per-timestep position loss (the endpoint is one of its 80 steps)
-    # once the lon down-weighting is removed, and the endpoint term only
-    # constrains the endpoint (not the path shape), adding a straight-line
-    # bias. It stays available (still computed for logging) as an opt-in knob.
+    # planTF loss shaping (docs/plantf_dead_mode_improvement.md). Both default
+    # to the diffusion head's original loss behavior. The "dango" collapse
+    # turned out to be driven by modes=1 (single-mode L2 = mean regression) and
+    # was already resolved by modes>=2 with WTA; the earlier planTF-specific
+    # overrides (endpoint loss on, lon down-weighting off) made results WORSE in
+    # A/B and are reverted. Both remain as opt-in experiment knobs.
     coeff_endpoint_fde_loss: float = 0.0
-    plantf_use_lon_velocity_weight: bool = False
+    plantf_use_lon_velocity_weight: bool = True
 
     # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False
