@@ -1427,6 +1427,7 @@ def render_segment(
     abort_deviation_m: float = 0.0,
     abort_after: int = 30,
     abort_max_snaps: int = 0,
+    drop_objects: bool = False,
 ) -> dict | SegmentResult:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1478,6 +1479,13 @@ def render_segment(
     ``collision``, and ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
     carries no lane geometry) alongside the ego pose, independent of ``instrument`` — see
     :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer.
+
+    ``drop_objects``: empty-world ablation — zero out ``neighbor_agents_past`` and
+    ``static_objects`` (and the derived ``neighbors_live``) every step, so the model sees no
+    other traffic while the map (lanes/route_lanes/line_strings/polygons) is unchanged. Model
+    input, rendering, and collision/clearance scoring are all consistently "no objects";
+    collision/near-miss are 0 by construction. Used to separate "reacts badly to traffic" from
+    "can't follow the route/map" — see ``objects_ablation_strategy.md``.
 
     Returns segment metrics dict, or a full :class:`SegmentResult` when ``instrument=True``.
     """
@@ -1569,6 +1577,16 @@ def render_segment(
             )
             break
         np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
+
+        if drop_objects:
+            # Empty-world ablation: no other traffic (dynamic neighbors + static objects), map
+            # kept. Zeroing makes every neighbor/static slot fail its validity mask, so the model
+            # sees an empty scene, the PNG/video render empty, and scoring finds nothing to hit
+            # (clearance inf, collision 0) — consistent across model input, draw, and scoring.
+            np_dict["neighbor_agents_past"] = np.zeros_like(np_dict["neighbor_agents_past"])
+            if "static_objects" in np_dict:
+                np_dict["static_objects"] = np.zeros_like(np_dict["static_objects"])
+            neighbors_live = np.zeros_like(neighbors_live)
 
         # Early-abort: check BEFORE the (expensive) model replan call, using the deviation from
         # last step's advance — an already-diverged segment skips inference too instead of just

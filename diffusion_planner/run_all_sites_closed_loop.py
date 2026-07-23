@@ -41,6 +41,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out_root", required=True, type=Path)
     parser.add_argument("--only_sites", nargs="*", default=None, help="run only these site names")
     parser.add_argument(
+        "--object_modes",
+        nargs="+",
+        choices=("objects", "noobj"),
+        default=["objects", "noobj"],
+        help="run each site once per mode: 'objects'=normal, 'noobj'=empty-world ablation "
+        "(--drop_objects, no dynamic/static objects, map kept). Output/site label for noobj "
+        "gets a '__noobj' suffix so both show up as separate sites — overlaid per metric in "
+        "W&B, side-by-side rows in the local report. See objects_ablation_strategy.md.",
+    )
+    parser.add_argument(
         "--extra_args",
         nargs=argparse.REMAINDER,
         default=[],
@@ -106,39 +116,46 @@ def main() -> int:
     args.out_root.mkdir(parents=True, exist_ok=True)
     results: dict[str, dict] = {}
     for site_name, npz_root in sites.items():
-        site_out_dir = args.out_root / site_name
-        print(f"=== [{site_name}] npz_root={npz_root} -> out_dir={site_out_dir} ===")
-        cmd = [
-            sys.executable,
-            str(cli_path),
-            "--mode",
-            "full",
-            "--model_path",
-            str(args.model_path),
-            "--npz_root",
-            str(npz_root),
-            "--out_dir",
-            str(site_out_dir),
-            *args.extra_args,
-        ]
-        # One site's failure (e.g. a transient disk I/O error partway through a long route
-        # sweep) must not abort the remaining sites — each site is an independent evaluation.
-        error = None
-        for attempt in range(1, 3):
-            try:
-                subprocess.run(cmd, check=True)
-                error = None
-                break
-            except subprocess.CalledProcessError as e:
-                error = e
-                print(f"  [{site_name}] attempt {attempt}/2 failed: {e}", file=sys.stderr)
-        summary_path = site_out_dir / "summary.json"
-        results[site_name] = {
-            "npz_root": str(npz_root),
-            "out_dir": str(site_out_dir),
-            "error": str(error) if error else None,
-            "summary": json.loads(summary_path.read_text()) if summary_path.is_file() else None,
-        }
+        for mode in args.object_modes:
+            # "noobj" gets a distinct site label (suffix) rather than a separate axis — this
+            # lets it ride the existing per-site machinery (HTML rows/cards, W&B per-site keys,
+            # metric_regex overlay) completely unchanged; see objects_ablation_strategy.md §4.
+            label = site_name if mode == "objects" else f"{site_name}__noobj"
+            site_out_dir = args.out_root / label
+            print(f"=== [{label}] npz_root={npz_root} -> out_dir={site_out_dir} ===")
+            cmd = [
+                sys.executable,
+                str(cli_path),
+                "--mode",
+                "full",
+                "--model_path",
+                str(args.model_path),
+                "--npz_root",
+                str(npz_root),
+                "--out_dir",
+                str(site_out_dir),
+                *args.extra_args,
+            ]
+            if mode == "noobj":
+                cmd.append("--drop_objects")
+            # One site's failure (e.g. a transient disk I/O error partway through a long route
+            # sweep) must not abort the remaining sites — each site is an independent evaluation.
+            error = None
+            for attempt in range(1, 3):
+                try:
+                    subprocess.run(cmd, check=True)
+                    error = None
+                    break
+                except subprocess.CalledProcessError as e:
+                    error = e
+                    print(f"  [{label}] attempt {attempt}/2 failed: {e}", file=sys.stderr)
+            summary_path = site_out_dir / "summary.json"
+            results[label] = {
+                "npz_root": str(npz_root),
+                "out_dir": str(site_out_dir),
+                "error": str(error) if error else None,
+                "summary": json.loads(summary_path.read_text()) if summary_path.is_file() else None,
+            }
 
     # Merge into any existing manifest instead of overwriting it outright, so a targeted
     # --only_sites re-run doesn't drop the other sites' entries from a prior full run.

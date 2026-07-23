@@ -117,6 +117,12 @@ def add_rollout_args(parser: argparse.ArgumentParser) -> None:
         help="early-abort a segment once its unstick teleport has fired this many times "
         "(0=disabled) — repeated snapping is itself a sign of a bad rollout",
     )
+    parser.add_argument(
+        "--drop_objects",
+        action="store_true",
+        help="empty-world ablation: run with NO other traffic (dynamic neighbors + static "
+        "objects zeroed each step); map/route kept. collision/near-miss go to 0 by design.",
+    )
 
 
 def add_output_args(parser: argparse.ArgumentParser) -> None:
@@ -176,6 +182,7 @@ def rollout_params_from_args(args: argparse.Namespace) -> RolloutParams:
         abort_deviation_m=args.abort_deviation_m,
         abort_after=args.abort_after,
         abort_max_snaps=args.abort_max_snaps,
+        drop_objects=args.drop_objects,
     )
 
 

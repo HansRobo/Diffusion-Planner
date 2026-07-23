@@ -11,8 +11,20 @@ import wandb
 from scenario_generation.metrics.group_report import WANDB_EXCLUDED_SCALAR_KEYS
 from scenario_generation.trajectory_colormap import METRIC_CHOICES, render_trajectory_colormaps
 
-# Per-site summary count keys summed across sites by build_sites_aggregate_log for the overview.
-_OVERVIEW_SUM_KEYS = ("total_collision_events", "total_curb_hits", "total_snaps", "n_segments_diverged")
+# Per-site summary count keys summed across ALL labels (objects + "__noobj" ablation) by
+# build_sites_aggregate_log for the overview — meaningful in either mode.
+_OVERVIEW_SUM_KEYS = ("total_curb_hits", "total_snaps", "n_segments_diverged")
+# Summed across objects-labeled sites ONLY (see _is_noobj_label) — these are structurally 0 for
+# the empty-world ablation (no traffic to collide with), so mixing "__noobj" labels in would
+# just dilute the objects-mode signal with meaningless zeros. See objects_ablation_strategy.md.
+_OVERVIEW_OBJECTS_ONLY_SUM_KEYS = ("total_collision_events",)
+
+
+def _is_noobj_label(label: str) -> bool:
+    """True for the empty-world-ablation site label convention (``{site}__noobj``) — see
+    objects_ablation_strategy.md. Used to exclude ablation labels from collision-style
+    aggregates that are 0 by construction in that mode."""
+    return label.endswith("__noobj")
 
 RESULTS_TABLE_COLUMNS = [
     "area_name",
@@ -206,11 +218,17 @@ def build_sites_aggregate_log(summaries: dict[str, dict]) -> dict:
     weighted mean route-completion (so long routes aren't under-weighted), plus the plain
     cross-site SUM of each event count. Deliberately just the small non-saturating set — no
     segment-rates / min-clearances / means (those stay in each site's summary.json only).
+
+    ``summaries`` is keyed by site LABEL — a ``{site}__noobj`` label (see
+    ``objects_ablation_strategy.md``) is excluded from collision-style sums
+    (``_OVERVIEW_OBJECTS_ONLY_SUM_KEYS``), since those are 0 by construction in the
+    empty-world ablation and would just dilute the objects-mode number with zeros.
     """
     log: dict = {}
     if not summaries:
         return log
     values = list(summaries.values())
+    objects_values = [s for label, s in summaries.items() if not _is_noobj_label(label)]
     n_sites = len(values)
     total_segments = sum(int(s.get("n_segments", 0)) for s in values)
 
@@ -226,6 +244,8 @@ def build_sites_aggregate_log(summaries: dict[str, dict]) -> dict:
 
     for key in _OVERVIEW_SUM_KEYS:
         log[f"closed_loop_overview/{key}"] = sum(int(s.get(key, 0)) for s in values)
+    for key in _OVERVIEW_OBJECTS_ONLY_SUM_KEYS:
+        log[f"closed_loop_overview/{key}"] = sum(int(s.get(key, 0)) for s in objects_values)
 
     return {k: v for k, v in log.items() if _wandb_scalar(v) or isinstance(v, int)}
 

@@ -53,6 +53,10 @@ class RolloutParams:
     abort_deviation_m: float = 50.0
     abort_after: int = 30
     abort_max_snaps: int = 0
+    # Empty-world ablation: zero neighbor_agents_past + static_objects each step (map kept). See
+    # objects_ablation_strategy.md — separates "reacts badly to traffic" from "can't follow the
+    # route/map". collision/near-miss are 0 by construction when this is set.
+    drop_objects: bool = False
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -72,6 +76,7 @@ class RolloutParams:
             "abort_deviation_m": self.abort_deviation_m,
             "abort_after": self.abort_after,
             "abort_max_snaps": self.abort_max_snaps,
+            "drop_objects": self.drop_objects,
         }
 
 
