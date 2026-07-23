@@ -112,7 +112,10 @@ EVAL_RED_LIGHT_LANE_TOLERANCE_M=${HDP_RL_EVAL_RED_LIGHT_LANE_TOLERANCE_M:-2.0}
 ROAD_BORDER_CRITICAL=${HDP_RL_ROAD_BORDER_CRITICAL_M:-0.20}
 ROAD_BORDER_SAFE=${HDP_RL_ROAD_BORDER_SAFE_M:-0.60}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
-UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-1}
+# 9 updates per sampled group matches the released HDP replay schedule's update
+# yield (each mined group is drawn ~9x across replay epochs) and amortizes the
+# dominant rollout cost ~3.5x; reward/weights/encoding are computed once per group.
+UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-9}
 UPDATE_MAX_CANDIDATES=${HDP_RL_UPDATE_MAX_CANDIDATES_PER_RANK:-2048}
 COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-True}
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}

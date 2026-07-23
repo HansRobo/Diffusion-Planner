@@ -202,9 +202,11 @@ class TrainConfig:
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
-    # The released NAVSIM trainer uses diffusion_repeat_size=1 per replay-buffer draw. Our full
-    # 5.6M-scene stream likewise uses one noising/update per draw; values above one intentionally
-    # reuse the same actions immediately and remain ablations.
+    # The released NAVSIM trainer performs one noising per replay draw, but each mined
+    # group is drawn ~9x across its replay epochs — so ~9 updates per rollout is the
+    # released schedule's effective yield. Online, values > 1 reproduce that
+    # amortization (fresh diffusion noise per update; reward/weights/encoding reused).
+    # The production launcher sets 9; 1 remains the strict one-update-per-draw form.
     rl_updates_per_rollout: int = 1
     # Keep full reward groups but cap differentiable candidate batches. With 64 scenes/rank,
     # G=32 remains one 2,048-candidate update; G=64 becomes two accumulated 2,048-candidate
