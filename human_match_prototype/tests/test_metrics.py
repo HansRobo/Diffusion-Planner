@@ -59,11 +59,11 @@ def test_multi_human_perfect_coverage():
 
 
 def test_multi_human_no_coverage():
-    """Humans far from planner samples -> zero coverage."""
+    """Humans with different trajectory shape -> zero coverage."""
     base = straight(5.0)
-    shifted = straight(5.0)
-    shifted[:, 1] += 50.0
-    humans = [shifted.copy() for _ in range(5)]
+    # Different direction (90 deg) — shape differs after origin normalization
+    turning = straight(5.0, yaw=1.5)
+    humans = [turning.copy() for _ in range(5)]
     samples = np.stack([base.copy() for _ in range(8)])
     m = multi_human_metrics(humans, samples, base)
     assert m["dp_human_coverage_4s"] == 0.0
@@ -71,13 +71,11 @@ def test_multi_human_no_coverage():
 
 
 def test_multi_human_partial_coverage():
-    """Some humans close, some far."""
+    """Some humans same shape as planner, some different shape."""
     base = straight(5.0)
-    close = base.copy()
-    close[:, 0] += 0.1
-    far = base.copy()
-    far[:, 1] += 50.0
-    humans = [close, far]
+    close = straight(5.1)  # slightly different speed, same direction
+    turning = straight(5.0, yaw=1.5)  # different direction
+    humans = [close, turning]
     samples = np.stack([base.copy() for _ in range(4)])
     m = multi_human_metrics(humans, samples, base)
     assert m["n_humans"] == 2

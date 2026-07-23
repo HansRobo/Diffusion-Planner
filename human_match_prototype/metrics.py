@@ -87,11 +87,21 @@ def multi_human_metrics(
     h_stack = np.stack(human_futures)  # (M, 80, 3)
     s_xy = dp_samples[:, :, :2]  # (N, 80, 2)
 
+    # Normalize all trajectories to start at origin so we compare shapes, not positions.
+    # Training humans come from different ego positions on the same lanelet.
+    h_origins = h_stack[:, 0:1, :2]  # (M, 1, 2)
+    h_norm = h_stack[:, :, :2] - h_origins  # (M, 80, 2)
+    s_origins = s_xy[:, 0:1, :]  # (N, 1, 2)
+    s_norm = s_xy - s_origins  # (N, 80, 2)
+    test_origin = test_human[0:1, :2]  # (1, 2)
+    test_norm = test_human[:, :2] - test_origin  # (80, 2)
+
     for name, T in HORIZONS.items():
         thr = CLOSE_ADE_THRESHOLDS[name]
-        h_xy = h_stack[:, :T, :2]  # (M, T, 2)
+        h_xy = h_norm[:, :T]  # (M, T, 2) — origin-normalized
+        s_xy_t = s_norm[:, :T]  # (N, T, 2) — origin-normalized
 
-        # human_spread: mean distance of endpoints from centroid
+        # human_spread: mean distance of endpoints from centroid (on normalized trajs)
         h_ends = h_xy[:, T - 1]  # (M, 2)
         centroid = h_ends.mean(axis=0)
         out[f"human_spread_{name}"] = float(np.linalg.norm(h_ends - centroid, axis=-1).mean())
@@ -99,17 +109,15 @@ def multi_human_metrics(
         # dp_human_coverage: fraction of humans covered by at least one DP sample
         covered_humans = 0
         for h in h_xy:
-            ade_per_sample = np.linalg.norm(s_xy[:, :T] - h[None, :, :], axis=-1).mean(
-                axis=1
-            )  # (N,)
+            ade_per_sample = np.linalg.norm(s_xy_t - h[None, :, :], axis=-1).mean(axis=1)
             if ade_per_sample.min() < thr:
                 covered_humans += 1
         out[f"dp_human_coverage_{name}"] = covered_humans / len(human_futures)
 
         # human_dp_coverage: fraction of DP samples close to at least one human
         covered_samples = 0
-        for s in s_xy:
-            ade_per_human = np.linalg.norm(h_xy - s[None, :T, :], axis=-1).mean(axis=1)  # (M,)
+        for s in s_xy_t:
+            ade_per_human = np.linalg.norm(h_xy - s[None, :, :], axis=-1).mean(axis=1)
             if ade_per_human.min() < thr:
                 covered_samples += 1
         out[f"human_dp_coverage_{name}"] = covered_samples / len(dp_samples)
@@ -118,7 +126,7 @@ def multi_human_metrics(
         out[f"human_consensus_{name}"] = float(out[f"human_spread_{name}"] < 3.0)
 
         # test_human_typicality: Mahalanobis CDF of test human endpoint
-        test_end = test_human[:T, :2][-1]  # (2,)
+        test_end = test_norm[T - 1]  # (2,) — origin-normalized
         if len(human_futures) >= 3:
             cov = np.cov(h_ends.T)
             if np.linalg.det(cov) > 1e-12:
