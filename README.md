@@ -53,7 +53,13 @@ artifacts/full_sequence_base_from_20260622_step3/path_list_train_fullseq_from_20
 artifacts/full_sequence_base_from_20260622_step3/path_list_valid_fullseq_from_20260622_step3.json
 ```
 
-SFT should use the corresponding SFT full-sequence list. Temporal consistency metrics require consecutive frames; single-frame lists can still train the model but cannot evaluate inter-frame consistency correctly.
+SFT and HDP-RL use the shared, precomputed `is_skipped`-filtered train list by default:
+
+```text
+/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_sft_is_skipped_filtered.json
+```
+
+The source `path_list_train_sft.json` remains unchanged. Temporal consistency metrics require consecutive frames; single-frame lists can still train the model but cannot evaluate inter-frame consistency correctly.
 
 ## Recommended training order
 

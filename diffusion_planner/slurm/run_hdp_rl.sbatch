@@ -22,8 +22,16 @@ fi
 ((COMPILE_THREADS >= 1)) || COMPILE_THREADS=1
 NUM_WORKERS=${HDP_RL_NUM_WORKERS:-8}
 TRAIN_SUBSAMPLE_STEP=${HDP_RL_TRAIN_SUBSAMPLE_STEP:-1}
-TRAIN_LIST=${HDP_RL_TRAIN_LIST:?submit with HDP_RL_TRAIN_LIST=<manifest>}
+DEFAULT_RL_TRAIN_LIST=${HDP_DEFAULT_RL_TRAIN_LIST:-${HDP_DEFAULT_SFT_TRAIN_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260707_vehicle_params_with_mirror/path_list_train_concatenated.json}}
+TRAIN_LIST=${HDP_RL_TRAIN_LIST:-${DEFAULT_RL_TRAIN_LIST}}
 VALID_LIST=${HDP_RL_VALID_LIST:?submit with HDP_RL_VALID_LIST=<manifest>}
+if [[ -n "${HDP_RL_FILTER_SKIPPED+x}" ]]; then
+  FILTER_SKIPPED=${HDP_RL_FILTER_SKIPPED}
+elif [[ "${TRAIN_LIST}" == "${DEFAULT_RL_TRAIN_LIST}" ]]; then
+  FILTER_SKIPPED=False
+else
+  FILTER_SKIPPED=True
+fi
 EXTRA_LISTS=${HDP_RL_EXTRA_LISTS:-}
 EXTRA_REPEAT=${HDP_RL_EXTRA_REPEAT:-0}
 INIT_CKPT=${HDP_RL_INIT_CKPT:-}
@@ -340,7 +348,10 @@ TRAIN_ARGS=(
   --save_dir "${SAVE_DIR}" \
   --train_set_list "${TRAIN_LIST}" \
   --valid_set_list "${VALID_LIST}" \
+  --filter_skipped "${FILTER_SKIPPED}" \
+  --skip_filter_workers "${HDP_RL_SKIP_FILTER_WORKERS:-32}" \
   "${EXTRA_ARGS[@]}" \
+  --align_legacy_neighbor_futures False \
   --normalization_file_path "${REPO}/diffusion_planner/normalization.json" \
   --num_workers "${NUM_WORKERS}" \
   --train_subsample_step "${TRAIN_SUBSAMPLE_STEP}" \

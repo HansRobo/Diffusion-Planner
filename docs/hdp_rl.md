@@ -97,9 +97,13 @@ RL starts from the SFT EMA checkpoint with `--init_weights_path`; `--resume_mode
 continuing the exact same RL run. The production Slurm launcher fingerprints code, manifests,
 normalization, checkpoint, and Python/CUDA/NCCL environment before starting distributed training.
 
-Experiments use the same SFT-derived training and validation manifests, including the separate
-unprotected-right-turn list. Traffic-light features are kept unchanged, and manifest paths are not
-rewritten by the RL loader.
+By default RL uses the shared precomputed SFT manifests:
+`/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_sft_is_skipped_filtered.json`
+and
+`/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_valid_sft_balanced_is_skipped_filtered.json`.
+They are already `is_skipped`-filtered, so the launcher does not rescan sidecars. Traffic-light
+features are kept unchanged, and manifest paths are not rewritten by the RL loader. Alternate
+right-turn or causal manifests must be passed explicitly as an experiment override.
 
 ## Selection Guards
 
