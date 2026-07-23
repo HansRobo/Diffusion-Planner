@@ -563,6 +563,18 @@ def export_onnx(
     print(f"Creating ONNX model with legacy exporter: {output_path}")
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
+        # The legacy exporter is retained intentionally for the deployment runtime's
+        # shape-repair path. PyTorch emits two known deprecation warnings for this
+        # compatibility API; keep them local to this call instead of hiding warnings
+        # from the rest of training/export code.
+        warnings.filterwarnings(
+            "ignore", category=DeprecationWarning, module=r"torch\.onnx(?:\..*)?"
+        )
+        warnings.filterwarnings(
+            "ignore",
+            category=DeprecationWarning,
+            message=r"You are using the legacy TorchScript-based ONNX export\..*",
+        )
         torch.onnx.export(
             wrapper,
             torch_input_tuple,
