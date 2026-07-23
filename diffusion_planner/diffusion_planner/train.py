@@ -207,6 +207,10 @@ def model_training(args: TrainConfig):
     # set seed
     set_seed(args.seed + global_rank)
 
+    # Allow TF32 tensor cores for fp32 matmuls (Ampere+). Determinism is preserved:
+    # TF32 results are reproducible across runs on the same hardware.
+    torch.set_float32_matmul_precision("high")
+
     # Deterministic
     if args.deterministic:
         # Set CUBLAS_WORKSPACE_CONFIG to ensure deterministic behavior for cuBLAS operations.
