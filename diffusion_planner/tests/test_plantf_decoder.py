@@ -278,37 +278,39 @@ def test_full_onnx_wrapper_keeps_diffusion_only_inputs(tmp_path):
     assert graph_inputs == set(FULL_INPUT_NAMES)
 
 
-def test_endpoint_fde_loss_and_velocity_weight_flag():
-    """The planTF loss must emit a metre-scale endpoint FDE term, and the
-    longitudinal velocity down-weighting must be opt-in (off by default it
-    suppresses the forward-progress signal; see
-    docs/plantf_dead_mode_improvement.md)."""
+def test_ego_loss_is_plain_smooth_l1_of_best_mode():
+    """The ego loss must be exactly the smooth L1 between the WTA best mode and
+    the GT over all channels (original planTF loss) — no lat/lon/heading
+    decomposition, no velocity down-weighting, no timestep weighting, no
+    endpoint term. See docs/plantf_dead_mode_improvement.md."""
     torch.manual_seed(0)
     config = _config()
-    model = Diffusion_Planner(config).train()
+    model = Diffusion_Planner(config).eval()  # eval: no dropout, deterministic
     inputs = _inputs()
-    # Large current longitudinal velocity so the weighting, if enabled, bites.
-    inputs["ego_current_state"][:, 4] = 15.0
-
     B, Pn = 2, MAX_NUM_NEIGHBORS
     futures = (
         torch.randn(B, OUTPUT_T, POSE_DIM),
         torch.randn(B, Pn, OUTPUT_T, POSE_DIM),
         torch.zeros(B, Pn, OUTPUT_T, dtype=torch.bool),
     )
+    loss = compute_plantf_training_loss(model, inputs, futures, _loss_args(config))
 
-    torch.manual_seed(1)
-    loss_default = compute_plantf_training_loss(model, inputs, futures, _loss_args(config))
-    assert "endpoint_fde_loss" in loss_default
-    assert torch.isfinite(loss_default["endpoint_fde_loss"])
-    assert float(loss_default["endpoint_fde_loss"]) > 0.0
-
-    weighted_args = _loss_args(config)
-    weighted_args.plantf_use_lon_velocity_weight = True
-    torch.manual_seed(1)
-    loss_weighted = compute_plantf_training_loss(model, inputs, futures, weighted_args)
-    # Dividing the lon term by |v|=15 must strictly shrink the ego loss.
-    assert float(loss_weighted["ego_planning_loss"]) < float(loss_default["ego_planning_loss"])
+    # The DP-specific loss terms must be gone.
+    assert "endpoint_fde_loss" not in loss
+    # Reproduce the ego smooth-L1 independently from the model's own outputs.
+    norm = config.state_normalizer
+    ego_gt = norm(futures[0][:, None])[:, 0]  # [B, T, 4] normalized
+    with torch.no_grad():
+        _, outputs = model(
+            {**inputs, "gt_trajectories": torch.zeros(B, 1 + Pn, OUTPUT_T + 1, POSE_DIM)}
+        )
+        traj = outputs["trajectory"]  # [B, K, T, 4]
+        ego_std_xy = norm.std[0][..., :2]
+        ade = ((traj[..., :2] - ego_gt[:, None, :, :2]) * ego_std_xy).norm(dim=-1).mean(-1)
+        best = ade.argmin(dim=-1)
+        best_traj = traj[torch.arange(B), best]
+        expected = torch.nn.functional.smooth_l1_loss(best_traj, ego_gt)
+    assert torch.allclose(loss["ego_planning_loss"], expected, atol=1e-5)
 
 
 def test_trajectory_progress_metrics_expose_stationary_collapse():
