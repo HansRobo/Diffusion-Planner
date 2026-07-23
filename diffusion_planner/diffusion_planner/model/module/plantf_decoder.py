@@ -361,13 +361,17 @@ def compute_plantf_training_loss(
     loss["ego_planning_loss"] = traj_loss[:, 0, : args.ego_prediction_horizon].mean()
     loss["mode_cls_loss"] = F.cross_entropy(probability, best_mode)
 
-    # Endpoint (FDE) loss in metres: a direct forward-progress signal that the
-    # per-timestep decomposition dilutes over 80 steps. Computed on the WTA
-    # best mode, rescaled from the normalized space so the coefficient has a
-    # metre interpretation.
-    ego_std_xy_grad = norm.std[0][..., :2].to(trajectory.device)  # [1, 2]
-    endpoint_diff = (best_trajectory[:, -1, :2] - ego_gt[:, -1, :2]) * ego_std_xy_grad
-    loss["endpoint_fde_loss"] = endpoint_diff.norm(dim=-1).mean()
+    # Endpoint L2 loss in the NORMALIZED state space (WTA best mode): a direct
+    # forward-progress signal that the 80-step per-timestep decomposition
+    # dilutes. It is deliberately NOT rescaled to metres — with ego xy std = 20
+    # a metre-scale endpoint term is ~std^2 = 400x the per-timestep position
+    # loss and dominates the total, collapsing the path to a straight
+    # terminal-homing line (it only constrains the endpoint, not the shape).
+    # Keeping it in the normalized space matches ego_planning_loss so the
+    # coefficient stays comparable and the per-step losses still shape the
+    # curve. See docs/plantf_dead_mode_improvement.md.
+    endpoint_diff = best_trajectory[:, -1, :2] - ego_gt[:, -1, :2]
+    loss["endpoint_fde_loss"] = (endpoint_diff**2).sum(dim=-1).mean()
 
     # Compute ego edge points for penalty losses (best mode only)
     need_ego_edge = args.coeff_road_border_loss > 0 or args.coeff_neighbor_collision_loss > 0
