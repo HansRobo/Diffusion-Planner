@@ -115,9 +115,12 @@ also required not to regress beyond `rl_max_valid_epdms_regression`.
 
 Checkpoint selection defaults to the deterministic deployment reward
 (`rl_selection_metric=deterministic`): validation additionally scores one zero-noise plan per scene
-(`deterministic_mean`), which is exactly what the deployed planner executes. The K-sample
-stochastic metrics remain reported as distribution diagnostics and stay selectable with
-`rl_selection_metric=mean`.
+(`deterministic_mean`), which is exactly what the deployed planner executes. One objective per
+run: the deterministic selection score uses the run's own training reward (native or
+`pdm_port`), matching the source repository's train-and-select discipline. The frozen
+`rl_eval_*` stochastic metrics are report-only diagnostics for comparing arms; acceptance is
+protected by the independent EPDMS/DAC/safety source guards, which are deployment metrics, not
+a second reward.
 
 ## AWR upgrades from the original-DP post-training audits (2026-07-23)
 

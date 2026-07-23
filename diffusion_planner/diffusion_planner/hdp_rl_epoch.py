@@ -1021,9 +1021,19 @@ def validate_hdp_reward_policy(data_loader, model, args):
                         use_bf16=getattr(args, "amp_dtype", "off") == "bf16",
                         sample_steps=args.diffusion_sample_steps,
                     )
-                    det_reward, _ = compute_hdp_reward(
-                        det_world, raw_inputs, reward_neighbors, num_scenes, 1, eval_reward_args
-                    )
+                    # One objective per run: the deterministic selection score uses the
+                    # SAME reward the run trains on (the source repository's discipline).
+                    # The frozen rl_eval_* stochastic metrics above remain report-only
+                    # diagnostics for cross-arm comparison; acceptance is protected by
+                    # the independent EPDMS/DAC/safety source guards, not a second reward.
+                    if getattr(args, "rl_reward_source", "native") == "pdm_port":
+                        det_reward, _ = compute_pdm_port_reward(
+                            det_world, raw_inputs, reward_neighbors, num_scenes, 1, args
+                        )
+                    else:
+                        det_reward, _ = compute_hdp_reward(
+                            det_world, raw_inputs, reward_neighbors, num_scenes, 1, args
+                        )
                     finite_det = torch.isfinite(det_reward)
                     totals[6] += torch.where(
                         finite_det, det_reward, torch.zeros_like(det_reward)

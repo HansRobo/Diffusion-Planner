@@ -192,9 +192,11 @@ class TrainConfig:
     # scoring horizon, or gate are swept.
     rl_eval_reward_aggregation: Literal["weighted_sum", "gated_product"] = "weighted_sum"
     rl_eval_reward_horizon_steps: int = 0
-    # The deployed planner executes one zero-noise plan. Selection should measure that
-    # exact trajectory (original-DP AWR selected/deployed deterministically); the K-sample
-    # stochastic metrics remain reported for distribution diagnostics.
+    # The deployed planner executes one zero-noise plan. Selection measures that exact
+    # trajectory under the run's OWN training objective (one reward per run, the
+    # source repository's discipline). The frozen rl_eval_* stochastic metrics are
+    # report-only cross-arm diagnostics; acceptance safety comes from the independent
+    # EPDMS/DAC/safety source guards, never from a second reward.
     rl_eval_deterministic: bool = True
     rl_selection_metric: Literal["deterministic", "mean"] = "deterministic"
     # Keep the RL rollout budget independent from validation/export so it can be profiled
