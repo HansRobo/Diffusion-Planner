@@ -160,8 +160,10 @@ def get_args(args_list=None):
     parser.add_argument(
         "--coeff_endpoint_fde_loss",
         type=float,
-        default=1.0,
-        help="endpoint FDE loss weight in metres (decoder_type='plantf' only)",
+        default=0.0,
+        help="normalized-space endpoint loss weight (decoder_type='plantf' only); "
+        "off by default — it only constrains the endpoint and biases toward "
+        "straight lines. Forward progress is taught by the per-timestep loss.",
     )
     parser.add_argument(
         "--plantf_use_lon_velocity_weight",
