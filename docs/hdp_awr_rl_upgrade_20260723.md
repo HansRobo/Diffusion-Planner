@@ -161,11 +161,18 @@ Same SFT checkpoint, frozen `rl_eval_*` selection, one arm per change:
    This is the highest-priority arm: without candidate augmentation AWR only
    reweights the policy's own support, and both audited upstream gains included an
    exploration mechanism. Optional sub-arm: `rl_candidate_aug_stretch=0.25`.
-3. `rl_reward_aggregation=gated_product` on the better of 1-2.
-4. (3) + `rl_reward_horizon_steps=40` (candidate loss follows automatically).
-5. (4) + `rl_diffusion_t_min=0.001 rl_diffusion_t_max=0.2`.
+3. **Ported objective arm:** (2) + `rl_reward_source=pdm_port
+   rl_reward_horizon_steps=40`. The verbatim port of the objective behind both
+   audited positive results; on the 512-scene real-data audit
+   (`docs/rl_threshold_audit_20260723.md`) it is far more expert-consistent than
+   the native reward (expert wins its group 91% vs 64% — the native progress term
+   rewards overtaking the expert endpoint, the pdm EP ratio is capped at 1).
+4. Native alternative: (2) + `rl_reward_aggregation=gated_product` +
+   `rl_reward_horizon_steps=40`, if (3) underperforms the native baseline.
+5. Best of 3-4 + `rl_diffusion_t_min=0.001 rl_diffusion_t_max=0.2`.
 6. Road-border reward sweep `rl_reward_w_road_border in {0, 0.25, 0.5, 1.0}` on the
-   best of 1-5 (the SFT objective no longer contains a road-border term).
+   best of 1-5 (the SFT objective no longer contains a road-border term; note the
+   pdm_port objective already hard-gates border crossings).
 
 Compare the deterministic deployment reward plus DAC/EPDMS, border distance, lane
 keeping, progress, comfort, collision and red-light metrics; a higher training

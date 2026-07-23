@@ -681,6 +681,18 @@ def get_args():
         help="anchor only scenes with an active reward group; broad anchoring was negative",
     )
     parser.add_argument(
+        "--rl_reward_source",
+        choices=["native", "pdm_port"],
+        default=_train_config_default("rl_reward_source"),
+        help="native Tier IV reward or the verbatim port of the audited hdp_pdm objective",
+    )
+    parser.add_argument(
+        "--rl_pdm_red_light_gate",
+        type=boolean,
+        default=_train_config_default("rl_pdm_red_light_gate"),
+        help="gate red-light violations in the ported reward (T4 extension; ablatable)",
+    )
+    parser.add_argument(
         "--rl_reward_aggregation",
         choices=["weighted_sum", "gated_product"],
         default=_train_config_default("rl_reward_aggregation"),

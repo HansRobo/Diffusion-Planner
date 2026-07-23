@@ -684,3 +684,80 @@ def test_stratified_beta_covers_every_stratum():
     strata = (cdf * 10).astype(int).clip(0, 9)
     for row in strata:
         assert sorted(row.tolist()) == list(range(10))
+
+
+# ───────────────────────── ported hdp_pdm training reward ────────────────────
+
+
+def _pdm_reward_scene(time_steps=4):
+    """Toy scene on the real 33-channel map schema planner_metrics expects."""
+    candidates, scene_inputs, neighbors = _reward_scene(time_steps)
+    lanes = torch.zeros(1, 1, time_steps + 1, 33)
+    lanes[0, 0, :, 0] = torch.linspace(0.1, 5.0, time_steps + 1)
+    lanes[..., 2] = 1.0
+    scene_inputs = dict(scene_inputs)
+    scene_inputs["lanes"] = lanes
+    scene_inputs["route_lanes"] = lanes.clone()
+    return candidates, scene_inputs, neighbors
+
+
+def test_pdm_port_reward_is_bounded_and_shaped(monkeypatch):
+    from diffusion_planner.pdm_reward_port import compute_pdm_port_reward
+
+    candidates, scene_inputs, neighbors = _pdm_reward_scene()
+    scene_batch = {key: value for key, value in scene_inputs.items()}
+    reward, metrics = compute_pdm_port_reward(
+        candidates,
+        scene_batch,
+        neighbors,
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(rl_pdm_red_light_gate=True),
+    )
+    assert reward.shape == (2,)
+    assert torch.isfinite(reward).all()
+    assert ((reward >= 0.0) & (reward <= 1.0)).all()
+    for key in (
+        "reward_pdm_ttc_score",
+        "reward_pdm_ep_score",
+        "reward_pdm_lane_score",
+        "reward_pdm_comfort_score",
+        "reward_pdm_terminal_gate",
+    ):
+        assert torch.isfinite(metrics[key]).all()
+
+    ungated, _ = compute_pdm_port_reward(
+        candidates,
+        scene_batch,
+        neighbors,
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(rl_pdm_red_light_gate=False),
+    )
+    # The toy scene has no red signal, so the T4 red-light gate must be neutral.
+    torch.testing.assert_close(reward, ungated)
+
+
+def test_pdm_port_horizon_matches_truncated_inputs():
+    from diffusion_planner.pdm_reward_port import compute_pdm_port_reward
+
+    candidates, scene_inputs, neighbors = _pdm_reward_scene(time_steps=4)
+    prefix, _ = compute_pdm_port_reward(
+        candidates,
+        scene_inputs,
+        neighbors,
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(rl_reward_horizon_steps=2),
+    )
+    truncated_inputs = dict(scene_inputs)
+    truncated_inputs["ego_agent_future"] = scene_inputs["ego_agent_future"][:, :2]
+    full_on_truncated, _ = compute_pdm_port_reward(
+        candidates[:, :2],
+        truncated_inputs,
+        neighbors[:, :, :2],
+        num_scenes=1,
+        n=2,
+        args=SimpleNamespace(),
+    )
+    torch.testing.assert_close(prefix, full_on_truncated)

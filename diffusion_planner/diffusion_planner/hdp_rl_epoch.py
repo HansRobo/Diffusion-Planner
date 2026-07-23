@@ -28,6 +28,7 @@ from diffusion_planner.hdp_rl_utils import (
     sample_group,
 )
 from diffusion_planner.loss import sample_diffusion_time
+from diffusion_planner.pdm_reward_port import compute_pdm_port_reward
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
@@ -569,9 +570,16 @@ def _hdp_rl_step(
     ego_world, candidate_aug_metrics = augment_rollout_candidates(
         ego_world, ego_speed, num_scenes, n, args, generator=rollout_generator
     )
-    reward, reward_metrics = compute_hdp_reward(
-        ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
-    )
+    # The training objective may use the ported original-DP hdp_pdm reward; held-out
+    # selection deliberately stays on the frozen native objective either way.
+    if getattr(args, "rl_reward_source", "native") == "pdm_port":
+        reward, reward_metrics = compute_pdm_port_reward(
+            ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
+        )
+    else:
+        reward, reward_metrics = compute_hdp_reward(
+            ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
+        )
     if not torch.isfinite(reward).all():
         raise FloatingPointError("Non-finite HDP reward returned for RL rollout")
     reward_metrics.update(candidate_aug_metrics)
