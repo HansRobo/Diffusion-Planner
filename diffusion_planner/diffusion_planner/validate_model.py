@@ -91,7 +91,14 @@ def compute_plantf_mode_metrics(
         "plantf_mode_entropy": mode_entropy,
     }
     for mode in range(trajectory.shape[1]):
+        # selected: which mode argmax(pi) picks. oracle: which mode is actually
+        # best (ADE min). A concentrated oracle distribution means the data is
+        # effectively uni/bi-modal (a small num_modes suffices); a spread oracle
+        # distribution means it is genuinely multi-modal and collapsing to one
+        # mode would average the trajectories away. See
+        # docs/plantf_dead_mode_improvement.md.
         metrics[f"plantf_mode_usage_{mode}"] = (selected_mode == mode).float()
+        metrics[f"plantf_oracle_usage_{mode}"] = (oracle_mode == mode).float()
     return metrics
 
 
