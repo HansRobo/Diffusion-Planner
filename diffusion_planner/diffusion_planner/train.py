@@ -677,7 +677,7 @@ def model_training(args: TrainConfig):
                 diffusion_planner,
                 args,
                 epoch,
-                os.path.join(save_path, f"epoch{epoch + 1:04d}", "closed_loop"),
+                os.path.join(args.save_dir, f"epoch{epoch + 1:04d}", "closed_loop"),
             )
 
         scheduler.step()
