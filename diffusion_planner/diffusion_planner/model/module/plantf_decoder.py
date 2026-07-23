@@ -29,7 +29,6 @@ from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
-    loss_func,
     make_turn_indicator_gt,
     velocity_to_waypoints,
 )
@@ -155,7 +154,7 @@ class PlanTFDecoder(nn.Module):
         ``velocity_to_waypoints`` cumsums the xy displacement (ego-centric metres,
         current pose = origin) and passes the heading channel through. The result
         is then mapped into the StateNormalizer space so every downstream consumer
-        (WTA selection, loss_func, mode metrics, prediction, ONNX) is unchanged.
+        (WTA selection, smooth-L1 loss, mode metrics, prediction, ONNX) is unchanged.
         """
         wp = velocity_to_waypoints(velocity)  # [..., T, 4] absolute metres, heading passthrough
         idx = 0 if ego else 1  # ego uses row 0; neighbors share the same neighbor stats
@@ -298,7 +297,6 @@ def compute_plantf_training_loss(
         inputs["ego_current_state"][:, :4],
         inputs["neighbor_agents_past"][:, :Pn, -1, :4],
     )
-    longitudinal_velocity = inputs["ego_current_state"][:, 4:5]
     neighbor_current_mask = torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
     neighbor_mask = torch.concat(
         (neighbor_current_mask.unsqueeze(-1), neighbor_future_mask), dim=-1
@@ -333,63 +331,31 @@ def compute_plantf_training_loss(
 
     prediction = torch.cat([best_trajectory[:, None], neighbor_prediction], dim=1)  # [B, P, T, 4]
 
-    loss_dict = loss_func(prediction, gt_norm)
-    heading_l2_loss = loss_dict["heading_l2_loss"]  # [B, P, T]
-    position_lat_loss = loss_dict["position_lat_loss"]  # [B, P, T]
-    position_lon_loss = loss_dict["position_lon_loss"]  # [B, P, T]
-
-    # Velocity weighting divides the longitudinal error by up to the current
-    # speed, which is what the diffusion head uses. For the one-shot regression
-    # head this down-weights the forward-progress signal by ~|v| at speed and
-    # pushes the optimum toward the (stop-heavy) marginal mean trajectory
-    # (docs/plantf_dead_mode_improvement.md), so it is off by default here.
-    if getattr(args, "plantf_use_lon_velocity_weight", False):
-        velocity_weight = longitudinal_velocity * args.coeff_velocity
-        velocity_weight = torch.abs(velocity_weight)
-        velocity_weight = torch.clamp_min(velocity_weight, 1.0)
-        velocity_weight = velocity_weight.unsqueeze(-1)  # [B, 1, 1]
-        position_lon_loss = position_lon_loss / velocity_weight
-
-    # timestep weight
-    timestep_weight = args.coeff_timestep
-    assert T % len(timestep_weight) == 0, (
-        f"Timestep {T} is not divisible by the number of timestep weights {len(timestep_weight)}"
-    )
-    unit = T // len(timestep_weight)
-    for i in range(len(timestep_weight)):
-        position_lat_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
-        position_lon_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
-        heading_l2_loss[:, :, (i + 0) * unit : (i + 1) * unit] *= timestep_weight[i]
-
-    traj_loss = (
-        args.coeff_position_lat_loss * position_lat_loss
-        + args.coeff_position_lon_loss * position_lon_loss
-        + args.coeff_heading_l2_loss * heading_l2_loss
-    )  # [B, P, T]
-
-    masked_prediction_loss = traj_loss[:, 1:, :][neighbors_future_valid]
-
+    # Original planTF ego/neighbor loss (jchengai/planTF): smooth L1 on the
+    # winner-takes-all best mode over all channels (x, y, cos, sin), uniform
+    # across timesteps, plus a cross-entropy on the DETACHED best mode. The DP
+    # diffusion-decoder tuning previously grafted on here — lat/lon/heading L2
+    # decomposition, longitudinal velocity down-weighting, timestep weighting and
+    # the endpoint term — is intentionally dropped: it destabilized this one-shot
+    # regression head (团子 / 直進 / 反対方向 / 櫛状; see
+    # docs/plantf_dead_mode_improvement.md). turn-indicator and penalty losses
+    # below are kept for the DP/Autoware interface.
     loss = {}
 
-    if masked_prediction_loss.numel() > 0:
-        loss["neighbor_prediction_loss"] = masked_prediction_loss.mean()
+    ego_pred = prediction[:, 0, : args.ego_prediction_horizon]  # [B, T', 4]
+    ego_tgt = gt_norm[:, 0, : args.ego_prediction_horizon]
+    loss["ego_planning_loss"] = F.smooth_l1_loss(ego_pred, ego_tgt)
+
+    neighbor_pred = prediction[:, 1:]  # [B, Pn, T, 4]
+    neighbor_tgt = gt_norm[:, 1:]
+    if bool(neighbors_future_valid.any()):
+        loss["neighbor_prediction_loss"] = F.smooth_l1_loss(
+            neighbor_pred[neighbors_future_valid], neighbor_tgt[neighbors_future_valid]
+        )
     else:
-        loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=masked_prediction_loss.device)
+        loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=prediction.device)
 
-    loss["ego_planning_loss"] = traj_loss[:, 0, : args.ego_prediction_horizon].mean()
-    loss["mode_cls_loss"] = F.cross_entropy(probability, best_mode)
-
-    # Endpoint L2 loss in the NORMALIZED state space (WTA best mode): a direct
-    # forward-progress signal that the 80-step per-timestep decomposition
-    # dilutes. It is deliberately NOT rescaled to metres — with ego xy std = 20
-    # a metre-scale endpoint term is ~std^2 = 400x the per-timestep position
-    # loss and dominates the total, collapsing the path to a straight
-    # terminal-homing line (it only constrains the endpoint, not the shape).
-    # Keeping it in the normalized space matches ego_planning_loss so the
-    # coefficient stays comparable and the per-step losses still shape the
-    # curve. See docs/plantf_dead_mode_improvement.md.
-    endpoint_diff = best_trajectory[:, -1, :2] - ego_gt[:, -1, :2]
-    loss["endpoint_fde_loss"] = (endpoint_diff**2).sum(dim=-1).mean()
+    loss["mode_cls_loss"] = F.cross_entropy(probability, best_mode.detach())
 
     # Compute ego edge points for penalty losses (best mode only)
     need_ego_edge = args.coeff_road_border_loss > 0 or args.coeff_neighbor_collision_loss > 0
@@ -410,7 +376,7 @@ def compute_plantf_training_loss(
         )  # [B, T]
         loss["road_border_loss"] = rb_loss.mean()
     else:
-        loss["road_border_loss"] = torch.tensor(0.0, device=traj_loss.device)
+        loss["road_border_loss"] = torch.tensor(0.0, device=prediction.device)
 
     if args.coeff_neighbor_collision_loss > 0:
         nc_loss = compute_neighbor_collision_penalty(
@@ -424,9 +390,9 @@ def compute_plantf_training_loss(
         )  # [B, T]
         loss["neighbor_collision_loss"] = nc_loss.mean()
     else:
-        loss["neighbor_collision_loss"] = torch.tensor(0.0, device=traj_loss.device)
+        loss["neighbor_collision_loss"] = torch.tensor(0.0, device=prediction.device)
 
-    assert not torch.isnan(traj_loss).sum(), "loss cannot be nan"
+    assert not torch.isnan(loss["ego_planning_loss"]), "loss cannot be nan"
 
     turn_indicator_logit = decoder_output["turn_indicator_logit"]
     turn_indicator_gt = make_turn_indicator_gt(inputs["turn_indicators"])  # [B,]
