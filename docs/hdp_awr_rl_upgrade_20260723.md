@@ -162,7 +162,11 @@ Same SFT checkpoint, frozen `rl_eval_*` selection, one arm per change:
    reweights the policy's own support, and both audited upstream gains included an
    exploration mechanism. Optional sub-arm: `rl_candidate_aug_stretch=0.25`.
 3. **Ported objective arm:** (2) + `rl_reward_source=pdm_port
-   rl_reward_horizon_steps=40`. The verbatim port of the objective behind both
+   rl_reward_horizon_steps=40 rl_reward_beta=1.0` (beta acts on dimensionless
+   group z-scores, so the source value transfers directly; our 0.5 default is a
+   local choice that halves weight contrast vs public HDP). For the
+   `stratified_beta` augmentation scheme, `rl_candidate_aug_std=1.0` matches the
+   source lambda_lat. The verbatim port of the objective behind both
    audited positive results; on the 512-scene real-data audit
    (`docs/rl_threshold_audit_20260723.md`) it is far more expert-consistent than
    the native reward (expert wins its group 91% vs 64% — the native progress term
