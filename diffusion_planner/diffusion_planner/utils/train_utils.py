@@ -7,8 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from timm.utils import ModelEmaV3
-from torch import optim
-from torch import nn
+from torch import nn, optim
 
 
 def atomic_torch_save(obj, path) -> None:

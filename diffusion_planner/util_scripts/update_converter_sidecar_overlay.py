@@ -52,6 +52,8 @@ from diffusion_planner.dimensions import (  # noqa: E402
 try:  # noqa: E402
     from audit_pr204_red_light_run import (
         _heading_diff_deg as _red_heading_diff_deg,
+    )
+    from audit_pr204_red_light_run import (
         _intersection_point,
         _red_entries,
         _stop_segments,
@@ -60,6 +62,8 @@ try:  # noqa: E402
 except ImportError:  # pragma: no cover - package-style invocation
     from diffusion_planner.util_scripts.audit_pr204_red_light_run import (  # type: ignore # noqa: E501
         _heading_diff_deg as _red_heading_diff_deg,
+    )
+    from diffusion_planner.util_scripts.audit_pr204_red_light_run import (
         _intersection_point,
         _red_entries,
         _stop_segments,

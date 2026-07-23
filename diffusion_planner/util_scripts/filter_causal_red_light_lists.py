@@ -25,13 +25,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
-
 from diffusion_planner.dimensions import (
     TRAFFIC_LIGHT_GREEN,
     TRAFFIC_LIGHT_RED,
     TRAFFIC_LIGHT_YELLOW,
 )
-
 
 STOP_SPEED_MPS = 0.3
 HISTORY_FRAMES = 5

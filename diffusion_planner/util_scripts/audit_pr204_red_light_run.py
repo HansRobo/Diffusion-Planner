@@ -23,13 +23,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
-
 from diffusion_planner.dimensions import (
     TRAFFIC_LIGHT,
     TRAFFIC_LIGHT_ONE_HOT_DIM,
     TRAFFIC_LIGHT_RED,
 )
-
 
 RED_RADIUS_M = 12.0
 HEADING_TOL_DEG = 45.0

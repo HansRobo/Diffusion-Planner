@@ -1,6 +1,5 @@
-import torch
 import pytest
-
+import torch
 from diffusion_planner.utils.metric_logging import (
     select_epdms_dashboard_metrics,
     select_valid_loss_dashboard_metrics,

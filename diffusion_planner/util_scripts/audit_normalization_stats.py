@@ -21,7 +21,6 @@ from pathlib import Path
 
 import numpy as np
 
-
 DEFAULT_NORMALIZATION = Path(__file__).resolve().parents[1] / "normalization.json"
 
 

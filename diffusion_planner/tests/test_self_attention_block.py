@@ -1,7 +1,6 @@
 """Regression tests for the encoder pre-LN self-attention contract."""
 
 import torch
-
 from diffusion_planner.model.module.encoder import SelfAttentionBlock
 
 

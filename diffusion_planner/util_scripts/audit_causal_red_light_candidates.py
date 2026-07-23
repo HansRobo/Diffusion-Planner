@@ -17,13 +17,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
-
 from diffusion_planner.dimensions import TRAFFIC_LIGHT_GREEN, TRAFFIC_LIGHT_RED
+
 # ``util_scripts`` is intentionally outside the installable model package;
 # import the filter helpers by sibling path so this tool works with the same
 # ``PYTHONPATH=diffusion_planner`` invocation as the filter itself.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filter_causal_red_light_lists import (  # noqa: E402
+    FUTURE_DT_S,
     HISTORY_FRAMES,
     HISTORY_SPEED_MPS,
     LANE_BEHIND_M,
@@ -33,7 +34,6 @@ from filter_causal_red_light_lists import (  # noqa: E402
     MOTION_SUSTAIN_FRAMES,
     SIGNAL_MATCH_M,
     STOP_SPEED_MPS,
-    FUTURE_DT_S,
     _sibling_frame_path,
     _transform_points_to_future_frame,
 )
