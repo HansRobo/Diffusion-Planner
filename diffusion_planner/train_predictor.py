@@ -168,9 +168,10 @@ def get_args(args_list=None):
     parser.add_argument(
         "--plantf_use_lon_velocity_weight",
         type=boolean,
-        default=False,
-        help="re-enable the diffusion-style longitudinal velocity down-weighting "
-        "for the planTF head (off by default; it suppresses forward progress)",
+        default=True,
+        help="longitudinal velocity down-weighting for the planTF head "
+        "(on by default = same as the diffusion head; A/B showed disabling it "
+        "hurt, so it is kept on)",
     )
 
     # Velocity representation & hybrid loss (HDP paper, Section IV-B)
