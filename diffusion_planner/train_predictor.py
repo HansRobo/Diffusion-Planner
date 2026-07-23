@@ -86,6 +86,13 @@ def get_args(args_list=None):
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--save_utd", type=int, default=10)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-4,
+        help="AdamW weight decay on matmul weights only (biases and "
+        "LayerNorm/BatchNorm/Embedding params are excluded)",
+    )
     parser.add_argument("--warm_up_epoch", type=int, default=5)
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
@@ -180,6 +187,25 @@ def get_args(args_list=None):
         help="feed the current ego motion state (vx,vy,ax,ay,steering,yaw_rate) "
         "into the planTF trajectory head to anchor the prediction to the current "
         "motion (decoder_type='plantf' only)",
+    )
+    parser.add_argument(
+        "--plantf_ego_state_token",
+        type=boolean,
+        default=False,
+        help="A2: replace the ego encoder token with an embedding of the current "
+        "ego motion state (original planTF use_ego_history=false path)",
+    )
+    parser.add_argument(
+        "--plantf_ego_state_dropout",
+        type=float,
+        default=0.75,
+        help="dropout rate on the ego motion-state channels for A2 (original planTF 0.75)",
+    )
+    parser.add_argument(
+        "--plantf_input_delta",
+        type=boolean,
+        default=False,
+        help="C1: feed agent (ego+neighbor) history as consecutive-frame xy deltas",
     )
 
     # Velocity representation & hybrid loss (HDP paper, Section IV-B)

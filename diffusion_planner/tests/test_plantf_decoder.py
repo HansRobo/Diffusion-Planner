@@ -380,6 +380,55 @@ def test_ego_state_injection_anchors_prediction():
     assert torch.allclose(fast_off["trajectory"], slow_off["trajectory"])
 
 
+def test_a2_ego_state_token_and_c1_input_delta_preserve_contract():
+    """A2 (ego token = current-state embedding) and C1 (xy-delta history inputs),
+    independently and together, must keep the inference contract:
+    denormalized [B, 1+Pn, T, 4], finite. See
+    docs/plantf_original_comparison_and_roadmap.md."""
+    for flags in (
+        {"plantf_ego_state_token": True},
+        {"plantf_input_delta": True},
+        {"plantf_ego_state_token": True, "plantf_input_delta": True},
+    ):
+        torch.manual_seed(0)
+        config = _config()
+        config.plantf_ego_state_dropout = 0.75
+        for key, value in flags.items():
+            setattr(config, key, value)
+        model = Diffusion_Planner(config).eval()
+        with torch.no_grad():
+            _, outputs = model(_inputs())
+        assert outputs["prediction"].shape == (
+            2,
+            1 + MAX_NUM_NEIGHBORS,
+            OUTPUT_T,
+            POSE_DIM,
+        ), flags
+        assert torch.isfinite(outputs["prediction"]).all(), flags
+
+
+def test_a2_c1_training_backward():
+    """A2 + C1 must train (finite gradients) with the planTF loss."""
+    torch.manual_seed(0)
+    config = _config()
+    config.plantf_ego_state_token = True
+    config.plantf_input_delta = True
+    config.plantf_ego_state_dropout = 0.75
+    model = Diffusion_Planner(config).train()
+    B, Pn = 2, MAX_NUM_NEIGHBORS
+    futures = (
+        torch.randn(B, OUTPUT_T, POSE_DIM),
+        torch.randn(B, Pn, OUTPUT_T, POSE_DIM),
+        torch.zeros(B, Pn, OUTPUT_T, dtype=torch.bool),
+    )
+    loss = compute_plantf_training_loss(model, _inputs(), futures, _loss_args(config))
+    total = loss["ego_planning_loss"] + loss["neighbor_prediction_loss"] + loss["mode_cls_loss"]
+    total.backward()
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    assert len(grads) > 0
+    assert all(torch.isfinite(g).all() for g in grads)
+
+
 def test_output_heads_are_zero_initialized():
     """Every mode must start at the normalized-space mean (zero output), not
     Xavier noise: under winner-takes-all training rarely-winning modes keep

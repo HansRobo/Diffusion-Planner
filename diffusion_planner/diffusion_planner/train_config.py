@@ -74,6 +74,11 @@ class TrainConfig:
     batch_size: int = 512
     save_utd: int = 10
     learning_rate: float = 1e-4
+    # AdamW weight decay. Applied only to matmul weights; biases and
+    # LayerNorm/BatchNorm/Embedding params are excluded (standard transformer
+    # practice, matches original planTF). Previously torch AdamW's default 0.01
+    # was applied to ALL params including norms/biases, over-regularizing.
+    weight_decay: float = 1e-4
     warm_up_epoch: int = 5
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
@@ -125,6 +130,18 @@ class TrainConfig:
     # current state; the planTF head otherwise does not). See
     # docs/plantf_dead_mode_improvement.md.
     plantf_use_ego_state_in_head: bool = True
+    # A2 (docs/plantf_original_comparison_and_roadmap.md): replace the ego encoder
+    # token with an embedding of the current ego motion state (vx,vy,ax,ay,steer,
+    # yaw_rate) instead of the position-history token, matching original planTF's
+    # use_ego_history=false path. state_dropout randomly zeroes those channels
+    # during training (original uses 0.75). Anchors the whole prediction to the
+    # current motion the way the diffusion decoder's pinned state does.
+    plantf_ego_state_token: bool = False
+    plantf_ego_state_dropout: float = 0.75
+    # C1: feed agent (ego + neighbor) history as consecutive-frame xy deltas
+    # instead of absolute positions, giving the encoder temporal-difference
+    # inputs (original planTF vectorizes history this way).
+    plantf_input_delta: bool = False
 
     # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False
