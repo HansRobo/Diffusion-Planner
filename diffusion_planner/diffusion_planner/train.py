@@ -18,6 +18,10 @@ from diffusion_planner.scenario_based_open_loop.validate import scenario_based_o
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.checkpoint_viz import (
+    render_checkpoint_trajectory_figure,
+    select_and_load_validation_sample,
+)
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
@@ -302,6 +306,47 @@ def closed_loop_validate(
         wandb.log(log, step=epoch + 1)
 
 
+def render_checkpoint_visualization(
+    model,
+    args,
+    epoch: int,
+    checkpoint_dir: str,
+    checkpoint_name: str,
+    sample_path: Path,
+    sample_data,
+) -> None:
+    """Render one validation sample and log the PNG to wandb."""
+    output_path = Path(checkpoint_dir) / "checkpoint_trajectory.png"
+    try:
+        metrics = render_checkpoint_trajectory_figure(
+            model,
+            args,
+            sample_data,
+            sample_path,
+            output_path,
+            title=f"{checkpoint_name} @epoch {epoch + 1}",
+            seed=args.seed,
+        )
+    except Exception as exc:
+        print(f"Checkpoint visualization failed for {checkpoint_name} @epoch {epoch + 1}: {exc}")
+        return
+
+    if args.use_wandb and wandb.run is not None:
+        wandb.log(
+            {
+                f"checkpoint_viz/{checkpoint_name}": wandb.Image(
+                    str(output_path),
+                    caption=(
+                        f"{checkpoint_name} @epoch {epoch + 1} "
+                        f"ADE={metrics['ADE']:.2f} FDE={metrics['FDE']:.2f} "
+                        f"max_step={metrics['max_step']:.2f} roughness={metrics['roughness']:.2f}"
+                    ),
+                )
+            },
+            step=epoch + 1,
+        )
+
+
 def model_training(args: TrainConfig):
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
@@ -424,6 +469,10 @@ def model_training(args: TrainConfig):
                     0 if valid_pair_loader is None else len(valid_pair_loader.dataset)
                 )
             )
+        viz_sample_idx, viz_sample_path, viz_sample_data = select_and_load_validation_sample(
+            valid_set.data_list
+        )
+        print(f"Checkpoint visualization sample: index={viz_sample_idx}, path={viz_sample_path}")
 
     if args.ddp:
         torch.distributed.barrier()
@@ -733,6 +782,15 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
+                render_checkpoint_visualization(
+                    diffusion_planner,
+                    args,
+                    epoch,
+                    curr_dir,
+                    f"epoch{epoch + 1:04d}",
+                    viz_sample_path,
+                    viz_sample_data,
+                )
                 # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
                 # (videos + metrics) land next to the saved weights they correspond to.
                 is_final_save = (epoch + 1 - init_epoch) // save_utd == (
@@ -766,6 +824,15 @@ def model_training(args: TrainConfig):
                     use_simplify=False,
                     opset_version=20,
                     external_data=False,
+                )
+                render_checkpoint_visualization(
+                    diffusion_planner,
+                    args,
+                    epoch,
+                    curr_dir,
+                    "best_model",
+                    viz_sample_path,
+                    viz_sample_data,
                 )
 
         scheduler.step()
