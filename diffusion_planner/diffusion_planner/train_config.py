@@ -75,9 +75,10 @@ class TrainConfig:
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True
-    # The 2026-06 Tier IV corpus predates converter commit 55eff4f and duplicates t=0 in
-    # short neighbor futures. Keep this on for that corpus; disable it for regenerated data.
-    align_legacy_neighbor_futures: bool = True
+    # New corpora generated after converter commit 55eff4f already start neighbor futures
+    # at t+0.1 s.  The legacy +1 correction is opt-in for old manifests only; keeping it
+    # enabled by default silently moves valid stationary/short tracks in the new corpus.
+    align_legacy_neighbor_futures: bool = False
 
     # ---------------------------------------------------------
     # Training Parameters
@@ -99,14 +100,16 @@ class TrainConfig:
     # history remains a separate, shorter six-frame perception window.
     ego_history_frames: int = 21
     ego_history_dropout_rate: float = 0.4
-    # The turn head sees generated trajectories at inference. Train it on both the detached
-    # model x-start trajectory and the expert trajectory; the normalized combination keeps the
-    # historical loss scale while removing pure teacher-forcing exposure bias.
+    # The turn head sees generated trajectories at inference. In the production staged
+    # contract these weights are consumed only by the later head stage (or an explicit
+    # joint ablation), never by policy-only Base/SFT.
     turn_indicator_generated_loss_weight: float = 1.0
     turn_indicator_expert_loss_weight: float = 1.0
-    # ``policy`` adapts the planner without evaluating the auxiliary head;
-    # ``turn_indicator`` freezes the planner and trains the head in the mode below.
-    supervised_training_stage: Literal["joint", "policy", "turn_indicator"] = "joint"
+    # The production SFT contract is deliberately staged: ``policy`` adapts the
+    # trajectory planner without evaluating or updating the auxiliary head, then
+    # ``turn_indicator`` freezes the planner and trains the detached head below.
+    # ``joint`` remains an explicit ablation only; it is never the safe default.
+    supervised_training_stage: Literal["joint", "policy", "turn_indicator"] = "policy"
     # Expert pretraining avoids the expensive DPM rollout while the randomly initialized
     # head learns clean intent features. Deployment fine-tuning then exposes it to the
     # exact final DPM trajectory used online.

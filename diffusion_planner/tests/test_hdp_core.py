@@ -2682,6 +2682,9 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
             "road_border_n_interp": 2,
             "turn_indicator_generated_loss_weight": 1.0,
             "turn_indicator_expert_loss_weight": 1.0,
+            # Joint mode is intentionally explicit here because production
+            # Base/SFT defaults to policy-only training.
+            "supervised_training_stage": "joint",
         },
     )()
     B, T = 2, 80
@@ -2809,7 +2812,11 @@ def _checkpoint_compat_config(predicted_neighbor_num: int):
 
 def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(tmp_path):
     checkpoint_args = _checkpoint_compat_config(predicted_neighbor_num=1)
+    # Keep the synthetic checkpoint contract stable while the production default
+    # is now policy-only; the loop below verifies changing stage is rejected.
+    checkpoint_args.supervised_training_stage = "joint"
     current_args = _checkpoint_compat_config(predicted_neighbor_num=0)
+    current_args.supervised_training_stage = "joint"
     serializable = {
         key: value.to_dict()
         if isinstance(value, (StateNormalizer, ObservationNormalizer))
@@ -2830,11 +2837,13 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
     )
 
     same_shape = _checkpoint_compat_config(predicted_neighbor_num=1)
+    same_shape.supervised_training_stage = "joint"
     same_shape.turn_indicator_generated_loss_weight = 0.25
     with pytest.raises(RuntimeError, match="training configuration mismatch"):
         assert_checkpoint_compatible(str(checkpoint_path), same_shape)
 
     same_shape = _checkpoint_compat_config(predicted_neighbor_num=1)
+    same_shape.supervised_training_stage = "joint"
     same_shape.turn_indicator_head_training_mode = "expert"
     with pytest.raises(RuntimeError, match="training configuration mismatch"):
         assert_checkpoint_compatible(str(checkpoint_path), same_shape)
@@ -2875,11 +2884,13 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         ("decoder_drop_path_rate", 0.0),
     ):
         changed = _checkpoint_compat_config(predicted_neighbor_num=1)
+        changed.supervised_training_stage = "joint"
         setattr(changed, field, value)
         with pytest.raises(RuntimeError, match="training configuration mismatch"):
             assert_checkpoint_compatible(str(checkpoint_path), changed)
 
     shorter_horizon = _checkpoint_compat_config(predicted_neighbor_num=1)
+    shorter_horizon.supervised_training_stage = "joint"
     shorter_horizon.train_epochs = 20
     assert_checkpoint_compatible(str(checkpoint_path), shorter_horizon)
 

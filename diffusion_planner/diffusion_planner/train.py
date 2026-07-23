@@ -47,7 +47,7 @@ from diffusion_planner.validate_model import aggregate_valid_metrics, validate_m
 
 
 def configure_supervised_trainable_parameters(model: torch.nn.Module, stage: str) -> None:
-    """Apply the explicit two-stage SFT parameter ownership contract."""
+    """Apply the staged SFT ownership contract (joint is an explicit ablation)."""
     if stage not in {"joint", "policy", "turn_indicator"}:
         raise ValueError(f"Unsupported supervised training stage: {stage!r}")
     head_prefix = "decoder.turn_indicator_predictor."
@@ -142,6 +142,31 @@ def _finite_validation_metrics(prefix: str, metrics: dict) -> dict[str, float]:
         if math.isfinite(number):
             result[f"{prefix}/{key}"] = number
     return result
+
+
+def _turn_indicator_validation_metrics(agg: dict) -> tuple[float | None, dict, dict]:
+    """Build head metrics only when the current stage actually evaluates the head."""
+    if not agg.get("turn_indicator_evaluated", True):
+        return None, {}, {}
+    metric_names = (
+        "turn_indicator_accuracy",
+        "turn_indicator_balanced_accuracy",
+        "turn_indicator_macro_f1",
+        "turn_indicator_active_precision",
+        "turn_indicator_active_recall",
+        "turn_indicator_active_f1",
+        "turn_indicator_direction_accuracy",
+    )
+    metrics = {
+        f"valid_turn_indicator/{key.removeprefix('turn_indicator_')}": agg[key]
+        for key in metric_names
+    }
+    class_metrics = {
+        f"valid_turn_indicator/{name}_accuracy": value
+        for name, value in agg["turn_indicator_class_accuracy"].items()
+        if agg["turn_indicator_class_count"].get(name, 0) > 0
+    }
+    return agg["turn_indicator_accuracy"], metrics, class_metrics
 
 
 def _finite_history_values(rows: list[dict], key: str) -> list[float]:
@@ -802,7 +827,9 @@ def model_training(args: TrainConfig):
         aug = None
 
     # prepare dataset
-    align_legacy_futures = bool(getattr(args, "align_legacy_neighbor_futures", True))
+    # New data is already time-aligned.  Legacy correction remains an explicit opt-in
+    # for old manifests, never an implicit fallback that can corrupt evaluation targets.
+    align_legacy_futures = bool(getattr(args, "align_legacy_neighbor_futures", False))
     train_needs_neighbor_futures = args.coeff_neighbor_collision_loss > 0
     train_set = DiffusionPlannerData(
         args.train_set_list,
@@ -875,7 +902,7 @@ def model_training(args: TrainConfig):
     # set up model
     diffusion_planner = Diffusion_Planner(args)
     configure_supervised_trainable_parameters(
-        diffusion_planner, getattr(args, "supervised_training_stage", "joint")
+        diffusion_planner, getattr(args, "supervised_training_stage", "policy")
     )
     diffusion_planner = diffusion_planner.to(rank if args.device == "cuda" else args.device)
 
@@ -918,7 +945,7 @@ def model_training(args: TrainConfig):
             "Model Params: {} (trainable: {}, stage: {})".format(
                 sum(p.numel() for p in ddp.get_model(diffusion_planner, args.ddp).parameters()),
                 trainable_parameters,
-                getattr(args, "supervised_training_stage", "joint"),
+                getattr(args, "supervised_training_stage", "policy"),
             )
         )
 
@@ -1074,31 +1101,20 @@ def model_training(args: TrainConfig):
         valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
             "valid_loss/ego_position_lon_loss", 0.0
         )
-        turn_indicator_accuracy = agg["turn_indicator_accuracy"]
-        turn_indicator_metrics = {
-            f"valid_turn_indicator/{key.removeprefix('turn_indicator_')}": agg[key]
-            for key in (
-                "turn_indicator_accuracy",
-                "turn_indicator_balanced_accuracy",
-                "turn_indicator_macro_f1",
-                "turn_indicator_active_precision",
-                "turn_indicator_active_recall",
-                "turn_indicator_active_f1",
-                "turn_indicator_direction_accuracy",
-            )
-        }
-        turn_indicator_class_metrics = {
-            f"valid_turn_indicator/{name}_accuracy": value
-            for name, value in agg["turn_indicator_class_accuracy"].items()
-            if agg["turn_indicator_class_count"].get(name, 0) > 0
-        }
+        turn_indicator_accuracy, turn_indicator_metrics, turn_indicator_class_metrics = (
+            _turn_indicator_validation_metrics(agg)
+        )
         print(
             f"{valid_loss_ego=:.3f}\n"
             f"{valid_loss_ego_position_lat_loss=:.3f}\n"
-            f"{valid_loss_ego_position_lon_loss=:.3f}\n"
-            f"{turn_indicator_accuracy=:.3f}\n"
-            f"turn_indicator_macro_f1={agg['turn_indicator_macro_f1']:.3f}\n"
-            f"turn_indicator_active_f1={agg['turn_indicator_active_f1']:.3f}"
+            f"{valid_loss_ego_position_lon_loss=:.3f}"
+            + (
+                f"\n{turn_indicator_accuracy=:.3f}"
+                f"\nturn_indicator_macro_f1={agg['turn_indicator_macro_f1']:.3f}"
+                f"\nturn_indicator_active_f1={agg['turn_indicator_active_f1']:.3f}"
+                if turn_indicator_accuracy is not None
+                else "\nturn_indicator_metrics=skipped (policy stage)"
+            )
         )
         if args.use_wandb:
             neighbor_metric = (
@@ -1163,32 +1179,21 @@ def model_training(args: TrainConfig):
             valid_loss_ego_position_lon_loss = mean_ego_loss_dict.get(
                 "valid_loss/ego_position_lon_loss", 0.0
             )
-            turn_indicator_accuracy = agg["turn_indicator_accuracy"]
-            turn_indicator_metrics = {
-                f"valid_turn_indicator/{key.removeprefix('turn_indicator_')}": agg[key]
-                for key in (
-                    "turn_indicator_accuracy",
-                    "turn_indicator_balanced_accuracy",
-                    "turn_indicator_macro_f1",
-                    "turn_indicator_active_precision",
-                    "turn_indicator_active_recall",
-                    "turn_indicator_active_f1",
-                    "turn_indicator_direction_accuracy",
-                )
-            }
-            turn_indicator_class_metrics = {
-                f"valid_turn_indicator/{name}_accuracy": value
-                for name, value in agg["turn_indicator_class_accuracy"].items()
-                if agg["turn_indicator_class_count"].get(name, 0) > 0
-            }
+            turn_indicator_accuracy, turn_indicator_metrics, turn_indicator_class_metrics = (
+                _turn_indicator_validation_metrics(agg)
+            )
             print(
                 f"Epoch {epoch + 1}/{train_epochs}\n"
                 f"{valid_loss_ego=:.3f}\n"
                 f"{valid_loss_ego_position_lat_loss=:.3f}\n"
-                f"{valid_loss_ego_position_lon_loss=:.3f}\n"
-                f"{turn_indicator_accuracy=:.3f}\n"
-                f"turn_indicator_macro_f1={agg['turn_indicator_macro_f1']:.3f}\n"
-                f"turn_indicator_active_f1={agg['turn_indicator_active_f1']:.3f}"
+                f"{valid_loss_ego_position_lon_loss=:.3f}"
+                + (
+                    f"\n{turn_indicator_accuracy=:.3f}"
+                    f"\nturn_indicator_macro_f1={agg['turn_indicator_macro_f1']:.3f}"
+                    f"\nturn_indicator_active_f1={agg['turn_indicator_active_f1']:.3f}"
+                    if turn_indicator_accuracy is not None
+                    else "\nturn_indicator_metrics=skipped (policy stage)"
+                )
             )
 
             lr_dict = {"lr": train_lr}
@@ -1220,18 +1225,23 @@ def model_training(args: TrainConfig):
                 "valid_loss_ego": valid_loss_ego,
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
                 "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
-                "valid_turn_indicator_accuracy": turn_indicator_accuracy,
-                **{
-                    key.replace("valid_turn_indicator/", "valid_turn_indicator_"): value
-                    for key, value in turn_indicator_metrics.items()
-                },
-                **{
-                    key.replace("valid_turn_indicator/", "valid_turn_indicator_"): value
-                    for key, value in turn_indicator_class_metrics.items()
-                },
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
                 **{k.replace("/", "_"): v for k, v in mean_multisample_dict.items()},
             }
+            if turn_indicator_accuracy is not None:
+                curr_data.update(
+                    {
+                        "valid_turn_indicator_accuracy": turn_indicator_accuracy,
+                        **{
+                            key.replace("valid_turn_indicator/", "valid_turn_indicator_"): value
+                            for key, value in turn_indicator_metrics.items()
+                        },
+                        **{
+                            key.replace("valid_turn_indicator/", "valid_turn_indicator_"): value
+                            for key, value in turn_indicator_class_metrics.items()
+                        },
+                    }
+                )
             if args.predicted_neighbor_num > 0:
                 curr_data["valid_loss_neighbor"] = valid_loss_neighbor
             data_list.append(curr_data)

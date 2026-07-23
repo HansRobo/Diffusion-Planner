@@ -105,7 +105,9 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     epoch_loss_sums = {}
     epoch_loss_counts = {}
 
-    training_stage = getattr(args, "supervised_training_stage", "joint")
+    # A missing stage must fail closed to policy-only training.  Falling back to
+    # joint would silently update the auxiliary head during Base/SFT.
+    training_stage = getattr(args, "supervised_training_stage", "policy")
     if training_stage == "turn_indicator":
         # Keep the frozen planner deterministic and deployment-aligned. Only the
         # classifier is returned to train mode (it currently has no dropout, but

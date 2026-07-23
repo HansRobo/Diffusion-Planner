@@ -2,6 +2,7 @@ import json
 
 import torch
 
+from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
 from diffusion_planner.utils.hdp_compat import require_velocity_normalizer
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
@@ -27,6 +28,11 @@ class Config:
             "rl_noise_scale": 1.5,
             "rl_eval_noise_scale": 0.5,
             "rl_eval_num_generations": 32,
+            # HDP policy inputs never contain the historical turn-indicator signal.
+            # Keep the default explicit so older args.json files remain loadable
+            # without silently selecting the legacy conditioning path.
+            "policy_uses_turn_indicator_history": False,
+            "turn_indicator_output_dim": TURN_INDICATOR_OUTPUT_DIM,
             # Preserve inference behavior for pre-window-contract checkpoints
             # that do not have this explicit field. New runs serialize 21.
             "ego_history_frames": 6,

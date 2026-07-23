@@ -104,7 +104,7 @@ Reasons:
 
 Single-frame lists can still run ordinary supervised training, but they are not sufficient for temporal-consistency evaluation.
 
-The current 2026-06 Tier IV corpus was generated before converter commit `55eff4f` and can duplicate the current frame in neighbor futures. `align_legacy_neighbor_futures=true` detects unambiguous short tracks from their padded tail. A rare track that disappears exactly at the 80-step boundary can look full; that case is shifted only when map-coordinate matching proves its second point is the next scene's current state. This preserves legitimate repeated poses. Alignment and tail padding happen in worker memory and never write, rename, or migrate shared NPZ files. Correctly regenerated corpora use NPZ format version 3, which marks neighbor futures as already starting at `t+0.1 s` and bypasses legacy alignment automatically. Standalone validation inherits the checkpoint setting unless explicitly overridden.
+The current regenerated Tier IV corpus already stores neighbor future index 0 at `t+0.1 s`; the default is `align_legacy_neighbor_futures=false`. The legacy correction is retained only as an explicit opt-in for pre-`55eff4f` manifests, where it detects unambiguous short tracks from their padded tail and verifies rare full-horizon cases against the next scene. Alignment happens in worker memory and never writes, renames, or migrates shared NPZ files. Standalone validation inherits the checkpoint setting unless explicitly overridden, so new runs serialize `false` and do not apply the old +1 shift.
 
 Oversampling accepts repeated `extra_train_set_list` flags and one shared
 `extra_train_set_repeat` inside the Dataset. It concatenates the sources and appends
@@ -151,6 +151,11 @@ Base is trained from scratch with HDP flags enabled. Use full-sequence base trai
 ```text
 Diffusion-Planner-Temporal
 ```
+
+Base and ordinary policy SFT explicitly use `--supervised_training_stage policy`.
+The trajectory model does not read historical turn indicators, and the auxiliary
+head is frozen, skipped, and omitted from policy validation metrics until the later
+head-only stage.
 
 ### Stage 2: staged HDP supervised fine-tuning
 

@@ -52,6 +52,10 @@ class DiffusionPlannerData(Dataset):
                 if key != "version"
                 and (self.include_neighbor_futures or key != "neighbor_agents_future")
             }
+        if "ego_shape" in data and data["ego_shape"].shape != (3,):
+            raise ValueError(
+                f"{path}: ego_shape with shape {data['ego_shape'].shape}, expected (3,)"
+            )
         if align_neighbor_futures:
             align_legacy_neighbor_futures_on_load(
                 data,

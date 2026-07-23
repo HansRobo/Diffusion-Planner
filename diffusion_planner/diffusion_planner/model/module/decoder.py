@@ -175,7 +175,9 @@ def compute_training_loss(
     args: Namespace,
     collision_futures: tuple[torch.Tensor, torch.Tensor] | None = None,
 ):
-    training_stage = getattr(args, "supervised_training_stage", "joint")
+    # Keep the low-level helper safe when called with a legacy Namespace: policy
+    # training must not silently re-enable the auxiliary turn-indicator branch.
+    training_stage = getattr(args, "supervised_training_stage", "policy")
     if training_stage not in {"joint", "policy"}:
         raise ValueError(
             f"compute_training_loss supports joint/policy stages, got {training_stage!r}"
@@ -372,7 +374,7 @@ def compute_turn_indicator_head_training_loss(
     sampling while the new head learns clean intent features. Deployment mode uses the
     exact final DPM trajectory and retains gradients only for the detached head calls.
     """
-    if getattr(args, "supervised_training_stage", "joint") != "turn_indicator":
+    if getattr(args, "supervised_training_stage", "policy") != "turn_indicator":
         raise ValueError("head-only loss requires supervised_training_stage='turn_indicator'")
 
     batch_size = ego_future.shape[0]

@@ -160,7 +160,7 @@ def get_args(args_list=None):
         "--supervised_training_stage",
         choices=("joint", "policy", "turn_indicator"),
         default=_train_config_default("supervised_training_stage"),
-        help="train the full model jointly, trajectory policy only, or detached intent head only",
+        help="train trajectory policy only (default), an explicit joint ablation, or the detached intent head only",
     )
     parser.add_argument(
         "--turn_indicator_head_training_mode",
