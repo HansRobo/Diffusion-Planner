@@ -131,6 +131,15 @@ diffusion-time draw; and the optional expert anchor applies only to scenes with 
 group. Training-objective defaults are unchanged; only checkpoint selection switched to the
 deterministic metric.
 
+`rl_candidate_aug_*` adds HDP's own rollout-candidate augmentation in the velocity-safe form:
+route-frame offsets with a mandatory ~2 s minimum-jerk onset (a constant offset is a first-delta
+impulse under velocity actions and is rejected), an optional PlannerRFT candidate stretch that
+scales per-step displacements (natively smooth for velocity actions), an unaugmented on-policy
+anchor per group, and a low-speed skip guard. Candidates are perturbed before reward and
+regression, so AWR can rank and internalize behavior beyond the policy's own support. Off by
+default; the exploration arm of the experiment ladder enables it. Guided denoising toward a
+frozen reference (full PlannerRFT) remains deferred pending the upstream full-scale verdict.
+
 The DAC guard is deliberate: a higher proxy reward must not be accepted if it worsens the binary
 drivable-area-compliance metric that motivated this experiment.
 

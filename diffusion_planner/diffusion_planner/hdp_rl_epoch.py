@@ -18,6 +18,7 @@ from torch import nn
 from tqdm import tqdm
 
 from diffusion_planner.hdp_rl_utils import (
+    augment_rollout_candidates,
     compute_hdp_reward,
     compute_reward_weighted_loss,
     compute_reward_weights,
@@ -560,15 +561,23 @@ def _hdp_rl_step(
         timing_events[1].record()
     _set_hdp_rl_train_mode(model, args)
 
+    # HDP's own RL perturbs rollout candidates before reward and regression — that is
+    # the exploration mechanism that lets AWR rank and internalize behavior beyond the
+    # policy's own support. Applied here in the velocity-safe ramped waypoint form; the
+    # reward, gate, and regression all consume the augmented candidates consistently.
+    ego_speed = raw_inputs["ego_current_state"][:, 4:6].norm(dim=-1)
+    ego_world, candidate_aug_metrics = augment_rollout_candidates(
+        ego_world, ego_speed, num_scenes, n, args, generator=rollout_generator
+    )
     reward, reward_metrics = compute_hdp_reward(
         ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
     )
     if not torch.isfinite(reward).all():
         raise FloatingPointError("Non-finite HDP reward returned for RL rollout")
+    reward_metrics.update(candidate_aug_metrics)
     # The reward is blind to near-field continuity, so a dynamically infeasible
     # standstill-jump candidate can otherwise win the group advantage. Rejected
     # candidates are excluded from both the group statistics and the weights.
-    ego_speed = raw_inputs["ego_current_state"][:, 4:6].norm(dim=-1)
     gate_mask, gate_metrics = first_waypoint_candidate_gate(
         ego_world, ego_speed, num_scenes, n, args
     )

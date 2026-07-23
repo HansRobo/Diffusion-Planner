@@ -1776,6 +1776,191 @@ def sample_group(
     return ego_world
 
 
+def _quintic_onset_ramp(future_len: int, ramp_steps: int, device, dtype) -> torch.Tensor:
+    """Minimum-jerk onset r(k) for k = 1..T: zero at the current state, saturating at 1.
+
+    Under HDP's velocity (per-step displacement) actions the regression target picks up
+    the *increment* r(k) - r(k-1) of any waypoint-space offset. A constant offset puts
+    the entire displacement into the first delta (an audited-broken configuration: a
+    0.5 m offset reads as a 5 m/s first-step impulse); this onset bounds every per-step
+    increment by ~1.875/ramp_steps of the sampled offset.
+    """
+    u = (
+        torch.arange(1, future_len + 1, device=device, dtype=dtype) / float(ramp_steps)
+    ).clamp(0.0, 1.0)
+    return u.pow(3) * (10.0 - 15.0 * u + 6.0 * u.pow(2))
+
+
+def _bounded_eta(
+    num_scenes: int,
+    n: int,
+    scheme: str,
+    concentration: float,
+    device,
+    generator=None,
+) -> torch.Tensor:
+    """Draw exploration magnitudes eta in [-1, 1] per candidate.
+
+    ``stratified_beta`` reproduces the PlannerRFT fixed-explorer prior (symmetric Beta
+    with the zero-init exploration-head concentration) with one draw per
+    equal-probability CDF stratum, shuffled per scene, so a small group cannot miss an
+    entire maneuver region. ``gaussian`` draws a clamped unit normal.
+    """
+    if scheme == "gaussian":
+        eta = torch.randn(num_scenes, n, device=device, generator=generator)
+        return eta.clamp(-1.0, 1.0)
+    if scheme != "stratified_beta":
+        raise ValueError(f"Unsupported candidate augmentation eta scheme {scheme!r}")
+    from scipy import special
+
+    uniforms = torch.rand(num_scenes, n, device=device, generator=generator)
+    strata = torch.arange(n, device=device, dtype=uniforms.dtype)
+    stratified = (strata[None, :] + uniforms) / float(n)
+    shuffle = torch.argsort(
+        torch.rand(num_scenes, n, device=device, generator=generator), dim=1
+    )
+    stratified = torch.gather(stratified, 1, shuffle)
+    beta_values = torch.from_numpy(
+        special.betaincinv(
+            float(concentration), float(concentration), stratified.cpu().double().numpy()
+        )
+    ).to(device=device, dtype=torch.float32)
+    return 2.0 * beta_values - 1.0
+
+
+@torch.no_grad()
+def augment_rollout_candidates(
+    ego_world: torch.Tensor,
+    ego_speed: torch.Tensor,
+    num_scenes: int,
+    n: int,
+    args,
+    generator=None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """HDP rollout-candidate augmentation in the velocity-safe waypoint form.
+
+    This is the exploration mechanism of HDP's own RL (`augment_trajectory_batch`),
+    absent from this pipeline until now: candidates are perturbed *before* reward and
+    regression, so the reward ranks alternatives beyond the policy's own support and
+    AWR can internalize them. Public HDP applies the transform in waypoint space and
+    re-encodes to model actions afterwards — exactly this pipeline's order, since the
+    loss converts these waypoints back to per-step velocities.
+
+    Two audited components, both state-continuous for velocity actions:
+    - a route-frame (per-waypoint local heading) offset pair with a mandatory
+      minimum-jerk onset ramp (the constant released transform is the audited-broken
+      first-delta impulse under `diff`/velocity actions and is rejected up front);
+    - an optional PlannerRFT candidate stretch: per-step displacements scaled by
+      ``1 + stretch * eta``, which is exactly a smooth speed-profile perturbation in
+      velocity space (headings unchanged, no first-step discontinuity).
+
+    The first ``rl_candidate_aug_keep`` candidates per scene stay untouched as
+    on-policy anchors, and low-speed scenes are skipped entirely (offsetting a
+    near-stationary trajectory manufactures the standstill-jump failure the
+    first-waypoint gate exists to catch).
+    """
+    zero = ego_world.new_zeros(())
+    idle_metrics = {
+        "reward_candidate_aug_scene_fraction": zero,
+        "reward_candidate_aug_offset_abs_mean_m": zero,
+        "reward_candidate_aug_stretch_abs_mean": zero,
+    }
+    prob = float(getattr(args, "rl_candidate_aug_prob", 0.0))
+    if prob <= 0.0:
+        return ego_world, idle_metrics
+    if ego_world.shape[0] != num_scenes * n:
+        raise ValueError(
+            f"candidate augmentation expects {num_scenes * n} candidates, "
+            f"got {ego_world.shape[0]}"
+        )
+    if ego_speed.shape != (num_scenes,):
+        raise ValueError(
+            f"candidate augmentation expects one speed per scene {(num_scenes,)}, "
+            f"got {tuple(ego_speed.shape)}"
+        )
+    ramp_steps = int(getattr(args, "rl_candidate_aug_ramp_steps", 20))
+    if ramp_steps < 1:
+        raise ValueError(
+            "rl_candidate_aug_ramp_steps must be >= 1: the constant (unramped) HDP "
+            "offset is a first-delta impulse under velocity actions and is not allowed"
+        )
+    std = float(getattr(args, "rl_candidate_aug_std", 0.5))
+    stretch_scale = float(getattr(args, "rl_candidate_aug_stretch", 0.0))
+    if std <= 0.0 and stretch_scale <= 0.0:
+        return ego_world, idle_metrics
+    keep = int(getattr(args, "rl_candidate_aug_keep", 1))
+    if not 0 <= keep < n:
+        raise ValueError(f"rl_candidate_aug_keep must be in [0, {n - 1}], got {keep}")
+    speed_min = float(getattr(args, "rl_candidate_aug_speed_min_mps", 2.0))
+    scheme = str(getattr(args, "rl_candidate_aug_eta_scheme", "gaussian"))
+    concentration = float(getattr(args, "rl_candidate_aug_beta_concentration", 1.6931471805599454))
+    if concentration <= 0.0:
+        raise ValueError("rl_candidate_aug_beta_concentration must be positive")
+
+    device = ego_world.device
+    future_len = ego_world.shape[1]
+    scene_active = ego_speed.abs() >= speed_min
+    if prob < 1.0:
+        scene_draw = torch.rand(num_scenes, device=device, generator=generator) < prob
+        scene_active = scene_active & scene_draw
+    if not scene_active.any():
+        return ego_world, idle_metrics
+    candidate_active = scene_active[:, None].expand(num_scenes, n).clone()
+    if keep > 0:
+        candidate_active[:, :keep] = False
+
+    grouped = ego_world.view(num_scenes, n, future_len, 4)
+    augmented = grouped.clone()
+    active_f = candidate_active.to(grouped.dtype)[..., None]  # [S, n, 1]
+
+    if stretch_scale > 0.0:
+        eta_stretch = _bounded_eta(num_scenes, n, scheme, concentration, device, generator)
+        stretch = 1.0 + stretch_scale * eta_stretch * candidate_active.to(grouped.dtype)
+        # Per-step displacements scale by s, so cumulative waypoints scale by s too;
+        # heading channels stay exact because the path direction is unchanged.
+        augmented[..., :2] = augmented[..., :2] * stretch[..., None, None]
+    else:
+        eta_stretch = torch.zeros(num_scenes, n, device=device, dtype=grouped.dtype)
+
+    if std > 0.0:
+        if scheme == "gaussian":
+            along = torch.randn(num_scenes, n, device=device, generator=generator) * std
+            lateral = torch.randn(num_scenes, n, device=device, generator=generator) * std
+        else:
+            # In the bounded scheme ``std`` is the support half-width (PlannerRFT lambda).
+            along = _bounded_eta(num_scenes, n, scheme, concentration, device, generator) * std
+            lateral = _bounded_eta(num_scenes, n, scheme, concentration, device, generator) * std
+        along = along * candidate_active.to(grouped.dtype)
+        lateral = lateral * candidate_active.to(grouped.dtype)
+        ramp = _quintic_onset_ramp(future_len, ramp_steps, device, grouped.dtype)
+        a = along[..., None] * ramp  # [S, n, T]
+        b = lateral[..., None] * ramp
+        cos_yaw = augmented[..., 2]
+        sin_yaw = augmented[..., 3]
+        # Released HDP route-frame transform: the offset follows each waypoint's own
+        # heading. Heading channels are preserved (the audited-robust mode; tangent
+        # reconstruction from stochastic x/y is a known failure).
+        augmented[..., 0] = augmented[..., 0] + a * cos_yaw - b * sin_yaw
+        augmented[..., 1] = augmented[..., 1] + a * sin_yaw + b * cos_yaw
+        offset_abs = (along.abs() + lateral.abs()) * 0.5
+    else:
+        offset_abs = torch.zeros(num_scenes, n, device=device, dtype=grouped.dtype)
+
+    result = torch.where(active_f[..., None].bool(), augmented, grouped)
+    active_count = candidate_active.sum().clamp_min(1)
+    metrics = {
+        "reward_candidate_aug_scene_fraction": scene_active.float().mean(),
+        "reward_candidate_aug_offset_abs_mean_m": offset_abs.sum() / active_count,
+        "reward_candidate_aug_stretch_abs_mean": (
+            stretch_scale * eta_stretch * candidate_active.to(grouped.dtype)
+        )
+        .abs()
+        .sum()
+        / active_count,
+    }
+    return result.reshape(num_scenes * n, future_len, 4), metrics
+
+
 @torch.no_grad()
 def first_waypoint_candidate_gate(
     ego_world: torch.Tensor,

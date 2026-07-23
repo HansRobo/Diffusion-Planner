@@ -241,6 +241,32 @@ class TrainConfig:
     # [eps, 1] distribution exactly.
     rl_diffusion_t_min: float = 0.0
     rl_diffusion_t_max: float = 1.0
+    # HDP rollout-candidate augmentation (the exploration mechanism of HDP's own RL,
+    # `augment_trajectory_batch`): perturb sampled candidates before reward/regression
+    # so AWR can rank and internalize behavior beyond the policy's own support. Applied
+    # in the velocity-safe form: route-frame offsets with a mandatory minimum-jerk
+    # onset ramp (a constant offset is a first-delta impulse under velocity actions and
+    # is rejected), plus an optional PlannerRFT candidate stretch that scales per-step
+    # displacements — natively smooth for velocity actions. Off by default; the
+    # experiment ladder enables it explicitly.
+    rl_candidate_aug_prob: float = 0.0
+    # Gaussian scheme: route-frame offset std in metres (released HDP uses 0.5).
+    # stratified_beta scheme: support half-width (PlannerRFT lambda; upstream used 1.0).
+    rl_candidate_aug_std: float = 0.5
+    rl_candidate_aug_eta_scheme: Literal["gaussian", "stratified_beta"] = "gaussian"
+    # softplus(0) + 1: the PlannerRFT zero-init exploration-head concentration.
+    rl_candidate_aug_beta_concentration: float = 1.6931471805599454
+    # PlannerRFT candidate stretch half-width; per-step displacements scale by
+    # 1 + stretch * eta (upstream lambda_lon = 0.25). Zero disables the stretch.
+    rl_candidate_aug_stretch: float = 0.0
+    # ~2 s minimum-jerk onset: bounds every per-step velocity increment to
+    # ~1.875/ramp_steps of the sampled offset (0.5 m over 20 steps ≈ 0.47 m/s peak).
+    rl_candidate_aug_ramp_steps: int = 20
+    # Unaugmented on-policy anchors kept at the front of every group.
+    rl_candidate_aug_keep: int = 1
+    # Skip near-stationary scenes: offsetting a standstill trajectory manufactures the
+    # exact jump failure the first-waypoint gate exists to catch (upstream guard: 2.0).
+    rl_candidate_aug_speed_min_mps: float = 2.0
     # Reject low-speed candidates whose first waypoint jumps away from the current pose
     # (audited original-DP failure: reward-blind standstill jumps winning the advantage).
     # The 5 cm tangent floor is mandatory — without it a numerically-zero standstill step

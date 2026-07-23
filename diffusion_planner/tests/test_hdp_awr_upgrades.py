@@ -529,3 +529,158 @@ def test_selection_score_prefers_deterministic_metric():
 def test_gate_math_uses_radians_conversion():
     # 75° in radians guards against an accidental degree/radian mixup in the port.
     assert math.isclose(math.radians(75.0), 1.3089969389957472)
+
+
+# ───────────────── velocity-safe rollout-candidate augmentation ──────────────
+
+
+def _aug_args(**overrides):
+    defaults = dict(
+        rl_candidate_aug_prob=1.0,
+        rl_candidate_aug_std=0.5,
+        rl_candidate_aug_eta_scheme="gaussian",
+        rl_candidate_aug_beta_concentration=1.6931471805599454,
+        rl_candidate_aug_stretch=0.0,
+        rl_candidate_aug_ramp_steps=20,
+        rl_candidate_aug_keep=1,
+        rl_candidate_aug_speed_min_mps=2.0,
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _straight_candidates(num_scenes=1, n=4, future_len=80, step_m=0.5):
+    ego = torch.zeros(num_scenes * n, future_len, 4)
+    ego[..., 0] = torch.arange(1, future_len + 1, dtype=torch.float32) * step_m
+    ego[..., 2] = 1.0
+    return ego
+
+
+def test_quintic_onset_ramp_shape_and_bounds():
+    ramp = hdp_rl_utils._quintic_onset_ramp(80, 20, torch.device("cpu"), torch.float32)
+    assert ramp.shape == (80,)
+    assert ramp[19:].allclose(torch.ones(61))
+    assert ramp[0].item() < 0.002  # near-zero onset: first-waypoint gate compatible
+    increments = torch.diff(torch.cat([torch.zeros(1), ramp]))
+    assert increments.min().item() >= 0.0
+    # Minimum-jerk peak slope is 1.875 / ramp_steps.
+    assert increments.max().item() <= 1.875 / 20 + 1e-6
+
+
+def test_candidate_aug_offsets_are_velocity_safe():
+    """The core representation claim: ramped offsets never spike per-step deltas.
+
+    Under velocity actions the regression target picks up offset *increments*; the
+    onset must bound them, and the first delta (which a constant offset would hit with
+    the full 0.5 m ≈ 5 m/s impulse) must stay essentially unchanged.
+    """
+    from diffusion_planner.loss import waypoints_to_velocity
+
+    torch.manual_seed(0)
+    base = _straight_candidates(n=4)
+    augmented, metrics = hdp_rl_utils.augment_rollout_candidates(
+        base.clone(), torch.tensor([5.0]), 1, 4, _aug_args(rl_candidate_aug_keep=0)
+    )
+    offsets = (augmented[..., :2] - base[..., :2]).norm(dim=-1)  # [4, 80]
+    assert offsets.abs().max().item() > 0.01  # augmentation actually happened
+    base_v = waypoints_to_velocity(base)[..., :2]
+    aug_v = waypoints_to_velocity(augmented)[..., :2]
+    delta_v = (aug_v - base_v).norm(dim=-1)  # per-step increment magnitude [4, 80]
+    max_offset = offsets[:, -1]  # saturated total offset per candidate
+    # Every per-step increment obeys the quintic slope bound of its own offset.
+    assert (delta_v.max(dim=1).values <= max_offset * (1.875 / 20) * math.sqrt(2) + 1e-5).all()
+    # The first delta is essentially untouched (a constant offset would put ~100% here).
+    assert (delta_v[:, 0] <= max_offset * 0.002 + 1e-6).all()
+
+
+def test_candidate_aug_stretch_is_exact_velocity_scaling():
+    from diffusion_planner.loss import waypoints_to_velocity
+
+    torch.manual_seed(3)
+    base = _straight_candidates(n=4)
+    augmented, metrics = hdp_rl_utils.augment_rollout_candidates(
+        base.clone(),
+        torch.tensor([5.0]),
+        1,
+        4,
+        _aug_args(rl_candidate_aug_std=0.0, rl_candidate_aug_stretch=0.25),
+    )
+    base_v = waypoints_to_velocity(base)[..., :2]
+    aug_v = waypoints_to_velocity(augmented)[..., :2]
+    ratio = aug_v[..., 0] / base_v[..., 0]  # [4, 80]
+    # One scalar per candidate, constant over time, within 1 ± 0.25.
+    assert torch.allclose(ratio, ratio[:, :1].expand_as(ratio), atol=1e-5)
+    assert (ratio >= 0.75 - 1e-5).all() and (ratio <= 1.25 + 1e-5).all()
+    # Headings are exact: the path direction is unchanged by a speed-profile scale.
+    torch.testing.assert_close(augmented[..., 2:4], base[..., 2:4])
+    assert metrics["reward_candidate_aug_stretch_abs_mean"].item() > 0.0
+
+
+def test_candidate_aug_keeps_anchor_and_skips_low_speed():
+    torch.manual_seed(1)
+    base = _straight_candidates(num_scenes=2, n=4)
+    speeds = torch.tensor([5.0, 0.5])  # scene 1 below the 2.0 m/s guard
+    augmented, metrics = hdp_rl_utils.augment_rollout_candidates(
+        base.clone(), speeds, 2, 4, _aug_args()
+    )
+    grouped_base = base.view(2, 4, 80, 4)
+    grouped_aug = augmented.view(2, 4, 80, 4)
+    torch.testing.assert_close(grouped_aug[0, 0], grouped_base[0, 0])  # anchor
+    assert not torch.allclose(grouped_aug[0, 1:], grouped_base[0, 1:])
+    torch.testing.assert_close(grouped_aug[1], grouped_base[1])  # low-speed scene
+    assert metrics["reward_candidate_aug_scene_fraction"].item() == pytest.approx(0.5)
+
+
+def test_candidate_aug_disabled_paths_are_noops():
+    base = _straight_candidates()
+    unchanged, metrics = hdp_rl_utils.augment_rollout_candidates(
+        base, torch.tensor([5.0]), 1, 4, _aug_args(rl_candidate_aug_prob=0.0)
+    )
+    assert unchanged is base
+    assert metrics["reward_candidate_aug_scene_fraction"].item() == 0.0
+    unchanged, _ = hdp_rl_utils.augment_rollout_candidates(
+        base,
+        torch.tensor([5.0]),
+        1,
+        4,
+        _aug_args(rl_candidate_aug_std=0.0, rl_candidate_aug_stretch=0.0),
+    )
+    assert unchanged is base
+
+
+def test_candidate_aug_rejects_constant_offset():
+    base = _straight_candidates()
+    with pytest.raises(ValueError, match="first-delta impulse"):
+        hdp_rl_utils.augment_rollout_candidates(
+            base, torch.tensor([5.0]), 1, 4, _aug_args(rl_candidate_aug_ramp_steps=0)
+        )
+
+
+def test_candidate_aug_is_deterministic_under_generator():
+    base = _straight_candidates()
+    gen_a = torch.Generator().manual_seed(11)
+    gen_b = torch.Generator().manual_seed(11)
+    out_a, _ = hdp_rl_utils.augment_rollout_candidates(
+        base.clone(), torch.tensor([5.0]), 1, 4, _aug_args(), generator=gen_a
+    )
+    out_b, _ = hdp_rl_utils.augment_rollout_candidates(
+        base.clone(), torch.tensor([5.0]), 1, 4, _aug_args(), generator=gen_b
+    )
+    torch.testing.assert_close(out_a, out_b)
+
+
+def test_stratified_beta_covers_every_stratum():
+    from scipy import special
+
+    gen = torch.Generator().manual_seed(5)
+    eta = hdp_rl_utils._bounded_eta(
+        8, 10, "stratified_beta", 1.6931471805599454, torch.device("cpu"), gen
+    )
+    assert eta.shape == (8, 10)
+    assert (eta >= -1.0).all() and (eta <= 1.0).all()
+    # Mapping back through the Beta CDF must land one draw per equal-probability
+    # stratum in every scene (the PlannerRFT variance-reduction property).
+    cdf = special.betainc(1.6931471805599454, 1.6931471805599454, ((eta + 1) / 2).numpy())
+    strata = (cdf * 10).astype(int).clip(0, 9)
+    for row in strata:
+        assert sorted(row.tolist()) == list(range(10))

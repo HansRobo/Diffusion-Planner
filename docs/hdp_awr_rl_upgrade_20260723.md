@@ -76,11 +76,12 @@ profile's semantics and stay unchanged.
   upstream (the `plannerrft_gatefix_clean` campaign was still mining as of
   2026-07-23); the projection/internalization question is unresolved. Port only
   after that campaign reports.
-- **Quintic-ramp trajectory augmentation.** That ramp is specifically a fix for
-  original-DP's absolute x-start first-frame continuity. HDP uses velocity
-  (per-step displacement) actions; a constant waypoint translation becomes a
-  first-delta impulse in this representation, so the transform cannot be copied.
-  The first-waypoint gate covers the corresponding failure mode defensively.
+- ~~Quintic-ramp trajectory augmentation~~ — **correction (same day):** the first
+  version of this note wrongly classified the ramped augmentation as
+  DP-representation-specific and excluded it. The opposite is true, and the
+  transform is now ported (see the augmentation section below). What remains
+  excluded is only the *unramped* released constant offset, which is the audited
+  first-delta-impulse failure under velocity actions.
 - **Survival reward** — broken upstream (ranked longer post-crash paths highest);
   a faithful reimplementation recovered 0.53% of the corpus. Not implemented.
 - **Learned exploration policy / PPO / critic** — the open-loop data cannot supply
@@ -90,16 +91,81 @@ profile's semantics and stay unchanged.
   velocity-latent geometry; scales must not be copied across representations
   without a sweep. All remain CLI-sweepable.
 
+## Rollout-candidate augmentation: the representation analysis (added same day)
+
+The first version of this note missed that HDP-RL had **no exploration
+augmentation at all**: candidates came only from diffusion prior noise, so AWR
+could only reweight the policy's own support (self-distillation). HDP's own RL
+includes rollout trajectory augmentation (`augment_trajectory_batch`) as part of
+the algorithm, and both audited positive original-DP results used a form of it
+(Gaussian offsets + quintic ramp in the first cycle; PlannerRFT-guided candidates
+in the second).
+
+The representation math, worked through for our velocity (per-step displacement)
+actions where the regression target is `v_k = w_k - w_{k-1}`:
+
+- **Public HDP's own order of operations is waypoint-space augmentation**:
+  `model_action_to_waypoint` → offset → `waypoint_to_model_action` before the
+  loss. Our pipeline natively matches it: `sample_group` returns decoded
+  waypoints and the loss re-encodes via `waypoints_to_velocity`.
+- **Constant offset `d` (the released transform)**: `v'_0 = v_0 + d`, all other
+  deltas unchanged — the entire 0.5 m offset becomes a single 5 m/s first-step
+  impulse. Upstream measured exactly this defect on `kinematic_type: diff`
+  ("translation cancels to later differences, concentrated in the first delta"),
+  and the constant-offset training branch regressed validation reward by
+  −0.01096 with −1.95 m path shortening. **Forbidden for us; the code rejects
+  `ramp_steps < 1`.**
+- **Quintic minimum-jerk onset ramp `r(k)` (20 steps ≈ 2 s)**: the velocity
+  target picks up increments `(r(k) - r(k-1)) · d`, bounded by
+  `1.875/ramp_steps ≈ 9.4%` of the offset per step — for a 0.5 m offset ≈
+  4.7 cm/step ≈ 0.47 m/s peak, about 1σ of our per-step action normalization
+  (`ego_velocity` std 0.5/0.25). The onset also starts near zero
+  (`r(1) ≈ 0.001`), so ramped candidates pass the first-waypoint gate by
+  construction. **The ramp is therefore not a DP-specific fix — velocity actions
+  need it strictly more than DP's absolute x-start does.**
+- **PlannerRFT candidate stretch (`speed_scale = 1 + λ·η`, λ=0.25)** scales every
+  per-step displacement uniformly: in velocity space this is exact, smooth, has
+  zero first-step discontinuity, and preserves headings bit-for-bit. Of all the
+  PlannerRFT exploration mechanisms, this one fits a velocity model *best* — it
+  is the natural longitudinal exploration for progress/red-light/follow rewards.
+- **Heading channels stay preserved** (upstream heading-mode audit: preserve
+  0.088% kinematic failure vs 23.35% for tangent reconstruction from stochastic
+  x/y). For the stretch, preserve is exact; for the ramped offset the tangent
+  error is bounded by ≈ atan(0.094·|b| / step length).
+
+Implemented as `augment_rollout_candidates` (`rl_candidate_aug_*` flags), applied
+between sampling and reward so the reward, gate, and regression all consume the
+augmented candidates consistently. Magnitude distributions: `gaussian`
+(N(0, 0.5 m) route-frame offsets — the released HDP transform, positive in the
+first audited cycle) and `stratified_beta` (the PlannerRFT fixed explorer:
+symmetric Beta with concentration softplus(0)+1 ≈ 1.693, one draw per
+equal-probability CDF stratum so a small group cannot miss a maneuver region;
+upstream λ_lat=1.0). The first `rl_candidate_aug_keep=1` candidate per group
+stays untouched as the on-policy anchor (PlannerRFT keeps native candidate 0),
+and near-stationary scenes are skipped (upstream 2.0 m/s guard). Default off —
+enabling it is the explicit exploration arm below.
+
+**Still not ported from PlannerRFT** (requires guided denoising and the frozen
+reference contract, verdict pending upstream): guidance toward the offset
+reference during sampling, the trigger-on-low-native-best policy, native∪guided
+union ranking with the ≥0.01 admission gain, and the learned Beta exploration
+head (upstream's own safe path is fixed Beta first, learned head only via a
+shadow-logged offline comparison).
+
 ## Recommended first RL experiment after the Base80 -> SFT chain
 
 Same SFT checkpoint, frozen `rl_eval_*` selection, one arm per change:
 
 1. Baseline: historical `weighted_sum` objective (gate on, deterministic selection).
-2. `rl_reward_aggregation=gated_product`.
-3. (2) + `rl_reward_horizon_steps=40` (candidate loss follows automatically).
-4. (3) + `rl_diffusion_t_min=0.001 rl_diffusion_t_max=0.2`.
-5. Road-border reward sweep `rl_reward_w_road_border in {0, 0.25, 0.5, 1.0}` on the
-   best of 1-4 (the SFT objective no longer contains a road-border term).
+2. **Exploration arm:** `rl_candidate_aug_prob=1.0` (gaussian offsets, ramp 20, keep 1).
+   This is the highest-priority arm: without candidate augmentation AWR only
+   reweights the policy's own support, and both audited upstream gains included an
+   exploration mechanism. Optional sub-arm: `rl_candidate_aug_stretch=0.25`.
+3. `rl_reward_aggregation=gated_product` on the better of 1-2.
+4. (3) + `rl_reward_horizon_steps=40` (candidate loss follows automatically).
+5. (4) + `rl_diffusion_t_min=0.001 rl_diffusion_t_max=0.2`.
+6. Road-border reward sweep `rl_reward_w_road_border in {0, 0.25, 0.5, 1.0}` on the
+   best of 1-5 (the SFT objective no longer contains a road-border term).
 
 Compare the deterministic deployment reward plus DAC/EPDMS, border distance, lane
 keeping, progress, comfort, collision and red-light metrics; a higher training

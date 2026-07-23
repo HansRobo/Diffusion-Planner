@@ -79,6 +79,15 @@ DIFFUSION_T_MAX=${HDP_RL_DIFFUSION_T_MAX:-1.0}
 FIRST_WAYPOINT_GATE=${HDP_RL_FIRST_WAYPOINT_GATE:-True}
 SELECTION_METRIC=${HDP_RL_SELECTION_METRIC:-deterministic}
 EVAL_DETERMINISTIC=${HDP_RL_EVAL_DETERMINISTIC:-True}
+# HDP rollout-candidate augmentation (velocity-safe ramped form). Off by default;
+# the recommended exploration arm sets CANDIDATE_AUG_PROB=1.0.
+CANDIDATE_AUG_PROB=${HDP_RL_CANDIDATE_AUG_PROB:-0.0}
+CANDIDATE_AUG_STD=${HDP_RL_CANDIDATE_AUG_STD:-0.5}
+CANDIDATE_AUG_ETA_SCHEME=${HDP_RL_CANDIDATE_AUG_ETA_SCHEME:-gaussian}
+CANDIDATE_AUG_STRETCH=${HDP_RL_CANDIDATE_AUG_STRETCH:-0.0}
+CANDIDATE_AUG_RAMP_STEPS=${HDP_RL_CANDIDATE_AUG_RAMP_STEPS:-20}
+CANDIDATE_AUG_KEEP=${HDP_RL_CANDIDATE_AUG_KEEP:-1}
+CANDIDATE_AUG_SPEED_MIN=${HDP_RL_CANDIDATE_AUG_SPEED_MIN:-2.0}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-1.5}
 EVAL_NOISE_SCALE=${HDP_RL_EVAL_NOISE_SCALE:-0.5}
@@ -433,6 +442,13 @@ TRAIN_ARGS=(
   --rl_first_waypoint_gate "${FIRST_WAYPOINT_GATE}" \
   --rl_selection_metric "${SELECTION_METRIC}" \
   --rl_eval_deterministic "${EVAL_DETERMINISTIC}" \
+  --rl_candidate_aug_prob "${CANDIDATE_AUG_PROB}" \
+  --rl_candidate_aug_std "${CANDIDATE_AUG_STD}" \
+  --rl_candidate_aug_eta_scheme "${CANDIDATE_AUG_ETA_SCHEME}" \
+  --rl_candidate_aug_stretch "${CANDIDATE_AUG_STRETCH}" \
+  --rl_candidate_aug_ramp_steps "${CANDIDATE_AUG_RAMP_STEPS}" \
+  --rl_candidate_aug_keep "${CANDIDATE_AUG_KEEP}" \
+  --rl_candidate_aug_speed_min_mps "${CANDIDATE_AUG_SPEED_MIN}" \
   --rl_ema_update_rate "${EMA_UPDATE_RATE}" \
   --rl_init_use_ema True \
   --rl_train_scope "${TRAIN_SCOPE}" \

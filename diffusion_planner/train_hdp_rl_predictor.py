@@ -711,6 +711,54 @@ def get_args():
         help="upper bound of the reweighted-regression diffusion time draw",
     )
     parser.add_argument(
+        "--rl_candidate_aug_prob",
+        type=float,
+        default=_train_config_default("rl_candidate_aug_prob"),
+        help="per-scene probability of HDP rollout-candidate augmentation (0 disables)",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_std",
+        type=float,
+        default=_train_config_default("rl_candidate_aug_std"),
+        help="route-frame offset std in metres (gaussian) or support half-width (beta)",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_eta_scheme",
+        choices=["gaussian", "stratified_beta"],
+        default=_train_config_default("rl_candidate_aug_eta_scheme"),
+        help="offset magnitude distribution; stratified_beta is the PlannerRFT explorer",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_beta_concentration",
+        type=float,
+        default=_train_config_default("rl_candidate_aug_beta_concentration"),
+        help="symmetric Beta concentration for the stratified scheme",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_stretch",
+        type=float,
+        default=_train_config_default("rl_candidate_aug_stretch"),
+        help="PlannerRFT candidate-stretch half-width for per-step displacements",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_ramp_steps",
+        type=int,
+        default=_train_config_default("rl_candidate_aug_ramp_steps"),
+        help="minimum-jerk onset steps for the offset (>=1; constant offsets rejected)",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_keep",
+        type=int,
+        default=_train_config_default("rl_candidate_aug_keep"),
+        help="unaugmented on-policy anchor candidates kept at the front of each group",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_speed_min_mps",
+        type=float,
+        default=_train_config_default("rl_candidate_aug_speed_min_mps"),
+        help="skip augmentation below this ego speed",
+    )
+    parser.add_argument(
         "--rl_first_waypoint_gate",
         type=boolean,
         default=_train_config_default("rl_first_waypoint_gate"),
@@ -1197,6 +1245,31 @@ def get_args():
         raise ValueError(
             "--rl_selection_metric deterministic requires --rl_eval_deterministic true"
         )
+    if not 0.0 <= args.rl_candidate_aug_prob <= 1.0:
+        raise ValueError("--rl_candidate_aug_prob must be in [0, 1]")
+    if args.rl_candidate_aug_prob > 0.0:
+        if args.rl_candidate_aug_ramp_steps < 1:
+            raise ValueError(
+                "--rl_candidate_aug_ramp_steps must be >= 1: a constant offset is a "
+                "first-delta impulse under velocity actions (audited-broken upstream)"
+            )
+        if args.rl_candidate_aug_std < 0.0:
+            raise ValueError("--rl_candidate_aug_std must be non-negative")
+        if not 0.0 <= args.rl_candidate_aug_stretch < 1.0:
+            raise ValueError("--rl_candidate_aug_stretch must be in [0, 1)")
+        if args.rl_candidate_aug_std == 0.0 and args.rl_candidate_aug_stretch == 0.0:
+            raise ValueError(
+                "candidate augmentation is enabled but both the offset std and the "
+                "stretch are zero"
+            )
+        if not 0 <= args.rl_candidate_aug_keep < args.num_generations:
+            raise ValueError(
+                f"--rl_candidate_aug_keep must be in [0, {args.num_generations - 1}]"
+            )
+        if args.rl_candidate_aug_beta_concentration <= 0.0:
+            raise ValueError("--rl_candidate_aug_beta_concentration must be positive")
+        if args.rl_candidate_aug_speed_min_mps <= 0.0:
+            raise ValueError("--rl_candidate_aug_speed_min_mps must be positive")
     if args.predicted_neighbor_num != 0:
         raise ValueError("HDP-RL is ego-only; --predicted_neighbor_num must be 0")
     if args.rl_full_eval_utd < 1:
