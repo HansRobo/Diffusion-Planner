@@ -17,6 +17,10 @@ TIME_INTERVAL = 0.1
 DENSE_SAMPLE_DS = 0.05
 
 
+class _BridgeInfeasibleError(RuntimeError):
+    """Expected failure while searching for a geometrically feasible bridge."""
+
+
 @dataclass
 class SegmentAugmentationResultTorch:
     query_xy: torch.Tensor
@@ -453,7 +457,9 @@ def solve_merge_centerline_s_torch(
         dense_ds,
     )
     if upper_length < distance_budget:
-        raise RuntimeError("Unable to find a feasible merge point within the distance budget.")
+        raise _BridgeInfeasibleError(
+            "Unable to find a feasible merge point within the distance budget."
+        )
 
     for _ in range(50):
         mid = 0.5 * (lower + upper)
@@ -1378,14 +1384,12 @@ class StatePerturbation:
                         wheel_base=wheel_base,
                     )
 
-        return assemble_augmented_sample_from_segments_torch(
-            context=context,
-            ego_current_state=ego_current_state,
-            past_result=initial_past_result,
-            future_result=initial_future_result,
-            past_connect_time_s=initial_past_connect_time_s,
-            future_recover_time_s=initial_future_recover_time_s,
-            wheel_base=wheel_base,
+        # The initial candidate was already evaluated above and failed at least one
+        # constraint.  Returning it would silently label an infeasible trajectory as
+        # a successful augmentation.  Let the caller shrink the perturbation and, if
+        # that still fails, keep the original sample unchanged.
+        raise _BridgeInfeasibleError(
+            "Unable to find a bridge satisfying the configured feasibility limits."
         )
 
     def augment(self, inputs, ego_future):
@@ -1425,7 +1429,7 @@ class StatePerturbation:
                         initial_future_recover_time_s=self._future_bridge_sec,
                     )
                     break
-                except RuntimeError:
+                except _BridgeInfeasibleError:
                     lateral_offset = lateral_offset * 0.5
                     heading_offset = heading_offset * 0.5
             if best_result is None:
