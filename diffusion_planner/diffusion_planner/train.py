@@ -198,9 +198,10 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
             )
             print(
                 f"closed-loop{site_label} @epoch {epoch + 1}: {summary['n_segments']} seg in "
-                f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
-                f"diverged_rate={summary.get('diverged_segment_rate', 0.0):.3f}  "
-                f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+                f"{summary['elapsed_sec']:.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
+                f"collisions={summary.get('total_collision_events', 0)}  "
+                f"curb_hits={summary.get('total_curb_hits', 0)}  "
+                f"snaps={summary.get('total_snaps', 0)}  -> {len(summary['video_mp4s'])} video(s)"
             )
         return site_log, summary
 

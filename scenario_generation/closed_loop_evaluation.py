@@ -50,7 +50,7 @@ class RolloutParams:
     # above the unstick_* knobs above: unstick snaps the ego back onto GT to let a merely-stuck
     # rollout continue; abort gives up on a rollout unstick can't save. 0 = disabled for either
     # knob. See ``reproducer_rollout.render_segment`` for the exact trigger condition.
-    abort_deviation_m: float = 8.0
+    abort_deviation_m: float = 50.0
     abort_after: int = 30
     abort_max_snaps: int = 0
 

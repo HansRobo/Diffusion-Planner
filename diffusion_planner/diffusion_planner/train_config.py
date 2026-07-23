@@ -181,7 +181,7 @@ class TrainConfig:
     # Early-abort a badly-diverged segment instead of burning the full step budget (see
     # RolloutParams / reproducer_rollout.render_segment for the exact trigger condition).
     # 0 = disabled for either knob. Defaults mirror RolloutParams's.
-    closed_loop_abort_deviation_m: float = 8.0
+    closed_loop_abort_deviation_m: float = 50.0
     closed_loop_abort_after: int = 30
     closed_loop_abort_max_snaps: int = 0
     # wandb payload shaping (see scenario_generation.wandb_closed_loop): only ONE

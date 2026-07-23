@@ -364,7 +364,7 @@ def get_args():
     parser.add_argument(
         "--closed_loop_abort_deviation_m",
         type=float,
-        default=8.0,
+        default=50.0,
         help="early-abort a segment (terminated='diverged') once GT deviation exceeds this "
         "(m) for --closed_loop_abort_after steps (0=disabled)",
     )

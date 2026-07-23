@@ -98,7 +98,7 @@ def add_rollout_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--abort_deviation_m",
         type=float,
-        default=8.0,
+        default=50.0,
         help="early-abort a segment (terminated='diverged') once the live ego strays this far "
         "(m) from the recorded GT pose for --abort_after consecutive steps (0=disabled). Set "
         "well above unstick_advance_m: unstick tries to save a merely-stuck rollout, abort "
