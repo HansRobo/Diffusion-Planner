@@ -17,4 +17,4 @@ colcon build \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
   -DBUILD_TESTING=0 \
-  --packages-up-to autoware_diffusion_planner_tools
+  --packages-up-to autoware_diffusion_planner_tools scenario_test_runner
