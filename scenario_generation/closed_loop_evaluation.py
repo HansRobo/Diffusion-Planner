@@ -45,6 +45,14 @@ class RolloutParams:
     tracker_mode: str = "mpc"
     profile_sync_gpu: bool = False
     neighbor_history_mode: str = "recorded"
+    # Early-abort a badly-diverged segment instead of burning the full step budget on a
+    # rollout that will never recover (e.g. an undertrained model driving off-lane). Set well
+    # above the unstick_* knobs above: unstick snaps the ego back onto GT to let a merely-stuck
+    # rollout continue; abort gives up on a rollout unstick can't save. 0 = disabled for either
+    # knob. See ``reproducer_rollout.render_segment`` for the exact trigger condition.
+    abort_deviation_m: float = 8.0
+    abort_after: int = 30
+    abort_max_snaps: int = 0
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -61,6 +69,9 @@ class RolloutParams:
             "tracker_mode": self.tracker_mode,
             "profile_sync_gpu": self.profile_sync_gpu,
             "neighbor_history_mode": self.neighbor_history_mode,
+            "abort_deviation_m": self.abort_deviation_m,
+            "abort_after": self.abort_after,
+            "abort_max_snaps": self.abort_max_snaps,
         }
 
 

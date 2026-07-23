@@ -1,0 +1,240 @@
+"""Run ``valid_predictor_closed_loop.py --mode full`` once per site directory.
+
+A "site" is a direct subdirectory of ``--sites_root`` (matching the existing
+``{project}/{area_map_id}_{area_map_name}/valid/...`` layout convention, e.g.
+``x2_dev/2231_odaiba_shinagawa_copied_from_xx1``). Each site is evaluated as an
+independent ``--npz_root`` (its own ``valid/`` subtree, which may contain
+multiple dates/bags) so routes are never grouped across sites — this avoids
+the cross-directory filename-collision failure mode of pointing --npz_root at
+a shared parent that mixes multiple sites' npz together.
+
+Per-site outputs land in ``<out_root>/<site_name>/`` (summary.json,
+segments.jsonl, videos), exactly as a standalone single-site run would
+produce. A ``sites_summary.json`` at ``<out_root>`` records which npz_root was
+used for which site name, for downstream reporting.
+
+Example::
+
+    python diffusion_planner/run_all_sites_closed_loop.py \\
+        --sites_root /media/.../diffusion_planner_local_dataset/x2_dev \\
+        --model_path /media/.../best_model.pth \\
+        --out_root /media/.../cl_results/all_sites \\
+        --near_miss_thresh 0.3 --replan_interval 10 --draw_every 8
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+from scenario_generation.closed_loop_html_report import build_html_report
+from scenario_generation.site_discovery import discover_sites
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sites_root", required=True, type=Path)
+    parser.add_argument("--model_path", required=True, type=Path)
+    parser.add_argument("--out_root", required=True, type=Path)
+    parser.add_argument("--only_sites", nargs="*", default=None, help="run only these site names")
+    parser.add_argument(
+        "--extra_args",
+        nargs=argparse.REMAINDER,
+        default=[],
+        help="passed through verbatim to valid_predictor_closed_loop.py (e.g. --near_miss_thresh 0.3)",
+    )
+    parser.add_argument(
+        "--no_report",
+        action="store_true",
+        help="skip writing the local HTML gallery (report.html) at --out_root",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default=None,
+        help="optional: log this evaluation run to wandb (one run, all sites as "
+        "closed_loop/<site>/... + cross-site aggregate + a link to the local report.html), "
+        "so separate model/dataset iterations can be tracked and compared as wandb runs "
+        "the same way training epochs are.",
+    )
+    parser.add_argument("--wandb_run_name", type=str, default=None)
+    parser.add_argument(
+        "--wandb_video_pick",
+        choices=("worst", "first", "longest"),
+        default="worst",
+        help="which single episode per site gets its video + trajectory colormap uploaded",
+    )
+    parser.add_argument(
+        "--wandb_colormap_metrics",
+        nargs="*",
+        choices=("clearance", "collision", "near_miss", "speed", "road_border"),
+        default=["clearance", "collision", "near_miss", "speed", "road_border"],
+        help="per-step metrics rendered as trajectory-colormap images for the wandb "
+        "representative episode (default: all — cheap images, unlike video/episode picking)",
+    )
+    parser.add_argument(
+        "--report_colormap_metrics",
+        nargs="*",
+        choices=("clearance", "collision", "near_miss", "speed", "road_border"),
+        default=["clearance", "collision", "near_miss", "speed", "road_border"],
+        help="per-step metrics rendered as trajectory-colormap images in the local HTML "
+        "report (every episode, not just the wandb representative one)",
+    )
+    parser.add_argument(
+        "--report_base_url",
+        type=str,
+        default=None,
+        help="if --out_root is served over HTTP from this base, wandb records a clickable "
+        "report URL instead of just the local path",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    sites = discover_sites(args.sites_root)
+    if args.only_sites:
+        sites = {name: root for name, root in sites.items() if name in args.only_sites}
+    if not sites:
+        print(f"No sites with npz found under {args.sites_root}", file=sys.stderr)
+        return 1
+
+    cli_path = Path(__file__).resolve().parent / "valid_predictor_closed_loop.py"
+    args.out_root.mkdir(parents=True, exist_ok=True)
+    results: dict[str, dict] = {}
+    for site_name, npz_root in sites.items():
+        site_out_dir = args.out_root / site_name
+        print(f"=== [{site_name}] npz_root={npz_root} -> out_dir={site_out_dir} ===")
+        cmd = [
+            sys.executable,
+            str(cli_path),
+            "--mode",
+            "full",
+            "--model_path",
+            str(args.model_path),
+            "--npz_root",
+            str(npz_root),
+            "--out_dir",
+            str(site_out_dir),
+            *args.extra_args,
+        ]
+        # One site's failure (e.g. a transient disk I/O error partway through a long route
+        # sweep) must not abort the remaining sites — each site is an independent evaluation.
+        error = None
+        for attempt in range(1, 3):
+            try:
+                subprocess.run(cmd, check=True)
+                error = None
+                break
+            except subprocess.CalledProcessError as e:
+                error = e
+                print(f"  [{site_name}] attempt {attempt}/2 failed: {e}", file=sys.stderr)
+        summary_path = site_out_dir / "summary.json"
+        results[site_name] = {
+            "npz_root": str(npz_root),
+            "out_dir": str(site_out_dir),
+            "error": str(error) if error else None,
+            "summary": json.loads(summary_path.read_text()) if summary_path.is_file() else None,
+        }
+
+    # Merge into any existing manifest instead of overwriting it outright, so a targeted
+    # --only_sites re-run doesn't drop the other sites' entries from a prior full run.
+    manifest_path = args.out_root / "sites_summary.json"
+    merged = {}
+    if manifest_path.is_file():
+        merged = json.loads(manifest_path.read_text())
+    merged.update(results)
+    manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
+    print(f"\nWrote {manifest_path}")
+    for site_name, r in results.items():
+        s = r["summary"] or {}
+        print(
+            f"  {site_name}: n_routes={s.get('n_routes')} "
+            f"collision_segment_rate={s.get('collision_segment_rate')} "
+            f"near_miss_segment_rate={s.get('near_miss_segment_rate')}"
+        )
+
+    # All site names with a summary (from THIS run's `merged`, so a targeted --only_sites
+    # re-run's report still covers every previously-completed site, not just the ones just run).
+    all_site_names = sorted(
+        name for name, r in merged.items() if r.get("summary") is not None
+    )
+    report_path = None
+    if not args.no_report and all_site_names:
+        report_path = build_html_report(
+            args.out_root,
+            all_site_names,
+            title="拠点別 Closed-Loop 評価",
+            subtitle=f"sites_root={args.sites_root}",
+            colormap_metrics=tuple(args.report_colormap_metrics),
+        )
+        if report_path:
+            print(f"Wrote {report_path}")
+
+    if args.wandb_project:
+        _log_to_wandb(args, all_site_names, merged, report_path)
+    return 0
+
+
+def _log_to_wandb(
+    args: argparse.Namespace,
+    site_names: list[str],
+    merged: dict,
+    report_path: Path | None,
+) -> None:
+    """One evaluation-only wandb run covering every site in this call — lets separate
+    model/dataset iterations (e.g. this vs. a previous checkpoint) be tracked and compared
+    as wandb runs, the same way training epochs are (see closed_loop_validate in train.py,
+    which this mirrors: per-site scalars/table/representative video, cross-site aggregate,
+    a link to the local report instead of uploading every video).
+    """
+    import wandb
+
+    from scenario_generation.wandb_closed_loop import build_full_closed_loop_wandb_log, build_sites_aggregate_log
+
+    run = wandb.init(project=args.wandb_project, name=args.wandb_run_name)
+    try:
+        log: dict = {}
+        site_summaries: dict[str, dict] = {}
+        for site_name in site_names:
+            r = merged.get(site_name) or {}
+            summary = r.get("summary")
+            if not summary:
+                continue
+            site_out_dir = r.get("out_dir") or str(args.out_root / site_name)
+            segments_path = Path(site_out_dir) / "segments.jsonl"
+            rows = []
+            if segments_path.is_file():
+                with segments_path.open(encoding="utf-8") as f:
+                    rows = [json.loads(line) for line in f if line.strip()]
+            summary_with_rows = {**summary, "segments": rows}
+            site_log = build_full_closed_loop_wandb_log(
+                summary_with_rows,
+                out_dir=site_out_dir,
+                site=site_name,
+                video_pick=args.wandb_video_pick,
+                colormap_metrics=tuple(args.wandb_colormap_metrics),
+                near_miss_thresh=summary.get("near_miss_thresh", 0.5),
+                report_base_url=args.report_base_url,
+            )
+            log.update(
+                {key.replace("closed_loop/", f"closed_loop/{site_name}/", 1): val for key, val in site_log.items()}
+            )
+            site_summaries[site_name] = summary_with_rows
+        if len(site_summaries) > 1:
+            log.update(build_sites_aggregate_log(site_summaries))
+        if report_path is not None:
+            from scenario_generation.wandb_closed_loop import resolve_report_link
+
+            log["closed_loop/report_path"] = resolve_report_link(args.out_root, args.report_base_url)
+        wandb.log(log)
+        print(f"wandb: logged {len(site_summaries)} site(s) to run {run.id}")
+    finally:
+        wandb.finish()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

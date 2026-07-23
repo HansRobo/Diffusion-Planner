@@ -1,5 +1,6 @@
 import json
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -9,6 +10,38 @@ def openjson(path):
     with open(path, "r", encoding="utf-8") as f:
         dict = json.load(f)
     return dict
+
+
+def check_resume_args_compat(resume_model_path: str, current_args) -> list[str]:
+    """Diff a resumed checkpoint's saved ``args.json`` (expected next to the .pth, same
+    convention ``valid_predictor_closed_loop.py`` relies on) against the current run's args.
+
+    Returns one ``"field: checkpoint=X current=Y"`` line per field present in both that
+    differs — or a single explanatory line if no ``args.json`` was found. This can't tell
+    which fields are architecture-critical (would break ``model.load_state_dict``) vs.
+    intentionally different (e.g. ``learning_rate``, ``train_set_list``) — it just surfaces
+    every difference so a real mismatch isn't a total surprise, and the caller decides
+    whether/how loudly to warn.
+    """
+    args_json_path = Path(resume_model_path).parent / "args.json"
+    if not args_json_path.is_file():
+        return [f"no args.json found next to {resume_model_path} — cannot check config compatibility"]
+    try:
+        ckpt_args = openjson(args_json_path)
+    except Exception as e:  # pragma: no cover - defensive, this is a diagnostic helper
+        return [f"failed to read {args_json_path}: {e}"]
+
+    current = vars(current_args) if not isinstance(current_args, dict) else current_args
+    diffs: list[str] = []
+    for key, ckpt_val in ckpt_args.items():
+        if key not in current:
+            continue
+        cur_val = current[key]
+        if not isinstance(cur_val, (bool, int, float, str, list, tuple, dict, type(None))):
+            continue  # skip non-JSON-plain objects (normalizers etc.) — not comparable as-is
+        if cur_val != ckpt_val:
+            diffs.append(f"{key}: checkpoint={ckpt_val!r} current={cur_val!r}")
+    return diffs
 
 
 def set_seed(CUR_SEED):

@@ -266,6 +266,44 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
+    parser.add_argument(
+        "--closed_loop_abort_deviation_m",
+        type=float,
+        default=8.0,
+        help="early-abort a segment (terminated='diverged') once GT deviation exceeds this "
+        "(m) for --closed_loop_abort_after steps (0=disabled)",
+    )
+    parser.add_argument("--closed_loop_abort_after", type=int, default=30)
+    parser.add_argument(
+        "--closed_loop_abort_max_snaps",
+        type=int,
+        default=0,
+        help="early-abort a segment after this many unstick teleports (0=disabled)",
+    )
+    parser.add_argument(
+        "--closed_loop_wandb_video_pick",
+        choices=("worst", "first", "longest"),
+        default="worst",
+        help="which single episode per site gets its video + trajectory colormap uploaded "
+        "to wandb (all episodes still get rendered to out_dir either way)",
+    )
+    parser.add_argument(
+        "--closed_loop_colormap_metrics",
+        nargs="*",
+        choices=("clearance", "collision", "near_miss", "speed", "road_border"),
+        default=["clearance", "collision", "near_miss", "speed", "road_border"],
+        help="per-step metrics rendered as trajectory-colormap images for the wandb "
+        "representative episode (one image each — cheap, unlike video/episode picking, so "
+        "all of them render by default; the local HTML report lets a human switch between "
+        "them per-card via a dropdown)",
+    )
+    parser.add_argument(
+        "--closed_loop_report_base_url",
+        type=str,
+        default="",
+        help="if the out_dir tree is served over HTTP from this base, wandb records a "
+        "clickable report URL instead of just the local path",
+    )
 
     # Deterministic
     parser.add_argument(

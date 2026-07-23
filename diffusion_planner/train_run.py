@@ -5,6 +5,8 @@ Thin launcher only: it resolves the run dir, saves git info, sets NCCL env and r
 train_predictor.py under torch.distributed.run. train_predictor.py itself is unchanged.
 
 Env: CLOSED_LOOP_NPZ_ROOT (optional) is forwarded to --closed_loop_npz_root, as before.
+Env: CLOSED_LOOP_SITES_ROOT (optional) is forwarded to --closed_loop_sites_root; takes
+precedence over CLOSED_LOOP_NPZ_ROOT when both are set (see closed_loop_validate).
 """
 
 import argparse
@@ -81,6 +83,8 @@ def main() -> None:
         "10",
         "--closed_loop_npz_root",
         os.environ.get("CLOSED_LOOP_NPZ_ROOT", ""),
+        "--closed_loop_sites_root",
+        os.environ.get("CLOSED_LOOP_SITES_ROOT", ""),
         *optional,
     ]
     rc = tee_run(

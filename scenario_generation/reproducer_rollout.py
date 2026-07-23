@@ -587,6 +587,7 @@ class _SegState:
     goal_xy: np.ndarray
     clearances: np.ndarray
     collisions: np.ndarray
+    rb_dists: np.ndarray
     # Closed-loop turn-indicator history (INPUT_T+1,). Seeded from the recorded frame, then
     # each step the MODEL's predicted turn indicator is fed back in (recorded seed phases out
     # within PAST steps, exactly like ego_hist) — so the model context + saved npz never carry
@@ -755,6 +756,7 @@ def _seed_state(
         goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
         collisions=np.zeros(cap, dtype=bool),
+        rb_dists=np.full(cap, np.inf, dtype=np.float32),
         prev_max_idx=cursor.max_idx_reached,
         max_steps=cap,
         unstick_after=int(unstick_after),
@@ -839,12 +841,20 @@ def _hold_turn_indicator(s: _SegState) -> None:
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
-def _score_into(s: _SegState, neighbors_live, device, timers):
-    """Score this step's ego↔neighbor clearance/collision into the segment state."""
+def _score_into(s: _SegState, neighbors_live, device, timers, np_dict: dict | None = None):
+    """Score this step's ego↔neighbor clearance/collision (+ road-border distance when
+    ``np_dict`` is given, e.g. for the trajectory-colormap trace) into the segment state.
+    ``np_dict`` is optional so callers without a per-step frame dict (e.g. the unstick
+    test driving ``_post_step`` directly) keep working unchanged (``rb_dists`` stays inf).
+    """
     with timers("score"):
         cl, col, _ = score_step(neighbors_live, s.ego_shape, s.dyn.speed, device)
         s.clearances[s.k] = cl
         s.collisions[s.k] = col
+        if np_dict is not None:
+            from scenario_generation.metrics.safety_clearance import road_border_distance
+
+            s.rb_dists[s.k] = road_border_distance(np_dict, device)
 
 
 def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None):
@@ -1381,6 +1391,9 @@ def render_segment(
     area_episodes: list | None = None,
     area_to_metric_group: dict[str, str] | None = None,
     profile_sync_gpu: bool = False,
+    abort_deviation_m: float = 0.0,
+    abort_after: int = 30,
+    abort_max_snaps: int = 0,
 ) -> dict | SegmentResult:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1416,6 +1429,23 @@ def render_segment(
     tracking: every step (replan ticks included) places the ego DIRECTLY on the model's predicted
     world pose, so the realized trajectory exactly follows the predicted polyline — no Euler /
     heading-snap drift and no MPC physical smoothing.
+
+    ``abort_deviation_m`` (0 = disabled): if the live ego strays more than this far from the
+    recorded GT pose at the cursor's current frame for ``abort_after`` consecutive steps, the
+    segment terminates early as ``"diverged"`` — a badly-diverged rollout (e.g. an undertrained
+    model driving off-lane) is cut short instead of burning the full step budget on a segment
+    that will never recover. Checked BEFORE the (expensive) model replan call each step, so an
+    already-diverged segment also skips inference on steps it would otherwise have wasted.
+    This is independent of (and set well above) the ``unstick_*`` knobs: unstick snaps the ego
+    back onto GT to let a merely-stuck rollout continue; abort instead gives up on a rollout
+    unstick can't save. ``abort_max_snaps`` (0 = disabled) aborts once the unstick teleport has
+    fired this many times in one segment — repeated snapping is itself a sign of a bad rollout.
+
+    Per-step ``rollout.jsonl`` lines (next to the PNGs) always include ``clearance_m``,
+    ``collision``, and ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
+    carries no lane geometry) alongside the ego pose, independent of ``instrument`` — see
+    :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer.
+
     Returns segment metrics dict, or a full :class:`SegmentResult` when ``instrument=True``.
     """
     from pathlib import Path
@@ -1461,6 +1491,7 @@ def render_segment(
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
     step_records: list = []
+    deviation_streak = 0  # consecutive steps the live ego has been > abort_deviation_m from GT
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
     # goal is the recorded GT end pose `poses[end-1]`, which a diverging closed-loop ego may never
@@ -1505,6 +1536,39 @@ def render_segment(
             )
             break
         np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
+
+        # Early-abort: check BEFORE the (expensive) model replan call, using the deviation from
+        # last step's advance — an already-diverged segment skips inference too instead of just
+        # cutting the render short. GT deviation is measured against the recorded pose at the
+        # cursor's current frame (same `idx` the goal/progress checks use).
+        gt_deviation_m = float(np.linalg.norm(s.live_pose[:2] - tl.poses[idx, :2]))
+        if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
+            deviation_streak += 1
+        else:
+            deviation_streak = 0
+        if (abort_deviation_m > 0 and deviation_streak >= abort_after) or (
+            abort_max_snaps > 0 and s.n_snaps >= abort_max_snaps
+        ):
+            s.terminated, s.done = "diverged", True
+            dbg.write(
+                json.dumps(
+                    {
+                        "event": "diverged",
+                        "k": k,
+                        "gt_deviation_m": round(gt_deviation_m, 3),
+                        "deviation_streak": int(deviation_streak),
+                        "n_snaps": int(s.n_snaps),
+                    }
+                )
+                + "\n"
+            )
+            break
+
+        # Scored here (before the replan/draw below) so this step's clearance/collision/
+        # road-border-distance are available for the per-step trace line right below — used by
+        # trajectory_colormap.py to color the rendered path by risk, independent of `instrument`.
+        _score_into(s, neighbors_live, device, timers, np_dict)
+
         # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
         # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
         dbg.write(
@@ -1521,6 +1585,12 @@ def render_segment(
                     "stuck": int(s.stuck),
                     "ego_stuck": int(s.ego_stuck),
                     "n_snaps": int(s.n_snaps),
+                    "clearance_m": round(float(s.clearances[k]), 4)
+                    if np.isfinite(s.clearances[k])
+                    else None,
+                    "collision": bool(s.collisions[k]),
+                    "rb_dist_m": round(float(s.rb_dists[k]), 4) if np.isfinite(s.rb_dists[k]) else None,
+                    "gt_deviation_m": round(gt_deviation_m, 3),
                 }
             )
             + "\n"
@@ -1608,7 +1678,6 @@ def render_segment(
                     png_path=png_path,
                 )
             )
-        _score_into(s, neighbors_live, device, timers)
         snaps_before = s.n_snaps
         _advance_step(s, pred_cur, idx, device, timers, override=override)
         if s.n_snaps > snaps_before:

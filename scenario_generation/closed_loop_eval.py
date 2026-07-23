@@ -32,6 +32,7 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
 
     n_seg_collision = sum(1 for r in rows if r["n_collision_steps"] > 0)
     n_seg_near_miss = sum(1 for r in rows if r["n_near_miss_steps"] > 0)
+    n_seg_diverged = sum(1 for r in rows if r["terminated"] == "diverged")
 
     finite_min_cl = [r["min_clearance"] for r in rows if np.isfinite(r["min_clearance"])]
     finite_mean_cl = [r["mean_clearance"] for r in rows if np.isfinite(r["mean_clearance"])]
@@ -60,6 +61,8 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
         if finite_mean_cl
         else float("inf"),
         "total_snaps": total_snaps,
+        "n_segments_diverged": n_seg_diverged,
+        "diverged_segment_rate": n_seg_diverged / n_seg if n_seg else 0.0,
         "terminated_counts": term_counts,
     }
 

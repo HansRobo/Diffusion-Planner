@@ -10,6 +10,28 @@ from planner_metrics.subscores import compute_road_border_penalty
 from scenario_generation.reproducer_rollout import score_step
 
 
+def road_border_distance(np_dict: dict, device: str) -> float:
+    """Ego-to-road-border distance (m) at the current step, or ``inf`` if ``np_dict``
+    carries no lane geometry (``line_strings``/``ego_shape``) to check against.
+    """
+    if "line_strings" not in np_dict or "ego_shape" not in np_dict:
+        return float("inf")
+    ego_shape_t = torch.tensor(
+        np.asarray(np_dict["ego_shape"]).reshape(-1)[:3],
+        dtype=torch.float32,
+        device=device,
+    )
+    traj = torch.zeros(1, 1, 4, dtype=torch.float32, device=device)
+    traj[0, 0, 2] = 1.0  # heading +x in ego frame
+    data = {
+        "line_strings": torch.tensor(np_dict["line_strings"], dtype=torch.float32, device=device)
+    }
+    _gate, _near, _wide, _steps, _cont, per_ts_min = compute_road_border_penalty(
+        traj, ego_shape_t, data, config=RewardConfig()
+    )
+    return float(per_ts_min[0, 0].item())
+
+
 def score_safety_step(
     neighbors_live: np.ndarray,
     ego_shape: np.ndarray,
@@ -22,25 +44,7 @@ def score_safety_step(
     clearance_m, collision, _n_valid = score_step(
         neighbors_live, ego_shape, ego_speed=0.0, device=device
     )
-
-    rb_dist_m = float("inf")
-    if "line_strings" in np_dict and "ego_shape" in np_dict:
-        ego_shape_t = torch.tensor(
-            np.asarray(np_dict["ego_shape"]).reshape(-1)[:3],
-            dtype=torch.float32,
-            device=device,
-        )
-        traj = torch.zeros(1, 1, 4, dtype=torch.float32, device=device)
-        traj[0, 0, 2] = 1.0  # heading +x in ego frame
-        data = {
-            "line_strings": torch.tensor(
-                np_dict["line_strings"], dtype=torch.float32, device=device
-            )
-        }
-        _gate, _near, _wide, _steps, _cont, per_ts_min = compute_road_border_penalty(
-            traj, ego_shape_t, data, config=RewardConfig()
-        )
-        rb_dist_m = float(per_ts_min[0, 0].item())
+    rb_dist_m = road_border_distance(np_dict, device)
 
     neighbor_violation = clearance_m < margin_m
     rb_violation = rb_dist_m < margin_m

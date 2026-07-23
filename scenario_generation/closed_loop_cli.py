@@ -95,6 +95,28 @@ def add_rollout_args(parser: argparse.ArgumentParser) -> None:
         default="perfect",
         help="ego advance: mpc=bicycle MPC tracker; perfect=place ego on predicted polyline",
     )
+    parser.add_argument(
+        "--abort_deviation_m",
+        type=float,
+        default=8.0,
+        help="early-abort a segment (terminated='diverged') once the live ego strays this far "
+        "(m) from the recorded GT pose for --abort_after consecutive steps (0=disabled). Set "
+        "well above unstick_advance_m: unstick tries to save a merely-stuck rollout, abort "
+        "gives up on one that won't recover.",
+    )
+    parser.add_argument(
+        "--abort_after",
+        type=int,
+        default=30,
+        help="consecutive steps of GT deviation (see --abort_deviation_m) before aborting",
+    )
+    parser.add_argument(
+        "--abort_max_snaps",
+        type=int,
+        default=0,
+        help="early-abort a segment once its unstick teleport has fired this many times "
+        "(0=disabled) — repeated snapping is itself a sign of a bad rollout",
+    )
 
 
 def add_output_args(parser: argparse.ArgumentParser) -> None:
@@ -151,6 +173,9 @@ def rollout_params_from_args(args: argparse.Namespace) -> RolloutParams:
         draw_every=args.draw_every,
         replan_interval=args.replan_interval,
         tracker_mode=args.tracker_mode,
+        abort_deviation_m=args.abort_deviation_m,
+        abort_after=args.abort_after,
+        abort_max_snaps=args.abort_max_snaps,
     )
 
 

@@ -23,7 +23,7 @@ from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlann
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
-from diffusion_planner.utils.train_utils import resume_model, set_seed
+from diffusion_planner.utils.train_utils import check_resume_args_compat, resume_model, set_seed
 from diffusion_planner.validate_model import (
     aggregate_replan_consistency_metrics,
     aggregate_valid_metrics,
@@ -128,6 +128,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     from scenario_generation.wandb_closed_loop import (
         build_full_closed_loop_wandb_log,
         build_grouped_closed_loop_wandb_log,
+        build_sites_aggregate_log,
     )
 
     rank = ddp.get_rank()
@@ -139,7 +140,8 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     was_training = net.training
     net.eval()
 
-    def run_one(npz_root: str, site_out_dir: str, site_label: str) -> dict:
+    def run_one(npz_root: str, site_out_dir: str, site_name: str | None) -> tuple[dict, dict]:
+        site_label = f" [{site_name}]" if site_name else ""
         evaluator = ResolvedClosedLoopEvaluation.from_training(
             net,
             args,
@@ -155,6 +157,9 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
                 draw_every=args.closed_loop_draw_every,
                 replan_interval=args.closed_loop_replan_interval,
                 profile_sync_gpu=args.closed_loop_profile_sync_gpu,
+                abort_deviation_m=args.closed_loop_abort_deviation_m,
+                abort_after=args.closed_loop_abort_after,
+                abort_max_snaps=args.closed_loop_abort_max_snaps,
             ),
             fps=float(args.closed_loop_fps),
             seg_len=args.closed_loop_seg_len,
@@ -168,7 +173,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
         )
         summary = evaluator.run_distributed() if ddp_active else evaluator.run()
         if rank != 0 or not summary:
-            return {}
+            return {}, {}
         if _is_grouped_closed_loop_summary(summary):
             site_log = build_grouped_closed_loop_wandb_log(summary)
             totals = (summary.get("grouped_summary") or {}).get("totals") or {}
@@ -181,13 +186,22 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
                 + (f" (DDP x{world_size})" if ddp_active else "")
             )
         else:
-            site_log = build_full_closed_loop_wandb_log(summary)
+            site_log = build_full_closed_loop_wandb_log(
+                summary,
+                out_dir=site_out_dir,
+                site=site_name,
+                video_pick=args.closed_loop_wandb_video_pick,
+                colormap_metrics=args.closed_loop_colormap_metrics,
+                near_miss_thresh=args.closed_loop_near_miss_thresh,
+                report_base_url=args.closed_loop_report_base_url or None,
+            )
             print(
                 f"closed-loop{site_label} @epoch {epoch + 1}: {summary['n_segments']} seg in "
                 f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
+                f"diverged_rate={summary.get('diverged_segment_rate', 0.0):.3f}  "
                 f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
             )
-        return site_log
+        return site_log, summary
 
     log: dict = {}
     try:
@@ -195,10 +209,9 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
             sites = discover_sites(args.closed_loop_sites_root)
             if rank == 0 and not sites:
                 print(f"closed-loop: no sites found under {args.closed_loop_sites_root}")
+            site_summaries: dict[str, dict] = {}
             for site_name, npz_root in sites.items():
-                site_log = run_one(
-                    str(npz_root), os.path.join(out_dir, site_name), f" [{site_name}]"
-                )
+                site_log, summary = run_one(str(npz_root), os.path.join(out_dir, site_name), site_name)
                 # "closed_loop/x" -> "closed_loop/<site_name>/x", so each site gets its own
                 # namespaced scalars/videos in the same wandb step instead of overwriting.
                 log.update(
@@ -207,8 +220,14 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
                         for key, val in site_log.items()
                     }
                 )
+                if summary and not _is_grouped_closed_loop_summary(summary):
+                    site_summaries[site_name] = summary
+            # Cross-site micro/macro aggregate (see build_sites_aggregate_log) — unprefixed,
+            # under closed_loop/_all_{micro,macro}/*, alongside the per-site keys above.
+            if len(site_summaries) > 1:
+                log.update(build_sites_aggregate_log(site_summaries))
         else:
-            log = run_one(args.closed_loop_npz_root, out_dir, "")
+            log, _summary = run_one(args.closed_loop_npz_root, out_dir, None)
     finally:
         net.train(was_training)
 
@@ -376,6 +395,21 @@ def model_training(args: TrainConfig):
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
+        if global_rank == 0:
+            # model.load_state_dict below is strict=True, so an architecture mismatch already
+            # raises — this just surfaces WHICH config fields differ from the checkpoint's own
+            # args.json first, so that failure (or a subtly-wrong-but-loadable shape) isn't a
+            # total surprise. Not all diffs are problems (learning_rate/train_set_list are
+            # meant to differ on resume) — this is a diagnostic, not a hard gate.
+            arg_diffs = check_resume_args_compat(args.resume_model_path, args)
+            if arg_diffs:
+                print(
+                    f"resume: {len(arg_diffs)} config field(s) differ from the checkpoint's "
+                    f"saved args.json (expected for things like learning_rate/train_set_list; "
+                    f"if load_state_dict fails below, check here first for an architecture field):"
+                )
+                for d in arg_diffs[:20]:
+                    print(f"  - {d}")
         # We always use new wandb run for each training session, so we don't need to load the wandb_id from the model_dict.
         diffusion_planner, optimizer, scheduler, init_epoch, _, model_ema = resume_model(
             args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device

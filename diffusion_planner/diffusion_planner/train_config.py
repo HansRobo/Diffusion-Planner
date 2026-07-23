@@ -178,6 +178,28 @@ class TrainConfig:
     closed_loop_scenario_dataset_name: str = ""
     closed_loop_profile: bool = False
     closed_loop_profile_sync_gpu: bool = False
+    # Early-abort a badly-diverged segment instead of burning the full step budget (see
+    # RolloutParams / reproducer_rollout.render_segment for the exact trigger condition).
+    # 0 = disabled for either knob. Defaults mirror RolloutParams's.
+    closed_loop_abort_deviation_m: float = 8.0
+    closed_loop_abort_after: int = 30
+    closed_loop_abort_max_snaps: int = 0
+    # wandb payload shaping (see scenario_generation.wandb_closed_loop): only ONE
+    # representative episode's video + trajectory-colormap image is uploaded per site per
+    # checkpoint (not all routes — those stay in the local/server report), picked by
+    # "worst" (default, most collisions) / "first" / "longest". The full report (all videos +
+    # HTML gallery) stays at the run's out_dir; closed_loop_report_base_url turns that into a
+    # clickable URL in wandb (e.g. when out_dir is served over HTTP on a training server) —
+    # leave empty to just record the local path for a human to open by hand.
+    closed_loop_wandb_video_pick: str = "worst"
+    # Trajectory-colormap metrics rendered for that one representative episode — a small,
+    # cheap-to-upload set of images (not videos), so unlike the video/episode pick above there's
+    # no need to choose just one: every metric here gets its own wandb key/local PNG, and the
+    # local HTML report additionally lets a human switch between them per-card via a dropdown.
+    closed_loop_colormap_metrics: list[str] = field(
+        default_factory=lambda: ["clearance", "collision", "near_miss", "speed", "road_border"]
+    )
+    closed_loop_report_base_url: str = ""
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)
