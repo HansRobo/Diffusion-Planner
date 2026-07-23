@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ja">
+<body>
+<main>
+  <h2>1. 背景：なぜ自動運転はPost-Trainingへ向かっているのか</h2>
+  <p><strong>自動運転の学習は、「大量logを模倣する一段階」から、「Imitation Learningで基礎能力を作り、その後に追加feedbackで閉ループ行動を改善する二段階」へ移りつつある。</strong> 2026年のpost-training surveyは、後段のfeedbackをdistillation、preference alignment、reinforcement learning、test-time refinementの4系統に整理している。<a href="https://arxiv.org/abs/2607.08072">Post-Training in End-to-End Autonomous Driving: A Unified View</a></p>
+
+  <table>
+    <thead><tr><th>Stage 1 · Imitation Learning</th><th>Stage 2 · Post-Training</th></tr></thead>
+    <tbody><tr>
+      <td>大量のhuman driving logから、通常運転、地図理解、車両操作、多様な交通分布を学ぶ。強いbase policyとhuman-like priorを作る段階。</td>
+      <td>base policy自身のcandidateやrolloutを安全・進捗・快適性・交通規則で評価し、closed-loopで弱い場面を重点的に直す段階。</td>
+    </tr></tbody>
+  </table>
+
+  <h3>Imitation Learningだけでは残る4つのgap</h3>
+  <ul>
+    <li><strong>Closed-loop distribution shift：</strong>学習中はexpert stateを見るが、配備後はmodel自身の行動が次のstateを作る。小さな誤差が時間とともに累積する。</li>
+    <li><strong>Objective mismatch：</strong>ADE/FDEやpoint-wise MSEが近くても、片方は衝突・急制動・road departureを起こし得る。学習lossと運転品質は同じではない。</li>
+    <li><strong>Long-tail scarcity：</strong>collision回避、yield、takeover、near-miss、失敗後のrecoveryは通常log中に少なく、模倣targetだけでは十分に反復できない。</li>
+    <li><strong>No counterfactual feedback：</strong>logはhumanが選んだ一つの未来しか示さない。「別の行動なら何が起きたか」を直接教えない。</li>
+  </ul>
+
+  <p>Post-trainingはこのgapに対し、modelが実際に生成した複数trajectoryやclosed-loop rolloutへrewardを与え、<strong>安全・progress・comfort・interactionという最終目的を直接学習signalへ戻す</strong>。特にtrajectory plannerでは、collision、TTC、drivable area、progress、comfortを計算できるため、RL / reward-weighted fine-tuningとの相性がよい。</p>
+
+  <h3>近年の論文が示した流れ</h3>
+  <table>
+    <thead><tr><th>Paper</th><th>Post-trainingの方法</th><th>報告されたclosed-loop evidence</th></tr></thead>
+    <tbody>
+      <tr><td><a href="https://arxiv.org/abs/2410.05582">Gen-Drive · 2024</a></td><td>learned reward model + diffusion RL fine-tuning</td><td>nuPlan reduced Val14でsingle-sample scoreが0.8260→0.8633。fine-tune後はyieldとoff-road回避が改善。</td></tr>
+      <tr><td><a href="https://arxiv.org/abs/2502.13144">RAD · NeurIPS 2025</a></td><td>3DGS photorealistic closed-loop RL + IL regularization</td><td>IL-based methodsに対して、多くのclosed-loop metricを改善しcollision rateを約3分の1へ低減。</td></tr>
+      <tr><td><a href="https://arxiv.org/abs/2502.19908">CarPlanner · 2025</a></td><td>large-scale autoregressive planner RL</td><td>nuPlan上でRL plannerがIL・rule-based SOTAを上回ると報告。</td></tr>
+      <tr><td><a href="https://arxiv.org/abs/2602.22801">HDP · 2026</a></td><td>trajectory-level AWR + multi-reward</td><td>実車closed-loop Overall Scoreが75.38→84.07。今回もっとも直接参考にする実証。</td></tr>
+      <tr><td><a href="https://arxiv.org/abs/2601.12901">PlannerRFT · CVPR 2026</a></td><td>closed-loop GRPO/PPO + adaptive diffusion exploration</td><td>IL Diffusion Planner比でVal14 reactive 82.80→84.46、Test14-hard reactive 69.22→72.21。</td></tr>
+      <tr><td><a href="https://arxiv.org/abs/2604.15308">RAD-2 · 2026</a></td><td>diffusion generator + RL discriminator + on-policy generator optimization</td><td>strong diffusion planners比でcollision rateを56%削減し、実車でも安全感・smoothness改善を報告。</td></tr>
+      <tr><td><a href="https://arxiv.org/abs/2606.19836">World Engine · 2026</a></td><td>interactive worldでlong-tailを生成し、behavior-regularized RL</td><td>production modelで10,000超のclosed-loop sceneを評価しcollision rateを最大45.5%削減。200 km実車testも実施。</td></tr>
+    </tbody>
+  </table>
+
+  <ac:structured-macro ac:name="tip" ac:schema-version="1">
+    <ac:rich-text-body><p><strong>文献から得る結論：</strong>「ILを捨ててRLを一から学ぶ」のではない。大量logで作った強いIL policyをbehavior priorとして残し、RL post-trainingでclosed-loop objectiveとlong-tail failureを補う。成功例の多くもIL loss、KL、EMA、real-log mixingなどでbase competenceを保持している。</p></ac:rich-text-body>
+  </ac:structured-macro>
+
+  <p><strong>本プロジェクトの位置づけ：</strong>Original DPをHDPへ置換するのではなく、既存の最良checkpointをStage 1として固定し、HDPで実車効果が示されたAWR lifecycleをStage 2として適用する。</p>
+
+  <h2>2. 本プロジェクトの結論を先に読む</h2>
+  <table>
+    <thead><tr><th>質問</th><th>答え</th></tr></thead>
+    <tbody>
+      <tr><td><strong>何をしたいか</strong></td><td>既存のOriginal Diffusion Plannerを、T4 full-sequence dataでpost-trainし、旧モデルを置き換えられる<strong>単一checkpoint</strong>を作る。</td></tr>
+      <tr><td><strong>方法</strong></td><td>HDPで有効性が示されたtrajectory-level AWRを使う。同じsceneからK本の軌跡を出し、良い軌跡のdiffusion lossを大きくする。</td></tr>
+      <tr><td><strong>モデルは変わるか</strong></td><td>変わらない。HDPモデルへ置換せず、Original DPのdecoder/DiTだけを更新する。</td></tr>
+      <tr><td><strong>今わかっていること</strong></td><td>固定2,048 sceneの中間評価ではepoch 2–10がすべてsourceより有意に高い平均scene scoreを示した。</td></tr>
+      <tr><td><strong>まだわからないこと</strong></td><td>配備用saved EMAがfull validation 46,068 sceneでも改善するか。現在、その最終評価を実行中。</td></tr>
+    </tbody>
+  </table>
+
+  <ac:structured-macro ac:name="tip" ac:schema-version="1">
+    <ac:rich-text-body><p><strong>一言でいうと：</strong>AWRは「modelが同じ問題に出した複数回答をrewardで採点し、良い回答を強く復習する」post-trainingである。</p></ac:rich-text-body>
+  </ac:structured-macro>
+
+  <h2>3. HDPのRLをゼロから理解する</h2>
+  <p>HDPはSFT済みplannerを出発点に、次の5段階を反復する。重要なのはpolicy-gradientではなく、<strong>trajectoryを生成・採点・重み付き回帰する安定した学習ループ</strong>である。<a href="https://arxiv.org/abs/2602.22801">HDP paper</a></p>
+  <figure><img src="../reference/external/Hyper-Diffusion-Planner/assets/framework.jpg" alt="HDP公式framework"><figcaption>HDP公式framework。本提案では、このうちtrajectory sampling、PDM-style reward、AWR、EMA、replay refreshをOriginal DPへ移す。</figcaption></figure>
+
+  <table>
+    <thead><tr><th>Step</th><th>何をするか</th><th>直感</th></tr></thead>
+    <tbody>
+      <tr><td>1 · Sample</td><td>同じsceneからK本の8秒軌跡を生成</td><td>一つの問題に複数の回答を出す</td></tr>
+      <tr><td>2 · Score</td><td>collision、TTC、on-road、progress、lane、comfortを評価</td><td>各回答を運転品質で採点する</td></tr>
+      <tr><td>3 · Normalize</td><td>rewardを同じsceneのK本の中で標準化</td><td>sceneの難易度ではなく、同じ問題内の良し悪しを見る</td></tr>
+      <tr><td>4 · AWR update</td><td>高reward trajectoryのdiffusion MSEを大きくする</td><td>良い回答を強く復習する</td></tr>
+      <tr><td>5 · EMA / replay</td><td>更新をEMAで平滑化し、一定周期で候補を再生成</td><td>学習を安定させ、改善したpolicyで問題を掘り直す</td></tr>
+    </tbody>
+  </table>
+
+  <p><code>zᵢ = (rᵢ − mean(r)) / (sample_std(r) + 10⁻⁶)</code><br />
+     <code>wᵢ = exp(βzᵢ)</code><br />
+     <code>L = mean(wᵢ × diffusion_MSEᵢ)</code></p>
+  <p><strong>K=10の意味：</strong>10回のPython逐次推論ではない。B×Kを一つのbatchとして5回のdiffusion solver stepを通す。10本は独立Gaussian noiseから始まるため、同じsceneでも異なる候補を出せる。</p>
+
+  <h2>4. Original DPへどう適用したか</h2>
+  <table>
+    <thead><tr><th>項目</th><th>HDP</th><th>今回のT4 Original DP</th></tr></thead>
+    <tbody>
+      <tr><td>Policy</td><td>HDP planner</td><td><strong>Original DPのまま</strong></td></tr>
+      <tr><td>更新範囲</td><td>HDP decoder</td><td>Original DPのDiT/decoderのみ</td></tr>
+      <tr><td>Loss</td><td>velocity + waypoint hybrid</td><td>Original DPに存在するplain diffusion MSE</td></tr>
+      <tr><td>Candidate</td><td>K=10</td><td>K=10、noise scale 0.5、trajectory augmentation 0.5 m</td></tr>
+      <tr><td>AWR</td><td>scene内reward正規化</td><td>β=1、sample std、<code>mean(exp(z)×MSE)</code></td></tr>
+      <tr><td>Replay</td><td>disk replayを周期refresh</td><td>epoch 1でmining、epoch 2–10でfrozen replay</td></tr>
+      <tr><td>Deployment</td><td>EMA policy</td><td>saved EMA、K=1、zero-noise、10 solver steps</td></tr>
+    </tbody>
+  </table>
+
+  <ac:structured-macro ac:name="info" ac:schema-version="1">
+    <ac:rich-text-body><p><strong>データ契約：</strong><code>is_skipped</code>を除外したtrain 4,578,036 scene / valid 46,068 sceneを使用する。旧T4データのneighbor futureは既知の1-frameずれがあるため、reward・評価・可視化すべてで<strong>raw[t+1] → aligned[t]</strong>を固定している。</p></ac:rich-text-body>
+  </ac:structured-macro>
+
+  <h2>5. Rewardは何を改善するのか</h2>
+  <p>checkpoint選定に使うscene scoreは、HDP/NAVSIMのPDM scoreをT4データで計算可能な形へ写像したもの。collision、on-road、kinematicは乗算gateであり、重大な失敗はscore全体を0にする。残りはTTC / progress / lane / comfortの加重平均である。</p>
+  <p><code>Rscene = no-collision × on-road × kinematic-feasible × (5×TTC + 5×progress + 2×lane + 2×comfort) / 14</code></p>
+  <table>
+    <thead><tr><th>指標</th><th>解決したい場面</th><th>良い方向</th><th>役割</th></tr></thead>
+    <tbody>
+      <tr><td>Collision / OBB</td><td>交差車両、先行車、隣接車とのbbox overlap</td><td>衝突なし</td><td>hard gate</td></tr>
+      <tr><td>Road border</td><td>狭い右左折、路肩・縁石へのはみ出し</td><td>車体がdrivable corridor内</td><td>hard gate</td></tr>
+      <tr><td>Kinematic</td><td>急なyaw、加速度、jerkで実行不能な軌跡</td><td>車両として実行可能</td><td>hard gate</td></tr>
+      <tr><td>TTC</td><td>今は衝突していないが近い将来危険な接近</td><td>時間・空間余裕が大きい</td><td>5/14</td></tr>
+      <tr><td>Progress</td><td>不要な停止、過度に遅い走行</td><td>安全な範囲で前進</td><td>5/14</td></tr>
+      <tr><td>Lane</td><td>routeからの不用意な逸脱</td><td>route/lane corridorへ整合</td><td>2/14、hard gateではない</td></tr>
+      <tr><td>Comfort</td><td>蛇行、急加減速、jitter</td><td>滑らか</td><td>2/14</td></tr>
+    </tbody>
+  </table>
+
+  <h3>実sceneで見る</h3>
+  <figure><img src="t4_conference_assets/formal_replay_safety/scene_002.gif" alt="formal replay collision candidates with ego and neighbor bbox"><figcaption><strong>Collision / TTC：</strong>epoch-1 replayへ実際に保存されたK=10。bboxとneighbor futureを時系列で描き、安全候補と衝突候補のreward差を見る。</figcaption></figure>
+  <figure><img src="t4_conference_assets/formal_replay_safety/scene_000.gif" alt="formal replay road border candidates with ego bbox"><figcaption><strong>Road border：</strong>候補ごとの車体bboxがborderを越えるかを比較。軌跡中心点が道路内でも、車体角がはみ出せば失敗になる。</figcaption></figure>
+  <figure><img src="t4_rl_assets/t4_scene_stopped_leader.gif" alt="stopped leader dynamic reward scene"><figcaption><strong>TTC × Progress：</strong>先行停止車がいるsceneでは「とにかく前進」ではなく、安全距離を保った停止が高scoreになる。</figcaption></figure>
+  <figure><img src="t4_rl_assets/t4_scene_tight_right_turn.gif" alt="tight right turn dynamic reward scene"><figcaption><strong>Road border × Lane × Comfort：</strong>急旋回でshortcutやbboxはみ出しを抑えつつ、実行可能な曲率と滑らかさを評価する。</figcaption></figure>
+
+  <h3>正常なlane changeはどう扱うか</h3>
+  <p>今回のformal runでは<code>lane_gate_enabled=false</code>なので、lane scoreだけでtotal rewardが0になることはない。通常のlane changeはcollision / road-border / kinematicを満たせば候補として残る。一方、T4のroute-centerline proxyが正常なlane changeへ弱いpenaltyを与える可能性はあるため、lane-change sliceを別に公開し、次cycleではHDP論文のexpert lane-change maskを独立ablationする。</p>
+  <figure><img src="t4_conference_assets/lane_mask_audit/lane_mask_audit.gif" alt="lane mask audit dynamic visualization"><figcaption>lane mask監査。lane score、lane polygon、logged expertの遷移を同じscene上で確認する。</figcaption></figure>
+
+  <h2>6. AWRが学べる条件：候補の多様性</h2>
+  <p>AWRは既存のK候補を並べ替える方法であり、全候補が同じ失敗をすると直せない。したがって「K本あるか」ではなく、stop / go、速度、横方向、曲率などの<strong>意味のあるmodeが含まれるか</strong>を確認する。</p>
+  <figure><img src="t4_conference_assets/awr_multimodality_compare/scene_001_multimodality.gif" alt="raw versus HDP augmented multimodal trajectory candidates"><figcaption>同僚のanchor multimodality可視化器をT4 Original DPへ適用。raw候補とHDP-style augmentation候補を同じscene・同じbbox上で比較する。</figcaption></figure>
+  <figure><img src="t4_conference_assets/awr_multimodality_compare/scene_003_multimodality.png" alt="multimodality endpoint spread and mode diagnostics"><figcaption>endpoint spreadだけでなく、heading・速度・lateral offsetのmode coverageを併記する。単なるjitterを多模態とは数えない。</figcaption></figure>
+
+  <ac:structured-macro ac:name="warning" ac:schema-version="1">
+    <ac:rich-text-body><p><strong>既知の限界：</strong>all-zero groupやoverride sceneでは、K=10の中に正解がないことがある。その場合はβを上げず、stop / slow / retrieved repair候補をKへ追加して同じAWR scoreへ戻す。</p></ac:rich-text-body>
+  </ac:structured-macro>
+
+  <h2>7. 実験結果：何が証明され、何が未確定か</h2>
+  <p>下図は固定2,048 validation scenesを、各epochの<strong>current policy・K=10・5 solver steps</strong>で成対比較した中間monitor。epoch 2–10はすべてsource比で平均scene scoreの95% CI下限が0より大きい。</p>
+  <figure><img src="t4_conference_assets/training_monitor/checkpoint_paired_sweep.png" alt="checkpoint paired mean score and diagnostic sweep"><figcaption>暫定championはepoch 6：Dataset Score 92.55 → 94.08、Δ +1.530 point、95% CI [+0.912, +2.181]。最終epoch 10もΔ +1.419 point [+0.790, +2.076]。</figcaption></figure>
+  <figure><img src="t4_conference_assets/training_monitor/hard_event_transition_audit.png" alt="paired recovered and newly introduced hard events"><figcaption>改善と新規回帰を分けて表示。epoch 10はcollision 2回収 / 1新規、road-border 40回収 / 5新規、kinematic 0回収 / 1新規。</figcaption></figure>
+
+  <table>
+    <thead><tr><th>証拠</th><th>現在の結論</th></tr></thead>
+    <tbody>
+      <tr><td>Loss / train reward</td><td>学習経路が動く証拠。性能改善の証明には使わない。</td></tr>
+      <tr><td>2,048-scene current-policy monitor</td><td><strong>方法は有望。</strong>平均scene scoreは統計的に改善。</td></tr>
+      <tr><td>Saved EMA screen</td><td>epoch 2–10をK=1 / zero-noise / 10-stepで比較予定。</td></tr>
+      <tr><td>Full 46,068-scene paired validation</td><td><strong>最終結論。現在実行中。</strong></td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>checkpoint選定基準：</strong>同じ46,068 sceneでsourceとsaved EMAを比較し、<code>100 × mean(Rema − Rsource)</code>のpaired-bootstrap 95% CI下限が最大のepochを選ぶ。下限が0より大きければ平均score改善と判定する。ADE/FDE、collision、road-border、kinematic、lane-changeは変化の理由を示す診断として併記するが、すべて同時改善を要求する独立vetoにはしない。</p>
+
+  <h2>8. 最終提案</h2>
+  <ol>
+    <li><strong>Faithful baselineを完走：</strong>現在のHDP-style AWRを途中変更せず、saved EMAをfull validationする。</li>
+    <li><strong>単一checkpointを選ぶ：</strong>full mean-score CIで最良のEMAだけをreplacement候補にする。</li>
+    <li><strong>coverageを閉じる：</strong>passした場合はcache欠損76,596 sceneをbackfillし、短いconfirm cycleを行う。</li>
+    <li><strong>候補がないsceneだけ修復：</strong>all-zero / override sceneへR2LPLのmistake miningとrepair candidateを限定吸収する。別SFT branchは作らず、同じAWR objectiveへ戻す。</li>
+    <li><strong>主張を段階的に広げる：</strong>open-loop full score → reactive simulation → closed-loop → 実車smokeの順で確認する。</li>
+  </ol>
+  <figure><img src="../reference/external/Learning-from-Mistakes-Rollout-Retrieval-Lifelong-Policy-Learning-for-Autonomous-Driving/docs/assets/r2lpl_framework.png" alt="R2LPL framework"><figcaption>R2LPLはAWRの代替ではなく、「K候補に正解がないscene」へrepair candidateを供給する補助として使う。</figcaption></figure>
+
+  <h2>9. 参考文献</h2>
+  <ul>
+    <li><a href="https://arxiv.org/abs/2602.22801">Hyper-Diffusion Planner</a> — 本実装のAWR lifecycle、PDM reward、replayの中心。</li>
+    <li><a href="https://github.com/autonomousvision/navsim/blob/main/docs/metrics.md">NAVSIM PDMS / EPDMS</a> — scene scoreとdataset meanの評価契約。</li>
+    <li><a href="https://arxiv.org/abs/2601.12901">PlannerRFT</a>、<a href="https://arxiv.org/abs/2502.19908">CarPlanner</a>、<a href="https://arxiv.org/abs/2410.05582">Gen-Drive</a> — planner RL/post-trainingの比較。</li>
+    <li><a href="https://arxiv.org/abs/2502.13144">RAD</a>、<a href="https://arxiv.org/abs/2604.15308">RAD-2</a> — photorealistic / BEV closed-loop simulationを使うlarge-scale RL。</li>
+    <li><a href="https://arxiv.org/abs/2512.07745">DiffusionDriveV2</a> — qualityとmultimodality coverageを分けて評価。</li>
+    <li><a href="https://arxiv.org/abs/2606.30537">R2LPL</a> — mistake miningとrepair candidate retrieval。</li>
+    <li><a href="https://arxiv.org/abs/2606.19836">World Engine</a>、<a href="https://arxiv.org/abs/2607.08072">Post-Training in End-to-End Autonomous Driving</a> — reactive evaluationと分野全体の位置づけ。</li>
+  </ul>
+
+  <ac:structured-macro ac:name="expand" ac:schema-version="1">
+    <ac:parameter ac:name="title">Appendix A · 正式runのexact contract</ac:parameter>
+    <ac:rich-text-body>
+      <ul>
+        <li>Train: 5,092,382 → 4,578,036 after <code>is_skipped</code> filtering</li>
+        <li>Valid: 53,008 → 46,068 after filtering</li>
+        <li>Recovered replay cache: 4,501,440 unique scene groups = 98.33%</li>
+        <li>8×H100、BF16、TF32、decoder compile、scene batch 192 / rank</li>
+        <li>K=10、5 sampling steps、noise scale 0.5、trajectory augmentation std 0.5 m</li>
+        <li>DiT-only、lr 1e−6、grad clip 0.5、β=1、BC anchor 0、EMA decay 0.999</li>
+        <li>Old neighbor future alignment: <code>raw[t+1] → aligned[t]</code></li>
+      </ul>
+    </ac:rich-text-body>
+  </ac:structured-macro>
+
+  <ac:structured-macro ac:name="expand" ac:schema-version="1">
+    <ac:parameter ac:name="title">Appendix B · Evidence package / provenance</ac:parameter>
+    <ac:rich-text-body>
+      <ul>
+        <li><a href="t4_conference_assets/formal_replay_safety/manifest.json">Formal K=10 replay manifest</a></li>
+        <li><a href="t4_conference_assets/awr_multimodality_compare/manifest.json">Multimodality manifest</a></li>
+        <li><a href="t4_conference_assets/training_monitor/manifest.json">Training-monitor manifest</a></li>
+        <li><a href="t4_conference_assets/visual_asset_audit.json">Visual asset audit</a></li>
+        <li><a href="t4_conference_assets/t4_awr_visual_assets_bundle.zip">Complete visual evidence bundle</a> / <a href="t4_conference_assets/t4_awr_visual_assets_bundle.zip.sha256">SHA-256</a></li>
+      </ul>
+    </ac:rich-text-body>
+  </ac:structured-macro>
+</main>
+</body>
+</html>

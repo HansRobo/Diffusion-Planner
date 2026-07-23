@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>T4 Original DP × AWR — Post-Training Framework</title>
+  <style>
+    @font-face{font-family:"T4 Noto Sans JP";src:url("assets/fonts/NotoSansJP-VF.ttf") format("truetype");font-style:normal;font-weight:100 900;font-display:swap}
+    :root {
+      --ink:#102a43; --muted:#52606d; --line:#d8e2ec; --paper:#f7fafc;
+      --blue:#1677ff; --blue2:#eaf4ff; --green:#238636; --green2:#eaf7ed;
+      --amber:#b7791f; --amber2:#fff8df; --red:#d64550; --red2:#fff0f1;
+      --violet:#7048e8; --violet2:#f2efff; --shadow:0 14px 36px rgba(16,42,67,.10);
+    }
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;background:var(--paper);color:var(--ink);font-family:"T4 Noto Sans JP",-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;line-height:1.72}
+    a{color:#0969da;text-decoration:none} a:hover{text-decoration:underline}
+    code,pre{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace}
+    code{padding:.12em .38em;border-radius:5px;background:#eef2f7;color:#243b53}
+    .hero{padding:68px 6vw 52px;color:#fff;background:radial-gradient(circle at 88% 12%,rgba(103,174,255,.28),transparent 30%),linear-gradient(135deg,#071a2d 0%,#12395d 55%,#155b85 100%)}
+    .hero-inner{max-width:1240px;margin:auto}.eyebrow{font-size:13px;font-weight:800;letter-spacing:.15em;text-transform:uppercase;color:#9dd8ff}
+    h1{font-size:clamp(34px,5vw,66px);line-height:1.08;margin:12px 0 18px;letter-spacing:-.035em}
+    .hero p{max-width:940px;font-size:clamp(16px,2vw,21px);color:#d9ecfa;margin:0}
+    .hero-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px}.hero-meta span{padding:7px 12px;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.08);font-size:13px}
+    .status{max-width:1240px;margin:-24px auto 0;padding:0 22px;position:relative}.status-box{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--shadow)}
+    .status-box>div{background:#fff;padding:20px}.status .k{font-size:12px;font-weight:800;color:var(--muted);letter-spacing:.08em}.status .v{font-size:22px;font-weight:850;margin:3px 0}.status .n{font-size:13px;color:var(--muted)}
+    .nav{position:sticky;top:0;z-index:20;background:rgba(247,250,252,.94);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+    .nav-inner{max-width:1240px;margin:auto;padding:10px 22px;display:flex;gap:8px;overflow-x:auto}.nav a{white-space:nowrap;padding:7px 10px;border-radius:8px;font-size:13px;font-weight:700;color:#334e68}.nav a:hover{background:#e9f2fb;text-decoration:none}
+    main{max-width:1240px;margin:auto;padding:34px 22px 80px} section{scroll-margin-top:70px;background:#fff;border:1px solid var(--line);border-radius:18px;padding:34px;margin:24px 0;box-shadow:0 5px 18px rgba(16,42,67,.05)}
+    h2{font-size:clamp(27px,3.2vw,40px);line-height:1.25;margin:0 0 16px;letter-spacing:-.025em} h3{font-size:22px;line-height:1.35;margin:28px 0 10px} h4{font-size:17px;margin:0 0 7px}
+    .lead{font-size:18px;color:#334e68;max-width:1000px}.small{font-size:13px;color:var(--muted)}
+    .grid{display:grid;gap:16px}.g2{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+    .card{border:1px solid var(--line);border-radius:14px;padding:20px;background:#fff}.card.blue{background:var(--blue2);border-color:#b9dbff}.card.green{background:var(--green2);border-color:#b9dfc2}.card.amber{background:var(--amber2);border-color:#eed994}.card.red{background:var(--red2);border-color:#f1b8bd}.card.violet{background:var(--violet2);border-color:#cfc4ff}
+    .tag{display:inline-block;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:850;letter-spacing:.05em;background:#e9f2fb;color:#1769aa;margin-bottom:8px}.tag.green{background:#dff3e4;color:#1f7a34}.tag.amber{background:#fff0b6;color:#8a5b00}.tag.red{background:#ffe0e3;color:#b42331}.tag.violet{background:#e8e2ff;color:#5a3fc0}
+    .cite{display:inline-block;margin-left:.28em;padding:.08em .42em;border:1px solid #b9d7f5;border-radius:999px;background:#f0f7ff;color:#1769aa;font-size:.78em;font-weight:800;white-space:nowrap}
+    .callout{padding:17px 19px;border-left:5px solid var(--blue);background:var(--blue2);border-radius:10px;margin:18px 0}.callout.warn{border-color:var(--amber);background:var(--amber2)}.callout.stop{border-color:var(--red);background:var(--red2)}.callout.good{border-color:var(--green);background:var(--green2)}
+    .flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;align-items:stretch;margin:22px 0}.flow .node{position:relative;border:1px solid var(--line);border-radius:14px;padding:18px;background:#fff}.flow .node:not(:last-child)::after{content:"→";position:absolute;right:-12px;top:44%;font-size:20px;color:var(--blue);font-weight:900;z-index:2}.num{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;background:var(--blue);color:#fff;font-weight:850;margin-bottom:10px}
+    .formula{background:#0b1d2e;color:#e7f2fb;border-radius:14px;padding:20px;overflow-x:auto;font-size:14px;line-height:1.8}.formula .c{color:#8fd3ff}.formula .g{color:#9ce5ad}
+    table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px} th,td{text-align:left;vertical-align:top;padding:12px 10px;border-bottom:1px solid var(--line)} th{font-size:12px;letter-spacing:.04em;color:#486581;background:#f4f7fa} td.numc{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+    figure{margin:22px 0;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#fff} figure img{width:100%;height:auto;display:block;background:#f8fafc} figcaption{padding:13px 16px;color:#486581;font-size:14px;border-top:1px solid var(--line)}
+    .figure-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.figure-grid figure{margin:0}.figure-grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .legend{display:flex;flex-wrap:wrap;gap:12px;margin:12px 0}.legend span{display:inline-flex;align-items:center;gap:6px;font-size:13px}.dot{width:12px;height:12px;border-radius:3px;display:inline-block}.dot.green{background:#dff3e4;border:1px solid #50a966}.dot.amber{background:#fff0b6;border:1px solid #c9971a}.dot.orange{background:#ffe4bd;border:1px solid #e87924}.dot.red{background:#ffd8dc;border:1px solid #d64550}
+    .decision{display:grid;grid-template-columns:1.2fr .8fr;gap:18px}.lane{border-radius:16px;padding:22px;border:2px solid #b9dbff;background:#f2f8ff}.lane.repair{border-color:#d2c5ff;background:#f7f4ff}.lane ul{padding-left:20px;margin-bottom:0}
+    .gate{display:grid;grid-template-columns:46px 1fr;gap:14px;margin:13px 0}.gate .n{width:42px;height:42px;border-radius:50%;background:#e9f2fb;color:#1769aa;display:grid;place-items:center;font-weight:900}.gate p{margin:3px 0;color:#486581}
+    .footer{max-width:1240px;margin:auto;padding:0 22px 50px;color:var(--muted);font-size:13px}
+    details{border:1px solid var(--line);border-radius:12px;padding:12px 15px;margin:13px 0;background:#fbfdff} summary{font-weight:800;cursor:pointer}
+    @media(max-width:900px){.status-box,.g4,.g3,.flow,.figure-grid.three{grid-template-columns:1fr 1fr}.decision{grid-template-columns:1fr}.flow .node::after{display:none}}
+    @media(max-width:640px){section{padding:23px 17px}.status-box,.g2,.g3,.g4,.flow,.figure-grid,.figure-grid.three{grid-template-columns:1fr}.hero{padding:54px 24px 44px}main{padding-left:12px;padding-right:12px}.status{padding:0 12px}}
+    @media print{.nav{display:none}.hero{padding:35px;color:#102a43;background:#fff;border-bottom:2px solid #102a43}.hero p{color:#334e68}.hero-meta span{border-color:#9fb3c8}.status{margin:10px auto}section{break-inside:avoid;box-shadow:none}.figure-grid figure{break-inside:avoid}body{background:#fff}}
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <div class="eyebrow">Tier-IV · Original Diffusion Planner · Internal Meeting Material</div>
+      <h1>HDPのRLをOriginal DPへ適用する<br>T4 AWR Post-Training Framework</h1>
+      <p>HDP原論文のRLをゼロから説明し、T4データに対する既存Diffusion Planner（Original DP）への適用、初期実験、実シーン可視化、そして次のpost-training基盤案までを一つの資料にまとめる。</p>
+      <div class="hero-meta"><span>日本語版 · 2026-07-17</span><span>正式 run: 8×H100 / K=10</span><span>実データBEV + OBB + 80-frame GIF</span><span>最終評価後に結論を更新</span></div>
+    </div>
+  </header>
+
+  <div class="status">
+    <div class="status-box">
+      <div><div class="k">TRAIN TARGET</div><div class="v">Original DP</div><div class="n">HDPモデルへの置換ではない</div></div>
+      <div><div class="k">FILTERED CORPUS</div><div class="v">4,578,036</div><div class="n"><code>is_skipped</code> 除外済み</div></div>
+      <div><div class="k">FORMAL GROUP</div><div class="v">K=10</div><div class="n">5 denoising steps / noise 0.5</div></div>
+      <div><div class="k">UNIQUE REPLAY</div><div class="v">4,501,440</div><div class="n">回収済みprefix · corpusの98.33%</div></div>
+    </div>
+  </div>
+
+  <nav class="nav" aria-label="目次"><div class="nav-inner">
+    <a href="#summary">結論</a><a href="#basics">AWR入門</a><a href="#hdp">HDP原論文</a><a href="#adaptation">DP適用</a><a href="#pipeline">Pipeline</a><a href="#metrics">指標</a><a href="#scenes">実シーン</a><a href="#multi">多様性</a><a href="#results">初期結果</a><a href="#r2lpl">R2LPL</a><a href="#proposal">提案</a><a href="#gate">判定基準</a><a href="t4_dp_awr_visual_assets_ja.html">素材庫</a>
+  </div></nav>
+
+  <main>
+    <section id="summary">
+      <h2>0. Executive summary</h2>
+      <p class="lead"><strong>狙いは、既存のOriginal DPを一つのcheckpointのまま、T4全量データでpost-trainし、場面平均の総合運転scoreを上げること。</strong> 方法の中核はHDPで実証されたtrajectory-level AWRであり、R2LPLはAWRが正解候補を生成できないoverride sceneだけを補修する。<a class="cite" href="https://arxiv.org/abs/2602.22801">HDP</a><a class="cite" href="https://arxiv.org/abs/2606.30537">R2LPL</a></p>
+      <div class="grid g3">
+        <div class="card green"><span class="tag green">採用</span><h3>HDPの学習ライフサイクル</h3><p>同一sceneでK本を生成し、rewardで順位付けし、良い軌跡のdiffusion lossを重くする。EMA、disk replay、周期refreshも引き継ぐ。</p></div>
+        <div class="card blue"><span class="tag">T4適用</span><h3>モデルはOriginal DPのまま</h3><p>Original DPのdecoder/DiTだけを更新し、lossはplain MSE。HDP固有のvelocity/waypoint headが存在するとは仮定しない。</p></div>
+        <div class="card amber"><span class="tag amber">現時点の結論</span><h3>最終評価まで判断を保留</h3><p>正式全量runは既存replay cacheを再利用して継続中。受理可否は全epoch後のsource-relative held-out評価だけで決める。</p></div>
+      </div>
+      <h3>この資料の可視化は、証拠の強さを混ぜない</h3>
+      <div class="grid g3">
+        <div class="card green"><span class="tag green">A · FORMAL REPLAY</span><h4>実際に学習へ入ったK=10</h4><p>epoch-1 cacheからtrajectory・reward・AWR weightを直接読む。衝突/road-borderのscene内contrastを示す最も強い局所証拠。</p></div>
+        <div class="card blue"><span class="tag">B · COVERAGE AUDIT</span><h4>source policyのK=16診断</h4><p>同僚の可視化器でraw/augmentationの候補coverageを検査。学習後性能ではなく、AWRが「選べる候補」を持つかを見る。</p></div>
+        <div class="card violet"><span class="tag violet">C · METRIC PROBE</span><h4>構造化counterfactual</h4><p>意図的にstop/go/shortcut等を作り、evaluatorが区別できるかを検査。model sampleとは呼ばない。</p></div>
+      </div>
+      <div class="callout stop"><strong>禁止する混同：</strong>K=16診断、構造化probe、過去のG=8/G=32小規模runを、正式K=10学習後checkpointの改善証拠として扱わない。最終改善はpaired held-out before/afterだけで判定する。</div>
+    </section>
+
+    <section id="basics">
+      <h2>1. AWRを知らない人のための5つの言葉</h2>
+      <div class="grid g3">
+        <div class="card"><span class="tag">Scene</span><h4>一つの運転問題</h4><p>ego履歴、地図、route、信号、周辺車両とその記録未来を含む。</p></div>
+        <div class="card"><span class="tag">Policy</span><h4>軌跡を出すモデル</h4><p>本資料では既存のOriginal DP。入力から8秒・80点の軌跡を生成する。</p></div>
+        <div class="card"><span class="tag">Candidate</span><h4>同じ問題への複数回答</h4><p>同じsceneからK本の未来を一括生成する。K=10は10回のPython逐次推論ではない。</p></div>
+        <div class="card"><span class="tag">Reward</span><h4>回答の採点</h4><p>collision、TTC/THW、border、red-light、route、progress、comfortなどを評価する。</p></div>
+        <div class="card"><span class="tag green">AWR</span><h4>高得点回答を強く復習</h4><p>同一scene内で相対的に良いcandidateのdiffusion lossへ大きい重みを与える。</p></div>
+        <div class="card red"><span class="tag red">重要な限界</span><h4>全候補が悪ければ選べない</h4><p>K本すべてが衝突なら、βを上げても安全な停止・譲りは生まれない。repair targetが必要。</p></div>
+      </div>
+      <h3>AWRの最小数式</h3>
+      <div class="formula"><span class="c">zᵢ</span> = (rᵢ − mean(r)) / (sample_std(r) + ε)　　ε = 10⁻⁶<br><span class="c">wᵢ</span> = exp(β · zᵢ)　　<span class="g">L<sub>HDP-faithful</sub></span> = (1/K) · Σᵢ wᵢ · MSE(predictionᵢ, candidateᵢ)</div>
+      <div class="callout"><strong>MSEは何と何の誤差か：</strong>replayから一つのcandidate軌跡を取り、各updateで独立にdiffusion時刻 <code>t∼U(0.001,0.999)</code> とGaussian noiseを引いてnoisy trajectoryを作る。decoderはscene条件とそのnoisy trajectoryからclean candidateを復元し、正規化後の80点×4 channel（x, y, cos yaw, sin yaw）について二乗誤差を平均する。そのcandidate単位MSEへreward由来の<code>wᵢ</code>を掛け、K本を平均する。したがってloss低下は「保存candidateをreward比率で復元しやすくなった」ことを示すが、未見sceneの運転性能向上そのものではない。</div>
+      <p class="small">正式runは1 replay actionにつき1つの独立<code>t/noise</code>を使い、prefix teacher forcingなし。encoder、turn-indicator、neighbor loss、HDP hybrid補助、BC anchorは固定/無効で、Original DPのDiTだけを更新する。同じfrozen candidateを別epochで引くたびnoiseが変わるため、replay反復はdenoising objectiveのMonte Carlo再サンプルにもなる。</p>
+      <p class="small">正式runはβ=1、sample std、<code>normalize_weights=false</code>、<code>awr_loss_reduction=hdp_mean</code>。したがって重み和では割らない。これは公開HDP codeの <code>mean(exp(group-normalized reward) × MSE)</code> と同じ縮約であり、重み和で割る方式は今後の安定化ablationとして区別する。</p>
+      <p class="small">比較は同じsceneのK本の中だけで行う。critic、PPO clipping、denoising transitionごとのpolicy ratioは使わない。</p>
+    </section>
+
+    <section id="hdp">
+      <h2>2. HDP原論文のRLは何をしているか</h2>
+      <p class="lead">HDPは、SFT済みのdiffusion plannerを出発点に、複数の完全軌跡を生成・評価・重み付き回帰する。要点は「RLらしい名前」ではなく、<strong>良い完全軌跡を学習分布へ戻す安定したライフサイクル</strong>にある。<a class="cite" href="https://arxiv.org/abs/2602.22801">HDP paper</a><a class="cite" href="../reference/external/Hyper-Diffusion-Planner/HDP-navsim/hdp_navsim/agent/dp_vla/dp_vla_rl_agent.py">released RL code</a></p>
+      <div class="flow">
+        <div class="node"><div class="num">1</div><h4>SFT policy</h4><p>既に基本運転ができるmodelを開始点にする。</p></div>
+        <div class="node"><div class="num">2</div><h4>K trajectories</h4><p>同一sceneから複数の8秒軌跡をsampleする。</p></div>
+        <div class="node"><div class="num">3</div><h4>PDM reward</h4><p>pseudo-closed-loop環境で安全・行動品質を採点する。</p></div>
+        <div class="node"><div class="num">4</div><h4>AWR update</h4><p>scene内で正規化し、高reward軌跡を重く回帰する。</p></div>
+        <div class="node"><div class="num">5</div><h4>EMA / replay</h4><p>更新を安定化し、一定間隔で候補を再生成する。</p></div>
+      </div>
+      <div class="grid g3">
+        <div class="card blue"><h4>HDP原論文のloss</h4><p>velocity diffusion lossと積分後waypoint lossのhybrid。HDP固有modelでは幾何連続性の安定化に有効。</p></div>
+        <div class="card amber"><h4>pseudo-closed-loopの意味</h4><p>ego候補は変わるが、neighborは主にログをreplayする。neighborがegoに反応する完全なreactive worldではない。</p></div>
+        <div class="card green"><h4>論文から採用するもの</h4><p>group normalization、reward-weighted diffusion regression、EMA、disk replay、周期refresh。</p></div>
+      </div>
+      <div class="callout warn"><strong>EMAの再現境界：</strong>HDP論文のparameter tableはEMAを<code>0.05</code>と記載するが、係数の向き・更新cadenceは同表だけでは確定できない。一方、公開NAVSIM packageは<code>use_ema: false</code>がdefaultで、<code>ModelEma(decay=0.999)</code>の生成部もcomment-outされている（update/save hookだけが残る）。したがって、今回の<code>decay=0.999 / optimizer step</code>は公開releaseのbit-exact再現ではなく、保存<code>ema_state_dict</code>を実車候補として評価するための<strong>T4側で明示した安定化契約</strong>である。2,962 stepの1 replay epoch後に開始時EMAが残る係数は<code>0.999^2962 = 0.0516</code>だが、論文の<code>0.05</code>と数値が近いだけで同一定義とはみなさない。</div>
+      <figure><img loading="lazy" src="../reference/external/Hyper-Diffusion-Planner/assets/framework.jpg" alt="HDP公式framework"><figcaption>HDP公式framework。方法の中心はplanner、real-data scaling、benchmark、real-vehicle validationを一つの反復系にすること。</figcaption></figure>
+    </section>
+
+    <section id="adaptation">
+      <h2>3. HDPの方法をOriginal DPへどう適用したか</h2>
+      <div class="callout good"><strong>モデルをHDPへ変更するのではない。</strong> 入出力、checkpoint ABI、trajectory表現、学習lossはOriginal DPに合わせ、HDPからはAWRの更新規則と運用ライフサイクルを借りる。</div>
+      <table>
+        <thead><tr><th>項目</th><th>HDP原論文</th><th>今回のOriginal DP適用</th><th>判断理由</th></tr></thead>
+        <tbody>
+          <tr><td>Policy</td><td>HDP固有planner</td><td>original DP checkpoint</td><td>実車置換用の単一checkpointを維持</td></tr>
+          <tr><td>Train scope</td><td>HDP decoder</td><td>DPのDiT/decoder-only</td><td>encoder表現を壊さず、更新を限定</td></tr>
+          <tr><td>Loss</td><td>velocity + waypoint hybrid</td><td>plain diffusion MSE</td><td>存在しないHDP headを仮定しない</td></tr>
+          <tr><td>Candidate</td><td>scene group</td><td>正式K=10、5 denoising steps</td><td>同一scene内の比較を維持</td></tr>
+          <tr><td>Data</td><td>nuPlan/PDM系</td><td>Tier-IV full-sequence NPZ</td><td>配備対象分布でpost-train</td></tr>
+          <tr><td>Neighbor future</td><td>実装依存</td><td>旧データは <code>raw[t+1]→aligned[t]</code></td><td>既知の1-frame offsetを全経路で統一</td></tr>
+          <tr><td>Replay</td><td>disk replay + refresh</td><td>epoch 1 mining、以後replay、10 epoch毎refresh</td><td>HDPの反復単位を忠実に再現</td></tr>
+          <tr><td>Reward-tied group</td><td>論文本文は全action同rewardをdiscard</td><td>公開agentに合わせ、有限tieは<code>std+1e-6</code>で全candidate weight 1</td><td>paper/release差分。現cacheでは6,659件（0.148%）；次armでdrop / repairを独立比較</td></tr>
+          <tr><td>EMA</td><td>論文表は0.05／公開NAVSIM releaseはdefault OFF</td><td>decay 0.999、optimizer stepごと</td><td>公開差分を隠さず、保存・評価policyを一意化</td></tr>
+          <tr><td>Checkpoint eval</td><td>EMA deployment policy</td><td>保存済みEMA、K=1、zero-noise、10 solver steps</td><td>学習中current-policy K=10/5-step診断と、配備選定を混同しない</td></tr>
+        </tbody>
+      </table>
+      <div class="callout"><strong>HDP原論文をそのまま読むと：</strong>RL ablationはclosed-loopのSuccess / Stability / Overallで比較され、HDP 75.38、HDP-RL safety reward 76.20、HDP-RL multi-reward 84.07と報告される。RL行にはopen-loop score・ADE・FDEが掲載されていない。したがって「RL後もADE/FDE不変」はHDPの採用条件ではなく、以前の資料で私たちが追加した独自条件だった。今回それを診断へ戻した。<a class="cite" href="https://arxiv.org/abs/2602.22801">HDP paper</a><a class="cite" href="../reference/papers/hyper_diffusion_planner_paper/src/neurips_2026.tex">local TeX</a></div>
+      <div class="grid g4">
+        <div class="card"><div class="tag">Corpus</div><h4>4.578M filtered</h4><p><code>is_skipped</code> を除外したfull sequence。</p></div>
+        <div class="card"><div class="tag">Replay</div><h4>4.501M unique</h4><p>fail-closed cacheから回収した98.33%。</p></div>
+        <div class="card"><div class="tag green">Compute</div><h4>8×H100</h4><p>BF16、TF32、decoder compile。</p></div>
+        <div class="card"><div class="tag amber">Update</div><h4>lr 1e−6</h4><p>grad clip 0.5、EMA 0.999。</p></div>
+      </div>
+      <div class="callout"><strong><code>is_skipped</code> filterの実数：</strong>trainは5,092,382→4,578,036（514,346 / 10.10%除外）、validは53,008→46,068（6,940 / 13.09%除外）。元listはread-onlyで保持し、filtered listのSHA-256と<code>neighbor_future_alignment_offset=1</code>をmanifestへ固定した。</div>
+      <div class="callout warn"><strong>現在runのcoverage：</strong>失敗したcache tailをゼロ埋めで公開せず、8 rankの完全prefix 4,501,440 group（filtered corpusの98.33%）だけを回収した。各epochは最大rankに合わせて2,962 batch × 8 rank × 192 = 4,549,632 groupをwith-replacementで抽選する。したがって「大規模full-sequence post-training」とは言えるが、残り76,596 sceneを補うまでは「train corpus 100% coverage」とは言わない。</div>
+      <div class="callout good"><strong>最小cost backfillは準備・dry-run済み：</strong>seed 3408のepoch-1 shuffleを再構成し、8 rankすべてで公開済みpathがdeterministic prefixと完全一致することを検証した。欠損はreal 76,596件 + padding 780件、重複0・想定外path 0で、独立set差分のhashも一致する。学習中の2.5 TB memmapは変更せず、終了後だけ既存array tailへ追記する。packed batchが失敗した場合は再帰的にsingle sceneまで隔離し、1 sceneでも生成不能ならstrict closeを維持して中断する。<a href="../../Diffusion-Planner-t4-main/outputs/awr_t4_full_sequence_filtered/replay_tail_backfill_plan/manifest.json">prefix plan</a> · <a href="../../Diffusion-Planner-t4-main/outputs/data/full_sequence_replay_backfill_audit.json">independent set audit</a></div>
+    </section>
+
+    <section id="pipeline">
+      <h2>4. 完全なpost-training pipeline</h2>
+      <p class="lead">一つのlossではなく、入力契約・候補生成・採点・replay・評価・promotionまでを含む再現可能な運用単位として定義する。</p>
+      <div class="grid g2">
+        <div class="gate"><div class="n">01</div><div><h4>Data contract</h4><p>filtered NPZ、scene hash、train/valid分離、neighbor +1 alignmentを固定する。</p></div></div>
+        <div class="gate"><div class="n">02</div><div><h4>Scene batch</h4><p>B scenesを同じego-frameへ変換し、map・route・signal・neighbor maskを検査する。</p></div></div>
+        <div class="gate"><div class="n">03</div><div><h4>B×K candidate sampling</h4><p>1回のbatched decoder samplingでK本を生成。各candidateは独立Gaussian noiseを持つ。</p></div></div>
+        <div class="gate"><div class="n">04</div><div><h4>OBB-aware evaluator</h4><p>collision、clearance、RB、kinematic、red-lightを先に、route/follow/progress/comfortを後に計算。</p></div></div>
+        <div class="gate"><div class="n">05</div><div><h4>Group weight</h4><p>scene内でrewardを正規化し、AWR weight、ESS、top-one share、valid groupを記録。</p></div></div>
+        <div class="gate"><div class="n">06</div><div><h4>Disk replay</h4><p>epoch 1は全量candidate cacheを構築。後続epochはfrozen groupをwith-replacementで再利用。</p></div></div>
+        <div class="gate"><div class="n">07</div><div><h4>DP update + EMA</h4><p>reward-weighted plain MSEでdecoderを更新し、有効update後だけEMAを進める。</p></div></div>
+        <div class="gate"><div class="n">08</div><div><h4>EMA paired evaluation / promotion</h4><p>保存済みEMAをK=1・zero-noise・10 solver stepsでsourceと比較。2,048場面screen後、最大3候補を46,068場面で評価する。</p></div></div>
+      </div>
+      <div class="callout warn"><strong>現在の正式run：</strong>epoch 1で生成済みのfrozen candidate groupsを再利用し、epoch 2以降をwith-replacement replayで継続する。学習中のK=10/5-step current-policy評価は傾向診断に限定し、checkpoint選定は実際に配備するEMAのK=1/10-step評価だけで行う。</div>
+      <div class="callout warn"><strong>epoch数の再現境界：</strong>公開HDP configは<code>replay_buffer_update_epoch=10</code>かつtrainer上限<code>total_epochs=10000</code>だが、論文は「10000 epochが必要条件」とは示していない。今回のepoch 1 mining + epoch 2–10 replayは、公開実装の<strong>最初の1 refresh cycle</strong>を再現するもので、10000 epochのbit-exact horizon再現ではない。保存EMAのfull paired結果が合格する場合だけ、最新policyで次cacheをre-mineしてcycleを継続する。不合格のreward/lossを999 cycle反復しても改善証拠にはならない。</div>
+      <div class="callout"><strong>noiseを混同しない：</strong>mining cacheのK=10は、公開HDP samplingに合わせて<strong>10本すべて</strong>を独立<code>N(0,I) × 0.5</code>から生成し、さらにtrajectory augmentation std 0.5 mを適用する。zero-noise anchorは含まない。一方、学習monitorは比較を再現可能にするためcandidate 0だけをzero-noiseにし、残り9本をnoise 0.5、augmentationなしで評価する。したがって<code>Rdet</code>はmonitor専用の決定論的policy値であり、formal replay図のcandidate 0を意味しない。</div>
+      <div class="callout"><strong>OBB座標契約：</strong>Original DPのego trajectory点は車体中心ではなく後軸基準。rewardと図ではbox中心を進行方向へ <code>0.5 × wheelbase</code> 移す。neighborはbox中心基準。ここを同じ扱いにすると、数値上はcollisionでも図では離れて見える誤可視化になる。</div>
+    </section>
+
+    <section id="metrics">
+      <h2>5. 指標は「何を解決するか」で読む</h2>
+      <div class="formula"><span class="c">R<sub>formal</sub></span> = CollisionGate × DAC(RoadBorder) × KinematicGate<br>　× (5·TTC + 5·Expert-route Progress + 2·Lane Robustness + 2·Comfort) / 14</div>
+      <p class="small">これは今回の <code>reward_profile=hdp_pdm</code> の<strong>T4実装契約</strong>。公開HDP/NAVSIM agentが実際に呼ぶPDMScorerの重み（TTC 5 / EP 5 / LK 2 / HC 2）を基準にしたが、bit-exactなNAVSIM scoreではない。T4 NPZにはNAVSIMのmetric cache、route object、intersection layer、human-history comfort objectがないため、DAC・EP・LK・HCは下表のproxyへ写像し、実行不能軌跡を除くkinematic gateを追加した。red-light、明示的THW/car-following、R2LPL expert-likenessはこのformal totalへ入れていない。</p>
+      <h3>Checkpoint選定の「平均標準」：一つのscene scoreを全sceneで平均する</h3>
+      <div class="formula"><span class="c">Dataset Score(π)</span> = 100 × (1/N) · Σ<sub>s=1..N</sub> R<sub>formal</sub>(π, s)<br><span class="c">ΔScore</span> = 100 × mean<sub>s</sub>[R<sub>formal</sub>(π<sub>AWR</sub>,s) − R<sub>formal</sub>(π<sub>source</sub>,s)]<br><span class="g">checkpoint rank</span> = paired-bootstrap 95% CI の下限が最大のepoch</div>
+      <div class="callout good"><strong>ここが採用判定の主軸：</strong>同じ46,068 sceneでsourceと保存EMAを成対比較し、<code>ΔScore</code>の95% CI下限が0より大きければ「この評価分布の平均scoreが上がった」と判定する。ADE/FDE、collision、road-border、kinematic、lane-change、停止場面は、改善理由と残存リスクを説明する<strong>診断内訳</strong>であり、単独のpromotion vetoにはしない。これは「安全を無視する」のではない。collision / DAC / kinematicはすでにscene scoreの乗算gateとして強く効き、さらにevent遷移を別表で公開する。</div>
+      <table>
+        <thead><tr><th>根拠</th><th>論文・公式実装が最終的に比較する値</th><th>今回へ移したknow-how</th></tr></thead>
+        <tbody>
+          <tr><td><a href="https://arxiv.org/abs/2602.22801">HDP</a> / <a href="../reference/external/Hyper-Diffusion-Planner/HDP-navsim/hdp_navsim/agent/dp_vla/dp_vla_rl_agent.py">code</a></td><td>実車はSuccessとStabilityの平均、公開NAVSIM RL agentはscene scoreのmeanを<code>PDMS</code>として記録</td><td>RL後のADE/FDE維持を別hard gateにせず、総合scoreでcheckpointを見る</td></tr>
+          <tr><td><a href="https://github.com/autonomousvision/navsim/blob/main/docs/metrics.md">NAVSIM PDMS / EPDMS</a></td><td>sceneごとにhard multipliers × weighted qualityを計算し、datasetへ集約</td><td>T4もhard safetyとqualityを同じscene score内で統合</td></tr>
+          <tr><td><a href="https://arxiv.org/abs/2601.12901">PlannerRFT</a></td><td>全scenarioの最終scoreを平均し、collision / TTC / drivable / comfort / progressを内訳報告</td><td>全体scoreを主指標、componentを説明用診断にする</td></tr>
+          <tr><td><a href="https://arxiv.org/abs/2502.19908">CarPlanner</a></td><td>closed-loop scoreを主評価。open-loop指標改善がclosed-loopを悪化させる例も報告</td><td>ADE/FDEを最終目的にしない。次段でreactive / real-carを追加する</td></tr>
+          <tr><td><a href="https://arxiv.org/abs/2410.05582">Gen-Drive</a></td><td>Overall / Collision / Progressを並べ、総合scoreがpeakの学習stepを採用</td><td>epoch最大ではなく、held-out平均scoreでearly selectionする</td></tr>
+          <tr><td><a href="https://arxiv.org/abs/2502.13144">RAD</a> / <a href="https://arxiv.org/abs/2604.15308">RAD-2</a></td><td>closed-loop collision・drivable・success・progress・comfortを平均率として比較</td><td>componentを隠さず、ただし全項同時完全改善を必須にしない</td></tr>
+          <tr><td><a href="https://arxiv.org/abs/2606.19836">World Engine</a> / <a href="https://opendrivelab.com/WorldEngine/">project</a></td><td>open-loop PDMSとclosed-loop SR / EP / PDMS*を分離</td><td>open-loop full validation合格後も、実車主張にはclosed-loop evidenceを要求</td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead><tr><th>指標</th><th>運転上の質問</th><th>良い方向</th><th>注意点</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Collision / OBB clearance</strong></td><td>ego boxがneighbor boxと重なるか、TTC lookaheadの余白は何mか</td><td>collision=0、clearance大</td><td><strong>formal hard gate</strong>。点距離ではなくyaw付きOBB</td></tr>
+          <tr><td><strong>TTC</strong></td><td>1秒lookahead内でOBB conflictへ近づくか</td><td>時間・空間余裕大</td><td><strong>formal quality</strong>。neighbor +1 alignment必須</td></tr>
+          <tr><td><strong>Road border / DAC proxy</strong></td><td>走行可能領域の境界を車体が越えたか</td><td>violation=0</td><td><strong>formal hard gate</strong>。NAVSIM polygon DACのT4 proxy。中心点ではなくfootprint</td></tr>
+          <tr><td><strong>Red light</strong></td><td>active stop lineを越えたか</td><td>violation=0</td><td>監視/probe。formal totalへ追加するなら別ablation</td></tr>
+          <tr><td><strong>Lane robustness / LK proxy</strong></td><td>routeに沿った自然な形状か</td><td>route likeness高</td><td><strong>formal quality</strong>。連続centerline score。現runのexpert maskはlane-union外への逸脱をscene単位で中和</td></tr>
+          <tr><td><strong>Expert-route Progress (EP)</strong></td><td>logged expert polyline上で必要な前進をしたか</td><td>hard-safe内で高</td><td><strong>formal quality</strong>。単なる終点距離ではない</td></tr>
+          <tr><td><strong>Comfort</strong></td><td>smoothnessと加速度feasibilityが良いか</td><td>score高</td><td><strong>formal quality</strong>。safetyを補償しない</td></tr>
+          <tr><td><strong>THW / car-following</strong></td><td>leaderへの時間gapが適切か</td><td>active sliceで改善</td><td>今回formal外。leader-present限定ablation候補</td></tr>
+          <tr><td><strong>ESS</strong></td><td>実質何本のcandidateが更新に寄与したか</td><td>高い</td><td>低ESSは少数候補への過集中</td></tr>
+        </tbody>
+      </table>
+      <div class="callout good"><strong>実装監査：</strong>rewardのsynthetic / golden / hard-gate test 85件と、旧T4 neighbor futureの<code>raw[t+1] → aligned[t]</code>回帰test 5件は全件pass。これに実T4 geometryのA/B/C層図を重ねる。unit testは式の退行を防ぐ証拠、scene probeは幾何の意味を確認する証拠、最終46,068-scene paired evaluationはmodel改善を判定する証拠であり、三者を混同しない。</div>
+      <div class="callout"><strong>HDPのlaneを正確に分ける：</strong>論文Appendixのmulti-rewardは、centerlineから半車線幅程度まで減衰する連続scoreを平均し、expertがoff-lane / lane-changeのsceneをmaskする。公開NAVSIM code側のPDMScorerは別実装で、route centerlineから0.5 m超の偏差が2.0 s連続した場合だけLK=0とし、intersection中は数えない。今回のT4 formal runはPDMの重みを使いながら、LK値はT4 route tensor上の連続scoreで代用し、expertが近傍lane polygonの<strong>union外へ出るscene</strong>だけを中和する。shared boundaryは内部境界として除かれるため、隣接lane間の通常変更を完全に検出するmaskではない。なお<code>lane_gate_enabled=false</code>なので、lane scoreだけで候補をhard-zeroにはしない。</div>
+      <div class="callout warn"><strong>実データlane監査：</strong>学習monitorと同一のfrozen valid 2,048 sceneを独立logged-future detectorへ通すと、非静止1,822件中86件をlane changeと判定した。actual/predicted strataから335件を選び、現formal maskをsceneごとに正確に再計算すると、その86件のうちmask activeは14件（diagnostic recall 16.3%）、非変道labelへのmask activeは51件だった。独立detector自体もground truthではないが、現primitiveがshared lane boundaryを跨ぐ通常変道ではなくlane-union外逸脱を主に検出することは、実map＋OBBの四分類visualでも確認できる。次回refreshでは、current turn indicator（2/3）、route topology、logged closest-lane遷移を事前sidecarへ統合し、precision/recallとturn/intersection sliceを固定してからmaskへ入れる。<a href="../../Diffusion-Planner-t4-main/outputs/awr_t4_full_sequence_filtered/lane_change_semantic_audit_monitor2048.json">lane-change audit</a> / <a href="../../Diffusion-Planner-t4-main/outputs/awr_t4_full_sequence_filtered/lane_mask_semantic_audit_monitor2048.json">formal-mask audit</a></div>
+      <table>
+        <thead><tr><th>独立detector lane-change slice（n=86）</th><th>Source</th><th>Epoch 8 current</th><th>paired差 [95% CI]</th></tr></thead>
+        <tbody>
+          <tr><td>Det reward ↑</td><td class="numc">0.8829</td><td class="numc">0.9016</td><td class="numc">+0.0187 [−0.0037, +0.0524]</td></tr>
+          <tr><td>Road-border hard event ↓</td><td class="numc">2 / 86</td><td class="numc">0 / 86</td><td>2 recovered / 0 new</td></tr>
+          <tr><td>ADE ↓</td><td class="numc">2.908 m</td><td class="numc">3.175 m</td><td class="numc">+0.268 m [+0.175, +0.362]</td></tr>
+          <tr><td>FDE ↓</td><td class="numc">6.512 m</td><td class="numc">7.192 m</td><td class="numc">+0.680 m [+0.464, +0.891]</td></tr>
+          <tr><td>Smoothness score ↑</td><td class="numc">−0.864</td><td class="numc">−0.910</td><td class="numc">−0.0464 [−0.1019, +0.0088]</td></tr>
+        </tbody>
+      </table>
+      <p class="small"><strong>読み方：</strong>これはepoch 8のcurrent-policy K=10 / 5-step診断であり、保存EMAのpromotion結果ではない。lane-change sliceではroad-border eventを2件回収した一方、reward改善のCIは0を跨ぎ、ADE/FDEとsmoothnessはlogged behaviorから離れる方向にある。したがって「lane-changeも改善済み」とは結論しないが、このsliceだけで全体score改善を否決もしない。最終EMA K=1/10-step × full 46,068の平均scoreを待ち、lane sidecarは原因説明と次のreward ablationへ使う。<a href="../../Diffusion-Planner-t4-main/outputs/awr_t4_full_sequence_filtered/lane_change_eval_slice_epoch008_monitor2048.json">paired slice JSON</a></p>
+      <figure><img loading="lazy" src="t4_rl_assets/t4_metric_gallery.png" alt="T4 RL historical metric guide"><figcaption><strong>Historical diagnostic / formal rewardではない。</strong> 過去のstable G=32 validation rowを使った指標ガイド。A–Fは運転品質、Gはreward相関、Hはweight/ESS、Iはsource baselineとの比較。異なる意味の数値を一つのtotalへ押し込まない。</figcaption></figure>
+      <h3>数字を実シーンへ戻す：metric → geometry → evidence</h3>
+      <div class="figure-grid">
+        <figure><img loading="lazy" src="t4_conference_assets/formal_replay_safety/scene_002.gif" alt="正式K10 replayで3.9秒の移動車衝突を示す80フレームGIF"><figcaption><span class="tag green">A · FORMAL</span><strong>Collision / TTC OBB：</strong>candidate #9は3.9 sでrecorded neighborと重なり、signed clearance −0.11 m、reward 0、AWR weight 0.15。安全上位はweight 1.65。右下EVENT CAMERAが同じ時刻の双方OBBを拡大する。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/formal_replay_safety/scene_000.gif" alt="正式K10 replayでroad-border footprint crossingを示す80フレームGIF"><figcaption><span class="tag green">A · FORMAL</span><strong>Road border：</strong>同一groupの8本はhard-safe、2本は0.1 sで車体footprint margin 0.01 mとなりhard-zero。中心点ではなく車体四隅とborderの関係をEVENT CAMERAで読む。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_rl_assets/t4_scene_red_light_stop_dashboard.png" alt="赤信号rewardの構造化counterfactual probe"><figcaption><span class="tag violet">C · PROBE</span><strong>Red light / progress：</strong>hard hold / stop-before-lineは正、go-on-redは0。これはmodelが複数行動をsampleした証拠ではなく、progressがred constraintを上書きしないことのevaluator単体試験。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_rl_assets/t4_scene_moving_crossing_dashboard.png" alt="動的交差場面の構造化counterfactual reward probe"><figcaption><span class="tag violet">C · PROBE</span><strong>Collision / TTC interaction：</strong>recorded neighborがcorridorへ入る実geometryで、fast approachはsigned OBB overlapにより0、brake / yield候補は幾何的に安全な場合だけ残ることを単体検査する。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_rl_assets/t4_scene_stopped_leader_dashboard.png" alt="停止先行車場面の構造化counterfactual reward probe"><figcaption><span class="tag violet">C · PROBE</span><strong>Following / anti-stopping：</strong>約5 m前方の停止車に対し、安全停止を保持しながら、progress pushやtailgateをoccupancy / TTCで落とせるかを見る。THW追加時のactive-slice testにも使う。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_rl_assets/t4_scene_tight_right_turn_dashboard.png" alt="急カーブのroute lane border reward probe"><figcaption><span class="tag violet">C · PROBE</span><strong>Lane / route / comfort：</strong>logged turnと滑らかなturnを残し、straight shortcutを下げる。正常な横移動を一律lane hard-gateにしない理由を幾何で示す。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/lane_mask_audit/lane_mask_audit.gif" alt="lane transition labelとformal maskの四分類を示す実scene動的監査"><figcaption><span class="tag violet">REAL VALID AUDIT</span><strong>Lane mask accuracy：</strong>covered / missed / over-exempt / controlを同じ形式で公開。各panelのOBB zoomはscene固有wheelbaseと旧neighbor +1 alignmentを使用し、統計だけでなく実際にどの道路形状をmaskが拾う・落とすかを示す。</figcaption></figure>
+      </div>
+      <div class="callout warn"><strong>Followingの扱い：</strong>今回のformal profileは公開HDP agentが呼ぶPDM totalの項と重みを優先し、T4上でTTC・expert-route progress・lane robustness・comfortへ適配した。一方、HDP論文Appendixで最良結果に使われたmulti-rewardはrisk / car-following / lane（1 / 3 / 2.5）であり、公開NAVSIM実装との間に表現差がある。停止leader図は「sourceが停止を保持できる」controlであり、現K候補にtailgate対比がないため改善証拠にはしない。paper-style THW/car-followingはleader-present sliceで別profileとして独立ablationし、現在のrunへ後付けしない。</div>
+    </section>
+
+    <section id="scenes">
+      <h2>6. 実シーンで「AWRが何を復習するか」を見る</h2>
+      <p class="lead">最初の4例は、正式full-sequence runのepoch-1 replay cacheから直接読んだK=10 group。各軌跡・reward・AWR weightは図のために再生成していない。したがって「このsceneで何が重く学習されたか」を候補単位で監査できる。</p>
+      <div class="legend"><span><i class="dot green"></i>hard-feasible candidate</span><span><i class="dot red"></i>collision / road-border / kinematic hard-zero</span><span><i class="dot orange"></i>recorded neighbor OBB</span><span>× = 最初のgate frame</span></div>
+      <div class="callout"><strong>図の読み方：</strong>赤線=road border、青線=route、緑破線=logged expert、彩色線=K candidates。左下のEVENT ZOOMとGIF内EVENT CAMERAは同じgate時刻を拡大する。<code>TTC OBB min</code>はlookahead内のsigned clearance、<code>RB min</code>はego footprintとroad borderのmargin。Lane IN/OUTは診断でありhard gateではない。</div>
+
+      <h3>6.1 移動neighbor：collision候補を下げ、安全候補を残す</h3>
+      <div class="figure-grid">
+        <figure><img loading="lazy" src="t4_conference_assets/formal_replay_safety/scene_002.png" alt="正式K10 replayの3.9秒collisionとAWR reward table"><figcaption><span class="tag green">A · FORMAL r0:114</span>8/10 hard-safe。#9は3.9 sでOBB overlap −0.11 m、reward 0 / weight 0.15。上位安全候補はreward 0.989 / weight 1.65。#10のroad-border zeroも表で分離する。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/formal_replay_safety/scene_002.gif" alt="3.9秒collisionの80フレーム動的replay"><figcaption>80 frames × 10 Hz。0–4 sはreward対象、以後はcontext-only。EVENT CAMERAで失敗ego（赤）・安全ego（緑）・衝突neighbor（橙）を同一時刻で比較する。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/formal_replay_safety/scene_003.png" alt="正式K10 replayの2.8秒collisionとAWR reward table"><figcaption><span class="tag green">A · FORMAL r0:186</span>9/10 hard-safe。#10は2.8 sでsigned clearance −0.02 m、reward 0 / weight 0.06。上位はreward 0.953 / weight 1.45。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/formal_replay_safety/scene_003.gif" alt="2.8秒collisionの80フレーム動的replay"><figcaption>長い直進軌跡でもbboxを読めるよう、全体固定カメラとmetric-scale event cameraを併置。後軸基準ego OBBを使用する。</figcaption></figure>
+      </div>
+
+      <h3>6.2 Road border：中心点ではなく車体footprintで越境を止める</h3>
+      <div class="figure-grid">
+        <figure><img loading="lazy" src="t4_conference_assets/formal_replay_safety/scene_000.png" alt="正式K10 replayのroad-border crossing対比"><figcaption><span class="tag green">A · FORMAL r0:0</span>8本safe / 2本crossing。safe top weight 1.67に対し、RB@0.1 s候補は0.15。lane OUTでもborderを越えないcandidateはhard-zeroにしない。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/formal_replay_safety/scene_000.gif" alt="road-border crossingの80フレームGIF"><figcaption>EVENT CAMERAは0.1 sのego四隅とborderを拡大。中心軌跡だけを見ると見落とす越境を説明する。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/formal_replay_safety/scene_001.png" alt="別sceneのroad-border crossing対比"><figcaption><span class="tag green">A · FORMAL r0:4</span>7本safe / 3本crossing。safe top weight 1.91、hard-zero 0.23。lane diagnosticは5/10 INだが、hard判定はroad borderで独立に行う。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/formal_replay_safety/scene_001.gif" alt="別sceneのroad-border crossing動的replay"><figcaption>正常なroute-followingとedge cuttingを時間方向に比較。lane changeを禁じず、road-edge footprint crossingだけを止める。</figcaption></figure>
+      </div>
+
+      <h3>6.3 B層source controls + C層metric probes：何を証明していないかも示す</h3>
+      <div class="figure-grid">
+        <figure><img loading="lazy" src="t4_conference_assets/awr_colleague_hdp_aug/scene_000.gif" alt="source policyの赤信号全候補停止control"><figcaption><span class="tag">B · COVERAGE</span>赤信号sceneのK=16はほぼ全候補が停止する。保持能力のcontrolにはなるが、go/stop contrastがないため「red rewardが改善した」証拠にはしない。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/awr_colleague_hdp_aug/scene_002.gif" alt="source policyの停止leader control"><figcaption><span class="tag">B · COVERAGE</span>停止leader sceneも候補がtight bundle。安全な停止を維持するcontrolであり、tailgate候補を下げた証拠ではない。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/awr_colleague_hdp_aug/scene_003.png" alt="source policyのtight turn route診断"><figcaption><span class="tag">B · COVERAGE</span>tight turnで合法な横移動を確認。lane crossingを一律hard gateにしない設計とroute/borderの整合を人手監査する。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_rl_assets/t4_scene_red_light_stop_dashboard.png" alt="赤信号counterfactual metric probe"><figcaption><span class="tag violet">C · PROBE</span>同じ実sceneにhard hold / stop-before-line / go-on-redを構造的に与えたevaluator試験。model outputではないが、red gateがprogressを上書きすることを確認できる。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_rl_assets/t4_scene_red_light_stop.gif" alt="赤信号counterfactual best/worstの動的OBB probe"><figcaption><span class="tag violet">C · DYNAMIC PROBE</span>実map上でhard holdとroll-toward-lineを時間展開。40 timestamps（0.2 s間隔）で、旧T4 neighborは+1 aligned、ego boxはscene固有wheelbaseを使用する。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_rl_assets/t4_scene_moving_crossing.gif" alt="動的交差counterfactualの動的OBB probe"><figcaption><span class="tag violet">C · DYNAMIC PROBE</span>brake / yield / fast-approachの差をrecorded moving neighborと同期再生し、signed OBB clearanceが負になる時刻を可視化する。model sampleではなくreward境界のunit test。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_rl_assets/t4_scene_stopped_leader.gif" alt="停止先行車counterfactualの動的OBB probe"><figcaption><span class="tag violet">C · DYNAMIC PROBE</span>hard hold / crawl / tailgate候補を実map・actor geometry上で比較する。formal profileにTHWを追加する前に、leader-present sliceで何を区別すべきかを固定する。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_rl_assets/t4_scene_tight_right_turn.gif" alt="急カーブcounterfactual best/worstの動的OBB probe"><figcaption><span class="tag violet">C · DYNAMIC PROBE</span>logged right turnとstraight shortcutを動的比較。これはmodel outputではなく、route/lane scoreがどの形状差を読むかの単体試験。</figcaption></figure>
+      </div>
+    </section>
+
+    <section id="multi">
+      <h2>7. 多様性はendpointの数字だけではない</h2>
+      <p class="lead">同じreal scene、同じsource checkpoint、同じseedでraw sampleとHDP-style trajectory augmentationを比較する。全16本のfuture、endpoint pairing、8秒の時間展開を一枚で読む。Best-of-K性能と候補多様性を分けて報告するDiffusionDriveV2、および短期pivotを共有し長期branchを生成するCoPlannerの考え方に合わせ、単なるendpoint jitterを「多モード」と数えない。<a class="cite" href="https://arxiv.org/abs/2512.07745">DiffusionDriveV2</a><a class="cite" href="https://arxiv.org/abs/2509.17080">CoPlanner</a></p>
+      <figure><img loading="lazy" src="t4_conference_assets/awr_multimodality_compare/scene_001_multimodality.png" alt="moving crossingのrawとaugmentation多様性比較"><figcaption>Moving crossingのpaired audit。各色線は一つのcomplete future。円/Xはendpoint、下左は同一seedのraw→augmented移動、下右は8秒の進行分布。</figcaption></figure>
+      <table>
+        <thead><tr><th>Scene</th><th>Sampling</th><th>Mean endpoint pair</th><th>Max pair</th><th>Components @1 m</th><th>解釈</th></tr></thead>
+        <tbody>
+          <tr><td>moving crossing</td><td>raw</td><td class="numc">1.51 m</td><td class="numc">4.86 m</td><td class="numc">2</td><td>既に幾何的分岐あり</td></tr>
+          <tr><td>moving crossing</td><td>augmentation</td><td class="numc">1.83 m</td><td class="numc">5.41 m</td><td class="numc">3</td><td>candidate coverageが拡大</td></tr>
+          <tr><td>tight turn</td><td>raw</td><td class="numc">0.82 m</td><td class="numc">2.22 m</td><td class="numc">1</td><td>routeでほぼ一意</td></tr>
+          <tr><td>tight turn</td><td>augmentation</td><td class="numc">1.12 m</td><td class="numc">3.08 m</td><td class="numc">1</td><td>spreadは増えるがsingle component</td></tr>
+        </tbody>
+      </table>
+      <div class="figure-grid">
+        <figure><img loading="lazy" src="t4_conference_assets/awr_multimodality_compare/scene_001_multimodality.gif" alt="moving crossingの多様性比較GIF"><figcaption>raw / augmentationを同時再生。分岐がいつ生まれるか、neighborがいつcorridorへ入るかを確認できる。</figcaption></figure>
+        <figure><img loading="lazy" src="t4_conference_assets/awr_multimodality_compare/scene_003_multimodality.png" alt="tight turnの多様性対照"><figcaption>近単峰のcontrol scene。noiseによるjitterを無理に「多モード能力」と呼ばないための対照。</figcaption></figure>
+      </div>
+      <div class="callout warn"><strong>科学的な境界：</strong>1 m componentは幾何clusterであり、yield / go / lane-changeの意味ラベルではない。意味的multimodalityを主張するにはfeasibility率とsemi-closed-loop / reactive evaluationが必要。</div>
+    </section>
+
+    <section id="results">
+      <h2>8. 初期実験：何が分かり、何がまだ分からないか</h2>
+      <h3>8.1 4.501M replayに、学習可能なgroup contrastはあるか</h3>
+      <figure><img loading="lazy" src="t4_conference_assets/full_replay_signal/full_replay_signal.png" alt="4.501M正式replay groupのcandidate headroom、weighted reward gain、ESS、zero reward比率"><figcaption><strong>正式epoch-1 cacheの全4,501,440 scene-group / 45,014,400 candidateを直接集計。</strong>trajectoryやencoderの2.5 TB領域は読まず、実際に学習へ使ったreward / weight memmapだけを監査した。post-training性能ではなく、更新信号のcoverageと集中度を示す。</figcaption></figure>
+      <table>
+        <thead><tr><th>Full replay fact</th><th>値</th><th>意味</th></tr></thead>
+        <tbody>
+          <tr><td>best − candidate 0 &gt; 0.01</td><td class="numc">57.2%</td><td>all-stochastic K=10内に明確により良い候補がある</td></tr>
+          <tr><td>reward=0と非0が同居</td><td class="numc">35.94%</td><td>強いscene内contrast。現memmapだけではevent種別を同定しない</td></tr>
+          <tr><td>weighted − uniform reward &gt; 0.01</td><td class="numc">59.5%</td><td>実weightがgroup内期待rewardを明確に上へ向ける</td></tr>
+          <tr><td>ESS p05 / p50 / p95</td><td class="numc">4.43 / 7.09 / 9.08</td><td>β=1は大半で一候補へcollapseしていない</td></tr>
+          <tr><td>all-zero = reward-tied group</td><td class="numc">0.148%</td><td>ranking情報なし。公開agent semanticsでは全candidate weight 1；論文本文はdiscardを指示</td></tr>
+          <tr><td>mean group weight</td><td class="numc">1.416</td><td>weight-sum非正規化のためuniform MSEより平均scaleが41.6%大きい</td></tr>
+        </tbody>
+      </table>
+      <div class="callout warn"><strong>読み方：</strong>weighted gainが99.85%のgroupで正なのは、rewardに単調な<code>exp(z)</code>を掛ける設計がcache上で正しく働いた証拠であり、modelが改善した証拠ではない。candidate index別のbest率は各約10%で、candidate 0に特別なdeterministic biasがないことも確認した。現在runはHDP忠実性を優先して<code>bc_weight=0</code>かつmean weight 1.416で学習する。ADE/FDE driftはfull pairedで公開するが、次armはdrift単独ではなく<strong>平均scene scoreをさらに上げる変更</strong>としてgroup-mean正規化、reward calibration、candidate coverageを一つずつablationする。現runへ後付けはしない。<a href="t4_conference_assets/full_replay_signal/full_replay_signal.json">exact JSON</a></div>
+
+      <h3>8.2 full-sequence runのtraining-monitor baseline</h3>
+      <p>以下は固定2,048-scene valid subsetでのepoch 0、K=10・5-step monitor評価。学習後改善ではなく、current-policyのepoch間傾向を見る基準値である。最終checkpoint選定は別途、保存EMAをK=1・zero-noise・10-stepで再評価するため、数値を混ぜない。</p>
+      <table>
+        <thead><tr><th>Metric</th><th>Baseline</th><th>意味</th></tr></thead>
+        <tbody>
+          <tr><td>Mean deterministic reward <code>Rdet</code></td><td class="numc">0.9255</td><td>source policyの決定論的planの平均score</td></tr>
+          <tr><td>Mean best group reward <code>Rbest</code></td><td class="numc">0.9348</td><td>K=10内の最高候補平均</td></tr>
+          <tr><td>Mean best safe reward</td><td class="numc">0.9572</td><td>hard-safe候補内の最高平均</td></tr>
+          <tr><td>Safe candidate count</td><td class="numc">9.689 / 10</td><td>平均で安全候補が何本あるか</td></tr>
+          <tr><td>Det collision / kinematic</td><td class="numc">0.146% / 0.049%</td><td>hard safety event率</td></tr>
+          <tr><td>Det road-border crossing</td><td class="numc">2.490%</td><td>独立して監視すべきmap constraint</td></tr>
+          <tr><td>ADE / FDE</td><td class="numc">2.621 m / 5.769 m</td><td>logged expertとの平均/終端距離</td></tr>
+        </tbody>
+      </table>
+
+      <h3>8.3 中間current-policy monitor：平均scoreは有意に上向く</h3>
+      <p>固定2,048 sceneを毎epoch同じseedで成対評価した中間診断。epoch 2–9の全候補でsource比の平均scoreが有意に改善し、CI下限で選ぶ暫定championはepoch 6（Dataset Score 92.55→94.08、Δ +1.530 point、95% CI [+0.912,+2.181]）。最新epoch 9もΔ +1.459 point [+0.815,+2.119]で第3位を維持する。これはHDP/NAVSIM型の主指標では<strong>明確に有望</strong>だが、配備対象は保存EMAのK=1/10-stepであり、このcurrent policy K=10/5-stepとは別物である。<a class="cite" href="https://arxiv.org/abs/2602.22801">HDP</a><a class="cite" href="https://github.com/autonomousvision/navsim/blob/main/docs/metrics.md">NAVSIM metrics</a></p>
+      <figure><img loading="lazy" src="t4_conference_assets/training_monitor/checkpoint_paired_sweep.png" alt="epoch 2から9のcurrent-policy mean score hard event ADE FDE成対診断"><figcaption><span class="tag green">C · CURRENT-POLICY MONITOR · N=2,048</span>主判定は上段左の平均scene score。epoch 9はDataset Score +1.459 point [95% CI +0.815,+2.119]、Best-of-K +1.449 point [+0.790,+2.094]。ADEは0.087 m、FDEは0.233 m悪化しているが、これはpolicyがlogged expertからどちらへ動いたかを読むbehavior-drift診断であり、総合score改善を単独否決しない。</figcaption></figure>
+      <figure><img loading="lazy" src="t4_conference_assets/training_monitor/hard_event_transition_audit.png" alt="epoch 2から9のcollision road-border kinematic recovered versus newly introduced scene counts"><figcaption><span class="tag amber">PAIRED HARD-EVENT DIAGNOSTIC</span>epoch 9はcollision 2回収 / 1新規、road-border 41回収 / 5新規、kinematic 0回収 / 1新規。scene scoreにはnet effectが反映される一方、この図では改善と回帰を隠さず分解する。赤棒は原因調査と実車risk reviewの対象だが、全赤棒0を論文由来の必要条件とはしない。</figcaption></figure>
+      <div class="grid g2">
+        <div class="card green"><span class="tag green">STOPPED · n=226</span><h4>受益slice</h4><p>Rdet +0.0721、road-border 17回収 / 0新規、FDE 0.149 m改善。安全停止を壊す一様なprogress pushではない可能性がある。</p></div>
+        <div class="card red"><span class="tag red">LANE-CHANGE · n=86</span><h4>未解決slice</h4><p>road-border 2回収 / 0新規だが、reward CIは0を跨ぎ、ADE +0.268 m、FDE +0.680 m、smoothness −0.0464。次refreshのlane-mask / reward診断対象。</p></div>
+      </div>
+      <div class="callout good"><strong>中間判定：</strong>平均score改善はepoch 2–9を通じて統計的に明確で、方法は有望。ADE/FDE・smoothness・新規eventはcheckpointを自動失格にする条件ではなく、何が変わったかを説明する診断として保持する。正式結論だけは、同じ基準を保存EMA × full 46,068 sceneに適用するまで保留する。終評8 sceneにはstopped受益、lane-change最大drift、hard-event回収と新規発生を対称に含め、双方bbox/GIFで確認する。<a href="t4_conference_assets/training_monitor/epoch_006_paired_scorecard.png">暫定champion epoch 6 scorecard</a> / <a href="t4_conference_assets/training_monitor/manifest.json">generator manifest</a></div>
+
+      <h3>8.4 過去の小規模AWR診断</h3>
+      <table>
+        <thead><tr><th>Run</th><th>Selection</th><th>EPDMS</th><th>Max weight</th><th>ESS</th><th>判定</th></tr></thead>
+        <tbody>
+          <tr><td>SFT source</td><td class="numc">6.974061</td><td class="numc">0.850135</td><td class="numc">—</td><td class="numc">—</td><td>baseline</td></tr>
+          <tr><td>G=8, β=.5, 1 epoch</td><td class="numc">6.973339</td><td class="numc">0.850172</td><td class="numc">3.064</td><td class="numc">0.828</td><td>not accepted</td></tr>
+          <tr><td>G=32, β=1, epoch 2</td><td class="numc">6.973062</td><td class="numc">0.850009</td><td class="numc">64.094</td><td class="numc">0.526</td><td>not accepted</td></tr>
+        </tbody>
+      </table>
+      <figure><img loading="lazy" src="t4_rl_assets/t4_rl_diagnostics.png" alt="過去のT4 AWR診断"><figcaption>過去のG=8/G=32診断。total rewardとの相関はprogress 0.532、lane 0.414に対し、risk 0.094、safety 0.014。G=32はmax weight約64×、ESS 0.526で更新が集中した。</figcaption></figure>
+      <div class="grid g3">
+        <div class="card green"><h4>確認できたこと</h4><p>Original DPでK-group生成、reward評価、AWR重み、decoder update、EMA、replayの経路は実行可能。</p></div>
+        <div class="card amber"><h4>確認できていないこと</h4><p>held-out全体性能を上げる受理可能checkpoint。loss低下やtrain reward上昇だけでは証明にならない。</p></div>
+        <div class="card red"><h4>最大の課題</h4><p>安全項のgroup内contrastとcandidate coverage。全候補が悪いsceneはAWR weightingだけでは修復できない。</p></div>
+      </div>
+    </section>
+
+    <section id="r2lpl">
+      <h2>9. R2LPLはAWR candidate生成の参考として限定吸収する</h2>
+      <p class="lead">R2LPLはpolicyが自ら作った失敗状態を再現し、実行可能なrepair targetを検索して学び直すlifelong loop。今回の範囲はAWRだけなので、独立Repair SFT branchは作らず、「選べる正解がないgroupへ候補を足す」生成技術としてだけ利用する。<a class="cite" href="https://arxiv.org/abs/2606.30537">R2LPL paper</a><a class="cite" href="../reference/external/Learning-from-Mistakes-Rollout-Retrieval-Lifelong-Policy-Learning-for-Autonomous-Driving/README.md">reference code</a></p>
+      <div class="flow">
+        <div class="node"><div class="num">1</div><h4>Chunk</h4><p>実driveを8秒・80 stepへ分割。</p></div>
+        <div class="node"><div class="num">2</div><h4>Reproduce</h4><p>egoをsemi-closed-loop、neighborをlog replay。</p></div>
+        <div class="node"><div class="num">3</div><h4>Detect</h4><p>realized violationとexpert disagreementを分離。</p></div>
+        <div class="node"><div class="num">4</div><h4>Retrieve</h4><p>K samples + stop/slow/morphからfeasible targetを選ぶ。</p></div>
+        <div class="node"><div class="num">5</div><h4>Train / re-mine</h4><p>fresh repairとbounded memoryを学び、再探索。</p></div>
+      </div>
+      <figure><img loading="lazy" src="../reference/external/Learning-from-Mistakes-Rollout-Retrieval-Lifelong-Policy-Learning-for-Autonomous-Driving/docs/assets/r2lpl_framework.png" alt="R2LPL framework"><figcaption>R2LPL公開framework。T4ではnuPlan/Müvo依存をそのまま移植せず、NPZ scene、OBB evaluator、DP diffusion lossへ置き換える。</figcaption></figure>
+      <div class="grid g2">
+        <div class="card violet"><span class="tag violet">AWRへ吸収</span><h4>mistake miningと候補retrieval</h4><p>collision/border violation、model waits/goes/lag/overshootをevent化し、retrieved repairを既存Kへ追加して同じrewardで再採点する。</p></div>
+        <div class="card amber"><span class="tag amber">条件付き候補</span><h4>expert likeness / morph</h4><p>logged stateに近い時だけexpert priorを使い、6 m超またはheading 60°超ではlikenessを落とす。feasible化できない候補はAWR groupへ入れない。</p></div>
+      </div>
+      <div class="callout stop"><strong>今回やらないこと：</strong>R2LPL原版の独立Repair SFT、別bounded memory、別checkpoint。採用するのはcandidate enrichmentだけで、学習は一貫してOriginal-DP AWRのloss / replay / EMAを使う。</div>
+    </section>
+
+    <section id="proposal">
+      <h2>10. 提案：T4-DP-AWR+ 単一post-training framework</h2>
+      <div class="decision">
+        <div class="lane">
+          <span class="tag">CANDIDATE POOL A · Faithful HDP</span>
+          <h3>Full-data Original DP AWR</h3>
+          <ul>
+            <li>4.578M filtered scenesを主分布として維持</li>
+            <li>正式baselineはK=10、plain MSE、HDP lifecycle</li>
+            <li>hard safety → risk margin → route/progress/comfortの順で評価</li>
+            <li>weight clip、target ESS、small BC/SFT anchorをablation</li>
+            <li>source / turn / stop / leader / red sliceでregression監視</li>
+          </ul>
+        </div>
+        <div class="lane repair">
+          <span class="tag violet">CANDIDATE POOL B · Enrichment</span>
+          <h3>All-zero / low-coverage groupだけ拡張</h3>
+          <ul>
+            <li>policy-induced violation/disagreementだけを対象</li>
+            <li>structured stop/slow/lateral + retrieval/morphをKへ追加</li>
+            <li>collision/border/red/dynamicsで同じhard filter</li>
+            <li>既存候補と一緒にreward / AWR weightを再計算</li>
+            <li>同じDP loss、disk replay、EMAへ統合</li>
+          </ul>
+        </div>
+      </div>
+      <h3>実cacheから決めるrouting比率</h3>
+      <table>
+        <thead><tr><th>正式replay stratum</th><th>scene-groups</th><th>mean weighted gain / ESS</th><th>提案する扱い</th></tr></thead>
+        <tbody>
+          <tr><td>K=10すべてreward非0</td><td class="numc">2,876,942（63.91%）</td><td class="numc">+0.0104 / 6.42</td><td>Broad quality AWR。quality componentの差を学び、全体平均scoreへの寄与を測る</td></tr>
+          <tr><td>reward 0 / 非0が混在</td><td class="numc">1,617,839（35.94%）</td><td class="numc">+0.2080 / 7.89</td><td>Reward-contrast AWRを優先。event sidecarでsafety subsetを分層</td></tr>
+          <tr><td>K=10すべてreward 0</td><td class="numc">6,659（0.148%）</td><td class="numc">0 / 10.0</td><td>AWR ranking不能。候補を拡張して再採点し、なお全不適ならskip</td></tr>
+        </tbody>
+      </table>
+      <div class="callout good"><strong>データ駆動の最強案：</strong>全量を同じ確率で何epochも回すだけではなく、上の三層を同一AWR schedulerの第一段にする。mixed groupは強い候補差を持つ主戦場、no-zero groupは一般運転・imitation保持、all-zeroはcandidate enrichment対象である。ただしreward=0はcollisionの同義語ではないため、collision / RB / kinematic / redのevent bitをsidecarへ保存し、closed-loop overrideとmode-coverage不足も拡張条件へ加える。別SFT branchは作らず、拡張後も同じAWR objectiveへ戻す。</div>
+      <h3>学習・評価・可視化を同じ事実へ固定するevent sidecar</h3>
+      <p>次回cacheではtrajectoryとは別に、下の小さな行指向sidecarをcandidateごとに保存する。これにより、reward 0を安全eventと誤解せず、replay routing、critical-slice評価、改善/回帰sceneの自動可視化を同じ判定値から作れる。</p>
+      <table>
+        <thead><tr><th>Field family</th><th>必須field</th><th>使い道</th></tr></thead>
+        <tbody>
+          <tr><td>Identity / provenance</td><td><code>scene_hash, split, source_ckpt_hash, group_id, candidate_id, reward_profile_hash</code></td><td>scene重複、別checkpoint、別reward実装の混入をfail-closed</td></tr>
+          <tr><td>Sampling</td><td><code>noise_seed, noise_scale, solver_steps, augmentation_seed</code></td><td>候補をbit-levelで再生成し、多様性とjitterを区別</td></tr>
+          <tr><td>Hard-event geometry</td><td><code>collision, rb, kinematic, red, first_event_step, min_obb_clearance, min_rb_margin</code></td><td>safe count、recovered/new event、event-camera時刻を一意に決める</td></tr>
+          <tr><td>Reward components</td><td><code>ttc, progress, lk, hc, total, weight</code></td><td>totalだけでなく、どの項がrankingを変えたか監査</td></tr>
+          <tr><td>Scene semantics</td><td><code>is_skipped, lane_mask_reason, lane_transition_diag, leader, intersection, signal_state, neighbor_offset</code></td><td>通常lane change、停止leader、赤信号、旧dataの<code>+1</code>をslice化</td></tr>
+          <tr><td>Coverage / repair</td><td><code>safe_count, reward_spread, ESS, mode_count, recoverable, repair_source, rejection_reason</code></td><td>AWR / broad retention / R2LPL repairを機械的にrouting</td></tr>
+        </tbody>
+      </table>
+      <div class="callout"><strong>可視化もsidecar駆動：</strong><code>first_event_step</code>でbbox event-cameraを開き、<code>recovered/new</code>を対称に選び、各図のJSONへ同じgeometry値とhashを埋め込む。手作業で「見栄えの良い成功例」を選ぶ余地をなくす。閾値 <code>m, δ, ESS range, mode_count</code> はfull replay分布とheld-out gateで校正し、提案段階で恣意的な固定値にはしない。</div>
+      <h3>Safe-first scoring contract</h3>
+      <div class="formula"><span class="c">hard violation</span> = {collision, red crossing, border critical, kinematic invalid}<br><span class="c">safe rank</span> = lexicographic(no_collision, no_red, border_margin, TTC/THW, survival)<br><span class="g">utility</span> = progress + route/lane + follow + comfort<br><span class="g">training reward</span> = safe_rank first, clipped utility second</div>
+      <p>progressやcomfortがcollision/red-lightを補償してはならない。一方、hard groupが全て同じ0になると学習不能なので、time-to-failureやsurvival marginで安全側のdense creditを残す。</p>
+      <h3>実装順序</h3>
+      <div class="grid g4">
+        <div class="card"><span class="tag">Phase 0</span><h4>正式run完了</h4><p>faithful K=10 replayを最後まで実行し、全checkpointを固定評価。</p></div>
+        <div class="card"><span class="tag green">Phase 1</span><h4>AWR安定化</h4><p>reward calibration、clip、ESS、BC anchor ablation。</p></div>
+        <div class="card"><span class="tag violet">Phase 2</span><h4>AWR候補拡張</h4><p>all-zero / override限定でretrieval・morphをKへ追加し、同じAWRで再採点。</p></div>
+        <div class="card"><span class="tag amber">Phase 3</span><h4>Reactive評価</h4><p>IDM/WorldEngine branchとinference selector。</p></div>
+      </div>
+      <h3>Full validationが決める、最小変更の順序</h3>
+      <p>active runへ途中から条件を足さない。まずfaithful HDP-style baselineを完走し、保存EMA × 46,068 pairedで失敗signatureを確定する。その後も一度に一要因だけ変え、同じgateで比較する。</p>
+      <table>
+        <thead><tr><th>Full pairedのsignature</th><th>最初に試す一変更</th><th>AWRとしての意味</th><th>次へ進む条件</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Mean-score pass</strong><br>full ΔScore CI下限&gt;0</td><td>欠損76,596 sceneをbackfillして短いconfirm pass</td><td>学習則は変えず、train coverageを98.33%→100%へ閉じる</td><td>confirmでも平均score gainを保てば単一EMAを採用</td></tr>
+          <tr><td><strong>現在のmonitor型</strong><br>score↑ / border↓、ADE・FDE drift</td><td>まず現行saved EMAをfull評価し、<strong>平均score基準で選ぶ</strong></td><td>ADE/FDEはreward目的と異なるbehavior診断。source candidateを自動追加してRL効果を薄めない</td><td>ΔScore CI下限&gt;0なら候補化。drift sceneは実車reviewと次ablationへ回す</td></tr>
+          <tr><td><strong>Lane-change診断が悪い</strong><br>全体scoreは改善</td><td>indicator＋route topology＋logged lane遷移でHDP式maskを独立ablation</td><td>正常なlane changeでLK priorを中和し、他sceneのrewardは不変</td><td>全体ΔScoreをさらに上げるかで採否。lane ADE単独をhard gateにしない</td></tr>
+          <tr><td><strong>新規hard eventが目立つ</strong><br>平均scoreは改善</td><td>event sidecarで該当stratumを可視化し、reward ordering / geometryを監査</td><td>scene scoreのhard multiplierが機能しているかを確認し、必要ならそのeventのcreditを強化</td><td>次armも同じfull平均scoreで比較。event内訳は常に公開</td></tr>
+          <tr><td><strong>All-zero / mode不足</strong><br>safe_count=0または有効な行動分岐なし</td><td>structured stop/slow/lateral＋retrieval/morph候補を追加</td><td>拡張候補も同じevaluator・weight・DP MSEへ通す。別SFT branchなし</td><td>feasible候補が生まれたgroupだけ採用。なお全不適ならskip</td></tr>
+          <tr><td><strong>Reward gain自体がない</strong></td><td>metricを足す前にcandidate spread / component ranking / label alignmentをaudit</td><td>選択肢に差がない問題をweight調整で隠さない</td><td>candidate headroomとreward orderingをsceneで確認後に再学習</td></tr>
+        </tbody>
+      </table>
+      <div class="callout good"><strong>現在の優先順位：</strong>epoch 2–9 current-policyではESSは健全域で、平均scoreのCIはすべて正。したがって現時点で方法を勝手に変えず、まずfaithful runのsaved EMAをfull評価する。次armが必要な場合も「ADEを元へ戻す」こと自体を目的にせず、lane mask、candidate coverage、hard-event creditのうち一要因だけを変え、最終的に同じ平均scoreをさらに上げられるかで選ぶ。</div>
+    </section>
+
+    <section id="gate">
+      <h2>11. 何を満たせば旧モデルを置き換えられるか</h2>
+      <div class="grid g2">
+        <div>
+          <div class="gate"><div class="n">1</div><div><h4>Exact paired full valid</h4><p>同じ46,068 scene、同じseed、同じevaluatorでsourceと保存EMAを100%比較。</p></div></div>
+          <div class="gate"><div class="n">2</div><div><h4>Mean-score improvement</h4><p><code>100×mean(Rema−Rsource)</code>のpaired-bootstrap 95% CI下限が0より大きいことをpromotion条件にする。</p></div></div>
+          <div class="gate"><div class="n">3</div><div><h4>CI-aware checkpoint ranking</h4><p>平均gainだけでなくCI下限が最大のepochを選ぶ。小標本の偶然のpeakを避ける。</p></div></div>
+          <div class="gate"><div class="n">4</div><div><h4>Transparent diagnostics</h4><p>collision / RB / kinematic、ADE/FDE、lane/stop slice、ESSを内訳公開するが、全項同時改善は要求しない。</p></div></div>
+          <div class="gate"><div class="n">5</div><div><h4>Deployment evidence ladder</h4><p>open-loop full scoreでcheckpointを選び、reactive simulation / closed-loop /実車smokeで主張範囲を順に広げる。</p></div></div>
+        </div>
+        <div class="card green">
+          <span class="tag green">会議での最終メッセージ</span>
+          <h3>方法は実行可能。中間scoreは有意に改善。</h3>
+          <p>HDPのAWR lifecycleをOriginal DPへ適用する技術経路、full-scale data contract、場面可視化、論文対齐の平均score selectorは整った。2,048-scene monitorでは全epochの平均score gainが正で、epoch 6の暫定Δは+1.530 point。</p>
+          <p><strong>次の判断は、保存EMAのfull 46,068-scene ΔScoreのCI下限が0を上回るか。</strong> 上回れば単一checkpoint候補とし、診断図とclosed-loop /実車evidenceを添える。<a class="cite" href="https://arxiv.org/abs/2601.12901">PlannerRFT</a><a class="cite" href="https://arxiv.org/abs/2502.19908">CarPlanner</a></p>
+        </div>
+      </div>
+      <div class="callout stop"><strong>禁止する結論：</strong>「lossが下がった」「train rewardが上がった」「一部のscene図がきれい」だけで実車用checkpointを置き換えない。</div>
+    </section>
+
+    <section id="sources">
+      <h2>12. Evidence & provenance</h2>
+      <div class="grid g2">
+        <div class="card"><h4>Local evidence</h4><ul>
+          <li><a href="t4_conference_assets/formal_replay_safety/manifest.json">formal K=10 replay visualization manifest</a></li>
+          <li><a href="t4_conference_assets/awr_colleague_hdp_aug/manifest.json">K=16 augmentation visualization manifest</a></li>
+          <li><a href="t4_conference_assets/awr_multimodality_compare/manifest.json">paired multimodality manifest</a></li>
+          <li><a href="t4_rl_assets/manifest.json">historical scene/reward manifest</a></li>
+          <li><a href="t4_conference_assets/visual_asset_audit.json">全使用画像の寸法・hash・GIF frame監査</a></li>
+          <li><a href="t4_conference_assets/VISUAL_ASSET_INDEX.md">全使用素材 → scene sidecar / manifest / generator 対応表</a></li>
+          <li><a href="t4_conference_assets/visual_asset_catalog.csv">機械可読visual catalog</a> / <a href="t4_conference_assets/visual_asset_checksums.sha256">SHA-256</a></li>
+          <li><a href="t4_conference_assets/t4_awr_visual_assets_bundle.zip">全可視化素材・sidecar・生成コード ZIP</a> / <a href="t4_conference_assets/t4_awr_visual_assets_bundle.zip.sha256">bundle SHA-256</a></li>
+          <li><a href="t4_dp_awr_visual_assets_ja.html">全可視化素材・証拠契約・生成入口</a></li>
+          <li><a href="assets/fonts/OFL.txt">embedded Noto Sans JP license</a></li>
+        </ul></div>
+        <div class="card"><h4>Papers / code（本文の判断根拠）</h4><ul>
+          <li><strong>中核AWR：</strong><a href="https://arxiv.org/abs/2602.22801">Hyper-Diffusion Planner</a> / <a href="../reference/papers/hyper_diffusion_planner_paper/src/neurips_2026.tex">local TeX</a> / <a href="../reference/external/Hyper-Diffusion-Planner/HDP-navsim/hdp_navsim/agent/dp_vla/dp_vla_rl_agent.py">released RL agent</a></li>
+          <li><strong>評価式：</strong><a href="https://github.com/autonomousvision/navsim/blob/main/docs/metrics.md">NAVSIM PDMS / EPDMS official metrics</a></li>
+          <li><strong>RL fine-tuning：</strong><a href="https://arxiv.org/abs/2601.12901">PlannerRFT</a> / <a href="../reference/papers/2601.12901/src/main.tex">local TeX</a></li>
+          <li><strong>diffusion RL：</strong><a href="https://arxiv.org/abs/2410.05582">Gen-Drive</a> / <a href="../reference/papers/Gen-Drive-Enhancing-Diffusion-Generative-Driving-Policies-with-Reward-Modeling-and-Reinforcement-Learning-Fine-tuning/src/root.tex">local TeX</a></li>
+          <li><strong>closed-loop RL：</strong><a href="https://arxiv.org/abs/2502.19908">CarPlanner</a> · <a href="https://arxiv.org/abs/2502.13144">RAD</a> · <a href="https://arxiv.org/abs/2604.15308">RAD-2</a></li>
+          <li><strong>多模態評価：</strong><a href="https://arxiv.org/abs/2512.07745">DiffusionDriveV2</a>（PDMS@Kとdiversityを分離）</li>
+          <li><strong>候補修復：</strong><a href="https://arxiv.org/abs/2606.30537">R2LPL</a> / <a href="../reference/papers/Learning-from-Mistakes-Rollout-Retrieval-Lifelong-Policy-Learning-for-Autonomous-Driving/src/R2LPL_tpami.tex">local TeX</a> / <a href="../reference/external/Learning-from-Mistakes-Rollout-Retrieval-Lifelong-Policy-Learning-for-Autonomous-Driving/README.md">code</a></li>
+          <li><strong>interactive planning：</strong><a href="https://arxiv.org/abs/2509.17080">CoPlanner</a> / <a href="../reference/papers/CoPlanner-An-Interactive-Motion-Planner-with-Contingency-Aware-Diffusion-for-Autonomous-Driving/src/main.tex">local TeX</a></li>
+          <li><strong>post-training simulator：</strong><a href="https://arxiv.org/abs/2606.19836">World Engine paper</a> / <a href="https://opendrivelab.com/WorldEngine/">project</a> / <a href="../reference/papers/World-Engine-Towards-the-Era-of-Post-Training-for-Autonomous-Driving/src/main.tex">local TeX</a> / <a href="../reference/external/World-Engine-Towards-the-Era-of-Post-Training-for-Autonomous-Driving/README.md">code</a></li>
+          <li><strong>分野俯瞰：</strong><a href="https://arxiv.org/abs/2607.08072">Post-Training in End-to-End Autonomous Driving</a> / <a href="../reference/papers/Post-Training-in-End-to-End-Autonomous-Driving-A-Unified-View/src/main.tex">local TeX</a></li>
+        </ul></div>
+      </div>
+      <details><summary>図表の数値契約</summary><p>A層のformal図はepoch-1 replay cacheのK=10 trajectory / reward / weightを直接使用。B層K=16図はseed 3407、5 sampling steps、noise scale 0.5、HDP-style trajectory augmentation std 0.5で、candidate path coverageだけに使用する。A/C層で旧T4 neighbor futureの <code>raw[t+1]→aligned[t]</code> と、後軸ego点から <code>0.5×wheelbase</code> 前方へのOBB center shiftを再監査済み。neighbor OBBはcentroid基準。A層GIFは80 frames・10 Hz・100 ms/frame、reward horizonは最初の4 s。C層GIFは80 stepを0.2 s間隔の40 frameへ描画する。Confluence本文と素材庫で表示または直接linkする全visualはcatalogへ列挙し、元ファイル・引用ページ・sidecar・generator・SHA-256を固定する。</p></details>
+    </section>
+  </main>
+  <footer class="footer">T4 Original DP × HDP-style AWR · Internal meeting material · Generated from local code, local experiment logs, paper TeX and real T4 NPZ scenes.</footer>
+</body>
+</html>
