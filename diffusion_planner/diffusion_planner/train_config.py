@@ -117,6 +117,8 @@ class TrainConfig:
     guidance_scale: float = 0.5
     device: str = "cuda"
     use_ema: bool = True
+    compile_model: bool = False
+    use_amp: bool = False
 
     # ---------------------------------------------------------
     # Model Architecture
