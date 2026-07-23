@@ -119,6 +119,12 @@ class TrainConfig:
     # A/B and are reverted. Both remain as opt-in experiment knobs.
     coeff_endpoint_fde_loss: float = 0.0
     plantf_use_lon_velocity_weight: bool = True
+    # Feed the current ego motion state (vx, vy, ax, ay, steering, yaw_rate) into
+    # the planTF trajectory head so its absolute-waypoint regression is anchored
+    # to the current motion (the diffusion decoder gets this via its pinned
+    # current state; the planTF head otherwise does not). See
+    # docs/plantf_dead_mode_improvement.md.
+    plantf_use_ego_state_in_head: bool = True
 
     # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False

@@ -39,13 +39,28 @@ from diffusion_planner.utils.normalizer import StateNormalizer
 class PlanTFTrajectoryHead(nn.Module):
     """Multi-modal ego trajectory head (planTF ``TrajectoryDecoder``)."""
 
-    def __init__(self, embed_dim, num_modes, future_steps, out_channels=4):
+    def __init__(self, embed_dim, num_modes, future_steps, out_channels=4, ego_state_dim=0):
         super().__init__()
 
         self.embed_dim = embed_dim
         self.num_modes = num_modes
         self.future_steps = future_steps
         self.out_channels = out_channels
+        self.ego_state_dim = ego_state_dim
+
+        # Inject the current ego motion state (vx, vy, ax, ay, steering, yaw_rate)
+        # into the ego token before branching into modes. Unlike the diffusion
+        # decoder, the planTF head never sees the current state otherwise, so its
+        # absolute-waypoint regression is not anchored to "where/how fast am I
+        # now" — the cause of the start-point scatter / stop-jitter / divergence
+        # that the diffusion head (which pins the current state) does not show.
+        # See docs/plantf_dead_mode_improvement.md.
+        if ego_state_dim > 0:
+            self.ego_state_proj = nn.Sequential(
+                nn.Linear(ego_state_dim, embed_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(embed_dim, embed_dim),
+            )
 
         self.multimodal_proj = nn.Linear(embed_dim, num_modes * embed_dim)
 
@@ -63,15 +78,19 @@ class PlanTFTrajectoryHead(nn.Module):
             nn.Linear(hidden, 1),
         )
 
-    def forward(self, x):
+    def forward(self, x, ego_state=None):
         """
         Args:
             x: [B, embed_dim] ego token from the encoder.
+            ego_state: [B, ego_state_dim] normalized current ego motion state,
+                or None when ego_state_dim == 0.
 
         Returns:
             loc: [B, num_modes, future_steps, out_channels] mode trajectories.
             pi: [B, num_modes] mode logits.
         """
+        if self.ego_state_dim > 0 and ego_state is not None:
+            x = x + self.ego_state_proj(ego_state)
         x = self.multimodal_proj(x).view(-1, self.num_modes, self.embed_dim)
         loc = self.loc(x).view(-1, self.num_modes, self.future_steps, self.out_channels)
         pi = self.pi(x).squeeze(-1)
@@ -92,6 +111,13 @@ class PlanTFDecoder(nn.Module):
         # gives the temporal continuity a per-timestep absolute regression lacks
         # (fixes the "comb" jitter and stalled forward progress of the planTF head).
         self._use_velocity = getattr(config, "use_velocity_representation", False)
+        # Feed the current ego motion state (ego_current_state[:, 4:10] =
+        # vx, vy, ax, ay, steering, yaw_rate) into the trajectory head so the
+        # absolute-waypoint regression is anchored to the current motion, the
+        # way the diffusion decoder is via its pinned current state.
+        self._use_ego_state = getattr(config, "plantf_use_ego_state_in_head", True)
+        self._ego_state_slice = slice(4, 10)
+        ego_state_dim = self._ego_state_slice.stop - self._ego_state_slice.start
 
         hidden_dim = config.hidden_dim
         self.trajectory_head = PlanTFTrajectoryHead(
@@ -99,6 +125,7 @@ class PlanTFDecoder(nn.Module):
             num_modes=self._num_modes,
             future_steps=self._future_len,
             out_channels=4,  # x, y, cos, sin
+            ego_state_dim=ego_state_dim if self._use_ego_state else 0,
         )
         # planTF's agent_predictor, widened from (x, y) to DP's (x, y, cos, sin)
         self.neighbor_predictor = nn.Sequential(
@@ -162,7 +189,15 @@ class PlanTFDecoder(nn.Module):
         std = self._state_normalizer.std[idx].to(wp.device)  # [1, 4]
         return (wp - mean) / std
 
-    def _decode(self, encoding):
+    def _ego_state_feat(self, inputs):
+        """Normalized current ego motion state fed to the trajectory head, or
+        None when the feature is disabled. inputs are already observation-
+        normalized when this runs (train_epoch / node apply the normalizer)."""
+        if not self._use_ego_state:
+            return None
+        return inputs["ego_current_state"][:, self._ego_state_slice]
+
+    def _decode(self, encoding, ego_state=None):
         """Run both heads on the encoder tokens.
 
         Returns (trajectory [B, K, T, 4], probability [B, K],
@@ -170,7 +205,7 @@ class PlanTFDecoder(nn.Module):
         """
         B = encoding.shape[0]
         Pn = self._predicted_neighbor_num
-        trajectory, probability = self.trajectory_head(encoding[:, 0])
+        trajectory, probability = self.trajectory_head(encoding[:, 0], ego_state)
         neighbor_prediction = self.neighbor_predictor(encoding[:, 1 : 1 + Pn]).view(
             B, Pn, self._future_len, 4
         )
@@ -197,7 +232,7 @@ class PlanTFDecoder(nn.Module):
         training (index 1 on the current-state-prepended axis = future step 0)."""
         return ego_trajectory[:, ::10, :2].reshape(-1, 2 * (self._future_len // 10))
 
-    def forward_deploy(self, encoding):
+    def forward_deploy(self, encoding, ego_current_state=None):
         """One-shot deployment path for the split ONNX export.
 
         Unlike the diffusion decoder there is no external denoising loop, so a
@@ -205,12 +240,20 @@ class PlanTFDecoder(nn.Module):
         independent turn-indicator head is excluded (it re-encodes raw map
         inputs itself and is a training-time auxiliary, not a deploy output).
 
+        ``ego_current_state`` (normalized) is required when the head consumes the
+        current motion state; the ONNX decoder graph then takes it as a second input.
+
         Returns:
             prediction: [B, 1 + Pn, T, 4] best-mode ego + neighbors, denormalized.
             probability: [B, K] mode logits.
             turn_indicator_logit: [B, TURN_INDICATOR_OUTPUT_DIM]
         """
-        trajectory, probability, neighbor_prediction = self._decode(encoding)
+        ego_state = (
+            ego_current_state[:, self._ego_state_slice]
+            if (self._use_ego_state and ego_current_state is not None)
+            else None
+        )
+        trajectory, probability, neighbor_prediction = self._decode(encoding, ego_state)
         best_trajectory = self._best_mode_trajectory(trajectory, probability)
         turn_indicator_logit = self._compute_turn_indicator(
             self._subsampled_ego_xy(best_trajectory), self._pool_encoding(encoding)
@@ -240,7 +283,9 @@ class PlanTFDecoder(nn.Module):
         B = encoding.shape[0]
         Pn = self._predicted_neighbor_num
 
-        trajectory, probability, neighbor_prediction = self._decode(encoding)
+        trajectory, probability, neighbor_prediction = self._decode(
+            encoding, self._ego_state_feat(inputs)
+        )
         encoding_pooled = self._pool_encoding(encoding)
 
         outputs = {

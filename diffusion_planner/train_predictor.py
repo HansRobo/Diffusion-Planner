@@ -173,6 +173,14 @@ def get_args(args_list=None):
         "(on by default = same as the diffusion head; A/B showed disabling it "
         "hurt, so it is kept on)",
     )
+    parser.add_argument(
+        "--plantf_use_ego_state_in_head",
+        type=boolean,
+        default=True,
+        help="feed the current ego motion state (vx,vy,ax,ay,steering,yaw_rate) "
+        "into the planTF trajectory head to anchor the prediction to the current "
+        "motion (decoder_type='plantf' only)",
+    )
 
     # Velocity representation & hybrid loss (HDP paper, Section IV-B)
     parser.add_argument(

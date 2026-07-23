@@ -337,6 +337,49 @@ def test_trajectory_progress_metrics_expose_stationary_collapse():
     assert m["traj_fde_m_slow_available"].tolist() == [0.0, 0.0]
 
 
+def test_ego_state_injection_anchors_prediction():
+    """The current ego motion state must actually change the head output when
+    enabled (anchoring the absolute-waypoint regression to the current motion,
+    the way the diffusion decoder's pinned current state does), and be a no-op
+    when disabled. See docs/plantf_dead_mode_improvement.md."""
+    torch.manual_seed(0)
+
+    def _with_motion(base, value):
+        out = {k: (v.clone() if torch.is_tensor(v) else v) for k, v in base.items()}
+        out["ego_current_state"] = out["ego_current_state"].clone()
+        out["ego_current_state"][:, 4:10] = value  # vx, vy, ax, ay, steering, yaw_rate
+        return out
+
+    def _detrivialize(model):
+        # The loc/pi output layers are zero-initialized, so before training the
+        # head maps any input to 0. Perturb them to mimic a trained head, so the
+        # effect of the ego-state input is observable.
+        with torch.no_grad():
+            model.decoder.trajectory_head.loc[-1].weight.normal_(0, 0.1)
+            model.decoder.trajectory_head.pi[-1].weight.normal_(0, 0.1)
+
+    # Enabled: different current motion -> different prediction.
+    config = _config()
+    config.plantf_use_ego_state_in_head = True
+    model = Diffusion_Planner(config).eval()
+    _detrivialize(model)
+    base = _inputs()
+    with torch.no_grad():
+        _, fast = model(_with_motion(base, 3.0))
+        _, slow = model(_with_motion(base, 0.0))
+    assert not torch.allclose(fast["trajectory"], slow["trajectory"])
+
+    # Disabled: the motion state is ignored.
+    config_off = _config()
+    config_off.plantf_use_ego_state_in_head = False
+    model_off = Diffusion_Planner(config_off).eval()
+    _detrivialize(model_off)
+    with torch.no_grad():
+        _, fast_off = model_off(_with_motion(base, 3.0))
+        _, slow_off = model_off(_with_motion(base, 0.0))
+    assert torch.allclose(fast_off["trajectory"], slow_off["trajectory"])
+
+
 def test_output_heads_are_zero_initialized():
     """Every mode must start at the normalized-space mean (zero output), not
     Xavier noise: under winner-takes-all training rarely-winning modes keep
