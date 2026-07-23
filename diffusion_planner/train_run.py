@@ -32,6 +32,16 @@ def parse_args() -> argparse.Namespace:
         help="optional: dir tree of route NPZ frames for closed-loop validation, OR a .json path "
         "list of such dirs (like --train_set_list). Empty = disabled.",
     )
+    p.add_argument(
+        "--compile_model",
+        action="store_true",
+        help="compile the model with torch.compile before training",
+    )
+    p.add_argument(
+        "--use_amp",
+        action="store_true",
+        help="train with Automatic Mixed Precision (bf16 autocast)",
+    )
     return p.parse_args()
 
 
@@ -55,6 +65,10 @@ def main() -> None:
         optional += ["--wandb_run_id", args.wandb_run_id]
     if args.wandb_project_name:
         optional += ["--wandb_project_name", args.wandb_project_name]
+    if args.compile_model:
+        optional += ["--compile_model"]
+    if args.use_amp:
+        optional += ["--use_amp"]
 
     Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
 
