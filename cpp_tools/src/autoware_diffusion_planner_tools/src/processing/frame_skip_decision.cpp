@@ -37,7 +37,7 @@ SkippingInfo decide_frame_skip(
   const std::vector<float> & ego_shape, const std::vector<float> & static_objects,
   const std::vector<float> & neighbor_future, const std::vector<float> & neighbor_past,
   const std::vector<float> & line_strings, const std::vector<float> & lanes,
-  const FrameFilterParams & filter_params)
+  const std::vector<float> & route_lanes, const FrameFilterParams & filter_params)
 {
   using autoware::diffusion_planner::INPUT_T;
 
@@ -49,16 +49,31 @@ SkippingInfo decide_frame_skip(
     return SkippingInfo::invalid_covariance(inputs.cov_xx, inputs.cov_yy);
   }
 
-  // Red/yellow-light run. Two complementary triggers with distinct labels so the extra
-  // coverage of the second can be counted separately. The original stopped gate is checked
-  // first, so a stopped-then-pulling-away frame keeps the RedOrYellowLight label; the
-  // AcceleratingAtTrafficLight label then counts only the moving (linear.x >= 0.1) starts
-  // that the stopped-only gate leaked.
+  // Red/yellow-light run. A stopped frame is dropped only when the GT future crosses a
+  // stop line belonging to the ego's heading-aligned red route lane. The old coarse
+  // route-light bit is still used for moving/accelerating cases, but must not by itself
+  // drop a perpendicular approach at an intersection.
   if (inputs.is_red_or_yellow) {
     if (inputs.is_stop && inputs.is_future_forward) {
-      return SkippingInfo::red_or_yellow_light();
-    }
-    if (frame_filters::is_accelerating(frame_filters::compute_future_accel(ego_future))) {
+      if (!inputs.is_red_light) {
+        // Yellow keeps the historical coarse filtering behavior. The strict
+        // geometry rule is specifically for a currently red route signal.
+        return SkippingInfo::red_or_yellow_light();
+      }
+      const bool has_geometry = !route_lanes.empty() && !line_strings.empty();
+      if (!has_geometry) {
+        // Preserve source compatibility for callers that do not provide map geometry.
+        return SkippingInfo::red_or_yellow_light();
+      }
+      if (
+        frame_filters::detect_red_light_run(
+          ego_future, route_lanes, line_strings, filter_params.red_light_run_radius_m,
+          filter_params.red_light_run_heading_tol_deg)) {
+        return SkippingInfo::detected_red_light_run();
+      }
+      // A red bit without a matching stop-line crossing is commonly a perpendicular
+      // signal. Keep the sample rather than silently deleting a valid maneuver.
+    } else if (frame_filters::is_accelerating(frame_filters::compute_future_accel(ego_future))) {
       return SkippingInfo::accelerating_at_traffic_light();
     }
   }
@@ -89,6 +104,19 @@ SkippingInfo decide_frame_skip(
   }
 
   return SkippingInfo::accepted();
+}
+
+SkippingInfo decide_frame_skip(
+  const FrameSkipInputs & inputs, const std::vector<float> & ego_future,
+  const std::vector<float> & ego_shape, const std::vector<float> & static_objects,
+  const std::vector<float> & neighbor_future, const std::vector<float> & neighbor_past,
+  const std::vector<float> & line_strings, const std::vector<float> & lanes,
+  const FrameFilterParams & filter_params)
+{
+  static const std::vector<float> empty_route_lanes;
+  return decide_frame_skip(
+    inputs, ego_future, ego_shape, static_objects, neighbor_future, neighbor_past, line_strings,
+    lanes, empty_route_lanes, filter_params);
 }
 
 }  // namespace frame_processor

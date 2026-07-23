@@ -89,7 +89,7 @@ void process_sequence(
               << ")" << std::endl;
     save_route_json(
       paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
-      SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map);
+      SkippingInfo::insufficient_frames(n, options.min_frames), timestamp_stats_map, false);
     return;
   }
 
@@ -100,16 +100,23 @@ void process_sequence(
     save_route_json(
       paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
       SkippingInfo::insufficient_distance(traveled_distance, options.min_distance),
-      timestamp_stats_map);
+      timestamp_stats_map, false);
     return;
+  }
+
+  bool goal_pose_overwritten = false;
+  {
+    const auto & last_state = seq.data_list.back().kinematic_state;
+    const double last_speed = std::abs(last_state.twist.twist.linear.x);
+    if (last_speed < 0.5) {
+      seq.route.goal_pose = last_state.pose.pose;
+      goal_pose_overwritten = true;
+    }
   }
 
   save_route_json(
     paths.save_dir, rosbag_dir_name, sequence_id_str, n, traveled_distance, start_ts, end_ts,
-    SkippingInfo::accepted(), timestamp_stats_map);
-
-  // Replace the goal pose with the last frame's pose
-  seq.route.goal_pose = seq.data_list.back().kinematic_state.pose.pose;
+    SkippingInfo::accepted(), timestamp_stats_map, goal_pose_overwritten);
 
   // Pack-sequence accumulators: in pack mode every frame is collected here (gap-free) and
   // flushed once after the loop into a single npz + single json array for the sequence.
@@ -280,18 +287,20 @@ void process_sequence(
       is_red_or_yellow,
       is_future_forward,
       stopping_count,
-      no_future_progress_count * options.step};
+      no_future_progress_count * options.step,
+      is_red_light};
 
     const frame_processor::FrameFilterParams filter_params{
       options.static_object_margin,  options.neighbor_margin,   options.road_border_margin,
-      options.collision_time_stride, options.offlane_max_score, options.offlane_time_stride};
+      options.collision_time_stride, options.offlane_max_score, options.offlane_time_stride,
+      options.red_light_run_radius_m, options.red_light_run_heading_tol_deg};
 
     const std::vector<float> ego_shape = {
       options.ego_wheel_base, options.ego_length, options.ego_width};
 
     const SkippingInfo skipping_info = frame_processor::decide_frame_skip(
       skip_inputs, ego_future, ego_shape, static_objects, neighbor_future, neighbor_past,
-      line_strings, lanes, filter_params);
+      line_strings, lanes, route_lanes, filter_params);
 
     const bool is_skipped = skipping_info.label != SkippingLabel::NotSkipped;
     if (options.pack_sequence) {

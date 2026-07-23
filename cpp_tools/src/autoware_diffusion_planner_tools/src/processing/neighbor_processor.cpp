@@ -157,6 +157,8 @@ NeighborResult process_neighbor_agents_and_future(
   std::unordered_map<std::string, AgentHistory> id_to_history;
   for (size_t i = 0; i < agent_histories.size(); ++i) {
     const auto object_id = agent_histories[i].get_latest_state().object_id;
+    // Do not seed the current state here: neighbor_future[0] is the first
+    // t+0.1 s future sample, while the current state belongs to neighbor_past.
     id_to_history.emplace(object_id, AgentHistory(OUTPUT_T));
   }
 

@@ -6,14 +6,14 @@ including the ones the production filter would normally drop (stopped at a red/y
 light, no future progress, GT collision, off-lane, stale data). Each frame's JSON
 sidecar carries ``is_skipped``. TRAINING must not learn from those frames.
 
-The training/eval loaders (``DiffusionPlannerData``) no longer filter at load time, so
-run this script ONCE up front to produce a pre-filtered scene list on disk, then point
-training/eval at that filtered list.
+The training/eval loaders (``DiffusionPlannerData``) do not filter at load time. The
+training and validation entrypoints prepare a run-local cache automatically; this
+script is useful when a filtered list is needed by another tool.
 
-It is a thin wrapper over the same shared helper used everywhere else
-(``diffusion_planner.utils.scene_skip.filter_scene_list``), so the result is byte-for-byte
-the same as the old in-loader filtering. Input and output are both a flat JSON list of
-npz paths (the format ``DiffusionPlannerData`` consumes, e.g. ``path_list_valid.json``).
+It uses the same shared helper as the training entrypoints. Filtering is parallelized
+over sidecar reads and the output is written atomically. Input and output are both a
+flat JSON list of npz paths (the format ``DiffusionPlannerData`` consumes, e.g.
+``path_list_valid.json``).
 
 Backward-compatible: a frame with no resolvable sidecar (older corpora) is treated as NOT
 skipped, so existing lists pass through unchanged.
@@ -28,10 +28,9 @@ Example::
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
-from diffusion_planner.utils.scene_skip import filter_scene_list
+from diffusion_planner.utils.scene_skip import filter_manifest_file
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         help="root of pose/skip JSON sidecars if not next to the NPZ (e.g. the "
         "pre-padding conversion tree when the padded NPZs dropped their sidecars)",
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=32,
+        help="parallel sidecar readers (default: 32)",
+    )
     return p.parse_args()
 
 
@@ -59,13 +64,17 @@ def main() -> None:
     out_path = args.out
     sidecar_root = args.sidecar_root
 
-    scenes = json.loads(scenes_path.read_text())
-    if not isinstance(scenes, list):
-        raise ValueError(f"{scenes_path}: scene list must be a flat JSON list of npz paths")
-    kept = filter_scene_list(scenes, sidecar_root=sidecar_root, label=str(scenes_path))
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(kept))
-    print(f"wrote {len(kept)} scenes -> {out_path}")
+    stats = filter_manifest_file(
+        scenes_path,
+        out_path,
+        sidecar_root=sidecar_root,
+        workers=args.workers,
+        label=str(scenes_path),
+    )
+    print(
+        f"wrote {stats['kept_count']}/{stats['source_count']} scenes "
+        f"(dropped {stats['dropped_count']}) -> {out_path}"
+    )
 
 
 if __name__ == "__main__":

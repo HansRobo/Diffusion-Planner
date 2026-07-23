@@ -123,6 +123,8 @@ Both converter commands accept these options:
 | `--collision_time_stride N` | Time stride for trajectory collision filters | `5` |
 | `--offlane_max_score M` | Off-lane filter maximum average distance from lane centerlines | `6.0` |
 | `--offlane_time_stride N` | Time stride for the off-lane filter | `1` |
+| `--red_light_run_radius_m M` | Maximum distance from a stop-line crossing to an aligned red route-lane entry | `12.0` |
+| `--red_light_run_heading_tol_deg D` | Maximum heading difference when matching the ego's red route lane | `45.0` |
 | `--write_skipped_npz 0/1` | Also write `.npz` files for skipped frames | `0` |
 
 ## Per-frame JSON sidecar (data converter)
@@ -132,7 +134,7 @@ absolute map ego pose plus two fields used by downstream tooling:
 
 | field | meaning |
 | --- | --- |
-| `is_skipped` (bool) | `true` if the production filter would have dropped this frame (stopped at a red/yellow light, no future progress, GT collision, off-lane, stale data). See also `skipping_info.label`. |
+| `is_skipped` (bool) | `true` if the production filter would have dropped this frame (strict route-aligned red-light future crossing, stopped at a red/yellow light, no future progress, GT collision, off-lane, stale data). See also `skipping_info.label`. |
 | `neighbor_ids` (list[str]) | perception track UUIDs of the kept neighbors, aligned 1:1 with the `neighbor_past` slots (sorted by ego distance, trimmed). Lets a consumer associate the same agent across frames. |
 
 By default the converter **drops** flagged frames (writes only accepted ones). Pass

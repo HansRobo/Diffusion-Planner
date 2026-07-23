@@ -36,6 +36,7 @@ struct FrameSkipInputs
   bool is_future_forward;             // GT future mileage > 1.0 m
   int64_t stopping_count;             // consecutive ticks ego has been stopped
   int64_t no_future_progress_x_step;  // no_future_progress_count * step (scaled ticks)
+  bool is_red_light = false;          // true when the current route signal is specifically red
 };
 
 // Filter thresholds forwarded from ConverterOptions.
@@ -48,6 +49,8 @@ struct FrameFilterParams
   int64_t collision_time_stride;
   float offlane_max_score;
   int64_t offlane_time_stride;
+  float red_light_run_radius_m;
+  float red_light_run_heading_tol_deg;
 };
 
 // Pure skip-reason computation — no I/O, no ROS time, no file system.
@@ -58,6 +61,15 @@ SkippingInfo decide_frame_skip(
   const std::vector<float> & neighbor_future, const std::vector<float> & neighbor_past,
   const std::vector<float> & line_strings, const std::vector<float> & lanes,
   const FrameFilterParams & filter_params);
+
+// Strict red-light geometry variant. Kept as a separate overload so external
+// converter callers using the legacy signature remain source-compatible.
+SkippingInfo decide_frame_skip(
+  const FrameSkipInputs & inputs, const std::vector<float> & ego_future,
+  const std::vector<float> & ego_shape, const std::vector<float> & static_objects,
+  const std::vector<float> & neighbor_future, const std::vector<float> & neighbor_past,
+  const std::vector<float> & line_strings, const std::vector<float> & lanes,
+  const std::vector<float> & route_lanes, const FrameFilterParams & filter_params);
 
 }  // namespace frame_processor
 

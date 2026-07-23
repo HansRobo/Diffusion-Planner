@@ -94,6 +94,7 @@ enum class SkippingLabel {
                                // (linear.x >= 0.1). Complements RedOrYellowLight, which only
                                // covers the fully-stopped case; counted separately so the
                                // extra coverage of this trigger is measurable.
+  DetectedRedLightRun,         // GT future crosses a stop line near an aligned red route lane
 };
 
 // Structure to hold detailed skipping information
@@ -169,6 +170,16 @@ struct SkippingInfo
     return {
       SkippingLabel::AcceleratingAtTrafficLight,
       "Accelerating into red/yellow light while moving (linear.x >= 0.1)",
+      {},
+      {}};
+  }
+
+  static SkippingInfo detected_red_light_run()
+  {
+    return {
+      SkippingLabel::DetectedRedLightRun,
+      "Detected red light run: GT future crosses a stop line near a heading-aligned red route "
+      "lane",
       {},
       {}};
   }

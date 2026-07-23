@@ -38,6 +38,8 @@ static ConverterOptions make_default_opts()
   o.collision_time_stride = 5;
   o.offlane_max_score = 6.0f;
   o.offlane_time_stride = 1;
+  o.red_light_run_radius_m = 12.0f;
+  o.red_light_run_heading_tol_deg = 45.0f;
   o.write_skipped_npz = false;
   o.sidecar_only = false;
   o.pack_sequence = false;
@@ -58,6 +60,8 @@ TEST(DefaultConverterOptionsTest, UsesSharedDefaults)
   EXPECT_FLOAT_EQ(opts.ego_wheel_base, -1.0f);
   EXPECT_FLOAT_EQ(opts.ego_length, -1.0f);
   EXPECT_FLOAT_EQ(opts.ego_width, -1.0f);
+  EXPECT_FLOAT_EQ(opts.red_light_run_radius_m, 12.0f);
+  EXPECT_FLOAT_EQ(opts.red_light_run_heading_tol_deg, 45.0f);
   EXPECT_TRUE(opts.use_interpolation);
   EXPECT_FALSE(opts.write_skipped_npz);
   EXPECT_FALSE(opts.sidecar_only);   // full conversion (writes npz) by default
@@ -127,4 +131,18 @@ TEST(ValidateOptionsTest, ZeroWheelBasePasses)
   opts.ego_wheel_base = 0.0f;
   // Validation requires < 0.0; zero itself is accepted.
   EXPECT_FALSE(validate_options(opts).has_value());
+}
+
+TEST(ValidateOptionsTest, NegativeRedLightRadiusReturnsError)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.red_light_run_radius_m = -0.1f;
+  EXPECT_TRUE(validate_options(opts).has_value());
+}
+
+TEST(ValidateOptionsTest, NegativeRedLightHeadingToleranceReturnsError)
+{
+  ConverterOptions opts = make_default_opts();
+  opts.red_light_run_heading_tol_deg = -1.0f;
+  EXPECT_TRUE(validate_options(opts).has_value());
 }

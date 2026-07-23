@@ -4,6 +4,12 @@ project(autoware_diffusion_planner_tools)
 include(FetchContent)
 
 find_package(autoware_cmake REQUIRED)
+# cnpy is a vendored third-party library with its own MIT header. Exclude those
+# upstream files from ament copyright checks without weakening checks elsewhere.
+set(AMENT_LINT_AUTO_FILE_EXCLUDE
+  include/utils/cnpy.hpp
+  src/utils/cnpy.cpp
+)
 autoware_package()
 
 find_package(yaml-cpp REQUIRED)
