@@ -1275,6 +1275,15 @@ def compute_hdp_reward(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute the real-vehicle-oriented HDP reward on Tier IV scene tensors."""
     config = _hdp_reward_config(args)
+    horizon = int(getattr(args, "rl_reward_horizon_steps", 0) or 0)
+    if horizon > 0 and horizon < ego_world.shape[1]:
+        # Score only the near-term prefix (the original-DP AWR profile scores 4 s of the
+        # 8 s plan). All time-indexed inputs are truncated together so collision, TTC,
+        # progress and red-light terms stay mutually consistent on the same window.
+        ego_world = ego_world[:, :horizon]
+        neighbors_future = neighbors_future[:, :, :horizon]
+        scene_inputs = dict(scene_inputs)
+        scene_inputs["ego_agent_future"] = scene_inputs["ego_agent_future"][:, :horizon]
     ego_group = ego_world.reshape(num_scenes, n, ego_world.shape[1], ego_world.shape[2])
     if neighbors_future.shape[0] != num_scenes:
         raise ValueError(
@@ -1456,12 +1465,39 @@ def compute_hdp_reward(
         + args.rl_reward_w_lane * lane_scores
         + getattr(args, "rl_reward_w_progress", 0.0) * progress_scores
     )
-    reward_group = (
-        getattr(args, "rl_reward_w_safety", 0.0) * safety
-        + args.rl_reward_w_risk * risk
-        + behavior_reward * behavior_gate
-        + road_border_weight * road_border_score
-    )
+    aggregation = getattr(args, "rl_reward_aggregation", "weighted_sum")
+    if aggregation == "gated_product":
+        # PDM-style bounded objective (the aggregation behind the audited original-DP
+        # AWR gains): continuous multiplicative safety gates times a normalized quality
+        # mix, so no behavior term can buy back an unsafe candidate and the reward stays
+        # in [0, 1]. The safety weight is unused here because safety *is* the gate.
+        quality_weight_sum = (
+            args.rl_reward_w_risk
+            + args.rl_reward_w_follow
+            + args.rl_reward_w_lane
+            + getattr(args, "rl_reward_w_progress", 0.0)
+        )
+        if quality_weight_sum <= 0.0:
+            raise ValueError(
+                "rl_reward_aggregation='gated_product' requires a positive "
+                "risk/follow/lane/progress weight sum"
+            )
+        quality = (
+            args.rl_reward_w_risk * risk
+            + args.rl_reward_w_follow * scene_term_tensors["follow"]
+            + args.rl_reward_w_lane * lane_scores
+            + getattr(args, "rl_reward_w_progress", 0.0) * progress_scores
+        ) / quality_weight_sum
+        reward_group = collision_safety * red_light_score * road_border_score * quality
+    elif aggregation == "weighted_sum":
+        reward_group = (
+            getattr(args, "rl_reward_w_safety", 0.0) * safety
+            + args.rl_reward_w_risk * risk
+            + behavior_reward * behavior_gate
+            + road_border_weight * road_border_score
+        )
+    else:
+        raise ValueError(f"Unsupported rl_reward_aggregation={aggregation!r}")
     ttc_min = scene_term_tensors["ttc"].amin(dim=-1)
     thw_min = scene_term_tensors["thw"].amin(dim=-1)
     occupancy_min = occupancy.amin(dim=-1)
@@ -1740,6 +1776,83 @@ def sample_group(
     return ego_world
 
 
+@torch.no_grad()
+def first_waypoint_candidate_gate(
+    ego_world: torch.Tensor,
+    ego_speed: torch.Tensor,
+    num_scenes: int,
+    n: int,
+    args,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Reject low-speed candidates whose first waypoint jumps away from the current pose.
+
+    Ported from the audited original-DP AWR gate (2026-07-23 form). Sampled diffusion
+    candidates can place their first waypoint far from the vehicle while the scene is
+    (near) stationary; those candidates are dynamically infeasible yet often earn a
+    high advantage because the reward is blind to near-field continuity. The gate is
+    active only below a speed threshold, and the off-tangent test applies only when the
+    first step has real displacement (the 5 cm floor): a millimetre-scale standstill
+    step has no meaningful direction and must never fail the tangent test.
+
+    ``ego_world`` is in the current-ego frame (origin = current rear axle, +x = current
+    heading), so the first waypoint itself is the first step. Returns a per-candidate
+    boolean mask [num_scenes * n] (True = keep) and scalar diagnostics.
+    """
+    if ego_world.shape[0] != num_scenes * n:
+        raise ValueError(
+            f"first-waypoint gate expects {num_scenes * n} candidates, got {ego_world.shape[0]}"
+        )
+    if ego_speed.shape != (num_scenes,):
+        raise ValueError(
+            f"first-waypoint gate expects one speed per scene {(num_scenes,)}, "
+            f"got {tuple(ego_speed.shape)}"
+        )
+    device = ego_world.device
+    keep = torch.ones(num_scenes * n, dtype=torch.bool, device=device)
+    if not bool(getattr(args, "rl_first_waypoint_gate", True)):
+        zero = ego_world.new_zeros(())
+        return keep, {
+            "reward_first_waypoint_gated_fraction": zero,
+            "reward_first_waypoint_gate_active_scene_fraction": zero,
+        }
+    speed_max = float(getattr(args, "rl_first_waypoint_gate_speed_max_mps", 1.0))
+    max_step = float(getattr(args, "rl_first_waypoint_gate_max_step_m", 0.25))
+    max_lateral = float(getattr(args, "rl_first_waypoint_gate_max_lateral_m", 0.20))
+    max_backward = float(getattr(args, "rl_first_waypoint_gate_max_backward_m", 0.05))
+    max_tangent_deg = float(getattr(args, "rl_first_waypoint_gate_max_tangent_deg", 75.0))
+    tangent_min_step = float(getattr(args, "rl_first_waypoint_gate_tangent_min_step_m", 0.05))
+
+    low_speed_scene = ego_speed.abs() < speed_max  # [S]
+    step = ego_world[:, 0, :2]  # [S*n, 2] — displacement from the current pose
+    step_norm = step.norm(dim=-1)
+    forward = step[:, 0]
+    lateral = step[:, 1].abs()
+    # The tangent test is measurable only when the step has real displacement. Without
+    # this floor a numerically-zero standstill step reads as 90° off-tangent and the
+    # gate silently discards entire low-speed groups (audited original-DP failure).
+    tangent_measurable = step_norm >= tangent_min_step
+    tangent_rad = torch.atan2(lateral, forward.clamp_min(1e-9))
+    off_tangent = tangent_measurable & (tangent_rad > math.radians(max_tangent_deg))
+    reject = (
+        (step_norm > max_step)
+        | (lateral > max_lateral)
+        | (forward < -max_backward)
+        | off_tangent
+    )
+    reject = reject & low_speed_scene.repeat_interleave(n)
+    keep = ~reject
+    gated_fraction = reject.float().mean()
+    active_scene_fraction = (
+        reject.view(num_scenes, n).any(dim=1).float().mean()
+        if num_scenes > 0
+        else ego_world.new_zeros(())
+    )
+    return keep, {
+        "reward_first_waypoint_gated_fraction": gated_fraction,
+        "reward_first_waypoint_gate_active_scene_fraction": active_scene_fraction,
+    }
+
+
 def compute_reward_weights(
     reward: torch.Tensor,
     num_scenes: int,
@@ -1748,6 +1861,7 @@ def compute_reward_weights(
     beta: float,
     eps: float,
     use_ddp: bool = False,
+    candidate_valid_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if reward.ndim != 1:
         raise ValueError(f"RL reward tensor must be 1-D, got shape {tuple(reward.shape)}")
@@ -1763,24 +1877,56 @@ def compute_reward_weights(
     if not math.isfinite(float(eps)) or eps <= 0.0:
         raise ValueError("RL reward normalization epsilon must be finite and > 0")
     grouped = reward.view(num_scenes, n)
-    group_std = grouped.std(dim=1, keepdim=True)
-    finite_group = torch.isfinite(grouped).all(dim=1, keepdim=True)
-    # This filter is part of the paper's RL procedure, independently of the normalization
-    # ablation: a scene with identical candidate rewards contains no action preference signal.
-    valid_group = finite_group & torch.isfinite(group_std) & (group_std > eps)
+    if candidate_valid_mask is None:
+        candidate_keep = torch.ones_like(grouped, dtype=torch.bool)
+        group_mean = grouped.mean(dim=1, keepdim=True)
+        group_std = grouped.std(dim=1, keepdim=True)
+        finite_group = torch.isfinite(grouped).all(dim=1, keepdim=True)
+        # This filter is part of the paper's RL procedure, independently of the normalization
+        # ablation: a scene with identical candidate rewards contains no action preference
+        # signal.
+        valid_group = finite_group & torch.isfinite(group_std) & (group_std > eps)
+    else:
+        if candidate_valid_mask.shape != reward.shape:
+            raise ValueError(
+                "candidate_valid_mask must match the flattened reward shape "
+                f"{tuple(reward.shape)}, got {tuple(candidate_valid_mask.shape)}"
+            )
+        if candidate_valid_mask.dtype != torch.bool:
+            raise TypeError("candidate_valid_mask must be a boolean tensor")
+        # Gate-rejected candidates are excluded from the group statistics as well as
+        # from the weights; otherwise an infeasible candidate still shifts every other
+        # candidate's advantage. A group needs at least two surviving candidates to
+        # carry a preference signal.
+        candidate_keep = candidate_valid_mask.view(num_scenes, n)
+        keep_f = candidate_keep.to(grouped.dtype)
+        valid_count = keep_f.sum(dim=1, keepdim=True)
+        safe = torch.where(candidate_keep, grouped, torch.zeros_like(grouped))
+        group_mean = safe.sum(dim=1, keepdim=True) / valid_count.clamp_min(1.0)
+        variance = ((safe - group_mean).square() * keep_f).sum(dim=1, keepdim=True) / (
+            valid_count - 1.0
+        ).clamp_min(1.0)
+        group_std = variance.clamp_min(0.0).sqrt()
+        finite_group = (torch.isfinite(grouped) | ~candidate_keep).all(dim=1, keepdim=True)
+        valid_group = (
+            finite_group
+            & (valid_count >= 2.0)
+            & torch.isfinite(group_std)
+            & (group_std > eps)
+        )
+    group_valid_sample = (valid_group.expand(-1, n) & candidate_keep).reshape(-1)
     if normalize == "group":
-        mean = grouped.mean(dim=1, keepdim=True)
         # The HDP paper discards scenes whose candidate actions all receive the
         # same reward. Keeping them at exp(0) == 1 silently turns those scenes
         # into unweighted self-distillation and can dominate the useful groups.
         reward_norm = torch.where(
             valid_group,
-            (grouped - mean) / (group_std + eps),
+            (grouped - group_mean) / (group_std + eps),
             torch.zeros_like(grouped),
         ).reshape(-1)
-        valid_sample = valid_group.expand(-1, n).reshape(-1)
+        valid_sample = group_valid_sample
     elif normalize == "batch":
-        valid_sample = valid_group.expand(-1, n).reshape(-1)
+        valid_sample = group_valid_sample
         moment_dtype = (
             torch.float64
             if reward.dtype in (torch.float16, torch.bfloat16, torch.float32)
@@ -1812,7 +1958,7 @@ def compute_reward_weights(
             reward_norm = torch.zeros_like(reward)
     elif normalize == "none":
         reward_norm = reward
-        valid_sample = valid_group.expand(-1, n).reshape(-1)
+        valid_sample = group_valid_sample
     else:
         raise ValueError(f"Unsupported rl_reward_normalize={normalize!r}")
     reward_norm = torch.nan_to_num(reward_norm, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1855,6 +2001,7 @@ def _compute_policy_ego_loss_per_sample(
     cached_encoding: torch.Tensor | None = None,
     diffusion_time: torch.Tensor | None = None,
     diffusion_noise: torch.Tensor | None = None,
+    loss_horizon: int | None = None,
 ) -> dict[str, torch.Tensor]:
     if not args.use_velocity_representation:
         raise ValueError("HDP RL requires velocity representation")
@@ -1871,16 +2018,22 @@ def _compute_policy_ego_loss_per_sample(
     eps = 1e-3
     if (diffusion_time is None) != (diffusion_noise is None):
         raise ValueError("diffusion_time and diffusion_noise must be provided together")
-    t = (
-        sample_diffusion_time(
-            B,
-            device,
-            eps,
-            getattr(args, "diffusion_time_sample_method", "uniform"),
-        )
-        if diffusion_time is None
-        else diffusion_time
-    )
+    if diffusion_time is None:
+        method = getattr(args, "diffusion_time_sample_method", "uniform")
+        if method != "uniform":
+            raise ValueError(f"Unsupported diffusion_time_sample_method={method!r}")
+        # The original-DP AWR ablation found restricting the reweighted regression to
+        # low noise levels beats the full range; the default keeps the historical
+        # [eps, 1] distribution exactly.
+        t_lo = max(float(getattr(args, "rl_diffusion_t_min", 0.0)), eps)
+        t_hi = min(float(getattr(args, "rl_diffusion_t_max", 1.0)), 1.0)
+        if not (eps <= t_lo < t_hi <= 1.0):
+            raise ValueError(
+                f"Invalid RL diffusion time range [{t_lo}, {t_hi}]; need eps <= lo < hi <= 1"
+            )
+        t = torch.rand(B, device=device) * (t_hi - t_lo) + t_lo
+    else:
+        t = diffusion_time
     t_broadcast = t.view(B, 1, 1, 1)
     z = torch.randn_like(gt_future) if diffusion_noise is None else diffusion_noise
     if t.shape != (B,) or z.shape != gt_future.shape:
@@ -1930,7 +2083,12 @@ def _compute_policy_ego_loss_per_sample(
         W=args.hybrid_loss_window,
     )
     ego_reconstruction = ego_diffusion_loss + args.planning_hybrid_loss * ego_waypoint_loss
-    ego_loss_per_sample = ego_reconstruction[:, : args.ego_prediction_horizon].mean(dim=-1)
+    horizon = args.ego_prediction_horizon if loss_horizon is None else int(loss_horizon)
+    if not 1 <= horizon <= ego_reconstruction.shape[1]:
+        raise ValueError(
+            f"loss horizon {horizon} outside [1, {ego_reconstruction.shape[1]}]"
+        )
+    ego_loss_per_sample = ego_reconstruction[:, :horizon].mean(dim=-1)
 
     return {
         "ego_loss_per_sample": ego_loss_per_sample,
@@ -1958,6 +2116,7 @@ def compute_reward_weighted_loss(
     include_bc: bool = True,
     policy_diffusion_time: torch.Tensor | None = None,
     policy_diffusion_noise: torch.Tensor | None = None,
+    bc_scene_active_mask: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     if reward_weights is None or valid_sample is None:
         reward_weights, valid_sample = compute_reward_weights(
@@ -1985,6 +2144,13 @@ def compute_reward_weighted_loss(
     )
     bc_weight = float(getattr(args, "rl_bc_weight", 0.0))
     zero = reward.new_zeros(())
+    # A candidate scored on a short reward prefix must also be regressed on that prefix:
+    # the original-DP AWR ablation showed full-horizon regression of prefix-scored
+    # candidates is significantly negative (the unscored tail is pure noise imitation).
+    candidate_loss_horizon = int(getattr(args, "rl_candidate_loss_horizon", 0) or 0)
+    if candidate_loss_horizon <= 0:
+        candidate_loss_horizon = int(getattr(args, "rl_reward_horizon_steps", 0) or 0)
+    candidate_horizon = candidate_loss_horizon if candidate_loss_horizon > 0 else None
     # With a BC anchor, keep the candidate forward in every step so DDP static_graph sees the
     # same graph even in the rare case where every reward group is constant.
     if has_valid_group or bc_weight > 0.0:
@@ -1996,6 +2162,7 @@ def compute_reward_weighted_loss(
             cached_encoding,
             policy_diffusion_time,
             policy_diffusion_noise,
+            loss_horizon=candidate_horizon,
         )
         ego_loss_per_sample = loss_terms["ego_loss_per_sample"]
         if has_valid_group:
@@ -2021,6 +2188,8 @@ def compute_reward_weighted_loss(
     if bc_weight > 0.0 and include_bc:
         if expert_norm_inputs is None or expert_ego_gt is None:
             raise ValueError("rl_bc_weight > 0 requires expert observations and trajectories")
+        # The expert anchor keeps the full supervision horizon on purpose; only reward-
+        # scored candidates are restricted to the scored prefix.
         expert_terms = _compute_policy_ego_loss_per_sample(
             model,
             expert_norm_inputs,
@@ -2029,14 +2198,35 @@ def compute_reward_weighted_loss(
             expert_cached_encoding,
         )
         expert_per_sample = expert_terms["ego_loss_per_sample"]
-        expert_count = expert_per_sample.new_tensor(float(expert_per_sample.numel()))
+        active_mask = bc_scene_active_mask
+        if active_mask is None and bool(getattr(args, "rl_bc_active_groups_only", True)):
+            if expert_per_sample.shape[0] != num_scenes:
+                raise ValueError(
+                    "rl_bc_active_groups_only requires bc_scene_active_mask when the "
+                    "expert batch does not match the local candidate scene count"
+                )
+            active_mask = valid_sample.view(num_scenes, n).any(dim=1)
+        if active_mask is not None:
+            # Anchoring every scene ("broad SFT") was significantly negative in the
+            # original-DP AWR ablations; the retained recipe anchors only scenes that
+            # still carry an active reward group.
+            if active_mask.shape != expert_per_sample.shape:
+                raise ValueError(
+                    f"BC active-scene mask shape {tuple(active_mask.shape)} must match "
+                    f"expert loss shape {tuple(expert_per_sample.shape)}"
+                )
+            active_f = active_mask.to(expert_per_sample.dtype)
+            expert_per_sample = expert_per_sample * active_f
+            expert_count = active_f.sum()
+        else:
+            expert_count = expert_per_sample.new_tensor(float(expert_per_sample.numel()))
         if (
             bool(getattr(args, "ddp", False))
             and torch.distributed.is_available()
             and torch.distributed.is_initialized()
         ):
             torch.distributed.all_reduce(expert_count, op=torch.distributed.ReduceOp.SUM)
-        bc_loss = expert_per_sample.sum() * float(ddp_world_size) / expert_count
+        bc_loss = expert_per_sample.sum() * float(ddp_world_size) / expert_count.clamp_min(1.0)
 
     loss = rl_loss + bc_weight * bc_loss
 

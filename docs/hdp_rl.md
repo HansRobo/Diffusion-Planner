@@ -113,6 +113,24 @@ red-light compliance, TTC, THW, occupancy, comfort, collision rates, and EPDMS. 
 road-border term and EPDMS are enabled, continuous border reward and binary `valid_epdms_dac` are
 also required not to regress beyond `rl_max_valid_epdms_regression`.
 
+Checkpoint selection defaults to the deterministic deployment reward
+(`rl_selection_metric=deterministic`): validation additionally scores one zero-noise plan per scene
+(`deterministic_mean`), which is exactly what the deployed planner executes. The K-sample
+stochastic metrics remain reported as distribution diagnostics and stay selectable with
+`rl_selection_metric=mean`.
+
+## AWR upgrades from the original-DP post-training audits (2026-07-23)
+
+See `docs/hdp_awr_rl_upgrade_20260723.md` for the evidence record. In brief: a first-waypoint
+candidate gate with a mandatory 5 cm tangent floor excludes low-speed standstill-jump candidates
+from both the advantage statistics and the weights; `rl_reward_aggregation=gated_product` offers
+the PDM-style bounded multiplicative-gate objective; `rl_reward_horizon_steps` scores a prefix with
+the candidate regression horizon following it (regressing the unscored tail is a known-negative
+configuration and is rejected); `rl_diffusion_t_min/max` restrict the reweighted regression's
+diffusion-time draw; and the optional expert anchor applies only to scenes with an active reward
+group. Training-objective defaults are unchanged; only checkpoint selection switched to the
+deterministic metric.
+
 The DAC guard is deliberate: a higher proxy reward must not be accepted if it worsens the binary
 drivable-area-compliance metric that motivated this experiment.
 

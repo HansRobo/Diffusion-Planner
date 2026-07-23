@@ -188,6 +188,15 @@ class TrainConfig:
     rl_eval_stopped_neighbor_disp_thresh: float = 0.5
     rl_eval_red_light_constraint: bool = True
     rl_eval_red_light_lane_tolerance_m: float = 2.0
+    # Held-out selection stays on one frozen objective while the training aggregation,
+    # scoring horizon, or gate are swept.
+    rl_eval_reward_aggregation: Literal["weighted_sum", "gated_product"] = "weighted_sum"
+    rl_eval_reward_horizon_steps: int = 0
+    # The deployed planner executes one zero-noise plan. Selection should measure that
+    # exact trajectory (original-DP AWR selected/deployed deterministically); the K-sample
+    # stochastic metrics remain reported for distribution diagnostics.
+    rl_eval_deterministic: bool = True
+    rl_selection_metric: Literal["deterministic", "mean"] = "deterministic"
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
@@ -216,6 +225,33 @@ class TrainConfig:
     # extension that prevents follow/lane/progress from compensating for a collision;
     # ``risk`` also suppresses those terms for near misses.
     rl_behavior_gate: Literal["none", "safety", "risk"] = "safety"
+    # ``gated_product`` is the PDM-style bounded objective behind the audited original-DP
+    # AWR gains: multiplicative collision/red-light/border gates times a normalized
+    # risk/follow/lane/progress quality mix. ``weighted_sum`` preserves the historical
+    # additive objective exactly.
+    rl_reward_aggregation: Literal["weighted_sum", "gated_product"] = "weighted_sum"
+    # Score only the first N steps of each candidate (0 = full horizon). The original-DP
+    # AWR profile scored a 4 s prefix (40 steps) of the 8 s plan.
+    rl_reward_horizon_steps: int = 0
+    # Candidates regressed on the scored prefix only; 0 follows rl_reward_horizon_steps.
+    # Regressing the unscored tail was significantly negative in the original-DP audits.
+    rl_candidate_loss_horizon: int = 0
+    # Restrict the reweighted regression's diffusion-time draw. The original-DP ablation
+    # preferred [0.001, 0.2] over the full range; defaults preserve the historical
+    # [eps, 1] distribution exactly.
+    rl_diffusion_t_min: float = 0.0
+    rl_diffusion_t_max: float = 1.0
+    # Reject low-speed candidates whose first waypoint jumps away from the current pose
+    # (audited original-DP failure: reward-blind standstill jumps winning the advantage).
+    # The 5 cm tangent floor is mandatory — without it a numerically-zero standstill step
+    # reads as 90 degrees off-tangent and entire low-speed groups are silently discarded.
+    rl_first_waypoint_gate: bool = True
+    rl_first_waypoint_gate_speed_max_mps: float = 1.0
+    rl_first_waypoint_gate_max_step_m: float = 0.25
+    rl_first_waypoint_gate_max_lateral_m: float = 0.20
+    rl_first_waypoint_gate_max_backward_m: float = 0.05
+    rl_first_waypoint_gate_max_tangent_deg: float = 75.0
+    rl_first_waypoint_gate_tangent_min_step_m: float = 0.05
     # Tier IV data has no populated static-object tensor, so OCC falls back to
     # stopped actors and, when none exist, HD-map road borders. Keep this ablatable
     # because road borders are a practical proxy rather than literal occupancy.
@@ -225,6 +261,9 @@ class TrainConfig:
     # The EMA policy boundary already limits drift. Real-data and recovery-set ablations found
     # that an additional expert anchor slows reward learning without improving robustness.
     rl_bc_weight: float = 0.0
+    # When the anchor is enabled, restrict it to scenes with an active reward group; a
+    # broad every-scene anchor was significantly negative in the original-DP AWR audits.
+    rl_bc_active_groups_only: bool = True
     # Commit the live proposal into the frozen rollout policy once per policy iteration.
     rl_ema_update_rate: float = 0.05
     # The paper does not publish the numerical speed-adaptive shaping functions.

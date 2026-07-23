@@ -23,6 +23,7 @@ from diffusion_planner.hdp_rl_utils import (
     compute_reward_weights,
     distributed_valid_sample_count,
     expand_batch,
+    first_waypoint_candidate_gate,
     sample_group,
 )
 from diffusion_planner.loss import sample_diffusion_time
@@ -349,6 +350,13 @@ def _backward_reward_weighted_update(
             "RL cached encoding must remain scene-level, got batch "
             f"{cached_encoding.shape[0]} for {num_scenes} scenes"
         )
+    # The BC anchor runs once on the last chunk against the full expert batch, so its
+    # active-scene mask must come from the full-batch valid_sample, not a chunk slice.
+    bc_scene_active = (
+        valid_sample.view(num_scenes, n).any(dim=1)
+        if bool(getattr(args, "rl_bc_active_groups_only", True))
+        else None
+    )
 
     for chunk_index, (scene_start, scene_stop) in enumerate(ranges):
         candidate_start = scene_start * n
@@ -394,6 +402,7 @@ def _backward_reward_weighted_update(
                 include_bc=is_last,
                 policy_diffusion_time=diffusion_time[candidate_start:candidate_stop],
                 policy_diffusion_noise=diffusion_noise[candidate_start:candidate_stop],
+                bc_scene_active_mask=bc_scene_active if is_last else None,
             )
             chunk_loss["loss"].backward()
 
@@ -556,6 +565,14 @@ def _hdp_rl_step(
     )
     if not torch.isfinite(reward).all():
         raise FloatingPointError("Non-finite HDP reward returned for RL rollout")
+    # The reward is blind to near-field continuity, so a dynamically infeasible
+    # standstill-jump candidate can otherwise win the group advantage. Rejected
+    # candidates are excluded from both the group statistics and the weights.
+    ego_speed = raw_inputs["ego_current_state"][:, 4:6].norm(dim=-1)
+    gate_mask, gate_metrics = first_waypoint_candidate_gate(
+        ego_world, ego_speed, num_scenes, n, args
+    )
+    reward_metrics.update(gate_metrics)
     if timing_events is not None:
         timing_events[2].record()
 
@@ -567,6 +584,7 @@ def _hdp_rl_step(
         getattr(args, "rl_reward_beta", 0.5),
         args.advantage_eps,
         use_ddp=bool(getattr(args, "ddp", False)),
+        candidate_valid_mask=gate_mask,
     )
     global_valid_count, ddp_world_size = distributed_valid_sample_count(
         valid_sample,
@@ -905,10 +923,22 @@ def validate_hdp_reward_policy(data_loader, model, args):
         "rl_eval_red_light_lane_tolerance_m",
         red_light_tolerance_default,
     )
+    aggregation_default = TrainConfig.__dataclass_fields__["rl_eval_reward_aggregation"].default
+    eval_reward_args.rl_reward_aggregation = getattr(
+        args, "rl_eval_reward_aggregation", aggregation_default
+    )
+    horizon_default = TrainConfig.__dataclass_fields__["rl_eval_reward_horizon_steps"].default
+    eval_reward_args.rl_reward_horizon_steps = int(
+        getattr(args, "rl_eval_reward_horizon_steps", horizon_default)
+    )
+    # The deployed planner runs one zero-noise plan, so checkpoint selection should
+    # measure exactly that trajectory rather than only the sampling distribution.
+    eval_deterministic = bool(getattr(args, "rl_eval_deterministic", True))
     # reward sum, candidate count, per-group max sum, scene count, invalid reward count,
-    # invalid diagnostic count. Invalid values are reported after the collective so every
-    # rank exits together instead of leaving peers blocked in all_reduce.
-    totals = torch.zeros(6, dtype=torch.float64, device=device)
+    # invalid diagnostic count, deterministic reward sum, invalid deterministic count.
+    # Invalid values are reported after the collective so every rank exits together
+    # instead of leaving peers blocked in all_reduce.
+    totals = torch.zeros(8, dtype=torch.float64, device=device)
     metric_totals = None
     metric_keys = None
     iterator = (
@@ -960,6 +990,28 @@ def validate_hdp_reward_policy(data_loader, model, args):
                 totals[2] += grouped.max(dim=1).values.double().sum()
                 totals[3] += num_scenes
                 totals[4] += (~finite_reward).sum()
+                if eval_deterministic:
+                    det_exp = expand_batch(decoder_inputs, 1)
+                    det_exp["route_lanes"] = norm_inputs["route_lanes"]
+                    det_exp["_global_route_repeat_interleave"] = 1
+                    det_world = sample_group(
+                        model,
+                        det_exp,
+                        0.0,
+                        device,
+                        scene_norm_inputs=norm_inputs,
+                        group_size=1,
+                        use_bf16=getattr(args, "amp_dtype", "off") == "bf16",
+                        sample_steps=args.diffusion_sample_steps,
+                    )
+                    det_reward, _ = compute_hdp_reward(
+                        det_world, raw_inputs, reward_neighbors, num_scenes, 1, eval_reward_args
+                    )
+                    finite_det = torch.isfinite(det_reward)
+                    totals[6] += torch.where(
+                        finite_det, det_reward, torch.zeros_like(det_reward)
+                    ).double().sum()
+                    totals[7] += (~finite_det).sum()
                 current_keys = tuple(sorted(reward_metrics))
                 if metric_keys is None:
                     metric_keys = current_keys
@@ -981,16 +1033,22 @@ def validate_hdp_reward_policy(data_loader, model, args):
     if args.ddp:
         torch.distributed.all_reduce(totals, op=torch.distributed.ReduceOp.SUM)
         torch.distributed.all_reduce(metric_totals, op=torch.distributed.ReduceOp.SUM)
-    if totals[4].item() > 0 or totals[5].item() > 0:
+    if totals[4].item() > 0 or totals[5].item() > 0 or totals[7].item() > 0:
         raise FloatingPointError(
             "RL reward validation produced non-finite values: "
-            f"rewards={int(totals[4].item())}, diagnostics={int(totals[5].item())}"
+            f"rewards={int(totals[4].item())}, diagnostics={int(totals[5].item())}, "
+            f"deterministic={int(totals[7].item())}"
         )
     candidate_count = totals[1].clamp_min(1.0)
     scene_count = totals[3].clamp_min(1.0)
     result = {
         "mean": (totals[0] / candidate_count).float(),
         "group_max": (totals[2] / scene_count).float(),
+        **(
+            {"deterministic_mean": (totals[6] / scene_count).float()}
+            if eval_deterministic
+            else {}
+        ),
         **{
             key.removeprefix("reward_").removesuffix("_score"): (
                 metric_totals[offset] / candidate_count

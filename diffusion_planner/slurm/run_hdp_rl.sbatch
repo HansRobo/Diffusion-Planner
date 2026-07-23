@@ -67,6 +67,18 @@ STOPPED_NEIGHBOR_DISP_THRESH=${HDP_RL_STOPPED_NEIGHBOR_DISP_THRESH:-0.5}
 RED_LIGHT_CONSTRAINT=${HDP_RL_RED_LIGHT_CONSTRAINT:-True}
 RED_LIGHT_LANE_TOLERANCE_M=${HDP_RL_RED_LIGHT_LANE_TOLERANCE_M:-2.0}
 BC_WEIGHT=${HDP_RL_BC_WEIGHT:-0.0}
+BC_ACTIVE_GROUPS_ONLY=${HDP_RL_BC_ACTIVE_GROUPS_ONLY:-True}
+# AWR upgrades ported from the audited original-DP post-training pipeline. Defaults
+# preserve the historical objective exactly; the gated_product/prefix-horizon/t-range
+# profile is enabled per experiment.
+REWARD_AGGREGATION=${HDP_RL_REWARD_AGGREGATION:-weighted_sum}
+REWARD_HORIZON_STEPS=${HDP_RL_REWARD_HORIZON_STEPS:-0}
+CANDIDATE_LOSS_HORIZON=${HDP_RL_CANDIDATE_LOSS_HORIZON:-0}
+DIFFUSION_T_MIN=${HDP_RL_DIFFUSION_T_MIN:-0.0}
+DIFFUSION_T_MAX=${HDP_RL_DIFFUSION_T_MAX:-1.0}
+FIRST_WAYPOINT_GATE=${HDP_RL_FIRST_WAYPOINT_GATE:-True}
+SELECTION_METRIC=${HDP_RL_SELECTION_METRIC:-deterministic}
+EVAL_DETERMINISTIC=${HDP_RL_EVAL_DETERMINISTIC:-True}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-1.5}
 EVAL_NOISE_SCALE=${HDP_RL_EVAL_NOISE_SCALE:-0.5}
@@ -412,6 +424,15 @@ TRAIN_ARGS=(
   --rl_red_light_constraint "${RED_LIGHT_CONSTRAINT}" \
   --rl_red_light_lane_tolerance_m "${RED_LIGHT_LANE_TOLERANCE_M}" \
   --rl_bc_weight "${BC_WEIGHT}" \
+  --rl_bc_active_groups_only "${BC_ACTIVE_GROUPS_ONLY}" \
+  --rl_reward_aggregation "${REWARD_AGGREGATION}" \
+  --rl_reward_horizon_steps "${REWARD_HORIZON_STEPS}" \
+  --rl_candidate_loss_horizon "${CANDIDATE_LOSS_HORIZON}" \
+  --rl_diffusion_t_min "${DIFFUSION_T_MIN}" \
+  --rl_diffusion_t_max "${DIFFUSION_T_MAX}" \
+  --rl_first_waypoint_gate "${FIRST_WAYPOINT_GATE}" \
+  --rl_selection_metric "${SELECTION_METRIC}" \
+  --rl_eval_deterministic "${EVAL_DETERMINISTIC}" \
   --rl_ema_update_rate "${EMA_UPDATE_RATE}" \
   --rl_init_use_ema True \
   --rl_train_scope "${TRAIN_SCOPE}" \
