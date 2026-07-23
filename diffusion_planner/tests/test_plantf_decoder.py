@@ -350,11 +350,75 @@ def test_output_heads_are_zero_initialized():
     assert torch.all(neighbor_prediction == 0.0)
 
 
-def test_velocity_representation_rejected():
+def test_velocity_representation_integrates_to_continuous_waypoints():
+    """With use_velocity_representation the heads regress displacement and
+    _decode integrates it: consecutive waypoints must differ by the (normalized)
+    per-step displacement, giving the temporal continuity a per-step absolute
+    regression lacks. See docs/plantf_dead_mode_improvement.md."""
+    from diffusion_planner.loss import velocity_to_waypoints
+
+    torch.manual_seed(0)
     config = _config()
     config.use_velocity_representation = True
-    with pytest.raises(NotImplementedError):
-        Diffusion_Planner(config)
+    decoder = Diffusion_Planner(config).decoder
+    encoding = torch.randn(2, 1 + MAX_NUM_NEIGHBORS + 5, HIDDEN_DIM)
+
+    # Raw head displacement, before integration.
+    raw_vel, _ = decoder.trajectory_head(encoding[:, 0])  # [B, K, T, 4]
+    trajectory, _, neighbor = decoder._decode(encoding)
+
+    norm = decoder._state_normalizer
+    # De-normalize the integrated trajectory back to metres and confirm it is the
+    # cumulative sum of the raw displacement (heading passed through).
+    ego_world = trajectory * norm.std[0] + norm.mean[0]
+    assert torch.allclose(ego_world, velocity_to_waypoints(raw_vel), atol=1e-4)
+    # xy strictly integrates (waypoint[t]-waypoint[t-1] == displacement[t]), so a
+    # bounded displacement can never produce the comb jitter of absolute regression.
+    step = ego_world[:, :, 1:, :2] - ego_world[:, :, :-1, :2]
+    assert torch.allclose(step, raw_vel[:, :, 1:, :2], atol=1e-4)
+    assert trajectory.shape == (2, NUM_MODES, OUTPUT_T, 4)
+    assert neighbor.shape == (2, MAX_NUM_NEIGHBORS, OUTPUT_T, 4)
+
+
+def test_velocity_representation_inference_contract():
+    """The velocity head must still honor the Decoder inference contract:
+    a denormalized [B, 1+Pn, T, 4] prediction."""
+    torch.manual_seed(0)
+    config = _config()
+    config.use_velocity_representation = True
+    model = Diffusion_Planner(config).eval()
+    with torch.no_grad():
+        _, outputs = model(_inputs())
+    assert outputs["prediction"].shape == (2, 1 + MAX_NUM_NEIGHBORS, OUTPUT_T, POSE_DIM)
+    assert torch.isfinite(outputs["prediction"]).all()
+
+
+def test_velocity_representation_training_loss_backward():
+    torch.manual_seed(0)
+    config = _config()
+    config.use_velocity_representation = True
+    model = Diffusion_Planner(config).train()
+    inputs = _inputs()
+    B, Pn = 2, MAX_NUM_NEIGHBORS
+    futures = (
+        torch.randn(B, OUTPUT_T, POSE_DIM),
+        torch.randn(B, Pn, OUTPUT_T, POSE_DIM),
+        torch.zeros(B, Pn, OUTPUT_T, dtype=torch.bool),
+    )
+    loss = compute_plantf_training_loss(model, inputs, futures, _loss_args(config))
+    total = loss["ego_planning_loss"] + loss["neighbor_prediction_loss"] + loss["mode_cls_loss"]
+    total.backward()
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    assert len(grads) > 0
+    assert all(torch.isfinite(g).all() for g in grads)
+
+
+def test_velocity_representation_rejected_removed():
+    """Sanity: constructing a velocity-representation planTF decoder no longer
+    raises (the NotImplementedError guard was removed)."""
+    config = _config()
+    config.use_velocity_representation = True
+    Diffusion_Planner(config)  # must not raise
 
 
 def test_mode_metrics_separate_candidate_quality_from_mode_selection():

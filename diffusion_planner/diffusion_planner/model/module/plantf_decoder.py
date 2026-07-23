@@ -31,6 +31,7 @@ from diffusion_planner.loss import (
     compute_road_border_penalty,
     loss_func,
     make_turn_indicator_gt,
+    velocity_to_waypoints,
 )
 from diffusion_planner.model.module.turn_indicator import TurnIndicatorNetwork
 from diffusion_planner.utils.normalizer import StateNormalizer
@@ -84,14 +85,14 @@ class PlanTFDecoder(nn.Module):
     def __init__(self, config):
         super().__init__()
 
-        if getattr(config, "use_velocity_representation", False):
-            raise NotImplementedError(
-                "decoder_type='plantf' does not support use_velocity_representation"
-            )
-
         self._predicted_neighbor_num = config.predicted_neighbor_num
         self._future_len = config.future_len
         self._num_modes = getattr(config, "num_modes", 6)
+        # When True the heads regress per-step displacement instead of absolute
+        # waypoints; _decode integrates it (cumsum) into absolute waypoints, which
+        # gives the temporal continuity a per-timestep absolute regression lacks
+        # (fixes the "comb" jitter and stalled forward progress of the planTF head).
+        self._use_velocity = getattr(config, "use_velocity_representation", False)
 
         hidden_dim = config.hidden_dim
         self.trajectory_head = PlanTFTrajectoryHead(
@@ -148,6 +149,20 @@ class PlanTFDecoder(nn.Module):
         turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
         return self.turn_indicator_predictor(turn_indicator_input)
 
+    def _integrate_velocity(self, velocity: torch.Tensor, ego: bool) -> torch.Tensor:
+        """Integrate per-step displacement into normalized absolute waypoints.
+
+        ``velocity_to_waypoints`` cumsums the xy displacement (ego-centric metres,
+        current pose = origin) and passes the heading channel through. The result
+        is then mapped into the StateNormalizer space so every downstream consumer
+        (WTA selection, loss_func, mode metrics, prediction, ONNX) is unchanged.
+        """
+        wp = velocity_to_waypoints(velocity)  # [..., T, 4] absolute metres, heading passthrough
+        idx = 0 if ego else 1  # ego uses row 0; neighbors share the same neighbor stats
+        mean = self._state_normalizer.mean[idx].to(wp.device)  # [1, 4]
+        std = self._state_normalizer.std[idx].to(wp.device)  # [1, 4]
+        return (wp - mean) / std
+
     def _decode(self, encoding):
         """Run both heads on the encoder tokens.
 
@@ -160,6 +175,9 @@ class PlanTFDecoder(nn.Module):
         neighbor_prediction = self.neighbor_predictor(encoding[:, 1 : 1 + Pn]).view(
             B, Pn, self._future_len, 4
         )
+        if self._use_velocity:
+            trajectory = self._integrate_velocity(trajectory, ego=True)
+            neighbor_prediction = self._integrate_velocity(neighbor_prediction, ego=False)
         return trajectory, probability, neighbor_prediction
 
     def _best_mode_trajectory(self, trajectory, probability):
