@@ -71,7 +71,6 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
             args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]
             + args.alpha_planning_loss * loss["ego_planning_loss"]
             + loss["turn_indicator_loss"]
-            + loss["independent_turn_indicator_loss"]
             + args.coeff_road_border_loss * loss["road_border_loss"]
             + args.coeff_neighbor_collision_loss * loss["neighbor_collision_loss"]
         )
