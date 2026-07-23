@@ -37,6 +37,8 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
     model.train()
 
+    device_type = "cuda" if "cuda" in str(args.device) else "cpu"
+
     if args.ddp:
         torch.cuda.synchronize()
 

@@ -47,6 +47,7 @@ def ddp_setup_universal(verbose=False, args=None):
         world_size=world_size,
         rank=rank,
         timeout=timedelta(seconds=1000),
+        device_id=torch.device("cuda", gpu),
     )
     torch.distributed.barrier()
     if verbose:
