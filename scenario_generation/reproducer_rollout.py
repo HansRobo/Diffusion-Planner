@@ -1627,7 +1627,7 @@ def render_segment(
         else:
             deviation_streak = 0
         if (abort_deviation_m > 0 and deviation_streak >= abort_after) or (
-            abort_max_snaps > 0 and s.n_snaps >= abort_max_snaps
+            abort_max_snaps > 0 and s.snap_count >= abort_max_snaps
         ):
             s.terminated, s.done = "diverged", True
             dbg.write(
@@ -1637,7 +1637,7 @@ def render_segment(
                         "k": k,
                         "gt_deviation_m": round(gt_deviation_m, 3),
                         "deviation_streak": int(deviation_streak),
-                        "n_snaps": int(s.n_snaps),
+                        "snap_count": int(s.snap_count),
                     }
                 )
                 + "\n"
