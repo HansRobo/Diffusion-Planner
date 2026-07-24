@@ -185,6 +185,12 @@ class TrainConfig:
     notes: str = ""
     ddp: bool = True
     port: str = "22323"
+    # Portability toggles: per-checkpoint trajectory rendering (matplotlib +
+    # per-checkpoint forward pass) and ONNX export. Both default on to preserve
+    # behavior, but can be disabled for lightweight / dependency-free training
+    # runs on other environments.
+    enable_checkpoint_viz: bool = True
+    enable_onnx_export: bool = True
 
     # Validation-only temporal stability metrics. Replan consistency requires full-sequence
     # Step-1 NPZ frames in valid_set_list; the default gap=1 avoids treating skip-N lists

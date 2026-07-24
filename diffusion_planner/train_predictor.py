@@ -289,6 +289,21 @@ def get_args(args_list=None):
     )
     parser.add_argument("--notes", default="", type=str)
 
+    # Portability toggles (disable for lightweight/dependency-free runs).
+    parser.add_argument(
+        "--enable_checkpoint_viz",
+        default=True,
+        type=boolean,
+        help="render a checkpoint trajectory PNG each save (matplotlib + an extra "
+        "forward pass); disable to avoid the dependency and overhead",
+    )
+    parser.add_argument(
+        "--enable_onnx_export",
+        default=True,
+        type=boolean,
+        help="export ONNX graphs at each checkpoint save; disable to skip ONNX/onnxruntime",
+    )
+
     # distributed training parameters
     parser.add_argument("--ddp", default=True, type=boolean, help="use ddp or not")
     parser.add_argument("--port", default="22323", type=str, help="port")
