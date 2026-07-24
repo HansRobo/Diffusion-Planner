@@ -67,6 +67,8 @@ _INPUT_T_PLUS_1 = 31  # tensor_converter._INPUT_T + 1 (history length the model 
 # 1 DISABLE / 2 ENABLE_LEFT / 3 ENABLE_RIGHT. KEEP -> retain previous command.
 _TI_MODEL_TO_SIM = {0: 0, 1: 1, 2: 2, 3: 3}
 
+EGO_NAME = "ego"  # the headless EgoEntity is always named "ego"
+
 
 @dataclass
 class RolloutConfig:
@@ -213,6 +215,38 @@ def _build_scene(
                 age_steps=buffers.age[name],
             )
         )
+
+    # Zero-neighbor guard: the exported ONNX neighbor_encoder does a dynamic gather
+    # of valid (non-zero) neighbor slots and crashes on an empty gather (MatMul
+    # "cannot broadcast on dim 0") when the ego has NO NPCs at this tick (e.g. a
+    # scenario that starts ego-alone). Inject a synthetic neighbor placed far away
+    # (cfg.dummy_neighbor_dist_m) so the model sees >=1 valid slot but ignores it,
+    # and scoring clearance stays large. Real NPCs, once present, replace the need.
+    if len(agents) == 1:
+        eh = ego_state["pose"]["yaw"]
+        far = np.array(
+            [
+                [
+                    ego_xy[0] + cfg.dummy_neighbor_dist_m * math.cos(eh),
+                    ego_xy[1] + cfg.dummy_neighbor_dist_m * math.sin(eh),
+                    eh,
+                ]
+            ]
+            * _INPUT_T_PLUS_1,
+            dtype=np.float32,
+        )
+        agents.append(
+            Agent(
+                id="__synthetic_far_npc__",
+                agent_type=AgentType.VEHICLE,
+                length=4.0,
+                width=1.8,
+                wheelbase=2.6,
+                past_trajectory=far,
+                past_velocities=np.zeros((_INPUT_T_PLUS_1, 2), dtype=np.float32),
+                age_steps=999,
+            )
+        )
     return SceneContext(agents=agents, map_data=map_data, ego_agent_id=ego_name, dt=DT)
 
 
@@ -261,6 +295,158 @@ def _resolve_route(
 
 
 # --------------------------------------------------------------------------- #
+# Per-tick helpers (keep the main rollout loop readable).
+# --------------------------------------------------------------------------- #
+def _pose_xyh(state: dict) -> tuple[float, float, float]:
+    p = state["pose"]
+    return float(p["x"]), float(p["y"]), float(p["yaw"])
+
+
+def _update_history(buffers: _HistoryBuffers, states: dict) -> None:
+    """Append this tick's truth pose to each dynamic entity's rolling buffer."""
+    for name, st in states.items():
+        if _sim_type_to_agent_type(int(st["type"])) is not None:
+            buffers.update(name, st["pose"]["x"], st["pose"]["y"], st["pose"]["yaw"])
+
+
+def _map_turn_indicator(ti_model: int, prev_cmd: int) -> int:
+    """Model turn-indicator class -> sim command. KEEP (4) retains ``prev_cmd``."""
+    return _TI_MODEL_TO_SIM.get(ti_model, prev_cmd)
+
+
+def _predict_ego_plan(model, model_args, scene, device, map_cache) -> tuple[np.ndarray, int]:
+    """Run the model as ego -> (ego-frame plan ``(future_len, 4)``, turn-indicator class)."""
+    preds, tis = _predict_batch(
+        model, model_args, scene, [EGO_NAME], device,
+        map_cache=map_cache, return_turn_indicators=True,
+    )
+    return preds[EGO_NAME], int(tis.get(EGO_NAME, 0))
+
+
+def _ego_plan_to_map_trajectory(
+    plan_ego: np.ndarray, ex: float, ey: float, eh: float
+) -> np.ndarray:
+    """Ego-frame plan -> map-frame trajectory ``[N, 4]`` = (x, y, yaw, longitudinal v)
+    for ``set_ego_trajectory``, using the current ego pose as the frame origin."""
+    world_xy, world_h = _ego_to_world(plan_ego[:, :2], plan_ego[:, 2:4], ex, ey, eh)
+    seg = np.linalg.norm(np.diff(world_xy, axis=0), axis=1)
+    speeds = np.concatenate([seg[:1], seg]) / DT if len(seg) else np.zeros(1)
+    return np.column_stack([world_xy, world_h, speeds]).astype(float)
+
+
+def _score_neighbors(
+    scene, ego_state: dict, ex: float, ey: float, eh: float, cfg: RolloutConfig, device: str
+) -> tuple[float, bool]:
+    """Instantaneous (min_clearance, collision) from raw ego-frame neighbor OBBs."""
+    R = _rotation_matrix(eh)
+    neighbors_live = _build_neighbor_agents_past(
+        scene, EGO_NAME, R, np.array([ex, ey], dtype=np.float64), eh
+    )[0, :, -1, :]
+    ego_shape = np.array(_entity_shape(ego_state, cfg), dtype=np.float32)[
+        [2, 0, 1]
+    ]  # (wheelbase, length, width)
+    min_clr, coll, _ = score_step(neighbors_live, ego_shape, 0.0, device)
+    return min_clr, coll
+
+
+def _traj_entry(step: int, ego_state: dict, goal_xy: np.ndarray) -> dict:
+    """One trajectory_log row (world pose + speed + goal distance) for post-hoc metrics."""
+    x, y, h = _pose_xyh(ego_state)
+    tw = ego_state["twist"]
+    return {
+        "step": step,
+        "x": x,
+        "y": y,
+        "heading": h,
+        "speed": float(math.hypot(tw["linear_x"], tw["linear_y"])),
+        "goal_d": float(math.hypot(x - goal_xy[0], y - goal_xy[1])),
+    }
+
+
+def _start_and_resolve_route(
+    runner, builder: LaneletSceneBuilder, osc_path: str | Path, cfg: RolloutConfig, verbose: bool
+) -> tuple[list[int], np.ndarray]:
+    """Configure+activate the sim, verify the ego spawned, and resolve its route.
+
+    A scenario the interpreter rejects at parse time leaves configure() at
+    "unconfigured" (the on_configure exception is swallowed by withExceptionHandler
+    -> FAILURE); proceeding to get_entity_states() on an unconfigured SimulatorCore
+    dereferences a null core and SEGFAULTS, so we bail cleanly on a bad transition.
+    Returns ``(ego_route_lanelet_ids, goal_pose)``."""
+    st_cfg = runner.configure()
+    if st_cfg != "inactive":
+        raise RuntimeError(
+            f"configure() did not reach 'inactive' (got '{st_cfg}') -- scenario "
+            f"rejected by the interpreter at parse/configure time: {osc_path}"
+        )
+    st_act = runner.activate()
+    if st_act != "active":
+        raise RuntimeError(f"activate() did not reach 'active' (got '{st_act}'): {osc_path}")
+    if EGO_NAME not in runner.get_entity_states():
+        raise RuntimeError(
+            f"'{EGO_NAME}' entity not spawned; entities={list(runner.get_entity_states())}"
+        )
+
+    ego0 = runner.get_ego_state(ego_ref=EGO_NAME)
+    ego0_xy = np.array([ego0["pose"]["x"], ego0["pose"]["y"]], dtype=np.float32)
+    ego_route_ids = _resolve_route(builder, ego0_xy, osc_path, cfg)
+    if not ego_route_ids:
+        raise RuntimeError("Empty ego route -- cannot build SceneContext")
+    goal_pose = builder._route_goal(ego_route_ids)
+    if verbose:
+        print(
+            f"  [scenario_sim] route={len(ego_route_ids)} lanelets, "
+            f"start_ll={ego_route_ids[0]}, goal_ll={ego_route_ids[-1]}"
+        )
+    return ego_route_ids, goal_pose
+
+
+def _finalize_row(
+    output_dir: Path,
+    map_path: str | Path,
+    trajectory_log: list[dict],
+    ego_state: dict | None,
+    cfg: RolloutConfig,
+    clearances: list[float],
+    collisions: list[bool],
+    terminated_reason: str,
+    result_kind: str,
+    coord_ok: bool | None,
+    coord_err: float,
+) -> dict:
+    """Dump the trajectory, compute post-hoc road-border metrics, and build the
+    aggregate-ready metrics row."""
+    (output_dir / "trajectory_log.json").write_text(json.dumps(trajectory_log))
+
+    ego_len, ego_w, ego_wb = (
+        _entity_shape(ego_state, cfg) if ego_state is not None else (4.0, 1.8, 2.6)
+    )
+    rb = evaluate_trajectory(
+        trajectory_log, load_border_segments(str(map_path)), ego_len, ego_w, ego_wb
+    )
+
+    finite_clr = [c for c in clearances if np.isfinite(c)]
+    return {
+        "n_steps_run": len(trajectory_log),
+        "terminated": terminated_reason,
+        "result_kind": result_kind,
+        "min_clearance": float(min(finite_clr)) if finite_clr else float("inf"),
+        "mean_clearance": float(np.mean(finite_clr)) if finite_clr else float("inf"),
+        "n_collision_steps": int(sum(collisions)),
+        "n_near_miss_steps": int(sum(1 for c in clearances if c <= cfg.near_miss_thresh)),
+        "worst_step": int(np.argmin(clearances)) if clearances else -1,
+        "progress_m": rb["progress_m"],
+        "n_snaps": 0,  # scenario_sim has no unstick/teleport mechanism
+        # post-hoc road-border (doc 02) + coordinate-contract diagnostics.
+        "rb_dist_min": rb["rb_dist_min"],
+        "rb_cross_steps": rb["rb_cross_steps"],
+        "rb_has_data": rb["rb_has_data"],
+        "coord_check_ok": bool(coord_ok) if coord_ok is not None else False,
+        "coord_check_err_m": coord_err,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Main rollout.
 # --------------------------------------------------------------------------- #
 def run_scenario_sim_rollout(
@@ -299,9 +485,7 @@ def run_scenario_sim_rollout(
     ti_cmd = 0  # last sim turn-indicator command (KEEP retains this)
     coord_err: float = float("nan")
     coord_ok: bool | None = None
-
-    outcome = "running"
-    result_kind = ""
+    ego_state: dict | None = None  # last tick's ego truth (for finalize ego shape)
     terminated_reason = "max_steps"
 
     with osp.HeadlessRunner(
@@ -309,124 +493,55 @@ def run_scenario_sim_rollout(
         output_directory=str(output_dir / "osp_out"),
         local_frame_rate=cfg.fps,
     ) as runner:
-        runner.configure()
-        runner.activate()
-
-        # The headless EgoEntity is always named "ego". Guard its presence so a
-        # scenario that fails to spawn it fails cleanly rather than downstream.
-        ego_name = "ego"
-        if ego_name not in runner.get_entity_states():
-            raise RuntimeError(
-                f"'{ego_name}' entity not spawned; entities="
-                f"{list(runner.get_entity_states())}"
-            )
-        ego0 = runner.get_ego_state(ego_ref=ego_name)
-        ego0_xy = np.array([ego0["pose"]["x"], ego0["pose"]["y"]], dtype=np.float32)
-        ego_route_ids = _resolve_route(builder, ego0_xy, osc_path, cfg)
-        if not ego_route_ids:
-            raise RuntimeError("Empty ego route -- cannot build SceneContext")
-        goal_pose = builder._route_goal(ego_route_ids)
+        ego_route_ids, goal_pose = _start_and_resolve_route(
+            runner, builder, osc_path, cfg, verbose
+        )
         goal_xy = goal_pose[:2]
-        if verbose:
-            print(
-                f"  [scenario_sim] route={len(ego_route_ids)} lanelets, "
-                f"start_ll={ego_route_ids[0]}, goal_ll={ego_route_ids[-1]}"
-            )
 
         for step in range(cfg.max_steps):
             states = runner.get_entity_states()
-            if ego_name not in states:
-                raise RuntimeError(f"Sim reports no '{ego_name}' entity")
+            if EGO_NAME not in states:
+                raise RuntimeError(f"Sim reports no '{EGO_NAME}' entity")
+            ego_state = states[EGO_NAME]
+            ex, ey, eh = _pose_xyh(ego_state)
 
-            # 1. Update per-entity history buffers from truth.
-            for name, st in states.items():
-                if _sim_type_to_agent_type(int(st["type"])) is None:
-                    continue
-                buffers.update(
-                    name, st["pose"]["x"], st["pose"]["y"], st["pose"]["yaw"]
-                )
-
-            # 2. Build the SceneContext snapshot (map/MGRS frame).
+            # Build the SceneContext snapshot (map/MGRS frame) from sim truth.
+            _update_history(buffers, states)
             scene = _build_scene(
-                states, buffers, builder, ego_route_ids, goal_pose, cfg, ego_name
+                states, buffers, builder, ego_route_ids, goal_pose, cfg, EGO_NAME
             )
             map_cache = MapTensorCache(scene.map_data)
 
-            ego_state = states[ego_name]
-            ex = float(ego_state["pose"]["x"])
-            ey = float(ego_state["pose"]["y"])
-            eh = float(ego_state["pose"]["yaw"])
-
-            # 3. Replan gate: run the model, cache the ego-frame plan.
+            # Replan gate: run the model every ``replan_interval`` ticks; between
+            # replans the cached ego-frame plan is consumed open-loop.
             if cached_plan_ego is None or step % cfg.replan_interval == 0:
-                preds, tis = _predict_batch(
-                    model,
-                    model_args,
-                    scene,
-                    [ego_name],
-                    device,
-                    map_cache=map_cache,
-                    return_turn_indicators=True,
+                cached_plan_ego, ti_model = _predict_ego_plan(
+                    model, model_args, scene, device, map_cache
                 )
-                cached_plan_ego = preds[ego_name]  # (future_len, 4) ego frame
-                ti_model = int(tis.get(ego_name, 0))
-                if ti_model in _TI_MODEL_TO_SIM:  # KEEP (4) retains ti_cmd
-                    ti_cmd = _TI_MODEL_TO_SIM[ti_model]
+                ti_cmd = _map_turn_indicator(ti_model, ti_cmd)
 
-            # 4. Ego-frame plan -> map-frame trajectory, inject.
-            world_xy, world_h = _ego_to_world(
-                cached_plan_ego[:, :2], cached_plan_ego[:, 2:4], ex, ey, eh
-            )
-            seg = np.linalg.norm(np.diff(world_xy, axis=0), axis=1)
-            speeds = np.concatenate([seg[:1], seg]) / DT if len(seg) else np.zeros(1)
-            pts = np.column_stack([world_xy, world_h, speeds]).astype(float)  # (N, 4)
-            runner.set_ego_trajectory(pts, ego_ref=ego_name)
-            runner.set_ego_turn_indicator(int(ti_cmd), ego_ref=ego_name)
-            planned_first_xy = world_xy[0].copy()
+            # Inject the plan (ego-frame -> map-frame) + turn indicator.
+            pts = _ego_plan_to_map_trajectory(cached_plan_ego, ex, ey, eh)
+            runner.set_ego_trajectory(pts, ego_ref=EGO_NAME)
+            runner.set_ego_turn_indicator(int(ti_cmd), ego_ref=EGO_NAME)
 
-            # 5. Score at state k (raw ego-frame neighbors, un-normalized).
-            if buffers.age[ego_name] >= cfg.warmup_steps:
-                R = _rotation_matrix(eh)
-                neighbors_live = _build_neighbor_agents_past(
-                    scene, ego_name, R, np.array([ex, ey], dtype=np.float64), eh
-                )[0, :, -1, :]
-                ego_shape = np.array(
-                    _entity_shape(ego_state, cfg), dtype=np.float32
-                )[[2, 0, 1]]  # (wheelbase, length, width)
-                min_clr, coll, _ = score_step(neighbors_live, ego_shape, 0.0, device)
-                clearances.append(min_clr)
+            # Score at state k (skip until the history buffer is warm).
+            if buffers.age[EGO_NAME] >= cfg.warmup_steps:
+                clr, coll = _score_neighbors(scene, ego_state, ex, ey, eh, cfg, device)
+                clearances.append(clr)
                 collisions.append(coll)
 
-            # 6. Advance the C++ sim by one tick (ego + NPCs).
+            # Advance the C++ sim by one tick (ego sim_model + NPC behavior_trees).
             outcome = runner.step()
 
-            # 7. Record realized ego pose + coordinate-contract check.
-            ego_after = runner.get_ego_state(ego_ref=ego_name)
-            ax = float(ego_after["pose"]["x"])
-            ay = float(ego_after["pose"]["y"])
-            ah = float(ego_after["pose"]["yaw"])
-            speed = float(
-                math.hypot(
-                    ego_after["twist"]["linear_x"], ego_after["twist"]["linear_y"]
-                )
-            )
-            trajectory_log.append(
-                {
-                    "step": step,
-                    "x": ax,
-                    "y": ay,
-                    "heading": ah,
-                    "speed": speed,
-                    "goal_d": float(math.hypot(ax - goal_xy[0], ay - goal_xy[1])),
-                }
-            )
+            # Record realized ego pose; the first stepped tick also validates the
+            # ego-frame -> map-frame -> sim injection frame contract (realized pose
+            # should land near the plan's first future point).
+            ego_after = runner.get_ego_state(ego_ref=EGO_NAME)
+            trajectory_log.append(_traj_entry(step, ego_after, goal_xy))
             if coord_ok is None:
-                # First stepped tick: realized pose should land near the plan's
-                # first future point (one step ahead). Validates the full
-                # ego-frame -> map-frame -> sim injection frame contract.
-                coord_err = float(
-                    math.hypot(ax - planned_first_xy[0], ay - planned_first_xy[1])
-                )
+                ax, ay, _ = _pose_xyh(ego_after)
+                coord_err = float(math.hypot(ax - pts[0, 0], ay - pts[0, 1]))
                 coord_ok = coord_err <= cfg.coord_check_tol_m
                 if verbose:
                     print(
@@ -440,38 +555,10 @@ def run_scenario_sim_rollout(
 
         result_kind = runner.result_kind()
 
-    # --- Finalize: dump trajectory + post-hoc road-border metrics. ---
-    (output_dir / "trajectory_log.json").write_text(json.dumps(trajectory_log))
-
-    ego_len, ego_w, ego_wb = (
-        _entity_shape(ego_state, cfg) if trajectory_log else (4.0, 1.8, 2.6)
+    return _finalize_row(
+        output_dir, map_path, trajectory_log, ego_state, cfg, clearances, collisions,
+        terminated_reason, result_kind, coord_ok, coord_err,
     )
-    borders = load_border_segments(str(map_path))
-    rb = evaluate_trajectory(trajectory_log, borders, ego_len, ego_w, ego_wb)
-
-    finite_clr = [c for c in clearances if np.isfinite(c)]
-    n_near_miss = sum(1 for c in clearances if c <= cfg.near_miss_thresh)
-    worst_step = int(np.argmin(clearances)) if clearances else -1
-
-    row = {
-        "n_steps_run": len(trajectory_log),
-        "terminated": terminated_reason,
-        "result_kind": result_kind,
-        "min_clearance": float(min(finite_clr)) if finite_clr else float("inf"),
-        "mean_clearance": float(np.mean(finite_clr)) if finite_clr else float("inf"),
-        "n_collision_steps": int(sum(1 for c in collisions if c)),
-        "n_near_miss_steps": int(n_near_miss),
-        "worst_step": worst_step,
-        "progress_m": rb["progress_m"],
-        "n_snaps": 0,  # scenario_sim has no unstick/teleport mechanism
-        # post-hoc road-border (doc 02) + coordinate-contract diagnostics.
-        "rb_dist_min": rb["rb_dist_min"],
-        "rb_cross_steps": rb["rb_cross_steps"],
-        "rb_has_data": rb["rb_has_data"],
-        "coord_check_ok": bool(coord_ok) if coord_ok is not None else False,
-        "coord_check_err_m": coord_err,
-    }
-    return row
 
 
 def main() -> int:
