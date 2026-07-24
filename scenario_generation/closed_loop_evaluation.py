@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from scenario_generation.closed_loop_ddp import shard_items
-from scenario_generation.closed_loop_eval import aggregate, build_mp4, enumerate_routes
+from scenario_generation.closed_loop_eval import aggregate, build_mp4, enumerate_multi_root_routes
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
@@ -309,7 +309,13 @@ class FullRouteRouteJob(ClosedLoopJob):
 
 
 class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
-    """Segment-wise full-route closed-loop over every route under ``npz_root``."""
+    """Segment-wise full-route closed-loop over every route under ``npz_root``.
+
+    ``npz_root`` accepts anything ``closed_loop_eval.resolve_npz_roots`` does: a single
+    directory tree, a ``.json`` path-list file, or an already-resolved list of root paths
+    (e.g. one site's several curated date/time entries from a JSON-manifest-based site
+    discovery) -- ``discover_jobs`` merges routes across all of them.
+    """
 
     mode = "full"
 
@@ -318,7 +324,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         model,
         model_args,
         config: ClosedLoopEvalConfig,
-        npz_root: Path | str,
+        npz_root: Path | str | list[Path | str],
         *,
         seg_len: int = 100_000,
         ddp_rank: int = 0,
@@ -331,14 +337,14 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             ddp_rank=ddp_rank,
             ddp_world_size=ddp_world_size,
         )
-        self.npz_root = Path(npz_root)
+        self.npz_root = npz_root
         self.seg_len = seg_len
 
     @classmethod
     def from_checkpoint(
         cls,
         model_path: Path | str,
-        npz_root: Path | str,
+        npz_root: Path | str | list[Path | str],
         config: ClosedLoopEvalConfig,
         *,
         seg_len: int = 100_000,
@@ -357,11 +363,11 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         )
 
     def discover_jobs(self) -> list[FullRouteRouteJob]:
-        routes = enumerate_routes(self.npz_root)
+        routes, route_sidecar_dir = enumerate_multi_root_routes(self.npz_root)
         return [
             FullRouteRouteJob(
                 job_id=key,
-                npz_root=self.npz_root,
+                npz_root=route_sidecar_dir[key],
                 route_key=key,
                 route_paths=routes[key],
                 seg_len=self.seg_len,
