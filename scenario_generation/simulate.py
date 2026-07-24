@@ -41,6 +41,13 @@ def load_model(model_path: str | Path, device: str = "cuda"):
     from diffusion_planner.model.diffusion_planner import Diffusion_Planner
     from diffusion_planner.utils.config import Config
 
+    if str(device).startswith("cuda"):
+        # ORT's CUDAExecutionProvider defaults to TF32 matmuls on Ampere+; torch keeps matmul
+        # TF32 off by default, so the .pth and .onnx GPU rollouts diverge (~1e-3/layer, then
+        # amplified by the closed loop). Opt torch in so both runtimes compute the same way.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     args_file = str(Path(model_path).parent / "args.json")
     args = Config(args_file)
     model = Diffusion_Planner(args)
