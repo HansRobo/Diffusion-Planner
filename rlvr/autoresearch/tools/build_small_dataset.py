@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import importlib.util
 import json
 import os
@@ -52,6 +53,17 @@ from rlvr.autoresearch.tools.lifelong_replay_memory import _parse_label_quotas, 
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 N_SLOTS = 320  # canonical neighbor slot count
+
+
+def output_basename(src: str) -> str:
+    """Collision-free output filename for a source NPZ. A bare basename is NOT
+    unique across a multi-bag/multi-date corpus (e.g. the same ``HH-MM-SS_...npz``
+    recorded on different dates), which would silently overwrite scenes and leak
+    the same output path into both train and val. Prefixing a short hash of the
+    FULL source path makes distinct sources map to distinct outputs, and is stable
+    (same src -> same name) so canonicalization and rendering agree."""
+    h = hashlib.md5(src.encode()).hexdigest()[:10]
+    return f"{h}_{os.path.basename(src)}"
 
 
 def _load_util_script(module_name: str, rel_path: str):
@@ -313,7 +325,7 @@ def render_selected(
         os.makedirs(bdir, exist_ok=True)
         pngs = []
         for r in picks:
-            out_npz = os.path.join(out_root, "npz", os.path.basename(str(r["npz_path"])))
+            out_npz = os.path.join(out_root, "npz", output_basename(str(r["npz_path"])))
             if not os.path.exists(out_npz):
                 continue
             title = (
@@ -378,7 +390,7 @@ def canonicalize_all(rows: list[dict], out_root: str) -> list[str]:
     out_paths = []
     for i, r in enumerate(rows):
         src = str(r["npz_path"])
-        dst = os.path.join(npz_out_dir, os.path.basename(src))
+        dst = os.path.join(npz_out_dir, output_basename(src))
         canonicalize_npz(src, dst)
         out_paths.append(dst)
         if (i + 1) % 500 == 0:
@@ -458,7 +470,7 @@ def run_contiguous_mode(rows: list[dict], args) -> None:
     gidx = 0
     for wi, win in enumerate(windows):
         win_out = [
-            os.path.join(args.out_dir, "npz", os.path.basename(str(r["npz_path"]))) for r in win
+            os.path.join(args.out_dir, "npz", output_basename(str(r["npz_path"]))) for r in win
         ]
         start_frame = int(win[0]["frame"])
         end_frame = int(win[-1]["frame"])
