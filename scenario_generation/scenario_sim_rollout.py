@@ -151,9 +151,10 @@ def _build_scene(
     ego_route_ids: list[int],
     goal_pose: np.ndarray,
     cfg: RolloutConfig,
+    ego_name: str,
 ) -> SceneContext:
     """Build a SceneContext SNAPSHOT (map/MGRS world frame) from sim truth."""
-    ego_state = states["ego"]
+    ego_state = states[ego_name]
     ego_xy = np.array(
         [ego_state["pose"]["x"], ego_state["pose"]["y"]], dtype=np.float32
     )
@@ -191,7 +192,7 @@ def _build_scene(
             continue
         length, width, wheelbase = _entity_shape(st, cfg)
         traj = buffers.trajectory(name)
-        is_ego = name == "ego"
+        is_ego = name == ego_name
         agents.append(
             Agent(
                 id=name,
@@ -212,7 +213,7 @@ def _build_scene(
                 age_steps=buffers.age[name],
             )
         )
-    return SceneContext(agents=agents, map_data=map_data, ego_agent_id="ego", dt=DT)
+    return SceneContext(agents=agents, map_data=map_data, ego_agent_id=ego_name, dt=DT)
 
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +312,15 @@ def run_scenario_sim_rollout(
         runner.configure()
         runner.activate()
 
-        ego0 = runner.get_ego_state()
+        # The headless EgoEntity is always named "ego". Guard its presence so a
+        # scenario that fails to spawn it fails cleanly rather than downstream.
+        ego_name = "ego"
+        if ego_name not in runner.get_entity_states():
+            raise RuntimeError(
+                f"'{ego_name}' entity not spawned; entities="
+                f"{list(runner.get_entity_states())}"
+            )
+        ego0 = runner.get_ego_state(ego_ref=ego_name)
         ego0_xy = np.array([ego0["pose"]["x"], ego0["pose"]["y"]], dtype=np.float32)
         ego_route_ids = _resolve_route(builder, ego0_xy, osc_path, cfg)
         if not ego_route_ids:
@@ -326,8 +335,8 @@ def run_scenario_sim_rollout(
 
         for step in range(cfg.max_steps):
             states = runner.get_entity_states()
-            if "ego" not in states:
-                raise RuntimeError("Sim reports no 'ego' entity")
+            if ego_name not in states:
+                raise RuntimeError(f"Sim reports no '{ego_name}' entity")
 
             # 1. Update per-entity history buffers from truth.
             for name, st in states.items():
@@ -339,11 +348,11 @@ def run_scenario_sim_rollout(
 
             # 2. Build the SceneContext snapshot (map/MGRS frame).
             scene = _build_scene(
-                states, buffers, builder, ego_route_ids, goal_pose, cfg
+                states, buffers, builder, ego_route_ids, goal_pose, cfg, ego_name
             )
             map_cache = MapTensorCache(scene.map_data)
 
-            ego_state = states["ego"]
+            ego_state = states[ego_name]
             ex = float(ego_state["pose"]["x"])
             ey = float(ego_state["pose"]["y"])
             eh = float(ego_state["pose"]["yaw"])
@@ -354,13 +363,13 @@ def run_scenario_sim_rollout(
                     model,
                     model_args,
                     scene,
-                    ["ego"],
+                    [ego_name],
                     device,
                     map_cache=map_cache,
                     return_turn_indicators=True,
                 )
-                cached_plan_ego = preds["ego"]  # (future_len, 4) ego frame
-                ti_model = int(tis.get("ego", 0))
+                cached_plan_ego = preds[ego_name]  # (future_len, 4) ego frame
+                ti_model = int(tis.get(ego_name, 0))
                 if ti_model in _TI_MODEL_TO_SIM:  # KEEP (4) retains ti_cmd
                     ti_cmd = _TI_MODEL_TO_SIM[ti_model]
 
@@ -371,15 +380,15 @@ def run_scenario_sim_rollout(
             seg = np.linalg.norm(np.diff(world_xy, axis=0), axis=1)
             speeds = np.concatenate([seg[:1], seg]) / DT if len(seg) else np.zeros(1)
             pts = np.column_stack([world_xy, world_h, speeds]).astype(float)  # (N, 4)
-            runner.set_ego_trajectory(pts)
-            runner.set_ego_turn_indicator(int(ti_cmd))
+            runner.set_ego_trajectory(pts, ego_ref=ego_name)
+            runner.set_ego_turn_indicator(int(ti_cmd), ego_ref=ego_name)
             planned_first_xy = world_xy[0].copy()
 
             # 5. Score at state k (raw ego-frame neighbors, un-normalized).
-            if buffers.age["ego"] >= cfg.warmup_steps:
+            if buffers.age[ego_name] >= cfg.warmup_steps:
                 R = _rotation_matrix(eh)
                 neighbors_live = _build_neighbor_agents_past(
-                    scene, "ego", R, np.array([ex, ey], dtype=np.float64), eh
+                    scene, ego_name, R, np.array([ex, ey], dtype=np.float64), eh
                 )[0, :, -1, :]
                 ego_shape = np.array(
                     _entity_shape(ego_state, cfg), dtype=np.float32
@@ -392,7 +401,7 @@ def run_scenario_sim_rollout(
             outcome = runner.step()
 
             # 7. Record realized ego pose + coordinate-contract check.
-            ego_after = runner.get_ego_state()
+            ego_after = runner.get_ego_state(ego_ref=ego_name)
             ax = float(ego_after["pose"]["x"])
             ay = float(ego_after["pose"]["y"])
             ah = float(ego_after["pose"]["yaw"])
