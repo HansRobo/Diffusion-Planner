@@ -290,3 +290,186 @@ def run_closed_loop_eval(
             )
 
     return summary
+
+
+# --------------------------------------------------------------------------- #
+# scenario_sim sibling: OpenSCENARIO-driven closed loop (no NPZ input).
+# --------------------------------------------------------------------------- #
+def enumerate_scenarios(scenario_root) -> list[Path]:
+    """Resolve a scenario input into an ordered list of .xosc files.
+
+    ``scenario_root`` is either a single ``.xosc`` file or a directory tree
+    globbed recursively for ``*.xosc`` (sorted for determinism)."""
+    root = Path(scenario_root)
+    if root.suffix == ".xosc":
+        return [root]
+    paths = sorted(root.rglob("*.xosc"))
+    if not paths:
+        raise FileNotFoundError(f"No .xosc under {scenario_root}")
+    return paths
+
+
+def run_scenario_sim_eval(
+    scenario_root,
+    map_path,
+    out_dir,
+    *,
+    device: str,
+    model_path: str | None = None,
+    dummy_param_json: str | None = None,
+    near_miss_thresh: float = 1.0,
+    replan_interval: int = 4,
+    max_steps: int = 300,
+    warmup_steps: int = 5,
+    fps: float = 10.0,
+    verbose: bool = True,
+) -> dict:
+    """Closed-loop eval over OpenSCENARIO ``.xosc`` scenarios (scenario_sim path).
+
+    Sibling of :func:`run_closed_loop_eval`: instead of replaying NPZ frames it
+    drives each scenario through the in-process C++ interpreter with the model as
+    ego. Reuses :func:`aggregate` and the same ``segments.jsonl`` / ``summary.json``
+    output contract so downstream summaries (``scalar_keys`` / wandb) stay
+    compatible. One scenario == one whole rollout == one row.
+
+    PROCESS-PER-SCENARIO: the C++ ``SimulatorCore`` is a static singleton
+    (1 process = 1 scenario -- reusing it across scenarios leaks nodes and aborts
+    at teardown), so each scenario runs in a FRESH subprocess worker
+    (``python -m scenario_generation.scenario_sim_rollout``). This also gives
+    crash isolation and is the unit of plan/04's process parallelism. Unlike the
+    NPZ path this takes a MODEL SPEC (``model_path`` / ``dummy_param_json``), not a
+    live model object, because each worker builds its own model; the checkpoint
+    the closed-loop cadence fires on is exactly what a real worker would load.
+    """
+    import subprocess
+    import sys
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    scenarios = enumerate_scenarios(scenario_root)
+
+    rows: list[dict] = []
+    t0 = time.perf_counter()
+    with open(out_dir / "segments.jsonl", "w") as fout:
+        for si, scenario in enumerate(scenarios):
+            key = scenario.stem
+            work = out_dir / key
+            work.mkdir(parents=True, exist_ok=True)
+            row_out = work / "row.json"
+            cmd = [
+                sys.executable, "-m", "scenario_generation.scenario_sim_rollout",
+                "--osc", str(scenario),
+                "--map_path", str(map_path),
+                "--out_dir", str(work),
+                "--row_out", str(row_out),
+                "--device", device,
+                "--replan_interval", str(replan_interval),
+                "--max_steps", str(max_steps),
+                "--warmup_steps", str(warmup_steps),
+                "--near_miss_thresh", str(near_miss_thresh),
+                "--fps", str(fps),
+            ]
+            if model_path is not None:
+                cmd += ["--model_path", str(model_path)]
+            if dummy_param_json is not None:
+                cmd += ["--dummy_param_json", str(dummy_param_json)]
+
+            proc = subprocess.run(cmd, capture_output=not verbose)
+            # The worker's row is authoritative; a nonzero rc at teardown (after the
+            # row is written) must not lose a completed rollout, so key off row.json.
+            if row_out.exists():
+                metrics = json.loads(row_out.read_text())
+                status = "ok" if proc.returncode == 0 else f"rc={proc.returncode}(teardown)"
+            else:
+                metrics = _failed_row(f"worker rc={proc.returncode}, no row.json")
+                status = f"FAILED rc={proc.returncode}"
+            row = {"route": key, **metrics}
+            fout.write(json.dumps(row, default=float) + "\n")
+            fout.flush()
+            rows.append(row)
+            if verbose:
+                print(
+                    f"[{si + 1}/{len(scenarios)}] {key} -> {status} "
+                    f"{metrics.get('terminated')}/{metrics.get('result_kind', '')} "
+                    f"steps={metrics.get('n_steps_run')} "
+                    f"coll={metrics.get('n_collision_steps')} "
+                    f"coord_ok={metrics.get('coord_check_ok')}"
+                )
+
+    summary = aggregate(rows, near_miss_thresh)
+    summary["scenario_root"] = str(scenario_root)
+    summary["map_path"] = str(map_path)
+    summary["n_scenarios"] = len(scenarios)
+    summary["elapsed_sec"] = time.perf_counter() - t0
+    summary["segments"] = rows
+    with open(out_dir / "summary.json", "w") as f:
+        json.dump({k: v for k, v in summary.items() if k != "segments"}, f, indent=4)
+    return summary
+
+
+def _failed_row(reason: str) -> dict:
+    """Aggregate-schema row for a scenario whose worker produced no output."""
+    return {
+        "n_steps_run": 0,
+        "terminated": "worker_failed",
+        "result_kind": "",
+        "min_clearance": float("inf"),
+        "mean_clearance": float("inf"),
+        "n_collision_steps": 0,
+        "n_near_miss_steps": 0,
+        "worst_step": -1,
+        "progress_m": 0.0,
+        "n_snaps": 0,
+        "error": reason,
+    }
+
+
+def main() -> None:
+    """Standalone scenario_sim eval CLI (mirrors valid_predictor_closed_loop.py).
+
+    Runs the scenario_sim closed loop over a scenario root with a real model
+    (.pth / ONNX) or the plumbing dummy, spawning one worker process per
+    scenario, writing segments.jsonl + summary.json. Training integration
+    (train.py wiring) is a separate task."""
+    import argparse
+
+    p = argparse.ArgumentParser(description="scenario_sim closed-loop eval")
+    p.add_argument("--scenario_root", required=True, help=".xosc file or dir tree")
+    p.add_argument("--map_path", required=True, help="lanelet2 .osm the scenarios reference")
+    p.add_argument("--out_dir", required=True)
+    p.add_argument("--device", default="cpu")
+    p.add_argument(
+        "--model_path",
+        default=None,
+        help="best_model.pth (torch) or diffusion_planner.onnx. Omit to use the "
+        "forward-driving dummy model (plumbing validation).",
+    )
+    p.add_argument(
+        "--dummy_param_json",
+        default=None,
+        help="Config param json for the dummy model_args (required with the dummy).",
+    )
+    p.add_argument("--replan_interval", type=int, default=4)
+    p.add_argument("--max_steps", type=int, default=300)
+    p.add_argument("--near_miss_thresh", type=float, default=1.0)
+    args = p.parse_args()
+
+    if args.model_path is None and not args.dummy_param_json:
+        p.error("--dummy_param_json is required when --model_path is omitted")
+
+    summary = run_scenario_sim_eval(
+        args.scenario_root,
+        args.map_path,
+        args.out_dir,
+        device=args.device,
+        model_path=args.model_path,
+        dummy_param_json=args.dummy_param_json,
+        near_miss_thresh=args.near_miss_thresh,
+        replan_interval=args.replan_interval,
+        max_steps=args.max_steps,
+    )
+    print(json.dumps({k: v for k, v in summary.items() if k != "segments"}, indent=2, default=float))
+
+
+if __name__ == "__main__":
+    main()
