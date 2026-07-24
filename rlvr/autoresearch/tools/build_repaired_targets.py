@@ -123,10 +123,8 @@ def _future_to_4col(traj: torch.Tensor | np.ndarray) -> np.ndarray:
         raise ValueError(f"expected future shaped (T,C) or (1,T,C), got {arr.shape}")
     if arr.shape[1] >= 4:
         return arr[:, :4].astype(np.float32)
-    if arr.shape[1] != 3:
-        raise ValueError(f"expected 3 or 4 future channels, got {arr.shape}")
-    yaw = arr[:, 2]
-    return np.column_stack([arr[:, 0], arr[:, 1], np.cos(yaw), np.sin(yaw)]).astype(np.float32)
+    # Single ego trajectory: a waypoint at the origin is real, not padding.
+    return future_to_4col(arr, zero_rows_are_padding=False)
 
 
 def _row_is_expert_disagreement(row: dict[str, Any]) -> bool:

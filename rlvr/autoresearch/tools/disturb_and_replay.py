@@ -80,6 +80,7 @@ import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 
+from planner_metrics.scene_format import future_to_4col
 from preference_optimization.utils import load_npz_data
 from rlvr.grpo_trainer_batched import _normalize_batch, _stack_scene_data
 from rlvr.reward import compute_lane_departure_penalty
@@ -94,19 +95,7 @@ def _wrap_angle(rad: float) -> float:
     return float((rad + math.pi) % (2 * math.pi) - math.pi)
 
 
-def _future_to_4col(arr: np.ndarray) -> np.ndarray:
-    """Futures are ALWAYS 4-col [x,y,cos,sin]; widen legacy 3-col [x,y,heading].
-    4-col passes through; invalid (zero) rows stay zero."""
-    arr = np.asarray(arr, dtype=np.float32)
-    if arr.shape[-1] == 4:
-        return arr
-    mask = np.abs(arr[..., :2]).sum(-1) == 0
-    h = arr[..., 2]
-    out = np.concatenate(
-        [arr[..., :2], np.cos(h)[..., None], np.sin(h)[..., None]], axis=-1
-    ).astype(np.float32)
-    out[mask] = 0.0
-    return out
+_future_to_4col = future_to_4col
 
 
 def _rotate_past_about_pivot(
