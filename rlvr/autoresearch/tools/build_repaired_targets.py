@@ -488,6 +488,12 @@ def _repairs_source_labels(
     # soft, deviation-class-weighted term (c_E, dropped entirely for far-off states,
     # w_E=0). So expert_disagreement is handled by the soft r2lpl_score ranking in
     # _best_safe_candidate, not by rejecting conflict-flagged candidates here.
+    #
+    # NOTE: the road-border gate is ABSOLUTE (any crossing is rejected). An earlier
+    # expert-relative relaxation for shoulder-stop scenes was removed: rb_min_dist is an
+    # unsigned distance to the border, so it cannot distinguish a shoulder skim from a
+    # trajectory that crossed to the wrong side and ran far outside, making any distance
+    # floor unsafe. Re-enabling it needs a signed / side-aware containment metric.
     if not _passes_global_gates(label_row, reward_row):
         return False
     for label in source_labels:

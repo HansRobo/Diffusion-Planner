@@ -42,9 +42,14 @@ from scenario_generation.perf_timer import Timers
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.simulate import decode_turn_indicator
 from scenario_generation.tensor_converter import _heading_to_cos_sin
+from scenario_generation.tools._heatmap_common import project_points_to_polyline
 from scenario_generation.transforms import _rotation_matrix, world_to_ego_frame
 
 DT = 0.1
+# Stuck speed gate (m/s): ego must be at or below this to accumulate stuck steps.
+# Pose mode also requires the reproducer to be in ``repeat`` (Autoware-aligned); clock
+# mode is speed-only because bag frames always advance by wall time (no ``repeat``).
+STUCK_SPEED_MPS = 0.5
 
 
 def _credit_window_width_frames(spec: dict | None, fallback: int) -> int:
@@ -68,6 +73,8 @@ _CREDIT_EVENT_METADATA_KEYS = (
     "expert_disagreement_expert_end_progress",
     "expert_disagreement_model_end_speed",
     "expert_disagreement_expert_end_speed",
+    "expert_disagreement_realized_lag",
+    "expert_disagreement_realized_gap_m",
     # Propagate the rear-end tag into the credit-window manifest so downstream
     # (mining / repair filters) can drop a rear-end moving-collision if desired
     # instead of it being indistinguishable from a genuine forward collision.
@@ -541,17 +548,18 @@ class _SegState:
     # FIRST widen the cursor search radius to ``unstick_radius_mult`` x nominal so it can
     # reach recorded frames further ahead (where a phantom lead/blocker has cleared) and the
     # model can proceed on its own — closed-loop continuity preserved. The widened radius is
-    # restored to nominal as soon as the ego moves again (speed >= 0.5). Only if the ego is
-    # STILL stuck ``unstick_teleport_after`` further steps later does the rollout fall back to
-    # snapping it forward onto the recorded GT pose ~``unstick_advance_m`` ahead (the hard last
-    # resort). Set ``unstick_radius_mult`` <= 1.0 to disable the gentle stage (teleport at
+    # restored to nominal as soon as the ego moves again (speed > STUCK_SPEED_MPS). Only if the
+    # ego is STILL stuck ``unstick_teleport_after`` further steps later does the rollout fall back
+    # to snapping it forward onto the recorded GT pose ~``unstick_advance_m`` ahead (the hard
+    # last resort). Set ``unstick_radius_mult`` <= 1.0 to disable the gentle stage (teleport at
     # ``unstick_after``, the legacy behavior).
     unstick_after: int = 0
     unstick_advance_m: float = 5.0
     unstick_radius_mult: float = 3.0
     unstick_teleport_after: int = 300
-    ego_stuck: int = 0
-    n_snaps: int = 0
+    ego_stuck: int = 0  # consecutive stuck steps (pose: repeat AND ego <= STUCK_SPEED_MPS)
+    expand_count: int = 0  # stage-1 radius-widen events this segment
+    snap_count: int = 0  # stage-2 arc-length teleports (replaces n_snaps)
     # One-pass collision-scene save (set when run_segments_batched gets save_dir).
     # save_buf rolls the last save_max_scenes+1 (k, idx, live_pose, np_dict) snapshots
     # (deep enough for the min-movement window extension); it is CLEARED on an unstick
@@ -570,6 +578,12 @@ class _SegState:
     # Corrected neighbor context (neighbor_history_mode="sim"): rebuild neighbor_agents_past
     # each step from the SIMULATED shown motion (velocity from shown deltas, frozen->v~0).
     nbr_tracker: object = None
+    # Realized-lag tracking (clock mode): consecutive steps the realized ego has been
+    # >= lag_progress_gap_m behind the moving expert clock on the route polyline. The
+    # realized-event scorer flags model_lagging_expert when the streak reaches its
+    # sustain threshold. route_arc_s caches tl.poses cumulative arc length (lazy).
+    realized_lag_streak: int = 0
+    route_arc_s: object = None
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -624,6 +638,7 @@ def _seed_state(
     goal_mode="segment",
     replay_mode="pose",
     tracker_mode="mpc",
+    yaw_gate: bool = True,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
@@ -631,7 +646,7 @@ def _seed_state(
     # (e.g. one that waited out a long red light) can still drive to the segment end.
     cap = int(max_steps) if max_steps is not None else (end - start)
 
-    cursor = PerceptionReproducer(tl, search_radius=search_radius, timers=timers)
+    cursor = PerceptionReproducer(tl, search_radius=search_radius, timers=timers, yaw_gate=yaw_gate)
     cursor.reset(start)
     live_pose, ego_hist, dyn = _ego_state_from_frame(tl, start)
     # Corrected neighbor context: one timeline sample per 0.1 s sim step (real time on a
@@ -709,8 +724,11 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         s.cursor.max_idx_reached = idx
         s.prev_max_idx = idx
         s.stuck = 0
+        # Clock progression bypasses cursor.step(); still credit each tick as normal
+        # advancement so normal_steps / repeat_steps match executed steps.
+        s.cursor._update_base_state(repeat=False)
     else:
-        idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time)
+        idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time, sim_yaw=float(s.live_pose[2]))
         if s.cursor.max_idx_reached > s.prev_max_idx:
             s.prev_max_idx, s.stuck = s.cursor.max_idx_reached, 0
         else:
@@ -818,39 +836,52 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
         s.sim_time += DT
         s.k += 1
 
-        # Unstick (two-stage): if the ego has been (near-)stopped for too long (e.g. it
-        # halted at a yellow light and won't proceed), FIRST widen the cursor search radius
-        # so it reaches recorded frames further ahead (phantom blocker clears -> the model
-        # proceeds on its own, no teleport). Only if it is STILL stuck after a further grace
-        # window do we fall back to the hard snap onto the recorded GT pose ahead.
+        # Unstick (two-stage): if the ego has been stuck for too long (e.g. it halted at a
+        # yellow light and won't proceed), FIRST widen the cursor search radius so it reaches
+        # recorded frames further ahead (phantom blocker clears -> the model proceeds on its
+        # own, no teleport). Only if it is STILL stuck after a further grace window do we fall
+        # back to the hard snap onto the recorded GT pose ahead.
+        #
+        # Stuck definition depends on timeline progress mode:
+        # - pose: reproducer in ``repeat`` AND ego (near-)stopped. A stopped ego whose cursor
+        #   is still advancing (e.g. waiting at a light while the bag keeps playing nearby
+        #   frames) is NOT stuck.
+        # - clock: bag frames always advance by wall time (no cursor.step / no ``repeat``),
+        #   so stuck is speed-only — otherwise unstick would never fire on the R2LPL default.
         if s.unstick_after > 0:
-            if s.dyn.speed >= 0.5:
+            cur = s.cursor
+            if s.dyn.speed > STUCK_SPEED_MPS:
                 # Moving again: clear the counter and undo any temporary cursor widening so
                 # frame selection returns to the nominal search_radius.
                 s.ego_stuck = 0
-                s.cursor.restore_radius()
+                cur.restore_radius()
+            elif s.replay_mode != "clock" and not cur.last_was_repeat:
+                # Pose mode: stopped but the reproducer is still advancing (normal, not
+                # repeat) -> not stuck. Clear the counter; keep any widened radius until
+                # the ego moves again.
+                s.ego_stuck = 0
             else:
+                # Clock: stopped. Pose: stopped AND reproducer in repeat.
                 s.ego_stuck += 1
             widen_on = s.unstick_radius_mult > 1.0
             # Stage 1 (gentle): widen once, exactly when the stuck count first crosses the
             # threshold (so it isn't re-applied every subsequent stuck step).
             if widen_on and s.ego_stuck == s.unstick_after:
-                s.cursor.widen(s.unstick_radius_mult)
+                cur.widen(s.unstick_radius_mult)
+                s.expand_count += 1
             # Stage 2 (last resort): teleport. With widening on this is deferred by
             # ``unstick_teleport_after`` extra steps; with it off it fires at ``unstick_after``
             # (legacy behavior).
             teleport_at = s.unstick_after + (s.unstick_teleport_after if widen_on else 0)
             if s.ego_stuck >= teleport_at:
-                n = len(s.tl)
-                tgt = min(max(s.cursor.max_idx_reached, 0) + 1, n - 1)
-                while tgt < n - 1 and (
-                    float(np.linalg.norm(s.tl.poses[tgt, :2] - s.live_pose[:2]))
-                    < s.unstick_advance_m
-                ):
-                    tgt += 1
+                # Target chosen by BAG ARC LENGTH ahead of the current bag anchor (never
+                # rewind), mirroring Autoware's find_perturb_index_along_bag.
+                tgt = s.tl.index_ahead_by_arc_length(
+                    max(cur.max_idx_reached, 0), s.unstick_advance_m
+                )
                 s.live_pose, s.ego_hist, s.dyn = _ego_state_from_frame(s.tl, tgt)
-                s.cursor.reset(tgt)
-                s.cursor.restore_radius()  # teleport is a fresh start -> nominal radius
+                cur.reset(tgt)
+                cur.restore_radius()  # teleport is a fresh start -> nominal radius
                 # Re-seed the sim machinery at the teleport target so post-snap recording is
                 # correct, not stale: the neighbor tracker's rec_t is capped at 1.0/step, so
                 # without this it would lag many steps behind the jumped ego (stale neighbors);
@@ -865,9 +896,9 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.last_turn_indicator = int(s.turn_hist[-1])
                 s.last_collision_uuid = None  # teleported -> next contact is a fresh collision
                 s.in_episode = False
-                s.prev_max_idx = s.cursor.max_idx_reached
+                s.prev_max_idx = cur.max_idx_reached
                 s.ego_stuck = 0
-                s.n_snaps += 1
+                s.snap_count += 1
 
 
 def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers):
@@ -893,7 +924,10 @@ def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
         if valid_cl.size
         else -1,
         "progress_m": progress,
-        "n_snaps": int(s.n_snaps),
+        "expand_count": int(s.expand_count),
+        "snap_count": int(s.snap_count),
+        "normal_steps": int(s.cursor.normal_steps),
+        "repeat_steps": int(s.cursor.repeat_steps),
     }
     return SegmentResult(
         metrics=metrics, clearances=s.clearances, collisions=s.collisions, timers=timers
@@ -1296,6 +1330,7 @@ def render_segment(
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
+    yaw_gate: bool = True,
     *,
     replan_interval: int = 1,
     draw_every: int = 1,
@@ -1362,6 +1397,7 @@ def render_segment(
         tracker_mode=tracker_mode,
         replay_mode=timeline_progress_mode,
         goal_mode=goal_mode,
+        yaw_gate=yaw_gate,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
@@ -1409,7 +1445,7 @@ def render_segment(
                         "ego": [float(s.live_pose[0]), float(s.live_pose[1])],
                         "dist_goal": float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)),
                         "max_idx_reached": int(s.cursor.max_idx_reached),
-                        "n_snaps": int(s.n_snaps),
+                        "snap_count": int(s.snap_count),
                     }
                 )
                 + "\n"
@@ -1431,7 +1467,10 @@ def render_segment(
                     "max_idx_reached": int(s.cursor.max_idx_reached),
                     "stuck": int(s.stuck),
                     "ego_stuck": int(s.ego_stuck),
-                    "n_snaps": int(s.n_snaps),
+                    "expand_count": int(s.expand_count),
+                    "snap_count": int(s.snap_count),
+                    "state": s.cursor.state,
+                    "state_run_steps": int(s.cursor.state_run_steps),
                 }
             )
             + "\n"
@@ -1504,9 +1543,9 @@ def render_segment(
                 view_half_m=view_half_m,
             )
         _score_into(s, neighbors_live, device, timers)
-        snaps_before = s.n_snaps
+        snaps_before = s.snap_count
         _advance_step(s, pred_cur, idx, device, timers, override=override)
-        if s.n_snaps > snaps_before:
+        if s.snap_count > snaps_before:
             # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
             # world location, so executing it next step would drag the ego right back. Invalidate
             # it to force a fresh inference at the snapped pose (else the snap never sticks).
@@ -1557,6 +1596,7 @@ def run_segments_batched(
     danger_credit_windows: dict[str, dict[str, int | float]] | None = None,
     danger_decluster_steps: int = 10,
     danger_manifest_callback=None,
+    yaw_gate: bool = True,
 ) -> list[SegmentResult]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
@@ -1626,6 +1666,7 @@ def run_segments_batched(
                     neighbor_history_mode=neighbor_history_mode,
                     tracker_mode=tracker_mode,
                     replay_mode=timeline_progress_mode,
+                    yaw_gate=yaw_gate,
                 )
                 for (tl, start, end) in chunk
             ]
@@ -1784,12 +1825,41 @@ def run_segments_batched(
                         expert_future_world = None
                         expert_future_speed = None
                         ref_polyline_world = None
+                        realized_lag_gap_m = None
                         if hasattr(_s.tl, "poses") and hasattr(_s.tl, "speeds"):
                             H = int(pred_row.shape[0])
                             idx_i = int(_idx)
                             expert_future_world = _s.tl.poses[idx_i : idx_i + 1 + H, :2]
                             expert_future_speed = _s.tl.speeds[idx_i : idx_i + 1 + H]
                             ref_polyline_world = _s.tl.poses[:, :2]
+                            # Realized-lag streak (clock mode only: in pose mode the
+                            # cursor advances WITH the ego, so the clock gap is ~0 by
+                            # construction). Compare the realized ego arc position to
+                            # the expert clock arc position on the recorded polyline;
+                            # the scorer flags once the gap sustains long enough.
+                            lag_thr = getattr(realized_event_scorer, "expert_lag_thresholds", None)
+                            if lag_thr is not None and _s.replay_mode == "clock":
+                                if _s.route_arc_s is None:
+                                    seg_d = np.linalg.norm(
+                                        np.diff(ref_polyline_world, axis=0), axis=1
+                                    )
+                                    _s.route_arc_s = np.concatenate([[0.0], np.cumsum(seg_d)])
+                                ego_arc = float(
+                                    project_points_to_polyline(
+                                        _s.live_pose[None, :2],
+                                        ref_polyline_world,
+                                        _s.route_arc_s,
+                                    )[0, 0]
+                                )
+                                expert_arc = float(_s.route_arc_s[idx_i])
+                                realized_lag_gap_m = expert_arc - ego_arc
+                                if (
+                                    float(_s.tl.speeds[idx_i]) >= lag_thr["moving_speed_mps"]
+                                    and realized_lag_gap_m >= lag_thr["lag_progress_gap_m"]
+                                ):
+                                    _s.realized_lag_streak += 1
+                                else:
+                                    _s.realized_lag_streak = 0
                         realized_rows.append(
                             realized_event_scorer(
                                 np_dict,
@@ -1799,6 +1869,8 @@ def run_segments_batched(
                                 expert_future_world=expert_future_world,
                                 expert_future_speed=expert_future_speed,
                                 ref_polyline_world=ref_polyline_world,
+                                realized_lag_streak=_s.realized_lag_streak,
+                                realized_lag_gap_m=realized_lag_gap_m,
                             )
                         )
                     for row_idx, (
@@ -2061,7 +2133,7 @@ def run_segments_batched(
                                         s.saved_collision = True  # recorded-mode one-save latch
                                         s.last_collision_uuid = colliding_uuid
                     for i, (s, _np, nb, idx, _suuid, _wbu) in enumerate(built):
-                        prev_snaps = s.n_snaps
+                        prev_snaps = s.snap_count
                         _advance_step(s, preds[i], idx, device, timers)
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved
@@ -2070,9 +2142,13 @@ def run_segments_batched(
                         s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
                         # Clear the buffer on an unstick teleport: pre-jump frames belong
                         # to a different ego path and must never enter a saved window.
-                        if s.save_buf is not None and s.n_snaps > prev_snaps:
+                        if s.save_buf is not None and s.snap_count > prev_snaps:
                             s.save_buf.clear()
                             s.last_snap_step = s.k
+                        # A teleport also invalidates the realized-lag streak: the snap
+                        # closes the gap artificially, so restart the sustain count.
+                        if s.snap_count > prev_snaps:
+                            s.realized_lag_streak = 0
                 active = [s for s in active if not s.done]
             results.extend(_finalize(s, timers) for s in states)
     finally:
