@@ -1,14 +1,7 @@
-"""Reusable closed-loop rollout + render + metric aggregation.
+"""Low-level closed-loop rollout helpers.
 
-Shared by the standalone CLI (``diffusion_planner/valid_predictor_closed_loop.py``) and the
-per-epoch training validation (``diffusion_planner/diffusion_planner/train.py``): both drive the
-ego in CLOSED LOOP through ``reproducer_rollout.render_segment`` over the route NPZ frames under
-``npz_root``, write a per-step PNG, build one MP4 per segment, and aggregate the per-segment
-metrics into a single summary.
-
-``run_closed_loop_eval`` takes an already-loaded ``(model, model_args)`` (so training can pass its
-live model + ``TrainConfig`` straight in, no checkpoint reload) and returns the summary dict plus
-the per-segment MP4 paths (for wandb upload).
+``run_closed_loop_eval`` is the tier4-main entry point used by ``train.py``.
+New code should use :class:`scenario_generation.closed_loop_evaluation.FullRouteClosedLoopEvaluation`.
 """
 
 from __future__ import annotations
@@ -16,14 +9,11 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-import time
 from pathlib import Path
 
 import numpy as np
 
-from scenario_generation.perf_timer import Timers
-from scenario_generation.reproducer_rollout import render_segment
-from scenario_generation.route_timeline import RouteTimeline, group_routes
+from scenario_generation.route_timeline import group_routes
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -84,10 +74,30 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
 
     n_seg_collision = sum(1 for r in rows if r["n_collision_steps"] > 0)
     n_seg_near_miss = sum(1 for r in rows if r["n_near_miss_steps"] > 0)
+    n_seg_diverged = sum(1 for r in rows if r["terminated"] == "diverged")
 
-    # min_clearance is +inf for a segment that never saw a valid neighbor; exclude those.
     finite_min_cl = [r["min_clearance"] for r in rows if np.isfinite(r["min_clearance"])]
     finite_mean_cl = [r["mean_clearance"] for r in rows if np.isfinite(r["mean_clearance"])]
+
+    # Graded (non-saturating) headline metrics — see closed_loop_eval design notes: these
+    # improve smoothly as the model trains, unlike the binary *_segment_rate / worst-moment
+    # *_min_clearance keys (still computed below for continuity, but no longer displayed).
+    total_collision_events = sum(r.get("n_collision_events", 0) for r in rows)
+    total_curb_hits = sum(r.get("n_curb_hits", 0) for r in rows)
+    completions = [r["route_completion"] for r in rows if "route_completion" in r]
+    # gt-deviation pooled across all steps (weight each segment's mean by its step count, which
+    # equals that segment's gt-deviation sample count), so long routes aren't under-weighted.
+    dev_num = sum(
+        r["mean_gt_deviation_m"] * r["n_steps_run"]
+        for r in rows
+        if np.isfinite(r.get("mean_gt_deviation_m", float("inf")))
+    )
+    dev_den = sum(
+        r["n_steps_run"]
+        for r in rows
+        if np.isfinite(r.get("mean_gt_deviation_m", float("inf")))
+    )
+    mean_clearance = float(np.mean(finite_mean_cl)) if finite_mean_cl else float("inf")
 
     term_counts: dict[str, int] = {}
     for r in rows:
@@ -97,22 +107,29 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
         "near_miss_thresh": near_miss_thresh,
         "n_segments": n_seg,
         "total_steps": total_steps,
-        "n_segments_with_collision": n_seg_collision,
-        "collision_segment_rate": n_seg_collision / n_seg if n_seg else 0.0,
+        # --- displayed (graded) ---
+        "mean_route_completion": float(np.mean(completions)) if completions else 0.0,
+        "mean_clearance": mean_clearance,
+        "mean_gt_deviation_m": float(dev_num / dev_den) if dev_den else float("inf"),
+        "total_collision_events": total_collision_events,
+        "total_curb_hits": total_curb_hits,
         "total_collision_steps": total_collision_steps,
         "collision_step_rate": total_collision_steps / total_steps if total_steps else 0.0,
-        "n_segments_with_near_miss": n_seg_near_miss,
-        "near_miss_segment_rate": n_seg_near_miss / n_seg if n_seg else 0.0,
         "total_near_miss_steps": total_near_miss_steps,
         "near_miss_step_rate": total_near_miss_steps / total_steps if total_steps else 0.0,
+        "total_snaps": total_snaps,
+        "n_segments_diverged": n_seg_diverged,
+        # --- kept for continuity / episode table, NOT displayed as headline (saturating) ---
+        "n_segments_with_collision": n_seg_collision,
+        "collision_segment_rate": n_seg_collision / n_seg if n_seg else 0.0,
+        "n_segments_with_near_miss": n_seg_near_miss,
+        "near_miss_segment_rate": n_seg_near_miss / n_seg if n_seg else 0.0,
+        "diverged_segment_rate": n_seg_diverged / n_seg if n_seg else 0.0,
         "global_min_clearance": float(min(finite_min_cl)) if finite_min_cl else float("inf"),
         "mean_segment_min_clearance": float(np.mean(finite_min_cl))
         if finite_min_cl
         else float("inf"),
-        "mean_segment_mean_clearance": float(np.mean(finite_mean_cl))
-        if finite_mean_cl
-        else float("inf"),
-        "total_snaps": total_snaps,
+        "mean_segment_mean_clearance": mean_clearance,
         "total_expand_count": total_expand,
         "total_normal_steps": total_normal,
         "total_repeat_steps": total_repeat,
@@ -122,12 +139,7 @@ def aggregate(rows: list[dict], near_miss_thresh: float) -> dict:
 
 
 def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
-    """Encode the PNG sequence in ``png_dir`` to an MP4.
-
-    PNGs are named by step ``k`` and may be sparse (``draw_every`` skips frames), so glob the
-    directory (gap-tolerant, name-sorted) instead of a contiguous ``%05d`` counter. ``fps`` is the
-    raw frame rate, so a sparse sequence plays faster than real time (shorter video).
-    """
+    """Encode the PNG sequence in ``png_dir`` to an MP4."""
     subprocess.run(
         [
             "ffmpeg",
@@ -167,15 +179,19 @@ def run_closed_loop_eval(
     unstick_after: int,
     unstick_advance_m: float,
     fps: float,
-    replan_interval: int,
     draw_every: int,
     neighbor_history_mode: str,
+    replan_interval: int = 10,
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
     tracker_mode: str = "mpc",
     verbose: bool = True,
     shard: tuple[int, int] | None = None,
     yaw_gate: bool = True,
+    abort_deviation_m: float = 0.0,
+    abort_after: int = 30,
+    abort_max_snaps: int = 0,
+    drop_objects: bool = False,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
 
@@ -195,6 +211,9 @@ def run_closed_loop_eval(
     Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back into
     the input history each step, held across cached-plan steps when ``replan_interval`` > 1
     (see ``render_segment``).
+
+    ``drop_objects``: empty-world ablation, forwarded to ``render_segment`` (see its docstring
+    and ``objects_ablation_strategy.md``).
 
     Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-route MP4),
     ``segments`` (list[row]), and ``elapsed_sec``.
@@ -255,6 +274,10 @@ def run_closed_loop_eval(
                 neighbor_history_mode=neighbor_history_mode,
                 tracker_mode=tracker_mode,
                 yaw_gate=yaw_gate,
+                abort_deviation_m=abort_deviation_m,
+                abort_after=abort_after,
+                abort_max_snaps=abort_max_snaps,
+                drop_objects=drop_objects,
             )
             row = {"route": key, **metrics}
             fout.write(json.dumps(row, default=float) + "\n")
