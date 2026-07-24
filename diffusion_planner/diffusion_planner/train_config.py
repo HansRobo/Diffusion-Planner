@@ -123,6 +123,10 @@ class TrainConfig:
     # A/B and are reverted. Both remain as opt-in experiment knobs.
     coeff_endpoint_fde_loss: float = 0.0
     plantf_use_lon_velocity_weight: bool = True
+    # Smoothness penalty on the xy second difference of the best planTF mode,
+    # to suppress the "comb" jitter of the per-timestep absolute regression.
+    # Off by default; try 0.1-1.0. See docs/plantf_original_comparison_and_roadmap.md.
+    coeff_smoothness_loss: float = 0.0
     # Feed the current ego motion state (vx, vy, ax, ay, steering, yaw_rate) into
     # the planTF trajectory head so its absolute-waypoint regression is anchored
     # to the current motion (the diffusion decoder gets this via its pinned

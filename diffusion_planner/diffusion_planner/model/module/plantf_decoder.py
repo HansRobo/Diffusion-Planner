@@ -402,6 +402,16 @@ def compute_plantf_training_loss(
 
     loss["mode_cls_loss"] = F.cross_entropy(probability, best_mode.detach())
 
+    # Smoothness penalty: the planTF head regresses 80 absolute waypoints
+    # independently per timestep, which produces "comb" jitter (large second
+    # difference) even when ADE/FDE look fine. Penalizing the xy second
+    # difference of the best mode directly suppresses that jitter. Computed in
+    # the normalized space (same scale as ego_planning_loss). Off by default
+    # (coeff_smoothness_loss). See docs/plantf_original_comparison_and_roadmap.md.
+    best_xy = best_trajectory[:, :, :2]
+    second_diff = best_xy[:, 2:] - 2.0 * best_xy[:, 1:-1] + best_xy[:, :-2]
+    loss["smoothness_loss"] = (second_diff**2).sum(dim=-1).mean()
+
     # Compute ego edge points for penalty losses (best mode only)
     need_ego_edge = args.coeff_road_border_loss > 0 or args.coeff_neighbor_collision_loss > 0
     if need_ego_edge:
