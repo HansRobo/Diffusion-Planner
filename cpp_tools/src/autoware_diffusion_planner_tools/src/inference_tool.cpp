@@ -133,6 +133,7 @@ DiffusionPlannerParams read_planner_params(const ParamMap & params)
     static_cast<float>(get_param<double>(params, "turn_indicator_keep_offset", -1.25));
   p.turn_indicator_hold_duration = get_param<double>(params, "turn_indicator_hold_duration", 0.0);
   p.shift_x = get_param<bool>(params, "shift_x", false);
+  // Defaults below match config/diffusion_planner.param.yaml.
   p.ignore_unknown_neighbors = get_param<bool>(params, "ignore_unknown_neighbors", false);
   p.delay_step = get_param<int64_t>(params, "delay_step", 0);
   p.line_string_max_step_m = get_param<double>(params, "line_string_max_step_m", 5.0);
@@ -413,8 +414,6 @@ int main(int argc, char ** argv)
   std::cout << "  plugins_path: " << params.plugins_path << std::endl;
   std::cout << "  planning_frequency_hz: " << params.planning_frequency_hz << std::endl;
   std::cout << "  ignore_neighbors: " << std::boolalpha << params.ignore_neighbors << std::endl;
-  std::cout << "  ignore_unknown_neighbors: " << std::boolalpha << params.ignore_unknown_neighbors
-            << std::endl;
   std::cout << "  traffic_light_group_msg_timeout_seconds: "
             << params.traffic_light_group_msg_timeout_seconds << std::endl;
   std::cout << "  batch_size: " << params.batch_size << std::endl;

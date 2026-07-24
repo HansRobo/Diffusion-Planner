@@ -125,8 +125,6 @@ preprocess::InputDataMap generate_random_inputs(std::mt19937 & gen)
   input["goal_pose"] = make_random(GOAL_POSE_SHAPE);
   input["ego_shape"] = make_random(EGO_SHAPE_SHAPE);
   input["turn_indicators"] = make_random(TURN_INDICATORS_SHAPE);
-  // infer() reads "delay" unconditionally; a missing key throws std::out_of_range.
-  input["delay"] = std::vector<float>(1, 0.0F);
   return input;
 }
 
