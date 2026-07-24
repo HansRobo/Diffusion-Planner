@@ -23,17 +23,18 @@ def calc_loss(inputs, prediction) -> tuple:
         ],
         axis=-1,
     )  # (T, 4)
-    neighbors_future = inputs["neighbor_agents_future"]  # (P32, T, 3)
+    neighbors_future = inputs["neighbor_agents_future"]  # (Pn, T, 3 or 4)
     neighbors_future_original = neighbors_future.copy()  # 元の角度情報を保持
-    neighbor_future_mask = np.sum((neighbors_future[..., :3] != 0), axis=-1) == 0  # (P32, T)
-    neighbors_future = np.concatenate(
-        [
-            neighbors_future[..., :2],
-            np.cos(neighbors_future[..., 2:3]),
-            np.sin(neighbors_future[..., 2:3]),
-        ],
-        axis=-1,
-    )  # (P32, T, 4)
+    neighbor_future_mask = np.sum((neighbors_future[..., :3] != 0), axis=-1) == 0  # (Pn, T)
+    if neighbors_future.shape[-1] == 3:
+        neighbors_future = np.concatenate(
+            [
+                neighbors_future[..., :2],
+                np.cos(neighbors_future[..., 2:3]),
+                np.sin(neighbors_future[..., 2:3]),
+            ],
+            axis=-1,
+        )  # (Pn, T, 4)
     neighbors_future[neighbor_future_mask] = 0.0
 
     P32, T, _ = neighbors_future.shape
