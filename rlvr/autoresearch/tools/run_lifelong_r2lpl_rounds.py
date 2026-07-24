@@ -1079,7 +1079,7 @@ def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
     stay zero, so the trainer's validity mask is preserved); 4-col scenes pass
     through by original path.
     """
-    from scenario_generation.reproducer_rollout import _future_to_4col
+    from planner_metrics.scene_format import future_to_4col as _future_to_4col
 
     out: list[str] = []
     for path in paths:

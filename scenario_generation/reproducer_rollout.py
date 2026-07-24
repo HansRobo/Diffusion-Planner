@@ -36,6 +36,7 @@ from planner_metrics.geometry import (
     _build_ego_bbox_corners,
     _closest_points_between_rects,
 )
+from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
@@ -2321,20 +2322,9 @@ def _min_clearance_any(neighbors_live: np.ndarray, ego_shape: np.ndarray, device
     return float((p1 - p2).norm(dim=-1).min())
 
 
-def _future_to_4col(arr: np.ndarray) -> np.ndarray:
-    """Heading future -> cos/sin future: (..., 3) [x, y, heading] -> (..., 4)
-    [x, y, cos, sin]. Already-4-col input passes through. Zero (invalid) rows stay zero.
-    The trainable / reward schema is ALWAYS 4-col for futures — never save 3-col."""
-    arr = np.asarray(arr, dtype=np.float32)
-    if arr.shape[-1] == 4:
-        return arr
-    mask = np.abs(arr[..., :2]).sum(-1) == 0
-    h = arr[..., 2]
-    out = np.concatenate(
-        [arr[..., :2], np.cos(h)[..., None], np.sin(h)[..., None]], axis=-1
-    ).astype(np.float32)
-    out[mask] = 0.0
-    return out
+# Canonical implementation lives in planner_metrics.scene_format; existing importers
+# (tests, r2lpl runner) keep this name.
+_future_to_4col = future_to_4col
 
 
 def _recenter_neighbor_future(naf: np.ndarray, dx: float, dy: float, dyaw: float) -> np.ndarray:
