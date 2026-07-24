@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from planner_metrics.scene_format import future_to_4col
 from planner_metrics.subscores import compute_road_border_penalty
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _ego_shape_from_data,

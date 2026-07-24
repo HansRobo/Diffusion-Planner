@@ -160,3 +160,16 @@ def test_centric_transform_neighbor_future_3col_equals_4col(module):
     assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
     # padding slots remain zero
     assert out4[0, 1:].abs().sum() == 0
+
+
+def test_build_repaired_targets_widens_3col_ego():
+    from rlvr.autoresearch.tools.build_repaired_targets import _future_to_4col as brt_to_4col
+
+    tr3 = np.zeros((80, 3), dtype=np.float32)
+    tr3[:, 0] = np.arange(80) * 0.5
+    tr3[:, 2] = 0.4
+    out = brt_to_4col(tr3)
+    assert out.shape == (80, 4)
+    assert np.allclose(out[:, 2], np.cos(0.4)) and np.allclose(out[:, 3], np.sin(0.4))
+    # origin waypoint is real for a single ego trajectory
+    assert abs(out[0, 2] - np.cos(0.4)) < 1e-6
