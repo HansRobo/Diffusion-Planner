@@ -11,7 +11,10 @@ This module uses the ``wandb-workspaces`` SDK to define an explicit, curated wor
 instead: one LinePlot PER METRIC with every site overlaid as its own colored line (via
 ``metric_regex``, so it doesn't need to know site names), one MediaBrowser per site (its
 colormap gallery + video), and one table panel for the combined episode table. Built with
-``auto_generate_panels=False``, so none of the flat auto-panels appear alongside it.
+``auto_generate_panels=True`` (default) so every other logged key (train/valid loss, lr,
+epdms, replan consistency, ...) still gets its usual auto panel alongside these curated
+sections — nothing from the default workspace is lost. Pass ``include_auto_panels=False``
+for a closed-loop-only view.
 
 This is a project-level view, not a per-run artifact — run it ONCE (or whenever the set of
 score metrics changes) via the CLI below, not from inside the training loop. The resulting
@@ -61,6 +64,7 @@ def build_closed_loop_workspace(
     site_names: list[str],
     name: str = "Closed-Loop Dashboard",
     include_noobj: bool = True,
+    include_auto_panels: bool = True,
 ) -> str:
     """Create/save a curated closed-loop workspace view and return its URL.
 
@@ -130,11 +134,22 @@ def build_closed_loop_workspace(
         wr.WeavePanelSummaryTable(table_name="closed_loop_episodes/all", layout=wr.Layout(w=24, h=16)),
     ]
 
+    # Plain training-loop metrics (every epoch, not just closed-loop-firing epochs) — placed
+    # FIRST so loss/lr trends are visible above the closed-loop sections, in one unified view
+    # instead of needing the separate default auto-generated workspace for these.
+    training_panels = [
+        wr.LinePlot(title="train_loss", metric_regex=r"^train_loss/.*$"),
+        wr.LinePlot(title="valid_loss", metric_regex=r"^valid_loss/.*$"),
+        wr.LinePlot(title="learning_rate", metric_regex=r"^lr/.*$"),
+    ]
+
     workspace = ws.Workspace(
         entity=entity,
         project=project,
         name=name,
+        auto_generate_panels=include_auto_panels,
         sections=[
+            ws.Section(name="Training", panels=training_panels, is_open=True, pinned=True),
             ws.Section(name="Overview", panels=overview_panels, is_open=True, pinned=True),
             ws.Section(
                 name="Scores: comparison (objects vs no-objects)" if include_noobj else "Scores: comparison",
@@ -170,6 +185,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="objects-only dashboard: skip the empty-world-ablation ('__noobj') labels entirely",
     )
+    parser.add_argument(
+        "--no_auto_panels",
+        action="store_true",
+        help="closed-loop-only view: skip the auto-generated panel for every other logged key "
+        "(train/valid loss, lr, epdms, replan consistency, ...)",
+    )
     return parser.parse_args()
 
 
@@ -181,6 +202,7 @@ def main() -> int:
         site_names=args.site_names,
         name=args.name,
         include_noobj=not args.no_noobj,
+        include_auto_panels=not args.no_auto_panels,
     )
     print(f"Saved workspace view: {url}")
     return 0
