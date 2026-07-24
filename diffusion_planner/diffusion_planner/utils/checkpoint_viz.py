@@ -29,7 +29,9 @@ def _trajectory_metrics(prediction_xy: np.ndarray, gt_xy: np.ndarray) -> dict[st
 
 
 def _select_validation_sample(
-    data_list: list[str], min_gt_endpoint_m: float = 10.0
+    data_list: list[str],
+    min_gt_endpoint_m: float | None = None,
+    max_gt_endpoint_m: float | None = None,
 ) -> tuple[int, Path]:
     if not data_list:
         raise ValueError("Validation list is empty; cannot create checkpoint visualization.")
@@ -39,8 +41,12 @@ def _select_validation_sample(
         path = Path(path_str)
         with np.load(path, allow_pickle=True) as data:
             gt_xy = np.asarray(data["ego_agent_future"], dtype=np.float32)[:80, :2]
-        if np.linalg.norm(gt_xy[-1]) >= min_gt_endpoint_m:
-            return idx, path
+        endpoint = float(np.linalg.norm(gt_xy[-1]))
+        if min_gt_endpoint_m is not None and endpoint < min_gt_endpoint_m:
+            continue
+        if max_gt_endpoint_m is not None and endpoint >= max_gt_endpoint_m:
+            continue
+        return idx, path
     return 0, fallback
 
 
@@ -163,3 +169,23 @@ def select_and_load_validation_sample(
 ) -> tuple[int, Path, dict[str, np.ndarray]]:
     idx, path = _select_validation_sample(data_list, min_gt_endpoint_m=min_gt_endpoint_m)
     return idx, path, _load_raw_sample(path)
+
+
+def select_and_load_validation_samples(
+    data_list: list[str],
+) -> dict[str, tuple[int, Path, dict[str, np.ndarray]]]:
+    """Select representative validation scenes for stop / slow / move bins."""
+    sample_specs = {
+        "stop": (None, 2.0),
+        "slow": (2.0, 10.0),
+        "move": (10.0, None),
+    }
+    samples: dict[str, tuple[int, Path, dict[str, np.ndarray]]] = {}
+    for label, (min_gt_endpoint_m, max_gt_endpoint_m) in sample_specs.items():
+        idx, path = _select_validation_sample(
+            data_list,
+            min_gt_endpoint_m=min_gt_endpoint_m,
+            max_gt_endpoint_m=max_gt_endpoint_m,
+        )
+        samples[label] = (idx, path, _load_raw_sample(path))
+    return samples

@@ -21,6 +21,7 @@ from diffusion_planner.utils import ddp
 from diffusion_planner.utils.checkpoint_viz import (
     render_checkpoint_trajectory_figure,
     select_and_load_validation_sample,
+    select_and_load_validation_samples,
 )
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
@@ -312,11 +313,19 @@ def render_checkpoint_visualization(
     epoch: int,
     checkpoint_dir: str,
     checkpoint_name: str,
+    sample_label: str | None,
     sample_path: Path,
     sample_data,
 ) -> None:
     """Render one validation sample and log the PNG to wandb."""
-    output_path = Path(checkpoint_dir) / "checkpoint_trajectory.png"
+    if sample_label is None:
+        output_path = Path(checkpoint_dir) / "checkpoint_trajectory.png"
+        wandb_key = f"checkpoint_viz/{checkpoint_name}"
+        caption_label = checkpoint_name
+    else:
+        output_path = Path(checkpoint_dir) / f"checkpoint_trajectory_{sample_label}.png"
+        wandb_key = f"checkpoint_viz/{checkpoint_name}/{sample_label}"
+        caption_label = f"{checkpoint_name} [{sample_label}]"
     try:
         metrics = render_checkpoint_trajectory_figure(
             model,
@@ -324,7 +333,7 @@ def render_checkpoint_visualization(
             sample_data,
             sample_path,
             output_path,
-            title=f"{checkpoint_name} @epoch {epoch + 1}",
+            title=f"{caption_label} @epoch {epoch + 1}",
             seed=args.seed,
         )
     except Exception as exc:
@@ -334,10 +343,10 @@ def render_checkpoint_visualization(
     if args.use_wandb and wandb.run is not None:
         wandb.log(
             {
-                f"checkpoint_viz/{checkpoint_name}": wandb.Image(
+                wandb_key: wandb.Image(
                     str(output_path),
                     caption=(
-                        f"{checkpoint_name} @epoch {epoch + 1} "
+                        f"{caption_label} @epoch {epoch + 1} "
                         f"ADE={metrics['ADE']:.2f} FDE={metrics['FDE']:.2f} "
                         f"max_step={metrics['max_step']:.2f} roughness={metrics['roughness']:.2f}"
                     ),
@@ -345,6 +354,52 @@ def render_checkpoint_visualization(
             },
             step=epoch + 1,
         )
+
+
+def render_checkpoint_visualizations(
+    model,
+    args,
+    epoch: int,
+    checkpoint_dir: str,
+    checkpoint_name: str,
+    viz_samples,
+) -> None:
+    for sample_label, (sample_idx, sample_path, sample_data) in viz_samples.items():
+        print(
+            f"Rendering checkpoint visualization [{checkpoint_name}/{sample_label}] "
+            f"sample_index={sample_idx} path={sample_path}"
+        )
+        render_checkpoint_visualization(
+            model,
+            args,
+            epoch,
+            checkpoint_dir,
+            checkpoint_name,
+            sample_label,
+            sample_path,
+            sample_data,
+        )
+
+
+def render_checkpoint_legacy_visualization(
+    model,
+    args,
+    epoch: int,
+    checkpoint_dir: str,
+    checkpoint_name: str,
+    sample_path: Path,
+    sample_data,
+) -> None:
+    render_checkpoint_visualization(
+        model,
+        args,
+        epoch,
+        checkpoint_dir,
+        checkpoint_name,
+        None,
+        sample_path,
+        sample_data,
+    )
 
 
 def model_training(args: TrainConfig):
@@ -474,10 +529,22 @@ def model_training(args: TrainConfig):
                 valid_set.data_list
             )
             print(
-                f"Checkpoint visualization sample: index={viz_sample_idx}, path={viz_sample_path}"
+                f"Checkpoint legacy visualization sample: "
+                f"index={viz_sample_idx}, path={viz_sample_path}"
             )
+            viz_samples = select_and_load_validation_samples(valid_set.data_list)
+            for sample_label, (
+                viz_sample_idx,
+                viz_sample_path,
+                _viz_sample_data,
+            ) in viz_samples.items():
+                print(
+                    f"Checkpoint visualization sample [{sample_label}]: "
+                    f"index={viz_sample_idx}, path={viz_sample_path}"
+                )
         else:
             viz_sample_path, viz_sample_data = None, None
+            viz_samples = {}
 
     if args.ddp:
         torch.distributed.barrier()
@@ -791,7 +858,7 @@ def model_training(args: TrainConfig):
                         external_data=False,
                     )
                 if args.enable_checkpoint_viz:
-                    render_checkpoint_visualization(
+                    render_checkpoint_legacy_visualization(
                         diffusion_planner,
                         args,
                         epoch,
@@ -799,6 +866,14 @@ def model_training(args: TrainConfig):
                         f"epoch{epoch + 1:04d}",
                         viz_sample_path,
                         viz_sample_data,
+                    )
+                    render_checkpoint_visualizations(
+                        diffusion_planner,
+                        args,
+                        epoch,
+                        curr_dir,
+                        f"epoch{epoch + 1:04d}",
+                        viz_samples,
                     )
                 # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
                 # (videos + metrics) land next to the saved weights they correspond to.
@@ -836,7 +911,7 @@ def model_training(args: TrainConfig):
                         external_data=False,
                     )
                 if args.enable_checkpoint_viz:
-                    render_checkpoint_visualization(
+                    render_checkpoint_legacy_visualization(
                         diffusion_planner,
                         args,
                         epoch,
@@ -844,6 +919,14 @@ def model_training(args: TrainConfig):
                         "best_model",
                         viz_sample_path,
                         viz_sample_data,
+                    )
+                    render_checkpoint_visualizations(
+                        diffusion_planner,
+                        args,
+                        epoch,
+                        curr_dir,
+                        "best_model",
+                        viz_samples,
                     )
 
         scheduler.step()
