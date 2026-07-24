@@ -36,7 +36,7 @@ def _fake_sample_result():
 
 
 def test_bev_overlay_produces_png(tmp_path):
-    from human_match_prototype.analyze import bev_overlay
+    from human_match_prototype.render_report import render_scene_overlay
 
     npz_path = tmp_path / "test.npz"
     np.savez(npz_path, **_fake_npz())
@@ -45,18 +45,19 @@ def test_bev_overlay_produces_png(tmp_path):
     sampler = MagicMock()
     sampler.sample.return_value = _fake_sample_result()
 
-    bev_overlay(sampler, str(npz_path), out_png, num_samples=4)
+    render_scene_overlay(sampler, str(npz_path), out_png, num_samples=4)
 
     assert out_png.exists()
     assert out_png.stat().st_size > 1000  # non-trivial PNG
-    sampler.sample.assert_called_once_with(str(npz_path), num_samples=4, seed=0, temperature=0.5)
+    sampler.sample.assert_called_once_with(str(npz_path), num_samples=4, seed=0, temperature=1.0)
 
 
-def test_bev_overlay_accepts_training_humans():
-    """bev_overlay should accept training_humans kwarg without error."""
+def test_render_scene_overlay_signature():
+    """render_scene_overlay should accept seed and temperature kwargs."""
     import inspect
 
-    from human_match_prototype.analyze import bev_overlay
+    from human_match_prototype.render_report import render_scene_overlay
 
-    sig = inspect.signature(bev_overlay)
-    assert "training_humans" in sig.parameters
+    sig = inspect.signature(render_scene_overlay)
+    assert "seed" in sig.parameters
+    assert "temperature" in sig.parameters
