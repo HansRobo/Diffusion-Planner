@@ -2,8 +2,6 @@ import numpy as np
 import pytest
 
 from human_match_prototype.route_projection import (
-    RouteQA,
-    StitchedRoute,
     frenet_energy_scores,
     project_to_route,
     stitch_route_lanes,

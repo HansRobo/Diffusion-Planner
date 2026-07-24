@@ -2,8 +2,6 @@
 import warnings
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from human_match_prototype.build_lanelet_index import (
     add_lanelet_ids,
     load_lanelet_index,

@@ -2,7 +2,6 @@
 import math
 
 import numpy as np
-import pytest
 
 from human_match_prototype.coord_transform import (
     WorldPose,

@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import pytest
 
 from human_match_prototype.rank_and_select import compute_ranks, select_review_set
 

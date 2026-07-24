@@ -1,9 +1,7 @@
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 
 from human_match_prototype.score_scenes import score_one_scene
 

@@ -1,10 +1,6 @@
 import json
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
-import pytest
 
 from human_match_prototype.fetch_validation import create_subsample, verify_route_format
 
