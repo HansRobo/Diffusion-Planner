@@ -20,7 +20,7 @@ from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
-from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.lr_schedule import build_lr_scheduler
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
@@ -328,7 +328,12 @@ def model_training(args: TrainConfig):
     ]
 
     optimizer = optim.AdamW(params)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
+    scheduler = build_lr_scheduler(
+        optimizer,
+        train_epochs,
+        args.warm_up_epoch,
+        schedule_type=getattr(args, "lr_schedule_type", "cosine"),
+    )
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")

@@ -87,6 +87,13 @@ def get_args(args_list=None):
     parser.add_argument("--save_utd", type=int, default=10)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--warm_up_epoch", type=int, default=5)
+    parser.add_argument(
+        "--lr_schedule_type",
+        type=str,
+        default="cosine",
+        choices=["cosine", "constant"],
+        help="post-warmup lr schedule: 'cosine' decay (default) or legacy 'constant' hold",
+    )
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)

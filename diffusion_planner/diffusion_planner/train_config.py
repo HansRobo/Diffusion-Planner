@@ -74,6 +74,11 @@ class TrainConfig:
     save_utd: int = 10
     learning_rate: float = 1e-4
     warm_up_epoch: int = 5
+    # LR schedule after warmup. "cosine" (default): cosine-decay to ~1e-6 over the
+    # remaining epochs (recommended; prevents the post-warmup collapse). "constant":
+    # legacy behavior that holds the peak lr for the whole run (kept for
+    # backward-compatible reproduction of pre-existing runs).
+    lr_schedule_type: Literal["cosine", "constant"] = "cosine"
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True
