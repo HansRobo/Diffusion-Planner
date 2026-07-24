@@ -30,8 +30,8 @@ Scope (task #5, Phase 3 bring-up):
     shortestPath / find_route). This is an INTERIM: the plan's route sidecar
     (mission_planner exact match, doc 03) is deferred -- the route only needs
     to be plausible for the model here, not bit-identical to mission_planner.
-  * a forward-driving dummy model is provided for plumbing validation; the real
-    ONNX/.pth model is a drop-in (same ``model(data) -> (_, outputs)`` contract).
+  * inference uses the torch ``.pth`` checkpoint (the training-env path), loaded
+    via ``simulate.load_model`` (``model(data) -> (_, outputs)`` contract).
 """
 
 from __future__ import annotations
@@ -39,16 +39,15 @@ from __future__ import annotations
 import json
 import math
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import numpy as np
-import torch
 
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.reproducer_rollout import score_step
-from scenario_generation.scene_context import Agent, AgentType, MapData, SceneContext
+from scenario_generation.scene_context import Agent, AgentType, SceneContext
 from scenario_generation.simulate import _ego_to_world, _predict_batch
 from scenario_generation.tensor_converter import (
     MapTensorCache,
@@ -466,27 +465,6 @@ def run_scenario_sim_rollout(
     return row
 
 
-def build_model(model_path: str | None, dummy_param_json: str | None, device: str):
-    """Construct ``(model, model_args)`` from a spec.
-
-    ``model_path`` ``.onnx`` -> exported planner; ``.pth`` -> torch checkpoint;
-    ``None`` -> the forward-driving dummy (requires ``dummy_param_json`` for a
-    faithful ``Config``). Shared by the standalone worker and the eval driver so
-    every process builds the model identically."""
-    if model_path is None:
-        if not dummy_param_json:
-            raise ValueError("dummy_param_json required when model_path is None")
-        model_args = load_dummy_model_args(dummy_param_json)
-        return ForwardDummyModel(future_len=model_args.future_len, device=device), model_args
-    if str(model_path).endswith(".onnx"):
-        from scenario_generation.simulate import load_onnx_model
-
-        return load_onnx_model(model_path, device)
-    from scenario_generation.simulate import load_model
-
-    return load_model(model_path, device)
-
-
 def main() -> int:
     """Single-scenario worker: run ONE rollout, write its row to ``--row_out``.
 
@@ -502,7 +480,7 @@ def main() -> int:
     p.add_argument("--out_dir", required=True)
     p.add_argument("--row_out", required=True, help="write the metrics row JSON here")
     p.add_argument("--device", default="cpu")
-    p.add_argument("--model_path", required=True, help=".pth (torch) or .onnx")
+    p.add_argument("--model_path", required=True, help="torch .pth checkpoint")
     p.add_argument("--replan_interval", type=int, default=4)
     p.add_argument("--max_steps", type=int, default=300)
     p.add_argument("--warmup_steps", type=int, default=5)
@@ -510,7 +488,9 @@ def main() -> int:
     p.add_argument("--fps", type=float, default=10.0)
     a = p.parse_args()
 
-    model, model_args = build_model(a.model_path, a.device)
+    from scenario_generation.simulate import load_model
+
+    model, model_args = load_model(a.model_path, a.device)
     cfg = RolloutConfig(
         fps=a.fps,
         replan_interval=a.replan_interval,
@@ -527,7 +507,6 @@ def main() -> int:
 
 __all__ = [
     "RolloutConfig",
-    "build_model",
     "run_scenario_sim_rollout",
 ]
 

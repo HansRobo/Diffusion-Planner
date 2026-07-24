@@ -336,7 +336,7 @@ def run_scenario_sim_eval(
     at teardown), so each scenario runs in a FRESH subprocess worker
     (``python -m scenario_generation.scenario_sim_rollout``). This also gives
     crash isolation and is the unit of plan/04's process parallelism. Unlike the
-    NPZ path this takes a ``model_path`` (``.pth`` / ``.onnx``), not a live model
+    NPZ path this takes a ``model_path`` (torch ``.pth``), not a live model
     object, because each worker builds its own model; the checkpoint the closed-loop
     cadence fires on is exactly what a real worker would load.
     """
@@ -423,9 +423,8 @@ def main() -> None:
     """Standalone scenario_sim eval CLI (mirrors valid_predictor_closed_loop.py).
 
     Runs the scenario_sim closed loop over a scenario root with a torch ``.pth``
-    checkpoint (or an exported ``.onnx``), spawning one worker process per
-    scenario, writing segments.jsonl + summary.json. Training integration
-    (train.py wiring) is a separate task."""
+    checkpoint, spawning one worker process per scenario, writing segments.jsonl +
+    summary.json. Training integration (train.py wiring) is a separate task."""
     import argparse
 
     p = argparse.ArgumentParser(description="scenario_sim closed-loop eval")
@@ -434,9 +433,7 @@ def main() -> None:
     p.add_argument("--out_dir", required=True)
     p.add_argument("--device", default="cpu")
     p.add_argument(
-        "--model_path",
-        required=True,
-        help="best_model.pth (torch checkpoint) or diffusion_planner.onnx.",
+        "--model_path", required=True, help="best_model.pth (torch checkpoint)"
     )
     p.add_argument("--replan_interval", type=int, default=4)
     p.add_argument("--max_steps", type=int, default=300)
