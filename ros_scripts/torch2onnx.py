@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 import subprocess
 import sys
@@ -26,6 +27,11 @@ torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 torch.backends.mha.set_fastpath_enabled(False)
+
+# Validation must compare strict-FP32 numbers: TF32 matmuls (10-bit mantissa) introduce ~1e-3
+# per-layer error that makes torch-vs-ORT comparison meaningless on Ampere+ GPUs.
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
 
 
 def parse_args() -> argparse.Namespace:
@@ -123,6 +129,9 @@ def run_ort_in_subprocess(model_path: Path, np_inputs: NumpyDict) -> list[np.nda
         output_path = f"{tmpdir}/outputs.npz"
         np.savez(input_path, **np_inputs)
 
+        # use_tf32=0: ORT's CUDA EP defaults to TF32 matmuls on Ampere+, which would put ~1e-3
+        # error between these outputs and the strict-FP32 torch reference. Validation-only —
+        # deployed sessions keep the (faster) TF32 default.
         script = f"""
 import numpy as np
 import onnxruntime as ort
@@ -132,7 +141,7 @@ sess_options = ort.SessionOptions()
 sess_options.log_severity_level = 3
 sess = ort.InferenceSession(
     "{model_path}", sess_options,
-    providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+    providers=[("CUDAExecutionProvider", {{"use_tf32": 0}}), "CPUExecutionProvider"])
 print("ORT providers:", sess.get_providers())
 outputs = sess.run(None, inputs)
 np.savez("{output_path}", **{{f"out_{{i}}": o for i, o in enumerate(outputs)}})
@@ -142,6 +151,7 @@ np.savez("{output_path}", **{{f"out_{{i}}": o for i, o in enumerate(outputs)}})
             capture_output=True,
             text=True,
             timeout=300,
+            env={**os.environ, "NVIDIA_TF32_OVERRIDE": "0"},
         )
         if result.returncode != 0:
             raise RuntimeError(f"ORT subprocess failed:\n{result.stderr[-1000:]}")
