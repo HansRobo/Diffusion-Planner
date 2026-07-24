@@ -315,8 +315,7 @@ def run_scenario_sim_eval(
     out_dir,
     *,
     device: str,
-    model_path: str | None = None,
-    dummy_param_json: str | None = None,
+    model_path: str,
     near_miss_thresh: float = 1.0,
     replan_interval: int = 4,
     max_steps: int = 300,
@@ -337,11 +336,10 @@ def run_scenario_sim_eval(
     at teardown), so each scenario runs in a FRESH subprocess worker
     (``python -m scenario_generation.scenario_sim_rollout``). This also gives
     crash isolation and is the unit of plan/04's process parallelism. Unlike the
-    NPZ path this takes a MODEL SPEC (``model_path`` / ``dummy_param_json``), not a
-    live model object, because each worker builds its own model; the checkpoint
-    the closed-loop cadence fires on is exactly what a real worker would load.
+    NPZ path this takes a ``model_path`` (``.pth`` / ``.onnx``), not a live model
+    object, because each worker builds its own model; the checkpoint the closed-loop
+    cadence fires on is exactly what a real worker would load.
     """
-    import subprocess
     import sys
 
     out_dir = Path(out_dir)
@@ -368,11 +366,8 @@ def run_scenario_sim_eval(
                 "--warmup_steps", str(warmup_steps),
                 "--near_miss_thresh", str(near_miss_thresh),
                 "--fps", str(fps),
+                "--model_path", str(model_path),
             ]
-            if model_path is not None:
-                cmd += ["--model_path", str(model_path)]
-            if dummy_param_json is not None:
-                cmd += ["--dummy_param_json", str(dummy_param_json)]
 
             proc = subprocess.run(cmd, capture_output=not verbose)
             # The worker's row is authoritative; a nonzero rc at teardown (after the
@@ -427,8 +422,8 @@ def _failed_row(reason: str) -> dict:
 def main() -> None:
     """Standalone scenario_sim eval CLI (mirrors valid_predictor_closed_loop.py).
 
-    Runs the scenario_sim closed loop over a scenario root with a real model
-    (.pth / ONNX) or the plumbing dummy, spawning one worker process per
+    Runs the scenario_sim closed loop over a scenario root with a torch ``.pth``
+    checkpoint (or an exported ``.onnx``), spawning one worker process per
     scenario, writing segments.jsonl + summary.json. Training integration
     (train.py wiring) is a separate task."""
     import argparse
@@ -440,22 +435,13 @@ def main() -> None:
     p.add_argument("--device", default="cpu")
     p.add_argument(
         "--model_path",
-        default=None,
-        help="best_model.pth (torch) or diffusion_planner.onnx. Omit to use the "
-        "forward-driving dummy model (plumbing validation).",
-    )
-    p.add_argument(
-        "--dummy_param_json",
-        default=None,
-        help="Config param json for the dummy model_args (required with the dummy).",
+        required=True,
+        help="best_model.pth (torch checkpoint) or diffusion_planner.onnx.",
     )
     p.add_argument("--replan_interval", type=int, default=4)
     p.add_argument("--max_steps", type=int, default=300)
     p.add_argument("--near_miss_thresh", type=float, default=1.0)
     args = p.parse_args()
-
-    if args.model_path is None and not args.dummy_param_json:
-        p.error("--dummy_param_json is required when --model_path is omitted")
 
     summary = run_scenario_sim_eval(
         args.scenario_root,
@@ -463,7 +449,6 @@ def main() -> None:
         args.out_dir,
         device=args.device,
         model_path=args.model_path,
-        dummy_param_json=args.dummy_param_json,
         near_miss_thresh=args.near_miss_thresh,
         replan_interval=args.replan_interval,
         max_steps=args.max_steps,

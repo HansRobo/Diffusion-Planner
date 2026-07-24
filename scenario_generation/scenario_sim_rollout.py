@@ -90,61 +90,9 @@ class RolloutConfig:
     # realized pose must land within this tolerance (m) of the injected plan's
     # first future point. Larger = looser; a gross frame mismatch blows past it.
     coord_check_tol_m: float = 2.0
-
-
-# --------------------------------------------------------------------------- #
-# Dummy model for plumbing validation (real ONNX/.pth is a drop-in).
-# --------------------------------------------------------------------------- #
-class ForwardDummyModel:
-    """A deterministic stand-in planner: drive straight ahead at a fixed speed.
-
-    Returns the same ``(None, outputs)`` contract as ``Diffusion_Planner`` /
-    ``simulate._OnnxModel`` with ``outputs["prediction"]`` of shape
-    ``[B, P, future_len, 4]`` (x, y, cos, sin in the ego frame) and
-    ``outputs["turn_indicator_logit"]`` ``[B, 5]``. The plan is a constant-speed
-    straight line in the ego frame, so the resulting map-frame injection makes
-    the ego advance along its current heading -- which makes the coordinate
-    overlay sanity check meaningful (unlike a random-init model).
-    """
-
-    def __init__(self, future_len: int = 80, speed_mps: float = 3.0, device: str = "cpu"):
-        self.future_len = future_len
-        self.speed = speed_mps
-        self.device = device
-
-    def __call__(self, data):
-        # Batch size from any input tensor.
-        b = int(next(iter(data.values())).shape[0])
-        t = self.future_len
-        xs = (np.arange(1, t + 1) * self.speed * DT).astype(np.float32)  # forward in ego-x
-        step = np.zeros((t, 4), dtype=np.float32)
-        step[:, 0] = xs  # x
-        step[:, 1] = 0.0  # y (straight)
-        step[:, 2] = 1.0  # cos(0)
-        step[:, 3] = 0.0  # sin(0)
-        pred = np.broadcast_to(step, (b, 1, t, 4)).copy()
-        ti = np.zeros((b, 5), dtype=np.float32)
-        ti[:, 4] = 1.0  # KEEP -> retain previous indicator command
-        return None, {
-            "prediction": torch.from_numpy(pred).to(self.device),
-            "turn_indicator_logit": torch.from_numpy(ti).to(self.device),
-        }
-
-    def eval(self):  # nn.Module parity (no-op)
-        return self
-
-
-def load_dummy_model_args(param_json_path: str | Path):
-    """Build a real ``Config`` (faithful observation_normalizer / shapes) from a
-    Diffusion-Planner param json, for use with :class:`ForwardDummyModel`.
-
-    The exported ``diffusion_planner.param.json`` carries inline
-    ``state_normalizer`` / ``observation_normalizer`` dicts, so ``Config`` loads
-    it directly -- exercising the true normalization + tensor contract even
-    though the forward pass is a dummy."""
-    from diffusion_planner.utils.config import Config
-
-    return Config(str(param_json_path))
+    # Distance (m) at which a synthetic neighbor is injected when the ego has no
+    # real NPCs (works around the exported ONNX's empty-neighbor-gather crash).
+    dummy_neighbor_dist_m: float = 500.0
 
 
 # --------------------------------------------------------------------------- #
@@ -554,8 +502,7 @@ def main() -> int:
     p.add_argument("--out_dir", required=True)
     p.add_argument("--row_out", required=True, help="write the metrics row JSON here")
     p.add_argument("--device", default="cpu")
-    p.add_argument("--model_path", default=None)
-    p.add_argument("--dummy_param_json", default=None)
+    p.add_argument("--model_path", required=True, help=".pth (torch) or .onnx")
     p.add_argument("--replan_interval", type=int, default=4)
     p.add_argument("--max_steps", type=int, default=300)
     p.add_argument("--warmup_steps", type=int, default=5)
@@ -563,7 +510,7 @@ def main() -> int:
     p.add_argument("--fps", type=float, default=10.0)
     a = p.parse_args()
 
-    model, model_args = build_model(a.model_path, a.dummy_param_json, a.device)
+    model, model_args = build_model(a.model_path, a.device)
     cfg = RolloutConfig(
         fps=a.fps,
         replan_interval=a.replan_interval,
@@ -580,8 +527,6 @@ def main() -> int:
 
 __all__ = [
     "RolloutConfig",
-    "ForwardDummyModel",
-    "load_dummy_model_args",
     "build_model",
     "run_scenario_sim_rollout",
 ]
