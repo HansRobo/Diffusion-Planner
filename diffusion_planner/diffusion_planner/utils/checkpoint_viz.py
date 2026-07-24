@@ -2,17 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.visualize_input import visualize_inputs
 from diffusion_planner.validate_model import _prepare_validation_inputs
+
+# matplotlib and visualize_inputs are imported lazily inside
+# render_checkpoint_trajectory_figure so that importing this module (which
+# train.py always does) does not require matplotlib when checkpoint viz is
+# disabled (enable_checkpoint_viz=False). select_and_load_validation_sample and
+# the metric helpers below use only numpy/torch.
 
 
 def _trajectory_metrics(prediction_xy: np.ndarray, gt_xy: np.ndarray) -> dict[str, float]:
@@ -74,6 +75,13 @@ def render_checkpoint_trajectory_figure(
     seed: int,
 ) -> dict[str, float]:
     """Render a single validation scene with GT and the checkpoint prediction."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from diffusion_planner.utils.visualize_input import visualize_inputs
+
     device = torch.device(args.device)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

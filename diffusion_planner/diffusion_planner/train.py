@@ -339,10 +339,15 @@ def model_training(args: TrainConfig):
                     0 if valid_pair_loader is None else len(valid_pair_loader.dataset)
                 )
             )
-        viz_sample_idx, viz_sample_path, viz_sample_data = select_and_load_validation_sample(
-            valid_set.data_list
-        )
-        print(f"Checkpoint visualization sample: index={viz_sample_idx}, path={viz_sample_path}")
+        if args.enable_checkpoint_viz:
+            viz_sample_idx, viz_sample_path, viz_sample_data = select_and_load_validation_sample(
+                valid_set.data_list
+            )
+            print(
+                f"Checkpoint visualization sample: index={viz_sample_idx}, path={viz_sample_path}"
+            )
+        else:
+            viz_sample_path, viz_sample_data = None, None
 
     if args.ddp:
         torch.distributed.barrier()
@@ -595,25 +600,27 @@ def model_training(args: TrainConfig):
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
                 # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
-                export_checkpoint_onnx_guarded(
-                    config_json_path=os.path.join(curr_dir, "args.json"),
-                    ckpt_path=f"{curr_dir}/best_model.pth",
-                    output_dir=Path(curr_dir),
-                    output_prefix="diffusion_planner",
-                    use_ema=False,
-                    use_simplify=False,
-                    opset_version=20,
-                    external_data=False,
-                )
-                render_checkpoint_visualization(
-                    diffusion_planner,
-                    args,
-                    epoch,
-                    curr_dir,
-                    f"epoch{epoch + 1:04d}",
-                    viz_sample_path,
-                    viz_sample_data,
-                )
+                if args.enable_onnx_export:
+                    export_checkpoint_onnx_guarded(
+                        config_json_path=os.path.join(curr_dir, "args.json"),
+                        ckpt_path=f"{curr_dir}/best_model.pth",
+                        output_dir=Path(curr_dir),
+                        output_prefix="diffusion_planner",
+                        use_ema=False,
+                        use_simplify=False,
+                        opset_version=20,
+                        external_data=False,
+                    )
+                if args.enable_checkpoint_viz:
+                    render_checkpoint_visualization(
+                        diffusion_planner,
+                        args,
+                        epoch,
+                        curr_dir,
+                        f"epoch{epoch + 1:04d}",
+                        viz_sample_path,
+                        viz_sample_data,
+                    )
                 # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
                 # (videos + metrics) land next to the saved weights they correspond to.
                 closed_loop_validate(
@@ -631,25 +638,27 @@ def model_training(args: TrainConfig):
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
                 # Export ONNX next to the checkpoint (regular weights, ORT validation skipped).
-                export_checkpoint_onnx_guarded(
-                    config_json_path=os.path.join(curr_dir, "args.json"),
-                    ckpt_path=f"{curr_dir}/best_model.pth",
-                    output_dir=Path(curr_dir),
-                    output_prefix="diffusion_planner",
-                    use_ema=False,
-                    use_simplify=False,
-                    opset_version=20,
-                    external_data=False,
-                )
-                render_checkpoint_visualization(
-                    diffusion_planner,
-                    args,
-                    epoch,
-                    curr_dir,
-                    "best_model",
-                    viz_sample_path,
-                    viz_sample_data,
-                )
+                if args.enable_onnx_export:
+                    export_checkpoint_onnx_guarded(
+                        config_json_path=os.path.join(curr_dir, "args.json"),
+                        ckpt_path=f"{curr_dir}/best_model.pth",
+                        output_dir=Path(curr_dir),
+                        output_prefix="diffusion_planner",
+                        use_ema=False,
+                        use_simplify=False,
+                        opset_version=20,
+                        external_data=False,
+                    )
+                if args.enable_checkpoint_viz:
+                    render_checkpoint_visualization(
+                        diffusion_planner,
+                        args,
+                        epoch,
+                        curr_dir,
+                        "best_model",
+                        viz_sample_path,
+                        viz_sample_data,
+                    )
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
