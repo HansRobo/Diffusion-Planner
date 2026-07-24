@@ -44,9 +44,7 @@ NeighborResult process_neighbor_agents_and_future(
     if (frame_idx >= static_cast<int64_t>(data_list.size())) {
       break;
     }
-    // ignore_unknown_agents=false keeps every tracked object, matching the
-    // behavior before upstream added the parameter.
-    agent_data_past.update_histories(data_list[frame_idx].tracked_objects, false);
+    agent_data_past.update_histories(data_list[frame_idx].tracked_objects);
   }
   const auto transformed_histories =
     agent_data_past.transformed_and_trimmed_histories(map2bl_matrix, MAX_NUM_NEIGHBORS);
