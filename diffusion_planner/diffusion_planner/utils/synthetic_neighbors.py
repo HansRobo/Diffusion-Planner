@@ -104,7 +104,7 @@ class SyntheticColliderInjector:
     def _rand(self, lo, hi, device):
         return torch.rand((), device=device) * (hi - lo) + lo
 
-    def _make_neighbor(self, ego_xy, device, future_cols=3):
+    def _make_neighbor(self, ego_xy, device, future_cols):
         """Build one (past[31,11], future[80,future_cols]) colliding neighbor for a scene.
 
         ego_xy: [80, 2] ego GT future positions (ego frame, metres).
@@ -209,7 +209,7 @@ class SyntheticColliderInjector:
         _, p0, v0, a = best
         return self._assemble(p0, v0, a, tau_p, tau_f, spec, width, length, device, future_cols)
 
-    def _assemble(self, p0, v0, a, tau_p, tau_f, spec, width, length, device, future_cols=3):
+    def _assemble(self, p0, v0, a, tau_p, tau_f, spec, width, length, device, future_cols):
         def motion(tau):  # tau [M] -> pos [M,2], vel [M,2]
             t = tau[:, None]
             pos = p0[None, :] + v0[None, :] * t + 0.5 * a[None, :] * (t * t)

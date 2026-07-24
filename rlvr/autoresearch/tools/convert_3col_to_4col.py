@@ -34,12 +34,12 @@ def main():
     conv = 0
     for p in paths:
         d = dict(np.load(p, allow_pickle=True))
-        for k in ("ego_agent_future", "neighbor_agents_future"):
+        for k, zero_is_pad in (("ego_agent_future", False), ("neighbor_agents_future", True)):
             if k not in d:
                 raise KeyError(f"{p} missing {k}")
             if d[k].shape[-1] == 3:
                 conv += 1
-            d[k] = _to_4col(d[k])
+            d[k] = _to_4col(d[k], zero_rows_are_padding=zero_is_pad)
         out_p = os.path.join(args.out_dir, os.path.basename(p))
         np.savez(out_p, **d)
         out_paths.append(out_p)

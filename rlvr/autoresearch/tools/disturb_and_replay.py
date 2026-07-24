@@ -546,7 +546,9 @@ def _apply_inverse_rigid_to_spatial(
     # --- ego_agent_future (T, 4) [x, y, cos, sin] — zeros mark invalid steps.
     # Legacy 3-col [x,y,yaw] is widened first; we never keep/emit 3-col futures. ---
     if "ego_agent_future" in out:
-        fut = _future_to_4col(np.asarray(out["ego_agent_future"], dtype=np.float32))
+        fut = _future_to_4col(
+            np.asarray(out["ego_agent_future"], dtype=np.float32), zero_rows_are_padding=False
+        )
         out["ego_agent_future"] = fut
         valid = (fut[:, 0] != 0) | (fut[:, 1] != 0)
         _xy_inv(fut, 0, 1)
@@ -1055,7 +1057,9 @@ def main(argv: Iterable[str] | None = None) -> None:
                     pass
 
                 # Widen the legacy baseline prediction to 4-col; never save 3-col.
-                perturbed["ego_agent_future"] = _future_to_4col(fut.astype(np.float32))
+                perturbed["ego_agent_future"] = _future_to_4col(
+                    fut.astype(np.float32), zero_rows_are_padding=False
+                )
                 np.savez(out_path, **perturbed)
             else:
                 # Skip baseline inference. Source NPZ's ego_agent_future

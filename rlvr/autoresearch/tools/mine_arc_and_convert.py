@@ -27,7 +27,9 @@ from scenario_generation.tools._heatmap_common import build_route_polyline, proj
 
 def convert(d):
     out = {k: d[k] for k in d.files}
-    out["ego_agent_future"] = _f2to4(d["ego_agent_future"].astype(np.float32))
+    out["ego_agent_future"] = _f2to4(
+        d["ego_agent_future"].astype(np.float32), zero_rows_are_padding=False
+    )
     out["ego_agent_past"] = d["ego_agent_past"].astype(np.float32)
     # neighbors: pad slots to 320
     npf = d["neighbor_agents_future"].astype(np.float32)  # (32,80,3)

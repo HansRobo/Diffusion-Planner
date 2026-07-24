@@ -223,7 +223,12 @@ if __name__ == "__main__":
         plt.figure(figsize=(20, 10))
         for i in range(32):
             nf = neighbor_agents_future[:, i, timestep - 1]
-            cos = nf[:, 2] if nf.shape[-1] == 4 else np.cos(nf[:, 2])
+            if nf.shape[-1] == 4:
+                cos = nf[:, 2]
+            elif nf.shape[-1] == 3:
+                cos = np.cos(nf[:, 2])
+            else:
+                raise ValueError(f"neighbor future must be 3- or 4-col, got {nf.shape}")
             plt.subplot(4, 8, i + 1)
             plt.hist(cos, bins=BIN_NUM)
             plt.xlabel("heading cos")
@@ -241,7 +246,12 @@ if __name__ == "__main__":
         plt.figure(figsize=(20, 10))
         for i in range(32):
             nf = neighbor_agents_future[:, i, timestep - 1]
-            sin = nf[:, 3] if nf.shape[-1] == 4 else np.sin(nf[:, 2])
+            if nf.shape[-1] == 4:
+                sin = nf[:, 3]
+            elif nf.shape[-1] == 3:
+                sin = np.sin(nf[:, 2])
+            else:
+                raise ValueError(f"neighbor future must be 3- or 4-col, got {nf.shape}")
             plt.subplot(4, 8, i + 1)
             plt.hist(sin, bins=BIN_NUM)
             plt.xlabel("heading sin")

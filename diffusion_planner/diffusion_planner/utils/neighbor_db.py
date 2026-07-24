@@ -252,7 +252,9 @@ class NeighborPatternDB:
     ):
         data = np.load(db_path, allow_pickle=True)
         self.past = torch.from_numpy(np.asarray(data["past"], dtype=np.float32))  # [M, 31, 11]
-        self.future = torch.from_numpy(np.asarray(data["future"], dtype=np.float32))  # [M, 80, 3]
+        self.future = torch.from_numpy(
+            np.asarray(data["future"], dtype=np.float32)
+        )  # [M, 80, 4] (legacy DBs: [M, 80, 3]; reconciled at inject)
         self.num_patterns = self.past.shape[0]
 
         # Precompute future xy + validity for fast collision search.
@@ -311,7 +313,7 @@ class NeighborPatternDB:
         slots actually written is stored on ``self.last_injected_mask`` ([B, Pn]).
         """
         neighbor_past = inputs["neighbor_agents_past"]  # [B, Pn, 31, 11]
-        neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3]
+        neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3 or 4]
         ego_future = inputs["ego_agent_future"]  # [B, 80, 3] (x, y, heading)
         device = neighbor_past.device
         self._to(device)

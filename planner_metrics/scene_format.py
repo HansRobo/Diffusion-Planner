@@ -2,8 +2,10 @@
 
 Trainable/reward futures are ALWAYS 4-col ``[x, y, cos, sin]`` — the cpp
 data_converter writes this layout natively since npz version 3. Legacy 3-col
-``[x, y, heading]`` arrays are widened HERE and only here: this is the single
-implementation the repo shares (do not copy it into tools).
+``[x, y, heading]`` arrays are widened HERE: this is the implementation the
+repo shares (do not copy it into tools). Sole exception: ``diffusion_planner``
+must stay installable standalone, so ``utils/neighbor_db.py`` carries its own
+numpy/torch equivalents rather than importing this package.
 """
 
 from __future__ import annotations
