@@ -117,7 +117,9 @@ T get_param(const ParamMap & params, const std::string & name, const T & default
 DiffusionPlannerParams read_planner_params(const ParamMap & params)
 {
   DiffusionPlannerParams p;
-  p.model_path = resolve_substitutions(get_param<std::string>(params, "onnx_model_path", ""));
+  p.model_type = get_param<std::string>(params, "model_type", "single_step");
+  p.single_step_model_path =
+    resolve_substitutions(get_param<std::string>(params, "onnx_model_path", ""));
   p.args_path = resolve_substitutions(get_param<std::string>(params, "args_path", ""));
   p.plugins_path = resolve_substitutions(get_param<std::string>(params, "plugins_path", ""));
   p.build_only = false;
@@ -133,11 +135,6 @@ DiffusionPlannerParams read_planner_params(const ParamMap & params)
     static_cast<float>(get_param<double>(params, "turn_indicator_keep_offset", -1.25));
   p.turn_indicator_hold_duration = get_param<double>(params, "turn_indicator_hold_duration", 0.0);
   p.shift_x = get_param<bool>(params, "shift_x", false);
-  // Defaults below match config/diffusion_planner.param.yaml.
-  p.ignore_unknown_neighbors = get_param<bool>(params, "ignore_unknown_neighbors", false);
-  p.delay_step = get_param<int64_t>(params, "delay_step", 0);
-  p.line_string_max_step_m = get_param<double>(params, "line_string_max_step_m", 5.0);
-  p.use_time_interpolation = get_param<bool>(params, "use_time_interpolation", false);
   return p;
 }
 
@@ -409,7 +406,7 @@ int main(int argc, char ** argv)
     get_param<double>(param_map, "vehicle_height", 0.0),
     get_param<double>(param_map, "max_steer_angle", 0.0));
 
-  std::cout << "  model_path: " << params.model_path << std::endl;
+  std::cout << "  model_path: " << params.single_step_model_path << std::endl;
   std::cout << "  args_path: " << params.args_path << std::endl;
   std::cout << "  plugins_path: " << params.plugins_path << std::endl;
   std::cout << "  planning_frequency_hz: " << params.planning_frequency_hz << std::endl;
@@ -701,7 +698,7 @@ int main(int argc, char ** argv)
       }
     }
 
-    preprocess::normalize_input_data(input_data_map, core.get_normalization_map());
+    preprocess::normalize_input_data(input_data_map, core.get_observation_normalization());
 
     if (!utils::check_input_map(input_data_map)) {
       ++skipped_frames;
@@ -709,9 +706,9 @@ int main(int argc, char ** argv)
     }
 
     const auto inference_result = core.run_inference(input_data_map);
-    if (!inference_result.outputs.has_value()) {
-      std::cerr << "  Frame " << total_frames << ": inference failed - "
-                << inference_result.error_msg << std::endl;
+    if (!inference_result.has_value()) {
+      std::cerr << "  Frame " << total_frames << ": inference failed - " << inference_result.error()
+                << std::endl;
       ++failed_frames;
       continue;
     }
@@ -719,8 +716,7 @@ int main(int argc, char ** argv)
     PlannerOutput planner_output;
     try {
       planner_output = core.create_planner_output(
-        inference_result.outputs->first, inference_result.outputs->second, *frame_context,
-        frame_time, generator_uuid);
+        inference_result.value(), *frame_context, frame_time, generator_uuid);
     } catch (const std::exception & e) {
       std::cerr << "  Frame " << total_frames << ": postprocessing failed - " << e.what()
                 << std::endl;
@@ -735,7 +731,7 @@ int main(int argc, char ** argv)
     writer_parser.write_topic(
       planner_output.predicted_objects, frame_time, TOPIC_OUT_PREDICTED_OBJECTS);
     writer_parser.write_topic(
-      planner_output.turn_indicator_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
+      planner_output.turn_indicators_command, frame_time, TOPIC_OUT_TURN_INDICATORS);
 
     // Build ground truth trajectory from future odometry with interpolation
     autoware_planning_msgs::msg::Trajectory gt_trajectory;
