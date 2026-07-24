@@ -207,6 +207,13 @@ def get_args(args_list=None):
         default=False,
         help="C1: feed agent (ego+neighbor) history as consecutive-frame xy deltas",
     )
+    parser.add_argument(
+        "--coeff_smoothness_loss",
+        type=float,
+        default=0.0,
+        help="weight on the xy second-difference smoothness penalty for the planTF "
+        "best mode (suppresses comb jitter; try 0.1-1.0)",
+    )
 
     # Velocity representation & hybrid loss (HDP paper, Section IV-B)
     parser.add_argument(
