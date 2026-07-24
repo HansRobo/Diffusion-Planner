@@ -470,9 +470,6 @@ Convert ego/neighbor futures between canonical 3-col `(x,y,heading)` and 4-col `
 ### pad_neighbors_320.py
 Pad/truncate `neighbor_agents_*` to a fixed neighbor-slot count (e.g. 320) so heterogeneous NPZs stack into one batch.
 
-### cpp_bin_to_npz.py
-Convert the C++ converter's binary tensor dumps to training-format NPZs (heading → cos/sin where needed).
-
 ### filter_avoidance_fittable.py
 Keep only scenes where a competent target source can produce a candidate that clears all safety/feasibility gates with real margin — i.e. genuinely fittable avoidance scenes; drops scenes even an expert can't satisfy.
 
