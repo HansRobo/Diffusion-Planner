@@ -96,3 +96,67 @@ def test_synthetic_injector_rejects_bad_width():
     }
     with pytest.raises(ValueError):
         inj.inject(batch, inject_max=1, inject_prob=1.0)
+
+
+def _augmentation_inputs():
+    """Minimal batch for StatePerturbation.centric_transform."""
+    B = 1
+    inputs = {
+        "ego_current_state": torch.zeros(B, 10),
+        "ego_agent_past": torch.zeros(B, 31, 4),
+        "ego_agent_future": torch.zeros(B, 80, 3),
+        "neighbor_agents_past": torch.zeros(B, 4, 31, 11),
+        "lanes": torch.zeros(B, 10, 20, 13),
+        "route_lanes": torch.zeros(B, 5, 20, 13),
+        "line_strings": torch.zeros(B, 6, 20, 4),
+        "polygons": torch.zeros(B, 3, 40, 5),
+        "static_objects": torch.zeros(B, 5, 10),
+    }
+    # Non-trivial ego pose so the re-centering rotation is a real one (~53 deg).
+    inputs["ego_current_state"][0, :4] = torch.tensor([2.0, -1.0, 0.6, 0.8])
+    ego_future = torch.zeros(B, 80, 3)
+    ego_future[0, :, 0] = torch.linspace(1, 40, 80)
+    return inputs, ego_future
+
+
+@pytest.mark.parametrize("module", ["quintic", "bridge"])
+def test_centric_transform_neighbor_future_3col_equals_4col(module):
+    if module == "quintic":
+        from diffusion_planner.utils.data_augmentation import StatePerturbation
+    else:
+        from diffusion_planner.utils.data_augmentation_bridge import StatePerturbation
+
+    def clone_all(inputs, ego_future, nf):
+        return (
+            {k: v.clone() for k, v in inputs.items()},
+            ego_future.clone(),
+            nf.clone(),
+        )
+
+    sp = StatePerturbation.__new__(StatePerturbation)  # avoid full __init__
+    sp._use_smoothing_future_trajectory = False
+
+    nf3 = torch.zeros(1, 4, 80, 3)
+    nf3[0, 0, :, 0] = torch.linspace(1, 30, 80)
+    nf3[0, 0, :, 1] = 2.0
+    nf3[0, 0, :, 2] = 0.9  # heading angle
+    nf4 = torch.cat([nf3[..., :2], nf3[..., 2:3].cos(), nf3[..., 2:3].sin()], dim=-1)
+    nf4[0, 1:] = 0.0  # padding slots stay zero in both
+
+    in3, ef3 = _augmentation_inputs()
+    in4, ef4 = _augmentation_inputs()
+    _, _, out3 = sp.centric_transform(*clone_all(in3, ef3, nf3)[:2], nf3)
+    _, _, out4 = sp.centric_transform(*clone_all(in4, ef4, nf4)[:2], nf4)
+
+    assert out3.shape[-1] == 3 and out4.shape[-1] == 4
+    # xy identical across widths
+    assert torch.allclose(out3[..., :2], out4[..., :2], atol=1e-5)
+    # 4-col heading vector must equal (cos, sin) of the 3-col transformed angle,
+    # and stay unit-norm on the valid slot.
+    cos3, sin3 = out3[0, 0, :, 2].cos(), out3[0, 0, :, 2].sin()
+    assert torch.allclose(out4[0, 0, :, 2], cos3, atol=1e-5)
+    assert torch.allclose(out4[0, 0, :, 3], sin3, atol=1e-5)
+    norms = out4[0, 0, :, 2] ** 2 + out4[0, 0, :, 3] ** 2
+    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
+    # padding slots remain zero
+    assert out4[0, 1:].abs().sum() == 0

@@ -546,11 +546,14 @@ def _apply_inverse_rigid_to_spatial(
     # --- ego_agent_future (T, 4) [x, y, cos, sin] — zeros mark invalid steps.
     # Legacy 3-col [x,y,yaw] is widened first; we never keep/emit 3-col futures. ---
     if "ego_agent_future" in out:
-        fut = _future_to_4col(
-            np.asarray(out["ego_agent_future"], dtype=np.float32), zero_rows_are_padding=False
-        )
+        raw = np.asarray(out["ego_agent_future"], dtype=np.float32)
+        # Validity from the RAW row: a stopped ego recorded at the origin keeps a
+        # nonzero heading channel (yaw for 3-col, cos/sin for 4-col) while padding
+        # rows are all-zero. (A 3-col origin row with yaw exactly 0 remains
+        # indistinguishable from padding and is treated as padding, as before.)
+        valid = np.any(raw != 0, axis=-1)
+        fut = _future_to_4col(raw, zero_rows_are_padding=False)
         out["ego_agent_future"] = fut
-        valid = (fut[:, 0] != 0) | (fut[:, 1] != 0)
         _xy_inv(fut, 0, 1)
         _dir_inv(fut, 2, 3)  # rotate the (cos,sin) heading vector, not wrap a yaw scalar
         fut[~valid] = 0
