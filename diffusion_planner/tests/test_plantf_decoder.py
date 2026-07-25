@@ -12,10 +12,11 @@ from diffusion_planner.dimensions import (
 )
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.model.module.plantf_decoder import (
+    PlanTFCrossAttnHead,
     PlanTFTrajectoryHead,
     compute_plantf_training_loss,
 )
-from diffusion_planner.utils.normalizer import StateNormalizer
+from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import (
     FULL_INPUT_NAMES,
     FULL_OUTPUT_NAMES,
@@ -547,3 +548,131 @@ def test_mode_metrics_separate_candidate_quality_from_mode_selection():
     # the selected mode, which is the whole point of tracking it separately.
     assert torch.equal(metrics["plantf_oracle_usage_1"], torch.tensor([1.0, 0.0]))
     assert torch.equal(metrics["plantf_oracle_usage_2"], torch.tensor([0.0, 1.0]))
+
+
+# ---------------------------------------------------------------------------
+# Combinable ablation toggles (docs/plantf_head_development_notes.md §9)
+# ---------------------------------------------------------------------------
+
+
+def _config_with(**kw):
+    c = _config()
+    for k, v in kw.items():
+        setattr(c, k, v)
+    return c
+
+
+def _run_loss(config, **loss_kw):
+    torch.manual_seed(0)
+    model = Diffusion_Planner(config).train()
+    inputs = _inputs()
+    B, Pn = 2, MAX_NUM_NEIGHBORS
+    ego_future = torch.randn(B, OUTPUT_T, POSE_DIM)
+    neighbors_future = torch.randn(B, Pn, OUTPUT_T, POSE_DIM)
+    mask = torch.zeros(B, Pn, OUTPUT_T, dtype=torch.bool)
+    args = _loss_args(config)
+    for k, v in loss_kw.items():
+        setattr(args, k, v)
+    return compute_plantf_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
+
+
+def test_cross_attn_head_shapes():
+    torch.manual_seed(0)
+    head = PlanTFCrossAttnHead(
+        embed_dim=HIDDEN_DIM, num_modes=NUM_MODES, future_steps=OUTPUT_T, num_heads=2
+    )
+    memory = torch.randn(2, 7, HIDDEN_DIM)
+    valid = torch.ones(2, 7, dtype=torch.bool)
+    loc, pi = head(memory, valid)
+    assert loc.shape == (2, NUM_MODES, OUTPUT_T, 4)
+    assert pi.shape == (2, NUM_MODES)
+
+
+def test_cross_attn_head_predict_scale():
+    head = PlanTFCrossAttnHead(
+        embed_dim=HIDDEN_DIM,
+        num_modes=NUM_MODES,
+        future_steps=OUTPUT_T,
+        num_heads=2,
+        predict_scale=True,
+    )
+    out = head(torch.randn(2, 7, HIDDEN_DIM), torch.ones(2, 7, dtype=torch.bool))
+    assert len(out) == 3
+    assert out[2].shape == (2, NUM_MODES, OUTPUT_T, 4)
+
+
+def test_mlp_head_predict_scale():
+    head = PlanTFTrajectoryHead(
+        embed_dim=HIDDEN_DIM, num_modes=NUM_MODES, future_steps=OUTPUT_T, predict_scale=True
+    )
+    out = head(torch.randn(2, HIDDEN_DIM))
+    assert len(out) == 3
+    assert out[2].shape == (2, NUM_MODES, OUTPUT_T, 4)
+
+
+def test_cross_attn_decoder_forward_and_loss():
+    config = _config_with(plantf_head_type="cross_attn")
+    model = Diffusion_Planner(config).eval()
+    _, outputs = model(_inputs())
+    assert outputs["trajectory"].shape[1] == NUM_MODES
+    assert "prediction" in outputs
+    loss = _run_loss(config)
+    assert torch.isfinite(loss["ego_planning_loss"])
+
+
+def test_laplace_nll_finite_and_changes_loss():
+    base = _run_loss(_config())
+    nll = _run_loss(_config_with(plantf_use_laplace_nll=True), plantf_use_laplace_nll=True)
+    assert torch.isfinite(nll["ego_planning_loss"])
+    assert not torch.isclose(base["ego_planning_loss"], nll["ego_planning_loss"])
+
+
+def test_tail_weighted_regression_changes_ego_loss():
+    base = _run_loss(_config())
+    tw = _run_loss(_config(), plantf_tail_weight=3.0)
+    assert not torch.isclose(base["ego_planning_loss"], tw["ego_planning_loss"])
+
+
+def test_tail_weighted_smoothness_changes_smoothness_loss():
+    torch.manual_seed(0)
+    config = _config()
+    model = Diffusion_Planner(config).train()
+    # Zero-init makes the prediction constant (second-difference == 0), so the
+    # penalty is 0 regardless of weighting. Perturb the loc head so the best-mode
+    # trajectory actually curves and the penalty is non-zero.
+    with torch.no_grad():
+        model.decoder.trajectory_head.loc[-1].weight.normal_(0, 0.1)
+    inputs = _inputs()
+    B, Pn = 2, MAX_NUM_NEIGHBORS
+    ego_future = torch.randn(B, OUTPUT_T, POSE_DIM)
+    neighbors_future = torch.randn(B, Pn, OUTPUT_T, POSE_DIM)
+    mask = torch.zeros(B, Pn, OUTPUT_T, dtype=torch.bool)
+
+    def run(weight):
+        args = _loss_args(config)
+        args.plantf_smoothness_tail_weight = weight
+        return compute_plantf_training_loss(
+            model, inputs, (ego_future, neighbors_future, mask), args
+        )["smoothness_loss"]
+
+    base = run(0.0)
+    weighted = run(3.0)
+    assert base > 0
+    assert not torch.isclose(base, weighted)
+
+
+def test_route_rerank_falls_back_without_normalizer():
+    config = _config_with(plantf_route_rerank=True)  # observation_normalizer stays None
+    model = Diffusion_Planner(config).eval()
+    _, outputs = model(_inputs())
+    assert "prediction" in outputs
+
+
+def test_route_rerank_runs_with_identity_normalizer():
+    inputs = _inputs()
+    c = inputs["route_lanes"].shape[-1]
+    obs = ObservationNormalizer({"route_lanes": {"mean": torch.zeros(c), "std": torch.ones(c)}})
+    config = _config_with(plantf_route_rerank=True, observation_normalizer=obs)
+    model = Diffusion_Planner(config).eval()
+    _, outputs = model(inputs)
+    assert outputs["prediction"].shape[0] == inputs["route_lanes"].shape[0]
