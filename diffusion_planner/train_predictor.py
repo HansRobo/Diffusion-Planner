@@ -215,6 +215,48 @@ def get_args(args_list=None):
         "best mode (suppresses comb jitter; try 0.1-1.0)",
     )
 
+    # planTF combinable ablation toggles (docs/plantf_head_development_notes.md §9)
+    parser.add_argument(
+        "--plantf_head_type",
+        type=str,
+        default="mlp",
+        choices=["mlp", "cross_attn"],
+        help="trajectory head: 'mlp' (reshape ego token) or 'cross_attn' (K mode "
+        "queries cross-attend to all encoder tokens)",
+    )
+    parser.add_argument(
+        "--plantf_route_rerank",
+        type=boolean,
+        default=False,
+        help="at inference, pick the ego mode by route adherence among the top-k pi "
+        "modes instead of argmax(pi) (validation path only, not ONNX)",
+    )
+    parser.add_argument(
+        "--plantf_route_rerank_topk",
+        type=int,
+        default=3,
+        help="number of top-pi modes considered by the route re-ranker",
+    )
+    parser.add_argument(
+        "--plantf_tail_weight",
+        type=float,
+        default=0.0,
+        help="tail weighting on the ego regression loss (w_t = 1 + w*t/(T-1))",
+    )
+    parser.add_argument(
+        "--plantf_smoothness_tail_weight",
+        type=float,
+        default=0.0,
+        help="tail weighting on the curvature (smoothness) penalty",
+    )
+    parser.add_argument(
+        "--plantf_use_laplace_nll",
+        type=boolean,
+        default=False,
+        help="use Laplace NLL (head-predicted per-point log-scale) for the ego "
+        "regression instead of smooth-L1",
+    )
+
     # Velocity representation & hybrid loss (HDP paper, Section IV-B)
     parser.add_argument(
         "--use_velocity_representation",

@@ -145,6 +145,30 @@ class TrainConfig:
     # instead of absolute positions, giving the encoder temporal-difference
     # inputs (original planTF vectorizes history this way).
     plantf_input_delta: bool = False
+    # --- planTF combinable ablation toggles (docs/plantf_head_development_notes.md §9) ---
+    # Trajectory head architecture. "mlp" (default): reshape the single ego token
+    # into K modes. "cross_attn": K mode queries cross-attend to ALL encoder
+    # tokens (map/agents/route), giving the head scene context the single-token
+    # bottleneck lacks (candidate fix for tail divergence).
+    plantf_head_type: Literal["mlp", "cross_attn"] = "mlp"
+    # Inference mode selection. When True, pick the ego mode by route adherence
+    # among the top-k pi modes instead of argmax(pi). Recovers oracle-ish modes
+    # for the smooth (velocity-rep) head at zero training cost. Applies to the
+    # validation forward path only, not the ONNX deploy graph.
+    plantf_route_rerank: bool = False
+    plantf_route_rerank_topk: int = 3
+    # Loss improvements (docs/plantf_head_development_notes.md §9), all opt-in and
+    # independently combinable:
+    #  - plantf_tail_weight (>0): weight the per-timestep ego regression toward the
+    #    tail (w_t = 1 + tail_weight * t/(T-1)).
+    #  - plantf_smoothness_tail_weight (>0, #6): same tail weighting on the curvature
+    #    (second-difference) penalty.
+    #  - plantf_use_laplace_nll (#5): replace the ego smooth-L1 with a Laplace NLL
+    #    using a head-predicted per-point log-scale (planTF's probabilistic
+    #    regression; calibrates tail uncertainty and mode confidence).
+    plantf_tail_weight: float = 0.0
+    plantf_smoothness_tail_weight: float = 0.0
+    plantf_use_laplace_nll: bool = False
 
     # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False
