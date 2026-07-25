@@ -23,6 +23,18 @@ DEFAULT_MODEL_DIR = Path("/opt/autoware/mlmodels/diffusion_planner_for_x2")
 NAN_FRENET = {f"es_{c}_{h}": float("nan") for h in HORIZONS for c in ("lon", "lat")}
 
 
+def _load_done_paths(csv_path: Path) -> set[str]:
+    """Read an existing CSV and return the set of already-scored npz_path values."""
+    if not csv_path.exists():
+        return set()
+    done = set()
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            done.add(row["npz_path"])
+    return done
+
+
 def score_one_scene(
     npz_path: str,
     sampler: TrajectorySampler,
@@ -75,6 +87,9 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument(
+        "--resume", action="store_true", help="Skip already-scored scenes, append to output CSV"
+    )
     p.add_argument("--device", default="cuda")
     p.add_argument("--model_dir", type=Path, default=None)
     p.add_argument(
@@ -101,17 +116,30 @@ def main():
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    done_paths: set[str] = set()
+    if args.resume:
+        done_paths = _load_done_paths(out_path)
+        if done_paths:
+            print(f"Resume: {len(done_paths)} scenes already scored, skipping.")
+
+    pending = [p for p in paths if p not in done_paths]
+    if not pending:
+        print(f"All {len(paths)} scenes already scored.")
+        return
+
     fieldnames = None
     skipped = 0
-    with open(out_path, "w", newline="") as csvfile:
+    mode = "a" if args.resume and done_paths else "w"
+    with open(out_path, mode, newline="") as csvfile:
         writer = None
-        for path in tqdm(paths, desc="Scoring"):
+        for path in tqdm(pending, desc="Scoring"):
             try:
                 row = score_one_scene(path, sampler, args.num_samples, args.seed, args.temperature)
                 if writer is None:
                     fieldnames = list(row.keys())
                     writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                    writer.writeheader()
+                    if mode == "w":
+                        writer.writeheader()
                 writer.writerow(row)
                 csvfile.flush()
             except Exception:
@@ -119,7 +147,10 @@ def main():
                 print(f"skip {path}")
                 traceback.print_exc()
 
-    print(f"Wrote {len(paths) - skipped} rows to {out_path} ({skipped} skipped)")
+    total_done = len(done_paths) + len(pending) - skipped
+    print(
+        f"Wrote {len(pending) - skipped} new rows to {out_path} ({skipped} skipped, {total_done} total)"
+    )
 
 
 if __name__ == "__main__":
