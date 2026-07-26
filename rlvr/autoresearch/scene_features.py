@@ -52,7 +52,8 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 _FRAME_RE = re.compile(r"_(\d+)\.npz$")
 
 # Neighbor past last-dim layout (npz_loader.py:208): [x, y, cos, sin, vx, vy,
-# width, length, is_veh, is_ped, is_bike]. Pedestrian one-hot is column 9.
+# width, length, is_veh, is_ped, is_bike]. Type one-hot is columns 8,9,10.
+_NB_VEH_COL = 8
 _NB_PED_COL = 9
 
 
@@ -263,11 +264,12 @@ def gt_stats(npz_path: str) -> dict:
 
 
 def active_neighbor_info(neighbor_agents_past: np.ndarray):
-    """``(pos (Q,2), ped_mask (Q,), dists_origin (Q,))`` for the ACTIVE neighbors at
-    the last timestep of ``neighbor_agents_past`` (N,T,11). "Active" = any of the 11
-    cols non-zero at t=0 (the interaction is judged at the present). The ordering is
-    deterministic so a path distance computed separately (e.g. batched on GPU) stays
-    aligned with ``pos``. Q=0 arrays when there are no active neighbors.
+    """``(pos (Q,2), ped_mask (Q,), veh_mask (Q,), dists_origin (Q,))`` for the ACTIVE
+    neighbors at the last timestep of ``neighbor_agents_past`` (N,T,11). "Active" =
+    any of the 11 cols non-zero at t=0 (the interaction is judged at the present).
+    ``ped_mask``/``veh_mask`` are the pedestrian/vehicle type one-hots (cols 9/8). The
+    ordering is deterministic so a path distance computed separately (e.g. batched on
+    GPU) stays aligned with ``pos``. Q=0 arrays when there are no active neighbors.
 
     Note: this "present at t=0, all-cols" activeness differs from ``npz_loader``'s
     "any timestep, cols 0:5" — they haven't diverged on real data, but a neighbor
@@ -278,8 +280,9 @@ def active_neighbor_info(neighbor_agents_past: np.ndarray):
     active = np.any(cur != 0, axis=-1)
     pos = cur[active, :2]
     ped_mask = cur[active, _NB_PED_COL] == 1
+    veh_mask = cur[active, _NB_VEH_COL] == 1
     dists_origin = np.linalg.norm(pos, axis=-1) if pos.shape[0] else np.empty((0,), np.float32)
-    return pos, ped_mask, dists_origin
+    return pos, ped_mask, veh_mask, dists_origin
 
 
 def _empty_neighbor_stats() -> dict:
@@ -298,6 +301,7 @@ def _empty_neighbor_stats() -> dict:
 def finalize_neighbor_stats(
     pos: np.ndarray,
     ped_mask: np.ndarray,
+    veh_mask: np.ndarray,
     dists_origin: np.ndarray,
     dpath: np.ndarray,
     *,
@@ -311,7 +315,14 @@ def finalize_neighbor_stats(
     quantities: ego-origin distances ``dists_origin`` and ego-PATH distances
     ``dpath`` (both (Q,), aligned with ``pos``). This is the single finalize used by
     BOTH the CPU per-scene path and the batched GPU path, so their outputs are
-    identical by construction."""
+    identical by construction.
+
+    All interaction signals are ego-future-PATH relevant: ``n_interacting`` (any
+    agent within ``interaction_corridor_m`` of the path), ``has_pedestrian`` (a
+    pedestrian within ``ped_corridor_m`` of the path), and ``has_lead`` (a VEHICLE
+    within ``lead_half_width_m`` of the path AND ahead of the ego within
+    ``lead_range_m``). The lateral gate is distance-to-the-actual-path, so a lead
+    around a curve is caught (a straight t=0 front cone would miss it)."""
     out = _empty_neighbor_stats()
     if pos.shape[0] == 0:
         return out
@@ -319,9 +330,11 @@ def finalize_neighbor_stats(
     out["nearest_neighbor_m"] = float(dists_origin.min())
     out["nearest_agent_path_m"] = float(dpath.min())
     out["n_interacting"] = int(np.sum(dpath <= interaction_corridor_m))
-    # front-cone lead vehicle (ego frame: +x forward, y lateral)
-    fx, fy = pos[:, 0], pos[:, 1]
-    lead_mask = (fx > 0) & (fx <= lead_range_m) & (np.abs(fy) <= lead_half_width_m)
+    # lead vehicle: a VEHICLE on the ego path corridor, ahead within range. "Ahead"
+    # uses ego-frame +x (path leaves the origin forward); the lateral gate is the
+    # distance to the actual (possibly curved) future path, not a straight cone.
+    fx = pos[:, 0]
+    lead_mask = veh_mask & (dpath <= lead_half_width_m) & (fx > 0) & (fx <= lead_range_m)
     if np.any(lead_mask):
         out["has_lead"] = True
         out["lead_dist_m"] = float(fx[lead_mask].min())
@@ -348,13 +361,13 @@ def neighbor_stats(
     """Neighbor interaction features scored for RELEVANCE to the ego's GT future
     path. ``neighbor_count`` / ``nearest_neighbor_m`` are ego-ORIGIN proximity
     (informational); ``nearest_agent_path_m`` / ``n_interacting`` /
-    ``nearest_ped_path_m`` / ``has_pedestrian`` are measured against the ego PATH;
-    ``has_lead`` is the front cone.
+    ``nearest_ped_path_m`` / ``has_pedestrian`` / ``has_lead`` are all measured
+    against the ego PATH (has_lead = a vehicle on the path corridor, ahead).
 
     ``dpath`` (Q,) may be supplied precomputed (e.g. batched on GPU, aligned with
     :func:`active_neighbor_info`'s ordering); otherwise it is computed per-scene via
     :func:`min_dist_to_polyline` on ``device``."""
-    pos, ped_mask, dists_origin = active_neighbor_info(neighbor_agents_past)
+    pos, ped_mask, veh_mask, dists_origin = active_neighbor_info(neighbor_agents_past)
     if pos.shape[0] == 0:
         return _empty_neighbor_stats()
     if dpath is None:
@@ -362,6 +375,7 @@ def neighbor_stats(
     return finalize_neighbor_stats(
         pos,
         ped_mask,
+        veh_mask,
         dists_origin,
         np.asarray(dpath, dtype=np.float32),
         radius_m=radius_m,

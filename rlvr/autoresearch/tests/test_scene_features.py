@@ -207,6 +207,53 @@ def test_lead_vehicle_front_cone():
     assert out["nearest_ped_path_m"] is None  # no pedestrians present
 
 
+def test_lead_requires_vehicle_type():
+    # a pedestrian directly ahead is NOT a lead (lead is vehicle-typed) -> has-ped
+    out = sf.neighbor_stats(
+        _neighbors([_neighbor_row(15.0, 0.0, is_ped=1)]),
+        _straight_ego_future(),
+        radius_m=30.0,
+        lead_range_m=40.0,
+        lead_half_width_m=2.0,
+        interaction_corridor_m=8.0,
+        ped_corridor_m=6.0,
+    )
+    assert out["has_lead"] is False
+    assert out["has_pedestrian"] is True
+
+
+def test_lead_on_curved_path_caught():
+    # ego turns left; a vehicle sitting on the curved path ahead is laterally OFF the
+    # straight +x axis (a t=0 front cone would miss it) but ON the path corridor.
+    ego = _turning_ego_future(80.0)
+    midpt = ego[40, :2]
+    assert abs(float(midpt[1])) > 2.0  # genuinely outside a straight |y|<=2 cone
+    out = sf.neighbor_stats(
+        _neighbors([_neighbor_row(float(midpt[0]), float(midpt[1]), is_veh=1)]),
+        ego,
+        radius_m=60.0,
+        lead_range_m=60.0,
+        lead_half_width_m=2.0,
+        interaction_corridor_m=8.0,
+        ped_corridor_m=6.0,
+    )
+    assert out["has_lead"] is True
+
+
+def test_lead_off_path_not_flagged():
+    # vehicle ahead in x but far laterally from the (straight) path -> not a lead
+    out = sf.neighbor_stats(
+        _neighbors([_neighbor_row(15.0, 10.0, is_veh=1)]),
+        _straight_ego_future(),
+        radius_m=30.0,
+        lead_range_m=40.0,
+        lead_half_width_m=2.0,
+        interaction_corridor_m=8.0,
+        ped_corridor_m=6.0,
+    )
+    assert out["has_lead"] is False
+
+
 def test_no_active_neighbors():
     out = sf.neighbor_stats(
         np.zeros((8, 2, 11), np.float32),

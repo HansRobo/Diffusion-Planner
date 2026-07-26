@@ -77,7 +77,7 @@ def _gpu_load(npz_path):
     from rlvr.autoresearch.scene_features import active_neighbor_info
 
     d = np.load(npz_path, allow_pickle=True)
-    pos, _ped, _do = active_neighbor_info(d["neighbor_agents_past"])
+    pos, _ped, _veh, _do = active_neighbor_info(d["neighbor_agents_past"])
     path = np.asarray(d["ego_agent_future"], dtype=np.float32)[:, :2]
     return npz_path, d, pos, path
 
