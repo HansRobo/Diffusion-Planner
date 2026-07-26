@@ -10,23 +10,99 @@ from diffusion_planner.utils.neighbor_future_alignment import (
     align_neighbor_future_tensor,
 )
 
-
-# The released v5 Original-DP checkpoint was trained with the legacy X2 body
-# width.  New 20260707 archives carry the updated X2 width, so normalize it at
-# the canonical RL loader boundary until a checkpoint trained on the new body
-# geometry is used.  Do not alter xx1/J6 scenes.
+# The released v5 Original-DP checkpoint was trained on the pre-rewrite
+# archives, so RL must feed it those body widths.  20260707 was produced by
+# rewriting *only* the width to mirror-inclusive values
+# (rewrite_ego_shape.py); wheel_base and length are untouched, so restoring the
+# legacy geometry is a pure width revert.  Verified against the upstream
+# archives that the checkpoint was actually trained on:
+#
+#   20260425_takanawa_full/x2_dev          4.76012 / 7.23690 / 2.29156
+#   20260331_with_interpolation/j6_real_train  4.76012 / 7.23690 / 2.29156
+#   20260331_with_interpolation/xx1_real_train 2.75    / 4.34    / 1.70000
+#   20260331_with_interpolation/xx1_psim       2.75    / 4.34    / 1.70000
+#
+# ``j6_real_train`` holds X2-geometry data despite its directory name — the
+# rewrite maps it to the x2_dev parameter key, and its pre-rewrite width was
+# already 2.29156.  An earlier version of this module excluded xx1 and J6 from
+# normalization, which left 16.85% of the corpus (j6_real_train) feeding the old
+# model a 5.9% wider X2 and 74.3% (xx1_*) an 8.2% wider xx1.  Body width feeds
+# the OBB collision and road-border terms, so that was a systematic bias.
 X2_LEGACY_EGO_WIDTH_M = 2.29156
-_X2_DATASET_COMPONENTS = frozenset({"x2", "x2_dev"})
+XX1_LEGACY_EGO_WIDTH_M = 1.70
+_X2_DATASET_COMPONENTS = frozenset({"x2", "x2_dev", "j6_real_train"})
+_XX1_DATASET_COMPONENTS = frozenset({"xx1_real_train", "xx1_psim", "prd_jt"})
 
 
 def _uses_legacy_x2_geometry(npz_path: str | Path) -> bool:
     return bool(_X2_DATASET_COMPONENTS.intersection(Path(npz_path).parts))
 
 
+def _uses_legacy_xx1_geometry(npz_path: str | Path) -> bool:
+    return bool(_XX1_DATASET_COMPONENTS.intersection(Path(npz_path).parts))
+
+
+def legacy_ego_width_m(npz_path: str | Path) -> float | None:
+    """Body width the released checkpoint was trained with, or None if unknown."""
+
+    if _uses_legacy_x2_geometry(npz_path):
+        return X2_LEGACY_EGO_WIDTH_M
+    if _uses_legacy_xx1_geometry(npz_path):
+        return XX1_LEGACY_EGO_WIDTH_M
+    return None
+
+
+def effective_ego_shape_numpy(
+    npz_path: str | Path,
+    ego_shape: np.ndarray | tuple[float, ...] | list[float] | None,
+    *,
+    fallback: tuple[float, float, float] = (2.75, 4.34, 1.70),
+) -> np.ndarray:
+    """Return the geometry actually used by the Original-DP RL loader.
+
+    Scene visualisers often read an NPZ directly instead of going through
+    :func:`load_npz_data`. Without this helper they draw the new X2 body width
+    even though the released v5 checkpoint is scored and trained with the
+    legacy 2.29156 m width. Keep rendering and reward geometry identical.
+    """
+
+    if ego_shape is None:
+        shape = np.asarray(fallback, dtype=np.float32).copy()
+    else:
+        shape = np.asarray(ego_shape, dtype=np.float32).reshape(-1).copy()
+        if shape.size < 3:
+            raise ValueError(
+                f"ego_shape for '{npz_path}' has {shape.size} values; expected at least 3"
+            )
+    legacy_width = legacy_ego_width_m(npz_path)
+    if legacy_width is not None:
+        shape[2] = legacy_width
+    return shape
+
+
+def apply_npz_heading_transforms(
+    data: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Apply the canonical device-local heading transforms in place.
+
+    Packed loaders may defer these two trigonometric operations until after a
+    CPU batch has been copied to CUDA.  Running them on the destination device
+    preserves the exact historical CUDA numerics while still replacing
+    hundreds of per-scene host-to-device copies with one copy per field.
+    """
+
+    if "goal_pose" in data:
+        data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
+    if "ego_agent_past" in data:
+        data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
+    return data
+
+
 def load_npz_data(
     npz_path: str | Path,
     device: torch.device,
     ego_shape_override: tuple[float, ...] | None = None,
+    defer_heading_transforms: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Load NPZ file into tensors on the specified device.
 
@@ -35,6 +111,9 @@ def load_npz_data(
         device: Device to load tensors onto.
         ego_shape_override: If provided and the NPZ lacks ego_shape,
             use this (wheelbase, length, width) instead of crashing.
+        defer_heading_transforms: Keep heading-angle tensors raw so a packed
+            loader can apply their trigonometric conversion after one batched
+            device transfer. The default preserves the historical API.
 
     Returns:
         Dictionary of tensors with observation data.
@@ -52,10 +131,8 @@ def load_npz_data(
                 continue
             data[key] = torch.tensor(np.expand_dims(value, axis=0)).to(device)
 
-    if "goal_pose" in data:
-        data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
-    if "ego_agent_past" in data:
-        data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
+    if not defer_heading_transforms:
+        apply_npz_heading_transforms(data)
     if "neighbor_agents_future" in data:
         # Current T4 archives are present-frame inclusive. Keep the correction
         # at the canonical loader boundary so AWR's target, OBB reward, and
@@ -76,7 +153,8 @@ def load_npz_data(
                 f"load_npz_data: '{npz_path}' is missing 'ego_shape' (wheel_base, length, width)."
             )
 
-    if _uses_legacy_x2_geometry(npz_path):
+    legacy_width = legacy_ego_width_m(npz_path)
+    if legacy_width is not None:
         ego_shape = data["ego_shape"]
         if ego_shape.ndim != 2 or ego_shape.shape[0] != 1 or ego_shape.shape[1] < 3:
             raise ValueError(
@@ -84,7 +162,7 @@ def load_npz_data(
                 f"{tuple(ego_shape.shape)}; expected [1, >=3]"
             )
         ego_shape = ego_shape.clone()
-        ego_shape[0, 2] = X2_LEGACY_EGO_WIDTH_M
+        ego_shape[0, 2] = legacy_width
         data["ego_shape"] = ego_shape
 
     # v4 decoder requires delay (always 0 at inference, training uses random delay)
