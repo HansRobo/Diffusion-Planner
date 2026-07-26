@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import math
 import os
@@ -237,6 +238,15 @@ def main() -> None:
     print(f"[index] device={device} (requested {args.device})", flush=True)
 
     os.makedirs(args.out_dir, exist_ok=True)
+    if args.overwrite:
+        # Wipe existing shards so a re-run with a different --shard_size can't leave
+        # stale higher-numbered shards behind (which would silently mix old + new
+        # rows). Without --overwrite, existing shards are kept (resume).
+        stale = sorted(glob.glob(os.path.join(args.out_dir, "shard_*.parquet")))
+        for f in stale:
+            os.remove(f)
+        if stale:
+            print(f"[index] --overwrite: cleared {len(stale)} existing shard(s)", flush=True)
     n_shards = math.ceil(len(paths) / args.shard_size)
     err_log = os.path.join(args.out_dir, "errors.log")
     total_ok = 0
