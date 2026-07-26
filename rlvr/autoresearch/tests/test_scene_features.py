@@ -125,33 +125,19 @@ def test_signed_total_yaw_matches_maneuver():
 def test_interaction_priority_ped_first():
     # a lead vehicle AND a relevant pedestrian both present -> has-ped wins
     assert (
-        sf.interaction(
-            n_interacting=10, has_lead=True, has_pedestrian=True, static_count=3, dense_count=4
-        )
+        sf.interaction(n_interacting=10, has_lead=True, has_pedestrian=True, dense_count=4)
         == "has-ped"
     )
     assert (
-        sf.interaction(
-            n_interacting=1, has_lead=True, has_pedestrian=False, static_count=0, dense_count=4
-        )
+        sf.interaction(n_interacting=1, has_lead=True, has_pedestrian=False, dense_count=4)
         == "has-lead"
     )
     assert (
-        sf.interaction(
-            n_interacting=5, has_lead=False, has_pedestrian=False, static_count=0, dense_count=4
-        )
+        sf.interaction(n_interacting=5, has_lead=False, has_pedestrian=False, dense_count=4)
         == "dense"
     )
     assert (
-        sf.interaction(
-            n_interacting=0, has_lead=False, has_pedestrian=False, static_count=2, dense_count=4
-        )
-        == "has-static"
-    )
-    assert (
-        sf.interaction(
-            n_interacting=0, has_lead=False, has_pedestrian=False, static_count=0, dense_count=4
-        )
+        sf.interaction(n_interacting=0, has_lead=False, has_pedestrian=False, dense_count=4)
         == "none"
     )
 

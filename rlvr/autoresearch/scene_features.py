@@ -69,8 +69,8 @@ class FeatureConfig:
     straight_yaw_deg: float = 15.0  # |signed total GT yaw| < this => straight
     dense_count: int = 4  # agents interacting with the ego path >= this => dense
     neighbor_radius_m: float = 30.0  # ego-origin proximity (informational count)
-    lead_range_m: float = 40.0  # front-cone lead vehicle: 0 < x <= range
-    lead_half_width_m: float = 2.0  # ... and |lateral| <= half width
+    lead_range_m: float = 40.0  # lead vehicle: ahead within this range (ego +x)
+    lead_half_width_m: float = 2.0  # ... and within this distance of the ego PATH
     interaction_corridor_m: float = 8.0  # agent within this of ego GT path => interacting
     ped_corridor_m: float = 6.0  # pedestrian within this of ego GT path => has-ped
 
@@ -91,7 +91,7 @@ FEATURE_COLUMNS = [
     "nearest_neighbor_m",  # nearest active neighbor to ego ORIGIN
     "nearest_agent_path_m",  # nearest active neighbor to the ego GT PATH
     "n_interacting",  # active neighbors within interaction_corridor of the ego PATH
-    "has_lead",  # vehicle in the front cone (ego-relative, ahead)
+    "has_lead",  # vehicle on the ego PATH corridor, ahead within range
     "lead_dist_m",
     "nearest_ped_path_m",  # nearest pedestrian to the ego GT PATH (None if no peds)
     "has_pedestrian",  # a pedestrian within ped_corridor of the ego PATH
@@ -103,7 +103,7 @@ FEATURE_COLUMNS = [
     "world_heading_deg",
     "speed_bin",  # stopped|low|mid|high
     "maneuver",  # straight|turn-L|turn-R
-    "interaction",  # has-ped|has-lead|dense|has-static|none
+    "interaction",  # has-ped|has-lead|dense|none (all ego-path-relevant)
     "label",  # "<speed_bin>|<maneuver>|<interaction>" (bucket triple)
 ]
 
@@ -430,21 +430,25 @@ def interaction(
     n_interacting: int,
     has_lead: bool,
     has_pedestrian: bool,
-    static_count: int,
     dense_count: int,
 ) -> str:
     """Single interaction label, priority by interestingness for scene mining:
-    has-ped > has-lead > dense > has-static > none. Pedestrian-near-path is the
-    rarest/most safety-critical, so it wins over a lead vehicle or dense traffic
-    that may co-occur."""
+    has-ped > has-lead > dense > none. Every branch is ego-future-PATH relevant
+    (pedestrian/vehicle/agents near the path), so a distant agent never drives the
+    label. Pedestrian-near-path is the rarest/most safety-critical, so it wins.
+
+    ``has-static`` is intentionally NOT a category: ``static_objects`` is unpopulated
+    (all-zero) in the current data and its column layout is not documented anywhere
+    in the repo, so a path-relevant static check can't be verified. Add a
+    ``has-static`` branch here (static within a corridor of the path — same shape as
+    the others) once static_objects is populated and its xy columns are confirmed;
+    ``static_count`` is still emitted as an informational feature."""
     if has_pedestrian:
         return "has-ped"
     if has_lead:
         return "has-lead"
     if n_interacting >= dense_count:
         return "dense"
-    if static_count > 0:
-        return "has-static"
     return "none"
 
 
@@ -457,7 +461,6 @@ def derive_labels(features: dict, config: FeatureConfig = FeatureConfig()) -> di
         n_interacting=features["n_interacting"] or 0,
         has_lead=bool(features["has_lead"]),
         has_pedestrian=bool(features["has_pedestrian"]),
-        static_count=features["static_count"] or 0,
         dense_count=config.dense_count,
     )
     return {
