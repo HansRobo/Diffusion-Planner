@@ -54,14 +54,13 @@ import hashlib
 import json
 import os
 import random
-import re
 import shutil
 from collections import Counter, defaultdict
 
 import numpy as np
 
 from planner_metrics.scene_format import future_to_4col
-from rlvr.autoresearch.scene_features import _load_util_script
+from rlvr.autoresearch.scene_features import _load_util_script, session_key
 from rlvr.autoresearch.tools.lifelong_replay_memory import _parse_label_quotas, build_memory
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -80,19 +79,16 @@ def output_basename(src: str) -> str:
 
 
 def contig_relpath(src: str) -> str:
-    """Output path (relative to ``npz/``) for CONTIGUOUS mode. No new naming
-    convention: the frame keeps its ORIGINAL dataset filename, placed under a
-    per-bag subdirectory named for its source bag (the dataset's own
-    ``<date>/<HH-MM-SS>`` session dir). This is exactly what the reproducer's
-    lineage check (``mine_direct_reproducer_chunks._is_next_contiguous``) expects
-    — consecutive frames sharing a parent dir, a common prefix, and a +1 trailing
-    frame index — and distinct bags land in distinct subdirs so nothing collides.
-    (Frame mode flattens into one dir and must hash-prefix for uniqueness; the
-    contiguous corpus keeps the bag structure instead.)"""
-    d = os.path.dirname(src)
-    bag = "_".join(p for p in d.split(os.sep)[-2:] if p) or "bag"
-    bag = re.sub(r"[^A-Za-z0-9_.-]+", "-", bag)
-    return os.path.join(bag, os.path.basename(src))
+    """Output path (relative to ``npz/``) for CONTIGUOUS mode. The frame keeps its
+    ORIGINAL dataset filename under a per-session subdirectory. The subdir is
+    ``scene_features.session_key`` (``<tail>_<hash8>`` over the full source dir) —
+    the SAME injective key used to group contiguous windows in ``bag_and_frame``, so
+    a selected window maps to exactly one output dir and distinct source dirs never
+    collide (a plain ``_``-join of the last two path parts is not injective:
+    ``/A/a_b/c`` and ``/B/a/b_c`` both -> ``a_b_c``). Consecutive frames of a bag then
+    share a parent dir + prefix + a +1 trailing index, which is what the reproducer's
+    lineage check (``mine_direct_reproducer_chunks._is_next_contiguous``) requires."""
+    return os.path.join(session_key(src), os.path.basename(src))
 
 
 # --------------------------------------------------------------------------- #

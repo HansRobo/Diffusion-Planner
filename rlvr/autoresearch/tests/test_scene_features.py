@@ -7,6 +7,8 @@ path-relevant interaction flags, and the label taxonomy.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -149,6 +151,32 @@ def test_signed_yaw_3col_4col_equivalent():
 def test_signed_yaw_bad_width_fails_loud():
     with pytest.raises(ValueError):
         sf.signed_total_yaw_deg(np.zeros((10, 5), np.float32))
+
+
+def test_unsigned_yaw_3col_4col_equivalent():
+    # peak_abs_yaw_deg (unsigned total) must decode width consistently too — the
+    # legacy compute_gt_stats read col 2 as radians and gave ~28.6 for a 60° 4-col turn.
+    for deg in (60.0, -60.0, 35.0):
+        ego3 = _turning_ego_future(deg)
+        u3 = sf.unsigned_total_yaw_deg(ego3)
+        u4 = sf.unsigned_total_yaw_deg(_to_4col_ego(ego3))
+        assert abs(u3 - u4) < 1e-3, (deg, u3, u4)
+        assert abs(u3 - abs(deg)) < 1.0  # ~|deg| total heading change
+
+
+def test_session_key_injective_on_ambiguous_dirs():
+    # a plain "_".join of the last two path parts is NOT injective:
+    # /A/a_b/c and /B/a/b_c would both collapse to "a_b_c". session_key must not.
+    ka = sf.session_key("/A/a_b/c/run_00000000_00000000.npz")
+    kb = sf.session_key("/B/a/b_c/run_00000000_00000000.npz")
+    assert ka != kb, (ka, kb)
+    # and contig_relpath (build side) uses the same key -> consistent + injective
+    from rlvr.autoresearch.tools.build_small_dataset import contig_relpath
+
+    assert (
+        contig_relpath("/A/a_b/c/run_00000000_00000000.npz").split(os.sep)[0]
+        != contig_relpath("/B/a/b_c/run_00000000_00000000.npz").split(os.sep)[0]
+    )
 
 
 def test_bag_and_frame_distinguishes_sessions(tmp_path):

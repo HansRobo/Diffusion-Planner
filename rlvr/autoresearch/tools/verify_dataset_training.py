@@ -46,6 +46,8 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 # Repo root = three levels up from rlvr/autoresearch/tools/this_file.py. Subprocesses
 # run from here so both ``rlvr`` and ``diffusion_planner`` import cleanly.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -89,11 +91,31 @@ def _run(cmd: list[str], log_path: Path, env: dict) -> tuple[int, str]:
     return proc.returncode, text
 
 
+def resolve_device(requested: str) -> str:
+    """Resolve the requested device to a concrete 'cuda' or 'cpu' using ACTUAL CUDA
+    availability. 'auto' must check availability (hiding CUDA via an env var does not
+    make it available), and 'cuda' on a CPU-only host fails loudly rather than
+    launching subprocesses that then crash."""
+    if requested == "cpu":
+        return "cpu"
+    try:
+        import torch
+
+        avail = torch.cuda.is_available()
+    except Exception:
+        avail = False
+    if requested == "cuda":
+        if not avail:
+            raise SystemExit("--device cuda requested but no CUDA device is available")
+        return "cuda"
+    return "cuda" if avail else "cpu"  # auto
+
+
 def _env_for_device(device: str) -> dict:
     env = dict(os.environ)
     if device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
-    elif device in ("cuda", "auto"):
+    else:  # cuda (already resolved concrete)
         env.setdefault("CUDA_VISIBLE_DEVICES", "0")
     # Put the repo root on PYTHONPATH so repo-root packages (planner_metrics, rlvr,
     # diffusion_planner) resolve even when they are not pip-installed. train_predictor
@@ -136,10 +158,11 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
         str(int(cfg.get("batch_size", 8))),
         "--ddp",
         "false",
-        # train_predictor defaults to --device cuda; pass the resolved device so
-        # --device cpu actually runs on CPU instead of failing on a hidden GPU.
+        # train_predictor defaults to --device cuda; pass the resolved concrete
+        # device (args.device is 'cuda'/'cpu' after resolve_device) so --device cpu
+        # (and auto on a CPU-only host) actually runs on CPU.
         "--device",
-        "cpu" if args.device == "cpu" else "cuda",
+        args.device,
         "--use_data_augment",
         str(bool(cfg.get("use_data_augment", True))).lower(),
         "--augment_prob",
@@ -199,21 +222,31 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
     ]
     print(f"[RSFT] train {n_tr} / val {n_va} scenes -> {work / 'rsft.log'}", flush=True)
     rc, text = _run(cmd, work / "rsft.log", env)
-    # Capture the full token (incl. inf/nan) so a sentinel -inf reward is not read as a
-    # bare "-" and mistaken for success; require an actual finite number to PASS.
-    reward = re.findall(r"val_reward:\s*(-?inf|nan|[0-9.eE+-]+)", text)
-    reward_val = None
-    if reward:
+    # PASS requires evidence that TRAINING actually happened, not just a saved adapter
+    # + a promoted summary reward:
+    #  - kept training scenes >= 1 (the trainer swallows train-load failures and
+    #    returns {} for N=0 while still saving an adapter and evaluating val), and
+    #  - a per-epoch training-loss line was emitted, and
+    #  - a FINITE per-epoch validation reward (the "Eval [epochN-val]: reward=" line,
+    #    which exists regardless of the model-quality promotion threshold; the summary
+    #    "val_reward" stays -inf with --skip_baseline when the reward is <= -5, so a
+    #    real run would false-FAIL on it).
+    kept = re.findall(r"train:\s*kept\s+(\d+)\s*/", text)
+    kept_train = int(kept[-1]) if kept else 0
+    trained = re.search(r"Epoch\s+\d+.*Loss=", text) is not None
+    ev = re.findall(r"Eval \[epoch\d+-val\][^\n]*reward=([+-]?(?:inf|nan|[0-9.eE]+))", text)
+    ev_val = None
+    if ev:
         try:
-            v = float(reward[-1])
-            reward_val = v if math.isfinite(v) else None
+            v = float(ev[-1])
+            ev_val = v if math.isfinite(v) else None
         except ValueError:
-            reward_val = None
+            ev_val = None
     lora = list((work / "out").rglob("adapter_model.safetensors"))
-    ok = rc == 0 and reward_val is not None and bool(lora)
+    ok = rc == 0 and kept_train >= 1 and trained and ev_val is not None and bool(lora)
     detail = (
-        f"rc={rc} val_reward={reward[-1] if reward else 'NONE'} "
-        f"lora_saved={'yes' if lora else 'no'}"
+        f"rc={rc} kept_train={kept_train} trained={trained} "
+        f"epoch_val_reward={ev[-1] if ev else 'NONE'} lora_saved={'yes' if lora else 'no'}"
     )
     return ok, detail
 
@@ -224,6 +257,28 @@ def _resolve_cfg_path(value) -> Path | None:
         return None
     p = Path(value)
     return p if p.is_absolute() else (_REPO_ROOT / p)
+
+
+def _scenes_loadable(scene_list: Path, k: int = 5) -> tuple[int, int]:
+    """Sample up to k scenes from the JSON list, actually ``np.load`` each and require
+    the core training fields. Returns (checked, loadable). This makes the R2LPL check
+    genuinely CONSUME the dataset: the miner's plan-only branch only parses path
+    strings + frame suffixes, so a list of nonexistent paths would otherwise plan
+    chunks and PASS. Requiring real scenes to load rejects a fabricated/missing corpus."""
+    scenes = _load_json(scene_list)
+    if not isinstance(scenes, list) or not scenes:
+        return 0, 0
+    idx = sorted({0, len(scenes) // 2, len(scenes) - 1, *range(min(k, len(scenes)))})[:k]
+    checked = loadable = 0
+    for i in idx:
+        checked += 1
+        try:
+            with np.load(scenes[i], allow_pickle=True) as z:
+                if {"neighbor_agents_past", "ego_agent_future"} <= set(z.files):
+                    loadable += 1
+        except Exception:
+            pass
+    return checked, loadable
 
 
 def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
@@ -300,11 +355,18 @@ def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
         s = _load_json(summary)
         sim = s.get("simulated_chunks")
         planned = s.get("planned_chunks")
+    # The sampled contiguous scenes must actually load (guards plan-only, whose miner
+    # branch only parses path strings and would PASS on a nonexistent corpus).
+    checked, loadable = _scenes_loadable(scene_list, 5)
+    scenes_ok = checked > 0 and loadable == checked
     # PASS = the dataset feeds R2LPL: full-rollout must simulate a chunk; plan-only
-    # must plan at least one (lineage detected on the contiguous corpus).
+    # must plan at least one (lineage detected) AND the sampled scenes must load.
     key = sim if full_rollout else planned
-    ok = rc == 0 and bool(key) and key >= 1
-    detail = f"rc={rc} mode={mode} planned_chunks={planned} simulated_chunks={sim}"
+    ok = rc == 0 and bool(key) and key >= 1 and scenes_ok
+    detail = (
+        f"rc={rc} mode={mode} planned_chunks={planned} simulated_chunks={sim} "
+        f"scenes_loadable={loadable}/{checked}"
+    )
     return ok, detail
 
 
@@ -356,6 +418,7 @@ def main() -> None:
         "contig_scene_list": root / "contiguous" / "window_scenes.json",
         "normalization": args.normalization or (root / "normalization.json"),
     }
+    args.device = resolve_device(args.device)  # 'auto' -> concrete cuda/cpu by availability
     env = _env_for_device(args.device)
 
     pipelines = []

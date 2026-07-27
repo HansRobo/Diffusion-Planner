@@ -38,6 +38,7 @@ a ``file:line`` citation. Heavy imports (torch) are deferred to first use so
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import math
 import os
@@ -196,25 +197,34 @@ def batch_min_dist_to_paths(points, seg_p1, seg_p2, point_mask=None):
 # --------------------------------------------------------------------------- #
 # filename parsing
 # --------------------------------------------------------------------------- #
+def session_key(npz_path: str) -> str:
+    """Injective, stable identifier for a source **session directory** (the dir the
+    NPZ lives in). ``<readable-tail>_<hash8>`` where the hash is over the FULL
+    directory path, so distinct source dirs never collide — unlike joining the last
+    two path components with ``_`` (``/A/a_b/c`` and ``/B/a/b_c`` both -> ``a_b_c``),
+    or the basename alone (same date/session under two roots). Used identically for
+    contiguous-window grouping (``bag_and_frame``) and output lineage
+    (``build_small_dataset.contig_relpath``) so a selected window maps to exactly one
+    output dir."""
+    d = os.path.dirname(npz_path)
+    tail = re.sub(r"[^A-Za-z0-9_.-]+", "-", os.path.basename(d)) or "bag"
+    h = hashlib.md5(d.encode()).hexdigest()[:8]
+    return f"{tail}_{h}"
+
+
 def bag_and_frame(npz_path: str) -> tuple[str, int]:
     """(bag id, frame index) from the path. Frame index is the trailing ``_(\\d+)``
     of the filename (search_scenes.py:317-ff); -1 if absent.
 
-    The bag id includes the source **session directory** (last two path components,
-    e.g. ``<date>/<HH-MM-SS>``) as well as the filename prefix. Using the filename
-    prefix alone conflates different bags that share a basename (``/dateA/sess/
-    run_00000000.npz`` and ``/dateB/sess/run_00000000.npz`` both -> ``(run, 0)``),
-    which lets contiguous-window selection cross source bags and then breaks
-    reproducer lineage. This session key matches ``build_small_dataset.contig_relpath``
-    so a selected window and its emitted per-bag output dir agree."""
+    The bag id is ``<session_key>/<filename prefix>``. Using the filename prefix
+    alone conflates different bags that share a basename, which lets contiguous-window
+    selection cross source bags and then breaks reproducer lineage;
+    :func:`session_key` is an injective per-directory key (see its docstring)."""
     base = os.path.basename(npz_path)
     m = _FRAME_RE.search(base)
     frame = int(m.group(1)) if m else -1
     prefix = _FRAME_RE.sub("", base) if m else base[:-4]
-    d = os.path.dirname(npz_path)
-    session = "_".join(p for p in d.split(os.sep)[-2:] if p)
-    bag = f"{session}/{prefix}" if session else prefix
-    return bag, frame
+    return f"{session_key(npz_path)}/{prefix}", frame
 
 
 # --------------------------------------------------------------------------- #
@@ -250,6 +260,15 @@ def signed_total_yaw_deg(ego_future: np.ndarray) -> float:
     Reading col 2 as a yaw on 4-col input integrates changes in *cosine*, which
     silently mislabels the maneuver and can flip the turn direction. Any other
     width fails loudly."""
+    dh = _ego_yaw_steps(ego_future)
+    return float(np.degrees(dh.sum()))
+
+
+def _ego_yaw_steps(ego_future: np.ndarray) -> np.ndarray:
+    """Per-step wrapped heading deltas (radians), width-aware. 3-col ego is
+    ``[x,y,yaw]`` (col 2); 4-col is ``[x,y,cos,sin]`` (``atan2(sin,cos)``); any other
+    width fails loudly. Shared by the signed and unsigned total-yaw computations so
+    both decode width consistently."""
     fut = np.asarray(ego_future, dtype=np.float32)
     w = fut.shape[1]
     if w == 3:
@@ -261,8 +280,14 @@ def signed_total_yaw_deg(ego_future: np.ndarray) -> float:
             f"ego_future must be 3-col [x,y,yaw] or 4-col [x,y,cos,sin]; got width {w}"
         )
     dh = np.diff(yaw)
-    dh = np.arctan2(np.sin(dh), np.cos(dh))
-    return float(np.degrees(dh.sum()))
+    return np.arctan2(np.sin(dh), np.cos(dh))
+
+
+def unsigned_total_yaw_deg(ego_future: np.ndarray) -> float:
+    """Unsigned cumulative heading change (deg), width-aware. Matches
+    curate_curve_scenes.compute_gt_stats' magnitude but decodes 4-col ego futures
+    correctly (that legacy helper reads col 2 as radians, wrong for [x,y,cos,sin])."""
+    return float(np.degrees(np.abs(_ego_yaw_steps(ego_future)).sum()))
 
 
 def peak_lat_accel(ego_future: np.ndarray) -> float:
@@ -509,8 +534,8 @@ def features_from_npz(
     """Compute the numeric feature columns from an already-loaded NPZ mapping ``d``
     (``np.load(..., allow_pickle=True)`` or a dict). Does NOT read the sidecar or
     parse the filename — see :func:`extract_scene_features` for the full row.
-    ``peak_abs_yaw_deg``/``gt_path_m`` require a path (compute_gt_stats reloads),
-    so they're left None here; pass a path to :func:`extract_scene_features`.
+    ``peak_abs_yaw_deg``/``gt_path_m`` are computed here from the loaded ego future
+    (width-aware, no reload).
 
     ``device`` selects where the per-scene path geometry runs; ``precomputed_dpath``
     (aligned with :func:`active_neighbor_info`) lets a batched GPU caller supply the
@@ -523,8 +548,9 @@ def features_from_npz(
         "is_stopped": is_stopped(speed),
         "travel_dist_m": gt_travel_distance_m(ego_future),
         "gt_yaw_deg": signed_total_yaw_deg(ego_future),
-        "gt_path_m": None,
-        "peak_abs_yaw_deg": None,
+        # width-aware (from the loaded ego future); no reload, no legacy col-2 decode
+        "gt_path_m": gt_travel_distance_m(ego_future),
+        "peak_abs_yaw_deg": unsigned_total_yaw_deg(ego_future),
         "peak_lat_accel": peak_lat_accel(ego_future),
     }
     row.update(
@@ -565,11 +591,8 @@ def extract_scene_features(
     row["npz_path"] = npz_path
     row["bag"], row["frame"] = bag_and_frame(npz_path)
     row.update(features_from_npz(d, config, device=device, precomputed_dpath=precomputed_dpath))
-
-    s = gt_stats(npz_path)
-    if s:
-        row["peak_abs_yaw_deg"] = s["yaw_deg"]
-        row["gt_path_m"] = s["path_m"]
+    # gt_path_m / peak_abs_yaw_deg are now computed width-aware inside
+    # features_from_npz (no compute_gt_stats reload / legacy col-2 decode).
 
     if with_sidecar:
         side = read_sidecar(npz_path)

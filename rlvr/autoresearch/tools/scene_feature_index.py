@@ -74,10 +74,16 @@ def _process_shard_cpu(shard_paths, config, workers):
 
 def _gpu_load(npz_path):
     """Thread worker: load NPZ + extract the active-neighbor positions / ego path
-    needed to batch the geometry (reuses scene_features.active_neighbor_info)."""
+    needed to batch the geometry (reuses scene_features.active_neighbor_info).
+
+    Materializes every array into a plain dict inside the ``with`` block and closes
+    the NpzFile before returning: ``np.load`` holds an open zip handle, and the
+    shard-level list retains one entry per scene, so returning the live NpzFile
+    leaked a file descriptor per scene and hit the open-files limit at shard scale."""
     from rlvr.autoresearch.scene_features import active_neighbor_info
 
-    d = np.load(npz_path, allow_pickle=True)
+    with np.load(npz_path, allow_pickle=True) as z:
+        d = {k: z[k] for k in z.files}
     pos, _ped, _veh, _do = active_neighbor_info(d["neighbor_agents_past"])
     path = np.asarray(d["ego_agent_future"], dtype=np.float32)[:, :2]
     return npz_path, d, pos, path
