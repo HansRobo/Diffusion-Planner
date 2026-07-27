@@ -272,22 +272,27 @@ def _resolve_cfg_path(value) -> Path | None:
     return p if p.is_absolute() else (_REPO_ROOT / p)
 
 
-def _scenes_loadable(scene_list: Path, k: int = 5) -> tuple[int, int]:
-    """Sample up to k scenes from the JSON list, actually ``np.load`` each and require
-    the core training fields. Returns (checked, loadable). This makes the R2LPL check
-    genuinely CONSUME the dataset: the miner's plan-only branch only parses path
-    strings + frame suffixes, so a list of nonexistent paths would otherwise plan
-    chunks and PASS. Requiring real scenes to load rejects a fabricated/missing corpus."""
+def _scenes_loadable(scene_list: Path, k: int = 8) -> tuple[int, int]:
+    """Sample k EVENLY-SPACED scenes across the whole list (incl. first + last), then
+    actually ``np.load`` each and validate the array SHAPES of the core training
+    fields — not just key presence. Returns (checked, loadable). This makes the R2LPL
+    check genuinely CONSUME the dataset: the miner's plan-only branch only parses path
+    strings + frame suffixes, so nonexistent paths or zip members with junk payloads
+    under the expected names would otherwise plan chunks and PASS. Even spacing (not
+    just indices 0..k-1) means a corpus valid only at the start still fails."""
     scenes = _load_json(scene_list)
     if not isinstance(scenes, list) or not scenes:
         return 0, 0
-    idx = sorted({0, len(scenes) // 2, len(scenes) - 1, *range(min(k, len(scenes)))})[:k]
+    n = len(scenes)
+    idx = sorted({round(i * (n - 1) / max(k - 1, 1)) for i in range(min(k, n))}) if n > 1 else [0]
     checked = loadable = 0
     for i in idx:
         checked += 1
         try:
             with np.load(scenes[i], allow_pickle=True) as z:
-                if {"neighbor_agents_past", "ego_agent_future"} <= set(z.files):
+                nap = z["neighbor_agents_past"]
+                ef = z["ego_agent_future"]
+                if nap.ndim == 3 and ef.ndim == 2 and ef.shape[0] > 0 and ef.shape[1] >= 3:
                     loadable += 1
         except Exception:
             pass
@@ -356,10 +361,12 @@ def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
             "--batch_size",
             str(int(cfg.get("batch_size", 8))),
         ]
-        if cfg.get("max_chunks") is not None:
-            cmd += ["--max_chunks", str(int(cfg["max_chunks"]))]
     else:
         cmd += ["--plan_only"]
+    # max_chunks bounds work in BOTH modes (plan-only still scans/plans the whole
+    # corpus otherwise) — apply it regardless of the rollout branch.
+    if cfg.get("max_chunks") is not None:
+        cmd += ["--max_chunks", str(int(cfg["max_chunks"]))]
     mode = "full-rollout" if full_rollout else "plan-only"
     print(f"[R2LPL] reproducer ({mode}) on contiguous corpus -> {work / 'r2lpl.log'}", flush=True)
     rc, _ = _run(cmd, work / "r2lpl.log", env)

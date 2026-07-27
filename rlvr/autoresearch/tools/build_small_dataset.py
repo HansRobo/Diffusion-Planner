@@ -66,6 +66,30 @@ from rlvr.autoresearch.tools.lifelong_replay_memory import _parse_label_quotas, 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 N_SLOTS = 320  # canonical neighbor slot count
 
+# Every field the model consumes at train time (train_epoch indexes ego_agent_past /
+# goal_pose; the encoder consumes the map / static / indicator tensors). Every output
+# NPZ must carry all of these or SFT KeyErrors mid-training — so require them at build
+# time. (``version`` is stamped by us, not required on input.)
+_REQUIRED_FIELDS = (
+    "ego_agent_past",
+    "ego_current_state",
+    "ego_agent_future",
+    "neighbor_agents_past",
+    "neighbor_agents_future",
+    "static_objects",
+    "lanes",
+    "lanes_speed_limit",
+    "lanes_has_speed_limit",
+    "route_lanes",
+    "route_lanes_speed_limit",
+    "route_lanes_has_speed_limit",
+    "polygons",
+    "line_strings",
+    "goal_pose",
+    "turn_indicators",
+    "ego_shape",
+)
+
 
 def output_basename(src: str) -> str:
     """Collision-free output filename for a source NPZ. A bare basename is NOT
@@ -263,17 +287,9 @@ def canonicalize_npz(in_path: str, out_path: str) -> None:
     ego_shape must be present (fail loud). Sidecar copied alongside if present.
     version stamped to 3 (native 4-col)."""
     d = dict(np.load(in_path, allow_pickle=True))
-    # Every output must carry the fields SFT indexes unconditionally (train_epoch /
-    # neighbor_db / Dataset.__getitem__ read them with no fill-in). Fail loud at BUILD
-    # time rather than emit a training-invalid NPZ that KeyErrors mid-training.
-    _REQUIRED = (
-        "ego_current_state",
-        "ego_agent_future",
-        "neighbor_agents_past",
-        "neighbor_agents_future",
-        "ego_shape",
-    )
-    missing = [k for k in _REQUIRED if k not in d]
+    # Fail loud at BUILD time if any model-input field is missing, rather than emit a
+    # training-invalid NPZ that KeyErrors mid-training (see _REQUIRED_FIELDS).
+    missing = [k for k in _REQUIRED_FIELDS if k not in d]
     if missing:
         raise ValueError(
             f"{in_path}: missing required training field(s) {missing} (no default permitted)"
@@ -303,13 +319,7 @@ def canonicalize_npz(in_path: str, out_path: str) -> None:
 
 def _verify_canonical(out_path: str) -> None:
     d = np.load(out_path, allow_pickle=True)
-    for k in (
-        "ego_current_state",
-        "ego_agent_future",
-        "neighbor_agents_past",
-        "neighbor_agents_future",
-        "ego_shape",
-    ):
+    for k in _REQUIRED_FIELDS:
         assert k in d.files, f"{out_path}: required field {k} missing"
     nap = d["neighbor_agents_past"]
     assert nap.shape[0] == N_SLOTS, (

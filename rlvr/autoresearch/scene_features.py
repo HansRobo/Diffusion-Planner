@@ -578,6 +578,12 @@ def extract_scene_features(
     optional world pose from the sidecar (nullable), and the derived labels.
     ``device`` / ``precomputed_dpath`` are forwarded to :func:`features_from_npz`."""
     d = loaded if loaded is not None else np.load(npz_path, allow_pickle=True)
+    # Canonicalize to physical identity: resolve symlinks + relativeness so the same
+    # source scene reached via different path spellings (relative vs absolute) maps to
+    # ONE identity everywhere downstream — the stored npz_path, the collision-free
+    # output name (md5 of this string), and the frame/val split exclusion — instead of
+    # aliasing into both train and val.
+    npz_path = os.path.realpath(npz_path)
     row: dict = dict.fromkeys(FEATURE_COLUMNS)
     row["npz_path"] = npz_path
     row["bag"], row["frame"] = bag_and_frame(npz_path)

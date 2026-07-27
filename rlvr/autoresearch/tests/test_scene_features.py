@@ -344,6 +344,25 @@ def _write_npz(path, ego_future, nap, speed_ms=5.0):
     )
 
 
+def test_extract_scene_features_normalizes_path_identity(tmp_path):
+    # the same source scene reached via different spellings (absolute vs a relative
+    # alias) must resolve to ONE physical identity in row["npz_path"], so it can't
+    # alias into both train and val (realpath dedup).
+    p = tmp_path / "sub" / "scene_00000007.npz"
+    p.parent.mkdir(parents=True)
+    _write_npz(p, _straight_ego_future(), _neighbors([_neighbor_row(10.0, 1.0, is_ped=1)]))
+    cwd = os.getcwd()
+    try:
+        os.chdir(tmp_path)
+        rel = os.path.join("sub", "scene_00000007.npz")
+        r_abs = sf.extract_scene_features(str(p), with_sidecar=False)
+        r_rel = sf.extract_scene_features(rel, with_sidecar=False)
+    finally:
+        os.chdir(cwd)
+    assert r_abs["npz_path"] == r_rel["npz_path"] == os.path.realpath(str(p))
+    assert r_abs["bag"] == r_rel["bag"]
+
+
 def test_extract_scene_features_end_to_end(tmp_path):
     p = tmp_path / "scene_00000042.npz"
     _write_npz(

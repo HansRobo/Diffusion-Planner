@@ -107,43 +107,46 @@ def _process_shard_gpu(shard_paths, config, device, gpu_batch_size, load_workers
         except Exception as e:
             return ("__error__", f"{p}: {type(e).__name__}: {e}")
 
+    # Load + process ONE gpu_batch_size chunk at a time (thread-load just that chunk,
+    # batch the geometry, extract, release) so peak memory is bounded by
+    # gpu_batch_size scenes — NOT the whole shard. Materializing a full default
+    # 5000-scene shard of 320-slot NPZs is multiple GB and can OOM before batch 1.
     with ThreadPoolExecutor(max_workers=load_workers) as tex:
-        loaded = list(tex.map(_safe_load, shard_paths))
-
-    for start in range(0, len(loaded), gpu_batch_size):
-        chunk = [it for it in loaded[start : start + gpu_batch_size] if it[0] != "__error__"]
-        err_msgs += [it[1] for it in loaded[start : start + gpu_batch_size] if it[0] == "__error__"]
-        if not chunk:
-            continue
-        b = len(chunk)
-        qmax = max((it[2].shape[0] for it in chunk), default=0)
-        pmax = max(it[3].shape[0] for it in chunk)
-        pts = np.zeros((b, max(qmax, 1), 2), np.float32)
-        mask = np.zeros((b, max(qmax, 1)), bool)
-        paths = np.zeros((b, pmax, 2), np.float32)
-        for i, (_p, _d, pos, path) in enumerate(chunk):
-            q = pos.shape[0]
-            if q:
-                pts[i, :q] = pos
-                mask[i, :q] = True
-            # edge-repeat pad the path to pmax (repeated last point => zero-length
-            # segments AT a real path vertex, which never lowers the true min dist)
-            paths[i, : path.shape[0]] = path
-            if path.shape[0] < pmax:
-                paths[i, path.shape[0] :] = path[-1]
-        t_pts = torch.from_numpy(pts).to(device)
-        t_p1 = torch.from_numpy(paths[:, :-1]).to(device)
-        t_p2 = torch.from_numpy(paths[:, 1:]).to(device)
-        t_mask = torch.from_numpy(mask).to(device)
-        dpath = batch_min_dist_to_paths(t_pts, t_p1, t_p2, t_mask).cpu().numpy()  # (b, qmax)
-        for i, (p, d, pos, _path) in enumerate(chunk):
-            q = pos.shape[0]
-            try:
-                rows.append(
-                    extract_scene_features(p, config, loaded=d, precomputed_dpath=dpath[i, :q])
-                )
-            except Exception as e:
-                err_msgs.append(f"{p}: {type(e).__name__}: {e}")
+        for start in range(0, len(shard_paths), gpu_batch_size):
+            loaded = list(tex.map(_safe_load, shard_paths[start : start + gpu_batch_size]))
+            chunk = [it for it in loaded if it[0] != "__error__"]
+            err_msgs += [it[1] for it in loaded if it[0] == "__error__"]
+            if not chunk:
+                continue
+            b = len(chunk)
+            qmax = max((it[2].shape[0] for it in chunk), default=0)
+            pmax = max(it[3].shape[0] for it in chunk)
+            pts = np.zeros((b, max(qmax, 1), 2), np.float32)
+            mask = np.zeros((b, max(qmax, 1)), bool)
+            paths = np.zeros((b, pmax, 2), np.float32)
+            for i, (_p, _d, pos, path) in enumerate(chunk):
+                q = pos.shape[0]
+                if q:
+                    pts[i, :q] = pos
+                    mask[i, :q] = True
+                # edge-repeat pad the path to pmax (repeated last point => zero-length
+                # segments AT a real path vertex, which never lowers the true min dist)
+                paths[i, : path.shape[0]] = path
+                if path.shape[0] < pmax:
+                    paths[i, path.shape[0] :] = path[-1]
+            t_pts = torch.from_numpy(pts).to(device)
+            t_p1 = torch.from_numpy(paths[:, :-1]).to(device)
+            t_p2 = torch.from_numpy(paths[:, 1:]).to(device)
+            t_mask = torch.from_numpy(mask).to(device)
+            dpath = batch_min_dist_to_paths(t_pts, t_p1, t_p2, t_mask).cpu().numpy()  # (b, qmax)
+            for i, (p, d, pos, _path) in enumerate(chunk):
+                q = pos.shape[0]
+                try:
+                    rows.append(
+                        extract_scene_features(p, config, loaded=d, precomputed_dpath=dpath[i, :q])
+                    )
+                except Exception as e:
+                    err_msgs.append(f"{p}: {type(e).__name__}: {e}")
     return rows, err_msgs
 
 
