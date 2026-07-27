@@ -1299,13 +1299,10 @@ def get_args():
             raise ValueError("--rl_candidate_aug_stretch must be in [0, 1)")
         if args.rl_candidate_aug_std == 0.0 and args.rl_candidate_aug_stretch == 0.0:
             raise ValueError(
-                "candidate augmentation is enabled but both the offset std and the "
-                "stretch are zero"
+                "candidate augmentation is enabled but both the offset std and the stretch are zero"
             )
         if not 0 <= args.rl_candidate_aug_keep < args.num_generations:
-            raise ValueError(
-                f"--rl_candidate_aug_keep must be in [0, {args.num_generations - 1}]"
-            )
+            raise ValueError(f"--rl_candidate_aug_keep must be in [0, {args.num_generations - 1}]")
         if args.rl_candidate_aug_beta_concentration <= 0.0:
             raise ValueError("--rl_candidate_aug_beta_concentration must be positive")
         if args.rl_candidate_aug_speed_min_mps <= 0.0:
@@ -1785,6 +1782,15 @@ def model_training(args):
             )
         )
 
+    # Gradient clipping in the epoch loop needs the flat parameter list.  It is exactly the
+    # union of the AdamW decay/no-decay groups below, which are built from the same
+    # requires_grad filter, so clipping and optimization always cover the same tensors.
+    trainable_params = [
+        p for p in ddp.get_model(diffusion_planner, args.ddp).parameters() if p.requires_grad
+    ]
+    if not trainable_params:
+        raise RuntimeError("No trainable parameters found for RL training")
+
     optimizer_param_groups, optimizer_group_summary = build_adamw_param_groups(
         ddp.get_model(diffusion_planner, args.ddp),
         weight_decay=args.weight_decay,
@@ -2155,9 +2161,7 @@ def model_training(args):
             source_policy_within_guard = all(
                 value for key, value in source_guards.items() if key != "available"
             )
-            raw_selection_score = selection_score_from_reward_metrics(
-                valid_reward_metrics, args
-            )
+            raw_selection_score = selection_score_from_reward_metrics(valid_reward_metrics, args)
             selection_score = (
                 raw_selection_score if math.isfinite(raw_selection_score) else float("nan")
             )
