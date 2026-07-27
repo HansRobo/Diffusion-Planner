@@ -4269,11 +4269,13 @@ class _DiskReplayReader:
         compressed_context_root: Path | None = None,
         compressed_context_workers: int = 1,
         context_active_weight_only: bool = False,
+        context_expert_safe_groups: bool = False,
     ) -> None:
         self.rank = int(rank)
         self.positive_advantage_only = bool(positive_advantage_only)
         self.deterministic_first = bool(deterministic_first)
         self.context_active_weight_only = bool(context_active_weight_only)
+        self.context_expert_safe_groups = bool(context_expert_safe_groups)
         self.rank_dir = Path(root) / f"rank_{self.rank:04d}"
         manifest_path = self.rank_dir / "manifest.json"
         if not manifest_path.exists():
@@ -4542,6 +4544,18 @@ class _DiskReplayReader:
             if self.context_active_weight_only
             else np.ones(batch_size, dtype=bool)
         )
+        if self.context_active_weight_only and self.context_expert_safe_groups:
+            # A zero-weight group still trains from its logged human trajectory
+            # when the expert anchor is not restricted to active groups, so its
+            # context is needed.  The overlay decides which flags survive; here
+            # we only follow them.
+            expert_safe_rows = self.expert_anchor_scalars.get("expert_safe")
+            if expert_safe_rows is None:
+                expert_safe_rows = self.expert_anchor.get("expert_safe")
+            if expert_safe_rows is not None:
+                context_mask = context_mask | (
+                    materialize(expert_safe_rows).reshape(batch_size) > 0.5
+                )
         compressed: dict[str, np.ndarray] | None = None
         if self.compressed_context is not None:
             active_positions = np.flatnonzero(context_mask)
@@ -4846,16 +4860,23 @@ class _DiskReplayReader:
 def _can_materialize_only_nonzero_replay_groups(
     train_config: dict[str, Any],
 ) -> bool:
-    """Whether zero-weight groups are guaranteed to have zero replay gradient."""
+    """Whether zero-weight groups have zero replay gradient from AWR and BC."""
 
-    if float(train_config.get("bc_weight", 0.0)) > 0.0:
-        return False
-    expert_weight = float(train_config.get("expert_anchor_weight", 0.0))
-    if expert_weight > 0.0 and not bool(
+    return float(train_config.get("bc_weight", 0.0)) <= 0.0
+
+
+def _replay_expert_safe_groups_are_trained(train_config: dict[str, Any]) -> bool:
+    """Whether a safe expert anchor trains a group whose candidates cannot.
+
+    An unrestricted expert anchor is the one term that gives an all-zero-weight
+    group a gradient, so its scenes need context decoded even though the AWR
+    mask would skip them.  Answering per group costs ~52% of this corpus;
+    answering "then decode everything" costs 100%.
+    """
+
+    return float(train_config.get("expert_anchor_weight", 0.0)) > 0.0 and not bool(
         train_config.get("expert_anchor_active_groups_only", False)
-    ):
-        return False
-    return True
+    )
 
 
 def _iter_prefetched_replay_batches(
@@ -8658,6 +8679,9 @@ def main() -> None:
                     args.compressed_replay_context_root is not None
                     and _can_materialize_only_nonzero_replay_groups(train_config)
                 ),
+                context_expert_safe_groups=_replay_expert_safe_groups_are_trained(
+                    train_config
+                ),
             )
             local_count = torch.tensor(
                 [len(disk_replay_reader)], device=device, dtype=torch.int64
@@ -8693,6 +8717,9 @@ def main() -> None:
                             and _can_materialize_only_nonzero_replay_groups(
                                 train_config
                             )
+                        ),
+                        "context_expert_safe_groups": bool(
+                            _replay_expert_safe_groups_are_trained(train_config)
                         ),
                         "salvaged_partial_replay": bool(args.salvage_partial_replay),
                         "start_epoch": start_epoch,
@@ -9287,6 +9314,9 @@ def main() -> None:
                 context_active_weight_only=(
                     args.compressed_replay_context_root is not None
                     and _can_materialize_only_nonzero_replay_groups(train_config)
+                ),
+                context_expert_safe_groups=_replay_expert_safe_groups_are_trained(
+                    train_config
                 ),
             )
             if distributed:

@@ -255,6 +255,7 @@ def build_overlay(
     headroom_scaling_power: float = 0.0,
     oversample_paths: set[str] | None = None,
     oversample_weight: float = 1.0,
+    expert_improves_margin: float | None = None,
 ) -> dict[str, Any]:
     source_replay = source_replay.expanduser().resolve(strict=True)
     output_replay = output_replay.expanduser().resolve()
@@ -288,6 +289,9 @@ def build_overlay(
         "source_zero_masked_candidates": 0,
         "oversampled_groups": 0,
         "oversampled_active_groups": 0,
+        "expert_safe_groups": 0,
+        "expert_improving_groups": 0,
+        "expert_improving_dead_groups": 0,
     }
     try:
         for source_rank in rank_dirs:
@@ -401,11 +405,57 @@ def build_overlay(
                         f"incomplete expert sidecar in {source_rank}: "
                         f"{sorted(expert_arrays)}"
                     )
-                for filename in expert_arrays.values():
+                restricted_expert_safe: np.ndarray | None = None
+                if expert_improves_margin is not None:
+                    # A group whose candidates never beat the deterministic
+                    # anchor has all-zero weights and trains on nothing -- 80.6%
+                    # of this corpus.  The logged human trajectory for that same
+                    # scene is already cached here, and on the safe ones it beats
+                    # the deployed output by >margin in 42.5% of cases (mean
+                    # +0.029, ~2x the within-group candidate headroom).  Keeping
+                    # expert_safe only where the human actually scores better
+                    # turns those groups into behaviour-cloning targets without
+                    # re-mining, and drops the ones where cloning would regress.
+                    expert_rewards = np.asarray(
+                        np.load(
+                            source_rank / str(expert_arrays["expert_rewards"]),
+                            mmap_mode="r",
+                        ),
+                        dtype=np.float64,
+                    ).reshape(count)
+                    source_safe = np.asarray(
+                        np.load(
+                            source_rank / str(expert_arrays["expert_safe"]),
+                            mmap_mode="r",
+                        )
+                    )
+                    safe = source_safe.reshape(count).astype(bool)
+                    deterministic = np.asarray(rewards[:, 0], dtype=np.float64)
+                    keep = (
+                        safe
+                        & np.isfinite(expert_rewards)
+                        & np.isfinite(deterministic)
+                        & (
+                            expert_rewards
+                            > deterministic + float(expert_improves_margin)
+                        )
+                    )
+                    restricted_expert_safe = keep.reshape(source_safe.shape).astype(
+                        source_safe.dtype
+                    )
+                    totals["expert_safe_groups"] += int(safe.sum())
+                    totals["expert_improving_groups"] += int(keep.sum())
+                    totals["expert_improving_dead_groups"] += int(
+                        (keep & ~(weights > 0.0).any(axis=1)).sum()
+                    )
+                for name, filename in expert_arrays.items():
                     source_file = source_rank / str(filename)
                     if not source_file.is_file():
                         raise FileNotFoundError(source_file)
-                    os.symlink(source_file.resolve(), output_rank / str(filename))
+                    if name == "expert_safe" and restricted_expert_safe is not None:
+                        np.save(output_rank / str(filename), restricted_expert_safe)
+                    else:
+                        os.symlink(source_file.resolve(), output_rank / str(filename))
                 os.symlink(
                     expert_manifest_path.resolve(),
                     output_rank / expert_manifest_path.name,
@@ -496,6 +546,11 @@ def build_overlay(
             "saturated_reward": saturated_reward,
             "oversample_weight": float(oversample_weight),
             "oversample_scene_count": len(oversample_paths or ()),
+            "expert_improves_margin": (
+                None
+                if expert_improves_margin is None
+                else float(expert_improves_margin)
+            ),
         },
         **totals,
         "groups_with_better_candidate_fraction": (
@@ -574,6 +629,18 @@ def main() -> None:
         default=1.0,
         help="weight multiplier for --oversample-list scenes; 1.0 disables",
     )
+    parser.add_argument(
+        "--expert-improves-margin",
+        type=float,
+        default=None,
+        help=(
+            "materialize expert_safe as safe AND expert_reward > "
+            "deterministic_reward + margin instead of symlinking it, so the "
+            "logged human can train groups whose candidates cannot. Requires "
+            "--no-expert_anchor_active_groups_only on the trainer. Unset "
+            "symlinks the mined flags unchanged"
+        ),
+    )
     args = parser.parse_args()
     oversample_paths = (
         load_oversample_paths(args.oversample_list)
@@ -592,6 +659,7 @@ def main() -> None:
         headroom_scaling_power=args.headroom_scaling_power,
         oversample_paths=oversample_paths,
         oversample_weight=args.oversample_weight,
+        expert_improves_margin=args.expert_improves_margin,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 

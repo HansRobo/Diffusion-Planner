@@ -58,6 +58,31 @@ REPLAY_BETA=${REPLAY_BETA:-1.0}
 BEHAVIOR_ANCHOR_WEIGHT=${BEHAVIOR_ANCHOR_WEIGHT:-0.0}
 AWR_CANDIDATE_LOSS_HORIZON=${AWR_CANDIDATE_LOSS_HORIZON:-40}
 EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=${EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY:-1}
+# 80.55% of mined groups have no candidate that beats the deployed deterministic
+# output, so AWR trains nothing on them and replay epochs are nearly inert
+# (+0.00024 selection reward over 9 epochs in the last full cycle).  The logged
+# human trajectory for those same scenes is already cached by the mine, and on
+# the expert_safe ones it scores above the deployed output by >0.01 in 42.52% of
+# cases -- mean +0.029, about twice the within-group candidate headroom.  Setting
+# a margin here makes the overlay keep expert_safe only where the human actually
+# wins, which turns those groups into behaviour-cloning targets with no extra
+# mining and lifts trainable coverage 19.45% -> 52.31%.  Only 0.46% of groups are
+# dead, safe, and expert-worse, so the margin costs almost nothing to respect.
+# It also hands the gating entirely to the overlay, hence the unrestricted anchor.
+# Empty disables it, and that is the default: this cycle must isolate the reward
+# fixes.  The overlay rebuilds from the mine cache in minutes, so enabling it
+# later costs no mine time.
+EXPERT_IMPROVES_MARGIN=${EXPERT_IMPROVES_MARGIN:-}
+OVERLAY_EXPERT_ARGS=()
+if [[ -n ${EXPERT_IMPROVES_MARGIN} ]]; then
+  OVERLAY_EXPERT_ARGS+=(--expert-improves-margin "${EXPERT_IMPROVES_MARGIN}")
+  EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=0
+fi
+# run_plannerrft_jitterfix_to_epoch100.sh, which owns cycle 1 and hands over to
+# this script, does NOT carry this knob: it was mid-mine when the knob landed and
+# editing a running bash script corrupts its read offset.  So cycle 1 is always
+# the un-gated baseline, which is what isolates the reward fixes anyway.  Say so
+# rather than letting a set margin look like it applied to the whole campaign.
 # Aligned to plannerrft_prefix_full_cycles02_to10_e100, the only run that
 # improved across cycles for 41 epochs (0.93233 -> 0.93297, no cycle
 # regressing).  It held these four values for its entire length.
@@ -148,6 +173,13 @@ die() {
   log "FATAL: $*"
   exit 1
 }
+
+if [[ -n ${EXPERT_IMPROVES_MARGIN} ]]; then
+  log "expert-improves gate ON at margin ${EXPERT_IMPROVES_MARGIN}: overlays keep" \
+      "expert_safe only where the logged human beats the deterministic output," \
+      "and the trainer anchors on all safe groups, not just AWR-active ones." \
+      "Cycle 1 was built without it, so compare cycle >=2 against cycle 1."
+fi
 
 require_nvme_reserve() {
   local phase=$1 available
@@ -432,6 +464,7 @@ build_or_validate_overlay() {
       --behavior-anchor-weight "${BEHAVIOR_ANCHOR_WEIGHT}" \
       --unsafe-behavior-anchor-weight "${BEHAVIOR_ANCHOR_WEIGHT}" \
       ${OVERSAMPLE_ARGS[@]+"${OVERSAMPLE_ARGS[@]}"} \
+      ${OVERLAY_EXPERT_ARGS[@]+"${OVERLAY_EXPERT_ARGS[@]}"} \
       > "${output_parent}.log" 2>&1
   fi
   if [[ ! -s ${geometry} ]]; then

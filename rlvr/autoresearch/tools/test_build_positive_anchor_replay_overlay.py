@@ -209,6 +209,57 @@ def test_oversample_weight_replaces_repeated_mining_but_not_its_coverage(
     np.testing.assert_allclose(unit_weights, plain_weights, rtol=1e-6)
 
 
+def test_expert_improves_margin_gives_dead_groups_a_logged_human_target(
+    tmp_path: Path,
+) -> None:
+    # Column 0 is the deployed deterministic output.  Row 0 has a candidate that
+    # beats it; rows 1-3 do not, so AWR trains nothing there -- 80.6% of the real
+    # corpus.  Only row 1 has a logged human that is both safe and better.
+    rewards = np.asarray(
+        [[0.2, 0.8], [0.5, 0.5], [0.7, 0.7], [0.4, 0.4]], dtype=np.float32
+    )
+    source = _write_minimal_source_cache(tmp_path, rewards, np.ones_like(rewards))
+    rank = source / "rank_0000"
+    np.save(rank / "expert_rewards.npy", np.asarray([0.9, 0.9, 0.6, 0.9], np.float32))
+    np.save(rank / "expert_safe.npy", np.asarray([1.0, 1.0, 1.0, 0.0], np.float32))
+
+    def run(name: str, **kwargs) -> tuple[dict, np.ndarray, Path]:
+        payload = build_overlay(
+            source,
+            tmp_path / name / "replay_buffer",
+            behavior_anchor_weight=0.0,
+            unsafe_behavior_anchor_weight=0.0,
+            **kwargs,
+        )
+        output_rank = tmp_path / name / "replay_buffer" / "rank_0000"
+        return payload, np.load(output_rank / "expert_safe.npy"), output_rank
+
+    plain, plain_safe, plain_rank = run("plain")
+    gated, safe, gated_rank = run("gated", expert_improves_margin=0.01)
+
+    # Unset leaves the mined flags exactly as they are, still a symlink.
+    assert plain_rank.joinpath("expert_safe.npy").is_symlink()
+    np.testing.assert_allclose(plain_safe, [1.0, 1.0, 1.0, 0.0])
+    assert plain["parameters"]["expert_improves_margin"] is None
+
+    # Set keeps only the safe groups where the human beats the deployed output.
+    assert not gated_rank.joinpath("expert_safe.npy").is_symlink()
+    assert gated_rank.joinpath("expert_trajectories.npy").is_symlink()
+    assert gated_rank.joinpath("expert_rewards.npy").is_symlink()
+    np.testing.assert_allclose(safe, [1.0, 1.0, 0.0, 0.0])
+    assert safe.dtype == plain_safe.dtype
+    assert gated["parameters"]["expert_improves_margin"] == 0.01
+
+    weights = np.load(gated_rank / "weights.npy")
+    assert weights[0].any(), "row 0 keeps its AWR candidate"
+    assert not weights[1].any(), "the human is an anchor, not an AWR weight"
+    # Coverage: 1 group trainable by AWR, 1 more only by the logged human.
+    assert gated["expert_safe_groups"] == 3
+    assert gated["expert_improving_groups"] == 2
+    assert gated["expert_improving_dead_groups"] == 1
+    assert plain["expert_safe_groups"] == 0
+
+
 def test_builds_read_only_overlay_with_only_weights_materialized(tmp_path: Path) -> None:
     source_run = tmp_path / "source"
     source = source_run / "replay_buffer"

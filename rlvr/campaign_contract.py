@@ -71,6 +71,39 @@ POSITIVE_ADVANTAGE_MARGIN = 0.01
 BEHAVIOR_ANCHOR_WEIGHT = 0.0
 BEHAVIOR_ANCHOR_WEIGHT_MAX = 0.5
 
+#: Margin by which the logged human must beat the deployed deterministic output
+#: before the overlay keeps its expert_safe flag.  None = the flag is passed
+#: through as mined, which is the campaign default and what every cycle so far
+#: ran with.
+#:
+#: Measured over all 5,446,656 groups of
+#: plannerrft_full_cycle01_mine/20260720-050941 (full census, not a sample):
+#:
+#:   19.45%  of groups hold a candidate that beats the deterministic output by
+#:           POSITIVE_ADVANTAGE_MARGIN, i.e. 80.55% of the corpus trains on
+#:           nothing.  This is why replay epochs are nearly inert: the last full
+#:           cycle moved train_selection_reward_before_epoch by +0.00024 across
+#:           nine of them.
+#:   42.52%  of dead *and* expert_safe groups have a logged human that beats the
+#:           deterministic output by >0.01, mean gap +0.029 where positive --
+#:           about twice the typical within-group candidate headroom
+#:           (0.013-0.017).  That target is already cached by the mine.
+#:   +32.87pp coverage if those groups anchor on the human: 19.45% -> 52.31%.
+#:    0.46%  of groups are dead, safe, and expert-*worse*; gating on
+#:           expert > deterministic + margin drops exactly those, so the
+#:           coverage is bought without a regression channel.
+#:
+#: Mass check against the "1.08x drowns the signal" bound above: improvement mass
+#: is 0.6555/group (weight_sum 4,019,080.5 over 2,914,556 active targets).  The
+#: expert anchor at 0.4 contributes ~0.0743/group today (11.3%) and ~0.2058/group
+#: (31.4%) once ungated.  Well inside the bound.
+#:
+#: Caveat carried by the source cache: its rewards predate db5ad350, so the
+#: absolute dead fraction will shift under today's reward.  The comparison
+#: between expert and deterministic is unaffected -- both were scored by the same
+#: reward -- so the 42.52% and +0.029 stand.
+EXPERT_IMPROVES_MARGIN: float | None = None
+
 # --- conditional commit ------------------------------------------------------
 
 #: Policy-interpolation steps searched when committing a cycle, smallest first.
