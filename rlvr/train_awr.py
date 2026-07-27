@@ -5875,8 +5875,18 @@ def _train_scene(
             )
             result["expert_anchor_cache_hit"] = 1.0
         else:
+            # The same unused-diagnostic skip the native candidates get.
+            # Outside the conditions above this *is* reward_config, so the
+            # faithful profile is untouched; inside them the lane-departure
+            # polygon check feeds nothing here either, because every lane
+            # scale is 0.0 (no contribution to total) and lane_gate_enabled is
+            # False (so _expert_reward_is_hard_safe never reads lane_crossing).
+            # Verified on real corpus scenes: bit-identical rewards and an
+            # identical hard-safe mask, 1.53x faster.  It matters because the
+            # stage timers put expert_anchor at 42% of rollout wall time --
+            # more than scoring all ten native candidates.
             scored_experts = _score_expert_anchor_batch(
-                data, int(model_args.future_len), reward_config
+                data, int(model_args.future_len), scoring_reward_config
             )
             result["expert_anchor_cache_hit"] = 0.0
         if scored_experts is not None:
