@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import pathlib
 import random
 from dataclasses import asdict, replace
 from types import SimpleNamespace
@@ -343,10 +344,17 @@ def test_file_sha256_streams_checkpoint_provenance(tmp_path) -> None:
     )
 
 
-def test_inherited_refresh_baseline_requires_exact_checkpoint_config_and_order(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def _contract_drift(capsys, *args, _call=None, **kwargs) -> str:
+    """Run a compatibility check and return what it reported about drift."""
+
+    capsys.readouterr()
+    (_call or _validate_replay_source_contract)(*args, **kwargs)
+    return capsys.readouterr().out
+
+
+def _write_inherited_baseline_source(tmp_path, monkeypatch):
+    """Build a mine-only run that a replay may legitimately inherit from."""
+
     monkeypatch.setenv("DP_NEIGHBOR_FUTURE_OFFSET", "1")
     source = tmp_path / "mine"
     source.mkdir()
@@ -373,7 +381,6 @@ def test_inherited_refresh_baseline_requires_exact_checkpoint_config_and_order(
                 "start_epoch": 1,
                 "neighbor_future_alignment_offset": 1,
                 "x2_legacy_ego_width_m": 2.29156,
-        "xx1_legacy_ego_width_m": 1.70,
                 "xx1_legacy_ego_width_m": 1.70,
             }
         )
@@ -409,6 +416,31 @@ def test_inherited_refresh_baseline_requires_exact_checkpoint_config_and_order(
         directory.joinpath("scenes.json").write_text(
             json.dumps([{"scene_path": path} for path in paths])
         )
+    return (
+        source,
+        checkpoint,
+        args_path,
+        rollout_config,
+        reward_config,
+        valid_paths,
+        selector_paths,
+    )
+
+
+def test_inherited_refresh_baseline_reports_checkpoint_config_and_order_drift(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    (
+        source,
+        checkpoint,
+        args_path,
+        rollout_config,
+        reward_config,
+        valid_paths,
+        selector_paths,
+    ) = _write_inherited_baseline_source(tmp_path, monkeypatch)
 
     inherited = _load_inherited_refresh_baseline(
         source,
@@ -425,35 +457,42 @@ def test_inherited_refresh_baseline_requires_exact_checkpoint_config_and_order(
     assert inherited[0]["scene_count"] == 2
     assert inherited[2]["scene_count"] == 3
 
+    # de551822 converted these two aborts into warnings.  The baseline supplies
+    # the "before" numbers the cycle-level commit veto tests against, so what
+    # must hold is that reusing one measured on a different model or a different
+    # scene order is never silent.
     different_checkpoint = tmp_path / "different.pth"
     torch.save({"model": {"weight": torch.tensor([9.0])}}, different_checkpoint)
-    with pytest.raises(RuntimeError, match="checkpoint differs"):
-        _load_inherited_refresh_baseline(
-            source,
-            current_checkpoint=different_checkpoint,
-            current_args=args_path,
-            valid_paths=valid_paths,
-            train_selector_paths=selector_paths,
-            rollout_config=rollout_config,
-            reward_config=reward_config,
-            eval_k=rollout_config.n_trajectories,
-            eval_sample_steps=rollout_config.sample_steps,
-            verify_checkpoint_hash=True,
-        )
-    with pytest.raises(RuntimeError, match="valid scene order differs"):
-        _load_inherited_refresh_baseline(
-            source,
-            current_checkpoint=checkpoint,
-            current_args=args_path,
-            valid_paths=list(reversed(valid_paths)),
-            train_selector_paths=selector_paths,
-            rollout_config=rollout_config,
-            reward_config=reward_config,
-            eval_k=rollout_config.n_trajectories,
-            eval_sample_steps=rollout_config.sample_steps,
-            verify_checkpoint_hash=False,
-        )
+    assert "checkpoint differs" in _contract_drift(
+        capsys,
+        source,
+        current_checkpoint=different_checkpoint,
+        current_args=args_path,
+        valid_paths=valid_paths,
+        train_selector_paths=selector_paths,
+        rollout_config=rollout_config,
+        reward_config=reward_config,
+        eval_k=rollout_config.n_trajectories,
+        eval_sample_steps=rollout_config.sample_steps,
+        verify_checkpoint_hash=True,
+        _call=_load_inherited_refresh_baseline,
+    )
+    assert "valid scene order differs" in _contract_drift(
+        capsys,
+        source,
+        current_checkpoint=checkpoint,
+        current_args=args_path,
+        valid_paths=list(reversed(valid_paths)),
+        train_selector_paths=selector_paths,
+        rollout_config=rollout_config,
+        reward_config=reward_config,
+        eval_k=rollout_config.n_trajectories,
+        eval_sample_steps=rollout_config.sample_steps,
+        verify_checkpoint_hash=False,
+        _call=_load_inherited_refresh_baseline,
+    )
 
+    # Sample steps still abort, and must: they change what the numbers mean.
     with pytest.raises(RuntimeError, match="evaluation sample steps differ"):
         _load_inherited_refresh_baseline(
             source,
@@ -773,9 +812,87 @@ def test_evaluation_rng_transaction_preserves_training_streams() -> None:
     assert torch.equal(observed[2], expected[2])
 
 
-def test_replay_contract_rejects_silent_weighting_change(
-    tmp_path, monkeypatch
+def test_inherited_baseline_drift_is_reported_to_the_caller(
+    tmp_path, monkeypatch, capsys
 ) -> None:
+    """The loader must hand its findings back, not just print them.
+
+    inherited_refresh_baseline.json used to record verified=true unconditionally.
+    Since de551822 the checks behind those flags only warn, so a baseline
+    measured on a different checkpoint was still written down as verified -- and
+    that baseline is the "before" side of the cycle-level commit veto.
+    """
+
+    (
+        source,
+        checkpoint,
+        args_path,
+        rollout_config,
+        reward_config,
+        valid_paths,
+        selector_paths,
+    ) = _write_inherited_baseline_source(tmp_path, monkeypatch)
+
+    clean: list[str] = []
+    _load_inherited_refresh_baseline(
+        source,
+        current_checkpoint=checkpoint,
+        current_args=args_path,
+        valid_paths=valid_paths,
+        train_selector_paths=selector_paths,
+        rollout_config=rollout_config,
+        reward_config=reward_config,
+        eval_k=rollout_config.n_trajectories,
+        eval_sample_steps=rollout_config.sample_steps,
+        verify_checkpoint_hash=True,
+        drift=clean,
+    )
+    assert clean == [], f"a matching baseline reported drift: {clean}"
+
+    different = tmp_path / "other.pth"
+    torch.save({"model": {"weight": torch.tensor([9.0])}}, different)
+    found: list[str] = []
+    _load_inherited_refresh_baseline(
+        source,
+        current_checkpoint=different,
+        current_args=args_path,
+        valid_paths=valid_paths,
+        train_selector_paths=selector_paths,
+        rollout_config=rollout_config,
+        reward_config=reward_config,
+        eval_k=rollout_config.n_trajectories,
+        eval_sample_steps=rollout_config.sample_steps,
+        verify_checkpoint_hash=True,
+        drift=found,
+    )
+    assert any("checkpoint differs" in item for item in found), found
+
+    # The artifact is written from inside main(), which no test can drive, so
+    # pin the one property that matters at source level: none of its verified
+    # flags may be a literal again.
+    source_text = pathlib.Path(train_awr_module.__file__).read_text()
+    block = source_text.split('inherited_contract = {', 1)[1].split('}', 1)[0]
+    assert '"verified": verified' in block, block
+    for flag in (
+        "valid_scene_order_verified",
+        "train_selector_scene_order_verified",
+        "awr_config_verified",
+        "reward_config_verified",
+    ):
+        assert f'"{flag}": True' not in block, (
+            f"{flag} is hardcoded true again; the check behind it only warns"
+        )
+    assert '"drift": list(inherited_drift)' in block
+
+
+def test_replay_contract_reports_a_silent_weighting_change(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    # de551822 converted 17 of these aborts into warnings on purpose: the
+    # pipeline is designed to retune between cycles, so probe-driven drift is
+    # legitimate and aborting on it killed twelve consecutive replay restarts.
+    # What still has to hold is that the drift is never SILENT -- that is the
+    # property this guards, and asserting pytest.raises stopped guarding it.
     replay_root = tmp_path / "source" / "replay_buffer"
     replay_root.mkdir(parents=True)
     rollout = AWRRolloutConfig(
@@ -797,27 +914,35 @@ def test_replay_contract_rejects_silent_weighting_change(
         json.dumps({"neighbor_future_alignment_offset": 1})
     )
     monkeypatch.setenv("DP_NEIGHBOR_FUTURE_OFFSET", "1")
-    _validate_replay_source_contract(replay_root, rollout, reward)
+    # A matching cache must stay quiet, or "it warned" carries no information.
+    assert _contract_drift(capsys, replay_root, rollout, reward) == ""
 
     source = json.loads((replay_root.parent / "effective_config.json").read_text())
     source["awr"].pop("plannerrft_reference_mode")
     (replay_root.parent / "effective_config.json").write_text(json.dumps(source))
-    with pytest.raises(RuntimeError, match="plannerrft_reference_mode"):
-        _validate_replay_source_contract(replay_root, rollout, reward)
-    _validate_replay_source_contract(
-        replay_root,
-        rollout,
-        reward,
-        allow_missing_defaults={
-            "awr": {"plannerrft_reference_mode": "zero_noise"}
-        },
+    assert "plannerrft_reference_mode" in _contract_drift(
+        capsys, replay_root, rollout, reward
+    )
+    # ...unless the caller declares the default the old cache predates.
+    assert (
+        _contract_drift(
+            capsys,
+            replay_root,
+            rollout,
+            reward,
+            allow_missing_defaults={
+                "awr": {"plannerrft_reference_mode": "zero_noise"}
+            },
+        )
+        == ""
     )
     source["awr"]["plannerrft_reference_mode"] = "zero_noise"
     (replay_root.parent / "effective_config.json").write_text(json.dumps(source))
 
+    # beta rescales every replay weight, so it is the change that must never
+    # pass unmentioned: the arrays on disk were produced under the old value.
     changed = replace(rollout, beta=2.0)
-    with pytest.raises(RuntimeError, match="awr.beta"):
-        _validate_replay_source_contract(replay_root, changed, reward)
+    assert "awr.beta" in _contract_drift(capsys, replay_root, changed, reward)
 
 
 def _reward(total: float, **kwargs) -> RewardBreakdown:
@@ -1405,7 +1530,6 @@ def test_decoder_context_attachment_preserves_candidates_and_enables_cached_read
                 "future_len": 4,
                 "neighbor_future_alignment_offset": 1,
                 "x2_legacy_ego_width_m": 2.29156,
-        "xx1_legacy_ego_width_m": 1.70,
                 "xx1_legacy_ego_width_m": 1.70,
                 "expected_paths_sha256": expected_sha,
                 "arrays": {
@@ -1742,7 +1866,6 @@ def test_shared_decoder_context_contract_binds_loader_semantics_and_shapes(
                 "staged_args": str(args_path),
                 "neighbor_future_alignment_offset": 1,
                 "x2_legacy_ego_width_m": 2.29156,
-        "xx1_legacy_ego_width_m": 1.70,
                 "xx1_legacy_ego_width_m": 1.70,
             }
         )
@@ -1820,7 +1943,6 @@ def test_shared_expert_anchor_contract_binds_data_reward_and_geometry(
                 "skip_filtered_scenes": False,
                 "neighbor_future_alignment_offset": 1,
                 "x2_legacy_ego_width_m": 2.29156,
-        "xx1_legacy_ego_width_m": 1.70,
                 "xx1_legacy_ego_width_m": 1.70,
             }
         )

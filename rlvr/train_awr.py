@@ -1124,6 +1124,7 @@ def _load_inherited_refresh_baseline(
     eval_k: int,
     eval_sample_steps: int,
     verify_checkpoint_hash: bool,
+    drift: list[str] | None = None,
 ) -> tuple[
     dict[str, Any],
     list[dict[str, Any]],
@@ -1141,6 +1142,14 @@ def _load_inherited_refresh_baseline(
     broadcasts success before other ranks consume the same immutable JSON.
     """
 
+    def _note(message: str) -> None:
+        # de551822 made every check below report instead of abort, on purpose.
+        # Collect what it reported so the caller can record the drift instead of
+        # writing verified=true over the top of it.
+        print(f"WARNING: {message}", flush=True)
+        if drift is not None:
+            drift.append(message)
+
     source_run = Path(source_run).expanduser().resolve()
     provenance_path = source_run / "provenance.json"
     effective_path = source_run / "effective_config.json"
@@ -1151,7 +1160,7 @@ def _load_inherited_refresh_baseline(
     provenance = json.loads(provenance_path.read_text())
     effective = json.loads(effective_path.read_text())
     if provenance.get("resume_replay_root") is not None:
-        print("WARNING: inherited baseline source is not a mine-only run", flush=True)
+        _note("inherited baseline source is not a mine-only run")
     source_start = int(provenance.get("start_epoch", -1))
     source_epochs = int(effective.get("training", {}).get("train_epochs", -1))
     interval = int(
@@ -1176,14 +1185,14 @@ def _load_inherited_refresh_baseline(
     if int(provenance.get("neighbor_future_alignment_offset", -1)) != int(
         get_neighbor_future_offset()
     ):
-        print("WARNING: inherited baseline used a different neighbor-future offset", flush=True)
+        _note("inherited baseline used a different neighbor-future offset")
     if not math.isclose(
         float(provenance.get("x2_legacy_ego_width_m", float("nan"))),
         2.29156,
         rel_tol=0.0,
         abs_tol=1e-9,
     ):
-        print("WARNING: inherited baseline used a different X2 body width", flush=True)
+        _note("inherited baseline used a different X2 body width")
 
     source_checkpoint = Path(provenance["staged_model"]).expanduser().resolve()
     source_args = Path(provenance["staged_args"]).expanduser().resolve()
@@ -1192,11 +1201,11 @@ def _load_inherited_refresh_baseline(
     if not source_args.is_file():
         raise FileNotFoundError(source_args)
     if _file_sha256(source_args) != _file_sha256(current_args):
-        print("WARNING: inherited baseline model args differ", flush=True)
+        _note("inherited baseline model args differ")
     if verify_checkpoint_hash and _file_sha256(source_checkpoint) != _file_sha256(
         current_checkpoint
     ):
-        print("WARNING: inherited baseline checkpoint differs", flush=True)
+        _note("inherited baseline checkpoint differs")
 
     source_awr = dict(effective.get("awr", {}))
     current_awr = _json_safe(asdict(rollout_config))
@@ -1206,10 +1215,7 @@ def _load_inherited_refresh_baseline(
             for key in set(source_awr) | set(current_awr)
             if source_awr.get(key) != current_awr.get(key)
         )
-        print(
-            f"WARNING: inherited baseline AWR/evaluation config differs: {mismatches}",
-            flush=True,
-        )
+        _note(f"inherited baseline AWR/evaluation config differs: {mismatches}")
     source_reward = dict(effective.get("reward", {}))
     # These two fields document the resolved HDP/PDM adapter but do not alter
     # RewardConfig or evaluation. Compare the executable dataclass contract.
@@ -1222,11 +1228,9 @@ def _load_inherited_refresh_baseline(
             for key in set(source_reward) | set(current_reward)
             if source_reward.get(key) != current_reward.get(key)
         )
-        print(
-            f"WARNING: inherited baseline reward config differs: {mismatches}",
-        )
+        _note(f"inherited baseline reward config differs: {mismatches}")
     if int(effective.get("training", {}).get("eval_k", -1)) != int(eval_k):
-        print("WARNING: inherited baseline evaluation K differs", flush=True)
+        _note("inherited baseline evaluation K differs")
     source_eval_steps = int(
         effective.get("training", {}).get(
             "eval_sample_steps", source_awr.get("sample_steps", -1)
@@ -1254,17 +1258,17 @@ def _load_inherited_refresh_baseline(
     selector_summary = json.loads(selector_summary_path.read_text())
     selector_rows = json.loads(selector_rows_path.read_text())
     if [str(row.get("scene_path")) for row in eval_rows] != list(valid_paths):
-        print("WARNING: inherited baseline valid scene order differs", flush=True)
+        _note("inherited baseline valid scene order differs")
     if [str(row.get("scene_path")) for row in selector_rows] != list(
         train_selector_paths
     ):
-        print("WARNING: inherited baseline train-selector order differs", flush=True)
+        _note("inherited baseline train-selector order differs")
     if int(eval_summary.get("scene_count", -1)) != len(valid_paths):
-        print("WARNING: inherited baseline valid summary count differs", flush=True)
+        _note("inherited baseline valid summary count differs")
     if int(selector_summary.get("scene_count", -1)) != len(
         train_selector_paths
     ):
-        print("WARNING: inherited baseline train-selector count differs", flush=True)
+        _note("inherited baseline train-selector count differs")
     return eval_summary, eval_rows, selector_summary, selector_rows
 
 
@@ -1621,12 +1625,17 @@ def _validate_replay_source_contract(
     *,
     allow_missing_defaults: dict[str, dict[str, Any]] | None = None,
 ) -> None:
-    """Fail closed when a frozen cache was mined by another AWR/reward setup.
+    """Report when a frozen cache was mined by another AWR/reward setup.
 
     Replay arrays already contain trajectories, rewards and final weights.
     Changing beta, positive-only semantics, augmentation, heading handling or
     reward config on the resume command does not retroactively change those
     arrays.  Treating such a cache as compatible is a silent method change.
+
+    This used to abort.  de551822 made it print instead, because the pipeline is
+    designed to retune between cycles and a probe-driven change is legitimate --
+    aborting cost twelve consecutive replay restarts.  So it no longer fails
+    closed: it makes the drift visible and leaves the decision to the caller.
     """
 
     source_run = Path(replay_root).resolve().parent
@@ -8138,6 +8147,7 @@ def main() -> None:
         dict[str, Any],
         list[dict[str, Any]],
     ] | None = None
+    inherited_drift: list[str] = []
     if args.inherit_refresh_baseline_root is not None:
         inherited_error: list[str | None] = [None]
         if is_main:
@@ -8157,6 +8167,7 @@ def main() -> None:
                     ),
                     eval_sample_steps=eval_sample_steps,
                     verify_checkpoint_hash=True,
+                    drift=inherited_drift,
                 )
             except Exception as error:
                 inherited_error[0] = f"{type(error).__name__}: {error}"
@@ -8194,12 +8205,28 @@ def main() -> None:
             inherited_selector_rows,
         ) = inherited_baseline
         if is_main:
-            print(
-                "Reusing hash/config/path-verified refresh baseline from "
-                f"{args.inherit_refresh_baseline_root.expanduser().resolve()}"
-            )
+            # These flags used to be hardcoded true.  Since de551822 the checks
+            # that back them only warn, so a baseline measured on a DIFFERENT
+            # checkpoint would still be recorded as verified -- and this baseline
+            # supplies the "before" numbers the cycle-level commit veto tests
+            # against, so a wrong one silently invalidates the delta.  Record
+            # what the loader actually found.
+            verified = not inherited_drift
+            if verified:
+                print(
+                    "Reusing hash/config/path-verified refresh baseline from "
+                    f"{args.inherit_refresh_baseline_root.expanduser().resolve()}"
+                )
+            else:
+                print(
+                    "WARNING: reusing a refresh baseline that does NOT match "
+                    "this run; every delta measured against it is suspect: "
+                    f"{inherited_drift}",
+                    flush=True,
+                )
             inherited_contract = {
-                "verified": True,
+                "verified": verified,
+                "drift": list(inherited_drift),
                 "source_run": str(
                     args.inherit_refresh_baseline_root.expanduser().resolve()
                 ),
@@ -8210,10 +8237,21 @@ def main() -> None:
                 "xx1_legacy_ego_width_m": XX1_LEGACY_EGO_WIDTH_M,
                 "valid_scene_count": len(valid_paths),
                 "train_selector_scene_count": len(train_selector_paths),
-                "valid_scene_order_verified": True,
-                "train_selector_scene_order_verified": True,
-                "awr_config_verified": True,
-                "reward_config_verified": True,
+                "valid_scene_order_verified": not any(
+                    "valid scene order differs" in item
+                    for item in inherited_drift
+                ),
+                "train_selector_scene_order_verified": not any(
+                    "train-selector order differs" in item
+                    for item in inherited_drift
+                ),
+                "awr_config_verified": not any(
+                    "AWR/evaluation config differs" in item
+                    for item in inherited_drift
+                ),
+                "reward_config_verified": not any(
+                    "reward config differs" in item for item in inherited_drift
+                ),
             }
             _write_json(
                 run_dir / "inherited_refresh_baseline.json",
