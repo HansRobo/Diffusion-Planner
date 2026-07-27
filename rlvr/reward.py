@@ -162,6 +162,54 @@ def _expert_route_progress_ratio(
     )
 
 
+def _low_speed_steer_penalty(
+    ego_trajs: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    config: RewardConfig,
+) -> torch.Tensor:
+    """Bounded [0, 1] penalty on the front-wheel angle the first step implies.
+
+    ``delta = atan(wheel_base * 2|y| / s**2)`` for a first step of arc length
+    ``s`` ending ``y`` off the current heading -- the same criterion AWR's
+    first-waypoint gate uses, so a candidate the gate would reject scores the
+    full penalty here.  Only active below ``low_speed_steer_speed_mps``; steps
+    shorter than ``low_speed_steer_min_step_m`` are sampler noise whose geometry
+    is meaningless and score zero.  Returns zeros when the weight is zero or the
+    scene carries no ego velocity, so no existing profile changes silently.
+    """
+
+    N = ego_trajs.shape[0]
+    device = ego_trajs.device
+    zero = torch.zeros(N, device=device, dtype=ego_trajs.dtype)
+    weight = float(getattr(config, "low_speed_steer_penalty", 0.0))
+    if weight <= 0.0 or ego_trajs.shape[1] == 0:
+        return zero
+
+    state = data.get("ego_current_state")
+    if not isinstance(state, torch.Tensor) or state.shape[-1] <= 4:
+        return zero
+    speed = float(state.reshape(-1, state.shape[-1])[0, 4].abs().item())
+    if not math.isfinite(speed) or speed >= float(config.low_speed_steer_speed_mps):
+        return zero
+
+    wheel_base = 2.79
+    shape = data.get("ego_shape")
+    if isinstance(shape, torch.Tensor) and shape.numel():
+        candidate = float(shape.reshape(-1)[0].item())
+        if math.isfinite(candidate) and candidate > 0.0:
+            wheel_base = candidate
+
+    first_xy = ego_trajs[:, 0, :2].to(dtype=torch.float32)
+    step = first_xy.norm(dim=-1)
+    min_step = max(float(config.low_speed_steer_min_step_m), 1e-6)
+    steer = torch.atan(
+        wheel_base * 2.0 * first_xy[:, 1].abs() / step.clamp_min(min_step).pow(2)
+    )
+    steer = torch.where(step >= min_step, steer, torch.zeros_like(steer))
+    limit = max(float(config.low_speed_steer_max_rad), 1e-6)
+    return (weight * (steer / limit).clamp(0.0, 1.0)).to(dtype=ego_trajs.dtype)
+
+
 def _hdp_multi_reward_components(
     ego_trajs: torch.Tensor,
     data: dict[str, torch.Tensor],
@@ -667,6 +715,19 @@ def _shape_reward(
         comfort_score = comfort_score * torch.exp(feasibility_scores.clamp(min=-10.0, max=0.0))
         comfort_score = comfort_score.clamp(0.0, 1.0)
 
+        # Low-speed steering feasibility.  ``smoothness_scores`` is computed from
+        # the whole 8 s horizon and cannot see a standstill first step: the
+        # deployed candidate implies a median 1.47 rad front-wheel angle on a
+        # third of low-speed scenes and still scores a full comfort slot.  AWR's
+        # first-waypoint gate rejects such candidates but is powerless against
+        # the anchor, and without a reward term the smoother of two survivors was
+        # never preferred -- which is why low-speed behaviour never improved
+        # across a campaign while the real vehicle jittered at a stop.
+        comfort_score = comfort_score - _low_speed_steer_penalty(
+            ego_trajs, data, config
+        )
+        comfort_score = comfort_score.clamp(0.0, 1.0)
+
         # HDP's released NAVSIM agent uses the PDM scorer.  Its weighted
         # terms are EP=5, TTC=5, lane-keeping=2 and history comfort=2; the
         # speed-limit term belongs to other PlannerRFT variants and must not
@@ -679,17 +740,47 @@ def _shape_reward(
             ego_trajs, data, subs, config
         )
         driving_direction_score = torch.ones(N, device=device)
+
+        # The bare PDM TTC indicator is dead signal on this corpus: measured over
+        # 300 mined scenes x 10 candidates it was exactly 1.0 on 99.67% of
+        # candidates and varied within a candidate group on 0.33% of scenes,
+        # while collision fired on 0.00%.  Those are the *only* neighbour-aware
+        # terms in this profile -- risk and follow are computed and discarded --
+        # so AWR was ranking candidates on progress/lane/comfort alone and had no
+        # reason to keep clear of other vehicles.  That is the reward-up /
+        # collisions-up trade, not an inherent property of the method.
+        #
+        # ``hdp_risk_use_clearance`` already means "grade near misses before they
+        # become collisions"; it just only reached the hdp_multi profile.  Grade
+        # the same clearance here and take the min, so a real TTC failure still
+        # lands and the clearance term can only ever tighten.  Non-saturated on
+        # 26.0% of scenes and discriminative within the candidate group on 25.7%,
+        # which moves the selected candidate on 16.3% of scenes.  Deliberately
+        # the clearance alone and not the composite ``risk_score``: that also
+        # folds in road-border proximity, which this profile already gates
+        # separately, and only the clearance version was measured.
+        ttc_term = ttc_scores.clamp(0.0, 1.0)
+        clearance = subs.get("ttc_min_clearance")
+        if bool(getattr(config, "hdp_risk_use_clearance", False)) and isinstance(
+            clearance, torch.Tensor
+        ) and clearance.dim() == 2:
+            safe_m = max(float(getattr(config, "hdp_risk_clearance_safe_m", 2.0)), 1e-3)
+            clearance_score = (
+                clearance.to(dtype=ttc_term.dtype) / safe_m
+            ).clamp(0.0, 1.0).min(dim=-1).values
+            ttc_term = torch.minimum(ttc_term, clearance_score)
         pdm_quality = (
-            5.0 * ttc_scores.clamp(0.0, 1.0)
+            5.0 * ttc_term
             + 5.0 * ep_score
             + 2.0 * lane_score.clamp(0.0, 1.0)
             + 2.0 * comfort_score
         ) / 14.0
 
-        # Col×DAC terminal product, with survival credit for the first failure
-        # time when requested (the HDP open-loop scorer's key hard-scene
-        # stabilization).  A road-border cross is DAC=0 regardless of whether
-        # the custom profile's optional rb gate is enabled.
+        # Col×DAC terminal product.  ``survival`` is an optional
+        # PlannerRFT-style hard-scene ablation that adds first-failure-time
+        # credit; it is not part of HDP's published max-collision / risk
+        # reward.  A road-border cross is DAC=0 regardless of whether the
+        # custom profile's optional rb gate is enabled.
         pdm_terminal = collision_gate * rb_crossing_gate * driving_direction_score
         if config.reward_mode == "survival":
             pdm_survival_frac = torch.ones(N, device=device)

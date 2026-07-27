@@ -163,6 +163,22 @@ class RewardConfig:
     # to 1 while preserving the existing binary collision gate.
     hdp_risk_use_clearance: bool = False
     hdp_risk_clearance_safe_m: float = 2.0
+    # Low-speed steering feasibility.  A first step of arc length ``s`` ending
+    # ``y`` off the current heading implies a front-wheel angle
+    # ``atan(wheel_base * 2|y| / s**2)``; at standstill a 1 cm offset over a 4 cm
+    # step is a steering-lock command.  AWR's first-waypoint gate rejects such
+    # candidates but never the deterministic anchor, and nothing rewarded the
+    # smoother of two survivors -- measured on 40,847 low-speed mined scenes,
+    # only 5.9% had any candidate clearing the advantage margin, so low-speed
+    # behaviour was effectively untrained while the deployed output itself
+    # implied a median 1.47 rad on a third of them.  Grading this into the
+    # comfort slot takes trained-on candidates over the limit from 3.0% to 0.1%
+    # and makes 20.0% of low-speed scenes trainable.  Weight 0 disables.
+    # Thresholds mirror rlvr/campaign_contract.py's gate.
+    low_speed_steer_penalty: float = 1.0
+    low_speed_steer_max_rad: float = 0.64
+    low_speed_steer_speed_mps: float = 1.0
+    low_speed_steer_min_step_m: float = 0.005
 
 
 __all__ = [
