@@ -94,6 +94,12 @@ def _env_for_device(device: str) -> dict:
         env["CUDA_VISIBLE_DEVICES"] = ""
     elif device in ("cuda", "auto"):
         env.setdefault("CUDA_VISIBLE_DEVICES", "0")
+    # Put the repo root on PYTHONPATH so repo-root packages (planner_metrics, rlvr,
+    # diffusion_planner) resolve even when they are not pip-installed. train_predictor
+    # runs as a script path (sys.path[0] = diffusion_planner/, not the repo root), so
+    # without this a source-only planner_metrics is not importable.
+    prev = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(_REPO_ROOT) + (os.pathsep + prev if prev else "")
     return env
 
 
