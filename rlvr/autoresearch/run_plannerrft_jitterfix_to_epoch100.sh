@@ -129,6 +129,12 @@ export PYTHONUNBUFFERED=1
 # on.  Set EXTRA_TRAIN_REPEAT=0 to train on the un-augmented list.
 RIGHT_TURN_ARTIFACTS=${RIGHT_TURN_ARTIFACTS:-/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/artifacts/right_turn_is_skipped_filtered_20260716}
 EXTRA_TRAIN_REPEAT=${EXTRA_TRAIN_REPEAT:-10}
+# Retention anchor on the deterministic trajectory.  0 (the previous value) left
+# 81.7% of scenes contributing nothing to the loss, so the policy drifted freely
+# exactly where the rare collision events live; see rlvr/campaign_contract.py.
+BEHAVIOR_ANCHOR_WEIGHT=${BEHAVIOR_ANCHOR_WEIGHT:-$(
+  "${PYTHON}" -c 'from rlvr.campaign_contract import BEHAVIOR_ANCHOR_WEIGHT as w; print(f"{w:g}")'
+)}
 EXTRA_TRAIN_LISTS=(
   "${RIGHT_TURN_ARTIFACTS}/path_list_train_unprotected_right_turn_is_skipped_filtered.json"
   "${RIGHT_TURN_ARTIFACTS}/path_list_unprotected_right_turn_xx1_is_skipped_filtered.json"
@@ -200,22 +206,34 @@ MINE_RUN=$(latest_completed_mine_run)
 # check hours later with no obvious cause, so fail here instead and say exactly
 # what to do about it.
 if [[ -n ${MINE_RUN} && -s ${MINE_RUN}/provenance.json ]]; then
-  cached_extras=$(jq -c '[.extra_train_set_lists[]?] + [.extra_train_set_repeat]' \
-    "${MINE_RUN}/provenance.json")
-  current_extras=$("${PYTHON}" - "${EXTRA_TRAIN_REPEAT}" "${EXTRA_TRAIN_LISTS[@]}" <<'PY'
+  # Compare PARSED values, never serialized text: jq -c emits ["a","b",10] and
+  # json.dumps emits ["a", "b", 10], so a string comparison here always differed
+  # and this guard hard-stalled the campaign 98 times with 8 idle GPUs.
+  extras_match=$("${PYTHON}" - \
+    "${MINE_RUN}/provenance.json" "${EXTRA_TRAIN_REPEAT}" "${EXTRA_TRAIN_LISTS[@]}" <<'PY'
 import json, pathlib, sys
-repeat = int(sys.argv[1])
-lists = [
+
+provenance = json.loads(pathlib.Path(sys.argv[1]).read_text())
+repeat = int(sys.argv[2])
+current = [
     str(pathlib.Path(p).expanduser().resolve())
-    for p in sys.argv[2:]
+    for p in sys.argv[3:]
     if pathlib.Path(p).is_file() and json.loads(pathlib.Path(p).read_text())
 ]
-print(json.dumps((lists if repeat > 0 else []) + [repeat if repeat > 0 else 0]))
+cached = [
+    str(pathlib.Path(p).expanduser().resolve())
+    for p in (provenance.get("extra_train_set_lists") or [])
+]
+cached_repeat = int(provenance.get("extra_train_set_repeat", 0) or 0)
+if repeat <= 0:
+    current, repeat = [], 0
+same = cached == current and cached_repeat == repeat
+print("match" if same else "differ")
+print(json.dumps({"cached": cached + [cached_repeat], "current": current + [repeat]}))
 PY
   )
-  if [[ ${cached_extras} != "${current_extras}" ]]; then
-    log "committed cycle-1 cache: ${cached_extras}"
-    log "current script setting:  ${current_extras}"
+  if [[ $(printf '%s\n' "${extras_match}" | head -n 1) != match ]]; then
+    log "oversampling mismatch: $(printf '%s\n' "${extras_match}" | tail -n 1)"
     die "the right-turn oversampling changed after the cycle-1 cache was mined; \
 either restore the previous lists or delete ${MINE_PARENT} to re-mine"
   fi
@@ -308,19 +326,34 @@ if [[ ! -s ${OVERLAY_PARENT}/overlay_manifest.json ]]; then
     --source-replay "${MINE_CACHE}" \
     --output-replay "${OVERLAY_PARENT}/replay_buffer" \
     --beta 1 --margin 0.01 \
-    --behavior-anchor-weight 0 --unsafe-behavior-anchor-weight 0 \
+    --behavior-anchor-weight "${BEHAVIOR_ANCHOR_WEIGHT}" \
+    --unsafe-behavior-anchor-weight "${BEHAVIOR_ANCHOR_WEIGHT}" \
     > "${RUN_ROOT}/cycle01_overlay.log" 2>&1
 fi
+# A committed overlay is verified against the anchor *it* was built with, not
+# against the current contract value: this stage is idempotent, and re-pinning a
+# constant must never invalidate an artifact that a finished replay already
+# trained on.  Changing BEHAVIOR_ANCHOR_WEIGHT therefore takes effect on the next
+# freshly built overlay (i.e. from cycle 2 on, or a fresh cycle 1).  The anchor
+# still has to be internally consistent and non-negative.
+COMMITTED_ANCHOR=$(jq -er '.parameters.behavior_anchor_weight' \
+  "${OVERLAY_PARENT}/overlay_manifest.json")
 jq -er --arg source "$(readlink -f "${MINE_CACHE}")" \
   --argjson groups "${EXPECTED_PADDED_GROUPS}" '
   .source_replay == $source and
   .groups == $groups and
   .expert_anchor_sidecar == true and
   .parameters.beta == 1 and .parameters.margin == 0.01 and
-  .parameters.behavior_anchor_weight == 0 and
+  .parameters.behavior_anchor_weight >= 0 and
+  .parameters.behavior_anchor_weight
+    == .parameters.unsafe_behavior_anchor_weight and
   .parameters.respect_source_zero_weights == true
 ' "${OVERLAY_PARENT}/overlay_manifest.json" >/dev/null \
   || die "cycle-1 overlay contract differs"
+if [[ ${COMMITTED_ANCHOR} != "${BEHAVIOR_ANCHOR_WEIGHT}" ]]; then
+  log "note: committed cycle-1 overlay uses behaviour anchor ${COMMITTED_ANCHOR}; \
+the configured ${BEHAVIOR_ANCHOR_WEIGHT} applies to the next fresh overlay"
+fi
 log "stage 2 committed: masked candidates=$(jq -r '.source_zero_masked_candidates' "${OVERLAY_PARENT}/overlay_manifest.json") active targets=$(jq -r '.active_targets' "${OVERLAY_PARENT}/overlay_manifest.json")"
 
 # --- stage 3: cycle-1 replay epochs 2-10 --------------------------------------

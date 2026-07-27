@@ -49,6 +49,22 @@ GROUP_SIZE = 10
 #: much to become an active replay target.
 POSITIVE_ADVANTAGE_MARGIN = 0.01
 
+#: Weight on the deterministic behaviour trajectory as a *retention* target.
+#:
+#: This was 0, and that is why every safety class degraded while the aggregate
+#: reward rose.  With no retention term and EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=1,
+#: only the 18.3% of scenes carrying a positive-advantage candidate contributed
+#: anything to the loss; the policy was free to drift on the other 81.7%, which
+#: is where nearly all of the 0.15% collision events live.  Measured on the
+#: cycle-1 cache: any positive value lifts loss-constrained scenes from 19.2% to
+#: 98.3% while leaving the 33,880 improvement targets untouched.
+#:
+#: 0.25 keeps the anchor's total weight at 27% of the improvement targets' —
+#: enough to pin behaviour, not enough to drown the improvement signal.  Matches
+#: the "conservative original-DP adaptation ... with behavior retention anchor"
+#: profile in docs/awr_zero_risk_improvement_audit_20260718.md.
+BEHAVIOR_ANCHOR_WEIGHT = 0.25
+
 # --- conditional commit ------------------------------------------------------
 
 #: Policy-interpolation steps searched when committing a cycle, smallest first.
@@ -137,6 +153,7 @@ def shell_assignments() -> str:
         f"REPLAY_BETA={REPLAY_BETA:g}",
         f"GROUP_SIZE={GROUP_SIZE}",
         f"POSITIVE_ADVANTAGE_MARGIN={POSITIVE_ADVANTAGE_MARGIN:g}",
+        f"BEHAVIOR_ANCHOR_WEIGHT={BEHAVIOR_ANCHOR_WEIGHT:g}",
         f"COMMIT_ALPHAS=({ladder})",
         f"COMMIT_ALPHA_LABELS=({labels})",
         f"ALLOW_UNSCALED_COMMIT={1 if ALLOW_UNSCALED_COMMIT else 0}",

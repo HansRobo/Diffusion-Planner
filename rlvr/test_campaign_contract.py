@@ -114,3 +114,20 @@ def test_module_cli_runs():
     ).stdout
     assert "REPLAY_BETA=" in out
     assert "XX1_LEGACY_EGO_WIDTH_M=1.7" in out
+
+
+def test_retention_anchor_is_positive():
+    """0 left 81.7% of scenes contributing nothing to the loss and the policy
+    drifted freely exactly where the rare collision events live."""
+    assert C.BEHAVIOR_ANCHOR_WEIGHT > 0.0
+    # Must not drown the improvement signal either: measured anchor-to-improvement
+    # total weight ratio is ~1.08x at 1.0, ~0.27x at 0.25.
+    assert C.BEHAVIOR_ANCHOR_WEIGHT <= 0.5
+
+
+def test_entrypoint_uses_the_contract_retention_anchor():
+    text = (ROOT / "rlvr/autoresearch/run_plannerrft_jitterfix_to_epoch100.sh").read_text()
+    assert "--behavior-anchor-weight \"${BEHAVIOR_ANCHOR_WEIGHT}\"" in text
+    assert "behavior_anchor_weight == $anchor" in text, (
+        "the overlay contract must follow the configured anchor, not a literal 0"
+    )

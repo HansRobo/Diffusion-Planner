@@ -198,12 +198,18 @@ for epoch in range(first, last + 1):
         "checkpoint": str(checkpoint.resolve()),
     })
 direction = max(candidates, key=lambda row: (row["mean_det_reward"], -row["epoch"]))
-assert direction["mean_det_reward"] <= baseline + 1e-12
+# This block used to assert direction <= baseline, because it was only reachable
+# when formal replay had failed to beat the selector.  The ladder now always
+# runs — committing the unscaled policy needs an explicit opt-in — so an
+# improving direction is the normal case: we interpolate toward it and take the
+# smallest step that still improves, instead of shipping it raw.
+improved_direction = direction["mean_det_reward"] > baseline + 1e-12
 direction_path.write_text(json.dumps({
     "baseline_epoch": first - 1,
     "baseline_mean_det_reward": baseline,
     "candidate_epochs": candidates,
     "selected_direction": direction,
+    "direction_improved_selector": improved_direction,
 }, indent=2, sort_keys=True) + "\n")
 PY
 

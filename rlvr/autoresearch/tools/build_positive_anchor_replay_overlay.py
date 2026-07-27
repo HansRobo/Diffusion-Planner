@@ -53,8 +53,27 @@ def compute_positive_anchor_weights(
     min_group_std: float = 1e-6,
     normalize: bool = False,
     drop_all_zero_groups: bool = True,
+    significance_sigma: float = 0.0,
+    saturated_reward: float = 1.0,
 ) -> np.ndarray:
-    """Vectorized equivalent of ``compute_awr_weights`` for cached totals."""
+    """Vectorized equivalent of ``compute_awr_weights`` for cached totals.
+
+    ``significance_sigma`` and ``saturated_reward`` add a *scene-level* filter on
+    top of the per-candidate margin, because the margin alone cannot tell a real
+    improvement direction from an order statistic of sampler noise.
+
+    Measured on the cycle-1 cache (85k sampled scenes, K=10):
+
+    * median headroom ``best - det`` = 0.00366, median within-group candidate
+      std = 0.00479 — for the typical scene the best candidate's advantage is
+      *smaller than the noise it was drawn from*, so training toward it teaches
+      the policy to reproduce noise draws it cannot control.
+    * 68.8% of scenes already score above 0.95 and the 7.8% above 0.995 carry a
+      mean headroom of 0.00006, i.e. nothing to learn.
+    * Requiring ``best - det > 2 * std`` and ``det < 0.98`` keeps 26.9% of scenes
+      but 67.3% of the total available headroom, lifting the mean gain of a
+      trained-on scene from 0.00785 to 0.01964.
+    """
 
     totals = np.asarray(rewards, dtype=np.float64)
     if totals.ndim != 2 or totals.shape[1] < 1:
@@ -138,6 +157,27 @@ def compute_positive_anchor_weights(
             np.where(finite, np.abs(totals) <= 1e-8, True), axis=1
         )
         weights[all_zero] = 0.0
+
+    # Scene-level significance filter.  Computed over *all* finite candidates
+    # (not just the active ones) so the noise estimate is not itself biased by
+    # having selected the winners.
+    if significance_sigma > 0.0 or saturated_reward < 1.0:
+        drop = np.zeros(totals.shape[0], dtype=bool)
+        deterministic = np.where(behavior_finite, totals[:, 0], np.nan)
+        masked = np.where(finite, totals, np.nan)
+        with np.errstate(invalid="ignore"):
+            best = np.nanmax(masked, axis=1)
+            group_std = np.nanstd(masked, axis=1)
+        headroom = best - deterministic
+        if significance_sigma > 0.0:
+            threshold = float(significance_sigma) * group_std
+            insignificant = np.isfinite(headroom) & (headroom <= threshold)
+            drop |= insignificant
+        if saturated_reward < 1.0:
+            drop |= np.isfinite(deterministic) & (
+                deterministic >= float(saturated_reward)
+            )
+        weights[drop] = 0.0
     return weights
 
 
@@ -153,6 +193,8 @@ def build_overlay(
     min_group_std: float = 1e-6,
     normalize: bool = False,
     drop_all_zero_groups: bool = True,
+    significance_sigma: float = 0.0,
+    saturated_reward: float = 1.0,
 ) -> dict[str, Any]:
     source_replay = source_replay.expanduser().resolve(strict=True)
     output_replay = output_replay.expanduser().resolve()
@@ -210,6 +252,8 @@ def build_overlay(
                 min_group_std=min_group_std,
                 normalize=normalize,
                 drop_all_zero_groups=drop_all_zero_groups,
+                significance_sigma=significance_sigma,
+                saturated_reward=saturated_reward,
             )
             source_vetoed = np.asarray(source_weights) <= 0.0
             masked_candidates = int((source_vetoed & (weights > 0.0)).sum())
@@ -361,6 +405,8 @@ def build_overlay(
             "normalize": bool(normalize),
             "drop_all_zero_groups": bool(drop_all_zero_groups),
             "respect_source_zero_weights": True,
+            "significance_sigma": significance_sigma,
+            "saturated_reward": saturated_reward,
         },
         **totals,
         "groups_with_better_candidate_fraction": (
@@ -391,6 +437,26 @@ def main() -> None:
     parser.add_argument("--margin", type=float, default=0.0)
     parser.add_argument("--behavior-anchor-weight", type=float, default=1.0)
     parser.add_argument("--unsafe-behavior-anchor-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--significance-sigma",
+        type=float,
+        default=0.0,
+        help=(
+            "drop a scene unless best-minus-deterministic headroom exceeds this "
+            "many within-group candidate standard deviations; 0 disables. "
+            "2.0 keeps 26.9%% of scenes but 67.3%% of the available headroom"
+        ),
+    )
+    parser.add_argument(
+        "--saturated-reward",
+        type=float,
+        default=1.0,
+        help=(
+            "drop a scene whose deterministic reward is already at or above "
+            "this; 1.0 disables. Scenes above 0.995 carry a mean headroom of "
+            "0.00006"
+        ),
+    )
     args = parser.parse_args()
     payload = build_overlay(
         args.source_replay,
@@ -399,6 +465,8 @@ def main() -> None:
         margin=args.margin,
         behavior_anchor_weight=args.behavior_anchor_weight,
         unsafe_behavior_anchor_weight=args.unsafe_behavior_anchor_weight,
+        significance_sigma=args.significance_sigma,
+        saturated_reward=args.saturated_reward,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 
