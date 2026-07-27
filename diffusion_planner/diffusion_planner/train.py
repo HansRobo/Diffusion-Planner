@@ -10,7 +10,7 @@ import wandb
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
-from diffusion_planner.dimensions import *
+from diffusion_planner.dimensions import MAX_NUM_NEIGHBORS
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
@@ -516,7 +516,7 @@ def assert_checkpoint_compatible(
             )
 
     checkpoint_neighbors = int(ckpt_args.get("predicted_neighbor_num", MAX_NUM_NEIGHBORS))
-    current_neighbors = int(getattr(args, "predicted_neighbor_num"))
+    current_neighbors = int(args.predicted_neighbor_num)
     if checkpoint_neighbors != current_neighbors and not allow_predicted_neighbor_change:
         raise RuntimeError(
             "Checkpoint action shape mismatch: "

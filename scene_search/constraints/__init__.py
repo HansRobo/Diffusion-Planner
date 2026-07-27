@@ -10,3 +10,5 @@ from scene_search.constraints import (  # noqa: F401
     travel_distance,
 )
 from scene_search.constraints.registry import build, list_available
+
+__all__ = ["build", "list_available"]

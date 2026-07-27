@@ -2,7 +2,19 @@ import argparse
 import math
 from functools import partial
 
-from diffusion_planner.dimensions import *
+from diffusion_planner.dimensions import (
+    INPUT_T,
+    MAX_NUM_NEIGHBORS,
+    NUM_LINE_STRINGS,
+    NUM_POLYGONS,
+    NUM_SEGMENTS_IN_LANE,
+    NUM_SEGMENTS_IN_ROUTE,
+    OUTPUT_T,
+    POINTS_PER_LANELET,
+    POINTS_PER_LINE_STRING,
+    POINTS_PER_POLYGON,
+    TURN_INDICATOR_OUTPUT_DIM,
+)
 from diffusion_planner.train import model_training
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.utils.cli import boolean, dataclass_default

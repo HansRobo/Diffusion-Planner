@@ -1,7 +1,7 @@
 import argparse
 import json
 import logging
-from collections import defaultdict, deque
+from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +16,17 @@ from autoware_perception_msgs.msg import (
 )
 from autoware_planning_msgs.msg import LaneletRoute
 from autoware_vehicle_msgs.msg import TurnIndicatorsReport
-from diffusion_planner.dimensions import *
+from diffusion_planner.dimensions import (
+    INPUT_T,
+    MAX_NUM_NEIGHBORS,
+    NUM_LINE_STRINGS,
+    NUM_POLYGONS,
+    NUM_SEGMENTS_IN_LANE,
+    NUM_SEGMENTS_IN_ROUTE,
+    OUTPUT_T,
+    POINTS_PER_LINE_STRING,
+    POINTS_PER_POLYGON,
+)
 from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (
     LINE_STRING_TYPE_MAP,
     LINE_STRING_TYPE_NUM,
@@ -27,13 +37,10 @@ from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (
     create_line_tensor,
 )
 from diffusion_planner_ros.utils import (
-    convert_tracked_objects_to_tensor,
     create_current_ego_state,
     filter_route_lanelets,
-    get_nearest_msg,
     get_transform_matrix,
     parse_timestamp,
-    parse_traffic_light_recognition,
     pose_to_mat4x4,
     rot3x3_to_heading_cos_sin,
     tracking_one_step,
@@ -416,7 +423,7 @@ def create_neighbor_future(
 
     # [Discrepancy1] for future tensor, sort is not needed
 
-    for i, (object_id_bytes, tracked_obj) in enumerate(tracked_objs.items()):
+    for i, (_object_id_bytes, tracked_obj) in enumerate(tracked_objs.items()):
         if i >= max_num_objects:
             break
         label_in_model = tracked_obj.class_label
@@ -471,7 +478,7 @@ def tracking_past_and_future(data_list, i, map2bl_matrix_4x4):
     # tracking for future (for ground truth)
     tracking_future = deepcopy(tracking_past)
     # reset lost_time and list
-    for key in tracking_future.keys():
+    for key in tracking_future:
         tracking_future[key].lost_time = 1
         tracking_future[key].shape_list = tracking_future[key].shape_list[-1:]
         tracking_future[key].kinematics_list = tracking_future[key].kinematics_list[-1:]
@@ -488,7 +495,7 @@ def tracking_past_and_future(data_list, i, map2bl_matrix_4x4):
             key: value for key, value in tracking_future.items() if key in tracking_past
         }
     # erase losing from tracking_future
-    for key, val in tracking_future.items():
+    for _key, val in tracking_future.items():
         total = len(val.kinematics_list)
         lost_time = val.lost_time
         valid_t = total - lost_time

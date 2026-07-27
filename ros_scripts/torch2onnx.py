@@ -15,7 +15,10 @@ if _CHECKOUT_SOURCE.is_dir():
 
 import numpy as np
 import torch
-from diffusion_planner.dimensions import *
+from diffusion_planner.dimensions import (
+    OUTPUT_T,
+    POSE_DIM,
+)
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.onnx_export import (
     DECODER_INPUT_NAMES,
