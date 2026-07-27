@@ -186,7 +186,7 @@ class DecoderONNXWrapper(nn.Module):
         agent_num = 1 + self.decoder._predicted_neighbor_num
 
         sampled_trajectories = sampled_trajectories.reshape(
-            batch_size, agent_num, 1 + self.decoder._future_len, 4
+            batch_size, agent_num, (1 + self.decoder._future_len) * 4
         )
 
         model_output = self.decoder.dit(
