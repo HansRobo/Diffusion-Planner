@@ -43,6 +43,7 @@ import importlib.util
 import json
 import os
 import random
+import re
 import shutil
 from collections import Counter, defaultdict
 
@@ -64,6 +65,22 @@ def output_basename(src: str) -> str:
     (same src -> same name) so canonicalization and rendering agree."""
     h = hashlib.md5(src.encode()).hexdigest()[:10]
     return f"{h}_{os.path.basename(src)}"
+
+
+def contig_relpath(src: str) -> str:
+    """Output path (relative to ``npz/``) for CONTIGUOUS mode. No new naming
+    convention: the frame keeps its ORIGINAL dataset filename, placed under a
+    per-bag subdirectory named for its source bag (the dataset's own
+    ``<date>/<HH-MM-SS>`` session dir). This is exactly what the reproducer's
+    lineage check (``mine_direct_reproducer_chunks._is_next_contiguous``) expects
+    — consecutive frames sharing a parent dir, a common prefix, and a +1 trailing
+    frame index — and distinct bags land in distinct subdirs so nothing collides.
+    (Frame mode flattens into one dir and must hash-prefix for uniqueness; the
+    contiguous corpus keeps the bag structure instead.)"""
+    d = os.path.dirname(src)
+    bag = "_".join(p for p in d.split(os.sep)[-2:] if p) or "bag"
+    bag = re.sub(r"[^A-Za-z0-9_.-]+", "-", bag)
+    return os.path.join(bag, os.path.basename(src))
 
 
 def _load_util_script(module_name: str, rel_path: str):
@@ -384,13 +401,14 @@ def _write_readme(path: str, *, mode: str, before: Counter, after: Counter, meta
         f.write("\n".join(lines) + "\n")
 
 
-def canonicalize_all(rows: list[dict], out_root: str) -> list[str]:
+def canonicalize_all(rows: list[dict], out_root: str, namer=output_basename) -> list[str]:
     npz_out_dir = os.path.join(out_root, "npz")
     os.makedirs(npz_out_dir, exist_ok=True)
     out_paths = []
     for i, r in enumerate(rows):
         src = str(r["npz_path"])
-        dst = os.path.join(npz_out_dir, output_basename(src))
+        dst = os.path.join(npz_out_dir, namer(src))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)  # namer may include a bag subdir
         canonicalize_npz(src, dst)
         out_paths.append(dst)
         if (i + 1) % 500 == 0:
@@ -463,14 +481,18 @@ def run_contiguous_mode(rows: list[dict], args) -> None:
         prefer_labels=prefer,
     )
     all_rows = [r for win in windows for r in win]
-    out_paths = canonicalize_all(all_rows, args.out_dir)
+    # Contiguous mode keeps each frame's ORIGINAL dataset filename under a per-bag
+    # subdir (contig_relpath) so a bag's frames stay one detectable rollout lineage
+    # for the reproducer (frame mode's per-file hash would give every frame a
+    # different prefix and break it).
+    out_paths = canonicalize_all(all_rows, args.out_dir, namer=contig_relpath)
 
     # index output paths by (bag, frame) for manifest reconstruction
     chunk_lines = []
     gidx = 0
     for wi, win in enumerate(windows):
         win_out = [
-            os.path.join(args.out_dir, "npz", output_basename(str(r["npz_path"]))) for r in win
+            os.path.join(args.out_dir, "npz", contig_relpath(str(r["npz_path"]))) for r in win
         ]
         start_frame = int(win[0]["frame"])
         end_frame = int(win[-1]["frame"])
