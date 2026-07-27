@@ -15,9 +15,38 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 import numpy as np
+import pytest
 import torch
 
 from rlvr.grpo_sampler import SampledTrajectory, SamplerConfig, generate_diverse_group
+
+# This module doubles as a script: ``__main__`` below loads a real checkpoint
+# from --model_path/--npz_path and calls the model-dependent tests directly with
+# those four arguments.  Under pytest nothing supplies them, and pytest builds
+# the whole fixture closure before running setup, so all four names have to
+# resolve or the tests error out with "fixture 'model' not found" instead of
+# skipping.  Errors and skips read very differently in a suite summary.
+_NEEDS_CHECKPOINT = "needs a loaded model: run this file as a script with --model_path/--npz_path"
+
+
+@pytest.fixture
+def model():
+    pytest.skip(_NEEDS_CHECKPOINT)
+
+
+@pytest.fixture
+def model_args():
+    pytest.skip(_NEEDS_CHECKPOINT)
+
+
+@pytest.fixture
+def data():
+    pytest.skip(_NEEDS_CHECKPOINT)
+
+
+@pytest.fixture
+def device():
+    pytest.skip(_NEEDS_CHECKPOINT)
 
 
 def test_sampler_config_defaults():
