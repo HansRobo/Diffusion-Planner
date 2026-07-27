@@ -156,6 +156,8 @@ def _turn_indicator_validation_metrics(agg: dict) -> tuple[float | None, dict, d
         "turn_indicator_active_recall",
         "turn_indicator_active_f1",
         "turn_indicator_direction_accuracy",
+        "turn_indicator_nll",
+        "turn_indicator_ece",
     )
     metrics = {
         f"valid_turn_indicator/{key.removeprefix('turn_indicator_')}": agg[key]
@@ -416,6 +418,12 @@ def assert_checkpoint_compatible(
             "turn_indicator_expert_loss_weight",
             "supervised_training_stage",
             "turn_indicator_head_training_mode",
+            "turn_indicator_opposite_direction_weight",
+            "turn_indicator_implied_intent_smoothing",
+            "turn_indicator_implied_intent_min_yaw_deg",
+            "turn_indicator_implied_intent_full_yaw_deg",
+            "turn_indicator_implied_intent_min_lateral_m",
+            "turn_indicator_implied_intent_full_lateral_m",
             "use_ema",
             "amp_dtype",
             "tf32",
@@ -490,8 +498,24 @@ def assert_checkpoint_compatible(
             "rl_road_border_critical_m",
             "rl_road_border_safe_m",
         )
+        # The cost-sensitive intent-objective fields postdate the first head checkpoints.
+        # A checkpoint written before them was trained at the documented legacy setting
+        # (both weights 0.0), so absence is meaningful rather than corrupt; an explicit
+        # value must still match exactly.
+        objective_migration_fields = {
+            "turn_indicator_opposite_direction_weight",
+            "turn_indicator_implied_intent_smoothing",
+            "turn_indicator_implied_intent_min_yaw_deg",
+            "turn_indicator_implied_intent_full_yaw_deg",
+            "turn_indicator_implied_intent_min_lateral_m",
+            "turn_indicator_implied_intent_full_lateral_m",
+        }
         missing_training_fields = [
-            field for field in training_fields if hasattr(args, field) and field not in ckpt_args
+            field
+            for field in training_fields
+            if hasattr(args, field)
+            and field not in ckpt_args
+            and field not in objective_migration_fields
         ]
         if missing_training_fields:
             raise RuntimeError(

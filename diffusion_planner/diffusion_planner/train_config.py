@@ -105,6 +105,24 @@ class TrainConfig:
     # joint ablation), never by policy-only Base/SFT.
     turn_indicator_generated_loss_weight: float = 1.0
     turn_indicator_expert_loss_weight: float = 1.0
+    # Cost-sensitive intent objective. Cross entropy stays the calibration backbone
+    # because the deployment state machine gates on absolute probabilities, but plain
+    # cross entropy prices a LEFT/RIGHT swap exactly like a late signal even though the
+    # first commands the opposite maneuver. This is the expected cost of opposite-
+    # direction probability mass on active ground truth; 0.0 restores plain CE.
+    turn_indicator_opposite_direction_weight: float = 1.0
+    # The Base80 audit measured a median 3.5 s (1.6-6.4 s p10-p90 left, 1.4-6.8 s right)
+    # from lever to motion, so an OFF frame whose expert future already turns is a late
+    # annotation, not a negative. Move at most this much target mass from OFF onto the
+    # geometrically implied direction, ramped by evidence strength. Mass never moves
+    # between LEFT and RIGHT, and active labels stay one-hot. 0.0 restores hard labels.
+    turn_indicator_implied_intent_smoothing: float = 0.2
+    # Evidence bars, in the same quantities the audit tool reports. The weak pair is the
+    # audit's own activation-confirmation bar; the strong pair is its next bucket.
+    turn_indicator_implied_intent_min_yaw_deg: float = 5.0
+    turn_indicator_implied_intent_full_yaw_deg: float = 20.0
+    turn_indicator_implied_intent_min_lateral_m: float = 0.5
+    turn_indicator_implied_intent_full_lateral_m: float = 2.0
     # The production SFT contract is deliberately staged: ``policy`` adapts the
     # trajectory planner without evaluating or updating the auxiliary head, then
     # ``turn_indicator`` freezes the planner and trains the detached head below.
