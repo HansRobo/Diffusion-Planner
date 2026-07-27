@@ -50,7 +50,10 @@ from rlvr.autoresearch.tools.mine_direct_reproducer_chunks import (
     iter_direct_chunks,
     iter_manifest_chunks,
 )
-from rlvr.autoresearch.tools.reproducer_danger_scorer import build_realized_event_scorer
+from rlvr.autoresearch.tools.reproducer_danger_scorer import (
+    REALIZED_LAG_SUSTAIN_STEPS,
+    build_realized_event_scorer,
+)
 from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
     _apply_repair_refresh_config,
     _base_train_invocation,
@@ -654,7 +657,11 @@ def test_mine_direct_main_forwards_realized_hard_event_scorer(monkeypatch, tmp_p
     def _fake_run_segments_batched(*args, **kwargs):
         captured["realized_event_scorer"] = kwargs.get("realized_event_scorer")
         captured["danger_scorer"] = kwargs.get("danger_scorer")
-        return [SimpleNamespace(metrics={"n_collision_steps": 1, "min_clearance": -0.1})]
+        return [
+            {
+                "object": {"collision_steps": 1, "clearance_min_m": -0.1},
+            }
+        ]
 
     chunk = Chunk(
         key="chunkA",
@@ -1740,6 +1747,12 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             ego_shape=np.ones(3, dtype=np.float32),
             clearances=np.full(8, np.inf, dtype=np.float32),
             collisions=np.zeros(8, dtype=bool),
+            rb_dists=np.full(8, np.inf, dtype=np.float32),
+            red_light=np.zeros(8, dtype=bool),
+            accels=np.zeros(8, dtype=np.float32),
+            strong_brake_mps2=-2.5,
+            dyn=SimpleNamespace(speed=0.0),
+            ego_hist=np.zeros((31, 3), dtype=np.float64),
             k=0,
             done=False,
             terminated="max_steps",
@@ -1747,7 +1760,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             live_pose=np.zeros(3, dtype=np.float32),
             save_buf=None,
             last_snap_step=None,
-            n_snaps=0,
+            snap_count=0,
             turn_hist=np.zeros(31, dtype=np.int64),
             credit_window=None,
             credit_saved=False,
@@ -1755,6 +1768,8 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             verified_credit_first_step={},
             danger_event_selector=None,
             output_route_key="bagA",
+            realized_lag_streak=0,
+            route_arc_s=None,
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -1772,7 +1787,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     def _fake_to_torch_batch(np_dicts, model_args, device):
         return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
 
-    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+    def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
         return [(1.0, False, 0, -1) for _ in neighbors_list]
 
     def _fake_realized_event_scorer(
@@ -1791,8 +1806,8 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
 
-    def _fake_finalize(s, timers):
-        return SimpleNamespace(metrics={"n_steps_run": s.k})
+    def _fake_finalize(s, *args, **kwargs):
+        return {"n_steps_run": s.k}
 
     def _fake_dump_credit_window(*args, **kwargs):
         calls.append(
@@ -1809,7 +1824,9 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
     monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
     monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
-    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(
+        reproducer_rollout, "score_object_step_batched", _fake_score_object_step_batched
+    )
     monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
     monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
     monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
@@ -1891,12 +1908,18 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             replay_mode="clock",
             clearances=np.full(max_steps + 1, np.inf, dtype=np.float32),
             collisions=np.zeros(max_steps + 1, dtype=bool),
+            rb_dists=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            red_light=np.zeros(max_steps + 1, dtype=bool),
+            accels=np.zeros(max_steps + 1, dtype=np.float32),
+            strong_brake_mps2=-2.5,
+            dyn=SimpleNamespace(speed=0.0),
+            ego_hist=np.zeros((31, 3), dtype=np.float64),
             near_miss_thresh=near_miss_thresh,
             ego_shape=np.ones(3, dtype=np.float32),
             live_pose=np.zeros(3, dtype=np.float32),
             save_buf=None,
             last_snap_step=None,
-            n_snaps=0,
+            snap_count=0,
             turn_hist=np.zeros(31, dtype=np.int64),
             credit_window=None,
             credit_saved=False,
@@ -1904,6 +1927,8 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             verified_credit_first_step={},
             danger_event_selector=None,
             output_route_key="bagA",
+            realized_lag_streak=0,
+            route_arc_s=None,
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -1923,7 +1948,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
 
     score_calls = {"n": 0}
 
-    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+    def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
         score_calls["n"] += 1
         collided = score_calls["n"] >= 2
         return [(0.0, collided, 1, 0) for _ in neighbors_list]
@@ -1947,8 +1972,8 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
 
-    def _fake_finalize(s, timers):
-        return SimpleNamespace(metrics={"n_steps_run": s.k})
+    def _fake_finalize(s, *args, **kwargs):
+        return {"n_steps_run": s.k}
 
     def _fake_dump_credit_window(*args, **kwargs):
         calls.append(
@@ -1963,7 +1988,9 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
     monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
     monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
-    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(
+        reproducer_rollout, "score_object_step_batched", _fake_score_object_step_batched
+    )
     monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
     monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
     monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
@@ -2032,12 +2059,18 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             replay_mode="clock",
             clearances=np.full(max_steps + 1, np.inf, dtype=np.float32),
             collisions=np.zeros(max_steps + 1, dtype=bool),
+            rb_dists=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            red_light=np.zeros(max_steps + 1, dtype=bool),
+            accels=np.zeros(max_steps + 1, dtype=np.float32),
+            strong_brake_mps2=-2.5,
+            dyn=SimpleNamespace(speed=0.0),
+            ego_hist=np.zeros((31, 3), dtype=np.float64),
             near_miss_thresh=near_miss_thresh,
             ego_shape=np.ones(3, dtype=np.float32),
             live_pose=np.zeros(3, dtype=np.float32),
             save_buf=None,
             last_snap_step=None,
-            n_snaps=0,
+            snap_count=0,
             turn_hist=np.zeros(31, dtype=np.int64),
             credit_window=None,
             credit_saved=False,
@@ -2045,6 +2078,8 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             verified_credit_first_step={},
             danger_event_selector=None,
             output_route_key="bagA",
+            realized_lag_streak=0,
+            route_arc_s=None,
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -2062,7 +2097,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     def _fake_to_torch_batch(np_dicts, model_args, device):
         return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
 
-    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+    def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
         return [(0.0, True, 1, 0) for _ in neighbors_list]
 
     def _fake_clean_scorer(*_args, **_kwargs):
@@ -2074,8 +2109,8 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
 
-    def _fake_finalize(s, timers):
-        return SimpleNamespace(metrics={"n_steps_run": s.k})
+    def _fake_finalize(s, *args, **kwargs):
+        return {"n_steps_run": s.k}
 
     def _fake_dump_credit_window(*args, **kwargs):
         calls.append({"out_dir": args[0], "label": args[10]})
@@ -2084,7 +2119,9 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
     monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
     monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
-    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(
+        reproducer_rollout, "score_object_step_batched", _fake_score_object_step_batched
+    )
     monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
     monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
     monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
@@ -2735,6 +2772,90 @@ def test_realized_event_scorer_supports_expert_disagreement(tmp_path):
     # sits at the route origin (s0=0), so the model keeps its ~10 m end arc.
     assert row["expert_disagreement_model_end_progress"] == pytest.approx(10.0, abs=0.1)
     assert row["expert_disagreement_expert_end_progress"] == pytest.approx(0.0, abs=1e-4)
+
+
+def test_realized_event_scorer_realized_lag_flags_on_sustained_streak(tmp_path):
+    # Closed-loop fail-to-resume: the model's open-loop proposal keeps pace with the
+    # expert schedule (no projected-branch flag — the dithering blindspot), but the
+    # rollout loop reports a sustained realized gap -> the realized branch must flag
+    # model_lagging_expert so the depart repair can fire.
+    reward_cfg, threshold_cfg = _write_realized_scorer_configs(tmp_path)
+    scorer = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"expert_disagreement"},
+    )
+    np_dict = {
+        "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+    }
+    ref_polyline_world = np.stack([np.linspace(0.0, 100.0, 101), np.zeros(101)], axis=1).astype(
+        np.float32
+    )
+    # Expert drives 5 -> 15 m; the proposal matches its schedule exactly, so none of
+    # the frozen 3 branches fires on its own.
+    expert_future_world = np.stack([np.linspace(5.0, 15.0, 81), np.zeros(81)], axis=1).astype(
+        np.float32
+    )
+    expert_future_speed = np.full((81,), 1.25, dtype=np.float32)
+    model_pred_world = expert_future_world[1:].copy()
+
+    common = dict(
+        collided=False,
+        model_pred_world=model_pred_world,
+        expert_future_world=expert_future_world,
+        expert_future_speed=expert_future_speed,
+        ref_polyline_world=ref_polyline_world,
+    )
+    below = scorer(
+        np_dict,
+        step=7,
+        realized_lag_streak=REALIZED_LAG_SUSTAIN_STEPS - 1,
+        realized_lag_gap_m=4.2,
+        **common,
+    )
+    assert "expert_disagreement" not in below["labels"]
+    assert below["expert_disagreement_realized_lag"] is False
+    assert below["expert_disagreement_realized_gap_m"] == pytest.approx(4.2)
+
+    flagged = scorer(
+        np_dict,
+        step=8,
+        realized_lag_streak=REALIZED_LAG_SUSTAIN_STEPS,
+        realized_lag_gap_m=4.5,
+        **common,
+    )
+    assert "expert_disagreement" in flagged["labels"]
+    assert flagged["expert_disagreement_reason"] == "model_lagging_expert"
+    assert flagged["expert_disagreement_realized_lag"] is True
+    assert flagged["expert_disagreement_step"] == 8
+
+
+def test_realized_event_scorer_exposes_expert_lag_thresholds(tmp_path):
+    # The rollout loop maintains the streak using the SAME thresholds the scorer was
+    # built with — exposed as an attribute so there is a single source of truth.
+    reward_cfg, threshold_cfg = _write_realized_scorer_configs(tmp_path)
+    scorer = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"expert_disagreement"},
+    )
+    thr = scorer.expert_lag_thresholds
+    assert thr is not None
+    assert set(thr) == {"lag_progress_gap_m", "moving_speed_mps"}
+    assert thr["lag_progress_gap_m"] > 0
+    assert thr["moving_speed_mps"] > 0
+
+    no_ed = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"moving_collision"},
+    )
+    assert no_ed.expert_lag_thresholds is None
 
 
 def test_realized_event_scorer_expert_disagreement_requires_inputs(tmp_path):
@@ -4935,3 +5056,177 @@ def test_selection_report_vetoes_and_ranks():
     report = round_runner._selection_report(reference, drifted)
     assert report["recommended"] is None
     assert any("denominator" in v for v in report["rounds"][0]["veto_reasons"])
+
+
+def test_road_border_gate_is_absolute():
+    # The road-border gate is absolute: ANY crossing candidate is rejected, scripted
+    # (depart/morph) or model/fan alike. rb_min_dist is an UNSIGNED distance to the border,
+    # so it cannot tell a shoulder skim from a trajectory that crossed to the wrong side and
+    # ran far outside — an earlier expert-relative distance floor was removed as unsafe.
+    source_row = {
+        "repair_labels": ["expert_disagreement", "road_border_crossing"],
+        "expert_disagreement_max_dev": 0.5,
+    }
+    T = 20
+    expert = np.zeros((T, 4), dtype=np.float32)
+    depart = np.zeros((T, 4), dtype=np.float32)
+    model = np.zeros((T, 4), dtype=np.float32)
+    xrow = lambda: SimpleNamespace(  # noqa: E731
+        **{**vars(_morph_outcome_reward_row(2.0, rb_crossing=True)), "rb_min_dist": 0.12}
+    )
+    rows = [
+        _morph_outcome_candidate_row(["road_border_crossing"]),
+        _morph_outcome_candidate_row(["road_border_crossing"]),
+    ]
+
+    # Both crossing candidates gate-rejected, including the scripted depart (idx 0).
+    idx, meta = _best_safe_candidate(
+        source_row,
+        rows,
+        [xrow(), xrow()],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[depart, model],
+        reference_traj=expert,
+        depart_index=0,
+    )
+    assert idx is None and meta["depart_outcome"] == "gate_rejected"
+    assert meta["depart_gate_flags"]["rb_crossing"] is True
+
+
+def test_direct_reproducer_chunks_support_overlapping_stride(tmp_path):
+    # start_stride < chunk_len: consecutive windows overlap (sliding read-ahead
+    # buffer). Anchor density and chunk runway become independent knobs — needed
+    # for long expert wait cycles where an 80-step chunk has no post-departure
+    # runway but a 160 stride would halve the anchors.
+    scene_list = _write_direct_chunk_scene_list(
+        tmp_path,
+        [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 400)],
+    )
+
+    chunks = list(iter_direct_chunks(scene_list, chunk_len=160, start_stride=80))
+
+    # Tail window (start 320) is only 80 frames -> dropped by the default
+    # min_chunk_len == chunk_len.
+    assert [c.global_start_index for c in chunks] == [0, 80, 160, 240]
+    assert [c.n_frames for c in chunks] == [160, 160, 160, 160]
+    assert chunks[0].start_frame == 31
+    assert chunks[0].end_frame == 31 + 159
+    assert chunks[1].start_frame == 31 + 80  # overlaps chunk 0 by 80 frames
+
+    with_tail = list(
+        iter_direct_chunks(scene_list, chunk_len=160, start_stride=80, min_chunk_len=80)
+    )
+    assert [c.global_start_index for c in with_tail] == [0, 80, 160, 240, 320]
+    assert with_tail[-1].n_frames == 80
+    assert with_tail[-1].end_reason == "scene_list_tail"
+
+
+def test_direct_reproducer_chunks_overlap_preserves_sharding(tmp_path):
+    # Sharding/sampling still key off global_start // start_stride with overlap.
+    scene_list = _write_direct_chunk_scene_list(
+        tmp_path,
+        [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 400)],
+    )
+
+    shard0 = list(
+        iter_direct_chunks(scene_list, chunk_len=160, start_stride=80, num_shards=2, shard_index=0)
+    )
+    shard1 = list(
+        iter_direct_chunks(scene_list, chunk_len=160, start_stride=80, num_shards=2, shard_index=1)
+    )
+
+    assert [c.global_start_index for c in shard0] == [0, 160]
+    assert [c.global_start_index for c in shard1] == [80, 240]
+
+
+def test_realized_reward_scorer_per_batch_accumulate_and_teleport_skip(monkeypatch):
+    """The realized-reward scorer must: score the driven future per sampled pose,
+    accumulate across finalize() calls (one per mining batch) while clearing its
+    buffers each time (bounds memory + avoids cross-batch id(s) aliasing), and skip
+    any window that crosses an unstick teleport."""
+    import rlvr.reward as _reward
+
+    # Deterministic stand-in reward = the future's total forward displacement, so we can
+    # predict which poses get scored and that teleport windows are excluded.
+    def fake_reward(ego, data, cfg):
+        xy = ego[0, :, :2].cpu().numpy()
+        return [SimpleNamespace(total=float(abs(xy[-1, 0] - xy[0, 0])))]
+
+    monkeypatch.setattr(_reward, "compute_reward_batch", fake_reward)
+
+    import tempfile
+    from pathlib import Path as _P
+
+    with tempfile.TemporaryDirectory() as td:
+        rc, _tc = _write_realized_scorer_configs(_P(td))
+        hook, finalize = reproducer_danger_scorer.build_realized_reward_scorer(
+            reward_config=rc, device="cpu", horizon=3, sample_step=1
+        )
+
+        def _np_dict():
+            return {
+                "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+                "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+                "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+                "ego_agent_past": np.zeros((21, 3), dtype=np.float32),
+            }
+
+        # Batch 1: one segment, 6 steps, straight line, a teleport lands at k=3.
+        seg = SimpleNamespace(k=0, live_pose=np.zeros(3), snap_count=0)
+        for k in range(6):
+            seg.k = k
+            seg.live_pose = np.array([float(k), 0.0, 0.0])  # 1 m/step forward
+            if k == 3:
+                seg.snap_count = 1  # teleport landed here
+            hook([(seg, _np_dict())], None, None, "cpu")
+        mean1, n1 = finalize()
+        # horizon=3 → sampled poses t need t+1..t+3 present AND no teleport in that window.
+        # k can be 0,1,2 (k+3<=5). k=0 window {1,2,3} contains teleport@3 -> skip.
+        # k=1 window {2,3,4} contains 3 -> skip. k=2 window {3,4,5} contains 3 -> skip.
+        assert n1 == 0, f"all windows cross the teleport, expected 0 scored, got {n1}"
+
+        # Batch 2: fresh segment (id reused is fine — buffers were cleared), 5 steps, no teleport.
+        seg2 = SimpleNamespace(k=0, live_pose=np.zeros(3), snap_count=0)
+        for k in range(5):
+            seg2.k = k
+            seg2.live_pose = np.array([float(k), 0.0, 0.0])
+            hook([(seg2, _np_dict())], None, None, "cpu")
+        mean2, n2 = finalize()
+        # k=0 {1,2,3}, k=1 {2,3,4} valid; k=2 needs {3,4,5} -> 5 absent -> skip. So 2 scored.
+        assert n2 == 2, f"expected 2 scored poses in batch 2, got {n2}"
+        # running total accumulates across batches (n2 cumulative); fake reward = intra-window fwd disp
+        assert mean2 == pytest.approx(2.0, abs=1e-6)  # fake reward = intra-window forward disp
+
+
+def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
+    """finalize() must clear its internal buffers so a second finalize on no new data
+    does not re-score the same poses."""
+    import rlvr.reward as _reward
+
+    monkeypatch.setattr(
+        _reward, "compute_reward_batch", lambda ego, data, cfg: [SimpleNamespace(total=1.0)]
+    )
+    import tempfile
+    from pathlib import Path as _P
+
+    with tempfile.TemporaryDirectory() as td:
+        rc, _ = _write_realized_scorer_configs(_P(td))
+        hook, finalize = reproducer_danger_scorer.build_realized_reward_scorer(
+            reward_config=rc, device="cpu", horizon=2, sample_step=1
+        )
+        nd = {
+            "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+            "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+            "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+            "ego_agent_past": np.zeros((21, 3), dtype=np.float32),
+        }
+        seg = SimpleNamespace(k=0, live_pose=np.zeros(3), snap_count=0)
+        for k in range(4):
+            seg.k = k
+            seg.live_pose = np.array([float(k), 0.0, 0.0])
+            hook([(seg, nd)], None, None, "cpu")
+        _, n_first = finalize()
+        _, n_second = finalize()  # no new data
+        assert n_first > 0
+        assert n_second == n_first, "second finalize must not re-score cleared buffers"
