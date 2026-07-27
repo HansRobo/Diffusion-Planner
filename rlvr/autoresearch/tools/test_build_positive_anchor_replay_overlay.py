@@ -259,3 +259,77 @@ def test_builds_read_only_overlay_with_only_weights_materialized(tmp_path: Path)
         drop_all_zero_groups=True,
     )
     _validate_replay_source_contract(output, replay_rollout, RewardConfig())
+
+
+def _bands(rewards, weights):
+    """Weight share vs headroom share over reward bands."""
+    import numpy as np
+
+    det = rewards[:, 0]
+    gain = np.clip(rewards.max(axis=1) - det, 0.0, None)
+    total_gain = gain.sum()
+    total_w = weights[:, 1:].sum()
+    out = {}
+    for lo, hi in ((0.0, 0.85), (0.85, 0.96), (0.96, 1.01)):
+        m = (det >= lo) & (det < hi)
+        if not m.any():
+            continue
+        out[(lo, hi)] = (
+            gain[m].sum() / max(1e-12, total_gain),
+            weights[m][:, 1:].sum() / max(1e-12, total_w),
+        )
+    return out
+
+
+def test_headroom_scaling_is_off_by_default():
+    """A new weighting must never turn itself on: one variable at a time."""
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_positive_anchor_replay_overlay import (
+        compute_positive_anchor_weights,
+    )
+
+    rewards = np.array([[0.80, 0.90, 0.85], [0.97, 0.975, 0.972]])
+    base = compute_positive_anchor_weights(rewards, beta=1.0, margin=0.01)
+    same = compute_positive_anchor_weights(
+        rewards, beta=1.0, margin=0.01, headroom_scaling_power=0.0
+    )
+    assert np.array_equal(base, same)
+
+
+def test_headroom_scaling_lifts_the_low_reward_band():
+    """The bottom band holds most of the headroom but is under-weighted."""
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_positive_anchor_replay_overlay import (
+        compute_positive_anchor_weights,
+    )
+
+    rng = np.random.default_rng(0)
+    # Low-reward scenes with large headroom, high-reward scenes with small.
+    low = 0.78 + rng.normal(0, 0.01, (300, 1)) + np.concatenate(
+        [np.zeros((300, 1)), rng.uniform(0.03, 0.06, (300, 2))], axis=1
+    )
+    high = 0.965 + rng.normal(0, 0.002, (300, 1)) + np.concatenate(
+        [np.zeros((300, 1)), rng.uniform(0.012, 0.02, (300, 2))], axis=1
+    )
+    rewards = np.concatenate([low, high], axis=0)
+
+    plain = compute_positive_anchor_weights(rewards, beta=1.0, margin=0.01)
+    scaled = compute_positive_anchor_weights(
+        rewards, beta=1.0, margin=0.01, headroom_scaling_power=0.5
+    )
+
+    band = (0.0, 0.85)
+    gain_share, plain_share = _bands(rewards, plain)[band]
+    _, scaled_share = _bands(rewards, scaled)[band]
+    assert plain_share < gain_share, "fixture should reproduce the under-weighting"
+    assert abs(scaled_share - gain_share) < abs(plain_share - gain_share)
+
+
+# NOTE: the finding that power=0.5 beats power=1.0 is a property of the *measured*
+# reward distribution (six graded bands on the cycle-1 cache: L1 0.294 vs 0.426),
+# not a mathematical invariant.  A two-band synthetic fixture makes power=1.0 look
+# optimal (L1 0.0013), so asserting the ordering here would fabricate support for
+# it.  The measurement lives in compute_positive_anchor_weights' docstring; re-run
+# it against a real cache before changing the default.

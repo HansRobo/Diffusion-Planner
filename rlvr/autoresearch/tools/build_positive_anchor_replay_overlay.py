@@ -55,6 +55,7 @@ def compute_positive_anchor_weights(
     drop_all_zero_groups: bool = True,
     significance_sigma: float = 0.0,
     saturated_reward: float = 1.0,
+    headroom_scaling_power: float = 0.0,
 ) -> np.ndarray:
     """Vectorized equivalent of ``compute_awr_weights`` for cached totals.
 
@@ -161,6 +162,31 @@ def compute_positive_anchor_weights(
     # Scene-level significance filter.  Computed over *all* finite candidates
     # (not just the active ones) so the noise estimate is not itself biased by
     # having selected the winners.
+    # Optional headroom scaling.  ``exp(beta * z)`` uses only the *within-group*
+    # z-score, so a scene with 0.03 of available headroom and one with 0.005 get
+    # identical weights when their internal rankings match — the update ignores
+    # how much a scene has to gain.  Measured on the cycle-1 cache, that
+    # under-weights exactly the scenes worth learning from: the bottom 9.7% of
+    # scenes (det < 0.85) hold 36.9% of all headroom but receive 31.9% of the
+    # weight, while the 0.85-0.96 band is over-weighted 1.4-1.6x.
+    #
+    # Scaling non-anchor weights by ``sqrt(gain)`` brings the bottom band to
+    # 1.04x its fair share and cuts total misallocation (L1 over reward bands)
+    # from 0.328 to 0.294.  Linear ``gain`` scaling overshoots to 1.49x and makes
+    # the total *worse* (0.426), so the exponent matters.
+    if headroom_scaling_power > 0.0:
+        deterministic = np.where(behavior_finite, totals[:, 0], np.nan)
+        with np.errstate(invalid="ignore"):
+            best = np.nanmax(np.where(finite, totals, np.nan), axis=1)
+        headroom = np.clip(best - deterministic, 0.0, None)
+        positive = headroom[np.isfinite(headroom) & (headroom > 0.0)]
+        if positive.size:
+            scale = np.power(
+                headroom / float(positive.mean()), float(headroom_scaling_power)
+            )
+            scale = np.where(np.isfinite(scale), scale, 0.0)
+            weights[:, 1:] = (weights[:, 1:] * scale[:, None]).astype(np.float32)
+
     if significance_sigma > 0.0 or saturated_reward < 1.0:
         drop = np.zeros(totals.shape[0], dtype=bool)
         deterministic = np.where(behavior_finite, totals[:, 0], np.nan)
@@ -195,6 +221,7 @@ def build_overlay(
     drop_all_zero_groups: bool = True,
     significance_sigma: float = 0.0,
     saturated_reward: float = 1.0,
+    headroom_scaling_power: float = 0.0,
 ) -> dict[str, Any]:
     source_replay = source_replay.expanduser().resolve(strict=True)
     output_replay = output_replay.expanduser().resolve()
@@ -254,6 +281,7 @@ def build_overlay(
                 drop_all_zero_groups=drop_all_zero_groups,
                 significance_sigma=significance_sigma,
                 saturated_reward=saturated_reward,
+                headroom_scaling_power=headroom_scaling_power,
             )
             source_vetoed = np.asarray(source_weights) <= 0.0
             masked_candidates = int((source_vetoed & (weights > 0.0)).sum())
@@ -406,6 +434,7 @@ def build_overlay(
             "drop_all_zero_groups": bool(drop_all_zero_groups),
             "respect_source_zero_weights": True,
             "significance_sigma": significance_sigma,
+            "headroom_scaling_power": headroom_scaling_power,
             "saturated_reward": saturated_reward,
         },
         **totals,
@@ -448,6 +477,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--headroom-scaling-power",
+        type=float,
+        default=0.0,
+        help=(
+            "scale non-anchor weights by (scene headroom / mean headroom) ** P. "
+            "0 disables (pure within-group z-score). 0.5 aligned training weight "
+            "with available headroom best in measurement (L1 misallocation 0.328 "
+            "-> 0.294); 1.0 overshoots the low-reward band and is worse (0.426)"
+        ),
+    )
+    parser.add_argument(
         "--saturated-reward",
         type=float,
         default=1.0,
@@ -467,6 +507,7 @@ def main() -> None:
         unsafe_behavior_anchor_weight=args.unsafe_behavior_anchor_weight,
         significance_sigma=args.significance_sigma,
         saturated_reward=args.saturated_reward,
+        headroom_scaling_power=args.headroom_scaling_power,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 

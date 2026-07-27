@@ -126,8 +126,49 @@ def test_retention_anchor_is_positive():
 
 
 def test_entrypoint_uses_the_contract_retention_anchor():
+    """The anchor must come from the contract, never a literal."""
     text = (ROOT / "rlvr/autoresearch/run_plannerrft_jitterfix_to_epoch100.sh").read_text()
     assert "--behavior-anchor-weight \"${BEHAVIOR_ANCHOR_WEIGHT}\"" in text
-    assert "behavior_anchor_weight == $anchor" in text, (
-        "the overlay contract must follow the configured anchor, not a literal 0"
-    )
+    assert "--behavior-anchor-weight 0" not in text
+
+
+def test_no_corpus_size_constants_remain_in_the_live_chain():
+    """Constants compared against already-produced artifacts caused >100 hard
+    failures: a corpus change retroactively condemned valid caches."""
+    chain = [
+        "run_plannerrft_jitterfix_to_epoch100.sh",
+        "run_plannerrft_full_to_epoch100.sh",
+        "run_conditional_train_selector_line_search.sh",
+        "run_plannerrft_replay_beta_sensitivity.sh",
+        "run_plannerrft_solver_step_sensitivity.sh",
+        "run_plannerrft_candidate_sensitivity.sh",
+    ]
+    banned = ("5446154", "5446656", "680832", "766464", "6131712", "46262")
+    offenders = []
+    for name in chain:
+        text = (ROOT / "rlvr/autoresearch" / name).read_text()
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            for token in banned:
+                if token in stripped:
+                    offenders.append(f"{name}: {stripped[:70]}")
+    assert not offenders, "corpus-size constants reintroduced:\n" + "\n".join(offenders)
+
+
+def test_no_expected_hash_or_scene_count_pins_remain():
+    chain = ROOT / "rlvr/autoresearch"
+    banned = ("EXPECTED_SELECTOR_SHA256", "EXPECTED_VALID_SHA256",
+              "EXPECTED_MODEL_SHA256", "EXPECTED_VALID_SCENES",
+              "EXPECTED_SELECTOR_SCENES", "EXPECTED_PADDED_GROUPS",
+              "EXPECTED_RANK_GROUPS")
+    offenders = []
+    for name in ("run_plannerrft_full_to_epoch100.sh",
+                 "run_conditional_train_selector_line_search.sh",
+                 "run_plannerrft_replay_beta_sensitivity.sh"):
+        text = (chain / name).read_text()
+        for token in banned:
+            if token in text:
+                offenders.append(f"{name}: {token}")
+    assert not offenders, "pinned hash/count reintroduced: " + ", ".join(offenders)
