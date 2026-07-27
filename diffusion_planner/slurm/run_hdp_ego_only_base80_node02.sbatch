@@ -39,6 +39,11 @@ PYTHON=${HDP_PYTHON:-/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/.venv/b
 PORT=${HDP_PORT:-22633}
 MAX_ATTEMPTS=${HDP_MAX_ATTEMPTS:-3}
 FRESH_WANDB_RUN_ID=${HDP_WANDB_RUN_ID:-hdp-base80-no-road-border-${SLURM_JOB_ID}}
+# A SIGTERM that is not our own failure means the node is being taken away
+# (slurmd restart, package upgrade, maintenance).  Requeue so the job comes back
+# and strict-resumes from latest.pth.  Set to 0, or touch ${SAVE_DIR}/NO_REQUEUE,
+# to make a deliberate scancel stick.
+REQUEUE_ON_SIGTERM=${HDP_REQUEUE_ON_SIGTERM:-1}
 
 TORCHINDUCTOR_RUN_CACHE=${SAVE_DIR}/torchinductor_cache
 mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${TORCHINDUCTOR_RUN_CACHE}" \
@@ -49,6 +54,43 @@ TRAIN_LOG=${SAVE_DIR}/train_stdout.log
 log_health() {
   printf '[%s] %s\n' "$(date '+%F %T %Z')" "$*" | tee -a "${HEALTH_LOG}"
 }
+
+# Interruptible sleep.  Bash defers a trap until the current foreground command
+# finishes, so a plain `sleep 60` would swallow SIGTERM for up to a minute -- far
+# longer than the few seconds Slurm gives us before SIGKILL.  Blocking in `wait`
+# instead lets the handler run immediately.
+snooze() {
+  sleep "$1" &
+  wait $! 2>/dev/null || true
+}
+
+on_term() {
+  trap '' TERM
+  log_health "SIGTERM received (slurmd restart, node maintenance, or scancel)"
+  if [[ -e "${SAVE_DIR}/NO_REQUEUE" ]]; then
+    log_health "NO_REQUEUE marker present; honouring the cancellation"
+  elif [[ "${REQUEUE_ON_SIGTERM}" != "1" ]]; then
+    log_health "HDP_REQUEUE_ON_SIGTERM=${REQUEUE_ON_SIGTERM}; honouring the cancellation"
+  else
+    log_health "requeueing job ${SLURM_JOB_ID}; it will strict-resume from latest.pth"
+    scontrol requeue "${SLURM_JOB_ID}" ||
+      log_health "WARNING: scontrol requeue failed; job will stay dead"
+  fi
+  # Reap the trainer explicitly.  When slurmd itself is going down it never gets
+  # to clean up the step, and the eight ranks survive as orphans holding the GPUs
+  # -- that is what drained node02 on 2026-07-25.
+  if [[ -n "${TRAIN_PID:-}" ]] && kill -0 "${TRAIN_PID}" 2>/dev/null; then
+    log_health "terminating trainer pid ${TRAIN_PID}"
+    kill -TERM "${TRAIN_PID}" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+      kill -0 "${TRAIN_PID}" 2>/dev/null || break
+      snooze 1
+    done
+    kill -KILL "${TRAIN_PID}" 2>/dev/null || true
+  fi
+  exit 143
+}
+trap on_term TERM
 
 for required in "${TRAIN_LIST}" "${VALID_LIST}" "${NORMALIZATION}" "${EXTRA_X2}" "${EXTRA_XX1}" "${EXTRA_PSIM}" "${PYTHON}"; do
   if [[ ! -r "${required}" ]]; then
@@ -204,7 +246,7 @@ monitor_attempt() {
   local last_mtime=0
   local unchanged=0
   while kill -0 "${train_pid}" 2>/dev/null; do
-    sleep 60
+    snooze 60
     local current_mtime=0
     [[ -e "${TRAIN_LOG}" ]] && current_mtime=$(stat -c %Y "${TRAIN_LOG}")
     if (( current_mtime == last_mtime )); then
@@ -231,7 +273,15 @@ while (( attempt <= MAX_ATTEMPTS )); do
   RESUME_ARGS=()
   if [[ -r "${SAVE_DIR}/latest.pth" ]]; then
     RESUME_ARGS=(--resume_model_path "${SAVE_DIR}/latest.pth")
-    log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: strict resume from latest.pth"
+    # Checkpoints record wandb_id=None, so a strict resume would otherwise start a
+    # fresh W&B run instead of continuing the original one.  Pin the id explicitly
+    # to reattach; leave unset to keep the previous fork-a-new-run behaviour.
+    if [[ -n "${HDP_RESUME_WANDB_RUN_ID:-}" ]]; then
+      RESUME_ARGS+=(--wandb_run_id "${HDP_RESUME_WANDB_RUN_ID}")
+      log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: strict resume from latest.pth into W&B run ${HDP_RESUME_WANDB_RUN_ID}"
+    else
+      log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: strict resume from latest.pth"
+    fi
   else
     RESUME_ARGS=(--wandb_run_id "${FRESH_WANDB_RUN_ID}")
     log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: fresh Base run, no SFT initialization"
@@ -257,7 +307,7 @@ while (( attempt <= MAX_ATTEMPTS )); do
   attempt=$((attempt + 1))
   if (( attempt <= MAX_ATTEMPTS )); then
     log_health "Cooling down for 60 seconds before retry"
-    sleep 60
+    snooze 60
   fi
 done
 
