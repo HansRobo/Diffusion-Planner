@@ -72,9 +72,12 @@ BEHAVIOR_ANCHOR_WEIGHT = 0.0
 BEHAVIOR_ANCHOR_WEIGHT_MAX = 0.5
 
 #: Margin by which the logged human must beat the deployed deterministic output
-#: before the overlay keeps its expert_safe flag.  None = the flag is passed
-#: through as mined, which is the campaign default and what every cycle so far
-#: ran with.
+#: before the overlay keeps its expert_safe flag.  None passes the flag through
+#: as mined, which is what every cycle up to and including cycle 1 of
+#: plannerrft_rewardfix_v3 ran with; 0.01 (= POSITIVE_ADVANTAGE_MARGIN) is the
+#: default from cycle 2 on.  The supervisor repeats the number rather than
+#: reading it from here -- run_plannerrft_full_to_epoch100.sh does not eval this
+#: module -- so the two must be changed together.
 #:
 #: Measured over all 5,446,656 groups of
 #: plannerrft_full_cycle01_mine/20260720-050941 (full census, not a sample):
@@ -98,11 +101,17 @@ BEHAVIOR_ANCHOR_WEIGHT_MAX = 0.5
 #: expert anchor at 0.4 contributes ~0.0743/group today (11.3%) and ~0.2058/group
 #: (31.4%) once ungated.  Well inside the bound.
 #:
-#: Caveat carried by the source cache: its rewards predate db5ad350, so the
-#: absolute dead fraction will shift under today's reward.  The comparison
-#: between expert and deterministic is unaffected -- both were scored by the same
-#: reward -- so the 42.52% and +0.029 stand.
-EXPERT_IMPROVES_MARGIN: float | None = None
+#: That census cache predates db5ad350, so the absolute dead fraction was
+#: expected to shift under today's reward.  Re-measured on the first 663,552
+#: groups of the live plannerrft_rewardfix_v3 cycle-1 mine, which runs the fixed
+#: reward: mean deterministic reward 0.8922 (was 0.9319), mean best-vs-
+#: deterministic gain +0.0137 (was +0.0077), trainable 28.92% (was 19.45%).  The
+#: fixed reward does discriminate between candidates more, but it does not close
+#: the gap: 71.08% of groups still train on nothing, and of the dead-and-safe
+#: ones 44.47% have a better logged human -- the 42.52% reproduces.  Coverage
+#: with the gate is 28.92% -> 59.26%, so context decoding costs 2.05x, not 2.69x.
+#: Those rows are the corpus in mining order, not a random sample.
+EXPERT_IMPROVES_MARGIN: float | None = 0.01
 
 # --- conditional commit ------------------------------------------------------
 

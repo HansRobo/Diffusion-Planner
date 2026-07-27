@@ -70,6 +70,49 @@ def test_supervisor_replay_beta_matches_the_contract():
     )
 
 
+def test_supervisor_expert_improves_gate_resolves_without_unbound_variables():
+    """The supervisor cannot be dry-run, and it runs under ``set -u``.
+
+    A first attempt at this default referenced POSITIVE_ADVANTAGE_MARGIN, which
+    this script never defines because it does not eval the contract module.
+    ``bash -n`` accepts that happily and the campaign would have died on an
+    unbound variable at the cycle-1 handover, hours in.  Resolve the real line
+    under ``set -u`` instead, and pin it to the contract that documents it.
+    """
+
+    line = next(
+        ln for ln in SUPERVISOR.read_text().splitlines()
+        if ln.startswith("EXPERT_IMPROVES_MARGIN=")
+    )
+    resolved = subprocess.run(
+        ["bash", "-uc", f'{line}; printf %s "$EXPERT_IMPROVES_MARGIN"'],
+        capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"},
+    )
+    assert resolved.returncode == 0, f"unbound variable in {line!r}: {resolved.stderr}"
+    if C.EXPERT_IMPROVES_MARGIN is None:
+        assert resolved.stdout == "", "contract disables the gate, supervisor enables it"
+    else:
+        assert float(resolved.stdout) == C.EXPERT_IMPROVES_MARGIN, (
+            f"supervisor margin {resolved.stdout!r} disagrees with contract "
+            f"{C.EXPERT_IMPROVES_MARGIN}"
+        )
+
+
+def test_expert_improves_gate_implies_an_unrestricted_expert_anchor():
+    """The gate moves the decision into the overlay, so the trainer must not
+    also restrict the anchor to AWR-active groups -- that would re-kill exactly
+    the dead groups the gate exists to reach."""
+
+    text = SUPERVISOR.read_text()
+    assert "--no-expert_anchor_active_groups_only" in text
+    gate = text.index("EXPERT_IMPROVES_MARGIN=${EXPERT_IMPROVES_MARGIN")
+    override = text.index("EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=0")
+    inherited = text.index("EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=${")
+    assert inherited < gate < override, (
+        "the gate must override the inherited anchor scope, not be overridden by it"
+    )
+
+
 @pytest.mark.parametrize(
     ("scenes", "expected_groups", "expected_per_rank"),
     [

@@ -58,21 +58,32 @@ REPLAY_BETA=${REPLAY_BETA:-1.0}
 BEHAVIOR_ANCHOR_WEIGHT=${BEHAVIOR_ANCHOR_WEIGHT:-0.0}
 AWR_CANDIDATE_LOSS_HORIZON=${AWR_CANDIDATE_LOSS_HORIZON:-40}
 EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=${EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY:-1}
-# 80.55% of mined groups have no candidate that beats the deployed deterministic
+# 71% of mined groups have no candidate that beats the deployed deterministic
 # output, so AWR trains nothing on them and replay epochs are nearly inert
 # (+0.00024 selection reward over 9 epochs in the last full cycle).  The logged
 # human trajectory for those same scenes is already cached by the mine, and on
-# the expert_safe ones it scores above the deployed output by >0.01 in 42.52% of
-# cases -- mean +0.029, about twice the within-group candidate headroom.  Setting
-# a margin here makes the overlay keep expert_safe only where the human actually
-# wins, which turns those groups into behaviour-cloning targets with no extra
-# mining and lifts trainable coverage 19.45% -> 52.31%.  Only 0.46% of groups are
-# dead, safe, and expert-worse, so the margin costs almost nothing to respect.
-# It also hands the gating entirely to the overlay, hence the unrestricted anchor.
-# Empty disables it, and that is the default: this cycle must isolate the reward
-# fixes.  The overlay rebuilds from the mine cache in minutes, so enabling it
-# later costs no mine time.
-EXPERT_IMPROVES_MARGIN=${EXPERT_IMPROVES_MARGIN:-}
+# the expert_safe ones it scores above the deployed output by >0.01 in 44% of
+# cases.  Setting a margin here makes the overlay keep expert_safe only where the
+# human actually wins, which turns those groups into behaviour-cloning targets
+# with no extra mining and lifts trainable coverage 28.93% -> 59.26%.  It also
+# hands the gating entirely to the overlay, hence the unrestricted anchor.
+#
+# Measured on the first 692,736 groups of the cycle-1 mine, i.e. under the FIXED
+# reward, not the pre-db5ad350 cache the census used.  Both directions of the
+# gate point the same way: it ADDS the anchor to 30.3% of the corpus where the
+# human beats the deployed output, and REMOVES it from 3.95% (13.9% of today's
+# anchored-alive groups) where the human is a tie-or-worse -- 58% of those are
+# strictly worse, median gap -0.003.  Cost is nil: context decode is 1.0 ms/row
+# with 4 workers, so 59.26% of a 192-group batch is 116 ms against a 904 ms GPU
+# step, and replay_prefetch_batches=2 hides it.
+#
+# Cycle 1 ran WITHOUT this (empty) so it isolates the reward fixes; cycle 2 on is
+# a single-variable test against it, protected by the per-cycle non-regression
+# veto.  The overlay rebuilds from the mine cache in minutes, so this costs no
+# mine time.  Set empty to go back to passing expert_safe through as mined.
+# Keep in step with POSITIVE_ADVANTAGE_MARGIN in rlvr/campaign_contract.py; this
+# script does not eval the contract, so the value is repeated here on purpose.
+EXPERT_IMPROVES_MARGIN=${EXPERT_IMPROVES_MARGIN-0.01}
 OVERLAY_EXPERT_ARGS=()
 if [[ -n ${EXPERT_IMPROVES_MARGIN} ]]; then
   OVERLAY_EXPERT_ARGS+=(--expert-improves-margin "${EXPERT_IMPROVES_MARGIN}")
