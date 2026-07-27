@@ -33,9 +33,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from preference_optimization.dpo_loss import compute_trajectory_loss as _compute_trajectory_loss_raw
 from diffusion_planner.loss import hybrid_loss, loss_func
+
+from preference_optimization.dpo_loss import (
+    compute_trajectory_loss as _compute_trajectory_loss_raw,
+)
 from rlvr.grpo_config import GRPOConfig
 
 
@@ -250,6 +252,58 @@ def compute_direct_best_loss(
     return total_loss, metrics
 
 
+def _mean_over_ego_loss_horizons(
+    per_timestep: torch.Tensor,
+    *,
+    default_horizon: int,
+    loss_horizons: torch.Tensor | None,
+) -> torch.Tensor:
+    """Average ``[N,T]`` losses over an explicit per-target horizon.
+
+    Reward-ranked AWR targets may only be justified over the scorer horizon,
+    while a logged-expert retention target remains justified over the full
+    planner horizon.  Keeping the horizon per target lets one compiled batch
+    express both objectives without treating an unscored stochastic tail as
+    reward-supervised.  ``None`` preserves the historical full-horizon mean.
+    """
+
+    if per_timestep.ndim != 2:
+        raise ValueError(
+            f"per_timestep loss must be [N,T], got {tuple(per_timestep.shape)}"
+        )
+    target_count, available_horizon = per_timestep.shape
+    default_horizon = int(default_horizon)
+    if not 1 <= default_horizon <= available_horizon:
+        raise ValueError(
+            "default ego loss horizon must lie inside the trajectory: "
+            f"horizon={default_horizon}, T={available_horizon}"
+        )
+    values = per_timestep[:, :default_horizon]
+    if loss_horizons is None:
+        return values.mean(dim=-1)
+    if loss_horizons.shape != (target_count,):
+        raise ValueError(
+            "ego loss horizons must have one value per target: "
+            f"expected={(target_count,)}, got={tuple(loss_horizons.shape)}"
+        )
+    horizons = loss_horizons.to(device=values.device, dtype=torch.long)
+    if bool((horizons < 1).any().item()) or bool(
+        (horizons > default_horizon).any().item()
+    ):
+        raise ValueError(
+            "ego loss horizons must lie in [1, default_horizon]: "
+            f"min={int(horizons.min().item())}, "
+            f"max={int(horizons.max().item())}, default={default_horizon}"
+        )
+    mask = (
+        torch.arange(default_horizon, device=values.device)[None, :]
+        < horizons[:, None]
+    )
+    return (values * mask.to(dtype=values.dtype)).sum(dim=-1) / horizons.to(
+        dtype=values.dtype
+    )
+
+
 def compute_batched_trajectory_losses(
     model,
     data,
@@ -266,6 +320,7 @@ def compute_batched_trajectory_losses(
     hdp_hybrid_window: int = 10,
     use_prefix_mask: bool = True,
     awr_loss_type: str = "dp_geometry",
+    ego_loss_horizons: torch.Tensor | None = None,
 ):
     """Compute diffusion losses for N trajectories in ONE forward pass.
 
@@ -424,11 +479,12 @@ def compute_batched_trajectory_losses(
     # Prefix: replace noised steps with clean GT for delay steps
     xT_full = torch.where(prefix_mask, all_gt, xT_full)
 
-    # Normalize observation data
-    data_for_norm = {
-        k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in batch_data.items()
-    }
-    data_normalized = model_args.observation_normalizer(data_for_norm)
+    # ObservationNormalizer starts from a shallow dictionary copy and creates
+    # a new tensor for every field it normalizes; it does not mutate its input.
+    # Avoid cloning the already candidate-expanded decoder context before each
+    # of the K diffusion-loss steps.  This is especially important for the
+    # aligned neighbor future, and is numerically identical to the old path.
+    data_normalized = model_args.observation_normalizer(batch_data)
 
     merged = {**data_normalized}
     merged["gt_trajectories"] = all_gt
@@ -494,8 +550,7 @@ def compute_batched_trajectory_losses(
         # HDP's released RL step uses a direct mean-squared diffusion action
         # loss.  Keep this opt-in because original DP SFT normally uses the
         # geometry-aware decomposition below.
-        ego_horizon = min(T, int(getattr(model_args, "ego_prediction_horizon", T)))
-        per_traj_ego_loss = (ego_output[:, :ego_horizon] - ego_gt[:, :ego_horizon]).pow(2).mean(dim=(1, 2))
+        per_timestep_ego = (ego_output - ego_gt).pow(2).mean(dim=-1)
         position_lat_loss = position_lon_loss = heading_l2_loss = None
     else:
         loss_terms = loss_func(ego_output, ego_gt)
@@ -518,6 +573,11 @@ def compute_batched_trajectory_losses(
     if isinstance(timestep_coeff, torch.Tensor):
         timestep_coeff = timestep_coeff.detach().flatten().tolist()
     timestep_coeff = [float(value) for value in timestep_coeff]
+    # An empty coeff_timestep means the same thing as an absent one: weight
+    # every timestep equally.  Without this the "unit" division below raises
+    # ZeroDivisionError instead, which says nothing about the config.
+    if not timestep_coeff:
+        timestep_coeff = [1.0]
     if len(timestep_coeff) > 1 and T % len(timestep_coeff) != 0:
         raise ValueError(
             "original DP coeff_timestep must divide the future horizon: "
@@ -536,8 +596,12 @@ def compute_batched_trajectory_losses(
             + float(getattr(model_args, "coeff_position_lon_loss", 1.0)) * position_lon_loss
             + float(getattr(model_args, "coeff_heading_l2_loss", 1.0)) * heading_l2_loss
         )
-        ego_horizon = min(T, int(getattr(model_args, "ego_prediction_horizon", T)))
-        per_traj_ego_loss = per_timestep_ego[:, :ego_horizon].mean(dim=-1)
+    ego_horizon = min(T, int(getattr(model_args, "ego_prediction_horizon", T)))
+    per_traj_ego_loss = _mean_over_ego_loss_horizons(
+        per_timestep_ego,
+        default_horizon=ego_horizon,
+        loss_horizons=ego_loss_horizons,
+    )
 
     # Optional HDP-style kinematic auxiliary for the original x-start model.
     #
@@ -561,7 +625,13 @@ def compute_batched_trajectory_losses(
             omega=float(hdp_hybrid_waypoint_weight),
             W=max(1, min(int(hdp_hybrid_window), T)),
         )
-        per_traj_ego_loss = per_traj_ego_loss + float(hdp_hybrid_loss_weight) * hybrid_position_loss[:, :ego_horizon].mean(dim=-1)
+        per_traj_ego_loss = per_traj_ego_loss + float(
+            hdp_hybrid_loss_weight
+        ) * _mean_over_ego_loss_horizons(
+            hybrid_position_loss,
+            default_horizon=ego_horizon,
+            loss_horizons=ego_loss_horizons,
+        )
 
     # Neighbor regularization loss: per-trajectory MSE on valid neighbor predictions.
     # This prevents the LoRA from distorting neighbor predictions, which feeds back
