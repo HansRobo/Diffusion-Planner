@@ -55,10 +55,19 @@ def test_unscaled_commit_is_opt_in_only():
 
 
 def test_supervisor_replay_beta_matches_the_contract():
-    text = SUPERVISOR.read_text()
-    assert f"REPLAY_BETA=${{AWR_EXPECTED_REPLAY_BETA:-{C.REPLAY_BETA:g}}}" in text or (
-        f"REPLAY_BETA={C.REPLAY_BETA:g}" in text
-    ), "supervisor default beta disagrees with the contract"
+    """Compare the resolved value, not the literal: 1.0 and 1 are the same beta
+    but never the same string, and a text match fails on formatting alone."""
+    line = next(
+        ln for ln in SUPERVISOR.read_text().splitlines()
+        if ln.startswith("REPLAY_BETA=")
+    )
+    resolved = subprocess.run(
+        ["bash", "-c", f'{line}; printf %s "$REPLAY_BETA"'],
+        capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin"},
+    ).stdout
+    assert float(resolved) == C.REPLAY_BETA, (
+        f"supervisor default beta {resolved} disagrees with contract {C.REPLAY_BETA}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -116,13 +125,15 @@ def test_module_cli_runs():
     assert "XX1_LEGACY_EGO_WIDTH_M=1.7" in out
 
 
-def test_retention_anchor_is_positive():
-    """0 left 81.7% of scenes contributing nothing to the loss and the policy
-    drifted freely exactly where the rare collision events live."""
-    assert C.BEHAVIOR_ANCHOR_WEIGHT > 0.0
-    # Must not drown the improvement signal either: measured anchor-to-improvement
-    # total weight ratio is ~1.08x at 1.0, ~0.27x at 0.25.
-    assert C.BEHAVIOR_ANCHOR_WEIGHT <= 0.5
+def test_retention_anchor_defaults_to_the_validated_runs_value():
+    """The only run that produced a cycle-level gain used anchor=0.  A positive
+    value is an experiment against that baseline, never part of it -- the
+    "anchor=0 causes safety degradation" claim was refuted by that run's own
+    cycle-5 epochs, which degrade identically at anchor=0."""
+    assert C.BEHAVIOR_ANCHOR_WEIGHT == 0.0
+    # Raising it is allowed, but 1.0 puts the anchor's total weight at 1.08x the
+    # improvement targets' and drowns the signal.
+    assert C.BEHAVIOR_ANCHOR_WEIGHT <= C.BEHAVIOR_ANCHOR_WEIGHT_MAX <= 0.5
 
 
 def test_entrypoint_uses_the_contract_retention_anchor():
@@ -130,6 +141,28 @@ def test_entrypoint_uses_the_contract_retention_anchor():
     text = (ROOT / "rlvr/autoresearch/run_plannerrft_jitterfix_to_epoch100.sh").read_text()
     assert "--behavior-anchor-weight \"${BEHAVIOR_ANCHOR_WEIGHT}\"" in text
     assert "--behavior-anchor-weight 0" not in text
+
+
+def test_live_chain_never_hardcodes_neighbor_future_offset_zero():
+    """Offset 0 says "future[0] is already t+1".  Measured on the 20260707 corpus
+    (200 scenes, 15,997 agents): median ||present - future[0]|| == 0.0000 while
+    ||present - future[1]|| == 0.1368 ~= one 0.1 s step.  future[0] IS the present
+    state, so offset must be 1 or every neighbour is one frame stale -- in the
+    model target *and* in the reward's OBB collision replay that AWR ranks
+    candidates with.  0 is only correct once a converter writes pre-aligned files.
+    """
+    offenders = []
+    for name in ("run_plannerrft_jitterfix_to_epoch100.sh",
+                 "run_plannerrft_full_to_epoch100.sh"):
+        for line in (ROOT / "rlvr/autoresearch" / name).read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "DP_NEIGHBOR_FUTURE_OFFSET=0" in stripped.replace('"', "").replace("'", ""):
+                offenders.append(f"{name}: {stripped[:70]}")
+            if "DP_NEIGHBOR_FUTURE_OFFSET:-0}" in stripped:
+                offenders.append(f"{name}: {stripped[:70]}")
+    assert not offenders, "neighbour-future offset 0 reintroduced:\n" + "\n".join(offenders)
 
 
 def test_no_corpus_size_constants_remain_in_the_live_chain():

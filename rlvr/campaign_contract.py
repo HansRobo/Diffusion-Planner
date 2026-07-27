@@ -51,19 +51,25 @@ POSITIVE_ADVANTAGE_MARGIN = 0.01
 
 #: Weight on the deterministic behaviour trajectory as a *retention* target.
 #:
-#: This was 0, and that is why every safety class degraded while the aggregate
-#: reward rose.  With no retention term and EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=1,
-#: only the 18.3% of scenes carrying a positive-advantage candidate contributed
-#: anything to the loss; the policy was free to drift on the other 81.7%, which
-#: is where nearly all of the 0.15% collision events live.  Measured on the
-#: cycle-1 cache: any positive value lifts loss-constrained scenes from 19.2% to
-#: 98.3% while leaving the 33,880 improvement targets untouched.
+#: 0 = the value the only run that ever produced a cycle-level gain used
+#: (plannerrft_prefix_full_cycles02_to10_e100, +0.00108 reward over cycles 1-3).
 #:
-#: 0.25 keeps the anchor's total weight at 27% of the improvement targets' —
-#: enough to pin behaviour, not enough to drown the improvement signal.  Matches
-#: the "conservative original-DP adaptation ... with behavior retention anchor"
-#: profile in docs/awr_zero_risk_improvement_audit_20260718.md.
-BEHAVIOR_ANCHOR_WEIGHT = 0.25
+#: A previous note here claimed 0 was the cause of safety degrading while the
+#: aggregate reward rose.  That is refuted: the validated run ran anchor=0 for
+#: all 41 epochs and its cycle-5 epochs show the identical pattern (collision
+#: 0.001686 -> 0.001924, reward peaking then turning negative).  The
+#: reward-up/safety-down trade is inherent to the method; the validated run
+#: survives it via cycle-level max-selection, not via an anchor.
+#:
+#: The measurement that motivated a positive value still stands on its own --
+#: with EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=1 only 18.3% of scenes contribute to
+#: the loss, and any positive value lifts that to 98.3% without touching the
+#: 33,880 improvement targets.  But it has never been shown to beat 0 at the
+#: cycle level.  Treat it as a single-variable experiment against this baseline,
+#: not as part of it.  0.5 is the cap: 1.0 puts the anchor's total weight at
+#: 1.08x the improvement targets' and drowns the signal.
+BEHAVIOR_ANCHOR_WEIGHT = 0.0
+BEHAVIOR_ANCHOR_WEIGHT_MAX = 0.5
 
 # --- conditional commit ------------------------------------------------------
 

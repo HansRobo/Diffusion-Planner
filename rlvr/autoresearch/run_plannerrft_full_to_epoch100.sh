@@ -47,18 +47,25 @@ EVAL_LOADER_BENCHMARK_OUT=${OUT}/eval_loader_benchmark
 # Default to the audited/probe-selected beta=1 (the probe ranked 2 worst on both
 # reward and kinematic violations). After cycle 1 completes, a paired bounded
 # same-cache probe sets this value for every later cycle.
-REPLAY_BETA=1
+REPLAY_BETA=${REPLAY_BETA:-1.0}
 # Retention anchor on the deterministic trajectory.  0 left 81.7% of scenes
 # contributing nothing to the loss, so the policy drifted freely exactly where
 # the rare collision events live; see rlvr/campaign_contract.py.
-BEHAVIOR_ANCHOR_WEIGHT=${BEHAVIOR_ANCHOR_WEIGHT:-0.25}
+# The validated run used 0.0.  My 0.25 was introduced on a diagnosis that this
+# comparison refutes: that run degraded collision by +14% across its cycle-5
+# epochs with anchor=0.0 and still improved at cycle level, so the anchor was
+# never the cause.  Back to 0.0; it can be tested later as a single variable.
+BEHAVIOR_ANCHOR_WEIGHT=${BEHAVIOR_ANCHOR_WEIGHT:-0.0}
 AWR_CANDIDATE_LOSS_HORIZON=${AWR_CANDIDATE_LOSS_HORIZON:-40}
 EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=${EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY:-1}
-PLANNERRFT_REFERENCE_MODE=zero_noise
-PLANNERRFT_REFERENCE_NOISE_SCALE=0.5
+# Aligned to plannerrft_prefix_full_cycles02_to10_e100, the only run that
+# improved across cycles for 41 epochs (0.93233 -> 0.93297, no cycle
+# regressing).  It held these four values for its entire length.
+PLANNERRFT_REFERENCE_MODE=${PLANNERRFT_REFERENCE_MODE:-stochastic}
+PLANNERRFT_REFERENCE_NOISE_SCALE=${PLANNERRFT_REFERENCE_NOISE_SCALE:-0.5}
 PLANNERRFT_LONGITUDINAL_MODE=candidate_stretch
-PLANNERRFT_LAMBDA_LAT=1.0
-ROLLOUT_SAMPLE_STEPS=5
+PLANNERRFT_LAMBDA_LAT=${PLANNERRFT_LAMBDA_LAT:-1.5}
+ROLLOUT_SAMPLE_STEPS=${ROLLOUT_SAMPLE_STEPS:-10}
 # Row order and decoded float32 bytes are invariant to this thread count.
 # On the production 192-scene row shape, 16 workers measured 0.161 s versus
 # 0.254 s at 4 workers; 8 ranks x 16 remains below this node's 224 logical CPUs.
@@ -114,7 +121,7 @@ printf '%s\n' "$$" > "${OUT}/supervisor.pid"
 
 export PYTHONPATH="${ROOT}/diffusion_planner:${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export CONFIG
-NEIGHBOR_FUTURE_OFFSET=${DP_NEIGHBOR_FUTURE_OFFSET:-0}
+NEIGHBOR_FUTURE_OFFSET=${DP_NEIGHBOR_FUTURE_OFFSET:-1}
 [[ ${NEIGHBOR_FUTURE_OFFSET} =~ ^0$|^1$ ]] \
   || { echo "unsupported DP_NEIGHBOR_FUTURE_OFFSET=${NEIGHBOR_FUTURE_OFFSET}" >&2; exit 2; }
 export DP_NEIGHBOR_FUTURE_OFFSET=${NEIGHBOR_FUTURE_OFFSET}
@@ -908,7 +915,17 @@ main() {
     REPLAY_SCENE_LOAD_WORKERS="${REPLAY_SCENE_LOAD_WORKERS}" \
     "${BETA_SENSITIVITY_SCRIPT}" >> "${STATUS}" 2>&1
   [[ -s ${BETA_SELECTION} ]] || die "beta sensitivity produced no selection"
-  REPLAY_BETA=$(jq -er '.selected_beta' "${BETA_SELECTION}")
+  # Probe reports, does not override.  The 41-epoch run that actually improved
+  # (plannerrft_prefix_full_cycles02_to10_e100: 0.93233 -> 0.93297 over five
+  # cycles, no cycle regressing) held beta=1.0 for its entire length.  The probe
+  # picks on a short paired delta whose three arms all came out negative and
+  # within tolerance of each other, so it is choosing noise; a 41-epoch empirical
+  # result outranks that.  Set PROBE_MAY_OVERRIDE=1 to restore probe control.
+  if [[ ${PROBE_MAY_OVERRIDE:-0} == 1 ]]; then
+    REPLAY_BETA=$(jq -er '.selected_beta' "${BETA_SELECTION}")
+  else
+    log "beta probe suggested $(jq -r '.selected_beta' "${BETA_SELECTION}"); keeping validated ${REPLAY_BETA}"
+  fi
   [[ ${REPLAY_BETA} == 0.5 || ${REPLAY_BETA} == 1 || ${REPLAY_BETA} == 2 ]] \
     || die "invalid selected replay beta ${REPLAY_BETA}"
   log "Cycles 2--${TOTAL_CYCLES} selected replay beta=${REPLAY_BETA}; reason=$(jq -er '.selection_reason' "${BETA_SELECTION}")"
@@ -938,10 +955,20 @@ main() {
     "${CANDIDATE_SENSITIVITY_SCRIPT}" >> "${STATUS}" 2>&1
   [[ -s ${CANDIDATE_SELECTION} ]] \
     || die "candidate sensitivity produced no selection"
-  PLANNERRFT_REFERENCE_MODE=$(jq -er '.selected_reference_mode' "${CANDIDATE_SELECTION}")
-  PLANNERRFT_REFERENCE_NOISE_SCALE=$(jq -er '.selected_reference_noise_scale' "${CANDIDATE_SELECTION}")
-  PLANNERRFT_LONGITUDINAL_MODE=$(jq -er '.selected_longitudinal_mode' "${CANDIDATE_SELECTION}")
-  PLANNERRFT_LAMBDA_LAT=$(jq -er '.selected_lambda_lat_m' "${CANDIDATE_SELECTION}")
+  # Same reasoning.  The validated run generated candidates with
+  # reference_mode=stochastic and reference_noise_scale=0.5 throughout.  The
+  # probe selected zero_noise/0.0, which removes the only source of behavioural
+  # diversity between candidates — and the measured median headroom (0.00366) is
+  # already below the within-group candidate std (0.00479), so making candidates
+  # *more* homogeneous removes learnable signal rather than adding it.
+  if [[ ${PROBE_MAY_OVERRIDE:-0} == 1 ]]; then
+    PLANNERRFT_REFERENCE_MODE=$(jq -er '.selected_reference_mode' "${CANDIDATE_SELECTION}")
+    PLANNERRFT_REFERENCE_NOISE_SCALE=$(jq -er '.selected_reference_noise_scale' "${CANDIDATE_SELECTION}")
+    PLANNERRFT_LONGITUDINAL_MODE=$(jq -er '.selected_longitudinal_mode' "${CANDIDATE_SELECTION}")
+    PLANNERRFT_LAMBDA_LAT=$(jq -er '.selected_lambda_lat_m' "${CANDIDATE_SELECTION}")
+  else
+    log "candidate probe suggested $(jq -r '.selected_reference_mode' "${CANDIDATE_SELECTION}")/$(jq -r '.selected_longitudinal_mode' "${CANDIDATE_SELECTION}") noise=$(jq -r '.selected_reference_noise_scale' "${CANDIDATE_SELECTION}"); keeping validated ${PLANNERRFT_REFERENCE_MODE}/${PLANNERRFT_LONGITUDINAL_MODE} noise=${PLANNERRFT_REFERENCE_NOISE_SCALE}"
+  fi
   [[ $(jq -er '.selected_sample_steps' "${CANDIDATE_SELECTION}") == ${ROLLOUT_SAMPLE_STEPS} ]] \
     || die "candidate sensitivity used a different diffusion solver"
   [[ ${PLANNERRFT_REFERENCE_MODE} == zero_noise || ${PLANNERRFT_REFERENCE_MODE} == stochastic ]] \

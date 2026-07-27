@@ -95,7 +95,10 @@ done
 
 cd "${ROOT}"
 export PYTHONPATH="${ROOT}/diffusion_planner:${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
-export DP_NEIGHBOR_FUTURE_OFFSET=0
+# The 20260707 corpus is legacy data: measured ||present - future[0]|| == 0, so
+# frame 0 of neighbor_agents_future is the present state and must be dropped.
+# 0 is only correct once a converter writes pre-aligned files.
+export DP_NEIGHBOR_FUTURE_OFFSET=${DP_NEIGHBOR_FUTURE_OFFSET:-1}
 export DP_DDP_TIMEOUT_MINUTES=${DP_DDP_TIMEOUT_MINUTES:-180}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
@@ -108,9 +111,10 @@ export PYTHONUNBUFFERED=1
 # on.  Set EXTRA_TRAIN_REPEAT=0 to train on the un-augmented list.
 RIGHT_TURN_ARTIFACTS=${RIGHT_TURN_ARTIFACTS:-/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/artifacts/right_turn_is_skipped_filtered_20260716}
 EXTRA_TRAIN_REPEAT=${EXTRA_TRAIN_REPEAT:-10}
-# Retention anchor on the deterministic trajectory.  0 (the previous value) left
-# 81.7% of scenes contributing nothing to the loss, so the policy drifted freely
-# exactly where the rare collision events live; see rlvr/campaign_contract.py.
+# Retention anchor on the deterministic trajectory.  Defaults to 0, the value the
+# only run that produced a cycle-level gain used; a positive value is a
+# single-variable experiment against that baseline.  See rlvr/campaign_contract.py
+# for why the "0 causes safety degradation" reading was refuted.
 BEHAVIOR_ANCHOR_WEIGHT=${BEHAVIOR_ANCHOR_WEIGHT:-$(
   "${PYTHON}" -c 'from rlvr.campaign_contract import BEHAVIOR_ANCHOR_WEIGHT as w; print(f"{w:g}")'
 )}
@@ -338,7 +342,7 @@ exec env \
   RIGHT_TURN_ARTIFACTS="${RIGHT_TURN_ARTIFACTS}" \
   EXTRA_TRAIN_REPEAT="${EXTRA_TRAIN_REPEAT}" \
   EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=1 \
-  DP_NEIGHBOR_FUTURE_OFFSET=0 \
+  DP_NEIGHBOR_FUTURE_OFFSET="${DP_NEIGHBOR_FUTURE_OFFSET}" \
   TARGET_EPOCH="${TARGET_EPOCH}" \
   OUT="${CAMPAIGN_OUT}" \
   bash "${SUPERVISOR}"
