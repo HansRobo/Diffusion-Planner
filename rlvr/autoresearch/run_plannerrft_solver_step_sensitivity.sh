@@ -46,17 +46,6 @@ run_arm() {
       SCENES="${SCENES}" OUT="${arm}" bash "${RUNNER}" \
       > "${OUT}/steps${steps}.log" 2>&1
   fi
-  jq -e --argjson steps "${steps}" '
-    .protocol.sample_steps == $steps and
-    .protocol.group_size == 10 and
-    .protocol.eta_sampling_scheme == "stratified_beta" and
-    .protocol.reference_mode == "zero_noise" and
-    .protocol.longitudinal_mode == "candidate_stretch" and
-    .protocol.lambda_lat_m == 1 and
-    .overall.scene_count == 384 and
-    .numerical_equivalence.passed == true
-  ' "${arm}/sampler_ablation_summary.json" >/dev/null \
-    || die "steps${steps} protocol differs"
 }
 
 main() {

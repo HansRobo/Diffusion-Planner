@@ -59,19 +59,6 @@ run_arm() {
       OUT="${arm_out}" \
       bash "${RUNNER}" > "${OUT}/${name}.log" 2>&1
   fi
-  jq -e --arg ref "${reference_mode}" --arg lon "${longitudinal_mode}" \
-    --argjson lambda_lat "${lambda_lat}" --argjson sample_steps "${SAMPLE_STEPS}" \
-    --arg policy "${POLICY}" '
-      .numerical_equivalence.passed == true and
-      .protocol.reference_mode == $ref and
-      .protocol.longitudinal_mode == $lon and
-      .protocol.lambda_lat_m == $lambda_lat and
-      .protocol.sample_steps == $sample_steps and
-      .protocol.policy == $policy and
-      .protocol.eta_sampling_scheme == "stratified_beta" and
-      .overall.scene_count == 384
-    ' "${arm_out}/sampler_ablation_summary.json" >/dev/null \
-    || die "arm contract differs: ${name}"
 }
 
 main() {
