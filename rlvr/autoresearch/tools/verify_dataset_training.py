@@ -8,8 +8,10 @@ fast pass of each training pipeline, reporting PASS/FAIL per pipeline:
 * **RSFT**  - ``rlvr.autoresearch.run_experiment`` on the frame set (K-sample
   ranked SFT, 1 epoch): generation + reward + a LoRA checkpoint save.
 * **R2LPL** - ``rlvr.autoresearch.tools.mine_direct_reproducer_chunks`` on the
-  contiguous corpus: the closed-loop rollout runs on the contiguous NPZs
-  (>=1 chunk simulated).
+  contiguous corpus. Default (no reward config) = plan-only: load the contiguous
+  NPZs, detect the rollout lineage, and plan chunks by frame contiguity (does NOT
+  run the model). Supplying ``danger_reward_config`` runs the full closed-loop model
+  rollout (>=1 chunk simulated). PASS reflects whichever mode ran.
 
 The intent is a fast "did I break training?" gate: change something, run this
 against a dataset, get confirmation. Each pipeline can be skipped independently
@@ -55,7 +57,7 @@ _CONFIG_DIR = Path(__file__).resolve().parent / "dataset_smoke_configs"
 
 # smoke-only keys the RSFT config carries but run_experiment must not receive as
 # config fields (they are applied by this script instead).
-_RSFT_SCRIPT_KEYS = {"_doc", "n_train_cap", "n_val_cap", "sft_batch_size"}
+_RSFT_SCRIPT_KEYS = {"_doc", "n_train_cap", "n_val_cap", "sft_batch_size", "train_epochs"}
 
 
 def _load_json(path: Path):
@@ -170,11 +172,19 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
     ]
     print(f"[SFT] train {n_tr} / val {n_va} scenes -> {work / 'sft.log'}", flush=True)
     rc, text = _run(cmd, work / "sft.log", env)
-    tr_loss = re.findall(r"epoch_mean_loss\['loss'\]=([0-9.eE+-]+)", text)
-    va_loss = re.findall(r"valid_loss_ego=([0-9.eE+-]+)", text)
+    # capture inf/nan as full tokens too, so a non-finite loss is a clean FAIL rather
+    # than a bare "-" that raises ValueError on float()
+    num = r"(-?inf|nan|[0-9.eE+-]+)"
+    tr_loss = re.findall(rf"epoch_mean_loss\['loss'\]={num}", text)
+    va_loss = re.findall(rf"valid_loss_ego={num}", text)
 
     def _finite(xs):
-        return xs and all(v == v and abs(float(v)) != float("inf") for v in (float(x) for x in xs))
+        if not xs:
+            return False
+        try:
+            return all(math.isfinite(float(x)) for x in xs)
+        except ValueError:
+            return False
 
     ok = rc == 0 and _finite(tr_loss) and _finite(va_loss)
     detail = (
@@ -222,17 +232,20 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
     ]
     print(f"[RSFT] train {n_tr} / val {n_va} scenes -> {work / 'rsft.log'}", flush=True)
     rc, text = _run(cmd, work / "rsft.log", env)
-    # PASS requires evidence that TRAINING actually happened, not just a saved adapter
-    # + a promoted summary reward:
-    #  - kept training scenes >= 1 (the trainer swallows train-load failures and
-    #    returns {} for N=0 while still saving an adapter and evaluating val), and
-    #  - a per-epoch training-loss line was emitted, and
+    # PASS requires evidence that TRAINING actually happened, not just rc=0 + a saved
+    # adapter + a promoted summary reward:
+    #  - a per-epoch training-loss line was emitted (`trained`) — this is the real
+    #    guard: the trainer swallows train-load failures to {} for N=0, but then
+    #    log_metrics raises (rc!=0) AND no per-epoch Loss= line is printed, so N=0
+    #    can't satisfy `trained`. (kept_train below is informational only: the
+    #    skip-filter line prints only when skip_filtered_scenes is enabled, so gating
+    #    on it would false-FAIL a healthy run that disables that feature.)
     #  - a FINITE per-epoch validation reward (the "Eval [epochN-val]: reward=" line,
     #    which exists regardless of the model-quality promotion threshold; the summary
-    #    "val_reward" stays -inf with --skip_baseline when the reward is <= -5, so a
-    #    real run would false-FAIL on it).
+    #    "val_reward" stays -inf with --skip_baseline when the reward is <= -5, so
+    #    gating on it would false-FAIL a real run).
     kept = re.findall(r"train:\s*kept\s+(\d+)\s*/", text)
-    kept_train = int(kept[-1]) if kept else 0
+    kept_train = int(kept[-1]) if kept else None
     trained = re.search(r"Epoch\s+\d+.*Loss=", text) is not None
     ev = re.findall(r"Eval \[epoch\d+-val\][^\n]*reward=([+-]?(?:inf|nan|[0-9.eE]+))", text)
     ev_val = None
@@ -243,7 +256,7 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
         except ValueError:
             ev_val = None
     lora = list((work / "out").rglob("adapter_model.safetensors"))
-    ok = rc == 0 and kept_train >= 1 and trained and ev_val is not None and bool(lora)
+    ok = rc == 0 and trained and ev_val is not None and bool(lora)
     detail = (
         f"rc={rc} kept_train={kept_train} trained={trained} "
         f"epoch_val_reward={ev[-1] if ev else 'NONE'} lora_saved={'yes' if lora else 'no'}"

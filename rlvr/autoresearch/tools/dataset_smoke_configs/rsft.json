@@ -1,5 +1,5 @@
 {
-  "_doc": "Smoke config for Ranked-SFT / RL (rlvr.autoresearch.run_experiment) on a v1 dataset. The keys below are the run_experiment config (passed verbatim via --config); n_train_cap / n_val_cap / sft_batch_size are read by the smoke script to subsample + set the forward batch. Reduced generations/rank/epochs for speed - not a real training recipe.",
+  "_doc": "Smoke config for Ranked-SFT / RL (rlvr.autoresearch.run_experiment) on a v1 dataset. The keys below are the run_experiment config (passed verbatim via --config); n_train_cap / n_val_cap / sft_batch_size / train_epochs are consumed by the smoke script (stripped from the --config and passed as CLI flags / used to subsample). Reduced generations/rank/epochs for speed - not a real training recipe.",
   "ranked_sft_mode": "gt_neighbor",
   "sft_velocity_weight": true,
   "num_generations": 16,

@@ -27,9 +27,9 @@ trajectory (min distance point→polyline, reusing
 pedestrian the ego will actually pass close to", not "a pedestrian exists
 somewhere in the 320 slots".
 
-All feature bodies REUSE the canonical implementations (``compute_gt_stats``,
-``lat_accel_curvature``, ``read_sidecar``, ``future_to_4col``,
-``_point_to_segments_min_dist``) — never reimplemented. The features that live
+All feature bodies REUSE the canonical implementations (``lat_accel_curvature``,
+``read_sidecar``, ``future_to_4col``, ``_point_to_segments_min_dist``) — never
+reimplemented. The features that live
 inline inside ``scene_search`` constraint ``.filter()`` methods (ego speed, GT
 travel distance, ego-origin neighbor count) use the exact documented formula with
 a ``file:line`` citation. Heavy imports (torch) are deferred to first use so
@@ -87,7 +87,7 @@ FEATURE_COLUMNS = [
     "gt_yaw_deg",  # signed total GT yaw
     "gt_path_m",
     "peak_lat_accel",  # max |speed*omega| over ego future
-    "peak_abs_yaw_deg",  # unsigned total yaw magnitude (from compute_gt_stats)
+    "peak_abs_yaw_deg",  # unsigned total yaw magnitude (width-aware unsigned_total_yaw_deg)
     "neighbor_count",  # active neighbors within radius of ego ORIGIN (informational)
     "nearest_neighbor_m",  # nearest active neighbor to ego ORIGIN
     "nearest_agent_path_m",  # nearest active neighbor to the ego GT PATH
@@ -302,15 +302,6 @@ def peak_lat_accel(ego_future: np.ndarray) -> float:
     fut4 = future_to_4col(fut, zero_rows_are_padding=False)
     la = lat_accel_curvature(fut4)
     return float(np.max(np.abs(la))) if la.size else 0.0
-
-
-def gt_stats(npz_path: str) -> dict:
-    """{'yaw_deg': unsigned total yaw, 'path_m': path length} via
-    curate_curve_scenes.compute_gt_stats, or {} if it returns None."""
-    from rlvr.autoresearch.tools.curate_curve_scenes import compute_gt_stats
-
-    s = compute_gt_stats(npz_path)
-    return {} if s is None else {"yaw_deg": float(s["yaw_deg"]), "path_m": float(s["path_m"])}
 
 
 def active_neighbor_info(neighbor_agents_past: np.ndarray):
@@ -582,8 +573,8 @@ def extract_scene_features(
     loaded=None,
 ) -> dict:
     """Full per-scene feature row for one NPZ path — every :data:`FEATURE_COLUMNS`
-    key. Loads the NPZ (or reuses ``loaded`` if given), computes numeric features,
-    adds ``gt_path_m`` / ``peak_abs_yaw_deg`` (via compute_gt_stats), the bag/frame,
+    key. Loads the NPZ (or reuses ``loaded`` if given), computes numeric features
+    (incl. width-aware ``gt_path_m`` / ``peak_abs_yaw_deg``), the bag/frame,
     optional world pose from the sidecar (nullable), and the derived labels.
     ``device`` / ``precomputed_dpath`` are forwarded to :func:`features_from_npz`."""
     d = loaded if loaded is not None else np.load(npz_path, allow_pickle=True)

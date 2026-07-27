@@ -263,19 +263,30 @@ def canonicalize_npz(in_path: str, out_path: str) -> None:
     ego_shape must be present (fail loud). Sidecar copied alongside if present.
     version stamped to 3 (native 4-col)."""
     d = dict(np.load(in_path, allow_pickle=True))
-    if "ego_shape" not in d:
-        raise ValueError(f"ego_shape missing in {in_path} (no default permitted)")
+    # Every output must carry the fields SFT indexes unconditionally (train_epoch /
+    # neighbor_db / Dataset.__getitem__ read them with no fill-in). Fail loud at BUILD
+    # time rather than emit a training-invalid NPZ that KeyErrors mid-training.
+    _REQUIRED = (
+        "ego_current_state",
+        "ego_agent_future",
+        "neighbor_agents_past",
+        "neighbor_agents_future",
+        "ego_shape",
+    )
+    missing = [k for k in _REQUIRED if k not in d]
+    if missing:
+        raise ValueError(
+            f"{in_path}: missing required training field(s) {missing} (no default permitted)"
+        )
 
-    if "neighbor_agents_past" in d:
-        d["neighbor_agents_past"] = _pad_slots(
-            np.asarray(d["neighbor_agents_past"], dtype=np.float32), N_SLOTS
-        )
-    if "neighbor_agents_future" in d:
-        naf = future_to_4col(
-            np.asarray(d["neighbor_agents_future"], dtype=np.float32),
-            zero_rows_are_padding=True,
-        )
-        d["neighbor_agents_future"] = _pad_slots(naf, N_SLOTS)
+    d["neighbor_agents_past"] = _pad_slots(
+        np.asarray(d["neighbor_agents_past"], dtype=np.float32), N_SLOTS
+    )
+    naf = future_to_4col(
+        np.asarray(d["neighbor_agents_future"], dtype=np.float32),
+        zero_rows_are_padding=True,
+    )
+    d["neighbor_agents_future"] = _pad_slots(naf, N_SLOTS)
 
     # enforce float32 on all floating arrays (ego_agent_future stays [80,3])
     for k, v in list(d.items()):
@@ -292,15 +303,21 @@ def canonicalize_npz(in_path: str, out_path: str) -> None:
 
 def _verify_canonical(out_path: str) -> None:
     d = np.load(out_path, allow_pickle=True)
+    for k in (
+        "ego_current_state",
+        "ego_agent_future",
+        "neighbor_agents_past",
+        "neighbor_agents_future",
+        "ego_shape",
+    ):
+        assert k in d.files, f"{out_path}: required field {k} missing"
     nap = d["neighbor_agents_past"]
     assert nap.shape[0] == N_SLOTS, (
         f"{out_path}: neighbor_agents_past slots {nap.shape[0]} != {N_SLOTS}"
     )
-    if "neighbor_agents_future" in d.files:
-        naf = d["neighbor_agents_future"]
-        assert naf.shape[0] == N_SLOTS, f"{out_path}: future slots {naf.shape[0]} != {N_SLOTS}"
-        assert naf.shape[-1] == 4, f"{out_path}: future not 4-col ({naf.shape[-1]})"
-    assert "ego_shape" in d.files, f"{out_path}: ego_shape missing"
+    naf = d["neighbor_agents_future"]
+    assert naf.shape[0] == N_SLOTS, f"{out_path}: future slots {naf.shape[0]} != {N_SLOTS}"
+    assert naf.shape[-1] == 4, f"{out_path}: future not 4-col ({naf.shape[-1]})"
 
 
 # --------------------------------------------------------------------------- #
