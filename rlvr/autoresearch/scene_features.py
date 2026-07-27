@@ -197,13 +197,23 @@ def batch_min_dist_to_paths(points, seg_p1, seg_p2, point_mask=None):
 # filename parsing
 # --------------------------------------------------------------------------- #
 def bag_and_frame(npz_path: str) -> tuple[str, int]:
-    """(bag prefix, frame index) from filename. Mirrors search_scenes ``_bag_prefix``
-    (``rsplit('_',1)[0]``) + frame regex ``_(\\d+)\\.npz$`` (search_scenes.py:317-ff).
-    Frame is -1 if the name has no trailing numeric index."""
+    """(bag id, frame index) from the path. Frame index is the trailing ``_(\\d+)``
+    of the filename (search_scenes.py:317-ff); -1 if absent.
+
+    The bag id includes the source **session directory** (last two path components,
+    e.g. ``<date>/<HH-MM-SS>``) as well as the filename prefix. Using the filename
+    prefix alone conflates different bags that share a basename (``/dateA/sess/
+    run_00000000.npz`` and ``/dateB/sess/run_00000000.npz`` both -> ``(run, 0)``),
+    which lets contiguous-window selection cross source bags and then breaks
+    reproducer lineage. This session key matches ``build_small_dataset.contig_relpath``
+    so a selected window and its emitted per-bag output dir agree."""
     base = os.path.basename(npz_path)
     m = _FRAME_RE.search(base)
     frame = int(m.group(1)) if m else -1
-    bag = base.rsplit("_", 1)[0] if "_" in base else base[:-4]
+    prefix = _FRAME_RE.sub("", base) if m else base[:-4]
+    d = os.path.dirname(npz_path)
+    session = "_".join(p for p in d.split(os.sep)[-2:] if p)
+    bag = f"{session}/{prefix}" if session else prefix
     return bag, frame
 
 
@@ -233,8 +243,23 @@ def gt_travel_distance_m(ego_future: np.ndarray) -> float:
 def signed_total_yaw_deg(ego_future: np.ndarray) -> float:
     """Signed cumulative GT heading change (deg), wrapped per-step. Same per-step
     wrap as curate_curve_scenes.compute_gt_stats (lines 40-42) but keeps the sign so
-    turn direction can be classified. Assumes ego_future[:,2] is the yaw column."""
-    yaw = np.asarray(ego_future, dtype=np.float32)[:, 2]
+    turn direction can be classified.
+
+    Width-aware: a 3-col ego future is ``[x, y, yaw]`` (col 2 is the yaw angle); a
+    4-col ego future is ``[x, y, cos, sin]`` (recover yaw via ``atan2(sin, cos)``).
+    Reading col 2 as a yaw on 4-col input integrates changes in *cosine*, which
+    silently mislabels the maneuver and can flip the turn direction. Any other
+    width fails loudly."""
+    fut = np.asarray(ego_future, dtype=np.float32)
+    w = fut.shape[1]
+    if w == 3:
+        yaw = fut[:, 2]
+    elif w == 4:
+        yaw = np.arctan2(fut[:, 3], fut[:, 2])
+    else:
+        raise ValueError(
+            f"ego_future must be 3-col [x,y,yaw] or 4-col [x,y,cos,sin]; got width {w}"
+        )
     dh = np.diff(yaw)
     dh = np.arctan2(np.sin(dh), np.cos(dh))
     return float(np.degrees(dh.sum()))

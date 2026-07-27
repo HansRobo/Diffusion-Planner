@@ -122,6 +122,51 @@ def test_signed_total_yaw_matches_maneuver():
     assert abs(sf.signed_total_yaw_deg(_straight_ego_future())) < 1.0
 
 
+def _to_4col_ego(ego3: np.ndarray) -> np.ndarray:
+    """[x,y,yaw] -> canonical [x,y,cos(yaw),sin(yaw)]."""
+    yaw = ego3[:, 2]
+    out = np.zeros((ego3.shape[0], 4), np.float32)
+    out[:, 0:2] = ego3[:, 0:2]
+    out[:, 2] = np.cos(yaw)
+    out[:, 3] = np.sin(yaw)
+    return out
+
+
+def test_signed_yaw_3col_4col_equivalent():
+    # the same turn must classify identically whether ego future is 3-col [x,y,yaw]
+    # or canonical 4-col [x,y,cos,sin]; reading col 2 on 4-col would flip the sign.
+    for deg in (60.0, -60.0, 20.0, -20.0):
+        ego3 = _turning_ego_future(deg)
+        y3 = sf.signed_total_yaw_deg(ego3)
+        y4 = sf.signed_total_yaw_deg(_to_4col_ego(ego3))
+        assert abs(y3 - y4) < 1e-3, (deg, y3, y4)
+        assert sf.maneuver(y3, 15.0) == sf.maneuver(y4, 15.0)
+    # a left turn stays turn-L in both widths (regression for the col-2-as-cos bug)
+    ego3 = _turning_ego_future(60.0)
+    assert sf.maneuver(sf.signed_total_yaw_deg(_to_4col_ego(ego3)), 15.0) == "turn-L"
+
+
+def test_signed_yaw_bad_width_fails_loud():
+    with pytest.raises(ValueError):
+        sf.signed_total_yaw_deg(np.zeros((10, 5), np.float32))
+
+
+def test_bag_and_frame_distinguishes_sessions(tmp_path):
+    # identical filename under two different session dirs must NOT collide.
+    # Paths are built from tmp_path (self-contained; bag_and_frame only parses
+    # the string, so the files need not exist).
+    a = tmp_path / "sessA" / "seg" / "run_00000000_00000131.npz"
+    b = tmp_path / "sessB" / "seg" / "run_00000000_00000131.npz"
+    c = tmp_path / "sessA" / "seg" / "run_00000000_00000132.npz"
+    ba, fa = sf.bag_and_frame(str(a))
+    bb, fb = sf.bag_and_frame(str(b))
+    bc, fc = sf.bag_and_frame(str(c))
+    assert ba != bb, (ba, bb)
+    assert fa == fb == 131
+    # same session dir + prefix -> same bag, consecutive frame
+    assert bc == ba and fc == 132
+
+
 def test_interaction_priority_ped_first():
     # a lead vehicle AND a relevant pedestrian both present -> has-ped wins
     assert (
@@ -279,7 +324,7 @@ def test_extract_scene_features_end_to_end(tmp_path):
     row = sf.extract_scene_features(str(p), with_sidecar=False)
     # every declared column present
     assert set(row) == set(sf.FEATURE_COLUMNS)
-    assert row["bag"] == "scene"
+    assert row["bag"].endswith("scene")  # bag id = <session>/<prefix>; prefix is "scene"
     assert row["frame"] == 42
     assert row["speed_bin"] == "mid"
     assert row["maneuver"] == "turn-L"

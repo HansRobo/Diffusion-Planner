@@ -136,6 +136,10 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
         str(int(cfg.get("batch_size", 8))),
         "--ddp",
         "false",
+        # train_predictor defaults to --device cuda; pass the resolved device so
+        # --device cpu actually runs on CPU instead of failing on a hidden GPU.
+        "--device",
+        "cpu" if args.device == "cpu" else "cuda",
         "--use_data_augment",
         str(bool(cfg.get("use_data_augment", True))).lower(),
         "--augment_prob",
@@ -253,9 +257,13 @@ def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
     # which still loads the contiguous NPZs, detects the rollout lineage and plans
     # chunks by frame-index contiguity (a self-contained dataset-consumable check;
     # pose/timeline continuity is validated only in the full rollout).
-    reward_cfg = _resolve_cfg_path(cfg.get("danger_reward_config"))
-    full_rollout = reward_cfg is not None and reward_cfg.exists()
+    # null danger_reward_config -> plan_only (self-contained). A SUPPLIED path must
+    # exist: fail loudly on a typo/stale path rather than silently downgrading to
+    # plan-only (which could report PASS without ever running the model).
+    reward_ref = cfg.get("danger_reward_config")
+    full_rollout = bool(reward_ref)
     if full_rollout:
+        reward_cfg = _require(_resolve_cfg_path(reward_ref), "danger_reward_config (R2LPL rollout)")
         thr = _require(_resolve_cfg_path(cfg["danger_threshold_config"]), "danger_threshold_config")
         crd = _require(
             _resolve_cfg_path(cfg["danger_credit_window_config"]), "danger_credit_window_config"
