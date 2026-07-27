@@ -42,24 +42,42 @@ Run hooks manually before preparing PRs:
 uv run pre-commit run --all-files
 ```
 
+## Quality gates
+
+Both gates must be green before a PR:
+
+```bash
+uv run --group dev python -m pytest -m "not benchmark"
+uv run ruff check .
+uv run ruff format --check .
+```
+
+`uv run pytest` resolves to a system binary on the GPU nodes and fails with
+`ModuleNotFoundError`; always go through `python -m pytest` as above.
+
+Ruff enforces `B, E, F, I, RET, SIM, W`. Reviewed exceptions are listed per file in
+`[tool.ruff.lint.per-file-ignores]` with the reason for each, so a fresh violation is always
+a real regression rather than accumulated noise. `F` in particular is what catches a name
+that no longer resolves — do not reintroduce `import *`, which silently disables it.
+
 ## Data
 
-Use the fixed full-sequence train/valid lists for HDP experiments. Do not mix unrelated project/area lists into these runs.
+Use the fixed train/valid lists for HDP experiments. Do not mix unrelated project or area
+lists into a run.
 
-Current HDP experiments use branch-local artifacts such as:
+**The launchers in `diffusion_planner/slurm/` are the source of truth for dataset paths.**
+Each one pins its corpus in a `HDP_*_LIST` default at the top of the file; read that rather
+than copying paths from prose, which goes stale. The corpora currently in use are:
 
-```text
-artifacts/full_sequence_base_from_20260622_step3/path_list_train_fullseq_from_20260622_step3.json
-artifacts/full_sequence_base_from_20260622_step3/path_list_valid_fullseq_from_20260622_step3.json
-```
+| Corpus | Used by |
+| --- | --- |
+| `20260707_vehicle_params_with_mirror/path_list_train_concatenated.json` | Base80, HDP-RL |
+| `20260623_full_sequence/path_list_train_sft_is_skipped_filtered.json` | SFT |
+| `20260702_basic_dataset/path_list_valid_sft_balanced.json` | Base80 validation |
 
-SFT and HDP-RL use the shared, precomputed `is_skipped`-filtered train list by default:
-
-```text
-/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_sft_is_skipped_filtered.json
-```
-
-The source `path_list_train_sft.json` remains unchanged. Temporal consistency metrics require consecutive frames; single-frame lists can still train the model but cannot evaluate inter-frame consistency correctly.
+Source lists are treated as immutable inputs; a job never rewrites them. Temporal consistency
+metrics require consecutive frames, so a single-frame list can still train the model but
+cannot evaluate inter-frame consistency correctly.
 
 ## Recommended training order
 
@@ -96,6 +114,30 @@ Unsafe pattern:
 - Using `--resume_model_path` to reinterpret waypoint latents as velocity latents.
 
 The training code performs representation checks to prevent silent checkpoint misuse.
+
+## Cluster and Slurm
+
+Launchers live in `diffusion_planner/slurm/`. Submit with the staged commit pinned:
+
+```bash
+sbatch --export=ALL,HDP_EXPECTED_COMMIT=<sha>,HDP_RESUME_WANDB_RUN_ID=<run-id> \
+  diffusion_planner/slurm/run_hdp_ego_only_base80_node02.sbatch
+```
+
+- **Commit guard.** `HDP_EXPECTED_COMMIT` is mandatory and must equal the staged checkout's
+  HEAD. Use `HDP_ALLOW_DIRTY=1` only for a deliberate dirty-worktree snapshot.
+- **Auto-resume.** When `latest.pth` exists in the run's save directory the launcher performs
+  a strict resume — model, optimizer, scheduler, EMA, RNG state and epoch — instead of
+  starting over.
+- **W&B re-attach.** Checkpoints currently store `wandb_id=None`, so a resume would otherwise
+  fork a new run. Pass `HDP_RESUME_WANDB_RUN_ID=<run-id>` to continue the original one.
+- **Requeue on SIGTERM.** The batch script traps SIGTERM and requeues itself, so losing the
+  node costs at most the epoch in flight. To make a deliberate `scancel` stick, either
+  `touch <save_dir>/NO_REQUEUE` first or submit with `HDP_REQUEUE_ON_SIGTERM=0`.
+
+The requeue path exists because a node-level `slurmd` restart cancels every job on that node.
+Keep automatic apt upgrades disabled on the GPU nodes; `node01` and `node02` currently have
+`unattended-upgrades` disabled and `apt-daily-upgrade.timer` masked for that reason.
 
 ## W&B
 
