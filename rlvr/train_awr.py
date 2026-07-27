@@ -2153,6 +2153,36 @@ def _compile_planner_modules(
     dynamic = bool(compile_config.get("dynamic", False))
     result.update({"enabled": True, "mode": mode, "backend": backend, "fullgraph": fullgraph, "dynamic": dynamic})
 
+    # The mine calls the DiT at two batch ranks -- B=scenes for the reference
+    # pass and B=scenes*K for the candidate bank -- and the guided subset is
+    # padded to multiples of plannerrft_guidance_bucket_size, so the live shape
+    # count is roughly twice the bucket count.  With bucket 32 over a 192-scene
+    # batch that is ~12 shapes against dynamo's default budget of 8, and once
+    # the budget is gone dynamo drops the *whole function* to eager for the rest
+    # of the process.  Every mine log on disk shows exactly that, within a
+    # minute of launch; every replay log is clean because replay has one shape.
+    # Raising the budget keeps the DiT compiled.  Left unset the behaviour is
+    # unchanged, so this is opt-in per config.
+    recompile_limit = compile_config.get("recompile_limit")
+    if recompile_limit is not None:
+        limit = int(recompile_limit)
+        applied: str | None = None
+        try:
+            # ``as`` form on purpose: a plain ``import torch._dynamo`` binds the
+            # name ``torch`` locally and shadows the module-level import that
+            # the hasattr(torch, "compile") check above relies on.
+            import torch._dynamo as dynamo_module
+
+            for attribute in ("recompile_limit", "cache_size_limit"):
+                if hasattr(dynamo_module.config, attribute):
+                    setattr(dynamo_module.config, attribute, limit)
+                    applied = attribute
+                    break
+        except Exception as error:  # pragma: no cover - depends on local torch
+            result["recompile_limit_error"] = f"{type(error).__name__}: {error}"
+        result["recompile_limit"] = limit
+        result["recompile_limit_attribute"] = applied
+
     targets: list[tuple[str, nn.Module, Any, str]] = []
     if bool(compile_config.get("encoder", True)):
         targets.append(("encoder", planner.encoder, planner, "encoder"))
@@ -6847,6 +6877,16 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--compile_mode", type=str, default=None)
     parser.add_argument(
+        "--compile_recompile_limit",
+        type=int,
+        default=None,
+        help=(
+            "override acceleration.recompile_limit: dynamo's per-function "
+            "recompile budget.  The mine exceeds the default 8 and falls back "
+            "to eager for the rest of the run"
+        ),
+    )
+    parser.add_argument(
         "--compile_encoder",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -6966,6 +7006,8 @@ def main() -> None:
         acceleration_config["compile"] = True
     if args.compile_mode is not None:
         acceleration_config["mode"] = args.compile_mode
+    if args.compile_recompile_limit is not None:
+        acceleration_config["recompile_limit"] = int(args.compile_recompile_limit)
     if args.compile_encoder is not None:
         acceleration_config["encoder"] = bool(args.compile_encoder)
     if args.compile_decoder is not None:

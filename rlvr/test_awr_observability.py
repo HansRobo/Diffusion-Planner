@@ -2824,3 +2824,66 @@ def test_compact_mine_row_summary_matches_finite_scalar_means():
     assert merged["mean_optimizer_step"] == 0.0
     assert "mean_loss" not in merged
     assert sums["optimizer_step"] == 0.0
+
+
+def test_compile_config_recompile_limit_is_applied_and_recorded():
+    """The mine exceeds dynamo's default budget; the knob must actually move it.
+
+    Every mine log on disk shows ``torch._dynamo hit config.recompile_limit
+    (8)`` on the DiT forward within a minute of launch, after which dynamo runs
+    that function eager for the rest of the process.  This asserts the config
+    key reaches dynamo rather than being silently recorded and dropped.
+    """
+
+    import torch._dynamo
+
+    attribute = next(
+        name
+        for name in ("recompile_limit", "cache_size_limit")
+        if hasattr(torch._dynamo.config, name)
+    )
+    original = getattr(torch._dynamo.config, attribute)
+    try:
+        result = train_awr_module._compile_planner_modules(
+            torch.nn.Linear(2, 2),
+            {"enabled": True, "encoder": False, "decoder": False,
+             "recompile_limit": original + 41},
+            "unit-test",
+        )
+        assert result["recompile_limit"] == original + 41
+        assert result["recompile_limit_attribute"] == attribute
+        assert "recompile_limit_error" not in result
+        assert getattr(torch._dynamo.config, attribute) == original + 41
+    finally:
+        setattr(torch._dynamo.config, attribute, original)
+
+
+def test_compile_config_without_recompile_limit_leaves_dynamo_untouched():
+    """Absent the key the behaviour must be byte-identical to before."""
+
+    import torch._dynamo
+
+    attribute = next(
+        name
+        for name in ("recompile_limit", "cache_size_limit")
+        if hasattr(torch._dynamo.config, name)
+    )
+    original = getattr(torch._dynamo.config, attribute)
+    result = train_awr_module._compile_planner_modules(
+        torch.nn.Linear(2, 2),
+        {"enabled": True, "encoder": False, "decoder": False},
+        "unit-test",
+    )
+    assert "recompile_limit" not in result
+    assert getattr(torch._dynamo.config, attribute) == original
+
+
+def test_recompile_limit_cli_flag_reaches_the_acceleration_config():
+    """The flag is only useful if it lands in the dict the compiler reads."""
+
+    source = pathlib.Path(train_awr_module.__file__).read_text()
+    assert '"--compile_recompile_limit"' in source
+    assert (
+        'acceleration_config["recompile_limit"] = int(args.compile_recompile_limit)'
+        in source
+    )
