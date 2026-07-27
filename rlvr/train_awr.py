@@ -5521,6 +5521,42 @@ def _expert_reward_is_hard_safe(reward: Any, reward_config: RewardConfig) -> boo
     )
 
 
+def _expert_anchor_trajectories(
+    data: dict[str, torch.Tensor], future_len: int
+) -> torch.Tensor | None:
+    """Build one logged target per scene in reward-trajectory layout."""
+
+    future = data.get("ego_agent_future")
+    if not isinstance(future, torch.Tensor):
+        return None
+    return heading_to_cos_sin(future)[:, : int(future_len), :4]
+
+
+def _expert_anchor_from_rewards(
+    expert: torch.Tensor,
+    scene_rewards: list[Any],
+    reward_config: RewardConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Apply the configured hard gates to one scored expert per scene.
+
+    Shared by both scoring routes -- the merged one that rides along in the
+    native rollout call and the standalone one below -- so the gate semantics
+    that decide which logged targets are trainable exist in exactly one place.
+    """
+
+    batch_size = int(expert.shape[0])
+    if len(scene_rewards) != batch_size:
+        raise ValueError(
+            f"expected one scored expert per scene: {len(scene_rewards)} != {batch_size}"
+        )
+    rewards = torch.empty(batch_size, device=expert.device, dtype=torch.float32)
+    safe = torch.zeros(batch_size, device=expert.device, dtype=torch.bool)
+    for scene_index, scene_reward in enumerate(scene_rewards):
+        rewards[scene_index] = float(scene_reward.total)
+        safe[scene_index] = _expert_reward_is_hard_safe(scene_reward, reward_config)
+    return expert, rewards, safe
+
+
 @torch.no_grad()
 def _score_expert_anchor_batch(
     data: dict[str, torch.Tensor],
@@ -5533,27 +5569,24 @@ def _score_expert_anchor_batch(
     wheelbase, and masks differ.  The model sampling/denoising path remains
     fully batched; this optional retention audit performs one additional
     reward call per scene and is disabled in the faithful HDP experiment.
+
+    The batched rollout path no longer needs this: it merges the expert into
+    the reward call it already makes per scene.  This remains the route for the
+    single-scene rollout and for callers that score experts without a rollout.
     """
 
-    future = data.get("ego_agent_future")
-    if not isinstance(future, torch.Tensor):
+    expert = _expert_anchor_trajectories(data, future_len)
+    if expert is None:
         return None
-    expert = heading_to_cos_sin(future)[:, : int(future_len), :4]
-    batch_size = int(expert.shape[0])
-    rewards = torch.empty(batch_size, device=expert.device, dtype=torch.float32)
-    safe = torch.zeros(batch_size, device=expert.device, dtype=torch.bool)
-    for scene_index in range(batch_size):
-        scene_data = _slice_eval_scene_data(data, scene_index)
-        scene_reward = compute_reward_batch(
+    scene_rewards = [
+        compute_reward_batch(
             expert[scene_index : scene_index + 1],
-            reward_compatible_data(scene_data),
+            reward_compatible_data(_slice_eval_scene_data(data, scene_index)),
             reward_config,
         )[0]
-        rewards[scene_index] = float(scene_reward.total)
-        safe[scene_index] = _expert_reward_is_hard_safe(
-            scene_reward, reward_config
-        )
-    return expert, rewards, safe
+        for scene_index in range(int(expert.shape[0]))
+    ]
+    return _expert_anchor_from_rewards(expert, scene_rewards, reward_config)
 
 
 def _inject_expert_anchor_batch(
@@ -5794,6 +5827,28 @@ def _train_scene(
     ):
         scoring_reward_config = copy.copy(reward_config)
         scoring_reward_config.enable_lane_departure = False
+    # Decided before the rollout because the batched path can score the logged
+    # expert as one extra row of the reward call it already makes per scene.  A
+    # reward call costs the same for K rows as for K+1 -- measured flat from
+    # N=1 to N=80, so the cost is per call, not per candidate -- which makes
+    # the separate expert pass pure duplicated overhead.  The stage timers put
+    # it at 42% of rollout wall time before the lane skip and ~35% after.
+    # An incomplete cached sidecar is still diagnosed by the block below rather
+    # than here, so that error and its message are unchanged.
+    cached_expert_keys = [key for key in _REPLAY_EXPERT_KEYS if key in data]
+    merged_expert_trajectories: torch.Tensor | None = None
+    merged_expert_rewards: list[Any] | None = None
+    if (
+        (expert_anchor_weight > 0.0 or (collect_only and cache_replay_expert_anchor))
+        and not cached_expert_keys
+        and rollout_override is None
+        and len(scene_paths) > 1
+    ):
+        merged_expert_trajectories = _expert_anchor_trajectories(
+            data, int(model_args.future_len)
+        )
+        if merged_expert_trajectories is not None:
+            merged_expert_rewards = []
     if rollout_override is None:
         if len(scene_paths) == 1:
             rollout = rollout_and_score_scene(
@@ -5817,6 +5872,8 @@ def _train_scene(
                     device,
                     exploration_reference_model=exploration_reference_model,
                     exploration_reference_model_args=exploration_reference_model_args,
+                    expert_trajectories=merged_expert_trajectories,
+                    expert_rewards_out=merged_expert_rewards,
                 ),
                 data,
             )
@@ -5835,7 +5892,6 @@ def _train_scene(
     if expert_anchor_weight > 0.0 or (
         collect_only and cache_replay_expert_anchor
     ):
-        cached_expert_keys = [key for key in _REPLAY_EXPERT_KEYS if key in data]
         if cached_expert_keys and len(cached_expert_keys) != len(
             _REPLAY_EXPERT_KEYS
         ):
@@ -5874,6 +5930,16 @@ def _train_scene(
                 expert_anchor_safe,
             )
             result["expert_anchor_cache_hit"] = 1.0
+        elif merged_expert_rewards is not None:
+            # Already scored, as a trailing row of each scene's native reward
+            # call, under scoring_reward_config -- the same config the else
+            # branch passes.  Only the gates are left to apply.
+            scored_experts = _expert_anchor_from_rewards(
+                merged_expert_trajectories,
+                merged_expert_rewards,
+                scoring_reward_config,
+            )
+            result["expert_anchor_cache_hit"] = 0.0
         else:
             # The same unused-diagnostic skip the native candidates get.
             # Outside the conditions above this *is* reward_config, so the

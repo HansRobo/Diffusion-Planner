@@ -1648,9 +1648,28 @@ def rollout_and_score_scene_batch(
     device: torch.device,
     exploration_reference_model: nn.Module | None = None,
     exploration_reference_model_args: Config | None = None,
+    expert_trajectories: torch.Tensor | None = None,
+    expert_rewards_out: list[RewardBreakdown] | None = None,
 ) -> list[AWRRollout]:
-    """Generate, optionally enrich, then weight each scene's candidate group."""
+    """Generate, optionally enrich, then weight each scene's candidate group.
 
+    ``expert_trajectories`` [B, T, C] is an optional extra target per scene --
+    the logged expert future -- scored as one additional row of each scene's
+    existing reward call, with its breakdown appended to ``expert_rewards_out``
+    in scene order and excluded from the candidate group.  A reward call costs
+    the same for K rows as for K+1 (measured flat from N=1 to N=80), so this
+    replaces a whole second per-scene call with nothing.  The candidate rewards
+    are unaffected because the reward reduces over neighbors and timesteps but
+    never over the candidate dimension.
+    """
+
+    if (expert_trajectories is None) != (expert_rewards_out is None):
+        raise ValueError(
+            "expert_trajectories and expert_rewards_out must be supplied "
+            "together: one without the other would either score an expert "
+            "whose breakdown is discarded or return an empty list the caller "
+            "would read as 'no expert'"
+        )
     if (
         rollout_config.plannerrft_guided_exploration
         and rollout_config.hdp_trajectory_augmentation
@@ -1685,16 +1704,39 @@ def rollout_and_score_scene_batch(
     )
     stage_end("gate_native", _stage_start)
     native_valid_by_scene = [native_valid_batch[index] for index in range(batch_size)]
+    if expert_trajectories is not None:
+        expected_expert_shape = (batch_size, *tuple(trajectories.shape[2:]))
+        if tuple(expert_trajectories.shape) != expected_expert_shape:
+            raise ValueError(
+                "expert trajectory shape must match one candidate per scene: "
+                f"{tuple(expert_trajectories.shape)} != {expected_expert_shape}"
+            )
+        expert_trajectories = expert_trajectories.to(
+            device=trajectories.device, dtype=trajectories.dtype
+        )
     _stage_start = time.perf_counter()
     for scene_index in range(batch_size):
         scene_data = _slice_scene_data(data, scene_index)
         scene_reward_data = reward_compatible_data(scene_data)
         reward_data_by_scene.append(scene_reward_data)
-        rewards_by_scene.append(
-            compute_reward_batch(
-                trajectories[scene_index], scene_reward_data, reward_config
+        scene_candidates = trajectories[scene_index]
+        if expert_trajectories is not None:
+            scene_candidates = torch.cat(
+                [
+                    scene_candidates,
+                    expert_trajectories[scene_index : scene_index + 1],
+                ],
+                dim=0,
             )
+        scene_rewards = compute_reward_batch(
+            scene_candidates, scene_reward_data, reward_config
         )
+        if expert_rewards_out is not None:
+            # Trailing row, so every index below still means the same
+            # candidate it did before the expert was merged in.
+            expert_rewards_out.append(scene_rewards[-1])
+            scene_rewards = scene_rewards[:-1]
+        rewards_by_scene.append(scene_rewards)
     stage_end("score_native", _stage_start)
 
     _stage_start = time.perf_counter()
