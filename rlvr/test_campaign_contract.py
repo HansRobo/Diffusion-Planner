@@ -70,6 +70,31 @@ def test_supervisor_replay_beta_matches_the_contract():
     )
 
 
+@pytest.mark.parametrize("script", ["run_plannerrft_full_to_epoch100.sh",
+                                    "run_plannerrft_jitterfix_to_epoch100.sh"])
+def test_right_turn_emphasis_matches_the_contract(script):
+    """This contract said REPEAT=10 while both entrypoints defaulted to 1.
+
+    Nothing read the value, so the drift was invisible.  What has to hold is the
+    product: REPEAT * WEIGHT is the total gradient mass on the right-turn lists,
+    and the user's standing requirement is 10x.
+    """
+
+    text = (SUPERVISOR.parent / script).read_text()
+    found = {}
+    for name in ("EXTRA_TRAIN_REPEAT", "EXTRA_TRAIN_WEIGHT"):
+        line = next(
+            ln for ln in text.splitlines() if ln.startswith(f"{name}=${{{name}:-")
+        )
+        found[name] = int(line.split(":-", 1)[1].split("}", 1)[0])
+    assert found["EXTRA_TRAIN_REPEAT"] == C.EXTRA_TRAIN_REPEAT
+    assert found["EXTRA_TRAIN_WEIGHT"] == C.EXTRA_TRAIN_WEIGHT
+    assert found["EXTRA_TRAIN_REPEAT"] * found["EXTRA_TRAIN_WEIGHT"] == 10, (
+        "the three right-turn lists must keep their 10x emphasis"
+    )
+    assert C.EXTRA_TRAIN_REPEAT * C.EXTRA_TRAIN_WEIGHT == 10
+
+
 def test_supervisor_expert_improves_gate_resolves_without_unbound_variables():
     """The supervisor cannot be dry-run, and it runs under ``set -u``.
 

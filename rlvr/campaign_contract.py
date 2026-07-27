@@ -14,8 +14,13 @@ straight out of that:
 * Corpus-size constants were literals in two scripts, so changing the
   oversampling lists failed a cache-shape check hours into a mine.
 
-Shell callers get the same values via ``python -m rlvr.campaign_contract --shell``
-and ``eval``, so there is exactly one place to change any of them.
+``shell_assignments`` exists so shell callers can ``eval`` these values instead of
+re-declaring them.  Be aware that today almost nothing does: the live entrypoints
+pull only ``BEHAVIOR_ANCHOR_WEIGHT``, via a direct ``python -c`` import, and no
+script evals ``--shell`` at all.  So this module is authoritative for Python and
+*documentation* for the shell chain -- which is exactly how ``EXTRA_TRAIN_REPEAT``
+came to say 10 while both entrypoints ran 1.  When you change a value here, grep
+the scripts for it.
 
 Every value below is tied to recorded evidence; do not adjust one without
 re-reading the note next to it.
@@ -172,8 +177,26 @@ WORLD_SIZE = 8
 ROLLOUT_SCENE_BATCH_SIZE = 192
 GLOBAL_ROLLOUT_BATCH = WORLD_SIZE * ROLLOUT_SCENE_BATCH_SIZE
 
-#: Times each right-turn oversampling list is repeated into the training set.
-EXTRA_TRAIN_REPEAT = 10
+#: How the three unprotected-right-turn lists get their 10x emphasis.
+#:
+#: This said REPEAT = 10 while both live entrypoints defaulted to 1, and nothing
+#: read this value, so the 10 was wrong and dead at the same time.  What actually
+#: runs is repeat=1 with the 10x applied as replay weight.  The invariant is the
+#: PRODUCT: REPEAT * WEIGHT = 10 keeps the total gradient mass fixed however the
+#: emphasis is split.
+#:
+#: The split is not cosmetic.  Weight only amplifies a scene that already has a
+#: positive-advantage target; repeats give it that many independent mining
+#: attempts.  Measured on the live cycle-1 mine over 1,118,400 rows, of which
+#: 13,798 are right-turn scenes: they are trainable 28.04% of the time, which is
+#: no worse than the rest of the corpus (28.98%), so they carry no special
+#: deficit -- and the expert-improves gate lifts them to 53.97%.  At 28% per
+#: attempt, repeat=10 would reach ~97% coverage, but it costs 10x the mine time
+#: for those scenes (~+1.2 h per cycle) and it is a second variable.  Cycle 2
+#: already tests the gate alone, so repeats are the next single-variable
+#: candidate, not part of this baseline.
+EXTRA_TRAIN_REPEAT = 1
+EXTRA_TRAIN_WEIGHT = 10
 
 
 def padded_group_count(source_scenes: int) -> int:
@@ -211,6 +234,7 @@ def shell_assignments() -> str:
         f"ROLLOUT_SCENE_BATCH_SIZE={ROLLOUT_SCENE_BATCH_SIZE}",
         f"GLOBAL_ROLLOUT_BATCH={GLOBAL_ROLLOUT_BATCH}",
         f"EXTRA_TRAIN_REPEAT={EXTRA_TRAIN_REPEAT}",
+        f"EXTRA_TRAIN_WEIGHT={EXTRA_TRAIN_WEIGHT}",
         f"X2_LEGACY_EGO_WIDTH_M={X2_LEGACY_EGO_WIDTH_M:g}",
         f"XX1_LEGACY_EGO_WIDTH_M={XX1_LEGACY_EGO_WIDTH_M:g}",
     ]
