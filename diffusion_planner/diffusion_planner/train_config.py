@@ -79,6 +79,11 @@ class TrainConfig:
     # legacy behavior that holds the peak lr for the whole run (kept for
     # backward-compatible reproduction of pre-existing runs).
     lr_schedule_type: Literal["cosine", "constant"] = "cosine"
+    lr_start_factor: float = 0.1
+    lr_eta_min: float = 1e-6
+    # Number of cosine-decay epochs. 0 derives it from train_epochs - warm_up_epoch.
+    lr_cosine_t_max: int = 0
+    lr_scheduler_interval: Literal["epoch", "batch"] = "epoch"
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True

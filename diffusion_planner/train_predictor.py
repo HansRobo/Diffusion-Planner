@@ -94,6 +94,31 @@ def get_args(args_list=None):
         choices=["cosine", "constant"],
         help="post-warmup lr schedule: 'cosine' decay (default) or legacy 'constant' hold",
     )
+    parser.add_argument(
+        "--lr_start_factor",
+        type=float,
+        default=_train_config_default("lr_start_factor"),
+        help="initial LR as a fraction of learning_rate during warmup",
+    )
+    parser.add_argument(
+        "--lr_eta_min",
+        type=float,
+        default=_train_config_default("lr_eta_min"),
+        help="minimum LR for cosine annealing",
+    )
+    parser.add_argument(
+        "--lr_cosine_t_max",
+        type=int,
+        default=_train_config_default("lr_cosine_t_max"),
+        help="cosine-decay duration in epochs; 0 uses train_epochs - warm_up_epoch",
+    )
+    parser.add_argument(
+        "--lr_scheduler_interval",
+        type=str,
+        choices=["epoch", "batch"],
+        default=_train_config_default("lr_scheduler_interval"),
+        help="call scheduler.step() after each epoch or each optimizer batch",
+    )
     parser.add_argument("--encoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--decoder_drop_path_rate", type=float, default=0.1)
     parser.add_argument("--use_ego_history", type=boolean, default=True)
