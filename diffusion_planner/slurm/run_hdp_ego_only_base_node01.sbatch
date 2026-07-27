@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=hdp-route-base20
+#SBATCH --job-name=hdp-route-base60
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --nodelist=node01
@@ -9,20 +9,21 @@
 #SBATCH --gres=gpu:h100:8
 #SBATCH --exclusive
 #SBATCH --requeue
-#SBATCH --output=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsvisible_3veh_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512/slurm-%j.out
-#SBATCH --error=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsvisible_3veh_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512/slurm-%j.err
+#SBATCH --output=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base60_causal_red_light_v2_fullrt_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512/slurm-%j.out
+#SBATCH --error=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base60_causal_red_light_v2_fullrt_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512/slurm-%j.err
 
 set -euo pipefail
 
-REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
-RUN_NAME=hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsvisible_3veh_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512
+REPO=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner
+RUN_NAME=hdp_ego_only_route_adaln_base60_causal_red_light_v2_fullrt_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with --export=ALL,HDP_EXPECTED_COMMIT=<commit>}
-TRAIN_LIST=${REPO}/artifacts/full_sequence_base_from_20260622_step3/path_list_train_fullseq_from_20260622_step3_exclude_unprotected_right_turn_after_entry_all_vehicles.json
+MANIFEST_DIR=${REPO}/artifacts/causal_red_light_full_right_turn_20260715_v3_nearest_controlled
+TRAIN_LIST=${MANIFEST_DIR}/path_list_train_base_causal_red_light_filtered.json
 VALID_LIST=${REPO}/artifacts/full_sequence_base_from_20260622_step3/path_list_valid_fullseq_from_20260622_step3.json
-EXTRA_X2=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/x2_dev/2231_odaiba_shinagawa_copied_from_xx1/path_list_train_unprotected_right_turn_after_entry.json
-EXTRA_XX1=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/prd_jt/path_list_unprotected_right_turn_xx1_after_entry.json
-EXTRA_PSIM=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/xx1_psim/path_list_unprotected_right_turn_xx1_psim_after_entry.json
+EXTRA_X2=${MANIFEST_DIR}/path_list_train_unprotected_right_turn_causal_red_light_filtered.json
+EXTRA_XX1=${MANIFEST_DIR}/path_list_unprotected_right_turn_xx1_causal_red_light_filtered.json
+EXTRA_PSIM=${MANIFEST_DIR}/path_list_unprotected_right_turn_xx1_psim_causal_red_light_filtered.json
 NORMALIZATION=${REPO}/diffusion_planner/normalization.json
 PYTHON=${REPO}/.venv/bin/python
 PORT=22631
@@ -43,6 +44,7 @@ log_health() {
 
 for required in \
   "${TRAIN_LIST}" \
+  "${MANIFEST_DIR}/metadata.json" \
   "${VALID_LIST}" \
   "${EXTRA_X2}" \
   "${EXTRA_XX1}" \
@@ -54,6 +56,26 @@ for required in \
     exit 10
   fi
 done
+
+check_manifest_sha256() {
+  local expected=$1
+  local path=$2
+  local actual
+  if [[ -z "${expected}" || ! -r "${path}" ]]; then
+    log_health "FATAL: missing manifest checksum or list: ${path}"
+    exit 10
+  fi
+  actual=$(sha256sum "${path}" | awk '{print $1}')
+  if [[ "${actual}" != "${expected}" ]]; then
+    log_health "FATAL: manifest SHA256 mismatch for ${path}: expected ${expected}, got ${actual}"
+    exit 10
+  fi
+}
+
+check_manifest_sha256 "$(jq -r '.generated_sha256.base // empty' "${MANIFEST_DIR}/metadata.json")" "${TRAIN_LIST}"
+check_manifest_sha256 "$(jq -r '.generated_sha256.right_turn_lists[0] // empty' "${MANIFEST_DIR}/metadata.json")" "${EXTRA_X2}"
+check_manifest_sha256 "$(jq -r '.generated_sha256.right_turn_lists[1] // empty' "${MANIFEST_DIR}/metadata.json")" "${EXTRA_XX1}"
+check_manifest_sha256 "$(jq -r '.generated_sha256.right_turn_lists[2] // empty' "${MANIFEST_DIR}/metadata.json")" "${EXTRA_PSIM}"
 
 cd "${REPO}"
 ACTUAL_COMMIT=$(git rev-parse HEAD)
@@ -105,6 +127,8 @@ BASE_ARGS=(
   --extra_train_set_list "${EXTRA_PSIM}"
   --extra_train_set_repeat 10
   --valid_set_list "${VALID_LIST}"
+  --filter_skipped True
+  --skip_filter_workers "${HDP_BASE_SKIP_FILTER_WORKERS:-64}"
   --train_subsample_step 1
   --align_legacy_neighbor_futures True
   --normalization_file_path "${NORMALIZATION}"
@@ -113,7 +137,7 @@ BASE_ARGS=(
   --weight_decay 0.01
   --adamw_no_decay True
   --warm_up_epoch 5
-  --train_epochs 20
+  --train_epochs 60
   --save_utd 10
   --num_workers 16
   --enable_epdms_eval True
@@ -159,6 +183,7 @@ BASE_ARGS=(
   --hybrid_loss_window 10
   --turn_indicator_generated_loss_weight 1.0
   --turn_indicator_expert_loss_weight 1.0
+  --supervised_training_stage policy
   --coeff_road_border_loss 0.0
   --road_border_margin 0.25
   --road_border_n_interp 2
@@ -244,12 +269,12 @@ p = pathlib.Path(sys.argv[1])
 ckpt = torch.load(p / "latest.pth", map_location="cpu", weights_only=True)
 with (p / "train_log.tsv").open(newline="", encoding="utf-8") as f:
     rows = list(csv.DictReader(f, delimiter="\t"))
-assert int(ckpt["epoch"]) == 20, ckpt["epoch"]
-assert rows and int(rows[-1]["epoch"]) == 20, rows[-1].get("epoch") if rows else None
+assert int(ckpt["epoch"]) == 60, ckpt["epoch"]
+assert rows and int(rows[-1]["epoch"]) == 60, rows[-1].get("epoch") if rows else None
 assert (p / "best_model" / "best_model.pth").is_file()
 assert (p / "best_epdms_model" / "best_model.pth").is_file()
 print(f"verified epoch={ckpt['"'"'epoch'"'"']} rows={len(rows)}")' \
   "${SAVE_DIR}" | tee -a "${HEALTH_LOG}"
 
 touch "${SAVE_DIR}/RUN_COMPLETE"
-log_health "RUN_COMPLETE: verified 20 epochs and both best checkpoints"
+log_health "RUN_COMPLETE: verified 60 epochs and both best checkpoints"

@@ -17,11 +17,8 @@ import random
 from pathlib import Path
 
 import gradio as gr
-import numpy as np
-from PIL import Image as PILImage
 
 from scene_search.batch_search import (
-    Batch,
     build_index,
     find_batches,
     load_index_parquet,
@@ -34,7 +31,6 @@ from scene_search.map_renderer import MapRenderer, Viewport
 from scene_search.replay_index import load_replay_runs
 from scene_search.scene_previewer import (
     render_batch_thumbnails,
-    render_single_thumbnail,
     thumbnails_to_pil_images,
 )
 
@@ -114,7 +110,7 @@ def _heatmap_metadata(points: list[dict]) -> dict:
         return {"metrics": [], "ranges": {}, "polarity": {}}
     field_names: set[str] = set()
     for p in points:
-        for k in p.keys():
+        for k in p:
             if k in ("x", "y"):
                 continue
             field_names.add(k)
@@ -134,7 +130,7 @@ def _heatmap_metadata(points: list[dict]) -> dict:
     # abs_cl_score branch already does the |·| + polarity flip. Same
     # pattern applies to pred_cl_score when it's present.
     hidden_signed = {"cl_score", "pred_cl_score"}
-    metrics = sorted(k for k in ranges.keys() if k not in hidden_signed)
+    metrics = sorted(k for k in ranges if k not in hidden_signed)
     if "cl_score" in ranges:
         metrics.append("abs_cl_score")
     if "pred_cl_score" in ranges:

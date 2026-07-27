@@ -554,6 +554,30 @@ def get_args():
         help="held-out maximum distance used to associate a red route lane with a stop line",
     )
     parser.add_argument(
+        "--rl_eval_reward_aggregation",
+        choices=["weighted_sum", "gated_product"],
+        default=_train_config_default("rl_eval_reward_aggregation"),
+        help="held-out reward aggregation; frozen while the training objective is swept",
+    )
+    parser.add_argument(
+        "--rl_eval_reward_horizon_steps",
+        type=int,
+        default=_train_config_default("rl_eval_reward_horizon_steps"),
+        help="held-out scoring horizon (0 = full); frozen while training scoring is swept",
+    )
+    parser.add_argument(
+        "--rl_eval_deterministic",
+        type=boolean,
+        default=_train_config_default("rl_eval_deterministic"),
+        help="also evaluate the single zero-noise deployment trajectory per scene",
+    )
+    parser.add_argument(
+        "--rl_selection_metric",
+        choices=["deterministic", "mean"],
+        default=_train_config_default("rl_selection_metric"),
+        help="checkpoint selection on the deterministic deployment reward or the K-sample mean",
+    )
+    parser.add_argument(
         "--rl_rollout_steps",
         type=int,
         default=_train_config_default("rl_rollout_steps"),
@@ -649,6 +673,156 @@ def get_args():
         type=float,
         default=_train_config_default("rl_bc_weight"),
         help="hybrid imitation-loss weight on one logged expert target per scene",
+    )
+    parser.add_argument(
+        "--rl_bc_active_groups_only",
+        type=boolean,
+        default=_train_config_default("rl_bc_active_groups_only"),
+        help="anchor only scenes with an active reward group; broad anchoring was negative",
+    )
+    parser.add_argument(
+        "--rl_rollout_interval",
+        type=int,
+        default=_train_config_default("rl_rollout_interval"),
+        help="mine/replay cycle length (10 = 1 mining + 9 replay epochs); 0 = online loop",
+    )
+    parser.add_argument(
+        "--rl_replay_dir",
+        type=str,
+        default=_train_config_default("rl_replay_dir"),
+        help="local-NVMe directory for the frozen per-cycle replay shards",
+    )
+    parser.add_argument(
+        "--rl_reward_source",
+        choices=["native", "pdm_port"],
+        default=_train_config_default("rl_reward_source"),
+        help="native Tier IV reward or the verbatim port of the audited hdp_pdm objective",
+    )
+    parser.add_argument(
+        "--rl_pdm_red_light_gate",
+        type=boolean,
+        default=_train_config_default("rl_pdm_red_light_gate"),
+        help="gate red-light violations in the ported reward (T4 extension; ablatable)",
+    )
+    parser.add_argument(
+        "--rl_reward_aggregation",
+        choices=["weighted_sum", "gated_product"],
+        default=_train_config_default("rl_reward_aggregation"),
+        help="additive historical objective or PDM-style multiplicative-gate quality mix",
+    )
+    parser.add_argument(
+        "--rl_reward_horizon_steps",
+        type=int,
+        default=_train_config_default("rl_reward_horizon_steps"),
+        help="score only the first N candidate steps (0 = full horizon)",
+    )
+    parser.add_argument(
+        "--rl_candidate_loss_horizon",
+        type=int,
+        default=_train_config_default("rl_candidate_loss_horizon"),
+        help="candidate regression horizon; 0 follows rl_reward_horizon_steps",
+    )
+    parser.add_argument(
+        "--rl_diffusion_t_min",
+        type=float,
+        default=_train_config_default("rl_diffusion_t_min"),
+        help="lower bound of the reweighted-regression diffusion time draw",
+    )
+    parser.add_argument(
+        "--rl_diffusion_t_max",
+        type=float,
+        default=_train_config_default("rl_diffusion_t_max"),
+        help="upper bound of the reweighted-regression diffusion time draw",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_prob",
+        type=float,
+        default=_train_config_default("rl_candidate_aug_prob"),
+        help="per-scene probability of HDP rollout-candidate augmentation (0 disables)",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_std",
+        type=float,
+        default=_train_config_default("rl_candidate_aug_std"),
+        help="route-frame offset std in metres (gaussian) or support half-width (beta)",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_eta_scheme",
+        choices=["gaussian", "stratified_beta"],
+        default=_train_config_default("rl_candidate_aug_eta_scheme"),
+        help="offset magnitude distribution; stratified_beta is the PlannerRFT explorer",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_beta_concentration",
+        type=float,
+        default=_train_config_default("rl_candidate_aug_beta_concentration"),
+        help="symmetric Beta concentration for the stratified scheme",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_stretch",
+        type=float,
+        default=_train_config_default("rl_candidate_aug_stretch"),
+        help="PlannerRFT candidate-stretch half-width for per-step displacements",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_ramp_steps",
+        type=int,
+        default=_train_config_default("rl_candidate_aug_ramp_steps"),
+        help="minimum-jerk onset steps for the offset (>=1; constant offsets rejected)",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_keep",
+        type=int,
+        default=_train_config_default("rl_candidate_aug_keep"),
+        help="unaugmented on-policy anchor candidates kept at the front of each group",
+    )
+    parser.add_argument(
+        "--rl_candidate_aug_speed_min_mps",
+        type=float,
+        default=_train_config_default("rl_candidate_aug_speed_min_mps"),
+        help="skip augmentation below this ego speed",
+    )
+    parser.add_argument(
+        "--rl_first_waypoint_gate",
+        type=boolean,
+        default=_train_config_default("rl_first_waypoint_gate"),
+        help="reject low-speed candidates whose first waypoint jumps from the current pose",
+    )
+    parser.add_argument(
+        "--rl_first_waypoint_gate_speed_max_mps",
+        type=float,
+        default=_train_config_default("rl_first_waypoint_gate_speed_max_mps"),
+        help="gate applies only below this ego speed",
+    )
+    parser.add_argument(
+        "--rl_first_waypoint_gate_max_step_m",
+        type=float,
+        default=_train_config_default("rl_first_waypoint_gate_max_step_m"),
+        help="maximum first-step displacement at low speed",
+    )
+    parser.add_argument(
+        "--rl_first_waypoint_gate_max_lateral_m",
+        type=float,
+        default=_train_config_default("rl_first_waypoint_gate_max_lateral_m"),
+        help="maximum first-step lateral offset at low speed",
+    )
+    parser.add_argument(
+        "--rl_first_waypoint_gate_max_backward_m",
+        type=float,
+        default=_train_config_default("rl_first_waypoint_gate_max_backward_m"),
+        help="maximum first-step reverse displacement at low speed",
+    )
+    parser.add_argument(
+        "--rl_first_waypoint_gate_max_tangent_deg",
+        type=float,
+        default=_train_config_default("rl_first_waypoint_gate_max_tangent_deg"),
+        help="maximum first-step off-tangent angle when the step is measurable",
+    )
+    parser.add_argument(
+        "--rl_first_waypoint_gate_tangent_min_step_m",
+        type=float,
+        default=_train_config_default("rl_first_waypoint_gate_tangent_min_step_m"),
+        help="tangent test applies only above this displacement (5 cm floor is mandatory)",
     )
     parser.add_argument(
         "--rl_reward_normalize",
@@ -1065,6 +1239,74 @@ def get_args():
         raise ValueError("At least one RL held-out reward weight must be positive")
     if args.rl_bc_weight < 0.0:
         raise ValueError("--rl_bc_weight must be non-negative")
+    for horizon_name in ("rl_reward_horizon_steps", "rl_candidate_loss_horizon"):
+        horizon_value = int(getattr(args, horizon_name))
+        if horizon_value < 0 or horizon_value > args.future_len:
+            raise ValueError(f"--{horizon_name} must be in [0, {args.future_len}]")
+    if (
+        args.rl_candidate_loss_horizon > 0
+        and args.rl_reward_horizon_steps > 0
+        and args.rl_candidate_loss_horizon > args.rl_reward_horizon_steps
+    ):
+        raise ValueError(
+            "--rl_candidate_loss_horizon must not exceed --rl_reward_horizon_steps: "
+            "regressing the unscored tail is a known-negative configuration"
+        )
+    if not 0.0 <= args.rl_diffusion_t_min < args.rl_diffusion_t_max <= 1.0:
+        raise ValueError("--rl_diffusion_t_min/--rl_diffusion_t_max must satisfy 0 <= lo < hi <= 1")
+    for gate_name in (
+        "rl_first_waypoint_gate_speed_max_mps",
+        "rl_first_waypoint_gate_max_step_m",
+        "rl_first_waypoint_gate_max_lateral_m",
+        "rl_first_waypoint_gate_max_backward_m",
+        "rl_first_waypoint_gate_max_tangent_deg",
+        "rl_first_waypoint_gate_tangent_min_step_m",
+    ):
+        gate_value = float(getattr(args, gate_name))
+        if not math.isfinite(gate_value) or gate_value <= 0.0:
+            raise ValueError(f"--{gate_name} must be finite and positive")
+    if args.rl_selection_metric == "deterministic" and not args.rl_eval_deterministic:
+        raise ValueError(
+            "--rl_selection_metric deterministic requires --rl_eval_deterministic true"
+        )
+    if args.rl_rollout_interval < 0:
+        raise ValueError("--rl_rollout_interval must be >= 0")
+    if args.rl_rollout_interval > 0:
+        if not args.rl_replay_dir:
+            raise ValueError("cycle mode requires --rl_replay_dir on local NVMe")
+        if args.rl_rollout_interval < 2:
+            raise ValueError("--rl_rollout_interval must be >= 2 (mine + at least one replay)")
+        if getattr(args, "rl_train_scope", "decoder") != "decoder":
+            raise ValueError("cycle mode caches decoder context; requires --rl_train_scope decoder")
+        if args.rl_bc_weight != 0.0:
+            raise ValueError("cycle mode does not store expert anchors; requires --rl_bc_weight 0")
+        if args.rl_updates_per_rollout != 1:
+            raise ValueError(
+                "cycle mode's replay epochs are the rollout amortization; "
+                "set --rl_updates_per_rollout 1"
+            )
+    if not 0.0 <= args.rl_candidate_aug_prob <= 1.0:
+        raise ValueError("--rl_candidate_aug_prob must be in [0, 1]")
+    if args.rl_candidate_aug_prob > 0.0:
+        if args.rl_candidate_aug_ramp_steps < 1:
+            raise ValueError(
+                "--rl_candidate_aug_ramp_steps must be >= 1: a constant offset is a "
+                "first-delta impulse under velocity actions (audited-broken upstream)"
+            )
+        if args.rl_candidate_aug_std < 0.0:
+            raise ValueError("--rl_candidate_aug_std must be non-negative")
+        if not 0.0 <= args.rl_candidate_aug_stretch < 1.0:
+            raise ValueError("--rl_candidate_aug_stretch must be in [0, 1)")
+        if args.rl_candidate_aug_std == 0.0 and args.rl_candidate_aug_stretch == 0.0:
+            raise ValueError(
+                "candidate augmentation is enabled but both the offset std and the stretch are zero"
+            )
+        if not 0 <= args.rl_candidate_aug_keep < args.num_generations:
+            raise ValueError(f"--rl_candidate_aug_keep must be in [0, {args.num_generations - 1}]")
+        if args.rl_candidate_aug_beta_concentration <= 0.0:
+            raise ValueError("--rl_candidate_aug_beta_concentration must be positive")
+        if args.rl_candidate_aug_speed_min_mps <= 0.0:
+            raise ValueError("--rl_candidate_aug_speed_min_mps must be positive")
     if args.predicted_neighbor_num != 0:
         raise ValueError("HDP-RL is ego-only; --predicted_neighbor_num must be 0")
     if args.rl_full_eval_utd < 1:
@@ -1146,6 +1388,20 @@ def scalar(value):
     if torch.is_tensor(value):
         return float(value.detach().cpu().item())
     return float(value)
+
+
+def selection_score_from_reward_metrics(reward_metrics, args) -> float:
+    """Checkpoint-selection scalar from the held-out reward metrics.
+
+    The deployed planner executes one zero-noise plan, so ``deterministic`` selects on
+    exactly that trajectory's reward; the K-sample stochastic mean remains reported as
+    a distribution diagnostic (and stays selectable for legacy comparisons).
+    """
+    metric = getattr(args, "rl_selection_metric", "deterministic")
+    key = "deterministic_mean" if metric == "deterministic" else "mean"
+    if key not in reward_metrics:
+        raise KeyError(f"Held-out reward metrics are missing selection key {key!r}")
+    return scalar(reward_metrics[key])
 
 
 def finite_scalar_metrics(metrics):
@@ -1526,6 +1782,15 @@ def model_training(args):
             )
         )
 
+    # Gradient clipping in the epoch loop needs the flat parameter list.  It is exactly the
+    # union of the AdamW decay/no-decay groups below, which are built from the same
+    # requires_grad filter, so clipping and optimization always cover the same tensors.
+    trainable_params = [
+        p for p in ddp.get_model(diffusion_planner, args.ddp).parameters() if p.requires_grad
+    ]
+    if not trainable_params:
+        raise RuntimeError("No trainable parameters found for RL training")
+
     optimizer_param_groups, optimizer_group_summary = build_adamw_param_groups(
         ddp.get_model(diffusion_planner, args.ddp),
         weight_decay=args.weight_decay,
@@ -1748,7 +2013,9 @@ def model_training(args):
         baseline_epdms = baseline_epdms_metrics.get("total", 0.0)
         baseline_turn_metrics = turn_indicator_metrics(baseline_agg)
         baseline_reward_mean = scalar(baseline_reward_metrics["mean"])
-        baseline_selection_score = baseline_reward_mean
+        baseline_selection_score = selection_score_from_reward_metrics(
+            baseline_reward_metrics, args
+        )
         baseline_rng_states = gather_rng_states()
         if global_rank == 0:
             best_valid_score = baseline_selection_score
@@ -1894,8 +2161,9 @@ def model_training(args):
             source_policy_within_guard = all(
                 value for key, value in source_guards.items() if key != "available"
             )
+            raw_selection_score = selection_score_from_reward_metrics(valid_reward_metrics, args)
             selection_score = (
-                valid_reward_mean if math.isfinite(valid_reward_mean) else float("nan")
+                raw_selection_score if math.isfinite(raw_selection_score) else float("nan")
             )
             improves_best = (
                 run_full_eval

@@ -131,8 +131,7 @@ preprocess::InputDataMap generate_random_inputs(std::mt19937 & gen)
   input["turn_indicators"] = make_random(TURN_INDICATORS_SHAPE);
   // The temporal HDP graph still exposes a scalar delay input even though the
   // current model only accepts zero delay. The runtime transfer path requires it.
-  input["delay"] = std::vector<float>(
-    static_cast<size_t>(DELAY_SHAPE[0] * DELAY_SHAPE[1]), 0.0f);
+  input["delay"] = std::vector<float>(static_cast<size_t>(DELAY_SHAPE[0] * DELAY_SHAPE[1]), 0.0f);
   return input;
 }
 

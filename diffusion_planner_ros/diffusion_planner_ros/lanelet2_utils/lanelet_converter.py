@@ -25,8 +25,7 @@ from .lanelet_map import (
 def _get_attribute(attribute_map, key: str, default: str) -> str:
     if key in attribute_map:
         return attribute_map[key]
-    else:
-        return default
+    return default
 
 
 def _interpolate_lane(waypoints: NDArray, num_points: int):
@@ -454,7 +453,7 @@ def process_lanelet(
             elif traffic_light_color == 4:  # WHITE
                 traffic_light[3] = 1
             else:
-                assert False, f"Unexpected traffic light color: {traffic_light_color}"
+                raise AssertionError(f"Unexpected traffic light color: {traffic_light_color}")
         else:
             traffic_light[3] = 1
     traffic_light = np.tile(traffic_light, (centerline.shape[0], 1))

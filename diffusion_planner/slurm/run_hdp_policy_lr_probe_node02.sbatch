@@ -81,7 +81,7 @@ COMMON_ARGS=(
   --filter_skipped False
   --seed 3407
   --train_subsample_step 6
-  --align_legacy_neighbor_futures True
+  --align_legacy_neighbor_futures False
   --normalization_file_path "${NORMALIZATION}"
   --batch_size 512
   --weight_decay 0.01
@@ -130,7 +130,7 @@ COMMON_ARGS=(
   --hybrid_loss_window 10
   --turn_indicator_generated_loss_weight 1.0
   --turn_indicator_expert_loss_weight 1.0
-  --coeff_road_border_loss 1.0
+  --coeff_road_border_loss 0.0
   --road_border_margin 0.25
   --road_border_n_interp 2
   --coeff_neighbor_collision_loss 0.0

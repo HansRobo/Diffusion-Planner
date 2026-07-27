@@ -24,8 +24,7 @@ def parse_args() -> argparse.Namespace:
 def _get_attribute(attribute_map, key: str, default: str) -> str:
     if key in attribute_map:
         return attribute_map[key]
-    else:
-        return default
+    return default
 
 
 if __name__ == "__main__":

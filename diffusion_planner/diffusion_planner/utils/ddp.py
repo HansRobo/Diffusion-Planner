@@ -9,7 +9,7 @@ from torch.distributed import init_process_group
 
 
 def ddp_setup_universal(verbose=False, args=None):
-    if args.ddp == False:
+    if not args.ddp:
         print(f"DDP disabled; using {args.device}")
         return 0, 0, 1
 
@@ -28,7 +28,7 @@ def ddp_setup_universal(verbose=False, args=None):
         gpu = rank % torch.cuda.device_count()
         world_size = int(os.environ["SLURM_NTASKS"])
         node_list = os.environ["SLURM_NODELIST"]
-        num_gpus = torch.cuda.device_count()
+        torch.cuda.device_count()
         addr = subprocess.getoutput(f"scontrol show hostname {node_list} | head -n1")
         os.environ["MASTER_PORT"] = str(args.port)
         os.environ["MASTER_ADDR"] = addr
@@ -95,16 +95,13 @@ def get_rank():
 def get_model(model, use_ddp):
     if use_ddp:
         return model.module
-    else:
-        return model
+    return model
 
 
 def is_dist_avail_and_initialized():
     if not dist.is_available():
         return False
-    if not dist.is_initialized():
-        return False
-    return True
+    return dist.is_initialized()
 
 
 def cleanup():

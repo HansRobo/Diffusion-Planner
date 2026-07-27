@@ -107,7 +107,9 @@ void save_frame_data_npz(
 
   const std::string npz_filename = output_path + "/" + rosbag_dir_name + "_" + token + ".npz";
 
-  const uint32_t version = 2;
+  // Version 3 records the post-55eff4f contract: neighbor future index 0 is
+  // the first future frame (t+0.1 s), never a current-frame seed.
+  constexpr uint32_t version = 3;
   cnpy::npz_save_compressed(npz_filename, "version", &version, {1}, "w");
 
   const std::vector<float> ego_past_heading = cos_sin_to_heading(ego_past, INPUT_T_WITH_CURRENT);
@@ -270,7 +272,8 @@ void save_sequence_data_npz(
   const std::string npz_filename = output_path + "/" + rosbag_dir_name + "_" + sequence_id + ".npz";
   const size_t f = static_cast<size_t>(acc.num_frames);
 
-  const uint32_t version = 2;
+  // Keep packed and per-frame NPZs on the same time-alignment contract.
+  constexpr uint32_t version = 3;
   cnpy::npz_save_compressed(npz_filename, "version", &version, {1}, "w");
 
   cnpy::npz_save_compressed(npz_filename, "frame_indices", acc.frame_indices.data(), {f}, "a");

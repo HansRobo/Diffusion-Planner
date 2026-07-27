@@ -50,7 +50,7 @@ def main(rosbag_path: Path):
 
     data_list = topic_name_to_data["/perception/traffic_light_recognition/traffic_signals"]
     id_list = []
-    for i, data in enumerate(tqdm(data_list)):
+    for _i, data in enumerate(tqdm(data_list)):
         for group in data.traffic_light_groups:
             id_list.append(group.traffic_light_group_id)
 

@@ -405,7 +405,6 @@ def _draw_agent_view(
     """Render a zoomed view centered on a single agent."""
     from scenario_generation.visualize import (
         _EGO_COLOR,
-        _agent_color,
         draw_agent_box,
         draw_lanes,
         draw_road_borders,

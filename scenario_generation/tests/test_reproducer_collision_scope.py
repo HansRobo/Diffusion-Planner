@@ -83,9 +83,9 @@ def test_batched_scorer_matches_per_segment():
         [EGO_SHAPE] * 8,
         [np.array([4.76 + 0.1 * i, 7.24, 2.29], np.float32) for i in range(8)],
     ):
-        single = [score_step(nb, sh, 5.0, "cpu") for nb, sh in zip(segs, shapes)]
+        single = [score_step(nb, sh, 5.0, "cpu") for nb, sh in zip(segs, shapes, strict=False)]
         batched = score_step_batched(segs, shapes, "cpu")
-        for a, b in zip(single, batched):
+        for a, b in zip(single, batched, strict=False):
             # score_step returns a 3-tuple (min_clearance, collision, n_valid); score_step_batched
             # intentionally returns a 4-tuple that appends collider_slot — its first three elements
             # are bit-identical to score_step (same ops, same order), the 4th is extra.

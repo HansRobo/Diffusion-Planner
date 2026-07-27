@@ -17,7 +17,7 @@ ROS_PKG_ROOT = REPO_ROOT / "diffusion_planner_ros"
 if str(ROS_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(ROS_PKG_ROOT))
 
-from diffusion_planner.dimensions import (
+from diffusion_planner.dimensions import (  # noqa: E402  (import follows the sys.path bootstrap above)
     INPUT_T,
     MAX_NUM_NEIGHBORS,
     NUM_LINE_STRINGS,
@@ -28,7 +28,7 @@ from diffusion_planner.dimensions import (
     POINTS_PER_LINE_STRING,
     POINTS_PER_POLYGON,
 )
-from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (
+from diffusion_planner_ros.lanelet2_utils.lanelet_converter import (  # noqa: E402  (import follows the sys.path bootstrap above)
     convert_lanelet,
     create_lane_tensor,
     create_line_tensor,

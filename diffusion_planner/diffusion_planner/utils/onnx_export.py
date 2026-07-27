@@ -20,7 +20,24 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from diffusion_planner.dimensions import *
+from diffusion_planner.dimensions import (
+    INPUT_T,
+    LINE_STRING_TYPE_NUM,
+    MAX_NUM_NEIGHBORS,
+    NUM_LINE_STRINGS,
+    NUM_POLYGONS,
+    NUM_SEGMENTS_IN_LANE,
+    NUM_SEGMENTS_IN_ROUTE,
+    NUM_STATIC_OBJECTS,
+    OUTPUT_T,
+    POINTS_PER_LANELET,
+    POINTS_PER_LINE_STRING,
+    POINTS_PER_POLYGON,
+    POLYGON_TYPE_NUM,
+    POSE_DIM,
+    SEGMENT_POINT_DIM,
+    TURN_INDICATOR_OUTPUT_DIM,
+)
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 
@@ -523,7 +540,7 @@ def _repair_onnx_output_shapes(
         )
     model = onnx.load(str(output_path))
     graph_outputs = {value.name: value for value in model.graph.output}
-    for name, reference in zip(output_names, reference_outputs):
+    for name, reference in zip(output_names, reference_outputs, strict=False):
         if name not in graph_outputs:
             raise RuntimeError(f"Exported ONNX output {name!r} is missing")
         if not torch.is_tensor(reference) or reference.ndim == 0:
@@ -563,6 +580,18 @@ def export_onnx(
     print(f"Creating ONNX model with legacy exporter: {output_path}")
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
+        # The legacy exporter is retained intentionally for the deployment runtime's
+        # shape-repair path. PyTorch emits two known deprecation warnings for this
+        # compatibility API; keep them local to this call instead of hiding warnings
+        # from the rest of training/export code.
+        warnings.filterwarnings(
+            "ignore", category=DeprecationWarning, module=r"torch\.onnx(?:\..*)?"
+        )
+        warnings.filterwarnings(
+            "ignore",
+            category=DeprecationWarning,
+            message=r"You are using the legacy TorchScript-based ONNX export\..*",
+        )
         torch.onnx.export(
             wrapper,
             torch_input_tuple,
@@ -575,10 +604,7 @@ def export_onnx(
     # alter graph computation, only its declared non-batch dimensions.
     with torch.no_grad():
         traced_outputs = wrapper(*torch_input_tuple)
-    if torch.is_tensor(traced_outputs):
-        traced_outputs = (traced_outputs,)
-    else:
-        traced_outputs = tuple(traced_outputs)
+    traced_outputs = (traced_outputs,) if torch.is_tensor(traced_outputs) else tuple(traced_outputs)
     _repair_onnx_output_shapes(output_path, output_names, traced_outputs)
 
     if use_simplify:

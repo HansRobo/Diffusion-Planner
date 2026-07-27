@@ -3,7 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import DropPath, Mlp
 
-from diffusion_planner.dimensions import *
+from diffusion_planner.dimensions import (
+    LINE_STRING_TYPE_NUM,
+    POLYGON_TYPE_NUM,
+)
 from diffusion_planner.model.module.mixer import MixerBlock
 from diffusion_planner.utils.masks import neighbor_past_padding_mask
 

@@ -212,9 +212,7 @@ def run_grouped_closed_loop_eval(
         area_rows = [r for r in all_rows if r["area_name"] == area_name]
         write_metrics_summary(
             aggregate_segment_rows(area_rows),
-            out_dir
-            / "by_area"
-            / f"{artifact_component(area_name)}_metrics_summary.json",
+            out_dir / "by_area" / f"{artifact_component(area_name)}_metrics_summary.json",
         )
 
     write_results_table(all_rows, out_dir / "results_table.csv")

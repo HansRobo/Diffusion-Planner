@@ -19,14 +19,9 @@ _UTIL_SCRIPTS_DIR = str(
 if _UTIL_SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _UTIL_SCRIPTS_DIR)
 
-from search_scenes import (
-    build_index,
+from search_scenes import (  # noqa: E402  (import follows the sys.path bootstrap above)
     filter_heading,
     filter_radius,
-    group_sequences,
-    load_index_parquet,
-    read_sidecar,
-    save_index_parquet,
 )
 
 

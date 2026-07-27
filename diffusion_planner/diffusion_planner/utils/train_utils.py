@@ -7,8 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from timm.utils import ModelEmaV3
-from torch import optim
-from torch import nn
+from torch import nn, optim
 
 
 def atomic_torch_save(obj, path) -> None:
@@ -42,9 +41,12 @@ class ModelEma(ModelEmaV3):
     def __init__(self, model, decay=0.9999, device=None):
         model_device = next(model.parameters()).device
         requested_device = torch.device(device) if device not in (None, "") else None
-        if requested_device is not None and requested_device.type == model_device.type:
-            if requested_device.index is None or requested_device.index == model_device.index:
-                requested_device = None
+        if (
+            requested_device is not None
+            and requested_device.type == model_device.type
+            and (requested_device.index is None or requested_device.index == model_device.index)
+        ):
+            requested_device = None
         super().__init__(
             model,
             decay=decay,
@@ -87,9 +89,7 @@ def build_adamw_optimizer(
         probe_optimizer.zero_grad(set_to_none=True)
         probe.square().sum().backward()
         probe_optimizer.step()
-        optimizer = optim.AdamW(
-            params, lr=learning_rate, weight_decay=weight_decay, fused=True
-        )
+        optimizer = optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay, fused=True)
     except (TypeError, RuntimeError):
         return (
             optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay),

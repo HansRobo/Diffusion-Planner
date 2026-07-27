@@ -22,7 +22,6 @@ from diffusion_planner.hdp_rl_utils import (
     HDPRewardConfig,
     _apply_behavior_gate,
     _batched_occupancy_score,
-    _batched_road_border_clearance,
     _collision_and_leader_terms,
     _hdp_lane_score,
     _lane_reward_centerlines,
@@ -93,6 +92,10 @@ from diffusion_planner.utils.train_utils import (
     resume_model,
     update_epoch_loss_sums,
 )
+from diffusion_planner.validate_model import (
+    _multisample_metrics,
+    aggregate_valid_metrics,
+)
 
 
 def test_adamw_fused_request_falls_back_cleanly_on_cpu():
@@ -141,9 +144,6 @@ def test_adamw_no_decay_can_be_disabled_without_dropping_parameters():
     assert groups[0]["weight_decay"] == 0.01
     assert summary["no_decay_param_count"] == 0
     assert summary["decay_param_count"] == sum(p.numel() for p in model.parameters())
-
-
-from diffusion_planner.validate_model import _multisample_metrics, aggregate_valid_metrics
 
 
 def test_tuned_hdp_rl_defaults_are_consistent():
@@ -999,7 +999,9 @@ def test_road_border_penalty_keeps_valid_segment_at_ego_origin():
 
 
 def test_hdp_behavior_cloning_anchor_uses_one_expert_target_per_scene(monkeypatch):
-    def fake_policy_loss(_model, _inputs, target, _args, _encoding=None, _time=None, _noise=None):
+    def fake_policy_loss(
+        _model, _inputs, target, _args, _encoding=None, _time=None, _noise=None, **_kwargs
+    ):
         per_sample = (
             torch.tensor([1.0, 2.0, 3.0, 4.0])
             if target.shape[0] == 4
@@ -1046,7 +1048,14 @@ def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkey
     captured_candidate_encodings = []
 
     def fake_policy_loss(
-        _model, _inputs, target, _args, _encoding=None, diffusion_time=None, diffusion_noise=None
+        _model,
+        _inputs,
+        target,
+        _args,
+        _encoding=None,
+        diffusion_time=None,
+        diffusion_noise=None,
+        **_kwargs,
     ):
         if diffusion_time is not None:
             captured_draws.append((diffusion_time.clone(), diffusion_noise.clone()))
@@ -1116,7 +1125,9 @@ def test_bc_and_reward_objective_are_unchanged_by_candidate_microbatching(monkey
 
 
 def test_rl_weight_diagnostics_exclude_discarded_groups(monkeypatch):
-    def fake_policy_loss(_model, _inputs, _target, _args, _encoding=None, _time=None, _noise=None):
+    def fake_policy_loss(
+        _model, _inputs, _target, _args, _encoding=None, _time=None, _noise=None, **_kwargs
+    ):
         per_sample = torch.ones(4)
         return {
             "ego_loss_per_sample": per_sample,
@@ -2682,6 +2693,9 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
             "road_border_n_interp": 2,
             "turn_indicator_generated_loss_weight": 1.0,
             "turn_indicator_expert_loss_weight": 1.0,
+            # Joint mode is intentionally explicit here because production
+            # Base/SFT defaults to policy-only training.
+            "supervised_training_stage": "joint",
         },
     )()
     B, T = 2, 80
@@ -2809,7 +2823,11 @@ def _checkpoint_compat_config(predicted_neighbor_num: int):
 
 def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(tmp_path):
     checkpoint_args = _checkpoint_compat_config(predicted_neighbor_num=1)
+    # Keep the synthetic checkpoint contract stable while the production default
+    # is now policy-only; the loop below verifies changing stage is rejected.
+    checkpoint_args.supervised_training_stage = "joint"
     current_args = _checkpoint_compat_config(predicted_neighbor_num=0)
+    current_args.supervised_training_stage = "joint"
     serializable = {
         key: value.to_dict()
         if isinstance(value, (StateNormalizer, ObservationNormalizer))
@@ -2830,11 +2848,13 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
     )
 
     same_shape = _checkpoint_compat_config(predicted_neighbor_num=1)
+    same_shape.supervised_training_stage = "joint"
     same_shape.turn_indicator_generated_loss_weight = 0.25
     with pytest.raises(RuntimeError, match="training configuration mismatch"):
         assert_checkpoint_compatible(str(checkpoint_path), same_shape)
 
     same_shape = _checkpoint_compat_config(predicted_neighbor_num=1)
+    same_shape.supervised_training_stage = "joint"
     same_shape.turn_indicator_head_training_mode = "expert"
     with pytest.raises(RuntimeError, match="training configuration mismatch"):
         assert_checkpoint_compatible(str(checkpoint_path), same_shape)
@@ -2875,11 +2895,13 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         ("decoder_drop_path_rate", 0.0),
     ):
         changed = _checkpoint_compat_config(predicted_neighbor_num=1)
+        changed.supervised_training_stage = "joint"
         setattr(changed, field, value)
         with pytest.raises(RuntimeError, match="training configuration mismatch"):
             assert_checkpoint_compatible(str(checkpoint_path), changed)
 
     shorter_horizon = _checkpoint_compat_config(predicted_neighbor_num=1)
+    shorter_horizon.supervised_training_stage = "joint"
     shorter_horizon.train_epochs = 20
     assert_checkpoint_compatible(str(checkpoint_path), shorter_horizon)
 

@@ -17,7 +17,16 @@ from planner_metrics.collision_geometry import (
     center_rect_to_points,
 )
 from planner_metrics.config import RewardConfig
-from planner_metrics.geometry import *  # noqa: F401,F403  geometry primitives
+from planner_metrics.geometry import (
+    _build_ego_bbox_corners,
+    _build_lane_polygons,
+    _build_sg_diff_kernel,
+    _classify_outer_boundaries,
+    _closest_points_between_rects,
+    _point_to_segments_min_dist,
+    _point_to_segments_signed_min_dist,
+    _points_inside_intersection_areas,
+)
 
 ROAD_BORDER_NO_DATA_DISTANCE_M = float("inf")
 _ROAD_BORDER_SEGMENT_LEN_EPS = 1e-9
@@ -353,7 +362,7 @@ def compute_feasibility_score_batch(
         _sg_window = min(11, T - (1 if T % 2 == 0 else 0))
         if _sg_window >= 5:
             _lat_cache_key = (device, config.dt, _sg_window)
-            if _SG_VEL_KERNEL is None or _SG_LAT_CACHE_KEY != _lat_cache_key:
+            if _SG_VEL_KERNEL is None or _lat_cache_key != _SG_LAT_CACHE_KEY:
                 _SG_VEL_KERNEL = _build_sg_diff_kernel(
                     window=_sg_window, poly=3, deriv=1, delta=config.dt
                 ).to(device)
@@ -444,7 +453,7 @@ def compute_kinematic_gate(
     if _sg_window < 5:
         return torch.ones(N, device=device)
     key = (device, _sg_window)
-    if _SG_SMOOTH_KERNEL is None or _SG_SMOOTH_CACHE_KEY != key:
+    if _SG_SMOOTH_KERNEL is None or key != _SG_SMOOTH_CACHE_KEY:
         _SG_SMOOTH_KERNEL = _build_sg_diff_kernel(
             window=_sg_window, poly=3, deriv=0, delta=config.dt
         ).to(device)
@@ -474,7 +483,7 @@ def compute_kinematic_gate(
     pos_padded = torch.nn.functional.pad(pos, (pad, pad), mode="replicate")
     global _SG_VEL_KERNEL, _SG_ACCEL_KERNEL, _SG_LAT_CACHE_KEY
     _lat_key = (device, config.dt, _sg_window)
-    if _SG_VEL_KERNEL is None or _SG_LAT_CACHE_KEY != _lat_key:
+    if _SG_VEL_KERNEL is None or _lat_key != _SG_LAT_CACHE_KEY:
         _SG_VEL_KERNEL = _build_sg_diff_kernel(
             window=_sg_window, poly=3, deriv=1, delta=config.dt
         ).to(device)
@@ -729,7 +738,7 @@ def compute_smoothness_score_batch(
 
     # Build kernel once, cache by (device, dt)
     _cache_key = (ego_trajs.device, config.dt)
-    if _SG_JERK_KERNEL is None or _SG_JERK_CACHE_KEY != _cache_key:
+    if _SG_JERK_KERNEL is None or _cache_key != _SG_JERK_CACHE_KEY:
         _SG_JERK_KERNEL = _build_sg_diff_kernel(window=11, poly=3, deriv=3, delta=config.dt).to(
             ego_trajs.device
         )
@@ -829,7 +838,7 @@ def compute_red_light_score_batch(
         return scores
     red_xy = red_xy[valid]  # (R', 2)
     red_dir = red_dir[valid]  # (R', 2)
-    R = red_xy.shape[0]
+    red_xy.shape[0]
 
     # Normalize lane directions
     red_dir_norm = red_dir / (red_dir.norm(dim=-1, keepdim=True).clamp(min=1e-6))
@@ -1144,36 +1153,35 @@ def compute_road_border_penalty(
             per_timestep_min,
             *closest_return,
         )
+    # Original "frac" mode: fraction of timesteps in violation
+    near_frac = (is_not_crossing & (per_timestep_min[:, 1:] < near_thresh)).float().mean(dim=1)
+    wide_frac = (
+        (
+            is_not_crossing
+            & (per_timestep_min[:, 1:] >= near_thresh)
+            & (per_timestep_min[:, 1:] < wide_thresh)
+        )
+        .float()
+        .mean(dim=1)
+    )
+    if cont_thresh <= 0:
+        cont_penalty = torch.zeros(N, device=device)
     else:
-        # Original "frac" mode: fraction of timesteps in violation
-        near_frac = (is_not_crossing & (per_timestep_min[:, 1:] < near_thresh)).float().mean(dim=1)
-        wide_frac = (
-            (
-                is_not_crossing
-                & (per_timestep_min[:, 1:] >= near_thresh)
-                & (per_timestep_min[:, 1:] < wide_thresh)
-            )
-            .float()
-            .mean(dim=1)
-        )
-        if cont_thresh <= 0:
-            cont_penalty = torch.zeros(N, device=device)
-        else:
-            cont_penalty = torch.where(
-                is_not_crossing,
-                (1.0 - per_timestep_min[:, 1:] / cont_thresh).clamp(min=0, max=1),
-                torch.zeros_like(per_timestep_min[:, 1:]),
-            ).mean(dim=1)
+        cont_penalty = torch.where(
+            is_not_crossing,
+            (1.0 - per_timestep_min[:, 1:] / cont_thresh).clamp(min=0, max=1),
+            torch.zeros_like(per_timestep_min[:, 1:]),
+        ).mean(dim=1)
 
-        return (
-            crossing_gate,
-            near_frac,
-            wide_frac,
-            first_crossing_steps,
-            cont_penalty,
-            per_timestep_min,
-            *closest_return,
-        )
+    return (
+        crossing_gate,
+        near_frac,
+        wide_frac,
+        first_crossing_steps,
+        cont_penalty,
+        per_timestep_min,
+        *closest_return,
+    )
 
 
 @torch.no_grad()
@@ -1270,7 +1278,7 @@ def compute_static_collision_penalty(
     nb_f_s = neighbor_futures[stopped_mask]  # (S, T, 4)
     nb_shapes_s = neighbor_shapes[stopped_mask]  # (S, 2) [width, length]
     nb_valid_s = neighbor_valid[stopped_mask]  # (S, T)
-    S = nb_f_s.shape[0]
+    nb_f_s.shape[0]
     distances, pt_e_nst, pt_n_nst = compute_ego_neighbor_signed_clearance(
         ego_trajs,
         ego_shape,
@@ -1459,7 +1467,7 @@ def compute_lane_departure_penalty(
     S, P, D = lanes.shape
 
     # Select K nearest lanes by min centerline-point distance to any trajectory point
-    if k_nearest_lanes > 0 and S > k_nearest_lanes:
+    if k_nearest_lanes > 0 and k_nearest_lanes < S:
         center_all = lanes[..., :2]  # (S, P, 2)
         valid_all = center_all.norm(dim=-1) > 1e-3
         # Use trajectory bbox center + half-diagonal as reference

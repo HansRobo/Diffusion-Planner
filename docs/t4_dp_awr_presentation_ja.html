@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Original DP × HDP-style AWR — T4 Post-Training Proposal</title>
+  <style>
+    @font-face{font-family:"T4 Noto Sans JP";src:url("assets/fonts/NotoSansJP-VF.ttf") format("truetype");font-style:normal;font-weight:100 900;font-display:swap}
+    :root{
+      --navy:#07111d;--navy2:#10253c;--paper:#f7f9fc;--ink:#102a43;--muted:#5f7287;
+      --line:#d7e0e9;--blue:#2878ff;--cyan:#21c6e8;--green:#20a44b;--amber:#e79b12;
+      --red:#dc3f4d;--violet:#7656e8;--shadow:0 28px 80px rgba(0,0,0,.34)
+    }
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden}
+    body{font-family:"T4 Noto Sans JP",-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;color:#eaf2fb;background:radial-gradient(circle at 12% 6%,#1a3252,var(--navy) 38%)}
+    a{color:inherit}.deck{width:100%;height:100%;display:grid;place-items:center;padding:34px 22px 52px}
+    .slide{display:none;position:relative;width:min(1320px,96vw);aspect-ratio:16/9;max-height:calc(100vh - 88px);padding:42px 54px 40px;overflow:hidden;color:var(--ink);background:var(--paper);border:1px solid rgba(255,255,255,.22);border-radius:18px;box-shadow:var(--shadow)}
+    .slide.active{display:flex;flex-direction:column}.slide.dark{color:#eef6ff;background:linear-gradient(135deg,#0a1828 0%,#112b46 62%,#123b59 100%)}
+    .slide.dark:after{content:"";position:absolute;width:520px;height:520px;right:-230px;top:-250px;border-radius:50%;border:1px solid rgba(255,255,255,.11);box-shadow:0 0 0 38px rgba(255,255,255,.025),0 0 0 76px rgba(255,255,255,.02);pointer-events:none}
+    h1,h2,h3,p{margin-top:0}h1{font-size:clamp(38px,4.4vw,68px);line-height:1.03;letter-spacing:-.045em;margin:0 0 20px}h2{font-size:clamp(29px,3.1vw,45px);line-height:1.08;letter-spacing:-.035em;margin:0 0 9px}h3{font-size:18px;line-height:1.22;margin:0 0 7px}p{font-size:14px;line-height:1.5;color:#334e68;margin-bottom:10px}.dark p{color:#c9daeb}
+    strong{font-weight:850}.kicker{font-size:11px;font-weight:850;letter-spacing:.14em;text-transform:uppercase;color:#607a96;margin-bottom:8px}.dark .kicker{color:#9dc4e6}
+    .subtitle{font-size:19px;line-height:1.48;color:#d3e3f2;max-width:760px}.small{font-size:11px;line-height:1.4;color:var(--muted)}.dark .small{color:#9eb6cd}.micro{font-size:9px;line-height:1.34;color:#74879b}
+    .top{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;position:relative;z-index:1}.section-label{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:#637c96}.dark .section-label{color:#9bb9d5}.rule{height:1px;background:var(--line);margin:3px 0 16px}.dark .rule{background:rgba(255,255,255,.15)}
+    .grow{flex:1;min-height:0}.grid{display:grid;gap:14px}.g2{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+    .card{padding:16px 17px;border:1px solid var(--line);border-radius:13px;background:#fff}.dark .card{background:rgba(255,255,255,.075);border-color:rgba(255,255,255,.14)}.card p{margin-bottom:0}.accent{border-left:5px solid var(--blue)}.accent.green{border-left-color:var(--green)}.accent.amber{border-left-color:var(--amber)}.accent.red{border-left-color:var(--red)}.accent.violet{border-left-color:var(--violet)}
+    .pill{display:inline-block;padding:4px 9px;margin:0 4px 6px 0;border-radius:999px;background:#e8f1ff;color:#1d5ec8;font-size:10px;font-weight:850}.pill.green{background:#e7f7eb;color:#16813a}.pill.amber{background:#fff3d7;color:#9a6400}.pill.red{background:#ffe9eb;color:#b92635}.pill.violet{background:#f0ecff;color:#6041c9}.dark .pill{background:rgba(40,120,255,.18);color:#c2dbff}.dark .pill.green{background:rgba(32,164,75,.19);color:#b9f1c6}.dark .pill.amber{background:rgba(231,155,18,.18);color:#ffe0a0}.dark .pill.red{background:rgba(220,63,77,.18);color:#ffc5ca}
+    .stat{padding:14px 15px;border:1px solid var(--line);border-radius:12px;background:#fff}.dark .stat{background:rgba(0,0,0,.16);border-color:rgba(255,255,255,.13)}.stat .label{font-size:10px;font-weight:850;letter-spacing:.05em;color:#526c86}.dark .stat .label{color:#bad0e4}.stat .value{font-size:28px;line-height:1;font-weight:900;letter-spacing:-.04em;margin:5px 0 6px}.stat .note{font-size:10px;line-height:1.3;color:var(--muted)}.dark .stat .note{color:#9db4c9}
+    .hero{display:grid;grid-template-columns:1.04fr .96fr;gap:34px;align-items:center;flex:1;min-height:0;position:relative;z-index:1}.hero-img{display:block;width:100%;max-height:480px;object-fit:contain;border-radius:13px;background:#fff;box-shadow:0 16px 42px rgba(0,0,0,.28)}.badge{display:inline-flex;padding:6px 10px;margin-bottom:18px;border:1px solid rgba(33,198,232,.4);border-radius:999px;color:#b4f4ff;background:rgba(33,198,232,.1);font-size:11px;font-weight:850}
+    .flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:11px;align-items:stretch;margin-top:14px}.node{position:relative;padding:15px 13px;min-height:117px;border:1px solid var(--line);border-radius:12px;background:#fff}.node:not(:last-child):after{content:"→";position:absolute;right:-17px;top:40px;z-index:2;color:var(--blue);font-size:23px;font-weight:900}.node .n{width:28px;height:28px;display:grid;place-items:center;margin-bottom:9px;border-radius:50%;color:#fff;background:var(--ink);font-size:12px;font-weight:850}.node h3{font-size:14px}.node p{font-size:10px;line-height:1.36;margin:0}
+    .dark .node h3{color:var(--ink)}.dark .node p{color:#405a73}
+    .formula{padding:11px 13px;border-radius:9px;background:#eaf2ff;color:#1b57af;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.dark .formula{background:rgba(40,120,255,.12);color:#c7ddff}
+    .callout{padding:11px 14px;border-left:4px solid var(--cyan);border-radius:0 10px 10px 0;background:#e9faff;color:#173c57;font-size:13px;line-height:1.45}.callout.warn{border-color:var(--amber);background:#fff6df}.callout.stop{border-color:var(--red);background:#fff0f1}.dark .callout{background:rgba(33,198,232,.09);color:#e1faff}.dark .callout.warn{background:rgba(231,155,18,.11);color:#ffe9b9}
+    .figure{height:100%;min-height:0;padding:7px;border:1px solid #cdd8e3;border-radius:12px;background:#fff;overflow:hidden}.figure img{display:block;width:100%;height:100%;object-fit:contain;border-radius:7px}.caption{font-size:10px;line-height:1.35;color:#60758a;margin-top:5px}.dark .caption{color:#9db4c9}
+    .paper-crop{position:relative}.paper-crop img{position:absolute;right:7px;top:50%;width:160%;max-width:none;height:auto;object-fit:initial;transform:translateY(-50%)}
+    .scene{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(270px,.72fr);gap:15px;flex:1;min-height:0}.scene-main,.scene-side{display:flex;flex-direction:column;min-height:0}.scene-main .figure,.scene-side .figure{flex:1}.scene-side{gap:9px}.scene-side .card{flex:none}.scene-side p{font-size:11px;line-height:1.4}.gif-label{font-size:9px;font-weight:800;color:#63788d;margin:0 3px 4px;text-transform:uppercase;letter-spacing:.05em}
+    .dual-scenes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px;flex:1;min-height:0}.dual-scenes>div{display:flex;flex-direction:column;min-height:0}.dual-scenes .figure{flex:1}.mini-caption{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-top:7px}.mini-caption h3{font-size:14px;margin:0}.mini-caption p{font-size:10px;margin:0;max-width:70%}
+    .multi{display:grid;grid-template-columns:minmax(0,1.52fr) minmax(300px,.72fr);gap:15px;flex:1;min-height:0}.multi-left,.multi-right{display:flex;flex-direction:column;min-height:0}.multi-left .figure,.multi-right .figure{flex:1}.multi-right{gap:9px}.multi-right .card{flex:none}
+    .metric-grid{display:grid;grid-template-columns:1.05fr 1fr 1fr;gap:13px;flex:1;min-height:0}.metric-grid .card{min-height:0}.metric-grid ul{margin:8px 0 0 17px;padding:0}.metric-grid li{font-size:11px;line-height:1.34;margin:5px 0}.metric-grid h3{font-size:16px}
+    table{width:100%;border-collapse:collapse;border:1px solid var(--line);background:#fff;font-size:10px}th,td{padding:7px 8px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}th{background:#edf3f8;color:#28425c;font-size:9px;letter-spacing:.03em}tr:last-child td{border-bottom:0}.numc{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.ok{color:#16813a;font-weight:850}.hold{color:#a66b00;font-weight:850}.no{color:#bb2c39;font-weight:850}
+    .contract{display:grid;grid-template-columns:1.06fr .94fr;gap:16px;flex:1;min-height:0}.checklist{display:grid;grid-template-columns:36px 1fr;gap:9px 11px;align-content:start}.checklist .n{width:32px;height:32px;display:grid;place-items:center;border-radius:50%;background:#e8f1ff;color:#1e63c9;font-size:11px;font-weight:900}.checklist h3{font-size:14px;margin:1px 0 2px}.checklist p{font-size:10px;margin:0}
+    .two-lane{display:grid;grid-template-columns:1fr 1fr;gap:16px;flex:1;min-height:0}.lane{position:relative;overflow:hidden;padding:18px 20px;border:1px solid var(--line);border-radius:14px;background:#fff}.lane:before{content:"";position:absolute;inset:0 auto 0 0;width:6px;background:var(--blue)}.lane.repair:before{background:var(--violet)}.lane ol{margin:12px 0 0 23px;padding:0}.lane li{font-size:12px;line-height:1.36;margin:7px 0}.bridge{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2;width:50px;height:50px;display:grid;place-items:center;border-radius:50%;background:var(--ink);color:#fff;border:4px solid var(--paper);font-size:17px;font-weight:900}
+    .gate{display:grid;grid-template-columns:38px 1fr;gap:10px;margin:9px 0}.gate .n{width:34px;height:34px;display:grid;place-items:center;border-radius:50%;background:#e7f7eb;color:#16813a;font-weight:900}.gate h3{font-size:14px;margin:1px 0 2px}.gate p{font-size:10px;margin:0}
+    .bottom{position:absolute;left:54px;right:54px;bottom:15px;z-index:3;display:flex;justify-content:space-between;align-items:center;font-size:9px;color:#73869a}.dark .bottom{color:#94acc2}.bottom a{text-decoration:none}.dark .bottom a{color:#9dd8ff}
+    .controls{position:fixed;left:22px;right:22px;bottom:12px;z-index:30;display:flex;justify-content:space-between;align-items:center;color:#9aacbf;font-size:10px}.buttons{display:flex;gap:6px}.controls button{padding:6px 9px;color:#d9e7f5;background:rgba(14,28,44,.9);border:1px solid rgba(255,255,255,.18);border-radius:7px;cursor:pointer}.controls button:hover{background:#1c3a59}.dots{display:flex;gap:5px}.dot{width:6px;height:6px;padding:0;border:0;border-radius:50%;background:#536579;cursor:pointer}.dot.active{width:18px;border-radius:4px;background:var(--cyan)}.progress{position:fixed;left:0;bottom:0;z-index:40;width:0;height:3px;background:linear-gradient(90deg,var(--cyan),var(--blue));transition:width .2s ease}
+    .speaker-notes{display:none;position:fixed;left:18px;top:18px;z-index:40;max-width:460px;padding:13px 15px;border:1px solid rgba(255,255,255,.2);border-radius:10px;background:rgba(7,17,29,.95);color:#e2edf7;font-size:11px;line-height:1.45}body.notes-on .speaker-notes{display:block}
+    @media(max-width:980px){html,body{height:auto;overflow:auto}.deck{display:block;padding:12px}.slide,.slide.active{display:flex;width:100%;max-height:none;min-height:680px;aspect-ratio:auto;margin:0 0 14px;padding:34px 28px 44px;overflow:visible}.hero,.scene,.dual-scenes,.multi,.metric-grid,.contract,.two-lane,.g3,.g4{grid-template-columns:1fr}.flow{grid-template-columns:1fr 1fr}.node:not(:last-child):after,.bridge{display:none}.figure{min-height:300px}.controls,.progress,.speaker-notes{display:none}.bottom{left:28px;right:28px}}
+    @media print{html,body{height:auto;overflow:visible;background:#fff}.deck{display:block;padding:0}.slide,.slide.active{display:flex;width:100vw;height:56.25vw;max-height:none;aspect-ratio:16/9;border:0;border-radius:0;box-shadow:none;page-break-after:always}.controls,.progress,.speaker-notes{display:none!important}}
+  </style>
+</head>
+<body>
+<main class="deck">
+  <section class="slide dark active" data-title="タイトル" data-notes="最初に境界を明示します。目標はHDPモデルへの置換ではなく、既存original DPを単一checkpointのまま改善することです。">
+    <div class="hero">
+      <div>
+        <div class="badge">T4 POST-TRAINING · MEETING MATERIAL</div>
+        <div class="kicker">Original Diffusion Planner × HDP-style AWR</div>
+        <h1>Original DPを<br>「自分の良い軌跡」から<br>改善する</h1>
+        <p class="subtitle">HDP原論文のRLを再現し、T4 full-sequenceへ適用する。実データ場面でrewardを検証し、AWRだけでは直せない失敗にはrepairを組み合わせる。</p>
+        <div style="margin-top:22px"><span class="pill green">配備対象はOriginal DP</span><span class="pill">8×H100 / K=10</span><span class="pill amber">正式結果は学習中</span></div>
+        <p class="small" style="margin-top:20px">2026-07-17 · local code / paper TeX / reference implementation / T4 NPZ scenesに基づく</p>
+      </div>
+      <div><img class="hero-img" src="t4_conference_assets/formal_replay_safety/scene_002.png" alt="正式K10 replayの安全候補と衝突候補、AWR weight、双方OBBを示す図"></div>
+    </div>
+    <div class="bottom"><span>Original DP × AWR on T4</span><span>01 / 16</span></div>
+  </section>
+
+  <section class="slide dark" data-title="結論" data-notes="現時点で証明済みなのは、全量向けの実装とデータ契約、候補生成、場面可視化です。学習後の総合改善はまだ主張しません。">
+    <div class="top"><div><div class="kicker">01 · executive summary</div><h2>最初に、結論と証拠の境界</h2></div><div class="section-label">proven / pending</div></div><div class="rule"></div>
+    <div class="grid g3 grow" style="align-content:center">
+      <div class="card accent green"><span class="pill green">目的</span><h3>単一のoriginal DP checkpointを改善</h3><p>モデルABIを変えず、decoder-only post-trainingで既存SFT checkpointを直接置き換えられる形にする。</p></div>
+      <div class="card accent"><span class="pill">方法</span><h3>HDPのAWRライフサイクルを移植</h3><p>同一sceneでK本を生成し、場面意味に沿って採点し、良い完全軌跡のdiffusion lossを重くする。</p></div>
+      <div class="card accent amber"><span class="pill amber">現在地</span><h3>full-sequence runはepoch 2から再開</h3><p>回収済み4.501M frozen groups（corpusの98.33%）を再利用し、8 GPUで継続する。</p></div>
+    </div>
+    <div class="grid g4" style="margin-top:14px">
+      <div class="stat"><div class="label">FILTERED CORPUS</div><div class="value">4,578,036</div><div class="note">is_skippedを除外</div></div>
+      <div class="stat"><div class="label">UNIQUE REPLAY</div><div class="value">4,501,440</div><div class="note">98.33% recovered</div></div>
+      <div class="stat"><div class="label">FIXED VALID</div><div class="value">46,068</div><div class="note">100% paired eval</div></div>
+      <div class="stat"><div class="label">FORMAL UPDATE</div><div class="value">K=10</div><div class="note">5 denoise steps</div></div>
+    </div>
+    <div class="callout warn" style="margin-top:14px"><strong>証拠の3層：</strong>A=正式K10 replay、B=source K16 coverage、C=structured metric probe。Aは実際の局所学習選択を示すが、全体改善はなお固定validのsource対比較でのみ確定する。</div>
+    <div class="bottom"><span>正式runと診断可視化の証拠を混同しない</span><span>02 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="AWR入門" data-notes="AWRを知らない人には、同じ問題に対する複数回答を採点し、良い回答を強く復習する方法だと説明します。MSEは画面上の最終軌跡距離だけではありません。replay candidateごとに独立なdiffusion時刻とGaussian noiseでnoisy trajectoryを作り、decoderがclean candidateの80点×x/y/cos/sinを復元する二乗誤差です。candidate MSEへreward weightを掛けてK本平均します。loss低下は保存targetへの適合であり、未見scene性能の証明ではありません。">
+    <div class="top"><div><div class="kicker">02 · AWR in one scene</div><h2>AWRは「同じ運転問題への複数回答」を比較する</h2></div><div class="section-label">no critic · no PPO ratio</div></div><div class="rule"></div>
+    <div class="flow">
+      <div class="node"><div class="n">1</div><h3>Scene</h3><p>ego履歴、map、route、信号、周辺車と記録未来。</p></div>
+      <div class="node"><div class="n">2</div><h3>K候補</h3><p>同じsceneから独立noiseで完全な8秒軌跡を一括生成。</p></div>
+      <div class="node"><div class="n">3</div><h3>Reward</h3><p>安全、ルール、route、進行、comfortを軌跡単位で採点。</p></div>
+      <div class="node"><div class="n">4</div><h3>Group weight</h3><p>同じscene内だけで標準化し、相対的に良い候補を重くする。</p></div>
+      <div class="node"><div class="n">5</div><h3>DP update</h3><p>重み付きdiffusion regressionで良い軌跡を出しやすくする。</p></div>
+    </div>
+    <div class="grid g2 grow" style="align-items:center;margin-top:16px">
+      <div>
+        <div class="formula">zᵢ = (rᵢ − mean(r)) / (sample_std(r) + 10⁻⁶)<br>wᵢ = exp(β · zᵢ)<br>L_HDP-faithful = (1/K) · Σ wᵢ · MSEᵢ</div>
+        <p class="small" style="margin-top:9px">正式miningはβ=1、sample std、重み和で割らない<code>hdp_mean</code>。K=10は1回のbatched samplingで、全10本が独立<code>N(0,I)×0.5</code>＋trajectory aug 0.5 m。monitorだけcandidate 0をzero-noiseにする。</p>
+      </div>
+      <div class="grid g2">
+        <div class="card accent green"><h3>得意</h3><p>候補集合の中に、より安全・より進める・より滑らかな軌跡が既に存在するscene。</p></div>
+        <div class="card accent red"><h3>限界</h3><p>K本すべてが同じ衝突へ進むなら、重み付けだけでは停止や譲りを新しく作れない。</p></div>
+      </div>
+    </div>
+    <div class="bottom"><span>AWR = trajectory-level weighted regression</span><span>03 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="HDP原論文" data-notes="HDPから借りる中心は、候補を作って重み付き回帰し、EMA・disk replay・refreshで安定運用する一連のライフサイクルです。">
+    <div class="top"><div><div class="kicker">03 · original HDP RL</div><h2>HDP原論文のRL：一回のlossではなく、反復する学習系</h2></div><div class="section-label">paper + reference code</div></div><div class="rule"></div>
+    <div class="contract">
+      <div class="figure paper-crop"><img src="../reference/external/Hyper-Diffusion-Planner/assets/framework.jpg" alt="Hyper-Diffusion Planner公式図のRL post-training部分を拡大"></div>
+      <div>
+        <div class="checklist">
+          <div class="n">1</div><div><h3>SFT policyから開始</h3><p>既に基本運転ができるplannerを出発点にする。</p></div>
+          <div class="n">2</div><div><h3>完全軌跡をgroup sampling</h3><p>同じsceneのK候補をtrajectory-level rewardで比較する。</p></div>
+          <div class="n">3</div><div><h3>HDP固有hybrid loss</h3><p>velocity diffusion lossと積分waypoint lossを組み合わせる。</p></div>
+          <div class="n">4</div><div><h3>EMA + disk replay</h3><p>候補を保存して反復学習し、周期的に最新policyでrefreshする。</p></div>
+          <div class="n">5</div><div><h3>pseudo-closed-loop評価</h3><p>ego候補を変えて採点するが、neighborは主にログ未来をreplayする。</p></div>
+        </div>
+        <div class="callout" style="margin-top:12px"><strong>再現境界：</strong>論文表はEMA 0.05。公開NAVSIM releaseはdefault OFFで、EMA生成部もcomment-out。T4ではgroup-AWR / replay / refreshを採用し、EMA .999/stepは明示的な配備安定化契約として区別する。</div>
+      </div>
+    </div>
+    <div class="bottom"><span>根拠：<a href="https://arxiv.org/abs/2602.22801">HDP paper</a> · <a href="../reference/external/Hyper-Diffusion-Planner/HDP-navsim/hdp_navsim/agent/dp_vla/dp_vla_rl_agent.py">released RL code</a></span><span>04 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="DP適用" data-notes="HDPの方法を忠実に使うことと、HDPモデル構造をコピーすることは別です。original DPのlossとcheckpoint契約を守ります。なお論文本文は全候補同rewardのgroupをdiscardと記しますが、公開agentは有限tieをstd+1e-6で正規化するため全weight 1です。現runは公開code側に合わせ、該当6,659 group、0.148%を保持しています。次armではpaper通りdropする条件を独立ablationにします。">
+    <div class="top"><div><div class="kicker">04 · adaptation</div><h2>HDPの学習則を、original DPの構造に忠実に移す</h2></div><div class="section-label">same deployment ABI</div></div><div class="rule"></div>
+    <div class="callout"><strong>配備モデルは最後までoriginal DP。</strong> 候補生成とreward/replayの外側をHDP方式にし、学習対象はDPのDiT/decoder、lossはplain diffusion MSEとする。</div>
+    <table style="margin-top:14px;font-size:11px">
+      <thead><tr><th>項目</th><th>HDP原論文</th><th>T4 Original DP版</th><th>理由</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Policy</strong></td><td>HDP planner</td><td>source original-DP checkpoint</td><td>実車用の単一checkpointを維持</td></tr>
+        <tr><td><strong>Update</strong></td><td>HDP decoder</td><td>DP DiT / decoder-only</td><td>encoder表現を保護し、変更範囲を限定</td></tr>
+        <tr><td><strong>Loss</strong></td><td>velocity + waypoint hybrid</td><td>reward-weighted plain MSE</td><td>存在しないHDP headを仮定しない</td></tr>
+        <tr><td><strong>Candidate</strong></td><td>scene group</td><td>K=10 / 5 denoise steps</td><td>同一scene内比較を維持しつつ計算を最適化</td></tr>
+        <tr><td><strong>Replay</strong></td><td>disk replay + refresh</td><td>1 pass mining → replay → 10 epoch refresh</td><td>HDPの反復単位を再現</td></tr>
+        <tr><td><strong>EMA</strong></td><td>論文表0.05／公開release default OFF</td><td>decay .999 / optimizer step</td><td>差分を隠さず、配備policyを一意化</td></tr>
+        <tr><td><strong>Neighbor</strong></td><td>dataset依存</td><td>旧T4 dataは raw[t+1] → aligned[t]</td><td>既知の1-frame offsetを全経路で補正</td></tr>
+      </tbody>
+    </table>
+    <div class="grid g4" style="margin-top:14px">
+      <div class="stat"><div class="label">PRECISION</div><div class="value">BF16</div><div class="note">autocast training</div></div>
+      <div class="stat"><div class="label">MATMUL</div><div class="value">TF32</div><div class="note">H100 tensor cores</div></div>
+      <div class="stat"><div class="label">T4 STABILITY</div><div class="value">EMA .999</div><div class="note">per step · grad clip 0.5</div></div>
+      <div class="stat"><div class="label">LEARNING RATE</div><div class="value">1e−6</div><div class="note">保守的post-training</div></div>
+    </div>
+    <div class="bottom"><span>忠実性 = 学習原理を守り、モデルABIは壊さない</span><span>05 / 16</span></div>
+  </section>
+
+  <section class="slide dark" data-title="全量実験" data-notes="全量runではis_skippedフィルタとneighbor +1補正を固定し、8 GPUでfrozen replayを学習中です。replay epochは高価なmodel samplingを再実行しないため速くなります。公開HDP configのtotal_epochs=10000はtrainer上限であり、論文が必要条件として証明した値ではありません。今回の1 mining + 9 replayは最初の10-epoch refresh cycleです。full paired評価に合格した時だけ最新policyで次cycleをre-mineします。">
+    <div class="top"><div><div class="kicker">05 · full-data experiment contract</div><h2>全量で再現できるよう、入力からpromotionまで固定する</h2></div><div class="section-label">current formal run</div></div><div class="rule"></div>
+    <div class="grid g4">
+      <div class="stat"><div class="label">CORPUS</div><div class="value">4.578M</div><div class="note">filtered full sequence</div></div>
+      <div class="stat"><div class="label">REPLAY</div><div class="value">4.501M</div><div class="note">98.33% unique groups</div></div>
+      <div class="stat"><div class="label">COMPUTE</div><div class="value">8×H100</div><div class="note">DDP + compile</div></div>
+      <div class="stat"><div class="label">VALID</div><div class="value">46,068</div><div class="note">100% paired eval</div></div>
+    </div>
+    <div class="flow" style="margin-top:18px">
+      <div class="node"><div class="n">1</div><h3>Filter</h3><p>is_skippedを除外し、manifestとscene provenanceを固定。</p></div>
+      <div class="node"><div class="n">2</div><h3>Align</h3><p>旧データのneighbor futureを+1 frameから読む。</p></div>
+      <div class="node"><div class="n">3</div><h3>Mine</h3><p>B×K候補、reward、重みをdisk cacheへ保存。</p></div>
+      <div class="node"><div class="n">4</div><h3>Replay</h3><p>cache groupをwith-replacementで再利用し更新。</p></div>
+      <div class="node"><div class="n">5</div><h3>Refresh</h3><p>10 epochごとに最新policyで候補を再生成。</p></div>
+    </div>
+    <div class="grid g2 grow" style="align-items:end;margin-top:13px">
+      <div class="callout"><strong>Exact geometry：</strong>neighborはraw[t+1]へalign。ego点は後軸基準なので、OBB centerを進行方向へ0.5×wheelbase移す。reward・静止画・GIFを同じ契約にする。</div>
+      <div class="callout warn"><strong>同じpolicyを比べる：</strong>学習monitorはcurrent policyのK=10/5-step診断。選定は保存EMAをK=1・zero-noise・10-stepで2,048場面screenし、最大3候補だけ46,068場面へ進める。</div>
+    </div>
+    <div class="bottom"><span>Full run: single checkpoint · full filtered dataset · deterministic contract</span><span>06 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="指標" data-notes="総和だけを最適化するとprogressやlaneのような密な項が勝ちやすいため、hard constraint、interaction、qualityの順に読みます。laneは元車線維持ではありません。">
+    <div class="top"><div><div class="kicker">06 · metric guide</div><h2>rewardは「全部を同時に最大化」ではなく、優先順位で設計する</h2></div><div class="section-label">safety first · quality second</div></div><div class="rule"></div>
+    <div class="metric-grid">
+      <div class="card accent red">
+        <span class="pill red">1 · formal hard gate</span><h3>今回のHDP/PDM totalを0にする制約</h3>
+        <ul><li><strong>Collision：</strong>yaw付きego/neighbor OBBの重なり</li><li><strong>Road border / DAC proxy：</strong>車体footprintの境界越え</li><li><strong>Kinematic：</strong>yaw-rate・曲率等の実行不能（T4保護）</li><li><strong>Red light：</strong>今回は監視/probe。formal totalへの追加は別ablation</li></ul>
+      </div>
+      <div class="card accent amber">
+        <span class="pill amber">2 · formal quality</span><h3>hard-safe候補を比較するPDM項</h3>
+        <ul><li><strong>TTC：</strong>1秒lookaheadのOBB時間余裕</li><li><strong>EP proxy：</strong>logged expert polyline上のroute progress比</li><li><strong>LK proxy：</strong>連続route整合。現maskはexpertのlane-union外逸脱</li><li><strong>HC proxy：</strong>smoothnessとfeasibilityの連続score</li></ul>
+      </div>
+      <div class="card accent green">
+        <span class="pill green">3 · proposed additions</span><h3>別profileで独立検証する項</h3>
+        <ul><li><strong>Red-light gate：</strong>active stop-line sliceで追加価値を検証</li><li><strong>THW / car-following：</strong>leader-present sceneだけで有効化</li><li><strong>Expert likeness：</strong>off-policy距離で減衰しrepairに使用</li><li><strong>Diversity：</strong>rewardではなくcandidate coverage診断</li></ul>
+      </div>
+    </div>
+    <div class="callout stop" style="margin-top:13px"><strong>忠実性の境界：</strong>公開HDP agentのPDM重み5/5/2/2を採用するが各値はT4 proxy。原版LKは「0.5 m超が2 s連続・intersection除外」。現T4 maskはlane-union外逸脱だけで、同一monitor-2048の実データ監査recallは16.3%。lane gateはOFFだが、次refresh前にindicator＋route topology sidecarで補う。</div>
+    <div class="bottom"><span>根拠：<a href="https://github.com/autonomousvision/navsim/blob/main/docs/metrics.md">NAVSIM PDMS/EPDMS</a> · <a href="https://arxiv.org/abs/2602.22801">HDP</a></span><span>07 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="正式衝突場面" data-notes="これは診断用K16ではなく、正式epoch-1 replay cacheから直接読んだK10です。表のrewardとAWR weightが実際に学習へ使われました。">
+    <div class="top"><div><div class="kicker">07 · formal replay evidence A</div><h2>実際のAWR選択：衝突候補を下げ、安全候補を強く復習する</h2></div><div class="section-label">exact K=10 trajectories / rewards / weights</div></div><div class="rule"></div>
+    <div class="scene">
+      <div class="scene-main"><div class="gif-label">FORMAL r0:114 · candidate table + exact gate geometry</div><div class="figure"><img src="t4_conference_assets/formal_replay_safety/scene_002.png" alt="正式K10 replayで3.9秒のcollision候補と安全候補、AWR weightを比較した図"></div></div>
+      <div class="scene-side">
+        <div class="gif-label">80 frames · full camera + EVENT CAMERA</div>
+        <div class="figure"><img src="t4_conference_assets/formal_replay_safety/scene_002.gif" alt="3.9秒collisionを双方OBB付きで示す80フレームGIF"></div>
+        <div class="card accent red"><h3>#9 collision @ 3.9 s</h3><p>signed OBB −0.11 m · reward 0 · AWR w 0.15。安全topはreward 0.989 · w 1.65。0–4 sだけがscore対象、以後はcontext。</p></div>
+      </div>
+    </div>
+    <div class="bottom"><span>egoは後軸基準：bbox center = trajectory point + 0.5×wheelbase</span><span>08 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="正式境界場面" data-notes="Road borderは軌跡中心点ではなく、後軸基準から作ったego footprintの四隅で評価します。lane IN/OUTは診断で、正常な車線変更をhard-zeroにはしません。">
+    <div class="top"><div><div class="kicker">08 · formal replay evidence A</div><h2>Road border：正常な横移動を許し、車体越境だけをhard-zeroにする</h2></div><div class="section-label">footprint margin · lane diagnostic-only</div></div><div class="rule"></div>
+    <div class="scene">
+      <div class="scene-main"><div class="gif-label">FORMAL r0:0 · 8 hard-safe / 2 road-border crossings</div><div class="figure"><img src="t4_conference_assets/formal_replay_safety/scene_000.png" alt="正式K10 replayのroad-border safe versus crossing候補とAWR weight"></div></div>
+      <div class="scene-side">
+        <div class="gif-label">80 frames · border event zoom @ 0.1 s</div><div class="figure"><img src="t4_conference_assets/formal_replay_safety/scene_000.gif" alt="road-border footprint crossingをevent camera付きで示す80フレームGIF"></div>
+        <div class="card accent amber"><h3>同一group内のcontrast</h3><p>safe top w 1.67、crossing w 0.15。lane OUTでもborderを越えなければgreen feasible。lane-changeを禁じるrewardではない。</p></div>
+      </div>
+    </div>
+    <div class="bottom"><span>中心線ではなくego footprint → road-border margin</span><span>09 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="Lane監査" data-notes="lane gateはOFFなので車線変更を即失格にはしません。しかし、論文のlane-change maskを再現できているか実データで調べると、現在のouter-union primitiveは通常のshared-boundary transitionをほとんど拾いませんでした。">
+    <div class="top"><div><div class="kicker">09 · metric accuracy audit</div><h2>Lane：hard gateではない。しかし現maskは通常の車線変更を網羅しない</h2></div><div class="section-label">real validation scenes · honest failure audit</div></div><div class="rule"></div>
+    <div class="scene">
+      <div class="scene-main"><div class="gif-label">独立lane-transition label × 現formal expert mask · 4 role</div><div class="figure"><img src="t4_conference_assets/lane_mask_audit/lane_mask_audit.png" alt="実検証場面におけるlane transition labelとformal expert maskのcovered missed over-exempt control四分類"></div></div>
+      <div class="scene-side">
+        <div class="gif-label">40 frames · rear-axle ego OBB + aligned neighbors</div><div class="figure"><img src="t4_conference_assets/lane_mask_audit/lane_mask_audit.gif" alt="lane mask四分類を実場面とOBBで同期表示する動的GIF"></div>
+        <div class="card accent red"><h3>監査＋epoch 5 slice</h3><p>335 scene監査：change 86件中mask ONは14件（16.3%）。同86件のcurrent-policy診断はRB 2→0だが、ADE +0.31 m / FDE +0.84 m。lane-change改善済みとは判定しない。</p></div>
+        <div class="card accent amber"><h3>次refreshの修正</h3><p>indicator 2/3、route topology、logged closest-lane遷移をprecomputed sidecarへ統合し、turn / intersection sliceでprecision・recallを固定する。</p></div>
+      </div>
+    </div>
+    <div class="bottom"><span>現runの契約は保持して評価 · 次runでreward semanticsを変更</span><span>10 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="多モード性" data-notes="多様性はendpoint spreadだけではなく、行動分岐の数で読みます。trajectory augmentationで動く交差場面の構成要素は2から3へ増えましたが、急カーブでは1のままで、万能ではありません。">
+    <div class="top"><div><div class="kicker">10 · multimodality evidence</div><h2>多モード性：散らばりではなく「異なる行動の枝」があるか</h2></div><div class="section-label">paired source-checkpoint diagnostic</div></div><div class="rule"></div>
+    <div class="multi">
+      <div class="multi-left"><div class="gif-label">交差場面 · raw sampling と HDP-style trajectory augmentation の成対比較</div><div class="figure"><img src="t4_conference_assets/awr_multimodality_compare/scene_001_multimodality.png" alt="同じ交差場面についてraw samplingとHDP式trajectory augmentationの候補分布、endpoint、距離分布を比較した図"></div><div class="caption">同じsource original-DP checkpoint、同じscene、K=16。これは学習後の性能比較ではなく、候補coverageの診断。</div></div>
+      <div class="multi-right">
+        <div class="gif-label">動的candidate replay</div><div class="figure"><img src="t4_conference_assets/awr_multimodality_compare/scene_001_multimodality.gif" alt="raw samplingとHDP式trajectory augmentationの候補を時間発展で比較したGIF"></div>
+        <div class="grid g2">
+          <div class="card accent"><h3>Raw</h3><p><strong>平均pair距離 1.51 m</strong><br>1 m成分数 2</p></div>
+          <div class="card accent green"><h3>Augmented</h3><p><strong>平均pair距離 1.83 m</strong><br>1 m成分数 3</p></div>
+        </div>
+        <div class="card accent amber"><p><strong>対照：</strong>急カーブsceneはraw 0.82 m / augmented 1.12 mだが、1 m成分数は両方1。noiseを増やすだけでは新しいmaneuverが必ず生まれるわけではない。</p></div>
+      </div>
+    </div>
+    <div class="bottom"><span>coverage不足のsceneはAWRではなくrepair branchへ</span><span>11 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="初期実験" data-notes="正式replay全4.501M groupを読み、候補contrastとweight concentrationを確認しました。これは学習信号の証拠で、checkpoint改善はEMA K1/10-stepの別評価で判定します。">
+    <div class="top"><div><div class="kicker">11 · experiments</div><h2>全量replayに学習信号はある。ただし「改善」は別問題</h2></div><div class="section-label">4.501M exact groups · not model outcome</div></div><div class="rule"></div>
+    <div class="grid g4">
+      <div class="stat"><div class="label">Rdet</div><div class="value">0.9255</div><div class="note">source deterministic reward</div></div>
+      <div class="stat"><div class="label">Rbest-group</div><div class="value">0.9348</div><div class="note">各groupの最高候補</div></div>
+      <div class="stat"><div class="label">SAFE CANDIDATES</div><div class="value">9.689/10</div><div class="note">平均hard-safe本数</div></div>
+      <div class="stat"><div class="label">SOURCE ADE / FDE</div><div class="value">2.62 / 5.77</div><div class="note">m · K10/5-step monitor</div></div>
+    </div>
+    <div class="grid g2 grow" style="margin-top:14px;min-height:0">
+      <div style="display:flex;flex-direction:column;min-height:0">
+        <table>
+          <thead><tr><th>正式epoch-1 replay全件</th><th class="numc">値</th><th>読み方</th></tr></thead>
+          <tbody>
+            <tr><td>Scene-groups / candidates</td><td class="numc">4.501M / 45.014M</td><td>実reward/weight memmap</td></tr>
+            <tr><td>best−candidate0 &gt; .01</td><td class="numc">57.2%</td><td>候補headroomあり</td></tr>
+            <tr><td>zero / nonzero混在</td><td class="numc">35.94%</td><td>強いcontrast · event未同定</td></tr>
+            <tr><td>weighted gain &gt; .01</td><td class="numc">59.5%</td><td>weightは上向き</td></tr>
+            <tr><td>ESS p05 / p50 / p95</td><td class="numc">4.43 / 7.09 / 9.08</td><td>普遍的collapseなし</td></tr>
+            <tr><td>all-zero / tied</td><td class="numc">0.148%</td><td>ranking信号なし</td></tr>
+            <tr><td>mean group weight</td><td class="numc">1.416</td><td>更新scale +41.6%</td></tr>
+          </tbody>
+        </table>
+        <div class="callout warn" style="margin-top:10px"><strong>noise契約：</strong>miningのcandidate 0もstochastic。上段Rdetだけがmonitorのzero-noise plan。bc=0＋mean weight 1.416なのでADE/FDE driftを診断として公開するが、単独のpromotion vetoにはしない。</div>
+      </div>
+      <div style="display:flex;flex-direction:column;min-height:0"><div class="figure"><img src="t4_conference_assets/full_replay_signal/full_replay_signal.png" alt="正式4.501M replay全件のcandidate headroom weighted reward gain ESS zero reward比率"></div><div class="caption">更新方向は成立しているが、これはtarget/weightの事実。model outcomeは保存EMAの46,068 paired評価だけで判定する。</div></div>
+    </div>
+    <div class="bottom"><span>loss低下は最適化の証拠であり、運転性能向上の証拠ではない</span><span>12 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="学習中monitor" data-notes="固定2,048 sceneのcurrent-policy診断では、epoch 2から9の全候補で平均scene scoreの95% CIが正です。CI下限で選ぶ暫定championはepoch 6で、92.55から94.08、+1.530 point、CIは+0.912から+2.181です。最新epoch 9も+1.459 pointです。ADE/FDEや新規eventは重要な診断ですが、論文由来の独立hard gateではありません。正式結論は保存EMAの46,068 full pairedで出します。">
+    <div class="top"><div><div class="kicker">12 · current-policy monitor</div><h2>中途経過：平均scoreは有意に改善。<br>正式EMA証明はfull評価待ち</h2></div><div class="section-label">N=2,048 paired · K=10/5-step · not EMA</div></div><div class="rule"></div>
+    <div class="scene">
+      <div class="scene-main"><div class="gif-label">epoch 2–9 · primary mean score + diagnostic breakdown</div><div class="figure"><img src="t4_conference_assets/training_monitor/checkpoint_paired_sweep.png" alt="epoch 2から9のcurrent-policy mean scoreとcomponent診断"></div><div class="caption">主判定は平均scene score。ADE/FDE、hard-event transitionは変化の中身を説明する診断であり、全項同時改善を要求しない。</div></div>
+      <div class="scene-side">
+        <div class="gif-label">recovered ↑ / newly introduced ↓</div><div class="figure"><img src="t4_conference_assets/training_monitor/hard_event_transition_audit.png" alt="epoch 2から9のhard event回収と新規発生の成対件数"></div>
+        <div class="grid g2"><div class="stat"><div class="label">e9 ΔScore [95% CI]</div><div class="value">+1.46 pt</div><div class="note">[+.81, +2.12]</div></div><div class="stat"><div class="label">暫定champion e6</div><div class="value">+1.53 pt</div><div class="note">CI lower +.91</div></div></div>
+        <div class="callout warn"><strong>診断を隠さない：</strong>e9はcollision 2回収/1新規、road-border 41回収/5新規、kinematic 0回収/1新規、ADE/FDE drift +.087/+.233 m。</div>
+        <div class="callout warn"><strong>次の判断：</strong>epoch 10後、保存EMAをK=1・zero-noise・10-stepでscreenし、最大3候補を全46,068件で評価する。</div>
+      </div>
+    </div>
+    <div class="bottom"><span>current-policyの傾向 ≠ deployment checkpointの証明</span><span>13 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="R2LPL" data-notes="R2LPLは同僚のoverride scene案として紹介します。ただし今回の範囲はAWRだけです。借りるのはcandidate retrievalとconstrained morphで、生成物を同じAWR groupへ追加し、同じreward、weight、DP loss、EMAで学習します。R2LPL原版の独立Repair SFT branchは作りません。">
+    <div class="top"><div><div class="kicker">13 · learn from R2LPL</div><h2>R2LPLから借りるのは候補生成。<br>学習則はAWRのまま</h2></div><div class="section-label">colleague proposal · idea source only</div></div><div class="rule"></div>
+    <div class="contract">
+      <div class="figure"><img src="../reference/external/Learning-from-Mistakes-Rollout-Retrieval-Lifelong-Policy-Learning-for-Autonomous-Driving/docs/assets/r2lpl_framework.png" alt="R2LPL論文のrollout retrieval lifelong policy learning framework図"></div>
+      <div>
+        <div class="checklist">
+          <div class="n">1</div><div><h3>Reproduce</h3><p>実driveをsemi-closed-loopで再生し、policyが失敗する状態を作る。</p></div>
+          <div class="n">2</div><div><h3>Detect</h3><p>collision、border、expert disagreementをrealized ego / open-loop planで分けて検出。</p></div>
+          <div class="n">3</div><div><h3>Retrieve / morph</h3><p>K候補からrule-feasible targetを選び、必要ならGT-informed Frenet morphを追加。</p></div>
+          <div class="n">4</div><div><h3>原版：Repair SFT</h3><p>失敗前のcredit windowだけをbounded replayと混ぜて学習。</p></div>
+          <div class="n">5</div><div><h3>Re-mine</h3><p>最新checkpointで未回収sceneを再探索し、新しい失敗も発見する。</p></div>
+        </div>
+        <div class="callout warn" style="margin-top:12px"><strong>T4で吸収する範囲：</strong>hard-safe候補ゼロ、行動分岐不足、closed-loop overrideではretrieval / constrained morphを追加候補として生成し、既存Kと一緒に同じAWR evaluatorで再採点する。独立Repair SFT・別memory・別checkpointは作らない。</div>
+      </div>
+    </div>
+    <div class="bottom"><span>R2LPL原版はSFT、今回借りるのはAWR candidate enrichmentだけ</span><span>14 / 16</span></div>
+  </section>
+
+  <section class="slide" data-title="最終提案" data-notes="最強案は一つのAWR frameworkの中でcandidate coverageだけを適応させることです。次cacheではcandidateごとにevent sidecarを保存し、collision/RB/kinematic/red、first event、OBB clearance、reward成分、sampling seed、mode countまで固定します。通常groupはHDP方式のK候補、all-zeroやmode不足groupだけretrieval/morph候補を足し、全候補を同じrewardとAWR lossへ通します。最終成果物は同じoriginal DPの一つのEMAです。">
+    <div class="top"><div><div class="kicker">14 · strongest proposal</div><h2>T4-DP-AWR+：一つのAWR内で<br>candidate coverageを適応</h2></div><div class="section-label">one loss · one replay · one checkpoint</div></div><div class="rule"></div>
+    <div class="two-lane">
+      <div class="lane">
+        <span class="pill">Candidate pool A · faithful HDP</span><h3>全量分布で「より良い既存候補」を選ぶ</h3>
+        <ol><li>full filtered T4 sceneをB×Kでsampling</li><li>hard gate → interaction → qualityの順で採点</li><li>safe contrastがあるgroupだけAWR update</li><li>disk replay、EMA、10-epoch refresh</li><li>normal / lane-change / curve / followingを広く改善</li></ol>
+        <div class="formula">route to AWR if:<br>safe_count ≥ m ∧ reward_spread ≥ δ ∧ ESS in range</div>
+        <div class="grid g2" style="margin-top:12px"><div class="stat"><div class="label">BROAD QUALITY</div><div class="value">2.877M</div><div class="note">no-zero · gain +.010</div></div><div class="stat"><div class="label">REWARD CONTRAST</div><div class="value">1.618M</div><div class="note">mixed · eventで再分層</div></div></div>
+      </div>
+      <div class="bridge">+</div>
+      <div class="lane repair">
+        <span class="pill violet">Candidate pool B · enrichment</span><h3>候補集合にない安全行動だけを追加</h3>
+        <ol><li>all-zero / low-spread / override groupを検出</li><li>structured stop/slow/lateral候補を生成</li><li>retrieval / constrained morphを候補へ追加</li><li>同じhard evaluatorで再採点</li><li>同じAWR loss / replay / EMAで更新</li></ol>
+        <div class="formula" style="color:#6041c9;background:#f0ecff">enrich K only if:<br>safe_count = 0 ∨ mode_coverage insufficient ∨ override</div>
+        <div class="grid g2" style="margin-top:12px"><div class="stat"><div class="label">ALL-ZERO SEED</div><div class="value">6,659</div><div class="note">AWR rankingなし</div></div><div class="stat"><div class="label">EXTRA ROUTE</div><div class="value">Override</div><div class="note">closed-loop / mode不足</div></div></div>
+      </div>
+    </div>
+    <div class="callout" style="margin-top:12px"><strong>実cacheでrouting：</strong>no-zero 2,876,942件→faithful broad AWR、zero/nonzero混在1,617,839件→contrast AWR、all-zero 6,659件→候補を拡張して再採点。それでもfeasible候補がなければskipする。全groupは最後まで同じAWR objectiveと一つのEMAへ流れる。</div>
+    <div class="bottom"><span>R2LPLはcandidate ideaだけを提供 · optimizerとcheckpointはAWRで一つ</span><span>15 / 16</span></div>
+  </section>
+
+  <section class="slide dark" data-title="採用判定" data-notes="最後に選定標準をまとめます。HDP、NAVSIM、PlannerRFTに合わせ、sceneごとのhard-gated quality scoreを全データで平均します。同じ46,068 sceneでsourceとの差を取り、paired bootstrap CIの下限が0より大きいcheckpointだけを候補にし、CI下限最大のepochを選びます。ADE/FDEとevent内訳は公開診断で、単項拒否条件ではありません。">
+    <div class="top"><div><div class="kicker">15 · promotion contract</div><h2>一つの総合scene scoreを、<br>全46,068件で公平に平均する</h2></div><div class="section-label">paper-aligned · paired · CI-aware</div></div><div class="rule"></div>
+    <div class="grid g2 grow">
+      <div>
+        <div class="gate"><div class="n">1</div><div><h3>Per-scene PDM-like score</h3><p>collision × road-border × kinematic gateの内側でTTC / progress / lane / comfortを加重。</p></div></div>
+        <div class="gate"><div class="n">2</div><div><h3>Full paired mean</h3><p>同一46,068 scenesで<code>100×mean(Rema−Rsource)</code>を計算。</p></div></div>
+        <div class="gate"><div class="n">3</div><div><h3>Bootstrap confidence</h3><p>95% CI下限&gt;0でpromotion。下限最大のepochを単一checkpointとして選ぶ。</p></div></div>
+        <div class="gate"><div class="n">4</div><div><h3>Diagnostics, not vetoes</h3><p>collision/RB/kinematic、ADE/FDE、lane/stop slice、ESSを全公開し、原因とriskを読む。</p></div></div>
+        <div class="gate"><div class="n">5</div><div><h3>Evidence ladder</h3><p>open-loop full scoreで選定し、reactive simulation、closed-loop、実車smokeへ進む。</p></div></div>
+      </div>
+      <div class="grid" style="align-content:center">
+        <div class="card accent green"><span class="pill green">Promote</span><h3>AWR checkpointを候補化</h3><p>full ΔScoreのCI下限&gt;0。component診断とscene GIFを添えてclosed-loop /実車確認へ進む。</p></div>
+        <div class="card accent amber"><span class="pill amber">Hold</span><h3>source DPを維持</h3><p>full平均gainのCIが0を跨ぐ場合。candidate coverage / reward orderingを監査し、次AWR armへ送る。</p></div>
+        <div class="card accent red"><span class="pill red">現時点</span><h3>正式な改善結論はpending</h3><p>4.501M unique replay trainingを継続中。最終EMAと46,068 full valid評価が出た時点で更新する。</p></div>
+        <p class="small">根拠：<a href="https://arxiv.org/abs/2602.22801">HDP</a> · <a href="https://github.com/autonomousvision/navsim/blob/main/docs/metrics.md">NAVSIM</a> · <a href="https://arxiv.org/abs/2601.12901">PlannerRFT</a> · <a href="https://arxiv.org/abs/2502.19908">CarPlanner</a><br>資料：<a href="t4_dp_awr_material_ja.html">material</a> · <a href="t4_dp_awr_visual_assets_ja.html">全素材</a> · <a href="t4_conference_assets/t4_awr_visual_assets_bundle.zip">ZIP</a> · ←/→ · N notes</p>
+      </div>
+    </div>
+    <div class="bottom"><span>目標：大規模データで総合性能を上げ、単一checkpointとして安全に置換</span><span>16 / 16</span></div>
+  </section>
+</main>
+
+<div class="speaker-notes" id="speakerNotes" role="status" aria-live="polite"></div>
+<div class="controls" aria-label="スライド操作">
+  <div class="buttons"><button type="button" id="prev" aria-label="前のスライド">←</button><button type="button" id="next" aria-label="次のスライド">→</button><button type="button" id="notes" aria-label="発表者ノート表示切替">N</button></div>
+  <div class="dots" id="dots" aria-label="スライド一覧"></div>
+  <span id="counter">1 / 16</span>
+</div>
+<div class="progress" id="progress" aria-hidden="true"></div>
+<script>
+  (() => {
+    const slides = [...document.querySelectorAll('.slide')];
+    const dots = document.getElementById('dots');
+    const counter = document.getElementById('counter');
+    const progress = document.getElementById('progress');
+    const notes = document.getElementById('speakerNotes');
+    let index = Math.max(0, Math.min(slides.length - 1, Number(location.hash.replace('#slide-', '')) - 1 || 0));
+
+    slides.forEach((slide, i) => {
+      const dot = document.createElement('button');
+      dot.type = 'button'; dot.className = 'dot';
+      dot.title = slide.dataset.title || `Slide ${i + 1}`;
+      dot.setAttribute('aria-label', `${i + 1}枚目：${dot.title}`);
+      dot.addEventListener('click', () => show(i));
+      dots.appendChild(dot);
+    });
+
+    function restartGifs(slide) {
+      slide.querySelectorAll('img[src*=".gif"]').forEach(img => {
+        const src = img.getAttribute('src').split('?')[0];
+        img.setAttribute('src', `${src}?restart=${Date.now()}`);
+      });
+    }
+    function show(nextIndex, updateHash = true) {
+      index = (nextIndex + slides.length) % slides.length;
+      slides.forEach((slide, i) => slide.classList.toggle('active', i === index));
+      [...dots.children].forEach((dot, i) => dot.classList.toggle('active', i === index));
+      counter.textContent = `${index + 1} / ${slides.length}`;
+      progress.style.width = `${((index + 1) / slides.length) * 100}%`;
+      notes.textContent = slides[index].dataset.notes || '';
+      restartGifs(slides[index]);
+      if (updateHash) history.replaceState(null, '', `#slide-${index + 1}`);
+    }
+    function toggleNotes() { document.body.classList.toggle('notes-on'); }
+    document.getElementById('prev').addEventListener('click', () => show(index - 1));
+    document.getElementById('next').addEventListener('click', () => show(index + 1));
+    document.getElementById('notes').addEventListener('click', toggleNotes);
+    document.addEventListener('keydown', event => {
+      if (['ArrowRight', 'PageDown', ' '].includes(event.key)) { event.preventDefault(); show(index + 1); }
+      if (['ArrowLeft', 'PageUp'].includes(event.key)) { event.preventDefault(); show(index - 1); }
+      if (event.key === 'Home') show(0);
+      if (event.key === 'End') show(slides.length - 1);
+      if (event.key.toLowerCase() === 'n') toggleNotes();
+    });
+    show(index, false);
+  })();
+</script>
+</body>
+</html>

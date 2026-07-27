@@ -153,8 +153,7 @@ def run_closed_loop_eval(
     video_mp4s: list[Path] = []
     t0 = time.perf_counter()
 
-    fout = open(out_dir / "segments.jsonl", "w")
-    try:
+    with open(out_dir / "segments.jsonl", "w", encoding="utf-8") as fout:
         for ri, key in enumerate(route_keys):
             tl = RouteTimeline(routes[key], sidecar_dir=npz_root, timers=timers)
             n_seg_videos = 0
@@ -205,8 +204,6 @@ def run_closed_loop_eval(
 
             if verbose:
                 print(f"[{ri + 1}/{len(route_keys)}] {key}: {n_seg_videos} segment video(s)")
-    finally:
-        fout.close()
 
     summary = aggregate(rows, near_miss_thresh)
     summary["npz_root"] = str(npz_root)

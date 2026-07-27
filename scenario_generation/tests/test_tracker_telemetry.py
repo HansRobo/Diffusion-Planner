@@ -9,7 +9,6 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import pytest
 
 from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
@@ -131,7 +130,7 @@ class TestWarmStartReset:
         ref[:, 0] = np.arange(1, 21) * 0.5
         x0 = np.array([0.0, 0.0, 0.0, 5.0], dtype=np.float64)
         tracker.track(x0, ref)
-        first_knots = tracker._prev_knots.copy()
+        tracker._prev_knots.copy()
         # Next step with moving ego — warm start should evolve from the
         # shifted previous solution, NOT reset to zeros.
         x0_2 = np.array([0.5, 0.0, 0.0, 5.0], dtype=np.float64)

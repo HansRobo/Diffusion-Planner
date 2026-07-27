@@ -41,7 +41,7 @@ if __name__ == "__main__":
         file_list[location].append(file_path)
 
     files = []
-    for location, loc_files in file_list.items():
+    for _location, loc_files in file_list.items():
         loc_files_sorted = sorted(loc_files)
         curr_num = len(loc_files_sorted) // num_filter
         files.extend(loc_files_sorted[:curr_num])

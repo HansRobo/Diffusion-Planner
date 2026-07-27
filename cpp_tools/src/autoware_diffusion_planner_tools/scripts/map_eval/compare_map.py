@@ -509,8 +509,8 @@ def match_geometry_only(
     if not int_indexed or not ref_indexed:
         return []
 
-    int_orig_idx, int_clean = zip(*int_indexed) if int_indexed else ([], [])
-    ref_orig_idx, ref_clean = zip(*ref_indexed) if ref_indexed else ([], [])
+    int_orig_idx, int_clean = zip(*int_indexed, strict=False) if int_indexed else ([], [])
+    ref_orig_idx, ref_clean = zip(*ref_indexed, strict=False) if ref_indexed else ([], [])
 
     int_clean = list(int_clean)
     ref_clean = list(ref_clean)
@@ -676,12 +676,12 @@ def make_static_plots(
     # Panel 1: Fused overlay (reference first, then internal)
     for lane in reference["lane_segments"]:
         c_id, c = points3_id_to_np(lane["centerline"])
-        l_id, l = points3_id_to_np(lane["left_boundary"])
+        l_id, left = points3_id_to_np(lane["left_boundary"])
         r_id, r = points3_id_to_np(lane["right_boundary"])
         if len(c):
             ax1.plot(c[:, 0], c[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
-        if len(l):
-            ax1.plot(l[:, 0], l[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
+        if len(left):
+            ax1.plot(left[:, 0], left[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
         if len(r):
             ax1.plot(r[:, 0], r[:, 1], color="#2d5016", alpha=0.7, linewidth=1.5)
     for line_string in reference["line_strings"]:
@@ -696,18 +696,18 @@ def make_static_plots(
     for lane in internal["lane_segments"]:
         c = points3_to_np(lane["centerline"])
         r = points3_to_np(lane["right_boundary"])
-        l = points3_to_np(lane["left_boundary"])
+        left = points3_to_np(lane["left_boundary"])
         if len(c):
             ax1.plot(c[:, 0], c[:, 1], color="blue", alpha=0.55, linewidth=0.9)
         if len(r):
             ax1.plot(r[:, 0], r[:, 1], color="blue", alpha=0.55, linewidth=0.9)
-        if len(l):
-            ax1.plot(l[:, 0], l[:, 1], color="blue", alpha=0.55, linewidth=0.9)
-    for i, line_string in enumerate(internal["line_strings"]):
+        if len(left):
+            ax1.plot(left[:, 0], left[:, 1], color="blue", alpha=0.55, linewidth=0.9)
+    for _i, line_string in enumerate(internal["line_strings"]):
         s = points3_to_np(line_string["points"])
         if len(s):
             ax1.plot(s[:, 0], s[:, 1], color="red", alpha=0.8)
-    for i, polygon in enumerate(internal["polygons"]):
+    for _i, polygon in enumerate(internal["polygons"]):
         poly = points3_to_np(polygon["points"])
         if len(poly):
             ax1.fill(
@@ -721,14 +721,14 @@ def make_static_plots(
     for lane in internal["lane_segments"]:
         lane_id = int(lane["id"])
         c = points3_to_np(lane["centerline"])
-        l = points3_to_np(lane["left_boundary"])
+        left = points3_to_np(lane["left_boundary"])
         r = points3_to_np(lane["right_boundary"])
         if len(c):
             err = lane_error_map.get(lane_id, 0.0)
             ax2.plot(c[:, 0], c[:, 1], color=cmap(norm_lane(err)), alpha=0.9, linewidth=1.2)
-        if len(l):
+        if len(left):
             err = lane_error_map.get(lane_id, 0.0)
-            ax2.plot(l[:, 0], l[:, 1], color=cmap(norm_lane(err)), alpha=0.9, linewidth=1.2)
+            ax2.plot(left[:, 0], left[:, 1], color=cmap(norm_lane(err)), alpha=0.9, linewidth=1.2)
         if len(r):
             err = lane_error_map.get(lane_id, 0.0)
             ax2.plot(r[:, 0], r[:, 1], color=cmap(norm_lane(err)), alpha=0.9, linewidth=1.2)
@@ -740,8 +740,8 @@ def make_static_plots(
     cbar2.set_label("Hausdorff error (m)", fontsize=10)
 
     # Panel 3: Line string error heatmap (per-type scale)
-    for i, l in enumerate(internal["line_strings"]):
-        s = points3_to_np(l["points"])
+    for i, line_string in enumerate(internal["line_strings"]):
+        s = points3_to_np(line_string["points"])
         if len(s):
             err = line_error_map.get(i, 0.0)
             ax3.plot(s[:, 0], s[:, 1], color=cmap(norm_line(err)), alpha=0.9, linewidth=1.2)
@@ -822,12 +822,12 @@ def render_html_dashboard(
     lanes_ref = []
     for lane in reference["lane_segments"]:
         _, c = points3_id_to_np(lane["centerline"])
-        _, l = points3_id_to_np(lane["left_boundary"])
+        _, left = points3_id_to_np(lane["left_boundary"])
         _, r = points3_id_to_np(lane["right_boundary"])
         lane_id = int(lane["id"])
         lane_geometries = {
             "centerline": _pts_to_coords(c),
-            "left_boundary": _pts_to_coords(l),
+            "left_boundary": _pts_to_coords(left),
             "right_boundary": _pts_to_coords(r),
         }
         if (

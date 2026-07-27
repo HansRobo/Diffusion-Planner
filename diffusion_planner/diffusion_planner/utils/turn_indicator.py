@@ -101,9 +101,10 @@ class TurnIndicatorStateMachine:
         probabilities = torch.softmax(values, dim=0) if logits else values
         if not torch.isfinite(probabilities).all():
             raise ValueError("Turn-indicator probabilities must be finite")
-        if not logits:
-            if (probabilities < 0).any() or abs(float(probabilities.sum()) - 1.0) > 1e-4:
-                raise ValueError("Probabilities must be non-negative and sum to one")
+        if not logits and (
+            (probabilities < 0).any() or abs(float(probabilities.sum()) - 1.0) > 1e-4
+        ):
+            raise ValueError("Probabilities must be non-negative and sum to one")
 
         alpha = self.config.probability_ema_alpha
         if self._smoothed_probabilities is None:

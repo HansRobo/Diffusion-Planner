@@ -224,7 +224,8 @@ def test_full_policy_inference_needs_no_signal_input_and_is_signal_invariant():
 
 def test_training_loss_updates_only_the_intent_head_for_indicator_loss():
     torch.manual_seed(0)
-    args = _encoder_config()
+    # Joint mode is an explicit ablation; production Base/SFT defaults to policy.
+    args = _encoder_config(supervised_training_stage="joint")
     model = Diffusion_Planner(args).train()
     batch = 2
     inputs = _encoder_inputs(batch)

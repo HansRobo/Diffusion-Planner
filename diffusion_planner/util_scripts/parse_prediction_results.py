@@ -175,7 +175,9 @@ if __name__ == "__main__":
     ave_lon_error_nei = 0.0
     ave_angle_error_nei = 0.0
 
-    for validation_path, prediction_result_path in zip(validation_paths, prediction_result_paths):
+    for validation_path, prediction_result_path in zip(
+        validation_paths, prediction_result_paths, strict=False
+    ):
         validation_data = np.load(validation_path)
         prediction_result = np.load(prediction_result_path)["prediction"]
 

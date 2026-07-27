@@ -19,24 +19,23 @@ if __name__ == "__main__":
     if save_path is None:
         save_path = root_dir_list[0].parent / "path_list.json"
 
-    log = open(save_path.with_suffix(".log"), "w")
-
     all_list = []
 
-    for root_dir in root_dir_list:
-        root_dir = root_dir.resolve()
-        assert root_dir.is_absolute(), f"{root_dir} is not an absolute path."
-        assert root_dir.exists(), f"{root_dir} does not exist."
-        assert root_dir.is_dir(), f"{root_dir} is not a directory."
+    with open(save_path.with_suffix(".log"), "w", encoding="utf-8") as log:
+        for root_dir in root_dir_list:
+            root_dir = root_dir.resolve()
+            assert root_dir.is_absolute(), f"{root_dir} is not an absolute path."
+            assert root_dir.exists(), f"{root_dir} does not exist."
+            assert root_dir.is_dir(), f"{root_dir} is not a directory."
 
-        npz_files = sorted(root_dir.rglob("*.npz"))
-        print(f"Found {len(npz_files)} npz files in {root_dir}.")
-        log.write(f"Found {len(npz_files)} npz files in {root_dir}.\n")
+            npz_files = sorted(root_dir.rglob("*.npz"))
+            print(f"Found {len(npz_files)} npz files in {root_dir}.")
+            log.write(f"Found {len(npz_files)} npz files in {root_dir}.\n")
 
-        all_list.extend(npz_files)
+            all_list.extend(npz_files)
 
-    print(f"Found {len(all_list)} npz files in total.")
-    log.write(f"Found {len(all_list)} npz files in total.\n")
+        print(f"Found {len(all_list)} npz files in total.")
+        log.write(f"Found {len(all_list)} npz files in total.\n")
 
     root_dir = root_dir_list[0]
 

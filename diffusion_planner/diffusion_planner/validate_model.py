@@ -385,6 +385,11 @@ def _epdms_eval_metrics(
 def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, float]:
     """return: ave_loss_ego, ave_loss_neighbor"""
     device = args.device
+    # The production policy stage has an intentionally untrained/frozen intent
+    # head. Do not spend validation time running it or publish random head metrics
+    # as if they measured the trajectory policy. Joint and head-only stages still
+    # evaluate the head normally.
+    evaluate_turn_indicator = getattr(args, "supervised_training_stage", "policy") != "policy"
     model.eval()
     total_loss_ego = 0.0
     total_loss_neighbor = 0.0
@@ -408,7 +413,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         inputs = {key: value.to(device) for key, value in inputs.items()}
         B = inputs["ego_current_state"].shape[0]
 
-        turn_indicator_seq = inputs["turn_indicators"]
+        turn_indicator_seq = inputs["turn_indicators"] if evaluate_turn_indicator else None
 
         inputs["sampled_trajectories"] = torch.zeros(
             B, action_agent_num, OUTPUT_T, POSE_DIM, dtype=torch.float32, device=device
@@ -432,6 +437,8 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             inputs["neighbor_agents_past"][:, :Pn, -1, :4],
         )
         inputs = args.observation_normalizer(inputs)
+        if not evaluate_turn_indicator:
+            inputs["_skip_turn_indicator"] = True
 
         use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and str(device).startswith("cuda")
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
@@ -456,35 +463,43 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         all_gt[:, 1:][neighbor_mask] = 0.0
 
         prediction = outputs["prediction"]
-        turn_indicator_logit = outputs["turn_indicator_logit"]
-        if not torch.isfinite(prediction).all() or not torch.isfinite(turn_indicator_logit).all():
+        turn_indicator_logit = outputs.get("turn_indicator_logit")
+        turn_logit_finite = turn_indicator_logit is not None and bool(
+            torch.isfinite(turn_indicator_logit).all()
+        )
+        if not torch.isfinite(prediction).all() or (
+            evaluate_turn_indicator and not turn_logit_finite
+        ):
             raise FloatingPointError(
                 f"Non-finite validation model output at batch {step}: "
                 f"prediction_finite={bool(torch.isfinite(prediction).all())}, "
-                f"turn_logit_finite={bool(torch.isfinite(turn_indicator_logit).all())}"
+                f"turn_logit_finite={turn_logit_finite}"
             )
         multisample_metrics = _multisample_metrics(
             model, inputs, encoder_outputs, ego_future, args, step
         )
         for key, value in multisample_metrics.items():
             total_result_dict[key].append(value.cpu())
-        turn_indicator = turn_indicator_logit.argmax(dim=-1)
-        turn_indicator_gt = make_turn_indicator_gt(turn_indicator_seq)
-        batch_confusion = (
-            torch.bincount(
-                turn_indicator_gt * TURN_INDICATOR_OUTPUT_DIM + turn_indicator,
-                minlength=TURN_INDICATOR_OUTPUT_DIM**2,
+        if evaluate_turn_indicator:
+            turn_indicator = turn_indicator_logit.argmax(dim=-1)
+            turn_indicator_gt = make_turn_indicator_gt(turn_indicator_seq)
+            batch_confusion = (
+                torch.bincount(
+                    turn_indicator_gt * TURN_INDICATOR_OUTPUT_DIM + turn_indicator,
+                    minlength=TURN_INDICATOR_OUTPUT_DIM**2,
+                )
+                .cpu()
+                .tolist()
             )
-            .cpu()
-            .tolist()
-        )
-        turn_indicator_confusion = [
-            old + int(new) for old, new in zip(turn_indicator_confusion, batch_confusion)
-        ]
+            turn_indicator_confusion = [
+                old + int(new)
+                for old, new in zip(turn_indicator_confusion, batch_confusion, strict=False)
+            ]
         if return_pred:
             predictions.append(prediction.cpu())
-            turn_indicators.append(turn_indicator.cpu())
-            turn_indicator_logits.append(turn_indicator_logit.float().cpu())
+            if evaluate_turn_indicator:
+                turn_indicators.append(turn_indicator.cpu())
+                turn_indicator_logits.append(turn_indicator_logit.float().cpu())
 
         neighbors_future_valid = ~neighbor_future_mask
         all_neighbors_future_valid = ~all_neighbor_future_mask
@@ -556,8 +571,12 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
 
     if return_pred:
         predictions = torch.cat(predictions, dim=0)
-        turn_indicators = torch.cat(turn_indicators, dim=0)
-        turn_indicator_logits = torch.cat(turn_indicator_logits, dim=0)
+        if evaluate_turn_indicator:
+            turn_indicators = torch.cat(turn_indicators, dim=0)
+            turn_indicator_logits = torch.cat(turn_indicator_logits, dim=0)
+        else:
+            turn_indicators = torch.empty(0, dtype=torch.long)
+            turn_indicator_logits = torch.empty(0, TURN_INDICATOR_OUTPUT_DIM)
     turn_metrics = turn_indicator_metrics_from_confusion(turn_indicator_confusion)
     return {
         "avg_loss_ego": avg_loss_ego,
@@ -576,6 +595,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         "_loss_neighbor_sum": total_loss_neighbor,
         "_samples_neighbor": total_samples_neighbor,
         "_turn_confusion": turn_indicator_confusion,
+        "_turn_indicator_evaluated": evaluate_turn_indicator,
         **total_result_dict,
     }
 
@@ -598,6 +618,7 @@ def aggregate_valid_metrics(valid_dict, device):
     turn_confusion = [
         int(value) for value in ddp.all_reduce_sum_values(valid_dict["_turn_confusion"], device)
     ]
+    turn_indicator_evaluated = bool(valid_dict.get("_turn_indicator_evaluated", True))
     turn_matrix = [
         turn_confusion[row * TURN_INDICATOR_OUTPUT_DIM : (row + 1) * TURN_INDICATOR_OUTPUT_DIM]
         for row in range(TURN_INDICATOR_OUTPUT_DIM)
@@ -664,6 +685,7 @@ def aggregate_valid_metrics(valid_dict, device):
         **turn_indicator_metrics_from_confusion(turn_confusion),
         "turn_indicator_class_accuracy": turn_class_accuracy,
         "turn_indicator_class_count": turn_class_count,
+        "turn_indicator_evaluated": turn_indicator_evaluated,
         "ego_means": ego_means,
         "epdms_means": epdms_means,
         "multisample_means": multisample_means,

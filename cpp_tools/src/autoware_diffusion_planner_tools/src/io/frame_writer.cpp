@@ -69,7 +69,7 @@ nlohmann::json build_frame_json(
 nlohmann::json build_route_json(
   const int64_t num_frames, const double traveled_distance_m, const int64_t start_timestamp,
   const int64_t end_timestamp, const SkippingInfo & skipping_info,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map)
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten)
 {
   std::vector<int> missing_types;
   for (const auto & t : skipping_info.missing_topic_types) {
@@ -78,6 +78,7 @@ nlohmann::json build_route_json(
 
   nlohmann::json j;
   j["is_skipped"] = (skipping_info.label != SkippingLabel::NotSkipped);
+  j["goal_pose_overwritten"] = goal_pose_overwritten;
   j["num_frames"] = num_frames;
   j["traveled_distance_m"] = traveled_distance_m;
   j["start_timestamp"] = start_timestamp;
@@ -145,7 +146,7 @@ void save_route_json(
   const std::string & output_path, const std::string & rosbag_dir_name,
   const std::string & identifier, const int64_t num_frames, const double traveled_distance_m,
   const int64_t start_timestamp, const int64_t end_timestamp, const SkippingInfo & skipping_info,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map)
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten)
 {
   namespace fs = std::filesystem;
 
@@ -154,7 +155,7 @@ void save_route_json(
 
   const nlohmann::json j = build_route_json(
     num_frames, traveled_distance_m, start_timestamp, end_timestamp, skipping_info,
-    timestamp_stats_map);
+    timestamp_stats_map, goal_pose_overwritten);
 
   const std::string json_filename = routes_dir + "/" + rosbag_dir_name + "_" + identifier + ".json";
   std::ofstream json_file(json_filename);

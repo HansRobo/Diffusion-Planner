@@ -6,14 +6,13 @@ Tests coordinate transforms, NPZ loading, and tensor conversion.
 from __future__ import annotations
 
 import math
-import tempfile
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from scenario_generation.npz_loader import from_npz
-from scenario_generation.scene_context import Agent, AgentType, MapData, SceneContext
+from scenario_generation.scene_context import Agent, AgentType
 from scenario_generation.transforms import (
     _rotation_matrix,
     transform_cos_sin,
@@ -280,8 +279,6 @@ class TestTensorConverter:
         """When using original ego, the transform should be identity-like."""
         from scenario_generation.tensor_converter import (
             _build_ego_agent_past,
-            _build_ego_current_state,
-            _heading_to_cos_sin,
         )
 
         npz_path = _make_synthetic_npz(tmp_path)
@@ -307,7 +304,7 @@ class TestTensorConverter:
         ego = scene.ego_agent
 
         R = _rotation_matrix(ego.current_heading)
-        ego_xy = ego.current_position.astype(np.float64)
+        ego.current_position.astype(np.float64)
 
         state = _build_ego_current_state(ego, R)
         assert state.shape == (1, 10)
