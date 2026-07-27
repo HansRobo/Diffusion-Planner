@@ -172,3 +172,20 @@ def test_no_expected_hash_or_scene_count_pins_remain():
             if token in text:
                 offenders.append(f"{name}: {token}")
     assert not offenders, "pinned hash/count reintroduced: " + ", ".join(offenders)
+
+
+def test_supervisor_reuses_a_mine_cache_when_the_policy_is_unchanged():
+    """A vetoed cycle keeps its incumbent, so the next cycle's policy is
+    byte-identical to the one that already produced a cache. Re-rolling it costs
+    ~10 GPU-hours for a statistically identical sample."""
+    text = (ROOT / "rlvr/autoresearch/run_plannerrft_full_to_epoch100.sh").read_text()
+    assert "reusable_mine_run_for_checkpoint" in text
+    # Matching must be on content hash, not path, so a copied checkpoint matches
+    # and a different policy never does.
+    assert "staged_model_sha256" in text
+    reuse = text.index("reusable_mine_run_for_checkpoint()")
+    loop = text.index("mine_run=$(reusable_mine_run_for_checkpoint")
+    assert reuse < loop, "helper must be defined before the cycle loop uses it"
+    assert "mine_cache_shape_complete" in text[reuse:reuse + 1200], (
+        "a reused cache must still pass the completeness check"
+    )

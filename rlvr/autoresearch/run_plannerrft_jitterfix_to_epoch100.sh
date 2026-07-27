@@ -152,7 +152,7 @@ export AWR_EXPECTED_PADDED_GROUPS=${EXPECTED_PADDED_GROUPS}
 export AWR_EXPECTED_RANK_GROUPS=${EXPECTED_RANK_GROUPS}
 
 mine_cache_shape_complete() {
-  local run=$1 cache=$1/replay_buffer total=0 rank rank_dir count
+  local run=$1 cache=$1/replay_buffer total=0 rank rank_dir count first_count=''
   [[ -d ${cache} ]] || return 1
   for rank in $(seq 0 7); do
     printf -v rank_dir '%s/rank_%04d' "${cache}" "${rank}"

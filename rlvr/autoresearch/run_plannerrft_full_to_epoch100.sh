@@ -211,6 +211,28 @@ latest_completed_mine_run() {
   )
 }
 
+reusable_mine_run_for_checkpoint() {
+  # Return an already-committed mine cache that was rolled from exactly this
+  # policy, or nothing.  Matching is on the checkpoint's content hash recorded in
+  # the cache's own provenance, so a renamed or copied checkpoint still matches
+  # and a genuinely different policy never does.
+  local checkpoint=$1 want run provenance
+  [[ -s ${checkpoint} ]] || return 0
+  want=$(sha256sum "${checkpoint}" | awk '{print $1}')
+  while IFS= read -r run; do
+    provenance=${run}/provenance.json
+    [[ -s ${provenance} ]] || continue
+    [[ $(jq -r '.staged_model_sha256 // empty' "${provenance}") == "${want}" ]] \
+      || continue
+    mine_cache_shape_complete "${run}" || continue
+    printf '%s\n' "${run}"
+    return 0
+  done < <(
+    find "${CYCLE1_MINE_RUN%/*}" "${OUT}" -mindepth 1 -maxdepth 3 -type d \
+      -name '20*_plannerrft_full_cycle*_mine*' -print 2>/dev/null | sort -r
+  )
+}
+
 run_from_log() {
   local path=$1
   sed -n 's/^Run directory: //p' "${path}" | tail -n 1
@@ -317,7 +339,13 @@ validate_mine_run() {
     log "Cycle ${cycle}: accepting complete cache-only mine artifact; run summaries were interrupted after cache close"
   fi
 
-  if [[ ${cycle} -ge 2 || ${CYCLE1_FIRST} -ge 3 ]]; then
+  # These three contracts assert that a *freshly rolled* later-cycle mine
+  # symlinked cycle 1's encoding rather than copying 3 TB.  When the cache being
+  # validated IS cycle 1's — the policy was unchanged so we reused it outright —
+  # the question is vacuous and the contract files do not exist.
+  if [[ $(readlink -f "${run}") == $(readlink -f "${CYCLE1_MINE_RUN}") ]]; then
+    log "Cycle ${cycle}: validating cycle-1's own cache; encoding-reuse contracts do not apply"
+  elif [[ ${cycle} -ge 2 || ${CYCLE1_FIRST} -ge 3 ]]; then
     jq -e --arg root "${SOURCE_CACHE}" '
       .enabled == true and .root == $root and .order_epoch == 1
     ' "${run}/shared_replay_encoding_contract.json" >/dev/null \
@@ -342,7 +370,9 @@ validate_mine_run() {
     [[ -s ${manifest} && -s ${expert} ]] \
       || die "Cycle ${cycle} rank ${rank} has no strict manifests"
     count=$(jq -er '.scene_count' "${manifest}")
-    if [[ ${cycle} -ge 2 ]]; then
+    # Same reasoning as the contracts above: when this *is* cycle 1's cache the
+    # arrays are the originals, not symlinks into it.
+    if [[ ${cycle} -ge 2 && $(readlink -f "${run}") != $(readlink -f "${CYCLE1_MINE_RUN}") ]]; then
       encoding=${rank_dir}/$(jq -er '.arrays.scene_encoding' "${manifest}")
       [[ -L ${encoding} ]] || die "Cycle ${cycle} rank ${rank} copied the 3-TB encoding"
       [[ $(readlink -f "${encoding}") == "$(readlink -f "${SOURCE_CACHE}/rank_$(printf '%04d' "${rank}")/scene_encoding.npy")" ]] \
@@ -942,9 +972,19 @@ main() {
 
     mine_run=$(latest_completed_mine_run "${mine_parent}")
     if [[ -z ${mine_run} ]]; then
-      archive_interrupted_stage_log "${mine_log}" \
-        "cycle$(printf '%02d' "${cycle}")_mine"
-      mine_run=$(run_mine "${cycle}" "${mine_epoch}" "${checkpoint}" "${args}" "${mine_parent}" "${mine_log}")
+      # A mine cache is a function of (policy, corpus).  When the previous cycle
+      # kept its incumbent — a non-regression veto, or no epoch beating the
+      # selector — the policy is byte-identical to the one that produced the
+      # previous cache, so re-rolling it costs ~10 GPU-hours and yields a
+      # statistically identical sample.  Reuse it instead.
+      mine_run=$(reusable_mine_run_for_checkpoint "${checkpoint}")
+      if [[ -n ${mine_run} ]]; then
+        log "Cycle ${cycle}: policy unchanged since $(basename "${mine_run}"); reusing that mine cache instead of re-rolling"
+      else
+        archive_interrupted_stage_log "${mine_log}" \
+          "cycle$(printf '%02d' "${cycle}")_mine"
+        mine_run=$(run_mine "${cycle}" "${mine_epoch}" "${checkpoint}" "${args}" "${mine_parent}" "${mine_log}")
+      fi
     fi
     cache=$(validate_mine_run "${mine_run}" "${cycle}" "${mine_epoch}")
     overlay=$(build_or_validate_overlay "${cycle}" "${cache}" "${overlay_parent}")
