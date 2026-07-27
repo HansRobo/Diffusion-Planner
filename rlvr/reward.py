@@ -768,35 +768,94 @@ def _shape_reward(
     on_road_factor = 1.0 - off_road_fractions
     adjusted_progress = progress_scores * on_road_factor
 
+    # Materialise every scalar diagnostic with one device-to-host transfer.
+    #
+    # The rollout miner calls this function once per scene with K candidates.
+    # Converting each field with ``float(cuda_tensor[i])`` in the loop below
+    # used to introduce O(K * fields) independent CUDA synchronisations per
+    # scene.  Packing the already-computed tensors changes no reward math (the
+    # same values, in the same dtype, are merely copied together) while
+    # reducing that boundary to one synchronisation per scene.  Keep the
+    # Python dataclass ABI unchanged for replay writers and diagnostics.
+    packed_rows = torch.stack(
+        (
+            safety_scores,
+            adjusted_progress,
+            smoothness_scores,
+            feasibility_scores,
+            centerline_scores,
+            red_light_scores,
+            totals,
+            off_road_fractions,
+            rb_crossing_gate,
+            rb_near_pen,
+            rb_wide_pen,
+            rb_min_dist_t,
+            lane_crossing_gate,
+            lane_near_frac,
+            lane_wide_frac,
+            sc_crossing_gate,
+            sc_near_pen,
+            sc_wide_pen,
+            sc_cont_pen,
+            sc_min_dist_scalar,
+            kinematic_gate,
+        ),
+        dim=1,
+    ).detach().cpu().tolist()
+
     results: list[RewardBreakdown] = []
-    for i in range(N):
+    for i, row in enumerate(packed_rows):
+        (
+            safety_value,
+            progress_value,
+            smoothness_value,
+            feasibility_value,
+            centerline_value,
+            red_light_value,
+            total_value,
+            off_road_value,
+            rb_gate_value,
+            rb_near_value,
+            rb_wide_value,
+            rb_min_value,
+            lane_gate_value,
+            lane_near_value,
+            lane_wide_value,
+            sc_gate_value,
+            sc_near_value,
+            sc_wide_value,
+            sc_cont_value,
+            sc_min_value,
+            kinematic_gate_value,
+        ) = row
         results.append(
             RewardBreakdown(
-                safety=float(safety_scores[i]),
-                progress=float(adjusted_progress[i]),
-                smoothness=float(smoothness_scores[i]),
-                feasibility=float(feasibility_scores[i]),
-                centerline=float(centerline_scores[i]),
-                red_light=float(red_light_scores[i]),
-                total=float(totals[i]),
+                safety=float(safety_value),
+                progress=float(progress_value),
+                smoothness=float(smoothness_value),
+                feasibility=float(feasibility_value),
+                centerline=float(centerline_value),
+                red_light=float(red_light_value),
+                total=float(total_value),
                 collision_step=collision_steps[i],
-                off_road_fraction=float(
-                    off_road_fractions[i]
-                ),  # always 0 (polygon disabled); use rb_crossing/rb_near_penalty instead
-                rb_crossing=bool(rb_crossing_gate[i] < 0.5),
-                rb_near_penalty=float(rb_near_pen[i]),
-                rb_wide_penalty=float(rb_wide_pen[i]),
-                rb_min_dist=float(rb_min_dist_t[i].item()),
-                lane_crossing=bool(lane_crossing_gate[i] < 0.5),
-                lane_near_frac=float(lane_near_frac[i]),
-                lane_wide_frac=float(lane_wide_frac[i]),
-                static_crossing=bool(sc_crossing_gate[i] < 0.5),
-                sc_near_penalty=float(sc_near_pen[i]),
-                sc_wide_penalty=float(sc_wide_pen[i]),
-                sc_cont_penalty=float(sc_cont_pen[i]),
-                sc_min_dist=float(sc_min_dist_scalar[i].item()),
+                # Always 0 for the current polygon-disabled profile; retain
+                # it for backward-compatible diagnostics.
+                off_road_fraction=float(off_road_value),
+                rb_crossing=bool(rb_gate_value < 0.5),
+                rb_near_penalty=float(rb_near_value),
+                rb_wide_penalty=float(rb_wide_value),
+                rb_min_dist=float(rb_min_value),
+                lane_crossing=bool(lane_gate_value < 0.5),
+                lane_near_frac=float(lane_near_value),
+                lane_wide_frac=float(lane_wide_value),
+                static_crossing=bool(sc_gate_value < 0.5),
+                sc_near_penalty=float(sc_near_value),
+                sc_wide_penalty=float(sc_wide_value),
+                sc_cont_penalty=float(sc_cont_value),
+                sc_min_dist=float(sc_min_value),
                 sc_n_stopped=sc_n_stopped_scene,
-                kinematic_violated=bool(kinematic_gate[i] < 0.5),
+                kinematic_violated=bool(kinematic_gate_value < 0.5),
             )
         )
 
