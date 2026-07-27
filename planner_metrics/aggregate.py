@@ -84,7 +84,7 @@ def _stack_subscore_outputs(
 def compute_subscores_batch(
     ego_trajs: torch.Tensor,
     data: dict[str, torch.Tensor],
-    config: RewardConfig = RewardConfig(),
+    config: RewardConfig | None = None,
 ) -> dict[str, torch.Tensor | list[int | None]]:
     """Raw per-trajectory subscores + diagnostics for ``ego_trajs`` ``(N, T, 4)``.
 
@@ -96,6 +96,7 @@ def compute_subscores_batch(
     ``data`` must carry ``ego_shape``; map / neighbor terms degrade to their
     neutral values when the corresponding keys are absent.
     """
+    config = config if config is not None else RewardConfig()
     N, T, _ = ego_trajs.shape
     device = ego_trajs.device
 
@@ -295,7 +296,7 @@ def compute_subscores_batch(
 def compute_subscores_scene_batch(
     ego_trajs: torch.Tensor,
     data: dict[str, torch.Tensor],
-    config: RewardConfig = RewardConfig(),
+    config: RewardConfig | None = None,
 ) -> dict[str, torch.Tensor | list[list[int | None]]]:
     """Raw subscores for ``B`` scenes, each with ``N`` candidate trajectories.
 
@@ -307,7 +308,8 @@ def compute_subscores_scene_batch(
         ego_trajs: ``(B, N, T, 4)`` x/y/cos/sin trajectories.
         data: Scene-batched observation dict. Tensor values whose leading dim is
             ``B`` are sliced per scene; scalar/shared values are forwarded.
-        config: RewardConfig with subscore thresholds.
+        config: RewardConfig with subscore thresholds; defaults are applied by
+            ``compute_subscores_batch`` when omitted.
 
     Returns:
         Dict matching ``compute_subscores_batch`` but with tensor outputs

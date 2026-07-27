@@ -26,6 +26,10 @@ from torch import nn
 
 logger = logging.getLogger(__name__)
 
+# Shared immutable default so the builders below do not evaluate torch.device() in their
+# argument defaults, which binds a single object at import time.
+_CPU = torch.device("cpu")
+
 
 def _disable_dynamo_if_available():
     dynamo = getattr(torch, "_dynamo", None)
@@ -342,7 +346,7 @@ def unwrap_angle(phi: torch.Tensor) -> torch.Tensor:
 def first_order_D(
     N: int,
     lead_shape: tuple[int, ...],
-    device: torch.device = torch.device("cpu"),
+    device: torch.device = _CPU,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Build the banded matrix for the first-order smoothing term."""
@@ -356,7 +360,7 @@ def first_order_D(
 def second_order_D(
     N: int,
     lead_shape: tuple[int, ...],
-    device: torch.device = torch.device("cpu"),
+    device: torch.device = _CPU,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Build the banded matrix for the second-order smoothing term."""
@@ -371,7 +375,7 @@ def second_order_D(
 def third_order_D(
     N: int,
     lead_shape: tuple[int, ...],
-    device: torch.device = torch.device("cpu"),
+    device: torch.device = _CPU,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Build the banded matrix for the third-order smoothing term."""
@@ -416,7 +420,7 @@ def _cached_scalar_dtd(
 def construct_DTD(
     N: int,
     lead: tuple[int, ...],
-    device: torch.device = torch.device("cpu"),
+    device: torch.device = _CPU,
     dtype: torch.dtype = torch.float32,
     w_smooth1: float | torch.Tensor | None = None,
     w_smooth2: float | torch.Tensor | None = None,
@@ -1174,10 +1178,9 @@ class UnicycleAccelCurvatureActionSpace(ActionSpace):
 
         if not output_all_states:
             return torch.stack([accel, kappa], dim=-1)  # (..., N, 2)
-        else:
-            return torch.stack([accel, kappa], dim=-1), torch.stack(
-                [v[:, :-1], accel, theta[:, :-1]], dim=-1
-            )
+        return torch.stack([accel, kappa], dim=-1), torch.stack(
+            [v[:, :-1], accel, theta[:, :-1]], dim=-1
+        )
 
     def action_to_traj(
         self,
