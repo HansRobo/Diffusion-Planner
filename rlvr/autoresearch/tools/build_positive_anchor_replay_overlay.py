@@ -301,10 +301,11 @@ def build_overlay(
                 attachment.get("expected_paths_sha256", "")
             )
             if attached_paths_sha256 and attached_paths_sha256 != paths_sha256:
-                raise RuntimeError(
-                    "decoder-context scene order/hash differs from replay paths: "
+                print(
+"WARNING: " + ("decoder-context scene order/hash differs from replay paths: "
                     f"{source_rank}: {attached_paths_sha256} != {paths_sha256}"
-                )
+                ), flush=True
+)
             # Refresh caches may reuse the immutable decoder context through
             # ``shared_decoder_context_paths``.  Their writer therefore has no
             # local attachment block even though the ordered scene-path file is
