@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import math
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,34 @@ from rlvr.reward import (
     compute_reward_batch,
     reward_breakdown_to_json_dict,
 )
+
+# Wall-clock accounting for the rollout stages.  The mine leaves about two
+# thirds of every GPU idle, and until now there were no timers anywhere in the
+# rollout path -- only a whole-epoch one -- so there was no way to see which
+# stage owns that time.  Note that denoising is one batched GPU call while
+# scoring and weighting are per-scene Python loops, so a per-stage split is
+# exactly what distinguishes "the GPU is too slow" from "the GPU is waiting
+# for Python".
+#
+# These markers are deliberately sync-free: inserting torch.cuda.synchronize()
+# to get textbook attribution would itself change the thing being measured.
+# Asynchronous GPU work is therefore charged to whichever stage first blocks
+# on it, which is the honest answer to "where does the wall clock go".
+_STAGE_SECONDS: dict[str, float] = {}
+
+
+def stage_end(name: str, start: float) -> None:
+    """Charge ``time.perf_counter() - start`` to stage ``name``."""
+    _STAGE_SECONDS[name] = _STAGE_SECONDS.get(name, 0.0) + (
+        time.perf_counter() - start
+    )
+
+
+def drain_stage_seconds() -> dict[str, float]:
+    """Return the accumulated per-stage seconds and reset the accumulator."""
+    drained = dict(_STAGE_SECONDS)
+    _STAGE_SECONDS.clear()
+    return drained
 
 
 @dataclass
@@ -1640,18 +1669,23 @@ def rollout_and_score_scene_batch(
             "candidate-0 behavior-anchor semantics"
         )
 
+    _stage_start = time.perf_counter()
     trajectories, noise_scales, scene_encoding = sample_unguided_dp_group_batch(
         behavior_model, model_args, data, rollout_config, device
     )
+    stage_end("sample_native", _stage_start)
     batch_size = int(trajectories.shape[0])
     reward_data_by_scene: list[dict[str, torch.Tensor]] = []
     rewards_by_scene: list[list[RewardBreakdown]] = []
+    _stage_start = time.perf_counter()
     native_valid_batch, first_waypoint_diagnostics_by_scene = (
         _first_waypoint_gate_and_diagnostics_batch(
             trajectories, data, rollout_config
         )
     )
+    stage_end("gate_native", _stage_start)
     native_valid_by_scene = [native_valid_batch[index] for index in range(batch_size)]
+    _stage_start = time.perf_counter()
     for scene_index in range(batch_size):
         scene_data = _slice_scene_data(data, scene_index)
         scene_reward_data = reward_compatible_data(scene_data)
@@ -1661,7 +1695,9 @@ def rollout_and_score_scene_batch(
                 trajectories[scene_index], scene_reward_data, reward_config
             )
         )
+    stage_end("score_native", _stage_start)
 
+    _stage_start = time.perf_counter()
     enrichment_by_scene: dict[int, dict[str, float]] = {}
     if rollout_config.plannerrft_guided_exploration:
         if exploration_reference_model is None or exploration_reference_model_args is None:
@@ -1800,6 +1836,9 @@ def rollout_and_score_scene_batch(
                     }
                 )
                 enrichment_by_scene[scene_index] = enrichment
+    stage_end("guided", _stage_start)
+
+    _stage_start = time.perf_counter()
     result: list[AWRRollout] = []
     for scene_index in range(batch_size):
         scene_trajectories = trajectories[scene_index]
@@ -1870,6 +1909,7 @@ def rollout_and_score_scene_batch(
                 diagnostics=diagnostics,
             )
         )
+    stage_end("weight", _stage_start)
     return result
 
 

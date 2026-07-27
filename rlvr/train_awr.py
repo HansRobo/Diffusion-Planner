@@ -65,6 +65,7 @@ from rlvr.awr import (
     AWRRollout,
     AWRRolloutConfig,
     breakdown_metrics,
+    drain_stage_seconds,
     load_original_dp_checkpoint,
     load_scene,
     reward_compatible_data,
@@ -72,6 +73,7 @@ from rlvr.awr import (
     rollout_and_score_scene_batch,
     rollout_to_json,
     save_checkpoint_pair,
+    stage_end,
     update_ema,
 )
 from rlvr.grpo_loss import compute_batched_trajectory_losses
@@ -5745,6 +5747,7 @@ def _train_scene(
         and rollout_override.scene_encoding is not None
         and expert_anchor_weight <= 0.0
     )
+    _stage_start = time.perf_counter()
     if data_override is None:
         data = _load_scene_batch(
             scene_paths,
@@ -5765,6 +5768,11 @@ def _train_scene(
         # idempotent for already-converted 4-channel tensors and a no-op for
         # compact replay context.
         apply_npz_heading_transforms(data)
+    # Charged separately from the rollout because the prefetcher runs one
+    # loader worker at prefetch depth 1: if a batch's host-to-device transfer
+    # and heading transform cost more than the GPU work they feed, the rank
+    # stalls here and no amount of GPU tuning helps.
+    stage_end("scene_data", _stage_start)
     scoring_reward_config = reward_config
     # In the HDP/PDM profile lane robustness is the centerline-based reward
     # term.  The separate lane-departure polygon diagnostic is not a reward
@@ -5821,6 +5829,7 @@ def _train_scene(
     }
     if replay_update:
         result["replay_update"] = 1.0
+    _stage_start = time.perf_counter()
     expert_anchor_batch: torch.Tensor | None = None
     expert_anchor_safe: torch.Tensor | None = None
     if expert_anchor_weight > 0.0 or (
@@ -5883,12 +5892,14 @@ def _train_scene(
             result["expert_anchor_used"] = 0.0
     else:
         result["expert_anchor_used"] = 0.0
+    stage_end("expert_anchor", _stage_start)
 
     if collect_only:
         # Faithful HDP phase: one epoch only mines a frozen-behavior replay
         # buffer; the following epochs train on those fixed groups. Keep
         # this before optimizer/gradient construction so the rollout epoch is
         # genuinely update-free rather than mixing on-policy and replay loss.
+        _stage_start = time.perf_counter()
         if bool(train_config.get("cache_replay_decoder_context", False)):
             # Replace the scoring-oriented reward view with the exact compact
             # decoder context.  It is consumed only by the disk writer and
@@ -5929,6 +5940,7 @@ def _train_scene(
                 ),
             }
         )
+        stage_end("replay_context", _stage_start)
         return result, rollout
 
     if (
@@ -9170,6 +9182,8 @@ def main() -> None:
                 shared_expert_anchor if hdp_rollout_phase else None
             ),
         )
+        drain_stage_seconds()
+        stage_window_start = time.perf_counter()
         for (
             batch_start,
             prefetched_scene_paths,
@@ -9327,11 +9341,13 @@ def main() -> None:
                 # replay does not re-rollout or re-encode with the changing
                 # policy.  A failed scene is intentionally not silently
                 # replaced by a bad target; close() will fail closed below.
+                _stage_start = time.perf_counter()
                 disk_replay_writer.append(
                     scene_paths,
                     rollout,
                     group_size=int(rollout_config.n_trajectories),
                 )
+                stage_end("shard_write", _stage_start)
             if (
                 not faithful_disk_replay
                 and
@@ -9354,6 +9370,26 @@ def main() -> None:
                     f"Rbest={row.get('best_reward', float('nan')):+.2f} "
                     f"valid={row.get('valid_group', 0):.0f}"
                 )
+                # Where the wall clock actually went since the previous line.
+                # "other" is the unattributed remainder, printed rather than
+                # dropped so an unstaged cost cannot hide inside a breakdown
+                # that looks complete.
+                stage_seconds = drain_stage_seconds()
+                if stage_seconds:
+                    stage_window = time.perf_counter() - stage_window_start
+                    parts = " ".join(
+                        f"{name}={seconds:.1f}s/{100 * seconds / max(stage_window, 1e-9):.0f}%"
+                        for name, seconds in sorted(
+                            stage_seconds.items(), key=lambda kv: -kv[1]
+                        )
+                    )
+                    other = stage_window - sum(stage_seconds.values())
+                    print(
+                        f"  stages over {stage_window:.1f}s: {parts} "
+                        f"other={other:.1f}s/"
+                        f"{100 * other / max(stage_window, 1e-9):.0f}%"
+                    )
+                stage_window_start = time.perf_counter()
             if (
                 not hdp_rollout_phase
                 and optimizer_step
