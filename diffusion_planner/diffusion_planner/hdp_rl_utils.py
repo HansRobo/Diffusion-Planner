@@ -24,7 +24,6 @@ from diffusion_planner.loss import (
     hybrid_waypoint_loss,
     inverse_normalize_ego_velocity,
     normalize_ego_velocity,
-    sample_diffusion_time,
     waypoints_to_velocity,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
@@ -88,7 +87,9 @@ class HDPRewardConfig:
             "road_border_critical_m",
             "road_border_safe_m",
         )
-        non_finite = [name for name in finite_fields if not math.isfinite(float(getattr(self, name)))]
+        non_finite = [
+            name for name in finite_fields if not math.isfinite(float(getattr(self, name)))
+        ]
         if non_finite:
             raise ValueError(f"HDP reward fields must be finite: {non_finite}")
         if self.dt <= 0.0:
@@ -143,12 +144,8 @@ def _hdp_reward_config(args) -> HDPRewardConfig:
         occupancy_critical_m=float(getattr(args, "rl_occupancy_critical_m", 0.25)),
         occupancy_safe_m=float(getattr(args, "rl_occupancy_safe_m", 2.0)),
         occupancy_speed_gain_s=float(getattr(args, "rl_occupancy_speed_gain_s", 0.10)),
-        stopped_neighbor_vel_thresh=float(
-            getattr(args, "rl_stopped_neighbor_vel_thresh", 0.1)
-        ),
-        stopped_neighbor_disp_thresh=float(
-            getattr(args, "rl_stopped_neighbor_disp_thresh", 0.5)
-        ),
+        stopped_neighbor_vel_thresh=float(getattr(args, "rl_stopped_neighbor_vel_thresh", 0.1)),
+        stopped_neighbor_disp_thresh=float(getattr(args, "rl_stopped_neighbor_disp_thresh", 0.5)),
         lane_half_width_m=float(getattr(args, "rl_lane_half_width_m", 1.75)),
         leader_lateral_margin_m=float(getattr(args, "rl_leader_lateral_margin_m", 0.75)),
         stationary_reference_threshold_m=float(
@@ -310,10 +307,7 @@ def _batched_road_border_clearance(
 
 
 def _trajectory_speed(xy: torch.Tensor, dt: float, initial_xy: torch.Tensor | None = None):
-    if initial_xy is None:
-        first = torch.zeros_like(xy[..., :1, :])
-    else:
-        first = initial_xy[..., None, :]
+    first = torch.zeros_like(xy[..., :1, :]) if initial_xy is None else initial_xy[..., None, :]
     step = torch.diff(torch.cat([first, xy], dim=-2), dim=-2)
     return step.norm(dim=-1) / dt
 
@@ -1010,9 +1004,7 @@ def _nearest_lane_distance(
     seg_end = center[..., 1:, :].reshape(-1, 2)
     flat_points = points.reshape(-1, 2)
     if seg_start.shape[0] == 0:
-        return torch.full(
-            points.shape[:-1], float("inf"), dtype=points.dtype, device=points.device
-        )
+        return torch.full(points.shape[:-1], float("inf"), dtype=points.dtype, device=points.device)
     max_distance_elements = 10_000_000
     chunk_size = max(1, max_distance_elements // seg_start.shape[0])
     chunks = []
@@ -1047,9 +1039,7 @@ def _nearest_lane_distance_batch(
     segment_end = center[..., 1:, :].flatten(1, 2)
     flat_points = points.reshape(batch_size, -1, 2)
     if segment_start.shape[1] == 0:
-        return torch.full(
-            points.shape[:-1], float("inf"), dtype=points.dtype, device=points.device
-        )
+        return torch.full(points.shape[:-1], float("inf"), dtype=points.dtype, device=points.device)
 
     max_distance_elements = 10_000_000
     elements_per_query = max(batch_size * segment_start.shape[1], 1)
@@ -1716,7 +1706,7 @@ def sample_group(
         ):
             if scene_norm_inputs is not None:
                 scene_count = scene_norm_inputs["ego_current_state"].shape[0]
-                if B != scene_count * group_size:
+                if scene_count * group_size != B:
                     raise ValueError(
                         f"Expanded rollout batch {B} does not match {scene_count} scenes * "
                         f"group_size {group_size}"
@@ -1785,9 +1775,9 @@ def _quintic_onset_ramp(future_len: int, ramp_steps: int, device, dtype) -> torc
     0.5 m offset reads as a 5 m/s first-step impulse); this onset bounds every per-step
     increment by ~1.875/ramp_steps of the sampled offset.
     """
-    u = (
-        torch.arange(1, future_len + 1, device=device, dtype=dtype) / float(ramp_steps)
-    ).clamp(0.0, 1.0)
+    u = (torch.arange(1, future_len + 1, device=device, dtype=dtype) / float(ramp_steps)).clamp(
+        0.0, 1.0
+    )
     return u.pow(3) * (10.0 - 15.0 * u + 6.0 * u.pow(2))
 
 
@@ -1816,9 +1806,7 @@ def _bounded_eta(
     uniforms = torch.rand(num_scenes, n, device=device, generator=generator)
     strata = torch.arange(n, device=device, dtype=uniforms.dtype)
     stratified = (strata[None, :] + uniforms) / float(n)
-    shuffle = torch.argsort(
-        torch.rand(num_scenes, n, device=device, generator=generator), dim=1
-    )
+    shuffle = torch.argsort(torch.rand(num_scenes, n, device=device, generator=generator), dim=1)
     stratified = torch.gather(stratified, 1, shuffle)
     beta_values = torch.from_numpy(
         special.betaincinv(
@@ -1870,8 +1858,7 @@ def augment_rollout_candidates(
         return ego_world, idle_metrics
     if ego_world.shape[0] != num_scenes * n:
         raise ValueError(
-            f"candidate augmentation expects {num_scenes * n} candidates, "
-            f"got {ego_world.shape[0]}"
+            f"candidate augmentation expects {num_scenes * n} candidates, got {ego_world.shape[0]}"
         )
     if ego_speed.shape != (num_scenes,):
         raise ValueError(
@@ -2019,10 +2006,7 @@ def first_waypoint_candidate_gate(
     tangent_rad = torch.atan2(lateral, forward.clamp_min(1e-9))
     off_tangent = tangent_measurable & (tangent_rad > math.radians(max_tangent_deg))
     reject = (
-        (step_norm > max_step)
-        | (lateral > max_lateral)
-        | (forward < -max_backward)
-        | off_tangent
+        (step_norm > max_step) | (lateral > max_lateral) | (forward < -max_backward) | off_tangent
     )
     reject = reject & low_speed_scene.repeat_interleave(n)
     keep = ~reject
@@ -2094,10 +2078,7 @@ def compute_reward_weights(
         group_std = variance.clamp_min(0.0).sqrt()
         finite_group = (torch.isfinite(grouped) | ~candidate_keep).all(dim=1, keepdim=True)
         valid_group = (
-            finite_group
-            & (valid_count >= 2.0)
-            & torch.isfinite(group_std)
-            & (group_std > eps)
+            finite_group & (valid_count >= 2.0) & torch.isfinite(group_std) & (group_std > eps)
         )
     group_valid_sample = (valid_group.expand(-1, n) & candidate_keep).reshape(-1)
     if normalize == "group":
@@ -2270,9 +2251,7 @@ def _compute_policy_ego_loss_per_sample(
     ego_reconstruction = ego_diffusion_loss + args.planning_hybrid_loss * ego_waypoint_loss
     horizon = args.ego_prediction_horizon if loss_horizon is None else int(loss_horizon)
     if not 1 <= horizon <= ego_reconstruction.shape[1]:
-        raise ValueError(
-            f"loss horizon {horizon} outside [1, {ego_reconstruction.shape[1]}]"
-        )
+        raise ValueError(f"loss horizon {horizon} outside [1, {ego_reconstruction.shape[1]}]")
     ego_loss_per_sample = ego_reconstruction[:, :horizon].mean(dim=-1)
 
     return {

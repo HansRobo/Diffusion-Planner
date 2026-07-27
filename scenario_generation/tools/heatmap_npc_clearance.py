@@ -180,7 +180,7 @@ def _export_bad_areas(
         if d_bin.min() >= threshold:
             continue
         local = int(np.argmin(d_bin))
-        rec = [r for r, m in zip(recs, mask) if m][local]
+        rec = [r for r, m in zip(recs, mask, strict=False) if m][local]
         bad.append(
             {
                 "arc_m": float((b + 0.5) * bin_m),

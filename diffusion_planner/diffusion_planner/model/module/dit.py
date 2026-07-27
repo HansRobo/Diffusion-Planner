@@ -46,7 +46,10 @@ class DiTBlock(nn.Module):
         self.attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        approx_gelu = lambda: nn.GELU(approximate="tanh")
+
+        def approx_gelu():
+            return nn.GELU(approximate="tanh")
+
         self.cross_attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm3 = nn.LayerNorm(dim, eps=1e-6)
         self.mlp = Mlp(

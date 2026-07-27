@@ -1201,7 +1201,7 @@ class StatePerturbation:
             bridge_constraint_series_torch(sample_result)
         )
 
-        gt_curvature = curvature_from_xy_torch(sample_result.original_full_xy, original_sigma)
+        curvature_from_xy_torch(sample_result.original_full_xy, original_sigma)
         augmented_curvature = curvature_from_xy_torch(
             sample_result.augmented_full_xy, augmented_sigma
         )

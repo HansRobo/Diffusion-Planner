@@ -434,7 +434,7 @@ def build_interface(
                     no_change,
                     reset_mode,
                 )
-            elif evt_type == "goal_pose":
+            if evt_type == "goal_pose":
                 x, y = evt.x, evt.y
                 heading_deg = evt.heading
                 heading_rad = heading_deg * math.pi / 180
@@ -461,7 +461,7 @@ def build_interface(
                     no_change,
                     reset_mode,
                 )
-            elif evt_type == "waypoint_append":
+            if evt_type == "waypoint_append":
                 x, y = evt.x, evt.y
                 heading_rad = evt.heading * math.pi / 180
                 new_waypoints = list(current_waypoints or []) + [(x, y, heading_rad)]
@@ -487,37 +487,37 @@ def build_interface(
                     _format_waypoints_md(new_waypoints, builder),
                     no_change,
                 )
-            else:  # rect
-                x1, y1 = evt.x1, evt.y1
-                x2, y2 = evt.x2, evt.y2
-                rot = getattr(evt, "rotation", 0.0) or 0.0
-                w = abs(x2 - x1)
-                h = abs(y2 - y1)
-                rot_deg = float(rot) * 180 / math.pi
-                info = f"Selected: {w:.0f}m x {h:.0f}m (rot: {rot_deg:.0f}°)"
-                rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-                return (
-                    round(rect[0], 1),
-                    round(rect[1], 1),
-                    round(rect[2], 1),
-                    round(rect[3], 1),
-                    info,
-                    rect,
-                    float(rot),
-                    no_change,
-                    no_change,
-                    no_change,
-                    no_change,
-                    no_change,
-                    no_change,
-                    no_change,
-                    no_change,
-                    no_change,
-                    no_change,
-                    no_change,
-                    no_change,
-                    no_change,
-                )
+            # rect
+            x1, y1 = evt.x1, evt.y1
+            x2, y2 = evt.x2, evt.y2
+            rot = getattr(evt, "rotation", 0.0) or 0.0
+            w = abs(x2 - x1)
+            h = abs(y2 - y1)
+            rot_deg = float(rot) * 180 / math.pi
+            info = f"Selected: {w:.0f}m x {h:.0f}m (rot: {rot_deg:.0f}°)"
+            rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+            return (
+                round(rect[0], 1),
+                round(rect[1], 1),
+                round(rect[2], 1),
+                round(rect[3], 1),
+                info,
+                rect,
+                float(rot),
+                no_change,
+                no_change,
+                no_change,
+                no_change,
+                no_change,
+                no_change,
+                no_change,
+                no_change,
+                no_change,
+                no_change,
+                no_change,
+                no_change,
+                no_change,
+            )
 
         def refresh_route_and_arrows(ego_pose, goal_pose, waypoints):
             """Recompute the route polyline + snapped arrow JSONs for the

@@ -6,11 +6,7 @@ Uses mock objects to isolate TL logic from the LaneletSceneBuilder.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from unittest.mock import MagicMock
-
 import numpy as np
-import pytest
 
 from scenario_generation.traffic_light import (
     PERP_GREEN_AFTER_DELAY,

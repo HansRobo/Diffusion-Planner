@@ -60,7 +60,6 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.colors as mcolors  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
@@ -71,7 +70,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from docs import generate_t4_scene_reward_visualizations as scene_viz  # noqa: E402
-
 
 DEFAULT_MODEL = ROOT / (
     "outputs/hdp_route_sft20_latest_rl_stable_current_g32_beta1_lr1e7_dp0_"
@@ -197,10 +195,7 @@ def _sample_checkpoint(
     from diffusion_planner.hdp_rl_utils import sample_group
 
     raw_scenes = [scene_viz._raw_tensors(scene)[0] for scene in scenes]
-    raw = {
-        key: torch.cat([item[key] for item in raw_scenes], dim=0)
-        for key in raw_scenes[0]
-    }
+    raw = {key: torch.cat([item[key] for item in raw_scenes], dim=0) for key in raw_scenes[0]}
     normalized = cfg.observation_normalizer(raw)
     grouped = _grouped_policy_inputs(normalized, generations, True)
     generator = torch.Generator(device=device).manual_seed(int(seed))
@@ -298,10 +293,7 @@ def _score_model_group(scene: dict, model_trajectories: list[np.ndarray], reward
     endpoint = np.asarray([trajectory[-1, :2] for trajectory in model_trajectories])
     endpoint_distance = np.linalg.norm(endpoint[:, None] - endpoint[None], axis=-1)
     shape_distance = np.asarray(
-        [
-            [_shape_distance(a, b) for b in model_trajectories]
-            for a in model_trajectories
-        ],
+        [[_shape_distance(a, b) for b in model_trajectories] for a in model_trajectories],
         dtype=np.float32,
     )
     anchor_names, anchor_distance = _nearest_anchor_names(model_trajectories, anchors)
@@ -374,19 +366,27 @@ def _draw_scene_map(
     if extent is None:
         extent = scene_viz._scene_extent(scene, all_candidates)
     scene_viz._draw_map(ax, scene["data"], extent)
-    scene_viz._draw_neighbors(
-        ax, scene["data"], time_index, extent, selected=None, alpha_path=0.22
-    )
+    scene_viz._draw_neighbors(ax, scene["data"], time_index, extent, selected=None, alpha_path=0.22)
     expert = group["expert"]["trajectory"]
     ax.plot(
-        expert[:, 0], expert[:, 1], color="#16a34a", lw=2.8,
-        linestyle=(0, (7, 3)), label="logged expert", zorder=8,
+        expert[:, 0],
+        expert[:, 1],
+        color="#16a34a",
+        lw=2.8,
+        linestyle=(0, (7, 3)),
+        label="logged expert",
+        zorder=8,
     )
     for anchor_index, anchor in enumerate(group["anchors"]):
         trajectory = anchor["trajectory"]
         ax.plot(
-            trajectory[:, 0], trajectory[:, 1], color="#7c3aed", lw=0.9,
-            linestyle=(0, (3, 3)), alpha=0.32, zorder=5,
+            trajectory[:, 0],
+            trajectory[:, 1],
+            color="#7c3aed",
+            lw=0.9,
+            linestyle=(0, (3, 3)),
+            alpha=0.32,
+            zorder=5,
             label="behavioural anchor" if anchor_index == 0 else None,
         )
     order = np.argsort([row["reward"] for row in group["actual_rows"]])[::-1]
@@ -397,27 +397,51 @@ def _draw_scene_map(
         alpha = 0.82 if position < 3 else 0.34
         linewidth = 2.4 if position < 3 else 1.15
         ax.plot(
-            trajectory[:, 0], trajectory[:, 1], color=color, lw=linewidth,
-            alpha=alpha, zorder=7,
+            trajectory[:, 0],
+            trajectory[:, 1],
+            color=color,
+            lw=linewidth,
+            alpha=alpha,
+            zorder=7,
             label=f"RL samples (top {min(3, len(order))})" if position == 0 else None,
         )
         ax.scatter(
-            trajectory[-1, 0], trajectory[-1, 1], color=color, s=24,
-            edgecolor="white", linewidth=0.6, zorder=9,
+            trajectory[-1, 0],
+            trajectory[-1, 1],
+            color=color,
+            s=24,
+            edgecolor="white",
+            linewidth=0.6,
+            zorder=9,
         )
         if position < 3 or index == selected_index:
             pose = trajectory[min(time_index, len(trajectory) - 1)]
             heading = math.atan2(float(pose[3]), float(pose[2]))
             scene_viz._draw_oriented_box(
-                ax, float(pose[0]), float(pose[1]), heading,
+                ax,
+                float(pose[0]),
+                float(pose[1]),
+                heading,
                 float(scene["data"]["ego_shape"][1]),
-                float(scene["data"]["ego_shape"][2]), color,
-                alpha=0.33, lw=1.8, rear_axle=True, zorder=12,
+                float(scene["data"]["ego_shape"][2]),
+                color,
+                alpha=0.33,
+                lw=1.8,
+                rear_axle=True,
+                zorder=12,
             )
     scene_viz._draw_oriented_box(
-        ax, 0.0, 0.0, 0.0, float(scene["data"]["ego_shape"][1]),
-        float(scene["data"]["ego_shape"][2]), "#2563eb",
-        alpha=0.28, lw=1.8, rear_axle=True, zorder=13,
+        ax,
+        0.0,
+        0.0,
+        0.0,
+        float(scene["data"]["ego_shape"][1]),
+        float(scene["data"]["ego_shape"][2]),
+        "#2563eb",
+        alpha=0.28,
+        lw=1.8,
+        rear_axle=True,
+        zorder=13,
     )
     ax.scatter([0], [0], color="#2563eb", s=32, zorder=14, label="ego at t=0")
     ax.set_xlim(extent[0], extent[1])
@@ -428,9 +452,13 @@ def _draw_scene_map(
     ax.set_ylabel("ego-frame y (m)")
     ax.legend(loc="upper left", fontsize=8, framealpha=0.93)
     ax.text(
-        0.01, 0.01,
+        0.01,
+        0.01,
         f"oriented boxes at t={time_index / 10:.1f}s | red=border | yellow dash=stop line | blue=route",
-        transform=ax.transAxes, fontsize=8, color="#475569", va="bottom",
+        transform=ax.transAxes,
+        fontsize=8,
+        color="#475569",
+        va="bottom",
     )
     if title:
         ax.set_title(title, loc="left", fontsize=13, fontweight="bold")
@@ -439,16 +467,33 @@ def _draw_scene_map(
 def _draw_table(ax, group: dict):
     ax.axis("off")
     rows = sorted(group["actual_rows"], key=lambda row: row["rank"])
-    headers = ["rank", "reward", "safety", "risk", "follow", "lane", "progress", "clear(m)", "nearest anchor"]
+    headers = [
+        "rank",
+        "reward",
+        "safety",
+        "risk",
+        "follow",
+        "lane",
+        "progress",
+        "clear(m)",
+        "nearest anchor",
+    ]
     cell_text = []
     cell_colors = []
     for row in rows:
-        cell_text.append([
-            f"#{row['rank']}", f"{row['reward']:.2f}", f"{row['safety']:.2f}",
-            f"{row['risk']:.2f}", f"{row['follow']:.2f}", f"{row['lane']:.2f}",
-            f"{row['progress']:.2f}", f"{row['min_signed_clearance_m']:+.2f}",
-            row["anchor_mode"],
-        ])
+        cell_text.append(
+            [
+                f"#{row['rank']}",
+                f"{row['reward']:.2f}",
+                f"{row['safety']:.2f}",
+                f"{row['risk']:.2f}",
+                f"{row['follow']:.2f}",
+                f"{row['lane']:.2f}",
+                f"{row['progress']:.2f}",
+                f"{row['min_signed_clearance_m']:+.2f}",
+                row["anchor_mode"],
+            ]
+        )
         if row["safety"] > 0.999 and row["reward"] > 0.0:
             cell_colors.append(["#e8f5e9"] * len(headers))
         else:
@@ -458,19 +503,24 @@ def _draw_table(ax, group: dict):
         colLabels=headers,
         cellColours=cell_colors,
         colColours=["#e8eef5"] * len(headers),
-        cellLoc="center", colLoc="center", loc="upper center",
+        cellLoc="center",
+        colLoc="center",
+        loc="upper center",
         bbox=[0.0, 0.05, 1.0, 0.88],
     )
     table.auto_set_font_size(False)
     table.set_fontsize(7.5)
-    for (row_index, col_index), cell in table.get_celld().items():
+    for (row_index, _col_index), cell in table.get_celld().items():
         cell.set_edgecolor("#cbd5e1")
         cell.set_linewidth(0.45)
         if row_index == 0:
             cell.set_text_props(weight="bold", color="#102a43")
     ax.set_title(
         "Every stochastic sample: reward and safety breakdown (green = feasible)",
-        loc="left", fontsize=12, fontweight="bold", pad=8,
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+        pad=8,
     )
     metrics = group["metrics"]
     summary = (
@@ -488,14 +538,32 @@ def _draw_heatmap(ax, group: dict):
         [[group["actual_rows"][index][key] for key in COMPONENT_KEYS] for index in order],
         dtype=np.float32,
     )
-    labels = [f"#{group['actual_rows'][index]['rank']} · {group['actual_rows'][index]['anchor_mode']}" for index in order]
+    labels = [
+        f"#{group['actual_rows'][index]['rank']} · {group['actual_rows'][index]['anchor_mode']}"
+        for index in order
+    ]
     image = ax.imshow(matrix, vmin=0.0, vmax=1.0, aspect="auto", cmap="RdYlGn")
     ax.set_yticks(np.arange(len(order)), labels, fontsize=7)
-    ax.set_xticks(np.arange(len(COMPONENT_KEYS)), COMPONENT_LABELS, rotation=28, ha="right", fontsize=8)
-    ax.set_title("Why trajectories rank differently: exact evaluator components", loc="left", fontsize=12, fontweight="bold")
+    ax.set_xticks(
+        np.arange(len(COMPONENT_KEYS)), COMPONENT_LABELS, rotation=28, ha="right", fontsize=8
+    )
+    ax.set_title(
+        "Why trajectories rank differently: exact evaluator components",
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+    )
     for row_index in range(matrix.shape[0]):
         for col_index in range(matrix.shape[1]):
-            ax.text(col_index, row_index, f"{matrix[row_index, col_index]:.2f}", ha="center", va="center", fontsize=6.5, color="#102a43")
+            ax.text(
+                col_index,
+                row_index,
+                f"{matrix[row_index, col_index]:.2f}",
+                ha="center",
+                va="center",
+                fontsize=6.5,
+                color="#102a43",
+            )
     ax.set_xlabel("normalized component score")
     ax.grid(False)
     ax.figure.colorbar(image, ax=ax, fraction=0.025, pad=0.02)
@@ -507,15 +575,37 @@ def _draw_endpoint_modes(ax, scene: dict, group: dict):
     anchor_names = sorted(set(row["anchor_mode"] for row in rows))
     colors = plt.get_cmap("tab10")
     color_map = {name: colors(index % 10) for index, name in enumerate(anchor_names)}
-    for index, (point, row) in enumerate(zip(endpoints, rows)):
+    for index, (point, row) in enumerate(zip(endpoints, rows, strict=False)):
         color = color_map[row["anchor_mode"]]
-        ax.scatter(point[0], point[1], s=65, color=color, edgecolor="white", linewidth=1.0, zorder=5)
-        ax.text(point[0], point[1], str(index + 1), fontsize=7, ha="center", va="center", color="#102a43", zorder=6)
+        ax.scatter(
+            point[0], point[1], s=65, color=color, edgecolor="white", linewidth=1.0, zorder=5
+        )
+        ax.text(
+            point[0],
+            point[1],
+            str(index + 1),
+            fontsize=7,
+            ha="center",
+            va="center",
+            color="#102a43",
+            zorder=6,
+        )
     expert = group["expert"]["trajectory"][-1, :2]
-    ax.scatter(expert[0], expert[1], marker="*", s=170, color="#16a34a", edgecolor="white", linewidth=1.0, label="logged expert")
+    ax.scatter(
+        expert[0],
+        expert[1],
+        marker="*",
+        s=170,
+        color="#16a34a",
+        edgecolor="white",
+        linewidth=1.0,
+        label="logged expert",
+    )
     for name, color in color_map.items():
         ax.scatter([], [], color=color, s=45, label=name)
-    ax.set_title("Endpoint coverage and nearest behavioural mode", loc="left", fontsize=12, fontweight="bold")
+    ax.set_title(
+        "Endpoint coverage and nearest behavioural mode", loc="left", fontsize=12, fontweight="bold"
+    )
     ax.set_xlabel("endpoint x (m)")
     ax.set_ylabel("endpoint y (m)")
     ax.grid(color="#cbd5e1", alpha=0.45)
@@ -527,9 +617,23 @@ def _plot_dashboard(scene: dict, group: dict, output: Path):
     all_candidates = [group["expert"]] + group["anchors"] + group["actual"]
     extent = scene_viz._scene_extent(scene, all_candidates)
     fig = plt.figure(figsize=(21, 14), facecolor="#f8fafc")
-    grid = GridSpec(2, 2, figure=fig, width_ratios=[1.25, 1.0], height_ratios=[1.08, 0.92], hspace=0.28, wspace=0.22)
+    grid = GridSpec(
+        2,
+        2,
+        figure=fig,
+        width_ratios=[1.25, 1.0],
+        height_ratios=[1.08, 0.92],
+        hspace=0.28,
+        wspace=0.22,
+    )
     ax_map = fig.add_subplot(grid[0, 0])
-    _draw_scene_map(ax_map, scene, group, extent=extent, title=f"{scene['short']} · K stochastic outputs + behavioural anchors")
+    _draw_scene_map(
+        ax_map,
+        scene,
+        group,
+        extent=extent,
+        title=f"{scene['short']} · K stochastic outputs + behavioural anchors",
+    )
     ax_table = fig.add_subplot(grid[0, 1])
     _draw_table(ax_table, group)
     ax_heat = fig.add_subplot(grid[1, 0])
@@ -541,14 +645,22 @@ def _plot_dashboard(scene: dict, group: dict, output: Path):
         f"T4 multimodality diagnostic · {scene['title']} · "
         f"safe {metrics['safe_candidate_count']}/{metrics['K']} · "
         f"endpoint modes {metrics['endpoint_mode_count_2m']} · shape modes {metrics['shape_mode_count_2m']}",
-        x=0.035, y=0.997, ha="left", fontsize=19, fontweight="bold", color="#0f172a",
+        x=0.035,
+        y=0.997,
+        ha="left",
+        fontsize=19,
+        fontweight="bold",
+        color="#0f172a",
     )
     fig.text(
-        0.035, 0.008,
+        0.035,
+        0.008,
         "Green dashed = logged expert; purple dashed = structured behavioural anchors; "
         "coloured lines = actual checkpoint samples ranked by exact T4 reward. "
         "Neighbour motion is recorded future replay; bboxes are oriented, not point markers.",
-        fontsize=8.5, color="#475569", ha="left",
+        fontsize=8.5,
+        color="#475569",
+        ha="left",
     )
     fig.savefig(output, dpi=185, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
@@ -560,25 +672,77 @@ def _plot_single_trajectory(scene: dict, group: dict, row_index: int, output: Pa
     all_candidates = [group["expert"]] + group["anchors"] + group["actual"]
     extent = scene_viz._scene_extent(scene, all_candidates)
     fig = plt.figure(figsize=(19, 11), facecolor="#f8fafc")
-    grid = GridSpec(2, 2, figure=fig, width_ratios=[1.25, 0.85], height_ratios=[1.1, 0.9], hspace=0.28, wspace=0.20)
+    grid = GridSpec(
+        2,
+        2,
+        figure=fig,
+        width_ratios=[1.25, 0.85],
+        height_ratios=[1.1, 0.9],
+        hspace=0.28,
+        wspace=0.20,
+    )
     ax_map = fig.add_subplot(grid[:, 0])
-    _draw_scene_map(ax_map, scene, group, selected_index=row_index, extent=extent, title=f"Trajectory #{row['rank']} · RL sample {row['sample_index']} · {row['anchor_mode']}")
+    _draw_scene_map(
+        ax_map,
+        scene,
+        group,
+        selected_index=row_index,
+        extent=extent,
+        title=f"Trajectory #{row['rank']} · RL sample {row['sample_index']} · {row['anchor_mode']}",
+    )
     # Overlay the selected trajectory strongly on top of the group.
-    ax_map.plot(trajectory[:, 0], trajectory[:, 1], color="#0f172a", lw=3.0, alpha=0.90, zorder=15, label="selected trajectory")
+    ax_map.plot(
+        trajectory[:, 0],
+        trajectory[:, 1],
+        color="#0f172a",
+        lw=3.0,
+        alpha=0.90,
+        zorder=15,
+        label="selected trajectory",
+    )
     pose = trajectory[40]
-    scene_viz._draw_oriented_box(ax_map, float(pose[0]), float(pose[1]), math.atan2(float(pose[3]), float(pose[2])), float(scene["data"]["ego_shape"][1]), float(scene["data"]["ego_shape"][2]), "#0f172a", alpha=0.16, lw=2.2, rear_axle=True, zorder=16)
+    scene_viz._draw_oriented_box(
+        ax_map,
+        float(pose[0]),
+        float(pose[1]),
+        math.atan2(float(pose[3]), float(pose[2])),
+        float(scene["data"]["ego_shape"][1]),
+        float(scene["data"]["ego_shape"][2]),
+        "#0f172a",
+        alpha=0.16,
+        lw=2.2,
+        rear_axle=True,
+        zorder=16,
+    )
     ax_map.legend(loc="upper left", fontsize=8, framealpha=0.93)
 
     ax_bar = fig.add_subplot(grid[0, 1])
     values = np.asarray([row[key] for key in COMPONENT_KEYS], dtype=float)
-    bars = ax_bar.barh(np.arange(len(values)), values, color=plt.get_cmap("RdYlGn")(values), edgecolor="#334155", linewidth=0.4)
+    bars = ax_bar.barh(
+        np.arange(len(values)),
+        values,
+        color=plt.get_cmap("RdYlGn")(values),
+        edgecolor="#334155",
+        linewidth=0.4,
+    )
     ax_bar.set_yticks(np.arange(len(values)), COMPONENT_LABELS)
     ax_bar.set_xlim(0.0, 1.05)
     ax_bar.set_xlabel("component score")
-    ax_bar.set_title(f"Reward = {row['reward']:.3f} · exact T4 components", loc="left", fontsize=12, fontweight="bold")
+    ax_bar.set_title(
+        f"Reward = {row['reward']:.3f} · exact T4 components",
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+    )
     ax_bar.grid(axis="x", color="#cbd5e1", alpha=0.45)
-    for bar, value in zip(bars, values):
-        ax_bar.text(min(value + 0.015, 1.01), bar.get_y() + bar.get_height() / 2.0, f"{value:.2f}", va="center", fontsize=8)
+    for bar, value in zip(bars, values, strict=False):
+        ax_bar.text(
+            min(value + 0.015, 1.01),
+            bar.get_y() + bar.get_height() / 2.0,
+            f"{value:.2f}",
+            va="center",
+            fontsize=8,
+        )
 
     ax_time = fig.add_subplot(grid[1, 1])
     clearance = group["clearance"][row_index]
@@ -588,8 +752,21 @@ def _plot_single_trajectory(scene: dict, group: dict, row_index: int, output: Pa
         scene_viz._raw_tensors(scene)[1],
     )[0]
     times = np.arange(len(clearance)) / 10.0
-    ax_time.plot(times, clearance, color="#dc2626" if np.nanmin(clearance) < 0 else "#0f766e", lw=2.2, label="selected OBB clearance")
-    ax_time.plot(times, expert_clearance, color="#16a34a", lw=1.4, linestyle=(0, (5, 3)), label="expert clearance")
+    ax_time.plot(
+        times,
+        clearance,
+        color="#dc2626" if np.nanmin(clearance) < 0 else "#0f766e",
+        lw=2.2,
+        label="selected OBB clearance",
+    )
+    ax_time.plot(
+        times,
+        expert_clearance,
+        color="#16a34a",
+        lw=1.4,
+        linestyle=(0, (5, 3)),
+        label="expert clearance",
+    )
     ax_time.axhline(0, color="#dc2626", linestyle="--", lw=1.0)
     ax_time.fill_between(times, -3.0, 0.0, color="#fecaca", alpha=0.35)
     ax_time.set_xlabel("time (s)")
@@ -603,14 +780,22 @@ def _plot_single_trajectory(scene: dict, group: dict, row_index: int, output: Pa
     fig.suptitle(
         f"T4 per-trajectory audit · {scene['title']} · rank #{row['rank']} · "
         f"clearance {row['min_signed_clearance_m']:+.3f} m",
-        x=0.035, y=0.997, ha="left", fontsize=18, fontweight="bold", color="#0f172a",
+        x=0.035,
+        y=0.997,
+        ha="left",
+        fontsize=18,
+        fontweight="bold",
+        color="#0f172a",
     )
     fig.text(
-        0.035, 0.008,
+        0.035,
+        0.008,
         f"nearest behavioural anchor: {row['anchor_mode']} ({row['anchor_shape_distance_m']:.2f} m shape distance) | "
         f"endpoint=({row['endpoint_x_m']:.2f}, {row['endpoint_y_m']:.2f}) m | "
         "neighbours are logged future replay",
-        fontsize=8.5, color="#475569", ha="left",
+        fontsize=8.5,
+        color="#475569",
+        ha="left",
     )
     fig.savefig(output, dpi=190, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
@@ -628,30 +813,103 @@ def _render_gif(scene: dict, group: dict, output: Path):
         scene_viz._draw_map(ax, scene["data"], extent)
         scene_viz._draw_neighbors(scene["data"], time_index, extent, selected=None, alpha_path=0.18)
         expert = group["expert"]["trajectory"]
-        ax.plot(expert[:, 0], expert[:, 1], color="#16a34a", lw=1.8, linestyle=(0, (5, 3)), label="logged expert")
+        ax.plot(
+            expert[:, 0],
+            expert[:, 1],
+            color="#16a34a",
+            lw=1.8,
+            linestyle=(0, (5, 3)),
+            label="logged expert",
+        )
         for anchor_index, anchor in enumerate(group["anchors"]):
-            ax.plot(anchor["trajectory"][:, 0], anchor["trajectory"][:, 1], color="#7c3aed", lw=0.7, linestyle=(0, (3, 3)), alpha=0.20, label="behavioural anchor" if anchor_index == 0 else None)
+            ax.plot(
+                anchor["trajectory"][:, 0],
+                anchor["trajectory"][:, 1],
+                color="#7c3aed",
+                lw=0.7,
+                linestyle=(0, (3, 3)),
+                alpha=0.20,
+                label="behavioural anchor" if anchor_index == 0 else None,
+            )
         for position, index in enumerate(order):
             trajectory = group["actual"][index]["trajectory"]
             row = group["actual_rows"][index]
             color = _rank_color(int(row["rank"] - 1), len(order))
-            ax.plot(trajectory[:, 0], trajectory[:, 1], color=color, lw=1.9 if position < 3 else 0.75, alpha=0.78 if position < 3 else 0.20, label="actual RL samples" if position == 0 else None)
+            ax.plot(
+                trajectory[:, 0],
+                trajectory[:, 1],
+                color=color,
+                lw=1.9 if position < 3 else 0.75,
+                alpha=0.78 if position < 3 else 0.20,
+                label="actual RL samples" if position == 0 else None,
+            )
             pose = trajectory[time_index]
             if position < 3:
-                scene_viz._draw_oriented_box(ax, float(pose[0]), float(pose[1]), math.atan2(float(pose[3]), float(pose[2])), float(scene["data"]["ego_shape"][1]), float(scene["data"]["ego_shape"][2]), color, alpha=0.34, lw=1.5, rear_axle=True, zorder=12)
-        scene_viz._draw_oriented_box(ax, 0.0, 0.0, 0.0, float(scene["data"]["ego_shape"][1]), float(scene["data"]["ego_shape"][2]), "#2563eb", alpha=0.25, lw=1.5, rear_axle=True, zorder=13)
-        ax.set_xlim(extent[0], extent[1]); ax.set_ylim(extent[2], extent[3])
+                scene_viz._draw_oriented_box(
+                    ax,
+                    float(pose[0]),
+                    float(pose[1]),
+                    math.atan2(float(pose[3]), float(pose[2])),
+                    float(scene["data"]["ego_shape"][1]),
+                    float(scene["data"]["ego_shape"][2]),
+                    color,
+                    alpha=0.34,
+                    lw=1.5,
+                    rear_axle=True,
+                    zorder=12,
+                )
+        scene_viz._draw_oriented_box(
+            ax,
+            0.0,
+            0.0,
+            0.0,
+            float(scene["data"]["ego_shape"][1]),
+            float(scene["data"]["ego_shape"][2]),
+            "#2563eb",
+            alpha=0.25,
+            lw=1.5,
+            rear_axle=True,
+            zorder=13,
+        )
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
         ax.set_aspect("equal", adjustable="box")
         ax.grid(color="#cbd5e1", alpha=0.35)
-        ax.set_xlabel("ego-frame x (m)"); ax.set_ylabel("ego-frame y (m)")
-        ax.set_title(f"{scene['short']} · replay time {time_index / 10:.1f}s · K={len(order)} stochastic outputs · oriented OBBs", loc="left", fontsize=13, fontweight="bold")
+        ax.set_xlabel("ego-frame x (m)")
+        ax.set_ylabel("ego-frame y (m)")
+        ax.set_title(
+            f"{scene['short']} · replay time {time_index / 10:.1f}s · K={len(order)} stochastic outputs · oriented OBBs",
+            loc="left",
+            fontsize=13,
+            fontweight="bold",
+        )
         ax.legend(loc="upper left", fontsize=8, framealpha=0.93)
-        ax.text(0.99, 0.02, "neighbour motion = logged future\ncolours = reward rank", transform=ax.transAxes, ha="right", va="bottom", fontsize=8, color="#475569", bbox=dict(boxstyle="round,pad=0.35", facecolor="white", edgecolor="#cbd5e1", alpha=0.90))
+        ax.text(
+            0.99,
+            0.02,
+            "neighbour motion = logged future\ncolours = reward rank",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            color="#475569",
+            bbox=dict(
+                boxstyle="round,pad=0.35", facecolor="white", edgecolor="#cbd5e1", alpha=0.90
+            ),
+        )
         fig.canvas.draw()
         frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
         plt.close(fig)
     images = [Image.fromarray(frame) for frame in frames]
-    images[0].save(output, format="GIF", save_all=True, append_images=images[1:], duration=100, loop=0, disposal=2)
+    images[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=images[1:],
+        duration=100,
+        loop=0,
+        disposal=2,
+    )
 
 
 def _scene_specs(scene_ids: list[str]) -> list[dict]:
@@ -690,7 +948,12 @@ def _delegate_original_dp_awr(args) -> None:
     for required in (tool, scenes, reward):
         if not required.exists():
             raise FileNotFoundError(required)
-    scene_map = {"red_light_stop": 0, "moving_crossing": 1, "stopped_leader": 2, "tight_right_turn": 3}
+    scene_map = {
+        "red_light_stop": 0,
+        "moving_crossing": 1,
+        "stopped_leader": 2,
+        "tight_right_turn": 3,
+    }
     requested = [item.strip() for item in args.scene_ids.split(",") if item.strip()]
     unknown = [item for item in requested if item not in scene_map]
     if unknown:
@@ -698,32 +961,56 @@ def _delegate_original_dp_awr(args) -> None:
     command = [
         sys.executable,
         str(tool),
-        "--model_path", str(args.model_path.resolve()),
-        "--scenes", str(scenes),
-        "--output_dir", str(args.output_dir.resolve()),
-        "--indices", *(str(scene_map[item]) for item in requested),
-        "--K", str(args.K),
-        "--tag", "original_dp_awr",
+        "--model_path",
+        str(args.model_path.resolve()),
+        "--scenes",
+        str(scenes),
+        "--output_dir",
+        str(args.output_dir.resolve()),
+        "--indices",
+        *(str(scene_map[item]) for item in requested),
+        "--K",
+        str(args.K),
+        "--tag",
+        "original_dp_awr",
         "--awr_mode",
-        "--reward_config", str(reward),
-        "--sample_steps", str(args.steps),
-        "--noise_scale", str(args.noise_scale),
-        "--seed", str(args.seed),
+        "--reward_config",
+        str(reward),
+        "--sample_steps",
+        str(args.steps),
+        "--noise_scale",
+        str(args.noise_scale),
+        "--seed",
+        str(args.seed),
         "--no-deterministic_first",
     ]
     if args.hdp_trajectory_augmentation:
-        command.extend(["--hdp_trajectory_augmentation", "--hdp_trajectory_augmentation_std", str(args.hdp_trajectory_augmentation_std)])
+        command.extend(
+            [
+                "--hdp_trajectory_augmentation",
+                "--hdp_trajectory_augmentation_std",
+                str(args.hdp_trajectory_augmentation_std),
+            ]
+        )
     if args.gif:
-        command.extend([
-            "--gif",
-            "--gif_frame_stride", str(args.gif_frame_stride),
-            "--gif_frame_duration_ms", str(args.gif_frame_duration_ms),
-        ])
+        command.extend(
+            [
+                "--gif",
+                "--gif_frame_stride",
+                str(args.gif_frame_stride),
+                "--gif_frame_duration_ms",
+                str(args.gif_frame_duration_ms),
+            ]
+        )
     if args.scene_meta:
         command.extend(["--scene_meta", str(args.scene_meta.resolve())])
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
-        [str(DEFAULT_T4_ROOT / "diffusion_planner"), str(DEFAULT_T4_ROOT), env.get("PYTHONPATH", "")]
+        [
+            str(DEFAULT_T4_ROOT / "diffusion_planner"),
+            str(DEFAULT_T4_ROOT),
+            env.get("PYTHONPATH", ""),
+        ]
     )
     print("Delegating ordinary-DP AWR visualization to colleague grpo_viz.py:", flush=True)
     print(" ".join(command), flush=True)
@@ -731,19 +1018,35 @@ def _delegate_original_dp_awr(args) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL)
     parser.add_argument("--args-path", type=Path, default=None)
     parser.add_argument("--scene-ids", default="red_light_stop,moving_crossing")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--reward-config", type=Path, default=DEFAULT_REWARD_CONFIG)
-    parser.add_argument("--K", type=int, default=16, help="number of stochastic model trajectories per scene")
+    parser.add_argument(
+        "--K", type=int, default=16, help="number of stochastic model trajectories per scene"
+    )
     parser.add_argument("--steps", type=int, default=6)
     parser.add_argument("--noise-scale", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=20260715)
-    parser.add_argument("--gif", action="store_true", help="write a 40-frame 10 Hz replay GIF per scene")
-    parser.add_argument("--per-traj", action=argparse.BooleanOptionalAction, default=True, help="write a detailed PNG for every sampled trajectory")
-    parser.add_argument("--legacy-checkpoint-abi", action=argparse.BooleanOptionalAction, default=True, help="use the pre-LineEncoder-refactor compatibility shim for the saved local RL checkpoint")
+    parser.add_argument(
+        "--gif", action="store_true", help="write a 40-frame 10 Hz replay GIF per scene"
+    )
+    parser.add_argument(
+        "--per-traj",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="write a detailed PNG for every sampled trajectory",
+    )
+    parser.add_argument(
+        "--legacy-checkpoint-abi",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="use the pre-LineEncoder-refactor compatibility shim for the saved local RL checkpoint",
+    )
     parser.add_argument(
         "--original-dp-awr",
         action="store_true",
@@ -752,7 +1055,9 @@ def main() -> None:
     parser.add_argument("--t4-grpo-viz", type=Path, default=DEFAULT_T4_GRPO_VIZ)
     parser.add_argument("--t4-scenes-json", type=Path, default=DEFAULT_T4_SCENES)
     parser.add_argument("--t4-reward-config", type=Path, default=DEFAULT_T4_REWARD_CONFIG)
-    parser.add_argument("--scene-meta", type=Path, default=ROOT / "docs/t4_conference_assets/t4_scene_metadata.json")
+    parser.add_argument(
+        "--scene-meta", type=Path, default=ROOT / "docs/t4_conference_assets/t4_scene_metadata.json"
+    )
     parser.add_argument("--hdp-trajectory-augmentation", action="store_true")
     parser.add_argument("--hdp-trajectory-augmentation-std", type=float, default=0.5)
     parser.add_argument("--gif-frame-stride", type=int, default=1)
@@ -769,15 +1074,25 @@ def main() -> None:
     scene_ids = [item.strip() for item in args.scene_ids.split(",") if item.strip()]
     scenes = [scene_viz._load_scene(spec) for spec in _scene_specs(scene_ids)]
     reward_args, reward_payload = _load_reward_args(args.reward_config.resolve())
-    args_path = _args_path_for_checkpoint(checkpoint, args.args_path.resolve() if args.args_path else None)
+    args_path = _args_path_for_checkpoint(
+        checkpoint, args.args_path.resolve() if args.args_path else None
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Sampling {args.K} trajectories for {len(scenes)} scene(s) with {args.steps} diffusion steps", flush=True)
+    print(
+        f"Sampling {args.K} trajectories for {len(scenes)} scene(s) with {args.steps} diffusion steps",
+        flush=True,
+    )
     print(f"checkpoint={checkpoint}", flush=True)
     print(f"reward_config={args.reward_config.resolve()}", flush=True)
     samples = _sample_checkpoint(
-        scenes, checkpoint, args_path, generations=args.K, steps=args.steps,
-        noise_scale=args.noise_scale, seed=args.seed,
+        scenes,
+        checkpoint,
+        args_path,
+        generations=args.K,
+        steps=args.steps,
+        noise_scale=args.noise_scale,
+        seed=args.seed,
         legacy_checkpoint_abi=args.legacy_checkpoint_abi,
     )
     manifest = {
@@ -791,7 +1106,9 @@ def main() -> None:
         "args_path": str(args_path),
         "reward_config_path": str(args.reward_config.resolve()),
         "reward_config": reward_payload,
-        "K": int(args.K), "steps": int(args.steps), "noise_scale": float(args.noise_scale),
+        "K": int(args.K),
+        "steps": int(args.steps),
+        "noise_scale": float(args.noise_scale),
         "seed": int(args.seed),
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "scenes": {},
@@ -805,7 +1122,10 @@ def main() -> None:
         per_traj = []
         if args.per_traj:
             for index, row in enumerate(group["actual_rows"]):
-                path = scene_dir / f"{scene['id']}_traj_{row['rank']:02d}_sample_{row['sample_index']:02d}.png"
+                path = (
+                    scene_dir
+                    / f"{scene['id']}_traj_{row['rank']:02d}_sample_{row['sample_index']:02d}.png"
+                )
                 _plot_single_trajectory(scene, group, index, path)
                 per_traj.append(path.name)
         gif_path = None

@@ -46,7 +46,7 @@ def load_time_ranges(filter_json_path: Path) -> list[tuple[int, int]]:
 
     # Extract time ranges from time_series
     if "time_series" in data:
-        for time_key, time_data in data["time_series"].items():
+        for _time_key, time_data in data["time_series"].items():
             # Support both old format ("scenes") and new format ("whitelist_scenes")
             if "whitelist_scenes" in time_data:
                 scenes = time_data["whitelist_scenes"]

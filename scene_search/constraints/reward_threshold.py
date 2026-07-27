@@ -87,9 +87,8 @@ class RewardThresholdConstraint(BaseConstraint):
             return False
         if cl is None or abs(cl) < params["abs_cl_score_min"]:
             return False
-        if params["require_lane_cross"] >= 0.5:
-            if gate is None or gate >= 0.5:
-                return False
+        if params["require_lane_cross"] >= 0.5 and (gate is None or gate >= 0.5):
+            return False
         if params["lane_near_frac_min"] > 0.0:
             if near is None or near < params["lane_near_frac_min"]:
                 return False

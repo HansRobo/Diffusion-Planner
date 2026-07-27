@@ -310,9 +310,7 @@ class StatePerturbation:
                 ego_width = ego_shape[:, 2:3]  # [B, 1]
 
                 heading = aug_ego_state[:, 2:4]
-                heading = heading / torch.linalg.norm(
-                    heading, dim=-1, keepdim=True
-                ).clamp_min(1e-6)
+                heading = heading / torch.linalg.norm(heading, dim=-1, keepdim=True).clamp_min(1e-6)
                 # Ego poses are rear-axle referenced while collision boxes are center
                 # referenced. Match the convention used by training penalties and
                 # planner metrics.
@@ -398,11 +396,7 @@ class StatePerturbation:
         ego_past_is_heading = inputs["ego_agent_past"].shape[-1] == 3
         # Raw 3-column ego poses use (0, 0, 0) for a valid origin. Only a
         # converted 4-column tensor can use the all-zero padding sentinel.
-        ego_past_mask = (
-            None
-            if ego_past_is_heading
-            else pose_padding_mask(inputs["ego_agent_past"])
-        )
+        ego_past_mask = None if ego_past_is_heading else pose_padding_mask(inputs["ego_agent_past"])
         if transform_ego_history:
             inputs["ego_agent_past"][..., :2] = vector_transform(
                 inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
@@ -574,7 +568,7 @@ class StatePerturbation:
             ego_future_heading = ego_future
 
         P = self.num_refine
-        if P >= ego_future.shape[1]:
+        if ego_future.shape[1] <= P:
             raise ValueError(
                 f"num_refine ({P}) must be smaller than the future horizon ({ego_future.shape[1]})"
             )
@@ -585,9 +579,7 @@ class StatePerturbation:
         # a valid double/other-dtype caller fail at matmul with a mixed-dtype error.
         M_t = self.t_matrix.to(device=aug_current_state.device, dtype=aug_current_state.dtype)
         M_t = M_t.unsqueeze(0).expand(B, -1, -1)
-        A = self.coeff_matrix.to(
-            device=aug_current_state.device, dtype=aug_current_state.dtype
-        )
+        A = self.coeff_matrix.to(device=aug_current_state.device, dtype=aug_current_state.dtype)
         A = A.unsqueeze(0).expand(B, -1, -1)
 
         # state: [x, y, heading, velocity, acceleration, yaw_rate]

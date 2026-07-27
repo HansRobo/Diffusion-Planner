@@ -46,10 +46,7 @@ class _Accumulator:
 
     def add(self, values: np.ndarray, valid: np.ndarray | None = None) -> None:
         values = np.asarray(values, dtype=np.float64)
-        if values.ndim == 1:
-            values = values.reshape(1, -1)
-        else:
-            values = values.reshape(-1, values.shape[-1])
+        values = values.reshape(1, -1) if values.ndim == 1 else values.reshape(-1, values.shape[-1])
         if valid is not None:
             values = values[np.asarray(valid, dtype=bool).reshape(-1)]
         if values.size == 0:
@@ -71,9 +68,7 @@ class _Accumulator:
 def _pose_with_heading(pose: np.ndarray) -> np.ndarray:
     if pose.shape[-1] != 3:
         raise ValueError(f"Expected [x, y, heading] input, got {pose.shape}")
-    return np.concatenate(
-        [pose[..., :2], np.cos(pose[..., 2:3]), np.sin(pose[..., 2:3])], axis=-1
-    )
+    return np.concatenate([pose[..., :2], np.cos(pose[..., 2:3]), np.sin(pose[..., 2:3])], axis=-1)
 
 
 def _update(summary: dict[str, _Accumulator], key: str, values: np.ndarray, valid=None) -> None:
@@ -124,9 +119,7 @@ def _worker(
                 _update(summary, "ego_agent_past_pose", _pose_with_heading(ego_past))
                 _update(summary, "ego_agent_future_pose", _pose_with_heading(ego_future))
                 velocity = np.diff(
-                    np.concatenate(
-                        [np.zeros_like(ego_future[:1, :2]), ego_future[:, :2]], axis=0
-                    ),
+                    np.concatenate([np.zeros_like(ego_future[:1, :2]), ego_future[:, :2]], axis=0),
                     axis=0,
                 )
                 # ``waypoints_to_velocity`` keeps the orientation channels from
@@ -157,7 +150,9 @@ def _worker(
                 _update(summary, "lanes_geometry", lanes[..., :8], lane_valid)
                 _update(summary, "lanes_attributes", lanes[..., 8:], lane_valid)
                 lane_speed_valid = archive["lanes_has_speed_limit"].reshape(-1).astype(bool)
-                _update(summary, "lanes_speed_limit", archive["lanes_speed_limit"], lane_speed_valid)
+                _update(
+                    summary, "lanes_speed_limit", archive["lanes_speed_limit"], lane_speed_valid
+                )
 
                 route = archive["route_lanes"]
                 route_valid = np.any(route[..., :8] != 0, axis=-1)
@@ -281,9 +276,12 @@ def main() -> None:
     versions: dict[str, int] = {}
     error_examples: list[dict[str, str]] = []
     with context.Pool(workers) as pool:
-        for partial, partial_errors, partial_versions, partial_error_examples in pool.imap_unordered(
-            _worker, chunks
-        ):
+        for (
+            partial,
+            partial_errors,
+            partial_versions,
+            partial_error_examples,
+        ) in pool.imap_unordered(_worker, chunks):
             _merge(summary, partial)
             errors += partial_errors
             error_examples.extend(partial_error_examples)

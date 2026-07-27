@@ -142,9 +142,7 @@ def test_reward_weights_mask_shape_and_dtype_are_validated():
             reward, 1, 2, "group", 1.0, 1e-6, candidate_valid_mask=torch.ones(3, dtype=torch.bool)
         )
     with pytest.raises(TypeError, match="boolean"):
-        compute_reward_weights(
-            reward, 1, 2, "group", 1.0, 1e-6, candidate_valid_mask=torch.ones(2)
-        )
+        compute_reward_weights(reward, 1, 2, "group", 1.0, 1e-6, candidate_valid_mask=torch.ones(2))
 
 
 # ─────────────────── reward horizon and gated aggregation ───────────────────
@@ -408,9 +406,7 @@ def test_diffusion_time_draw_respects_configured_range():
         rl_diffusion_t_min=0.001,
         rl_diffusion_t_max=0.2,
     )
-    hdp_rl_utils._compute_policy_ego_loss_per_sample(
-        model, {}, torch.zeros(64, 80, 4), args
-    )
+    hdp_rl_utils._compute_policy_ego_loss_per_sample(model, {}, torch.zeros(64, 80, 4), args)
     times = model.captured_times[0]
     assert times.shape == (64,)
     assert times.min().item() >= 0.001
@@ -453,9 +449,9 @@ def test_loss_horizon_prefix_shortens_reduction():
     target = torch.zeros(1, 80, 4)
     target[:, 40:, 0] = 100.0  # error mass only in the tail
     torch.manual_seed(1)
-    tail_included = hdp_rl_utils._compute_policy_ego_loss_per_sample(
-        model, {}, target, args
-    )["ego_loss_per_sample"]
+    tail_included = hdp_rl_utils._compute_policy_ego_loss_per_sample(model, {}, target, args)[
+        "ego_loss_per_sample"
+    ]
     torch.manual_seed(1)
     prefix_only = hdp_rl_utils._compute_policy_ego_loss_per_sample(
         model, {}, target, args, loss_horizon=40

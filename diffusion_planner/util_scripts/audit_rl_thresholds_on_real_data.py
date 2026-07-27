@@ -65,9 +65,7 @@ def _load_scene(path: str) -> dict[str, torch.Tensor] | None:
 
 def _expert_world(future: torch.Tensor) -> torch.Tensor:
     """Logged expert future (T, 3) -> (T, 4) in the current-ego frame."""
-    return torch.cat(
-        [future[:, :2], torch.cos(future[:, 2:3]), torch.sin(future[:, 2:3])], dim=-1
-    )
+    return torch.cat([future[:, :2], torch.cos(future[:, 2:3]), torch.sin(future[:, 2:3])], dim=-1)
 
 
 def _neighbors_world(neighbor_future: torch.Tensor) -> torch.Tensor:
@@ -137,9 +135,7 @@ def main() -> None:
     speeds = torch.stack([s["ego_current_state"][4:6].norm() for s in scenes])
     low_speed = speeds < 1.0
     for name, floor in (("floored_5cm", 0.05), ("unfloored", 1e-9)):
-        keep, _ = first_waypoint_candidate_gate(
-            experts, speeds, len(scenes), 1, _gate_args(floor)
-        )
+        keep, _ = first_waypoint_candidate_gate(experts, speeds, len(scenes), 1, _gate_args(floor))
         rejected = ~keep
         report[f"gate_{name}_expert_reject_fraction"] = rejected.float().mean().item()
         report[f"gate_{name}_expert_reject_fraction_low_speed"] = (
@@ -153,20 +149,14 @@ def main() -> None:
         groups.clone(), speeds, len(scenes), n, aug_args, generator=generator
     )
     delta = augmented[..., :2] - groups[..., :2]
-    increments = torch.diff(
-        torch.cat([torch.zeros_like(delta[:, :1]), delta], dim=1), dim=1
-    )
+    increments = torch.diff(torch.cat([torch.zeros_like(delta[:, :1]), delta], dim=1), dim=1)
     # Per-step action normalization: ego_velocity std (0.5 m dx, 0.25 m dy).
     sigma = increments.abs() / torch.tensor([0.5, 0.25])
     changed = delta.abs().sum(dim=(1, 2)) > 1e-6
-    report["aug_scene_fraction"] = aug_metrics[
-        "reward_candidate_aug_scene_fraction"
-    ].item()
+    report["aug_scene_fraction"] = aug_metrics["reward_candidate_aug_scene_fraction"].item()
     report["aug_changed_candidate_fraction"] = changed.float().mean().item()
     report["aug_max_step_increment_m_p99"] = (
-        increments.norm(dim=-1).amax(dim=1)[changed].quantile(0.99).item()
-        if changed.any()
-        else 0.0
+        increments.norm(dim=-1).amax(dim=1)[changed].quantile(0.99).item() if changed.any() else 0.0
     )
     report["aug_max_step_increment_sigma_p99"] = (
         sigma.amax(dim=(1, 2))[changed].quantile(0.99).item() if changed.any() else 0.0

@@ -16,6 +16,7 @@ can be resumed without reopening completed chunks.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import tempfile
@@ -34,9 +35,7 @@ HEADING_TOL_DEG = 45.0
 XY_EPS = 1e-6
 
 
-def _strict_crossing(
-    p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, p4: np.ndarray
-) -> bool:
+def _strict_crossing(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, p4: np.ndarray) -> bool:
     """Exact proper-intersection test used by PR #204 (no endpoint touching)."""
     r0 = float(p2[0] - p1[0])
     r1 = float(p2[1] - p1[1])
@@ -206,17 +205,14 @@ def _atomic_json(value: object, path: Path) -> None:
             os.fsync(stream.fileno())
         os.replace(tmp, path)
     finally:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
-        except FileNotFoundError:
-            pass
 
 
 def scan(
     paths: list[str], workers: int, checkpoint_dir: Path | None, chunk_size: int
 ) -> tuple[list[str], list[str]]:
     removed: list[str] = []
-    malformed: list[str] = []
     root = checkpoint_dir / "chunks" if checkpoint_dir is not None else None
     if root is not None:
         root.mkdir(parents=True, exist_ok=True)
@@ -230,7 +226,7 @@ def scan(
             else:
                 chunk = paths[start:end]
                 results = list(executor.map(detect_red_light_run, chunk, chunksize=32))
-                chunk_removed = [p for p, flag in zip(chunk, results) if flag]
+                chunk_removed = [p for p, flag in zip(chunk, results, strict=False) if flag]
                 if checkpoint is not None:
                     _atomic_json({"start": start, "end": end, "removed": chunk_removed}, checkpoint)
             removed.extend(chunk_removed)

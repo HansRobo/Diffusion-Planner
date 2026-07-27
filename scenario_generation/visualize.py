@@ -20,7 +20,6 @@ import argparse
 import math
 from pathlib import Path
 
-import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import numpy as np
@@ -154,10 +153,7 @@ def draw_agent_box(
     (ego convention). When None, (x, y) is the bbox centroid (neighbor
     convention from the perception pipeline).
     """
-    if wheelbase is not None:
-        rear_overhang = (length - wheelbase) / 2
-    else:
-        rear_overhang = length / 2
+    rear_overhang = (length - wheelbase) / 2 if wheelbase is not None else length / 2
     t_rot = mtransforms.Affine2D().rotate(heading).translate(x, y) + ax.transData
     rect = Rectangle(
         (-rear_overhang, -width / 2),
@@ -275,11 +271,9 @@ def draw_scene(ax, scene: SceneContext, ego_id: str | None = None):
 
         if is_ego:
             color = _EGO_COLOR
-            label = f"ego ({agent.id})"
             zorder = 20
         else:
             color = _agent_color(agent.agent_type, nb_idx)
-            label = f"{agent.id} ({agent.agent_type.value})"
             zorder = 15
             nb_idx += 1
 

@@ -38,7 +38,6 @@ from mcap.reader import make_reader
 from rosbags.typesys import Stores, get_types_from_msg, get_typestore
 from scipy.interpolate import CubicSpline
 
-
 TRAJECTORY_TOPIC = "/planning/trajectory"
 ODOMETRY_TOPIC = "/localization/kinematic_state"
 DIAGNOSTIC_TOPIC = "/control/trajectory_follower/lateral/diagnostic"
@@ -202,10 +201,13 @@ def transform_trajectory(
     c0, s0 = math.cos(recorded_ego[2]), math.sin(recorded_ego[2])
     c1, s1 = math.cos(simulated_ego[2]), math.sin(simulated_ego[2])
     delta = trajectory.xy - recorded_ego[:2]
-    local = np.column_stack((c0 * delta[:, 0] + s0 * delta[:, 1],
-                             -s0 * delta[:, 0] + c0 * delta[:, 1]))
-    xy = np.column_stack((c1 * local[:, 0] - s1 * local[:, 1],
-                          s1 * local[:, 0] + c1 * local[:, 1])) + simulated_ego[:2]
+    local = np.column_stack(
+        (c0 * delta[:, 0] + s0 * delta[:, 1], -s0 * delta[:, 0] + c0 * delta[:, 1])
+    )
+    xy = (
+        np.column_stack((c1 * local[:, 0] - s1 * local[:, 1], s1 * local[:, 0] + c1 * local[:, 1]))
+        + simulated_ego[:2]
+    )
     yaw = np.unwrap(trajectory.yaw + simulated_ego[2] - recorded_ego[2])
     return xy, yaw
 
@@ -262,9 +264,7 @@ def make_reference(
         spline_y = CubicSpline(unique_s, unique_xy[:, 1])
         spatial_xy = np.column_stack((spline_x(curvature_s), spline_y(curvature_s)))
         curvature = circle_curvature(spatial_xy, curvature_smoothing_points)
-    return ReferencePath(
-        trajectory.header_s, times, xy, yaw, velocity, arc, curvature_s, curvature
-    )
+    return ReferencePath(trajectory.header_s, times, xy, yaw, velocity, arc, curvature_s, curvature)
 
 
 def project_to_path(path: ReferencePath, state: np.ndarray) -> tuple[float, np.ndarray, float]:
@@ -312,9 +312,8 @@ def reference_at(
 
 def fit_mpc_surrogate(diagnostics: np.ndarray) -> np.ndarray:
     # target Uex(0) from [feed-forward, lateral error, yaw error, measured steer, bias]
-    valid = (
-        np.all(np.isfinite(diagnostics[:, [1, 2, 4, 5, 8, 10]]), axis=1)
-        & (np.abs(diagnostics[:, 10]) > 0.5)
+    valid = np.all(np.isfinite(diagnostics[:, [1, 2, 4, 5, 8, 10]]), axis=1) & (
+        np.abs(diagnostics[:, 10]) > 0.5
     )
     data = diagnostics[valid]
     x = np.column_stack((data[:, 2], data[:, 5], data[:, 8], data[:, 4], np.ones(data.shape[0])))
@@ -366,7 +365,9 @@ def run_variant(
     times: list[float] = []
 
     while next_time <= end_s:
-        while plan_index + 1 < len(trajectories) and trajectories[plan_index + 1].log_s <= next_time:
+        while (
+            plan_index + 1 < len(trajectories) and trajectories[plan_index + 1].log_s <= next_time
+        ):
             plan_index += 1
             trajectory = trajectories[plan_index]
             recorded_ego = interpolate_state(recorded, trajectory.header_s)
@@ -415,10 +416,7 @@ def run_variant(
         state[0] += args.control_period_s * velocity * math.cos(state[2])
         state[1] += args.control_period_s * velocity * math.sin(state[2])
         state[2] = float(
-            wrap(
-                state[2]
-                + args.control_period_s * velocity * math.tan(steer) / args.wheelbase_m
-            )
+            wrap(state[2] + args.control_period_s * velocity * math.tan(steer) / args.wheelbase_m)
         )
 
         times.append(next_time)
@@ -486,9 +484,7 @@ def main() -> int:
         "temporal_anchor": run_variant(
             trajectories, recorded, coefficients, "temporal", True, args
         ),
-        "spatial_anchor": run_variant(
-            trajectories, recorded, coefficients, "spatial", True, args
-        ),
+        "spatial_anchor": run_variant(trajectories, recorded, coefficients, "spatial", True, args),
     }
     report = {
         "bag": str(args.bag),
@@ -498,6 +494,7 @@ def main() -> int:
             for name, value in zip(
                 ["feed_forward", "lateral_error", "yaw_error", "measured_steer", "bias"],
                 coefficients,
+                strict=False,
             )
         },
         "vehicle_model": {

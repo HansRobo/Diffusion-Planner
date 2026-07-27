@@ -509,8 +509,8 @@ def match_geometry_only(
     if not int_indexed or not ref_indexed:
         return []
 
-    int_orig_idx, int_clean = zip(*int_indexed) if int_indexed else ([], [])
-    ref_orig_idx, ref_clean = zip(*ref_indexed) if ref_indexed else ([], [])
+    int_orig_idx, int_clean = zip(*int_indexed, strict=False) if int_indexed else ([], [])
+    ref_orig_idx, ref_clean = zip(*ref_indexed, strict=False) if ref_indexed else ([], [])
 
     int_clean = list(int_clean)
     ref_clean = list(ref_clean)
@@ -703,11 +703,11 @@ def make_static_plots(
             ax1.plot(r[:, 0], r[:, 1], color="blue", alpha=0.55, linewidth=0.9)
         if len(l):
             ax1.plot(l[:, 0], l[:, 1], color="blue", alpha=0.55, linewidth=0.9)
-    for i, line_string in enumerate(internal["line_strings"]):
+    for _i, line_string in enumerate(internal["line_strings"]):
         s = points3_to_np(line_string["points"])
         if len(s):
             ax1.plot(s[:, 0], s[:, 1], color="red", alpha=0.8)
-    for i, polygon in enumerate(internal["polygons"]):
+    for _i, polygon in enumerate(internal["polygons"]):
         poly = points3_to_np(polygon["points"])
         if len(poly):
             ax1.fill(

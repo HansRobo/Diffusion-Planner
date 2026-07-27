@@ -20,13 +20,8 @@ if _UTIL_SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _UTIL_SCRIPTS_DIR)
 
 from search_scenes import (
-    build_index,
     filter_heading,
     filter_radius,
-    group_sequences,
-    load_index_parquet,
-    read_sidecar,
-    save_index_parquet,
 )
 
 

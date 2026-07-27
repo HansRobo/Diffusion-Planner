@@ -23,8 +23,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.colors as mcolors
-import matplotlib.pyplot as plt
 import matplotlib.patheffects as patheffects
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -303,10 +303,7 @@ def _raw_tensors(scene: dict) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         if not isinstance(value, np.ndarray) or value.dtype.kind not in "biuf":
             continue
         tensor = torch.from_numpy(np.asarray(value).copy())
-        if key.endswith("has_speed_limit"):
-            tensor = tensor.bool()
-        else:
-            tensor = tensor.float()
+        tensor = tensor.bool() if key.endswith("has_speed_limit") else tensor.float()
         raw[key] = tensor.unsqueeze(0)
     # Ego-frame origin poses are valid stationary states, including in the
     # current/goal/future fields; only known neighbor padding uses zero masking.
@@ -329,11 +326,10 @@ def _signed_clearance(
     sys.path.insert(0, str(ROOT))
     sys.path.insert(0, str(ROOT / "diffusion_planner"))
     from diffusion_planner.hdp_rl_utils import _scene_neighbors
+
     from planner_metrics.subscores import compute_ego_neighbor_signed_clearance
 
-    future, shapes, valid, _, _ = _scene_neighbors(
-        neighbors[0], raw["neighbor_agents_past"][0]
-    )
+    future, shapes, valid, _, _ = _scene_neighbors(neighbors[0], raw["neighbor_agents_past"][0])
     if future.shape[0] == 0:
         return np.full((len(trajectories), trajectories.shape[1]), np.inf, dtype=np.float32)
     ego = torch.from_numpy(trajectories).float()
@@ -477,7 +473,9 @@ def _draw_map(ax, data: dict, extent: tuple[float, float, float, float]):
         points = lane[:, :2]
         valid = (np.abs(points).sum(-1) > 1e-5) & np.isfinite(points).all(-1)
         if valid.sum() >= 2:
-            ax.plot(points[valid, 0], points[valid, 1], color="#2563eb", lw=2.7, alpha=0.72, zorder=2)
+            ax.plot(
+                points[valid, 0], points[valid, 1], color="#2563eb", lw=2.7, alpha=0.72, zorder=2
+            )
     for polygon in np.asarray(data.get("polygons", np.zeros((0, 1, 2)))):
         points = polygon[:, :2]
         valid = (np.abs(points).sum(-1) > 1e-5) & np.isfinite(points).all(-1)
@@ -499,7 +497,9 @@ def _draw_map(ax, data: dict, extent: tuple[float, float, float, float]):
         if valid.sum() < 2:
             continue
         if line.shape[-1] >= 4 and np.any(line[:, 3] > 0.5):
-            ax.plot(points[valid, 0], points[valid, 1], color="#dc2626", lw=1.3, alpha=0.68, zorder=3)
+            ax.plot(
+                points[valid, 0], points[valid, 1], color="#dc2626", lw=1.3, alpha=0.68, zorder=3
+            )
         elif line.shape[-1] >= 3 and np.any(line[:, 2] > 0.5):
             ax.plot(
                 points[valid, 0],
@@ -640,10 +640,14 @@ def _draw_trajectory_bev(
             lw=1.65 if is_model else (1.25 if rank > 1 else 2.4),
             alpha=0.70 if is_model else (0.34 if rank > 1 else 0.92),
             linestyle=(0, (3, 2)) if is_model else "-",
-            label="historical checkpoint sample" if is_model and index == next(
+            label="historical checkpoint sample"
+            if is_model
+            and index
+            == next(
                 (i for i, row in enumerate(rows) if row["kind"] == "model"),
                 index,
-            ) else None,
+            )
+            else None,
             zorder=6,
         )
     best = int(np.argmax([row["reward"] for row in rows]))
@@ -786,7 +790,9 @@ def _plot_dashboard(scene: dict, candidates: list[dict], rows: list[dict], out_p
     )
     for r, row_values in enumerate(matrix):
         for c, value in enumerate(row_values):
-            ax_heat.text(c, r, f"{value:.2f}", ha="center", va="center", fontsize=7, color="#0f172a")
+            ax_heat.text(
+                c, r, f"{value:.2f}", ha="center", va="center", fontsize=7, color="#0f172a"
+            )
     fig.colorbar(image, ax=ax_heat, fraction=0.025, pad=0.02, label="component score")
 
     ax_time = fig.add_subplot(grid[1, 1])
@@ -914,9 +920,7 @@ def _install_legacy_line_encoder():
                 act_layer=nn.GELU,
                 drop=0.0,
             )
-            self.blocks = nn.ModuleList(
-                [MixerBlock(64, 128, drop_path_rate) for _ in range(depth)]
-            )
+            self.blocks = nn.ModuleList([MixerBlock(64, 128, drop_path_rate) for _ in range(depth)])
             self.norm = nn.LayerNorm(128)
             self.emb_project = Mlp(
                 in_features=128,
@@ -1012,10 +1016,7 @@ def _actual_model_candidates(
         )
 
     raw_scenes = [_raw_tensors(scene)[0] for scene in scenes]
-    raw = {
-        key: torch.cat([item[key] for item in raw_scenes], dim=0)
-        for key in raw_scenes[0]
-    }
+    raw = {key: torch.cat([item[key] for item in raw_scenes], dim=0) for key in raw_scenes[0]}
     norm = cfg.observation_normalizer(raw)
     grouped = _grouped_policy_inputs(norm, generations, True)
     generator = torch.Generator(device=device).manual_seed(20260715)
@@ -1123,7 +1124,9 @@ def _render_gif(scene: dict, candidates: list[dict], rows: list[dict], out_path:
             va="bottom",
             fontsize=8,
             color="#475569",
-            bbox=dict(boxstyle="round,pad=0.35", facecolor="white", edgecolor="#cbd5e1", alpha=0.90),
+            bbox=dict(
+                boxstyle="round,pad=0.35", facecolor="white", edgecolor="#cbd5e1", alpha=0.90
+            ),
         )
         fig.canvas.draw()
         frames.append(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy())
@@ -1220,9 +1223,7 @@ def main():
 
     model_status = {"requested": bool(args_cli.run_model), "success": False}
     if args_cli.run_model:
-        requested_ids = {
-            item.strip() for item in args_cli.model_scenes.split(",") if item.strip()
-        }
+        requested_ids = {item.strip() for item in args_cli.model_scenes.split(",") if item.strip()}
         model_scenes = [scene for scene in loaded if scene["id"] in requested_ids]
         try:
             model_samples = _actual_model_candidates(
@@ -1272,7 +1273,7 @@ def main():
             print("actual RL checkpoint sampling failed:", repr(exc), flush=True)
 
     fig, axes = plt.subplots(2, 2, figsize=(18, 14), facecolor="#f8fafc")
-    for ax, scene in zip(axes.flat, loaded):
+    for ax, scene in zip(axes.flat, loaded, strict=False):
         _draw_trajectory_bev(
             ax,
             scene,

@@ -50,7 +50,7 @@ markers = [
 line-length = 100
 
 [tool.ruff.lint]
-select=["I"]
+select=["B", "E", "F", "I", "RET", "SIM", "W"]
 extend-ignore=["ANN", "D", "FBT", "FIX", "PLR", "TD", "UP"]
 ignore=[
     "B904",
@@ -72,3 +72,38 @@ ignore=[
     "T201",
     "TRY003",
 ]
+
+# Reviewed exceptions, not a blanket relaxation.  Each entry was inspected once; the goal is
+# that `ruff check` stays green so a new violation is always a real regression.
+#   E402   - the module deliberately sets up sys.path or a backend before importing.
+#   SIM115 - the file handle intentionally outlives the statement (streamed writers, CLIs).
+#   E741   - `l`/`I` are lane/identity indices in maths-heavy code where renaming hurts.
+#   B023   - the closure is invoked inside the same loop iteration; verified correct.
+#   SIM10x/SIM117 - readability-only nits in legacy utility scripts.
+[tool.ruff.lint.per-file-ignores]
+"cpp_tools/src/autoware_diffusion_planner_tools/scripts/map_eval/compare_map.py" = ["E741"]
+"diffusion_planner/diffusion_planner/model/diffusion_utils/dpm_solver_pytorch.py" = ["SIM102"]
+"diffusion_planner/diffusion_planner/utils/train_utils.py" = ["SIM102"]
+"diffusion_planner/diffusion_planner/utils/turn_indicator.py" = ["SIM102"]
+"diffusion_planner/tests/test_cluster.py" = ["E402"]
+"diffusion_planner/tests/test_data_augmentation.py" = ["E741"]
+"diffusion_planner/tests/test_hdp_awr_upgrades.py" = ["SIM108"]
+"diffusion_planner/tests/test_hdp_core.py" = ["E402"]
+"diffusion_planner/tests/test_scene_skip.py" = ["SIM115"]
+"diffusion_planner/util_scripts/create_filtered_train_set_path.py" = ["SIM115"]
+"diffusion_planner/util_scripts/create_train_set_path.py" = ["SIM115"]
+"diffusion_planner/util_scripts/filter_causal_red_light_lists.py" = ["SIM103"]
+"diffusion_planner/util_scripts/update_converter_sidecar_overlay.py" = ["B023", "E402"]
+"diffusion_planner/util_scripts/visualize_prediction.py" = ["SIM115"]
+"planner_metrics/__init__.py" = ["E402"]
+"ros_scripts/parse_gpudrive_result.py" = ["E402"]
+"ros_scripts/replay_hdp_trajectory_control.py" = ["SIM105"]
+"ros_scripts/summarize_npz_and_processing_time.py" = ["SIM115"]
+"ros_scripts/torch2onnx.py" = ["E402"]
+"scenario_generation/closed_loop_eval.py" = ["SIM115"]
+"scenario_generation/mpc_tracker.py" = ["SIM102"]
+"scenario_generation/reproducer_rollout.py" = ["SIM115"]
+"scenario_generation/route_timeline.py" = ["SIM117"]
+"scenario_generation/visualize.py" = ["E741"]
+"scene_search/batch_search.py" = ["E402"]
+"scene_search/constraints/reward_threshold.py" = ["SIM102"]

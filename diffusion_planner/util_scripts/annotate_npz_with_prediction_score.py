@@ -77,7 +77,7 @@ def main() -> None:
 
     n_written = 0
     n_missing = 0
-    for npz_path, loss_file in zip(npz_list, loss_files):
+    for npz_path, loss_file in zip(npz_list, loss_files, strict=False):
         sidecar = Path(npz_path).with_suffix(".json")
         if not sidecar.is_file():
             n_missing += 1

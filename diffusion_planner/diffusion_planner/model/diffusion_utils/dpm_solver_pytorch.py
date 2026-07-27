@@ -188,21 +188,22 @@ def model_wrapper(
             output = model(x, t_continuous, cond, **model_kwargs)
         if model_type == "noise":
             return output
-        elif model_type == "x_start":
+        if model_type == "x_start":
             alpha_t, sigma_t = (
                 noise_schedule.marginal_alpha(t_continuous),
                 noise_schedule.marginal_std(t_continuous),
             )
             return (x - expand_dims(alpha_t, x.dim()) * output) / expand_dims(sigma_t, x.dim())
-        elif model_type == "v":
+        if model_type == "v":
             alpha_t, sigma_t = (
                 noise_schedule.marginal_alpha(t_continuous),
                 noise_schedule.marginal_std(t_continuous),
             )
             return expand_dims(alpha_t, x.dim()) * output + expand_dims(sigma_t, x.dim()) * x
-        elif model_type == "score":
+        if model_type == "score":
             sigma_t = noise_schedule.marginal_std(t_continuous)
             return -expand_dims(sigma_t, x.dim()) * output
+        return None
 
     def cond_grad_fn(x, t_input):
         """
@@ -222,7 +223,7 @@ def model_wrapper(
         """
         if guidance_type == "uncond":
             return noise_pred_fn(x, t_continuous)
-        elif guidance_type == "classifier":
+        if guidance_type == "classifier":
             if classifier_fn is None:
                 raise ValueError("classifier guidance requires classifier_fn")
             cond_grad = cond_grad_fn(x, t_continuous)
@@ -233,17 +234,17 @@ def model_wrapper(
             # when prefix_constraint flattens x between solver steps.
             cond_grad = cond_grad.reshape(noise.shape)
             return noise - guidance_scale * expand_dims(sigma_t, noise.dim()) * cond_grad
-        elif guidance_type == "classifier-free":
+        if guidance_type == "classifier-free":
             if guidance_scale == 1.0 or unconditional_condition is None:
                 return noise_pred_fn(x, t_continuous, cond=condition)
-            else:
-                # x_in = torch.cat([x] * 2)
-                # t_in = torch.cat([t_continuous] * 2)
-                # c_in = torch.cat([unconditional_condition, condition])
-                # noise_uncond, noise = noise_pred_fn(x_in, t_in, cond=c_in).chunk(2)
-                noise_uncond = noise_pred_fn(x, t_continuous, cond=unconditional_condition)
-                noise = noise_pred_fn(x, t_continuous, cond=condition)
-                return noise_uncond + guidance_scale * (noise - noise_uncond)
+            # x_in = torch.cat([x] * 2)
+            # t_in = torch.cat([t_continuous] * 2)
+            # c_in = torch.cat([unconditional_condition, condition])
+            # noise_uncond, noise = noise_pred_fn(x_in, t_in, cond=c_in).chunk(2)
+            noise_uncond = noise_pred_fn(x, t_continuous, cond=unconditional_condition)
+            noise = noise_pred_fn(x, t_continuous, cond=condition)
+            return noise_uncond + guidance_scale * (noise - noise_uncond)
+        return None
 
     if model_type not in ["noise", "x_start", "v", "score"]:
         raise ValueError(f"Unsupported DPM model_type: {model_type}")
@@ -348,9 +349,9 @@ class DPM_Solver:
             unit_steps = torch.linspace(0.0, 1.0, N + 1, device=device)
             logSNR_steps = lambda_T + (lambda_0 - lambda_T) * unit_steps
             return self.noise_schedule.inverse_lambda(logSNR_steps)
-        elif skip_type == "time_uniform":
+        if skip_type == "time_uniform":
             return torch.linspace(t_T, t_0, N + 1, device=device)
-        elif skip_type == "time_quadratic":
+        if skip_type == "time_quadratic":
             t_order = 2
             t = torch.linspace(
                 t_T ** (1.0 / t_order),
@@ -359,12 +360,11 @@ class DPM_Solver:
                 device=device,
             ).pow(t_order)
             return t
-        else:
-            raise ValueError(
-                "Unsupported skip_type {}, need to be 'logSNR' or 'time_uniform' or 'time_quadratic'".format(
-                    skip_type
-                )
+        raise ValueError(
+            "Unsupported skip_type {}, need to be 'logSNR' or 'time_uniform' or 'time_quadratic'".format(
+                skip_type
             )
+        )
 
     def dpm_solver_first_update(self, x, s, t, model_s=None, return_intermediate=False):
         """
@@ -394,8 +394,7 @@ class DPM_Solver:
         x_t = sigma_t / sigma_s * x - alpha_t * phi_1 * model_s
         if return_intermediate:
             return x_t, {"model_s": model_s}
-        else:
-            return x_t
+        return x_t
 
     def multistep_dpm_solver_second_update(self, x, model_prev_list, t_prev_list, t):
         """
@@ -417,7 +416,7 @@ class DPM_Solver:
             ns.marginal_lambda(t_prev_0),
             ns.marginal_lambda(t),
         )
-        log_alpha_prev_0, log_alpha_t = (
+        _log_alpha_prev_0, log_alpha_t = (
             ns.marginal_log_mean_coeff(t_prev_0),
             ns.marginal_log_mean_coeff(t),
         )
@@ -452,10 +451,9 @@ class DPM_Solver:
         """
         if order == 1:
             return self.dpm_solver_first_update(x, t_prev_list[-1], t, model_s=model_prev_list[-1])
-        elif order == 2:
+        if order == 2:
             return self.multistep_dpm_solver_second_update(x, model_prev_list, t_prev_list, t)
-        else:
-            raise ValueError("Solver order must be 1 or 2, got {}".format(order))
+        raise ValueError("Solver order must be 1 or 2, got {}".format(order))
 
     def sample(self, x, steps, skip_type="time_uniform"):
         """
@@ -552,10 +550,7 @@ class DPM_Solver:
                 t = timesteps[step]
                 t_batch = t.expand(batch_size)
                 # We only use lower order for steps < 10
-                if steps < 10:
-                    step_order = min(order, steps + 1 - step)
-                else:
-                    step_order = order
+                step_order = min(order, steps + 1 - step) if steps < 10 else order
                 x = self.multistep_dpm_solver_update(x, model_prev_list, t_prev_list, t, step_order)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step)

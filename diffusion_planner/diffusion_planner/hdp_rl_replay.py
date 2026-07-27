@@ -75,9 +75,7 @@ class CycleReplayWriter:
         if rank == 0:
             marker = self.dir / _MARKER
             if marker.exists():
-                raise RuntimeError(
-                    f"refusing to overwrite a completed replay cycle: {self.dir}"
-                )
+                raise RuntimeError(f"refusing to overwrite a completed replay cycle: {self.dir}")
             (self.dir / _META).write_text(
                 json.dumps(
                     {
@@ -102,7 +100,10 @@ class CycleReplayWriter:
         missing = required - set(batch)
         if missing:
             raise ValueError(f"replay shard is missing tensors: {sorted(missing)}")
-        payload = {key: value.detach().to("cpu", torch.float32 if value.is_floating_point() else None) for key, value in batch.items()}
+        payload = {
+            key: value.detach().to("cpu", torch.float32 if value.is_floating_point() else None)
+            for key, value in batch.items()
+        }
         path = self.dir / f"rank{self.rank:02d}_shard{self._count:05d}.pt"
         tmp = path.with_suffix(".tmp")
         torch.save(payload, tmp)

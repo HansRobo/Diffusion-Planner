@@ -84,7 +84,7 @@ def test_load_npz_paths_valid():
 def test_load_npz_paths_missing_file():
     try:
         load_npz_paths("/nonexistent/path.json")
-        assert False, "Should have raised FileNotFoundError"
+        raise AssertionError("Should have raised FileNotFoundError")
     except (FileNotFoundError, OSError):
         pass
     print("  [PASS] load_npz_paths missing file raises")
@@ -119,7 +119,7 @@ def test_extract_features_missing_key():
         np.savez(npz_path, wrong_key=np.zeros((80, 3)))
         try:
             extract_features(npz_path)
-            assert False, "Should have raised KeyError"
+            raise AssertionError("Should have raised KeyError")
         except KeyError:
             pass
     print("  [PASS] extract_features missing key raises KeyError")
@@ -326,7 +326,7 @@ def test_cluster_trajectories_no_valid_files_raises():
     strategy = ElbowKMeansStrategy(k_max=3)
     try:
         cluster_trajectories(["/nonexistent/a.npz", "/nonexistent/b.npz"], strategy)
-        assert False, "Should have raised RuntimeError"
+        raise AssertionError("Should have raised RuntimeError")
     except RuntimeError:
         pass
     print("  [PASS] cluster_trajectories raises on no valid files")

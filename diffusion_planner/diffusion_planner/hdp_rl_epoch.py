@@ -818,11 +818,7 @@ def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, rollout_generator
     metrics = {
         "reward_mean": reward.mean().detach(),
         "reward_max": reward.view(num_scenes, n).max(dim=1).values.mean().detach(),
-        "valid_group_fraction": valid_sample.view(num_scenes, n)
-        .any(dim=1)
-        .float()
-        .mean()
-        .detach(),
+        "valid_group_fraction": valid_sample.view(num_scenes, n).any(dim=1).float().mean().detach(),
         **{key: value.detach().mean() for key, value in reward_metrics.items()},
     }
     return shard, metrics, num_scenes
@@ -902,8 +898,7 @@ def _train_cycle_epoch(data_loader, model, optimizer, trainable_params, args, em
         )
         for raw_inputs in iterator:
             raw_inputs = {
-                key: value.to(args.device, non_blocking=True)
-                for key, value in raw_inputs.items()
+                key: value.to(args.device, non_blocking=True) for key, value in raw_inputs.items()
             }
             shard, metrics, _ = _mine_groups_from_batch(
                 raw_inputs, model, args, ema, aug, rollout_generator
@@ -922,9 +917,7 @@ def _train_cycle_epoch(data_loader, model, optimizer, trainable_params, args, em
         optimizer_steps = 0.0
         for path in iterator:
             shard = CycleReplayReader.load(path, device)
-            update_loss = _replay_update_from_shard(
-                shard, model, optimizer, trainable_params, args
-            )
+            update_loss = _replay_update_from_shard(shard, model, optimizer, trainable_params, args)
             if update_loss is None:
                 continue
             optimizer_steps += 1.0
@@ -939,9 +932,7 @@ def _train_cycle_epoch(data_loader, model, optimizer, trainable_params, args, em
     epoch_mean_loss.setdefault("loss", torch.zeros((), device=device))
     epoch_mean_loss.setdefault("reward_mean", torch.zeros((), device=device))
     epoch_mean_loss.setdefault("reward_max", torch.zeros((), device=device))
-    epoch_mean_loss["optimizer_steps_per_epoch"] = torch.tensor(
-        optimizer_steps, device=device
-    )
+    epoch_mean_loss["optimizer_steps_per_epoch"] = torch.tensor(optimizer_steps, device=device)
     epoch_mean_loss["wall_time_s"] = torch.tensor(
         time.perf_counter() - wall_start, device=device
     ).float()
@@ -1254,9 +1245,11 @@ def validate_hdp_reward_policy(data_loader, model, args):
                             det_world, raw_inputs, reward_neighbors, num_scenes, 1, args
                         )
                     finite_det = torch.isfinite(det_reward)
-                    totals[6] += torch.where(
-                        finite_det, det_reward, torch.zeros_like(det_reward)
-                    ).double().sum()
+                    totals[6] += (
+                        torch.where(finite_det, det_reward, torch.zeros_like(det_reward))
+                        .double()
+                        .sum()
+                    )
                     totals[7] += (~finite_det).sum()
                 current_keys = tuple(sorted(reward_metrics))
                 if metric_keys is None:
@@ -1290,11 +1283,7 @@ def validate_hdp_reward_policy(data_loader, model, args):
     result = {
         "mean": (totals[0] / candidate_count).float(),
         "group_max": (totals[2] / scene_count).float(),
-        **(
-            {"deterministic_mean": (totals[6] / scene_count).float()}
-            if eval_deterministic
-            else {}
-        ),
+        **({"deterministic_mean": (totals[6] / scene_count).float()} if eval_deterministic else {}),
         **{
             key.removeprefix("reward_").removesuffix("_score"): (
                 metric_totals[offset] / candidate_count

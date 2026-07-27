@@ -401,11 +401,11 @@ def test_checkpoint_bool_uses_recorded_source_value(tmp_path):
     run_dir = tmp_path / "run"
     nested = run_dir / "epoch0001"
     nested.mkdir(parents=True)
-    (run_dir / "args.json").write_text(
-        '{"rl_validate_before_training": false}', encoding="utf-8"
-    )
+    (run_dir / "args.json").write_text('{"rl_validate_before_training": false}', encoding="utf-8")
 
-    assert _checkpoint_bool(str(nested / "latest.pth"), "rl_validate_before_training", True) is False
+    assert (
+        _checkpoint_bool(str(nested / "latest.pth"), "rl_validate_before_training", True) is False
+    )
     assert _checkpoint_bool(str(nested / "latest.pth"), "missing", True) is True
 
 

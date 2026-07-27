@@ -379,7 +379,7 @@ def score_step_batched(
 
     # All valid neighbors across all segments -> one transfer -> one corner build.
     nb_all = np.concatenate(
-        [nb[v] for nb, v in zip(neighbors_list, valids) if v.any()], axis=0
+        [nb[v] for nb, v in zip(neighbors_list, valids, strict=False) if v.any()], axis=0
     )  # (K, 11)
     rects = torch.tensor(
         np.stack(
@@ -1600,7 +1600,9 @@ def run_segments_batched(
             while active:
                 with timers("input_build"):
                     pre_list = list(pool.map(lambda s: _pre_step(s, gpu_transform), active))
-                live = [(s, pre) for s, pre in zip(active, pre_list) if pre is not None]
+                live = [
+                    (s, pre) for s, pre in zip(active, pre_list, strict=False) if pre is not None
+                ]
                 if live:
                     if gpu_transform:
                         # ONE batched on-device world_to_ego_frame; downstream identical.
@@ -1651,8 +1653,8 @@ def run_segments_batched(
                         score_list = score_step_batched(
                             [b[2] for b in built], [b[0].ego_shape for b in built], device
                         )
-                    for (s, _np, nb, idx, suuid, wbu), (cl, col, _M, collider_slot) in zip(
-                        built, score_list
+                    for (s, _np, _nb, idx, suuid, wbu), (cl, col, _M, collider_slot) in zip(
+                        built, score_list, strict=False
                     ):
                         s.clearances[s.k] = cl
                         s.collisions[s.k] = col
@@ -1732,7 +1734,7 @@ def run_segments_batched(
                                         s.episode_saved = True
                                         s.saved_collision = True  # recorded-mode one-save latch
                                         s.last_collision_uuid = colliding_uuid
-                    for i, (s, _np, nb, idx, _suuid, _wbu) in enumerate(built):
+                    for i, (s, _np, _nb, idx, _suuid, _wbu) in enumerate(built):
                         prev_snaps = s.n_snaps
                         _advance_step(s, preds[i], idx, device, timers)
                         # Feed the model's predicted turn indicator back into the rolling

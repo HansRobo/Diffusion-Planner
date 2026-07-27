@@ -796,10 +796,7 @@ class LaneletSceneBuilder:
             score = dist
             if heading_rad is not None and len(cl) >= 2:
                 # Lane direction at the closest centerline point.
-                if idx < len(cl) - 1:
-                    dxdy = cl[idx + 1] - cl[idx]
-                else:
-                    dxdy = cl[idx] - cl[idx - 1]
+                dxdy = cl[idx + 1] - cl[idx] if idx < len(cl) - 1 else cl[idx] - cl[idx - 1]
                 lane_hdg = math.atan2(float(dxdy[1]), float(dxdy[0]))
                 delta = lane_hdg - heading_rad
                 # Wrap into [-pi, pi] and take absolute value (degrees).

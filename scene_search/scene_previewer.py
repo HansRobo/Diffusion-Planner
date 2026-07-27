@@ -5,7 +5,6 @@ Renders every Nth scene in a batch as a small matplotlib figure for the GUI.
 
 import io
 from concurrent.futures import ProcessPoolExecutor
-from pathlib import Path
 
 import matplotlib
 

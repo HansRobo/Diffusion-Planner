@@ -115,7 +115,7 @@ def _points_in_polygons_batched(
     Returns:
         (M, P) bool — True if point m is inside polygon p.
     """
-    M = points.shape[0]
+    points.shape[0]
     P, V, _ = polygons_v1.shape
 
     px = points[:, 0:1, None]  # (M, 1, 1)

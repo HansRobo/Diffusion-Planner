@@ -11,9 +11,7 @@ class StateNormalizer:
         self.std = torch.as_tensor(std)
         self._validate_stats("state", self.mean, self.std)
         if (ego_velocity_mean is None) != (ego_velocity_std is None):
-            raise ValueError(
-                "ego_velocity_mean and ego_velocity_std must be provided together"
-            )
+            raise ValueError("ego_velocity_mean and ego_velocity_std must be provided together")
         self.ego_velocity_mean = (
             torch.as_tensor(ego_velocity_mean) if ego_velocity_mean is not None else None
         )
@@ -21,9 +19,7 @@ class StateNormalizer:
             torch.as_tensor(ego_velocity_std) if ego_velocity_std is not None else None
         )
         if self.ego_velocity_mean is not None:
-            self._validate_stats(
-                "ego_velocity", self.ego_velocity_mean, self.ego_velocity_std
-            )
+            self._validate_stats("ego_velocity", self.ego_velocity_mean, self.ego_velocity_std)
 
     @staticmethod
     def _validate_stats(name, mean: torch.Tensor, std: torch.Tensor) -> None:
@@ -37,9 +33,7 @@ class StateNormalizer:
         if not torch.isfinite(mean_float).all():
             raise ValueError(f"{name} normalization mean contains non-finite values")
         if not torch.isfinite(std_float).all() or (std_float <= 0).any():
-            raise ValueError(
-                f"{name} normalization std must contain only finite positive values"
-            )
+            raise ValueError(f"{name} normalization std must contain only finite positive values")
 
     @classmethod
     def from_json(cls, args):
@@ -126,10 +120,7 @@ class ObservationNormalizer:
 
     @classmethod
     def from_json(cls, args):
-        if isinstance(args, str):
-            path = args
-        else:
-            path = args.normalization_file_path
+        path = args if isinstance(args, str) else args.normalization_file_path
 
         data = openjson(path)
         ndt = {}

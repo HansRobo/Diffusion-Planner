@@ -55,7 +55,7 @@ if __name__ == "__main__":
             f"{valid_data_list}. Did the prediction step complete and write its outputs?"
         )
     valid_data_path_list, prediction_path_list, loss_path_list = (
-        list(x) for x in zip(*list_of_tuple)
+        list(x) for x in zip(*list_of_tuple, strict=False)
     )
 
     info_path_list = [
@@ -68,7 +68,7 @@ if __name__ == "__main__":
     loss_ego_position_lat = defaultdict(list)
     loss_ego_neighbor_margin_loss = defaultdict(list)
     loss_list = []
-    for info_path, loss_path in zip(info_path_list, loss_path_list):
+    for info_path, loss_path in zip(info_path_list, loss_path_list, strict=False):
         assert info_path.is_file()
         time_str = info_path.stem.split("_")[0]
 
@@ -157,7 +157,7 @@ if __name__ == "__main__":
         # loss_nei (P, T, 4)
         loss_ego = np.sqrt(loss_ego)
         loss_nei = np.sqrt(loss_nei)
-        loss_ego_mean = np.mean(loss_ego)
+        np.mean(loss_ego)
 
         fig, ax = plt.subplots(1, 2, figsize=(8, 5.5), gridspec_kw={"width_ratios": [2, 1]})
         visualize_inputs(valid_data_dict, save_path=None, ax=ax[0])
@@ -257,6 +257,6 @@ if __name__ == "__main__":
     pool = Pool(os.cpu_count())
     with tqdm(total=len(valid_data_path_list)) as pbar:
         for _ in pool.imap_unordered(
-            process_one_pair, zip(valid_data_path_list, prediction_path_list)
+            process_one_pair, zip(valid_data_path_list, prediction_path_list, strict=False)
         ):
             pbar.update(1)

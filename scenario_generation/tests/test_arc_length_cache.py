@@ -71,7 +71,7 @@ class TestCachedLaneletArc:
 
         snip = next(map_snippets_dir.glob("*.pkl"))
         with open(snip, "rb") as f:
-            data = pickle.load(f)
+            pickle.load(f)
         # The builder needs a lanelet map, not snippets. Skip if we can't
         # determine the map path.
         pytest.skip("Builder requires full map path, not snippet-only test")

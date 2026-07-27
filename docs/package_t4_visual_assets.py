@@ -20,7 +20,6 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CATALOG = REPO_ROOT / "docs/t4_conference_assets/visual_asset_catalog.csv"
 DEFAULT_OUTPUT = REPO_ROOT / "docs/t4_conference_assets/t4_awr_visual_assets_bundle.zip"

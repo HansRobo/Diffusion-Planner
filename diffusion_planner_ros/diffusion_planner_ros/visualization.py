@@ -122,7 +122,7 @@ def create_route_marker(route_tensor: torch.Tensor, stamp) -> MarkerArray:
             axis=1,
         )
         # Create a marker for the centerline
-        for i, point in enumerate(centerline_in_base_link):
+        for _i, point in enumerate(centerline_in_base_link):
             p = Point()
             norm = np.linalg.norm(point)
             if norm < 2:

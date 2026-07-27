@@ -17,7 +17,6 @@ from urllib.parse import unquote, urlparse
 
 from PIL import Image, ImageChops
 
-
 VISUAL_SUFFIXES = {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
 
 
@@ -129,7 +128,9 @@ def _args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(__file__).resolve().parent / "t4_conference_assets" / "visual_asset_audit.json",
+        default=Path(__file__).resolve().parent
+        / "t4_conference_assets"
+        / "visual_asset_audit.json",
     )
     return parser.parse_args()
 
@@ -181,7 +182,11 @@ def _generator_paths(root: Path, path: Path) -> list[str]:
             t4_root / "rlvr/autoresearch/tools/render_gate_comparison.py",
             t4_root / "rlvr/autoresearch/tools/grpo_viz.py",
         ]
-    elif "/formal_replay_safety/" in value or "/awr_colleague_" in value or "/awr_multimodality_compare/" in value:
+    elif (
+        "/formal_replay_safety/" in value
+        or "/awr_colleague_" in value
+        or "/awr_multimodality_compare/" in value
+    ):
         candidates = [t4_root / "rlvr/autoresearch/tools/grpo_viz.py"]
     elif "/full_replay_signal/" in value:
         candidates = [t4_root / "rlvr/autoresearch/tools/analyze_full_replay_signal.py"]
@@ -228,12 +233,7 @@ def _write_handoff_catalogs(root: Path, output: Path, payload: dict[str, object]
                 "displayed_in": ";".join(displayed_in),
                 "linked_in": ";".join(linked_in),
                 "usage_contexts": ";".join(
-                    sorted(
-                        {
-                            f'{item["page"]}#{item.get("context", "page")}'
-                            for item in references
-                        }
-                    )
+                    sorted({f"{item['page']}#{item.get('context', 'page')}" for item in references})
                 ),
                 "companion_data": ";".join(_companion_data(root, path)),
                 "generator": ";".join(_generator_paths(root, path)),
@@ -246,9 +246,7 @@ def _write_handoff_catalogs(root: Path, output: Path, payload: dict[str, object]
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    checksum_path.write_text(
-        "".join(f'{row["sha256"]}  {row["path"]}\n' for row in rows)
-    )
+    checksum_path.write_text("".join(f"{row['sha256']}  {row['path']}\n" for row in rows))
 
     tier_order = (
         "A_formal_replay",
@@ -301,18 +299,24 @@ def _write_handoff_catalogs(root: Path, output: Path, payload: dict[str, object]
             ]
         )
         for row in tier_rows:
-            visual = f'[{Path(row["path"]).name}](../../{row["path"]})'
-            data_links = "<br>".join(
-                f'[{Path(item).name}](../../{item})'
-                for item in row["companion_data"].split(";")
-                if item
-            ) or "—"
-            generator_links = "<br>".join(
-                f'[{Path(item).name}](../../{item})'
-                for item in row["generator"].split(";")
-                if item
-            ) or "paper / source原図"
-            shape = f'{row["width_px"]}×{row["height_px"]} / {row["frame_count"]}'
+            visual = f"[{Path(row['path']).name}](../../{row['path']})"
+            data_links = (
+                "<br>".join(
+                    f"[{Path(item).name}](../../{item})"
+                    for item in row["companion_data"].split(";")
+                    if item
+                )
+                or "—"
+            )
+            generator_links = (
+                "<br>".join(
+                    f"[{Path(item).name}](../../{item})"
+                    for item in row["generator"].split(";")
+                    if item
+                )
+                or "paper / source原図"
+            )
+            shape = f"{row['width_px']}×{row['height_px']} / {row['frame_count']}"
             usage = "<br>".join(
                 item.replace("docs/t4_dp_awr_presentation_ja.html#", "deck ")
                 .replace("docs/t4_dp_awr_material_ja.html#", "report ")
@@ -321,7 +325,7 @@ def _write_handoff_catalogs(root: Path, output: Path, payload: dict[str, object]
                 if item
             )
             lines.append(
-                f'| {row["asset_id"]} | {visual} | {shape} | {usage} | {data_links} | {generator_links} | {claim_boundary_ja.get(tier, row["claim_boundary"])} |'
+                f"| {row['asset_id']} | {visual} | {shape} | {usage} | {data_links} | {generator_links} | {claim_boundary_ja.get(tier, row['claim_boundary'])} |"
             )
         lines.append("")
     markdown_path.write_text("\n".join(lines))
@@ -384,20 +388,19 @@ def _inspect_image(path: Path) -> dict[str, object]:
                 {
                     "unique_frame_count": len(set(frame_hashes)),
                     "adjacent_changed_count": sum(
-                        before != after for before, after in zip(frame_hashes, frame_hashes[1:])
+                        before != after
+                        for before, after in zip(frame_hashes, frame_hashes[1:], strict=False)
                     ),
                     "content_roi": "full width, lower 85%; excludes changing title/timestamp band",
                     "content_roi_unique_frame_count": len(set(content_roi_hashes)),
                     "content_roi_adjacent_changed_count": sum(
                         before != after
-                        for before, after in zip(content_roi_hashes, content_roi_hashes[1:])
+                        for before, after in zip(
+                            content_roi_hashes, content_roi_hashes[1:], strict=False
+                        )
                     ),
-                    "content_roi_changed_pixel_fraction_min": min(
-                        content_roi_changed_fractions
-                    ),
-                    "content_roi_changed_pixel_fraction_mean": sum(
-                        content_roi_changed_fractions
-                    )
+                    "content_roi_changed_pixel_fraction_min": min(content_roi_changed_fractions),
+                    "content_roi_changed_pixel_fraction_mean": sum(content_roi_changed_fractions)
                     / len(content_roi_changed_fractions),
                     "duration_ms_min": min(durations_ms),
                     "duration_ms_max": max(durations_ms),
@@ -458,8 +461,7 @@ def main() -> None:
         if int(asset.get("unique_frame_count", 0)) != int(asset["frame_count"])
         or int(asset.get("adjacent_changed_count", -1)) != int(asset["frame_count"]) - 1
         or int(asset.get("content_roi_unique_frame_count", 0)) != int(asset["frame_count"])
-        or int(asset.get("content_roi_adjacent_changed_count", -1))
-        != int(asset["frame_count"]) - 1
+        or int(asset.get("content_roi_adjacent_changed_count", -1)) != int(asset["frame_count"]) - 1
     ]
     low_resolution = [
         str(asset["path"]) for asset in assets if not bool(asset["minimum_resolution_pass"])

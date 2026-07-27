@@ -78,7 +78,9 @@ def test_line_mixer_feature_layout_is_xy_diff_without_type_channels():
     assert encoder.channel_pre_project.fc1.in_features == 4
     assert features.shape == (2, POINTS_PER_LINE_STRING, 4)
     torch.testing.assert_close(features[0, :, :2], x[0, 0, :, :2])
-    torch.testing.assert_close(features[0, :, 2:], torch.tensor([[0.0, 0.2]] + [[0.0, 0.0]] * (POINTS_PER_LINE_STRING - 1)))
+    torch.testing.assert_close(
+        features[0, :, 2:], torch.tensor([[0.0, 0.2]] + [[0.0, 0.0]] * (POINTS_PER_LINE_STRING - 1))
+    )
 
 
 def test_line_type_is_injected_after_geometric_pooling():

@@ -128,9 +128,7 @@ def test_replay_update_uses_frozen_weights_and_skips_invalid(monkeypatch):
     shard["valid_sample"] = torch.zeros(8, dtype=torch.bool)
     captured.clear()
     assert (
-        hdp_rl_epoch._replay_update_from_shard(
-            shard, torch.nn.Linear(1, 1), _Opt(), [], args
-        )
+        hdp_rl_epoch._replay_update_from_shard(shard, torch.nn.Linear(1, 1), _Opt(), [], args)
         is None
     )
     assert "stepped" not in captured  # discarded batch must not touch the optimizer

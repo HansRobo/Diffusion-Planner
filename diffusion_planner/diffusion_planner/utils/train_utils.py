@@ -86,9 +86,7 @@ def build_adamw_optimizer(
         probe_optimizer.zero_grad(set_to_none=True)
         probe.square().sum().backward()
         probe_optimizer.step()
-        optimizer = optim.AdamW(
-            params, lr=learning_rate, weight_decay=weight_decay, fused=True
-        )
+        optimizer = optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay, fused=True)
     except (TypeError, RuntimeError):
         return (
             optim.AdamW(params, lr=learning_rate, weight_decay=weight_decay),

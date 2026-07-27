@@ -22,7 +22,6 @@ from diffusion_planner.hdp_rl_utils import (
     HDPRewardConfig,
     _apply_behavior_gate,
     _batched_occupancy_score,
-    _batched_road_border_clearance,
     _collision_and_leader_terms,
     _hdp_lane_score,
     _lane_reward_centerlines,

@@ -61,7 +61,8 @@ def test_world_to_ego_frame_torch_matches_numpy():
     ]
 
     ref = [
-        world_to_ego_frame({k: v.copy() for k, v in s.items()}, *p) for s, p in zip(samples, poses)
+        world_to_ego_frame({k: v.copy() for k, v in s.items()}, *p)
+        for s, p in zip(samples, poses, strict=False)
     ]
 
     batch = {

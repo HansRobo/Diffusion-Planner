@@ -790,9 +790,7 @@ def test_augmented_history_remains_anchored_at_perturbed_current_pose():
         atol=1e-5,
         rtol=0,
     )
-    torch.testing.assert_close(
-        transformed["ego_agent_past"], ego_past_reference, atol=1e-5, rtol=0
-    )
+    torch.testing.assert_close(transformed["ego_agent_past"], ego_past_reference, atol=1e-5, rtol=0)
     torch.testing.assert_close(
         transformed["ego_agent_past"][0, 1],
         torch.zeros(4),

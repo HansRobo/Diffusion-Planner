@@ -40,6 +40,8 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 if str(_PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(_PACKAGE_ROOT))
 
+import contextlib
+
 from diffusion_planner.dimensions import (  # noqa: E402
     INPUT_T,
     MAX_NUM_NEIGHBORS,
@@ -159,9 +161,7 @@ def _heading_diff_deg(a_deg: float, b_deg: float) -> float:
     return min(d, 360.0 - d)
 
 
-def _red_light_run_arrays(
-    future: np.ndarray, route: np.ndarray, line_strings: np.ndarray
-) -> bool:
+def _red_light_run_arrays(future: np.ndarray, route: np.ndarray, line_strings: np.ndarray) -> bool:
     """Run PR #204 on already-open arrays (avoids a second NPZ decompression)."""
     entries = _red_entries(route)
     if not entries:
@@ -201,7 +201,11 @@ def _red_light_run_arrays(
 
 
 def _has_green_route(route: np.ndarray) -> bool:
-    if route.ndim != 3 or route.shape[0] < 1 or route.shape[2] < TRAFFIC_LIGHT + TRAFFIC_LIGHT_ONE_HOT_DIM:
+    if (
+        route.ndim != 3
+        or route.shape[0] < 1
+        or route.shape[2] < TRAFFIC_LIGHT + TRAFFIC_LIGHT_ONE_HOT_DIM
+    ):
         return False
     for segment in route[:25]:
         traffic = segment[0, TRAFFIC_LIGHT : TRAFFIC_LIGHT + TRAFFIC_LIGHT_ONE_HOT_DIM]
@@ -211,7 +215,9 @@ def _has_green_route(route: np.ndarray) -> bool:
     return False
 
 
-def _green_stop_arrays(future: np.ndarray, current: np.ndarray, route: np.ndarray, neighbors: np.ndarray) -> bool:
+def _green_stop_arrays(
+    future: np.ndarray, current: np.ndarray, route: np.ndarray, neighbors: np.ndarray
+) -> bool:
     """Port remote ``detect_green_stop`` for arrays loaded by the caller."""
     if future.ndim != 2 or future.shape[0] < OUTPUT_T or future.shape[1] < 2:
         return False
@@ -258,7 +264,11 @@ def _green_stop_arrays(future: np.ndarray, current: np.ndarray, route: np.ndarra
     else:
         return False
 
-    if neighbors.ndim != 3 or neighbors.shape[0] < MAX_NUM_NEIGHBORS or neighbors.shape[1] < INPUT_T + 1:
+    if (
+        neighbors.ndim != 3
+        or neighbors.shape[0] < MAX_NUM_NEIGHBORS
+        or neighbors.shape[1] < INPUT_T + 1
+    ):
         return False
     for state in neighbors[:MAX_NUM_NEIGHBORS, INPUT_T, :4]:
         if float(np.abs(state).sum()) <= XY_EPS:
@@ -270,7 +280,9 @@ def _green_stop_arrays(future: np.ndarray, current: np.ndarray, route: np.ndarra
     return True
 
 
-def _process_one(path: str, *, only_green: bool = False) -> tuple[str, int | None, str | None, bool]:
+def _process_one(
+    path: str, *, only_green: bool = False
+) -> tuple[str, int | None, str | None, bool]:
     payload, old_skipped = _read_sidecar(path)
     if old_skipped:
         return path, None, None, False
@@ -308,10 +320,15 @@ def _process_one(path: str, *, only_green: bool = False) -> tuple[str, int | Non
         # Malformed individual NPZs must not abort a multi-million-frame scan.
         red = green = False
     if red:
-        return path, RED_LABEL, (
-            "Detected red light run: ego future crosses a stop line segment near the entry point "
-            "of a heading-aligned red route lane"
-        ), False
+        return (
+            path,
+            RED_LABEL,
+            (
+                "Detected red light run: ego future crosses a stop line segment near the entry point "
+                "of a heading-aligned red route lane"
+            ),
+            False,
+        )
     if green:
         return path, GREEN_LABEL, "Stopped at green light with no lead neighbor", False
     return path, None, None, not payload
@@ -328,13 +345,13 @@ def _atomic_write(payload: dict, path: Path) -> None:
             os.fsync(stream.fileno())
         os.replace(tmp_name, path)
     finally:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
 
 
-def _update_one(result: tuple[str, int | None, str | None, bool], output_root: Path) -> tuple[int, int]:
+def _update_one(
+    result: tuple[str, int | None, str | None, bool], output_root: Path
+) -> tuple[int, int]:
     path, label, details, missing_old_sidecar = result
     if label is None:
         return 0, int(missing_old_sidecar)
@@ -485,11 +502,7 @@ def main() -> None:
 
     # In green-only append mode, include files from the earlier red pass and
     # report the actual on-disk overlay count instead of only this pass's count.
-    overlay_files = [
-        p
-        for p in args.output_root.rglob("*.json")
-        if p.name != "metadata.json"
-    ]
+    overlay_files = [p for p in args.output_root.rglob("*.json") if p.name != "metadata.json"]
     total["overlay_files_on_disk"] = len(overlay_files)
     summary["totals"] = total
     _atomic_write(summary, args.output_root / "metadata.json")

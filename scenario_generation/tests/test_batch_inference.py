@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import numpy as np
-import pytest
 import torch
 
 from scenario_generation.simulate import _cat_tensor_dicts, _predict_batch

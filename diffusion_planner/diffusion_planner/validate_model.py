@@ -492,7 +492,8 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
                 .tolist()
             )
             turn_indicator_confusion = [
-                old + int(new) for old, new in zip(turn_indicator_confusion, batch_confusion)
+                old + int(new)
+                for old, new in zip(turn_indicator_confusion, batch_confusion, strict=False)
             ]
         if return_pred:
             predictions.append(prediction.cpu())

@@ -348,7 +348,9 @@ def _visualize(
         for bound in (ll.leftBound, ll.rightBound):
             bxs = [p.x for p in bound]
             bys = [p.y for p in bound]
-            if any(x_min <= x <= x_max and y_min <= y <= y_max for x, y in zip(bxs, bys)):
+            if any(
+                x_min <= x <= x_max and y_min <= y <= y_max for x, y in zip(bxs, bys, strict=False)
+            ):
                 ax.plot(bxs, bys, color="gray", linewidth=0.5, alpha=0.7)
 
     ax.plot(
@@ -461,7 +463,7 @@ def main():
     excluded_ego = 0
     excluded_label = 0
     excluded_frames = 0
-    for key, entry in merged_tracks.items():
+    for _key, entry in merged_tracks.items():
         if len(entry["speeds"]) < args.min_frames:
             excluded_frames += 1
             continue

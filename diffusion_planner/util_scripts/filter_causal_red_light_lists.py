@@ -16,6 +16,7 @@ written atomically to the requested directory.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -61,9 +62,7 @@ def _sibling_frame_path(path: str, frame_offset: int) -> str | None:
     return str(Path(path).with_name(f"{match.group(1)}{frame:08d}{match.group(3)}"))
 
 
-def _transform_points_to_future_frame(
-    points: np.ndarray, future_pose: np.ndarray
-) -> np.ndarray:
+def _transform_points_to_future_frame(points: np.ndarray, future_pose: np.ndarray) -> np.ndarray:
     """Transform current-frame points into the ego frame at a future pose."""
     dx, dy = future_pose[:2]
     if future_pose.shape[0] >= 4:
@@ -75,8 +74,7 @@ def _transform_points_to_future_frame(
     c, s = np.cos(heading), np.sin(heading)
     relative = points - np.asarray([dx, dy], dtype=points.dtype)
     return np.stack(
-        (c * relative[:, 0] + s * relative[:, 1],
-         -s * relative[:, 0] + c * relative[:, 1]),
+        (c * relative[:, 0] + s * relative[:, 1], -s * relative[:, 0] + c * relative[:, 1]),
         axis=-1,
     )
 
@@ -320,9 +318,7 @@ def _filter_paths(
                     with prior_checkpoint.open("r", encoding="utf-8") as stream:
                         prior_payload = json.load(stream)
                     prior_kept = (
-                        prior_payload.get("kept")
-                        if isinstance(prior_payload, dict)
-                        else None
+                        prior_payload.get("kept") if isinstance(prior_payload, dict) else None
                     )
                     if (
                         not isinstance(prior_payload, dict)
@@ -346,14 +342,13 @@ def _filter_paths(
                     for path, remove in zip(
                         batch,
                         executor.map(_is_causal_red_light_release, batch),
+                        strict=False,
                     ):
                         if not remove:
                             candidate_kept.add(path)
                 if prior_kept is not None:
                     chunk_kept = [
-                        path
-                        for path in chunk
-                        if path in prior_kept_set or path in candidate_kept
+                        path for path in chunk if path in prior_kept_set or path in candidate_kept
                     ]
                 else:
                     chunk_kept = [path for path in chunk if path in candidate_kept]
@@ -375,9 +370,7 @@ def _filter_paths(
 
 def _atomic_json_dump(value, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(value, stream, separators=(",", ":"))
@@ -386,10 +379,8 @@ def _atomic_json_dump(value, path: Path) -> None:
             os.fsync(stream.fileno())
         os.replace(temporary_name, path)
     finally:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
 
 
 def _sha256(path: Path) -> str:
@@ -429,7 +420,7 @@ def main() -> None:
 
     right_lists = [(path, _load_list(path)) for path in args.right_turn_list]
     right_union = set()
-    for path, values in right_lists:
+    for _path, values in right_lists:
         right_union.update(values)
 
     base_values = _load_list(args.base_list)
@@ -503,8 +494,7 @@ def main() -> None:
     metadata["generated_sha256"] = {
         "base": _sha256(base_output),
         "right_turn_lists": [
-            _sha256(Path(entry["output_list"]))
-            for entry in metadata["right_turn_lists"]
+            _sha256(Path(entry["output_list"])) for entry in metadata["right_turn_lists"]
         ],
     }
     _atomic_json_dump(metadata, args.output_dir / "metadata.json")

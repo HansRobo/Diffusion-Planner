@@ -66,10 +66,11 @@ def _segments_cross(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) 
             and abs(_orientation(p, q, r)) <= eps
         )
 
-    return (abs(o1) <= eps and on_segment(a, c, b)) or (
-        abs(o2) <= eps and on_segment(a, d, b)
-    ) or (abs(o3) <= eps and on_segment(c, a, d)) or (
-        abs(o4) <= eps and on_segment(c, b, d)
+    return (
+        (abs(o1) <= eps and on_segment(a, c, b))
+        or (abs(o2) <= eps and on_segment(a, d, b))
+        or (abs(o3) <= eps and on_segment(c, a, d))
+        or (abs(o4) <= eps and on_segment(c, b, d))
     )
 
 
@@ -113,7 +114,9 @@ def _stop_line_segments(
     return segments
 
 
-def _first_crossing(future_xy: np.ndarray, stop_segments: list[tuple[np.ndarray, np.ndarray]]) -> int | None:
+def _first_crossing(
+    future_xy: np.ndarray, stop_segments: list[tuple[np.ndarray, np.ndarray]]
+) -> int | None:
     for frame in range(max(0, len(future_xy) - 1)):
         a, b = future_xy[frame], future_xy[frame + 1]
         if any(_segments_cross(a, b, c, d) for c, d in stop_segments):
@@ -282,9 +285,13 @@ def classify(path: str) -> dict[str, object]:
         onset_frame=onset,
         crossing_frame=crossing,
         green_before_onset=green_before_onset,
-        green_before_onset_first_frame=(green_before_onset_frames[0] if green_before_onset_frames else None),
+        green_before_onset_first_frame=(
+            green_before_onset_frames[0] if green_before_onset_frames else None
+        ),
         green_after_onset=green_after_onset,
-        green_after_onset_first_frame=(green_after_onset_frames[0] if green_after_onset_frames else None),
+        green_after_onset_first_frame=(
+            green_after_onset_frames[0] if green_after_onset_frames else None
+        ),
         red_at_onset=red_at_onset,
         neighbor_loaded=neighbor_loaded,
         crossing_neighbor_loaded=crossing_neighbor_loaded,
@@ -305,7 +312,7 @@ def main() -> None:
     removed: list[str] = []
     if len(args.source) != len(args.filtered):
         raise ValueError("--source and --filtered must have equal counts")
-    for source, filtered in zip(args.source, args.filtered):
+    for source, filtered in zip(args.source, args.filtered, strict=False):
         source_values = json.loads(source.read_text(encoding="utf-8"))
         filtered_values = set(json.loads(filtered.read_text(encoding="utf-8")))
         removed.extend(path for path in source_values if path not in filtered_values)

@@ -32,7 +32,7 @@ if __name__ == "__main__":
         data = np.load(npz_path, allow_pickle=True)
 
         # Print the shape of each array
-        for key in data.keys():
+        for key in data:
             val = data[key]
             npy_data_list[key].append(val)
 
@@ -181,7 +181,7 @@ if __name__ == "__main__":
     target = [2, 3, 4, 5, 6, 7]
     label_list = ["cos", "sin", "velocity_x", "velocity_y", "width", "length"]
 
-    for index, label in zip(target, label_list):
+    for index, label in zip(target, label_list, strict=False):
         plt.figure(figsize=(20, 10))
         for i in range(32):
             plt.subplot(4, 8, i + 1)
@@ -259,7 +259,7 @@ if __name__ == "__main__":
     static_objects = npy_data_list["static_objects"]
     target = [0, 1, 2, 3, 4, 5]
     label_list = ["pos_x", "pos_y", "head_cos", "head_sin", "obj_width", "obj_length"]
-    for index, label in zip(target, label_list):
+    for index, label in zip(target, label_list, strict=False):
         plt.figure(figsize=(20, 10))
         for i in range(5):
             plt.subplot(3, 2, i + 1)

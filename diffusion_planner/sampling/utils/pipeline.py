@@ -148,7 +148,7 @@ def cluster_trajectories(
     labels = strategy.fit_predict(features_pca)
 
     clusters: dict = defaultdict(list)
-    for path, label in zip(valid_paths, labels):
+    for path, label in zip(valid_paths, labels, strict=False):
         clusters[f"cluster_id{label}"].append(path)
 
     return {

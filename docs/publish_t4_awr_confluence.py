@@ -21,14 +21,11 @@ from typing import Any
 
 import requests
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = REPO_ROOT / "docs" / "t4_dp_awr_confluence_ja.html"
 IMAGE_RE = re.compile(r"<img\b(?P<attrs>[^>]*)>", re.IGNORECASE)
-ATTR_RE = re.compile(r'''([:\w-]+)\s*=\s*(["'])(.*?)\2''', re.DOTALL)
-LOCAL_LINK_RE = re.compile(
-    r'''<a\b(?P<attrs>[^>]*)>(?P<body>.*?)</a>''', re.IGNORECASE | re.DOTALL
-)
+ATTR_RE = re.compile(r"""([:\w-]+)\s*=\s*(["'])(.*?)\2""", re.DOTALL)
+LOCAL_LINK_RE = re.compile(r"""<a\b(?P<attrs>[^>]*)>(?P<body>.*?)</a>""", re.IGNORECASE | re.DOTALL)
 SUPPORT_SUFFIXES = {".json", ".md", ".csv", ".sha256", ".zip", ".txt"}
 
 
@@ -121,9 +118,7 @@ def discover_supporting_files(source_html: Path) -> dict[str, tuple[Path, str]]:
     return result
 
 
-def replace_local_links(
-    value: str, supporting_files: dict[str, tuple[Path, str]]
-) -> str:
+def replace_local_links(value: str, supporting_files: dict[str, tuple[Path, str]]) -> str:
     def replacement(match: re.Match[str]) -> str:
         attrs = parse_attrs(match.group("attrs"))
         href = attrs.get("href", "")
@@ -215,9 +210,7 @@ def confluence_storage(
     # Confluence storage is XML-like. Validate structure before any write.
     wrapped = (
         '<root xmlns:ac="http://atlassian.com/content" '
-        'xmlns:ri="http://atlassian.com/resource/identifier">'
-        + storage
-        + "</root>"
+        'xmlns:ri="http://atlassian.com/resource/identifier">' + storage + "</root>"
     )
     try:
         ET.fromstring(wrapped)
@@ -251,6 +244,7 @@ class Confluence:
         except Exception:
             detail = response.text[:300]
         fail(f"{operation} failed: HTTP {response.status_code}: {detail}")
+        return None
 
     def get_page(self, page_id: str) -> dict[str, Any]:
         response = self.session.get(
@@ -351,14 +345,19 @@ def main() -> int:
     unique_attachments = {
         (path, name) for path, name in (*assets.values(), *supporting_files.values())
     }
-    print(json.dumps({
-        "source": str(source),
-        "storage_chars": len(storage),
-        "image_attachments": len({name for _, name in assets.values()}),
-        "support_attachments": len({name for _, name in supporting_files.values()}),
-        "attachments": len(unique_attachments),
-        "dry_run": args.dry_run,
-    }, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "source": str(source),
+                "storage_chars": len(storage),
+                "image_attachments": len({name for _, name in assets.values()}),
+                "support_attachments": len({name for _, name in supporting_files.values()}),
+                "attachments": len(unique_attachments),
+                "dry_run": args.dry_run,
+            },
+            ensure_ascii=False,
+        )
+    )
     if args.dry_run:
         return 0
 
@@ -366,7 +365,7 @@ def main() -> int:
     page = confluence.get_page(args.page_id)
     if page.get("status") != "draft":
         fail(f"Refusing to update non-draft content: status={page.get('status')!r}")
-    remote_storage = (((page.get("body") or {}).get("storage") or {}).get("value") or "")
+    remote_storage = ((page.get("body") or {}).get("storage") or {}).get("value") or ""
     remote_sha256 = hashlib.sha256(remote_storage.encode("utf-8")).hexdigest()
     if not args.replace_entire_draft:
         fail(
@@ -395,13 +394,18 @@ def main() -> int:
             print(f"attachment {index}/{len(unique_assets)} uploaded: {name}")
 
     updated = confluence.update_draft(page, storage)
-    print(json.dumps({
-        "updated": True,
-        "id": updated.get("id"),
-        "status": updated.get("status"),
-        "title": updated.get("title"),
-        "version": (updated.get("version") or {}).get("number"),
-    }, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "updated": True,
+                "id": updated.get("id"),
+                "status": updated.get("status"),
+                "title": updated.get("title"),
+                "version": (updated.get("version") or {}).get("number"),
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 

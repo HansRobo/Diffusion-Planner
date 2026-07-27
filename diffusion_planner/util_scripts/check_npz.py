@@ -18,6 +18,6 @@ if __name__ == "__main__":
     data = np.load(npz_path, allow_pickle=True)
 
     # Print the shape of each array
-    for key in data.keys():
+    for key in data:
         val = data[key]
         print(f"{key}\t{val.dtype}\t{val.shape}")

@@ -20,7 +20,6 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyBboxPatch
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FONT = ROOT / "docs" / "assets" / "fonts" / "NotoSansJP-VF.ttf"
 
@@ -90,7 +89,9 @@ def improvement_series(
     for epoch in epochs:
         row = metric(get_epoch(report, epoch), name)
         if row is None:
-            center.append(np.nan); low.append(np.nan); high.append(np.nan)
+            center.append(np.nan)
+            low.append(np.nan)
+            high.append(np.nan)
             continue
         ci = row.get("improvement_ci95", [np.nan, np.nan])
         center.append(float(row["improvement"]) * scale)
@@ -242,8 +243,10 @@ def render_checkpoint_sweep(report: dict[str, Any], output: Path) -> dict[str, A
         linewidth=1.3,
         zorder=3,
     )
-    for x, y, epoch in zip(ade, reward, epochs):
-        ax.annotate(f"e{epoch}", (x, y), xytext=(7, 7), textcoords="offset points", fontsize=9, weight=800)
+    for x, y, epoch in zip(ade, reward, epochs, strict=False):
+        ax.annotate(
+            f"e{epoch}", (x, y), xytext=(7, 7), textcoords="offset points", fontsize=9, weight=800
+        )
     ax.set_title("D · Mean score vs behavior drift", loc="left")
     ax.set_xlabel("ADE reduction [m] → closer to logged expert")
     ax.set_ylabel("mean scene-score gain [points] ↑")
@@ -289,12 +292,17 @@ def render_hard_event_transitions(
     fig.subplots_adjust(left=0.055, right=0.98, top=0.75, bottom=0.18, wspace=0.25)
     fig.suptitle(
         "Paired hard-event transitions — diagnostic decomposition",
-        x=0.055, y=0.90, ha="left", fontsize=21, weight=900, color=COLORS["ink"],
+        x=0.055,
+        y=0.90,
+        ha="left",
+        fontsize=21,
+        weight=900,
+        color=COLORS["ink"],
     )
     add_evidence_banner(fig, scene_count, bootstrap)
     x = np.arange(len(epochs), dtype=float)
     width = 0.34
-    for ax, (name, label) in zip(axes, specs):
+    for ax, (name, label) in zip(axes, specs, strict=False):
         recovered: list[int] = []
         introduced: list[int] = []
         source_counts: list[int] = []
@@ -302,38 +310,79 @@ def render_hard_event_transitions(
         for epoch in epochs:
             row = metric(get_epoch(report, epoch), name)
             if row is None:
-                recovered.append(0); introduced.append(0); source_counts.append(0); candidate_counts.append(0)
+                recovered.append(0)
+                introduced.append(0)
+                source_counts.append(0)
+                candidate_counts.append(0)
                 continue
-            paired = int(row.get("paired_scene_count", get_epoch(report, epoch).get("scene_count", 0)))
+            paired = int(
+                row.get("paired_scene_count", get_epoch(report, epoch).get("scene_count", 0))
+            )
             recovered.append(int(round(float(row.get("improved_scene_fraction", 0.0)) * paired)))
             introduced.append(int(round(float(row.get("regressed_scene_fraction", 0.0)) * paired)))
             source_counts.append(int(round(float(row["baseline_mean"]) * paired)))
             candidate_counts.append(int(round(float(row["candidate_mean"]) * paired)))
         recovered_array = np.asarray(recovered)
         introduced_array = np.asarray(introduced)
-        ax.bar(x - width / 2, recovered_array, width=width, color=COLORS["green"], label="recovered")
-        ax.bar(x + width / 2, -introduced_array, width=width, color=COLORS["red"], label="new regression")
-        for xpos, value in zip(x - width / 2, recovered_array):
-            ax.text(xpos, value, str(int(value)), ha="center", va="bottom", fontsize=8, color=COLORS["green"], weight=800)
-        for xpos, value in zip(x + width / 2, introduced_array):
-            ax.text(xpos, -value, str(int(value)), ha="center", va="top", fontsize=8, color=COLORS["red"], weight=800)
+        ax.bar(
+            x - width / 2, recovered_array, width=width, color=COLORS["green"], label="recovered"
+        )
+        ax.bar(
+            x + width / 2,
+            -introduced_array,
+            width=width,
+            color=COLORS["red"],
+            label="new regression",
+        )
+        for xpos, value in zip(x - width / 2, recovered_array, strict=False):
+            ax.text(
+                xpos,
+                value,
+                str(int(value)),
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                color=COLORS["green"],
+                weight=800,
+            )
+        for xpos, value in zip(x + width / 2, introduced_array, strict=False):
+            ax.text(
+                xpos,
+                -value,
+                str(int(value)),
+                ha="center",
+                va="top",
+                fontsize=8,
+                color=COLORS["red"],
+                weight=800,
+            )
         ax.axhline(0, color=COLORS["ink"], linewidth=1.0)
         ax.grid(axis="y", linestyle="--", linewidth=0.7, alpha=0.55)
         ax.spines[["top", "right"]].set_visible(False)
         ax.set_xticks(x, [f"e{epoch}" for epoch in epochs])
         ax.set_title(label, loc="left", fontsize=13, weight=850)
         ax.set_ylabel("paired scene count\n↑ recovered / ↓ newly introduced", fontsize=9)
-        net = [source - candidate for source, candidate in zip(source_counts, candidate_counts)]
+        net = [
+            source - candidate
+            for source, candidate in zip(source_counts, candidate_counts, strict=False)
+        ]
         ax.text(
-            0.02, 0.98,
-            "net source−AWR: " + ", ".join(f"e{epoch} {value:+d}" for epoch, value in zip(epochs, net)),
-            transform=ax.transAxes, va="top", fontsize=7.8, color=COLORS["muted"],
+            0.02,
+            0.98,
+            "net source−AWR: "
+            + ", ".join(f"e{epoch} {value:+d}" for epoch, value in zip(epochs, net, strict=False)),
+            transform=ax.transAxes,
+            va="top",
+            fontsize=7.8,
+            color=COLORS["muted"],
         )
     axes[0].legend(frameon=False, fontsize=9, loc="lower left")
     fig.text(
-        0.055, 0.055,
+        0.055,
+        0.055,
         "Recovered and newly introduced events are both disclosed. The primary promotion decision remains the full-dataset mean scene score.",
-        fontsize=9.5, color=COLORS["muted"],
+        fontsize=9.5,
+        color=COLORS["muted"],
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=180)
@@ -365,9 +414,7 @@ def fmt_improvement(name: str, value: float) -> str:
     return f"{value:+.5f}"
 
 
-def render_scorecard(
-    report: dict[str, Any], epoch: int, output: Path, evidence_class: str
-) -> None:
+def render_scorecard(report: dict[str, Any], epoch: int, output: Path, evidence_class: str) -> None:
     data = get_epoch(report, epoch)
     rows = [
         ("Primary", "Dataset Score", "det_reward"),
@@ -384,29 +431,70 @@ def render_scorecard(
     rows = [row for row in rows if metric(data, row[2]) is not None]
 
     fig, ax = plt.subplots(figsize=(15.5, 8.8))
-    ax.set_xlim(0, 1); ax.set_ylim(0, len(rows) + 2.1); ax.axis("off")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, len(rows) + 2.1)
+    ax.axis("off")
     fig.subplots_adjust(left=0.04, right=0.98, top=0.91, bottom=0.08)
-    fig.text(0.055, 0.94, f"Epoch {epoch} paired scorecard", fontsize=24, weight=900, color=COLORS["ink"])
-    status = "FULL 46,068-SCENE EVIDENCE" if evidence_class == "full_held_out" else "2,048-SCENE DIAGNOSTIC — NOT PROMOTION EVIDENCE"
-    fig.text(0.055, 0.905, status, fontsize=10, weight=850, color=COLORS["green"] if evidence_class == "full_held_out" else COLORS["amber"])
+    fig.text(
+        0.055, 0.94, f"Epoch {epoch} paired scorecard", fontsize=24, weight=900, color=COLORS["ink"]
+    )
+    status = (
+        "FULL 46,068-SCENE EVIDENCE"
+        if evidence_class == "full_held_out"
+        else "2,048-SCENE DIAGNOSTIC — NOT PROMOTION EVIDENCE"
+    )
+    fig.text(
+        0.055,
+        0.905,
+        status,
+        fontsize=10,
+        weight=850,
+        color=COLORS["green"] if evidence_class == "full_held_out" else COLORS["amber"],
+    )
 
     columns = [0.04, 0.20, 0.42, 0.57, 0.72, 0.88]
     headers = ["class", "metric", "source", "checkpoint", "paired Δ", "95% CI"]
-    for x, header in zip(columns, headers):
-        ax.text(x, len(rows) + 1.25, header, fontsize=10, weight=850, color=COLORS["muted"], transform=ax.transData)
+    for x, header in zip(columns, headers, strict=False):
+        ax.text(
+            x,
+            len(rows) + 1.25,
+            header,
+            fontsize=10,
+            weight=850,
+            color=COLORS["muted"],
+            transform=ax.transData,
+        )
     ax.plot([0.035, 0.97], [len(rows) + 0.95] * 2, color=COLORS["grid"], linewidth=1.2)
 
-    class_colors = {"Primary": COLORS["blue"], "Sampling diagnostic": COLORS["green"], "Coverage": COLORS["green"], "Hard safety": COLORS["red"], "Diagnostic": COLORS["cyan"], "Behavior diagnostic": COLORS["violet"]}
+    class_colors = {
+        "Primary": COLORS["blue"],
+        "Sampling diagnostic": COLORS["green"],
+        "Coverage": COLORS["green"],
+        "Hard safety": COLORS["red"],
+        "Diagnostic": COLORS["cyan"],
+        "Behavior diagnostic": COLORS["violet"],
+    }
     for index, (group, label, name) in enumerate(rows):
         row = metric(data, name)
         assert row is not None
         y = len(rows) - index + 0.35
         if index % 2 == 0:
-            ax.add_patch(FancyBboxPatch((0.03, y - 0.34), 0.94, 0.72, boxstyle="round,pad=0.005,rounding_size=0.015", linewidth=0, facecolor="#f6f9fc"))
+            ax.add_patch(
+                FancyBboxPatch(
+                    (0.03, y - 0.34),
+                    0.94,
+                    0.72,
+                    boxstyle="round,pad=0.005,rounding_size=0.015",
+                    linewidth=0,
+                    facecolor="#f6f9fc",
+                )
+            )
         ci = row["improvement_ci95"]
         improved = ci[0] > 0
         regressed = ci[1] < 0
-        delta_color = COLORS["green"] if improved else COLORS["red"] if regressed else COLORS["amber"]
+        delta_color = (
+            COLORS["green"] if improved else COLORS["red"] if regressed else COLORS["amber"]
+        )
         values = [
             group,
             label,
@@ -415,18 +503,42 @@ def render_scorecard(
             fmt_improvement(name, float(row["improvement"])),
             f"[{fmt_improvement(name, float(ci[0]))}, {fmt_improvement(name, float(ci[1]))}]",
         ]
-        for col, (x, value) in enumerate(zip(columns, values)):
+        for col, (x, value) in enumerate(zip(columns, values, strict=False)):
             color = class_colors[group] if col == 0 else delta_color if col >= 4 else COLORS["ink"]
             weight = 850 if col in {0, 1, 4} else 500
             ax.text(x, y, value, fontsize=10.5, color=color, weight=weight, va="center")
 
     handles = [
-        Line2D([0], [0], marker="o", color="none", markerfacecolor=COLORS["green"], label="95% CI > 0"),
-        Line2D([0], [0], marker="o", color="none", markerfacecolor=COLORS["amber"], label="CI crosses 0"),
-        Line2D([0], [0], marker="o", color="none", markerfacecolor=COLORS["red"], label="95% CI < 0"),
+        Line2D(
+            [0], [0], marker="o", color="none", markerfacecolor=COLORS["green"], label="95% CI > 0"
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="none",
+            markerfacecolor=COLORS["amber"],
+            label="CI crosses 0",
+        ),
+        Line2D(
+            [0], [0], marker="o", color="none", markerfacecolor=COLORS["red"], label="95% CI < 0"
+        ),
     ]
-    ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.03, -0.02), ncol=3, frameon=False, fontsize=9)
-    fig.text(0.64, 0.055, "Δ is direction-normalized: positive always means better.", fontsize=9, color=COLORS["muted"])
+    ax.legend(
+        handles=handles,
+        loc="lower left",
+        bbox_to_anchor=(0.03, -0.02),
+        ncol=3,
+        frameon=False,
+        fontsize=9,
+    )
+    fig.text(
+        0.64,
+        0.055,
+        "Δ is direction-normalized: positive always means better.",
+        fontsize=9,
+        color=COLORS["muted"],
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=180)
     fig.savefig(output.with_suffix(".svg"))

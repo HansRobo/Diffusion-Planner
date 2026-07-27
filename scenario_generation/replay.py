@@ -2032,7 +2032,7 @@ def _backfill_neighbor_futures(npz_dir: Path) -> None:
     step_nums = []
     all_nb_ego_xy = []  # list of (N, 2)
     all_nb_ego_cs = []  # list of (N, 2) cos,sin
-    for fi, p in enumerate(npz_paths):
+    for _fi, p in enumerate(npz_paths):
         d = np.load(p)
         nb_past = d["neighbor_agents_past"]  # (N, 31, 11)
         all_nb_ego_xy.append(nb_past[:, -1, :2].copy())

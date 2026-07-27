@@ -25,10 +25,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 from mcap.reader import make_reader
 from rosbags.typesys import Stores, get_types_from_msg, get_typestore
-
 
 TOPICS: dict[str, tuple[str, str]] = {
     # HDP generator and its diagnostics.
@@ -144,8 +142,18 @@ def finite(values: Any) -> np.ndarray:
 def qsummary(values: Any, scale: float = 1.0) -> dict[str, float | int | None]:
     arr = finite(values) * scale
     if arr.size == 0:
-        return {"count": 0, "mean": None, "std": None, "min": None, "p01": None,
-                "p05": None, "p50": None, "p95": None, "p99": None, "max": None}
+        return {
+            "count": 0,
+            "mean": None,
+            "std": None,
+            "min": None,
+            "p01": None,
+            "p05": None,
+            "p50": None,
+            "p95": None,
+            "p99": None,
+            "max": None,
+        }
     qs = np.percentile(arr, [1, 5, 50, 95, 99])
     return {
         "count": int(arr.size),
@@ -167,9 +175,17 @@ def timing_summary(records: list[dict[str, Any]], time_key: str = "log_ns") -> d
     )
     result: dict[str, Any] = {"count": int(times.size), "time_key": time_key}
     if times.size < 2:
-        result.update({"duration_s": 0.0, "rate_hz": None, "median_period_s": None,
-                       "dt": qsummary([]), "gap_count": 0, "lost_cycles": 0,
-                       "max_gap_s": None})
+        result.update(
+            {
+                "duration_s": 0.0,
+                "rate_hz": None,
+                "median_period_s": None,
+                "dt": qsummary([]),
+                "gap_count": 0,
+                "lost_cycles": 0,
+                "max_gap_s": None,
+            }
+        )
         return result
     dt = np.diff(times).astype(float) * 1e-9
     dt = dt[dt >= 0]
@@ -185,21 +201,23 @@ def timing_summary(records: list[dict[str, Any]], time_key: str = "log_ns") -> d
         if period > 0 and coefficient_of_variation < 0.25
         else None
     )
-    result.update({
-        "start_ns": int(times[0]),
-        "end_ns": int(times[-1]),
-        "duration_s": duration_s,
-        "rate_hz": average_rate,
-        "median_rate_hz": float(1.0 / period) if period > 0 else None,
-        "mean_period_s": mean_period,
-        "period_coefficient_of_variation": coefficient_of_variation,
-        "median_period_s": period,
-        "dt": qsummary(dt),
-        "gap_threshold_s": float(threshold),
-        "gap_count": int(gaps.size),
-        "lost_cycles_estimate": lost,
-        "max_gap_s": float(np.max(dt)) if dt.size else None,
-    })
+    result.update(
+        {
+            "start_ns": int(times[0]),
+            "end_ns": int(times[-1]),
+            "duration_s": duration_s,
+            "rate_hz": average_rate,
+            "median_rate_hz": float(1.0 / period) if period > 0 else None,
+            "mean_period_s": mean_period,
+            "period_coefficient_of_variation": coefficient_of_variation,
+            "median_period_s": period,
+            "dt": qsummary(dt),
+            "gap_threshold_s": float(threshold),
+            "gap_count": int(gaps.size),
+            "lost_cycles_estimate": lost,
+            "max_gap_s": float(np.max(dt)) if dt.size else None,
+        }
+    )
     return result
 
 
@@ -215,8 +233,13 @@ def nearest_indices(query: np.ndarray, ref: np.ndarray) -> np.ndarray:
 
 def sequence_metrics(records: list[dict[str, Any]], value_key: str) -> dict[str, Any]:
     if len(records) < 2:
-        return {"count": len(records), "value": qsummary([]), "step": qsummary([]),
-                "rate": qsummary([]), "sign_changes": 0}
+        return {
+            "count": len(records),
+            "value": qsummary([]),
+            "step": qsummary([]),
+            "rate": qsummary([]),
+            "sign_changes": 0,
+        }
     records = sorted(records, key=lambda r: int(r["log_ns"]))
     t = np.array([int(r["log_ns"]) for r in records], dtype=float) * 1e-9
     v = np.array([float(r[value_key]) for r in records], dtype=float)
@@ -279,15 +302,22 @@ def decode_message(obj: Any, kind: str, log_ns: int) -> dict[str, Any]:
         rec["value"] = float(obj.data)
     elif kind == "processing_tree":
         rec["nodes"] = [
-            {"id": int(n.id), "name": str(n.name), "processing_time": float(n.processing_time),
-             "parent_id": int(n.parent_id), "comment": str(n.comment)}
+            {
+                "id": int(n.id),
+                "name": str(n.name),
+                "processing_time": float(n.processing_time),
+                "parent_id": int(n.parent_id),
+                "comment": str(n.comment),
+            }
             for n in getattr(obj, "nodes", [])
         ]
     elif kind == "candidate":
         candidates = list(getattr(obj, "candidate_trajectories", []))
         rec["n_candidates"] = len(candidates)
         rec["candidate_points"] = [len(getattr(c, "points", [])) for c in candidates]
-        rec["header_ns"] = stamp_ns(getattr(candidates[0], "header", None).stamp) if candidates else None
+        rec["header_ns"] = (
+            stamp_ns(getattr(candidates[0], "header", None).stamp) if candidates else None
+        )
     elif kind == "published_time":
         rec["header_ns"] = stamp_ns(getattr(obj, "header", None).stamp)
         rec["published_ns"] = stamp_ns(getattr(obj, "published_stamp", None))
@@ -403,10 +433,15 @@ def planner_latency(records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     traj = sorted(records.get("hdp_trajectory", []), key=lambda r: r["log_ns"])
     if not traj:
         traj = sorted(records.get("hdp_legacy_trajectory", []), key=lambda r: r["log_ns"])
-    result: dict[str, Any] = {"trajectory_topic_used": "hdp_trajectory" if records.get("hdp_trajectory") else "hdp_legacy_trajectory"}
+    result: dict[str, Any] = {
+        "trajectory_topic_used": "hdp_trajectory"
+        if records.get("hdp_trajectory")
+        else "hdp_legacy_trajectory"
+    }
     lat = [
         (int(r["log_ns"]) - int(r["header_ns"])) * 1e-6
-        for r in traj if r.get("header_ns") is not None
+        for r in traj
+        if r.get("header_ns") is not None
     ]
     result["trajectory_record_minus_header_ms"] = qsummary(lat)
     result["reported_processing_ms"] = qsummary(
@@ -419,7 +454,9 @@ def planner_latency(records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     # nearest trajectory header timestamp, then expose cycle-to-output delay.
     proc = [r for r in records.get("hdp_processing_ms", []) if r.get("stamp_ns") is not None]
     if proc and traj:
-        output_pairs = [(r["header_ns"], r["log_ns"]) for r in traj if r.get("header_ns") is not None]
+        output_pairs = [
+            (r["header_ns"], r["log_ns"]) for r in traj if r.get("header_ns") is not None
+        ]
         if output_pairs:
             out_t = np.array([pair[0] for pair in output_pairs], dtype=np.int64)
             out_log_t = np.array([pair[1] for pair in output_pairs], dtype=np.int64)
@@ -491,9 +528,7 @@ def trajectory_stability(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
         dt = np.diff(r["time_s"])
         internal_steer_steps.extend(np.diff(r["steer"]).tolist())
         internal_accel_steps.extend(np.diff(r["acceleration"]).tolist())
-        internal_xy_speeds.extend(
-            (np.linalg.norm(np.diff(r["xy"], axis=0), axis=1) / dt).tolist()
-        )
+        internal_xy_speeds.extend((np.linalg.norm(np.diff(r["xy"], axis=0), axis=1) / dt).tolist())
     result["within_trajectory_steering_step_rad"] = qsummary(internal_steer_steps)
     result["within_trajectory_acceleration_step_mps2"] = qsummary(internal_accel_steps)
     result["within_trajectory_xy_speed_mps"] = qsummary(internal_xy_speeds)
@@ -518,7 +553,9 @@ def trajectory_stability(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
             cy, sy = math.cos(e["yaw"]), math.sin(e["yaw"])
             longitudinal.append(cy * dx + sy * dy)
             lateral.append(-sy * dx + cy * dy)
-            heading_error.append(math.atan2(math.sin(r["yaw"][0] - e["yaw"]), math.cos(r["yaw"][0] - e["yaw"])))
+            heading_error.append(
+                math.atan2(math.sin(r["yaw"][0] - e["yaw"]), math.cos(r["yaw"][0] - e["yaw"]))
+            )
         result["first_point_relative_longitudinal_m"] = qsummary(longitudinal)
         result["first_point_relative_lateral_m"] = qsummary(lateral)
         result["first_point_heading_error_rad"] = qsummary(heading_error)
@@ -528,10 +565,20 @@ def trajectory_stability(records: dict[str, list[dict[str, Any]]]) -> dict[str, 
 def command_actual_lag(records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     commands = records.get("command_control_cmd", []) or records.get("controller_cmd", [])
     actual = records.get("steering_status", [])
-    commands = sorted([r for r in commands if r.get("steer") is not None], key=lambda r: r.get("stamp_ns", r["log_ns"]))
-    actual = sorted([r for r in actual if r.get("steer") is not None], key=lambda r: r.get("stamp_ns", r["log_ns"]))
+    commands = sorted(
+        [r for r in commands if r.get("steer") is not None],
+        key=lambda r: r.get("stamp_ns", r["log_ns"]),
+    )
+    actual = sorted(
+        [r for r in actual if r.get("steer") is not None],
+        key=lambda r: r.get("stamp_ns", r["log_ns"]),
+    )
     if len(commands) < 20 or len(actual) < 100:
-        return {"command_count": len(commands), "actual_count": len(actual), "status": "insufficient_data"}
+        return {
+            "command_count": len(commands),
+            "actual_count": len(actual),
+            "status": "insufficient_data",
+        }
     ct = np.array([r.get("stamp_ns") or r["log_ns"] for r in commands], dtype=float) * 1e-9
     cv = np.array([r["steer"] for r in commands], dtype=float)
     at = np.array([r.get("stamp_ns") or r["log_ns"] for r in actual], dtype=float) * 1e-9
@@ -541,7 +588,11 @@ def command_actual_lag(records: dict[str, list[dict[str, Any]]]) -> dict[str, An
     ct, cv = ct[valid_command], cv[valid_command]
     at, av = at[valid_actual], av[valid_actual]
     if np.std(cv) < 1e-4 or np.std(av) < 1e-4:
-        return {"command_count": len(cv), "actual_count": len(av), "status": "insufficient_excitation"}
+        return {
+            "command_count": len(cv),
+            "actual_count": len(av),
+            "status": "insufficient_excitation",
+        }
     candidates = np.arange(0.0, 0.501, 0.005)
     correlations: list[float] = []
     rmses: list[float] = []
@@ -577,57 +628,90 @@ def command_actual_lag(records: dict[str, list[dict[str, Any]]]) -> dict[str, An
 
 
 def write_topic_csv(path: Path, stats: dict[str, Any]) -> None:
-    fields = ["label", "topic", "count", "rate_hz", "median_period_s", "p01_dt_s", "p50_dt_s",
-              "p95_dt_s", "p99_dt_s", "max_gap_s", "gap_count", "lost_cycles_estimate"]
+    fields = [
+        "label",
+        "topic",
+        "count",
+        "rate_hz",
+        "median_period_s",
+        "p01_dt_s",
+        "p50_dt_s",
+        "p95_dt_s",
+        "p99_dt_s",
+        "max_gap_s",
+        "gap_count",
+        "lost_cycles_estimate",
+    ]
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for label, entry in stats.items():
             timing = entry["timing"]
             dt = timing.get("dt", {})
-            writer.writerow({
-                "label": label,
-                "topic": entry["topic"],
-                "count": timing.get("count"),
-                "rate_hz": timing.get("rate_hz"),
-                "median_period_s": timing.get("median_period_s"),
-                "p01_dt_s": dt.get("p01"),
-                "p50_dt_s": dt.get("p50"),
-                "p95_dt_s": dt.get("p95"),
-                "p99_dt_s": dt.get("p99"),
-                "max_gap_s": timing.get("max_gap_s"),
-                "gap_count": timing.get("gap_count"),
-                "lost_cycles_estimate": timing.get("lost_cycles_estimate"),
-            })
+            writer.writerow(
+                {
+                    "label": label,
+                    "topic": entry["topic"],
+                    "count": timing.get("count"),
+                    "rate_hz": timing.get("rate_hz"),
+                    "median_period_s": timing.get("median_period_s"),
+                    "p01_dt_s": dt.get("p01"),
+                    "p50_dt_s": dt.get("p50"),
+                    "p95_dt_s": dt.get("p95"),
+                    "p99_dt_s": dt.get("p99"),
+                    "max_gap_s": timing.get("max_gap_s"),
+                    "gap_count": timing.get("gap_count"),
+                    "lost_cycles_estimate": timing.get("lost_cycles_estimate"),
+                }
+            )
 
 
 def write_signal_csv(path: Path, records: dict[str, list[dict[str, Any]]]) -> None:
     with path.open("w", newline="") as f:
-        fields = ["source", "log_time_s", "stamp_time_s", "header_time_s", "published_time_s",
-                  "steering_rad", "velocity_mps", "acceleration_mps2", "planner_first_steering_rad",
-                  "planner_first_acceleration_mps2", "planner_first_velocity_mps"]
+        fields = [
+            "source",
+            "log_time_s",
+            "stamp_time_s",
+            "header_time_s",
+            "published_time_s",
+            "steering_rad",
+            "velocity_mps",
+            "acceleration_mps2",
+            "planner_first_steering_rad",
+            "planner_first_acceleration_mps2",
+            "planner_first_velocity_mps",
+        ]
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
-        traj = sorted(records.get("hdp_trajectory", []) or records.get("hdp_legacy_trajectory", []), key=lambda r: r["log_ns"])
+        traj = sorted(
+            records.get("hdp_trajectory", []) or records.get("hdp_legacy_trajectory", []),
+            key=lambda r: r["log_ns"],
+        )
         for r in traj:
-            writer.writerow({
-                "source": "hdp_trajectory",
-                "log_time_s": r["log_ns"] * 1e-9,
-                "header_time_s": (r.get("header_ns") or 0) * 1e-9,
-                "planner_first_steering_rad": r["steer"][0] if r["n_points"] else None,
-                "planner_first_acceleration_mps2": r["acceleration"][0] if r["n_points"] else None,
-                "planner_first_velocity_mps": r["velocity"][0] if r["n_points"] else None,
-            })
+            writer.writerow(
+                {
+                    "source": "hdp_trajectory",
+                    "log_time_s": r["log_ns"] * 1e-9,
+                    "header_time_s": (r.get("header_ns") or 0) * 1e-9,
+                    "planner_first_steering_rad": r["steer"][0] if r["n_points"] else None,
+                    "planner_first_acceleration_mps2": r["acceleration"][0]
+                    if r["n_points"]
+                    else None,
+                    "planner_first_velocity_mps": r["velocity"][0] if r["n_points"] else None,
+                }
+            )
         for label in ("command_control_cmd", "controller_cmd", "steering_status"):
             for r in sorted(records.get(label, []), key=lambda x: x["log_ns"]):
-                writer.writerow({
-                    "source": label,
-                    "log_time_s": r["log_ns"] * 1e-9,
-                    "stamp_time_s": (r.get("stamp_ns") or 0) * 1e-9,
-                    "steering_rad": r.get("steer"),
-                    "velocity_mps": r.get("velocity"),
-                    "acceleration_mps2": r.get("acceleration"),
-                })
+                writer.writerow(
+                    {
+                        "source": label,
+                        "log_time_s": r["log_ns"] * 1e-9,
+                        "stamp_time_s": (r.get("stamp_ns") or 0) * 1e-9,
+                        "steering_rad": r.get("steer"),
+                        "velocity_mps": r.get("velocity"),
+                        "acceleration_mps2": r.get("acceleration"),
+                    }
+                )
 
 
 def write_plots(out_dir: Path, records: dict[str, list[dict[str, Any]]]) -> None:
@@ -675,8 +759,11 @@ def write_plots(out_dir: Path, records: dict[str, list[dict[str, Any]]]) -> None
         axes[1].plot(x, y, ".", ms=1.5, label=name)
     axes[1].set_ylabel("latency [ms]")
     axes[1].legend(loc="upper right", ncol=4)
-    for label, name in [("hdp_trajectory", "HDP output"), ("command_control_cmd", "control command"),
-                        ("localization", "localization")]:
+    for label, name in [
+        ("hdp_trajectory", "HDP output"),
+        ("command_control_cmd", "control command"),
+        ("localization", "localization"),
+    ]:
         rs = records.get(label, [])
         if not rs:
             continue
@@ -719,17 +806,31 @@ def main() -> int:
             ts, schema_names = type_store_for(summary, available_topics)
             counts = summary.statistics.channel_message_counts if summary.statistics else {}
             target_counts = {
-                topic: int(counts.get(topic_channels[topic].id, 0)) for topic in sorted(available_topics)
+                topic: int(counts.get(topic_channels[topic].id, 0))
+                for topic in sorted(available_topics)
             }
-            bag_rows.append({
-                "file": path.name,
-                "bytes": path.stat().st_size,
-                "start_ns": int(summary.statistics.message_start_time) if summary.statistics else None,
-                "end_ns": int(summary.statistics.message_end_time) if summary.statistics else None,
-                "duration_s": ((summary.statistics.message_end_time - summary.statistics.message_start_time) * 1e-9
-                               if summary.statistics else None),
-                "target_counts": target_counts,
-            })
+            bag_rows.append(
+                {
+                    "file": path.name,
+                    "bytes": path.stat().st_size,
+                    "start_ns": int(summary.statistics.message_start_time)
+                    if summary.statistics
+                    else None,
+                    "end_ns": int(summary.statistics.message_end_time)
+                    if summary.statistics
+                    else None,
+                    "duration_s": (
+                        (
+                            summary.statistics.message_end_time
+                            - summary.statistics.message_start_time
+                        )
+                        * 1e-9
+                        if summary.statistics
+                        else None
+                    ),
+                    "target_counts": target_counts,
+                }
+            )
             for _, channel, message in reader.iter_messages(topics=sorted(available_topics)):
                 label = TOPIC_TO_LABEL[channel.topic]
                 kind = KIND_BY_LABEL[label]
@@ -738,13 +839,17 @@ def main() -> int:
                     continue
                 schema_name = schema_names.get(channel.schema_id)
                 if schema_name is None:
-                    decode_errors.append({"file": path.name, "topic": channel.topic, "error": "missing schema"})
+                    decode_errors.append(
+                        {"file": path.name, "topic": channel.topic, "error": "missing schema"}
+                    )
                     continue
                 try:
                     obj = ts.deserialize_cdr(message.data, schema_name)
                     records[label].append(decode_message(obj, kind, int(message.log_time)))
                 except Exception as exc:
-                    decode_errors.append({"file": path.name, "topic": channel.topic, "error": repr(exc)})
+                    decode_errors.append(
+                        {"file": path.name, "topic": channel.topic, "error": repr(exc)}
+                    )
 
     topic_stats = find_topic_stats({k: v for k, v in records.items() if v})
     report = {
@@ -769,13 +874,18 @@ def main() -> int:
     write_topic_csv(args.out_dir / "topic_stats.csv", topic_stats)
     write_signal_csv(args.out_dir / "signals.csv", records)
     write_plots(args.out_dir, records)
-    print(json.dumps({
-        "out_dir": str(args.out_dir),
-        "files": len(files),
-        "input_gb": sum(r["bytes"] for r in bag_rows) / 1e9,
-        "decode_errors": len(decode_errors),
-        "topic_counts": {label: len(recs) for label, recs in records.items() if recs},
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "out_dir": str(args.out_dir),
+                "files": len(files),
+                "input_gb": sum(r["bytes"] for r in bag_rows) / 1e9,
+                "decode_errors": len(decode_errors),
+                "topic_counts": {label: len(recs) for label, recs in records.items() if recs},
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

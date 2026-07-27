@@ -42,7 +42,9 @@ def main() -> None:
     )
     print(f"  goal_pose:         {_fmt_pose(route.goal_pose)}  lanelet_id={route.goal_lanelet_id}")
     print(f"  waypoints:         {route.num_waypoints()}")
-    for i, (wp, wl) in enumerate(zip(route.waypoint_poses, route.waypoint_lanelet_ids), 1):
+    for i, (wp, wl) in enumerate(
+        zip(route.waypoint_poses, route.waypoint_lanelet_ids, strict=False), 1
+    ):
         print(f"    #{i}: {_fmt_pose(wp)}  lanelet_id={wl}")
     if route.is_resolved():
         ids = route.route_lanelet_ids
