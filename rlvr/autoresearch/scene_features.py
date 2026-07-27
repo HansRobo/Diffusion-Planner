@@ -162,7 +162,7 @@ def min_dist_to_polyline(
 def batch_min_dist_to_paths(points, seg_p1, seg_p2, point_mask=None):
     """Batched point→polyline min distance for GPU throughput over many scenes.
 
-    Vectorized analog of ``planner_metrics.geometry._point_to_segments_dist`` over
+    Vectorized analog of ``planner_metrics.geometry._point_to_segments_min_dist`` over
     a scene batch — same projection-onto-segment math, one kernel for the whole
     batch instead of a Python loop of tiny per-scene calls (which is what makes the
     CPU path slow). Validated bit-for-bit against the canonical per-scene helper in

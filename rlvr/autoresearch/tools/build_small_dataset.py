@@ -32,6 +32,18 @@ Usage (contiguous mode):
     python -m rlvr.autoresearch.tools.build_small_dataset --contiguous \
         --parquet_dir <contiguous_parquet_dir> --out_dir <repro_dir> \
         --n_windows 4 --window_len 400 --frame_step 1 --seed 0
+
+Dataset layout for verify_dataset_training.py:
+    That verifier expects the frame set at ``<root>/frame/`` and the contiguous
+    corpus at ``<root>/contiguous/``, so build the two modes into those subdirs:
+    ``--out_dir <root>/frame`` (frame mode) and ``--out_dir <root>/contiguous``
+    (contiguous mode). Each mode writes its own ``train.json`` / ``val.json`` /
+    ``window_scenes.json`` at the root of its ``--out_dir``.
+
+    ``normalization.json`` is NOT produced here — it is an external input (the
+    normalization stats the model was trained with). Copy the repo's
+    ``diffusion_planner/normalization.json`` (or your model's) to ``<root>/`` for
+    the verifier / SFT to consume.
 """
 
 from __future__ import annotations
@@ -39,7 +51,6 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
-import importlib.util
 import json
 import os
 import random
@@ -50,6 +61,7 @@ from collections import Counter, defaultdict
 import numpy as np
 
 from planner_metrics.scene_format import future_to_4col
+from rlvr.autoresearch.scene_features import _load_util_script
 from rlvr.autoresearch.tools.lifelong_replay_memory import _parse_label_quotas, build_memory
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -81,19 +93,6 @@ def contig_relpath(src: str) -> str:
     bag = "_".join(p for p in d.split(os.sep)[-2:] if p) or "bag"
     bag = re.sub(r"[^A-Za-z0-9_.-]+", "-", bag)
     return os.path.join(bag, os.path.basename(src))
-
-
-def _load_util_script(module_name: str, rel_path: str):
-    """Load a self-contained ``diffusion_planner/util_scripts/*.py`` helper by file
-    path (the nested-package layout makes ``diffusion_planner.util_scripts`` not a
-    real module — see scene_feature_index._load_util_script)."""
-    path = os.path.join(_REPO_ROOT, rel_path)
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {rel_path} at {path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # --------------------------------------------------------------------------- #
@@ -312,7 +311,13 @@ def _verify_canonical(out_path: str) -> None:
 # renders
 # --------------------------------------------------------------------------- #
 def render_selected(
-    selected: list[dict], out_root: str, render_dir: str, *, frac: float, seed: int
+    selected: list[dict],
+    out_root: str,
+    render_dir: str,
+    *,
+    frac: float,
+    seed: int,
+    namer=output_basename,
 ) -> None:
     """Stratified per-bucket titled renders + one collage grid per bucket.
     Reuses from_npz + _ego_future_to_predictions + save_step_figure (no route ->
@@ -342,7 +347,7 @@ def render_selected(
         os.makedirs(bdir, exist_ok=True)
         pngs = []
         for r in picks:
-            out_npz = os.path.join(out_root, "npz", output_basename(str(r["npz_path"])))
+            out_npz = os.path.join(out_root, "npz", namer(str(r["npz_path"])))
             if not os.path.exists(out_npz):
                 continue
             title = (
@@ -544,7 +549,12 @@ def run_contiguous_mode(rows: list[dict], args) -> None:
     for r in firsts:
         r["label"] = f"window_{r['bag']}_{int(r['frame'])}"
     render_selected(
-        firsts, args.out_dir, os.path.join(args.out_dir, "renders"), frac=1.0, seed=args.seed
+        firsts,
+        args.out_dir,
+        os.path.join(args.out_dir, "renders"),
+        frac=1.0,
+        seed=args.seed,
+        namer=contig_relpath,  # contiguous frames live in per-bag subdirs, not hash-flat
     )
     print(f"[build] contiguous-mode DONE: {len(windows)} windows -> {args.out_dir}", flush=True)
 

@@ -8,8 +8,8 @@ fast pass of each training pipeline, reporting PASS/FAIL per pipeline:
 * **RSFT**  - ``rlvr.autoresearch.run_experiment`` on the frame set (K-sample
   ranked SFT, 1 epoch): generation + reward + a LoRA checkpoint save.
 * **R2LPL** - ``rlvr.autoresearch.tools.mine_direct_reproducer_chunks`` on the
-  contiguous corpus: the closed-loop rollout runs on the contiguous NPZs and
-  yields a native realized closed-loop reward.
+  contiguous corpus: the closed-loop rollout runs on the contiguous NPZs
+  (>=1 chunk simulated).
 
 The intent is a fast "did I break training?" gate: change something, run this
 against a dataset, get confirmation. Each pipeline can be skipped independently
@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -194,9 +195,18 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
     ]
     print(f"[RSFT] train {n_tr} / val {n_va} scenes -> {work / 'rsft.log'}", flush=True)
     rc, text = _run(cmd, work / "rsft.log", env)
-    reward = re.findall(r"val_reward:\s*([0-9.eE+-]+)", text)
+    # Capture the full token (incl. inf/nan) so a sentinel -inf reward is not read as a
+    # bare "-" and mistaken for success; require an actual finite number to PASS.
+    reward = re.findall(r"val_reward:\s*(-?inf|nan|[0-9.eE+-]+)", text)
+    reward_val = None
+    if reward:
+        try:
+            v = float(reward[-1])
+            reward_val = v if math.isfinite(v) else None
+        except ValueError:
+            reward_val = None
     lora = list((work / "out").rglob("adapter_model.safetensors"))
-    ok = rc == 0 and bool(reward) and bool(lora)
+    ok = rc == 0 and reward_val is not None and bool(lora)
     detail = (
         f"rc={rc} val_reward={reward[-1] if reward else 'NONE'} "
         f"lora_saved={'yes' if lora else 'no'}"
@@ -240,8 +250,9 @@ def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
     # A real closed-loop rollout needs the three danger_* configs (threshold/credit
     # ship in-repo; the reward config is an internal asset). When a reward config is
     # supplied we run the full model rollout; otherwise we fall back to --plan_only,
-    # which still loads the contiguous NPZs, detects the lineage, plans chunks and
-    # validates timeline continuity (a self-contained dataset-consumable check).
+    # which still loads the contiguous NPZs, detects the rollout lineage and plans
+    # chunks by frame-index contiguity (a self-contained dataset-consumable check;
+    # pose/timeline continuity is validated only in the full rollout).
     reward_cfg = _resolve_cfg_path(cfg.get("danger_reward_config"))
     full_rollout = reward_cfg is not None and reward_cfg.exists()
     if full_rollout:
