@@ -1,0 +1,14 @@
+{
+  "_doc": "Smoke config for the R2LPL reproducer stage (rlvr.autoresearch.tools.mine_direct_reproducer_chunks) on a v1 dataset's contiguous corpus. By DEFAULT runs plan_only: loads the contiguous NPZs, detects the rollout lineage, plans chunks, and validates timeline continuity (planned_chunks>=1) - self-contained, needs no external asset. To exercise the full closed-loop MODEL rollout (simulated_chunks>=1, native realized CL reward), set danger_reward_config to a reward config path; the threshold/credit configs default to the in-repo ones. The reward config is an internal asset (not committed), so plan_only is the committed default.",
+  "chunk_len": 80,
+  "start_stride": 80,
+  "expected_frame_step": 1,
+  "tracker_mode": "mpc",
+  "timeline_progress_mode": "clock",
+  "neighbor_history_mode": "sim",
+  "batch_size": 8,
+  "max_chunks": 2,
+  "danger_reward_config": null,
+  "danger_threshold_config": "rlvr/configs/scene_failure_thresholds.json",
+  "danger_credit_window_config": "rlvr/configs/r2lpl_credit_windows.json"
+}
