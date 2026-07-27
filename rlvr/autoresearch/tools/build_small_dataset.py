@@ -91,6 +91,40 @@ _REQUIRED_FIELDS = (
 )
 
 
+def _require_fields(d, ctx: str) -> None:
+    """Fail loud if any required model-input field NAME is absent. (Field names are
+    the model's input contract; shapes are validated separately by the canonical
+    loader — see _validate_output — so no shape literals live here.)"""
+    missing = [k for k in _REQUIRED_FIELDS if k not in (d.files if hasattr(d, "files") else d)]
+    if missing:
+        raise ValueError(
+            f"{ctx}: missing required training field(s) {missing} (no default permitted)"
+        )
+
+
+def _validate_output(path: str) -> None:
+    """Full per-output schema+shape validation, with NO hardcoded shape literals:
+    field-name presence, the canonical slot count (N_SLOTS) and pose width
+    (dimensions.POSE_DIM) for the padded neighbor arrays, and a run of the canonical
+    model-input loader (load_npz_data — builds the tensors + heading_to_cos_sin the
+    model consumes) so a scene that would crash the model is rejected at build time."""
+    import torch
+    from diffusion_planner.dimensions import POSE_DIM
+
+    from preference_optimization.utils import load_npz_data
+
+    d = np.load(path, allow_pickle=True)
+    _require_fields(d, path)
+    nap = d["neighbor_agents_past"]
+    naf = d["neighbor_agents_future"]
+    assert nap.shape[0] == N_SLOTS, (
+        f"{path}: neighbor_agents_past slots {nap.shape[0]} != {N_SLOTS}"
+    )
+    assert naf.shape[0] == N_SLOTS, f"{path}: neighbor future slots {naf.shape[0]} != {N_SLOTS}"
+    assert naf.shape[-1] == POSE_DIM, f"{path}: neighbor future width {naf.shape[-1]} != {POSE_DIM}"
+    load_npz_data(path, torch.device("cpu"))
+
+
 def output_basename(src: str) -> str:
     """Collision-free output filename for a source NPZ. A bare basename is NOT
     unique across a multi-bag/multi-date corpus (e.g. the same ``HH-MM-SS_...npz``
@@ -287,13 +321,8 @@ def canonicalize_npz(in_path: str, out_path: str) -> None:
     ego_shape must be present (fail loud). Sidecar copied alongside if present.
     version stamped to 3 (native 4-col)."""
     d = dict(np.load(in_path, allow_pickle=True))
-    # Fail loud at BUILD time if any model-input field is missing, rather than emit a
-    # training-invalid NPZ that KeyErrors mid-training (see _REQUIRED_FIELDS).
-    missing = [k for k in _REQUIRED_FIELDS if k not in d]
-    if missing:
-        raise ValueError(
-            f"{in_path}: missing required training field(s) {missing} (no default permitted)"
-        )
+    # Fail loud early if a required field is missing (before transforms touch them).
+    _require_fields(d, in_path)
 
     d["neighbor_agents_past"] = _pad_slots(
         np.asarray(d["neighbor_agents_past"], dtype=np.float32), N_SLOTS
@@ -316,18 +345,13 @@ def canonicalize_npz(in_path: str, out_path: str) -> None:
     if os.path.exists(side):
         shutil.copy(side, out_path[:-4] + ".json")
 
+    # Validate every output against the canonical schema (names + N_SLOTS/POSE_DIM +
+    # the real model-input loader) — a malformed tensor fails here, not mid-training.
+    _validate_output(out_path)
+
 
 def _verify_canonical(out_path: str) -> None:
-    d = np.load(out_path, allow_pickle=True)
-    for k in _REQUIRED_FIELDS:
-        assert k in d.files, f"{out_path}: required field {k} missing"
-    nap = d["neighbor_agents_past"]
-    assert nap.shape[0] == N_SLOTS, (
-        f"{out_path}: neighbor_agents_past slots {nap.shape[0]} != {N_SLOTS}"
-    )
-    naf = d["neighbor_agents_future"]
-    assert naf.shape[0] == N_SLOTS, f"{out_path}: future slots {naf.shape[0]} != {N_SLOTS}"
-    assert naf.shape[-1] == 4, f"{out_path}: future not 4-col ({naf.shape[-1]})"
+    _validate_output(out_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -622,6 +646,21 @@ def main() -> None:
 
     os.makedirs(args.out_dir, exist_ok=True)
     rows = load_feature_table(args.parquet_dir)
+    # Deduplicate by canonical (realpath'd) npz_path BEFORE sequence grouping / caps.
+    # extract_scene_features maps path aliases to one identity, but the parquet can
+    # still hold multiple rows for the same physical scene (same path listed twice, or
+    # two aliases pre-realpath in an older index); consuming them as distinct frames
+    # underfills the requested capacity and skews stride caps.
+    seen: set[str] = set()
+    deduped = []
+    for r in rows:
+        p = str(r.get("npz_path"))
+        if p not in seen:
+            seen.add(p)
+            deduped.append(r)
+    if len(deduped) != len(rows):
+        print(f"[build] dedup npz_path identity: {len(rows)} -> {len(deduped)} rows", flush=True)
+    rows = deduped
     if args.contiguous:
         run_contiguous_mode(rows, args)
     else:

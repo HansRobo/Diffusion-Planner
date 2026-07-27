@@ -23,7 +23,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import glob
+import hashlib
 import json
 import math
 import os
@@ -256,6 +258,33 @@ def main() -> None:
             os.remove(f)
         if stale:
             print(f"[index] --overwrite: cleared {len(stale)} existing shard(s)", flush=True)
+
+    # Job fingerprint: shard skip-on-resume is by filename only, so re-running into the
+    # same dir with a different path list/order, prefilter seed/fraction, limit, shard
+    # size, or label thresholds would silently mix old + new rows. Bind resume to the
+    # exact job. (path list/order + prefilter/seed/limit are all baked into `paths`.)
+    fingerprint = {
+        "paths_sha1": hashlib.sha1("\n".join(paths).encode()).hexdigest(),
+        "n_paths": len(paths),
+        "shard_size": args.shard_size,
+        "config": {
+            k: (list(v) if isinstance(v, tuple) else v)
+            for k, v in dataclasses.asdict(config).items()
+        },
+    }
+    manifest_path = os.path.join(args.out_dir, "_index_manifest.json")
+    if not args.overwrite and os.path.exists(manifest_path):
+        with open(manifest_path) as f:
+            prev = json.load(f)
+        if prev != fingerprint:
+            changed = [k for k in fingerprint if prev.get(k) != fingerprint[k]]
+            raise SystemExit(
+                f"[index] resume aborted: job fingerprint changed {changed} vs {manifest_path}; "
+                f"pass --overwrite to rebuild {args.out_dir}"
+            )
+    with open(manifest_path, "w") as f:
+        json.dump(fingerprint, f, indent=2)
+
     n_shards = math.ceil(len(paths) / args.shard_size)
     err_log = os.path.join(args.out_dir, "errors.log")
     total_ok = 0

@@ -344,6 +344,20 @@ def _write_npz(path, ego_future, nap, speed_ms=5.0):
     )
 
 
+def test_require_fields_presence_contract():
+    # _require_fields checks field-NAME presence (the model's input contract); shapes
+    # are validated separately by the canonical loader, so no shape literals here.
+    from rlvr.autoresearch.tools.build_small_dataset import _REQUIRED_FIELDS, _require_fields
+
+    full = {k: np.zeros((1,), np.float32) for k in _REQUIRED_FIELDS}  # names only, dummy values
+    _require_fields(full, "ok")  # no raise
+    for drop in ("ego_agent_past", "goal_pose", "neighbor_agents_future"):
+        d = dict(full)
+        del d[drop]
+        with pytest.raises(ValueError):
+            _require_fields(d, f"missing-{drop}")
+
+
 def test_extract_scene_features_normalizes_path_identity(tmp_path):
     # the same source scene reached via different spellings (absolute vs a relative
     # alias) must resolve to ONE physical identity in row["npz_path"], so it can't
