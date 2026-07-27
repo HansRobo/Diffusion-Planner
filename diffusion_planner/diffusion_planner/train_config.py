@@ -129,6 +129,9 @@ class TrainConfig:
     guidance_scale: float = 0.5
     device: str = "cuda"
     use_ema: bool = True
+    # ModelEma decay; 0.999 needs ~3000 steps to absorb a behavior change —
+    # lower for short fine-tune rounds (e.g. 0.996 for ~800-step rounds).
+    ema_decay: float = 0.999
 
     # ---------------------------------------------------------
     # Model Architecture
@@ -165,7 +168,6 @@ class TrainConfig:
     # one route).
     # ---------------------------------------------------------
     closed_loop_npz_root: str = ""
-    closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
     # Re-plan every N steps: replan=1 is a model forward EVERY step (~minutes/epoch over a full
     # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
     closed_loop_replan_interval: int = 4

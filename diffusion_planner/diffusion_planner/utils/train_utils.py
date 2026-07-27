@@ -1,11 +1,21 @@
 import json
 import random
+from typing import Any
 
 import numpy as np
 import torch
 
 
 def openjson(path):
+    """Load a json file; transparently handles zstd-compressed ``*.zst`` files."""
+    if str(path).endswith(".zst"):
+        import io
+
+        import zstandard
+
+        with open(path, "rb") as f:
+            reader = zstandard.ZstdDecompressor().stream_reader(f)
+            return json.load(io.TextIOWrapper(reader, encoding="utf-8"))
     with open(path, "r", encoding="utf-8") as f:
         dict = json.load(f)
     return dict
@@ -81,17 +91,31 @@ def get_epoch_mean_loss(epoch_loss):
     return epoch_mean_loss
 
 
-def resume_model(path: str, model, optimizer, scheduler, ema, device):
+def strip_module_prefix(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Remove DDP ``module.`` prefix from checkpoint keys."""
+    return {
+        k.replace("module.", "", 1) if k.startswith("module.") else k: v
+        for k, v in state_dict.items()
+    }
+
+
+def resume_model(path: str, model, optimizer, scheduler, ema, device, use_ddp: bool = False):
     """
     load ckpt from path
     """
     ckpt = torch.load(path, map_location=device)
 
     # load model
-    try:
-        model.load_state_dict(ckpt["model"])
-    except:
-        model.load_state_dict(ckpt)
+    if use_ddp:
+        try:
+            model.load_state_dict(ckpt["model"])
+        except:
+            model.load_state_dict(ckpt)
+    else:
+        try:
+            model.load_state_dict(strip_module_prefix(ckpt["model"]))
+        except:
+            model.load_state_dict(strip_module_prefix(ckpt))
     print("Model load done")
 
     # load optimizer
@@ -123,7 +147,10 @@ def resume_model(path: str, model, optimizer, scheduler, ema, device):
         wandb_id = None
 
     try:
-        ema.ema.load_state_dict(ckpt["ema_state_dict"])
+        ema_state = ckpt["ema_state_dict"]
+        if not use_ddp:
+            ema_state = strip_module_prefix(ema_state)
+        ema.ema.load_state_dict(ema_state)
         ema.ema.eval()
         for p in ema.ema.parameters():
             p.requires_grad_(False)

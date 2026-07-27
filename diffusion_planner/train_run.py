@@ -4,7 +4,7 @@
 Thin launcher only: it resolves the run dir, saves git info, sets NCCL env and runs
 train_predictor.py under torch.distributed.run. train_predictor.py itself is unchanged.
 
-Env: CLOSED_LOOP_NPZ_ROOT (optional) is forwarded to --closed_loop_npz_root, as before.
+--closed_loop_npz_root (optional) is forwarded to train_predictor.py's flag of the same name.
 """
 
 import argparse
@@ -22,9 +22,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--exp_name", required=True)
     p.add_argument("--train_set_list", required=True)
     p.add_argument("--valid_set_list", required=True)
+    p.add_argument("--output_root", default="/mnt/nvme/training_result")
     p.add_argument("--resume_model_path", default=None, help="optional: resume from this .pth")
     p.add_argument("--wandb_run_id", default=None, help="optional: existing wandb run id")
     p.add_argument("--wandb_project_name", default=None, help="optional: wandb project name")
+    p.add_argument(
+        "--closed_loop_npz_root",
+        default="",
+        help="optional: dir tree of route NPZ frames for closed-loop validation, OR a .json path "
+        "list of such dirs (like --train_set_list). Empty = disabled.",
+    )
     return p.parse_args()
 
 
@@ -32,9 +39,7 @@ def main() -> None:
     args = parse_args()
 
     here = Path(__file__).resolve().parent
-    save_path = (
-        Path("/mnt/nvme/training_result") / f"{datetime.now():%Y%m%d-%H%M%S}_{args.exp_name}"
-    )
+    save_path = Path(args.output_root) / f"{datetime.now():%Y%m%d-%H%M%S}_{args.exp_name}"
     save_path.mkdir(parents=True, exist_ok=True)
 
     # Save git info next to the run.
@@ -80,7 +85,7 @@ def main() -> None:
         "--save_utd",
         "10",
         "--closed_loop_npz_root",
-        os.environ.get("CLOSED_LOOP_NPZ_ROOT", ""),
+        str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else "",
         *optional,
     ]
     rc = tee_run(

@@ -376,3 +376,181 @@ def build_expert_morph_candidate(
         clamp_fire_fraction=fired_fraction,
         v0_mps=float(v_det[0]),
     )
+
+
+# --- Depart morph (model_lagging_expert direction) -------------------------
+# The stop morph re-times the det plan's OWN geometry, which works for slowing
+# down (a prefix of the path) but cannot synthesize a departure from a parked
+# plan — a 2 m det path contains no road ahead. The depart morph instead takes
+# its geometry from the EXPERT's path (which has the road ahead), bridged to
+# the ego's pose with a Hermite spline, and tracks the expert's progress
+# schedule with the same accel/jerk-limited profile. Full catch-up within the
+# horizon is NOT required — the target only has to actually depart.
+# Reject when the expert path starts farther than this from the ego — the
+# Hermite bridge is only a plausible road approximation over short gaps.
+_DEPART_MAX_GAP_M = 25.0
+# Below this total expert arc there is nothing to depart to (expert stationary).
+_DEPART_MIN_EXPERT_ARC_M = 1.0
+# The feasible profile must actually leave the spot by at least this much,
+# otherwise the candidate is a park with extra steps.
+_DEPART_MIN_PROGRESS_M = 3.0
+# Expert starting behind the ego (longitudinal x below this) is not a
+# departure target — the bridge would point backwards.
+_DEPART_EXPERT_BEHIND_X_M = -1.0
+# Bridge sample spacing; gaps at numerical zero skip the bridge entirely.
+_DEPART_BRIDGE_SPACING_M = 0.5
+# Consecutive path tangents turning more than 90 deg (dot < 0) mean the
+# polyline doubles back on itself — arc-length heading would flip mid-path,
+# which is not drivable supervision. Checked on segments longer than
+# _DEPART_TANGENT_MIN_SEG_M so near-stationary jitter cannot false-trigger.
+_DEPART_TANGENT_MIN_SEG_M = 0.05
+# The path must leave the ego within this cone of its own heading (+x in the
+# ego frame): a start tangent outside it means the expert offset is mostly
+# lateral and no forward-drivable bridge exists (the output would crab).
+_DEPART_START_CONE_COS = np.cos(np.radians(45.0))
+
+
+def build_depart_morph_candidate(
+    det_traj: np.ndarray,
+    expert_traj: np.ndarray,
+    *,
+    max_accel: float = 2.0,
+    max_jerk: float = 4.0,
+    dt: float = 0.1,
+    return_diag: bool = False,
+) -> np.ndarray | None | tuple[np.ndarray | None, dict]:
+    """Departure repair candidate: expert-path geometry, feasible catch-up timing.
+
+    Args:
+        det_traj: (T,4) ego-frame model det plan (used only for the initial speed).
+        expert_traj: (T,4) ego-frame logged expert future (geometry + schedule
+            source). For a lagging ego the expert starts AHEAD along the road.
+        return_diag: when True return ``(morph, diag)`` with the failure stage.
+
+    Returns:
+        (T,4) [x,y,cos,sin] ego-frame departure trajectory, or None when no
+        plausible departure exists (expert stationary, lateral/behind gap, or
+        the feasible profile never leaves the spot).
+    """
+
+    def _ret(morph: np.ndarray | None, stage: str, **extra):
+        if not return_diag:
+            return morph
+        return morph, {"stage": stage, **extra}
+
+    det = np.asarray(det_traj, dtype=np.float64)
+    expert = np.asarray(expert_traj, dtype=np.float64)
+    if det.ndim != 2 or det.shape[1] < 2:
+        raise ValueError(f"det_traj must be (T,>=2), got {det.shape}")
+    if expert.ndim != 2 or expert.shape[1] < 2:
+        raise ValueError(f"expert_traj must be (T,>=2), got {expert.shape}")
+    T = int(min(det.shape[0], expert.shape[0]))
+    if T < 2:
+        return _ret(None, "too_short_horizon")
+    det = det[:T]
+    expert = expert[:T].copy()
+    if not (np.isfinite(det).all() and np.isfinite(expert).all()):
+        # NaN survives every threshold gate below (comparisons are False), so
+        # it must be rejected up front or it propagates into the SFT target.
+        return _ret(None, "non_finite_input")
+
+    # Hold the last valid pose over zero-padded expert tails, and back-fill
+    # zero-padded leading samples from the first valid one (a leading pad
+    # would otherwise make gap=0 and bypass the gap/behind gates). Padding is
+    # an ALL-zero row: an expert legitimately waiting at the ego-frame origin
+    # is written as [0, 0, cos, sin] (unit heading), and xy-only validity
+    # would rewrite that recorded wait and change the departure schedule.
+    expert_valid = np.abs(expert).sum(axis=1) > _EPS
+    if expert_valid.any() and not expert_valid.all():
+        valid_idx = np.flatnonzero(expert_valid)
+        last_valid = int(valid_idx[-1])
+        if last_valid < T - 1:
+            expert[last_valid + 1 :] = expert[last_valid]
+        first_valid = int(valid_idx[0])
+        if first_valid > 0:
+            expert[:first_valid] = expert[first_valid]
+
+    expert_xy = expert[:, :2]
+    v_gt = np.linalg.norm(np.diff(expert_xy, axis=0), axis=1) / dt
+    s_gt_sched = np.concatenate([[0.0], np.cumsum(v_gt * dt)])
+    if s_gt_sched[-1] < _DEPART_MIN_EXPERT_ARC_M:
+        return _ret(None, "expert_stationary", expert_arc_m=float(s_gt_sched[-1]))
+
+    e0 = expert_xy[0]
+    gap = float(np.linalg.norm(e0))
+    if gap > _DEPART_MAX_GAP_M:
+        return _ret(None, "gap_too_large", gap_m=gap)
+    if e0[0] < _DEPART_EXPERT_BEHIND_X_M:
+        return _ret(None, "expert_behind_ego", gap_m=gap)
+
+    # Expert start tangent from its first real motion step.
+    steps = np.diff(expert_xy, axis=0)
+    moving = np.linalg.norm(steps, axis=1) > _EPS
+    te = steps[int(np.argmax(moving))]
+    te = te / max(np.linalg.norm(te), _EPS)
+
+    if gap <= _EPS:
+        polyline = np.vstack([[0.0, 0.0], expert_xy])
+    else:
+        # Cubic Hermite bridge origin->expert start; ego-frame heading is +x.
+        # Used for ANY positive gap: a raw chord would put the path tangent
+        # (= output heading) sideways for laterally offset experts.
+        n_bridge = max(4, int(gap / _DEPART_BRIDGE_SPACING_M))
+        u = np.linspace(0.0, 1.0, n_bridge)[:, None]
+        h00 = 2 * u**3 - 3 * u**2 + 1
+        h10 = u**3 - 2 * u**2 + u
+        h01 = -2 * u**3 + 3 * u**2
+        h11 = u**3 - u**2
+        m0 = np.array([[1.0, 0.0]]) * gap
+        m1 = te[None, :] * gap
+        bridge = h00 * 0.0 + h10 * m0 + h01 * e0[None, :] + h11 * m1
+        polyline = np.vstack([bridge, expert_xy[1:]])
+
+    keep = np.concatenate([[True], np.linalg.norm(np.diff(polyline, axis=0), axis=1) > _EPS])
+    polyline = polyline[keep]
+    if polyline.shape[0] < 2:
+        return _ret(None, "degenerate_geometry")
+
+    # Reject doubled-back geometry (reversing expert, or a bridge forced
+    # through a near-pure-lateral offset): heading comes from the arc-length
+    # tangent, so a reversal shows up as an instantaneous ~180 deg flip.
+    seg = np.diff(polyline, axis=0)
+    seg = seg[np.linalg.norm(seg, axis=1) > _DEPART_TANGENT_MIN_SEG_M]
+    if seg.shape[0] >= 1:
+        t_unit = seg / np.linalg.norm(seg, axis=1, keepdims=True)
+        if float(t_unit[0, 0]) < _DEPART_START_CONE_COS:
+            return _ret(None, "not_forward_from_ego")
+        if seg.shape[0] >= 2 and float(np.min(np.sum(t_unit[:-1] * t_unit[1:], axis=1))) < 0.0:
+            return _ret(None, "path_reversal")
+    s_poly = _cumulative_arc(polyline)
+
+    # Demand: chase the expert — at step i the expert sits at (bridge length +
+    # its own progress). The schedule must START AT THE EGO (arc 0), not at the
+    # expert, or the target teleports across the bridge at t=0; the feasibility
+    # tracker below turns the chase into an accel/jerk-limited ramp.
+    bridge_len = max(float(s_poly[-1] - s_gt_sched[-1]), 0.0)
+    s_target = np.minimum(bridge_len + s_gt_sched, s_poly[-1])
+    s_target[0] = 0.0
+    v0 = float(np.linalg.norm(det[1, :2] - det[0, :2]) / dt) if det.shape[0] >= 2 else 0.0
+    s_feasible, _ = _feasible_longitudinal(
+        s_target, v0, max_accel=max_accel, max_jerk=max_jerk, dt=dt
+    )
+    s_feasible = np.minimum(np.maximum.accumulate(s_feasible), s_poly[-1])
+    if float(s_feasible[-1]) < _DEPART_MIN_PROGRESS_M:
+        return _ret(None, "no_departure", progress_m=float(s_feasible[-1]))
+
+    th_poly = np.arctan2(
+        np.gradient(polyline[:, 1], s_poly, edge_order=1),
+        np.gradient(polyline[:, 0], s_poly, edge_order=1),
+    )
+    th_poly = np.unwrap(th_poly)
+    x = np.interp(s_feasible, s_poly, polyline[:, 0])
+    y = np.interp(s_feasible, s_poly, polyline[:, 1])
+    heading = np.interp(s_feasible, s_poly, th_poly)
+
+    out = np.empty((T, 4), dtype=np.float32)
+    out[:, 0] = x
+    out[:, 1] = y
+    out[:, 2] = np.cos(heading)
+    out[:, 3] = np.sin(heading)
+    return _ret(out, "ok", gap_m=gap, progress_m=float(s_feasible[-1]), v0_mps=v0)
