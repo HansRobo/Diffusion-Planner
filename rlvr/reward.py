@@ -167,14 +167,28 @@ def _low_speed_steer_penalty(
     data: dict[str, torch.Tensor],
     config: RewardConfig,
 ) -> torch.Tensor:
-    """Bounded [0, 1] penalty on the front-wheel angle the first step implies.
+    """Bounded [0, 1] penalty on how far past the steering limit the first step is.
 
-    ``delta = atan(wheel_base * 2|y| / s**2)`` for a first step of arc length
-    ``s`` ending ``y`` off the current heading -- the same criterion AWR's
-    first-waypoint gate uses, so a candidate the gate would reject scores the
-    full penalty here.  Only active below ``low_speed_steer_speed_mps``; steps
-    shorter than ``low_speed_steer_min_step_m`` are sampler noise whose geometry
-    is meaningless and score zero.  Returns zeros when the weight is zero or the
+    ``delta = atan(wheel_base * 2|y| / s**2)`` is the front-wheel angle implied by
+    a first step of arc length ``s`` ending ``y`` off the current heading -- the
+    same criterion AWR's first-waypoint gate uses.  Penalise only the *excess*
+    over ``low_speed_steer_max_rad``, which is the physical steering limit:
+
+    * Below the limit the command is executable, so a genuine creeping turn of
+      radius ``R`` (which implies exactly ``atan(wheel_base / R)``) is not taxed
+      for turning correctly.  Ramping from zero instead would cost an 8 m radius
+      creep turn 0.048 reward against a typical within-group headroom of 0.013,
+      and this corpus oversamples unprotected right turns x10.
+    * ``delta`` is an ``atan``, so it is bounded by ``pi/2``; normalising the
+      excess by ``pi/2 - limit`` maps the whole infeasible range onto [0, 1]
+      without saturating.  That matters because the deployed candidate's median
+      low-speed implied steer is 1.4716 rad: under a ramp-from-zero form every
+      bad candidate clamps to 1.0, and AWR cannot prefer the least infeasible of
+      two -- exactly the discrimination this term exists to create.
+
+    Only active below ``low_speed_steer_speed_mps``; steps shorter than
+    ``low_speed_steer_min_step_m`` are sampler noise whose geometry is
+    meaningless and score zero.  Returns zeros when the weight is zero or the
     scene carries no ego velocity, so no existing profile changes silently.
     """
 
@@ -206,8 +220,9 @@ def _low_speed_steer_penalty(
         wheel_base * 2.0 * first_xy[:, 1].abs() / step.clamp_min(min_step).pow(2)
     )
     steer = torch.where(step >= min_step, steer, torch.zeros_like(steer))
-    limit = max(float(config.low_speed_steer_max_rad), 1e-6)
-    return (weight * (steer / limit).clamp(0.0, 1.0)).to(dtype=ego_trajs.dtype)
+    limit = min(max(float(config.low_speed_steer_max_rad), 1e-6), math.pi / 2.0 - 1e-6)
+    excess = (steer - limit) / (math.pi / 2.0 - limit)
+    return (weight * excess.clamp(0.0, 1.0)).to(dtype=ego_trajs.dtype)
 
 
 def _hdp_multi_reward_components(

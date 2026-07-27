@@ -449,14 +449,15 @@ def test_low_speed_steer_penalty_prefers_the_smoother_first_step():
 
     T = 80
 
-    def totals(speed_mps: float, weight: float) -> list[float]:
-        # Both candidates barely move; candidate 1 puts 1 cm of lateral offset on
-        # a 4 cm first step, which the bicycle model reads as near steering lock.
+    def totals(speed_mps: float, weight: float, lateral: float = 0.01) -> list[float]:
+        # Both candidates barely move; candidate 1 puts `lateral` of offset on a
+        # 4 cm first step.  At the 1 cm default the bicycle model reads that as
+        # near steering lock (delta = atan(3.0 * 2 * 0.01 / 0.04**2) = 1.55 rad).
         straight = torch.zeros(T, 4)
         straight[:, 0] = torch.arange(T, dtype=torch.float32) * 0.04
         straight[:, 2] = 1.0
         jitter = straight.clone()
-        jitter[0, 1] = 0.01
+        jitter[0, 1] = lateral
         ego_trajs = torch.stack([straight, jitter])
         state = torch.zeros(8)
         state[4] = speed_mps
@@ -482,6 +483,16 @@ def test_low_speed_steer_penalty_prefers_the_smoother_first_step():
             rb_gate_enabled=False,
         )
         return [float(b.total) for b in compute_reward_batch(ego_trajs, data, cfg)]
+
+    # An executable creeping turn must cost nothing.  The penalty grades only the
+    # excess over the physical steering limit, so a radius the vehicle can
+    # actually drive is not taxed for turning -- measured on real low-speed mined
+    # candidates, a ramp-from-zero form also saturated 100% of the unexecutable
+    # ones at full penalty, leaving AWR no way to prefer the least infeasible.
+    wheel_base, radius, step_m = 3.0, 8.0, 0.04
+    assert math.atan(wheel_base / radius) < 0.64, "test radius is not executable"
+    turn_y = step_m**2 / (2.0 * radius)
+    assert totals(0.0, 1.0, lateral=turn_y) == totals(0.0, 0.0, lateral=turn_y)
 
     straight, jitter = totals(0.0, 1.0)
     off_straight, off_jitter = totals(0.0, 0.0)

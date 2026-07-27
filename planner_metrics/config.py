@@ -168,13 +168,22 @@ class RewardConfig:
     # ``atan(wheel_base * 2|y| / s**2)``; at standstill a 1 cm offset over a 4 cm
     # step is a steering-lock command.  AWR's first-waypoint gate rejects such
     # candidates but never the deterministic anchor, and nothing rewarded the
-    # smoother of two survivors -- measured on 40,847 low-speed mined scenes,
-    # only 5.9% had any candidate clearing the advantage margin, so low-speed
-    # behaviour was effectively untrained while the deployed output itself
-    # implied a median 1.47 rad on a third of them.  Grading this into the
-    # comfort slot takes trained-on candidates over the limit from 3.0% to 0.1%
-    # and makes 20.0% of low-speed scenes trainable.  Weight 0 disables.
-    # Thresholds mirror rlvr/campaign_contract.py's gate.
+    # smoother of two survivors, so low-speed behaviour was effectively untrained
+    # while the deployed output itself implied a median 1.47 rad on the third of
+    # low-speed scenes where it exceeded the limit.
+    #
+    # ``low_speed_steer_max_rad`` is the physical steering limit, and only the
+    # *excess* over it is penalised, normalised by ``pi/2 - limit`` (the implied
+    # angle is an ``atan``, so that is the full infeasible range).  Two measured
+    # reasons not to ramp from zero instead: it taxes executable creeping turns
+    # (an 8 m radius costs 0.048 against a typical 0.013 within-group headroom,
+    # on a corpus that oversamples right turns x10), and it saturated 100% of
+    # unexecutable candidates at full penalty -- within-group spread exactly
+    # 0.0000 -- so AWR could not prefer the least infeasible of two.  Hinging
+    # takes low-speed trainable scenes from 8.5% (term off) to 24.1% versus
+    # 17.9% for the ramp, at the same rate of selecting an unexecutable
+    # candidate.  Weight 0 disables.  Thresholds mirror
+    # rlvr/campaign_contract.py's gate.
     low_speed_steer_penalty: float = 1.0
     low_speed_steer_max_rad: float = 0.64
     low_speed_steer_speed_mps: float = 1.0
