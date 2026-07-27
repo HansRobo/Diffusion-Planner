@@ -108,9 +108,22 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1
 
 # Unprotected-right-turn oversampling, on by default for every mine from here
-# on.  Set EXTRA_TRAIN_REPEAT=0 to train on the un-augmented list.
+# on.  Set EXTRA_TRAIN_REPEAT=0 and EXTRA_TRAIN_WEIGHT=1 to train on the
+# un-augmented list.
+#
+# The oversampling is applied as replay *weight*, not as repeated mining: each
+# scene is mined once and its overlay weights are multiplied by
+# EXTRA_TRAIN_WEIGHT.  Ten copies at weight 1 and one copy at weight 10 put the
+# same total gradient mass on these scenes, and mining once saves 616,059
+# redundant scene-groups (~10% of the mine, ~500 GB).  What it does not buy is
+# coverage: only 19.3% of groups hold a candidate that beats the deterministic
+# anchor, the rest have all-zero weights, and 0 x 10 is still 0.  Ten physical
+# copies reach 87.9% of the oversampled scenes; weighting reaches 19.3% of them
+# ten times as hard.  Raise EXTRA_TRAIN_REPEAT above 1 to buy coverage back at
+# proportional mining cost (keep REPEAT * WEIGHT = 10 to hold the mass fixed).
 RIGHT_TURN_ARTIFACTS=${RIGHT_TURN_ARTIFACTS:-/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/artifacts/right_turn_is_skipped_filtered_20260716}
-EXTRA_TRAIN_REPEAT=${EXTRA_TRAIN_REPEAT:-10}
+EXTRA_TRAIN_REPEAT=${EXTRA_TRAIN_REPEAT:-1}
+EXTRA_TRAIN_WEIGHT=${EXTRA_TRAIN_WEIGHT:-10}
 # Retention anchor on the deterministic trajectory.  Defaults to 0, the value the
 # only run that produced a cycle-level gain used; a positive value is a
 # single-variable experiment against that baseline.  See rlvr/campaign_contract.py
@@ -124,7 +137,9 @@ EXTRA_TRAIN_LISTS=(
   "${RIGHT_TURN_ARTIFACTS}/path_list_unprotected_right_turn_xx1_psim_is_skipped_filtered.json"
 )
 EXTRA_TRAIN_ARGS=()
+OVERSAMPLE_ARGS=()
 EXTRA_TRAIN_APPENDED=0
+EXTRA_TRAIN_UNIQUE=0
 if (( EXTRA_TRAIN_REPEAT > 0 )); then
   for extra_list in "${EXTRA_TRAIN_LISTS[@]}"; do
     [[ -s ${extra_list} ]] || die "missing extra train list: ${extra_list}"
@@ -137,12 +152,16 @@ if (( EXTRA_TRAIN_REPEAT > 0 )); then
       continue
     fi
     EXTRA_TRAIN_ARGS+=(--extra_train_set_list "${extra_list}")
+    OVERSAMPLE_ARGS+=(--oversample-list "${extra_list}")
     EXTRA_TRAIN_APPENDED=$(( EXTRA_TRAIN_APPENDED + extra_count * EXTRA_TRAIN_REPEAT ))
+    EXTRA_TRAIN_UNIQUE=$(( EXTRA_TRAIN_UNIQUE + extra_count ))
   done
   if (( ${#EXTRA_TRAIN_ARGS[@]} > 0 )); then
     EXTRA_TRAIN_ARGS+=(--extra_train_set_repeat "${EXTRA_TRAIN_REPEAT}")
+    OVERSAMPLE_ARGS+=(--oversample-weight "${EXTRA_TRAIN_WEIGHT}")
   fi
 fi
+export AWR_OVERSAMPLE_WEIGHT=${EXTRA_TRAIN_WEIGHT}
 
 EXPECTED_SOURCE_SCENES=$(( $(jq 'length' "${TRAIN}") + EXTRA_TRAIN_APPENDED ))
 EXPECTED_PADDED_GROUPS=$((
@@ -150,7 +169,7 @@ EXPECTED_PADDED_GROUPS=$((
   / GLOBAL_ROLLOUT_BATCH * GLOBAL_ROLLOUT_BATCH ))
 EXPECTED_RANK_GROUPS=$(( EXPECTED_PADDED_GROUPS / 8 ))
 DDP_TAIL_PADDING_COUNT=$(( EXPECTED_PADDED_GROUPS - EXPECTED_SOURCE_SCENES ))
-log "corpus: ${EXPECTED_SOURCE_SCENES} scenes (base + ${EXTRA_TRAIN_APPENDED} oversampled) -> ${EXPECTED_PADDED_GROUPS} groups, ${EXPECTED_RANK_GROUPS}/rank, ${DDP_TAIL_PADDING_COUNT} padded"
+log "corpus: ${EXPECTED_SOURCE_SCENES} scenes (base + ${EXTRA_TRAIN_APPENDED} oversampled from ${EXTRA_TRAIN_UNIQUE} unique at repeat=${EXTRA_TRAIN_REPEAT} x weight=${EXTRA_TRAIN_WEIGHT}) -> ${EXPECTED_PADDED_GROUPS} groups, ${EXPECTED_RANK_GROUPS}/rank, ${DDP_TAIL_PADDING_COUNT} padded"
 export AWR_EXPECTED_SOURCE_SCENES=${EXPECTED_SOURCE_SCENES}
 export AWR_EXPECTED_PADDED_GROUPS=${EXPECTED_PADDED_GROUPS}
 export AWR_EXPECTED_RANK_GROUPS=${EXPECTED_RANK_GROUPS}
@@ -264,9 +283,10 @@ if [[ ! -s ${OVERLAY_PARENT}/overlay_manifest.json ]]; then
     --beta 1 --margin 0.01 \
     --behavior-anchor-weight "${BEHAVIOR_ANCHOR_WEIGHT}" \
     --unsafe-behavior-anchor-weight "${BEHAVIOR_ANCHOR_WEIGHT}" \
+    ${OVERSAMPLE_ARGS[@]+"${OVERSAMPLE_ARGS[@]}"} \
     > "${RUN_ROOT}/cycle01_overlay.log" 2>&1
 fi
-log "stage 2 committed: masked candidates=$(jq -r '.source_zero_masked_candidates' "${OVERLAY_PARENT}/overlay_manifest.json") active targets=$(jq -r '.active_targets' "${OVERLAY_PARENT}/overlay_manifest.json")"
+log "stage 2 committed: masked candidates=$(jq -r '.source_zero_masked_candidates' "${OVERLAY_PARENT}/overlay_manifest.json") active targets=$(jq -r '.active_targets' "${OVERLAY_PARENT}/overlay_manifest.json") oversampled groups=$(jq -r '.oversampled_groups' "${OVERLAY_PARENT}/overlay_manifest.json") of which active=$(jq -r '.oversampled_active_groups' "${OVERLAY_PARENT}/overlay_manifest.json")"
 
 # --- stage 3: cycle-1 replay epochs 2-10 --------------------------------------
 latest_completed_replay() {
@@ -341,6 +361,7 @@ exec env \
   AWR_EXPECTED_RANK_GROUPS="${EXPECTED_RANK_GROUPS}" \
   RIGHT_TURN_ARTIFACTS="${RIGHT_TURN_ARTIFACTS}" \
   EXTRA_TRAIN_REPEAT="${EXTRA_TRAIN_REPEAT}" \
+  EXTRA_TRAIN_WEIGHT="${EXTRA_TRAIN_WEIGHT}" \
   EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=1 \
   DP_NEIGHBOR_FUTURE_OFFSET="${DP_NEIGHBOR_FUTURE_OFFSET}" \
   TARGET_EPOCH="${TARGET_EPOCH}" \

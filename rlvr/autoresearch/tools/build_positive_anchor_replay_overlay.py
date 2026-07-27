@@ -42,6 +42,37 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def _scene_path_key(line: str) -> str:
+    """One ``scene_paths.jsonl`` row as the plain path string it denotes."""
+
+    value = json.loads(line)
+    return str(value["path"] if isinstance(value, dict) else value)
+
+
+def load_oversample_paths(list_paths: list[Path]) -> set[str]:
+    """Union of JSON scene-path lists to oversample by weight rather than repeat.
+
+    ``--extra_train_set_repeat 10`` mines the same scene ten times: ten
+    independent candidate draws, ten times the mining cost.  Multiplying the
+    replay weight instead mines once and keeps the *total* gradient mass on the
+    oversampled scenes identical (10 copies x weight 1 == 1 copy x weight 10),
+    trading candidate diversity for ~10% of the mine.  What it cannot recover is
+    coverage: a group whose candidates never beat the deterministic anchor has
+    all-zero weights, and ``0 * 10`` is still 0.  Measured on the last full
+    mine, 19.3% of groups hold a better candidate, so ten physical copies reach
+    1 - 0.807**10 = 87.9% of the oversampled scenes while weighting reaches
+    19.3% of them at ten times the strength.
+    """
+
+    paths: set[str] = set()
+    for list_path in list_paths:
+        entries = json.loads(Path(list_path).expanduser().resolve(strict=True).read_text())
+        paths.update(
+            str(e["path"] if isinstance(e, dict) else e) for e in entries
+        )
+    return paths
+
+
 def compute_positive_anchor_weights(
     rewards: np.ndarray,
     *,
@@ -222,6 +253,8 @@ def build_overlay(
     significance_sigma: float = 0.0,
     saturated_reward: float = 1.0,
     headroom_scaling_power: float = 0.0,
+    oversample_paths: set[str] | None = None,
+    oversample_weight: float = 1.0,
 ) -> dict[str, Any]:
     source_replay = source_replay.expanduser().resolve(strict=True)
     output_replay = output_replay.expanduser().resolve()
@@ -253,6 +286,8 @@ def build_overlay(
         "active_targets": 0,
         "dropped_all_zero_groups": 0,
         "source_zero_masked_candidates": 0,
+        "oversampled_groups": 0,
+        "oversampled_active_groups": 0,
     }
     try:
         for source_rank in rank_dirs:
@@ -287,12 +322,34 @@ def build_overlay(
             masked_candidates = int((source_vetoed & (weights > 0.0)).sum())
             weights = np.where(source_vetoed, 0.0, weights).astype(np.float32)
 
+            paths_name = str(manifest.get("paths", "scene_paths.jsonl"))
+            if oversample_paths:
+                scene_keys = [
+                    _scene_path_key(line)
+                    for line in (source_rank / paths_name).read_text().splitlines()
+                    if line.strip()
+                ]
+                if len(scene_keys) != count:
+                    raise ValueError(
+                        f"scene path count differs from replay rank in {source_rank}: "
+                        f"{len(scene_keys)} != {count}"
+                    )
+                hit = np.fromiter(
+                    (key in oversample_paths for key in scene_keys),
+                    dtype=bool,
+                    count=count,
+                )
+                weights[hit] *= np.float32(oversample_weight)
+                totals["oversampled_groups"] += int(hit.sum())
+                totals["oversampled_active_groups"] += int(
+                    (hit & (weights > 0.0).any(axis=1)).sum()
+                )
+
             output_rank = temporary / source_rank.name
             output_rank.mkdir()
             for name in manifest["arrays"].values():
                 if name != manifest["arrays"]["weights"]:
                     os.symlink((source_rank / name).resolve(), output_rank / name)
-            paths_name = str(manifest.get("paths", "scene_paths.jsonl"))
             if not (output_rank / paths_name).exists():
                 os.symlink((source_rank / paths_name).resolve(), output_rank / paths_name)
             paths_sha256 = _sha256(source_rank / paths_name)
@@ -437,6 +494,8 @@ def build_overlay(
             "significance_sigma": significance_sigma,
             "headroom_scaling_power": headroom_scaling_power,
             "saturated_reward": saturated_reward,
+            "oversample_weight": float(oversample_weight),
+            "oversample_scene_count": len(oversample_paths or ()),
         },
         **totals,
         "groups_with_better_candidate_fraction": (
@@ -498,7 +557,29 @@ def main() -> None:
             "0.00006"
         ),
     )
+    parser.add_argument(
+        "--oversample-list",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "JSON scene-path list whose replay weights are multiplied by "
+            "--oversample-weight. Repeatable. Replaces mining the same scene N "
+            "times with mining it once at N times the weight"
+        ),
+    )
+    parser.add_argument(
+        "--oversample-weight",
+        type=float,
+        default=1.0,
+        help="weight multiplier for --oversample-list scenes; 1.0 disables",
+    )
     args = parser.parse_args()
+    oversample_paths = (
+        load_oversample_paths(args.oversample_list)
+        if args.oversample_list and args.oversample_weight != 1.0
+        else None
+    )
     payload = build_overlay(
         args.source_replay,
         args.output_replay,
@@ -509,6 +590,8 @@ def main() -> None:
         significance_sigma=args.significance_sigma,
         saturated_reward=args.saturated_reward,
         headroom_scaling_power=args.headroom_scaling_power,
+        oversample_paths=oversample_paths,
+        oversample_weight=args.oversample_weight,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 

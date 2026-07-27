@@ -10,6 +10,7 @@ import numpy as np
 from rlvr.autoresearch.tools.build_positive_anchor_replay_overlay import (
     build_overlay,
     compute_positive_anchor_weights,
+    load_oversample_paths,
 )
 from rlvr.awr import AWRRolloutConfig, compute_awr_weights
 from rlvr.reward import RewardBreakdown, RewardConfig
@@ -145,6 +146,67 @@ def test_source_zero_weight_candidates_never_resurrect(tmp_path: Path) -> None:
     assert result["source_zero_masked_candidates"] == 1
     assert result["parameters"]["respect_source_zero_weights"] is True
     assert result["ranks"][0]["source_zero_masked_candidates"] == 1
+
+
+def test_oversample_weight_replaces_repeated_mining_but_not_its_coverage(
+    tmp_path: Path,
+) -> None:
+    # Scene 0 is oversampled and has an improvable candidate; scene 1 is the
+    # identical group without oversampling, so the ratio between them isolates
+    # the multiplier.  Scene 2 is oversampled but all its candidates tie the
+    # deterministic anchor -- the coverage limit of weighting over repetition,
+    # asserted here so it cannot be mistaken for equivalence.
+    rewards = np.asarray(
+        [[0.2, 0.8], [0.2, 0.8], [0.5, 0.5]], dtype=np.float32
+    )
+    source_weights = np.ones_like(rewards)
+    source = _write_minimal_source_cache(tmp_path, rewards, source_weights)
+
+    extra_list = tmp_path / "right_turns.json"
+    extra_list.write_text(json.dumps(["/scene_0.npz", "/scene_2.npz"]))
+    oversample_paths = load_oversample_paths([extra_list])
+    assert oversample_paths == {"/scene_0.npz", "/scene_2.npz"}
+
+    def run(name: str, **kwargs) -> tuple[dict, np.ndarray]:
+        # The campaign runs behavior_anchor_weight=0 (campaign_contract), which
+        # is the configuration where a tied group has no active target at all.
+        payload = build_overlay(
+            source,
+            tmp_path / name / "replay_buffer",
+            behavior_anchor_weight=0.0,
+            unsafe_behavior_anchor_weight=0.0,
+            **kwargs,
+        )
+        return payload, np.load(
+            tmp_path / name / "replay_buffer" / "rank_0000" / "weights.npy"
+        )
+
+    plain, plain_weights = run("plain")
+    result, weights = run(
+        "overlay", oversample_paths=oversample_paths, oversample_weight=10.0
+    )
+
+    # The fixture is only meaningful if the un-oversampled build has something
+    # to scale and something that is already zero.
+    assert plain_weights[0, 1] > 0.0
+    assert plain_weights[1, 1] > 0.0
+    assert not plain_weights[2].any()
+
+    np.testing.assert_allclose(weights[0], plain_weights[0] * 10.0, rtol=1e-6)
+    np.testing.assert_allclose(weights[1], plain_weights[1], rtol=1e-6)
+    assert not weights[2].any(), "0 x 10 is still 0; weighting cannot cover a tied group"
+    assert weights[0, 1] == 10.0 * weights[1, 1]
+
+    assert result["oversampled_groups"] == 2
+    assert result["oversampled_active_groups"] == 1
+    assert result["parameters"]["oversample_weight"] == 10.0
+    assert result["parameters"]["oversample_scene_count"] == 2
+    # Inert unless both a list and a multiplier above 1 are supplied.
+    assert plain["oversampled_groups"] == 0
+    _, unit_weights = run(
+        "unit", oversample_paths=oversample_paths, oversample_weight=1.0
+    )
+    np.testing.assert_allclose(unit_weights, plain_weights, rtol=1e-6)
 
 
 def test_builds_read_only_overlay_with_only_weights_materialized(tmp_path: Path) -> None:

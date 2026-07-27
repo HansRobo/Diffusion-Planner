@@ -79,14 +79,19 @@ EVAL_SCENE_LOAD_WORKERS=1
 # the shared-encoding prefix contract in train_awr.py rejects, so a mine that
 # carries extras must build its own cache instead of reusing SOURCE_CACHE.
 # Set EXTRA_TRAIN_REPEAT=0 to fall back to the un-augmented training set.
+# Oversampling is applied as replay weight, not repeated mining: mine each scene
+# once and multiply its overlay weights by EXTRA_TRAIN_WEIGHT.  See the
+# entrypoint for the coverage trade-off this buys the mine time with.
 RIGHT_TURN_ARTIFACTS=${RIGHT_TURN_ARTIFACTS:-/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/artifacts/right_turn_is_skipped_filtered_20260716}
-EXTRA_TRAIN_REPEAT=${EXTRA_TRAIN_REPEAT:-10}
+EXTRA_TRAIN_REPEAT=${EXTRA_TRAIN_REPEAT:-1}
+EXTRA_TRAIN_WEIGHT=${EXTRA_TRAIN_WEIGHT:-10}
 EXTRA_TRAIN_LISTS=(
   "${RIGHT_TURN_ARTIFACTS}/path_list_train_unprotected_right_turn_is_skipped_filtered.json"
   "${RIGHT_TURN_ARTIFACTS}/path_list_unprotected_right_turn_xx1_is_skipped_filtered.json"
   "${RIGHT_TURN_ARTIFACTS}/path_list_unprotected_right_turn_xx1_psim_is_skipped_filtered.json"
 )
 EXTRA_TRAIN_ARGS=()
+OVERSAMPLE_ARGS=()
 if (( EXTRA_TRAIN_REPEAT > 0 )); then
   for extra_list in "${EXTRA_TRAIN_LISTS[@]}"; do
     [[ -s ${extra_list} ]] || { echo "missing extra train list: ${extra_list}" >&2; exit 2; }
@@ -95,9 +100,11 @@ if (( EXTRA_TRAIN_REPEAT > 0 )); then
     # filtering exactly, or the shared-cache provenance check would disagree.
     (( $(jq 'length' "${extra_list}") > 0 )) || continue
     EXTRA_TRAIN_ARGS+=(--extra_train_set_list "${extra_list}")
+    OVERSAMPLE_ARGS+=(--oversample-list "${extra_list}")
   done
   if (( ${#EXTRA_TRAIN_ARGS[@]} > 0 )); then
     EXTRA_TRAIN_ARGS+=(--extra_train_set_repeat "${EXTRA_TRAIN_REPEAT}")
+    OVERSAMPLE_ARGS+=(--oversample-weight "${EXTRA_TRAIN_WEIGHT}")
   fi
 fi
 
@@ -424,6 +431,7 @@ build_or_validate_overlay() {
       --beta "${REPLAY_BETA}" --margin 0.01 \
       --behavior-anchor-weight "${BEHAVIOR_ANCHOR_WEIGHT}" \
       --unsafe-behavior-anchor-weight "${BEHAVIOR_ANCHOR_WEIGHT}" \
+      ${OVERSAMPLE_ARGS[@]+"${OVERSAMPLE_ARGS[@]}"} \
       > "${output_parent}.log" 2>&1
   fi
   if [[ ! -s ${geometry} ]]; then
