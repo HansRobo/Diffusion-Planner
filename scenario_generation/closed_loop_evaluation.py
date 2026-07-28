@@ -243,9 +243,6 @@ class ClosedLoopEvaluation(ABC):
         ``segments_{rank}.jsonl`` (+ tdigest sidecar) directly -- no separate shard blob to write
         here, so a crashed rank can't leave stale/inconsistent shard state behind.
         """
-        return self.ddp_partial_summary(result, elapsed_sec=elapsed_sec)
-
-    def ddp_partial_summary(self, result: JobRunResult, *, elapsed_sec: float) -> dict:
         return {
             "mode": self.mode,
             "ddp_shard": True,
