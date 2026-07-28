@@ -172,6 +172,30 @@ class CycleReplayReader:
         return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
 
 
+def cycle_is_replayable(root: str | Path, cycle: int, rank: int, args) -> bool:
+    """True when this cycle was already mined to completion under the same objective.
+
+    Mining is the expensive half of the relay and it takes no optimizer steps, so a
+    run that restarts onto a mine epoch should train from the finalized cache rather
+    than pay for it twice — :class:`CycleReplayWriter` refuses to overwrite one in
+    any case. Every condition :class:`CycleReplayReader` would raise on is checked
+    here, including shards for this rank, so a cache mined by a different world size
+    is reported as not replayable instead of failing mid-epoch.
+    """
+    directory = Path(root) / f"cycle_{cycle:03d}"
+    if not (directory / _MARKER).exists():
+        return False
+    try:
+        meta = json.loads((directory / _META).read_text())
+    except (OSError, ValueError, KeyError):
+        return False
+    if meta.get("fingerprint") != reward_fingerprint(args):
+        return False
+    if int(meta.get("group_size", -1)) != int(args.num_generations):
+        return False
+    return any(directory.glob(f"rank{rank:02d}_shard*.pt"))
+
+
 def cleanup_previous_cycle(root: str | Path, cycle: int, rank: int) -> None:
     """Bound disk use to one cycle: drop the finished cycle before mining the next."""
     if rank != 0 or cycle <= 0:
