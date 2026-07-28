@@ -53,6 +53,64 @@ def load_model(model_path: str | Path, device: str = "cuda"):
     return model, args
 
 
+class _OnnxModel:
+    """Adapter that makes an exported ``diffusion_planner.onnx`` usable in the closed-loop
+    rollout exactly like the torch ``Diffusion_Planner`` (callable ``model(data) -> (_, outputs)``
+    with ``outputs["prediction"]`` / ``outputs["turn_indicator_logit"]``).
+
+    The ONNX is the ``FullONNXWrapper`` graph — encoder + diffusion decoder with NO normalization
+    (normalization is external, done by ``observation_normalizer`` before the call), so the SAME
+    normalized ``data`` dict the torch model receives feeds the ONNX unchanged. We just pull the
+    graph's declared inputs out of ``data``, cast to each input's onnx dtype (bool flags stay bool,
+    everything else float32; ``delay`` is reshaped to the graph's ``[1, 1]``), run the session, and
+    wrap the two outputs back into torch tensors on ``device``."""
+
+    def __init__(self, onnx_path: str | Path, device: str = "cuda"):
+        import onnxruntime as ort
+
+        self.device = device
+        avail = ort.get_available_providers()
+        # Prefer CUDA when the ORT build exposes it; otherwise fall back to CPU (the graph runs
+        # identically, just slower — a full 60 s segment on CPU is impractical, use a short seg_len).
+        providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in avail]
+        self.session = ort.InferenceSession(str(onnx_path), providers=providers)
+        self._inputs = [(i.name, i.type) for i in self.session.get_inputs()]
+        self._outputs = [o.name for o in self.session.get_outputs()]
+
+    def __call__(self, data):
+        feed = {}
+        for name, otype in self._inputs:
+            arr = np.asarray(data[name].detach().cpu().numpy())
+            if otype == "tensor(bool)":
+                arr = arr.astype(bool)
+            else:
+                arr = arr.astype(np.float32)
+            if name == "delay":
+                arr = arr.reshape(-1, 1)[:1]  # graph declares a static [1, 1] delay
+            feed[name] = arr
+        pred, ti = self.session.run(self._outputs, feed)
+        outputs = {
+            "prediction": torch.from_numpy(np.asarray(pred)).to(self.device),
+            "turn_indicator_logit": torch.from_numpy(np.asarray(ti)).to(self.device),
+        }
+        return None, outputs
+
+    def eval(self):  # parity with nn.Module (no-op)
+        return self
+
+
+def load_onnx_model(onnx_path: str | Path, device: str = "cuda"):
+    """Load an exported ONNX planner + its ``args.json`` (Config), returning ``(model, args)`` with
+    the same contract as :func:`load_model` so the closed-loop rollout is agnostic to which it got.
+
+    ``args`` (from ``args.json`` next to the onnx) supplies ``observation_normalizer`` /
+    ``predicted_neighbor_num`` / ``future_len`` exactly as for the .pth path."""
+    from diffusion_planner.utils.config import Config
+
+    args = Config(str(Path(onnx_path).parent / "args.json"))
+    return _OnnxModel(onnx_path, device), args
+
+
 def _ego_to_world(
     pred_xy: np.ndarray, pred_cos_sin: np.ndarray, ego_x: float, ego_y: float, ego_heading: float
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -588,6 +646,19 @@ def decode_turn_indicator(ti_logit, keep_bias: float = 0.25):
     if keep_bias != 0.0 and biased.shape[-1] > 4:
         biased[..., 4] -= keep_bias
     return biased.argmax(dim=-1).cpu().numpy()
+
+
+def resolve_keep_turn_indicator(ti_cls: int, prev: int) -> int:
+    """Resolve the KEEP pseudo-class (4) to the previous indicator state.
+
+    KEEP is an instruction ("hold the previous signal"), not a real indicator
+    state: the ``turn_indicators`` input history only holds classes 0-3, and the
+    model's history encoder one-hots it with num_classes=4, so writing a raw 4
+    into the history crashes the next forward pass. Mirrors the C++
+    ``TurnIndicatorManager``, which latches the previously published state on
+    KEEP. Every closed-loop path that feeds a decoded class back into the
+    history must go through this."""
+    return prev if ti_cls == 4 else ti_cls
 
 
 def _predict_batch(

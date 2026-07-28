@@ -22,27 +22,79 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import torch
 from diffusion_planner.dimensions import INPUT_T, POSE_DIM
-from diffusion_planner.model.guidance.collision import (
-    batch_signed_distance_rect,
-    center_rect_to_points,
-)
 
-from planner_metrics.geometry import (
-    _build_ego_bbox_corners,
-    _closest_points_between_rects,
+from planner_metrics.scene_format import future_to_4col
+from scenario_generation.danger_event_selection import OnlineEventSelector
+from scenario_generation.metrics import (
+    score_object_step,
+    score_object_step_batched,
+    score_red_light_step,
+    score_road_border_step,
+    strong_brake_mask,
 )
+from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
 from scenario_generation.route_timeline import RouteTimeline
-from scenario_generation.simulate import decode_turn_indicator
+from scenario_generation.simulate import decode_turn_indicator, resolve_keep_turn_indicator
 from scenario_generation.tensor_converter import _heading_to_cos_sin
+from scenario_generation.tools._heatmap_common import project_points_to_polyline
 from scenario_generation.transforms import _rotation_matrix, world_to_ego_frame
 
 DT = 0.1
+# Stuck speed gate (m/s): ego must be at or below this to accumulate stuck steps.
+# Pose mode also requires the reproducer to be in ``repeat`` (Autoware-aligned); clock
+# mode is speed-only because bag frames always advance by wall time (no ``repeat``).
+STUCK_SPEED_MPS = 0.5
+# Falling-edge debounce for ``*_count`` metrics: once an event starts, fewer than this many
+# consecutive False steps do not end it (threshold flicker does not re-count).
+EVENT_COUNT_CLEAR_FRAMES = 3
+# Unsigned curb distance below this (m) counts as a road-border collision in ``_finalize``.
+# Hardcoded (not RewardConfig.rb_cross_thresh): closed-loop metrics use unsigned clearance.
+RB_COLLISION_THRESH_M = 0.1
+
+
+def _credit_window_width_frames(spec: dict | None, fallback: int) -> int:
+    if spec is None:
+        return int(fallback)
+    return int(spec["width_frames"])
+
+
+def _credit_window_gap_frames(spec: dict | None) -> int:
+    if spec is None:
+        return 0
+    return int(spec["gap_frames"])
+
+
+_CREDIT_EVENT_METADATA_KEYS = (
+    "expert_disagreement",
+    "expert_disagreement_step",
+    "expert_disagreement_max_dev",
+    "expert_disagreement_reason",
+    "expert_disagreement_model_end_progress",
+    "expert_disagreement_expert_end_progress",
+    "expert_disagreement_model_end_speed",
+    "expert_disagreement_expert_end_speed",
+    "expert_disagreement_realized_lag",
+    "expert_disagreement_realized_gap_m",
+    # Propagate the rear-end tag into the credit-window manifest so downstream
+    # (mining / repair filters) can drop a rear-end moving-collision if desired
+    # instead of it being indistinguishable from a genuine forward collision.
+    "rear_end_collision",
+)
+
+
+def _credit_event_metadata(event_row: dict | None) -> dict:
+    if not event_row:
+        return {}
+    return {key: event_row[key] for key in _CREDIT_EVENT_METADATA_KEYS if key in event_row}
+
+
 PAST = INPUT_T + 1  # 31
 
 
@@ -296,164 +348,8 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
 
 
 # --------------------------------------------------------------------------- #
-# scoring (canonical OBB)
-# --------------------------------------------------------------------------- #
-def _ego_neighbor_obb(neighbors_live: np.ndarray, ego_shape: np.ndarray, device: str):
-    """Build ego corners (at origin) + valid-neighbor corners; return (ego_b, npc_corners, M).
-
-    Canonical OBB geometry (``_build_ego_bbox_corners`` + ``center_rect_to_points``).
-    Returns (None, None, 0) if there are no valid neighbors.
-    """
-    valid = np.abs(neighbors_live[:, :6]).sum(axis=1) > 0
-    if not valid.any():
-        return None, None, 0
-    nb = neighbors_live[valid]
-    M = nb.shape[0]
-    et = torch.zeros((1, 1, 4), dtype=torch.float32, device=device)
-    et[0, 0, 2] = 1.0
-    ego_c = _build_ego_bbox_corners(
-        et, torch.tensor(ego_shape[:3], dtype=torch.float32, device=device)
-    )[:, :1].reshape(1, 4, 2)
-    rects = torch.tensor(
-        np.stack([nb[:, 0], nb[:, 1], nb[:, 2], nb[:, 3], nb[:, 7], nb[:, 6]], axis=-1),
-        dtype=torch.float32,
-        device=device,
-    )  # x, y, cos, sin, length, width
-    return ego_c.expand(M, 4, 2), center_rect_to_points(rects), M
-
-
-def score_step(
-    neighbors_live: np.ndarray,
-    ego_shape: np.ndarray,
-    ego_speed: float,
-    device: str,
-) -> tuple[float, bool, int]:
-    """Min ego-neighbor clearance (m), collision flag, and #valid neighbors.
-
-    RAW oriented-bounding-box check against EVERY valid neighbor — moving and
-    static alike, with NO direction/rear-end or ego-speed gating. Collision =
-    the ego box overlaps any neighbor box (canonical ``batch_signed_distance_rect``
-    < 0); clearance = exact closest-point distance to the nearest neighbor
-    (``_closest_points_between_rects``). This deliberately differs from the
-    avoidance reward's ``compute_static_collision_penalty``, which only scores
-    *stopped* neighbors and filters out rear-end hits — for mining we want to
-    catch collisions with moving neighbors AND the ego being struck from behind.
-
-    neighbors_live: (320, 11) in live-ego frame [x,y,cos,sin,vx,vy,w,l,type...].
-    ``ego_speed`` is unused (kept for signature stability); collisions are counted
-    regardless of ego speed.
-    """
-    ego_b, npc_corners, M = _ego_neighbor_obb(neighbors_live, ego_shape, device)
-    if M == 0:
-        return float("inf"), False, 0
-    p1, p2 = _closest_points_between_rects(ego_b, npc_corners)
-    clr = (p1 - p2).norm(dim=-1)  # exact closest-point distance per neighbor
-    signed = batch_signed_distance_rect(ego_b, npc_corners)  # < 0 => overlap
-    return float(clr.min()), bool((signed < 0).any()), M
-
-
-def score_step_batched(
-    neighbors_list: list[np.ndarray],
-    ego_shapes: list[np.ndarray],
-    device: str,
-) -> list[tuple[float, bool, int, int]]:
-    """``score_step`` for many segments at once: ONE batched OBB pass over all pairs.
-
-    The OBB primitives (``_closest_points_between_rects`` / ``batch_signed_distance_rect``)
-    are per-pair independent, so we concatenate every segment's (ego, neighbor) box
-    pairs into one big batch, run the geometry once, then slice the result back per
-    segment. The (min_clearance, collision, n_valid) values are bit-identical to calling
-    ``score_step`` per segment (no cross-segment interaction), but this collapses N tiny
-    GPU launches per tick into one — including the box construction: ONE host->device
-    transfer + ONE ``center_rect_to_points`` for every neighbor across all segments (ego
-    corners built once when shapes match, else per segment and repeat-interleaved).
-    Returns a list aligned to the inputs:
-    (min_clearance, collision, n_valid_neighbors, collider_slot), where ``collider_slot``
-    is the ORIGINAL neighbor index (same order as the input ``neighbors_list`` rows, i.e.
-    the build()/slot_uuids order) achieving ``min_clearance`` — or -1 when no valid
-    neighbor. Callers use it to identify the actually-colliding agent (the OBB-closest one,
-    which can differ from the centroid-nearest slot 0)."""
-    valids = [np.abs(nb[:, :6]).sum(axis=1) > 0 for nb in neighbors_list]
-    counts = [int(v.sum()) for v in valids]
-    if sum(counts) == 0:
-        return [(float("inf"), False, 0, -1) for _ in neighbors_list]
-
-    # All valid neighbors across all segments -> one transfer -> one corner build.
-    nb_all = np.concatenate(
-        [nb[v] for nb, v in zip(neighbors_list, valids) if v.any()], axis=0
-    )  # (K, 11)
-    rects = torch.tensor(
-        np.stack(
-            [nb_all[:, 0], nb_all[:, 1], nb_all[:, 2], nb_all[:, 3], nb_all[:, 7], nb_all[:, 6]],
-            axis=-1,
-        ),
-        dtype=torch.float32,
-        device=device,
-    )  # (K, 6) x, y, cos, sin, length, width
-    npc_all = center_rect_to_points(rects)  # (K, 4, 2)
-
-    # Ego box at origin (heading +x), one per segment, repeated per its neighbors.
-    # K from the CPU list (avoids a per-tick GPU->CPU sync that int(counts_t.sum()) forces).
-    K = sum(counts)
-    et = torch.zeros((len(neighbors_list), 1, 4), dtype=torch.float32, device=device)
-    et[:, 0, 2] = 1.0
-    if all(np.array_equal(ego_shapes[0], sh) for sh in ego_shapes):
-        ego1 = _build_ego_bbox_corners(
-            et[:1], torch.tensor(ego_shapes[0][:3], dtype=torch.float32, device=device)
-        ).reshape(1, 4, 2)
-        ego_all = ego1.expand(K, 4, 2)
-    else:
-        ego_each = torch.stack(
-            [
-                _build_ego_bbox_corners(
-                    et[i : i + 1], torch.tensor(sh[:3], dtype=torch.float32, device=device)
-                ).reshape(4, 2)
-                for i, sh in enumerate(ego_shapes)
-            ],
-            dim=0,
-        )  # (B, 4, 2)
-        counts_t = torch.tensor(counts, device=device)
-        ego_all = ego_each.repeat_interleave(counts_t, dim=0)  # (K, 4, 2)
-
-    p1, p2 = _closest_points_between_rects(ego_all, npc_all)
-    # Move both result vectors to host ONCE, then slice/reduce per segment in numpy — avoids
-    # the per-segment GPU->CPU syncs that min()/any()/argmin() would each force. min/argmin are
-    # pure selection, so the per-segment values stay bit-identical to the on-device reduction.
-    clr_all = (p1 - p2).norm(dim=-1).cpu().numpy()  # (K,)
-    signed_neg = (batch_signed_distance_rect(ego_all, npc_all) < 0).cpu().numpy()  # (K,)
-    out: list[tuple[float, bool, int, int]] = []
-    off = 0
-    for seg_i, m in enumerate(counts):
-        if m == 0:
-            out.append((float("inf"), False, 0, -1))
-        else:
-            seg_clr = clr_all[off : off + m]
-            amin = int(seg_clr.argmin())  # index within this segment's VALID subset
-            # Map the valid-subset argmin back to the original neighbor slot (build() order).
-            collider_slot = int(np.flatnonzero(valids[seg_i])[amin])
-            out.append(
-                (
-                    float(seg_clr.min()),
-                    bool(signed_neg[off : off + m].any()),
-                    m,
-                    collider_slot,
-                )
-            )
-            off += m
-    return out
-
-
-# --------------------------------------------------------------------------- #
 # rollout — per-segment state so many segments can run in lock-step on the GPU
 # --------------------------------------------------------------------------- #
-@dataclass
-class SegmentResult:
-    metrics: dict
-    clearances: np.ndarray
-    collisions: np.ndarray
-    timers: Timers = field(default_factory=Timers)
-
-
 @dataclass
 class _SegState:
     tl: RouteTimeline
@@ -472,15 +368,26 @@ class _SegState:
     goal_xy: np.ndarray
     clearances: np.ndarray
     collisions: np.ndarray
+    rb_dists: np.ndarray
+    red_light: np.ndarray
     # Closed-loop turn-indicator history (INPUT_T+1,). Seeded from the recorded frame, then
     # each step the MODEL's predicted turn indicator is fed back in (recorded seed phases out
     # within PAST steps, exactly like ego_hist) — so the model context + saved npz never carry
     # the recorded driver's signals, only the sim's own predictions.
-    turn_hist: np.ndarray = None
+    turn_hist: np.ndarray
+    # Most recent turn-indicator class fed into turn_hist. Between replans
+    # (replan_interval > 1) no fresh inference runs, so this value is re-appended each step
+    # (_hold_turn_indicator) to keep the 10 Hz history scrolling with the held signal.
+    last_turn_indicator: int
     # Per-collision-episode save state. An episode runs while clearance <= thresh and ends on
     # clearing; ``last_collision_uuid`` is the colliding UUID of the last SAVED collision (a new
     # episode is distinct only if its UUID differs). ``episode_eligible`` is set once per episode
     # (distinct?), ``episode_saved`` latches after the episode's one window is written.
+    # Per-step realized tangential accel (m/s^2); a step is a "strong brake" when it drops
+    # at or below ``strong_brake_mps2`` (negative). Allocated by ``_seed_state`` (like
+    # ``clearances``); stays None for manually-built states that never step.
+    accels: np.ndarray | None = None
+    strong_brake_mps2: float = -2.5
     last_collision_uuid: object = None
     in_episode: bool = False
     episode_eligible: bool = False
@@ -508,8 +415,9 @@ class _SegState:
     unstick_advance_m: float = 5.0
     unstick_radius_mult: float = 3.0
     unstick_teleport_after: int = 300
-    ego_stuck: int = 0
-    n_snaps: int = 0
+    ego_stuck: int = 0  # consecutive stuck steps (repeat AND ego <= STUCK_SPEED_MPS)
+    expand_count: int = 0  # stage-1 radius-widen events this segment
+    snap_count: int = 0
     # One-pass collision-scene save (set when run_segments_batched gets save_dir).
     # save_buf rolls the last save_max_scenes+1 (k, idx, live_pose, np_dict) snapshots
     # (deep enough for the min-movement window extension); it is CLEARED on an unstick
@@ -518,9 +426,28 @@ class _SegState:
     saved_collision: bool = False  # recorded-mode latch: at most one saved window per segment
     last_snap_step: int | None = None
     save_out_dir: object = None
+    credit_window: dict | None = None
+    credit_saved: bool = False
+    output_route_key: str | None = None
+    verified_credit_labels: set[str] = field(default_factory=set)
+    verified_credit_first_step: dict[str, int] = field(default_factory=dict)
+    danger_event_selector: OnlineEventSelector | None = None
+    replay_mode: str = "pose"
     # Corrected neighbor context (neighbor_history_mode="sim"): rebuild neighbor_agents_past
     # each step from the SIMULATED shown motion (velocity from shown deltas, frozen->v~0).
     nbr_tracker: object = None
+    # Realized-lag tracking (clock mode): consecutive steps the realized ego has been
+    # >= lag_progress_gap_m behind the moving expert clock on the route polyline. The
+    # realized-event scorer flags model_lagging_expert when the streak reaches its
+    # sustain threshold. route_arc_s caches tl.poses cumulative arc length (lazy).
+    realized_lag_streak: int = 0
+    route_arc_s: object = None
+    # Running sum/count of per-step GT-pose deviation (m), for the mean_gt_deviation_m metric
+    # (average distance from the recorded expert path — a graded tracking-quality signal that,
+    # unlike the saturating segment-rates, improves smoothly as the model trains). Accumulated
+    # only in render_segment's loop (where gt_deviation is computed); 0 count -> reported inf.
+    gt_dev_sum: float = 0.0
+    gt_dev_count: int = 0
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -573,14 +500,18 @@ def _seed_state(
     unstick_teleport_after=300,
     neighbor_history_mode="recorded",
     goal_mode="segment",
+    replay_mode="pose",
+    tracker_mode="mpc",
+    strong_brake_mps2=-2.5,
+    yaw_gate: bool = True,
 ) -> _SegState:
-    from scenario_generation.mpc_tracker import PerfectTracker
+    from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
     # Step cap: defaults to the segment length, but can exceed it so a slow ego
     # (e.g. one that waited out a long red light) can still drive to the segment end.
     cap = int(max_steps) if max_steps is not None else (end - start)
 
-    cursor = PerceptionReproducer(tl, search_radius=search_radius, timers=timers)
+    cursor = PerceptionReproducer(tl, search_radius=search_radius, timers=timers, yaw_gate=yaw_gate)
     cursor.reset(start)
     live_pose, ego_hist, dyn = _ego_state_from_frame(tl, start)
     # Corrected neighbor context: one timeline sample per 0.1 s sim step (real time on a
@@ -596,6 +527,18 @@ def _seed_state(
         goal_xy = _goal_xy_from_npz_goal(tl, start, end - 1)
     else:
         raise ValueError(f"Unknown goal_mode={goal_mode!r}; expected 'segment' or 'route'")
+    ego_shape = np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32)
+    wheelbase = float(ego_shape[0])
+    # Closed-loop turn indicators: seed from the recorded frame, then feed the model's own
+    # prediction back each step (phasing the seed out) — the model context never carries the
+    # recorded driver's signals beyond the seed, only its own predictions.
+    turn_hist = np.asarray(tl.npz(start)["turn_indicators"]).reshape(-1).astype(np.int64)
+    if tracker_mode == "perfect":
+        tracker = PerfectTracker(dt=DT)
+    elif tracker_mode == "mpc":
+        tracker = MPCTracker(wheelbase=wheelbase, dt=DT)
+    else:
+        raise ValueError(f"Unknown tracker_mode={tracker_mode!r}; expected 'perfect' or 'mpc'")
     return _SegState(
         tl=tl,
         start=start,
@@ -605,29 +548,27 @@ def _seed_state(
         goal_reach_m=goal_reach_m,
         max_stuck_steps=max_stuck_steps,
         cursor=cursor,
-        tracker=PerfectTracker(dt=DT),
+        tracker=tracker,
         live_pose=live_pose,
         ego_hist=ego_hist,
         dyn=dyn,
-        # Closed-loop turn indicators are a SIM-mode feature: seed from the recorded frame,
-        # then feed the model's own prediction back each step (phasing the seed out). In
-        # recorded mode turn_hist stays None so the recorded turn_indicators flow through
-        # unchanged (the _pre_step override is gated on `turn_hist is not None`).
-        turn_hist=(
-            np.asarray(tl.npz(start)["turn_indicators"]).reshape(-1).astype(np.int64)
-            if neighbor_history_mode == "sim"
-            else None
-        ),
-        ego_shape=np.asarray(tl.npz(start)["ego_shape"]).reshape(-1)[:3].astype(np.float32),
+        turn_hist=turn_hist,
+        last_turn_indicator=int(turn_hist[-1]),
+        ego_shape=ego_shape,
         goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
         collisions=np.zeros(cap, dtype=bool),
+        rb_dists=np.full(cap, np.inf, dtype=np.float32),
+        red_light=np.zeros(cap, dtype=bool),
+        accels=np.zeros(cap, dtype=np.float32),
+        strong_brake_mps2=float(strong_brake_mps2),
         prev_max_idx=cursor.max_idx_reached,
         max_steps=cap,
         unstick_after=int(unstick_after),
         unstick_advance_m=float(unstick_advance_m),
         unstick_radius_mult=float(unstick_radius_mult),
         unstick_teleport_after=int(unstick_teleport_after),
+        replay_mode=str(replay_mode),
         nbr_tracker=nbr_tracker,
     )
 
@@ -647,11 +588,18 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     if float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)) < s.goal_reach_m:
         s.terminated, s.done = "goal", True
         return None
-    idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time)
-    if s.cursor.max_idx_reached > s.prev_max_idx:
-        s.prev_max_idx, s.stuck = s.cursor.max_idx_reached, 0
+    if s.replay_mode == "clock":
+        idx = min(int(s.start + s.k), int(s.end - 1))
+        s.cursor.max_idx_reached = idx
+        s.prev_max_idx = idx
+        s.stuck = 0
+        s.cursor._update_base_state(repeat=False)
     else:
-        s.stuck += 1
+        idx = s.cursor.step(s.live_pose[:2], s.dyn.speed, s.sim_time, sim_yaw=float(s.live_pose[2]))
+        if s.cursor.max_idx_reached > s.prev_max_idx:
+            s.prev_max_idx, s.stuck = s.cursor.max_idx_reached, 0
+        else:
+            s.stuck += 1
     if s.max_stuck_steps > 0 and s.stuck >= s.max_stuck_steps:
         s.terminated, s.done = "stuck", True
         return None
@@ -669,40 +617,72 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         base, dxyz, live_past, live_cur, ridx = build_input_raw(
             s.tl, idx, s.live_pose, s.ego_hist, s.dyn
         )
-        if s.turn_hist is not None:
-            base["turn_indicators"] = s.turn_hist[None].astype(
-                np.int64
-            )  # closed-loop, not recorded
+        base["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop
         return (base, dxyz, live_past, live_cur, ridx, sim_nb, slot_uuids, world_by_uuid)
     np_dict, neighbors_live = build_input_np(s.tl, idx, s.live_pose, s.ego_hist, s.dyn)
     if sim_nb is not None:
         np_dict["neighbor_agents_past"] = sim_nb
         neighbors_live = sim_nb[0, :, -1, :].copy()
-    if s.turn_hist is not None:
-        np_dict["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop, not recorded
+    np_dict["turn_indicators"] = s.turn_hist[None].astype(np.int64)  # closed-loop
     return np_dict, neighbors_live, idx, slot_uuids, world_by_uuid
 
 
 def _feed_turn_indicator(s: _SegState, outputs) -> None:
-    """Closed-loop turn-signal feedback for the single-segment ``run_segment`` rollout.
+    """Closed-loop turn-signal feedback for the single-segment ``render_segment`` rollout.
 
     Appends the model's predicted turn indicator to ``turn_hist`` (recorded seed scrolls
-    out within PAST steps). No-op in recorded mode (``turn_hist`` is None there). Mirrors
-    the per-batch feedback in ``run_segments_batched`` so a sim-mode single-segment rollout
-    evolves the turn signal identically instead of holding the seed. (``render_segment`` /
-    ``extract_collision_scenes`` are recorded-only — no ``turn_hist`` — so they don't call it.)"""
-    if s.turn_hist is None:
-        return
+    out within PAST steps) and remembers it as ``last_turn_indicator`` so the in-between
+    replan steps can re-append the same value (see ``_hold_turn_indicator``). Mirrors the
+    per-batch feedback in ``run_segments_batched`` so a single-segment rollout evolves the
+    turn signal identically instead of holding the seed."""
     ti = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
-    s.turn_hist = np.append(s.turn_hist[1:], np.int64(np.asarray(ti).reshape(-1)[0]))
+    s.last_turn_indicator = resolve_keep_turn_indicator(
+        int(np.asarray(ti).reshape(-1)[0]), s.last_turn_indicator
+    )
+    s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
-def _score_into(s: _SegState, neighbors_live, device, timers):
-    """Score this step's ego↔neighbor clearance/collision into the segment state."""
+def _hold_turn_indicator(s: _SegState) -> None:
+    """Cached-plan step (``replan_interval`` > 1, no fresh inference): keep the 10 Hz turn
+    history scrolling by re-appending the LAST decoded turn indicator, so the next replan
+    sees the held signal as if the model had re-confirmed it every step."""
+    s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
+
+
+def _score_into(
+    s: _SegState,
+    neighbors_live,
+    device,
+    timers,
+    np_dict: dict | None = None,
+    *,
+    object_cl: float | None = None,
+    object_col: bool | None = None,
+):
+    """Score this step's object / road-border / red-light metrics into the segment state.
+
+    When ``object_cl`` / ``object_col`` are provided (batched path already scored
+    neighbors), reuse them instead of calling ``score_object_step`` again.
+    """
     with timers("score"):
-        cl, col, _ = score_step(neighbors_live, s.ego_shape, s.dyn.speed, device)
-        s.clearances[s.k] = cl
-        s.collisions[s.k] = col
+        if object_cl is not None and object_col is not None:
+            s.clearances[s.k] = object_cl
+            s.collisions[s.k] = object_col
+        else:
+            cl, col, _ = score_object_step(neighbors_live, s.ego_shape, device)
+            s.clearances[s.k] = cl
+            s.collisions[s.k] = col
+        if np_dict is not None:
+            rb = score_road_border_step(np_dict, device=device)
+            s.rb_dists[s.k] = float(rb["rb_dist_m"])
+            red = score_red_light_step(
+                np_dict,
+                device=device,
+                ego_speed_mps=float(s.dyn.speed),
+                live_pose=np.asarray(s.live_pose, dtype=np.float64),
+                ego_hist=np.asarray(s.ego_hist),
+            )
+            s.red_light[s.k] = bool(red["red_light_violation"])
 
 
 def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=None):
@@ -751,41 +731,58 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
         s.live_pose = new_pose
         s.ego_hist = np.vstack([s.ego_hist[1:], s.live_pose[None]])
         s.sim_time += DT
+        # Record this step's realized accel (aligned with clearances[k], written pre-increment)
+        # for the strong-brake metric; guard states built without an accels buffer.
+        if s.accels is not None and s.k < s.accels.shape[0]:
+            s.accels[s.k] = s.dyn.accel
         s.k += 1
 
-        # Unstick (two-stage): if the ego has been (near-)stopped for too long (e.g. it
-        # halted at a yellow light and won't proceed), FIRST widen the cursor search radius
-        # so it reaches recorded frames further ahead (phantom blocker clears -> the model
-        # proceeds on its own, no teleport). Only if it is STILL stuck after a further grace
-        # window do we fall back to the hard snap onto the recorded GT pose ahead.
+        # Unstick (two-stage): if the ego has been STUCK for too long, FIRST widen the
+        # cursor search radius so it reaches recorded frames further ahead (phantom blocker
+        # clears -> the model proceeds on its own, no teleport). Only if it is STILL stuck
+        # after a further grace window do we fall back to the hard snap onto the recorded GT
+        # pose ahead.
+        #
+        # Stuck definition depends on timeline progress mode:
+        # - pose: reproducer in ``repeat`` AND ego (near-)stopped. A
+        #   stopped ego whose cursor is still advancing (e.g. waiting at a light while the
+        #   bag keeps playing nearby frames) is NOT stuck.
+        # - clock: bag frames always advance by wall time (no cursor.step / no ``repeat``),
+        #   so stuck is speed-only — otherwise unstick would never fire on the R2LPL default.
         if s.unstick_after > 0:
-            if s.dyn.speed >= 0.5:
+            cur = s.cursor
+            if s.dyn.speed > STUCK_SPEED_MPS:
                 # Moving again: clear the counter and undo any temporary cursor widening so
                 # frame selection returns to the nominal search_radius.
                 s.ego_stuck = 0
-                s.cursor.restore_radius()
+                cur.restore_radius()
+            elif s.replay_mode != "clock" and not cur.last_was_repeat:
+                # Pose mode: stopped but the reproducer is still advancing (normal, not
+                # repeat) -> not stuck. Clear the counter; keep any widened radius until
+                # the ego moves again.
+                s.ego_stuck = 0
             else:
+                # Clock: stopped. Pose: stopped AND reproducer in repeat.
                 s.ego_stuck += 1
             widen_on = s.unstick_radius_mult > 1.0
             # Stage 1 (gentle): widen once, exactly when the stuck count first crosses the
             # threshold (so it isn't re-applied every subsequent stuck step).
             if widen_on and s.ego_stuck == s.unstick_after:
-                s.cursor.widen(s.unstick_radius_mult)
+                cur.widen(s.unstick_radius_mult)
+                s.expand_count += 1
             # Stage 2 (last resort): teleport. With widening on this is deferred by
             # ``unstick_teleport_after`` extra steps; with it off it fires at ``unstick_after``
             # (legacy behavior).
             teleport_at = s.unstick_after + (s.unstick_teleport_after if widen_on else 0)
             if s.ego_stuck >= teleport_at:
-                n = len(s.tl)
-                tgt = min(max(s.cursor.max_idx_reached, 0) + 1, n - 1)
-                while tgt < n - 1 and (
-                    float(np.linalg.norm(s.tl.poses[tgt, :2] - s.live_pose[:2]))
-                    < s.unstick_advance_m
-                ):
-                    tgt += 1
+                # Target chosen by BAG ARC LENGTH ahead of the current bag anchor (never
+                # rewind), mirroring Autoware's find_perturb_index_along_bag.
+                tgt = s.tl.index_ahead_by_arc_length(
+                    max(cur.max_idx_reached, 0), s.unstick_advance_m
+                )
                 s.live_pose, s.ego_hist, s.dyn = _ego_state_from_frame(s.tl, tgt)
-                s.cursor.reset(tgt)
-                s.cursor.restore_radius()  # teleport is a fresh start -> nominal radius
+                cur.reset(tgt)
+                cur.restore_radius()  # teleport is a fresh start -> nominal radius
                 # Re-seed the sim machinery at the teleport target so post-snap recording is
                 # correct, not stale: the neighbor tracker's rec_t is capped at 1.0/step, so
                 # without this it would lag many steps behind the jumped ego (stale neighbors);
@@ -794,106 +791,149 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 # The save buffer is cleared on this snap (caller), so no window mixes the jump.
                 if s.nbr_tracker is not None:
                     s.nbr_tracker = SimNeighborTracker(s.tl, tgt, max_rec_advance=1.0)
-                if s.turn_hist is not None:
-                    s.turn_hist = (
-                        np.asarray(s.tl.npz(tgt)["turn_indicators"]).reshape(-1).astype(np.int64)
-                    )
+                s.turn_hist = (
+                    np.asarray(s.tl.npz(tgt)["turn_indicators"]).reshape(-1).astype(np.int64)
+                )
+                s.last_turn_indicator = int(s.turn_hist[-1])
                 s.last_collision_uuid = None  # teleported -> next contact is a fresh collision
                 s.in_episode = False
-                s.prev_max_idx = s.cursor.max_idx_reached
+                s.prev_max_idx = cur.max_idx_reached
                 s.ego_stuck = 0
-                s.n_snaps += 1
+                s.snap_count += 1
 
 
-def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers):
-    """Score this step and advance the ego (sequential path: run_segment + extractor)."""
-    _score_into(s, neighbors_live, device, timers)
+def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, timers, np_dict=None):
+    """Score this step and advance the ego (sequential render_segment path)."""
+    _score_into(s, neighbors_live, device, timers, np_dict=np_dict)
     _advance_step(s, pred, idx, device, timers)
 
 
-def _finalize(s: _SegState, timers: Timers) -> SegmentResult:
-    valid_cl = s.clearances[: s.k][np.isfinite(s.clearances[: s.k])]
-    progress = float(np.linalg.norm(s.live_pose[:2] - s.tl.poses[s.start, :2]))
-    metrics = {
+def _event_count(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES) -> int:
+    """Rising-edge event count with falling-edge debounce.
+
+    Entering True from outside an event increments the count. While in an event, a False
+    gap shorter than ``clear_frames`` keeps the latch (no re-count on the next True); only
+    ``clear_frames`` consecutive Falses release it so a later True is a new event. Used for
+    collision / near-miss / strong-brake ``*_count`` (``*_steps`` stay raw).
+    """
+    if mask.size == 0:
+        return 0
+    count = 0
+    in_event = False
+    false_run = 0
+    for v in mask.astype(bool):
+        if v:
+            if not in_event:
+                count += 1
+                in_event = True
+            false_run = 0
+        elif in_event:
+            false_run += 1
+            if false_run >= clear_frames:
+                in_event = False
+                false_run = 0
+    return count
+
+
+def _clearance_stats(values: np.ndarray) -> dict:
+    """min / mean / p5 over finite clearance samples; inf when empty.
+
+    p5 (not p95): clearance is a nearness quantity — the dangerous tail is the
+    low end, same spirit as min.
+
+    Also attaches ``_tdigest`` in memory so in-process aggregate can pool an approximate
+    global p5; the digest is written to a ``tdigests*.jsonl`` sidecar (not segments.jsonl).
+    """
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return {
+            "clearance_min_m": float("inf"),
+            "clearance_mean_m": float("inf"),
+            "clearance_p5_m": float("inf"),
+            "clearance_finite_steps": 0,
+        }
+    out = {
+        "clearance_min_m": float(finite.min()),
+        "clearance_mean_m": float(finite.mean()),
+        "clearance_p5_m": float(np.percentile(finite, 5)),
+        "clearance_finite_steps": int(finite.size),
+    }
+    digest = tdigest_dict_from_values(finite)
+    if digest is not None:
+        out[TDIGEST_KEY] = digest
+    return out
+
+
+def _finalize(s: _SegState) -> dict:
+    cl = s.clearances[: s.k]
+    finite = np.isfinite(cl)
+    rb = s.rb_dists[: s.k]
+    accels = s.accels[: s.k] if s.accels is not None else np.zeros(0, dtype=np.float32)
+    # Per-step state booleans -> both a step count and a rising-edge event count.
+    obj_coll = s.collisions[: s.k]
+    obj_miss = finite & (cl <= s.near_miss_thresh)
+    rb_finite = np.isfinite(rb)
+    rb_coll = rb_finite & (rb < RB_COLLISION_THRESH_M)
+    rb_miss = rb_finite & (rb <= s.near_miss_thresh)
+    red_mask = s.red_light[: s.k]
+    brake_mask = strong_brake_mask(accels, thresh_mps2=float(s.strong_brake_mps2))
+
+    # Graded (non-saturating) headline metrics: improve smoothly as the model trains, unlike the
+    # binary *_count event tallies below — the "getting better" signal those alone can't show.
+    # route_completion: fraction of the recorded route the ego actually advanced through
+    # (furthest recorded frame reached, normalized by route length).
+    route_span = max(int(s.end) - 1 - int(s.start), 1)
+    route_completion = float(
+        np.clip((int(s.cursor.max_idx_reached) - int(s.start)) / route_span, 0.0, 1.0)
+    )
+    progress_m = float(np.linalg.norm(s.live_pose[:2] - s.tl.poses[s.start, :2]))
+
+    return {
         "segment": [int(s.start), int(s.end)],
         "n_steps_run": int(s.k),
         "terminated": s.terminated,
-        "min_clearance": float(valid_cl.min()) if valid_cl.size else float("inf"),
-        "mean_clearance": float(valid_cl.mean()) if valid_cl.size else float("inf"),
-        "n_collision_steps": int(s.collisions[: s.k].sum()),
-        "n_near_miss_steps": int(np.sum(valid_cl <= s.near_miss_thresh)),
-        "worst_step": int(
-            np.argmin(np.where(np.isfinite(s.clearances[: s.k]), s.clearances[: s.k], np.inf))
-        )
-        if valid_cl.size
-        else -1,
-        "progress_m": progress,
-        "n_snaps": int(s.n_snaps),
+        "route_completion": route_completion,
+        "mean_gt_deviation_m": float(s.gt_dev_sum / s.gt_dev_count)
+        if s.gt_dev_count
+        else float("inf"),
+        "progress_m": progress_m,
+        "object": {
+            "miss_thresh_m": float(s.near_miss_thresh),
+            "collision_steps": int(obj_coll.sum()),
+            "collision_count": _event_count(obj_coll),
+            "miss_steps": int(obj_miss.sum()),
+            "miss_count": _event_count(obj_miss),
+            **_clearance_stats(cl),
+        },
+        "road_border": {
+            "miss_thresh_m": float(s.near_miss_thresh),
+            "collision_steps": int(rb_coll.sum()),
+            "collision_count": _event_count(rb_coll),
+            "miss_steps": int(rb_miss.sum()),
+            "miss_count": _event_count(rb_miss),
+            **_clearance_stats(rb),
+        },
+        "red_light_violation": {
+            "steps": int(red_mask.sum()),
+            "count": _event_count(red_mask),
+        },
+        "strong_brake": {
+            "thresh_mps2": float(s.strong_brake_mps2),
+            # Strongest over-threshold accel after the 2-frame consecutive mask
+            # (single-frame tracker/replan spikes are excluded).
+            "strongest_mps2": (
+                float(accels[brake_mask].min()) if brake_mask.any() else float("inf")
+            ),
+            "steps": int(brake_mask.sum()),
+            "count": _event_count(brake_mask),
+        },
+        "reproducer": {
+            "expand_count": int(s.expand_count),
+            "snap_count": int(s.snap_count),
+            "normal_steps": int(s.cursor.normal_steps),
+            "repeat_steps": int(s.cursor.repeat_steps),
+        },
     }
-    return SegmentResult(
-        metrics=metrics, clearances=s.clearances, collisions=s.collisions, timers=timers
-    )
-
-
-@torch.no_grad()
-def run_segment(
-    model,
-    model_args,
-    tl: RouteTimeline,
-    start: int,
-    end: int,
-    device: str = "cuda",
-    near_miss_thresh: float = 0.5,
-    search_radius: float = 1.5,
-    warmup_steps: int = 0,
-    goal_reach_m: float = 5.0,
-    max_stuck_steps: int = 0,
-    max_steps: int | None = None,
-    unstick_after: int = 300,
-    unstick_advance_m: float = 5.0,
-    unstick_radius_mult: float = 3.0,
-    unstick_teleport_after: int = 300,
-    neighbor_history_mode: str = "recorded",
-    timers: Timers | None = None,
-) -> SegmentResult:
-    """Single-segment closed-loop reproducer rollout over recorded frames [start, end).
-
-    Unstick is on by default (snap the ego forward onto the recorded GT pose after
-    ``unstick_after`` steps of no progress). The only timeout is the step cap
-    ``max_steps`` (default 3*(end-start)); the hard stuck-cutoff is off.
-    """
-    timers = timers or Timers()
-    s = _seed_state(
-        tl,
-        start,
-        end,
-        search_radius,
-        warmup_steps,
-        near_miss_thresh,
-        goal_reach_m,
-        max_stuck_steps,
-        timers,
-        max_steps=max_steps if max_steps is not None else 3 * (end - start),
-        unstick_after=unstick_after,
-        unstick_advance_m=unstick_advance_m,
-        unstick_radius_mult=unstick_radius_mult,
-        unstick_teleport_after=unstick_teleport_after,
-        neighbor_history_mode=neighbor_history_mode,
-    )
-    while not s.done:
-        with timers("input_build"):
-            pre = _pre_step(s)
-        if pre is None:
-            break
-        np_dict, neighbors_live, idx, _suuid, _wbu = pre
-        with timers("to_torch"):
-            data = _to_torch_batch([np_dict], model_args, device)
-        with timers("model_forward"):
-            _, outputs = model(data)
-            pred = outputs["prediction"][0, 0].cpu().numpy()
-        _feed_turn_indicator(s, outputs)  # closed-loop turn signal (sim mode)
-        _post_step(s, pred, neighbors_live, idx, device, timers)
-    return _finalize(s, timers)
 
 
 # --------------------------------------------------------------------------- #
@@ -1211,6 +1251,7 @@ def _draw_step(
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
+    extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
 ):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
@@ -1258,6 +1299,7 @@ def _draw_step(
         view_half_m=view_half_m,
         route_polylines=_polylines_from_tensor(data["route_lanes"]),
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
+        extra_ego_trajectories=extra_ego_trajectories,
     )
 
 
@@ -1284,15 +1326,28 @@ def render_segment(
     unstick_teleport_after: int = 300,
     interpolate: bool = True,
     neighbor_history_mode: str = "sim",
+    timeline_progress_mode: str = "pose",
+    tracker_mode: str = "mpc",
     goal_mode: str = "segment",
     title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
+    strong_brake_mps2: float = -2.5,
+    yaw_gate: bool = True,
     *,
     replan_interval: int = 1,
     draw_every: int = 1,
+    abort_deviation_m: float = 0.0,
+    abort_after: int = 30,
+    abort_max_snaps: int = 0,
+    drop_objects: bool = False,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
+
+    Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back
+    into the input ``turn_indicators`` history each step (recorded seed phases out within
+    PAST steps). With ``replan_interval`` > 1 the in-between steps re-append the last decoded
+    value so the 10 Hz history keeps scrolling with the held signal.
 
     ``replan_interval``: re-run the model every N steps (1 = every step). Between inferences the
     cached plan keeps being executed — pinned in the world frame and re-expressed in the current
@@ -1317,7 +1372,36 @@ def render_segment(
     is rebuilt from the shown simulated motion instead of copied from the recorded
     cursor frame. ``goal_mode="segment"`` terminates at ``end - 1``; ``"route"``
     terminates at the NPZ route goal displayed in the render.
-    Returns the SegmentResult metrics.
+    ``tracker_mode="mpc"`` (default) uses the bicycle-model MPC tracker for ego advance while
+    keeping the same reproduced perception inputs. ``tracker_mode="perfect"`` is *complete* perfect
+    tracking: every step (replan ticks included) places the ego DIRECTLY on the model's predicted
+    world pose, so the realized trajectory exactly follows the predicted polyline — no Euler /
+    heading-snap drift and no MPC physical smoothing.
+
+    ``abort_deviation_m`` (0 = disabled): if the live ego strays more than this far from the
+    recorded GT pose at the cursor's current frame for ``abort_after`` consecutive steps, the
+    segment terminates early as ``"diverged"`` — a badly-diverged rollout (e.g. an undertrained
+    model driving off-lane) is cut short instead of burning the full step budget on a segment
+    that will never recover. Checked BEFORE the (expensive) model replan call each step, so an
+    already-diverged segment also skips inference on steps it would otherwise have wasted.
+    This is independent of (and set well above) the ``unstick_*`` knobs: unstick snaps the ego
+    back onto GT to let a merely-stuck rollout continue; abort instead gives up on a rollout
+    unstick can't save. ``abort_max_snaps`` (0 = disabled) aborts once the unstick teleport has
+    fired this many times in one segment — repeated snapping is itself a sign of a bad rollout.
+
+    Per-step ``rollout.jsonl`` lines (next to the PNGs) always include ``clearance_m``,
+    ``collision``, and ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
+    carries no lane geometry) alongside the ego pose — see
+    :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer.
+
+    ``drop_objects``: empty-world ablation — zero out ``neighbor_agents_past`` and
+    ``static_objects`` (and the derived ``neighbors_live``) every step, so the model sees no
+    other traffic while the map (lanes/route_lanes/line_strings/polygons) is unchanged. Model
+    input, rendering, and collision/clearance scoring are all consistently "no objects";
+    collision/near-miss are 0 by construction. Used to separate "reacts badly to traffic" from
+    "can't follow the route/map".
+
+    Returns the segment metrics dict.
     """
     from pathlib import Path
 
@@ -1341,7 +1425,11 @@ def render_segment(
         unstick_radius_mult=unstick_radius_mult,
         unstick_teleport_after=unstick_teleport_after,
         neighbor_history_mode=neighbor_history_mode,
+        tracker_mode=tracker_mode,
+        replay_mode=timeline_progress_mode,
         goal_mode=goal_mode,
+        strong_brake_mps2=strong_brake_mps2,
+        yaw_gate=yaw_gate,
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
@@ -1352,6 +1440,7 @@ def render_segment(
         else {}
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
+    deviation_streak = 0  # consecutive steps the live ego has been > abort_deviation_m from GT
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
     # goal is the recorded GT end pose `poses[end-1]`, which a diverging closed-loop ego may never
@@ -1361,8 +1450,11 @@ def render_segment(
         json.dumps(
             {
                 "event": "start",
-                "start": int(start),
-                "end": int(end),
+                "start_frame_id": _frame_id(tl, start),
+                "end_frame_id": _frame_id(tl, max(start, end - 1)),
+                "start_route_index": int(start),
+                "end_route_index": int(end),
+                "goal_frame_id": _frame_id(tl, max(start, end - 1)),
                 "goal_idx": int(end - 1),
                 "goal": [float(s.goal_xy[0]), float(s.goal_xy[1])],
                 "goal_reach_m": float(s.goal_reach_m),
@@ -1386,13 +1478,65 @@ def render_segment(
                         "ego": [float(s.live_pose[0]), float(s.live_pose[1])],
                         "dist_goal": float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)),
                         "max_idx_reached": int(s.cursor.max_idx_reached),
-                        "n_snaps": int(s.n_snaps),
+                        "snap_count": int(s.snap_count),
                     }
                 )
                 + "\n"
             )
             break
         np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
+
+        if drop_objects:
+            # Empty-world ablation: no other traffic (dynamic neighbors + static objects), map
+            # kept. Zeroing makes every neighbor/static slot fail its validity mask, so the model
+            # sees an empty scene, the PNG/video render empty, and scoring finds nothing to hit
+            # (clearance inf, collision 0) — consistent across model input, draw, and scoring.
+            np_dict["neighbor_agents_past"] = np.zeros_like(np_dict["neighbor_agents_past"])
+            if "static_objects" in np_dict:
+                np_dict["static_objects"] = np.zeros_like(np_dict["static_objects"])
+            neighbors_live = np.zeros_like(neighbors_live)
+
+        # Early-abort: check BEFORE the (expensive) model replan call, using the deviation from
+        # last step's advance — an already-diverged segment skips inference too instead of just
+        # cutting the render short. GT deviation is measured against the recorded pose at the
+        # cursor's current frame (same `idx` the goal/progress checks use).
+        gt_deviation_m = float(np.linalg.norm(s.live_pose[:2] - tl.poses[idx, :2]))
+        s.gt_dev_sum += gt_deviation_m
+        s.gt_dev_count += 1
+        if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
+            deviation_streak += 1
+        else:
+            deviation_streak = 0
+        if (abort_deviation_m > 0 and deviation_streak >= abort_after) or (
+            abort_max_snaps > 0 and s.snap_count >= abort_max_snaps
+        ):
+            s.terminated, s.done = "diverged", True
+            dbg.write(
+                json.dumps(
+                    {
+                        "event": "diverged",
+                        "k": k,
+                        "gt_deviation_m": round(gt_deviation_m, 3),
+                        "deviation_streak": int(deviation_streak),
+                        "snap_count": int(s.snap_count),
+                    }
+                )
+                + "\n"
+            )
+            break
+
+        # Neighbor positions are interpolation-smoothed (if enabled) before scoring/drawing, same
+        # as the un-cached-plan path below — scoring on raw (freeze-then-jump) recorded positions
+        # would make clearance/collision noisier than what's actually rendered.
+        nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
+        if interpolate and nids and interp:
+            _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
+
+        # Scored here (before the replan/draw below) so this step's clearance/collision/
+        # road-border-distance are available for the per-step trace line right below — used by
+        # trajectory_colormap.py to color the rendered path by risk.
+        _score_into(s, neighbors_live, device, timers, np_dict)
+
         # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
         # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
         dbg.write(
@@ -1403,11 +1547,25 @@ def render_segment(
                     "yaw": round(float(s.live_pose[2]), 4),
                     "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
                     "speed": round(float(s.dyn.speed), 3),
+                    "rec_frame_id": _frame_id(tl, idx),
                     "rec_idx": int(idx),
                     "max_idx_reached": int(s.cursor.max_idx_reached),
                     "stuck": int(s.stuck),
                     "ego_stuck": int(s.ego_stuck),
-                    "n_snaps": int(s.n_snaps),
+                    # Cursor's own state (normal/repeat) + the rollout's escalation counts
+                    # (an expand/teleport this tick shows as a *_count delta on the next line).
+                    "state": s.cursor.state,
+                    "state_run_steps": int(s.cursor.state_run_steps),
+                    "expand_count": int(s.expand_count),
+                    "snap_count": int(s.snap_count),
+                    "clearance_m": round(float(s.clearances[k]), 4)
+                    if np.isfinite(s.clearances[k])
+                    else None,
+                    "collision": bool(s.collisions[k]),
+                    "rb_dist_m": round(float(s.rb_dists[k]), 4)
+                    if np.isfinite(s.rb_dists[k])
+                    else None,
+                    "gt_deviation_m": round(gt_deviation_m, 3),
                 }
             )
             + "\n"
@@ -1446,9 +1604,23 @@ def render_segment(
                 s.live_pose[1],
                 s.live_pose[2],
             )
-        nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
-        if interpolate and nids and interp:
-            _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
+            # No fresh inference this step: hold the last decoded turn indicator so the
+            # 10 Hz turn_indicators history keeps scrolling with the same signal.
+            _hold_turn_indicator(s)
+        # Complete perfect tracking (tracker_mode="perfect"): the replan step would otherwise run
+        # PerfectTracker.track, which advances the plan's *distance* along the CURRENT heading and
+        # snaps heading to the reference only AFTERWARD — so on any curve the ego drifts off the
+        # predicted point. Instead place the ego DIRECTLY on the first predicted world pose, exactly
+        # as the in-between steps already do for the cached plan (the "faithful perfect tracking" the
+        # override path implements). Every step then lands on the predicted polyline point.
+        if tracker_mode == "perfect" and override is None:
+            tx, ty, th = (
+                float(plan_world[0][0, 0]),
+                float(plan_world[0][0, 1]),
+                float(plan_world[1][0]),
+            )
+            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+            override = (np.array([tx, ty, th], dtype=np.float64), spd)
         if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
             _draw_step(
                 np_dict,
@@ -1462,16 +1634,15 @@ def render_segment(
                 distance_label_offset_m=distance_label_offset_m,
                 view_half_m=view_half_m,
             )
-        _score_into(s, neighbors_live, device, timers)
-        snaps_before = s.n_snaps
+        snaps_before = s.snap_count
         _advance_step(s, pred_cur, idx, device, timers, override=override)
-        if s.n_snaps > snaps_before:
+        if s.snap_count > snaps_before:
             # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
             # world location, so executing it next step would drag the ego right back. Invalidate
             # it to force a fresh inference at the snapped pose (else the snap never sticks).
             plan_world = None
     dbg.close()
-    return _finalize(s, timers).metrics
+    return _finalize(s)
 
 
 @torch.no_grad()
@@ -1505,7 +1676,20 @@ def run_segments_batched(
     route_keys: list[str] | None = None,
     gpu_transform: bool = False,
     neighbor_history_mode: str = "recorded",
-) -> list[SegmentResult]:
+    tracker_mode: str = "mpc",
+    timeline_progress_mode: str = "pose",
+    strong_brake_mps2: float = -2.5,
+    yaw_gate: bool = True,
+    credit_save_dir=None,
+    credit_windows: list[dict] | None = None,
+    verify_credit_windows: list[dict] | None = None,
+    danger_save_dir=None,
+    danger_scorer=None,
+    realized_event_scorer=None,
+    danger_credit_windows: dict[str, dict[str, int | float]] | None = None,
+    danger_decluster_steps: int = 10,
+    danger_manifest_callback=None,
+) -> list[dict]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
     work_units: list of (RouteTimeline, start, end). Processed in chunks of
@@ -1516,8 +1700,8 @@ def run_segments_batched(
     rolling buffer of its last ``save_pre_steps`` scene snapshots and, on the FIRST
     step within ``save_thresh`` m of a neighbor, dumps that window (+ manifest) to
     ``save_dir/<route>_<start>_<end>/``. The scenes come from THIS run — the same one
-    that detected the collision — so they always match the hit (the legacy two-pass
-    ``extract_collision_scenes`` re-ran the rollout, which is batch-sensitive and so
+    that detected the collision — so they always match the hit (a legacy two-pass
+    extractor, since removed, re-ran the rollout, which is batch-sensitive and so
     could anchor a different/empty window). The buffer is cleared on an unstick
     teleport so a saved window never spans the jump. ``route_keys`` (aligned to
     ``work_units``) names the output dirs; if None it is derived from each timeline.
@@ -1550,7 +1734,7 @@ def run_segments_batched(
             f"save_max_scenes ({save_max_scenes}) must be >= save_pre_steps + 1 "
             f"({save_pre_steps + 1}); otherwise the saved window is silently truncated."
         )
-    results: list[SegmentResult] = []
+    results: list[dict] = []
     pool = ThreadPoolExecutor(max_workers=max(1, n_build_threads))
     try:
         for c0 in range(0, len(work_units), batch_size):
@@ -1572,16 +1756,33 @@ def run_segments_batched(
                     unstick_radius_mult=unstick_radius_mult,
                     unstick_teleport_after=unstick_teleport_after,
                     neighbor_history_mode=neighbor_history_mode,
+                    tracker_mode=tracker_mode,
+                    replay_mode=timeline_progress_mode,
+                    strong_brake_mps2=strong_brake_mps2,
+                    yaw_gate=yaw_gate,
                 )
                 for (tl, start, end) in chunk
             ]
+            assigned_credit_windows = (
+                credit_windows if credit_windows is not None else verify_credit_windows
+            )
+            if assigned_credit_windows is not None:
+                if len(assigned_credit_windows) != len(work_units):
+                    raise ValueError(
+                        "credit_windows must align one-for-one with work_units: "
+                        f"{len(assigned_credit_windows)} vs {len(work_units)}"
+                    )
+                for off, s in enumerate(states):
+                    s.credit_window = assigned_credit_windows[c0 + off]
+                    if verify_credit_windows is not None:
+                        s.max_steps = max(1, int(s.end - s.start))
             if save_dir is not None:
                 import shutil
                 from collections import deque
-                from pathlib import Path
 
                 for off, s in enumerate(states):
                     key = route_keys[c0 + off] if route_keys else _route_key(s.tl)
+                    s.output_route_key = key
                     s.save_buf = deque(maxlen=save_max_scenes + 1)
                     s.save_out_dir = Path(save_dir) / f"{key}_{s.start}_{s.end}"
                     # Per-episode dirs are tagged by save step (..._tc#####), so a re-mine that
@@ -1597,6 +1798,38 @@ def run_segments_batched(
                         for stale in save_root.iterdir():
                             if stale.is_dir() and stale.name.startswith(stale_prefix):
                                 shutil.rmtree(stale, ignore_errors=True)
+            if credit_save_dir is not None or danger_save_dir is not None:
+                from collections import deque
+
+                for off, s in enumerate(states):
+                    if route_keys:
+                        s.output_route_key = route_keys[c0 + off]
+                    window_span = int(
+                        (s.credit_window or {}).get("credit_width", save_pre_steps)
+                    ) + int((s.credit_window or {}).get("credit_gap", 0))
+                    if danger_credit_windows:
+                        window_span = max(
+                            window_span,
+                            max(
+                                _credit_window_width_frames(spec, save_pre_steps)
+                                + _credit_window_gap_frames(spec)
+                                for spec in danger_credit_windows.values()
+                            ),
+                        )
+                    maxlen = window_span + 1
+                    if verify_credit_windows is None:
+                        maxlen = max(maxlen, save_pre_steps + 1)
+                    existing_maxlen = getattr(s.save_buf, "maxlen", None)
+                    if s.save_buf is None or (
+                        existing_maxlen is not None and existing_maxlen < maxlen
+                    ):
+                        s.save_buf = deque(
+                            list(s.save_buf) if s.save_buf is not None else [],
+                            maxlen=maxlen,
+                        )
+                    s.danger_event_selector = OnlineEventSelector(
+                        decluster_steps=danger_decluster_steps
+                    )
             active = list(states)
             while active:
                 with timers("input_build"):
@@ -1608,7 +1841,14 @@ def run_segments_batched(
                         raw_payloads = [pre for _s, pre in live]
                         with timers("to_torch"):
                             data, nb_list, npd_list = _to_torch_batch_gpu(
-                                raw_payloads, model_args, device, want_np_dicts=save_dir is not None
+                                raw_payloads,
+                                model_args,
+                                device,
+                                want_np_dicts=(
+                                    save_dir is not None
+                                    or credit_save_dir is not None
+                                    or danger_save_dir is not None
+                                ),
                             )
                         built = [
                             (
@@ -1633,34 +1873,293 @@ def run_segments_batched(
                             # Only the segments actually running this tick (built); ones
                             # that terminated in _pre_step won't consume more frames.
                             for s, *_ in built:
-                                nxt = s.cursor.max_idx_reached + 1
+                                if s.replay_mode == "clock":
+                                    nxt = min(int(s.start + s.k + 1), int(s.end - 1))
+                                else:
+                                    nxt = s.cursor.max_idx_reached + 1
                                 pool.submit(s.tl.prefetch, range(nxt, nxt + prefetch_ahead))
                         _, outputs = model(data)
                         preds = outputs["prediction"][:, 0].cpu().numpy()  # (B,80,4)
                         # Model's predicted turn indicator per segment, decoded with the SAME
                         # C++-style keep-bias logic as the perfect-tracker sim (reused helper),
                         # then fed back into turn_hist below (closed-loop, no recorded leak).
-                        # Only sim-mode segments carry turn_hist; skip the decode (a GPU->CPU
-                        # sync) entirely when none do (e.g. recorded mode).
-                        ti_pred = (
-                            decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
-                            if any(st.turn_hist is not None for st, *_ in built)
-                            else None
-                        )
+                        ti_pred = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
                     # Score ALL segments in one batched OBB pass, then advance each.
                     with timers("score"):
-                        score_list = score_step_batched(
+                        score_list = score_object_step_batched(
                             [b[2] for b in built], [b[0].ego_shape for b in built], device
                         )
-                    for (s, _np, nb, idx, suuid, wbu), (cl, col, _M, collider_slot) in zip(
-                        built, score_list
-                    ):
-                        s.clearances[s.k] = cl
-                        s.collisions[s.k] = col
+                    danger_rows = (
+                        danger_scorer(built, preds, data, device)
+                        if danger_scorer is not None
+                        else [None] * len(built)
+                    )
+                    realized_rows = []
+                    for _row_i, (
+                        (_s, np_dict, _nb, _idx, _suuid, _wbu),
+                        (_cl, col, _M, _collider_slot),
+                    ) in enumerate(zip(built, score_list)):
+                        if realized_event_scorer is None:
+                            realized_rows.append(None)
+                            continue
+                        # Paper-faithful Conflict inputs: the model's OPEN-LOOP proposal in
+                        # world xy, the logged expert future (INCLUDING the current pose at
+                        # index 0, so the detector's +1 shift lands on the first future
+                        # step), the real logged expert speeds, and the full recorded expert
+                        # path as the arc-length reference polyline.
+                        pred_row = preds[_row_i]  # (80, 4) ego-frame [x, y, cos, sin]
+                        model_pred_world, _ = _ego_pred_to_world(
+                            pred_row[:, :2],
+                            pred_row[:, 2:4],
+                            float(_s.live_pose[0]),
+                            float(_s.live_pose[1]),
+                            float(_s.live_pose[2]),
+                        )
+                        expert_future_world = None
+                        expert_future_speed = None
+                        ref_polyline_world = None
+                        realized_lag_gap_m = None
+                        if hasattr(_s.tl, "poses") and hasattr(_s.tl, "speeds"):
+                            H = int(pred_row.shape[0])
+                            idx_i = int(_idx)
+                            expert_future_world = _s.tl.poses[idx_i : idx_i + 1 + H, :2]
+                            expert_future_speed = _s.tl.speeds[idx_i : idx_i + 1 + H]
+                            ref_polyline_world = _s.tl.poses[:, :2]
+                            # Realized-lag streak (clock mode only: in pose mode the
+                            # cursor advances WITH the ego, so the clock gap is ~0 by
+                            # construction). Compare the realized ego arc position to
+                            # the expert clock arc position on the recorded polyline;
+                            # the scorer flags once the gap sustains long enough.
+                            lag_thr = getattr(realized_event_scorer, "expert_lag_thresholds", None)
+                            if lag_thr is not None and _s.replay_mode == "clock":
+                                if _s.route_arc_s is None:
+                                    seg_d = np.linalg.norm(
+                                        np.diff(ref_polyline_world, axis=0), axis=1
+                                    )
+                                    _s.route_arc_s = np.concatenate([[0.0], np.cumsum(seg_d)])
+                                ego_arc = float(
+                                    project_points_to_polyline(
+                                        _s.live_pose[None, :2],
+                                        ref_polyline_world,
+                                        _s.route_arc_s,
+                                    )[0, 0]
+                                )
+                                expert_arc = float(_s.route_arc_s[idx_i])
+                                realized_lag_gap_m = expert_arc - ego_arc
+                                if (
+                                    float(_s.tl.speeds[idx_i]) >= lag_thr["moving_speed_mps"]
+                                    and realized_lag_gap_m >= lag_thr["lag_progress_gap_m"]
+                                ):
+                                    _s.realized_lag_streak += 1
+                                else:
+                                    _s.realized_lag_streak = 0
+                        realized_rows.append(
+                            realized_event_scorer(
+                                np_dict,
+                                collided=bool(col),
+                                step=_s.k,
+                                model_pred_world=model_pred_world,
+                                expert_future_world=expert_future_world,
+                                expert_future_speed=expert_future_speed,
+                                ref_polyline_world=ref_polyline_world,
+                                realized_lag_streak=_s.realized_lag_streak,
+                                realized_lag_gap_m=realized_lag_gap_m,
+                            )
+                        )
+                    for row_idx, (
+                        (s, _np, nb, idx, suuid, wbu),
+                        (cl, col, _M, collider_slot),
+                    ) in enumerate(zip(built, score_list)):
+                        danger_row = danger_rows[row_idx] if danger_rows else None
+                        realized_row = realized_rows[row_idx] if realized_rows else None
+                        _score_into(
+                            s,
+                            nb,
+                            device,
+                            timers,
+                            np_dict=_np,
+                            object_cl=float(cl),
+                            object_col=bool(col),
+                        )
                         # One-pass save: buffer this step, then dump the window on the
                         # FIRST collision — from THIS run, so the scenes match the hit.
                         if s.save_buf is not None:
                             s.save_buf.append((s.k, idx, s.live_pose.copy(), _np, suuid, wbu))
+                        if (
+                            credit_save_dir is not None
+                            and s.credit_window is not None
+                            and not s.credit_saved
+                            and idx >= int(s.credit_window["offense_index"])
+                        ):
+                            _dump_credit_window(
+                                Path(credit_save_dir)
+                                / (
+                                    f"{s.credit_window['route_key']}_"
+                                    f"{s.credit_window['start_frame']}_"
+                                    f"{s.credit_window['offense_frame']}_credit_"
+                                    f"{s.credit_window['label']}"
+                                ),
+                                s.tl,
+                                model_args,
+                                s.k,
+                                list(s.save_buf),
+                                s.last_snap_step,
+                                int(s.credit_window["credit_width"]),
+                                int(s.credit_window["credit_gap"]),
+                                s.start,
+                                s.end,
+                                str(s.credit_window["label"]),
+                                # Record the AUTHORITATIVE offense frame, not the
+                                # current buffered index: in pose mode the cursor
+                                # can overshoot `offense_index` by >1 frame, so
+                                # buf[-1][1] would misreport the offense frame.
+                                extra_manifest={
+                                    "offense_frame_id": int(s.credit_window["offense_frame"])
+                                },
+                            )
+                            s.credit_saved = True
+                            s.terminated = "credit_window_saved"
+                            s.done = True
+                        if danger_save_dir is not None and s.save_buf is not None:
+                            if verify_credit_windows is not None and s.credit_window is not None:
+                                event_row = realized_row or {"labels": ["clean"], "label": "clean"}
+                                labels = list(event_row.get("labels", []))
+                                if labels and labels != ["clean"]:
+                                    realized_label = str(event_row.get("label") or labels[0])
+                                    spec = (danger_credit_windows or {}).get(realized_label)
+                                    width = _credit_window_width_frames(
+                                        spec,
+                                        int(
+                                            (s.credit_window or {}).get(
+                                                "credit_width", save_pre_steps
+                                            )
+                                        ),
+                                    )
+                                    gap = _credit_window_gap_frames(spec)
+                                    event_dir = Path(danger_save_dir) / (
+                                        f"{s.credit_window['route_key']}_"
+                                        f"{s.credit_window['start_frame']}_"
+                                        f"{_frame_id(s.tl, idx)}_event_{realized_label}"
+                                    )
+                                    manifest = _dump_credit_window(
+                                        event_dir,
+                                        s.tl,
+                                        model_args,
+                                        s.k,
+                                        list(s.save_buf),
+                                        s.last_snap_step,
+                                        width,
+                                        gap,
+                                        s.start,
+                                        s.end,
+                                        realized_label,
+                                        extra_manifest={
+                                            **_credit_event_metadata(event_row),
+                                            # Authoritative offense frame id (not the
+                                            # buf[-1] tick, which can overshoot in pose
+                                            # mode) — overrides _dump_credit_window's
+                                            # buffer-derived default.
+                                            "offense_frame_id": int(
+                                                s.credit_window["offense_frame"]
+                                            ),
+                                            "source_label": str(s.credit_window["label"]),
+                                            "source_anchor_frame": int(
+                                                s.credit_window["frame_index"]
+                                            ),
+                                            "source_anchor_index": int(
+                                                s.credit_window["source_index"]
+                                            ),
+                                            "source_event_start_frame": _frame_id(
+                                                s.tl,
+                                                int(s.credit_window["event_source_start_index"]),
+                                            ),
+                                            "source_event_end_frame": _frame_id(
+                                                s.tl,
+                                                int(s.credit_window["event_source_end_index"]),
+                                            ),
+                                            "source_event_member_count": int(
+                                                s.credit_window["event_member_count"]
+                                            ),
+                                            "source_offense_frame": int(
+                                                s.credit_window["offense_frame"]
+                                            ),
+                                            "realized_label": realized_label,
+                                            "realized_step": int(s.k),
+                                            "realized_frame": _frame_id(s.tl, idx),
+                                            "anchor_horizon_steps": int(
+                                                s.credit_window.get("anchor_horizon_steps", 0)
+                                            ),
+                                            "max_rollout_steps": int(
+                                                s.credit_window.get(
+                                                    "max_rollout_steps",
+                                                    max(1, s.end - s.start),
+                                                )
+                                            ),
+                                        },
+                                    )
+                                    if manifest is not None:
+                                        if danger_manifest_callback is not None:
+                                            danger_manifest_callback(
+                                                event_dir, manifest, realized_label
+                                            )
+                                        s.credit_saved = True
+                                        s.terminated = "verified_danger_window_saved"
+                                        s.done = True
+                            else:
+                                event_labels: list[str] = []
+                                event_row_by_label: dict[str, dict] = {}
+                                for event_row in (danger_row, realized_row):
+                                    if event_row is None:
+                                        continue
+                                    for label in event_row.get("labels", []):
+                                        label = str(label)
+                                        if label != "clean" and label not in event_labels:
+                                            event_labels.append(label)
+                                        if label != "clean" and label not in event_row_by_label:
+                                            event_row_by_label[label] = event_row
+                                if (
+                                    bool(col)
+                                    and realized_event_scorer is not None
+                                    and "moving_collision" not in event_labels
+                                ):
+                                    event_labels.append("moving_collision")
+                                    if realized_row is not None:
+                                        event_row_by_label["moving_collision"] = realized_row
+                                if event_labels:
+                                    selector = s.danger_event_selector or OnlineEventSelector(
+                                        decluster_steps=danger_decluster_steps
+                                    )
+                                    s.danger_event_selector = selector
+                                    for label in selector.update(s.k, event_labels):
+                                        spec = (danger_credit_windows or {}).get(label)
+                                        width = _credit_window_width_frames(spec, save_pre_steps)
+                                        gap = _credit_window_gap_frames(spec)
+                                        event_dir = Path(danger_save_dir) / (
+                                            f"{s.output_route_key or _route_key(s.tl)}_"
+                                            f"{s.start}_{idx}_danger_{label}"
+                                        )
+                                        manifest = _dump_credit_window(
+                                            event_dir,
+                                            s.tl,
+                                            model_args,
+                                            s.k,
+                                            list(s.save_buf),
+                                            s.last_snap_step,
+                                            width,
+                                            gap,
+                                            s.start,
+                                            s.end,
+                                            label,
+                                            extra_manifest=_credit_event_metadata(
+                                                event_row_by_label.get(label)
+                                            ),
+                                        )
+                                        if (
+                                            manifest is not None
+                                            and danger_manifest_callback is not None
+                                        ):
+                                            danger_manifest_callback(event_dir, manifest, label)
+                        if save_dir is not None and s.save_buf is not None:
                             # Per-EPISODE saving. A contact EPISODE runs while clearance <= thresh
                             # and ends when it clears (> thresh) — so a NEW distinct collision needs
                             # collided -> NOT collided -> collided (the clear gap). An episode is
@@ -1672,7 +2171,7 @@ def run_segments_batched(
                             # may have <80 clear steps before it, but a slightly-later step in the
                             # same episode often has a clean 80-step approach), then stop for that
                             # episode. The colliding vehicle is the OBB-CLOSEST neighbor at contact
-                            # (score_step_batched returns its slot, which can differ from the
+                            # (score_object_step_batched returns its slot, which can differ from the
                             # centroid-nearest slot 0 for long/rotated boxes), so its UUID is
                             # suuid[collider_slot]. Each save -> its own per-episode dir tagged by
                             # the save step. Gates (t0-clean / ego-moved / min-pre-frames) still
@@ -1734,23 +2233,177 @@ def run_segments_batched(
                                         s.saved_collision = True  # recorded-mode one-save latch
                                         s.last_collision_uuid = colliding_uuid
                     for i, (s, _np, nb, idx, _suuid, _wbu) in enumerate(built):
-                        prev_snaps = s.n_snaps
+                        prev_snaps = s.snap_count
                         _advance_step(s, preds[i], idx, device, timers)
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved
                         # context then carries the sim's own signals, never the recorded ones.
-                        if s.turn_hist is not None and ti_pred is not None:
-                            s.turn_hist = np.append(s.turn_hist[1:], np.int64(ti_pred[i]))
+                        s.last_turn_indicator = resolve_keep_turn_indicator(
+                            int(ti_pred[i]), s.last_turn_indicator
+                        )
+                        s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
                         # Clear the buffer on an unstick teleport: pre-jump frames belong
                         # to a different ego path and must never enter a saved window.
-                        if s.save_buf is not None and s.n_snaps > prev_snaps:
+                        if s.save_buf is not None and s.snap_count > prev_snaps:
                             s.save_buf.clear()
                             s.last_snap_step = s.k
+                        # A teleport also invalidates the realized-lag streak: the snap
+                        # closes the gap artificially, so restart the sustain count.
+                        if s.snap_count > prev_snaps:
+                            s.realized_lag_streak = 0
                 active = [s for s in active if not s.done]
-            results.extend(_finalize(s, timers) for s in states)
+            results.extend(_finalize(s) for s in states)
     finally:
         pool.shutdown(wait=True)
     return results
+
+
+def _dump_credit_window(
+    out_dir,
+    tl: RouteTimeline,
+    model_args,
+    offense_step: int,
+    buf,
+    last_snap_step: int | None,
+    credit_width: int,
+    credit_gap: int,
+    seg_start: int,
+    seg_end: int,
+    label: str,
+    extra_manifest: dict | None = None,
+) -> dict | None:
+    """Write an inclusive R2LPL credit window ending before the offense step.
+
+    This is explicitly separate from collision extraction. It saves
+    ``[offense_step - credit_gap - credit_width, offense_step - credit_gap]`` so repaired
+    targets are generated from an explicitly configured band before the violation.
+    Filenames remain relative to the true offense step.
+    """
+    import json
+    from pathlib import Path
+
+    if credit_width < 0:
+        raise ValueError(f"credit_width must be >= 0, got {credit_width}")
+    if credit_gap < 0:
+        raise ValueError(f"credit_gap must be >= 0, got {credit_gap}")
+    out_dir = Path(out_dir)
+    if out_dir.exists():
+        # Clear BOTH patterns: stale collision*.npz from a crashed prior run (between
+        # _dump_precollision_window and the rename below) would otherwise be renamed
+        # into this fresh credit window and pollute it with extra scenes.
+        for pattern in ("credit*.npz", "collision*.npz"):
+            for stale in out_dir.glob(pattern):
+                stale.unlink()
+        stale_manifest = out_dir / "manifest.json"
+        if stale_manifest.exists():
+            stale_manifest.unlink()
+    window_end_step = int(offense_step) - int(credit_gap)
+    manifest = _dump_precollision_window(
+        out_dir,
+        tl,
+        model_args,
+        window_end_step,
+        buf,
+        last_snap_step,
+        credit_width,
+        float("-inf"),
+        seg_start,
+        seg_end,
+        pre_arc_m=0.0,
+        max_scenes=credit_width + 1,
+        min_post_snap_frames=0,
+        min_pre_frames=0,
+        min_ego_speed=0.0,
+    )
+    if manifest is None:
+        return None
+    for path in out_dir.glob("collision*.npz"):
+        token = int(path.stem.replace("collision", ""))
+        saved_step = window_end_step + token
+        offense_relative = saved_step - int(offense_step)
+        path.rename(out_dir / f"credit{offense_relative:+06d}.npz")
+    manifest["credit_label"] = label
+    manifest["credit_width"] = int(credit_width)
+    manifest["credit_gap"] = int(credit_gap)
+    manifest["offense_step"] = int(offense_step)
+    manifest["credit_window_end_step"] = int(window_end_step)
+    # Default offense frame id = the last buffered tick. Correct for the online
+    # danger path (offense == current step == buf end); mined credit-window
+    # callers pass the authoritative offense_frame_id in extra_manifest to
+    # override it (the buffer tick can overshoot the offense in pose mode).
+    manifest["offense_frame_id"] = _frame_id(tl, int(buf[-1][1]))
+    if extra_manifest:
+        manifest.update(extra_manifest)
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
+
+
+def _dump_full_credit_segment(
+    out_dir,
+    tl: RouteTimeline,
+    model_args,
+    buf,
+    last_snap_step: int | None,
+    seg_start: int,
+    seg_end: int,
+    label: str,
+    *,
+    verified_step: int | None = None,
+) -> dict | None:
+    """Write every simulated scene in a preselected credit segment.
+
+    Used for verify-before-save mining: once a target issue is reproduced anywhere in the
+    segment, the whole mined event window becomes the repair set for that event.
+    """
+    import json
+    from pathlib import Path
+
+    if not buf:
+        return None
+    out_dir = Path(out_dir)
+    first_step = int(buf[0][0])
+    last_step = int(buf[-1][0])
+    manifest = _dump_precollision_window(
+        out_dir,
+        tl,
+        model_args,
+        last_step,
+        buf,
+        last_snap_step,
+        last_step - first_step,
+        float("-inf"),
+        seg_start,
+        seg_end,
+        pre_arc_m=0.0,
+        max_scenes=last_step - first_step + 1,
+        min_post_snap_frames=0,
+        min_pre_frames=0,
+        min_ego_speed=0.0,
+    )
+    if manifest is None:
+        return None
+    for path in out_dir.glob("collision*.npz"):
+        path.rename(out_dir / path.name.replace("collision", "credit", 1))
+    manifest["credit_label"] = label
+    manifest["credit_width"] = int(last_step - first_step)
+    manifest["offense_step"] = int(last_step)
+    manifest["offense_frame_id"] = _frame_id(tl, int(buf[-1][1]))
+    manifest["verified_first_step"] = None if verified_step is None else int(verified_step)
+    verified_idx = None
+    if verified_step is not None:
+        verified_idx = next(
+            (i for i, (step, *_rest) in enumerate(buf) if int(step) == int(verified_step)),
+            None,
+        )
+    manifest["verified_first_frame_id"] = (
+        None if verified_idx is None else _frame_id(tl, int(buf[verified_idx][1]))
+    )
+    manifest["window_first_step"] = int(first_step)
+    manifest["window_last_step"] = int(last_step)
+    manifest["window_first_frame_id"] = _frame_id(tl, int(buf[0][1]))
+    manifest["window_last_frame_id"] = _frame_id(tl, int(buf[-1][1]))
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    return manifest
 
 
 # --------------------------------------------------------------------------- #
@@ -1761,29 +2414,14 @@ def _min_clearance_any(neighbors_live: np.ndarray, ego_shape: np.ndarray, device
 
     Raw distance to the nearest neighbor of any kind (moving or static, any
     direction) — the collision trigger for extraction ("<= thresh m to a
-    neighbor"). Same all-neighbor geometry score_step uses.
+    neighbor"). Same all-neighbor geometry ``score_object_step`` uses.
     """
-    ego_b, npc_corners, M = _ego_neighbor_obb(neighbors_live, ego_shape, device)
-    if M == 0:
-        return float("inf")
-    p1, p2 = _closest_points_between_rects(ego_b, npc_corners)
-    return float((p1 - p2).norm(dim=-1).min())
+    return score_object_step(neighbors_live, ego_shape, device)[0]
 
 
-def _future_to_4col(arr: np.ndarray) -> np.ndarray:
-    """Heading future -> cos/sin future: (..., 3) [x, y, heading] -> (..., 4)
-    [x, y, cos, sin]. Already-4-col input passes through. Zero (invalid) rows stay zero.
-    The trainable / reward schema is ALWAYS 4-col for futures — never save 3-col."""
-    arr = np.asarray(arr, dtype=np.float32)
-    if arr.shape[-1] == 4:
-        return arr
-    mask = np.abs(arr[..., :2]).sum(-1) == 0
-    h = arr[..., 2]
-    out = np.concatenate(
-        [arr[..., :2], np.cos(h)[..., None], np.sin(h)[..., None]], axis=-1
-    ).astype(np.float32)
-    out[mask] = 0.0
-    return out
+# Canonical implementation lives in planner_metrics.scene_format; existing importers
+# (tests, r2lpl runner) keep this name.
+_future_to_4col = future_to_4col
 
 
 def _recenter_neighbor_future(naf: np.ndarray, dx: float, dy: float, dyaw: float) -> np.ndarray:
@@ -1895,6 +2533,10 @@ def _route_key(tl: RouteTimeline) -> str:
     return route_prefix(Path(tl.npz_paths[0]))
 
 
+def _frame_id(tl: RouteTimeline, idx: int) -> int:
+    return int(tl.frame_indices[int(idx)])
+
+
 def _dump_precollision_window(
     out_dir,
     tl: RouteTimeline,
@@ -1957,6 +2599,7 @@ def _dump_precollision_window(
     poses_by_step = {rec[0]: rec[2] for rec in buf}  # step k -> world pose (for ego_future)
     fut_len = int(model_args.future_len)
     saved: list[int] = []
+    saved_frame_ids: list[int] = []
 
     start_k = _precollision_window_start(
         t_c, pre_steps, last_snap_step, poses_by_step, pre_arc_m, max_scenes
@@ -2034,11 +2677,14 @@ def _dump_precollision_window(
         ).astype(np.float32)
         g = scene["goal_pose"]
         scene["goal_pose"] = np.array([g[0], g[1], math.atan2(g[3], g[2])], dtype=np.float32)
-        # neighbor_agents_future: read out of the SIMULATION's own shown future (the realized
+        # neighbor_agents_future: use the SIMULATION's own shown future first (the realized
         # neighbor world poses at the subsequent rollout steps), UUID-matched and slot-aligned
         # with neighbor_agents_past, expressed in this frame's live-ego frame. This keeps the
         # target consistent with the (sim) past — a held-static neighbor stays static instead
-        # of teleporting to its recorded log. Recorded mode (no tracker) keeps the recorded GT.
+        # of teleporting to its recorded log. When the remaining closed-loop horizon is shorter
+        # than the model's full future horizon, fill ONLY the unsimulated tail from the recorded
+        # future, UUID-matched into the live slot order. Recorded mode (no tracker) keeps the
+        # recorded GT for the full horizon.
         if slot_uuids is not None:
             naf_sim = np.zeros((320, fut_len, 4), dtype=np.float32)
             ex0, ey0, eh0 = float(live_pose[0]), float(live_pose[1]), float(live_pose[2])
@@ -2083,6 +2729,30 @@ def _dump_precollision_window(
                         traj[j] = last
                 if present[0] > 0:  # leading gap before the first shown pose
                     traj[: present[0]] = traj[present[0]]
+            recorded_ids = tl.neighbor_ids(idx)
+            if recorded_ids:
+                with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
+                    naf_rec = (
+                        z["neighbor_agents_future"] if "neighbor_agents_future" in z.files else None
+                    )
+                if naf_rec is not None:
+                    dx, dy, dyaw = _rel_pose(tl.poses[idx], live_pose)
+                    naf_rec_live = _recenter_neighbor_future(naf_rec, dx, dy, dyaw)
+                    rec_slot_by_uuid = {
+                        str(u): slot for slot, u in enumerate(recorded_ids[: naf_rec_live.shape[0]])
+                    }
+                    for slot, u in uuid_slots:
+                        rec_slot = rec_slot_by_uuid.get(str(u))
+                        if rec_slot is None:
+                            continue
+                        traj = naf_sim[slot]
+                        rec_traj = naf_rec_live[rec_slot, :fut_len, :4]
+                        if rec_traj.shape[0] < fut_len:
+                            padded = np.zeros((fut_len, 4), dtype=np.float32)
+                            padded[: rec_traj.shape[0]] = rec_traj
+                            rec_traj = padded
+                        missing = np.abs(traj).sum(axis=1) == 0
+                        traj[missing] = rec_traj[missing]
             scene["neighbor_agents_future"] = naf_sim
         else:
             with np.load(tl.npz_paths[idx], allow_pickle=True) as z:
@@ -2098,146 +2768,68 @@ def _dump_precollision_window(
             ex, ey, eh = _world_pose_to_ego(poses_by_step[fk], live_pose)
             eaf[j - 1] = (ex, ey, math.cos(eh), math.sin(eh))
         scene["ego_agent_future"] = eaf
+        # Logged expert (GT) future for the R2LPL Conflict comparison / GT overlay: the
+        # recorded ego's RELATIVE forward motion from the current cursor, re-anchored to
+        # the live ego (the paper's pseudo-target, get_expert_trajectory_from_scenario_
+        # with_rollout_ego). Starts at the live-ego origin and follows the recorded shape,
+        # so it overlays cleanly with the model plan / repaired target. NOT a training
+        # target — an auxiliary field consumers ignore unless they ask for it.
+        expert_eaf = np.zeros((fut_len, 4), dtype=np.float32)
+        rec0 = tl.poses[idx]
+        Rr = _rotation_matrix(float(rec0[2]))  # world delta -> recorded-ego frame
+        n_expert = 0
+        for j in range(1, fut_len + 1):
+            ridx = idx + j
+            if ridx >= len(tl.poses):
+                break
+            d = Rr @ (tl.poses[ridx][:2] - rec0[:2])
+            dh = float(tl.poses[ridx][2] - rec0[2])
+            expert_eaf[j - 1] = (d[0], d[1], math.cos(dh), math.sin(dh))
+            n_expert = j
+        # HOLD the last valid pose past the recorded route end instead of leaving
+        # (0,0) zero-padding: a zero tail reads as a teleport back to the ego
+        # origin (breaks the GT overlay + collapses the morph's expert projection).
+        if 0 < n_expert < fut_len:
+            expert_eaf[n_expert:] = expert_eaf[n_expert - 1]
+        scene["ego_expert_future"] = expert_eaf
+        # Recorded expert at its ACTUAL positions, in the live-ego frame (for
+        # overlays/analysis — NOT the repair pseudo-target above). Index 0 is
+        # the recorded ego's CURRENT pose, so the live-vs-recorded divergence
+        # offset is visible; the tail holds the last valid pose like above.
+        recorded_eaf = np.zeros((fut_len, 4), dtype=np.float32)
+        n_recorded = 0
+        for j in range(fut_len):
+            ridx = idx + j
+            if ridx >= len(tl.poses):
+                break
+            rx, ry, rh = _world_pose_to_ego(tl.poses[ridx], live_pose)
+            recorded_eaf[j] = (rx, ry, math.cos(rh), math.sin(rh))
+            n_recorded = j + 1
+        if 0 < n_recorded < fut_len:
+            recorded_eaf[n_recorded:] = recorded_eaf[n_recorded - 1]
+        scene["ego_recorded_future"] = recorded_eaf
         scene["origin"] = np.array("live")
         token = f"{step_k - t_c:+06d}"
         np.savez_compressed(out_dir / f"collision{token}.npz", **scene)
         saved.append(int(step_k))
+        saved_frame_ids.append(_frame_id(tl, idx))
 
+    seg_end_inclusive = min(int(seg_end) - 1, len(tl) - 1)
     manifest = {
         "segment": [int(seg_start), int(seg_end)],
-        "collision_step": int(t_c),
+        "segment_route_indices": [int(seg_start), int(seg_end)],
+        "segment_frame_ids": [_frame_id(tl, seg_start), _frame_id(tl, seg_end_inclusive)],
+        # Terminal step of the saved window (== t_c). For the one-pass collision
+        # save this is the actual collision step (window ends AT the collision),
+        # but for R2LPL credit windows it is offense_step - credit_gap (the window
+        # ends credit_gap before the violation), NOT the collision — the wrapper
+        # also records the unambiguous offense_step / credit_window_end_step.
+        "window_end_step": int(t_c),
         "collision_thresh": float(collision_thresh),
         "n_scenes": len(saved),
         "steps_saved": saved,
+        "scene_frame_ids_saved": saved_frame_ids,
         "n_live": len(saved),  # all-live by construction (no recorded backfill)
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
-
-
-def extract_collision_scenes(
-    model,
-    model_args,
-    tl: RouteTimeline,
-    start: int,
-    end: int,
-    out_dir,
-    device: str = "cuda",
-    collision_thresh: float = 0.2,
-    pre_steps: int = 80,
-    search_radius: float = 1.5,
-    warmup_steps: int = 0,
-    unstick_after: int = 300,
-    unstick_advance_m: float = 5.0,
-    unstick_radius_mult: float = 3.0,
-    unstick_teleport_after: int = 300,
-    max_steps: int | None = None,
-    pre_arc_m: float = 1.0,
-    max_scenes: int = 160,
-    min_post_snap_frames: int = 30,
-    min_pre_frames: int = 30,
-) -> dict | None:
-    """Mine the batch of scenes leading up to the FIRST collision in a segment.
-
-    Runs the closed-loop reproducer over [start, end); on the first sim-step T_c
-    whose ego↔any-neighbor OBB clearance <= ``collision_thresh`` (default 0.2 m),
-    saves the ``pre_steps`` (default 80) scenes BEFORE the collision as training
-    NPZs. Each saved scene is a full model-input snapshot centered on the ego at
-    that step, with:
-      * ego_agent_past + ego_current_state (backtracked live history),
-      * neighbor_agents_past (recorded neighbors re-centered),
-      * neighbor_agents_future (recorded GT, re-centered),
-      * the full map (lanes/route/borders/polygons/goal/ego_shape/turn_indicators),
-      * ego_agent_future = the realized live ego path truncated AT the collision
-        (zeros for timesteps after T_c).
-
-    When the collision is early (T_c < pre_steps) the window is SHORTER (all-live): it
-    shares ``_dump_precollision_window``, which no longer backfills recorded frames
-    before the rollout start (splicing the recorded ego/perception onto the live state
-    produced a discontinuous clearance seam) and skips a hit with fewer than
-    ``min_pre_frames`` (default 30) live frames before the contact. Returns a manifest
-    dict, or None if no collision occurred / the window was too short.
-
-    NOTE: this is the legacy SECOND-PASS path — it re-runs the rollout to reconstruct
-    the window, so the collision it finds can differ from the one the miner detected
-    (the closed-loop rollout is sensitive to GPU batch composition). Prefer the
-    ONE-PASS save in ``run_segments_batched`` (``save_dir=...``), which dumps the
-    buffer from the SAME run that detected the collision. Kept for backward compat.
-    """
-    from collections import deque
-    from pathlib import Path
-
-    if max_scenes < pre_steps + 1:
-        # Same invariant the one-pass saver enforces: the window is >= pre_steps frames
-        # plus the collision step, so a smaller cap would silently truncate it.
-        raise ValueError(
-            f"max_scenes ({max_scenes}) must be >= pre_steps + 1 ({pre_steps + 1}); "
-            "otherwise the saved window is silently truncated."
-        )
-    out_dir = Path(out_dir)
-    cap = max_steps if max_steps is not None else 3 * (end - start)
-    timers = Timers()
-    s = _seed_state(
-        tl,
-        start,
-        end,
-        search_radius,
-        warmup_steps,
-        0.5,
-        5.0,
-        0,
-        timers,
-        max_steps=cap,
-        unstick_after=unstick_after,
-        unstick_advance_m=unstick_advance_m,
-        unstick_radius_mult=unstick_radius_mult,
-        unstick_teleport_after=unstick_teleport_after,
-    )
-    # Rolling buffer of the last max_scenes+1 live steps; each: (k, idx, live_pose, np_dict).
-    buf: deque = deque(maxlen=max_scenes + 1)
-    t_c = None
-    # Step right after the most recent unstick snap (None = no snap yet). The pre-collision
-    # window must not cross a snap, or a saved scene's realized ego_future/ego_past would
-    # span the ~5 m teleport.
-    last_snap_step = None
-    while not s.done:
-        k = s.k
-        pre = _pre_step(s)
-        if pre is None:
-            break
-        np_dict, neighbors_live, idx, _suuid, _wbu = pre
-        data = _to_torch_batch([np_dict], model_args, device)
-        _, outputs = model(data)
-        pred = outputs["prediction"][0, 0].cpu().numpy()
-        clr = _min_clearance_any(neighbors_live, s.ego_shape, device)
-        # 6-tuple to match the batched buffer / _dump_precollision_window unpacking; this
-        # legacy extractor path is recorded-mode (no sim tracker) -> slot_uuids/world None.
-        buf.append((k, idx, s.live_pose.copy(), np_dict, None, None))
-        if clr <= collision_thresh:
-            t_c = k
-            break
-        prev_snaps = s.n_snaps
-        _post_step(s, pred, neighbors_live, idx, device, timers)
-        if s.n_snaps > prev_snaps:  # an unstick snap fired advancing k -> s.k
-            last_snap_step = s.k
-    if t_c is None:
-        return None
-
-    # buf's last entry is the collision step t_c (appended before the break), so it
-    # already carries the t_c world pose needed for the late scenes' ego_future.
-    return _dump_precollision_window(
-        out_dir,
-        tl,
-        model_args,
-        t_c,
-        list(buf),
-        last_snap_step,
-        pre_steps,
-        collision_thresh,
-        start,
-        end,
-        pre_arc_m=pre_arc_m,
-        max_scenes=max_scenes,
-        min_post_snap_frames=min_post_snap_frames,
-        min_pre_frames=min_pre_frames,
-    )

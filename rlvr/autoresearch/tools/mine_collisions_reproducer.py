@@ -2,7 +2,7 @@
 
 Runs a checkpoint closed-loop over recorded routes (ego driven by the planner +
 PerfectTracker; neighbors replayed from the log via the autoware-style cursor),
-scores every step with a raw all-neighbor OBB overlap check (``score_step`` —
+scores every step with a raw all-neighbor OBB overlap check (``score_object_step`` —
 collision = the ego box overlaps ANY neighbor box, moving or static, including
 rear-end hits; no stopped-only / ego-speed / direction gates), and writes a ranked
 index of the segments where the model collides or nearly collides.
@@ -31,6 +31,11 @@ from pathlib import Path
 import torch
 
 from rlvr.autoresearch.tools.render_metadata import render_tag, write_render_meta
+from rlvr.autoresearch.tools.reproducer_danger_scorer import (
+    build_reproducer_danger_scorer,
+    load_credit_windows,
+)
+from scenario_generation.closed_loop_eval import segment_row_for_json
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import run_segments_batched
 from scenario_generation.route_timeline import RouteTimeline, group_routes
@@ -132,6 +137,38 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--render_webm", action="store_true", help="assemble dumped hit PNGs into WebM")
     p.add_argument("--webm_fps", type=int, default=10)
+    p.add_argument(
+        "--danger_save_dir",
+        type=Path,
+        default=None,
+        help="if set, save R2LPL credit windows for any classifier dangerous label, "
+        "not just neighbor collisions",
+    )
+    p.add_argument(
+        "--danger_reward_config",
+        type=Path,
+        default=None,
+        help="reward config for --danger_save_dir scoring",
+    )
+    p.add_argument(
+        "--danger_threshold_config",
+        type=Path,
+        default=None,
+        help="scene failure threshold config for --danger_save_dir scoring",
+    )
+    p.add_argument(
+        "--danger_credit_window_config",
+        type=Path,
+        default=None,
+        help="label->window width JSON for --danger_save_dir",
+    )
+    p.add_argument(
+        "--danger_decluster_steps",
+        type=int,
+        default=10,
+        help="minimum sim steps between saved events of the same dangerous label",
+    )
+    p.add_argument("--enable_conflict_detector", action="store_true")
     # One-pass collision-scene save (no second extract pass). When --save_dir is set,
     # each segment buffers its last --save_pre_steps scenes during THIS rollout and dumps
     # them to <save_dir>/<route>_<start>_<end>/ on the first step within --save_thresh of a
@@ -223,6 +260,24 @@ def _model_lora_title(model_path: Path, lora_path: Path | None) -> str:
     return f"model: {model_label}  lora: {lora_label}"
 
 
+def _build_danger_scorer(args, device: str):
+    if args.danger_save_dir is None:
+        return None, None
+    if args.danger_reward_config is None or args.danger_threshold_config is None:
+        raise ValueError(
+            "--danger_save_dir requires --danger_reward_config and --danger_threshold_config"
+        )
+    return (
+        build_reproducer_danger_scorer(
+            reward_config=args.danger_reward_config,
+            threshold_config=args.danger_threshold_config,
+            device=device,
+            enable_conflict_detector=bool(args.enable_conflict_detector),
+        ),
+        load_credit_windows(args.danger_credit_window_config),
+    )
+
+
 def _enumerate_routes(npz_root: Path) -> dict[str, list[Path]]:
     # OPT-OUT of skip-filtering on purpose: the reproducer is the ONE consumer that needs
     # the converter's skip_for_training frames (red-light dwell etc.) so the timeline is
@@ -247,6 +302,7 @@ def main() -> None:
         print(f"loading LoRA: {args.lora_path}")
         model = load_lora_checkpoint(model, str(args.lora_path))
         model.eval()
+    danger_scorer, danger_credit_windows = _build_danger_scorer(args, device)
 
     routes = _enumerate_routes(args.npz_root)
     route_keys = sorted(routes)
@@ -270,7 +326,12 @@ def main() -> None:
 
     def _keep(row: dict) -> None:
         nonlocal seq
-        key = (row["n_collision_steps"], -row["min_clearance"], seq)
+        obj = row.get("object") or {}
+        key = (
+            int(obj.get("collision_steps", 0)),
+            -float(obj.get("clearance_min_m", float("inf"))),
+            seq,
+        )
         seq += 1
         heapq.heappush(heap, (key, row))
         if len(heap) > top_k:
@@ -307,9 +368,13 @@ def main() -> None:
             route_keys=buf_keys,
             gpu_transform=args.gpu_transform,
             neighbor_history_mode="sim",  # always sim (recorded mode removed)
+            danger_save_dir=args.danger_save_dir,
+            danger_scorer=danger_scorer,
+            danger_credit_windows=danger_credit_windows,
+            danger_decluster_steps=args.danger_decluster_steps,
         )
         for key, res in zip(buf_keys, res_list):
-            row = {"route": key, **res.metrics}
+            row = segment_row_for_json(res, route=key)
             fout.write(json.dumps(row, default=float) + "\n")
             _keep(row)
             n_seg += 1
@@ -352,9 +417,12 @@ def main() -> None:
     )
     print("top hits (collisions desc, clearance asc):")
     for r in hits[:10]:
+        obj = r.get("object") or {}
         print(
-            f"  {r['route']} {r['segment']}  collisions={r['n_collision_steps']:3d}  "
-            f"min_clr={r['min_clearance']:.2f}  near_miss={r['n_near_miss_steps']:3d}  "
+            f"  {r['route']} {r['segment']}  "
+            f"collisions={int(obj.get('collision_steps', 0)):3d}  "
+            f"min_clr={float(obj.get('clearance_min_m', float('inf'))):.2f}  "
+            f"miss={int(obj.get('miss_steps', 0)):3d}  "
             f"term={r['terminated']}"
         )
     print("\n" + timers.report(n_seg))
@@ -373,7 +441,10 @@ def main() -> None:
         )
         run_tag = render_tag(args.model_path, args.lora_path)
         for r in hits[: args.dump_hits]:
-            if r["n_collision_steps"] == 0 and r["n_near_miss_steps"] == 0:
+            obj = r.get("object") or {}
+            coll = int(obj.get("collision_steps", 0))
+            miss = int(obj.get("miss_steps", 0))
+            if coll == 0 and miss == 0:
                 continue  # nothing interesting to render
             s0, e0 = r["segment"]
             tl = RouteTimeline(routes[r["route"]], sidecar_dir=args.sidecar_root)

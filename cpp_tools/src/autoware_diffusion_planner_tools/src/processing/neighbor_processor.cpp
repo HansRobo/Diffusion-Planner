@@ -38,14 +38,13 @@ NeighborResult process_neighbor_agents_and_future(
   // Build agent histories using AgentData::update_histories
   const int64_t start_idx =
     std::max(static_cast<int64_t>(0), current_idx - INPUT_T_WITH_CURRENT + 1);
-  const bool ignore_unknown_agents = true;
   autoware::diffusion_planner::AgentData agent_data_past;
   for (int64_t t = 0; t < INPUT_T_WITH_CURRENT; ++t) {
     const int64_t frame_idx = start_idx + t;
     if (frame_idx >= static_cast<int64_t>(data_list.size())) {
       break;
     }
-    agent_data_past.update_histories(data_list[frame_idx].tracked_objects, ignore_unknown_agents);
+    agent_data_past.update_histories(data_list[frame_idx].tracked_objects);
   }
   const auto transformed_histories =
     agent_data_past.transformed_and_trimmed_histories(map2bl_matrix, MAX_NUM_NEIGHBORS);
@@ -64,7 +63,11 @@ NeighborResult process_neighbor_agents_and_future(
   std::unordered_map<std::string, AgentHistory> id_to_history;
   for (size_t i = 0; i < agent_histories.size(); ++i) {
     const auto object_id = agent_histories[i].get_latest_state().object_id;
-    id_to_history.emplace(object_id, AgentHistory(OUTPUT_T));
+    // Capacity must hold the current state plus OUTPUT_T future states. With only
+    // OUTPUT_T slots, pushing the current state followed by OUTPUT_T future frames
+    // evicts the current state, leaving the last future timestep unfilled (zeros).
+    // The `(t + 1)` offset below skips the current state at index 0.
+    id_to_history.emplace(object_id, AgentHistory(OUTPUT_T + 1));
     id_to_history.at(object_id).update(
       agent_histories[i].get_latest_state().original_info,
       agent_histories[i].get_latest_state().timestamp);

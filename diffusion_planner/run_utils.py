@@ -12,6 +12,7 @@ NCCL_ENV = {
     "NCCL_IB_DISABLE": "1",
     "NCCL_SOCKET_IFNAME": "lo",
     "NCCL_DEBUG": "INFO",
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
 }
 
 
@@ -31,9 +32,17 @@ def tee_run(cmd: list[str], cwd: Path, log_path: Path, env: dict | None = None) 
         proc = subprocess.Popen(
             cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
-        for line in proc.stdout:
-            sys.stdout.buffer.write(line)
+        # Forward raw byte chunks, NOT whole lines. tqdm redraws its progress bar with a carriage
+        # return ('\r') and no newline, so iterating `for line in proc.stdout` withholds every
+        # in-progress update until the bar's final '\n' (i.e. only at epoch end). read1() hands us
+        # whatever bytes are available right now (one underlying read), so the live bar streams
+        # through to the console the way the old ``... 2>&1 | tee`` shell pipeline did.
+        while True:
+            chunk = proc.stdout.read1(65536)
+            if not chunk:
+                break
+            sys.stdout.buffer.write(chunk)
             sys.stdout.buffer.flush()
-            log.write(line)
+            log.write(chunk)
             log.flush()
         return proc.wait()

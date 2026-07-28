@@ -1,0 +1,91 @@
+{
+  "_comment": "Template R2LPL lifelong-replay workflow config. Copy this file and replace every REPLACE_ME/... path and the WB,L,W ego shape with your own assets. The two config paths under 'judgement' point at files shipped in this repo and normally need no change. 'enabled_labels' ships with all three detectors ON by default (road_border_crossing + moving_collision use the realized closed-loop ego; expert_disagreement uses the model's open-loop proposal vs the logged expert future, per the R2LPL paper). Remove a label from the list to disable mining/repair for it.",
+  "inference": {
+    "mode": "det",
+    "batch_size": 32,
+    "device": "cuda"
+  },
+  "judgement": {
+    "reward_config": "REPLACE_ME/reward_config.json",
+    "threshold_config": "rlvr/configs/scene_failure_thresholds.json",
+    "credit_window_config": "rlvr/configs/r2lpl_credit_windows.json",
+    "enabled_labels": [
+      "road_border_crossing",
+      "moving_collision",
+      "expert_disagreement"
+    ]
+  },
+  "event_mining": {
+    "source_gap_steps": 10,
+    "danger_decluster_steps": 10,
+    "chunk_len": 80,
+    "start_stride": 80,
+    "expected_frame_step": 1,
+    "max_scenes": 10000
+  },
+  "perception_reproducer": {
+    "batch_size": 16,
+    "device": "cuda",
+    "render_webm": false,
+    "verify_reproduced_issue": true,
+    "neighbor_history_mode": "sim",
+    "anchor_horizon_steps": 40,
+    "max_rollout_steps": 80,
+    "timeline_progress_mode": "clock",
+    "tracker_mode": "mpc"
+  },
+  "repair_generation": {
+    "ego_shape": "WB,L,W",
+    "min_margin": 0.3,
+    "candidate_count_per_scene": 8,
+    "generation_batch_size": 8,
+    "device": "cuda",
+    "variant": "rl_cl_soft_sweep_stretch",
+    "noise_low": 0.5,
+    "noise_high": 2,
+    "use_route_cl_guidance": true,
+    "expert_stop_anchor": "recorded",
+    "_comment_expert_stop_anchor": "Where a stopped-expert morph stops: 'recorded' (default; the recorded expert's actual stop position, needs ego_recorded_future in mined scenes) or 'pseudo' (the expert's remaining travel distance from the ego pose; max coverage).",
+    "enable_depart_morph": false,
+    "_comment_enable_depart_morph": "Off by default. When true, model_lagging_expert scenes also get a depart-morph candidate (expert-path geometry Hermite-bridged to the ego pose, accel/jerk-feasible catch-up) \u2014 the re-timing morph cannot synthesize a departure from a parked plan."
+  },
+  "replay_memory": {
+    "capacity": 200,
+    "alpha": 0.5,
+    "beta": 0.5,
+    "arc_bin_m": 25,
+    "label_quotas": {
+      "expert_disagreement": 0.25,
+      "road_border_crossing": 0.2,
+      "moving_collision": 0.2
+    },
+    "_comment_capacity": "REQUIRED, no default. Capacity caps the carry-over replay memory between rounds (the current round's repaired scenes always train regardless). Size it to the campaign: >= 2-3x the expected repaired scenes per round \u2014 hundreds for local corpora, thousands+ for server-scale datasets."
+  },
+  "rounds": {
+    "rounds": 1,
+    "epochs_per_round": 1,
+    "checkpoint_selection_rule": "latest",
+    "_comment_checkpoint_selection_rule": "How the rsft backend materializes each round's checkpoint: 'latest' (default), 'best', or 'epoch:N'. Round guards are always REPORT-ONLY evaluation \u2014 select checkpoints from the per-round guard tables (see README selection recipe)."
+  },
+  "guards": {
+    "_comment": "Post-round guard EVALUATION (report-only, never gates), run on the starting model (reference row) and on each round's checkpoint. frozen_chunk_manifest = held-out chunk set: plan chunks over the FULL pool once with mine_direct_reproducer_chunks --plan_only, hold out a seeded RANDOM sample of chunks (never a contiguous tail), give the campaign the complement manifest, and keep the frozen scenes out of the anchor pool. The checkpoint is re-mined on it per round -> events/label (the cheap closed-loop metric). patience_benchmark = frozen waits benchmark (build_patience_benchmark), open-loop stop-onset eval. closed_loop_npz_root (optional, expensive) runs valid_predictor_closed_loop as a creep probe. Remove this whole section to skip guard evaluation.",
+    "frozen_chunk_manifest": "REPLACE_ME/frozen_heldout_chunks.jsonl",
+    "patience_benchmark": "REPLACE_ME/patience_benchmark.json",
+    "patience_stop_speed": 0.5
+  },
+  "training": {
+    "backend": "base_sft",
+    "val_scenes": "REPLACE_ME/val_scenes.json",
+    "anchor": {
+      "_comment": "Real logged normal scenes unioned into every round's train list (ratio : 1 anchor:focus). waits_scene_list = scenes where the logged ego waits (patience anchor); build it with rlvr.autoresearch.tools.build_patience_benchmark --out_pool. Remove this section to train on repaired+replay only (NOT recommended: competence drifts off the failure distribution).",
+      "scene_list": "REPLACE_ME/real_normal_scenes.json",
+      "ratio": 1.6,
+      "waits_scene_list": "REPLACE_ME/waits_interaction_scenes.json",
+      "waits_fraction": 0.25,
+      "seed": 0
+    },
+    "normal_scene_list": null,
+    "_comment_normal_scene_list": "Ranked-SFT backend counterpart of 'anchor' (which is base_sft-only): set training.normal_scene_list to a non-empty JSON list of real normal scenes to train each round as a prob/normal split (repaired = prob). Normal scenes are homogenized to 4-col neighbor futures per round. Requires explicit n_prob_scenes/n_normal_scenes in the training config; each round fails before training if n_prob_scenes < that round's repaired-scene count (run_experiment would silently subsample the repairs).",
+    "_comment_ema_decay": "base_sft backend: training.train_args.ema_decay is forwarded to train_predictor --ema_decay. Default 0.999 (~1000-step time constant) barely absorbs a short per-round fine-tune; set it so the round's step count spans a few time constants (e.g. 0.996 for rounds of several hundred to ~1000 steps)."
+  }
+}

@@ -64,9 +64,6 @@ from rlvr.reward import (
 _DIVERGING_CMAP = plt.get_cmap("RdYlGn")
 
 _DEFAULT_PROTOTYPES_PATH = str(Path(__file__).parent / "prototypes_k16.npy")
-_GENERATE_SCRIPT = (
-    Path(__file__).parent.parent / "guidance_gui" / "scripts" / "generate_prototypes.py"
-)
 
 ALL_GUIDANCE_NAMES = [
     "centerline_following",
@@ -248,24 +245,22 @@ def generate_batched_sampler_configs(
 # ---------------------------------------------------------------------------
 
 
-def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = False) -> str | None:
+def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = False) -> str:
     if not force and Path(prototypes_path).exists():
         print(f"Using existing prototypes: {prototypes_path}")
         return prototypes_path
-    if not _GENERATE_SCRIPT.exists():
-        print(f"Warning: generate_prototypes.py not found at {_GENERATE_SCRIPT}")
-        return prototypes_path
-    print(f"Generating prototypes from {npz_list_path} -> {prototypes_path} ...")
+    print(f"Generating path prototypes from {npz_list_path} -> {prototypes_path} ...")
     try:
         subprocess.run(
             [
                 sys.executable,
-                str(_GENERATE_SCRIPT),
-                "--npz_list",
+                "-m",
+                "rlvr.autoresearch.tools.build_path_prototypes",
+                "--data_list",
                 npz_list_path,
                 "--output",
                 prototypes_path,
-                "--k",
+                "--num_clusters",
                 "16",
                 "--max_samples",
                 "50000",
@@ -275,12 +270,14 @@ def ensure_prototypes(npz_list_path: str, prototypes_path: str, force: bool = Fa
         )
         print(f"Prototypes saved to {prototypes_path}")
     except subprocess.CalledProcessError as e:
-        print(f"Warning: prototype generation failed: {e}")
-    except subprocess.TimeoutExpired:
-        print("Warning: prototype generation timed out")
+        raise RuntimeError(f"prototype generation failed: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("prototype generation timed out") from e
     if not Path(prototypes_path).exists():
-        print(f"Warning: prototypes file not created at {prototypes_path}")
-        return None
+        # Fail loudly: downstream (GRPO sampler anchor pool, anchor guidance)
+        # treats the returned path as usable — a None/absent file would only
+        # surface later as a silently anchor-less run or a load error.
+        raise RuntimeError(f"prototypes file not created at {prototypes_path}")
     return prototypes_path
 
 
@@ -1511,18 +1508,17 @@ def build_interface(
         def _regen_protos(p_path):
             if not p_path:
                 p_path = _DEFAULT_PROTOTYPES_PATH
-            if not _GENERATE_SCRIPT.exists():
-                return f"Script not found: {_GENERATE_SCRIPT}"
             try:
                 subprocess.run(
                     [
                         sys.executable,
-                        str(_GENERATE_SCRIPT),
-                        "--npz_list",
+                        "-m",
+                        "rlvr.autoresearch.tools.build_path_prototypes",
+                        "--data_list",
                         ranker.npz_list_path,
                         "--output",
                         p_path,
-                        "--k",
+                        "--num_clusters",
                         "16",
                         "--max_samples",
                         "50000",
@@ -1532,7 +1528,10 @@ def build_interface(
                     text=True,
                     timeout=600,
                 )
-                return f"Regenerated prototypes at {p_path}"
+                # NOTE: anchor_following caches loaded libraries per path
+                # (lru_cache), so an in-process regen takes effect for NEW
+                # paths; restart the GUI to reload an overwritten one.
+                return f"Regenerated path prototypes at {p_path}"
             except subprocess.CalledProcessError as e:
                 return f"Error: {e.stderr[:500]}"
             except subprocess.TimeoutExpired:

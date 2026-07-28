@@ -151,8 +151,11 @@ class StatePerturbation:
         self._device = torch.device(device)
         self._ego_past_noise_std = ego_past_noise_std
         self._use_smoothing_future_trajectory = use_smoothing_future_trajectory
-        lo = ([0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0],)
-        hi = ([0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0],)
+        lo = [0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0]
+        hi = [0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0]
+        # Shape (9,) so that len(self._low) is the number of perturbation dims;
+        # the previous (1, 9) shape made torch.rand(B, len(self._low)) sample a
+        # single scalar per sample, perfectly correlating all 9 perturbations.
         self._low = torch.tensor(lo).to(self._device)
         self._high = torch.tensor(hi).to(self._device)
 
@@ -399,14 +402,7 @@ class StatePerturbation:
         #     inputs["ego_agent_past"][..., 2:4], transform_matrix
         # )
 
-        ego_past4d = torch.cat(
-            [
-                inputs["ego_agent_past"][..., :2],  # x, y
-                torch.cos(inputs["ego_agent_past"][..., 2:3]),  # cos
-                torch.sin(inputs["ego_agent_past"][..., 2:3]),  # sin
-            ],
-            dim=-1,
-        )
+        ego_past4d = inputs["ego_agent_past"]
         ego_future4d = torch.cat(
             [
                 ego_future[..., :2],  # x, y
@@ -452,7 +448,13 @@ class StatePerturbation:
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )
-        neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
+        if neighbors_future.shape[-1] == 4:
+            # Canonical [x, y, cos, sin]: rotate the heading unit vector.
+            neighbors_future[..., 2:4] = vector_transform(
+                neighbors_future[..., 2:4], transform_matrix
+            )
+        else:
+            neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
         neighbors_future[mask] = 0.0
 
         # lanes
