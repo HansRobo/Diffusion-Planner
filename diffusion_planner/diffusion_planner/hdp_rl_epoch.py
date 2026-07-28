@@ -325,12 +325,17 @@ def _backward_reward_weighted_update(
     ranges = [
         (start, min(start + scene_chunk, num_scenes)) for start in range(0, num_scenes, scene_chunk)
     ]
-    objective_keys = {"loss", "rl_loss", "reward_weighted_loss", "bc_loss"}
-    mean_keys = {
+    # Tuples, not sets: these drive the insertion order of `accumulated`, which
+    # `reduce_and_average_losses` packs positionally. Set iteration order over
+    # strings follows PYTHONHASHSEED, which torchrun randomizes per rank, so a set
+    # here gives every rank a differently ordered dict and the epoch-end reduce
+    # rejects the batch.
+    objective_keys = ("loss", "rl_loss", "reward_weighted_loss", "bc_loss")
+    mean_keys = (
         "ego_reconstruction_loss",
         "ego_hdp_diffusion_loss",
         "ego_hdp_waypoint_loss",
-    }
+    )
     accumulated: dict[str, torch.Tensor] = {}
     total_candidates = float(num_scenes * n)
     diffusion_time = sample_diffusion_time(
