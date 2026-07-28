@@ -32,6 +32,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import numpy as np
+import torch
 
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.reproducer_rollout import score_step
@@ -58,14 +59,25 @@ _TI_MODEL_TO_SIM = {0: 0, 1: 1, 2: 2, 3: 3}
 EGO_NAME = "ego"  # the headless EgoEntity is always named "ego"
 
 
+class _CloneEncoderOutput(torch.nn.Module):
+    """Clone the encoder's output: the encoding is held across all DPM steps, and a
+    cudagraph-managed buffer would be overwritten by the DiT's next replay."""
+
+    def __init__(self, inner: torch.nn.Module):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, *a, **kw):
+        return self.inner(*a, **kw).clone()
+
+
 @dataclass
 class RolloutConfig:
     """Tuning for a single scenario_sim rollout."""
 
     fps: float = 10.0
-    # 1 = re-plan every tick, matching the production node's planning_frequency_hz=10.0
-    # (diffusion_planner_node.cpp:151). Values > 1 make the ego consume a cached plan
-    # open-loop in between, which is cheaper but less reactive than the real vehicle.
+    # 1 = every tick = 10 Hz, matching the production node's planning_frequency_hz.
+    # Values > 1 consume a cached plan open-loop in between: cheaper, less reactive.
     replan_interval: int = 1
     max_steps: int = 300
     warmup_steps: int = 5  # skip scoring until the history buffer is warm
@@ -267,8 +279,13 @@ def _map_turn_indicator(ti_model: int, prev_cmd: int) -> int:
     return _TI_MODEL_TO_SIM.get(ti_model, prev_cmd)
 
 
+@torch.no_grad()
 def _predict_ego_plan(model, model_args, scene, device, map_cache) -> tuple[np.ndarray, int]:
-    """Run the model as ego -> (ego-frame plan ``(future_len, 4)``, turn-indicator class)."""
+    """Run the model as ego -> (ego-frame plan ``(future_len, 4)``, turn-indicator class).
+
+    ``no_grad`` is load-bearing, not an optimisation: outputs carrying an autograd graph
+    silently drop compile off the CUDA-graph fast path and give the whole 1.8x back."""
+    torch.compiler.cudagraph_mark_step_begin()  # one inference == one cudagraph step
     preds, tis = _predict_batch(
         model, model_args, scene, [EGO_NAME], device,
         map_cache=map_cache, return_turn_indicators=True,
@@ -534,6 +551,12 @@ def main() -> int:
     from scenario_generation.simulate import load_model
 
     model, model_args = load_model(a.model_path, a.device)
+    # T_fwd 26 -> 14.4 ms, bitwise identical to eager. Must come after load_state_dict
+    # (compiling rewrites key names). Measured mode/cost tradeoffs: plan/10 2b.
+    model.decoder.dit = torch.compile(model.decoder.dit, mode="reduce-overhead")
+    model.encoder = _CloneEncoderOutput(
+        torch.compile(model.encoder, mode="reduce-overhead")
+    )
     cfg = RolloutConfig(
         fps=a.fps,
         replan_interval=a.replan_interval,
