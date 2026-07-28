@@ -48,6 +48,8 @@ import sys
 import time
 from pathlib import Path
 
+from rlvr.autoresearch.scene_features import validate_canonical_scene
+
 # Repo root = three levels up from rlvr/autoresearch/tools/this_file.py. Subprocesses
 # run from here so both ``rlvr`` and ``diffusion_planner`` import cleanly.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -244,9 +246,12 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
     #    gating on it would false-FAIL a real run).
     kept = re.findall(r"train:\s*kept\s+(\d+)\s*/", text)
     kept_train = int(kept[-1]) if kept else None
-    # require a FINITE per-epoch training loss (a Loss=nan/inf line means training ran
-    # but diverged — not evidence of a healthy pipeline)
-    tl = re.findall(r"Epoch\s+\d+[^\n]*Loss=(-?inf|nan|[0-9.eE+-]+)", text)
+    # require a FINITE per-epoch TOTAL training loss (a Loss=nan/inf line means training
+    # ran but diverged — not evidence of a healthy pipeline). Anchor to the first
+    # standalone ``Loss=`` field: the negative lookbehind ``(?<![A-Za-z])`` skips
+    # sub-fields like ``EgoLoss=`` (real line: ``Epoch 1 ...: Loss=nan, EgoLoss=0``),
+    # and the non-greedy prefix prevents matching a later sub-loss instead of the total.
+    tl = re.findall(r"Epoch\s+\d+[^\n]*?(?<![A-Za-z])Loss=(-?(?:inf|nan|[0-9.eE+-]+))", text)
     trained = False
     if tl:
         try:
@@ -279,17 +284,19 @@ def _resolve_cfg_path(value) -> Path | None:
 
 
 def _scenes_loadable(scene_list: Path, k: int = 8) -> tuple[int, int]:
-    """Sample k EVENLY-SPACED scenes across the whole list (incl. first + last), then
-    run the canonical model-input loader (``load_npz_data``) on each — constructing
-    the tensors the model actually consumes — not just a key/shape spot-check. Returns
-    (checked, loadable). This makes the R2LPL check genuinely CONSUME the dataset: the
-    miner's plan-only branch only parses path strings + frame suffixes, so nonexistent
-    paths or zip members with junk payloads under the expected names would otherwise
-    plan chunks and PASS. Even spacing (not just indices 0..k-1) means a corpus valid
-    only at the start still fails."""
+    """Sample k EVENLY-SPACED scenes across the whole list (incl. first + last) and
+    enforce the FULL canonical schema on each, then run the model-input loader.
+    Returns (checked, loadable). ``load_npz_data`` alone is insufficient — it only
+    tensorizes keys that exist and effectively requires just ``ego_shape``, so an NPZ
+    carrying only ``ego_shape`` loads fine yet the real pipeline cannot consume it. So
+    each sampled scene must FIRST pass ``validate_canonical_scene`` (every required
+    field present with a compatible shape) and THEN load. This makes the R2LPL check
+    genuinely CONSUME the dataset (the miner's plan-only branch only parses path
+    strings). Even spacing means a corpus valid only at the start still fails."""
     scenes = _load_json(scene_list)
     if not isinstance(scenes, list) or not scenes:
         return 0, 0
+    import numpy as np
     import torch
 
     from preference_optimization.utils import load_npz_data
@@ -303,9 +310,10 @@ def _scenes_loadable(scene_list: Path, k: int = 8) -> tuple[int, int]:
     for i in idx:
         checked += 1
         try:
-            # reuse the canonical model-input loader: constructs the tensors + runs
-            # heading_to_cos_sin on ego/goal, so a scene the real pipeline cannot
-            # consume (missing fields, incompatible shapes) raises here.
+            # 1) full schema: every required field present with a compatible shape;
+            # 2) the canonical loader builds the tensors + heading_to_cos_sin — so a
+            #    scene the real pipeline cannot consume raises at one of these steps.
+            validate_canonical_scene(np.load(scenes[i], allow_pickle=True), ctx=scenes[i])
             load_npz_data(scenes[i], torch.device("cpu"))
             loadable += 1
         except Exception:

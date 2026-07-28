@@ -37,6 +37,7 @@ import numpy as np
 
 from rlvr.autoresearch.scene_features import (
     FEATURE_COLUMNS,
+    FEATURE_SCHEMA_VERSION,
     FeatureConfig,
     extract_scene_features,
 )
@@ -264,6 +265,10 @@ def main() -> None:
     # size, or label thresholds would silently mix old + new rows. Bind resume to the
     # exact job. (path list/order + prefilter/seed/limit are all baked into `paths`.)
     fingerprint = {
+        # Bumped when the feature/label extractor semantics change, so a partial index
+        # built by an older extractor can't be silently resumed and have new-semantic
+        # shards appended into the same dataset.
+        "schema_version": FEATURE_SCHEMA_VERSION,
         "paths_sha1": hashlib.sha1("\n".join(paths).encode()).hexdigest(),
         "n_paths": len(paths),
         "shard_size": args.shard_size,
@@ -273,13 +278,24 @@ def main() -> None:
         },
     }
     manifest_path = os.path.join(args.out_dir, "_index_manifest.json")
-    if not args.overwrite and os.path.exists(manifest_path):
-        with open(manifest_path) as f:
-            prev = json.load(f)
-        if prev != fingerprint:
-            changed = [k for k in fingerprint if prev.get(k) != fingerprint[k]]
+    existing_shards = sorted(glob.glob(os.path.join(args.out_dir, "shard_*.parquet")))
+    if not args.overwrite:
+        if os.path.exists(manifest_path):
+            with open(manifest_path) as f:
+                prev = json.load(f)
+            if prev != fingerprint:
+                changed = [k for k in fingerprint if prev.get(k) != fingerprint[k]]
+                raise SystemExit(
+                    f"[index] resume aborted: job fingerprint changed {changed} vs "
+                    f"{manifest_path}; pass --overwrite to rebuild {args.out_dir}"
+                )
+        elif existing_shards:
+            # Shards but no manifest = an index written before the fingerprint existed
+            # (or a partial/corrupt dir). We cannot prove they match THIS job, so we
+            # must not silently bless + skip them. Fail loud; --overwrite rebuilds.
             raise SystemExit(
-                f"[index] resume aborted: job fingerprint changed {changed} vs {manifest_path}; "
+                f"[index] found {len(existing_shards)} existing shard(s) but no "
+                f"{os.path.basename(manifest_path)} to prove they match this job; "
                 f"pass --overwrite to rebuild {args.out_dir}"
             )
     with open(manifest_path, "w") as f:

@@ -394,5 +394,53 @@ def test_extract_scene_features_end_to_end(tmp_path):
     assert row["has_pedestrian"] is True
 
 
+def _valid_canonical_scene() -> dict:
+    """A minimal scene carrying every required field at its canonical shape (variable
+    axes filled with 1) — the fixture the shared schema validator must accept."""
+    exp = sf._canonical_expected_shapes()
+    return {
+        k: np.zeros(tuple(a if a is not None else 1 for a in shp), np.float32)
+        for k, shp in exp.items()
+    }
+
+
+def test_validate_canonical_scene_accepts_valid():
+    sf.validate_canonical_scene(_valid_canonical_scene(), ctx="valid")
+
+
+def test_validate_canonical_scene_required_fields_match_builder():
+    # single source of truth: the builder's required list IS the validator's keys
+    from rlvr.autoresearch.tools.build_small_dataset import _REQUIRED_FIELDS
+
+    assert set(_REQUIRED_FIELDS) == set(sf.canonical_required_fields())
+
+
+def test_validate_canonical_scene_rejects_scalar_fields():
+    # a scalar in ANY required field (the encoder later slices it) must fail loud
+    for field in ("lanes", "static_objects", "turn_indicators", "ego_current_state", "goal_pose"):
+        d = _valid_canonical_scene()
+        d[field] = np.float32(0.0)
+        with pytest.raises(ValueError, match=field):
+            sf.validate_canonical_scene(d, ctx="scalar")
+
+
+def test_validate_canonical_scene_rejects_wrong_fixed_axis():
+    d = _valid_canonical_scene()
+    d["neighbor_agents_past"] = np.zeros((100, 31, 11), np.float32)  # slots != 320
+    with pytest.raises(ValueError, match="neighbor_agents_past"):
+        sf.validate_canonical_scene(d, ctx="slots")
+    d = _valid_canonical_scene()
+    d["ego_agent_future"] = np.zeros((80, 2), np.float32)  # width != 3
+    with pytest.raises(ValueError, match="ego_agent_future"):
+        sf.validate_canonical_scene(d, ctx="width")
+
+
+def test_validate_canonical_scene_rejects_missing_field():
+    d = _valid_canonical_scene()
+    del d["lanes"]
+    with pytest.raises(ValueError, match="missing required"):
+        sf.validate_canonical_scene(d, ctx="missing")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

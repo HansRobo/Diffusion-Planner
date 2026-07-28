@@ -61,43 +61,29 @@ import numpy as np
 from diffusion_planner.dimensions import (
     MAX_NUM_NEIGHBORS as N_SLOTS,  # canonical neighbor slot count
 )
-from diffusion_planner.dimensions import POSE_DIM  # canonical neighbor future width
 
 from planner_metrics.scene_format import future_to_4col
-from rlvr.autoresearch.scene_features import _load_util_script, session_key
+from rlvr.autoresearch.scene_features import (
+    _load_util_script,
+    canonical_required_fields,
+    session_key,
+    validate_canonical_scene,
+)
 from rlvr.autoresearch.tools.lifelong_replay_memory import _parse_label_quotas, build_memory
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
-# Every field the model consumes at train time (train_epoch indexes ego_agent_past /
-# goal_pose; the encoder consumes the map / static / indicator tensors). Every output
-# NPZ must carry all of these or SFT KeyErrors mid-training — so require them at build
-# time. (``version`` is stamped by us, not required on input.)
-_REQUIRED_FIELDS = (
-    "ego_agent_past",
-    "ego_current_state",
-    "ego_agent_future",
-    "neighbor_agents_past",
-    "neighbor_agents_future",
-    "static_objects",
-    "lanes",
-    "lanes_speed_limit",
-    "lanes_has_speed_limit",
-    "route_lanes",
-    "route_lanes_speed_limit",
-    "route_lanes_has_speed_limit",
-    "polygons",
-    "line_strings",
-    "goal_pose",
-    "turn_indicators",
-    "ego_shape",
-)
+# Every field the model consumes at train time, sourced from the shared canonical
+# schema (scene_features.canonical_required_fields) so the builder's required-field
+# list can never drift from the verifier's. Every output NPZ must carry all of these
+# with a compatible shape or SFT crashes mid-training.
+_REQUIRED_FIELDS = canonical_required_fields()
 
 
 def _require_fields(d, ctx: str) -> None:
-    """Fail loud if any required model-input field NAME is absent. (Field names are
-    the model's input contract; shapes are validated separately by the canonical
-    loader — see _validate_output — so no shape literals live here.)"""
+    """Fail loud if any required model-input field NAME is absent, checked early on the
+    INPUT (before transforms touch tensors). Full shape validation happens on the
+    OUTPUT via the shared ``validate_canonical_scene`` — see ``_validate_output``."""
     missing = [k for k in _REQUIRED_FIELDS if k not in (d.files if hasattr(d, "files") else d)]
     if missing:
         raise ValueError(
@@ -106,24 +92,18 @@ def _require_fields(d, ctx: str) -> None:
 
 
 def _validate_output(path: str) -> None:
-    """Full per-output schema+shape validation, with NO hardcoded shape literals:
-    field-name presence, the canonical slot count (N_SLOTS) and pose width
-    (dimensions.POSE_DIM) for the padded neighbor arrays, and a run of the canonical
-    model-input loader (load_npz_data — builds the tensors + heading_to_cos_sin the
-    model consumes) so a scene that would crash the model is rejected at build time."""
+    """Full per-output schema+shape validation, with NO hardcoded shape literals: the
+    shared ``validate_canonical_scene`` asserts every required field's shape against
+    the canonical ``diffusion_planner.dimensions`` contract (so a scalar/mis-shaped
+    tensor is rejected, not just the neighbor axes), then the canonical model-input
+    loader (``load_npz_data`` — builds the tensors + heading_to_cos_sin the model
+    consumes) is run so a scene that would crash the model is rejected at build time."""
     import torch
 
     from preference_optimization.utils import load_npz_data
 
     d = np.load(path, allow_pickle=True)
-    _require_fields(d, path)
-    nap = d["neighbor_agents_past"]
-    naf = d["neighbor_agents_future"]
-    assert nap.shape[0] == N_SLOTS, (
-        f"{path}: neighbor_agents_past slots {nap.shape[0]} != {N_SLOTS}"
-    )
-    assert naf.shape[0] == N_SLOTS, f"{path}: neighbor future slots {naf.shape[0]} != {N_SLOTS}"
-    assert naf.shape[-1] == POSE_DIM, f"{path}: neighbor future width {naf.shape[-1]} != {POSE_DIM}"
+    validate_canonical_scene(d, ctx=path)
     load_npz_data(path, torch.device("cpu"))
 
 
@@ -339,7 +319,7 @@ def canonicalize_npz(in_path: str, out_path: str) -> None:
     for k, v in list(d.items()):
         if isinstance(v, np.ndarray) and v.dtype.kind == "f":
             d[k] = v.astype(np.float32)
-    d["version"] = np.int64(3)
+    d["version"] = np.int64(3)  # npz FORMAT version (native 4-col); read by loaders
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     np.savez(out_path, **d)
@@ -663,7 +643,10 @@ def main() -> None:
     seen: set[str] = set()
     deduped = []
     for r in rows:
-        p = str(r.get("npz_path"))
+        # realpath so relative/absolute/symlink aliases of one physical scene (which an
+        # older pre-realpath index can still carry) collapse to a single identity —
+        # otherwise the same NPZ can land in both train and val.
+        p = os.path.realpath(str(r.get("npz_path")))
         if p not in seen:
             seen.add(p)
             deduped.append(r)

@@ -57,6 +57,80 @@ _FRAME_RE = re.compile(r"_(\d+)\.npz$")
 _NB_VEH_COL = 8
 _NB_PED_COL = 9
 
+# Bump when the per-scene NPZ feature/format contract changes in a way that makes
+# previously-extracted shards or previously-written canonical NPZs incompatible.
+# Included in the scene_feature_index resume fingerprint (so an index built with an
+# older extractor semantics can't be silently resumed/appended into) and stamped as
+# the canonical NPZ ``version`` field.
+FEATURE_SCHEMA_VERSION = 3
+
+# Raw stored ego/goal pose width in the canonical NPZ: [x, y, heading]. The
+# model-input loader (``preference_optimization.utils.load_npz_data``) expands
+# heading -> (cos, sin) to ``dimensions.POSE_DIM`` at load time, so the stored width
+# is one less than the model-input width.
+_EGO_RAW_POSE_DIM = 3
+
+
+def _canonical_expected_shapes() -> dict[str, tuple]:
+    """Per-field expected canonical-NPZ shape (per-scene, NO leading batch axis),
+    derived from ``diffusion_planner.dimensions`` — the single source of truth for
+    the model's tensor contract. ``None`` on an axis means "variable / not fixed by
+    the contract" (e.g. a per-timestep count or an un-named trailing width); every
+    other axis is asserted exactly. These are the shapes the converter emits and the
+    encoder later slices/indexes, so a malformed tensor (scalar, wrong count, wrong
+    feature width) is caught here instead of crashing mid-training."""
+    from diffusion_planner import dimensions as D
+
+    return {
+        "ego_agent_past": (D.INPUT_T + 1, _EGO_RAW_POSE_DIM),
+        "ego_current_state": (D.EGO_CURRENT_STATE_SHAPE[-1],),
+        "ego_agent_future": (D.OUTPUT_T, _EGO_RAW_POSE_DIM),
+        "neighbor_agents_past": (D.MAX_NUM_NEIGHBORS, D.INPUT_T + 1, D.NEIGHBOR_SHAPE[-1]),
+        "neighbor_agents_future": (D.MAX_NUM_NEIGHBORS, D.OUTPUT_T, D.POSE_DIM),
+        "static_objects": (D.NUM_STATIC_OBJECTS, D.STATIC_OBJECTS_SHAPE[-1]),
+        "lanes": (D.NUM_SEGMENTS_IN_LANE, D.POINTS_PER_LANELET, D.SEGMENT_POINT_DIM),
+        "lanes_speed_limit": (D.NUM_SEGMENTS_IN_LANE, 1),
+        "lanes_has_speed_limit": (D.NUM_SEGMENTS_IN_LANE, 1),
+        "route_lanes": (D.NUM_SEGMENTS_IN_ROUTE, D.POINTS_PER_LANELET, D.SEGMENT_POINT_DIM),
+        "route_lanes_speed_limit": (D.NUM_SEGMENTS_IN_ROUTE, 1),
+        "route_lanes_has_speed_limit": (D.NUM_SEGMENTS_IN_ROUTE, 1),
+        "polygons": (D.NUM_POLYGONS, D.POINTS_PER_POLYGON, None),
+        "line_strings": (D.NUM_LINE_STRINGS, D.POINTS_PER_LINE_STRING, None),
+        "goal_pose": (_EGO_RAW_POSE_DIM,),
+        "turn_indicators": (None,),
+        "ego_shape": (D.EGO_SHAPE_SHAPE[-1],),
+    }
+
+
+def canonical_required_fields() -> tuple[str, ...]:
+    """The model-input field names every canonical NPZ must carry (the keys of the
+    canonical shape contract) — the single source both the builder and the training
+    verifier use, so the required-field list can't drift between them."""
+    return tuple(_canonical_expected_shapes().keys())
+
+
+def validate_canonical_scene(data, ctx: str = "") -> None:
+    """Fail loud unless a loaded canonical scene carries EVERY required model-input
+    field with a shape compatible with the encoder. ``data`` is an npz mapping
+    (``np.load`` result or a dict) indexable by field name. Raises ``ValueError`` on
+    the first missing field or shape mismatch. This is the shared schema validator
+    the builder runs on each output and the R2LPL verifier runs on sampled scenes, so
+    a scene the real pipeline cannot consume never passes as loadable."""
+    keys = data.files if hasattr(data, "files") else data
+    expected = _canonical_expected_shapes()
+    missing = [k for k in expected if k not in keys]
+    if missing:
+        raise ValueError(f"{ctx}: missing required model-input field(s) {missing}")
+    for name, exp in expected.items():
+        shp = getattr(data[name], "shape", None)
+        if shp is None or len(shp) != len(exp):
+            raise ValueError(f"{ctx}: {name} has shape {shp}, expected {len(exp)} dim(s) {exp}")
+        for axis, (got, want) in enumerate(zip(shp, exp)):
+            if want is not None and got != want:
+                raise ValueError(
+                    f"{ctx}: {name} axis {axis} = {got}, expected {want} (got {shp}, want {exp})"
+                )
+
 
 @dataclass(frozen=True)
 class FeatureConfig:
