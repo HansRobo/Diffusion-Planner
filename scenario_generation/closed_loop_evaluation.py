@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import Any
 
 from scenario_generation.closed_loop_ddp import shard_items
-from scenario_generation.closed_loop_eval import aggregate, build_mp4, enumerate_multi_root_routes
+from scenario_generation.closed_loop_eval import (
+    aggregate,
+    build_mp4,
+    enumerate_multi_root_routes,
+    format_summary_lines,
+)
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
@@ -432,10 +437,11 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             build_mp4(png_dir, seg_mp4, self.config.fps)
             video_mp4s.append(seg_mp4)
             if self.config.verbose:
+                obj = metrics["object"]
                 print(
                     f"  [{job.route_key}] segment [{start},{end}] -> {seg_mp4.name}  "
-                    f"coll={metrics['n_collision_steps']} near={metrics['n_near_miss_steps']} "
-                    f"min_clr={metrics['min_clearance']:.3f}"
+                    f"coll={obj['collision_steps']} near={obj['miss_steps']} "
+                    f"min_clr={obj['clearance_min_m']:.3f}"
                 )
 
         extras: dict[str, Any] = {}
@@ -475,25 +481,10 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             )
 
     def print_summary(self, summary: dict) -> None:
-        near_miss_thresh = self.config.params.near_miss_thresh
         n_seg = summary["n_segments"]
         print(f"\n=== closed-loop validation: {n_seg} segments in {summary['elapsed_sec']:.1f}s ===")
-        print(
-            f"collision: {summary['n_segments_with_collision']}/{n_seg} segments "
-            f"(rate {summary['collision_segment_rate']:.4f}), "
-            f"{summary['total_collision_steps']} steps (rate {summary['collision_step_rate']:.6f})"
-        )
-        print(
-            f"near-miss (<= {near_miss_thresh} m): "
-            f"{summary['n_segments_with_near_miss']}/{n_seg} segments "
-            f"(rate {summary['near_miss_segment_rate']:.4f}), {summary['total_near_miss_steps']} steps"
-        )
-        print(
-            f"global_min_clearance={summary['global_min_clearance']:.3f} m  "
-            f"mean_segment_min_clearance={summary['mean_segment_min_clearance']:.3f} m  "
-            f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m"
-        )
-        print(f"total_snaps={summary['total_snaps']}  terminated={summary['terminated_counts']}")
+        for line in format_summary_lines(summary):
+            print(line)
         print(f"videos: per-segment <route>_<start>_<end>.mp4 in {self.out_dir}")
 
     def prepare_ddp_merge_artifacts(self, result: JobRunResult) -> None:
