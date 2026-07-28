@@ -186,6 +186,7 @@ def model_training(args: TrainConfig):
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
         print("Deterministic mode: {}".format(args.deterministic))
+        print("Use AMP: {}".format(args.use_amp))
 
         save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
@@ -206,6 +207,10 @@ def model_training(args: TrainConfig):
 
     # set seed
     set_seed(args.seed + global_rank)
+
+    # Allow TF32 tensor cores for fp32 matmuls (Ampere+). Determinism is preserved:
+    # TF32 results are reproducible across runs on the same hardware.
+    torch.set_float32_matmul_precision("high")
 
     # Deterministic
     if args.deterministic:
@@ -344,6 +349,16 @@ def model_training(args: TrainConfig):
 
     else:
         init_epoch = 0
+
+    if args.compile_model:
+        # In-place compile (nn.Module.compile) keeps state_dict keys unchanged, so
+        # checkpoint save/resume, the EMA copy, and ONNX re-export stay compatible.
+        # Compiling the DDP wrapper lets dynamo's DDPOptimizer split graphs at
+        # gradient-bucket boundaries.
+        if global_rank == 0:
+            print("Compiling model with torch.compile (first steps will be slow)")
+        diffusion_planner.compile()
+
     # logger
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"

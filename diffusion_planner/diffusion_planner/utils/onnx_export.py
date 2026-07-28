@@ -41,7 +41,6 @@ FULL_INPUT_NAMES = [
     "goal_pose",
     "ego_shape",
     "turn_indicators",
-    "delay",
 ]
 
 ENCODER_INPUT_NAMES = [
@@ -68,7 +67,19 @@ DECODER_INPUT_NAMES = [
     "neighbor_agents_past",
 ]
 
-TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0"]
+# The turn-indicator head does not consume any encoder/DiT features; it
+# predicts directly from the (denoised) ego future trajectory and the raw
+# map / turn-indicator-history inputs.
+TURN_INDICATOR_INPUT_NAMES = [
+    "final_x0",
+    "lanes",
+    "lanes_speed_limit",
+    "lanes_has_speed_limit",
+    "route_lanes",
+    "route_lanes_speed_limit",
+    "route_lanes_has_speed_limit",
+    "turn_indicators",
+]
 
 FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit"]
 ENCODER_OUTPUT_NAMES = ["encoding"]
@@ -201,22 +212,45 @@ class DecoderONNXWrapper(nn.Module):
 
 
 class TurnIndicatorONNXWrapper(nn.Module):
-    """Turn-indicator head evaluated once after the external denoising loop."""
+    """Turn-indicator head evaluated once after the external denoising loop.
+
+    The head does not consume the encoder output. It predicts the turn-indicator
+    logit directly from the (denoised) ego future trajectory and the raw
+    map / turn-indicator-history inputs.
+    """
 
     def __init__(self, model: Diffusion_Planner):
         super().__init__()
         self.decoder = model.decoder
 
-    def forward(self, encoding: torch.Tensor, final_x0: torch.Tensor) -> torch.Tensor:
-        batch_size = encoding.shape[0]
+    def forward(
+        self,
+        final_x0: torch.Tensor,
+        lanes: torch.Tensor,
+        lanes_speed_limit: torch.Tensor,
+        lanes_has_speed_limit: torch.Tensor,
+        route_lanes: torch.Tensor,
+        route_lanes_speed_limit: torch.Tensor,
+        route_lanes_has_speed_limit: torch.Tensor,
+        turn_indicators: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size = final_x0.shape[0]
         agent_num = 1 + self.decoder._predicted_neighbor_num
         final_x0 = final_x0.reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
 
-        encoding_pooled = torch.mean(encoding, dim=1)
-        ego_trajectory = final_x0[:, 0, 1::10, :2].reshape(
-            batch_size, 2 * (self.decoder._future_len // 10)
-        )
-        return self.decoder._compute_turn_indicator(ego_trajectory, encoding_pooled)
+        # The predictor conditions on the ego future trajectory
+        # (drop the current-state step at index 0), mirroring the decoder.
+        ego_trajectory = final_x0[:, 0, 1:]
+        inputs = {
+            "lanes": lanes,
+            "lanes_speed_limit": lanes_speed_limit,
+            "lanes_has_speed_limit": lanes_has_speed_limit,
+            "route_lanes": route_lanes,
+            "route_lanes_speed_limit": route_lanes_speed_limit,
+            "route_lanes_has_speed_limit": route_lanes_has_speed_limit,
+            "turn_indicators": turn_indicators,
+        }
+        return self.decoder._compute_turn_indicator(ego_trajectory, inputs)
 
 
 class FullONNXWrapper(nn.Module):
@@ -244,7 +278,6 @@ class FullONNXWrapper(nn.Module):
         goal_pose: torch.Tensor,
         ego_shape: torch.Tensor,
         turn_indicators: torch.Tensor,
-        delay: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         inputs = {
             "sampled_trajectories": sampled_trajectories,
@@ -263,7 +296,6 @@ class FullONNXWrapper(nn.Module):
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
             "turn_indicators": turn_indicators,
-            "delay": delay,
         }
         _, decoder_outputs = self.model(inputs)
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
@@ -303,7 +335,6 @@ def build_dummy_inputs() -> TensorDict:
     inputs["goal_pose"] = torch.randn(1, POSE_DIM, dtype=torch.float32)
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
     inputs["turn_indicators"] = torch.randint(0, 3, (1, INPUT_T + 1), dtype=torch.float32)
-    inputs["delay"] = torch.zeros(1, 1, dtype=torch.float32)
     return inputs
 
 
@@ -316,11 +347,40 @@ def build_decoder_inputs(inputs: TensorDict, encoding: torch.Tensor) -> TensorDi
     }
 
 
-def build_turn_indicator_inputs(encoding: torch.Tensor, final_x0: torch.Tensor) -> TensorDict:
+def build_turn_indicator_inputs(inputs: TensorDict, final_x0: torch.Tensor) -> TensorDict:
     return {
-        "encoding": encoding,
         "final_x0": final_x0,
+        "lanes": inputs["lanes"],
+        "lanes_speed_limit": inputs["lanes_speed_limit"],
+        "lanes_has_speed_limit": inputs["lanes_has_speed_limit"],
+        "route_lanes": inputs["route_lanes"],
+        "route_lanes_speed_limit": inputs["route_lanes_speed_limit"],
+        "route_lanes_has_speed_limit": inputs["route_lanes_has_speed_limit"],
+        "turn_indicators": inputs["turn_indicators"],
     }
+
+
+def _remap_legacy_turn_indicator_keys(state_dict: dict) -> dict:
+    """Remap checkpoints saved when two turn-indicator heads coexisted.
+
+    Legacy checkpoints carry both the old encoding-conditioned linear head
+    (``decoder.turn_indicator_predictor.{weight,bias}``) and the independent
+    network (``decoder.independent_turn_indicator_predictor.*``). The old head
+    was removed and the independent network is now ``turn_indicator_predictor``,
+    so drop the former and rename the latter.
+    """
+    legacy_prefix = "decoder.independent_turn_indicator_predictor."
+    new_prefix = "decoder.turn_indicator_predictor."
+    if not any(k.startswith(legacy_prefix) for k in state_dict):
+        return state_dict
+    remapped = {}
+    for key, value in state_dict.items():
+        if key.startswith(new_prefix):
+            continue  # old encoding-conditioned linear head
+        if key.startswith(legacy_prefix):
+            key = new_prefix + key[len(legacy_prefix) :]
+        remapped[key] = value
+    return remapped
 
 
 def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusion_Planner:
@@ -340,7 +400,8 @@ def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusio
     else:
         state_dict = ckpt["model"]
         print("Loading regular model weights")
-    model.load_state_dict({k.replace("module.", ""): v for k, v in state_dict.items()})
+    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(_remap_legacy_turn_indicator_keys(state_dict))
     return model
 
 
@@ -498,7 +559,7 @@ def export_model_to_onnx(
                 decoder_inputs["diffusion_time"],
                 decoder_inputs["neighbor_agents_past"],
             )
-        turn_indicator_inputs = build_turn_indicator_inputs(encoding, final_x0)
+        turn_indicator_inputs = build_turn_indicator_inputs(export_inputs, final_x0)
 
         export_specs = build_export_specs(
             wrappers,

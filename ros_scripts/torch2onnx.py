@@ -12,11 +12,13 @@ from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.onnx_export import (
     ENCODER_INPUT_NAMES,
     FULL_INPUT_NAMES,
+    TURN_INDICATOR_INPUT_NAMES,
     ModelWrappers,
     NumpyDict,
     TensorDict,
     build_decoder_inputs,
     build_dummy_inputs,
+    build_turn_indicator_inputs,
     build_wrappers,
     export_model_to_onnx,
     load_model,
@@ -194,7 +196,10 @@ def validate_split_models(
             decoder_inputs["diffusion_time"],
             decoder_inputs["neighbor_agents_past"],
         )
-        torch_turn_indicator = wrappers.turn_indicator(torch_encoding, torch_model_output)
+        turn_indicator_inputs = build_turn_indicator_inputs(inputs, torch_model_output)
+        torch_turn_indicator = wrappers.turn_indicator(
+            *(turn_indicator_inputs[name] for name in TURN_INDICATOR_INPUT_NAMES)
+        )
 
     encoder_onnx_inputs = {name: inputs[name].cpu().numpy() for name in ENCODER_INPUT_NAMES}
     onnx_encoding = run_ort_in_subprocess(encoder_onnx_path, encoder_onnx_inputs)[0]
@@ -210,9 +215,9 @@ def validate_split_models(
     compare("model_output", torch_model_output.cpu().numpy(), onnx_model_output)
 
     turn_indicator_onnx_inputs = {
-        "encoding": onnx_encoding,
-        "final_x0": onnx_model_output,
+        name: turn_indicator_inputs[name].cpu().numpy() for name in TURN_INDICATOR_INPUT_NAMES
     }
+    turn_indicator_onnx_inputs["final_x0"] = onnx_model_output
     onnx_turn_indicator = run_ort_in_subprocess(
         turn_indicator_onnx_path, turn_indicator_onnx_inputs
     )[0]

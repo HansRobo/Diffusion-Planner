@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 
@@ -64,6 +66,14 @@ class NoiseScheduleVP:
         """
         log_mean_coeff = self.marginal_log_mean_coeff(t)
         log_std = 0.5 * torch.log(1.0 - torch.exp(2.0 * log_mean_coeff))
+        return log_mean_coeff - log_std
+
+    def marginal_lambda_float(self, t: float) -> float:
+        """
+        Same as `marginal_lambda` but for a Python float `t`, returning a Python float.
+        """
+        log_mean_coeff = self.marginal_log_mean_coeff(t)
+        log_std = 0.5 * math.log(1.0 - math.exp(2.0 * log_mean_coeff))
         return log_mean_coeff - log_std
 
     def inverse_lambda(self, lamb):
@@ -325,11 +335,12 @@ class DPM_Solver:
             A pytorch tensor of the time steps, with the shape (N + 1,).
         """
         if skip_type == "logSNR":
-            lambda_T = self.noise_schedule.marginal_lambda(torch.tensor(t_T).to(device))
-            lambda_0 = self.noise_schedule.marginal_lambda(torch.tensor(t_0).to(device))
-            logSNR_steps = torch.linspace(lambda_T.cpu().item(), lambda_0.cpu().item(), N + 1).to(
-                device
-            )
+            # t_T and t_0 are Python floats, so compute the lambda endpoints with
+            # plain math. Going through GPU tensors + `.item()` would force a
+            # GPU->CPU sync and a torch.compile graph break.
+            lambda_T = self.noise_schedule.marginal_lambda_float(t_T)
+            lambda_0 = self.noise_schedule.marginal_lambda_float(t_0)
+            logSNR_steps = torch.linspace(lambda_T, lambda_0, N + 1, device=device)
             return self.noise_schedule.inverse_lambda(logSNR_steps)
         elif skip_type == "time_uniform":
             return torch.linspace(t_T, t_0, N + 1).to(device)
@@ -439,7 +450,7 @@ class DPM_Solver:
         else:
             raise ValueError("Solver order must be 1 or 2, got {}".format(order))
 
-    def sample(self, x, steps, prefix_mask, skip_type="time_uniform"):
+    def sample(self, x, steps, skip_type="time_uniform"):
         """
         Compute the sample at time `t_end` by DPM-Solver, given the initial `x` at time `t_start`.
 
@@ -478,7 +489,6 @@ class DPM_Solver:
         Args:
             x: (B, P, T, D)
             steps: A `int`. The total number of function evaluations (NFE).
-            prefix_mask: (B, P, T, 1)
             skip_type: A `str`. The type for the spacing of the time steps. 'time_uniform' or 'logSNR' or 'time_quadratic'.
         Returns:
             x_end: A pytorch tensor. The approximated solution at time `t_end`.
@@ -507,16 +517,11 @@ class DPM_Solver:
             timesteps = self.get_time_steps(
                 skip_type=skip_type, t_T=t_T, t_0=t_0, N=steps, device=device
             )
-            timesteps_masked = self.get_time_steps(
-                skip_type=skip_type, t_T=t_T, t_0=t_0, N=steps, device=device
-            )
             assert timesteps.shape[0] - 1 == steps
             # Init the initial values.
             step = 0
             t = timesteps[step]
-            t_masked = timesteps_masked[step]
             t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-            t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
             t_prev_list = [t]
             model_prev_list = [self.model_fn(x, t_BPT1)]
             if self.correcting_xt_fn is not None:
@@ -524,9 +529,7 @@ class DPM_Solver:
             # Init the first `order` values by lower order multistep DPM-Solver.
             for step in range(1, order):
                 t = timesteps[step]
-                t_masked = timesteps_masked[step]
                 t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
                 x = self.multistep_dpm_solver_update(x, model_prev_list, t_prev_list, t, step)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step)
@@ -535,9 +538,7 @@ class DPM_Solver:
             # Compute the remaining values by `order`-th order multistep DPM-Solver.
             for step in range(order, steps + 1):
                 t = timesteps[step]
-                t_masked = timesteps_masked[step]
                 t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
                 # We only use lower order for steps < 10
                 if steps < 10:
                     step_order = min(order, steps + 1 - step)
@@ -556,7 +557,6 @@ class DPM_Solver:
             if denoise_to_zero:
                 t = torch.ones((1,)).to(device) * t_0
                 t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_BPT1 = torch.where(prefix_mask, t_0, t_BPT1)
                 x = self.data_prediction_fn(x, t_BPT1)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step + 1)
