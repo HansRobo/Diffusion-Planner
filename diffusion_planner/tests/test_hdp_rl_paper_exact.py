@@ -14,17 +14,22 @@ Where the sources contradict each other the divergence is recorded in
 ``docs/hdp_rl_paper_fidelity.md``; the tests lock the value this repository ships.
 """
 
+import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 from diffusion_planner.hdp_rl_paper_exact import (
+    HYBRID_FIELDS,
     PAPER_REWARD_VARIANTS,
     apply_paper_exact_settings,
     assert_paper_exact,
+    base_corpus_mismatches,
     paper_exact_fields,
     paper_exact_values,
+    paper_hybrid_values,
 )
 from diffusion_planner.hdp_rl_utils import compute_reward_weighted_loss, compute_reward_weights
 from diffusion_planner.loss import _detached_integral
@@ -35,7 +40,40 @@ from diffusion_planner import hdp_rl_utils
 _NORMALIZATION = Path(__file__).resolve().parents[1] / "normalization.json"
 
 
-def _required_args():
+# The frozen IL base this pipeline post-trains. Paper-exact reads omega and W
+# from here rather than from Table 3, and checks the corpus against it, so the
+# tests need a base run directory that looks like a real one. The values are the
+# ones the shipped base80 run recorded (omega=0.01, W=10, StatePerturbation on).
+_BASE_ARGS = {
+    "planning_hybrid_loss": 0.01,
+    "hybrid_loss_window": 10,
+    "train_set_list": "train.json",
+    "valid_set_list": "valid.json",
+    "extra_train_set_list": [],
+    "extra_train_set_repeat": 0,
+    "filter_skipped": True,
+    "train_subsample_step": 1,
+    "align_legacy_neighbor_futures": False,
+    "use_data_augment": True,
+    "augment_type": "quintic",
+    "augment_prob": 0.5,
+    "num_refine": 20,
+    "ego_past_noise_std": 0.1,
+    "use_smoothing_future_trajectory": True,
+}
+
+_BASE_RUN = Path(tempfile.mkdtemp(prefix="hdp_paper_exact_base_"))
+(_BASE_RUN / "args.json").write_text(json.dumps(_BASE_ARGS), encoding="utf-8")
+
+
+def _write_base(**overrides):
+    """A second base run directory whose args.json differs from the default."""
+    run = Path(tempfile.mkdtemp(prefix="hdp_paper_exact_base_"))
+    (run / "args.json").write_text(json.dumps({**_BASE_ARGS, **overrides}), encoding="utf-8")
+    return run
+
+
+def _required_args(base_run=_BASE_RUN):
     return [
         "--exp_name",
         "paper_exact",
@@ -46,15 +84,15 @@ def _required_args():
         "--valid_set_list",
         "valid.json",
         "--init_weights_path",
-        "init.pth",
+        str(base_run / "latest.pth"),
         "--normalization_file_path",
         str(_NORMALIZATION),
     ]
 
 
-def _paper_args(*extra):
+def _paper_args(*extra, base_run=_BASE_RUN):
     return get_args(
-        _required_args() + ["--rl_paper_exact", "True", "--rl_replay_dir", "replay", *extra]
+        _required_args(base_run) + ["--rl_paper_exact", "True", "--rl_replay_dir", "replay", *extra]
     )
 
 
@@ -70,8 +108,8 @@ def test_table3_rl_hyperparameters_are_locked():
     assert args.rl_reward_w_risk == 1.0  # lambda_risk
     assert args.rl_reward_w_follow == 3.0  # lambda_follow
     assert args.rl_reward_w_lane == 2.5  # lambda_lane
-    assert args.planning_hybrid_loss == 0.1  # omega, IL block, reused by eq:awr_hybrid
-    assert args.hybrid_loss_window == args.future_len - 1  # Appendix: "we set W=L-1"
+    # omega and W are the one published pair this mode does NOT take from Table 3:
+    # see test_hybrid_norm_is_inherited_from_the_frozen_il_base.
 
 
 def test_total_training_reward_matches_the_appendix_cases():
@@ -165,8 +203,6 @@ def test_applied_changes_are_recorded_for_the_run_log():
         ("--num_generations", "8"),
         ("--rl_reward_beta", "0.5"),
         ("--rl_behavior_gate", "safety"),
-        ("--hybrid_loss_window", "10"),
-        ("--planning_hybrid_loss=0.01", None),
     ],
 )
 def test_explicit_flag_contradicting_the_paper_is_rejected(option, value):
@@ -207,14 +243,144 @@ def test_unknown_reward_variant_is_rejected():
 
 def test_horizon_relative_values_follow_the_configured_horizon():
     for horizon in (8, 80):
-        values = paper_exact_values("multi", SimpleNamespace(future_len=horizon))
+        values = paper_hybrid_values(SimpleNamespace(future_len=horizon))
         assert values["hybrid_loss_window"] == horizon - 1
+        assert values["planning_hybrid_loss"] == 0.1
 
 
 def test_apply_rejects_a_field_the_trainer_does_not_have():
     for variant in PAPER_REWARD_VARIANTS:
         with pytest.raises(AttributeError, match="drifted apart"):
             apply_paper_exact_settings(SimpleNamespace(future_len=80), variant)
+
+
+# ──────────── the hybrid norm: inherited from the frozen IL base ─────────────
+#
+# IL is never retrained here, so omega and W are taken from the checkpoint the
+# run post-trains rather than from Table 3. Which pair is better *for RL* is an
+# experiment, and --rl_hybrid_ablation is how it is asked.
+
+
+def test_hybrid_norm_is_inherited_from_the_frozen_il_base():
+    args = _paper_args()
+    assert args.planning_hybrid_loss == _BASE_ARGS["planning_hybrid_loss"]
+    assert args.hybrid_loss_window == _BASE_ARGS["hybrid_loss_window"]
+    # Not the published pair -- and the run log has to say so, with both values.
+    published = paper_hybrid_values(args)
+    assert published != {f: getattr(args, f) for f in HYBRID_FIELDS}
+    log = "\n".join(args.rl_paper_exact_changes)
+    for field in HYBRID_FIELDS:
+        assert field in log
+        assert repr(published[field]) in log
+    assert "frozen IL base" in log
+
+
+def test_hybrid_norm_follows_whichever_base_the_run_starts_from():
+    base = _write_base(planning_hybrid_loss=0.05, hybrid_loss_window=20)
+    args = _paper_args(base_run=base)
+    assert args.planning_hybrid_loss == 0.05
+    assert args.hybrid_loss_window == 20
+
+
+@pytest.mark.parametrize(
+    "option, value",
+    [
+        ("--planning_hybrid_loss", "0.1"),  # tab:param omega
+        ("--hybrid_loss_window", "79"),  # Appendix W = L - 1
+    ],
+)
+def test_explicit_hybrid_flag_contradicting_the_base_is_rejected(option, value):
+    with pytest.raises(ValueError, match="does not retrain IL"):
+        _paper_args(option, value)
+
+
+def test_explicit_hybrid_flag_agreeing_with_the_base_is_accepted():
+    args = _paper_args("--planning_hybrid_loss", "0.01", "--hybrid_loss_window", "10")
+    assert args.planning_hybrid_loss == 0.01
+    assert args.hybrid_loss_window == 10
+
+
+def test_ablation_releases_the_hybrid_norm_and_stamps_the_run():
+    args = _paper_args(
+        "--rl_hybrid_ablation",
+        "True",
+        "--planning_hybrid_loss",
+        "0.1",
+        "--hybrid_loss_window",
+        "79",
+    )
+    assert args.planning_hybrid_loss == 0.1
+    assert args.hybrid_loss_window == 79
+    log = "\n".join(args.rl_paper_exact_changes)
+    assert "released for ablation" in log
+    # The arm is only readable if the log carries both comparison points.
+    assert "frozen base" in log and "paper" in log
+
+
+def test_a_base_without_args_json_is_rejected():
+    orphan = Path(tempfile.mkdtemp(prefix="hdp_paper_exact_orphan_")) / "run"
+    orphan.mkdir()
+    with pytest.raises(ValueError, match="no args.json was found beside it"):
+        _paper_args(base_run=orphan)
+
+
+# ─────────── the corpus: identical to the run that produced the base ─────────
+
+
+@pytest.mark.parametrize(
+    "option, value",
+    [
+        ("--train_subsample_step", "10"),
+        ("--extra_train_set_repeat", "10"),
+        ("--filter_skipped", "False"),
+        ("--align_legacy_neighbor_futures", "True"),
+    ],
+)
+def test_a_different_corpus_than_the_base_is_rejected(option, value):
+    with pytest.raises(ValueError, match="corpus and the input perturbation"):
+        _paper_args(option, value)
+
+
+@pytest.mark.parametrize(
+    "option, value",
+    [
+        ("--use_data_augment", "False"),
+        ("--augment_prob", "0.25"),
+        ("--augment_type", "bridge"),
+        ("--num_refine", "5"),
+        ("--ego_past_noise_std", "0.0"),
+        ("--use_smoothing_future_trajectory", "False"),
+    ],
+)
+def test_a_different_perturbation_than_the_base_is_rejected(option, value):
+    with pytest.raises(ValueError, match="corpus and the input perturbation"):
+        _paper_args(option, value)
+
+
+def test_corpus_check_can_be_waived_deliberately():
+    args = _paper_args("--rl_base_corpus_check", "False", "--train_subsample_step", "10")
+    assert args.train_subsample_step == 10
+
+
+def test_extra_manifests_are_compared_by_basename():
+    # The same artifact has a different absolute path in each checkout, so the
+    # check must not fire on the prefix alone.
+    base_args = {**_BASE_ARGS, "extra_train_set_list": ["/node02/artifacts/right_turn.json"]}
+    args = SimpleNamespace(
+        **{k: v for k, v in _BASE_ARGS.items() if k != "extra_train_set_list"},
+        extra_train_set_list=["/node01/artifacts/right_turn.json"],
+    )
+    assert base_corpus_mismatches(args, base_args) == []
+    args.extra_train_set_list = ["/node01/artifacts/left_turn.json"]
+    assert any("extra_train_set_list" in m for m in base_corpus_mismatches(args, base_args))
+
+
+def test_a_base_that_does_not_record_a_corpus_field_is_reported():
+    base_args = {k: v for k, v in _BASE_ARGS.items() if k != "augment_prob"}
+    args = SimpleNamespace(**_BASE_ARGS)
+    assert base_corpus_mismatches(args, base_args) == [
+        "  augment_prob: the base args.json does not record it"
+    ]
 
 
 # ───────────────────── Algorithm 2, verbatim reimplementation ───────────────

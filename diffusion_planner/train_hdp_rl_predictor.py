@@ -35,13 +35,17 @@ from diffusion_planner.hdp_rl_epoch import (
     validate_hdp_reward_policy,
 )
 from diffusion_planner.hdp_rl_paper_exact import (
+    HYBRID_FIELDS,
     PAPER_REWARD_VARIANTS,
+    apply_frozen_base_hybrid,
     apply_paper_exact_settings,
+    assert_base_corpus_identical,
     assert_paper_exact,
     explicit_paper_exact_dests,
 )
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import (
+    _checkpoint_args_path,
     assert_checkpoint_compatible,
     closed_loop_validate,
     load_weights_only,
@@ -847,6 +851,22 @@ def get_args(argv: list[str] | None = None):
         "'single' = r_safety alone",
     )
     parser.add_argument(
+        "--rl_hybrid_ablation",
+        type=boolean,
+        default=_train_config_default("rl_hybrid_ablation"),
+        help="release --planning_hybrid_loss / --hybrid_loss_window from the frozen IL "
+        "base's values and stamp the run as an omega/W ablation arm; the published "
+        "pair is only reachable this way because IL is never retrained",
+    )
+    parser.add_argument(
+        "--rl_base_corpus_check",
+        type=boolean,
+        default=_train_config_default("rl_base_corpus_check"),
+        help="under --rl_paper_exact, require the corpus and the input perturbation to "
+        "be the ones the frozen IL base was trained on; set False only to post-train "
+        "on a deliberately different distribution",
+    )
+    parser.add_argument(
         "--rl_reward_normalize",
         "--official_reward_normalize",
         dest="rl_reward_normalize",
@@ -1120,6 +1140,29 @@ def get_args(argv: list[str] | None = None):
         raise ValueError("--resume_model_path and --init_weights_path are mutually exclusive")
     if args.resume_model_path is None and args.init_weights_path is None:
         raise ValueError("HDP-RL requires --init_weights_path or --resume_model_path")
+    if args.rl_paper_exact:
+        # omega and W are the geometry of the norm the frozen IL base was fitted in,
+        # and IL is never retrained, so they are inherited from that base rather than
+        # pinned to Table 3. This runs after the mutual-exclusion checks above so the
+        # checkpoint it reads is unambiguous.
+        base_path = args.init_weights_path or args.resume_model_path
+        base_args_path = _checkpoint_args_path(base_path)
+        base_args = None
+        if base_args_path is not None:
+            with open(base_args_path, "r", encoding="utf-8") as handle:
+                base_args = json.load(handle)
+        base_label = str(base_args_path) if base_args_path is not None else base_path
+        args.rl_paper_exact_changes += apply_frozen_base_hybrid(
+            args,
+            base_args,
+            base_label,
+            explicit_paper_exact_dests(parser, argv, fields=HYBRID_FIELDS),
+            ablation=args.rl_hybrid_ablation,
+        )
+        # A resume compares against its own args.json, where the corpus is by
+        # construction the one this check already passed on the fresh run.
+        if args.rl_base_corpus_check and base_args is not None and args.init_weights_path:
+            assert_base_corpus_identical(args, base_args, base_label)
     if args.train_subsample_step < 1:
         raise ValueError("--train_subsample_step must be >= 1")
     if args.extra_train_set_repeat < 0:
@@ -1611,6 +1654,13 @@ def model_training(args):
             # Print the full pin table so the log itself is the fidelity record: every
             # field the published configuration overrode, with its previous value.
             print("HDP-RL paper-exact mode: ON (reward variant: {})".format(args.rl_paper_reward))
+            if args.rl_hybrid_ablation:
+                print(
+                    "  omega/W ablation arm: planning_hybrid_loss={} hybrid_loss_window={} "
+                    "(released from the frozen IL base on purpose)".format(
+                        args.planning_hybrid_loss, args.hybrid_loss_window
+                    )
+                )
             if args.rl_paper_exact_changes:
                 for change in args.rl_paper_exact_changes:
                     print("  paper-exact pin: {}".format(change))

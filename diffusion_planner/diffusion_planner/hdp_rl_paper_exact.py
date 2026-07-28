@@ -60,6 +60,211 @@ def resolve_paper_exact_value(setting: PaperExactSetting, args: Any) -> Any:
     return setting.value
 
 
+# ---------------------------------------------------------------------------
+# The hybrid norm: inherited from the frozen IL base, not pinned to the paper
+# ---------------------------------------------------------------------------
+#
+# Eq. (awr_hybrid) weights the *hybrid* distance, so omega and W really do
+# belong to the RL objective and not only to imitation pretraining. That is
+# precisely why they are not pinned to Table 3 here. This pipeline does not
+# retrain IL, and omega/W define the geometry of the norm the frozen base was
+# fitted under: post-training a base fitted at omega=0.01 / W=10 under
+# omega=0.1 / W=L-1 rescales the waypoint term 10x and widens the detach
+# window, so every RL gradient would be measured in a norm the policy has
+# never been optimized for.
+#
+# Paper-exact therefore inherits both fields from the checkpoint the run
+# starts from, and refuses a conflicting explicit value. Which pair is better
+# *for RL* is an empirical question, and ``--rl_hybrid_ablation`` is how it
+# gets asked: it releases the two fields and stamps the run as an ablation
+# arm, so a sweep reads as a sweep in args.json rather than as a paper-exact
+# run that quietly disagrees with its own base.
+
+HYBRID_FIELDS: tuple[str, ...] = ("planning_hybrid_loss", "hybrid_loss_window")
+
+_PAPER_HYBRID_SOURCES: Mapping[str, str] = {
+    "planning_hybrid_loss": "neurips_2026.tex tab:param -- Hybrid loss weight omega = 0.1",
+    "hybrid_loss_window": ("neurips_2026.tex Appendix Hybrid Loss -- 'In practice, we set W=L-1'"),
+}
+
+
+def paper_hybrid_values(args: Any) -> dict[str, Any]:
+    """What Table 3 and the Hybrid Loss appendix publish, for the run log.
+
+    Reported alongside the inherited values so a paper-exact run states plainly
+    where it departs from the paper and why.
+    """
+    return {
+        "planning_hybrid_loss": 0.1,
+        "hybrid_loss_window": _horizon_minus_one(args),
+    }
+
+
+def apply_frozen_base_hybrid(
+    args: Any,
+    base_args: Mapping[str, Any] | None,
+    base_label: str,
+    explicit_fields: Iterable[str],
+    *,
+    ablation: bool = False,
+) -> list[str]:
+    """Inherit the hybrid norm from the frozen IL base this run starts from.
+
+    ``base_args`` is the ``args.json`` written beside that checkpoint. Returns
+    one human-readable line per inherited field, for the run log and args.json.
+    Raises when an explicit flag contradicts the base and ``ablation`` is off.
+    """
+    if ablation:
+        published = paper_hybrid_values(args)
+        return [
+            "hybrid norm released for ablation: "
+            + ", ".join(f"{f}={getattr(args, f)!r}" for f in HYBRID_FIELDS)
+            + " (frozen base "
+            + (
+                ", ".join(f"{f}={base_args.get(f, '?')!r}" for f in HYBRID_FIELDS)
+                if base_args is not None
+                else "unknown"
+            )
+            + "; paper "
+            + ", ".join(f"{f}={published[f]!r}" for f in HYBRID_FIELDS)
+            + ")"
+        ]
+
+    if base_args is None:
+        raise ValueError(
+            "--rl_paper_exact inherits the hybrid norm (omega, W) from the checkpoint the run "
+            "starts from, but no args.json was found beside it. Point --init_weights_path at a "
+            "run directory that contains args.json, or pass --rl_hybrid_ablation True to set "
+            "omega and W deliberately as an ablation arm."
+        )
+
+    explicit = set(explicit_fields)
+    published = paper_hybrid_values(args)
+    conflicts: list[str] = []
+    changes: list[str] = []
+    for field in HYBRID_FIELDS:
+        if field not in base_args:
+            raise ValueError(
+                f"{base_label} does not record {field!r}, so the frozen IL base's hybrid norm "
+                "cannot be reproduced. Pass --rl_hybrid_ablation True to set it deliberately."
+            )
+        base_value = base_args[field]
+        current = getattr(args, field)
+        if field in explicit and current != base_value:
+            conflicts.append(
+                f"  --{field} {current!r} != {base_value!r} in {base_label}\n"
+                f"      [frozen IL base; the paper publishes {published[field]!r} "
+                f"-- {_PAPER_HYBRID_SOURCES[field]}]"
+            )
+            continue
+        # Both branches carry the same citation, including the published value
+        # this run does not use: a departure from the paper has to be readable
+        # in the run log whether or not the launcher happened to pass it already.
+        provenance = (
+            f"\n      [inherited from the frozen IL base {base_label}; "
+            f"the paper publishes {published[field]!r} -- {_PAPER_HYBRID_SOURCES[field]}]"
+        )
+        if current != base_value:
+            changes.append(f"{field}: {current!r} -> {base_value!r}{provenance}")
+            setattr(args, field, base_value)
+        else:
+            changes.append(f"{field}: {base_value!r} (unchanged){provenance}")
+    if conflicts:
+        raise ValueError(
+            "--rl_paper_exact keeps the hybrid norm of the IL base it post-trains, because this "
+            "pipeline does not retrain IL. These explicit overrides contradict that base:\n"
+            + "\n".join(conflicts)
+            + "\n  Drop them, or pass --rl_hybrid_ablation True to run this as a deliberate "
+            "omega/W ablation arm."
+        )
+    return changes
+
+
+# ---------------------------------------------------------------------------
+# The corpus: identical to the run that produced the frozen IL base
+# ---------------------------------------------------------------------------
+#
+# RL post-training moves the same policy on the same distribution; a different
+# corpus or a different perturbation makes the RL delta unattributable, because
+# any change could be the objective or could be the data. These fields are
+# therefore compared against the base run's args.json rather than trusted to
+# match by convention.
+#
+# The extra manifests are compared by basename: they are addressed as
+# ``${REPO}/artifacts/...``, so the same file has a different absolute path in
+# each checkout. Contents are verified separately by the launcher's input
+# fingerprint.
+
+_BASE_DATA_FIELDS: tuple[str, ...] = (
+    "train_set_list",
+    "valid_set_list",
+    "extra_train_set_repeat",
+    "filter_skipped",
+    "train_subsample_step",
+    "align_legacy_neighbor_futures",
+)
+
+_BASE_AUGMENT_FIELDS: tuple[str, ...] = (
+    "use_data_augment",
+    "augment_prob",
+    "augment_type",
+    "num_refine",
+    "ego_past_noise_std",
+    "use_smoothing_future_trajectory",
+)
+
+
+def _basenames(paths: Any) -> list[str]:
+    if paths is None:
+        return []
+    if isinstance(paths, str):
+        paths = [paths]
+    return sorted(str(p).rsplit("/", 1)[-1] for p in paths)
+
+
+def base_corpus_mismatches(args: Any, base_args: Mapping[str, Any]) -> list[str]:
+    """Every way this run's corpus or perturbation differs from the IL base's."""
+    mismatches: list[str] = []
+    for field in _BASE_DATA_FIELDS + _BASE_AUGMENT_FIELDS:
+        if field not in base_args:
+            mismatches.append(f"  {field}: the base args.json does not record it")
+            continue
+        current = getattr(args, field, None)
+        base_value = base_args[field]
+        if current != base_value:
+            mismatches.append(f"  --{field} {current!r} != {base_value!r} in the IL base")
+    current_extra = _basenames(getattr(args, "extra_train_set_list", None))
+    base_extra = _basenames(base_args.get("extra_train_set_list"))
+    if current_extra != base_extra:
+        mismatches.append(
+            f"  --extra_train_set_list {current_extra} != {base_extra} in the IL base"
+        )
+    # The normalizer is compared by resolved content, not by path: the same file
+    # lives at a different --normalization_file_path in each checkout.
+    for field in ("observation_normalizer", "state_normalizer"):
+        if field not in base_args:
+            continue
+        current = getattr(args, field, None)
+        current = current if isinstance(current, dict) else getattr(current, "config", None)
+        if current is not None and current != base_args[field]:
+            mismatches.append(f"  {field} differs from the IL base's resolved normalizer")
+    return mismatches
+
+
+def assert_base_corpus_identical(args: Any, base_args: Mapping[str, Any], base_label: str) -> None:
+    """Refuse to post-train on a corpus the frozen IL base was not fitted on."""
+    mismatches = base_corpus_mismatches(args, base_args)
+    if mismatches:
+        raise ValueError(
+            "--rl_paper_exact post-trains a frozen IL base, so the corpus and the input "
+            f"perturbation must be the ones that base was trained on ({base_label}). "
+            "These differ:\n"
+            + "\n".join(mismatches)
+            + "\n  Match the base run's launcher, or pass --rl_base_corpus_check False to "
+            "post-train on a deliberately different distribution."
+        )
+
+
 # Fields shared by both published reward settings.
 _COMMON: tuple[PaperExactSetting, ...] = (
     # ---- Table 3 (tab:param), RL block -------------------------------------
@@ -108,21 +313,6 @@ _COMMON: tuple[PaperExactSetting, ...] = (
         "rl_diffusion_t_max",
         1.0,
         "neurips_2026.tex eq:awr_hybrid -- expectation over the full t range",
-    ),
-    # ---- The hybrid norm inside eq:awr_hybrid ------------------------------
-    # Eq. (awr_hybrid) weights the *hybrid* distance, so omega and W are part of
-    # the RL objective, not only of imitation pretraining. Both published
-    # implementations disagree with Table 3 here; see docs/hdp_rl_paper_fidelity.md.
-    PaperExactSetting(
-        "planning_hybrid_loss",
-        0.1,
-        "neurips_2026.tex tab:param -- Hybrid loss weight omega = 0.1; "
-        "code_rl.tex Algorithm 2 forwards omega into hybrid_loss()",
-    ),
-    PaperExactSetting(
-        "hybrid_loss_window",
-        _horizon_minus_one,
-        "neurips_2026.tex Appendix Hybrid Loss -- 'In practice, we set W=L-1'",
     ),
     # ---- Appendix app:rewards, "Total Training Reward" ---------------------
     PaperExactSetting(

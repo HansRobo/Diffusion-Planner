@@ -24,7 +24,8 @@ NUM_WORKERS=${HDP_RL_NUM_WORKERS:-8}
 TRAIN_SUBSAMPLE_STEP=${HDP_RL_TRAIN_SUBSAMPLE_STEP:-1}
 DEFAULT_RL_TRAIN_LIST=${HDP_DEFAULT_RL_TRAIN_LIST:-${HDP_DEFAULT_SFT_TRAIN_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260707_vehicle_params_with_mirror/path_list_train_concatenated.json}}
 TRAIN_LIST=${HDP_RL_TRAIN_LIST:-${DEFAULT_RL_TRAIN_LIST}}
-VALID_LIST=${HDP_RL_VALID_LIST:?submit with HDP_RL_VALID_LIST=<manifest>}
+DEFAULT_RL_VALID_LIST=${HDP_DEFAULT_RL_VALID_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260702_basic_dataset/path_list_valid_sft_balanced.json}
+VALID_LIST=${HDP_RL_VALID_LIST:-${DEFAULT_RL_VALID_LIST}}
 if [[ -n "${HDP_RL_FILTER_SKIPPED+x}" ]]; then
   FILTER_SKIPPED=${HDP_RL_FILTER_SKIPPED}
 elif [[ "${TRAIN_LIST}" == "${DEFAULT_RL_TRAIN_LIST}" ]]; then
@@ -32,8 +33,24 @@ elif [[ "${TRAIN_LIST}" == "${DEFAULT_RL_TRAIN_LIST}" ]]; then
 else
   FILTER_SKIPPED=True
 fi
-EXTRA_LISTS=${HDP_RL_EXTRA_LISTS:-}
-EXTRA_REPEAT=${HDP_RL_EXTRA_REPEAT:-0}
+# RL post-trains the IL base on the base's own corpus: same three right-turn
+# manifests at the same x10 repeat, so the RL delta is attributable to the
+# objective and not to a distribution shift. The trainer re-checks this against
+# the base checkpoint's args.json under --rl_paper_exact.
+RIGHT_TURN_DIR=${HDP_RIGHT_TURN_DIR:-${REPO}/artifacts/right_turn_is_skipped_filtered_20260716}
+DEFAULT_EXTRA_LISTS=${RIGHT_TURN_DIR}/path_list_train_unprotected_right_turn_is_skipped_filtered.json:${RIGHT_TURN_DIR}/path_list_unprotected_right_turn_xx1_is_skipped_filtered.json:${RIGHT_TURN_DIR}/path_list_unprotected_right_turn_xx1_psim_is_skipped_filtered.json
+EXTRA_LISTS=${HDP_RL_EXTRA_LISTS-${DEFAULT_EXTRA_LISTS}}
+EXTRA_REPEAT=${HDP_RL_EXTRA_REPEAT:-10}
+# StatePerturbation, identical to the base run. RL applies it before the rollout,
+# so the reward, the gate and the regression all see the same perturbed scene.
+USE_DATA_AUGMENT=${HDP_RL_USE_DATA_AUGMENT:-True}
+AUGMENT_TYPE=${HDP_RL_AUGMENT_TYPE:-quintic}
+AUGMENT_PROB=${HDP_RL_AUGMENT_PROB:-0.5}
+NUM_REFINE=${HDP_RL_NUM_REFINE:-20}
+EGO_PAST_NOISE_STD=${HDP_RL_EGO_PAST_NOISE_STD:-0.1}
+USE_SMOOTHING_FUTURE_TRAJECTORY=${HDP_RL_USE_SMOOTHING_FUTURE_TRAJECTORY:-True}
+HYBRID_ABLATION=${HDP_RL_HYBRID_ABLATION:-False}
+BASE_CORPUS_CHECK=${HDP_RL_BASE_CORPUS_CHECK:-True}
 INIT_CKPT=${HDP_RL_INIT_CKPT:-}
 RESUME_CKPT=${HDP_RL_RESUME_CKPT:-}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
@@ -176,8 +193,11 @@ case "${PAPER_EXACT}" in
     paper_pin NUM_GENERATIONS HDP_RL_NUM_GENERATIONS 32
     paper_pin REWARD_BETA HDP_RL_REWARD_BETA 1.0
     paper_pin EMA_UPDATE_RATE HDP_RL_EMA_UPDATE_RATE 0.05
-    paper_pin PLANNING_HYBRID_LOSS HDP_RL_PLANNING_HYBRID_LOSS 0.1
-    paper_pin HYBRID_LOSS_WINDOW HDP_RL_HYBRID_LOSS_WINDOW 79 # W = L - 1, L = 80
+    # omega and W are deliberately NOT pinned here. They are the geometry of the
+    # norm the frozen IL base was fitted in, IL is never retrained, and the trainer
+    # inherits them from the base checkpoint's args.json. The published pair
+    # (0.1, L-1) is reachable only through HDP_RL_HYBRID_ABLATION=True, which
+    # stamps the run as an ablation arm.
     # The published reward: a plain weighted sum of the four appendix terms.
     paper_pin REWARD_SOURCE HDP_RL_REWARD_SOURCE native
     paper_pin REWARD_AGGREGATION HDP_RL_REWARD_AGGREGATION weighted_sum
@@ -208,6 +228,32 @@ case "${PAPER_EXACT}" in
     exit 2
     ;;
 esac
+
+case "${HYBRID_ABLATION}" in
+  True | true | 1) HYBRID_ABLATION=True ;;
+  False | false | 0) HYBRID_ABLATION=False ;;
+  *)
+    echo "HDP_RL_HYBRID_ABLATION must be True or False; got ${HYBRID_ABLATION}" >&2
+    exit 2
+    ;;
+esac
+
+# omega and W are inherited from the IL base under --rl_paper_exact, so the
+# launcher must not hand the trainer its own defaults: argparse cannot tell a
+# default apart from a deliberate flag, and 0.01 / 10 would arrive as an explicit
+# override and be rejected against any base not fitted at that pair. They are
+# passed only when the operator set them, or when this is an ablation arm.
+HYBRID_ARGS=()
+hybrid_arg() { # hybrid_arg <flag> <env-var> <value>
+  local flag=$1 env=$2 value=$3
+  if [[ "${PAPER_EXACT}" == "True" && "${HYBRID_ABLATION}" != "True" && -z "${!env+set}" ]]; then
+    echo "paper-exact: ${flag} inherited from the IL base checkpoint's args.json"
+    return
+  fi
+  HYBRID_ARGS+=("${flag}" "${value}")
+}
+hybrid_arg --planning_hybrid_loss HDP_RL_PLANNING_HYBRID_LOSS "${PLANNING_HYBRID_LOSS}"
+hybrid_arg --hybrid_loss_window HDP_RL_HYBRID_LOSS_WINDOW "${HYBRID_LOSS_WINDOW}"
 
 RUN_NAME=${HDP_RL_RUN_NAME:-hdp_rl_${WORLD_SIZE}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
 SAVE_ROOT=${HDP_RL_SAVE_ROOT:-${REPO}/outputs}
@@ -463,6 +509,12 @@ TRAIN_ARGS=(
   "${EXTRA_ARGS[@]}" \
   --align_legacy_neighbor_futures False \
   --normalization_file_path "${REPO}/diffusion_planner/normalization.json" \
+  --use_data_augment "${USE_DATA_AUGMENT}" \
+  --augment_type "${AUGMENT_TYPE}" \
+  --augment_prob "${AUGMENT_PROB}" \
+  --num_refine "${NUM_REFINE}" \
+  --ego_past_noise_std "${EGO_PAST_NOISE_STD}" \
+  --use_smoothing_future_trajectory "${USE_SMOOTHING_FUTURE_TRAJECTORY}" \
   --num_workers "${NUM_WORKERS}" \
   --train_subsample_step "${TRAIN_SUBSAMPLE_STEP}" \
   --batch_size "${BATCH_SIZE}" \
@@ -546,7 +598,6 @@ TRAIN_ARGS=(
   --rl_init_use_ema True \
   --rl_train_scope "${TRAIN_SCOPE}" \
   "${CKPT_ARGS[@]}" \
-  --use_data_augment False \
   --enable_epdms_eval True \
   --epdms_eval_use_agent_boxes True \
   --epdms_eval_use_road_border True \
@@ -561,10 +612,11 @@ TRAIN_ARGS=(
   --num_heads 8 \
   --diffusion_sample_steps 6 \
   --use_velocity_representation True \
-  --planning_hybrid_loss "${PLANNING_HYBRID_LOSS}" \
-  --hybrid_loss_window "${HYBRID_LOSS_WINDOW}" \
+  "${HYBRID_ARGS[@]}" \
   --rl_paper_exact "${PAPER_EXACT}" \
   --rl_paper_reward "${PAPER_REWARD}" \
+  --rl_hybrid_ablation "${HYBRID_ABLATION}" \
+  --rl_base_corpus_check "${BASE_CORPUS_CHECK}" \
   --coeff_road_border_loss 0.0 \
   --coeff_neighbor_collision_loss 0.0 \
   --use_ema True \

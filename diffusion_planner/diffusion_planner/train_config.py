@@ -167,6 +167,16 @@ class TrainConfig:
     # ``multi`` = lambda_risk r_risk + lambda_follow r_follow + lambda_lane r_lane (HDP-RL);
     # ``single`` = r_safety alone (HDP-RL dagger, the paper's single-reward baseline).
     rl_paper_reward: Literal["multi", "single"] = "multi"
+    # The one pair paper-exact does NOT take from the paper. ``planning_hybrid_loss``
+    # and ``hybrid_loss_window`` are the geometry of the norm the IL base was fitted
+    # in, and this pipeline never retrains IL, so paper-exact inherits them from the
+    # checkpoint it post-trains. Setting this True releases them and marks the run as
+    # an omega/W ablation arm -- the only way to reach the published pair.
+    rl_hybrid_ablation: bool = False
+    # RL moves the same policy on the same distribution, so paper-exact compares the
+    # corpus and the input perturbation against the IL base's args.json instead of
+    # trusting the launcher to match by convention.
+    rl_base_corpus_check: bool = True
     num_generations: int = 8
     rl_reward_normalize: Literal["group", "batch", "none"] = "group"
     rl_reward_beta: float = 0.5

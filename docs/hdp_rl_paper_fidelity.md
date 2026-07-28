@@ -68,8 +68,8 @@ that a future default change cannot silently break a paper-exact run.
 | `rl_reward_w_risk` | 1.0 | 1.0 | `tab:param` λ_risk |
 | `rl_reward_w_follow` | 3.0 | 3.0 | `tab:param` λ_follow |
 | `rl_reward_w_lane` | 2.5 | 2.5 | `tab:param` λ_lane |
-| `planning_hybrid_loss` (ω) | 0.01 | **0.1** | `tab:param` IL / Hybrid loss weight — see contradiction 2 |
-| `hybrid_loss_window` (W) | 10 | **L − 1 = 79** | hybrid-loss appendix, "In practice, we set W=L−1" — see contradiction 3 |
+| `planning_hybrid_loss` (ω) | 0.01 | *inherited from the frozen IL base* | `tab:param` publishes 0.1 — see contradiction 2 and "The one pair not taken from the paper" |
+| `hybrid_loss_window` (W) | 10 | *inherited from the frozen IL base* | hybrid-loss appendix publishes W = L−1 — see contradiction 3 and the section below |
 | `advantage_eps` | 1e-6 | 1e-6 | `code_rl.tex` `r.std() + 1e-6` |
 | `rl_reward_normalize` | `group` | `group` | `ap:implementation`, reward group normalization |
 | `rl_init_use_ema` | True | True | Sec. RL, `pi^0` is the hybrid-loss imitation model |
@@ -117,7 +117,9 @@ without a replay cache would silently train ten epochs on nothing.
 
 These are properties of the published material, not of this repository. Where the
 paper and the released code disagree, paper-exact mode follows the **paper**,
-because the `.tex` is the only self-consistent, citable configuration.
+because the `.tex` is the only self-consistent, citable configuration. The single
+exception is the hybrid norm (ω, W) of contradictions 2 and 3, which is inherited
+from the frozen IL base instead — see "The one pair not taken from the paper".
 
 ### 1. `code_rl.tex` Algorithm 2 does not parse
 
@@ -156,12 +158,9 @@ We implement the corrected form. `tests/test_hdp_rl_paper_exact.py` locks
   baseline the paper argues against in "RL-Hybrid Loss Matters".
 
 This repository's normal default is 0.01 (it follows the released nuplan trainer,
-which is the codebase our planner descends from). Paper-exact mode pins 0.1.
-
-**Practical consequence:** our IL base checkpoints were trained at ω = 0.01, so a
-strictly paper-exact RL run changes the waypoint-term scale 10× relative to the
-pretraining it starts from. A fully paper-exact pipeline would pretrain at ω = 0.1
-as well. This is the one pin worth reviewing before a long run.
+which is the codebase our planner descends from). Paper-exact mode does **not**
+pin 0.1: it inherits ω from the IL base it post-trains — see "The one pair not
+taken from the paper" below.
 
 ### 3. W = L−1 (paper) vs a real axis bug (nuplan) vs W = 1 (navsim)
 
@@ -186,7 +185,67 @@ as well. This is the one pin worth reviewing before a long run.
 Our `diffusion_planner/loss.py:80` `_detached_integral` uses the correct time-axis
 slice, and `tests/test_hdp_rl_paper_exact.py` both checks it against a verbatim port
 of the navsim function (values *and* gradients, for W = 1, 3, 7, 8) and guards
-against the nuplan axis bug regressing into it.
+against the nuplan axis bug regressing into it. As with ω, paper-exact mode does
+not pin W = L−1; it inherits it.
+
+## The one pair not taken from the paper: the hybrid norm (ω, W)
+
+`eq:awr_hybrid` weights the *hybrid* distance, and `code_rl.tex` Algorithm 2
+forwards `W, omega` straight into `hybrid_loss()`, so ω and W genuinely belong to
+the RL objective and not only to imitation pretraining. That is exactly why
+paper-exact mode does not pin them.
+
+**IL is never retrained in this pipeline.** RL post-trains a frozen IL base, and
+ω and W are the geometry of the norm that base was fitted in. Our base80
+checkpoint was fitted at ω = 0.01, W = 10. Running RL on it at ω = 0.1, W = L−1
+rescales the waypoint term 10× and widens the detach window from 10 steps to 79 —
+every RL gradient would then be measured in a norm the policy has never been
+optimized for. Pinning the published pair would be paper-exact in the table and
+not paper-exact in the thing the table describes.
+
+So `--rl_paper_exact` reads ω and W out of the `args.json` beside the checkpoint
+in `--init_weights_path` and copies them onto the run:
+
+- the run log and `args.json` record the inherited value **and** the published
+  value it departs from, with the citation, so the departure is never silent;
+- an explicit `--planning_hybrid_loss` / `--hybrid_loss_window` that contradicts
+  the base is **rejected**, with the same citation in the error;
+- a base directory with no `args.json` is rejected rather than guessed at.
+
+Which pair is better *for RL* is an empirical question, not a citation question,
+and `--rl_hybrid_ablation True` is how it gets asked: it releases both fields and
+stamps the run as an ω/W ablation arm in `args.json`, so a sweep reads as a sweep
+instead of as a paper-exact run that quietly disagrees with its own base. The
+published pair (ω = 0.1, W = L−1) is reachable only through that flag:
+
+```bash
+HDP_RL_HYBRID_ABLATION=True \
+HDP_RL_PLANNING_HYBRID_LOSS=0.1 HDP_RL_HYBRID_LOSS_WINDOW=79 \
+  sbatch diffusion_planner/slurm/run_hdp_rl.sbatch
+```
+
+## The corpus and the input perturbation must match the IL base
+
+RL post-training moves the same policy on the same distribution. If the corpus or
+the augmentation differs from the base run's, the RL delta is unattributable —
+any change could be the objective or could be the data. Paper-exact mode therefore
+compares the run against the base's `args.json` and refuses a mismatch:
+
+- corpus: `train_set_list`, `valid_set_list`, `extra_train_set_list` (by basename,
+  since the same artifact has a different absolute path in each checkout),
+  `extra_train_set_repeat`, `filter_skipped`, `train_subsample_step`,
+  `align_legacy_neighbor_futures`;
+- perturbation: `use_data_augment`, `augment_type`, `augment_prob`, `num_refine`,
+  `ego_past_noise_std`, `use_smoothing_future_trajectory`;
+- the normalizer, compared by **resolved content** rather than by path.
+
+`run_hdp_rl.sbatch` defaults every one of these to base train's value, so the
+launcher reproduces the base corpus without being told to. Augmentation is applied
+before the rollout in both the training path (`hdp_rl_epoch.py:512-519`) and the
+mining path (`:757-762`), so the reward, the gate and the regression all see the
+same augmented candidate — turning it on does not desynchronise the objective.
+`--rl_base_corpus_check False` waives the check for a deliberately different
+distribution.
 
 ## Two further places the released code departs from its own paper
 
