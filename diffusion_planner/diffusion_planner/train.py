@@ -29,6 +29,12 @@ from diffusion_planner.utils.forced_augmentation import (
 )
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.utils.online_augmentations import (
+    FlipAugmentation,
+    NeighborDropoutAugmentation,
+    NeighborNoiseAugmentation,
+    TurnIndicatorDropoutAugmentation,
+)
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.utils.weighted_sampler import ClusterWeightedDistributedSampler
@@ -271,9 +277,39 @@ def model_training(args: TrainConfig):
     else:
         aug = None
 
+    flip_aug = FlipAugmentation(args.flip_prob, args.device) if args.use_flip_augment else None
+    neighbor_dropout = (
+        NeighborDropoutAugmentation(args.neighbor_dropout_prob, args.device)
+        if args.use_neighbor_dropout
+        else None
+    )
+    neighbor_noise = (
+        NeighborNoiseAugmentation(
+            args.neighbor_noise_pos_std,
+            args.neighbor_noise_vel_std,
+            args.neighbor_noise_heading_std,
+            args.device,
+        )
+        if args.use_neighbor_noise
+        else None
+    )
+    turn_indicator_dropout = (
+        TurnIndicatorDropoutAugmentation(args.turn_indicator_dropout_prob, args.device)
+        if args.use_turn_indicator_dropout
+        else None
+    )
+
     # Ordered (name, aug) pairs. train_epoch applies them in this order and looks up
     # each one's force mask by name.
-    aug_pipeline = build_aug_pipeline({"state_perturbation": aug})
+    aug_pipeline = build_aug_pipeline(
+        {
+            "flip": flip_aug,
+            "neighbor_dropout": neighbor_dropout,
+            "neighbor_noise": neighbor_noise,
+            "turn_indicator": turn_indicator_dropout,
+            "state_perturbation": aug,
+        }
+    )
 
     # Validate before the dataset scan: a bad flag must not surface after model init.
     try:

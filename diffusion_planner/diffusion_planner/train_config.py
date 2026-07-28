@@ -65,6 +65,16 @@ class TrainConfig:
     use_data_augment: bool = True
     augment_prob: float = 0.5
     augment_type: Literal["quintic", "bridge"] = "quintic"
+    use_flip_augment: bool = False
+    flip_prob: float = 0.5
+    use_neighbor_dropout: bool = False
+    neighbor_dropout_prob: float = 0.1
+    use_neighbor_noise: bool = False
+    neighbor_noise_pos_std: float = 0.2
+    neighbor_noise_vel_std: float = 0.3
+    neighbor_noise_heading_std: float = 0.05
+    use_turn_indicator_dropout: bool = False
+    turn_indicator_dropout_prob: float = 0.1
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
     use_smoothing_future_trajectory: bool = True

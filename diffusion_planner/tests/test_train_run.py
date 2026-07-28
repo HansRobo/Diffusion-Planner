@@ -66,3 +66,30 @@ def test_explicit_false_is_forwarded():
     )
 
     assert build_optional_args(args) == ["--force_aug_on_repeat", "False"]
+
+
+def test_multi_augmentation_enable_flags_are_forwarded():
+    args = parse_args(
+        [
+            *_required_args(),
+            "--use_flip_augment",
+            "True",
+            "--use_neighbor_dropout",
+            "True",
+            "--use_neighbor_noise",
+            "True",
+            "--use_turn_indicator_dropout",
+            "True",
+        ]
+    )
+
+    assert build_optional_args(args)[-8:] == [
+        "--use_flip_augment",
+        "True",
+        "--use_neighbor_dropout",
+        "True",
+        "--use_neighbor_noise",
+        "True",
+        "--use_turn_indicator_dropout",
+        "True",
+    ]

@@ -65,6 +65,10 @@ def parse_args(args_list: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="optional: comma-separated augmentations eligible for repeat-draw forcing",
     )
+    p.add_argument("--use_flip_augment", type=boolean, default=None)
+    p.add_argument("--use_neighbor_dropout", type=boolean, default=None)
+    p.add_argument("--use_neighbor_noise", type=boolean, default=None)
+    p.add_argument("--use_turn_indicator_dropout", type=boolean, default=None)
     return p.parse_args(args_list)
 
 
@@ -96,6 +100,15 @@ def build_optional_args(args: argparse.Namespace) -> list[str]:
         optional += ["--force_aug_on_repeat", str(args.force_aug_on_repeat)]
     if args.repeat_aug_pool is not None:
         optional += ["--repeat_aug_pool", args.repeat_aug_pool]
+    for name in (
+        "use_flip_augment",
+        "use_neighbor_dropout",
+        "use_neighbor_noise",
+        "use_turn_indicator_dropout",
+    ):
+        value = getattr(args, name, None)
+        if value is not None:
+            optional += [f"--{name}", str(value)]
     return optional
 
 
