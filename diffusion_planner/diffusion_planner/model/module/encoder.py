@@ -54,6 +54,12 @@ class Encoder(nn.Module):
         self.plantf_ego_state_token = getattr(config, "plantf_ego_state_token", False)
         self.plantf_ego_state_dropout = getattr(config, "plantf_ego_state_dropout", 0.75)
         self.plantf_input_delta = getattr(config, "plantf_input_delta", False)
+        # Zero out the goal_pose input entirely. The mini dataset's goal_pose is in
+        # global/map frame (a data bug) while Autoware feeds it ego-frame, so it is
+        # a train/deploy-mismatched input. Masking it makes the model plan from the
+        # route (route_lanes still encodes the goal) instead. Bakes into the ONNX,
+        # so Autoware needs no change. See docs/plantf_experiment_log.md.
+        self.plantf_mask_goal_pose = getattr(config, "plantf_mask_goal_pose", False)
         self._ego_state_slice = slice(4, 10)
         if self.plantf_ego_state_token:
             ego_state_dim = self._ego_state_slice.stop - self._ego_state_slice.start
@@ -233,6 +239,8 @@ class Encoder(nn.Module):
 
         # goal pose
         goal_pose = inputs["goal_pose"]  # (B, D=4)
+        if self.plantf_mask_goal_pose:
+            goal_pose = torch.zeros_like(goal_pose)  # ignore goal_pose; plan from route
 
         # ego shape
         ego_shape = inputs["ego_shape"]  # (B, D=3)

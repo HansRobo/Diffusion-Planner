@@ -208,6 +208,12 @@ def get_args(args_list=None):
         help="C1: feed agent (ego+neighbor) history as consecutive-frame xy deltas",
     )
     parser.add_argument(
+        "--plantf_mask_goal_pose",
+        type=boolean,
+        default=False,
+        help="zero the goal_pose input (global-frame data bug); model plans from route",
+    )
+    parser.add_argument(
         "--coeff_smoothness_loss",
         type=float,
         default=0.0,
