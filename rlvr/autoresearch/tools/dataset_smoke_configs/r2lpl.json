@@ -1,5 +1,11 @@
 {
-  "_doc": "Smoke config for the R2LPL reproducer stage (rlvr.autoresearch.tools.mine_direct_reproducer_chunks) on a v1 dataset's contiguous corpus. By DEFAULT runs plan_only: loads the contiguous NPZs, detects the rollout lineage, and plans chunks by frame-index contiguity (planned_chunks>=1) - self-contained, needs no external asset. To exercise the full closed-loop MODEL rollout (simulated_chunks>=1), set danger_reward_config to a reward config path; the threshold/credit configs default to the in-repo ones. The reward config is an internal asset (not committed), so plan_only is the committed default.",
+  "_doc": "Smoke config for the R2LPL lifelong round (rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds). Warmstarts from --base_model, mines the model's mistakes on the v1 contiguous corpus, builds repair targets, updates replay memory, and TRAINS one short round -> emits a trained model. IMPORTANT: R2LPL learns from MISTAKES, so v1's contiguous corpus must contain scenes the base model FAILS on (moving_collision / road_border_crossing / expert_disagreement). A clean normal-driving corpus mines zero credit rows and R2LPL fails loud. reward_config is an INTERNAL asset (a closed-loop scene-failure reward, not committed): set it to a valid path or R2LPL fails loud. threshold_config/credit_window_config ship in-repo. n_val_cap subsamples v1 frame/val for the base-vs-trained L2 regression check. Small caps for speed - not a real training recipe.",
+  "rounds": 1,
+  "epochs_per_round": 1,
+  "replay_capacity": 200,
+  "enabled_labels": ["moving_collision", "road_border_crossing", "expert_disagreement"],
+  "expert_stop_anchor": "recorded",
+  "min_margin": 0.3,
   "chunk_len": 80,
   "start_stride": 80,
   "expected_frame_step": 1,
@@ -7,8 +13,9 @@
   "timeline_progress_mode": "clock",
   "neighbor_history_mode": "sim",
   "batch_size": 8,
-  "max_chunks": 2,
-  "danger_reward_config": null,
-  "danger_threshold_config": "rlvr/configs/scene_failure_thresholds.json",
-  "danger_credit_window_config": "rlvr/configs/r2lpl_credit_windows.json"
+  "max_chunks": 15,
+  "n_val_cap": 40,
+  "reward_config": null,
+  "threshold_config": "rlvr/configs/scene_failure_thresholds.json",
+  "credit_window_config": "rlvr/configs/r2lpl_credit_windows.json"
 }

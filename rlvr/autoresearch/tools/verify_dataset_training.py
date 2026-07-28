@@ -1,38 +1,48 @@
 """Smoke-test that a v1-style dataset can still train every pipeline.
 
 Point this at a dataset built by ``build_small_dataset.py`` and it runs a tiny,
-fast pass of each training pipeline, reporting PASS/FAIL per pipeline:
+fast pass of each training pipeline — each **warmstarted from ``--base_model``** —
+reporting PASS/FAIL per pipeline, EMITTING each pipeline's trained model, and
+showing a base-vs-trained regression check:
 
-* **SFT**   - ``diffusion_planner/train_predictor.py`` on the frame set (1 epoch,
-  tiny batch): the frame NPZs load and train+val produce a finite loss.
-* **RSFT**  - ``rlvr.autoresearch.run_experiment`` on the frame set (K-sample
-  ranked SFT, 1 epoch): generation + reward + a LoRA checkpoint save.
-* **R2LPL** - ``rlvr.autoresearch.tools.mine_direct_reproducer_chunks`` on the
-  contiguous corpus. Default (no reward config) = plan-only: load the contiguous
-  NPZs, detect the rollout lineage, and plan chunks by frame contiguity (does NOT
-  run the model). Supplying ``danger_reward_config`` runs the full closed-loop model
-  rollout (>=1 chunk simulated). PASS reflects whichever mode ran.
+* **SFT**   - ``diffusion_planner/train_predictor.py`` on the frame set, warmstarted
+  (``train_epochs = base_epoch + N``, computed from the checkpoint). PASS = finite
+  train+val loss + a saved checkpoint. Reports **base->trained L2** (ego/neighbor via
+  ``valid_predictor``) as the regression signal.
+* **RSFT**  - ``rlvr.autoresearch.run_experiment`` (K-sample ranked SFT), warmstarted.
+  PASS = finite per-epoch loss + reward + a LoRA save. Reports **base->trained reward**
+  and merges the LoRA into a full model.
+* **R2LPL** - ``rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds``: one full lifelong
+  round (mine the model's mistakes on the contiguous corpus -> repair targets -> replay
+  memory -> train), warmstarted. PASS = a trained model is produced. Reports
+  **base->trained L2**. NOTE: R2LPL learns from MISTAKES, so the contiguous corpus MUST
+  contain scenes the base model fails on (moving_collision / road_border_crossing /
+  expert_disagreement); a clean corpus mines zero events and R2LPL fails loud. The
+  reward config is an internal asset — set ``reward_config`` in the R2LPL config.
 
-The intent is a fast "did I break training?" gate: change something, run this
-against a dataset, get confirmation. Each pipeline can be skipped independently
-(all run by default).
+Each pipeline emits its trained model to ``<out_dir>/models/`` (``--emit_models``,
+default on; ``--no-emit-models`` to skip). The base-vs-trained L2 check is on by
+default (``--no_l2`` to skip); a >2x base ego-L2 blowup FAILs the pipeline.
 
-No paths are hard-coded. The only assumption is the dataset layout produced by
-``build_small_dataset.py``::
+The intent is a fast "did I break training?" gate. Each pipeline can be skipped
+independently (all run by default). No paths are hard-coded; the only assumption is
+the dataset layout produced by ``build_small_dataset.py``::
 
     <dataset_root>/
       frame/train.json          # SFT + RSFT train scene list
-      frame/val.json            # SFT + RSFT val scene list
-      contiguous/window_scenes.json   # R2LPL ordered contiguous scene list
+      frame/val.json            # SFT + RSFT + L2 val scene list
+      contiguous/window_scenes.json     # R2LPL ordered contiguous scene list
+      contiguous/reproducer_chunks.jsonl  # R2LPL chunk manifest (failure corpus)
       normalization.json        # (or pass --normalization)
 
-The base model (``--base_model``) is required for RSFT/R2LPL and must have an
+The base model (``--base_model``) is required (warmstart) and must have an
 ``args.json`` beside it (the standard deploy-dir layout).
 
 Usage:
     python -m rlvr.autoresearch.tools.verify_dataset_training \
         --dataset_root <v1_dir> --base_model <best_model.pth> \
-        [--skip_sft] [--skip_rsft] [--skip_r2lpl] [--device auto]
+        [--skip_sft] [--skip_rsft] [--skip_r2lpl] [--no-emit-models] [--no_l2] \
+        [--device auto]
 """
 
 from __future__ import annotations
@@ -138,6 +148,80 @@ def _env_for_device(device: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# warmstart / model-output / L2 helpers (the script does all of this itself)
+# --------------------------------------------------------------------------- #
+def _ckpt_epoch(model_path: Path) -> int:
+    """The saved epoch in a checkpoint. train_predictor RESUMES at this epoch (its loop
+    is ``range(init_epoch, train_epochs)``), so to warmstart from this model and train
+    N more epochs the script passes ``train_epochs = epoch + N`` — never a hardcoded
+    number, so it is correct for any warmstart model."""
+    import torch
+
+    ck = torch.load(model_path, map_location="cpu", weights_only=False)
+    return int(ck.get("epoch", 0))
+
+
+def _deployable_ckpt(src: Path, dst: Path) -> Path:
+    """Write a valid_predictor-ready checkpoint next to a copied args.json. Uses the
+    EMA weights when present: train_predictor stores BOTH raw ``model`` (optimizer
+    iterates) and ``ema_state_dict`` (the deployable weights) — the EMA is what to
+    evaluate/ship (raw shows large fake L2 drift)."""
+    import shutil
+
+    import torch
+
+    ck = torch.load(src, map_location="cpu", weights_only=False)
+    weights = ck["ema_state_dict"] if "ema_state_dict" in ck else ck["model"]
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model": weights}, dst)
+    aj = src.parent / "args.json"
+    if aj.exists():
+        shutil.copy(aj, dst.parent / "args.json")
+    return dst
+
+
+def _l2_eval(model_path: Path, args_json: Path, val_list: Path, device: str, env: dict, log: Path):
+    """Ego/neighbor L2 on ``val_list`` via the canonical valid_predictor. Returns
+    (ego, neighbor) floats or None on failure. Runs single-process with ``--ddp false``
+    (numerically identical to DDP on one GPU): its ``resume_model`` path applies
+    ``strip_module_prefix``, so it loads BOTH a DDP-trained base (``module.`` prefix)
+    and a single-process-trained smoke model (no prefix) uniformly."""
+    cmd = [
+        sys.executable, "diffusion_planner/valid_predictor.py", "--ddp", "false",
+        "--resume_model_path", str(model_path), "--args_json_path", str(args_json),
+        "--valid_set_list", str(val_list), "--batch_size", "32",
+    ]  # fmt: skip
+    rc, text = _run(cmd, log, env)
+    ego = re.findall(r"avg_loss_ego=([0-9.]+)", text)
+    nbr = re.findall(r"avg_loss_neighbor=([0-9.]+)", text)
+    if rc == 0 and ego and nbr:
+        return float(ego[-1]), float(nbr[-1])
+    return None
+
+
+def _emit_model(src: Path, name: str, args) -> str:
+    """Copy a trained (deployable/EMA) checkpoint to <out_dir>/models/<name>.pth (with
+    args.json beside it) so each pipeline leaves one usable model output. Returns a
+    short display path."""
+    dst = args.out_dir / "models" / f"{name}.pth"
+    _deployable_ckpt(src, dst)
+    return str(dst.relative_to(args.out_dir))
+
+
+def _pct(new: float, base: float) -> str:
+    return f"{(new - base) / base * 100:+.1f}%" if base else "n/a"
+
+
+def _l2_line(base_l2, trained_l2) -> str:
+    """A compact 'base -> trained (Δ%)' L2 summary for both ego and neighbor."""
+    if not base_l2 or not trained_l2:
+        return f"L2=BASE{'?' if not base_l2 else ''}/TRAINED{'?' if not trained_l2 else ''}"
+    be, bn = base_l2
+    te, tn = trained_l2
+    return f"L2_ego {be:.3f}->{te:.3f} ({_pct(te, be)}) L2_nbr {bn:.3f}->{tn:.3f} ({_pct(tn, bn)})"
+
+
+# --------------------------------------------------------------------------- #
 # pipelines
 # --------------------------------------------------------------------------- #
 def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
@@ -148,41 +232,43 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
     work.mkdir(parents=True, exist_ok=True)
     n_tr = _subsample(train_list, int(cfg.get("n_train_cap", 400)), args.seed, work / "train.json")
     n_va = _subsample(val_list, int(cfg.get("n_val_cap", 100)), args.seed, work / "val.json")
+    n_epochs = int(cfg.get("train_epochs", 1))
+    # Warmstart from --base_model when given: train_predictor RESUMES at the base
+    # checkpoint's epoch, so train for n_epochs MORE => train_epochs = base_epoch +
+    # n_epochs (computed from the model, never hardcoded). warm_up_epoch=0 so a good
+    # warmstart isn't LR-warmed from ~0. Without a base model it trains from scratch.
+    resume = []
+    if args.base_model:
+        _require(args.base_model.parent / "args.json", "args.json beside --base_model (SFT)")
+        train_epochs = _ckpt_epoch(args.base_model) + n_epochs
+        resume = ["--resume_model_path", str(args.base_model)]
+    else:
+        train_epochs = n_epochs
     cmd = [
-        sys.executable,
-        "diffusion_planner/train_predictor.py",
-        "--exp_name",
-        "verify_sft",
-        "--save_dir",
-        str(work / "out"),
-        "--train_set_list",
-        str(work / "train.json"),
-        "--valid_set_list",
-        str(work / "val.json"),
-        "--normalization_file_path",
-        str(norm),
-        "--train_epochs",
-        str(int(cfg.get("train_epochs", 1))),
-        "--warm_up_epoch",
-        str(int(cfg.get("warm_up_epoch", 0))),
-        "--batch_size",
-        str(int(cfg.get("batch_size", 8))),
-        "--ddp",
-        "false",
-        # train_predictor defaults to --device cuda; pass the resolved concrete
-        # device (args.device is 'cuda'/'cpu' after resolve_device) so --device cpu
-        # (and auto on a CPU-only host) actually runs on CPU.
-        "--device",
-        args.device,
-        "--use_data_augment",
-        str(bool(cfg.get("use_data_augment", True))).lower(),
-        "--augment_prob",
-        str(float(cfg.get("augment_prob", 0.5))),
-    ]
-    print(f"[SFT] train {n_tr} / val {n_va} scenes -> {work / 'sft.log'}", flush=True)
+        sys.executable, "diffusion_planner/train_predictor.py",
+        "--exp_name", "verify_sft",
+        "--save_dir", str(work / "out"),
+        "--train_set_list", str(work / "train.json"),
+        "--valid_set_list", str(work / "val.json"),
+        "--normalization_file_path", str(norm),
+        "--train_epochs", str(train_epochs),
+        "--warm_up_epoch", str(int(cfg.get("warm_up_epoch", 0))),
+        "--batch_size", str(int(cfg.get("batch_size", 8))),
+        "--learning_rate", str(float(cfg.get("learning_rate", 1e-4))),
+        "--ddp", "false",
+        # train_predictor defaults to --device cuda; pass the resolved concrete device
+        # so --device cpu (and auto on a CPU-only host) actually runs on CPU.
+        "--device", args.device,
+        "--use_data_augment", str(bool(cfg.get("use_data_augment", True))).lower(),
+        "--augment_prob", str(float(cfg.get("augment_prob", 0.5))),
+        *resume,
+    ]  # fmt: skip
+    print(
+        f"[SFT] warmstart={'yes' if resume else 'no'} train {n_tr} / val {n_va} "
+        f"-> train_epochs={train_epochs} -> {work / 'sft.log'}",
+        flush=True,
+    )
     rc, text = _run(cmd, work / "sft.log", env)
-    # capture inf/nan as full tokens too, so a non-finite loss is a clean FAIL rather
-    # than a bare "-" that raises ValueError on float()
     num = r"(-?inf|nan|[0-9.eE+-]+)"
     tr_loss = re.findall(rf"epoch_mean_loss\['loss'\]={num}", text)
     va_loss = re.findall(rf"valid_loss_ego={num}", text)
@@ -196,9 +282,31 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
             return False
 
     ok = rc == 0 and _finite(tr_loss) and _finite(va_loss)
+    # locate the saved checkpoint, emit a deployable model, and compare L2 base->trained
+    best = work / "out" / "best_model" / "best_model.pth"
+    if not best.exists():
+        best = work / "out" / "latest.pth"
+    l2_note = ""
+    if ok and best.exists() and args.base_model and not args.no_l2:
+        trained_dep = _deployable_ckpt(best, work / "eval" / "trained.pth")
+        base_l2 = _l2_eval(
+            args.base_model, args.base_model.parent / "args.json",
+            work / "val.json", args.device, env, work / "l2_base.log",
+        )  # fmt: skip
+        trained_l2 = _l2_eval(
+            trained_dep, trained_dep.parent / "args.json",
+            work / "val.json", args.device, env, work / "l2_trained.log",
+        )  # fmt: skip
+        l2_note = " " + _l2_line(base_l2, trained_l2)
+        # a significant ego-L2 blowup (>2x base) is a real regression -> FAIL
+        if base_l2 and trained_l2 and trained_l2[0] > 2 * base_l2[0]:
+            ok = False
+            l2_note += " [REGRESSION: ego L2 >2x base]"
+    saved = _emit_model(best, "sft", args) if (best.exists() and args.emit_models) else None
     detail = (
         f"rc={rc} train_loss={tr_loss[-1] if tr_loss else 'NONE'} "
-        f"valid_loss_ego={va_loss[-1] if va_loss else 'NONE'}"
+        f"valid_loss_ego={va_loss[-1] if va_loss else 'NONE'}{l2_note}"
+        f"{f' model={saved}' if saved else ''}"
     )
     return ok, detail
 
@@ -233,13 +341,15 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
         str(work / "val.json"),
         "--output_dir",
         str(work / "out"),
-        "--skip_baseline",
         "--train_epochs",
         str(int(cfg.get("train_epochs", 1))),
         "--sft_batch_size",
         str(int(cfg.get("sft_batch_size", 8))),
     ]
-    print(f"[RSFT] train {n_tr} / val {n_va} scenes -> {work / 'rsft.log'}", flush=True)
+    # NOTE: --skip_baseline is deliberately NOT passed so run_experiment evaluates the
+    # BASE model reward ("Eval [base-val]: ... reward="), giving the base-vs-trained
+    # reward comparison (RSFT's native regression signal).
+    print(f"[RSFT] warmstart train {n_tr} / val {n_va} scenes -> {work / 'rsft.log'}", flush=True)
     rc, text = _run(cmd, work / "rsft.log", env)
     # PASS requires evidence that TRAINING actually happened, not just rc=0 + a saved
     # adapter + a promoted summary reward:
@@ -275,11 +385,50 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
             ev_val = v if math.isfinite(v) else None
         except ValueError:
             ev_val = None
+    # base model reward (from the non-skipped baseline eval) -> reward comparison
+    bv = re.findall(r"Eval \[base-val\][^\n]*reward=([+-]?(?:inf|nan|[0-9.eE]+))", text)
+    base_reward = None
+    if bv:
+        try:
+            b = float(bv[-1])
+            base_reward = b if math.isfinite(b) else None
+        except ValueError:
+            base_reward = None
     lora = list((work / "out").rglob("adapter_model.safetensors"))
     ok = rc == 0 and trained and ev_val is not None and bool(lora)
+    # merge the LoRA into the base and emit a usable full model
+    saved = None
+    if ok and lora and args.emit_models:
+        merged = args.out_dir / "models" / "rsft.pth"
+        merged.parent.mkdir(parents=True, exist_ok=True)
+        mrc, _ = _run(
+            [
+                sys.executable,
+                "-m",
+                "preference_optimization.merge_lora",
+                "--model_path",
+                str(base_model),
+                "--lora_dir",
+                str(lora[-1].parent),
+                "--output",
+                str(merged),
+            ],  # fmt: skip
+            work / "merge.log",
+            env,
+        )
+        saved = (
+            str(merged.relative_to(args.out_dir))
+            if mrc == 0 and merged.exists()
+            else "MERGE_FAILED"
+        )
+    reward_cmp = (
+        f"reward {base_reward:+.2f}->{ev_val:+.2f} ({ev_val - base_reward:+.2f})"
+        if base_reward is not None and ev_val is not None
+        else f"reward base={bv[-1] if bv else 'NONE'} trained={ev[-1] if ev else 'NONE'}"
+    )
     detail = (
-        f"rc={rc} kept_train={kept_train} trained={trained} "
-        f"epoch_val_reward={ev[-1] if ev else 'NONE'} lora_saved={'yes' if lora else 'no'}"
+        f"rc={rc} kept_train={kept_train} trained={trained} {reward_cmp} "
+        f"lora_saved={'yes' if lora else 'no'}{f' model={saved}' if saved else ''}"
     )
     return ok, detail
 
@@ -333,90 +482,112 @@ def _scenes_loadable(scene_list: Path, k: int = 8) -> tuple[int, int]:
 def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
     scene_list = _require(ds["contig_scene_list"], "contiguous/window_scenes.json (R2LPL)")
     base_model = _require(args.base_model, "--base_model (R2LPL)")
+    _require(base_model.parent / "args.json", "args.json beside --base_model (R2LPL)")
+    val_list = _require(ds["frame_val"], "frame/val.json (R2LPL)")
     work = args.out_dir / "r2lpl"
     work.mkdir(parents=True, exist_ok=True)
-    summary = work / "summary.json"
-    cmd = [
-        sys.executable,
-        "-m",
-        "rlvr.autoresearch.tools.mine_direct_reproducer_chunks",
-        "--scene_list",
-        str(scene_list),
-        "--segments_jsonl",
-        str(work / "segments.jsonl"),
-        "--model_path",
-        str(base_model),
-        "--summary_json",
-        str(summary),
-        "--chunk_len",
-        str(int(cfg.get("chunk_len", 80))),
-        "--start_stride",
-        str(int(cfg.get("start_stride", 80))),
-        "--expected_frame_step",
-        str(int(cfg.get("expected_frame_step", 1))),
-    ]
-    # A real closed-loop rollout needs the three danger_* configs (threshold/credit
-    # ship in-repo; the reward config is an internal asset). When a reward config is
-    # supplied we run the full model rollout; otherwise we fall back to --plan_only,
-    # which still loads the contiguous NPZs, detects the rollout lineage and plans
-    # chunks by frame-index contiguity (a self-contained dataset-consumable check;
-    # pose/timeline continuity is validated only in the full rollout).
-    # null danger_reward_config -> plan_only (self-contained). A SUPPLIED path must
-    # exist: fail loudly on a typo/stale path rather than silently downgrading to
-    # plan-only (which could report PASS without ever running the model).
-    reward_ref = cfg.get("danger_reward_config")
-    full_rollout = bool(reward_ref)
-    if full_rollout:
-        reward_cfg = _require(_resolve_cfg_path(reward_ref), "danger_reward_config (R2LPL rollout)")
-        thr = _require(_resolve_cfg_path(cfg["danger_threshold_config"]), "danger_threshold_config")
-        crd = _require(
-            _resolve_cfg_path(cfg["danger_credit_window_config"]), "danger_credit_window_config"
-        )
-        cmd += [
-            "--out_dir",
-            str(work / "out"),
-            "--out_jsonl",
-            str(work / "mined.jsonl"),
-            "--danger_reward_config",
-            str(reward_cfg),
-            "--danger_threshold_config",
-            str(thr),
-            "--danger_credit_window_config",
-            str(crd),
-            "--tracker_mode",
-            str(cfg.get("tracker_mode", "mpc")),
-            "--timeline_progress_mode",
-            str(cfg.get("timeline_progress_mode", "clock")),
-            "--neighbor_history_mode",
-            str(cfg.get("neighbor_history_mode", "sim")),
-            "--batch_size",
-            str(int(cfg.get("batch_size", 8))),
-        ]
-    else:
-        cmd += ["--plan_only"]
-    # max_chunks bounds work in BOTH modes (plan-only still scans/plans the whole
-    # corpus otherwise) — apply it regardless of the rollout branch.
-    if cfg.get("max_chunks") is not None:
-        cmd += ["--max_chunks", str(int(cfg["max_chunks"]))]
-    mode = "full-rollout" if full_rollout else "plan-only"
-    print(f"[R2LPL] reproducer ({mode}) on contiguous corpus -> {work / 'r2lpl.log'}", flush=True)
-    rc, _ = _run(cmd, work / "r2lpl.log", env)
-    sim = planned = None
-    if summary.exists():
-        s = _load_json(summary)
-        sim = s.get("simulated_chunks")
-        planned = s.get("planned_chunks")
-    # The sampled contiguous scenes must actually load (guards plan-only, whose miner
-    # branch only parses path strings and would PASS on a nonexistent corpus).
-    checked, loadable = _scenes_loadable(scene_list, 5)
-    scenes_ok = checked > 0 and loadable == checked
-    # PASS = the dataset feeds R2LPL: full-rollout must simulate a chunk; plan-only
-    # must plan at least one (lineage detected) AND the sampled scenes must load.
-    key = sim if full_rollout else planned
-    ok = rc == 0 and bool(key) and key >= 1 and scenes_ok
+    n_va = _subsample(val_list, int(cfg.get("n_val_cap", 40)), args.seed, work / "val.json")
+    # The lifelong round mines corrective chunks from the contiguous corpus, builds
+    # repair targets, updates replay memory, and TRAINS — warmstarting from base_model.
+    # The reward config is an internal asset (not committed): fail loud if absent
+    # rather than silently degrading (a real closed-loop reward is required to judge
+    # failures). threshold/credit ship in-repo.
+    reward_cfg = _require(
+        _resolve_cfg_path(cfg.get("reward_config")),
+        "reward_config (R2LPL lifelong training; internal asset — set it in r2lpl.json)",
+    )
+    thr = _require(_resolve_cfg_path(cfg["threshold_config"]), "threshold_config")
+    crd = _require(_resolve_cfg_path(cfg["credit_window_config"]), "credit_window_config")
+    # output_dir must contain an "auto_research" path component (runner enforces this).
+    out_dir = work / "auto_research" / "rounds"
+    labels = cfg.get("enabled_labels", ["moving_collision", "road_border_crossing"])
+    # The runner consumes the high-level "workflow contract": a workflow_config (judge/
+    # repair/replay/rounds/reproducer sections) + a training_config, from which it
+    # builds the full round config. Warmstart is --model_path.
+    workflow = {
+        "judgement": {
+            "reward_config": str(reward_cfg),
+            "threshold_config": str(thr),
+            "credit_window_config": str(crd),
+            "enabled_labels": labels,
+            "repair_labels": labels,
+        },
+        "repair_generation": {
+            "ego_shape": cfg.get("ego_shape", "from_npz"),
+            "min_margin": float(cfg.get("min_margin", 0.3)),
+        },
+        "replay_memory": {"capacity": int(cfg.get("replay_capacity", 200))},
+        "training": {"val_scenes": str(work / "val.json")},
+        "rounds": {
+            "rounds": int(cfg.get("rounds", 1)),
+            "epochs_per_round": int(cfg.get("epochs_per_round", 1)),
+        },
+        "perception_reproducer": {
+            k: cfg[k]
+            for k in (
+                "chunk_len",
+                "start_stride",
+                "expected_frame_step",
+                "tracker_mode",
+                "timeline_progress_mode",
+                "neighbor_history_mode",
+                "batch_size",
+            )
+            if cfg.get(k) is not None
+        },  # fmt: skip
+        "event_mining": {k: cfg[k] for k in ("max_chunks",) if cfg.get(k) is not None},
+    }
+    training_cfg = cfg.get("training_config", {"backend": "base_sft", "train_args": {}})
+    wf_path = work / "workflow_config.json"
+    tc_path = work / "training_config.json"
+    with open(wf_path, "w") as f:
+        json.dump(workflow, f, indent=2)
+    with open(tc_path, "w") as f:
+        json.dump(training_cfg, f, indent=2)
+    manifest = ds.get("contig_chunk_manifest")
+    source = (
+        ["--chunk_manifest", str(manifest)]
+        if manifest and manifest.exists()
+        else ["--scene_list", str(scene_list)]
+    )
+    print(f"[R2LPL] lifelong round (warmstart) val {n_va} -> {work / 'r2lpl.log'}", flush=True)
+    rc, text = _run(
+        [
+            sys.executable,
+            "-m",
+            "rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds",
+            "--model_path",
+            str(base_model),
+            "--output_dir",
+            str(out_dir),
+            "--workflow_config",
+            str(wf_path),
+            "--training_config",
+            str(tc_path),
+            *source,
+        ],  # fmt: skip
+        work / "r2lpl.log",
+        env,
+    )
+    # locate the round's trained checkpoint
+    models = sorted(out_dir.rglob("best_model.pth")) or sorted(out_dir.rglob("*.pth"))
+    trained = models[-1] if models else None
+    ok = rc == 0 and trained is not None
+    l2_note = ""
+    if ok and not args.no_l2:
+        trained_dep = _deployable_ckpt(trained, work / "eval" / "trained.pth")
+        base_l2 = _l2_eval(base_model, base_model.parent / "args.json", work / "val.json",
+                           args.device, env, work / "l2_base.log")  # fmt: skip
+        trained_l2 = _l2_eval(trained_dep, trained_dep.parent / "args.json", work / "val.json",
+                              args.device, env, work / "l2_trained.log")  # fmt: skip
+        l2_note = " " + _l2_line(base_l2, trained_l2)
+        if base_l2 and trained_l2 and trained_l2[0] > 2 * base_l2[0]:
+            ok = False
+            l2_note += " [REGRESSION: ego L2 >2x base]"
+    saved = _emit_model(trained, "r2lpl", args) if (trained and args.emit_models) else None
     detail = (
-        f"rc={rc} mode={mode} planned_chunks={planned} simulated_chunks={sim} "
-        f"scenes_loadable={loadable}/{checked}"
+        f"rc={rc} trained_model={'yes' if trained else 'NONE'}{l2_note}"
+        f"{f' model={saved}' if saved else ''}"
     )
     return ok, detail
 
@@ -445,6 +616,18 @@ def main() -> None:
     ap.add_argument("--skip_sft", action="store_true")
     ap.add_argument("--skip_rsft", action="store_true")
     ap.add_argument("--skip_r2lpl", action="store_true")
+    ap.add_argument(
+        "--emit_models",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="write each pipeline's trained model to <out_dir>/models/ (default on; "
+        "--no-emit-models to skip)",
+    )
+    ap.add_argument(
+        "--no_l2",
+        action="store_true",
+        help="skip the base-vs-trained L2 regression check (on by default)",
+    )
     ap.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument(
@@ -467,6 +650,7 @@ def main() -> None:
         "frame_train": root / "frame" / "train.json",
         "frame_val": root / "frame" / "val.json",
         "contig_scene_list": root / "contiguous" / "window_scenes.json",
+        "contig_chunk_manifest": root / "contiguous" / "reproducer_chunks.jsonl",
         "normalization": args.normalization or (root / "normalization.json"),
     }
     args.device = resolve_device(args.device)  # 'auto' -> concrete cuda/cpu by availability
