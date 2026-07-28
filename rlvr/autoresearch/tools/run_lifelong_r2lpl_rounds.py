@@ -1907,17 +1907,30 @@ def _base_train_invocation(
     if train_scene_count < 1:
         raise ValueError(f"{train_list} is empty; refusing to launch base training")
 
+    # Device-aware launch: on CPU (device=cpu, e.g. a CPU-only host or --device cpu) a
+    # torch.distributed.run / DDP launch drives NCCL + torch.cuda.set_device and dies
+    # with "No CUDA GPUs are available". Launch train_predictor directly with ddp=false
+    # there; keep the DDP launcher on CUDA.
+    device = str(overrides.get("device", base_args.get("device", "cuda"))).lower()
+    cpu = device == "cpu"
+    launcher = (
+        [sys.executable, "-m", "train_predictor"]
+        if cpu
+        else [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--nproc_per_node",
+            str(nproc),
+            "--standalone",
+            "--master_port",
+            master_port,
+            "-m",
+            "train_predictor",
+        ]
+    )
     cmd = [
-        sys.executable,
-        "-m",
-        "torch.distributed.run",
-        "--nproc_per_node",
-        str(nproc),
-        "--standalone",
-        "--master_port",
-        master_port,
-        "-m",
-        "train_predictor",
+        *launcher,
         "--exp_name",
         f"r2lpl_round_{round_idx:03d}",
         "--save_dir",
@@ -2002,7 +2015,7 @@ def _base_train_invocation(
     )
     merged = {k: base_args[k] for k in passthrough if k in base_args}
     merged.update(overrides)
-    merged["ddp"] = True
+    merged["ddp"] = not cpu  # single-process on CPU; DDP on CUDA
     merged["port"] = master_port
     if "batch_size" in merged:
         merged["batch_size"] = max(1, min(int(merged["batch_size"]), train_scene_count))
