@@ -394,14 +394,22 @@ def test_extract_scene_features_end_to_end(tmp_path):
     assert row["has_pedestrian"] is True
 
 
+def _axis_len(a) -> int:
+    """Concrete length for one expected axis: exact int as-is, first of a one-of
+    tuple, 1 for an unconstrained (None) axis."""
+    if a is None:
+        return 1
+    if isinstance(a, tuple):
+        return a[0]
+    return a
+
+
 def _valid_canonical_scene() -> dict:
-    """A minimal scene carrying every required field at its canonical shape (variable
-    axes filled with 1) — the fixture the shared schema validator must accept."""
+    """A minimal scene carrying every required field at its canonical shape — the
+    fixture the shared schema validator must accept. Uses the real per-axis contract
+    (NOT None->1), so it can't mask a too-loose axis."""
     exp = sf._canonical_expected_shapes()
-    return {
-        k: np.zeros(tuple(a if a is not None else 1 for a in shp), np.float32)
-        for k, shp in exp.items()
-    }
+    return {k: np.zeros(tuple(_axis_len(a) for a in shp), np.float32) for k, shp in exp.items()}
 
 
 def test_validate_canonical_scene_accepts_valid():
@@ -440,6 +448,36 @@ def test_validate_canonical_scene_rejects_missing_field():
     del d["lanes"]
     with pytest.raises(ValueError, match="missing required"):
         sf.validate_canonical_scene(d, ctx="missing")
+
+
+def test_validate_canonical_scene_accepts_both_ego_pose_widths():
+    # repo supports raw 3-col AND converted 4-col ego/goal poses (heading_to_cos_sin
+    # is idempotent for 4-col) — both must validate.
+    for w in (3, 4):
+        d = _valid_canonical_scene()
+        d["ego_agent_future"] = np.zeros((80, w), np.float32)
+        d["ego_agent_past"] = np.zeros((d["ego_agent_past"].shape[0], w), np.float32)
+        d["goal_pose"] = np.zeros((w,), np.float32)
+        sf.validate_canonical_scene(d, ctx=f"ego-width-{w}")
+    # a width the model can't consume still fails
+    d = _valid_canonical_scene()
+    d["ego_agent_future"] = np.zeros((80, 5), np.float32)
+    with pytest.raises(ValueError, match="ego_agent_future"):
+        sf.validate_canonical_scene(d, ctx="ego-width-5")
+
+
+def test_validate_canonical_scene_map_point_widths_exact():
+    # polygon/line-string trailing widths and turn-indicator length are fixed by the
+    # encoder contract — a wrong width must NOT slip through as "variable".
+    for field, bad in (
+        ("polygons", (10, 40, 1)),
+        ("line_strings", (60, 20, 1)),
+        ("turn_indicators", (1,)),
+    ):
+        d = _valid_canonical_scene()
+        d[field] = np.zeros(bad, np.float32)
+        with pytest.raises(ValueError, match=field):
+            sf.validate_canonical_scene(d, ctx=f"bad-{field}")
 
 
 if __name__ == "__main__":

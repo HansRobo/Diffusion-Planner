@@ -64,27 +64,30 @@ _NB_PED_COL = 9
 # the canonical NPZ ``version`` field.
 FEATURE_SCHEMA_VERSION = 3
 
-# Raw stored ego/goal pose width in the canonical NPZ: [x, y, heading]. The
-# model-input loader (``preference_optimization.utils.load_npz_data``) expands
-# heading -> (cos, sin) to ``dimensions.POSE_DIM`` at load time, so the stored width
-# is one less than the model-input width.
-_EGO_RAW_POSE_DIM = 3
+# Ego/goal pose widths accepted in a canonical NPZ. The repo supports BOTH the raw
+# 3-col form [x, y, heading] AND the converted 4-col form [x, y, cos, sin]
+# (``convert_3col_to_4col.py``): the model-input loader / ``heading_to_cos_sin`` are
+# idempotent for 4-col input, so both are valid on disk. An axis whose expected value
+# is a tuple means "one of these" (see ``validate_canonical_scene``).
+_EGO_POSE_WIDTHS = (3, 4)  # 4 == dimensions.POSE_DIM (cos/sin); 3 == raw yaw
 
 
 def _canonical_expected_shapes() -> dict[str, tuple]:
     """Per-field expected canonical-NPZ shape (per-scene, NO leading batch axis),
-    derived from ``diffusion_planner.dimensions`` — the single source of truth for
-    the model's tensor contract. ``None`` on an axis means "variable / not fixed by
-    the contract" (e.g. a per-timestep count or an un-named trailing width); every
-    other axis is asserted exactly. These are the shapes the converter emits and the
-    encoder later slices/indexes, so a malformed tensor (scalar, wrong count, wrong
-    feature width) is caught here instead of crashing mid-training."""
+    derived from ``diffusion_planner.dimensions`` — the single source of truth for the
+    model's tensor contract. Each axis is one of: an int (asserted exactly), a tuple
+    of ints (one-of, e.g. the 3-or-4-col ego pose width), or ``None`` (only where the
+    contract genuinely does not fix it). These are the shapes the converter emits and
+    the encoder later slices/indexes (e.g. it slices turn_indicators ``[:, :-1]`` into
+    ``FloatsEncoder(num_float=INPUT_T)``, so the stored length is ``INPUT_T + 1``, and
+    map points are (x, y) + a type one-hot), so a malformed tensor — scalar, wrong
+    count, wrong feature width — is caught here instead of crashing mid-training."""
     from diffusion_planner import dimensions as D
 
     return {
-        "ego_agent_past": (D.INPUT_T + 1, _EGO_RAW_POSE_DIM),
+        "ego_agent_past": (D.INPUT_T + 1, _EGO_POSE_WIDTHS),
         "ego_current_state": (D.EGO_CURRENT_STATE_SHAPE[-1],),
-        "ego_agent_future": (D.OUTPUT_T, _EGO_RAW_POSE_DIM),
+        "ego_agent_future": (D.OUTPUT_T, _EGO_POSE_WIDTHS),
         "neighbor_agents_past": (D.MAX_NUM_NEIGHBORS, D.INPUT_T + 1, D.NEIGHBOR_SHAPE[-1]),
         "neighbor_agents_future": (D.MAX_NUM_NEIGHBORS, D.OUTPUT_T, D.POSE_DIM),
         "static_objects": (D.NUM_STATIC_OBJECTS, D.STATIC_OBJECTS_SHAPE[-1]),
@@ -94,10 +97,12 @@ def _canonical_expected_shapes() -> dict[str, tuple]:
         "route_lanes": (D.NUM_SEGMENTS_IN_ROUTE, D.POINTS_PER_LANELET, D.SEGMENT_POINT_DIM),
         "route_lanes_speed_limit": (D.NUM_SEGMENTS_IN_ROUTE, 1),
         "route_lanes_has_speed_limit": (D.NUM_SEGMENTS_IN_ROUTE, 1),
-        "polygons": (D.NUM_POLYGONS, D.POINTS_PER_POLYGON, None),
-        "line_strings": (D.NUM_LINE_STRINGS, D.POINTS_PER_LINE_STRING, None),
-        "goal_pose": (_EGO_RAW_POSE_DIM,),
-        "turn_indicators": (None,),
+        # map points = (x, y) + a per-type one-hot: polygon width 2 + POLYGON_TYPE_NUM,
+        # line-string width 2 + LINE_STRING_TYPE_NUM.
+        "polygons": (D.NUM_POLYGONS, D.POINTS_PER_POLYGON, 2 + D.POLYGON_TYPE_NUM),
+        "line_strings": (D.NUM_LINE_STRINGS, D.POINTS_PER_LINE_STRING, 2 + D.LINE_STRING_TYPE_NUM),
+        "goal_pose": (_EGO_POSE_WIDTHS,),
+        "turn_indicators": (D.INPUT_T + 1,),
         "ego_shape": (D.EGO_SHAPE_SHAPE[-1],),
     }
 
@@ -126,7 +131,11 @@ def validate_canonical_scene(data, ctx: str = "") -> None:
         if shp is None or len(shp) != len(exp):
             raise ValueError(f"{ctx}: {name} has shape {shp}, expected {len(exp)} dim(s) {exp}")
         for axis, (got, want) in enumerate(zip(shp, exp)):
-            if want is not None and got != want:
+            # want: None = any; tuple = one-of; int = exact.
+            if want is None:
+                continue
+            allowed = want if isinstance(want, tuple) else (want,)
+            if got not in allowed:
                 raise ValueError(
                     f"{ctx}: {name} axis {axis} = {got}, expected {want} (got {shp}, want {exp})"
                 )
