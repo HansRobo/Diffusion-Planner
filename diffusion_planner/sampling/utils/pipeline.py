@@ -133,16 +133,20 @@ def extract_features_enriched(
     topk_dist = distances[sorted_idx].copy()
     topk_dist[topk_dist == np.inf] = -1.0
 
-    ego_block = np.concatenate([
-        ego_past.flatten(),
-        ego_future.flatten(),
-        ego_state,
-        topk_dist,
-    ])
-    neighbor_block = np.concatenate([
-        topk_past.flatten(),
-        topk_future.flatten(),
-    ])
+    ego_block = np.concatenate(
+        [
+            ego_past.flatten(),
+            ego_future.flatten(),
+            ego_state,
+            topk_dist,
+        ]
+    )
+    neighbor_block = np.concatenate(
+        [
+            topk_past.flatten(),
+            topk_future.flatten(),
+        ]
+    )
     return ego_block, neighbor_block
 
 
@@ -276,6 +280,5 @@ def cluster_trajectories_enriched(
         clusters[f"cluster_id{label}"].append(path)
 
     return {
-        k: clusters[k]
-        for k in sorted(clusters, key=lambda x: int(x.replace("cluster_id", "")))
+        k: clusters[k] for k in sorted(clusters, key=lambda x: int(x.replace("cluster_id", "")))
     }

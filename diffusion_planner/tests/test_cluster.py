@@ -201,7 +201,7 @@ def test_extract_enriched_top_k_selection():
         for i, dist in enumerate([1.0, 5.0, 3.0]):
             nbr_past[i, :, :] = 0.01  # make all values nonzero (active)
             nbr_past[i, -1, 0] = dist  # x at t=0
-            nbr_past[i, -1, 1] = 0.0   # y at t=0
+            nbr_past[i, -1, 1] = 0.0  # y at t=0
             nbr_future[i, :, :] = float(i + 1)  # distinguishable values
 
         np.savez(
@@ -230,9 +230,7 @@ def test_extract_enriched_fewer_than_k_neighbors():
     assert ego.shape == (99,), f"Expected (99,), got {ego.shape}"
     # Last 10 elements are distances; 3 active (>0), 7 inactive (== -1)
     distances = ego[-10:]
-    assert np.sum(distances > 0) == 3, (
-        f"Expected 3 positive distances, got {np.sum(distances > 0)}"
-    )
+    assert np.sum(distances > 0) == 3, f"Expected 3 positive distances, got {np.sum(distances > 0)}"
     assert np.sum(distances == -1.0) == 7, (
         f"Expected 7 sentinel distances, got {np.sum(distances == -1.0)}"
     )
@@ -692,8 +690,12 @@ def test_enriched_pipeline_returns_dict():
         npz_paths = _make_enriched_dataset(tmp, n=30)
         strategy = ElbowKMeansStrategy(k_max=5, random_state=42)
         result = cluster_trajectories_enriched(
-            npz_paths, strategy, pca_components=10,
-            neighbor_pca_components=10, top_k=5, temporal_hz=2,
+            npz_paths,
+            strategy,
+            pca_components=10,
+            neighbor_pca_components=10,
+            top_k=5,
+            temporal_hz=2,
         )
     assert isinstance(result, dict)
     assert isinstance(strategy.n_clusters_, int)
@@ -705,8 +707,12 @@ def test_enriched_pipeline_all_paths_present():
     with tempfile.TemporaryDirectory() as tmp:
         npz_paths = _make_enriched_dataset(tmp, n=20)
         result = cluster_trajectories_enriched(
-            npz_paths, ElbowKMeansStrategy(k_max=5, random_state=42),
-            pca_components=10, neighbor_pca_components=10, top_k=5, temporal_hz=2,
+            npz_paths,
+            ElbowKMeansStrategy(k_max=5, random_state=42),
+            pca_components=10,
+            neighbor_pca_components=10,
+            top_k=5,
+            temporal_hz=2,
         )
     all_out = [p for paths in result.values() for p in paths]
     assert sorted(all_out) == sorted(npz_paths)
@@ -716,8 +722,10 @@ def test_enriched_pipeline_no_valid_files_raises():
     strategy = ElbowKMeansStrategy(k_max=3)
     try:
         cluster_trajectories_enriched(
-            ["/nonexistent/a.npz"], strategy,
-            pca_components=10, neighbor_pca_components=10,
+            ["/nonexistent/a.npz"],
+            strategy,
+            pca_components=10,
+            neighbor_pca_components=10,
         )
         assert False, "Should have raised RuntimeError"
     except RuntimeError:
@@ -728,8 +736,12 @@ def test_enriched_pipeline_no_duplicates():
     with tempfile.TemporaryDirectory() as tmp:
         npz_paths = _make_enriched_dataset(tmp, n=25)
         result = cluster_trajectories_enriched(
-            npz_paths, ElbowKMeansStrategy(k_max=5, random_state=42),
-            pca_components=10, neighbor_pca_components=10, top_k=5, temporal_hz=2,
+            npz_paths,
+            ElbowKMeansStrategy(k_max=5, random_state=42),
+            pca_components=10,
+            neighbor_pca_components=10,
+            top_k=5,
+            temporal_hz=2,
         )
     all_paths = [p for paths in result.values() for p in paths]
     assert len(all_paths) == len(set(all_paths))
@@ -749,15 +761,24 @@ def test_main_enriched_end_to_end():
         output_path = str(Path(tmp) / "result.json")
         argv = [
             "cluster.py",
-            "--data_list", data_list_path,
-            "--output", output_path,
-            "--mode", "enriched",
-            "--k_max", "5",
-            "--pca_components", "10",
-            "--neighbor_pca_components", "10",
-            "--top_k_neighbors", "5",
-            "--temporal_hz", "2",
-            "--seed", "42",
+            "--data_list",
+            data_list_path,
+            "--output",
+            output_path,
+            "--mode",
+            "enriched",
+            "--k_max",
+            "5",
+            "--pca_components",
+            "10",
+            "--neighbor_pca_components",
+            "10",
+            "--top_k_neighbors",
+            "5",
+            "--temporal_hz",
+            "2",
+            "--seed",
+            "42",
         ]
         with patch("sys.argv", argv):
             main()
@@ -785,10 +806,14 @@ def test_main_trajectory_mode_unchanged():
 
         base_argv = [
             "cluster.py",
-            "--data_list", data_list_path,
-            "--k_max", "5",
-            "--pca_components", "10",
-            "--seed", "42",
+            "--data_list",
+            data_list_path,
+            "--k_max",
+            "5",
+            "--pca_components",
+            "10",
+            "--seed",
+            "42",
         ]
 
         with patch("sys.argv", base_argv + ["--output", out_default]):
