@@ -85,6 +85,10 @@ def _load_json(path: Path):
 
 
 def _require(path: Path, what: str) -> Path:
+    # `path is None` means the value was not provided (e.g. a null config field) —
+    # surface the intended "what" message instead of an opaque AttributeError.
+    if path is None:
+        raise FileNotFoundError(f"{what} not provided (no default permitted)")
     if not path.exists():
         raise FileNotFoundError(f"{what} not found: {path}")
     return path
@@ -200,10 +204,11 @@ def _l2_eval(model_path: Path, args_json: Path, val_list: Path, device: str, env
 
 
 def _emit_model(src: Path, name: str, args) -> str:
-    """Copy a trained (deployable/EMA) checkpoint to <out_dir>/models/<name>.pth (with
-    args.json beside it) so each pipeline leaves one usable model output. Returns a
-    short display path."""
-    dst = args.out_dir / "models" / f"{name}.pth"
+    """Copy a trained (deployable/EMA) checkpoint to <out_dir>/models/<name>/<name>.pth
+    with its OWN args.json beside it (a per-pipeline subdir so one pipeline's args.json
+    can't overwrite another's) so each pipeline leaves one self-contained, loadable
+    model output. Returns a short display path."""
+    dst = args.out_dir / "models" / name / f"{name}.pth"
     _deployable_ckpt(src, dst)
     return str(dst.relative_to(args.out_dir))
 
@@ -219,6 +224,32 @@ def _l2_line(base_l2, trained_l2) -> str:
     be, bn = base_l2
     te, tn = trained_l2
     return f"L2_ego {be:.3f}->{te:.3f} ({_pct(te, be)}) L2_nbr {bn:.3f}->{tn:.3f} ({_pct(tn, bn)})"
+
+
+def _regression_l2(base_model: Path, trained_ckpt: Path, val_list: Path, work: Path, args, env):
+    """Base-vs-trained L2 regression check. Returns (note, ok).
+
+    BOTH models are evaluated on their EMA (deployable) weights via ``_deployable_ckpt``
+    — ``valid_predictor`` scores ``ckpt["model"]``, so comparing the base's RAW ``model``
+    against the trained EMA would be apples-to-oranges (raw shows large fake drift), and
+    an inflated base would defeat the regression gate. ``ok`` is False if the check was
+    REQUESTED but either eval failed (a failed-but-requested L2 must not silently PASS —
+    distinct from ``--no_l2``) or ego L2 blew up >2x base."""
+    base_dep = _deployable_ckpt(base_model, work / "eval_base" / "base.pth")
+    trained_dep = _deployable_ckpt(trained_ckpt, work / "eval_trained" / "trained.pth")
+    base_l2 = _l2_eval(
+        base_dep, base_dep.parent / "args.json", val_list, args.device, env, work / "l2_base.log"
+    )
+    trained_l2 = _l2_eval(
+        trained_dep, trained_dep.parent / "args.json", val_list, args.device, env,
+        work / "l2_trained.log",
+    )  # fmt: skip
+    if not base_l2 or not trained_l2:
+        return f" L2 eval FAILED ({_l2_line(base_l2, trained_l2)})", False
+    note = " " + _l2_line(base_l2, trained_l2)
+    if trained_l2[0] > 2 * base_l2[0]:
+        return note + " [REGRESSION: ego L2 >2x base]", False
+    return note, True
 
 
 # --------------------------------------------------------------------------- #
@@ -288,20 +319,8 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
         best = work / "out" / "latest.pth"
     l2_note = ""
     if ok and best.exists() and args.base_model and not args.no_l2:
-        trained_dep = _deployable_ckpt(best, work / "eval" / "trained.pth")
-        base_l2 = _l2_eval(
-            args.base_model, args.base_model.parent / "args.json",
-            work / "val.json", args.device, env, work / "l2_base.log",
-        )  # fmt: skip
-        trained_l2 = _l2_eval(
-            trained_dep, trained_dep.parent / "args.json",
-            work / "val.json", args.device, env, work / "l2_trained.log",
-        )  # fmt: skip
-        l2_note = " " + _l2_line(base_l2, trained_l2)
-        # a significant ego-L2 blowup (>2x base) is a real regression -> FAIL
-        if base_l2 and trained_l2 and trained_l2[0] > 2 * base_l2[0]:
-            ok = False
-            l2_note += " [REGRESSION: ego L2 >2x base]"
+        l2_note, l2_ok = _regression_l2(args.base_model, best, work / "val.json", work, args, env)
+        ok = ok and l2_ok
     saved = _emit_model(best, "sft", args) if (best.exists() and args.emit_models) else None
     detail = (
         f"rc={rc} train_loss={tr_loss[-1] if tr_loss else 'NONE'} "
@@ -569,21 +588,16 @@ def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
         work / "r2lpl.log",
         env,
     )
-    # locate the round's trained checkpoint
-    models = sorted(out_dir.rglob("best_model.pth")) or sorted(out_dir.rglob("*.pth"))
-    trained = models[-1] if models else None
+    # locate the round's trained checkpoint — newest by mtime (a multi-round/epoch run
+    # writes several; alphabetical order does not track round/epoch across the mixed
+    # latest.pth / best_model.pth / epoch_*.pth names).
+    models = list(out_dir.rglob("best_model.pth")) or list(out_dir.rglob("*.pth"))
+    trained = max(models, key=lambda p: p.stat().st_mtime) if models else None
     ok = rc == 0 and trained is not None
     l2_note = ""
     if ok and not args.no_l2:
-        trained_dep = _deployable_ckpt(trained, work / "eval" / "trained.pth")
-        base_l2 = _l2_eval(base_model, base_model.parent / "args.json", work / "val.json",
-                           args.device, env, work / "l2_base.log")  # fmt: skip
-        trained_l2 = _l2_eval(trained_dep, trained_dep.parent / "args.json", work / "val.json",
-                              args.device, env, work / "l2_trained.log")  # fmt: skip
-        l2_note = " " + _l2_line(base_l2, trained_l2)
-        if base_l2 and trained_l2 and trained_l2[0] > 2 * base_l2[0]:
-            ok = False
-            l2_note += " [REGRESSION: ego L2 >2x base]"
+        l2_note, l2_ok = _regression_l2(base_model, trained, work / "val.json", work, args, env)
+        ok = ok and l2_ok
     saved = _emit_model(trained, "r2lpl", args) if (trained and args.emit_models) else None
     detail = (
         f"rc={rc} trained_model={'yes' if trained else 'NONE'}{l2_note}"
@@ -666,8 +680,10 @@ def main() -> None:
     if not pipelines:
         print("Nothing to do: all pipelines skipped.")
         return
-    if any(name in ("RSFT", "R2LPL") for name, _, _ in pipelines) and not args.base_model:
-        raise SystemExit("--base_model is required for RSFT / R2LPL")
+    # Every pipeline warmstarts from the base model and reports base-vs-trained metrics,
+    # so it is required for all three (not just RSFT/R2LPL) — no silent from-scratch SFT.
+    if not args.base_model:
+        raise SystemExit("--base_model is required (every pipeline warmstarts from it)")
 
     print(f"dataset_root: {root}")
     print(f"out_dir:      {args.out_dir}")

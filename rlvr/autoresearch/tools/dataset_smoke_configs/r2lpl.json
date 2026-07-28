@@ -1,5 +1,5 @@
 {
-  "_doc": "Smoke config for the R2LPL lifelong round (rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds). Warmstarts from --base_model, mines the model's mistakes on the v1 contiguous corpus, builds repair targets, updates replay memory, and TRAINS one short round -> emits a trained model. IMPORTANT: R2LPL learns from MISTAKES, so v1's contiguous corpus must contain scenes the base model FAILS on (moving_collision / road_border_crossing / expert_disagreement). A clean normal-driving corpus mines zero credit rows and R2LPL fails loud. reward_config is an INTERNAL asset (a closed-loop scene-failure reward, not committed): set it to a valid path or R2LPL fails loud. threshold_config/credit_window_config ship in-repo. n_val_cap subsamples v1 frame/val for the base-vs-trained L2 regression check. Small caps for speed - not a real training recipe.",
+  "_doc": "Smoke config for the R2LPL lifelong round (rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds). Warmstarts from --base_model, mines the model's mistakes on the v1 contiguous corpus, builds repair targets, updates replay memory, and TRAINS one short round -> emits a trained model. IMPORTANT: R2LPL learns from MISTAKES, so v1's contiguous corpus must contain scenes the base model FAILS on (moving_collision / road_border_crossing / expert_disagreement). A clean normal-driving corpus mines zero credit rows and R2LPL fails loud. reward_config, threshold_config, and credit_window_config all SHIP in-repo (generic, no dataset specifics) so this runs out of the box; override reward_config with your own closed-loop reward to mine against a real reward. n_val_cap subsamples v1 frame/val for the base-vs-trained L2 regression check. Small caps for speed - not a real training recipe.",
   "rounds": 1,
   "epochs_per_round": 1,
   "replay_capacity": 200,
@@ -15,7 +15,7 @@
   "batch_size": 8,
   "max_chunks": 15,
   "n_val_cap": 40,
-  "reward_config": null,
+  "reward_config": "rlvr/autoresearch/tools/dataset_smoke_configs/r2lpl_danger_reward.json",
   "threshold_config": "rlvr/configs/scene_failure_thresholds.json",
   "credit_window_config": "rlvr/configs/r2lpl_credit_windows.json"
 }
