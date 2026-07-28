@@ -44,6 +44,23 @@ def get_args(args_list=None):
         "weighting (every cluster gets an equal share of draws), 0.0 = uniform. "
         "Lower values soften oversampling. Ignored without --cluster_json.",
     )
+    parser.add_argument(
+        "--force_aug_on_repeat",
+        default=_train_config_default("force_aug_on_repeat"),
+        type=boolean,
+        help="Force one augmentation on any sample the cluster-weighted sampler draws "
+        "more than once in an epoch, so repeats vary instead of duplicating. "
+        "Requires --cluster_json.",
+    )
+    parser.add_argument(
+        "--repeat_aug_pool",
+        type=str,
+        default=_train_config_default("repeat_aug_pool"),
+        help="Comma-separated augmentation names eligible to be forced on a repeat "
+        "draw (flip, neighbor_dropout, neighbor_noise, turn_indicator, traffic_light, "
+        "state_perturbation). Empty means every enabled augmentation. Ignored without "
+        "--force_aug_on_repeat.",
+    )
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)

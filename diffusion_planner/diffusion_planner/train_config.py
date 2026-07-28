@@ -28,6 +28,11 @@ class TrainConfig:
     train_subsample_step: int
     cluster_json: str = ""
     cluster_weight_alpha: float = 1.0
+    force_aug_on_repeat: bool = False
+    # Must default to "" and never None: resolve_repeat_aug_pool calls .split(",") on it,
+    # so a None default turns a misconfiguration into an AttributeError traceback
+    # instead of the intended launch-time ValueError.
+    repeat_aug_pool: str = ""
 
     # ---------------------------------------------------------
     # Data Dimensions

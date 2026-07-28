@@ -209,3 +209,39 @@ class ForcedAugmentationSelector:
         return {
             name: (repeat & (choice == index)).to(device) for index, name in enumerate(self.pool)
         }
+
+
+def validate_forced_aug_flags(args, pipeline: list[tuple[str, object]]) -> tuple[list, list]:
+    """Validate forced-augmentation flags at launch, before the dataset scan.
+
+    Returns ``(pool_names, warnings)``; an empty pool means the feature is off. All
+    failures raise ValueError here rather than surfacing after model init and a
+    150,000-file dataset load.
+    """
+    if not args.force_aug_on_repeat:
+        return [], []
+    if not args.cluster_json:
+        raise ValueError(
+            "--force_aug_on_repeat requires --cluster_json. Without the "
+            "cluster-weighted sampler, draws are without replacement and no sample "
+            "repeats within an epoch, so the flag would silently do nothing."
+        )
+    return resolve_repeat_aug_pool(args.repeat_aug_pool, pipeline, args.augment_type)
+
+
+def duplicate_path_warning(data_list: list) -> str | None:
+    """Warn if data_list repeats a path; dedup is by INDEX, so repeats evade it.
+
+    Two entries for the same NPZ are distinct indices, so both are marked first
+    occurrences and the identical scene trains twice unflagged. A warning rather than
+    an error: a duplicated data_list is a dataset-generation problem that predates
+    this feature and should not block a launch.
+    """
+    duplicates = len(data_list) - len(set(data_list))
+    if duplicates == 0:
+        return None
+    return (
+        f"data_list contains {duplicates} duplicate path(s). Repeat detection is by "
+        f"dataset index, so duplicated paths are treated as distinct samples and the "
+        f"same scene can train twice without being force-augmented."
+    )

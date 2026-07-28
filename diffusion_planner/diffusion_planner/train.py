@@ -21,7 +21,12 @@ from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
-from diffusion_planner.utils.forced_augmentation import build_aug_pipeline
+from diffusion_planner.utils.forced_augmentation import (
+    ForcedAugmentationSelector,
+    build_aug_pipeline,
+    duplicate_path_warning,
+    validate_forced_aug_flags,
+)
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
@@ -269,13 +274,26 @@ def model_training(args: TrainConfig):
     # Ordered (name, aug) pairs. train_epoch applies them in this order and looks up
     # each one's force mask by name.
     aug_pipeline = build_aug_pipeline({"state_perturbation": aug})
-    aug_selector = None
+
+    # Validate before the dataset scan: a bad flag must not surface after model init.
+    try:
+        repeat_aug_pool, pool_warnings = validate_forced_aug_flags(args, aug_pipeline)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if global_rank == 0:
+        for message in pool_warnings:
+            print(f"WARNING: {message}")
 
     # prepare dataset
     train_set = DiffusionPlannerData(args.train_set_list)
     valid_set = DiffusionPlannerData(args.valid_set_list)
 
     train_set.data_list = train_set.data_list[:: args.train_subsample_step]
+
+    if repeat_aug_pool and global_rank == 0:
+        duplicate_message = duplicate_path_warning(train_set.data_list)
+        if duplicate_message is not None:
+            print(f"WARNING: {duplicate_message}")
 
     if args.cluster_json:
         train_sampler = ClusterWeightedDistributedSampler(
@@ -285,6 +303,7 @@ def model_training(args: TrainConfig):
             rank=global_rank,
             seed=args.seed,
             alpha=args.cluster_weight_alpha,
+            track_repeats=bool(repeat_aug_pool),
         )
         if global_rank == 0:
             print(f"Using cluster-weighted sampling from {args.cluster_json}")
@@ -297,6 +316,14 @@ def model_training(args: TrainConfig):
         train_sampler = DistributedSampler(
             train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
         )
+
+    if repeat_aug_pool:
+        aug_selector = ForcedAugmentationSelector(repeat_aug_pool, seed=args.seed)
+        if global_rank == 0:
+            print(f"Forcing one augmentation on repeat draws from pool: {repeat_aug_pool}")
+    else:
+        aug_selector = None
+
     train_loader = DataLoader(
         train_set,
         sampler=train_sampler,
@@ -384,6 +411,12 @@ def model_training(args: TrainConfig):
             "cluster_counts": ordered_counts,
             "cluster_multipliers": {
                 k: train_sampler.cluster_multipliers[k] for k in ordered_counts
+            },
+            # Configuration only. This file is written once at startup, so any
+            # forced/noop row counters here would be structurally always zero.
+            "forced_augmentation": {
+                "enabled": bool(repeat_aug_pool),
+                "pool": list(repeat_aug_pool),
             },
         }
         if save_path is not None:

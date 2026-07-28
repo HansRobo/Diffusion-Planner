@@ -1,10 +1,14 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 from diffusion_planner.utils.forced_augmentation import (
     AUG_ORDER,
     ForcedAugmentationSelector,
     build_aug_pipeline,
+    duplicate_path_warning,
     resolve_repeat_aug_pool,
+    validate_forced_aug_flags,
 )
 
 
@@ -277,3 +281,57 @@ class TestForcedAugmentationSelector:
         assert sum(counts) == n
         for count in counts:
             assert 0.25 * n < count < 0.42 * n, counts
+
+
+class TestValidateForcedAugFlags:
+    def _args(self, **overrides):
+        base = dict(
+            force_aug_on_repeat=True,
+            repeat_aug_pool="",
+            cluster_json="/tmp/clusters.json",
+            augment_type="quintic",
+        )
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def _pipeline(self, *names):
+        return [(n, _FakeAug(n)) for n in AUG_ORDER if n in names]
+
+    def test_disabled_returns_empty_pool_and_no_warnings(self):
+        pool, warnings = validate_forced_aug_flags(
+            self._args(force_aug_on_repeat=False), self._pipeline("flip")
+        )
+        assert pool == []
+        assert warnings == []
+
+    def test_requires_cluster_json(self):
+        """Without the weighted sampler there are no repeat draws at all."""
+        with pytest.raises(ValueError, match="--cluster_json"):
+            validate_forced_aug_flags(self._args(cluster_json=""), self._pipeline("flip"))
+
+    def test_returns_resolved_pool(self):
+        pool, _ = validate_forced_aug_flags(self._args(), self._pipeline("flip", "neighbor_noise"))
+        assert pool == ["flip", "neighbor_noise"]
+
+    def test_propagates_pool_resolution_errors(self):
+        with pytest.raises(ValueError, match="--use_neighbor_noise"):
+            validate_forced_aug_flags(
+                self._args(repeat_aug_pool="neighbor_noise"), self._pipeline("flip")
+            )
+
+    def test_propagates_warnings(self):
+        _, warnings = validate_forced_aug_flags(
+            self._args(repeat_aug_pool="flip"), self._pipeline("flip")
+        )
+        assert any("deterministic" in w for w in warnings)
+
+
+class TestDuplicatePathWarning:
+    def test_reports_duplicate_paths(self):
+        data_list = ["/d/a.npz", "/d/b.npz", "/d/a.npz", "/d/c.npz", "/d/b.npz"]
+        message = duplicate_path_warning(data_list)
+        assert message is not None
+        assert "2" in message
+
+    def test_none_when_unique(self):
+        assert duplicate_path_warning(["/d/a.npz", "/d/b.npz"]) is None
