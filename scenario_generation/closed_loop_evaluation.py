@@ -26,6 +26,9 @@ from scenario_generation.closed_loop_eval import (
     build_mp4,
     enumerate_multi_root_routes,
     format_summary_lines,
+    load_segment_rows_with_tdigests,
+    segment_row_for_json,
+    tdigest_sidecar_row,
 )
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import render_segment
@@ -172,16 +175,25 @@ class ClosedLoopEvaluation(ABC):
         return summary
 
     def run_distributed(self) -> dict:
-        """Run evaluation; under DDP, barrier then rank-0 ``merge_ddp_shards``."""
+        """Run evaluation; under DDP, barrier then rank-0 ``merge_ddp_shards``.
+
+        Requires an initialized process group whenever ``ddp_world_size > 1``: skipping the
+        barrier (e.g. because torch.distributed was never initialized) would let rank-0 start
+        merging before every other rank has finished writing its ``segments_{rank}.jsonl``
+        shard, silently producing a summary built from a partial/incomplete set of ranks.
+        """
         partial = self.run()
         if self.ddp_world_size <= 1:
             return partial
-        try:
-            import torch.distributed as dist
-        except ImportError:
-            return partial
-        if dist.is_available() and dist.is_initialized():
-            dist.barrier()
+        import torch.distributed as dist
+
+        if not (dist.is_available() and dist.is_initialized()):
+            raise RuntimeError(
+                f"closed-loop run_distributed: ddp_world_size={self.ddp_world_size} > 1 but "
+                "torch.distributed is not initialized -- refusing to merge without a barrier "
+                "to guarantee every rank finished writing its shard first."
+            )
+        dist.barrier()
         if self.ddp_rank != 0:
             return {}
         if partial.get("ddp_shard"):
@@ -224,22 +236,13 @@ class ClosedLoopEvaluation(ABC):
             self.on_job_complete(job, partial, ri, len(jobs))
         return merged
 
-    def ddp_shard_extras(self, result: JobRunResult) -> dict[str, Any]:
-        return dict(result.extras)
-
     def finalize_ddp(self, result: JobRunResult, *, elapsed_sec: float) -> dict:
-        from scenario_generation.closed_loop_ddp import write_eval_shard
+        """Signal rank-0 to merge once every rank reaches the barrier.
 
-        write_eval_shard(
-            self.out_dir,
-            self.ddp_rank,
-            mode=self.mode,
-            rows=result.rows,
-            video_mp4s=result.video_mp4s,
-            elapsed_sec=elapsed_sec,
-            extras=self.ddp_shard_extras(result),
-            profile=self.config.profile,
-        )
+        Per-rank rows are already durably persisted by ``execute_jobs`` writing
+        ``segments_{rank}.jsonl`` (+ tdigest sidecar) directly -- no separate shard blob to write
+        here, so a crashed rank can't leave stale/inconsistent shard state behind.
+        """
         return self.ddp_partial_summary(result, elapsed_sec=elapsed_sec)
 
     def ddp_partial_summary(self, result: JobRunResult, *, elapsed_sec: float) -> dict:
@@ -253,18 +256,27 @@ class ClosedLoopEvaluation(ABC):
         }
 
     def collect_ddp_shards(self, world_size: int) -> JobRunResult:
-        """Load per-rank shard JSON written under ``out_dir/ddp_shards/``."""
-        merged = JobRunResult()
-        for rank in range(world_size):
-            path = self.out_dir / "ddp_shards" / f"rank_{rank:03d}.json"
-            if not path.is_file():
-                continue
-            shard = json.loads(path.read_text(encoding="utf-8"))
-            merged.rows.extend(shard.get("rows") or [])
-            merged.video_mp4s.extend(Path(p) for p in shard.get("video_mp4s") or [])
-            merged.elapsed_sec = max(merged.elapsed_sec, float(shard.get("elapsed_sec", 0.0)))
-            self.merge_job_result(merged, JobRunResult(extras=shard.get("extras") or {}))
-        return merged
+        """Load every rank's ``segments_{rank}.jsonl`` (+ tdigest sidecar), the same convention
+        ``closed_loop_eval.run_closed_loop_eval`` uses for its own multi-GPU shards.
+
+        Fails loudly if any rank's file is missing (crashed before writing, or never reached
+        ``finalize_ddp``) instead of silently merging a partial result as a "successful" summary.
+        Videos are found by globbing the shared ``out_dir`` directly -- every rank renders into
+        the same directory with globally-unique route-keyed filenames, so there's nothing to
+        track per-shard.
+        """
+        missing = [
+            r for r in range(world_size) if not (self.out_dir / f"segments_{r}.jsonl").is_file()
+        ]
+        if missing:
+            raise RuntimeError(
+                f"closed-loop DDP merge: missing segments_<rank>.jsonl for rank(s) {missing} "
+                f"under {self.out_dir} (world_size={world_size}) -- one or more ranks likely "
+                "crashed or never reached finalize_ddp; refusing to merge a partial result."
+            )
+        rows = load_segment_rows_with_tdigests(self.out_dir, shard_glob="segments_*.jsonl")
+        video_mp4s = sorted(self.out_dir.glob("*.mp4"))
+        return JobRunResult(rows=rows, video_mp4s=video_mp4s)
 
     def merge_ddp_shards(self, world_size: int) -> dict:
         """Rank-0: merge shard files, persist artifacts, and return the final summary."""
@@ -384,13 +396,20 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         return {"route_keys": []}
 
     def execute_jobs(self, jobs: list[ClosedLoopJob]) -> JobRunResult:
-        """Stream per-segment rows to ``segments.jsonl`` while jobs run."""
+        """Stream per-segment rows to ``segments.jsonl`` (``segments_{rank}.jsonl`` + a tdigest
+        sidecar under DDP sharding -- the same convention ``run_closed_loop_eval`` uses), while
+        jobs run."""
         merged = JobRunResult(extras={"route_keys": []})
-        segments_path = self.out_dir / "segments.jsonl"
-        with segments_path.open("w", encoding="utf-8") as fout:
+        suffix = f"_{self.ddp_rank}" if self.ddp_world_size > 1 else ""
+        segments_path = self.out_dir / f"segments{suffix}.jsonl"
+        digests_path = self.out_dir / f"tdigests{suffix}.jsonl"
+        with (
+            segments_path.open("w", encoding="utf-8") as fout,
+            digests_path.open("w", encoding="utf-8") as fdigest,
+        ):
             for ri, job in enumerate(jobs):
                 assert isinstance(job, FullRouteRouteJob)
-                partial = self.run_job(job, segments_file=fout)
+                partial = self.run_job(job, segments_file=fout, digest_file=fdigest)
                 merged.rows.extend(partial.rows)
                 merged.video_mp4s.extend(partial.video_mp4s)
                 merged.extras["route_keys"].append(job.route_key)
@@ -402,6 +421,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         job: ClosedLoopJob,
         *,
         segments_file=None,
+        digest_file=None,
     ) -> JobRunResult:
         assert isinstance(job, FullRouteRouteJob)
         params = self.config.params
@@ -423,8 +443,16 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             )
             row = {"route": job.route_key, **metrics}
             if segments_file is not None:
-                segments_file.write(json.dumps(row, default=float) + "\n")
+                # Human-readable segments.jsonl never carries the raw _tdigest blobs; those go to
+                # the sidecar so a later DDP merge (or a re-load of this run) can still pool an
+                # approximate global clearance percentile without the full per-step samples.
+                segments_file.write(json.dumps(segment_row_for_json(row), default=float) + "\n")
                 segments_file.flush()
+                if digest_file is not None:
+                    side = tdigest_sidecar_row(row)
+                    if side is not None:
+                        digest_file.write(json.dumps(side, default=float) + "\n")
+                        digest_file.flush()
             rows.append(row)
 
             if not any(png_dir.glob("*.png")):
@@ -463,7 +491,10 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
     def build_summary(self, result: JobRunResult, *, elapsed_sec: float) -> dict:
         summary = aggregate(result.rows, self.config.params.near_miss_thresh)
         summary["npz_root"] = str(self.npz_root)
-        summary["n_routes"] = len(set(result.extras.get("route_keys") or []))
+        # Derived straight from the merged rows (each carries its own "route") rather than
+        # extras["route_keys"] -- extras aren't reconstructed across a DDP merge (see
+        # collect_ddp_shards), so this stays correct for both the single-process and merged path.
+        summary["n_routes"] = len({r["route"] for r in result.rows})
         summary["elapsed_sec"] = elapsed_sec
         summary["video_mp4s"] = result.video_mp4s
         summary["segments"] = result.rows
@@ -487,6 +518,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         print(f"videos: per-segment <route>_<start>_<end>.mp4 in {self.out_dir}")
 
     def prepare_ddp_merge_artifacts(self, result: JobRunResult) -> None:
+        """Rewrite ``segments.jsonl`` as the single merged, human-readable view across every
+        rank's ``segments_{rank}.jsonl`` (digests stripped, same convention ``execute_jobs`` uses
+        for the non-sharded path)."""
         with open(self.out_dir / "segments.jsonl", "w", encoding="utf-8") as fout:
             for row in result.rows:
-                fout.write(json.dumps(row, default=float) + "\n")
+                fout.write(json.dumps(segment_row_for_json(row), default=float) + "\n")
