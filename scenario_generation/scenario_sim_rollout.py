@@ -63,7 +63,10 @@ class RolloutConfig:
     """Tuning for a single scenario_sim rollout."""
 
     fps: float = 10.0
-    replan_interval: int = 4
+    # 1 = re-plan every tick, matching the production node's planning_frequency_hz=10.0
+    # (diffusion_planner_node.cpp:151). Values > 1 make the ego consume a cached plan
+    # open-loop in between, which is cheaper but less reactive than the real vehicle.
+    replan_interval: int = 1
     max_steps: int = 300
     warmup_steps: int = 5  # skip scoring until the history buffer is warm
     near_miss_thresh: float = 1.0
@@ -520,7 +523,8 @@ def main() -> int:
     p.add_argument("--row_out", required=True, help="write the metrics row JSON here")
     p.add_argument("--device", default="cpu")
     p.add_argument("--model_path", required=True, help="torch .pth checkpoint")
-    p.add_argument("--replan_interval", type=int, default=4)
+    p.add_argument("--replan_interval", type=int, default=1,
+                   help="re-plan every N ticks; 1 (default) = every tick = 10 Hz, matching production")
     p.add_argument("--max_steps", type=int, default=300)
     p.add_argument("--warmup_steps", type=int, default=5)
     p.add_argument("--near_miss_thresh", type=float, default=1.0)

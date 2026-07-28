@@ -317,7 +317,7 @@ def run_scenario_sim_eval(
     device: str,
     model_path: str,
     near_miss_thresh: float = 1.0,
-    replan_interval: int = 4,
+    replan_interval: int = 1,  # every tick = 10 Hz, matching the production node
     max_steps: int = 300,
     warmup_steps: int = 5,
     fps: float = 10.0,
@@ -435,7 +435,8 @@ def main() -> None:
     p.add_argument(
         "--model_path", required=True, help="best_model.pth (torch checkpoint)"
     )
-    p.add_argument("--replan_interval", type=int, default=4)
+    p.add_argument("--replan_interval", type=int, default=1,
+                   help="re-plan every N ticks; 1 (default) = every tick = 10 Hz, matching production")
     p.add_argument("--max_steps", type=int, default=300)
     p.add_argument("--near_miss_thresh", type=float, default=1.0)
     args = p.parse_args()
