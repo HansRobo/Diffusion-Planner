@@ -156,6 +156,17 @@ class TrainConfig:
 
     # HDP RL objective. The branch intentionally keeps only the official-style
     # reward-weighted RL-Hybrid path.
+    #
+    # ``rl_paper_exact`` pins every field listed in
+    # ``diffusion_planner.hdp_rl_paper_exact`` to its published value (paper Table 3,
+    # Eq. (14)-(17), Appendix "Reward Function Details", and the authors' released
+    # dp_vla_rl_agent). It turns off every real-vehicle extension of this repository and
+    # fails on any explicit flag that contradicts the paper, so a run either reproduces
+    # HDP-RL exactly or refuses to start. See docs/hdp_rl_paper_fidelity.md.
+    rl_paper_exact: bool = False
+    # ``multi`` = lambda_risk r_risk + lambda_follow r_follow + lambda_lane r_lane (HDP-RL);
+    # ``single`` = r_safety alone (HDP-RL dagger, the paper's single-reward baseline).
+    rl_paper_reward: Literal["multi", "single"] = "multi"
     num_generations: int = 8
     rl_reward_normalize: Literal["group", "batch", "none"] = "group"
     rl_reward_beta: float = 0.5

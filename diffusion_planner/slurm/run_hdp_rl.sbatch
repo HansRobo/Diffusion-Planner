@@ -129,6 +129,86 @@ USE_WANDB=${HDP_RL_USE_WANDB:-True}
 WANDB_PROJECT=${HDP_RL_WANDB_PROJECT:-hdp-rl}
 WANDB_RUN_ID=${HDP_RL_WANDB_RUN_ID:-}
 STEP_LOG_INTERVAL=${HDP_RL_STEP_LOG_INTERVAL:-100}
+PLANNING_HYBRID_LOSS=${HDP_RL_PLANNING_HYBRID_LOSS:-0.01}
+HYBRID_LOSS_WINDOW=${HDP_RL_HYBRID_LOSS_WINDOW:-10}
+
+# ── Published HDP-RL configuration ──────────────────────────────────────────
+# HDP_RL_PAPER_EXACT=True reproduces the paper's RL post-training exactly: every
+# knob below is replaced by its published value, and the trainer then refuses to
+# start if anything still contradicts the paper (docs/hdp_rl_paper_fidelity.md).
+# An env var you set yourself is never silently overwritten -- it is passed
+# through so the trainer can name the conflict together with its citation.
+PAPER_EXACT=${HDP_RL_PAPER_EXACT:-False}
+PAPER_REWARD=${HDP_RL_PAPER_REWARD:-multi}
+
+paper_pin() { # paper_pin <shell-var> <env-var> <published-value>
+  local var=$1 env=$2 value=$3
+  if [[ -n "${!env+set}" ]]; then
+    echo "paper-exact: keeping explicit ${env}=${!env} (published ${value});" \
+      "the trainer rejects it if it conflicts"
+  else
+    printf -v "${var}" '%s' "${value}"
+  fi
+}
+
+case "${PAPER_EXACT}" in
+  True | true | 1)
+    PAPER_EXACT=True
+    case "${PAPER_REWARD}" in
+      multi) # neurips_2026.tex app:rewards, multi-reward setting
+        paper_pin REWARD_W_SAFETY HDP_RL_REWARD_W_SAFETY 0.0
+        paper_pin REWARD_W_RISK HDP_RL_REWARD_W_RISK 1.0
+        paper_pin REWARD_W_FOLLOW HDP_RL_REWARD_W_FOLLOW 3.0
+        paper_pin REWARD_W_LANE HDP_RL_REWARD_W_LANE 2.5
+        ;;
+      single) # neurips_2026.tex app:rewards, r_safety alone (HDP-RL dagger)
+        paper_pin REWARD_W_SAFETY HDP_RL_REWARD_W_SAFETY 1.0
+        paper_pin REWARD_W_RISK HDP_RL_REWARD_W_RISK 0.0
+        paper_pin REWARD_W_FOLLOW HDP_RL_REWARD_W_FOLLOW 0.0
+        paper_pin REWARD_W_LANE HDP_RL_REWARD_W_LANE 0.0
+        ;;
+      *)
+        echo "HDP_RL_PAPER_REWARD must be multi or single; got ${PAPER_REWARD}" >&2
+        exit 2
+        ;;
+    esac
+    # Table 3 and the RL-hybrid loss of Eq. (awr_hybrid).
+    paper_pin NUM_GENERATIONS HDP_RL_NUM_GENERATIONS 32
+    paper_pin REWARD_BETA HDP_RL_REWARD_BETA 1.0
+    paper_pin EMA_UPDATE_RATE HDP_RL_EMA_UPDATE_RATE 0.05
+    paper_pin PLANNING_HYBRID_LOSS HDP_RL_PLANNING_HYBRID_LOSS 0.1
+    paper_pin HYBRID_LOSS_WINDOW HDP_RL_HYBRID_LOSS_WINDOW 79 # W = L - 1, L = 80
+    # The published reward: a plain weighted sum of the four appendix terms.
+    paper_pin REWARD_SOURCE HDP_RL_REWARD_SOURCE native
+    paper_pin REWARD_AGGREGATION HDP_RL_REWARD_AGGREGATION weighted_sum
+    paper_pin BEHAVIOR_GATE HDP_RL_BEHAVIOR_GATE none
+    paper_pin REWARD_W_PROGRESS HDP_RL_REWARD_W_PROGRESS 0.0
+    paper_pin REWARD_W_ROAD_BORDER HDP_RL_REWARD_W_ROAD_BORDER 0.0
+    paper_pin RED_LIGHT_CONSTRAINT HDP_RL_RED_LIGHT_CONSTRAINT False
+    paper_pin OCCUPANCY_USE_ROAD_BORDER HDP_RL_OCCUPANCY_USE_ROAD_BORDER False
+    paper_pin REWARD_HORIZON_STEPS HDP_RL_REWARD_HORIZON_STEPS 0
+    paper_pin CANDIDATE_LOSS_HORIZON HDP_RL_CANDIDATE_LOSS_HORIZON 0
+    # The released rollout / replay schedule.
+    paper_pin ROLLOUT_STEPS HDP_RL_ROLLOUT_STEPS 5
+    paper_pin ROLLOUT_INTERVAL HDP_RL_ROLLOUT_INTERVAL 10
+    paper_pin UPDATES_PER_ROLLOUT HDP_RL_UPDATES_PER_ROLLOUT 1
+    paper_pin NOISE_SCALE HDP_RL_NOISE_SCALE 1.0
+    # Real-vehicle extensions of this repository, off.
+    paper_pin BC_WEIGHT HDP_RL_BC_WEIGHT 0.0
+    paper_pin CANDIDATE_AUG_PROB HDP_RL_CANDIDATE_AUG_PROB 0.0
+    paper_pin FIRST_WAYPOINT_GATE HDP_RL_FIRST_WAYPOINT_GATE False
+    paper_pin DIFFUSION_T_MIN HDP_RL_DIFFUSION_T_MIN 0.0
+    paper_pin DIFFUSION_T_MAX HDP_RL_DIFFUSION_T_MAX 1.0
+    ;;
+  False | false | 0)
+    PAPER_EXACT=False
+    ;;
+  *)
+    echo "HDP_RL_PAPER_EXACT must be True or False; got ${PAPER_EXACT}" >&2
+    exit 2
+    ;;
+esac
+
 RUN_NAME=${HDP_RL_RUN_NAME:-hdp_rl_${WORLD_SIZE}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
 SAVE_ROOT=${HDP_RL_SAVE_ROOT:-${REPO}/outputs}
 for gate_name in "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}"; do
@@ -481,8 +561,10 @@ TRAIN_ARGS=(
   --num_heads 8 \
   --diffusion_sample_steps 6 \
   --use_velocity_representation True \
-  --planning_hybrid_loss 0.01 \
-  --hybrid_loss_window 10 \
+  --planning_hybrid_loss "${PLANNING_HYBRID_LOSS}" \
+  --hybrid_loss_window "${HYBRID_LOSS_WINDOW}" \
+  --rl_paper_exact "${PAPER_EXACT}" \
+  --rl_paper_reward "${PAPER_REWARD}" \
   --coeff_road_border_loss 0.0 \
   --coeff_neighbor_collision_loss 0.0 \
   --use_ema True \
