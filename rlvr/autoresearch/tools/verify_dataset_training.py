@@ -151,6 +151,34 @@ def _env_for_device(device: str) -> dict:
     return env
 
 
+# Model-architecture flags that must match the warmstart checkpoint for strict
+# state_dict loading. train_predictor takes these as CLI flags and otherwise uses parser
+# DEFAULTS, which silently diverge for a non-default base -> resume load fails. We
+# reconstruct them from the base model's args.json.
+_ARCH_KEYS = (
+    "future_len", "time_len", "ego_prediction_horizon", "agent_state_dim", "agent_num",
+    "static_objects_state_dim", "static_objects_num", "lane_num", "lane_len", "route_num",
+    "route_len", "polygon_num", "polygon_len", "line_string_num", "line_string_len",
+    "encoder_mixer_depth", "encoder_fusion_depth", "decoder_depth", "num_heads",
+    "hidden_dim", "predicted_neighbor_num", "use_ego_history", "use_turn_indicators",
+    "diffusion_model_type", "use_velocity_representation",
+)  # fmt: skip
+
+
+def _base_arch_args(args_json: Path) -> list[str]:
+    """CLI flags reconstructing the base model's architecture from its args.json so a
+    warmstart train_predictor builds a model matching the checkpoint (its parser
+    defaults would otherwise diverge for a non-default base and fail strict loading)."""
+    with open(args_json) as f:
+        a = json.load(f)
+    out: list[str] = []
+    for k in _ARCH_KEYS:
+        if k in a:
+            v = a[k]
+            out += [f"--{k}", str(v).lower() if isinstance(v, bool) else str(v)]
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # warmstart / model-output / L2 helpers (the script does all of this itself)
 # --------------------------------------------------------------------------- #
@@ -194,6 +222,9 @@ def _l2_eval(model_path: Path, args_json: Path, val_list: Path, device: str, env
         sys.executable, "diffusion_planner/valid_predictor.py", "--ddp", "false",
         "--resume_model_path", str(model_path), "--args_json_path", str(args_json),
         "--valid_set_list", str(val_list), "--batch_size", "32",
+        # valid_predictor defaults to cuda; pass the resolved device so --device cpu
+        # (and auto on a CPU-only host) actually runs on CPU instead of crashing.
+        "--device", device,
     ]  # fmt: skip
     rc, text = _run(cmd, log, env)
     ego = re.findall(r"avg_loss_ego=([0-9.eE+-]+)", text)
@@ -270,9 +301,12 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
     # warmstart isn't LR-warmed from ~0. Without a base model it trains from scratch.
     resume = []
     if args.base_model:
-        _require(args.base_model.parent / "args.json", "args.json beside --base_model (SFT)")
+        base_args = _require(
+            args.base_model.parent / "args.json", "args.json beside --base_model (SFT)"
+        )
         train_epochs = _ckpt_epoch(args.base_model) + n_epochs
-        resume = ["--resume_model_path", str(args.base_model)]
+        # pass the base ARCHITECTURE args so the resumed model matches the checkpoint
+        resume = ["--resume_model_path", str(args.base_model), *_base_arch_args(base_args)]
     else:
         train_epochs = n_epochs
     cmd = [
@@ -312,19 +346,21 @@ def run_sft(ds, cfg, args, env) -> tuple[bool, str]:
         except ValueError:
             return False
 
-    ok = rc == 0 and _finite(tr_loss) and _finite(va_loss)
-    # locate the saved checkpoint, emit a deployable model, and compare L2 base->trained
+    # locate the saved checkpoint FIRST — a trained checkpoint is part of the PASS
+    # contract (finite logs + rc=0 alone can be true while no model was written).
     best = work / "out" / "best_model" / "best_model.pth"
     if not best.exists():
         best = work / "out" / "latest.pth"
+    ok = rc == 0 and _finite(tr_loss) and _finite(va_loss) and best.exists()
     l2_note = ""
-    if ok and best.exists() and args.base_model and not args.no_l2:
+    if ok and not args.no_l2:
         l2_note, l2_ok = _regression_l2(args.base_model, best, work / "val.json", work, args, env)
         ok = ok and l2_ok
-    saved = _emit_model(best, "sft", args) if (best.exists() and args.emit_models) else None
+    saved = _emit_model(best, "sft", args) if (ok and best.exists() and args.emit_models) else None
     detail = (
         f"rc={rc} train_loss={tr_loss[-1] if tr_loss else 'NONE'} "
-        f"valid_loss_ego={va_loss[-1] if va_loss else 'NONE'}{l2_note}"
+        f"valid_loss_ego={va_loss[-1] if va_loss else 'NONE'} "
+        f"ckpt={'yes' if best.exists() else 'MISSING'}{l2_note}"
         f"{f' model={saved}' if saved else ''}"
     )
     return ok, detail
@@ -414,7 +450,9 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
         except ValueError:
             base_reward = None
     lora = list((work / "out").rglob("adapter_model.safetensors"))
-    ok = rc == 0 and trained and ev_val is not None and bool(lora)
+    # base_reward is required: we drop --skip_baseline specifically to compute the
+    # base-vs-trained reward comparison, so a missing base reward is a failed contract.
+    ok = rc == 0 and trained and ev_val is not None and base_reward is not None and bool(lora)
     # merge the LoRA into the base and emit a usable full model (own subdir + args.json,
     # matching SFT/R2LPL so the emitted model is self-contained and loadable)
     saved = None
@@ -542,6 +580,8 @@ def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
         "repair_generation": {
             "ego_shape": cfg.get("ego_shape", "from_npz"),
             "min_margin": float(cfg.get("min_margin", 0.3)),
+            # thread the resolved device so repair generation honors --device cpu
+            "device": args.device,
         },
         "replay_memory": {"capacity": int(cfg.get("replay_capacity", 200))},
         "training": {"val_scenes": str(work / "val.json")},
@@ -550,21 +590,26 @@ def run_r2lpl(ds, cfg, args, env) -> tuple[bool, str]:
             "epochs_per_round": int(cfg.get("epochs_per_round", 1)),
         },
         "perception_reproducer": {
-            k: cfg[k]
-            for k in (
-                "chunk_len",
-                "start_stride",
-                "expected_frame_step",
-                "tracker_mode",
-                "timeline_progress_mode",
-                "neighbor_history_mode",
-                "batch_size",
-            )
-            if cfg.get(k) is not None
+            "device": args.device,  # mining rollout honors --device cpu
+            **{
+                k: cfg[k]
+                for k in (
+                    "chunk_len",
+                    "start_stride",
+                    "expected_frame_step",
+                    "tracker_mode",
+                    "timeline_progress_mode",
+                    "neighbor_history_mode",
+                    "batch_size",
+                )
+                if cfg.get(k) is not None
+            },
         },  # fmt: skip
         "event_mining": {k: cfg[k] for k in ("max_chunks",) if cfg.get(k) is not None},
     }
     training_cfg = cfg.get("training_config", {"backend": "base_sft", "train_args": {}})
+    # ensure the base-SFT round training also honors the resolved device
+    training_cfg.setdefault("train_args", {}).setdefault("device", args.device)
     wf_path = work / "workflow_config.json"
     tc_path = work / "training_config.json"
     with open(wf_path, "w") as f:

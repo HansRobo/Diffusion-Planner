@@ -297,6 +297,17 @@ def _pad_slots(arr: np.ndarray, n: int) -> np.ndarray:
     return np.concatenate([arr, pad], axis=0)
 
 
+def _to_raw3_pose(arr: np.ndarray) -> np.ndarray:
+    """Normalize an ego/goal pose tensor to the canonical 3-col on-disk width
+    [x, y, heading]: a 4-col [x, y, cos, sin] is collapsed to heading=atan2(sin, cos);
+    3-col passes through. Works for both a [T, C] history/future and a [C] goal pose."""
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.shape[-1] == 4:
+        heading = np.arctan2(arr[..., 3], arr[..., 2])
+        arr = np.concatenate([arr[..., :2], heading[..., None]], axis=-1)
+    return arr.astype(np.float32)
+
+
 def canonicalize_npz(in_path: str, out_path: str) -> None:
     """Write a 320-slot / 4-col-neighbor-future / float32 copy of in_path.
 
@@ -314,6 +325,14 @@ def canonicalize_npz(in_path: str, out_path: str) -> None:
         zero_rows_are_padding=True,
     )
     d["neighbor_agents_future"] = _pad_slots(naf, N_SLOTS)
+
+    # Normalize ego/goal poses to ONE canonical on-disk width (3-col [x, y, heading]).
+    # The loader's heading_to_cos_sin accepts 3- OR 4-col, but a corpus that MIXES widths
+    # crashes at default DataLoader collation (before that transform): [31,3] vs [31,4].
+    # Collapsing any 4-col [x, y, cos, sin] to heading here keeps every output uniform.
+    for k in ("ego_agent_past", "ego_agent_future", "goal_pose"):
+        if k in d:
+            d[k] = _to_raw3_pose(d[k])
 
     # enforce float32 on all floating arrays (ego_agent_future stays [80,3])
     for k, v in list(d.items()):
