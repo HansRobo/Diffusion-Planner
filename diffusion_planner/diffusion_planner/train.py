@@ -283,6 +283,11 @@ def model_training(args: TrainConfig):
         if global_rank == 0:
             print(f"Using cluster-weighted sampling from {args.cluster_json}")
     else:
+        if global_rank == 0 and args.cluster_weight_alpha != 1.0:
+            print(
+                f"WARNING: --cluster_weight_alpha {args.cluster_weight_alpha} is ignored "
+                "without --cluster_json; using the default DistributedSampler."
+            )
         train_sampler = DistributedSampler(
             train_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=True
         )
@@ -355,8 +360,31 @@ def model_training(args: TrainConfig):
             suffix = key.replace("cluster_id", "", 1) if key.startswith("cluster_id") else key
             return (0, int(suffix), "") if suffix.isdigit() else (1, 0, key)
 
-        for k, v in sorted(train_sampler.cluster_counts.items(), key=_cluster_sort_key):
+        ordered_counts = dict(sorted(train_sampler.cluster_counts.items(), key=_cluster_sort_key))
+        for k, v in ordered_counts.items():
             print(f"  {k}: {v} samples  {train_sampler.cluster_multipliers[k]:.2f}x")
+
+        # Persist what was actually applied. The multipliers are derived from the
+        # LIVE, post---train_subsample_step data_list, so they cannot be
+        # reconstructed from args.json (which records only cluster_json and
+        # cluster_weight_alpha). Without this file the run's sampling distribution
+        # is lost the moment stdout is.
+        cluster_sampling = {
+            "cluster_json": args.cluster_json,
+            "cluster_weight_alpha": args.cluster_weight_alpha,
+            "train_subsample_step": args.train_subsample_step,
+            "data_list_size": len(train_set.data_list),
+            "matched_count": train_sampler.matched_count,
+            "cluster_counts": ordered_counts,
+            "cluster_multipliers": {
+                k: train_sampler.cluster_multipliers[k] for k in ordered_counts
+            },
+        }
+        if save_path is not None:
+            with open(os.path.join(save_path, "cluster_sampling.json"), "w", encoding="utf-8") as f:
+                json.dump(cluster_sampling, f, indent=4)
+    else:
+        cluster_sampling = None
 
     if args.ddp:
         torch.distributed.barrier()
@@ -428,6 +456,10 @@ def model_training(args: TrainConfig):
         )
 
         wandb.config.update(args_dict)
+        if cluster_sampling is not None:
+            # args_dict carries only the requested alpha; this carries the applied
+            # per-cluster multipliers, so runs at different alphas are comparable.
+            wandb.config.update({"cluster_sampling": cluster_sampling})
 
         # this function creates dataset artifacts and associate them with wandb run
         # if wandb_run_id is given, the input artifact is assumed to be created externally and will not be executed

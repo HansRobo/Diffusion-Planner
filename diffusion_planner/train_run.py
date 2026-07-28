@@ -72,8 +72,20 @@ def main() -> None:
     if args.wandb_project_name:
         optional += ["--wandb_project_name", args.wandb_project_name]
     if args.cluster_json:
-        optional += ["--cluster_json", str(Path(args.cluster_json).resolve())]
+        # ``Path.resolve()`` is non-strict, so a typo would sail through and only
+        # surface after every rank has loaded the (large) train/valid path lists
+        # and built the model. Fail before launching torchrun.
+        cluster_json = Path(args.cluster_json).resolve()
+        if not cluster_json.is_file():
+            sys.exit(f"--cluster_json not found: {cluster_json}")
+        optional += ["--cluster_json", str(cluster_json)]
     if args.cluster_weight_alpha is not None:
+        if not args.cluster_json:
+            print(
+                f"WARNING: --cluster_weight_alpha {args.cluster_weight_alpha} has no effect "
+                "without --cluster_json; training will use the default DistributedSampler.",
+                file=sys.stderr,
+            )
         optional += ["--cluster_weight_alpha", str(args.cluster_weight_alpha)]
 
     Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
