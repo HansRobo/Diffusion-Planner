@@ -47,12 +47,15 @@ class ClusterWeightedDistributedSampler(Sampler):
                 f"data_list has {len(data_list)} entries, exceeding "
                 f"torch.multinomial's 2^24 ({2**24:,}) category limit on CPU."
             )
-        # ``not alpha >= 0`` rather than ``alpha < 0`` so NaN is rejected too:
-        # every comparison with NaN is False, and a NaN alpha would otherwise
-        # make every weight NaN and surface as an opaque torch.multinomial error.
-        if not alpha >= 0:
+        # Reject negatives *and* non-finite values (NaN, +/-inf). ``not alpha >= 0``
+        # alone would let ``inf`` through: it makes every weight NaN (inf/inf), logs
+        # ``nan x`` multipliers, and only dies at the first ``__iter__`` with an
+        # opaque "invalid multinomial distribution" -- after model init and dataset
+        # load, wasting a whole training launch. Very large finite alphas also raise
+        # a bare OverflowError from ``float.__pow__``. Fail here instead, legibly.
+        if not (math.isfinite(alpha) and alpha >= 0):
             raise ValueError(
-                f"alpha={alpha} must be a number >= 0 (1.0 = full inverse, 0.0 = uniform)"
+                f"alpha={alpha} must be a finite number >= 0 (1.0 = full inverse, 0.0 = uniform)"
             )
         self.num_replicas = num_replicas
         self.rank = rank

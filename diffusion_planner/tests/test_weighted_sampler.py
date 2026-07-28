@@ -404,6 +404,27 @@ class TestAlpha:
                     alpha=float("nan"),
                 )
 
+    def test_inf_alpha_raises(self):
+        """inf must be rejected at construction, not at the first __iter__.
+
+        ``inf`` passes ``alpha >= 0``, but makes every weight NaN (inf/inf) and
+        only fails later inside torch.multinomial -- after model init and dataset
+        load, wasting a training launch.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(10)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            with pytest.raises(ValueError, match="alpha"):
+                ClusterWeightedDistributedSampler(
+                    data_list,
+                    cluster_path,
+                    num_replicas=1,
+                    rank=0,
+                    seed=42,
+                    alpha=float("inf"),
+                )
+
     def test_softened_alpha_with_unmatched_paths_keeps_ordering(self):
         """Regression guard on hunk ordering in ``_compute_weights``.
 

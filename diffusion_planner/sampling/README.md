@@ -143,6 +143,17 @@ python visualize_cluster_report.py \
 - `render-video-txt` on PATH (`pip install -e /path/to/clip-review-tool`)
 - `ffmpeg` on PATH (for video rendering; also used for GIF conversion in standalone mode)
 
+**Caveat — the report and training must describe the same population:**
+
+The report derives cluster frequencies from the cluster JSON's own totals, while
+training derives them from the live, post-subsample training file list. The two
+agree only when the cluster JSON and the training file list cover the same set of
+samples. In particular, `--train_subsample_step > 1`, or a cluster JSON that is a
+superset of `--train_set_list`, will make the report's **Weight** column diverge
+from the multipliers training actually applies — even when `--cluster_weight_alpha`
+matches. Training's startup log (`Cluster distribution ... alpha=...`, printed with
+one `Nx` multiplier per cluster) is the authoritative record of what was applied.
+
 **Report contents:**
 - Pipeline overview (trajectory → PCA → KMeans)
 - Cluster distribution table + bar chart (sorted by sample count)

@@ -140,6 +140,14 @@ class TestComputeClusterStats:
         with pytest.raises(ValueError, match="alpha"):
             compute_cluster_stats(clusters, alpha=float("nan"))
 
+    def test_inf_alpha_raises(self):
+        """inf must be rejected, matching the sampler: it would render an all-nan table."""
+        import pytest
+
+        clusters = {"cluster_id0": ["/a.npz"]}
+        with pytest.raises(ValueError, match="alpha"):
+            compute_cluster_stats(clusters, alpha=float("inf"))
+
     def test_report_weight_matches_sampler_weight(self):
         """The report must reproduce the sampler's multiplier exactly."""
         import json as _json

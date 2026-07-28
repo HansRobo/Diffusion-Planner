@@ -344,7 +344,18 @@ def model_training(args: TrainConfig):
             f"(matched {train_sampler.matched_count}/{len(train_set.data_list)} data paths, "
             f"alpha={args.cluster_weight_alpha:.2f}):"
         )
-        for k, v in sorted(train_sampler.cluster_counts.items()):
+
+        def _cluster_sort_key(item):
+            """Sort cluster_id<N> numerically so id10 follows id2, not id1.
+
+            Falls back to lexicographic order for keys that do not match the
+            ``cluster_id<N>`` shape -- a logging line must never crash training.
+            """
+            key = item[0]
+            suffix = key.replace("cluster_id", "", 1) if key.startswith("cluster_id") else key
+            return (0, int(suffix), "") if suffix.isdigit() else (1, 0, key)
+
+        for k, v in sorted(train_sampler.cluster_counts.items(), key=_cluster_sort_key):
             print(f"  {k}: {v} samples  {train_sampler.cluster_multipliers[k]:.2f}x")
 
     if args.ddp:

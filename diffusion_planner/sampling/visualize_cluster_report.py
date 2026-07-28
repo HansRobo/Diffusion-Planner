@@ -35,6 +35,7 @@ import argparse
 import base64
 import io
 import json
+import math
 import random
 import shutil
 import subprocess
@@ -57,12 +58,14 @@ def load_cluster_json(path: str) -> dict[str, list[str]]:
 
 def compute_cluster_stats(clusters: dict[str, list[str]], alpha: float = 1.0) -> list[dict]:
     """Compute per-cluster stats. ``alpha`` must match training's --cluster_weight_alpha."""
-    # ``not alpha >= 0`` rather than ``alpha < 0`` so NaN is rejected too:
-    # every comparison with NaN is False, and a NaN alpha would otherwise fill
-    # the whole report with nan weights instead of failing here. Matches the
-    # guard in ClusterWeightedDistributedSampler.
-    if not alpha >= 0:
-        raise ValueError(f"alpha={alpha} must be a number >= 0 (1.0 = full inverse, 0.0 = uniform)")
+    # Reject negatives *and* non-finite values (NaN, +/-inf). ``not alpha >= 0``
+    # alone would let ``inf`` through, silently rendering an all-nan Weight column
+    # that still looks like output -- worse than crashing. Matches the guard in
+    # ClusterWeightedDistributedSampler.
+    if not (math.isfinite(alpha) and alpha >= 0):
+        raise ValueError(
+            f"alpha={alpha} must be a finite number >= 0 (1.0 = full inverse, 0.0 = uniform)"
+        )
 
     sorted_ids = sorted(clusters.keys(), key=lambda x: int(x.replace("cluster_id", "")))
     total = sum(len(v) for v in clusters.values())
