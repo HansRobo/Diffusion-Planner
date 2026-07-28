@@ -429,9 +429,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
 
             if not any(png_dir.glob("*.png")):
                 if self.config.verbose:
-                    print(
-                        f"  [{job.route_key}] segment [{start},{end}] -> 0 frames, no video"
-                    )
+                    print(f"  [{job.route_key}] segment [{start},{end}] -> 0 frames, no video")
                 continue
             seg_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
             build_mp4(png_dir, seg_mp4, self.config.fps)
@@ -459,8 +457,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         assert isinstance(job, FullRouteRouteJob)
         if self.config.verbose:
             print(
-                f"[{index + 1}/{total}] {job.route_key}: "
-                f"{len(partial.video_mp4s)} segment video(s)"
+                f"[{index + 1}/{total}] {job.route_key}: {len(partial.video_mp4s)} segment video(s)"
             )
 
     def build_summary(self, result: JobRunResult, *, elapsed_sec: float) -> dict:
@@ -482,7 +479,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
 
     def print_summary(self, summary: dict) -> None:
         n_seg = summary["n_segments"]
-        print(f"\n=== closed-loop validation: {n_seg} segments in {summary['elapsed_sec']:.1f}s ===")
+        print(
+            f"\n=== closed-loop validation: {n_seg} segments in {summary['elapsed_sec']:.1f}s ==="
+        )
         for line in format_summary_lines(summary):
             print(line)
         print(f"videos: per-segment <route>_<start>_<end>.mp4 in {self.out_dir}")
