@@ -524,3 +524,169 @@ class TestAlpha:
                     f"{cid}: multiplier {sampler.cluster_multipliers[cid]:.3f} predicts "
                     f"{expected:.0f} draws over {n_epochs} epochs, observed {observed[cid]}"
                 )
+
+
+class TestShardConfigValidation:
+    """A bad rank/num_replicas must crash, not silently hand out a short shard.
+
+    ``indices[rank::num_replicas]`` yields fewer indices than ``__len__`` reports
+    when ``rank >= num_replicas``. That rank then runs fewer optimizer steps than
+    its peers and the whole job hangs on the next collective until the NCCL
+    timeout -- hours into a multi-node run, with nothing in the logs explaining why.
+    """
+
+    def test_rank_at_or_above_num_replicas_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(10)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            with pytest.raises(ValueError, match="rank"):
+                ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=4, rank=4, seed=42
+                )
+
+    def test_negative_rank_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(10)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            with pytest.raises(ValueError, match="rank"):
+                ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=4, rank=-1, seed=42
+                )
+
+    def test_zero_num_replicas_raises(self):
+        """Without the guard this is a bare ZeroDivisionError from math.ceil."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(10)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            with pytest.raises(ValueError, match="num_replicas"):
+                ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=0, rank=0, seed=42
+                )
+
+    def test_shard_length_matches_len_for_every_valid_rank(self):
+        """``__len__`` must not lie for any accepted rank -- DDP requires equal steps."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(103)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            for rank in range(4):
+                sampler = ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=4, rank=rank, seed=42
+                )
+                assert len(list(sampler)) == len(sampler)
+
+
+class TestAlphaUpperBound:
+    """alpha > 1 inverts the weighting and silently collapses the epoch.
+
+    Draws per cluster scale as ``matched ** alpha * n_c ** (1 - alpha)``, so above
+    alpha=1 the largest cluster is starved. On an 18,000 + 10 split over 18,010
+    draws: alpha=1.0 -> 8,935/9,075 (6,991 distinct), alpha=2.0 -> 7/18,003
+    (17 distinct), alpha=5.0 -> 0/18,010 (10 distinct). Nothing raised before this
+    guard; loss falls because the model memorizes.
+    """
+
+    @pytest.mark.parametrize("alpha", [1.0001, 2.0, 5.0, 200.0])
+    def test_alpha_above_one_raises(self, alpha):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(1000)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            with pytest.raises(ValueError, match="alpha"):
+                ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=alpha
+                )
+
+    @pytest.mark.parametrize("alpha", [0.0, 0.25, 0.5, 1.0])
+    def test_alpha_within_bounds_accepted(self, alpha):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(100)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=alpha
+            )
+            assert sampler.alpha == alpha
+
+
+class TestDuplicateClusterAssignment:
+    def test_path_in_two_clusters_raises(self):
+        """Last-write-wins would silently decide the cluster by JSON iteration order,
+        while matched_count still reports a full match."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/train/loc/train/d/t/sample_{i}.npz" for i in range(10)]
+            clusters = {
+                "cluster_id0": data_list[:5],
+                "cluster_id1": data_list[4:],  # sample_4 claimed twice
+            }
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                json.dump(clusters, f)
+
+            with pytest.raises(ValueError, match="more than"):
+                ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=1, rank=0, seed=42
+                )
+
+    def test_canonical_key_collision_across_roots_raises(self):
+        """``data_path_to_rel`` anchors on the first train/valid component, so two
+        NPZs under different dataset roots can collapse to one key."""
+        with tempfile.TemporaryDirectory() as tmp:
+            a = "/mnt/nvme1/dsA/loc/train/20240101/120000/0001.npz"
+            b = "/mnt/rdma/dsB/loc/train/20240101/120000/0001.npz"
+            clusters = {"cluster_id0": [a], "cluster_id1": [b]}
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                json.dump(clusters, f)
+
+            with pytest.raises(ValueError, match="more than"):
+                ClusterWeightedDistributedSampler(
+                    [a, b], cluster_path, num_replicas=1, rank=0, seed=42
+                )
+
+    def test_same_path_repeated_within_one_cluster_is_allowed(self):
+        """A duplicate inside a single cluster is not ambiguous -- do not reject it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(10)]
+            clusters = {"cluster_id0": data_list[:2] + data_list[:2], "cluster_id1": data_list[2:]}
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                json.dump(clusters, f)
+
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42
+            )
+            assert sampler.matched_count == 10
+
+
+class TestRanksPartitionOneStream:
+    def test_interleaved_shards_reconstruct_single_rank_stream(self):
+        """Every rank must draw the SAME global sequence and slice it by stride.
+
+        ``__iter__`` seeds only on ``seed + epoch`` deliberately -- no rank term.
+        Without this test, adding a ``+ rank`` to the seed still passes every other
+        DDP test (shards still differ, lengths still match) while silently giving
+        each rank its own overlapping sample stream.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(20)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            reference = list(
+                ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=1, rank=0, seed=42
+                )
+            )
+            shards = [
+                list(
+                    ClusterWeightedDistributedSampler(
+                        data_list, cluster_path, num_replicas=2, rank=r, seed=42
+                    )
+                )
+                for r in range(2)
+            ]
+            interleaved = [idx for pair in zip(*shards) for idx in pair]
+            assert interleaved == reference

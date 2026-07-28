@@ -15,13 +15,14 @@ class ClusterWeightedDistributedSampler(Sampler):
     each sample a weight of ``(1 / cluster_frequency) ** alpha``. Rare clusters are
     sampled more often; no data is discarded.
 
-    ``alpha`` controls how aggressive the reweighting is. At ``alpha=1.0`` (the
-    default) every cluster receives an equal share of draws regardless of size.
-    At ``alpha=0.0`` all weights are 1.0 and sampling is uniform -- note this is
-    still sampling *with* replacement, so it is not identical to
+    ``alpha`` controls how aggressive the reweighting is and must lie in ``[0, 1]``.
+    At ``alpha=1.0`` (the default) every cluster receives an equal share of draws
+    regardless of size. At ``alpha=0.0`` all weights are 1.0 and sampling is uniform
+    -- note this is still sampling *with* replacement, so it is not identical to
     ``DistributedSampler``, which samples without replacement. Intermediate
     values interpolate: the multiplier ratio between any two clusters goes from
-    ``R`` at alpha=1.0 to ``R ** alpha``.
+    ``R`` at alpha=1.0 to ``R ** alpha``. Values above 1.0 are rejected because they
+    invert the weighting and starve the largest cluster.
 
     Weights are normalized to mean 1.0, so a sample's weight equals its
     oversampling multiplier. Per-cluster multipliers are exposed as
@@ -51,12 +52,33 @@ class ClusterWeightedDistributedSampler(Sampler):
         # alone would let ``inf`` through: it makes every weight NaN (inf/inf), logs
         # ``nan x`` multipliers, and only dies at the first ``__iter__`` with an
         # opaque "invalid multinomial distribution" -- after model init and dataset
-        # load, wasting a whole training launch. Very large finite alphas also raise
-        # a bare OverflowError from ``float.__pow__``. Fail here instead, legibly.
-        if not (math.isfinite(alpha) and alpha >= 0):
+        # load, wasting a whole training launch.
+        #
+        # The upper bound matters just as much. Draws per cluster scale as
+        # ``matched ** alpha * n_c ** (1 - alpha)``, so above alpha=1 the exponent on
+        # ``n_c`` turns negative and the weighting INVERTS: the largest cluster is
+        # starved. Measured on an 18,000 + 10 split over 18,010 draws/epoch --
+        # alpha=1.0 gives 8,935/9,075 with 6,991 distinct samples, alpha=2.0 gives
+        # 7/18,003 with 17 distinct, alpha=5.0 gives 0/18,010 with 10 distinct. That
+        # trains on ten scenes while the loss falls, DDP stays healthy, and the only
+        # hint is a ``0.00x`` in the startup log.
+        if not (math.isfinite(alpha) and 0 <= alpha <= 1):
             raise ValueError(
-                f"alpha={alpha} must be a finite number >= 0 (1.0 = full inverse, 0.0 = uniform)"
+                f"alpha={alpha} must be a finite number in [0, 1] "
+                f"(1.0 = full inverse weighting, 0.0 = uniform). alpha > 1 over-inverts: "
+                f"draws scale as n_c ** (1 - alpha), starving the LARGEST cluster and "
+                f"collapsing the epoch onto a handful of samples."
             )
+        # ``DistributedSampler`` validates these; a silently out-of-range rank is
+        # worse here than a crash. ``indices[rank::num_replicas]`` yields a SHORT
+        # shard when ``rank >= num_replicas`` while ``__len__`` still reports
+        # ``ceil(N / num_replicas)``, so that rank runs fewer optimizer steps than
+        # its peers and the job hangs on the next collective until the NCCL
+        # timeout -- hours in, with no error explaining why.
+        if num_replicas < 1:
+            raise ValueError(f"num_replicas={num_replicas} must be >= 1")
+        if not 0 <= rank < num_replicas:
+            raise ValueError(f"rank={rank} must be in [0, {num_replicas - 1}]")
         self.num_replicas = num_replicas
         self.rank = rank
         self.seed = seed
@@ -78,9 +100,33 @@ class ClusterWeightedDistributedSampler(Sampler):
         clusters = openjson(cluster_json_path)
 
         path_to_cluster: dict[str, str] = {}
+        # A canonical key claimed twice would otherwise be silently last-write-wins,
+        # and the offending sample lands in whichever cluster the JSON happens to
+        # iterate last. Two ways it happens: the same path listed under two cluster
+        # ids, or two distinct NPZs whose ``data_path_to_rel`` keys collide (that
+        # helper anchors on the first "train"/"valid" component, so files under
+        # different dataset roots sharing a location/date/time/frame layout collapse
+        # to one key). Both cases make ``matched_count`` still read 100% while an
+        # arbitrary subset carries the wrong cluster's weight -- unfixable from the
+        # logs. cluster.py never emits duplicates, so this only fires on a
+        # hand-edited or cross-machine JSON.
+        collisions: dict[str, tuple[str, str]] = {}
         for cluster_id, paths in clusters.items():
             for p in paths:
-                path_to_cluster[str(data_path_to_rel(p))] = cluster_id
+                key = str(data_path_to_rel(p))
+                if key in path_to_cluster and path_to_cluster[key] != cluster_id:
+                    collisions[key] = (path_to_cluster[key], cluster_id)
+                path_to_cluster[key] = cluster_id
+        if collisions:
+            shown = list(collisions.items())[:5]
+            detail = "; ".join(f"{k} in both {a} and {b}" for k, (a, b) in shown)
+            raise ValueError(
+                f"Cluster JSON assigns {len(collisions)} canonical path(s) to more than "
+                f"one cluster: {detail}"
+                f"{' ...' if len(collisions) > len(shown) else ''}. "
+                f"Assignments must be disjoint -- otherwise the applied cluster depends "
+                f"on JSON iteration order and matched_count still reports a full match."
+            )
 
         if not path_to_cluster:
             raise ValueError(
@@ -110,6 +156,8 @@ class ClusterWeightedDistributedSampler(Sampler):
         cluster_freq = {cid: count / matched for cid, count in live_counts.items()}
 
         # Second pass: assign weights using live frequencies
+        # ``alpha <= 1`` bounds every weight by ``matched``, which the 2^24 guard in
+        # __init__ already caps -- so ``float.__pow__`` cannot overflow here.
         weights = torch.ones(len(self.data_list), dtype=torch.float64)
         for i, cid in enumerate(sample_cluster):
             if cid is not None:
