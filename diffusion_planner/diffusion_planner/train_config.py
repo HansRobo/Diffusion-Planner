@@ -146,6 +146,10 @@ class TrainConfig:
     # instead of absolute positions, giving the encoder temporal-difference
     # inputs (original planTF vectorizes history this way).
     plantf_input_delta: bool = False
+    # Zero the goal_pose input. The mini goal_pose is global-frame (data bug) while
+    # Autoware feeds ego-frame -> train/deploy mismatch. Masking makes the model
+    # plan from the route (route_lanes carries the goal). Bakes into ONNX.
+    plantf_mask_goal_pose: bool = False
     # --- planTF combinable ablation toggles (docs/plantf_head_development_notes.md §9) ---
     # Trajectory head architecture. "mlp" (default): reshape the single ego token
     # into K modes. "cross_attn": K mode queries cross-attend to ALL encoder
