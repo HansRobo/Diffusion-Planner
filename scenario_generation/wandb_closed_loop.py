@@ -192,6 +192,7 @@ def build_full_closed_loop_wandb_log(
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
     near_miss_thresh: float = 0.5,
     report_base_url: str | None = None,
+    render_media: bool = True,
 ) -> dict:
     """Per-site full-route closed-loop wandb payload, keyed into role-based sections so the
     workspace stays navigable (one collapsible section each) instead of one flat ``closed_loop``
@@ -203,6 +204,10 @@ def build_full_closed_loop_wandb_log(
       for the representative episode (captioned by metric), mirroring the HTML report's
       per-card metric dropdown; ``closed_loop_media/{site}__video`` — that episode's video.
     - ``closed_loop_links/{site}`` — where the full report (all videos + HTML) lives.
+
+    ``render_media=False`` skips the video + colormap-image block entirely (scores/links are
+    unaffected) -- for a caller that already skipped rendering (e.g. train.py's RolloutParams
+    ``draw=False`` on most epochs), so there's no colormap image to render from anyway.
 
     The per-episode table is built once across ALL sites by :func:`build_combined_episode_table`
     at the caller (so it's a single filterable/groupable panel), not here.
@@ -216,7 +221,7 @@ def build_full_closed_loop_wandb_log(
 
     rows = summary.get("segments") or []
     rep = pick_representative_row(rows, mode=video_pick)
-    if rep is not None and out_dir is not None:
+    if render_media and rep is not None and out_dir is not None:
         png_dir, mp4_path = _segment_paths(out_dir, rep)
         if mp4_path.is_file():
             log[f"closed_loop_media/{label}__video"] = wandb.Video(str(mp4_path), format="mp4")

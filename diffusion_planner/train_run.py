@@ -4,7 +4,8 @@
 Thin launcher only: it resolves the run dir, saves git info, sets NCCL env and runs
 train_predictor.py under torch.distributed.run. train_predictor.py itself is unchanged.
 
---closed_loop_npz_root (optional) is forwarded to train_predictor.py's flag of the same name.
+--closed_loop_npz_root / --closed_loop_sites_npz_root (both optional, may be set together) are
+forwarded to train_predictor.py's flags of the same name.
 """
 
 import argparse
@@ -31,6 +32,14 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="optional: dir tree of route NPZ frames for closed-loop validation, OR a .json path "
         "list of such dirs (like --train_set_list). Empty = disabled.",
+    )
+    p.add_argument(
+        "--closed_loop_sites_npz_root",
+        default="",
+        help="optional: a curated .json path-list manifest, grouped into per-site route pools by "
+        "site_discovery.discover_sites_from_json and evaluated as independent sites (objects + "
+        "no-objects ablation by default). May be set together with --closed_loop_npz_root (each "
+        "fires independently). Empty = disabled.",
     )
     return p.parse_args()
 
@@ -88,6 +97,10 @@ def main() -> None:
         "10",
         "--closed_loop_npz_root",
         str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else "",
+        "--closed_loop_sites_npz_root",
+        str(Path(args.closed_loop_sites_npz_root).resolve())
+        if args.closed_loop_sites_npz_root
+        else "",
         *optional,
     ]
     rc = tee_run(

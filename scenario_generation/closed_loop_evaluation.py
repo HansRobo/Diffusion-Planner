@@ -47,7 +47,12 @@ class RolloutParams:
     unstick_advance_m: float = 2.5
     unstick_radius_mult: float = 10.0
     unstick_teleport_after: int = 300
-    draw_every: int = 8
+    # write a PNG only every N steps; None skips the per-step render entirely (no PNGs, no
+    # video, no colormap images -- see build_full_closed_loop_wandb_log's matching
+    # render_media) while metrics/wandb scalars are unaffected -- lets a caller (e.g.
+    # train.py, most epochs) skip the dominant per-epoch cost and only pay it on the one call
+    # that actually needs media (e.g. the final epoch).
+    draw_every: int | None = 8
     replan_interval: int = 10
     tracker_mode: str = "mpc"
     neighbor_history_mode: str = "recorded"

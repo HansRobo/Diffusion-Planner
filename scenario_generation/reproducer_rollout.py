@@ -1336,7 +1336,7 @@ def render_segment(
     yaw_gate: bool = True,
     *,
     replan_interval: int = 1,
-    draw_every: int = 1,
+    draw_every: int | None = 1,
     abort_deviation_m: float = 0.0,
     abort_after: int = 30,
     abort_max_snaps: int = 0,
@@ -1358,6 +1358,9 @@ def render_segment(
     at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
     throttled. PNGs are named by step ``k`` (sparse); encoding them at the raw fps makes the video
     play ``draw_every`` x faster (shorter). For real-time playback use ``fps = 10 / draw_every``.
+    ``draw_every=None`` skips the per-step render entirely (no PNGs at all) -- scoring/
+    ``rollout.jsonl`` (and anything downstream that reads it, e.g. trajectory-colormap images)
+    are unaffected, only the video/PNG artifacts disappear.
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
@@ -1621,7 +1624,11 @@ def render_segment(
             )
             spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
             override = (np.array([tx, ty, th], dtype=np.float64), spd)
-        if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
+        if (
+            draw_every is not None
+            and (window is None or (window[0] <= k <= window[1]))
+            and k % draw_every == 0
+        ):
             _draw_step(
                 np_dict,
                 pred_cur,
