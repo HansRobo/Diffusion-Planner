@@ -1,6 +1,8 @@
 import pytest
+import torch
 from diffusion_planner.utils.forced_augmentation import (
     AUG_ORDER,
+    ForcedAugmentationSelector,
     build_aug_pipeline,
     resolve_repeat_aug_pool,
 )
@@ -133,3 +135,125 @@ class TestResolveRepeatAugPool:
         pool, warnings = resolve_repeat_aug_pool("flip", pipeline, augment_type="quintic")
         assert pool == ["flip"]
         assert any("deterministic" in w for w in warnings)
+
+
+class TestForcedAugmentationSelector:
+    def _selector(self, pool=("flip", "neighbor_noise"), seed=0):
+        return ForcedAugmentationSelector(list(pool), seed=seed)
+
+    def test_empty_pool_raises(self):
+        with pytest.raises(ValueError, match="pool must not be empty"):
+            ForcedAugmentationSelector([])
+
+    def test_exactly_one_aug_forced_per_repeat_row(self):
+        sel = self._selector()
+        flags = [False, True, True, False, True]
+        sel.start_epoch(0, flags, 0)
+        masks = sel.masks_for_batch(5, torch.device("cpu"))
+        stacked = torch.stack([masks["flip"], masks["neighbor_noise"]])
+        per_row = stacked.sum(dim=0)
+        assert per_row.tolist() == [0, 1, 1, 0, 1]
+
+    def test_non_repeat_rows_forced_nowhere(self):
+        sel = self._selector()
+        sel.start_epoch(0, [False, False, False], 0)
+        masks = sel.masks_for_batch(3, torch.device("cpu"))
+        for mask in masks.values():
+            assert not mask.any()
+
+    def test_mask_keys_are_exactly_the_pool(self):
+        sel = self._selector(pool=("flip",))
+        sel.start_epoch(0, [True, True], 0)
+        masks = sel.masks_for_batch(2, torch.device("cpu"))
+        assert set(masks) == {"flip"}
+
+    def test_single_member_pool_forces_that_member(self):
+        sel = self._selector(pool=("neighbor_noise",))
+        sel.start_epoch(0, [True, False, True], 0)
+        masks = sel.masks_for_batch(3, torch.device("cpu"))
+        assert masks["neighbor_noise"].tolist() == [True, False, True]
+
+    def test_masks_are_bool_on_requested_device(self):
+        sel = self._selector()
+        sel.start_epoch(0, [True], 0)
+        masks = sel.masks_for_batch(1, torch.device("cpu"))
+        for mask in masks.values():
+            assert mask.dtype == torch.bool
+            assert mask.device == torch.device("cpu")
+
+    def test_cursor_advances_across_batches(self):
+        sel = self._selector(pool=("flip",))
+        sel.start_epoch(0, [True, False, False, True], 0)
+        first = sel.masks_for_batch(2, torch.device("cpu"))["flip"]
+        second = sel.masks_for_batch(2, torch.device("cpu"))["flip"]
+        assert first.tolist() == [True, False]
+        assert second.tolist() == [False, True]
+        assert sel.rows_consumed == 4
+
+    def test_reading_past_flag_list_raises(self):
+        sel = self._selector()
+        sel.start_epoch(0, [True, False], 0)
+        with pytest.raises(RuntimeError, match="past the end"):
+            sel.masks_for_batch(3, torch.device("cpu"))
+
+    def test_start_epoch_resets_cursor(self):
+        sel = self._selector(pool=("flip",))
+        sel.start_epoch(0, [True, True], 0)
+        sel.masks_for_batch(2, torch.device("cpu"))
+        sel.start_epoch(1, [False, True], 1)
+        assert sel.rows_consumed == 0
+        assert sel.masks_for_batch(2, torch.device("cpu"))["flip"].tolist() == [False, True]
+
+    def test_stale_flags_raise(self):
+        """Flags stamped for a different epoch mean __iter__ has not run yet."""
+        sel = self._selector()
+        with pytest.raises(ValueError, match="stale"):
+            sel.start_epoch(3, [True, False], 2)
+
+    def test_missing_flags_raise(self):
+        sel = self._selector()
+        with pytest.raises(ValueError, match="track_repeats"):
+            sel.start_epoch(0, None, None)
+
+    def test_masks_before_start_epoch_raise(self):
+        sel = self._selector()
+        with pytest.raises(RuntimeError, match="start_epoch"):
+            sel.masks_for_batch(2, torch.device("cpu"))
+
+    def test_deterministic_for_same_seed_and_epoch(self):
+        flags = [True] * 8
+        a, b = self._selector(seed=7), self._selector(seed=7)
+        a.start_epoch(2, flags, 2)
+        b.start_epoch(2, flags, 2)
+        assert a.masks_for_batch(8, torch.device("cpu"))["flip"].tolist() == (
+            b.masks_for_batch(8, torch.device("cpu"))["flip"].tolist()
+        )
+
+    def test_choice_stream_differs_across_epochs(self):
+        """A forgotten set_epoch would replay the same choices every epoch."""
+        flags = [True] * 64
+        sel = self._selector(seed=7)
+        sel.start_epoch(0, flags, 0)
+        epoch0 = sel.masks_for_batch(64, torch.device("cpu"))["flip"].tolist()
+        sel.start_epoch(1, flags, 1)
+        epoch1 = sel.masks_for_batch(64, torch.device("cpu"))["flip"].tolist()
+        assert epoch0 != epoch1
+
+    def test_forced_count_accumulates(self):
+        sel = self._selector()
+        sel.start_epoch(0, [True, False, True, True], 0)
+        sel.masks_for_batch(2, torch.device("cpu"))
+        sel.masks_for_batch(2, torch.device("cpu"))
+        assert sel.forced_count == 3
+
+    def test_pool_members_are_used_roughly_uniformly(self):
+        """Uniform choice over the pool, not a fixed member."""
+        pool = ("flip", "neighbor_noise", "state_perturbation")
+        sel = self._selector(pool=pool, seed=1)
+        n = 3000
+        sel.start_epoch(0, [True] * n, 0)
+        masks = sel.masks_for_batch(n, torch.device("cpu"))
+        counts = [int(masks[name].sum()) for name in pool]
+        assert sum(counts) == n
+        for count in counts:
+            assert 0.25 * n < count < 0.42 * n, counts

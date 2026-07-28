@@ -14,6 +14,8 @@
 
 """Registry and per-batch force-mask dispatch for augmentation on repeat draws."""
 
+import torch
+
 # Canonical application order. NOT user-configurable: "state_perturbation" must run
 # last because it terminates with centric_transform(), which every other augmentation
 # assumes has not yet happened. This order reproduces the sequence the individual
@@ -122,3 +124,83 @@ def resolve_repeat_aug_pool(
         )
 
     return pool, warnings
+
+
+class ForcedAugmentationSelector:
+    """Turns per-draw repeat flags into one force mask per augmentation name.
+
+    For each repeat-flagged row exactly one pool member is chosen uniformly and forced
+    on; the rest keep their own probability. Forcing the whole stack instead would mean
+    rare clusters only ever see maximally-corrupted scenes.
+
+    Flags are consumed with a running cursor advanced by each batch's ACTUAL row count.
+    A computed ``j * batch_size`` offset would silently drift on any partial batch and
+    misattribute every later mask.
+    """
+
+    def __init__(self, pool: list[str], seed: int = 0):
+        if not pool:
+            raise ValueError("pool must not be empty")
+        unknown = sorted(set(pool) - set(AUG_ORDER))
+        if unknown:
+            raise ValueError(f"pool contains unknown augmentation(s) {unknown}")
+        self.pool = list(pool)
+        self.seed = seed
+        self.forced_count = 0
+        self.rows_consumed = 0
+        self._flags: list[bool] | None = None
+        self._generator: torch.Generator | None = None
+
+    def start_epoch(
+        self,
+        epoch: int,
+        repeat_flags: list[bool] | None,
+        repeat_flags_epoch: int | None,
+    ) -> None:
+        """Bind this epoch's flags. Must be called after the loader's iterator exists."""
+        if repeat_flags is None:
+            raise ValueError(
+                "sampler produced no repeat_flags; construct "
+                "ClusterWeightedDistributedSampler with track_repeats=True"
+            )
+        # repeat_flags is regenerated inside __iter__, so reading it before iterating
+        # returns the PREVIOUS epoch's flags. The stamp turns that silent misalignment
+        # into a crash. It cannot catch set_epoch never being called at all -- both
+        # values then stay equally stale -- which is covered by test coverage on
+        # set_epoch instead.
+        if repeat_flags_epoch != epoch:
+            raise ValueError(
+                f"stale repeat_flags: stamped for epoch {repeat_flags_epoch} but the "
+                f"current epoch is {epoch}. Bind flags after the DataLoader's iterator "
+                f"has been created."
+            )
+        self._flags = repeat_flags
+        self.rows_consumed = 0
+        self.forced_count = 0
+        self._generator = torch.Generator()
+        self._generator.manual_seed(self.seed + epoch)
+
+    def masks_for_batch(self, batch_size: int, device) -> dict[str, torch.Tensor]:
+        if self._flags is None or self._generator is None:
+            raise RuntimeError("start_epoch must be called before masks_for_batch")
+
+        end = self.rows_consumed + batch_size
+        if end > len(self._flags):
+            raise RuntimeError(
+                f"reading past the end of repeat_flags: need rows "
+                f"[{self.rows_consumed}, {end}) of {len(self._flags)}. The loader "
+                f"delivered more rows than the sampler drew -- most likely a second "
+                f"DataLoader iterator was created within one epoch."
+            )
+        flags = self._flags[self.rows_consumed : end]
+        self.rows_consumed = end
+
+        # Built on CPU because the flags originate as a Python list, then moved once.
+        # Reading a mask back off the GPU would add a sync per batch.
+        repeat = torch.tensor(flags, dtype=torch.bool)
+        choice = torch.randint(len(self.pool), (batch_size,), generator=self._generator)
+        self.forced_count += int(repeat.sum())
+
+        return {
+            name: (repeat & (choice == index)).to(device) for index, name in enumerate(self.pool)
+        }
