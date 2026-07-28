@@ -690,3 +690,109 @@ class TestRanksPartitionOneStream:
             ]
             interleaved = [idx for pair in zip(*shards) for idx in pair]
             assert interleaved == reference
+
+
+class TestRepeatFlags:
+    def test_repeat_flags_none_when_not_tracking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(20)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42
+            )
+            list(iter(sampler))
+            assert sampler.repeat_flags is None
+            assert sampler.repeat_flags_epoch is None
+
+    def test_repeat_flags_length_matches_num_samples(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(20)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, track_repeats=True
+            )
+            list(iter(sampler))
+            assert len(sampler.repeat_flags) == sampler.num_samples
+            assert sampler.repeat_flags_epoch == 0
+
+    def test_first_occurrence_false_later_true(self):
+        """Flag i is True iff indices[i] appeared earlier in the same epoch."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(20)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, track_repeats=True
+            )
+            indices = list(iter(sampler))
+            seen = set()
+            expected = []
+            for idx in indices:
+                expected.append(idx in seen)
+                seen.add(idx)
+            assert sampler.repeat_flags == expected
+
+    def test_some_repeats_actually_occur(self):
+        """Guard against a vacuous test: with 2 rare of 20, replacement must repeat."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(20)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, track_repeats=True
+            )
+            list(iter(sampler))
+            assert any(sampler.repeat_flags), "expected at least one repeat draw"
+
+    def test_deterministic_for_same_seed_and_epoch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(20)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+            kwargs = dict(num_replicas=1, rank=0, seed=42, track_repeats=True)
+            a = ClusterWeightedDistributedSampler(data_list, cluster_path, **kwargs)
+            b = ClusterWeightedDistributedSampler(data_list, cluster_path, **kwargs)
+            list(iter(a))
+            list(iter(b))
+            assert a.repeat_flags == b.repeat_flags
+
+    def test_flags_change_across_epochs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(20)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, track_repeats=True
+            )
+            list(iter(sampler))
+            epoch0 = list(sampler.repeat_flags)
+            sampler.set_epoch(1)
+            list(iter(sampler))
+            assert sampler.repeat_flags_epoch == 1
+            assert sampler.repeat_flags != epoch0
+
+    def test_dedup_is_global_across_ranks(self):
+        """A sample drawn on two ranks yields one first occurrence, not two.
+
+        Ordinals must be computed BEFORE sharding. Interleaving the two ranks'
+        flags must reconstruct the global first-occurrence pattern.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(20)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+            r0 = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=2, rank=0, seed=42, track_repeats=True
+            )
+            r1 = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=2, rank=1, seed=42, track_repeats=True
+            )
+            idx0, idx1 = list(iter(r0)), list(iter(r1))
+
+            global_indices, global_flags = [], []
+            for a, b in zip(idx0, idx1):
+                global_indices.extend([a, b])
+            for a, b in zip(r0.repeat_flags, r1.repeat_flags):
+                global_flags.extend([a, b])
+
+            seen = set()
+            expected = []
+            for idx in global_indices:
+                expected.append(idx in seen)
+                seen.add(idx)
+            assert global_flags == expected

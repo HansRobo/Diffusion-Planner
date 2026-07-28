@@ -41,6 +41,7 @@ class ClusterWeightedDistributedSampler(Sampler):
         rank: int = 0,
         seed: int = 0,
         alpha: float = 1.0,
+        track_repeats: bool = False,
     ):
         self.data_list = data_list
         if len(data_list) > 2**24:
@@ -84,6 +85,11 @@ class ClusterWeightedDistributedSampler(Sampler):
         self.seed = seed
         self.alpha = alpha
         self.epoch = 0
+        # Opt-in so a run that does not use forced augmentation pays nothing at all --
+        # not even the once-per-epoch marking loop.
+        self.track_repeats = track_repeats
+        self.repeat_flags: list[bool] | None = None
+        self.repeat_flags_epoch: int | None = None
         self.total_size = len(data_list)
         self.num_samples = math.ceil(self.total_size / self.num_replicas)
 
@@ -191,11 +197,26 @@ class ClusterWeightedDistributedSampler(Sampler):
         g.manual_seed(self.seed + self.epoch)
 
         padded_length = self.num_samples * self.num_replicas
-        indices = torch.multinomial(
+        draws = torch.multinomial(
             self.weights, padded_length, replacement=True, generator=g
         ).tolist()
 
-        indices = indices[self.rank : padded_length : self.num_replicas]
+        if self.track_repeats:
+            # Ordinals are computed on the GLOBAL draw list, BEFORE sharding, so a
+            # sample drawn on rank 0 and rank 3 in the same step yields one first
+            # occurrence and one repeat -- not two first occurrences. This needs no
+            # collective: every rank seeds an identical generator with seed + epoch and
+            # holds identical weights, so every rank computes the same `draws` and
+            # differs only in which stride it slices.
+            seen: set[int] = set()
+            repeat: list[bool] = []
+            for idx in draws:
+                repeat.append(idx in seen)
+                seen.add(idx)
+            self.repeat_flags = repeat[self.rank : padded_length : self.num_replicas]
+            self.repeat_flags_epoch = self.epoch
+
+        indices = draws[self.rank : padded_length : self.num_replicas]
         return iter(indices)
 
     def __len__(self) -> int:
