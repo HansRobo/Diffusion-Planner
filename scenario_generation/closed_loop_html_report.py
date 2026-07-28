@@ -16,6 +16,7 @@ from typing import Any
 
 from scenario_generation.closed_loop_score_keys import extract_score
 from scenario_generation.trajectory_colormap import METRIC_CHOICES, render_trajectory_colormaps
+from scenario_generation.wandb_closed_loop import episode_stem
 
 # Shown first in each card's metric dropdown when available (the rest follow METRIC_CHOICES
 # order) — clearance is the most broadly useful default view.
@@ -74,7 +75,7 @@ def collect_site_data(
                     continue
                 r = json.loads(line)
                 start, end = r["segment"]
-                stem = f"{r['route']}_{start}_{end}"
+                stem = episode_stem(site_dir, r)
                 video_name = f"{stem}.mp4"
                 video_path = site_dir / video_name
 

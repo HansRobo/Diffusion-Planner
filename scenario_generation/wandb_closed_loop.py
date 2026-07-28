@@ -22,12 +22,28 @@ def _is_noobj_label(label: str) -> bool:
     return label.endswith("__noobj")
 
 
-def _segment_paths(out_dir: str | Path, row: dict) -> tuple[Path, Path]:
-    """(png_dir, mp4_path) for one segments.jsonl row, matching FullRouteClosedLoopEvaluation's
-    naming (``run_job``): ``{out_dir}/{route}_{start}_{end}`` (dir) and ``...mp4``."""
-    start, end = row["segment"]
-    stem = f"{row['route']}_{start}_{end}"
+def episode_stem(out_dir: str | Path, row: dict) -> str:
+    """Base filename stem for one segments.jsonl row's video/png-dir/colormap files.
+
+    FullRouteClosedLoopEvaluation (PR2, train-time closed-loop validation) names these
+    ``{route}_{start}_{end}`` (segment-suffixed). PR1's ``run_closed_loop_eval`` (the
+    ``valid_predictor_closed_loop.py`` / ``run_all_sites_closed_loop.py`` CLI path) names
+    them just ``{route}`` -- one route = one whole-route rollout, no sub-segmenting.
+    Prefer the segment-suffixed form and fall back to the bare route name when that
+    file/dir doesn't exist, so callers resolve videos correctly for either pipeline.
+    """
     out_dir = Path(out_dir)
+    start, end = row["segment"]
+    segmented_stem = f"{row['route']}_{start}_{end}"
+    if (out_dir / f"{segmented_stem}.mp4").is_file() or (out_dir / segmented_stem).is_dir():
+        return segmented_stem
+    return row["route"]
+
+
+def _segment_paths(out_dir: str | Path, row: dict) -> tuple[Path, Path]:
+    """(png_dir, mp4_path) for one segments.jsonl row -- see :func:`episode_stem`."""
+    out_dir = Path(out_dir)
+    stem = episode_stem(out_dir, row)
     return out_dir / stem, out_dir / f"{stem}.mp4"
 
 
