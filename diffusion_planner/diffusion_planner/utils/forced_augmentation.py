@@ -148,6 +148,9 @@ class ForcedAugmentationSelector:
         self.seed = seed
         self.forced_count = 0
         self.rows_consumed = 0
+        # False until this epoch's flags are bound. train_epoch binds lazily on the
+        # first batch and uses this to do it exactly once per epoch.
+        self.is_bound = False
         self._flags: list[bool] | None = None
         self._generator: torch.Generator | None = None
 
@@ -158,6 +161,7 @@ class ForcedAugmentationSelector:
         repeat_flags_epoch: int | None,
     ) -> None:
         """Bind this epoch's flags. Must be called after the loader's iterator exists."""
+        self.is_bound = False
         if repeat_flags is None:
             raise ValueError(
                 "sampler produced no repeat_flags; construct "
@@ -179,6 +183,7 @@ class ForcedAugmentationSelector:
         self.forced_count = 0
         self._generator = torch.Generator()
         self._generator.manual_seed(self.seed + epoch)
+        self.is_bound = True
 
     def masks_for_batch(self, batch_size: int, device) -> dict[str, torch.Tensor]:
         if self._flags is None or self._generator is None:

@@ -145,6 +145,12 @@ class TestForcedAugmentationSelector:
         with pytest.raises(ValueError, match="pool must not be empty"):
             ForcedAugmentationSelector([])
 
+    def test_is_bound_reflects_start_epoch(self):
+        sel = self._selector()
+        assert not sel.is_bound
+        sel.start_epoch(0, [True], 0)
+        assert sel.is_bound
+
     def test_exactly_one_aug_forced_per_repeat_row(self):
         sel = self._selector()
         flags = [False, True, True, False, True]

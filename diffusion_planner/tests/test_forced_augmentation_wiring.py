@@ -17,6 +17,8 @@
 import pytest
 import torch
 from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.forced_augmentation import ForcedAugmentationSelector
+from torch.utils.data import DataLoader, Dataset
 
 
 def _perturbation(augment_prob: float) -> StatePerturbation:
@@ -88,3 +90,66 @@ class TestForceParameterContract:
         aug = _perturbation(1.0)
         aug.augment(_inputs(2))
         assert aug.pop_forced_noop_count() == 0
+
+
+class _IndexDataset(Dataset):
+    """Returns its own index so a test can prove flag-to-sample alignment."""
+
+    def __init__(self, size):
+        self.size = size
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, idx):
+        return {"idx": torch.tensor(idx, dtype=torch.long)}
+
+
+class _RecordingSampler:
+    """Deterministic index stream with a known repeat pattern."""
+
+    def __init__(self, indices):
+        self.indices = list(indices)
+        seen, flags = set(), []
+        for idx in self.indices:
+            flags.append(idx in seen)
+            seen.add(idx)
+        self.repeat_flags = flags
+        self.repeat_flags_epoch = 0
+
+    def __iter__(self):
+        return iter(self.indices)
+
+    def __len__(self):
+        return len(self.indices)
+
+
+class TestCursorAlignsWithDataLoaderOrder:
+    """The cursor is positional, so alignment is the thing most worth proving."""
+
+    @pytest.mark.parametrize("num_workers", [0, 2])
+    def test_force_mask_lands_on_the_repeated_samples(self, num_workers):
+        indices = [3, 1, 3, 0, 1, 1, 2, 0]
+        sampler = _RecordingSampler(indices)
+        loader = DataLoader(
+            _IndexDataset(4),
+            sampler=sampler,
+            batch_size=2,
+            num_workers=num_workers,
+            drop_last=True,
+        )
+        selector = ForcedAugmentationSelector(["neighbor_noise"], seed=0)
+        selector.start_epoch(0, sampler.repeat_flags, sampler.repeat_flags_epoch)
+
+        forced_indices, delivered = [], []
+        for batch in loader:
+            size = batch["idx"].shape[0]
+            masks = selector.masks_for_batch(size, torch.device("cpu"))
+            for row in range(size):
+                delivered.append(int(batch["idx"][row]))
+                if masks["neighbor_noise"][row]:
+                    forced_indices.append(int(batch["idx"][row]))
+
+        assert delivered == indices, "DataLoader must preserve sampler order"
+        expected = [idx for idx, flag in zip(indices, sampler.repeat_flags) if flag]
+        assert forced_indices == expected

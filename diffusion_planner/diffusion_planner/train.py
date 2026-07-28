@@ -21,6 +21,7 @@ from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
+from diffusion_planner.utils.forced_augmentation import build_aug_pipeline
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
@@ -264,6 +265,11 @@ def model_training(args: TrainConfig):
             )
     else:
         aug = None
+
+    # Ordered (name, aug) pairs. train_epoch applies them in this order and looks up
+    # each one's force mask by name.
+    aug_pipeline = build_aug_pipeline({"state_perturbation": aug})
+    aug_selector = None
 
     # prepare dataset
     train_set = DiffusionPlannerData(args.train_set_list)
@@ -519,6 +525,9 @@ def model_training(args: TrainConfig):
             torch.distributed.barrier()
 
         train_sampler.set_epoch(epoch)
+        # train_epoch binds the selector's repeat flags lazily on its first batch and
+        # needs to know which epoch it is stamping against.
+        args.current_epoch = epoch
 
         # Adjust learning rate for final 10 epochs
         final_epoch_count = 10
@@ -535,7 +544,7 @@ def model_training(args: TrainConfig):
 
         # training step
         train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug
+            train_loader, diffusion_planner, optimizer, args, model_ema, aug_pipeline, aug_selector
         )
 
         valid_dict = validate_model(diffusion_planner, valid_loader, args)
