@@ -5,7 +5,7 @@ from tqdm import tqdm
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.train_utils import get_epoch_mean_loss
+from diffusion_planner.utils.train_utils import get_epoch_mean_loss, tqdm_disabled
 
 
 def heading_to_cos_sin(x):
@@ -44,8 +44,9 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     if args.ddp:
         torch.cuda.synchronize()
 
-    if ddp.get_rank() == 0:
-        data_loader = tqdm(data_loader, desc="Training", unit="batch")
+    data_loader = tqdm(
+        data_loader, desc="Training", unit="batch", disable=tqdm_disabled(ddp.get_rank() == 0)
+    )
 
     for inputs in data_loader:
         inputs = {key: value.to(args.device) for key, value in inputs.items()}

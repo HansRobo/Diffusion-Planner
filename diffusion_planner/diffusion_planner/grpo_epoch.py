@@ -31,7 +31,7 @@ from diffusion_planner.grpo_utils import (
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.train_utils import get_epoch_mean_loss
+from diffusion_planner.utils.train_utils import get_epoch_mean_loss, tqdm_disabled
 
 
 def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
@@ -184,8 +184,9 @@ def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector
     if args.ddp:
         torch.cuda.synchronize()
 
-    if ddp.get_rank() == 0:
-        data_loader = tqdm(data_loader, desc="GRPO", unit="batch")
+    data_loader = tqdm(
+        data_loader, desc="GRPO", unit="batch", disable=tqdm_disabled(ddp.get_rank() == 0)
+    )
 
     # Synchronize the SFT/GRPO choice across ranks (args.seed is identical on every rank) so
     # all ranks emit the same metric key set each epoch -- required for the keyed all-reduce.

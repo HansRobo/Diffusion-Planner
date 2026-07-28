@@ -9,7 +9,7 @@ from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.path_key import data_path_to_rel
-from diffusion_planner.utils.train_utils import resume_model, set_seed
+from diffusion_planner.utils.train_utils import resume_model, set_seed, tqdm_disabled
 from diffusion_planner.valid_config import ValidConfig
 from diffusion_planner.validate_model import (
     aggregate_replan_consistency_metrics,
@@ -288,7 +288,7 @@ def run_validation(valid_cfg: ValidConfig):
     # the bar reaches 100% only when every rank has finished saving its shard.
     save_sync_every = 200
     n_save = predictions.shape[0]
-    pbar = tqdm(total=n_save, desc="save (slowest rank)", disable=global_rank != 0)
+    pbar = tqdm(total=n_save, desc="save (slowest rank)", disable=tqdm_disabled(global_rank == 0))
     for i in range(n_save):
         rel = data_path_to_rel(valid_set.data_list[sampler_indices[i]])
         out_base = save_predictions_dir / rel

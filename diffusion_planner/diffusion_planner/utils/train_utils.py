@@ -1,9 +1,26 @@
 import json
 import random
+import sys
 from typing import Any
 
 import numpy as np
 import torch
+
+
+def tqdm_disabled(is_rank_zero: bool) -> bool:
+    """Value for ``tqdm(disable=...)`` that keeps live progress bars on an interactive
+    terminal but silences them when output is piped / redirected (e.g. the SLURM
+    launcher's ``tee_run`` in run_utils.py).
+
+    tqdm redraws its bar with a carriage return and no newline; when the stream is a
+    file rather than a TTY every one of those redraws is written as a separate line, so
+    a single training run appended ~440k "Training: NN%" lines and ballooned one SLURM
+    log to 34 MB (99.7% tqdm). Gating on ``sys.stderr.isatty()`` (tqdm writes to stderr)
+    drops all of that noise off the TTY while leaving the interactive bar intact.
+    """
+    if not is_rank_zero:
+        return True
+    return not sys.stderr.isatty()
 
 
 def openjson(path):

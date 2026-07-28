@@ -27,6 +27,7 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.train_utils import tqdm_disabled
 from planner_metrics.temporal_stability import (
     compute_curvature_rate_batch,
     compute_mean_abs_jerk_batch,
@@ -322,7 +323,11 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
     # rendezvous also keeps a fast rank from racing far ahead (bounding memory imbalance).
     progress_sync_every = 20
     total_batches = len(val_loader)
-    pbar = tqdm(total=total_batches, desc="validate (slowest rank)", disable=ddp.get_rank() != 0)
+    pbar = tqdm(
+        total=total_batches,
+        desc="validate (slowest rank)",
+        disable=tqdm_disabled(ddp.get_rank() == 0),
+    )
     for step, inputs in enumerate(val_loader):
         prepared = _prepare_validation_inputs(inputs, args, device, delay)
         inputs = prepared.inputs
@@ -499,7 +504,7 @@ def validate_replan_consistency(model, pair_loader, args) -> dict[str, float]:
     pbar = tqdm(
         total=total_batches,
         desc="validate replan consistency (slowest rank)",
-        disable=ddp.get_rank() != 0,
+        disable=tqdm_disabled(ddp.get_rank() == 0),
     )
     for step, batch in enumerate(pair_loader):
         pred_a, future_a = _predict_ego_for_temporal_metrics(model, batch["current"], args, device)
