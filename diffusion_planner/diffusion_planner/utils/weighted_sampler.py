@@ -47,8 +47,13 @@ class ClusterWeightedDistributedSampler(Sampler):
                 f"data_list has {len(data_list)} entries, exceeding "
                 f"torch.multinomial's 2^24 ({2**24:,}) category limit on CPU."
             )
-        if alpha < 0:
-            raise ValueError(f"alpha={alpha} must be >= 0 (1.0 = full inverse, 0.0 = uniform)")
+        # ``not alpha >= 0`` rather than ``alpha < 0`` so NaN is rejected too:
+        # every comparison with NaN is False, and a NaN alpha would otherwise
+        # make every weight NaN and surface as an opaque torch.multinomial error.
+        if not alpha >= 0:
+            raise ValueError(
+                f"alpha={alpha} must be a number >= 0 (1.0 = full inverse, 0.0 = uniform)"
+            )
         self.num_replicas = num_replicas
         self.rank = rank
         self.seed = seed

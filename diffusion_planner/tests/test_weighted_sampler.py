@@ -388,6 +388,68 @@ class TestAlpha:
                     data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=-0.5
                 )
 
+    def test_nan_alpha_raises(self):
+        """NaN must be rejected up front: it would silently make every weight NaN."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(10)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            with pytest.raises(ValueError, match="alpha"):
+                ClusterWeightedDistributedSampler(
+                    data_list,
+                    cluster_path,
+                    num_replicas=1,
+                    rank=0,
+                    seed=42,
+                    alpha=float("nan"),
+                )
+
+    def test_softened_alpha_with_unmatched_paths_keeps_ordering(self):
+        """Regression guard on hunk ordering in ``_compute_weights``.
+
+        The neutral-weight assignment for unmatched paths must run BEFORE the
+        mean normalization, at *every* alpha -- not just the default. If someone
+        moves normalization above the neutral block in the softened path, the
+        unmatched weights stop landing between rare and common and this fails.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(10)]
+            clusters = {
+                "cluster_id0": data_list[:2],
+                "cluster_id1": data_list[2:6],
+            }
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                json.dump(clusters, f)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                sampler = ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=0.5
+                )
+
+            assert sampler.matched_count == 6
+            rare_weight = sampler.weights[0].item()
+            common_weight = sampler.weights[3].item()
+            unmatched_weight = sampler.weights[7].item()
+
+            assert rare_weight > unmatched_weight > common_weight, (
+                f"alpha=0.5: expected rare ({rare_weight:.3f}) > "
+                f"unmatched ({unmatched_weight:.3f}) > common ({common_weight:.3f})"
+            )
+            for i in range(6, 10):
+                assert sampler.weights[i].item() == pytest.approx(unmatched_weight)
+
+            # Assigning the neutral weight *before* normalization makes the overall
+            # mean equal the matched mean, so the neutral weight normalizes to
+            # exactly 1.0. Normalizing first leaves it at mean_matched / overall
+            # mean != 1.0. This is the assertion that pins the hunk order.
+            assert unmatched_weight == pytest.approx(1.0, rel=1e-9)
+            assert sampler.weights.mean().item() == pytest.approx(1.0, rel=1e-9)
+
+            # The softening must still be in effect (full inverse would give 2.0).
+            assert rare_weight / common_weight == pytest.approx(2.0**0.5, rel=1e-4)
+
     def test_cluster_multipliers_match_normalized_weights(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_list = [f"/data/sample_{i}.npz" for i in range(100)]
@@ -405,17 +467,39 @@ class TestAlpha:
                 sampler.weights[2].item()
             )
 
-    def test_multipliers_average_to_one(self):
-        """Multipliers weighted by cluster size average to 1.0 — no net inflation."""
+    def test_multipliers_predict_observed_draw_counts(self):
+        """A multiplier must be the *observed* oversampling factor, not just a number.
+
+        Draws are accumulated over many epochs and compared against
+        ``multiplier * cluster_size`` draws per epoch. This is what makes the
+        multiplier meaningful for tuning alpha, and it fails if the recorded
+        multipliers ever drift from the weights actually handed to
+        ``torch.multinomial`` (e.g. if they were captured before normalization).
+        """
+        n_epochs = 100
         with tempfile.TemporaryDirectory() as tmp:
             data_list = [f"/data/sample_{i}.npz" for i in range(100)]
-            cluster_path, _ = _make_cluster_json(tmp, data_list)
+            cluster_path, clusters = _make_cluster_json(tmp, data_list)
 
             sampler = ClusterWeightedDistributedSampler(
                 data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=0.5
             )
-            weighted = sum(
-                sampler.cluster_multipliers[cid] * count
-                for cid, count in sampler.cluster_counts.items()
-            )
-            assert weighted / len(data_list) == pytest.approx(1.0, rel=1e-6)
+            index_to_cluster = {
+                data_list.index(p): cid for cid, paths in clusters.items() for p in paths
+            }
+
+            observed = {cid: 0 for cid in clusters}
+            for epoch in range(n_epochs):
+                sampler.set_epoch(epoch)
+                for idx in sampler:
+                    observed[index_to_cluster[idx]] += 1
+
+            total_draws = sum(observed.values())
+            assert total_draws == n_epochs * len(data_list)
+
+            for cid, count in sampler.cluster_counts.items():
+                expected = sampler.cluster_multipliers[cid] * count * n_epochs
+                assert observed[cid] == pytest.approx(expected, rel=0.08), (
+                    f"{cid}: multiplier {sampler.cluster_multipliers[cid]:.3f} predicts "
+                    f"{expected:.0f} draws over {n_epochs} epochs, observed {observed[cid]}"
+                )
