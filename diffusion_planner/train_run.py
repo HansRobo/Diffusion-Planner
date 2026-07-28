@@ -17,7 +17,17 @@ from pathlib import Path
 from run_utils import NCCL_ENV, gpu_count, tee_run
 
 
-def parse_args() -> argparse.Namespace:
+def boolean(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ("yes", "true", "t", "y", "1"):
+        return True
+    if value.lower() in ("no", "false", "f", "n", "0"):
+        return False
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+
+
+def parse_args(args_list: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--exp_name", required=True)
     p.add_argument("--train_set_list", required=True)
@@ -44,26 +54,21 @@ def parse_args() -> argparse.Namespace:
         help="optional: exponent on inverse-frequency cluster weights "
         "(1.0 = full inverse, 0.0 = uniform)",
     )
-    return p.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-
-    here = Path(__file__).resolve().parent
-    save_path = Path(args.output_root) / f"{datetime.now():%Y%m%d-%H%M%S}_{args.exp_name}"
-    save_path.mkdir(parents=True, exist_ok=True)
-
-    # Save git info next to the run.
-    def git_output(cmd: list[str]) -> str:
-        return subprocess.run(cmd, cwd=here, capture_output=True, text=True).stdout
-
-    branch = git_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
-    (save_path / "git_show.txt").write_text(
-        f"branch: {branch}\n\n" + git_output(["git", "show", "-s", "--decorate"])
+    p.add_argument(
+        "--force_aug_on_repeat",
+        type=boolean,
+        default=None,
+        help="optional: force one augmentation on repeated weighted-sampler draws",
     )
-    (save_path / "git_diff.txt").write_text(git_output(["git", "diff"]))
+    p.add_argument(
+        "--repeat_aug_pool",
+        default=None,
+        help="optional: comma-separated augmentations eligible for repeat-draw forcing",
+    )
+    return p.parse_args(args_list)
 
+
+def build_optional_args(args: argparse.Namespace) -> list[str]:
     optional: list[str] = []
     if args.resume_model_path:
         optional += ["--resume_model_path", str(Path(args.resume_model_path).resolve())]
@@ -87,6 +92,31 @@ def main() -> None:
                 file=sys.stderr,
             )
         optional += ["--cluster_weight_alpha", str(args.cluster_weight_alpha)]
+    if args.force_aug_on_repeat is not None:
+        optional += ["--force_aug_on_repeat", str(args.force_aug_on_repeat)]
+    if args.repeat_aug_pool is not None:
+        optional += ["--repeat_aug_pool", args.repeat_aug_pool]
+    return optional
+
+
+def main() -> None:
+    args = parse_args()
+
+    here = Path(__file__).resolve().parent
+    save_path = Path(args.output_root) / f"{datetime.now():%Y%m%d-%H%M%S}_{args.exp_name}"
+    save_path.mkdir(parents=True, exist_ok=True)
+
+    # Save git info next to the run.
+    def git_output(cmd: list[str]) -> str:
+        return subprocess.run(cmd, cwd=here, capture_output=True, text=True).stdout
+
+    branch = git_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    (save_path / "git_show.txt").write_text(
+        f"branch: {branch}\n\n" + git_output(["git", "show", "-s", "--decorate"])
+    )
+    (save_path / "git_diff.txt").write_text(git_output(["git", "diff"]))
+
+    optional = build_optional_args(args)
 
     Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
 
