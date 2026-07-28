@@ -31,7 +31,10 @@ from rlvr.autoresearch.tools.build_repaired_targets import (
     _row_is_expert_disagreement,
     _validate_static_collision_config,
 )
-from rlvr.autoresearch.tools.expert_morph import build_expert_morph_candidate
+from rlvr.autoresearch.tools.expert_morph import (
+    build_depart_morph_candidate,
+    build_expert_morph_candidate,
+)
 from rlvr.autoresearch.tools.lifelong_replay_memory import build_memory
 from rlvr.autoresearch.tools.mine_credit_window_scenes import (
     _resolve_row,
@@ -47,7 +50,10 @@ from rlvr.autoresearch.tools.mine_direct_reproducer_chunks import (
     iter_direct_chunks,
     iter_manifest_chunks,
 )
-from rlvr.autoresearch.tools.reproducer_danger_scorer import build_realized_event_scorer
+from rlvr.autoresearch.tools.reproducer_danger_scorer import (
+    REALIZED_LAG_SUSTAIN_STEPS,
+    build_realized_event_scorer,
+)
 from rlvr.autoresearch.tools.run_lifelong_r2lpl_rounds import (
     _apply_repair_refresh_config,
     _base_train_invocation,
@@ -651,7 +657,11 @@ def test_mine_direct_main_forwards_realized_hard_event_scorer(monkeypatch, tmp_p
     def _fake_run_segments_batched(*args, **kwargs):
         captured["realized_event_scorer"] = kwargs.get("realized_event_scorer")
         captured["danger_scorer"] = kwargs.get("danger_scorer")
-        return [SimpleNamespace(metrics={"n_collision_steps": 1, "min_clearance": -0.1})]
+        return [
+            {
+                "object": {"collision_steps": 1, "clearance_min_m": -0.1},
+            }
+        ]
 
     chunk = Chunk(
         key="chunkA",
@@ -1737,6 +1747,12 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             ego_shape=np.ones(3, dtype=np.float32),
             clearances=np.full(8, np.inf, dtype=np.float32),
             collisions=np.zeros(8, dtype=bool),
+            rb_dists=np.full(8, np.inf, dtype=np.float32),
+            red_light=np.zeros(8, dtype=bool),
+            accels=np.zeros(8, dtype=np.float32),
+            strong_brake_mps2=-2.5,
+            dyn=SimpleNamespace(speed=0.0),
+            ego_hist=np.zeros((31, 3), dtype=np.float64),
             k=0,
             done=False,
             terminated="max_steps",
@@ -1744,14 +1760,17 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             live_pose=np.zeros(3, dtype=np.float32),
             save_buf=None,
             last_snap_step=None,
-            n_snaps=0,
+            snap_count=0,
             turn_hist=np.zeros(31, dtype=np.int64),
+            last_turn_indicator=0,
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
             verified_credit_first_step={},
             danger_event_selector=None,
             output_route_key="bagA",
+            realized_lag_streak=0,
+            route_arc_s=None,
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -1769,7 +1788,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     def _fake_to_torch_batch(np_dicts, model_args, device):
         return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
 
-    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+    def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
         return [(1.0, False, 0, -1) for _ in neighbors_list]
 
     def _fake_realized_event_scorer(
@@ -1788,8 +1807,8 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
 
-    def _fake_finalize(s, timers):
-        return SimpleNamespace(metrics={"n_steps_run": s.k})
+    def _fake_finalize(s, *args, **kwargs):
+        return {"n_steps_run": s.k}
 
     def _fake_dump_credit_window(*args, **kwargs):
         calls.append(
@@ -1806,7 +1825,9 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
     monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
     monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
-    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(
+        reproducer_rollout, "score_object_step_batched", _fake_score_object_step_batched
+    )
     monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
     monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
     monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
@@ -1888,19 +1909,28 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             replay_mode="clock",
             clearances=np.full(max_steps + 1, np.inf, dtype=np.float32),
             collisions=np.zeros(max_steps + 1, dtype=bool),
+            rb_dists=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            red_light=np.zeros(max_steps + 1, dtype=bool),
+            accels=np.zeros(max_steps + 1, dtype=np.float32),
+            strong_brake_mps2=-2.5,
+            dyn=SimpleNamespace(speed=0.0),
+            ego_hist=np.zeros((31, 3), dtype=np.float64),
             near_miss_thresh=near_miss_thresh,
             ego_shape=np.ones(3, dtype=np.float32),
             live_pose=np.zeros(3, dtype=np.float32),
             save_buf=None,
             last_snap_step=None,
-            n_snaps=0,
+            snap_count=0,
             turn_hist=np.zeros(31, dtype=np.int64),
+            last_turn_indicator=0,
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
             verified_credit_first_step={},
             danger_event_selector=None,
             output_route_key="bagA",
+            realized_lag_streak=0,
+            route_arc_s=None,
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -1920,7 +1950,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
 
     score_calls = {"n": 0}
 
-    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+    def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
         score_calls["n"] += 1
         collided = score_calls["n"] >= 2
         return [(0.0, collided, 1, 0) for _ in neighbors_list]
@@ -1944,8 +1974,8 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
 
-    def _fake_finalize(s, timers):
-        return SimpleNamespace(metrics={"n_steps_run": s.k})
+    def _fake_finalize(s, *args, **kwargs):
+        return {"n_steps_run": s.k}
 
     def _fake_dump_credit_window(*args, **kwargs):
         calls.append(
@@ -1960,7 +1990,9 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
     monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
     monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
-    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(
+        reproducer_rollout, "score_object_step_batched", _fake_score_object_step_batched
+    )
     monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
     monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
     monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
@@ -2029,19 +2061,28 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             replay_mode="clock",
             clearances=np.full(max_steps + 1, np.inf, dtype=np.float32),
             collisions=np.zeros(max_steps + 1, dtype=bool),
+            rb_dists=np.full(max_steps + 1, np.inf, dtype=np.float32),
+            red_light=np.zeros(max_steps + 1, dtype=bool),
+            accels=np.zeros(max_steps + 1, dtype=np.float32),
+            strong_brake_mps2=-2.5,
+            dyn=SimpleNamespace(speed=0.0),
+            ego_hist=np.zeros((31, 3), dtype=np.float64),
             near_miss_thresh=near_miss_thresh,
             ego_shape=np.ones(3, dtype=np.float32),
             live_pose=np.zeros(3, dtype=np.float32),
             save_buf=None,
             last_snap_step=None,
-            n_snaps=0,
+            snap_count=0,
             turn_hist=np.zeros(31, dtype=np.int64),
+            last_turn_indicator=0,
             credit_window=None,
             credit_saved=False,
             verified_credit_labels=set(),
             verified_credit_first_step={},
             danger_event_selector=None,
             output_route_key="bagA",
+            realized_lag_streak=0,
+            route_arc_s=None,
         )
 
     def _fake_pre_step(s, gpu_transform=False):
@@ -2059,7 +2100,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     def _fake_to_torch_batch(np_dicts, model_args, device):
         return {"dummy": torch.zeros((len(np_dicts), 1), dtype=torch.float32)}
 
-    def _fake_score_step_batched(neighbors_list, ego_shapes, device):
+    def _fake_score_object_step_batched(neighbors_list, ego_shapes, device):
         return [(0.0, True, 1, 0) for _ in neighbors_list]
 
     def _fake_clean_scorer(*_args, **_kwargs):
@@ -2071,8 +2112,8 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     def _fake_advance_step(s, pred, idx, device, timers):
         s.k += 1
 
-    def _fake_finalize(s, timers):
-        return SimpleNamespace(metrics={"n_steps_run": s.k})
+    def _fake_finalize(s, *args, **kwargs):
+        return {"n_steps_run": s.k}
 
     def _fake_dump_credit_window(*args, **kwargs):
         calls.append({"out_dir": args[0], "label": args[10]})
@@ -2081,7 +2122,9 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
     monkeypatch.setattr(reproducer_rollout, "_seed_state", _fake_seed_state)
     monkeypatch.setattr(reproducer_rollout, "_pre_step", _fake_pre_step)
     monkeypatch.setattr(reproducer_rollout, "_to_torch_batch", _fake_to_torch_batch)
-    monkeypatch.setattr(reproducer_rollout, "score_step_batched", _fake_score_step_batched)
+    monkeypatch.setattr(
+        reproducer_rollout, "score_object_step_batched", _fake_score_object_step_batched
+    )
     monkeypatch.setattr(reproducer_rollout, "_advance_step", _fake_advance_step)
     monkeypatch.setattr(reproducer_rollout, "_finalize", _fake_finalize)
     monkeypatch.setattr(reproducer_rollout, "_dump_credit_window", _fake_dump_credit_window)
@@ -2734,6 +2777,90 @@ def test_realized_event_scorer_supports_expert_disagreement(tmp_path):
     assert row["expert_disagreement_expert_end_progress"] == pytest.approx(0.0, abs=1e-4)
 
 
+def test_realized_event_scorer_realized_lag_flags_on_sustained_streak(tmp_path):
+    # Closed-loop fail-to-resume: the model's open-loop proposal keeps pace with the
+    # expert schedule (no projected-branch flag — the dithering blindspot), but the
+    # rollout loop reports a sustained realized gap -> the realized branch must flag
+    # model_lagging_expert so the depart repair can fire.
+    reward_cfg, threshold_cfg = _write_realized_scorer_configs(tmp_path)
+    scorer = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"expert_disagreement"},
+    )
+    np_dict = {
+        "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+    }
+    ref_polyline_world = np.stack([np.linspace(0.0, 100.0, 101), np.zeros(101)], axis=1).astype(
+        np.float32
+    )
+    # Expert drives 5 -> 15 m; the proposal matches its schedule exactly, so none of
+    # the frozen 3 branches fires on its own.
+    expert_future_world = np.stack([np.linspace(5.0, 15.0, 81), np.zeros(81)], axis=1).astype(
+        np.float32
+    )
+    expert_future_speed = np.full((81,), 1.25, dtype=np.float32)
+    model_pred_world = expert_future_world[1:].copy()
+
+    common = dict(
+        collided=False,
+        model_pred_world=model_pred_world,
+        expert_future_world=expert_future_world,
+        expert_future_speed=expert_future_speed,
+        ref_polyline_world=ref_polyline_world,
+    )
+    below = scorer(
+        np_dict,
+        step=7,
+        realized_lag_streak=REALIZED_LAG_SUSTAIN_STEPS - 1,
+        realized_lag_gap_m=4.2,
+        **common,
+    )
+    assert "expert_disagreement" not in below["labels"]
+    assert below["expert_disagreement_realized_lag"] is False
+    assert below["expert_disagreement_realized_gap_m"] == pytest.approx(4.2)
+
+    flagged = scorer(
+        np_dict,
+        step=8,
+        realized_lag_streak=REALIZED_LAG_SUSTAIN_STEPS,
+        realized_lag_gap_m=4.5,
+        **common,
+    )
+    assert "expert_disagreement" in flagged["labels"]
+    assert flagged["expert_disagreement_reason"] == "model_lagging_expert"
+    assert flagged["expert_disagreement_realized_lag"] is True
+    assert flagged["expert_disagreement_step"] == 8
+
+
+def test_realized_event_scorer_exposes_expert_lag_thresholds(tmp_path):
+    # The rollout loop maintains the streak using the SAME thresholds the scorer was
+    # built with — exposed as an attribute so there is a single source of truth.
+    reward_cfg, threshold_cfg = _write_realized_scorer_configs(tmp_path)
+    scorer = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"expert_disagreement"},
+    )
+    thr = scorer.expert_lag_thresholds
+    assert thr is not None
+    assert set(thr) == {"lag_progress_gap_m", "moving_speed_mps"}
+    assert thr["lag_progress_gap_m"] > 0
+    assert thr["moving_speed_mps"] > 0
+
+    no_ed = build_realized_event_scorer(
+        reward_config=reward_cfg,
+        threshold_config=threshold_cfg,
+        device="cpu",
+        allowed_labels={"moving_collision"},
+    )
+    assert no_ed.expert_lag_thresholds is None
+
+
 def test_realized_event_scorer_expert_disagreement_requires_inputs(tmp_path):
     # No silent fallback: the branch is allowed but the open-loop / route inputs
     # are missing -> fail loudly instead of silently skipping.
@@ -3157,6 +3284,7 @@ def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_pa
             "train_args": {
                 "batch_size": 8,
                 "num_workers": 1,
+                "ema_decay": 0.996,
             },
             "nproc_per_node": 1,
         },
@@ -3182,6 +3310,9 @@ def test_base_train_invocation_uses_cumulative_epochs_and_train_predictor(tmp_pa
     assert "train_predictor" in cmd
     assert cmd[cmd.index("--train_epochs") + 1] == "7"
     assert cmd[cmd.index("--batch_size") + 1] == "2"
+    # ema_decay must survive the train_args passthrough — 0.999 is too slow
+    # to absorb behavior changes within a short per-round fine-tune.
+    assert cmd[cmd.index("--ema_decay") + 1] == "0.996"
 
 
 def test_torchrun_subprocess_cleanup_removes_stale_file_store(tmp_path, monkeypatch):
@@ -3791,6 +3922,86 @@ def test_expert_morph_preserves_slow_creep():
     assert morph[-1, 0] > 0.5  # creep distance preserved (~0.7 m), not 0
 
 
+def test_depart_morph_synthesizes_departure_from_parked_plan():
+    # The stop morph cannot do this (det path has no road ahead) — the depart
+    # morph sources geometry from the expert path bridged to the ego pose.
+    det = _straight_traj(np.linspace(0.0, 2.0, _MORPH_T))  # parked/creeping plan
+    expert = _straight_traj(6.0 + np.cumsum(np.full(_MORPH_T, 0.45)))  # ahead, ~4.5 m/s
+    morph, diag = build_depart_morph_candidate(det, expert, return_diag=True)
+    assert diag["stage"] == "ok"
+    assert morph.shape == (_MORPH_T, 4)
+    assert abs(morph[0, 0]) < 0.1  # starts at the ego, not at the expert (no teleport)
+    assert np.all(np.diff(morph[:, 0]) >= -1e-4)
+    assert morph[-1, 0] > 10.0  # genuinely departs
+    steps = np.linalg.norm(np.diff(morph[:, :2], axis=0), axis=1)
+    assert steps.max() < 3.0  # accel/jerk-feasible, no jumps
+
+
+def test_depart_morph_bails_on_stationary_or_behind_expert():
+    det = _straight_traj(np.zeros(_MORPH_T))
+    stationary = _straight_traj(np.full(_MORPH_T, 6.0))
+    _, diag = build_depart_morph_candidate(det, stationary, return_diag=True)
+    assert diag["stage"] == "expert_stationary"
+    behind = _straight_traj(-8.0 + np.cumsum(np.full(_MORPH_T, 0.3)))
+    _, diag = build_depart_morph_candidate(det, behind, return_diag=True)
+    assert diag["stage"] == "expert_behind_ego"
+
+
+def test_depart_morph_rejects_undrivable_geometry():
+    det = _straight_traj(np.zeros(_MORPH_T))
+    # Near-pure-lateral expert offset: no forward-drivable bridge exists, and
+    # a raw chord would emit sideways (crab-motion) headings as supervision.
+    lateral = _straight_traj(np.cumsum(np.full(_MORPH_T, 0.5)) - 0.5)
+    lateral[:, 1] = 0.4
+    _, diag = build_depart_morph_candidate(det, lateral, return_diag=True)
+    assert diag["stage"] == "not_forward_from_ego"
+    # Reversing expert: arc-length heading would flip ~180 deg at the retrace.
+    reversing = _straight_traj(10.0 - np.cumsum(np.full(_MORPH_T, 0.1)))
+    _, diag = build_depart_morph_candidate(det, reversing, return_diag=True)
+    assert diag["stage"] == "path_reversal"
+    # A small forward gap must still synthesize with forward headings (the
+    # bridge, not a raw chord, applies at ANY positive gap).
+    near = _straight_traj(0.3 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    morph, diag = build_depart_morph_candidate(det, near, return_diag=True)
+    assert diag["stage"] == "ok"
+    headings = np.degrees(np.arctan2(morph[:, 3], morph[:, 2]))
+    assert np.abs(headings).max() < 10.0
+
+
+def test_depart_morph_preserves_recorded_wait_at_origin():
+    # An expert waiting at the ego-frame origin is written as [0, 0, cos, sin]
+    # (valid unit heading, reproducer_rollout convention) — NOT padding.
+    # Treating those rows as leading padding would back-fill them from the
+    # first moved pose and synthesize motion before the recorded departure.
+    det = _straight_traj(np.zeros(_MORPH_T))
+    xs = np.concatenate([np.zeros(10), np.cumsum(np.full(_MORPH_T - 10, 0.5))])
+    expert = _straight_traj(xs)  # waits 1 s at origin, then departs at ~5 m/s
+    morph, diag = build_depart_morph_candidate(det, expert, return_diag=True)
+    assert diag["stage"] == "ok"
+    assert np.abs(morph[:10, 0]).max() < 0.05  # initial wait preserved
+    assert morph[-1, 0] > 10.0  # then genuinely departs
+
+
+def test_depart_morph_rejects_padded_or_nonfinite_expert():
+    det = _straight_traj(np.zeros(_MORPH_T))
+    # A zero-padded LEADING sample must not read as gap=0 and bypass the
+    # gap/behind gates — the first valid sample defines the expert start.
+    far = _straight_traj(40.0 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    far[0] = 0.0
+    _, diag = build_depart_morph_candidate(det, far, return_diag=True)
+    assert diag["stage"] == "gap_too_large"
+    behind = _straight_traj(-8.0 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    behind[0] = 0.0
+    _, diag = build_depart_morph_candidate(det, behind, return_diag=True)
+    assert diag["stage"] == "expert_behind_ego"
+    # NaN passes every threshold gate (comparisons are False) so it must be
+    # rejected up front, not propagated into the SFT target.
+    nan_expert = _straight_traj(6.0 + np.cumsum(np.full(_MORPH_T, 0.5)))
+    nan_expert[30, 0] = np.nan
+    _, diag = build_depart_morph_candidate(det, nan_expert, return_diag=True)
+    assert diag["stage"] == "non_finite_input"
+
+
 def _patience_npz(path, *, red_route: bool, v_profile: np.ndarray) -> None:
     T = len(v_profile) + 1
     x = np.concatenate([[0.0], np.cumsum(v_profile * 0.1)])
@@ -3926,6 +4137,43 @@ def test_best_safe_candidate_reports_morph_outcome():
     assert idx is None
     assert meta["reason"] == "no_safe_candidate"
     assert meta["morph_outcome"] == "gate_rejected"
+
+
+def test_best_safe_candidate_reports_depart_outcome():
+    # The depart candidate must get the same outcome taxonomy as the stop
+    # morph (selected / lost_selection / gate_rejected), independently keyed.
+    source_row = {"repair_labels": ["expert_disagreement"], "state_class": "stopped"}
+    expert = torch.zeros(4, 4)
+    mover = torch.ones(4, 4)
+    depart = torch.full((4, 4), 2.0)
+
+    idx, meta = _best_safe_candidate(
+        source_row,
+        [
+            _morph_outcome_candidate_row(["clean"]),
+            _morph_outcome_candidate_row(["clean"]),
+            _morph_outcome_candidate_row(["road_border_crossing"]),
+        ],
+        [
+            _morph_outcome_reward_row(5.0),
+            _morph_outcome_reward_row(3.0),
+            _morph_outcome_reward_row(0.0, rb_crossing=True),
+        ],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[mover, depart, expert],
+        reference_traj=expert,
+        morph_index=2,
+        depart_index=1,
+    )
+    assert idx is not None
+    outcome = meta["depart_outcome"]
+    assert outcome == ("selected" if idx == 1 else "lost_selection")
+    if outcome == "lost_selection":
+        assert "depart_r2lpl_score" in meta
+    # Both scripted candidates reported independently.
+    assert meta["morph_outcome"] == "gate_rejected"
+    assert meta["morph_labels"] == ["road_border_crossing"]
 
 
 # ---------------------------------------------------------------------------
@@ -4418,6 +4666,157 @@ def test_replay_capacity_is_required():
     assert round_runner._required_replay_capacity({"capacity": 5000}) == 5000
 
 
+def test_validate_normal_scene_list_config(tmp_path):
+    """normal_scene_list must fail loudly at startup: it is rsft-only (base_sft
+    uses training.anchor), must be a non-empty JSON list of paths, and the
+    prob/normal split it enables needs explicit, sane n_prob_scenes /
+    n_normal_scenes — run_experiment would otherwise only raise (or silently
+    subsample) after the expensive mine+repair phases."""
+    scene = tmp_path / "normal_0.npz"
+    np.savez(scene, neighbor_agents_future=np.zeros((1, 2, 4), dtype=np.float32))
+    normals = tmp_path / "normals.json"
+    normals.write_text(json.dumps([str(scene)]))
+    tcfg = tmp_path / "train_cfg.json"
+    tcfg.write_text(json.dumps({"ranked_sft_mode": "curated"}))
+    base = {
+        "training_normal_scene_list": str(normals),
+        "training_backend": "rsft",
+        "training_config": str(tcfg),
+    }
+    # No normal_scene_list -> no-op.
+    round_runner._validate_normal_scene_list_config({"training_backend": "base_sft"})
+    with pytest.raises(ValueError, match="ranked-SFT backend"):
+        round_runner._validate_normal_scene_list_config({**base, "training_backend": "base_sft"})
+    with pytest.raises(ValueError, match="does not exist"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(tmp_path / "missing.json")}
+        )
+    # Empty or malformed list content fails at startup, not at collate time.
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]")
+    with pytest.raises(ValueError, match="non-empty JSON list"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(empty)}
+        )
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("{not json")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(malformed)}
+        )
+    not_paths = tmp_path / "not_paths.json"
+    not_paths.write_text(json.dumps([1, 2]))
+    with pytest.raises(ValueError, match="non-empty JSON list"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(not_paths)}
+        )
+    # A listed scene file that does not exist fails at startup, not in the
+    # 4-col conversion after the mine+repair phases.
+    broken = tmp_path / "broken.json"
+    broken.write_text(json.dumps([str(scene), "/missing/scene.npz"]))
+    with pytest.raises(ValueError, match=r"1/2 missing scene files.*missing/scene\.npz"):
+        round_runner._validate_normal_scene_list_config(
+            {**base, "training_normal_scene_list": str(broken)}
+        )
+    with pytest.raises(ValueError, match="n_prob_scenes"):
+        round_runner._validate_normal_scene_list_config(base)
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 0, "n_normal_scenes": 230})
+    )
+    with pytest.raises(ValueError, match="positive integer"):
+        round_runner._validate_normal_scene_list_config(base)
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 1000, "n_normal_scenes": -1})
+    )
+    with pytest.raises(ValueError, match="non-negative integer"):
+        round_runner._validate_normal_scene_list_config(base)
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 1000, "n_normal_scenes": 230})
+    )
+    round_runner._validate_normal_scene_list_config(base)  # valid -> no raise
+
+
+def test_rsft_scene_args_resolves_normals_and_guards_subsampling(tmp_path):
+    """The rsft prob/normal path must (a) homogenize 3-col logged normal scenes
+    to the 4-col schema before handing them to run_experiment (a mixed batch
+    cannot collate — same incompatibility the base_sft anchor slice already
+    handles), and (b) refuse an n_prob_scenes below the repaired count, which
+    run_experiment's min(n_prob, len(prob)) sampling would silently truncate."""
+    base = {
+        "ego_agent_future": np.zeros((80, 3), dtype=np.float32),
+        "turn_indicators": np.zeros(31, dtype=np.int64),
+    }
+    three = dict(base)
+    nf3 = np.zeros((4, 80, 3), dtype=np.float32)
+    nf3[0, :, 0] = np.arange(1, 81)
+    nf3[0, :, 2] = np.pi / 2
+    three["neighbor_agents_future"] = nf3
+    p3 = tmp_path / "logged_normal.npz"
+    np.savez(p3, **three)
+    four = dict(base)
+    four["neighbor_agents_future"] = np.zeros((4, 80, 4), dtype=np.float32)
+    p4 = tmp_path / "converted_normal.npz"
+    np.savez(p4, **four)
+    normals = tmp_path / "normals.json"
+    normals.write_text(json.dumps([str(p3), str(p4)]))
+    repaired_list = tmp_path / "repaired.json"
+    repaired_paths = ["/data/repaired_0.npz", "/data/repaired_1.npz"]
+    repaired_list.write_text(json.dumps(repaired_paths))
+    tcfg = tmp_path / "train_cfg.json"
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 10, "n_normal_scenes": 2})
+    )
+    cfg = {
+        "training_normal_scene_list": str(normals),
+        "training_backend": "rsft",
+        "training_config": str(tcfg),
+    }
+    rdir = tmp_path / "round"
+    rdir.mkdir()
+
+    args = round_runner._rsft_scene_args(
+        cfg,
+        repaired_paths=repaired_paths,
+        repaired_list_json=repaired_list,
+        rdir=rdir,
+        round_idx=1,
+    )
+    assert args[args.index("--prob_scenes") + 1] == str(repaired_list)
+    resolved = Path(args[args.index("--normal_scenes") + 1])
+    assert resolved == rdir / "normal_scenes_resolved.json"
+    resolved_paths = json.loads(resolved.read_text())
+    # 4-col passes through by original path; 3-col was rewritten to a copy.
+    assert resolved_paths[1] == str(p4)
+    assert resolved_paths[0] != str(p3)
+    batch = [dict(np.load(p)) for p in resolved_paths]
+    stacked = torch.stack([torch.from_numpy(b["neighbor_agents_future"]) for b in batch])
+    assert stacked.shape == (2, 4, 80, 4)
+
+    # Undersized n_prob_scenes fails before training instead of silently
+    # dropping repaired scenes.
+    tcfg.write_text(
+        json.dumps({"ranked_sft_mode": "curated", "n_prob_scenes": 1, "n_normal_scenes": 2})
+    )
+    with pytest.raises(ValueError, match="silently subsample"):
+        round_runner._rsft_scene_args(
+            cfg,
+            repaired_paths=repaired_paths,
+            repaired_list_json=repaired_list,
+            rdir=rdir,
+            round_idx=1,
+        )
+
+    # Without normal_scene_list the legacy combined-list path is kept.
+    args = round_runner._rsft_scene_args(
+        {"training_backend": "rsft", "training_config": str(tcfg)},
+        repaired_paths=repaired_paths,
+        repaired_list_json=repaired_list,
+        rdir=rdir,
+        round_idx=1,
+    )
+    assert args == ["--train_scenes", str(repaired_list)]
+
+
 def test_workflow_contract_forwards_prototypes_path_to_repair_cmd(tmp_path):
     """Regression pin: the contract parser used to silently drop
     repair_generation.prototypes_path, so anchor variants generated without
@@ -4660,3 +5059,177 @@ def test_selection_report_vetoes_and_ranks():
     report = round_runner._selection_report(reference, drifted)
     assert report["recommended"] is None
     assert any("denominator" in v for v in report["rounds"][0]["veto_reasons"])
+
+
+def test_road_border_gate_is_absolute():
+    # The road-border gate is absolute: ANY crossing candidate is rejected, scripted
+    # (depart/morph) or model/fan alike. rb_min_dist is an UNSIGNED distance to the border,
+    # so it cannot tell a shoulder skim from a trajectory that crossed to the wrong side and
+    # ran far outside — an earlier expert-relative distance floor was removed as unsafe.
+    source_row = {
+        "repair_labels": ["expert_disagreement", "road_border_crossing"],
+        "expert_disagreement_max_dev": 0.5,
+    }
+    T = 20
+    expert = np.zeros((T, 4), dtype=np.float32)
+    depart = np.zeros((T, 4), dtype=np.float32)
+    model = np.zeros((T, 4), dtype=np.float32)
+    xrow = lambda: SimpleNamespace(  # noqa: E731
+        **{**vars(_morph_outcome_reward_row(2.0, rb_crossing=True)), "rb_min_dist": 0.12}
+    )
+    rows = [
+        _morph_outcome_candidate_row(["road_border_crossing"]),
+        _morph_outcome_candidate_row(["road_border_crossing"]),
+    ]
+
+    # Both crossing candidates gate-rejected, including the scripted depart (idx 0).
+    idx, meta = _best_safe_candidate(
+        source_row,
+        rows,
+        [xrow(), xrow()],
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[depart, model],
+        reference_traj=expert,
+        depart_index=0,
+    )
+    assert idx is None and meta["depart_outcome"] == "gate_rejected"
+    assert meta["depart_gate_flags"]["rb_crossing"] is True
+
+
+def test_direct_reproducer_chunks_support_overlapping_stride(tmp_path):
+    # start_stride < chunk_len: consecutive windows overlap (sliding read-ahead
+    # buffer). Anchor density and chunk runway become independent knobs — needed
+    # for long expert wait cycles where an 80-step chunk has no post-departure
+    # runway but a 160 stride would halve the anchors.
+    scene_list = _write_direct_chunk_scene_list(
+        tmp_path,
+        [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 400)],
+    )
+
+    chunks = list(iter_direct_chunks(scene_list, chunk_len=160, start_stride=80))
+
+    # Tail window (start 320) is only 80 frames -> dropped by the default
+    # min_chunk_len == chunk_len.
+    assert [c.global_start_index for c in chunks] == [0, 80, 160, 240]
+    assert [c.n_frames for c in chunks] == [160, 160, 160, 160]
+    assert chunks[0].start_frame == 31
+    assert chunks[0].end_frame == 31 + 159
+    assert chunks[1].start_frame == 31 + 80  # overlaps chunk 0 by 80 frames
+
+    with_tail = list(
+        iter_direct_chunks(scene_list, chunk_len=160, start_stride=80, min_chunk_len=80)
+    )
+    assert [c.global_start_index for c in with_tail] == [0, 80, 160, 240, 320]
+    assert with_tail[-1].n_frames == 80
+    assert with_tail[-1].end_reason == "scene_list_tail"
+
+
+def test_direct_reproducer_chunks_overlap_preserves_sharding(tmp_path):
+    # Sharding/sampling still key off global_start // start_stride with overlap.
+    scene_list = _write_direct_chunk_scene_list(
+        tmp_path,
+        [f"bagA_00000001_{i:08d}" for i in range(31, 31 + 400)],
+    )
+
+    shard0 = list(
+        iter_direct_chunks(scene_list, chunk_len=160, start_stride=80, num_shards=2, shard_index=0)
+    )
+    shard1 = list(
+        iter_direct_chunks(scene_list, chunk_len=160, start_stride=80, num_shards=2, shard_index=1)
+    )
+
+    assert [c.global_start_index for c in shard0] == [0, 160]
+    assert [c.global_start_index for c in shard1] == [80, 240]
+
+
+def test_realized_reward_scorer_per_batch_accumulate_and_teleport_skip(monkeypatch):
+    """The realized-reward scorer must: score the driven future per sampled pose,
+    accumulate across finalize() calls (one per mining batch) while clearing its
+    buffers each time (bounds memory + avoids cross-batch id(s) aliasing), and skip
+    any window that crosses an unstick teleport."""
+    import rlvr.reward as _reward
+
+    # Deterministic stand-in reward = the future's total forward displacement, so we can
+    # predict which poses get scored and that teleport windows are excluded.
+    def fake_reward(ego, data, cfg):
+        xy = ego[0, :, :2].cpu().numpy()
+        return [SimpleNamespace(total=float(abs(xy[-1, 0] - xy[0, 0])))]
+
+    monkeypatch.setattr(_reward, "compute_reward_batch", fake_reward)
+
+    import tempfile
+    from pathlib import Path as _P
+
+    with tempfile.TemporaryDirectory() as td:
+        rc, _tc = _write_realized_scorer_configs(_P(td))
+        hook, finalize = reproducer_danger_scorer.build_realized_reward_scorer(
+            reward_config=rc, device="cpu", horizon=3, sample_step=1
+        )
+
+        def _np_dict():
+            return {
+                "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+                "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+                "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+                "ego_agent_past": np.zeros((21, 3), dtype=np.float32),
+            }
+
+        # Batch 1: one segment, 6 steps, straight line, a teleport lands at k=3.
+        seg = SimpleNamespace(k=0, live_pose=np.zeros(3), snap_count=0)
+        for k in range(6):
+            seg.k = k
+            seg.live_pose = np.array([float(k), 0.0, 0.0])  # 1 m/step forward
+            if k == 3:
+                seg.snap_count = 1  # teleport landed here
+            hook([(seg, _np_dict())], None, None, "cpu")
+        mean1, n1 = finalize()
+        # horizon=3 → sampled poses t need t+1..t+3 present AND no teleport in that window.
+        # k can be 0,1,2 (k+3<=5). k=0 window {1,2,3} contains teleport@3 -> skip.
+        # k=1 window {2,3,4} contains 3 -> skip. k=2 window {3,4,5} contains 3 -> skip.
+        assert n1 == 0, f"all windows cross the teleport, expected 0 scored, got {n1}"
+
+        # Batch 2: fresh segment (id reused is fine — buffers were cleared), 5 steps, no teleport.
+        seg2 = SimpleNamespace(k=0, live_pose=np.zeros(3), snap_count=0)
+        for k in range(5):
+            seg2.k = k
+            seg2.live_pose = np.array([float(k), 0.0, 0.0])
+            hook([(seg2, _np_dict())], None, None, "cpu")
+        mean2, n2 = finalize()
+        # k=0 {1,2,3}, k=1 {2,3,4} valid; k=2 needs {3,4,5} -> 5 absent -> skip. So 2 scored.
+        assert n2 == 2, f"expected 2 scored poses in batch 2, got {n2}"
+        # running total accumulates across batches (n2 cumulative); fake reward = intra-window fwd disp
+        assert mean2 == pytest.approx(2.0, abs=1e-6)  # fake reward = intra-window forward disp
+
+
+def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
+    """finalize() must clear its internal buffers so a second finalize on no new data
+    does not re-score the same poses."""
+    import rlvr.reward as _reward
+
+    monkeypatch.setattr(
+        _reward, "compute_reward_batch", lambda ego, data, cfg: [SimpleNamespace(total=1.0)]
+    )
+    import tempfile
+    from pathlib import Path as _P
+
+    with tempfile.TemporaryDirectory() as td:
+        rc, _ = _write_realized_scorer_configs(_P(td))
+        hook, finalize = reproducer_danger_scorer.build_realized_reward_scorer(
+            reward_config=rc, device="cpu", horizon=2, sample_step=1
+        )
+        nd = {
+            "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
+            "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+            "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
+            "ego_agent_past": np.zeros((21, 3), dtype=np.float32),
+        }
+        seg = SimpleNamespace(k=0, live_pose=np.zeros(3), snap_count=0)
+        for k in range(4):
+            seg.k = k
+            seg.live_pose = np.array([float(k), 0.0, 0.0])
+            hook([(seg, nd)], None, None, "cpu")
+        _, n_first = finalize()
+        _, n_second = finalize()  # no new data
+        assert n_first > 0
+        assert n_second == n_first, "second finalize must not re-score cleared buffers"

@@ -1,5 +1,7 @@
 import json
 import os
+import tempfile
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -42,6 +44,25 @@ def find_upward(start_file: str, target_name: str) -> Path:
     raise FileNotFoundError(f"{target_name} up {directory}")
 
 
+def _add_path_list_compressed(artifact: wandb.Artifact, path: Path, tmp_dir: Path) -> None:
+    """Attach a path-list json to the artifact as zstd-compressed ``<name>.zst``.
+
+    Raw path lists are multi-GB of near-identical absolute paths; zstd shrinks them
+    ~100x in a few seconds. openjson() reads ``*.zst`` transparently on download.
+    """
+    try:
+        import zstandard
+    except ImportError:
+        print(f"zstandard not installed; uploading {path.name} uncompressed.")
+        artifact.add_file(str(path), name=path.name)
+        return
+    dst = tmp_dir / f"{path.name}.zst"
+    cctx = zstandard.ZstdCompressor(level=3, threads=-1)
+    with open(path, "rb") as fin, open(dst, "wb") as fout:
+        cctx.copy_stream(fin, fout)
+    artifact.add_file(str(dst), name=dst.name)
+
+
 def log_dataset_artifact(
     run: wandb.sdk.wandb_run.Run, exp_name: str, train_set_list: str, valid_set_list: str
 ) -> None:
@@ -50,21 +71,23 @@ def log_dataset_artifact(
         type="dataset",
         metadata={"train_set_list": train_set_list, "valid_set_list": valid_set_list},
     )
-    train_path = Path(train_set_list)
-    valid_path = Path(valid_set_list)
-    artifact.add_file(str(train_path), name=train_path.name)
-    artifact.add_file(str(valid_path), name=valid_path.name)
-    try:
-        summary_csv = find_upward(train_set_list, "summary.csv")
-        artifact.add_file(str(summary_csv), name="summary.csv")
-    except FileNotFoundError:
-        print("summary.csv not found, skipping.")
-    try:
-        rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
-        artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
-    except FileNotFoundError:
-        print("rosbag_summary.csv not found, skipping.")
-    run.use_artifact(artifact)
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        _add_path_list_compressed(artifact, Path(train_set_list), tmp_dir)
+        _add_path_list_compressed(artifact, Path(valid_set_list), tmp_dir)
+        try:
+            summary_csv = find_upward(train_set_list, "summary.csv")
+            artifact.add_file(str(summary_csv), name="summary.csv")
+        except FileNotFoundError:
+            print("summary.csv not found, skipping.")
+        try:
+            rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
+            artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
+        except FileNotFoundError:
+            print("rosbag_summary.csv not found, skipping.")
+        # add_file() copies into wandb's staging cache, so the temp dir can be
+        # removed as soon as use_artifact() returns.
+        run.use_artifact(artifact)
 
 
 def mean_ego_loss(loss_dict):
@@ -109,7 +132,7 @@ def closed_loop_validate(model, args, step: int, out_dir: str) -> None:
         return
     import math
 
-    from scenario_generation.closed_loop_eval import run_closed_loop_eval
+    from scenario_generation.closed_loop_eval import format_summary_lines, run_closed_loop_eval
 
     net = ddp.get_model(model, args.ddp)
     was_training = net.training
@@ -135,33 +158,40 @@ def closed_loop_validate(model, args, step: int, out_dir: str) -> None:
     finally:
         net.train(was_training)
 
-    # Scalar metrics (drop non-finite clearances: a segment with no neighbor reports +inf).
-    scalar_keys = [
-        "collision_segment_rate",
-        "collision_step_rate",
-        "near_miss_segment_rate",
-        "near_miss_step_rate",
-        "global_min_clearance",
-        "mean_segment_min_clearance",
-        "mean_segment_mean_clearance",
-        "total_collision_steps",
-        "total_near_miss_steps",
-        "total_snaps",
-        "total_steps",
-    ]
+    # Scalar metrics from nested summary (skip non-finite clearances).
+    def _flat_scalars(node: dict, prefix: str = "") -> dict[str, float | int]:
+        out: dict[str, float | int] = {}
+        for k, v in node.items():
+            key = f"{prefix}{k}" if not prefix else f"{prefix}/{k}"
+            if isinstance(v, dict):
+                out.update(_flat_scalars(v, key))
+            elif isinstance(v, (int,)) or (isinstance(v, float) and math.isfinite(v)):
+                out[key] = v
+        return out
+
     log = {
-        f"closed_loop/{k}": summary[k]
-        for k in scalar_keys
-        if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
+        f"closed_loop/{k}": v
+        for k, v in _flat_scalars(
+            {
+                "n_segments": summary["n_segments"],
+                "total_steps": summary["total_steps"],
+                "object": summary["object"],
+                "road_border": summary["road_border"],
+                "red_light_violation": summary["red_light_violation"],
+                "strong_brake": summary["strong_brake"],
+                "reproducer": summary["reproducer"],
+            }
+        ).items()
     }
     for mp4 in summary["video_mp4s"]:
         log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
     wandb.log(log, step=step)
     print(
         f"closed-loop @step {step}: {summary['n_segments']} seg in "
-        f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
-        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+        f"{summary['elapsed_sec']:.1f}s  -> {len(summary['video_mp4s'])} video(s)"
     )
+    for line in format_summary_lines(summary):
+        print(f"  {line}")
 
 
 def run_validation(model, valid_loader, args):
@@ -346,7 +376,7 @@ def model_training(args: TrainConfig):
     if args.use_ema:
         model_ema = ModelEma(
             diffusion_planner,
-            decay=0.999,
+            decay=getattr(args, "ema_decay", 0.999),
             device=args.device,
         )
 
@@ -372,7 +402,13 @@ def model_training(args: TrainConfig):
         print(f"Model loaded from {args.resume_model_path}")
         # We always use new wandb run for each training session, so we don't need to load the wandb_id from the model_dict.
         diffusion_planner, optimizer, scheduler, init_step, _, model_ema = resume_model(
-            args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
+            args.resume_model_path,
+            diffusion_planner,
+            optimizer,
+            scheduler,
+            model_ema,
+            args.device,
+            use_ddp=args.ddp,
         )
 
         # Override learning rate with the new value
@@ -422,13 +458,27 @@ def model_training(args: TrainConfig):
     train_iter = iter(train_loader)
     interval_losses = []
 
+    # Timing reference for the ETA: wall clock from the first step, so the average step cost it
+    # is divided by includes checkpoint save / ONNX export / closed-loop steps.
+    training_start_time = time.perf_counter()
+    interval_start_time = training_start_time
+    interval_train_sec = 0.0
+    interval_steps = 0
+
     pbar = (
         tqdm(total=train_steps, initial=global_step, desc="Training", unit="step")
         if global_rank == 0
         else None
     )
 
-    while global_step < train_steps:
+    # An empty train loader (a closed-loop smoke run whose dataset yields no full batch) has no
+    # step to take, so the loop is never entered rather than spinning on StopIteration. The
+    # epoch-based path returned zero metrics for the same case.
+    has_train_data = len(train_loader) > 0
+    if not has_train_data and global_rank == 0:
+        print("Train loader is empty; skipping the training loop.")
+
+    while has_train_data and global_step < train_steps:
         # Restore train mode each iteration: validate_model() below switches the model to eval()
         # and does not restore it.
         diffusion_planner.train()
@@ -454,9 +504,12 @@ def model_training(args: TrainConfig):
             for param_group in optimizer.param_groups:
                 param_group["lr"] = adjusted_lr
 
+        train_start_time = time.perf_counter()
         loss = train_one_step(inputs, diffusion_planner, optimizer, args, model_ema, aug)
+        interval_train_sec += time.perf_counter() - train_start_time
         interval_losses.append(loss)
         global_step += 1
+        interval_steps += 1
         scheduler.step()
 
         if pbar is not None:
@@ -477,6 +530,7 @@ def model_training(args: TrainConfig):
             train_loss = ddp.reduce_and_average_losses(train_loss, torch.device(args.device))
         interval_losses = []
 
+        valid_start_time = time.perf_counter()
         summary = run_validation(diffusion_planner, valid_loader, args)
 
         # Replan-consistency validation (all ranks; metrics are all-reduced inside the aggregator).
@@ -484,6 +538,17 @@ def model_training(args: TrainConfig):
         if valid_pair_loader is not None:
             replan_dict = validate_replan_consistency(diffusion_planner, valid_pair_loader, args)
             replan_agg = aggregate_replan_consistency_metrics(replan_dict, args.device)
+        valid_sec = time.perf_counter() - valid_start_time
+
+        # Interval timing snapshot, taken on every rank so the accumulators reset together with
+        # ``interval_losses``. The next interval starts here, so rank-0's save / ONNX export /
+        # closed-loop work below lands in it (as it does in the elapsed-based ETA).
+        interval_sec = time.perf_counter() - interval_start_time
+        train_sec = interval_train_sec
+        steps_in_interval = interval_steps
+        interval_start_time = time.perf_counter()
+        interval_train_sec = 0.0
+        interval_steps = 0
 
         if global_rank == 0:
             print_validation_summary(summary, header=f"Step {global_step}/{train_steps}")
@@ -502,11 +567,41 @@ def model_training(args: TrainConfig):
 
             mean_ego_loss_dict = summary["mean_ego_loss_dict"]
             mean_epdms_dict = summary["mean_epdms_dict"]
+
+            # Timing, reported in hours (a validation interval is far too long for seconds to
+            # read well). interval_hour covers train + validation; the ETA is based on the
+            # average wall-clock step of this run so far, which also absorbs the save/export
+            # steps.
+            elapsed_sec = time.perf_counter() - training_start_time
+            steps_done = global_step - init_step
+            remaining_steps = train_steps - global_step
+            train_step_sec = train_sec / steps_in_interval
+            train_hour = train_sec / 3600.0
+            valid_hour = valid_sec / 3600.0
+            interval_hour = interval_sec / 3600.0
+            elapsed_hour = elapsed_sec / 3600.0
+            eta_hour = (elapsed_hour / steps_done) * remaining_steps
+            time_dict = {
+                "time/train_hour": train_hour,
+                "time/valid_hour": valid_hour,
+                "time/interval_hour": interval_hour,
+                "time/train_step_sec": train_step_sec,
+                "time/elapsed_hour": elapsed_hour,
+                "time/eta_hour": eta_hour,
+            }
+            print(
+                f"time: train={train_hour:.3f}h "
+                f"(x{steps_in_interval} steps, {train_step_sec:.3f}s/step), "
+                f"valid={valid_hour:.3f}h, interval={interval_hour:.3f}h, "
+                f"elapsed={elapsed_hour:.2f}h, eta={eta_hour:.2f}h"
+            )
+
             lr_dict = {"lr": optimizer.param_groups[0]["lr"]}
             wandb.log(
                 {
                     **{f"train_loss/{k}": v for k, v in train_loss.items()},
                     **{f"lr/{k}": v for k, v in lr_dict.items()},
+                    **time_dict,
                     "valid_loss/ego": summary["valid_loss_ego"],
                     "valid_loss/neighbors": summary["valid_loss_neighbor"],
                     "valid_loss/turn_indicator_accuracy": summary["turn_indicator_accuracy"],
@@ -527,6 +622,9 @@ def model_training(args: TrainConfig):
                 "valid_loss_neighbor": summary["valid_loss_neighbor"],
                 "valid_loss_ego_position_lat_loss": summary["valid_loss_ego_position_lat_loss"],
                 "valid_loss_ego_position_lon_loss": summary["valid_loss_ego_position_lon_loss"],
+                "train_hour": train_hour,
+                "valid_hour": valid_hour,
+                "interval_hour": interval_hour,
                 **replan_agg,
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }
