@@ -415,11 +415,17 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
             base_reward = None
     lora = list((work / "out").rglob("adapter_model.safetensors"))
     ok = rc == 0 and trained and ev_val is not None and bool(lora)
-    # merge the LoRA into the base and emit a usable full model
+    # merge the LoRA into the base and emit a usable full model (own subdir + args.json,
+    # matching SFT/R2LPL so the emitted model is self-contained and loadable)
     saved = None
     if ok and lora and args.emit_models:
-        merged = args.out_dir / "models" / "rsft.pth"
+        merged = args.out_dir / "models" / "rsft" / "rsft.pth"
         merged.parent.mkdir(parents=True, exist_ok=True)
+        base_args = base_model.parent / "args.json"
+        if base_args.exists():
+            import shutil
+
+            shutil.copy(base_args, merged.parent / "args.json")
         mrc, _ = _run(
             [
                 sys.executable,
