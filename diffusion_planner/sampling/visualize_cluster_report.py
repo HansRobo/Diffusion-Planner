@@ -18,7 +18,8 @@ Usage:
     python visualize_cluster_report.py \\
         --cluster_json /path/to/cluster_result.json \\
         --output_dir   /path/to/report_output/ \\
-        [--max_videos 3] [--workers 1] [--seed 42] [--standalone]
+        [--max_videos 3] [--workers 1] [--seed 42] [--standalone] \\
+        [--cluster_weight_alpha 1.0]
 
 Reads the cluster assignment JSON from cluster.py, computes sampling
 statistics, renders BEV video examples per cluster via render-video-txt
@@ -54,7 +55,15 @@ def load_cluster_json(path: str) -> dict[str, list[str]]:
         return json.load(f)
 
 
-def compute_cluster_stats(clusters: dict[str, list[str]]) -> list[dict]:
+def compute_cluster_stats(clusters: dict[str, list[str]], alpha: float = 1.0) -> list[dict]:
+    """Compute per-cluster stats. ``alpha`` must match training's --cluster_weight_alpha."""
+    # ``not alpha >= 0`` rather than ``alpha < 0`` so NaN is rejected too:
+    # every comparison with NaN is False, and a NaN alpha would otherwise fill
+    # the whole report with nan weights instead of failing here. Matches the
+    # guard in ClusterWeightedDistributedSampler.
+    if not alpha >= 0:
+        raise ValueError(f"alpha={alpha} must be a number >= 0 (1.0 = full inverse, 0.0 = uniform)")
+
     sorted_ids = sorted(clusters.keys(), key=lambda x: int(x.replace("cluster_id", "")))
     total = sum(len(v) for v in clusters.values())
     if total == 0:
@@ -63,7 +72,7 @@ def compute_cluster_stats(clusters: dict[str, list[str]]) -> list[dict]:
     raw_weights = {}
     for cid in sorted_ids:
         freq = len(clusters[cid]) / total
-        raw_weights[cid] = 1.0 / (freq + 1e-8)
+        raw_weights[cid] = (1.0 / (freq + 1e-8)) ** alpha
 
     mean_weight = sum(raw_weights[cid] * len(clusters[cid]) for cid in sorted_ids) / total
     weights = {cid: w / mean_weight for cid, w in raw_weights.items()}
@@ -76,15 +85,17 @@ def compute_cluster_stats(clusters: dict[str, list[str]]) -> list[dict]:
         w = weights[cid]
         sampling_rate = (w * count) / total_weight
         draws = sampling_rate * total
-        stats.append({
-            "cluster_id": cid,
-            "count": count,
-            "pct": 100.0 * count / total,
-            "weight": w,
-            "sampling_rate": sampling_rate,
-            "draws_per_epoch": draws,
-            "repeats_per_sample": draws / count if count > 0 else 0.0,
-        })
+        stats.append(
+            {
+                "cluster_id": cid,
+                "count": count,
+                "pct": 100.0 * count / total,
+                "weight": w,
+                "sampling_rate": sampling_rate,
+                "draws_per_epoch": draws,
+                "repeats_per_sample": draws / count if count > 0 else 0.0,
+            }
+        )
     return stats
 
 
@@ -143,23 +154,19 @@ def render_cluster_videos(
         cluster_dir = videos_dir / cluster_id
         cluster_dir.mkdir(parents=True, exist_ok=True)
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".txt", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             for p in paths:
                 f.write(p + "\n")
             txt_path = f.name
 
         try:
             result = subprocess.run(
-                ["render-video-txt", txt_path, str(cluster_dir),
-                 "--workers", str(workers)],
+                ["render-video-txt", txt_path, str(cluster_dir), "--workers", str(workers)],
                 check=False,
             )
             if result.returncode != 0:
                 warnings.warn(
-                    f"render-video-txt exited with code {result.returncode} "
-                    f"for {cluster_id}"
+                    f"render-video-txt exited with code {result.returncode} for {cluster_id}"
                 )
         finally:
             Path(txt_path).unlink(missing_ok=True)
@@ -172,11 +179,13 @@ def render_cluster_videos(
             for line in log_path.read_text().splitlines():
                 entry = json.loads(line)
                 if entry.get("status") == "error":
-                    errors.append({
-                        "cluster_id": cluster_id,
-                        "file": entry.get("file", ""),
-                        "reason": entry.get("reason", "unknown"),
-                    })
+                    errors.append(
+                        {
+                            "cluster_id": cluster_id,
+                            "file": entry.get("file", ""),
+                            "reason": entry.get("reason", "unknown"),
+                        }
+                    )
 
     return rendered, errors
 
@@ -186,10 +195,17 @@ def convert_mp4_to_gif(mp4_path: str) -> str:
     if Path(gif_path).exists():
         return gif_path
     result = subprocess.run(
-        ["ffmpeg", "-i", mp4_path,
-         "-vf", "fps=3,scale=240:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
-         "-y", gif_path],
-        capture_output=True, check=False,
+        [
+            "ffmpeg",
+            "-i",
+            mp4_path,
+            "-vf",
+            "fps=3,scale=240:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
+            "-y",
+            gif_path,
+        ],
+        capture_output=True,
+        check=False,
     )
     if result.returncode != 0:
         warnings.warn(f"ffmpeg failed for {mp4_path}: {result.stderr.decode()[-200:]}")
@@ -224,6 +240,7 @@ def generate_html_report(
     cluster_json_path: str,
     output_dir: str,
     standalone: bool = False,
+    alpha: float = 1.0,
 ) -> str:
     total = sum(s["count"] for s in stats)
     n_clusters = len(stats)
@@ -276,8 +293,8 @@ def generate_html_report(
             media_tags = "<p><em>No videos rendered for this cluster.</em></p>"
         galleries += f"""
         <div class="cluster-gallery">
-            <h3>{escape(cid)} &mdash; {s['count']:,} samples, weight {s['weight']:.3f},
-                ~{s['repeats_per_sample']:.1f}x repeats/sample/epoch</h3>
+            <h3>{escape(cid)} &mdash; {s["count"]:,} samples, weight {s["weight"]:.3f},
+                ~{s["repeats_per_sample"]:.1f}x repeats/sample/epoch</h3>
             <div class="video-grid">{media_tags}</div>
         </div>
         """
@@ -339,6 +356,10 @@ video {{ border-radius: 4px; background: #1a1a1a; }}
 <p><strong>What happens to unmatched samples?</strong> Samples not in any cluster
    receive the mean of matched weights (neutral rate). They are neither
    boosted nor starved. A warning is emitted.</p>
+<p><strong>Weight exponent (alpha)</strong> = {alpha:.2f}. Each sample's weight is
+   <code>(1 / cluster_frequency) ** alpha</code>, normalized to mean 1.0 &mdash; so the
+   Weight column above is the oversampling multiplier. alpha=1.0 gives every
+   cluster an equal share of draws; lower values soften it; 0.0 is uniform.</p>
 <p><strong>Total draws per epoch</strong> = <code>len(data_list)</code>
    ({total:,}), same as vanilla DistributedSampler.</p>
 </div>
@@ -361,24 +382,40 @@ def get_args() -> argparse.Namespace:
         description="Generate an HTML diagnostic report for cluster-weighted sampling"
     )
     parser.add_argument(
-        "--cluster_json", type=str, required=True,
+        "--cluster_json",
+        type=str,
+        required=True,
         help="Path to the clustering result JSON produced by cluster.py",
     )
     parser.add_argument(
-        "--output_dir", type=str, required=True,
+        "--output_dir",
+        type=str,
+        required=True,
         help="Output directory for report.html and videos/",
     )
     parser.add_argument(
-        "--max_videos", type=int, default=3,
+        "--max_videos",
+        type=int,
+        default=3,
         help="Max BEV video examples to render per cluster (default: 3)",
     )
     parser.add_argument(
-        "--workers", type=int, default=1,
+        "--workers",
+        type=int,
+        default=1,
         help="Parallel video rendering workers (default: 1)",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--standalone", action="store_true",
+        "--cluster_weight_alpha",
+        type=float,
+        default=1.0,
+        help="Exponent on inverse-frequency weights, matching training's "
+        "--cluster_weight_alpha (1.0 = full inverse, 0.0 = uniform)",
+    )
+    parser.add_argument(
+        "--standalone",
+        action="store_true",
         help="Produce a single self-contained HTML with embedded GIFs (240px, 3fps)",
     )
     return parser.parse_args()
@@ -393,7 +430,7 @@ def main() -> None:
     print(f"  {len(clusters)} clusters, {total:,} total samples")
 
     print("Computing cluster statistics...")
-    stats = compute_cluster_stats(clusters)
+    stats = compute_cluster_stats(clusters, alpha=args.cluster_weight_alpha)
 
     print("Rendering bar chart...")
     chart_uri = render_bar_chart(stats)
@@ -410,12 +447,19 @@ def main() -> None:
 
     print("Generating HTML report...")
     report_path = generate_html_report(
-        stats, chart_uri, rendered, errors, args.cluster_json, args.output_dir,
+        stats,
+        chart_uri,
+        rendered,
+        errors,
+        args.cluster_json,
+        args.output_dir,
         standalone=args.standalone,
+        alpha=args.cluster_weight_alpha,
     )
     print(f"Report saved to {report_path}")
     if args.standalone:
         import os
+
         size_mb = os.path.getsize(report_path) / 1024 / 1024
         print(f"  Standalone mode: {size_mb:.1f}MB self-contained HTML")
 

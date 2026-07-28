@@ -137,6 +137,7 @@ python visualize_cluster_report.py \
 | `--workers` | | `1` | Parallel video rendering workers |
 | `--seed` | | `42` | Random seed for video subsampling |
 | `--standalone` | | `False` | Embed GIFs (240px, 3fps) as base64 in a single HTML file |
+| `--cluster_weight_alpha` | | `1.0` | Weight exponent to model in the report. Must match training's `--cluster_weight_alpha` for the Weight column to reflect actual oversampling. |
 
 **Prerequisites:**
 - `render-video-txt` on PATH (`pip install -e /path/to/clip-review-tool`)

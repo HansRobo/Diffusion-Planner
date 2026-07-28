@@ -50,6 +50,7 @@ class TestLoadClusterJson:
 
     def test_raises_on_missing_file(self):
         import pytest
+
         with pytest.raises(FileNotFoundError):
             load_cluster_json("/nonexistent/path.json")
 
@@ -93,16 +94,100 @@ class TestComputeClusterStats:
         ids = [s["cluster_id"] for s in stats]
         assert ids == ["cluster_id0", "cluster_id1", "cluster_id2"]
 
+    def test_alpha_zero_gives_uniform_weights(self):
+        clusters = {
+            "cluster_id0": [f"/a/{i}.npz" for i in range(90)],
+            "cluster_id1": [f"/b/{i}.npz" for i in range(10)],
+        }
+        stats = compute_cluster_stats(clusters, alpha=0.0)
+        for s in stats:
+            assert abs(s["weight"] - 1.0) < 1e-6
+
+    def test_alpha_softens_weight_ratio(self):
+        clusters = {
+            "cluster_id0": [f"/a/{i}.npz" for i in range(90)],
+            "cluster_id1": [f"/b/{i}.npz" for i in range(10)],
+        }
+        full = compute_cluster_stats(clusters, alpha=1.0)
+        half = compute_cluster_stats(clusters, alpha=0.5)
+
+        def ratio(stats):
+            s0 = next(s for s in stats if s["cluster_id"] == "cluster_id0")
+            s1 = next(s for s in stats if s["cluster_id"] == "cluster_id1")
+            return s1["weight"] / s0["weight"]
+
+        assert abs(ratio(half) - ratio(full) ** 0.5) < 1e-4
+
+    def test_default_alpha_is_one(self):
+        clusters = {
+            "cluster_id0": [f"/a/{i}.npz" for i in range(90)],
+            "cluster_id1": [f"/b/{i}.npz" for i in range(10)],
+        }
+        assert compute_cluster_stats(clusters) == compute_cluster_stats(clusters, alpha=1.0)
+
+    def test_negative_alpha_raises(self):
+        import pytest
+
+        clusters = {"cluster_id0": ["/a.npz"]}
+        with pytest.raises(ValueError, match="alpha"):
+            compute_cluster_stats(clusters, alpha=-1.0)
+
+    def test_nan_alpha_raises(self):
+        """NaN must be rejected, matching the sampler: it would yield nan weights."""
+        import pytest
+
+        clusters = {"cluster_id0": ["/a.npz"]}
+        with pytest.raises(ValueError, match="alpha"):
+            compute_cluster_stats(clusters, alpha=float("nan"))
+
+    def test_report_weight_matches_sampler_weight(self):
+        """The report must reproduce the sampler's multiplier exactly."""
+        import json as _json
+        import tempfile as _tempfile
+
+        from diffusion_planner.utils.weighted_sampler import (
+            ClusterWeightedDistributedSampler,
+        )
+
+        data_list = [f"/data/sample_{i}.npz" for i in range(100)]
+        clusters = {"cluster_id0": data_list[:10], "cluster_id1": data_list[10:]}
+        with _tempfile.TemporaryDirectory() as tmp:
+            cluster_path = str(Path(tmp) / "clusters.json")
+            with open(cluster_path, "w") as f:
+                _json.dump(clusters, f)
+
+            for alpha in (1.0, 0.5, 0.0):
+                sampler = ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=alpha
+                )
+                stats = compute_cluster_stats(clusters, alpha=alpha)
+                for s in stats:
+                    assert abs(s["weight"] - sampler.cluster_multipliers[s["cluster_id"]]) < 1e-6, (
+                        f"alpha={alpha} cluster={s['cluster_id']}"
+                    )
+
 
 class TestRenderBarChart:
     def test_returns_base64_data_uri(self):
         stats = [
-            {"cluster_id": "cluster_id0", "count": 90, "pct": 90.0,
-             "weight": 0.5, "sampling_rate": 0.5, "draws_per_epoch": 50,
-             "repeats_per_sample": 0.56},
-            {"cluster_id": "cluster_id1", "count": 10, "pct": 10.0,
-             "weight": 4.5, "sampling_rate": 0.5, "draws_per_epoch": 50,
-             "repeats_per_sample": 5.0},
+            {
+                "cluster_id": "cluster_id0",
+                "count": 90,
+                "pct": 90.0,
+                "weight": 0.5,
+                "sampling_rate": 0.5,
+                "draws_per_epoch": 50,
+                "repeats_per_sample": 0.56,
+            },
+            {
+                "cluster_id": "cluster_id1",
+                "count": 10,
+                "pct": 10.0,
+                "weight": 4.5,
+                "sampling_rate": 0.5,
+                "draws_per_epoch": 50,
+                "repeats_per_sample": 5.0,
+            },
         ]
         result = render_bar_chart(stats)
         assert result.startswith("data:image/png;base64,")
@@ -144,8 +229,12 @@ class TestRenderClusterVideos:
             "cluster_id0": ["/a/0.npz", "/a/1.npz"],
             "cluster_id1": ["/b/0.npz"],
         }
-        with patch("visualize_cluster_report.shutil.which", return_value="/usr/bin/render-video-txt"), \
-             patch("visualize_cluster_report.subprocess.run") as mock_run:
+        with (
+            patch(
+                "visualize_cluster_report.shutil.which", return_value="/usr/bin/render-video-txt"
+            ),
+            patch("visualize_cluster_report.subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(returncode=0)
             rendered, errors = render_cluster_videos(subsampled, str(tmp_path), workers=1)
             assert mock_run.call_count == 2
@@ -154,8 +243,12 @@ class TestRenderClusterVideos:
         subsampled = {
             "cluster_id0": ["/a/0.npz"],
         }
-        with patch("visualize_cluster_report.shutil.which", return_value="/usr/bin/render-video-txt"), \
-             patch("visualize_cluster_report.subprocess.run") as mock_run:
+        with (
+            patch(
+                "visualize_cluster_report.shutil.which", return_value="/usr/bin/render-video-txt"
+            ),
+            patch("visualize_cluster_report.subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(returncode=0)
             rendered, errors = render_cluster_videos(subsampled, str(tmp_path), workers=1)
             assert (tmp_path / "videos" / "cluster_id0").is_dir()
@@ -163,6 +256,7 @@ class TestRenderClusterVideos:
     def test_checks_render_video_txt_available(self):
         with patch("visualize_cluster_report.shutil.which", return_value=None):
             import pytest
+
             with pytest.raises(RuntimeError, match="render-video-txt not found"):
                 render_cluster_videos({"cluster_id0": ["/a.npz"]}, "/tmp/out", workers=1)
 
@@ -175,8 +269,12 @@ class TestRenderClusterVideos:
             log_path.write_text(log_content)
             return MagicMock(returncode=0)
 
-        with patch("visualize_cluster_report.shutil.which", return_value="/usr/bin/render-video-txt"), \
-             patch("visualize_cluster_report.subprocess.run", side_effect=fake_run):
+        with (
+            patch(
+                "visualize_cluster_report.shutil.which", return_value="/usr/bin/render-video-txt"
+            ),
+            patch("visualize_cluster_report.subprocess.run", side_effect=fake_run),
+        ):
             rendered, errors = render_cluster_videos(subsampled, str(tmp_path), workers=1)
             assert len(errors) == 1
             assert errors[0]["cluster_id"] == "cluster_id0"
@@ -186,12 +284,24 @@ class TestRenderClusterVideos:
 class TestGenerateHtmlReport:
     def test_creates_report_html(self, tmp_path):
         stats = [
-            {"cluster_id": "cluster_id0", "count": 90, "pct": 90.0,
-             "weight": 0.56, "sampling_rate": 0.5, "draws_per_epoch": 50,
-             "repeats_per_sample": 0.56},
-            {"cluster_id": "cluster_id1", "count": 10, "pct": 10.0,
-             "weight": 4.5, "sampling_rate": 0.5, "draws_per_epoch": 50,
-             "repeats_per_sample": 5.0},
+            {
+                "cluster_id": "cluster_id0",
+                "count": 90,
+                "pct": 90.0,
+                "weight": 0.56,
+                "sampling_rate": 0.5,
+                "draws_per_epoch": 50,
+                "repeats_per_sample": 0.56,
+            },
+            {
+                "cluster_id": "cluster_id1",
+                "count": 10,
+                "pct": 10.0,
+                "weight": 4.5,
+                "sampling_rate": 0.5,
+                "draws_per_epoch": 50,
+                "repeats_per_sample": 5.0,
+            },
         ]
         chart_uri = "data:image/png;base64,AAAA"
         rendered = {
@@ -213,17 +323,22 @@ class TestGenerateHtmlReport:
 
     def test_video_tags_use_relative_paths(self, tmp_path):
         stats = [
-            {"cluster_id": "cluster_id0", "count": 1, "pct": 100.0,
-             "weight": 1.0, "sampling_rate": 1.0, "draws_per_epoch": 1,
-             "repeats_per_sample": 1.0},
+            {
+                "cluster_id": "cluster_id0",
+                "count": 1,
+                "pct": 100.0,
+                "weight": 1.0,
+                "sampling_rate": 1.0,
+                "draws_per_epoch": 1,
+                "repeats_per_sample": 1.0,
+            },
         ]
         vid_path = tmp_path / "videos" / "cluster_id0" / "sample.mp4"
         vid_path.parent.mkdir(parents=True)
         vid_path.touch()
         rendered = {"cluster_id0": [str(vid_path)]}
         path = generate_html_report(
-            stats, "data:image/png;base64,AAAA", rendered, [],
-            "/fake/cluster.json", str(tmp_path)
+            stats, "data:image/png;base64,AAAA", rendered, [], "/fake/cluster.json", str(tmp_path)
         )
         html = Path(path).read_text()
         assert "videos/cluster_id0/sample.mp4" in html
@@ -234,6 +349,7 @@ class TestGenerateHtmlReport:
 class TestGetArgs:
     def test_required_args(self):
         from unittest.mock import patch
+
         with patch("sys.argv", ["prog", "--cluster_json", "/a.json", "--output_dir", "/out"]):
             args = get_args()
             assert args.cluster_json == "/a.json"
@@ -244,10 +360,50 @@ class TestGetArgs:
 
     def test_optional_args(self):
         from unittest.mock import patch
-        with patch("sys.argv", ["prog", "--cluster_json", "/a.json",
-                                "--output_dir", "/out", "--max_videos", "5",
-                                "--workers", "4", "--seed", "99"]):
+
+        with patch(
+            "sys.argv",
+            [
+                "prog",
+                "--cluster_json",
+                "/a.json",
+                "--output_dir",
+                "/out",
+                "--max_videos",
+                "5",
+                "--workers",
+                "4",
+                "--seed",
+                "99",
+            ],
+        ):
             args = get_args()
             assert args.max_videos == 5
             assert args.workers == 4
             assert args.seed == 99
+
+    def test_cluster_weight_alpha_default(self):
+        argv = [
+            "visualize_cluster_report.py",
+            "--cluster_json",
+            "/tmp/c.json",
+            "--output_dir",
+            "/tmp/out",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = get_args()
+        assert args.cluster_weight_alpha == 1.0
+
+    def test_cluster_weight_alpha_override(self):
+        argv = [
+            "visualize_cluster_report.py",
+            "--cluster_json",
+            "/tmp/c.json",
+            "--output_dir",
+            "/tmp/out",
+            "--cluster_weight_alpha",
+            "0.25",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = get_args()
+        assert args.cluster_weight_alpha == 0.25
