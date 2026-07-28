@@ -51,6 +51,8 @@ class RolloutParams:
     replan_interval: int = 10
     tracker_mode: str = "mpc"
     neighbor_history_mode: str = "recorded"
+    yaw_gate: bool = True
+    strong_brake_mps2: float = -2.5
     # Early-abort a badly-diverged segment instead of burning the full step budget on a
     # rollout that will never recover (e.g. an undertrained model driving off-lane). Set well
     # above the unstick_* knobs above: unstick snaps the ego back onto GT to let a merely-stuck
@@ -78,6 +80,8 @@ class RolloutParams:
             "replan_interval": self.replan_interval,
             "tracker_mode": self.tracker_mode,
             "neighbor_history_mode": self.neighbor_history_mode,
+            "yaw_gate": self.yaw_gate,
+            "strong_brake_mps2": self.strong_brake_mps2,
             "abort_deviation_m": self.abort_deviation_m,
             "abort_after": self.abort_after,
             "abort_max_snaps": self.abort_max_snaps,
@@ -486,7 +490,11 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             )
 
     def build_summary(self, result: JobRunResult, *, elapsed_sec: float) -> dict:
-        summary = aggregate(result.rows, self.config.params.near_miss_thresh)
+        summary = aggregate(
+            result.rows,
+            self.config.params.near_miss_thresh,
+            strong_brake_mps2=self.config.params.strong_brake_mps2,
+        )
         summary["npz_root"] = str(self.npz_root)
         # Derived straight from the merged rows (each carries its own "route") rather than
         # extras["route_keys"] -- extras aren't reconstructed across a DDP merge (see
