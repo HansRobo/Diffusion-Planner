@@ -190,6 +190,20 @@ class TestForcedAugmentationSelector:
         assert second.tolist() == [False, True]
         assert sel.rows_consumed == 4
 
+    def test_cursor_handles_heterogeneous_batch_sizes(self):
+        """Partial batches are the production path (drop_last=False).
+
+        A computed j * batch_size offset passes the uniform-size tests and
+        misattributes masks here, so this is what pins the running cursor.
+        """
+        sel = self._selector(pool=("flip",))
+        sel.start_epoch(0, [True, False, False, True], 0)
+        first = sel.masks_for_batch(3, torch.device("cpu"))["flip"]
+        second = sel.masks_for_batch(1, torch.device("cpu"))["flip"]
+        assert first.tolist() == [True, False, False]
+        assert second.tolist() == [True]
+        assert sel.rows_consumed == 4
+
     def test_reading_past_flag_list_raises(self):
         sel = self._selector()
         sel.start_epoch(0, [True, False], 0)
