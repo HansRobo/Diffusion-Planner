@@ -60,6 +60,15 @@ _CONFIG_DIR = Path(__file__).resolve().parent / "dataset_smoke_configs"
 _RSFT_SCRIPT_KEYS = {"_doc", "n_train_cap", "n_val_cap", "sft_batch_size", "train_epochs"}
 
 
+def _fmt_dur(seconds: float) -> str:
+    """Human-readable wall-clock: raw seconds plus mm:ss once past a minute
+    (e.g. ``42s`` / ``156s (2m36s)``) — so each pipeline's cost is legible at a glance."""
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    return f"{s}s ({s // 60}m{s % 60:02d}s)"
+
+
 def _load_json(path: Path):
     with open(path) as f:
         return json.load(f)
@@ -490,12 +499,15 @@ def main() -> None:
             ok, detail = False, f"{type(e).__name__}: {e}"
         dt = time.time() - t0
         status = "PASS" if ok else "FAIL"
-        print(f"[{name}] {status}  ({dt:.0f}s)  {detail}\n", flush=True)
+        print(f"[{name}] {status}  (took {_fmt_dur(dt)})  {detail}\n", flush=True)
         results.append((name, ok, detail, dt))
 
+    total = sum(dt for _, _, _, dt in results)
     print("===== SUMMARY =====")
+    print(f"  {'PIPE':6s} {'RES':4s} {'TIME':>10s}  DETAIL")
     for name, ok, detail, dt in results:
-        print(f"  {name:6s} {'PASS' if ok else 'FAIL':4s}  {dt:5.0f}s  {detail}")
+        print(f"  {name:6s} {'PASS' if ok else 'FAIL':4s} {_fmt_dur(dt):>10s}  {detail}")
+    print(f"  {'TOTAL':6s} {'':4s} {_fmt_dur(total):>10s}")
     all_ok = all(ok for _, ok, _, _ in results)
     print(f"\nOVERALL: {'PASS' if all_ok else 'FAIL'}")
     sys.exit(0 if all_ok else 1)
