@@ -295,7 +295,10 @@ def _scenes_loadable(scene_list: Path, k: int = 8) -> tuple[int, int]:
     from preference_optimization.utils import load_npz_data
 
     n = len(scenes)
-    idx = sorted({round(i * (n - 1) / max(k - 1, 1)) for i in range(min(k, n))}) if n > 1 else [0]
+    # Spacing denominator is (samples-1), where samples = min(k, n) — so the largest
+    # index always lands on n-1 (the last scene) even when the corpus is smaller than k.
+    m = min(k, n)
+    idx = sorted({round(i * (n - 1) / max(m - 1, 1)) for i in range(m)}) if n > 1 else [0]
     checked = loadable = 0
     for i in idx:
         checked += 1

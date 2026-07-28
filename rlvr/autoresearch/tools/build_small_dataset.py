@@ -58,13 +58,16 @@ import shutil
 from collections import Counter, defaultdict
 
 import numpy as np
+from diffusion_planner.dimensions import (
+    MAX_NUM_NEIGHBORS as N_SLOTS,  # canonical neighbor slot count
+)
+from diffusion_planner.dimensions import POSE_DIM  # canonical neighbor future width
 
 from planner_metrics.scene_format import future_to_4col
 from rlvr.autoresearch.scene_features import _load_util_script, session_key
 from rlvr.autoresearch.tools.lifelong_replay_memory import _parse_label_quotas, build_memory
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-N_SLOTS = 320  # canonical neighbor slot count
 
 # Every field the model consumes at train time (train_epoch indexes ego_agent_past /
 # goal_pose; the encoder consumes the map / static / indicator tensors). Every output
@@ -109,7 +112,6 @@ def _validate_output(path: str) -> None:
     model-input loader (load_npz_data — builds the tensors + heading_to_cos_sin the
     model consumes) so a scene that would crash the model is rejected at build time."""
     import torch
-    from diffusion_planner.dimensions import POSE_DIM
 
     from preference_optimization.utils import load_npz_data
 
@@ -415,20 +417,27 @@ def render_selected(
                 pngs.append(png)
             except Exception as e:
                 print(f"[build] render FAIL {out_npz}: {type(e).__name__}: {e}", flush=True)
-        # collage grid
+        # collage grid — cosmetic only; never let a matplotlib hiccup abort a
+        # build whose NPZs + manifests are already written.
         if pngs:
-            ncol = min(4, len(pngs))
-            nrow = (len(pngs) + ncol - 1) // ncol
-            fig, axes = plt.subplots(nrow, ncol, figsize=(4 * ncol, 4 * nrow))
-            axes = np.atleast_1d(axes).ravel()
-            for ax in axes:
-                ax.axis("off")
-            for ax, png in zip(axes, pngs):
-                ax.imshow(plt.imread(png))
-            fig.suptitle(bucket)
-            fig.tight_layout()
-            fig.savefig(os.path.join(render_dir, f"collage__{safe}.png"), dpi=80)
-            plt.close(fig)
+            fig = None
+            try:
+                ncol = min(4, len(pngs))
+                nrow = (len(pngs) + ncol - 1) // ncol
+                fig, axes = plt.subplots(nrow, ncol, figsize=(4 * ncol, 4 * nrow))
+                axes = np.atleast_1d(axes).ravel()
+                for ax in axes:
+                    ax.axis("off")
+                for ax, png in zip(axes, pngs):
+                    ax.imshow(plt.imread(png))
+                fig.suptitle(bucket)
+                fig.tight_layout()
+                fig.savefig(os.path.join(render_dir, f"collage__{safe}.png"), dpi=80)
+            except Exception as e:
+                print(f"[build] collage FAIL {bucket}: {type(e).__name__}: {e}", flush=True)
+            finally:
+                if fig is not None:
+                    plt.close(fig)
     print(f"[build] renders -> {render_dir}", flush=True)
 
 
