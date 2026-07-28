@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -41,6 +42,25 @@ def find_upward(start_file: str, target_name: str) -> Path:
     raise FileNotFoundError(f"{target_name} up {directory}")
 
 
+def _add_path_list_compressed(artifact: wandb.Artifact, path: Path, tmp_dir: Path) -> None:
+    """Attach a path-list json to the artifact as zstd-compressed ``<name>.zst``.
+
+    Raw path lists are multi-GB of near-identical absolute paths; zstd shrinks them
+    ~100x in a few seconds. openjson() reads ``*.zst`` transparently on download.
+    """
+    try:
+        import zstandard
+    except ImportError:
+        print(f"zstandard not installed; uploading {path.name} uncompressed.")
+        artifact.add_file(str(path), name=path.name)
+        return
+    dst = tmp_dir / f"{path.name}.zst"
+    cctx = zstandard.ZstdCompressor(level=3, threads=-1)
+    with open(path, "rb") as fin, open(dst, "wb") as fout:
+        cctx.copy_stream(fin, fout)
+    artifact.add_file(str(dst), name=dst.name)
+
+
 def log_dataset_artifact(
     run: wandb.sdk.wandb_run.Run, exp_name: str, train_set_list: str, valid_set_list: str
 ) -> None:
@@ -49,21 +69,23 @@ def log_dataset_artifact(
         type="dataset",
         metadata={"train_set_list": train_set_list, "valid_set_list": valid_set_list},
     )
-    train_path = Path(train_set_list)
-    valid_path = Path(valid_set_list)
-    artifact.add_file(str(train_path), name=train_path.name)
-    artifact.add_file(str(valid_path), name=valid_path.name)
-    try:
-        summary_csv = find_upward(train_set_list, "summary.csv")
-        artifact.add_file(str(summary_csv), name="summary.csv")
-    except FileNotFoundError:
-        print("summary.csv not found, skipping.")
-    try:
-        rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
-        artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
-    except FileNotFoundError:
-        print("rosbag_summary.csv not found, skipping.")
-    run.use_artifact(artifact)
+    with tempfile.TemporaryDirectory() as tmp_dir_str:
+        tmp_dir = Path(tmp_dir_str)
+        _add_path_list_compressed(artifact, Path(train_set_list), tmp_dir)
+        _add_path_list_compressed(artifact, Path(valid_set_list), tmp_dir)
+        try:
+            summary_csv = find_upward(train_set_list, "summary.csv")
+            artifact.add_file(str(summary_csv), name="summary.csv")
+        except FileNotFoundError:
+            print("summary.csv not found, skipping.")
+        try:
+            rosbag_summary_csv = find_upward(train_set_list, "rosbag_summary.csv")
+            artifact.add_file(str(rosbag_summary_csv), name="rosbag_summary.csv")
+        except FileNotFoundError:
+            print("rosbag_summary.csv not found, skipping.")
+        # add_file() copies into wandb's staging cache, so the temp dir can be
+        # removed as soon as use_artifact() returns.
+        run.use_artifact(artifact)
 
 
 def mean_ego_loss(loss_dict):
@@ -127,7 +149,6 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
             args,
             args.closed_loop_npz_root,
             out_dir,
-            seg_len=args.closed_loop_seg_len,
             device=args.device,
             near_miss_thresh=args.closed_loop_near_miss_thresh,
             search_radius=args.closed_loop_search_radius,
@@ -143,33 +164,42 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     finally:
         net.train(was_training)
 
-    # Scalar metrics (drop non-finite clearances: a segment with no neighbor reports +inf).
-    scalar_keys = [
-        "collision_segment_rate",
-        "collision_step_rate",
-        "near_miss_segment_rate",
-        "near_miss_step_rate",
-        "global_min_clearance",
-        "mean_segment_min_clearance",
-        "mean_segment_mean_clearance",
-        "total_collision_steps",
-        "total_near_miss_steps",
-        "total_snaps",
-        "total_steps",
-    ]
+    # Scalar metrics from nested summary (skip non-finite clearances).
+    def _flat_scalars(node: dict, prefix: str = "") -> dict[str, float | int]:
+        out: dict[str, float | int] = {}
+        for k, v in node.items():
+            key = f"{prefix}{k}" if not prefix else f"{prefix}/{k}"
+            if isinstance(v, dict):
+                out.update(_flat_scalars(v, key))
+            elif isinstance(v, (int,)) or (isinstance(v, float) and math.isfinite(v)):
+                out[key] = v
+        return out
+
     log = {
-        f"closed_loop/{k}": summary[k]
-        for k in scalar_keys
-        if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
+        f"closed_loop/{k}": v
+        for k, v in _flat_scalars(
+            {
+                "n_segments": summary["n_segments"],
+                "total_steps": summary["total_steps"],
+                "object": summary["object"],
+                "road_border": summary["road_border"],
+                "red_light_violation": summary["red_light_violation"],
+                "strong_brake": summary["strong_brake"],
+                "reproducer": summary["reproducer"],
+            }
+        ).items()
     }
     for mp4 in summary["video_mp4s"]:
         log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
     wandb.log(log, step=epoch + 1)
+    from scenario_generation.closed_loop_eval import format_summary_lines
+
     print(
         f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
-        f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
-        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+        f"{summary['elapsed_sec']:.1f}s  -> {len(summary['video_mp4s'])} video(s)"
     )
+    for line in format_summary_lines(summary):
+        print(f"  {line}")
 
 
 def model_training(args: TrainConfig):
@@ -308,7 +338,7 @@ def model_training(args: TrainConfig):
     if args.use_ema:
         model_ema = ModelEma(
             diffusion_planner,
-            decay=0.999,
+            decay=getattr(args, "ema_decay", 0.999),
             device=args.device,
         )
 
@@ -334,7 +364,13 @@ def model_training(args: TrainConfig):
         print(f"Model loaded from {args.resume_model_path}")
         # We always use new wandb run for each training session, so we don't need to load the wandb_id from the model_dict.
         diffusion_planner, optimizer, scheduler, init_epoch, _, model_ema = resume_model(
-            args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
+            args.resume_model_path,
+            diffusion_planner,
+            optimizer,
+            scheduler,
+            model_ema,
+            args.device,
+            use_ddp=args.ddp,
         )
 
         # Override learning rate with the new value

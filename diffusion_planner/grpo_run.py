@@ -4,7 +4,7 @@
 Thin launcher only: resolves the run dir (``_grpo`` suffixed), saves git info, sets NCCL env and
 runs train_grpo_predictor.py under torch.distributed.run. The trainer itself is unchanged.
 
-Env: CLOSED_LOOP_NPZ_ROOT (optional) is forwarded to --closed_loop_npz_root, as before.
+--closed_loop_npz_root (optional) is forwarded to train_grpo_predictor.py's flag of the same name.
 """
 
 import argparse
@@ -25,6 +25,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--exp_name", required=True, help="a '_grpo' suffix is appended automatically")
     p.add_argument("--train_set_list", required=True)
     p.add_argument("--valid_set_list", required=True)
+    p.add_argument(
+        "--closed_loop_npz_root",
+        default="",
+        help="optional: dir tree of route NPZ frames for closed-loop validation, OR a .json path "
+        "list of such dirs (like --train_set_list). Empty = disabled.",
+    )
     return p.parse_args()
 
 
@@ -34,15 +40,22 @@ def main() -> None:
     exp_name = f"{args.exp_name}_grpo"
     train_set_list = str(Path(args.train_set_list).resolve())
     valid_set_list = str(Path(args.valid_set_list).resolve())
+    closed_loop_npz_root = (
+        str(Path(args.closed_loop_npz_root).resolve()) if args.closed_loop_npz_root else ""
+    )
 
     here = Path(__file__).resolve().parent
     save_path = Path("/mnt/nvme/training_result") / f"{datetime.now():%Y%m%d-%H%M%S}_{exp_name}"
     save_path.mkdir(parents=True, exist_ok=True)
 
-    for name, cmd in (("git_show.txt", ["git", "show", "-s"]), ("git_diff.txt", ["git", "diff"])):
-        (save_path / name).write_text(
-            subprocess.run(cmd, cwd=here, capture_output=True, text=True).stdout
-        )
+    def git_output(cmd: list[str]) -> str:
+        return subprocess.run(cmd, cwd=here, capture_output=True, text=True).stdout
+
+    branch = git_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    (save_path / "git_show.txt").write_text(
+        f"branch: {branch}\n\n" + git_output(["git", "show", "-s", "--decorate"])
+    )
+    (save_path / "git_diff.txt").write_text(git_output(["git", "diff"]))
 
     Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
 
@@ -67,7 +80,7 @@ def main() -> None:
         "--save_dir",
         str(save_path),
         "--closed_loop_npz_root",
-        os.environ.get("CLOSED_LOOP_NPZ_ROOT", ""),
+        closed_loop_npz_root,
     ]
     rc = tee_run(cmd, cwd=here, env={**os.environ, **NCCL_ENV}, log_path=save_path / "grpo_log.txt")
     sys.exit(rc)
