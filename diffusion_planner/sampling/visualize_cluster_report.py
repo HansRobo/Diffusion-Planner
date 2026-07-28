@@ -41,6 +41,7 @@ import shutil
 import subprocess
 import tempfile
 import warnings
+import zlib
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -56,21 +57,51 @@ def load_cluster_json(path: str) -> dict[str, list[str]]:
         return json.load(f)
 
 
+def cluster_index(cluster_id: str) -> tuple[int, int, str]:
+    """Sort key that orders ``cluster_id<N>`` numerically (id10 after id2).
+
+    Falls back to lexicographic order for keys that do not match that shape. The
+    report reads a JSON that may have been hand-edited or produced elsewhere, so a
+    key like ``noise`` must not crash it with a bare ``invalid literal for int()``.
+    Mirrors the tolerant ordering train.py uses for its startup log.
+    """
+    suffix = (
+        cluster_id.replace("cluster_id", "", 1)
+        if cluster_id.startswith("cluster_id")
+        else cluster_id
+    )
+    return (0, int(suffix), "") if suffix.isdigit() else (1, 0, cluster_id)
+
+
 def compute_cluster_stats(clusters: dict[str, list[str]], alpha: float = 1.0) -> list[dict]:
     """Compute per-cluster stats. ``alpha`` must match training's --cluster_weight_alpha."""
-    # Reject negatives *and* non-finite values (NaN, +/-inf). ``not alpha >= 0``
-    # alone would let ``inf`` through, silently rendering an all-nan Weight column
-    # that still looks like output -- worse than crashing. Matches the guard in
-    # ClusterWeightedDistributedSampler.
-    if not (math.isfinite(alpha) and alpha >= 0):
+    # Reject non-finite values (NaN, +/-inf) and anything outside [0, 1]. ``inf``
+    # would silently render an all-nan Weight column that still looks like output,
+    # and alpha > 1 inverts the weighting. Matches the guard in
+    # ClusterWeightedDistributedSampler so the two cannot disagree on what is valid.
+    if not (math.isfinite(alpha) and 0 <= alpha <= 1):
         raise ValueError(
-            f"alpha={alpha} must be a finite number >= 0 (1.0 = full inverse, 0.0 = uniform)"
+            f"alpha={alpha} must be a finite number in [0, 1] "
+            f"(1.0 = full inverse weighting, 0.0 = uniform)"
         )
 
-    sorted_ids = sorted(clusters.keys(), key=lambda x: int(x.replace("cluster_id", "")))
+    # Drop zero-count clusters. ``freq`` would be 0, so ``(1/(0 + 1e-8)) ** alpha``
+    # renders a weight of ~1e8 in the Weight column -- a number training never
+    # applies, because the sampler builds cluster_counts/cluster_multipliers from
+    # live matches and omits empty clusters entirely. This report is read to pick
+    # alpha, so a phantom 1e8 row is worse than no row.
+    sorted_ids = [
+        cid for cid in sorted(clusters.keys(), key=cluster_index) if len(clusters[cid]) > 0
+    ]
     total = sum(len(v) for v in clusters.values())
+    # ClusterWeightedDistributedSampler raises on an all-empty cluster JSON. Silently
+    # emitting a report with "Total samples: 0" would have this tool -- the one built
+    # to catch a broken cluster JSON before a training launch -- call it fine.
     if total == 0:
-        return []
+        raise ValueError(
+            f"Cluster JSON contains no paths ({len(clusters)} clusters, all empty). "
+            f"Check cluster JSON."
+        )
 
     raw_weights = {}
     for cid in sorted_ids:
@@ -128,7 +159,13 @@ def subsample_cluster_paths(
 ) -> dict[str, list[str]]:
     result = {}
     for cid, paths in clusters.items():
-        rng = random.Random(seed + int(cid.replace("cluster_id", "")))
+        # Per-cluster seed offset. Tolerant of non-``cluster_id<N>`` keys so a
+        # hand-edited JSON picks videos reproducibly instead of dying on int().
+        # crc32, not hash(): str hashing is salted per process, which would make
+        # --seed non-reproducible across runs.
+        kind, index, _ = cluster_index(cid)
+        offset = index if kind == 0 else zlib.crc32(cid.encode()) % 100_000
+        rng = random.Random(seed + offset)
         if len(paths) <= max_videos:
             result[cid] = list(paths)
         else:
@@ -180,7 +217,15 @@ def render_cluster_videos(
         log_path = cluster_dir / "render_log.jsonl"
         if log_path.exists():
             for line in log_path.read_text().splitlines():
-                entry = json.loads(line)
+                # render-video-txt is an external tool; a blank or truncated line
+                # must not throw away a completed render pass.
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    warnings.warn(f"Skipping malformed render_log.jsonl line in {cluster_id}")
+                    continue
                 if entry.get("status") == "error":
                     errors.append(
                         {
@@ -292,8 +337,16 @@ def generate_html_report(
                     f'<source src="{escape(rel)}" type="video/mp4">'
                     f"</video>\n"
                 )
-        if not mp4s:
-            media_tags = "<p><em>No videos rendered for this cluster.</em></p>"
+        # Key the placeholder on whether any tag was actually produced, not on
+        # whether MP4s existed: in --standalone mode every ffmpeg conversion can
+        # fail (which only warns), leaving an empty gallery with no explanation.
+        if not media_tags:
+            media_tags = (
+                "<p><em>No videos rendered for this cluster.</em></p>"
+                if not mp4s
+                else f"<p><em>{len(mp4s)} video(s) rendered but GIF conversion failed "
+                "&mdash; check the ffmpeg warnings.</em></p>"
+            )
         galleries += f"""
         <div class="cluster-gallery">
             <h3>{escape(cid)} &mdash; {s["count"]:,} samples, weight {s["weight"]:.3f},
@@ -333,9 +386,15 @@ video {{ border-radius: 4px; background: #1a1a1a; }}
    Total samples: {total:,} | Clusters: {n_clusters}</p>
 
 <h2>Pipeline Overview</h2>
-<p>Ego future trajectories (80 timesteps &times; [x, y, heading]) &rarr;
-   flatten (240-dim) &rarr; Z-score normalization &rarr; PCA (50 components)
-   &rarr; Elbow KMeans &rarr; {n_clusters} clusters</p>
+<p>Features extracted from each NPZ &rarr; Z-score normalization &rarr; PCA
+   &rarr; Elbow KMeans &rarr; {n_clusters} clusters.</p>
+<p class="meta">The specific feature set and PCA width depend on how
+   <code>cluster.py</code> was invoked and are not recorded in the cluster JSON:
+   <code>--mode trajectory</code> (the default) flattens the ego future trajectory
+   only, while <code>--mode enriched</code> adds neighbor and ego-state blocks
+   through a two-stage PCA. Check the <code>cluster.py</code> command line for the
+   actual <code>--pca_components</code> / <code>--neighbor_pca_components</code>
+   values used.</p>
 
 <h2>Cluster Distribution</h2>
 <div class="chart"><img src="{chart_uri}" alt="Cluster size distribution"></div>
@@ -413,7 +472,7 @@ def get_args() -> argparse.Namespace:
         "--cluster_weight_alpha",
         type=float,
         default=1.0,
-        help="Exponent on inverse-frequency weights, matching training's "
+        help="Exponent on inverse-frequency weights in [0, 1], matching training's "
         "--cluster_weight_alpha (1.0 = full inverse, 0.0 = uniform)",
     )
     parser.add_argument(
@@ -426,6 +485,15 @@ def get_args() -> argparse.Namespace:
 
 def main() -> None:
     args = get_args()
+
+    # Preflight ffmpeg alongside render-video-txt. Without this, --standalone renders
+    # every cluster's videos first and only then dies with FileNotFoundError inside
+    # generate_html_report -- throwing away the entire expensive render pass.
+    if args.standalone and not shutil.which("ffmpeg"):
+        raise RuntimeError(
+            "--standalone needs ffmpeg on PATH to convert MP4s to embedded GIFs, "
+            "and it was not found. Install ffmpeg or drop --standalone."
+        )
 
     print(f"Loading cluster JSON: {args.cluster_json}")
     clusters = load_cluster_json(args.cluster_json)
@@ -461,9 +529,7 @@ def main() -> None:
     )
     print(f"Report saved to {report_path}")
     if args.standalone:
-        import os
-
-        size_mb = os.path.getsize(report_path) / 1024 / 1024
+        size_mb = Path(report_path).stat().st_size / 1024 / 1024
         print(f"  Standalone mode: {size_mb:.1f}MB self-contained HTML")
 
 

@@ -21,6 +21,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 SAMPLING_DIR = Path(__file__).resolve().parent.parent / "sampling"
 sys.path.insert(0, str(SAMPLING_DIR))
 
@@ -49,7 +51,6 @@ class TestLoadClusterJson:
         assert result == data
 
     def test_raises_on_missing_file(self):
-        import pytest
 
         with pytest.raises(FileNotFoundError):
             load_cluster_json("/nonexistent/path.json")
@@ -126,7 +127,6 @@ class TestComputeClusterStats:
         assert compute_cluster_stats(clusters) == compute_cluster_stats(clusters, alpha=1.0)
 
     def test_negative_alpha_raises(self):
-        import pytest
 
         clusters = {"cluster_id0": ["/a.npz"]}
         with pytest.raises(ValueError, match="alpha"):
@@ -134,7 +134,6 @@ class TestComputeClusterStats:
 
     def test_nan_alpha_raises(self):
         """NaN must be rejected, matching the sampler: it would yield nan weights."""
-        import pytest
 
         clusters = {"cluster_id0": ["/a.npz"]}
         with pytest.raises(ValueError, match="alpha"):
@@ -142,7 +141,6 @@ class TestComputeClusterStats:
 
     def test_inf_alpha_raises(self):
         """inf must be rejected, matching the sampler: it would render an all-nan table."""
-        import pytest
 
         clusters = {"cluster_id0": ["/a.npz"]}
         with pytest.raises(ValueError, match="alpha"):
@@ -150,19 +148,16 @@ class TestComputeClusterStats:
 
     def test_report_weight_matches_sampler_weight(self):
         """The report must reproduce the sampler's multiplier exactly."""
-        import json as _json
-        import tempfile as _tempfile
-
         from diffusion_planner.utils.weighted_sampler import (
             ClusterWeightedDistributedSampler,
         )
 
         data_list = [f"/data/sample_{i}.npz" for i in range(100)]
         clusters = {"cluster_id0": data_list[:10], "cluster_id1": data_list[10:]}
-        with _tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             cluster_path = str(Path(tmp) / "clusters.json")
             with open(cluster_path, "w") as f:
-                _json.dump(clusters, f)
+                json.dump(clusters, f)
 
             for alpha in (1.0, 0.5, 0.0):
                 sampler = ClusterWeightedDistributedSampler(
@@ -244,7 +239,7 @@ class TestRenderClusterVideos:
             patch("visualize_cluster_report.subprocess.run") as mock_run,
         ):
             mock_run.return_value = MagicMock(returncode=0)
-            rendered, errors = render_cluster_videos(subsampled, str(tmp_path), workers=1)
+            render_cluster_videos(subsampled, str(tmp_path), workers=1)
             assert mock_run.call_count == 2
 
     def test_creates_cluster_subdirectories(self, tmp_path):
@@ -258,13 +253,11 @@ class TestRenderClusterVideos:
             patch("visualize_cluster_report.subprocess.run") as mock_run,
         ):
             mock_run.return_value = MagicMock(returncode=0)
-            rendered, errors = render_cluster_videos(subsampled, str(tmp_path), workers=1)
+            render_cluster_videos(subsampled, str(tmp_path), workers=1)
             assert (tmp_path / "videos" / "cluster_id0").is_dir()
 
     def test_checks_render_video_txt_available(self):
         with patch("visualize_cluster_report.shutil.which", return_value=None):
-            import pytest
-
             with pytest.raises(RuntimeError, match="render-video-txt not found"):
                 render_cluster_videos({"cluster_id0": ["/a.npz"]}, "/tmp/out", workers=1)
 
@@ -356,7 +349,6 @@ class TestGenerateHtmlReport:
 
 class TestGetArgs:
     def test_required_args(self):
-        from unittest.mock import patch
 
         with patch("sys.argv", ["prog", "--cluster_json", "/a.json", "--output_dir", "/out"]):
             args = get_args()
@@ -367,7 +359,6 @@ class TestGetArgs:
             assert args.seed == 42
 
     def test_optional_args(self):
-        from unittest.mock import patch
 
         with patch(
             "sys.argv",
@@ -415,3 +406,80 @@ class TestGetArgs:
         with patch.object(sys, "argv", argv):
             args = get_args()
         assert args.cluster_weight_alpha == 0.25
+
+
+class TestEmptyClusterRows:
+    def test_zero_count_clusters_are_dropped(self):
+        """An empty cluster would otherwise render weight ~1e8 -- a number training
+        never applies, because the sampler builds its multipliers from live matches
+        and omits empty clusters entirely. This report is read to pick alpha.
+        """
+        stats = compute_cluster_stats(
+            {"cluster_id0": [f"/a/{i}.npz" for i in range(100)], "cluster_id1": []}
+        )
+        assert [s["cluster_id"] for s in stats] == ["cluster_id0"]
+        assert stats[0]["weight"] == pytest.approx(1.0)
+
+    def test_all_empty_clusters_raise_like_the_sampler(self):
+        """ClusterWeightedDistributedSampler raises on an all-empty cluster JSON.
+        The report must not exit 0 with "Total samples: 0" -- it exists to catch
+        exactly this before a training launch."""
+        with pytest.raises(ValueError, match="no paths"):
+            compute_cluster_stats({"cluster_id0": [], "cluster_id1": []})
+        with pytest.raises(ValueError, match="no paths"):
+            compute_cluster_stats({})
+
+    def test_non_numeric_cluster_keys_are_tolerated(self):
+        """train.py's log sort deliberately never crashes on odd keys; the report
+        must not disagree with a bare ``invalid literal for int()``."""
+        stats = compute_cluster_stats(
+            {"cluster_id1": ["/a.npz"] * 10, "noise": ["/b.npz"] * 90, "cluster_id0": ["/c.npz"]}
+        )
+        # cluster_id<N> first in numeric order, non-conforming keys after.
+        assert [s["cluster_id"] for s in stats] == ["cluster_id0", "cluster_id1", "noise"]
+
+    def test_subsample_tolerates_non_numeric_keys(self):
+        result = subsample_cluster_paths(
+            {"noise": [f"/a/{i}.npz" for i in range(10)]}, max_videos=3, seed=42
+        )
+        assert len(result["noise"]) == 3
+        # crc32-based offset, so the pick is reproducible across processes.
+        again = subsample_cluster_paths(
+            {"noise": [f"/a/{i}.npz" for i in range(10)]}, max_videos=3, seed=42
+        )
+        assert result == again
+
+
+class TestRenderLogParsing:
+    def _run(self, tmp_path, log_lines):
+        subsampled = {"cluster_id0": ["/a/0.npz"]}
+
+        def fake_run(cmd, **kwargs):
+            log = Path(cmd[2]) / "render_log.jsonl"
+            log.write_text(log_lines)
+            return MagicMock(returncode=0)
+
+        with (
+            patch(
+                "visualize_cluster_report.shutil.which", return_value="/usr/bin/render-video-txt"
+            ),
+            patch("visualize_cluster_report.subprocess.run", side_effect=fake_run),
+        ):
+            return render_cluster_videos(subsampled, str(tmp_path), workers=1)
+
+    def test_blank_lines_do_not_discard_a_completed_render(self, tmp_path):
+        """render-video-txt is external; a trailing blank line must not raise
+        JSONDecodeError after every video has already been rendered."""
+        _, errors = self._run(
+            tmp_path, '{"status": "error", "file": "/a/0.npz", "reason": "corrupt"}\n\n'
+        )
+        assert len(errors) == 1
+        assert errors[0]["reason"] == "corrupt"
+
+    def test_malformed_line_warns_and_continues(self, tmp_path):
+        with pytest.warns(UserWarning, match="malformed render_log"):
+            _, errors = self._run(
+                tmp_path,
+                'not json\n{"status": "error", "file": "/a/0.npz", "reason": "corrupt"}\n',
+            )
+        assert len(errors) == 1
