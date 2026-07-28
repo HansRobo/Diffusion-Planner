@@ -36,6 +36,14 @@ def get_args(args_list=None):
         default="",
         help="Path to cluster assignment JSON from cluster.py. Enables weighted sampling.",
     )
+    parser.add_argument(
+        "--cluster_weight_alpha",
+        type=float,
+        default=1.0,
+        help="Exponent on inverse-frequency cluster weights. 1.0 = full inverse "
+        "weighting (every cluster gets an equal share of draws), 0.0 = uniform. "
+        "Lower values soften oversampling. Ignored without --cluster_json.",
+    )
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)

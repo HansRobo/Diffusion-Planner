@@ -177,6 +177,51 @@ find /path/to/report_output/videos -name "*.mp4" -exec sh -c '
 #    Authentication: Basic auth with your Atlassian email + API token.
 ```
 
+### Weighted Sampling During Training
+
+Instead of pre-sampling a balanced file list with `sampling.py`, training can
+consume the full dataset and oversample rare clusters on the fly. Pass the
+cluster result JSON to `train_run.py`:
+
+```bash
+python3 train_run.py \
+  --exp_name my_exp \
+  --train_set_list /path/to/train.json \
+  --valid_set_list /path/to/valid.json \
+  --cluster_json /path/to/cluster_result.json \
+  --cluster_weight_alpha 0.5
+```
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--cluster_json` | | — | Cluster assignment JSON from `cluster.py`. Enables weighted sampling. |
+| `--cluster_weight_alpha` | | `1.0` | Exponent on the inverse-frequency weights. `1.0` gives every cluster an equal share of draws; `0.0` is uniform sampling. |
+
+Each sample's weight is `(1 / cluster_frequency) ** alpha`, normalized to mean
+1.0 — so a sample's weight *is* its oversampling multiplier. Lowering `alpha`
+softens the reweighting: the multiplier ratio between any two clusters goes
+from `R` at `alpha=1.0` to `R ** alpha`.
+
+Note that `alpha=0.0` makes every sample equally likely but still draws *with
+replacement*, so it is not the same as omitting `--cluster_json` (which uses a
+plain `DistributedSampler` and draws without replacement).
+
+Training prints the resulting multipliers at startup, which is how you tune
+`alpha`:
+
+```
+Using cluster-weighted sampling from /path/to/cluster_result.json
+Cluster distribution (matched 48231/48231 data paths, alpha=0.50):
+  cluster_id0: 18402 samples  0.78x
+  cluster_id7: 1204 samples  1.53x
+```
+
+The cluster JSON must reference the same NPZ files as `--train_set_list`.
+Paths are canonicalized before matching, so differing prefixes (absolute vs
+relative, different mount points) are handled automatically. Paths present in
+the data list but absent from the JSON receive the mean matched weight and a
+warning is emitted.
+
 ### Step 4: Trajectory Visualization (`visualize_cluster.py`)
 
 ```bash

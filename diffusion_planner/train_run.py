@@ -37,6 +37,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="optional: path to cluster assignment JSON for weighted sampling",
     )
+    p.add_argument(
+        "--cluster_weight_alpha",
+        type=float,
+        default=None,
+        help="optional: exponent on inverse-frequency cluster weights "
+        "(1.0 = full inverse, 0.0 = uniform)",
+    )
     return p.parse_args()
 
 
@@ -66,6 +73,8 @@ def main() -> None:
         optional += ["--wandb_project_name", args.wandb_project_name]
     if args.cluster_json:
         optional += ["--cluster_json", str(Path(args.cluster_json).resolve())]
+    if args.cluster_weight_alpha is not None:
+        optional += ["--cluster_weight_alpha", str(args.cluster_weight_alpha)]
 
     Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
 

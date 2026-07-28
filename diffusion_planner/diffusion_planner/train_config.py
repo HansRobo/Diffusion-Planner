@@ -27,6 +27,7 @@ class TrainConfig:
     valid_set_list: str
     train_subsample_step: int
     cluster_json: str = ""
+    cluster_weight_alpha: float = 1.0
 
     # ---------------------------------------------------------
     # Data Dimensions

@@ -278,6 +278,7 @@ def model_training(args: TrainConfig):
             num_replicas=ddp.get_world_size(),
             rank=global_rank,
             seed=args.seed,
+            alpha=args.cluster_weight_alpha,
         )
         if global_rank == 0:
             print(f"Using cluster-weighted sampling from {args.cluster_json}")
@@ -340,10 +341,11 @@ def model_training(args: TrainConfig):
     if global_rank == 0 and args.cluster_json:
         print(
             f"Cluster distribution "
-            f"(matched {train_sampler.matched_count}/{len(train_set.data_list)} data paths):"
+            f"(matched {train_sampler.matched_count}/{len(train_set.data_list)} data paths, "
+            f"alpha={args.cluster_weight_alpha:.2f}):"
         )
         for k, v in sorted(train_sampler.cluster_counts.items()):
-            print(f"  {k}: {v} samples")
+            print(f"  {k}: {v} samples  {train_sampler.cluster_multipliers[k]:.2f}x")
 
     if args.ddp:
         torch.distributed.barrier()
