@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -164,33 +165,42 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     finally:
         net.train(was_training)
 
-    # Scalar metrics (drop non-finite clearances: a segment with no neighbor reports +inf).
-    scalar_keys = [
-        "collision_segment_rate",
-        "collision_step_rate",
-        "near_miss_segment_rate",
-        "near_miss_step_rate",
-        "global_min_clearance",
-        "mean_segment_min_clearance",
-        "mean_segment_mean_clearance",
-        "total_collision_steps",
-        "total_near_miss_steps",
-        "total_snaps",
-        "total_steps",
-    ]
+    # Scalar metrics from nested summary (skip non-finite clearances).
+    def _flat_scalars(node: dict, prefix: str = "") -> dict[str, float | int]:
+        out: dict[str, float | int] = {}
+        for k, v in node.items():
+            key = f"{prefix}{k}" if not prefix else f"{prefix}/{k}"
+            if isinstance(v, dict):
+                out.update(_flat_scalars(v, key))
+            elif isinstance(v, (int,)) or (isinstance(v, float) and math.isfinite(v)):
+                out[key] = v
+        return out
+
     log = {
-        f"closed_loop/{k}": summary[k]
-        for k in scalar_keys
-        if isinstance(summary[k], (int,)) or math.isfinite(summary[k])
+        f"closed_loop/{k}": v
+        for k, v in _flat_scalars(
+            {
+                "n_segments": summary["n_segments"],
+                "total_steps": summary["total_steps"],
+                "object": summary["object"],
+                "road_border": summary["road_border"],
+                "red_light_violation": summary["red_light_violation"],
+                "strong_brake": summary["strong_brake"],
+                "reproducer": summary["reproducer"],
+            }
+        ).items()
     }
     for mp4 in summary["video_mp4s"]:
         log[f"closed_loop/video/{Path(mp4).stem}"] = wandb.Video(str(mp4), format="mp4")
     wandb.log(log, step=epoch + 1)
+    from scenario_generation.closed_loop_eval import format_summary_lines
+
     print(
         f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
-        f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
-        f"min_clr={summary['global_min_clearance']:.2f}  -> {len(summary['video_mp4s'])} video(s)"
+        f"{summary['elapsed_sec']:.1f}s  -> {len(summary['video_mp4s'])} video(s)"
     )
+    for line in format_summary_lines(summary):
+        print(f"  {line}")
 
 
 def model_training(args: TrainConfig):
@@ -439,7 +449,11 @@ def model_training(args: TrainConfig):
             )
 
     # begin training
+    # Timing reference for the ETA: wall clock from the first epoch's start, so the average
+    # epoch cost it is divided by includes checkpoint save / ONNX export / closed-loop epochs.
+    training_start_time = time.perf_counter()
     for epoch in range(init_epoch, train_epochs):
+        epoch_start_time = time.perf_counter()
         # Synchronize all processes before training
         if args.ddp:
             torch.distributed.barrier()
@@ -458,16 +472,20 @@ def model_training(args: TrainConfig):
                 print(f"Final phase: Epoch {epoch + 1}, LR adjusted to {adjusted_lr}")
 
         # training step
+        train_start_time = time.perf_counter()
         train_loss, train_total_loss = train_epoch(
             train_loader, diffusion_planner, optimizer, args, model_ema, aug
         )
+        train_sec = time.perf_counter() - train_start_time
 
+        valid_start_time = time.perf_counter()
         valid_dict = validate_model(diffusion_planner, valid_loader, args)
         agg = aggregate_valid_metrics(valid_dict, args.device)
         replan_agg = {}
         if valid_pair_loader is not None:
             replan_dict = validate_replan_consistency(diffusion_planner, valid_pair_loader, args)
             replan_agg = aggregate_replan_consistency_metrics(replan_dict, args.device)
+        valid_sec = time.perf_counter() - valid_start_time
         if global_rank == 0:
             valid_loss_ego = agg["avg_loss_ego"]
             valid_loss_neighbor = agg["avg_loss_neighbor"]
@@ -504,11 +522,41 @@ def model_training(args: TrainConfig):
                     )
                 )
 
+            # Timing, reported in hours (a single epoch is far too long for seconds to read
+            # well). epoch_hour covers train + validation; the ETA is based on the average
+            # wall-clock epoch of this run so far, which also absorbs the save/export epochs.
+            epoch_sec = time.perf_counter() - epoch_start_time
+            num_train_steps = len(train_loader)
+            train_step_sec = train_sec / num_train_steps if num_train_steps > 0 else float("nan")
+            elapsed_sec = time.perf_counter() - training_start_time
+            epochs_done = epoch + 1 - init_epoch
+            remaining_epochs = train_epochs - (epoch + 1)
+            train_hour = train_sec / 3600.0
+            valid_hour = valid_sec / 3600.0
+            epoch_hour = epoch_sec / 3600.0
+            elapsed_hour = elapsed_sec / 3600.0
+            eta_hour = (elapsed_hour / epochs_done) * remaining_epochs
+            time_dict = {
+                "time/train_hour": train_hour,
+                "time/valid_hour": valid_hour,
+                "time/epoch_hour": epoch_hour,
+                "time/train_step_sec": train_step_sec,
+                "time/elapsed_hour": elapsed_hour,
+                "time/eta_hour": eta_hour,
+            }
+            print(
+                f"time: train={train_hour:.3f}h "
+                f"(x{num_train_steps} steps, {train_step_sec:.3f}s/step), "
+                f"valid={valid_hour:.3f}h, epoch={epoch_hour:.3f}h, "
+                f"elapsed={elapsed_hour:.2f}h, eta={eta_hour:.2f}h"
+            )
+
             lr_dict = {"lr": optimizer.param_groups[0]["lr"]}
             wandb.log(
                 {
                     **{f"train_loss/{k}": v for k, v in train_loss.items()},
                     **{f"lr/{k}": v for k, v in lr_dict.items()},
+                    **time_dict,
                     "valid_loss/ego": valid_loss_ego,
                     "valid_loss/neighbors": valid_loss_neighbor,
                     "valid_loss/turn_indicator_accuracy": turn_indicator_accuracy,
@@ -527,6 +575,9 @@ def model_training(args: TrainConfig):
                 "valid_loss_neighbor": valid_loss_neighbor,
                 "valid_loss_ego_position_lat_loss": valid_loss_ego_position_lat_loss,
                 "valid_loss_ego_position_lon_loss": valid_loss_ego_position_lon_loss,
+                "train_hour": train_hour,
+                "valid_hour": valid_hour,
+                "epoch_hour": epoch_hour,
                 **replan_agg,
                 **{k.replace("/", "_"): v for k, v in mean_epdms_dict.items()},
             }
