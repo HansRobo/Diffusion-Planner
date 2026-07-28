@@ -1,5 +1,5 @@
 {
-  "_comment": "Generic danger-detection reward config for the R2LPL lifelong SMOKE test (verify_dataset_training.py). Passed as --danger_reward_config: the perception reproducer scores each closed-loop rollout step for road-border / collision / kinematic danger so the base model's MISTAKES get mined into credit windows. These are generic reward gates/weights with NO dataset, place, or platform specifics; GRPOConfig.from_json fills every unset field with its dataclass default. Small LoRA/generation knobs keep the smoke round fast - this is not a real training recipe.",
+  "_comment": "Generic danger-detection reward config for the R2LPL lifelong SMOKE test (verify_dataset_training.py). Passed as --danger_reward_config: the perception reproducer scores each closed-loop rollout step for road-border / collision / kinematic danger so the base model's MISTAKES get mined into credit windows. These are generic reward gates/weights with NO dataset, place, or platform specifics; The miner loads this via the strict load_reward_config (reward_config_from_json), which REQUIRES every reward field explicitly (no silent defaults) - so this ships complete. Small LoRA/generation knobs keep the smoke round fast - this is not a real training recipe.",
   "reward_mode": "survival",
   "loss_mode": "diffusion",
   "enable_guidance": true,

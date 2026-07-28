@@ -196,8 +196,8 @@ def _l2_eval(model_path: Path, args_json: Path, val_list: Path, device: str, env
         "--valid_set_list", str(val_list), "--batch_size", "32",
     ]  # fmt: skip
     rc, text = _run(cmd, log, env)
-    ego = re.findall(r"avg_loss_ego=([0-9.]+)", text)
-    nbr = re.findall(r"avg_loss_neighbor=([0-9.]+)", text)
+    ego = re.findall(r"avg_loss_ego=([0-9.eE+-]+)", text)
+    nbr = re.findall(r"avg_loss_neighbor=([0-9.eE+-]+)", text)
     if rc == 0 and ego and nbr:
         return float(ego[-1]), float(nbr[-1])
     return None
@@ -441,11 +441,13 @@ def run_rsft(ds, cfg, args, env) -> tuple[bool, str]:
             work / "merge.log",
             env,
         )
-        saved = (
-            str(merged.relative_to(args.out_dir))
-            if mrc == 0 and merged.exists()
-            else "MERGE_FAILED"
-        )
+        if mrc == 0 and merged.exists():
+            saved = str(merged.relative_to(args.out_dir))
+        else:
+            # a broken merge means the emitted model is unusable -> FAIL loudly (not
+            # just a note in the detail string)
+            saved = "MERGE_FAILED"
+            ok = False
     reward_cmp = (
         f"reward {base_reward:+.2f}->{ev_val:+.2f} ({ev_val - base_reward:+.2f})"
         if base_reward is not None and ev_val is not None
