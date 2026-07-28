@@ -10,6 +10,7 @@ from diffusion_planner.hdp_rl_replay import (
     cleanup_previous_cycle,
     cycle_index,
     is_mine_epoch,
+    relay_epoch,
 )
 
 from diffusion_planner import hdp_rl_epoch
@@ -61,6 +62,22 @@ def test_relay_schedule_is_ten_cycles_of_ten():
     assert mine_epochs == [1, 11, 21, 31, 41, 51, 61, 71, 81, 91]
     assert [cycle_index(e, 10) for e in mine_epochs] == list(range(10))
     assert cycle_index(100, 10) == 9  # the last replay epoch trains cycle 9's cache
+
+
+def test_trainer_epoch_zero_mines_cycle_zero():
+    """The training loop counts from zero; the relay is numbered from one.
+
+    Without the shift, a fresh run's first epoch resolves to cycle -1 and reads as
+    a replay epoch, so it aborts on a cache that no mining pass ever wrote.
+    """
+    assert is_mine_epoch(relay_epoch(0), 10)
+    assert cycle_index(relay_epoch(0), 10) == 0
+    assert not is_mine_epoch(relay_epoch(1), 10)
+    assert cycle_index(relay_epoch(9), 10) == 0
+    assert is_mine_epoch(relay_epoch(10), 10)
+    assert cycle_index(relay_epoch(10), 10) == 1
+    trainer_mine_epochs = [e for e in range(100) if is_mine_epoch(relay_epoch(e), 10)]
+    assert trainer_mine_epochs == [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
 
 
 def test_writer_reader_roundtrip_preserves_frozen_weights(tmp_path):

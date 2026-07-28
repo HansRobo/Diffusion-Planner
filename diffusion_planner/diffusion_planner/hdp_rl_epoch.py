@@ -871,13 +871,18 @@ def _train_cycle_epoch(data_loader, model, optimizer, trainable_params, args, em
         cleanup_previous_cycle,
         cycle_index,
         is_mine_epoch,
+        relay_epoch,
     )
 
     interval = int(args.rl_rollout_interval)
     replay_root = args.rl_replay_dir
     rank = ddp.get_rank()
     device = torch.device(args.device)
-    cycle = cycle_index(epoch, interval)
+    # The relay is numbered from one; `epoch` is the training loop's zero-based
+    # counter. Without the shift the first epoch of a fresh run asks for cycle -1
+    # and is treated as a replay epoch, so it dies on a cache nothing mined.
+    cycle_epoch = relay_epoch(epoch)
+    cycle = cycle_index(cycle_epoch, interval)
     epoch_loss_sums: dict = {}
     epoch_loss_counts: dict = {}
     model.train()
@@ -886,7 +891,7 @@ def _train_cycle_epoch(data_loader, model, optimizer, trainable_params, args, em
     rollout_generator.manual_seed(int(args.seed) + int(epoch) * 1_000_003 + rank * 10_007)
     wall_start = time.perf_counter()
 
-    if is_mine_epoch(epoch, interval):
+    if is_mine_epoch(cycle_epoch, interval):
         cleanup_previous_cycle(replay_root, cycle, rank)
         if bool(getattr(args, "ddp", False)):
             torch.distributed.barrier()
@@ -938,14 +943,14 @@ def _train_cycle_epoch(data_loader, model, optimizer, trainable_params, args, em
     ).float()
     # Policy iteration: the behavior policy stays frozen through mining and is
     # committed only after a replay epoch actually trained a proposal.
-    if ema is not None and not is_mine_epoch(epoch, interval):
+    if ema is not None and not is_mine_epoch(cycle_epoch, interval):
         proposal_relative_l2 = commit_ema_policy_update(model, ema, optimizer, args.ddp)
         epoch_mean_loss["policy_proposal_relative_l2"] = proposal_relative_l2
     if args.ddp:
         epoch_mean_loss = ddp.reduce_and_average_losses(epoch_mean_loss, device)
     epoch_mean_loss = _add_stationary_progress_conditionals(epoch_mean_loss)
     if rank == 0:
-        phase = "mine" if is_mine_epoch(epoch, interval) else "replay"
+        phase = "mine" if is_mine_epoch(cycle_epoch, interval) else "replay"
         print(
             f"cycle {cycle} {phase}: loss={float(epoch_mean_loss['loss']):.4f} "
             f"reward_mean={float(epoch_mean_loss['reward_mean']):.4f}"

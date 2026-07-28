@@ -7,6 +7,12 @@ that freezes this cache (no optimizer steps), and the following
 validity are frozen at mine time and never recomputed during replay — the
 upstream overlay-resurrection bug class is structurally impossible here.
 
+Epochs here are the source repository's one-based numbering, the same one the
+trainer prints as ``Epoch {epoch + 1}/{train_epochs}``. The training loop counts
+from zero, so call sites convert with :func:`relay_epoch` rather than passing
+their loop variable straight in — epoch 0 would otherwise land in cycle -1 and
+look like a replay epoch whose cache was never mined.
+
 Storage is one ``.pt`` shard per mined batch per rank on local NVMe, plus a
 fail-closed ``meta.json`` contract (reward fingerprint, group size, commit
 marker). A cycle directory missing its ``MINE_COMPLETE`` marker is discarded
@@ -53,6 +59,11 @@ _FINGERPRINT_FIELDS = (
 def reward_fingerprint(args) -> dict:
     """The frozen-cache contract: everything that shapes mined groups/weights."""
     return {name: repr(getattr(args, name, None)) for name in _FINGERPRINT_FIELDS}
+
+
+def relay_epoch(trainer_epoch: int) -> int:
+    """Map the trainer's zero-based epoch onto this module's one-based numbering."""
+    return int(trainer_epoch) + 1
 
 
 def cycle_index(epoch: int, interval: int) -> int:
