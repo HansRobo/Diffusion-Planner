@@ -4,6 +4,7 @@ import warnings
 from pathlib import Path
 
 import pytest
+import torch
 from diffusion_planner.utils.weighted_sampler import ClusterWeightedDistributedSampler
 
 
@@ -201,9 +202,7 @@ class TestEdgeCases:
                 sampler = ClusterWeightedDistributedSampler(
                     data_list, cluster_path, num_replicas=1, rank=0, seed=42
                 )
-                matching_warnings = [
-                    x for x in w if "paths matched cluster JSON" in str(x.message)
-                ]
+                matching_warnings = [x for x in w if "paths matched cluster JSON" in str(x.message)]
                 assert len(matching_warnings) == 1
 
             assert len(sampler.weights) == 10
@@ -299,17 +298,13 @@ class TestEdgeCases:
     def test_prefix_mismatched_paths_still_match(self):
         """Cluster JSON with different path prefix still matches via canonicalization."""
         with tempfile.TemporaryDirectory() as tmp:
-            data_list = [
-                f"data/train/20230101/1200/frame_{i}.npz" for i in range(10)
-            ]
+            data_list = [f"data/train/20230101/1200/frame_{i}.npz" for i in range(10)]
             clusters = {
                 "cluster_id0": [
-                    f"/mnt/nfs/data/train/20230101/1200/frame_{i}.npz"
-                    for i in range(2)
+                    f"/mnt/nfs/data/train/20230101/1200/frame_{i}.npz" for i in range(2)
                 ],
                 "cluster_id1": [
-                    f"/mnt/nfs/data/train/20230101/1200/frame_{i}.npz"
-                    for i in range(2, 10)
+                    f"/mnt/nfs/data/train/20230101/1200/frame_{i}.npz" for i in range(2, 10)
                 ],
             }
             cluster_path = str(Path(tmp) / "clusters.json")
@@ -322,3 +317,105 @@ class TestEdgeCases:
             assert sampler.matched_count == 10, (
                 f"Expected all 10 paths to match, got {sampler.matched_count}"
             )
+
+
+class TestAlpha:
+    def test_default_alpha_is_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(100)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            default = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42
+            )
+            explicit = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=1.0
+            )
+            assert default.alpha == 1.0
+            assert torch.equal(default.weights, explicit.weights)
+
+    def test_alpha_zero_gives_uniform_weights(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(100)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=0.0
+            )
+            for w in sampler.weights.tolist():
+                assert w == pytest.approx(1.0)
+
+    def test_alpha_half_is_sqrt_of_full_ratio(self):
+        """The rare/common weight ratio must go from R to R**alpha."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(100)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            full = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=1.0
+            )
+            half = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=0.5
+            )
+            # index 0 is in the rare cluster (2 samples), index 2 in the common one (98)
+            ratio_full = full.weights[0].item() / full.weights[2].item()
+            ratio_half = half.weights[0].item() / half.weights[2].item()
+
+            assert ratio_full == pytest.approx(49.0, rel=1e-4)
+            assert ratio_half == pytest.approx(ratio_full**0.5, rel=1e-4)
+
+    def test_alpha_reduces_oversampling_multiplier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(100)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            full = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=1.0
+            )
+            soft = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=0.25
+            )
+            assert soft.cluster_multipliers["cluster_id0"] < full.cluster_multipliers["cluster_id0"]
+            assert soft.cluster_multipliers["cluster_id0"] > 1.0
+
+    def test_negative_alpha_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(10)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            with pytest.raises(ValueError, match="alpha"):
+                ClusterWeightedDistributedSampler(
+                    data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=-0.5
+                )
+
+    def test_cluster_multipliers_match_normalized_weights(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(100)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42
+            )
+            assert set(sampler.cluster_multipliers) == {"cluster_id0", "cluster_id1"}
+            # index 0 -> cluster_id0, index 2 -> cluster_id1
+            assert sampler.cluster_multipliers["cluster_id0"] == pytest.approx(
+                sampler.weights[0].item()
+            )
+            assert sampler.cluster_multipliers["cluster_id1"] == pytest.approx(
+                sampler.weights[2].item()
+            )
+
+    def test_multipliers_average_to_one(self):
+        """Multipliers weighted by cluster size average to 1.0 — no net inflation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            data_list = [f"/data/sample_{i}.npz" for i in range(100)]
+            cluster_path, _ = _make_cluster_json(tmp, data_list)
+
+            sampler = ClusterWeightedDistributedSampler(
+                data_list, cluster_path, num_replicas=1, rank=0, seed=42, alpha=0.5
+            )
+            weighted = sum(
+                sampler.cluster_multipliers[cid] * count
+                for cid, count in sampler.cluster_counts.items()
+            )
+            assert weighted / len(data_list) == pytest.approx(1.0, rel=1e-6)

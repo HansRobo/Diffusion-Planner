@@ -12,8 +12,20 @@ class ClusterWeightedDistributedSampler(Sampler):
     """Inverse-frequency weighted sampler compatible with DDP.
 
     Reads a cluster assignment JSON (Fumiya's cluster.py output format) and assigns
-    each sample a weight of 1/cluster_frequency. Rare clusters are sampled more often;
-    no data is discarded.
+    each sample a weight of ``(1 / cluster_frequency) ** alpha``. Rare clusters are
+    sampled more often; no data is discarded.
+
+    ``alpha`` controls how aggressive the reweighting is. At ``alpha=1.0`` (the
+    default) every cluster receives an equal share of draws regardless of size.
+    At ``alpha=0.0`` all weights are 1.0 and sampling is uniform -- note this is
+    still sampling *with* replacement, so it is not identical to
+    ``DistributedSampler``, which samples without replacement. Intermediate
+    values interpolate: the multiplier ratio between any two clusters goes from
+    ``R`` at alpha=1.0 to ``R ** alpha``.
+
+    Weights are normalized to mean 1.0, so a sample's weight equals its
+    oversampling multiplier. Per-cluster multipliers are exposed as
+    ``cluster_multipliers`` for logging and tuning.
 
     Paths are canonicalized via ``data_path_to_rel`` before matching, so
     different prefixes (absolute vs relative, different mount points) are
@@ -27,6 +39,7 @@ class ClusterWeightedDistributedSampler(Sampler):
         num_replicas: int = 1,
         rank: int = 0,
         seed: int = 0,
+        alpha: float = 1.0,
     ):
         self.data_list = data_list
         if len(data_list) > 2**24:
@@ -34,18 +47,26 @@ class ClusterWeightedDistributedSampler(Sampler):
                 f"data_list has {len(data_list)} entries, exceeding "
                 f"torch.multinomial's 2^24 ({2**24:,}) category limit on CPU."
             )
+        if alpha < 0:
+            raise ValueError(f"alpha={alpha} must be >= 0 (1.0 = full inverse, 0.0 = uniform)")
         self.num_replicas = num_replicas
         self.rank = rank
         self.seed = seed
+        self.alpha = alpha
         self.epoch = 0
         self.total_size = len(data_list)
         self.num_samples = math.ceil(self.total_size / self.num_replicas)
 
-        self.weights, self.cluster_counts, self.matched_count = self._compute_weights(
-            cluster_json_path
-        )
+        (
+            self.weights,
+            self.cluster_counts,
+            self.matched_count,
+            self.cluster_multipliers,
+        ) = self._compute_weights(cluster_json_path)
 
-    def _compute_weights(self, cluster_json_path: str) -> tuple[torch.Tensor, dict[str, int], int]:
+    def _compute_weights(
+        self, cluster_json_path: str
+    ) -> tuple[torch.Tensor, dict[str, int], int, dict[str, float]]:
         clusters = openjson(cluster_json_path)
 
         path_to_cluster: dict[str, str] = {}
@@ -84,12 +105,10 @@ class ClusterWeightedDistributedSampler(Sampler):
         weights = torch.ones(len(self.data_list), dtype=torch.float64)
         for i, cid in enumerate(sample_cluster):
             if cid is not None:
-                weights[i] = 1.0 / (cluster_freq[cid] + 1e-8)
+                weights[i] = (1.0 / (cluster_freq[cid] + 1e-8)) ** self.alpha
 
         if matched < len(self.data_list):
-            matched_mask = torch.tensor(
-                [c is not None for c in sample_cluster], dtype=torch.bool
-            )
+            matched_mask = torch.tensor([c is not None for c in sample_cluster], dtype=torch.bool)
             mean_matched = weights[matched_mask].mean().item()
             weights[~matched_mask] = mean_matched
             warnings.warn(
@@ -98,7 +117,15 @@ class ClusterWeightedDistributedSampler(Sampler):
             )
 
         weights = weights / weights.mean()
-        return weights, live_counts, matched
+
+        # Weights are mean-normalized, so a sample's weight is its oversampling
+        # multiplier. Record one representative per cluster.
+        multipliers: dict[str, float] = {}
+        for i, cid in enumerate(sample_cluster):
+            if cid is not None and cid not in multipliers:
+                multipliers[cid] = weights[i].item()
+
+        return weights, live_counts, matched, multipliers
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
