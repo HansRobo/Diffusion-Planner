@@ -2691,8 +2691,6 @@ def test_ego_only_supervised_loss_and_onnx_shapes():
             "coeff_neighbor_collision_loss": 0.0,
             "road_border_margin": 0.25,
             "road_border_n_interp": 2,
-            "turn_indicator_generated_loss_weight": 1.0,
-            "turn_indicator_expert_loss_weight": 1.0,
             # Joint mode is intentionally explicit here because production
             # Base/SFT defaults to policy-only training.
             "supervised_training_stage": "joint",
@@ -2835,6 +2833,12 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         for key, value in vars(checkpoint_args).items()
     }
     serializable["advantage_eps"] = 1e-6
+    # A checkpoint written before the head's generated-trajectory pass was removed. Its
+    # args.json still carries the three retired keys; strict resume must ignore them
+    # rather than refuse to load, since every such checkpoint predates the change.
+    serializable["turn_indicator_head_training_mode"] = "deployment"
+    serializable["turn_indicator_generated_loss_weight"] = 1.0
+    serializable["turn_indicator_expert_loss_weight"] = 1.0
     (tmp_path / "args.json").write_text(json.dumps(serializable), encoding="utf-8")
     checkpoint_path = tmp_path / "latest.pth"
 
@@ -2849,15 +2853,28 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
 
     same_shape = _checkpoint_compat_config(predicted_neighbor_num=1)
     same_shape.supervised_training_stage = "joint"
-    same_shape.turn_indicator_generated_loss_weight = 0.25
+    same_shape.hybrid_loss_window = checkpoint_args.hybrid_loss_window + 1
     with pytest.raises(RuntimeError, match="training configuration mismatch"):
         assert_checkpoint_compatible(str(checkpoint_path), same_shape)
 
     same_shape = _checkpoint_compat_config(predicted_neighbor_num=1)
     same_shape.supervised_training_stage = "joint"
-    same_shape.turn_indicator_head_training_mode = "expert"
+    same_shape.adamw_no_decay = not checkpoint_args.adamw_no_decay
     with pytest.raises(RuntimeError, match="training configuration mismatch"):
         assert_checkpoint_compatible(str(checkpoint_path), same_shape)
+
+    # The retired turn-indicator knobs are the mirror image: present in the checkpoint,
+    # absent from the current config, and therefore not compared at all. This resume
+    # must succeed, which is what keeps pre-change checkpoints loadable.
+    same_shape = _checkpoint_compat_config(predicted_neighbor_num=1)
+    same_shape.supervised_training_stage = "joint"
+    for retired in (
+        "turn_indicator_head_training_mode",
+        "turn_indicator_generated_loss_weight",
+        "turn_indicator_expert_loss_weight",
+    ):
+        assert not hasattr(same_shape, retired)
+    assert_checkpoint_compatible(str(checkpoint_path), same_shape)
 
     for field, value in (
         ("rl_reward_w_safety", 1.0),

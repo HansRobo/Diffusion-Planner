@@ -159,16 +159,6 @@ def get_args(args_list=None):
         default=_train_config_default("ego_history_dropout_rate"),
     )
     parser.add_argument(
-        "--turn_indicator_generated_loss_weight",
-        type=float,
-        default=_train_config_default("turn_indicator_generated_loss_weight"),
-    )
-    parser.add_argument(
-        "--turn_indicator_expert_loss_weight",
-        type=float,
-        default=_train_config_default("turn_indicator_expert_loss_weight"),
-    )
-    parser.add_argument(
         "--turn_indicator_head_num_queries",
         type=int,
         default=_train_config_default("turn_indicator_head_num_queries"),
@@ -196,12 +186,6 @@ def get_args(args_list=None):
         choices=("joint", "policy", "turn_indicator"),
         default=_train_config_default("supervised_training_stage"),
         help="train trajectory policy only (default), an explicit joint ablation, or the detached intent head only",
-    )
-    parser.add_argument(
-        "--turn_indicator_head_training_mode",
-        choices=("expert", "deployment"),
-        default=_train_config_default("turn_indicator_head_training_mode"),
-        help="use cheap expert trajectories or exact final-DPM trajectories for head-only training",
     )
 
     parser.add_argument(
@@ -487,8 +471,6 @@ def get_args(args_list=None):
         "encoder_drop_path_rate",
         "decoder_drop_path_rate",
         "ego_history_dropout_rate",
-        "turn_indicator_generated_loss_weight",
-        "turn_indicator_expert_loss_weight",
         "turn_indicator_head_dropout",
         "turn_indicator_label_smoothing",
         "coeff_road_border_loss",
@@ -565,12 +547,6 @@ def get_args(args_list=None):
         raise ValueError("--weight_decay must be >= 0")
     if args.wandb_step_log_interval < 0:
         raise ValueError("--wandb_step_log_interval must be >= 0")
-    if args.turn_indicator_generated_loss_weight < 0.0:
-        raise ValueError("--turn_indicator_generated_loss_weight must be >= 0")
-    if args.turn_indicator_expert_loss_weight < 0.0:
-        raise ValueError("--turn_indicator_expert_loss_weight must be >= 0")
-    if args.turn_indicator_generated_loss_weight + args.turn_indicator_expert_loss_weight <= 0.0:
-        raise ValueError("at least one turn-indicator loss weight must be positive")
     if args.extra_train_set_repeat < 0:
         raise ValueError("--extra_train_set_repeat must be >= 0")
     if args.extra_train_set_repeat > 0 and not args.extra_train_set_list:

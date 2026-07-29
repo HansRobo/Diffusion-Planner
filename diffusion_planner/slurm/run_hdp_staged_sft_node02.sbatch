@@ -36,19 +36,13 @@ POLICY_EPOCHS=${HDP_POLICY_EPOCHS:-20}
 POLICY_WARMUP=${HDP_POLICY_WARMUP:-2}
 POLICY_LR=${HDP_POLICY_LR:-1e-4}
 RUN_POLICY_STAGE=${HDP_RUN_POLICY_STAGE:-True}
-RUN_DEPLOYMENT_STAGE=${HDP_RUN_DEPLOYMENT_STAGE:-True}
 HEAD_EXPERT_EPOCHS=${HDP_HEAD_EXPERT_EPOCHS:-1}
 HEAD_EXPERT_WARMUP=${HDP_HEAD_EXPERT_WARMUP:-0}
 HEAD_EXPERT_LR=${HDP_HEAD_EXPERT_LR:-3e-4}
-HEAD_DEPLOYMENT_EPOCHS=${HDP_HEAD_DEPLOYMENT_EPOCHS:-1}
-HEAD_DEPLOYMENT_WARMUP=${HDP_HEAD_DEPLOYMENT_WARMUP:-0}
-HEAD_DEPLOYMENT_LR=${HDP_HEAD_DEPLOYMENT_LR:-1e-4}
 POLICY_NAME=${HDP_POLICY_NAME:-hdp_no_signal_policy_ft${POLICY_EPOCHS}_base80data_from_epoch${POLICY_INIT_EPOCH}_node02_8gpu_bf16_bs512}
 HEAD_EXPERT_NAME=${HDP_HEAD_EXPERT_NAME:-hdp_turn_indicator_expert_head${HEAD_EXPERT_EPOCHS}_from_${POLICY_NAME}_node02_8gpu_bf16_bs512}
-HEAD_DEPLOYMENT_NAME=${HDP_HEAD_DEPLOYMENT_NAME:-hdp_turn_indicator_deployment_head${HEAD_DEPLOYMENT_EPOCHS}_from_${HEAD_EXPERT_NAME}_node02_8gpu_bf16_bs512}
 POLICY_DIR=${ROOT}/outputs/${POLICY_NAME}
 HEAD_EXPERT_DIR=${ROOT}/outputs/${HEAD_EXPERT_NAME}
-HEAD_DEPLOYMENT_DIR=${ROOT}/outputs/${HEAD_DEPLOYMENT_NAME}
 
 TRAIN_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260707_vehicle_params_with_mirror/path_list_train_concatenated.json
 VALID_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260702_basic_dataset/path_list_valid_sft_balanced.json
@@ -255,8 +249,6 @@ COMMON_ARGS=(
   --use_velocity_representation True
   --planning_hybrid_loss 0.01
   --hybrid_loss_window 10
-  --turn_indicator_generated_loss_weight 1.0
-  --turn_indicator_expert_loss_weight 1.0
   --coeff_road_border_loss 0.0
   --road_border_margin 0.25
   --road_border_n_interp 2
@@ -278,14 +270,13 @@ PY
 run_stage() {
   local phase=$1
   local stage=$2
-  local head_mode=$3
-  local run_name=$4
-  local save_dir=$5
-  local init_weights=$6
-  local epochs=$7
-  local warmup=$8
-  local learning_rate=$9
-  local save_utd=${10}
+  local run_name=$3
+  local save_dir=$4
+  local init_weights=$5
+  local epochs=$6
+  local warmup=$7
+  local learning_rate=$8
+  local save_utd=$9
   local max_attempts=3
   local attempt=1
   local status=1
@@ -320,7 +311,6 @@ run_stage() {
       --exp_name "${run_name}" \
       --save_dir "${save_dir}" \
       --supervised_training_stage "${stage}" \
-      --turn_indicator_head_training_mode "${head_mode}" \
       --learning_rate "${learning_rate}" \
       --warm_up_epoch "${warmup}" \
       --train_epochs "${epochs}" \
@@ -355,7 +345,7 @@ cd "${SOURCE_REPO}/diffusion_planner"
 # head-only job can skip this stage and consume a completed policy checkpoint directly.
 case "${RUN_POLICY_STAGE}" in
   True|true|1)
-    run_stage policy policy deployment \
+    run_stage policy policy \
       "${POLICY_NAME}" "${POLICY_DIR}" "${BASE_WEIGHTS}" \
       "${POLICY_EPOCHS}" "${POLICY_WARMUP}" "${POLICY_LR}" 5
     ;;
@@ -369,30 +359,20 @@ case "${RUN_POLICY_STAGE}" in
     ;;
 esac
 
-# Stage 2: cheaply bootstrap the new head from expert trajectories. This evaluates
-# the frozen encoder once per batch and entirely skips the diffusion policy.
-run_stage turn-expert turn_indicator expert \
+# Stage 2, and the last one: train the head on expert trajectories. This evaluates the
+# frozen encoder once per batch and entirely skips the diffusion policy. The expert head
+# at ${HEAD_EXPERT_DIR} is the final artifact.
+#
+# There used to be a stage 3 that re-calibrated this head on the policy's own six-step
+# DPM trajectories, on the theory that supervising from a ground-truth path the vehicle
+# never has would mistrain it. Measured, it does not: over full epochs of jobs 1540/1541
+# the head's expert-conditioned and generated-conditioned predictions agree to 0.08
+# accuracy points, and the expert CE is the lower of the two. Stage 3 paid for six DPM
+# steps per batch to re-learn what stage 2 already knew. Validation is unchanged and
+# still scores the generated trajectory, so a regression here would still be visible.
+run_stage turn-expert turn_indicator \
   "${HEAD_EXPERT_NAME}" "${HEAD_EXPERT_DIR}" "${POLICY_DIR}/latest.pth" \
   "${HEAD_EXPERT_EPOCHS}" "${HEAD_EXPERT_WARMUP}" "${HEAD_EXPERT_LR}" 1
-
-# Stage 3: calibrate on exact final six-step DPM trajectories. The scene encoder is
-# still evaluated only once per batch and its output is reused by every DPM step.
-# Skippable on its own so the expert head can be inspected before paying for the
-# DPM-trajectory calibration pass.
-case "${RUN_DEPLOYMENT_STAGE}" in
-  True|true|1)
-    run_stage turn-deployment turn_indicator deployment \
-      "${HEAD_DEPLOYMENT_NAME}" "${HEAD_DEPLOYMENT_DIR}" "${HEAD_EXPERT_DIR}/latest.pth" \
-      "${HEAD_DEPLOYMENT_EPOCHS}" "${HEAD_DEPLOYMENT_WARMUP}" "${HEAD_DEPLOYMENT_LR}" 1
-    ;;
-  False|false|0)
-    log "turn-deployment: stage disabled; expert head at ${HEAD_EXPERT_DIR} is the final artifact"
-    ;;
-  *)
-    log "FATAL: HDP_RUN_DEPLOYMENT_STAGE must be True or False, got ${RUN_DEPLOYMENT_STAGE}"
-    exit 22
-    ;;
-esac
 
 touch "${ROOT}/RUN_COMPLETE"
 log "All staged SFT training completed"

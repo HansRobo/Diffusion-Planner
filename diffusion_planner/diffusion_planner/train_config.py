@@ -100,11 +100,6 @@ class TrainConfig:
     # history remains a separate, shorter six-frame perception window.
     ego_history_frames: int = 21
     ego_history_dropout_rate: float = 0.4
-    # The turn head sees generated trajectories at inference. In the production staged
-    # contract these weights are consumed only by the later head stage (or an explicit
-    # joint ablation), never by policy-only Base/SFT.
-    turn_indicator_generated_loss_weight: float = 1.0
-    turn_indicator_expert_loss_weight: float = 1.0
 
     # Intent-head capacity. The head is a probe on frozen policy features, so its own
     # depth is the only capacity knob available without retraining the policy. Defaults
@@ -123,11 +118,12 @@ class TrainConfig:
     # trajectory planner without evaluating or updating the auxiliary head, then
     # ``turn_indicator`` freezes the planner and trains the detached head below.
     # ``joint`` remains an explicit ablation only; it is never the safe default.
+    # The ``turn_indicator`` stage always trains the head on expert trajectories, which
+    # skips the DPM rollout entirely. A second pass on the policy's own generated
+    # trajectory used to be selectable and was dropped: the two branches agreed to 0.08
+    # accuracy points over a full epoch, so it bought a near-duplicate gradient at the
+    # sampler's price. Validation is unchanged and still scores the generated trajectory.
     supervised_training_stage: Literal["joint", "policy", "turn_indicator"] = "policy"
-    # Expert pretraining avoids the expensive DPM rollout while the randomly initialized
-    # head learns clean intent features. Deployment fine-tuning then exposes it to the
-    # exact final DPM trajectory used online.
-    turn_indicator_head_training_mode: Literal["expert", "deployment"] = "deployment"
     # Architecture provenance, persisted in args.json. These are deliberately
     # not user-tunable modes: the policy never consumes indicator history and
     # the detached intent head predicts the three valid Autoware driving states.

@@ -67,29 +67,28 @@ Its loss cannot reshape the scene encoder, AdaLN condition, or diffusion policy.
 The trajectory-policy total loss and checkpoint selection also exclude the head
 loss.
 
-Head-only training uses two sequential modes:
-
-- `expert`: expert future waypoints provide a clean intent signal without running
-  the diffusion policy;
-- `deployment`: expert waypoints and the detached final DPM x-start trajectory are
-  weighted equally, matching inference exposure after the head has learned a stable
-  representation.
+Head-only training uses expert future waypoints, which provide a clean intent signal
+without running the diffusion policy.
 
 The staged training protocol is:
 
 1. `supervised_training_stage=policy`: initialize from the stopped Base EMA,
    freeze and completely skip the new head, and adapt the trajectory policy after
    removing signal feedback.
-2. `supervised_training_stage=turn_indicator` and
-   `turn_indicator_head_training_mode=expert`: initialize from the policy-stage
+2. `supervised_training_stage=turn_indicator`: initialize from the policy-stage
    latest EMA, freeze the complete planner, keep it in evaluation mode, and train
-   only the head for one full epoch. The encoder runs once per batch and DiT is not
-   evaluated.
-3. `supervised_training_stage=turn_indicator` and
-   `turn_indicator_head_training_mode=deployment`: initialize from the expert-head
-   latest EMA and fine-tune for one full epoch. Generated inputs come from the final
-   six-step DPM trajectory, not a random-time one-step proxy. The frozen scene
-   encoding is computed once per batch and reused by all DPM evaluations.
+   only the head. The encoder runs once per batch and DiT is not evaluated.
+
+There used to be a third stage, selected by a `deployment` head mode, that re-trained
+the same head on the detached final six-step DPM trajectory so that its inputs matched
+inference exposure. It was removed after being measured. Over full epochs of the
+2026-07-29 head architecture A/B (jobs 1540/1541), the head's expert-conditioned and
+generated-conditioned predictions agree to 0.08 accuracy points — 0.96982 vs 0.96911 —
+and the expert cross-entropy is the *lower* of the two (0.25102 vs 0.25258). The extra
+stage paid for six DPM steps per batch to re-learn what the expert stage already knew.
+Removing it does not weaken the check: validation is unchanged and still scores
+`turn_indicator_logit`, the head applied to the *generated* trajectory
+(`validate_model.py`), so exposure drift would still be visible in the metrics.
 
 A persistent encoder-feature cache is deliberately not used. The full Base80 data
 would require roughly 1.8 TB even in bf16, and cached features would no longer match
@@ -97,9 +96,10 @@ the random geometric augmentation applied to the current sample. Batch-local reu
 keeps exact augmented inputs without redundant encoder evaluations.
 
 The joint mode remains available for controlled experiments. In that mode, the
-generated per-sample loss is weighted by `(1-t)` and normalized by the sum of
-weights. The production staged run does not use joint training. No stale four-class
-weights or transition-onset multiplier is used in any mode.
+generated per-sample loss is weighted by `(1-t)`, and the generated and expert
+cross-entropies are combined as an even mean. The production staged run does not use
+joint training. No stale four-class weights or transition-onset multiplier is used in
+any mode.
 
 Both stages use the exact Base80 data contract: the 20260707 vehicle-parameter and
 mirror manifest, the same three `is_skipped`-filtered right-turn manifests repeated

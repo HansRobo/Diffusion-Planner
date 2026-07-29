@@ -33,11 +33,15 @@ set -euo pipefail
 #     node02 lr2e5 lineage it produced 0.8605571 then 0.8605341 across two stages -- a
 #     2.3e-05 bf16 wobble -- while costing 17-21 min per validation pass out of a 65 min
 #     stage. It is pure wall-clock with no information in it.
-#   * a single turn_indicator round in `deployment` mode. Deployment mode's loss is
-#     (generated_CE + expert_CE)/2, i.e. a strict superset of `expert` mode's
-#     expert-only CE, and it costs only ~10% more wall clock because the scene encoder
-#     is evaluated once per batch and reused by all six DPM steps. The separate expert
-#     bootstrap stage buys nothing that this round does not already contain.
+#   * a single turn_indicator round on expert trajectories, and no DPM-trajectory round.
+#     The head used to also be trained on the policy's own six-step DPM trajectory.
+#     Measured over full epochs of jobs 1540/1541 the two branches agree to 0.08
+#     accuracy points (expert 0.96982 vs generated 0.96911 at epoch 4; expert CE is
+#     lower by 0.0016 of ~0.25, i.e. 0.6% relative), so the second branch paid for the
+#     sampler to produce a near-duplicate gradient. Dropping it does not weaken the
+#     test: validation still scores turn_indicator_logit, the head applied to the
+#     GENERATED trajectory (validate_model.py), so any expert/deployment drift would
+#     show up in exactly the metrics this launcher reads.
 #   * warm_up_epoch=0 makes LinearWarmupConstantLR a pure constant, so the per-epoch
 #     validation curve carries no schedule confound and each epoch is comparable.
 #
@@ -52,13 +56,11 @@ set -euo pipefail
 #     threshold is a free offline sweep over dumped logits while a loss weight costs a
 #     full run per operating point. Keep the loss calibrated; move the operating point
 #     downstream.
-#   * turn_indicator_expert_loss_weight is a real open question. At inference the head
-#     only ever sees the policy's own DPM trajectory (turn_indicator_logit);
-#     turn_indicator_expert_logit is computed from the ground truth expert path, which
-#     never exists on the vehicle. The node02 lineage weighted those 1.0/1.0, i.e. half
-#     the gradient came from an input distribution that does not occur at deployment.
-#     It is held at 1.0/1.0 here so that the only variable is the architecture; the
-#     weight sweep is a follow-up on whichever architecture wins.
+#   * the generated/expert loss blend is GONE, not tuned. The open question was whether
+#     supervising on the ground-truth path (which never exists on the vehicle) mistrains
+#     the head. The answer is that it does not matter: the head reaches the same answer
+#     from either input on ~97% of samples, and where they differ the expert branch is
+#     the cleaner target. A weight sweep would have been sweeping a duplicate.
 #
 # The A/B this launcher runs is ARCHITECTURE, selected by SOURCE_REPO:
 #   CONTROL  legacy pin (pre-33306cc8): single-query single-layer cross-attention over a
@@ -103,8 +105,7 @@ INIT_WEIGHTS=${POLICY_CKPT_DIR}/latest.pth
 HEAD_EPOCHS=${HDP_HEAD_EPOCHS:-2}
 HEAD_WARMUP=${HDP_HEAD_WARMUP:-0}
 HEAD_LR=${HDP_HEAD_LR:-3e-4}
-HEAD_MODE=${HDP_HEAD_MODE:-deployment}
-RUN_NAME=${HDP_RUN_NAME:-hdp_turn_indicator_${HEAD_MODE}_head${HEAD_EPOCHS}ep_lr${HEAD_LR}_from_base80_e${POLICY_EPOCH}_node01_8gpu_bf16_bs512}
+RUN_NAME=${HDP_RUN_NAME:-hdp_turn_indicator_head${HEAD_EPOCHS}ep_lr${HEAD_LR}_from_base80_e${POLICY_EPOCH}_node01_8gpu_bf16_bs512}
 SAVE_DIR=${ROOT}/outputs/${RUN_NAME}
 
 # Data contract copied verbatim from the RL campaign's args.json so the head is trained
@@ -272,9 +273,6 @@ TRAIN_ARGS=(
   --exp_name "${RUN_NAME}"
   --save_dir "${SAVE_DIR}"
   --supervised_training_stage turn_indicator
-  --turn_indicator_head_training_mode "${HEAD_MODE}"
-  --turn_indicator_generated_loss_weight "${HDP_GENERATED_LOSS_WEIGHT:-1.0}"
-  --turn_indicator_expert_loss_weight "${HDP_EXPERT_LOSS_WEIGHT:-1.0}"
   --learning_rate "${HEAD_LR}"
   --warm_up_epoch "${HEAD_WARMUP}"
   --train_epochs "${HEAD_EPOCHS}"

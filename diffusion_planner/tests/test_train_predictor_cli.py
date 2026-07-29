@@ -41,7 +41,6 @@ def test_training_cli_accepts_hdp_defaults():
     assert args.policy_uses_turn_indicator_history is False
     assert args.turn_indicator_output_dim == 3
     assert args.supervised_training_stage == "policy"
-    assert args.turn_indicator_head_training_mode == "deployment"
 
 
 def test_training_cli_selects_sequential_supervised_stages():
@@ -50,15 +49,17 @@ def test_training_cli_selects_sequential_supervised_stages():
         assert args.supervised_training_stage == stage
 
 
-@pytest.mark.parametrize("mode", ("expert", "deployment"))
-def test_training_cli_selects_turn_indicator_head_mode(mode):
-    args = get_args(
-        _required_args()
-        + [
-            "--supervised_training_stage",
-            "turn_indicator",
-            "--turn_indicator_head_training_mode",
-            mode,
-        ]
-    )
-    assert args.turn_indicator_head_training_mode == mode
+@pytest.mark.parametrize(
+    "option",
+    (
+        "--turn_indicator_head_training_mode",
+        "--turn_indicator_generated_loss_weight",
+        "--turn_indicator_expert_loss_weight",
+    ),
+)
+def test_training_cli_rejects_the_removed_generated_trajectory_knobs(option):
+    """The head trains on expert trajectories only. These three flags configured a second
+    pass over the policy's own DPM trajectory, which measured as a near-duplicate gradient.
+    Fail loudly rather than silently ignoring a launcher that still passes them."""
+    with pytest.raises(SystemExit):
+        get_args(_required_args() + [option, "1.0"])

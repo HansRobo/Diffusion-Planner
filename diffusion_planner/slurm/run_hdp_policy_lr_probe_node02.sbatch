@@ -144,8 +144,6 @@ COMMON_ARGS=(
   --use_velocity_representation True
   --planning_hybrid_loss 0.01
   --hybrid_loss_window 10
-  --turn_indicator_generated_loss_weight 1.0
-  --turn_indicator_expert_loss_weight 1.0
   --coeff_road_border_loss 0.0
   --road_border_margin 0.25
   --road_border_n_interp 2

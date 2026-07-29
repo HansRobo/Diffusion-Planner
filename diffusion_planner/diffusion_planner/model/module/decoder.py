@@ -392,12 +392,10 @@ def compute_training_loss(
         generated_turn_indicator_loss * generated_quality
     ).sum() / generated_quality.sum().clamp_min(1e-6)
     expert_turn_indicator_loss = expert_turn_indicator_loss.mean()
-    generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
-    expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
-    turn_indicator_loss = (
-        generated_weight * generated_turn_indicator_loss
-        + expert_weight * expert_turn_indicator_loss
-    ) / max(generated_weight + expert_weight, 1e-12)
+    # An even mean. This is the `joint` stage, which no launcher runs; the two tunable
+    # blend weights are gone with the head's deployment mode, and every configuration on
+    # disk set them 1.0/1.0, so this reproduces all of them exactly.
+    turn_indicator_loss = (generated_turn_indicator_loss + expert_turn_indicator_loss) / 2.0
     loss["turn_indicator_loss"] = turn_indicator_loss
     loss["turn_indicator_generated_loss"] = generated_turn_indicator_loss.detach()
     loss["turn_indicator_expert_loss"] = expert_turn_indicator_loss.detach()
@@ -432,40 +430,33 @@ def compute_turn_indicator_head_training_loss(
     ego_future: torch.Tensor,
     args: Namespace,
 ) -> dict[str, torch.Tensor]:
-    """Train only the intent head on expert or deployment trajectories.
+    """Train only the intent head, on the expert trajectory.
 
-    The caller freezes and evaluates the trajectory policy. Expert mode skips diffusion
-    sampling while the new head learns clean intent features. Deployment mode uses the
-    exact final DPM trajectory and retains gradients only for the detached head calls.
+    The caller freezes and evaluates the trajectory policy. Diffusion sampling is skipped
+    entirely: the scene encoder runs once per batch and the head learns intent from the
+    clean expert future, retaining gradients only for its own detached inputs.
+
+    Also conditioning the head on the policy's own six-step DPM trajectory was measured
+    and dropped: over a full epoch the two branches agree to 0.08 accuracy points
+    (0.96982 expert vs 0.96911 generated, jobs 1540/1541), so the second branch spent the
+    sampler's wall clock on a near-duplicate gradient. Removing it does not weaken the
+    test -- validation stays deployment-faithful, scoring `turn_indicator_logit` (the head
+    on the *generated* trajectory) in `validate_model.py`, never the expert logit.
     """
     if getattr(args, "supervised_training_stage", "policy") != "turn_indicator":
         raise ValueError("head-only loss requires supervised_training_stage='turn_indicator'")
 
-    batch_size = ego_future.shape[0]
     model_ref = getattr(model, "module", model)
     decoder = model_ref.decoder
     if model_ref.training or decoder.training:
         raise RuntimeError("The frozen trajectory policy must be in eval mode for head training")
 
-    training_mode = getattr(args, "turn_indicator_head_training_mode", "deployment")
-    if training_mode not in {"expert", "deployment"}:
-        raise ValueError(f"Unsupported turn-indicator head training mode: {training_mode!r}")
     normalized_expert = normalize_ego_state(ego_future[:, None], args.state_normalizer)
     head_inputs = {
         **inputs,
         "turn_indicator_trajectories": normalized_expert,
+        "_turn_indicator_expert_only": True,
     }
-    if training_mode == "expert":
-        head_inputs["_turn_indicator_expert_only"] = True
-    else:
-        head_inputs["sampled_trajectories"] = torch.zeros(
-            batch_size,
-            1 + decoder._predicted_neighbor_num,
-            decoder._future_len,
-            4,
-            dtype=torch.float32,
-            device=ego_future.device,
-        )
     use_bf16 = getattr(args, "amp_dtype", "off") == "bf16" and ego_future.device.type == "cuda"
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16):
         _, decoder_output = model(head_inputs)
@@ -474,40 +465,17 @@ def compute_turn_indicator_head_training_loss(
     target = make_turn_indicator_gt(inputs["turn_indicators"])
     label_smoothing = float(getattr(args, "turn_indicator_label_smoothing", 0.0))
     expert_loss = nn.functional.cross_entropy(expert_logit, target, label_smoothing=label_smoothing)
-    if training_mode == "expert":
-        total = expert_loss
-        generated_logit = None
-        generated_loss = None
-    else:
-        generated_logit = decoder_output["turn_indicator_logit"].float()
-        generated_loss = nn.functional.cross_entropy(
-            generated_logit, target, label_smoothing=label_smoothing
-        )
-        generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
-        expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
-        total = (generated_weight * generated_loss + expert_weight * expert_loss) / max(
-            generated_weight + expert_weight, 1e-12
-        )
-    if not torch.isfinite(total):
+    if not torch.isfinite(expert_loss):
         raise FloatingPointError("turn-indicator head loss is non-finite")
 
     with torch.no_grad():
         expert_accuracy = (expert_logit.argmax(dim=-1) == target).float().mean()
-        accuracy = (
-            (generated_logit.argmax(dim=-1) == target).float().mean()
-            if generated_logit is not None
-            else expert_accuracy
-        )
-    result = {
-        "turn_indicator_loss": total,
+    return {
+        "turn_indicator_loss": expert_loss,
         "turn_indicator_expert_loss": expert_loss.detach(),
-        "turn_indicator_accuracy": accuracy,
+        "turn_indicator_accuracy": expert_accuracy,
         "turn_indicator_expert_accuracy": expert_accuracy,
     }
-    if generated_loss is not None:
-        result["turn_indicator_generated_loss"] = generated_loss.detach()
-        result["turn_indicator_generated_accuracy"] = accuracy
-    return result
 
 
 class Decoder(nn.Module):

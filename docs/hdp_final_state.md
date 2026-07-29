@@ -65,7 +65,8 @@ check would hand an unknown flag to argparse.
 | SFT | `run_hdp_ego_only_sft_node01.sbatch` | Asserts `BASE_RUN/latest.pth` is at the expected epoch. |
 | Staged SFT | `run_hdp_staged_sft_node02.sbatch` | Stage 1 removes signal feedback and adapts only the trajectory planner; each stage hands its `latest.pth` EMA to the next. |
 | RL post-training | `run_hdp_rl.sbatch` | Same three manifests at the same ×10 repeat as Base, re-checked by the trainer, so an RL delta is attributable to the objective and not to a distribution shift. |
-| Turn-indicator head | `run_hdp_turn_indicator_head_node01.sbatch` | Safe to run **concurrently** with RL. Per `configure_rl_trainable_parameters` (`train_hdp_rl_predictor.py:87-95`), `--rl_train_scope decoder` trains only `decoder.dit.*` and `decoder.global_route_encoder.*`, and `all` trains everything *except* `decoder.turn_indicator_predictor.*` — so the head is untouched under **both** values. Default **2 epochs** — see below. |
+| Turn-indicator head | `run_hdp_turn_indicator_head_node01.sbatch` | Safe to run **concurrently** with RL. Per `configure_rl_trainable_parameters` (`train_hdp_rl_predictor.py:87-95`), `--rl_train_scope decoder` trains only `decoder.dit.*` and `decoder.global_route_encoder.*`, and `all` trains everything *except* `decoder.turn_indicator_predictor.*` — so the head is untouched under **both** values. Default **2 epochs**, on expert trajectories only — see below. |
+| LR probe | `run_hdp_policy_lr_probe_node02.sbatch` | |
 
 ### Why the head trains for 2 epochs
 
@@ -100,7 +101,53 @@ The A/B's winner is a **4-way bundle** — `turn_indicator_head_num_queries=4`,
 `num_layers=2`, `head_dropout=0.1`, `label_smoothing=0.05` (936,960 → 2,314,240 head
 parameters). It wins every epoch on every metric, but no single flag in it is separately
 attributed.
-| LR probe | `run_hdp_policy_lr_probe_node02.sbatch` | |
+
+### Why the head trains on expert trajectories only
+
+The `turn_indicator` stage conditions the head on the clean expert future and skips
+diffusion sampling entirely: the frozen scene encoder runs once per batch and DiT is not
+evaluated. There used to be a second, selectable pass — `--turn_indicator_head_training_mode
+deployment`, plus stage 3 of the staged-SFT launcher — that ran the full six-step DPM
+sampler and added a cross-entropy on the head applied to the policy's *own* generated
+trajectory, blended with the expert term by two tunable weights. It is gone.
+
+It was removed because the two branches turned out to be near-duplicates. Both arms of the
+same A/B log the head's expert-conditioned and generated-conditioned predictions every
+step, and over a full epoch they agree to **0.08 accuracy points**:
+
+| arm, epoch 4 | expert | generated |
+| --- | --- | --- |
+| NEW — accuracy | .96982 | .96911 |
+| NEW — cross-entropy | .25102 | .25258 |
+| CONTROL — accuracy | .97117 | .96996 |
+| CONTROL — cross-entropy | .07316 | .07627 |
+
+The expert cross-entropy is the *lower* of the two in both arms, and batch accuracy is
+bit-identical in 31.8% (NEW) / 74.5% (CONTROL) of logged steps. The second pass was
+therefore buying a near-duplicate gradient at the sampler's price — six DPM evaluations
+per batch.
+
+Two properties make the removal safe rather than merely cheaper:
+
+- **Validation is still deployment-faithful.** `validate_model.py` scores
+  `outputs["turn_indicator_logit"]` — the head applied to the *generated* trajectory. It
+  never reads `turn_indicator_expert_logit`. Exposure drift between training input and
+  inference input would still appear in the metrics we read, whatever the training mode.
+- **Base reproducibility is untouched.** The two loss-weight flags were only ever read
+  inside the head's loss path; `decoder.py` early-returns for `training_stage == "policy"`,
+  which is what every base, SFT and probe launcher passes. They were inert in all of them,
+  and every configuration on disk set them 1.0/1.0 — the value the surviving `joint` blend
+  is now hard-coded to.
+
+The intended weight sweep (`…_expertw0p0` / `…_expertw1p0`) is **not** the evidence here:
+both of those runs carry `RUN_FAILED` with zero epochs and no `train_log.tsv`. The numbers
+above come from the per-branch training metrics in the A/B runs' own wandb records.
+
+Strict resume stays backward compatible. `assert_checkpoint_compatible` compares a field
+only when the current config still has it, so a checkpoint whose `args.json` carries the
+three retired keys loads without complaint (pinned by
+`test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only`). Passing the
+flags on a command line now fails loudly instead of being ignored.
 
 Entry points: `train_predictor.py`, `train_hdp_rl_predictor.py`, `valid_predictor.py`,
 `valid_predictor_closed_loop.py`.
@@ -147,6 +194,13 @@ direction: below ~9 cm the logged human's own implied steer averages 50°, so di
 there is localization noise. A `|y| > 5 mm` low-speed cap rejects 0.004% of human
 standstill rows. `compute_reward_weights(candidate_valid_mask=...)` is retained as the
 integration point and currently has no caller.
+
+`--turn_indicator_head_training_mode`, `--turn_indicator_generated_loss_weight` and
+`--turn_indicator_expert_loss_weight` are gone with the head's generated-trajectory pass
+(stage 3 of staged SFT). The two weights were dead in every base/SFT/probe launcher —
+`decoder.py` early-returns before reading them for `training_stage == "policy"` — and the
+`joint` blend that did read them is now the even mean those launchers' 1.0/1.0 already
+produced. See "Why the head trains on expert trajectories only" for the measurement.
 
 ## Reproducibility contract
 
