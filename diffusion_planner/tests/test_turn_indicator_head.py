@@ -104,9 +104,7 @@ def test_dropout_is_active_in_train_mode_only():
         b = head(traj, scene, route, proprio)
         assert not torch.allclose(a, b), "dropout had no effect in train mode"
         head.eval()
-        assert torch.equal(
-            head(traj, scene, route, proprio), head(traj, scene, route, proprio)
-        )
+        assert torch.equal(head(traj, scene, route, proprio), head(traj, scene, route, proprio))
 
 
 def test_rejects_invalid_configuration():

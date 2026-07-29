@@ -113,7 +113,6 @@ class TrainConfig:
     turn_indicator_head_num_layers: int = 1
     turn_indicator_head_dropout: float = 0.0
 
-
     # The production SFT contract is deliberately staged: ``policy`` adapts the
     # trajectory planner without evaluating or updating the auxiliary head, then
     # ``turn_indicator`` freezes the planner and trains the detached head below.
