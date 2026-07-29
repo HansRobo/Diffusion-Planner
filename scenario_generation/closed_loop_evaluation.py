@@ -115,7 +115,6 @@ class JobRunResult:
     rows: list[dict] = field(default_factory=list)
     video_mp4s: list[Path] = field(default_factory=list)
     extras: dict[str, Any] = field(default_factory=dict)
-    elapsed_sec: float = 0.0
 
 
 class ClosedLoopEvaluation(ABC):
