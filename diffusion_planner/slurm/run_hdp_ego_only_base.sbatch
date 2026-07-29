@@ -38,7 +38,7 @@ if [[ -z "${REPO}" ]]; then
   echo "FATAL: no checkout on $(hostname -s); pass HDP_REPO" >&2
   exit 10
 fi
-RUN_NAME=hdp_ego_only_route_adaln_base60_causal_red_light_v2_fullrt_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512
+RUN_NAME=${HDP_RUN_NAME:-hdp_base60_causalred_recoveryaug}
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with --export=ALL,HDP_EXPECTED_COMMIT=<commit>}
 MANIFEST_DIR=${REPO}/artifacts/causal_red_light_full_right_turn_20260715_v3_nearest_controlled
@@ -111,7 +111,7 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   exit 12
 fi
 
-log_health "Slurm job ${SLURM_JOB_ID} allocated node01 at commit ${ACTUAL_COMMIT}"
+log_health "Slurm job ${SLURM_JOB_ID} allocated $(hostname -s) at commit ${ACTUAL_COMMIT}"
 log_health "Waiting for all pre-existing GPU compute processes to clear"
 while [[ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | sed '/^[[:space:]]*$/d')" ]]; do
   GPU_PIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null | paste -sd, -)

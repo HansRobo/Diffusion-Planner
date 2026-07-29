@@ -21,8 +21,8 @@ gave 8 ranks 8 iteration orders, and no HDP-RL replay epoch could finish under D
 
 | Stage | Launcher | Notes |
 | --- | --- | --- |
-| Base (80-token, ego-only) | `run_hdp_ego_only_base80.sbatch` | Full vehicle-parameter corpus, no SFT init. Three `is_skipped`-filtered right-turn manifests, each repeated ×10. Source lists are immutable inputs; the job never rewrites them. |
-| Base (60-token, ego-only) | `run_hdp_ego_only_base.sbatch` | Causal red-light corpus with the full right-turn repeat and recovery augmentation. |
+| Base, 80 epochs | `run_hdp_ego_only_base80.sbatch` | Full vehicle-parameter corpus, no SFT init. Three `is_skipped`-filtered right-turn manifests, each repeated ×10. Source lists are immutable inputs; the job never rewrites them. |
+| Base, 60 epochs | `run_hdp_ego_only_base.sbatch` | Causal red-light corpus with the full right-turn repeat and recovery augmentation. |
 | SFT | `run_hdp_ego_only_sft.sbatch` | Asserts `BASE_RUN/latest.pth` is at the expected epoch. |
 | Staged SFT | `run_hdp_staged_sft.sbatch` | Stage 1 removes signal feedback and adapts only the trajectory planner; stage 2 trains the turn-indicator head. Each stage hands its `latest.pth` EMA to the next. |
 | RL post-training | `run_hdp_rl.sbatch` | Same three manifests at the same ×10 repeat as Base, re-checked by the trainer, so an RL delta is attributable to the objective and not to a distribution shift. |
@@ -39,6 +39,13 @@ venv and output root resolve at runtime from the allocated node's local NVMe; Sl
 stdout/stderr go to shared storage because they must exist before the job starts. Every
 launcher requires `HDP_EXPECTED_COMMIT`, which is what makes floating safe: the checkouts
 on the two nodes sit at different commits, and landing on the wrong one aborts.
+
+Run names carry only what still varies: the stage, its epoch count, and what it initialized
+from. Settled choices are identical in every launcher — ego-only, adaLN route conditioning,
+no signal feedback, `batch_size 512`, `adamw_no_decay`, `coeff_road_border_loss 0.0` — so
+naming them costs length and carries no information. `HDP_RUN_NAME` (or `HDP_POLICY_NAME` /
+`HDP_HEAD_EXPERT_NAME` for the staged launcher) overrides the default when resuming a
+directory written under an older name.
 
 ## Turn-indicator head
 
@@ -152,8 +159,8 @@ checkpoint alone. Latest packages under `outputs/model_upload/`.
 
 ## Verification
 
-`.venv/bin/python -m pytest` from the repo root → **635 passed, 15 skipped** (the
-`diffusion_planner/tests` subdirectory alone collects only 418);
+`.venv/bin/python -m pytest` from the repo root → **622 passed, 15 skipped** (the
+`diffusion_planner/tests` subdirectory alone collects only 405);
 `.venv/bin/python -m ruff check` → clean. CI runs `pre-commit`, which includes
 `ruff format` — run `pre-commit run --all-files` before pushing. Note the system `python3`
 has neither pytest nor ruff; always use `.venv/bin/python`.

@@ -20,9 +20,8 @@
 
 set -euo pipefail
 
-# Turn-indicator head training, ONE round, on the Base80 policy that the node02 RL
-# campaign is fine-tuning. Two facts make this safe to run concurrently with that
-# campaign:
+# Turn-indicator head training, ONE round, on the same frozen Base80 policy an RL run
+# fine-tunes. Two facts make this safe to run concurrently with such a run:
 #
 #   * RL trains only decoder.dit.* and decoder.global_route_encoder.* (see
 #     configure_rl_trainable_parameters); decoder.turn_indicator_predictor.* is
@@ -35,10 +34,9 @@ set -euo pipefail
 # Deliberate deltas from run_hdp_staged_sft.sbatch:
 #
 #   * enable_epdms_eval=False. In a head-only stage the trajectory policy is frozen,
-#     so the EPDMS proxy re-scores identical trajectories every epoch. Measured on the
-#     node02 lr2e5 lineage it produced 0.8605571 then 0.8605341 across two stages -- a
-#     2.3e-05 bf16 wobble -- while costing 17-21 min per validation pass out of a 65 min
-#     stage. It is pure wall-clock with no information in it.
+#     so the EPDMS proxy re-scores identical trajectories every epoch. Across two stages
+#     it moved by 2.3e-05 -- bf16 wobble, not signal -- while costing 17-21 min per
+#     validation pass out of a 65 min stage. It is pure wall-clock with nothing in it.
 #   * a single turn_indicator round. The head trains on the expert future, so DiT is not
 #     evaluated at all; validation still scores turn_indicator_logit, the head applied to
 #     the GENERATED trajectory (validate_model.py).
@@ -78,7 +76,7 @@ POLICY_EPOCH=${HDP_POLICY_EPOCH:-80}
 INIT_WEIGHTS=${POLICY_CKPT_DIR}/latest.pth
 
 # Two epochs: this frozen-policy head turns over at epoch 2 on this configuration, and
-# epochs 3+ only overfit at ~50 min of node01 each. This is a training LENGTH, not a
+# epochs 3+ only overfit at ~50 min each. This is a training LENGTH, not a
 # checkpoint selection -- the deliverable is still `latest.pth` (../../CLAUDE.md), which
 # after two epochs simply *is* the epoch-2 head. Because HEAD_WARMUP=0 makes
 # LinearWarmupConstantLR a pure MultiplicativeLR(1.0) that ignores total_epochs, and
@@ -89,7 +87,7 @@ INIT_WEIGHTS=${POLICY_CKPT_DIR}/latest.pth
 HEAD_EPOCHS=${HDP_HEAD_EPOCHS:-2}
 HEAD_WARMUP=${HDP_HEAD_WARMUP:-0}
 HEAD_LR=${HDP_HEAD_LR:-3e-4}
-RUN_NAME=${HDP_RUN_NAME:-hdp_turn_indicator_head${HEAD_EPOCHS}ep_lr${HEAD_LR}_from_base80_e${POLICY_EPOCH}_bf16_bs512}
+RUN_NAME=${HDP_RUN_NAME:-hdp_turn_head${HEAD_EPOCHS}ep_lr${HEAD_LR}_from_base80_e${POLICY_EPOCH}}
 SAVE_DIR=${ROOT}/outputs/${RUN_NAME}
 
 # Data contract copied verbatim from the RL campaign's args.json so the head is trained
@@ -131,9 +129,9 @@ if (( LOCAL_BATCH > 64 )); then
   [[ "${HDP_ALLOW_LOCAL_BATCH:-0}" == "1" ]] || exit 22
 fi
 
-# Two arms share node01 (224 CPUs, 2 TB) alongside other users' non-Slurm work, which
-# Slurm does not account for, so the per-arm request is half the node rather than all of
-# it: 96 CPUs and 450 GB each leaves headroom instead of overcommitting real memory.
+# The allocated node (224 CPUs, 2 TB) also carries other users' non-Slurm work, which
+# Slurm does not account for, so this job requests half the node rather than all of it:
+# 96 CPUs and 450 GB leaves headroom instead of overcommitting real memory.
 mkdir -p "${ROOT}" "${ROOT}/outputs" "${ROOT}/tmp" "${ROOT}/cache" "${ROOT}/wandb_cache" "${SAVE_DIR}"
 
 log() {

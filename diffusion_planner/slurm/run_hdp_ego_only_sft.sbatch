@@ -40,7 +40,7 @@ if [[ -z "${REPO}" ]]; then
 fi
 SOURCE_REPO=${HDP_SOURCE_REPO:?submit with an immutable HDP_SOURCE_REPO worktree}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT}
-RUN_NAME=hdp_ego_only_route_adaln_sft20_no_signal_feedback_3state_node01_8gpu_bf16_bs512_from_base80
+RUN_NAME=${HDP_RUN_NAME:-hdp_sft20_from_base80}
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 BASE_RUN=${HDP_SFT_BASE_RUN:?submit with HDP_SFT_BASE_RUN=<Base output directory>}
 INIT_WEIGHTS=${BASE_RUN}/latest.pth

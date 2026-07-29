@@ -2882,7 +2882,7 @@ def main() -> None:
         help="Override the map path stored in the Route pickle",
     )
     parser.add_argument("--route", type=Path, required=True, help="Path to route.pkl")
-    parser.add_argument("--model_path", type=Path, required=True, help="Path to best_model.pth")
+    parser.add_argument("--model_path", type=Path, required=True, help="Path to latest.pth")
     parser.add_argument(
         "--output_dir", type=Path, required=True, help="Directory for per-step PNGs"
     )

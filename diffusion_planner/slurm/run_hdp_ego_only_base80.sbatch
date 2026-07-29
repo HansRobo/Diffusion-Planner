@@ -44,7 +44,7 @@ if [[ -z "${REPO}" ]]; then
   echo "FATAL: no checkout on $(hostname -s); pass HDP_REPO" >&2
   exit 10
 fi
-RUN_NAME=${HDP_RUN_NAME:-hdp_ego_only_route_adaln_base80_data_robust_v1_vehicle_params_mirror_rightturnx10_node02_8gpu_bf16_bs512_no_roadborder}
+RUN_NAME=${HDP_RUN_NAME:-hdp_base80_vehparams}
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with --export=ALL,HDP_EXPECTED_COMMIT=<commit>}
 # The staged node repository must be a clean checkout of the expected commit.
@@ -101,7 +101,7 @@ on_term() {
   fi
   # Reap the trainer explicitly.  When slurmd itself is going down it never gets
   # to clean up the step, and the eight ranks survive as orphans holding the GPUs
-  # -- that is what drained node02 on 2026-07-25.
+  # -- orphaned ranks holding GPUs are how a node ends up drained.
   if [[ -n "${TRAIN_PID:-}" ]] && kill -0 "${TRAIN_PID}" 2>/dev/null; then
     log_health "terminating trainer pid ${TRAIN_PID}"
     kill -TERM "${TRAIN_PID}" 2>/dev/null || true

@@ -25,7 +25,7 @@ reactive closed-loop guarantee.
 Example (from the repository root)::
 
     ./.venv/bin/python rlvr/autoresearch/tools/diag_anchor_multimodality.py \
-        --model-path outputs/hdp_route_sft20_latest_rl_stable_current_g32_beta1_lr1e7_dp0_ema010_distance_red_ep6_node01/best_model/best_model.pth \
+        --model-path outputs/hdp_route_sft20_latest_rl_stable_current_g32_beta1_lr1e7_dp0_ema010_distance_red_ep6_node01/latest.pth \
         --scene-ids red_light_stop,moving_crossing \
         --output-dir docs/t4_rl_assets/t4_multimodality \
         --reward-config docs/t4_rl_assets/t4_hdp_reward_config.json \
@@ -38,7 +38,7 @@ For the ordinary original-DP checkpoint used by this proposal, use the
 explicit delegation path instead of the HDP anchor ABI::
 
     ./.venv/bin/python rlvr/autoresearch/tools/diag_anchor_multimodality.py \
-        --original-dp-awr --model-path /tmp/t4_v5_original_dp/model/best_model.pth \
+        --original-dp-awr --model-path /path/to/original_dp_run/latest.pth \
         --scene-ids red_light_stop,moving_crossing,stopped_leader,tight_right_turn \
         --output-dir docs/t4_conference_assets/awr_colleague_hdp_aug \
         --hdp-trajectory-augmentation --gif
@@ -73,7 +73,7 @@ from docs import generate_t4_scene_reward_visualizations as scene_viz  # noqa: E
 
 DEFAULT_MODEL = ROOT / (
     "outputs/hdp_route_sft20_latest_rl_stable_current_g32_beta1_lr1e7_dp0_"
-    "ema010_distance_red_ep6_node01/best_model/best_model.pth"
+    "ema010_distance_red_ep6_node01/latest.pth"
 )
 DEFAULT_REWARD_CONFIG = ROOT / "docs/t4_rl_assets/t4_hdp_reward_config.json"
 DEFAULT_OUTPUT = ROOT / "docs/t4_rl_assets/t4_multimodality"

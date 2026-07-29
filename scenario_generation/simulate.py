@@ -8,7 +8,7 @@ At each timestep:
 
 Usage:
     python -m scenario_generation.simulate \
-        --model_path /path/to/best_model.pth \
+        --model_path /path/to/latest.pth \
         --npz /path/to/scene.npz \
         --output_dir /path/to/output \
         --steps 80
@@ -1043,7 +1043,7 @@ def run_simulation(
 
 def main():
     parser = argparse.ArgumentParser(description="Closed-loop simulation with Diffusion-Planner")
-    parser.add_argument("--model_path", type=Path, required=True, help="Path to best_model.pth")
+    parser.add_argument("--model_path", type=Path, required=True, help="Path to latest.pth")
     parser.add_argument("--npz", type=Path, required=True, help="NPZ scene file")
     parser.add_argument(
         "--output_dir", type=Path, required=True, help="Output directory for images"

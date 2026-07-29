@@ -9,7 +9,7 @@ Usage:
         --config scenario_generation/configs/example.json \
         --map_path /path/to/lanelet2_map.osm \
         --output_dir /path/to/output \
-        [--model_path /path/to/best_model.pth]
+        [--model_path /path/to/latest.pth]
 """
 
 from __future__ import annotations

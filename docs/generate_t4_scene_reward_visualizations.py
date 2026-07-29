@@ -37,11 +37,11 @@ ASSET_DIR = ROOT / "docs" / "t4_rl_assets"
 ASSET_DIR.mkdir(parents=True, exist_ok=True)
 SOURCE_ARGS = ROOT / (
     "outputs/hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsmask_allveh_x10_"
-    "node01_8gpu_bf16_bs512_from_base20/best_epdms_model/args.json"
+    "node01_8gpu_bf16_bs512_from_base20/args.json"
 )
 RL_ARGS = ROOT / (
     "outputs/hdp_route_sft20_latest_rl_stable_current_g32_beta1_lr1e7_dp0_"
-    "ema010_distance_red_ep6_node01/best_model/args.json"
+    "ema010_distance_red_ep6_node01/args.json"
 )
 
 SCENES = [
@@ -995,7 +995,7 @@ def _actual_model_candidates(
     # These checkpoints predate the configurable 21-frame ego window.
     cfg.ego_history_frames = 6
     device = torch.device(cfg.device)
-    checkpoint = RL_ARGS.parent / "best_model.pth"
+    checkpoint = RL_ARGS.parent / "latest.pth"
     model = Diffusion_Planner(cfg).to(device).eval()
     state_package = torch.load(checkpoint, map_location="cpu", weights_only=True)
     state = state_package.get("ema_state_dict", state_package.get("model", state_package))
@@ -1248,13 +1248,13 @@ def main():
                 records[scene["id"]]["candidate_source"] = (
                     "structured_counterfactual_reward_probe_plus_actual_rl_checkpoint_samples"
                 )
-                records[scene["id"]]["model_checkpoint"] = str(RL_ARGS.parent / "best_model.pth")
+                records[scene["id"]]["model_checkpoint"] = str(RL_ARGS.parent / "latest.pth")
                 records[scene["id"]]["model_sample_count"] = int(args_cli.model_generations)
                 records[scene["id"]]["candidates"] = scene["rows"]
             model_status.update(
                 {
                     "success": True,
-                    "checkpoint": str(RL_ARGS.parent / "best_model.pth"),
+                    "checkpoint": str(RL_ARGS.parent / "latest.pth"),
                     "scene_ids": [scene["id"] for scene in model_scenes],
                     "generations": int(args_cli.model_generations),
                     "steps": int(args_cli.model_steps),
@@ -1267,7 +1267,7 @@ def main():
                 {
                     "error_type": type(exc).__name__,
                     "error": str(exc),
-                    "checkpoint": str(RL_ARGS.parent / "best_model.pth"),
+                    "checkpoint": str(RL_ARGS.parent / "latest.pth"),
                 }
             )
             print("actual RL checkpoint sampling failed:", repr(exc), flush=True)

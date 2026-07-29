@@ -27,7 +27,7 @@ EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?set HDP_EXPECTED_COMMIT}
 BASE_RUN=${HDP_BASE_RUN:?set HDP_BASE_RUN}
 VALID_PROBE=${HDP_VALID_PROBE:?set HDP_VALID_PROBE}
 EXTRA_ROOT=${HDP_EXTRA_ROOT:?set HDP_EXTRA_ROOT}
-ROOT=${HDP_OUTPUT_ROOT:-/mnt/nvme/Diffusion-Planner-hdp-lr-sweep-20260721}
+ROOT=${HDP_OUTPUT_ROOT:-${SOURCE_REPO}}
 PYTHON=${SOURCE_REPO}/.venv/bin/python
 TRAIN_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260707_vehicle_params_with_mirror/path_list_train_concatenated.json
 EXTRA_1=${EXTRA_ROOT}/path_list_train_unprotected_right_turn_is_skipped_filtered.json
@@ -159,7 +159,7 @@ for index in "${!LR_VALUES[@]}"; do
   lr=${LR_VALUES[$index]}
   tag=${lr//-/m}
   tag=${tag//./p}
-  name=hdp_no_signal_policy_lr_probe_${tag}_base72_step6_node02_8gpu_bf16_bs512
+  name=hdp_lr_probe_${tag}_from_e72
   save_dir=${ROOT}/outputs/${name}
   mkdir -p "${save_dir}"
   echo "[$(date '+%F %T %Z')] starting ${name}"
