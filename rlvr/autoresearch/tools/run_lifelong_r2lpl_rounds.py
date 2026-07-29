@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -13,6 +14,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 _CONFIG_REQUIRED = {
@@ -79,6 +81,26 @@ def _first_non_null(*values: Any) -> Any:
         if value is not None:
             return value
     return None
+
+
+def _required_replay_capacity(replay: dict[str, Any]) -> int:
+    """Replay capacity must be sized per campaign — there is no sane default.
+
+    Capacity caps the CARRY-OVER memory between rounds (this round's repaired
+    scenes always train regardless); a too-small value silently evicts earlier
+    rounds' corrections. Rule of thumb: >= 2-3x the expected repaired scenes
+    per round — hundreds for local corpora, thousands+ for server-scale.
+    """
+    capacity = replay.get("capacity")
+    if capacity is None:
+        raise ValueError(
+            "replay_memory.capacity is required (no default): size it to the campaign "
+            "(>= 2-3x expected repaired scenes per round)"
+        )
+    capacity = int(capacity)
+    if capacity < 1:
+        raise ValueError(f"replay_memory.capacity must be >= 1, got {capacity}")
+    return capacity
 
 
 def _workflow_count_rear_end_collisions(judgement: dict[str, Any]) -> bool:
@@ -227,6 +249,8 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             "workflow training.anchor is present but empty; remove the section or "
             "fill in scene_list/ratio"
         )
+    if "guards" in workflow and not workflow["guards"]:
+        raise ValueError("workflow guards is present but empty; remove the section or fill it in")
 
     scene_list = _contract_scene_list(contract)
     chunk_manifest = _first_non_null(
@@ -306,6 +330,10 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "device": str(_first_non_null(repair.get("device"), "cuda")),
         "use_route_cl_guidance": bool(repair.get("use_route_cl_guidance", True)),
     }
+    if repair.get("prototypes_path"):
+        repair_cfg["prototypes_path"] = str(repair["prototypes_path"])
+    if repair.get("enable_depart_morph"):
+        repair_cfg["enable_depart_morph"] = bool(repair["enable_depart_morph"])
     missing_repair = [k for k in ("ego_shape", "min_margin") if not repair_cfg.get(k)]
     if missing_repair:
         raise ValueError(
@@ -400,11 +428,16 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "epochs_per_round": int(_first_non_null(rounds.get("epochs_per_round"), 1)),
         "model_path": str(contract["model_path"]),
         "val_scenes": str(val_scenes),
+        "training_normal_scene_list": (
+            str(training_section["normal_scene_list"])
+            if training_section.get("normal_scene_list")
+            else None
+        ),
         "reward_config": str(reward_config),
         "threshold_config": str(threshold_config),
         "credit_window_config": str(credit_window_config),
         "replay_memory": {
-            "capacity": int(_first_non_null(replay.get("capacity"), 200)),
+            "capacity": _required_replay_capacity(replay),
             "alpha": float(_first_non_null(replay.get("alpha"), 0.5)),
             "beta": float(_first_non_null(replay.get("beta"), 0.5)),
             "arc_bin_m": float(_first_non_null(replay.get("arc_bin_m"), 25.0)),
@@ -414,6 +447,14 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         # make "anchor key present but empty" (a misconfiguration the validator
         # rejects) indistinguishable from "no anchor".
         **({"anchor": dict(training_section["anchor"])} if training_section.get("anchor") else {}),
+        # Same present-but-empty rule as anchor (rejected above), so a set
+        # guards key here is always non-empty. "_"-prefixed comment keys are
+        # stripped so the runtime config carries only real knobs.
+        **(
+            {"guards": _strip_comment_keys(dict(workflow["guards"]))}
+            if workflow.get("guards")
+            else {}
+        ),
         "training_config": str(training_source)
         if isinstance(training_source, (str, os.PathLike))
         else training_source,
@@ -444,6 +485,10 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         ),
         "validate_on_repaired_targets": bool(workflow.get("validate_on_repaired_targets", False)),
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
+        "realized_reward": bool(workflow.get("realized_reward", False)),
+        "final_round_mining": bool(
+            workflow.get("final_round_mining", workflow.get("realized_reward", False))
+        ),
         "perception_mining": perception_mining,
         "repair_refresh_every_epochs": int(
             _first_non_null(
@@ -490,6 +535,7 @@ def _load_config(path: Path) -> dict[str, Any]:
     if missing:
         raise ValueError(f"{path} is missing required fields: {missing}")
     _validate_output_dir(cfg["output_dir"])
+    _required_replay_capacity(dict(cfg.get("replay_memory") or {}))
     mining = dict(cfg.get("perception_mining") or {})
     _validate_mining_tool(mining)
     if not _has_mining_source(cfg):
@@ -859,6 +905,11 @@ def _perception_mining_cmd(
     if bool(cfg.get("count_rear_end_collisions", False)):
         # Keep realized-event mining rear-end-consistent with the repair side.
         cmd.append("--count_rear_end_collisions")
+    if bool(cfg.get("realized_reward", False)) or bool(mining.get("realized_reward", False)):
+        # Compute the realized closed-loop reward on the driven trajectory in the
+        # same rollout (no extra sim, no disk save/reload) and write it to the
+        # mining summary. The reward reflects the checkpoint THIS mine ran with.
+        cmd.append("--realized_reward")
     return cmd, danger_save_dir
 
 
@@ -1017,6 +1068,142 @@ def _anchor_slice_paths(
     return picked
 
 
+def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
+    """Homogenize ``neighbor_agents_future`` to the 4-col training schema.
+
+    Repaired/replay scenes carry 4-col ``[x, y, cos, sin]`` neighbor futures
+    while raw logged anchor scenes carry 3-col ``[x, y, heading]``. Each format
+    trains fine alone, but torch's default collate cannot stack a mixed batch
+    (``[320, 80, 3]`` vs ``[320, 80, 4]``). Convert the 3-col scenes to 4-col
+    copies under ``out_dir`` with the canonical converter (zero padding rows
+    stay zero, so the trainer's validity mask is preserved); 4-col scenes pass
+    through by original path.
+    """
+    from planner_metrics.scene_format import future_to_4col as _future_to_4col
+
+    out: list[str] = []
+    for path in paths:
+        src = Path(path)
+        with np.load(src) as loaded:
+            future = loaded["neighbor_agents_future"]
+            if future.shape[-1] == 4:
+                out.append(str(src))
+                continue
+            if future.shape[-1] != 3:
+                raise ValueError(
+                    f"{src}: neighbor_agents_future has {future.shape[-1]} channels; "
+                    "expected 3 [x, y, heading] or 4 [x, y, cos, sin]"
+                )
+            data = dict(loaded)
+        data["neighbor_agents_future"] = _future_to_4col(future)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Anchor pools may mix source dirs with colliding basenames — prefix
+        # with a stable hash of the source path.
+        digest = hashlib.sha1(str(src).encode()).hexdigest()[:10]
+        dst = out_dir / f"{digest}_{src.name}"
+        np.savez_compressed(dst, **data)
+        out.append(str(dst))
+    return out
+
+
+def _validate_normal_scene_list_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on normal_scene_list misconfiguration, not after mining.
+
+    training.normal_scene_list is only wired into the ranked-SFT backend (the
+    base_sft counterpart is training.anchor), and the prob/normal split it
+    enables requires explicit n_prob_scenes / n_normal_scenes in the training
+    config — run_experiment raises otherwise, but only at the train phase,
+    after the expensive mine + repair phases. n_prob_scenes also caps how many
+    repaired scenes train, so it must be sized >= the expected repaired count
+    per round or repairs are silently subsampled.
+    """
+    normal_list = cfg.get("training_normal_scene_list")
+    if not normal_list:
+        return
+    backend = str(cfg.get("training_backend", "base_sft"))
+    if backend == "base_sft":
+        raise ValueError(
+            "training.normal_scene_list is only wired into the ranked-SFT backend; "
+            "for base_sft use training.anchor instead"
+        )
+    if not Path(normal_list).exists():
+        raise ValueError(f"training.normal_scene_list does not exist: {normal_list}")
+    try:
+        entries = json.loads(Path(normal_list).read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"training.normal_scene_list is not valid JSON: {normal_list}") from exc
+    if not isinstance(entries, list) or not entries or not all(isinstance(e, str) for e in entries):
+        raise ValueError(
+            f"training.normal_scene_list must be a non-empty JSON list of scene "
+            f"paths: {normal_list}"
+        )
+    missing_scenes = [e for e in entries if not Path(e).exists()]
+    if missing_scenes:
+        preview = ", ".join(missing_scenes[:3])
+        raise ValueError(
+            f"training.normal_scene_list references {len(missing_scenes)}/{len(entries)} "
+            f"missing scene files (first: {preview}); a broken entry would otherwise "
+            "only fail in the 4-col conversion after the mine+repair phases"
+        )
+    payload = _training_config_payload(cfg["training_config"])
+    missing = [k for k in ("n_prob_scenes", "n_normal_scenes") if k not in payload]
+    if missing:
+        raise ValueError(
+            "training.normal_scene_list enables the prob/normal split, which requires "
+            f"explicit {missing} in the training config (n_prob_scenes must be >= the "
+            "expected repaired scenes per round — smaller values silently subsample "
+            "the repairs)"
+        )
+    n_prob = payload["n_prob_scenes"]
+    n_normal = payload["n_normal_scenes"]
+    if not isinstance(n_prob, int) or n_prob < 1:
+        raise ValueError(f"n_prob_scenes must be a positive integer, got {n_prob!r}")
+    if not isinstance(n_normal, int) or n_normal < 0:
+        raise ValueError(f"n_normal_scenes must be a non-negative integer, got {n_normal!r}")
+
+
+def _rsft_scene_args(
+    cfg: dict[str, Any],
+    *,
+    repaired_paths: list[str],
+    repaired_list_json: Path,
+    rdir: Path,
+    round_idx: int,
+) -> list[str]:
+    """Scene args for the ranked-SFT training call of one round.
+
+    With training.normal_scene_list the round trains a prob/normal split
+    (repaired = prob, real normals = normal) so curated rounds can mix real
+    scenes; without it, the legacy combined-list path is kept. The normal
+    scenes are homogenized to 4-col neighbor futures (raw logged scenes may
+    carry 3-col ones, and a mixed batch cannot collate — same incompatibility
+    as the base_sft anchor slice) into a per-round resolved list.
+    """
+    normal_list = cfg.get("training_normal_scene_list")
+    if not normal_list:
+        return ["--train_scenes", str(repaired_list_json)]
+    n_prob = _training_config_payload(cfg["training_config"])["n_prob_scenes"]
+    if n_prob < len(repaired_paths):
+        raise ValueError(
+            f"[round {round_idx}] n_prob_scenes={n_prob} < {len(repaired_paths)} "
+            "repaired scenes: run_experiment would silently subsample the "
+            "repairs (min(n_prob, len(prob)) sampling). Raise n_prob_scenes to "
+            "cover the largest expected repaired count per round."
+        )
+    normal_paths = _ensure_4col_neighbor_futures(
+        [str(p) for p in _read_json_list(Path(normal_list))],
+        rdir / "normal_scenes_4col",
+    )
+    resolved_normals = rdir / "normal_scenes_resolved.json"
+    resolved_normals.write_text(json.dumps(normal_paths, indent=2))
+    return [
+        "--prob_scenes",
+        str(repaired_list_json),
+        "--normal_scenes",
+        str(resolved_normals),
+    ]
+
+
 def _validate_anchor_config(cfg: dict[str, Any]) -> None:
     """Fail at STARTUP on anchor misconfiguration, not hours into round 1.
 
@@ -1065,6 +1252,410 @@ def _validate_anchor_config(cfg: dict[str, Any]) -> None:
             raise ValueError(f"training.anchor.{key} does not exist: {path}")
         if not _read_json_list(path):
             raise ValueError(f"training.anchor.{key} is empty: {path}")
+
+
+_GUARD_KEYS = {
+    "frozen_chunk_manifest",
+    "patience_benchmark",
+    "patience_stop_speed",
+    "closed_loop_npz_root",
+    "closed_loop",
+}
+_GUARD_CLOSED_LOOP_KEYS = {
+    "seg_len",
+    "replan_interval",
+    "draw_every",
+    "near_miss_thresh",
+    "search_radius",
+    "warmup_steps",
+    "unstick_after",
+    "unstick_advance_m",
+    "fps",
+}
+
+
+def _validate_repair_generation_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on repair-generation misconfiguration, not mid-round.
+
+    Runs for BOTH config paths (workflow contract and direct config). Checks
+    are slot-derived, not name-derived: any variant containing anchor-mode
+    slots needs a prototype library, and K must cover det + every fixed slot —
+    otherwise the failure surfaces only at repair time, after a full mining
+    phase.
+    """
+    from rlvr.generation_variants import get_variant
+
+    repair_cfg = dict(cfg.get("repair_config") or {})
+    # None / empty mean "not set" — don't turn null into the literal "None".
+    variant_value = repair_cfg.get("variant")
+    if variant_value is None or not str(variant_value).strip():
+        return
+    variant_name = str(variant_value)
+    variant = get_variant(variant_name)  # unknown variant names raise here
+    if any("anchor" in slot for slot in variant.cl_spd_configs) and not repair_cfg.get(
+        "prototypes_path"
+    ):
+        raise ValueError(
+            f"repair variant {variant_name!r} has anchor-mode slots and requires "
+            "prototypes_path (build with rlvr.autoresearch.tools.build_path_prototypes)"
+        )
+    min_k = 1 + len(variant.cl_spd_configs) + len(variant.noise_configs)
+    k = int(repair_cfg.get("K", 8))
+    if str(repair_cfg.get("generation_mode", "")) == "guided_variant" and k < min_k:
+        raise ValueError(
+            f"repair variant {variant_name!r} needs K >= {min_k} "
+            f"(det + {min_k - 1} fixed slots), got K={k}"
+        )
+
+
+def _validate_guards_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on guard misconfiguration, not after a full round.
+
+    ``guards`` drives the post-round guard phase — REPORT-ONLY evaluation:
+    frozen-chunk event-rate mining (the cheap closed-loop metric), the
+    open-loop patience onset eval, and the optional closed-loop probe. Guards
+    never take checkpoint decisions; select checkpoints from the per-round
+    tables (see the README's selection recipe).
+    """
+    guards = cfg.get("guards")
+    policy = str(cfg.get("checkpoint_policy", "latest"))
+    if policy == "composite":
+        raise ValueError(
+            "the 'composite' checkpoint selection rule "
+            "(rounds.checkpoint_selection_rule in workflow configs, checkpoint_policy "
+            "in direct configs) was removed: automatic reject/rollback never recovered "
+            "a round (retries just re-roll the same distribution). Guards are "
+            "report-only — use 'latest' and select checkpoints from the per-round "
+            "guard tables / selection_report.json"
+        )
+    if "guards" in cfg and not guards:
+        raise ValueError("config has an empty 'guards' section; remove it or fill it in")
+    if guards is None:
+        return
+    # "_"-prefixed keys are JSON comments (template convention) — ignored here
+    # and stripped from the runtime config at contract-parse time.
+    unknown = sorted(k for k in set(guards) - _GUARD_KEYS if not k.startswith("_"))
+    if unknown:
+        raise ValueError(f"guards has unknown keys {unknown}; allowed: {sorted(_GUARD_KEYS)}")
+    for key in ("frozen_chunk_manifest", "closed_loop_npz_root"):
+        value = guards.get(key)
+        if value is not None and not Path(value).exists():
+            raise ValueError(f"guards.{key} does not exist: {value}")
+    manifest = guards.get("frozen_chunk_manifest")
+    if manifest is not None and not _read_jsonl(Path(manifest)):
+        # An empty frozen set yields all-zero event counts — a metric that
+        # can only mislead. Reject it up front.
+        raise ValueError(f"guards.frozen_chunk_manifest is empty: {manifest}")
+    benchmark = guards.get("patience_benchmark")
+    if benchmark is not None:
+        path = Path(benchmark)
+        if not path.exists():
+            raise ValueError(f"guards.patience_benchmark does not exist: {path}")
+        if not _read_json_list(path):
+            raise ValueError(f"guards.patience_benchmark is empty: {path}")
+    stop_speed = guards.get("patience_stop_speed")
+    if stop_speed is not None and float(stop_speed) <= 0.0:
+        raise ValueError(f"guards.patience_stop_speed must be > 0: {stop_speed}")
+    closed_loop = guards.get("closed_loop")
+    if closed_loop is not None:
+        if guards.get("closed_loop_npz_root") is None:
+            raise ValueError("guards.closed_loop knobs are set without closed_loop_npz_root")
+        unknown_cl = sorted(
+            k for k in set(closed_loop) - _GUARD_CLOSED_LOOP_KEYS if not k.startswith("_")
+        )
+        if unknown_cl:
+            raise ValueError(
+                f"guards.closed_loop has unknown keys {unknown_cl}; "
+                f"allowed: {sorted(_GUARD_CLOSED_LOOP_KEYS)}"
+            )
+
+
+def _strip_comment_keys(section: dict[str, Any]) -> dict[str, Any]:
+    """Drop "_"-prefixed JSON-comment keys (template convention), recursively."""
+    return {
+        k: _strip_comment_keys(v) if isinstance(v, dict) else v
+        for k, v in section.items()
+        if not k.startswith("_")
+    }
+
+
+def _guard_mining_cmd(
+    cfg: dict[str, Any], model_path: Path, gdir: Path, *, gpu_id: int | None
+) -> list[str]:
+    """Mining command for the FROZEN held-out chunk set (guard event rates).
+
+    The frozen set must be mined in full every round so event counts are
+    comparable — campaign-side subsampling/sharding knobs are neutralized.
+    """
+    overrides: dict[str, Any] = {
+        "chunk_manifest": str(cfg["guards"]["frozen_chunk_manifest"]),
+        "num_shards": None,
+        "shard_index": None,
+        "sample_fraction": None,
+        "sample_seed": None,
+        "max_chunks": None,
+        # A stale windows dir from an aborted guard run must fail loudly, even
+        # when the campaign mining config allows reusing its own out dirs.
+        "allow_existing_out_dir": False,
+    }
+    if gpu_id is not None:
+        overrides["device"] = "cuda"
+    cmd, _ = _perception_mining_cmd(
+        cfg,
+        model_path,
+        gdir,
+        out_dir=gdir / "windows",
+        out_jsonl=gdir / "credit_windows.jsonl",
+        segments_jsonl=gdir / "segments.jsonl",
+        summary_json=gdir / "summary.json",
+        mining_overrides=overrides,
+    )
+    return cmd
+
+
+def _patience_onset_cmd(cfg: dict[str, Any], model_path: Path, gdir: Path) -> list[str]:
+    guards = cfg["guards"]
+    return [
+        sys.executable,
+        "-m",
+        "rlvr.autoresearch.tools.eval_patience_onset",
+        "--model",
+        str(model_path),
+        "--scenes",
+        str(guards["patience_benchmark"]),
+        "--out",
+        str(gdir / "patience_onset.json"),
+        "--stop_speed",
+        str(guards.get("patience_stop_speed", 0.5)),
+    ]
+
+
+def _closed_loop_probe_cmd(cfg: dict[str, Any], model_path: Path) -> list[str]:
+    guards = cfg["guards"]
+    # The probe subprocess runs with cwd=diffusion_planner/, so relative paths
+    # that validated against the orchestrator's cwd must be resolved here.
+    cmd = [
+        sys.executable,
+        "-m",
+        "valid_predictor_closed_loop",
+        "--model_path",
+        str(Path(model_path).resolve()),
+        "--npz_root",
+        str(Path(guards["closed_loop_npz_root"]).resolve()),
+    ]
+    # Direct configs may carry template-style "_comment*" keys (the workflow
+    # path strips them at parse time) — never forward those as CLI flags.
+    for key, value in sorted(_strip_comment_keys(dict(guards.get("closed_loop") or {})).items()):
+        cmd.extend([f"--{key}", str(value)])
+    return cmd
+
+
+def _expert_disagreement_events_by_reason(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Per-branch event counts for the conflict detector's three directions.
+
+    The aggregate expert_disagreement count hides which way the model fails:
+    ``expert_wait_model_forward`` = fail-to-stop, ``model_lagging_expert`` =
+    fail-to-take-off, ``model_ahead_expert`` = over-eager progress. Repair
+    training can move failures between branches (observed: a campaign flipped
+    from stop-dominant to lagging-dominant), so the split must be visible in
+    the per-round tables.
+    """
+    events_by_reason: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        if str(row.get("label")) != "expert_disagreement":
+            continue
+        reason = str(row.get("expert_disagreement_reason") or "unknown")
+        # Same event keying as _derive_event_counts_from_credit_rows, so the
+        # per-reason counts sum to the label's aggregate count.
+        event_key = str(
+            row.get("event_key") or row.get("window_dir") or Path(str(row["scene_path"])).parent
+        )
+        events_by_reason[reason].add(event_key)
+    return {reason: len(events) for reason, events in sorted(events_by_reason.items())}
+
+
+def _guard_mining_metrics(gdir: Path) -> dict[str, Any]:
+    rows = _read_jsonl(gdir / "credit_windows.jsonl")
+    summary = _load_json(gdir / "summary.json")
+    event_counts = _derive_event_counts_from_credit_rows(rows)
+    simulated = int(summary.get("simulated_chunks", 0))
+    if simulated <= 0:
+        # Zero simulated chunks means zero events for every label — a metric
+        # that can only mislead. The frozen set is broken (moved NPZs, bad
+        # manifest), not clean.
+        raise RuntimeError(
+            f"guard mining simulated 0 chunks (see {gdir / 'summary.json'}); "
+            "the frozen chunk set is not usable as a metric"
+        )
+    total_events = int(sum(event_counts.values()))
+    metrics: dict[str, Any] = {
+        "event_count_by_label": event_counts,
+        "total_events": total_events,
+        "simulated_chunks": simulated,
+        "events_per_1000_chunks": round(1000.0 * total_events / simulated, 3),
+    }
+    by_reason = _expert_disagreement_events_by_reason(rows)
+    if by_reason:
+        metrics["expert_disagreement_by_reason"] = by_reason
+    return metrics
+
+
+def _selection_report(
+    reference: dict[str, Any], candidates: list[tuple[int, dict[str, Any]]]
+) -> dict[str, Any]:
+    """ADVISORY checkpoint recommendation from the per-round guard tables.
+
+    Applies the README selection recipe mechanically: a round is vetoed on any
+    per-label frozen-event increase vs the reference row, any
+    ``fail_to_stop`` / ``fail_to_resume`` increase, or an incomparable frozen
+    denominator; eligible rounds are ranked by total frozen events (then
+    ``fail_to_resume``, then ``fail_to_stop``). This REPORTS a recommendation —
+    it never feeds a checkpoint back into training, and the standard val L2
+    leg of the recipe still has to be run on the finalists by hand.
+    """
+    ref_mining = reference.get("frozen_chunk_mining") or {}
+    ref_events = dict(ref_mining.get("event_count_by_label") or {})
+    ref_onset = reference.get("patience_onset") or {}
+    rows: list[dict[str, Any]] = []
+    for round_idx, metrics in candidates:
+        row: dict[str, Any] = {
+            "round_idx": round_idx,
+            "checkpoint": metrics.get("model_path"),
+            "veto_reasons": [],
+        }
+        mining = metrics.get("frozen_chunk_mining")
+        onset = metrics.get("patience_onset")
+        if mining and ref_mining:
+            if int(mining.get("simulated_chunks", -1)) != int(
+                ref_mining.get("simulated_chunks", -1)
+            ):
+                row["veto_reasons"].append("frozen denominator differs from reference")
+            events = dict(mining.get("event_count_by_label") or {})
+            for label in sorted(set(events) | set(ref_events)):
+                cur, ref = int(events.get(label, 0)), int(ref_events.get(label, 0))
+                if cur > ref:
+                    row["veto_reasons"].append(f"{label} events {ref} -> {cur}")
+            row["total_frozen_events"] = int(mining.get("total_events", 0))
+        else:
+            row["veto_reasons"].append("no frozen-chunk metrics")
+        if onset and ref_onset:
+            for key in ("fail_to_stop", "fail_to_resume"):
+                cur, ref = int(onset.get(key, 0)), int(ref_onset.get(key, 0))
+                if cur > ref:
+                    row["veto_reasons"].append(f"{key} {ref} -> {cur}")
+            row["fail_to_stop"] = int(onset.get("fail_to_stop", 0))
+            row["fail_to_resume"] = int(onset.get("fail_to_resume", 0))
+        row["eligible"] = not row["veto_reasons"]
+        rows.append(row)
+    eligible = [r for r in rows if r["eligible"] and "total_frozen_events" in r]
+    eligible.sort(
+        key=lambda r: (
+            r["total_frozen_events"],
+            r.get("fail_to_resume", 0),
+            r.get("fail_to_stop", 0),
+            r["round_idx"],
+        )
+    )
+    recommended = eligible[0] if eligible else None
+    return {
+        "note": (
+            "Advisory only — apply the standard val L2 eval to the finalists before "
+            "shipping; the runner does not compute L2."
+        ),
+        "reference_checkpoint": reference.get("model_path"),
+        "rounds": rows,
+        "recommended": (
+            {"round_idx": recommended["round_idx"], "checkpoint": recommended["checkpoint"]}
+            if recommended
+            else None
+        ),
+    }
+
+
+def _run_guard_phase(
+    cfg: dict[str, Any],
+    model_path: Path,
+    gdir: Path,
+    gpu_ids: list[int],
+    *,
+    tag: str,
+) -> dict[str, Any]:
+    """Report-only guard evaluation of ``model_path``; returns the metrics dict.
+
+    Guards never take checkpoint decisions — they produce the per-round tables
+    (frozen-chunk event rates, patience onset, optional closed-loop probe)
+    that checkpoint selection reads.
+    """
+    guards = cfg["guards"]
+    gdir.mkdir(parents=True, exist_ok=True)
+    gpu_id = gpu_ids[0] if gpu_ids else None
+    # The closed-loop probe runs with a different cwd and writes next to the
+    # checkpoint — a relative checkpoint path would break both.
+    model_path = Path(model_path).resolve()
+    metrics: dict[str, Any] = {"tag": tag, "model_path": str(model_path)}
+
+    if guards.get("frozen_chunk_manifest"):
+        cmd = _guard_mining_cmd(cfg, model_path, gdir, gpu_id=gpu_id)
+        _run(cmd, gdir / "guard_mine.log", env=_env_for_gpu(gpu_id))
+        metrics["frozen_chunk_mining"] = _guard_mining_metrics(gdir)
+
+    if guards.get("patience_benchmark"):
+        cmd = _patience_onset_cmd(cfg, model_path, gdir)
+        _run(cmd, gdir / "patience_onset.log", env=_env_for_gpu(gpu_id))
+        report = _load_json(gdir / "patience_onset.json")
+        onset = dict(report["summary"]["model"])
+        onset["n_scenes"] = report["summary"]["n_scenes"]
+        metrics["patience_onset"] = onset
+
+    if guards.get("closed_loop_npz_root"):
+        metrics["closed_loop"] = _run_closed_loop_probe(cfg, model_path, gdir, gpu_id)
+
+    _write_json(gdir / "guard_metrics.json", metrics)
+    return metrics
+
+
+def _run_closed_loop_probe(
+    cfg: dict[str, Any], model_path: Path, gdir: Path, gpu_id: int | None
+) -> dict[str, Any]:
+    """Run ``valid_predictor_closed_loop`` on the guard NPZ root (report-only).
+
+    The tool writes to ``<ckpt dir>/closed_loop/<timestamp>/`` and offers no
+    --out_dir (diffusion_planner/ is not editable), so the new run dir is
+    detected by diffing and its summary copied into the guard dir. It also
+    requires args.json adjacent to the checkpoint; when the trainer did not
+    leave one there, the nearest one is copied in.
+    """
+    import shutil
+
+    adjacent_args = model_path.parent / "args.json"
+    if not adjacent_args.exists():
+        shutil.copy2(_args_json_for_model(model_path), adjacent_args)
+    cl_root = model_path.parent / "closed_loop"
+    before = set(cl_root.glob("*")) if cl_root.exists() else set()
+    repo_root = Path(__file__).resolve().parents[3]
+    _run(
+        _closed_loop_probe_cmd(cfg, model_path),
+        gdir / "closed_loop_probe.log",
+        cwd=repo_root / "diffusion_planner",
+        env=_env_for_gpu(gpu_id),
+    )
+    new_dirs = sorted(set(cl_root.glob("*")) - before, key=lambda p: p.name)
+    if not new_dirs:
+        raise RuntimeError(f"closed-loop probe produced no new run dir under {cl_root}")
+    summary_path = new_dirs[-1] / "summary.json"
+    summary = _load_json(summary_path)
+    shutil.copy2(summary_path, gdir / "closed_loop_summary.json")
+    keep = (
+        "n_segments",
+        "object",
+        "road_border",
+        "red_light_violation",
+        "strong_brake",
+        "reproducer",
+    )
+    picked = {k: summary[k] for k in keep if k in summary}
+    picked["run_dir"] = str(new_dirs[-1])
+    return picked
 
 
 def _repair_cmd(
@@ -1142,6 +1733,8 @@ def _repair_cmd(
         cmd.extend(["--expert_morph_max_jerk", str(repair_cfg["expert_morph_max_jerk"])])
     if "expert_stop_anchor" in repair_cfg:
         cmd.extend(["--expert_stop_anchor", str(repair_cfg["expert_stop_anchor"])])
+    if bool(repair_cfg.get("enable_depart_morph", False)):
+        cmd.append("--enable_depart_morph")
     if repair_cfg.get("prototypes_path"):
         cmd.extend(["--prototypes_path", str(repair_cfg["prototypes_path"])])
     if cfg.get("repair_labels"):
@@ -1314,17 +1907,30 @@ def _base_train_invocation(
     if train_scene_count < 1:
         raise ValueError(f"{train_list} is empty; refusing to launch base training")
 
+    # Device-aware launch: on CPU (device=cpu, e.g. a CPU-only host or --device cpu) a
+    # torch.distributed.run / DDP launch drives NCCL + torch.cuda.set_device and dies
+    # with "No CUDA GPUs are available". Launch train_predictor directly with ddp=false
+    # there; keep the DDP launcher on CUDA.
+    device = str(overrides.get("device", base_args.get("device", "cuda"))).lower()
+    cpu = device == "cpu"
+    launcher = (
+        [sys.executable, "-m", "train_predictor"]
+        if cpu
+        else [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--nproc_per_node",
+            str(nproc),
+            "--standalone",
+            "--master_port",
+            master_port,
+            "-m",
+            "train_predictor",
+        ]
+    )
     cmd = [
-        sys.executable,
-        "-m",
-        "torch.distributed.run",
-        "--nproc_per_node",
-        str(nproc),
-        "--standalone",
-        "--master_port",
-        master_port,
-        "-m",
-        "train_predictor",
+        *launcher,
         "--exp_name",
         f"r2lpl_round_{round_idx:03d}",
         "--save_dir",
@@ -1357,6 +1963,7 @@ def _base_train_invocation(
         "seed",
         "device",
         "use_ema",
+        "ema_decay",
         "use_ego_history",
         "ego_history_dropout_rate",
         "use_turn_indicators",
@@ -1408,7 +2015,7 @@ def _base_train_invocation(
     )
     merged = {k: base_args[k] for k in passthrough if k in base_args}
     merged.update(overrides)
-    merged["ddp"] = True
+    merged["ddp"] = not cpu  # single-process on CPU; DDP on CUDA
     merged["port"] = master_port
     if "batch_size" in merged:
         merged["batch_size"] = max(1, min(int(merged["batch_size"]), train_scene_count))
@@ -1485,6 +2092,18 @@ def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
         "elapsed_sec": max((float(s.get("elapsed_sec", 0.0)) for s in summaries), default=0.0),
         "shards": summaries,
     }
+    # Realized closed-loop reward: pose-count-weighted mean across shards (each shard
+    # scored a disjoint set of poses). Without this the sharded/multi-GPU summary would
+    # drop the field the single-GPU path emits.
+    rr_poses = sum(int(s.get("realized_cl_reward_poses", 0)) for s in summaries)
+    if rr_poses > 0:
+        rr_sum = sum(
+            float(s.get("realized_cl_reward", 0.0)) * int(s.get("realized_cl_reward_poses", 0))
+            for s in summaries
+            if s.get("realized_cl_reward") is not None
+        )
+        aggregate["realized_cl_reward"] = rr_sum / rr_poses
+        aggregate["realized_cl_reward_poses"] = rr_poses
     _write_json(output, aggregate)
     return aggregate
 
@@ -1909,6 +2528,22 @@ def _print_dry_run_plan(
                 f"CUDA_VISIBLE_DEVICES={gpu_id} {' '.join(repair_cmd)}"
             )
     print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
+    guards = cfg.get("guards")
+    if guards:
+        gdir = rdir / "guards"
+        gpu_id = gpu_ids[0] if gpu_ids else None
+        if guards.get("frozen_chunk_manifest"):
+            cmd = _guard_mining_cmd(cfg, model_path, gdir, gpu_id=gpu_id)
+            print(f"[round {round_idx}] guard_mine: {' '.join(cmd)}")
+        if guards.get("patience_benchmark"):
+            print(
+                f"[round {round_idx}] guard_onset: {' '.join(_patience_onset_cmd(cfg, model_path, gdir))}"
+            )
+        if guards.get("closed_loop_npz_root"):
+            print(
+                f"[round {round_idx}] guard_closed_loop: "
+                f"{' '.join(_closed_loop_probe_cmd(cfg, model_path))}"
+            )
     anchor_cfg = cfg.get("anchor")
     if anchor_cfg:
         print(
@@ -1942,6 +2577,7 @@ def _summarize_round(
     train_input_list: Path,
     phase_times: dict[str, float],
     next_model_path: Path,
+    guard_metrics: dict[str, Any] | None = None,
 ) -> None:
     mining_summary = _load_json(rdir / "perception_direct_summary.json")
     credit_rows = _read_jsonl(rdir / "credit_windows.jsonl")
@@ -1990,6 +2626,14 @@ def _summarize_round(
         "phase_peak_memory_mb": {k: None for k in sorted(phase_times)},
         "next_model_path": str(next_model_path),
     }
+    # Propagate the realized closed-loop reward (from this round's mining, i.e. the
+    # incoming checkpoint) into the round summary so workflow_summary.json can compare
+    # per-round checkpoints. None when --realized_reward was not enabled.
+    if mining_summary.get("realized_cl_reward") is not None:
+        summary["realized_cl_reward"] = mining_summary["realized_cl_reward"]
+        summary["realized_cl_reward_poses"] = int(mining_summary.get("realized_cl_reward_poses", 0))
+    if guard_metrics is not None:
+        summary["guards"] = guard_metrics
     _write_json(rdir / "round_summary.json", summary)
 
 
@@ -2007,12 +2651,45 @@ def main() -> None:
 
     cfg = _load_config(args.config) if args.config else _config_from_cli_args(args)
     _validate_anchor_config(cfg)
+    _validate_guards_config(cfg)
+    _validate_repair_generation_config(cfg)
+    _validate_normal_scene_list_config(cfg)
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
     model_path = Path(cfg["model_path"])
     previous_memory: Path | None = None
     checkpoint_policy = str(cfg.get("checkpoint_policy", "latest"))
+    guards_cfg = cfg.get("guards")
+    reference_metrics: dict[str, Any] | None = None
+    if guards_cfg:
+        # Round-0 reference row of the per-round guard tables: the starting
+        # model measured on the same frozen assets as every round checkpoint.
+        gdir0 = out / "guard_round_000"
+        gpu_ids0 = _gpu_ids_from_config(cfg)
+        if args.dry_run:
+            gpu_id0 = gpu_ids0[0] if gpu_ids0 else None
+            # Every probe is individually optional — gate each print exactly
+            # like _run_guard_phase gates the execution.
+            if guards_cfg.get("frozen_chunk_manifest"):
+                print(
+                    "[round 0] guard_mine: "
+                    f"{' '.join(_guard_mining_cmd(cfg, model_path, gdir0, gpu_id=gpu_id0))}"
+                )
+            if guards_cfg.get("patience_benchmark"):
+                print(
+                    "[round 0] guard_onset: "
+                    f"{' '.join(_patience_onset_cmd(cfg, model_path, gdir0))}"
+                )
+            if guards_cfg.get("closed_loop_npz_root"):
+                print(
+                    "[round 0] guard_closed_loop: "
+                    f"{' '.join(_closed_loop_probe_cmd(cfg, model_path))}"
+                )
+        else:
+            print("[round 0] guards on the starting model (reference row)")
+            reference_metrics = _run_guard_phase(cfg, model_path, gdir0, gpu_ids0, tag="round_000")
+    guard_rows: list[tuple[int, dict[str, Any]]] = []
     training_backend = str(cfg.get("training_backend", "base_sft"))
     if training_backend != "base_sft" and not isinstance(
         cfg["training_config"], (str, os.PathLike)
@@ -2047,7 +2724,7 @@ def main() -> None:
             "--out_replay_scenes",
             str(replay_json),
             "--capacity",
-            str(mem_cfg.get("capacity", 200)),
+            str(_required_replay_capacity(mem_cfg)),
             "--alpha",
             str(mem_cfg.get("alpha", 0.5)),
             "--beta",
@@ -2082,6 +2759,7 @@ def main() -> None:
             cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
         )
         if anchor_paths:
+            anchor_paths = _ensure_4col_neighbor_futures(anchor_paths, rdir / "anchor_scenes_4col")
             print(
                 f"[round {round_idx}] anchor slice: {len(anchor_paths)} real scenes "
                 f"({len(repaired_paths)} repaired + {len(replay_paths)} replay)"
@@ -2106,6 +2784,13 @@ def main() -> None:
             round_training_config = _round_training_config(
                 cfg, rdir=rdir, anchor_model_path=model_path
             )
+            scene_args = _rsft_scene_args(
+                cfg,
+                repaired_paths=repaired_paths,
+                repaired_list_json=repaired_list_json,
+                rdir=rdir,
+                round_idx=round_idx,
+            )
             train_cmd = [
                 sys.executable,
                 "-m",
@@ -2116,8 +2801,7 @@ def main() -> None:
                 name,
                 "--model_path",
                 str(model_path),
-                "--train_scenes",
-                str(repaired_list_json),
+                *scene_args,
                 "--replay_scenes",
                 str(replay_json),
                 "--val_scenes",
@@ -2133,6 +2817,16 @@ def main() -> None:
             run_dir = _latest_run_dir(out, name)
             model_path = _checkpoint_for(run_dir, checkpoint_policy, model_path)
 
+        guard_metrics: dict[str, Any] | None = None
+        if guards_cfg:
+            print(f"[round {round_idx}] guards")
+            t0 = time.perf_counter()
+            guard_metrics = _run_guard_phase(
+                cfg, model_path, rdir / "guards", gpu_ids, tag=f"round_{round_idx:03d}"
+            )
+            phase_times["guards"] = time.perf_counter() - t0
+            guard_rows.append((round_idx, guard_metrics))
+
         previous_memory = memory_json
         _summarize_round(
             cfg=cfg,
@@ -2142,12 +2836,60 @@ def main() -> None:
             train_input_list=train_input_list,
             phase_times=phase_times,
             next_model_path=model_path,
+            guard_metrics=guard_metrics,
         )
         workflow_summary.append(_load_json(rdir / "round_summary.json"))
         print(f"[round {round_idx}] next model: {model_path}")
 
+    # Final-round mining: one closed-loop mine with the LAST round's checkpoint so
+    # its residual problem-scene count AND realized closed-loop reward are recorded
+    # (every earlier round's final model is already covered by the next round's mine;
+    # the last round has no successor, so it needs this pass). Enabled whenever
+    # realized-reward is on, or explicitly via final_round_mining.
+    want_final_mine = bool(cfg.get("final_round_mining", cfg.get("realized_reward", False)))
+    final_round = None
+    if not args.dry_run and want_final_mine and not str(cfg.get("training_backend")) == "none":
+        fdir = out / "final_round_mine"
+        fdir.mkdir(parents=True, exist_ok=True)
+        print(f"[final] mining residual problems + realized reward with {model_path}")
+        _run_mining_phase(cfg, model_path, fdir, _gpu_ids_from_config(cfg))
+        fsum = _load_json(fdir / "perception_direct_summary.json")
+        # Represent the final-round mine in the operator-facing summary contract, not
+        # just stdout: the last round's checkpoint has no successor mine, so this is the
+        # only place its residual counts + realized reward appear.
+        final_round = {
+            "checkpoint": str(model_path),
+            "residual_credit_rows": int(fsum.get("credit_rows", 0)),
+            "residual_event_count_by_label": _derive_event_counts_from_credit_rows(
+                _read_jsonl(fdir / "credit_windows.jsonl")
+            ),
+            "realized_cl_reward": fsum.get("realized_cl_reward"),
+            "realized_cl_reward_poses": int(fsum.get("realized_cl_reward_poses", 0)),
+        }
+        print(
+            f"[final] residual credit_rows={final_round['residual_credit_rows']} "
+            f"realized_cl_reward={final_round['realized_cl_reward']}"
+        )
+
     if not args.dry_run:
-        _write_json(out / "workflow_summary.json", {"rounds": workflow_summary})
+        workflow_out = {"rounds": workflow_summary}
+        if final_round is not None:
+            workflow_out["final_round_mine"] = final_round
+        _write_json(out / "workflow_summary.json", workflow_out)
+        if reference_metrics is not None and guard_rows:
+            report = _selection_report(reference_metrics, guard_rows)
+            _write_json(out / "selection_report.json", report)
+            rec = report["recommended"]
+            if rec is None:
+                print(
+                    "[selection] no round improved without a regression — "
+                    "keep the starting model (see selection_report.json)"
+                )
+            else:
+                print(
+                    f"[selection] recommended checkpoint (advisory, L2 pending): "
+                    f"round {rec['round_idx']} -> {rec['checkpoint']}"
+                )
 
 
 if __name__ == "__main__":

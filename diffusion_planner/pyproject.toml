@@ -9,7 +9,7 @@ dependencies = [
     "natsort",
     "numpy>=1.26,<2",
     "onnx",
-    "onnxruntime",
+    "onnxruntime-gpu",
     "onnxsim",
     "opencv-python",
     "pandas>=2,<3",
@@ -23,6 +23,7 @@ dependencies = [
     "torch",
     "tqdm",
     "wandb",
+    "zstandard>=0.25.0",
 ]
 
 [build-system]

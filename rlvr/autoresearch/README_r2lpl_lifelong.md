@@ -126,6 +126,8 @@ Each round runs:
 2. `build_repaired_targets`
 3. `lifelong_replay_memory`
 4. training through either base SFT or `rlvr.autoresearch.run_experiment`
+5. optional post-round guard evaluation on the produced checkpoint (see
+   "Post-Round Guard Evaluation")
 
 The miner writes `credit_windows.jsonl` directly. Repair generation consumes that
 file and writes accepted repaired scenes. Replay memory merges current accepted
@@ -136,7 +138,29 @@ replay list, plus — when `training.anchor` is configured — a seeded slice of
 real logged normal scenes at `ratio` : 1 (anchor : focus), optionally stratified
 with a waits/interaction list; training on repaired+replay only leaves the model
 unanchored off the failure distribution (base_sft backend only; the runner
-rejects the anchor with any other backend).
+rejects the anchor with any other backend). The ranked-SFT backend's
+counterpart is `training.normal_scene_list`: it switches the round's training
+call to the prob/normal split (repaired scenes = prob, the listed real normal
+scenes = normal), with the mix controlled by the training config's explicit
+`n_prob_scenes` / `n_normal_scenes`. The list must be a non-empty JSON list of
+paths (validated at startup), the normal scenes are homogenized to 4-col
+neighbor futures into `r2lpl_round_NNN/normal_scenes_4col/` with a per-round
+resolved list (same collate incompatibility as the anchor slice below), and
+each round fails before training if `n_prob_scenes` is below that round's
+repaired-scene count — `run_experiment`'s `min(n_prob, len(prob))` sampling
+would otherwise silently drop repairs.
+Raw logged anchor scenes carry
+3-col `[x, y, heading]` neighbor futures while repaired scenes are 4-col
+`[x, y, cos, sin]` — a mixed batch cannot collate, so the runner rewrites the
+3-col anchors as 4-col copies under `r2lpl_round_NNN/anchor_scenes_4col/`
+(zero padding rows preserved) before the union.
+
+For the base_sft backend, `training.train_args.ema_decay` is forwarded to
+`train_predictor --ema_decay`. The default 0.999 (time constant ~1000 steps)
+is tuned for long SFT runs and is too slow for a short per-round fine-tune —
+the EMA checkpoint barely absorbs the round's behavior change. Set it so the
+round's step count spans a few time constants (e.g. 0.996 for rounds of
+several hundred to ~1000 steps).
 
 At a high level:
 
@@ -149,6 +173,83 @@ scene list or chunk manifest
   -> replay memory update
   -> configured SFT training backend
 ```
+
+## Post-Round Guard Evaluation (report-only)
+
+Configured through a top-level `guards` section in the workflow config (see
+`rlvr/configs/r2lpl_workflow_template.json`). Guards are EVALUATION ONLY:
+they never take checkpoint decisions. When present, they run once on the
+starting model (`guard_round_000/`, the reference row) and again on each
+round's checkpoint, written to `r2lpl_round_NNN/guards/guard_metrics.json` and
+folded into `round_summary.json`. Guards run on the first configured GPU.
+
+(An automatic accept/reject gate with rollback existed briefly and was
+removed: rejection retries only re-roll the same data distribution — across
+six rejected rounds of E2E testing not one retry recovered — and a hard gate
+inherits every flaw of its thresholds. Evaluate, then select.)
+
+Three probes, each optional:
+
+- **Frozen-chunk event rates** (`frozen_chunk_manifest`): the round checkpoint
+  is re-mined with `mine_direct_reproducer_chunks` on a FROZEN held-out chunk
+  manifest (build it once with `--plan_only`; never train on it — the frozen
+  chunks' scenes must also stay out of the anchor pool). **Construction rule:
+  plan chunks over the FULL pool once, then hold out a seeded RANDOM sample of
+  chunks and give the campaign the complement manifest.** Never hold out a
+  contiguous tail — that evaluates a single stretch of a single route and
+  biases the metric toward whatever that stretch contains (observed: a tail
+  frozen set measured 5 road-border events where a route-spread sample of the
+  same corpus measures 2). With a multi-bag corpus, stratify the sample across
+  bags/routes. Reported as events per label plus events-per-1000-chunks. This
+  is the cheap closed-loop metric: campaign subsampling/sharding knobs are
+  neutralized so counts are comparable across rounds (`simulated_chunks` must
+  stay constant — a drift means the frozen assets or mining knobs changed
+  mid-campaign and the numbers are no longer comparable). Guard mining writes
+  its danger-window NPZs under `guards/windows/` every round as a byproduct;
+  only `credit_windows.jsonl` + `summary.json` feed the metrics.
+- **Open-loop patience onset** (`patience_benchmark`): `eval_patience_onset`
+  on a frozen waits benchmark (`build_patience_benchmark`); reports BOTH
+  directions — `fail_to_stop` / stop-onset delay (pro-motion drift) and
+  `fail_to_resume` / resume-onset delay (over-conservatism: GT resumes after
+  its stop, the plan parks) — plus over-distance. `patience_stop_speed`
+  (default 0.5 m/s) sets the stop threshold. The frozen-chunk metric reports
+  the same two directions in closed loop via
+  `expert_disagreement_by_reason` (`expert_wait_model_forward` = fail-to-stop,
+  `model_lagging_expert` = fail-to-take-off, `model_ahead_expert` =
+  over-eager) — repair training can move failures between branches, so watch
+  the split, not just the aggregate.
+- **Closed-loop probe** (`closed_loop_npz_root`, optional and expensive):
+  `valid_predictor_closed_loop` on route NPZ frames — the creep detector the
+  open-loop onset eval is blind to. Knobs go under `guards.closed_loop`
+  (`seg_len`, `replan_interval`, `draw_every`, ...); PNG rendering dominates
+  its cost, so raise `draw_every` for cheap runs.
+
+These metrics exist because the standard open-loop eval (global L2, avoidance
+sc-dist) is blind to exactly the regressions they measure — held-out
+closed-loop event rates and patience onset — so they complement, not replace,
+the standard eval.
+
+**Checkpoint selection recipe** (from the per-round tables — the runner also
+applies steps 1–2 mechanically at campaign end, except step 1's L2 and
+over-distance clauses, and writes an ADVISORY `selection_report.json` naming
+the recommended checkpoint with per-round veto reasons; it never feeds a
+checkpoint back into training, and the L2 leg still has to be run on the
+finalists):
+
+1. *Eligibility filter — regressions are vetoes, not scores:* standard val L2
+   within +5% of base (the L2 column comes from the standard eval protocol run
+   on the finalist checkpoints — the runner does not compute it), patience
+   held in BOTH directions (`fail_to_stop` and `fail_to_resume` not above the
+   reference,
+   `over_distance_mean_m` within ~0.5 m of GT-length), no per-label event
+   increase on the frozen chunks vs the reference row.
+2. *Selection among eligible checkpoints:* largest drop in total frozen-chunk
+   event rate (the campaign objective).
+3. *Tie-break:* best L2.
+
+Guard mining fails loudly on a non-empty `guard_round_000/windows/`, so give
+each campaign a FRESH `output_dir` (same non-resumable semantics as the round
+dirs).
 
 ## Detection Semantics — closed-loop (realized) vs open-loop (predicted)
 
@@ -335,6 +436,25 @@ plan's initial speed, so neither can demand the impossible. Pick `recorded` when
 campaign metric is stop-location fidelity (patience repair); pick `pseudo` when
 repair coverage matters more than where exactly the target stops.
 
+### Depart morph (`repair_generation.enable_depart_morph`)
+
+The re-timing morph covers the fail-to-stop direction only: it re-times the
+model's OWN plan, and a parked plan contains no road ahead to accelerate
+along, so `model_lagging_expert` (fail-to-take-off) scenes die as
+`not_synthesized:infeasible_deceleration`. With
+`repair_generation.enable_depart_morph: true` (CLI `--enable_depart_morph`,
+off by default) a second scripted candidate is synthesized for those scenes
+from the EXPERT path's geometry: a cubic Hermite bridge connects the ego pose
+to the expert path, and the same accel/jerk-limited tracker chases the
+expert's progress schedule starting at the ego (no jump at t=0; full catch-up
+within the horizon is not required). Synthesis rejects undrivable inputs
+(non-finite samples, reversing/doubling-back geometry, near-pure-lateral
+expert offsets, expert behind or beyond the bridge range) with a diagnostic
+stage. It competes through the same gates/reward as every candidate;
+per-row diagnostics land in `expert_depart_added/selected/diag` and
+`depart_outcome` (`selected` / `lost_selection` / `gate_rejected` /
+`not_synthesized:<stage>` — same taxonomy as `morph_outcome`).
+
 ## Outputs
 
 Per round, the workflow reports:
@@ -350,6 +470,7 @@ Per round, the workflow reports:
 - discarded unrepaired scene count
 - replay memory size
 - final training scene count
+- guard metrics, when guards are configured
 
 Artifacts belong under the SSD `auto_research` area, not inside the git repo.
 
