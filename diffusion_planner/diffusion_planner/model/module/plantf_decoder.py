@@ -18,6 +18,7 @@ classification, with DP's lat/lon/heading decomposition, velocity/timestep
 weighting and penalty losses reused as-is.
 """
 
+import math
 from argparse import Namespace
 
 import torch
@@ -36,8 +37,43 @@ from diffusion_planner.model.module.turn_indicator import TurnIndicatorNetwork
 from diffusion_planner.utils.normalizer import StateNormalizer
 
 
+def bezier_basis(num_control_points: int, num_steps: int) -> torch.Tensor:
+    """Bernstein/Bezier basis matrix ``[num_control_points, num_steps]``.
+
+    Column ``t`` holds the Bernstein weights ``B_{i,n}(t)`` (n = num_control_points-1)
+    at ``t = τ/(num_steps-1)`` for control point ``i``. A trajectory is the
+    basis-weighted control points: ``traj[t] = Σ_i ctrl_i · basis[i, t]``.
+
+    Why: the default head is a flat ``Linear(hidden, T*C)`` — the ``T`` output
+    steps are independent linear read-outs with no temporal inductive bias, so
+    temporal coherence is only bolted on afterwards (velocity-rep cumsum +
+    smoothness penalty). A Bezier expansion makes time an explicit axis: the
+    partition-of-unity (``Σ_i basis[i,t]=1``) and convex-hull property bound the
+    curve by its control points, so it is *structurally* smooth (C∞) instead of
+    smooth-by-penalty. See docs/plantf_head_development_notes.md §9.
+    """
+    n = num_control_points - 1
+    t = torch.linspace(0.0, 1.0, num_steps)  # [T]
+    i = torch.arange(num_control_points)  # [n+1]
+    coeff = torch.tensor([math.comb(n, int(k)) for k in i], dtype=torch.float32)  # [n+1]
+    # B_i(t) = C(n,i) t^i (1-t)^(n-i); torch defines 0**0 = 1 so the endpoints
+    # (t=0 for i=0, t=1 for i=n) evaluate to 1 as required.
+    t_pow = t[None, :] ** i[:, None].float()  # [n+1, T]
+    tm_pow = (1.0 - t)[None, :] ** (n - i)[:, None].float()  # [n+1, T]
+    return coeff[:, None] * t_pow * tm_pow  # [n+1, T]
+
+
 class PlanTFTrajectoryHead(nn.Module):
-    """Multi-modal ego trajectory head (planTF ``TrajectoryDecoder``)."""
+    """Multi-modal ego trajectory head (planTF ``TrajectoryDecoder``).
+
+    When ``num_control_points > 0`` the head regresses that many Bezier control
+    points per mode/channel instead of ``future_steps`` free waypoints, then
+    expands them through a fixed :func:`bezier_basis` matrix. This injects a
+    temporal inductive bias (structural smoothness) the flat head lacks while
+    keeping the exact same ``[B, K, future_steps, out_channels]`` output contract
+    (velocity integration, WTA, zero-init, ONNX unchanged). The basis matrix is a
+    constant buffer, so ONNX export is just an extra matmul — no recurrence.
+    """
 
     def __init__(
         self,
@@ -47,6 +83,7 @@ class PlanTFTrajectoryHead(nn.Module):
         out_channels=4,
         ego_state_dim=0,
         predict_scale=False,
+        num_control_points=0,
     ):
         super().__init__()
 
@@ -56,6 +93,16 @@ class PlanTFTrajectoryHead(nn.Module):
         self.out_channels = out_channels
         self.ego_state_dim = ego_state_dim
         self.predict_scale = predict_scale
+        # Temporal basis: 0 disables (flat per-step head); >0 regresses that many
+        # Bezier control points and expands them to future_steps via the buffer.
+        self.num_control_points = num_control_points
+        if num_control_points > 0:
+            self.register_buffer(
+                "basis", bezier_basis(num_control_points, future_steps), persistent=False
+            )
+            self._out_steps = num_control_points
+        else:
+            self._out_steps = future_steps
 
         # Inject the current ego motion state (vx, vy, ax, ay, steering, yaw_rate)
         # into the ego token before branching into modes. Unlike the diffusion
@@ -78,7 +125,7 @@ class PlanTFTrajectoryHead(nn.Module):
             nn.Linear(embed_dim, hidden),
             nn.LayerNorm(hidden),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden, future_steps * out_channels),
+            nn.Linear(hidden, self._out_steps * out_channels),
         )
         self.pi = nn.Sequential(
             nn.Linear(embed_dim, hidden),
@@ -93,8 +140,18 @@ class PlanTFTrajectoryHead(nn.Module):
                 nn.Linear(embed_dim, hidden),
                 nn.LayerNorm(hidden),
                 nn.ReLU(inplace=True),
-                nn.Linear(hidden, future_steps * out_channels),
+                nn.Linear(hidden, self._out_steps * out_channels),
             )
+
+    def _expand(self, flat):
+        """[B, K, _out_steps*C] -> [B, K, future_steps, C], applying the Bezier
+        basis when enabled. Zero-init of the final Linear makes control points
+        zero -> trajectory zero, identical to the flat head's zero-init prior."""
+        if self.num_control_points > 0:
+            ctrl = flat.view(-1, self.num_modes, self.num_control_points, self.out_channels)
+            # traj[t] = Σ_c ctrl[c] · basis[c, t]
+            return torch.einsum("bkcd,ct->bktd", ctrl, self.basis)
+        return flat.view(-1, self.num_modes, self.future_steps, self.out_channels)
 
     def forward(self, x, ego_state=None):
         """
@@ -111,10 +168,10 @@ class PlanTFTrajectoryHead(nn.Module):
         if self.ego_state_dim > 0 and ego_state is not None:
             x = x + self.ego_state_proj(ego_state)
         x = self.multimodal_proj(x).view(-1, self.num_modes, self.embed_dim)
-        loc = self.loc(x).view(-1, self.num_modes, self.future_steps, self.out_channels)
+        loc = self._expand(self.loc(x))
         pi = self.pi(x).squeeze(-1)
         if self.predict_scale:
-            log_scale = self.scale(x).view(-1, self.num_modes, self.future_steps, self.out_channels)
+            log_scale = self._expand(self.scale(x))
             return loc, pi, log_scale
         return loc, pi
 
@@ -223,6 +280,100 @@ class PlanTFCrossAttnHead(nn.Module):
         return loc, pi
 
 
+class PlanTFGRUHead(nn.Module):
+    """Recurrent trajectory head: a GRU unrolls the ``future_steps`` waypoints.
+
+    Same mlp-style mode formation as :class:`PlanTFTrajectoryHead` (reshape the
+    single ego token into K modes), but instead of a flat ``Linear(hidden, T*C)``
+    the per-step waypoints come from unrolling a GRU. The recurrence couples
+    adjacent steps in the *architecture* (each step's hidden state carries the
+    previous), giving the output an explicit temporal inductive bias the flat
+    head lacks. This is NON-autoregressive — the GRU is fed a per-step input
+    (learned temporal embedding + the mode context) rather than its own previous
+    xy — so it exports as a single ONNX GRU op (no output-feedback loop). Same
+    (loc, pi[, log_scale]) contract, so velocity integration / WTA / zero-init
+    are unchanged. Note: RNN heads are more deploy-fragile than mlp/basis; this
+    is an experimental toggle, not the deploy default.
+    """
+
+    def __init__(
+        self,
+        embed_dim,
+        num_modes,
+        future_steps,
+        out_channels=4,
+        ego_state_dim=0,
+        predict_scale=False,
+        gru_hidden=None,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_modes = num_modes
+        self.future_steps = future_steps
+        self.out_channels = out_channels
+        self.ego_state_dim = ego_state_dim
+        self.predict_scale = predict_scale
+        self.gru_hidden = gru_hidden or embed_dim
+
+        if ego_state_dim > 0:
+            self.ego_state_proj = nn.Sequential(
+                nn.Linear(ego_state_dim, embed_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(embed_dim, embed_dim),
+            )
+
+        self.multimodal_proj = nn.Linear(embed_dim, num_modes * embed_dim)
+        # Per-step temporal embedding: breaks the symmetry of feeding the same
+        # context every step and gives the GRU an explicit time signal.
+        self.step_emb = nn.Parameter(torch.randn(future_steps, embed_dim) * 0.02)
+        self.h0_proj = nn.Linear(embed_dim, self.gru_hidden)
+        self.gru = nn.GRU(embed_dim, self.gru_hidden, batch_first=True)
+
+        hidden = 2 * embed_dim
+        # loc/scale kept as Sequential ending in Linear so the shared zero-init
+        # (PlanTFDecoder indexes head[-1]) works uniformly across head types.
+        self.loc = nn.Sequential(nn.Linear(self.gru_hidden, out_channels))
+        self.pi = nn.Sequential(
+            nn.Linear(embed_dim, hidden),
+            nn.LayerNorm(hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, 1),
+        )
+        if predict_scale:
+            self.scale = nn.Sequential(nn.Linear(self.gru_hidden, out_channels))
+
+    def _unroll(self, modes):
+        """[B, K, D] mode embeddings -> [B, K, T, gru_hidden] GRU outputs."""
+        B = modes.shape[0]
+        m = modes.reshape(B * self.num_modes, self.embed_dim)  # [BK, D]
+        h0 = torch.tanh(self.h0_proj(m)).unsqueeze(0)  # [1, BK, H]
+        inp = self.step_emb.unsqueeze(0) + m.unsqueeze(1)  # [BK, T, D]
+        out, _ = self.gru(inp, h0)  # [BK, T, H]
+        return out.view(B, self.num_modes, self.future_steps, self.gru_hidden)
+
+    def forward(self, x, ego_state=None):
+        """
+        Args:
+            x: [B, embed_dim] ego token from the encoder.
+            ego_state: [B, ego_state_dim] normalized current ego motion state.
+
+        Returns:
+            loc: [B, num_modes, future_steps, out_channels]
+            pi:  [B, num_modes]
+            (predict_scale only) log_scale: [B, num_modes, future_steps, out_channels]
+        """
+        if self.ego_state_dim > 0 and ego_state is not None:
+            x = x + self.ego_state_proj(ego_state)
+        modes = self.multimodal_proj(x).view(-1, self.num_modes, self.embed_dim)
+        out = self._unroll(modes)
+        loc = self.loc(out)  # [B, K, T, C]
+        pi = self.pi(modes).squeeze(-1)
+        if self.predict_scale:
+            log_scale = self.scale(out)
+            return loc, pi, log_scale
+        return loc, pi
+
+
 class PlanTFDecoder(nn.Module):
     """One-shot regression decoder with the same forward contract as ``Decoder``."""
 
@@ -252,6 +403,13 @@ class PlanTFDecoder(nn.Module):
         #   modes instead of argmax(pi) (only in `forward`, not the ONNX deploy
         #   graph, which lacks route_lanes).
         self._head_type = getattr(config, "plantf_head_type", "mlp")
+        # head_type "basis": the mlp head, but the trajectory is a Bezier curve of
+        # `plantf_basis_control_points` control points expanded over time (a
+        # temporal inductive bias the flat per-step head lacks). Uses the same
+        # single-ego-token mode formation as "mlp" (keeps deploy robustness).
+        self._basis_control_points = (
+            getattr(config, "plantf_basis_control_points", 8) if self._head_type == "basis" else 0
+        )
         self._route_rerank = getattr(config, "plantf_route_rerank", False)
         self._route_rerank_topk = getattr(config, "plantf_route_rerank_topk", 3)
         self._observation_normalizer = getattr(config, "observation_normalizer", None)
@@ -270,6 +428,17 @@ class PlanTFDecoder(nn.Module):
                 num_heads=config.num_heads,
                 predict_scale=self._predict_scale,
             )
+        elif self._head_type == "gru":
+            # Recurrent head: GRU unrolls the waypoints (temporal recurrence).
+            # Experimental — more deploy-fragile than mlp/basis (RNN ONNX op).
+            self.trajectory_head = PlanTFGRUHead(
+                embed_dim=hidden_dim,
+                num_modes=self._num_modes,
+                future_steps=self._future_len,
+                out_channels=4,  # x, y, cos, sin
+                ego_state_dim=head_ego_state_dim,
+                predict_scale=self._predict_scale,
+            )
         else:
             self.trajectory_head = PlanTFTrajectoryHead(
                 embed_dim=hidden_dim,
@@ -278,6 +447,7 @@ class PlanTFDecoder(nn.Module):
                 out_channels=4,  # x, y, cos, sin
                 ego_state_dim=head_ego_state_dim,
                 predict_scale=self._predict_scale,
+                num_control_points=self._basis_control_points,
             )
         # planTF's agent_predictor, widened from (x, y) to DP's (x, y, cos, sin)
         self.neighbor_predictor = nn.Sequential(
