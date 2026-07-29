@@ -105,6 +105,17 @@ class TrainConfig:
     # joint ablation), never by policy-only Base/SFT.
     turn_indicator_generated_loss_weight: float = 1.0
     turn_indicator_expert_loss_weight: float = 1.0
+
+    # Intent-head capacity. The head is a probe on frozen policy features, so its own
+    # depth is the only capacity knob available without retraining the policy. Defaults
+    # reproduce the single-query single-layer probe.
+    turn_indicator_head_num_queries: int = 1
+    turn_indicator_head_num_layers: int = 1
+    turn_indicator_head_dropout: float = 0.0
+    # Soft target for the intent CE. Whether a human has ALREADY flipped the stalk at a
+    # given point on the approach is partly arbitrary, so a fraction of the label is
+    # irreducible noise that a hard target asks the head to fit exactly.
+    turn_indicator_label_smoothing: float = 0.0
     # The production SFT contract is deliberately staged: ``policy`` adapts the
     # trajectory planner without evaluating or updating the auxiliary head, then
     # ``turn_indicator`` freezes the planner and trains the detached head below.

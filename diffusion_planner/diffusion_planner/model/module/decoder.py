@@ -45,29 +45,69 @@ class TurnIndicatorHead(nn.Module):
         trajectory_dim: int,
         proprio_dim: int = 6,
         num_heads: int = 4,
+        num_queries: int = 1,
+        num_layers: int = 1,
+        dropout: float = 0.0,
     ):
         super().__init__()
+        if num_queries < 1:
+            raise ValueError(f"num_queries must be >= 1, got {num_queries}")
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be >= 1, got {num_layers}")
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError(f"dropout must be in [0, 1), got {dropout}")
+        self._num_queries = num_queries
+        # Every input is a frozen policy feature whose scale was fixed by the trajectory
+        # objective, not by this classifier. Normalize before reading so the head is not
+        # at the mercy of whatever magnitude the policy happened to leave behind.
+        self.scene_norm = nn.LayerNorm(hidden_dim)
+        self.route_norm = nn.LayerNorm(hidden_dim)
         self.trajectory_encoder = Mlp(
             in_features=trajectory_dim,
             hidden_features=hidden_dim,
             out_features=hidden_dim,
             act_layer=nn.GELU,
-            drop=0.0,
+            drop=dropout,
         )
         self.proprio_encoder = Mlp(
             in_features=proprio_dim,
             hidden_features=hidden_dim,
             out_features=hidden_dim,
             act_layer=nn.GELU,
-            drop=0.0,
+            drop=dropout,
         )
-        self.scene_attention = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+        # Concat-and-project instead of summing the three conditions. A sum forces
+        # trajectory, proprioception and route into one shared subspace where they can
+        # cancel; the turn intent lives in their conjunction ("this path bends left AND
+        # the route turns left here"), which a sum cannot represent.
+        self.context_proj = nn.Linear(3 * hidden_dim, hidden_dim)
+        self.query_embedding = nn.Parameter(torch.zeros(num_queries, hidden_dim))
+        nn.init.normal_(self.query_embedding, std=0.02)
+        self.attention_layers = nn.ModuleList(
+            nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout, batch_first=True)
+            for _ in range(num_layers)
+        )
+        self.attention_norms = nn.ModuleList(
+            nn.LayerNorm(hidden_dim) for _ in range(num_layers)
+        )
+        self.ffn_norms = nn.ModuleList(nn.LayerNorm(hidden_dim) for _ in range(num_layers))
+        self.ffns = nn.ModuleList(
+            Mlp(
+                in_features=hidden_dim,
+                hidden_features=2 * hidden_dim,
+                out_features=hidden_dim,
+                act_layer=nn.GELU,
+                drop=dropout,
+            )
+            for _ in range(num_layers)
+        )
+        self.readout_norm = nn.LayerNorm(hidden_dim)
         self.classifier = Mlp(
-            in_features=4 * hidden_dim,
+            in_features=(num_queries + 3) * hidden_dim,
             hidden_features=2 * hidden_dim,
             out_features=TURN_INDICATOR_OUTPUT_DIM,
             act_layer=nn.GELU,
-            drop=0.0,
+            drop=dropout,
         )
 
     def forward(
@@ -88,19 +128,40 @@ class TurnIndicatorHead(nn.Module):
         scene_tokens = scene_tokens.detach()
         route_condition = route_condition.detach()
         proprioception = proprioception.detach()
+
+        # Derive the mask BEFORE normalizing: scene_norm maps an all-zero padding row to
+        # its own bias, which is not zero, so the contract only holds on the raw tokens.
+        padding_mask = torch.all(scene_tokens == 0, dim=-1)
+        # Defensive, not a bug fix: the installed PyTorch already returns finite values
+        # for a row masked at every key, but that behaviour is a softmax-over-all--inf
+        # special case rather than a documented guarantee. Unmasking a scene-less row
+        # makes it attend uniformly over zeros and lean on the residual context path,
+        # which is well defined in any version. tests/test_turn_indicator_head.py pins it.
+        padding_mask = padding_mask & ~padding_mask.all(dim=-1, keepdim=True)
+
+        scene = self.scene_norm(scene_tokens)
+        route = self.route_norm(route_condition)
         trajectory_embedding = self.trajectory_encoder(trajectory_features)
         proprio_embedding = self.proprio_encoder(proprioception)
-        query = (trajectory_embedding + proprio_embedding + route_condition)[:, None]
-        padding_mask = torch.all(scene_tokens == 0, dim=-1)
-        scene_readout = self.scene_attention(
-            query,
-            scene_tokens,
-            scene_tokens,
-            key_padding_mask=padding_mask,
-            need_weights=False,
-        )[0][:, 0]
+        context = self.context_proj(
+            torch.cat([trajectory_embedding, proprio_embedding, route], dim=-1)
+        )
+        queries = context[:, None] + self.query_embedding[None]
+        for attention, attention_norm, ffn_norm, ffn in zip(
+            self.attention_layers, self.attention_norms, self.ffn_norms, self.ffns
+        ):
+            attended = attention(
+                attention_norm(queries),
+                scene,
+                scene,
+                key_padding_mask=padding_mask,
+                need_weights=False,
+            )[0]
+            queries = queries + attended
+            queries = queries + ffn(ffn_norm(queries))
+        readout = self.readout_norm(queries).flatten(1)
         head_input = torch.cat(
-            [scene_readout, route_condition, trajectory_embedding, proprio_embedding], dim=-1
+            [readout, route, trajectory_embedding, proprio_embedding], dim=-1
         )
         return self.classifier(head_input)
 
@@ -408,14 +469,19 @@ def compute_turn_indicator_head_training_loss(
 
     expert_logit = decoder_output["turn_indicator_expert_logit"].float()
     target = make_turn_indicator_gt(inputs["turn_indicators"])
-    expert_loss = nn.functional.cross_entropy(expert_logit, target)
+    label_smoothing = float(getattr(args, "turn_indicator_label_smoothing", 0.0))
+    expert_loss = nn.functional.cross_entropy(
+        expert_logit, target, label_smoothing=label_smoothing
+    )
     if training_mode == "expert":
         total = expert_loss
         generated_logit = None
         generated_loss = None
     else:
         generated_logit = decoder_output["turn_indicator_logit"].float()
-        generated_loss = nn.functional.cross_entropy(generated_logit, target)
+        generated_loss = nn.functional.cross_entropy(
+            generated_logit, target, label_smoothing=label_smoothing
+        )
         generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
         expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
         total = (generated_weight * generated_loss + expert_weight * expert_loss) / max(
@@ -494,6 +560,9 @@ class Decoder(nn.Module):
         self.turn_indicator_predictor = TurnIndicatorHead(
             hidden_dim=config.hidden_dim,
             trajectory_dim=self._turn_trajectory_dim,
+            num_queries=getattr(config, "turn_indicator_head_num_queries", 1),
+            num_layers=getattr(config, "turn_indicator_head_num_layers", 1),
+            dropout=getattr(config, "turn_indicator_head_dropout", 0.0),
         )
         self._state_normalizer: StateNormalizer = config.state_normalizer
         self._observation_normalizer: ObservationNormalizer = config.observation_normalizer
