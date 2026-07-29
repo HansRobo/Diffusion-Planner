@@ -87,7 +87,15 @@ def load_weights_only(path: str, model, device, *, prefer_ema: bool = False):
     removed_signal_prefix = f"{root}encoder.turn_indicator_encoder."
     head_prefix = f"{root}decoder.turn_indicator_predictor."
     removed_signal_keys = [key for key in state if key.startswith(removed_signal_prefix)]
-    head_shape_mismatch = any(
+    # The intent head is reinitialized as one unit whenever its tensor contract differs
+    # from the checkpoint's, which covers BOTH a shape change and a change in the key
+    # set. Keying off shapes alone was not enough: a head restructured at constant
+    # widths (e.g. scene_attention -> attention_layers.0 at num_queries=1) leaves every
+    # shared shape intact, so the mismatch went undetected and the load died on
+    # disallowed missing/unexpected keys instead of migrating.
+    checkpoint_head_keys = {key for key in state if key.startswith(head_prefix)}
+    model_head_keys = {key for key in model_state if key.startswith(head_prefix)}
+    head_shape_mismatch = checkpoint_head_keys != model_head_keys or any(
         key.startswith(head_prefix)
         and key in model_state
         and tuple(value.shape) != tuple(model_state[key].shape)

@@ -66,8 +66,10 @@ fi
 
 # The pinned worktree the node02 RL campaign runs from. Read-only here: job 1528 still
 # re-checks `git diff --quiet` against it, so nothing may be written inside it.
-SOURCE_REPO=${HDP_SOURCE_REPO:-/mnt/storage_rdma/workspaces/wang/hdp-rl-d848517b}
-EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:-8b0336e93a27131e22258b6e2a68a9c02486726e}
+# Pinned at the redesigned-head commit. The previous pin (hdp-rl-d848517b, commit
+# 8b0336e9) predates --turn_indicator_head_* and would reject those flags outright.
+SOURCE_REPO=${HDP_SOURCE_REPO:-/mnt/storage_rdma/workspaces/wang/hdp-head-33306cc8}
+EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:-33306cc888df3173666a2211664afb6499498b85}
 ROOT=${HDP_OUTPUT_ROOT:-/mnt/nvme/wangbin/Diffusion-Planner-hdp-turn-indicator-20260729}
 
 POLICY_CKPT_DIR=${HDP_POLICY_CKPT_DIR:-/mnt/storage_rdma/diffusion_planner/checkpoints/hdp_base80_data_robust_v1_no_roadborder_e80_latest}
@@ -229,6 +231,10 @@ TRAIN_ARGS=(
   --turn_indicator_head_training_mode "${HEAD_MODE}"
   --turn_indicator_generated_loss_weight "${HDP_GENERATED_LOSS_WEIGHT:-1.0}"
   --turn_indicator_expert_loss_weight "${HDP_EXPERT_LOSS_WEIGHT:-1.0}"
+  --turn_indicator_head_num_queries "${HDP_HEAD_NUM_QUERIES:-1}"
+  --turn_indicator_head_num_layers "${HDP_HEAD_NUM_LAYERS:-1}"
+  --turn_indicator_head_dropout "${HDP_HEAD_DROPOUT:-0.0}"
+  --turn_indicator_label_smoothing "${HDP_LABEL_SMOOTHING:-0.0}"
   --learning_rate "${HEAD_LR}"
   --warm_up_epoch "${HEAD_WARMUP}"
   --train_epochs "${HEAD_EPOCHS}"
