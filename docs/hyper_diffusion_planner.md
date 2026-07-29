@@ -2,6 +2,10 @@
 
 This document defines how this branch should be used for HDP experiments in the Tier IV Diffusion Planner codebase.
 
+For the branch/PR state, the launcher map, the checkpoint rule, what was removed and why, and
+the archive tags holding every unmerged experiment, read
+[`hdp_final_state.md`](hdp_final_state.md) first. This page is the model contract.
+
 ## Decision: HDP-only branch
 
 This branch has one model contract: ego-only HDP with normalized velocity actions,
