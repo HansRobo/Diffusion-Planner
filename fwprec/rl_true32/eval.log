@@ -1,0 +1,14 @@
+/mnt/nvme/wangbin/Diffusion-Planner-t4-main/.venv/lib/python3.10/site-packages/timm/models/layers/__init__.py:49: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+Traceback (most recent call last):
+  File "/mnt/nvme/wangbin/Diffusion-Planner-t4-main/rlvr/autoresearch/tools/eval_awr_full_distributed.py", line 392, in <module>
+    main()
+  File "/mnt/nvme/wangbin/Diffusion-Planner-t4-main/rlvr/autoresearch/tools/eval_awr_full_distributed.py", line 388, in main
+    _evaluate_rank(args)
+  File "/mnt/nvme/wangbin/Diffusion-Planner-t4-main/rlvr/autoresearch/tools/eval_awr_full_distributed.py", line 191, in _evaluate_rank
+    paths = json.loads(args.scenes.read_text())
+  File "/usr/lib/python3.10/pathlib.py", line 1134, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+  File "/usr/lib/python3.10/pathlib.py", line 1119, in open
+    return self._accessor.open(self, mode, buffering, encoding, errors,
+FileNotFoundError: [Errno 2] No such file or directory: 'fwprec/scenes_subset.json'

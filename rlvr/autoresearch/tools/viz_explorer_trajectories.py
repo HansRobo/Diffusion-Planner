@@ -14,7 +14,8 @@ Usage:
       [--lora_path /path/to/lora_dir] \
       [--n_scenes 10] \
       [--indices 0 5 10 15] \
-      [--lambda_lat 2.5] [--lambda_lon 0.25] [--guidance_scale 0.5] \
+      [--lambda_lat 2.5] [--lambda_lon 0.25] [--ramp_steps 20] \
+      [--guidance_scale 0.5] \
       [--cols 3]
 """
 
@@ -32,8 +33,6 @@ import matplotlib.transforms as mtransforms
 import numpy as np
 import torch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.model.guidance.composer import GuidanceComposer
-from diffusion_planner.model.guidance.config import GuidanceConfig, GuidanceSetConfig
 from diffusion_planner.utils.config import Config
 from matplotlib.patches import Rectangle
 
@@ -43,6 +42,7 @@ from guidance_gui.generate_samples import generate_samples
 from preference_optimization.lora_utils import load_lora_checkpoint
 from preference_optimization.utils import load_npz_data
 from rlvr.grpo_config import GRPOConfig
+from rlvr.guidance_batched import build_head_composer
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -182,9 +182,9 @@ def draw_trajectory(ax, traj, label, color, linestyle="-", zorder=10):
     )
 
 
-def draw_footprints(ax, traj, color, zorder=8):
+def draw_footprints(ax, traj, color, ego_shape, zorder=8):
     """Draw ego footprints at regular intervals along trajectory."""
-    wb, length, width = 2.75, 4.34, 1.70
+    wb, length, width = map(float, np.asarray(ego_shape).reshape(-1)[:3])
     ro = (length - wb) / 2
 
     for ts in range(5, len(traj), 10):
@@ -264,7 +264,16 @@ def main():
     )
     parser.add_argument("--lambda_lat", type=float, default=2.5, help="Lateral guidance lambda")
     parser.add_argument(
-        "--lambda_lon", type=float, default=0.25, help="Longitudinal guidance lambda"
+        "--lambda_lon",
+        type=float,
+        default=0.25,
+        help="Maximum relative speed change (0.25 means +/-25%%)",
+    )
+    parser.add_argument(
+        "--ramp_steps",
+        type=int,
+        default=20,
+        help="Quintic lateral-onset length for Original-DP absolute trajectories",
     )
     parser.add_argument("--guidance_scale", type=float, default=0.5, help="Global guidance scale")
     parser.add_argument("--cols", type=int, default=3, help="Columns in grid layout")
@@ -335,26 +344,25 @@ def main():
                 dtype=torch.float32,
             )
 
-            # 4) Guided trajectory using explorer's etas
-            guidance_fns = [
-                GuidanceConfig(
-                    name="lateral",
-                    enabled=True,
-                    scale=1.0,
-                    params={"lambda_lat": args.lambda_lat, "eta_lat": eta_lat},
-                ),
-                GuidanceConfig(
-                    name="longitudinal",
-                    enabled=True,
-                    scale=1.0,
-                    params={"lambda_lon": args.lambda_lon, "eta_lon": eta_lon},
-                ),
-            ]
-            set_cfg = GuidanceSetConfig(
-                functions=guidance_fns,
-                global_scale=args.guidance_scale,
+            # 4) Guided trajectory using Original-DP-safe semantics.
+            #
+            # Do not use the legacy ``longitudinal`` energy here: its target is
+            # lambda_lon * eta_lon * v_ref, so eta_lon=0 incorrectly requests
+            # zero speed. ``speed_stretch_batched`` is neutral at eta=0 and
+            # maps +/-1 to (1 +/- lambda_lon) times the reference displacement.
+            # The v2 lateral energy uses a quintic onset instead of requesting
+            # the full offset at the first 0.1 s waypoint.
+            composer = build_head_composer(
+                {"lateral": eta_lat, "stretch": eta_lon},
+                lambda_lat=args.lambda_lat,
+                lat_scale=1.0,
+                lambda_spd=args.lambda_lon,
+                stretch_scale=1.0,
+                guidance_scale=args.guidance_scale,
+                envelope="v2",
+                ramp_steps=args.ramp_steps,
+                fast=False,
             )
-            composer = GuidanceComposer(set_cfg)
 
             traj_guided = generate_samples(
                 model,
@@ -373,6 +381,7 @@ def main():
                     "name": name,
                     "traj_ref": traj_ref,
                     "traj_guided": traj_guided,
+                    "ego_shape": data["ego_shape"][0].detach().cpu().numpy(),
                     "eta_lat": eta_lat,
                     "eta_lon": eta_lon,
                 }
@@ -410,10 +419,7 @@ def main():
         ax.plot(gt[::3, 0], gt[::3, 1], "go", ms=3, alpha=0.7, mew=0, zorder=6, label="GT")
 
         # Ego box at origin
-        wb, length, width = 2.75, 4.34, 1.70
-        es = npz.get("ego_shape", None)
-        if es is not None and len(es) >= 3:
-            wb, length, width = float(es[0]), float(es[1]), float(es[2])
+        wb, length, width = map(float, res["ego_shape"][:3])
         ro = (length - wb) / 2
         ax.add_patch(
             Rectangle(
@@ -430,11 +436,11 @@ def main():
 
         # Reference trajectory (blue)
         draw_trajectory(ax, traj_ref, "Reference", "blue", "-", zorder=10)
-        draw_footprints(ax, traj_ref, "blue", zorder=8)
+        draw_footprints(ax, traj_ref, "blue", res["ego_shape"], zorder=8)
 
         # Guided trajectory (red)
         draw_trajectory(ax, traj_guided, "Explorer-guided", "red", "--", zorder=12)
-        draw_footprints(ax, traj_guided, "red", zorder=11)
+        draw_footprints(ax, traj_guided, "red", res["ego_shape"], zorder=11)
 
         # Shift arrows at a few timesteps
         T = min(80, traj_ref.shape[0], traj_guided.shape[0])
@@ -484,7 +490,7 @@ def main():
     fig.suptitle(
         "Exploration Policy: Reference (blue) vs Guided (red)\n"
         f"lambda_lat={args.lambda_lat}, lambda_lon={args.lambda_lon}, "
-        f"guidance_scale={args.guidance_scale}",
+        f"ramp_steps={args.ramp_steps}, guidance_scale={args.guidance_scale}",
         fontsize=13,
     )
     fig.tight_layout()
@@ -502,10 +508,7 @@ def main():
         ax_s.plot(gt[:, 0], gt[:, 1], "g-", lw=2, alpha=0.5, zorder=5)
         ax_s.plot(gt[::3, 0], gt[::3, 1], "go", ms=3, alpha=0.7, mew=0, zorder=6, label="GT")
 
-        es = npz.get("ego_shape", None)
-        wb = float(es[0]) if es is not None and len(es) >= 1 else 2.75
-        length = float(es[1]) if es is not None and len(es) >= 2 else 4.34
-        width = float(es[2]) if es is not None and len(es) >= 3 else 1.70
+        wb, length, width = map(float, res["ego_shape"][:3])
         ro = (length - wb) / 2
         ax_s.add_patch(
             Rectangle(
@@ -521,9 +524,9 @@ def main():
         )
 
         draw_trajectory(ax_s, res["traj_ref"], "Reference", "blue", "-", zorder=10)
-        draw_footprints(ax_s, res["traj_ref"], "blue", zorder=8)
+        draw_footprints(ax_s, res["traj_ref"], "blue", res["ego_shape"], zorder=8)
         draw_trajectory(ax_s, res["traj_guided"], "Explorer-guided", "red", "--", zorder=12)
-        draw_footprints(ax_s, res["traj_guided"], "red", zorder=11)
+        draw_footprints(ax_s, res["traj_guided"], "red", res["ego_shape"], zorder=11)
 
         T = min(80, res["traj_ref"].shape[0], res["traj_guided"].shape[0])
         for t in [10, 20, 35, 55]:

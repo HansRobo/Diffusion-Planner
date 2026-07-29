@@ -16,6 +16,9 @@ Provided:
         slows/shortens the trajectory, > 1 speeds it up, 1 = inert. Same
         surrogate-gradient formulation as the scalar ``speed`` guidance's
         stretch mode, without its scalar-only ``abs(stretch - 1)`` branch.
+    reference_speed_push_batched -- an opt-in PlannerRFT diagnostic whose
+        signed speed push is derived from the frozen reference trajectory,
+        with a quintic onset. It is not enabled by the formal AWR config.
 """
 
 import torch
@@ -150,6 +153,79 @@ class SpeedStretchBatchedGuidance(BaseGuidance):
 
 
 @register
+class ReferenceSpeedPushBatchedGuidance(BaseGuidance):
+    """Zero-centred longitudinal push from frozen-reference displacement.
+
+    This is an opt-in diagnostic for the ambiguity in PlannerRFT's printed
+    longitudinal equation.  Unlike ``speed_stretch_batched``, whose push is
+    derived from each noisy candidate's own displacement, this function uses
+    the frozen reference heading and forward displacement.  It deliberately
+    remains a surrogate *push* rather than a quadratic tether: ``eta_lon=0``
+    is exactly inert and therefore cannot collapse native diffusion diversity
+    back onto the reference trajectory.
+
+    At future step ``t`` the requested displacement correction is
+
+        lambda_lon * eta_lon * smootherstep(t / ramp_steps) * ref_step_t.
+
+    Positive eta pushes along the reference tangent (faster), negative eta
+    pushes against it (slower).  The quintic onset protects the current-state
+    boundary of Original DP's absolute x-start representation.
+
+    Params:
+        lambda_lon (float): maximum relative speed change. Default 0.25.
+        eta_lon (float | Tensor[B]): signed command in [-1, 1].
+        ramp_steps (int): steps to reach full command. Default 20 (2 s).
+    """
+
+    name = "reference_speed_push_batched"
+    _energy_scale = 1.0
+
+    def __init__(self, config: "GuidanceConfig", **kwargs):  # noqa: F821
+        super().__init__(config)
+        self._lambda_lon = float(config.params.get("lambda_lon", 0.25))
+        self._eta_lon = config.params.get("eta_lon", 0.0)
+        self._ramp_steps = int(config.params.get("ramp_steps", 20))
+
+    def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
+        B, _, T_plus1, _ = x.shape
+        T = T_plus1 - 1
+        device = x.device
+        ref = inputs.get("reference_trajectory")
+        if ref is None:
+            return torch.zeros(B, device=device)
+        ref = ref[:, :T, :]
+
+        cos_h = ref[..., 2]
+        sin_h = ref[..., 3]
+        h_norm = (cos_h.square() + sin_h.square()).sqrt().clamp_min(1e-6)
+        tangent = torch.stack((cos_h / h_norm, sin_h / h_norm), dim=-1)
+
+        ref_pos = ref[..., :2]
+        # Frozen-reference trajectories are ego-centric, so the current
+        # position preceding their first future waypoint is the origin.
+        ref_previous = torch.cat(
+            (torch.zeros_like(ref_pos[:, :1]), ref_pos[:, :-1]), dim=1
+        )
+        ref_displacement = ref_pos - ref_previous
+        ref_forward_step = (ref_displacement * tangent).sum(dim=-1).clamp_min(0.0)
+
+        eta = _as_batch_param(self._eta_lon, B, device)
+        u = torch.arange(1, T + 1, device=device, dtype=torch.float32)
+        u = (u / max(self._ramp_steps, 1)).clamp(max=1.0)
+        ramp = u**3 * (10.0 - 15.0 * u + 6.0 * u**2)
+        signed_step = (
+            self._lambda_lon
+            * eta[:, None]
+            * ramp[None, :]
+            * ref_forward_step
+        )
+        correction = tangent * signed_step[..., None]
+        ego_pos = x[:, 0, 1:, :2]
+        return torch.sum(correction.detach() * ego_pos, dim=(1, 2))
+
+
+@register
 class LateralBatchedGuidance(BaseGuidance):
     """PlannerRFT Eq.2 lateral guidance with head protection.
 
@@ -244,13 +320,23 @@ def build_head_composer(
         GuidanceSetConfig,
     )
 
-    unknown = set(etas) - {"lateral", "collision", "stretch", "longitudinal"}
+    unknown = set(etas) - {
+        "lateral",
+        "collision",
+        "stretch",
+        "reference_speed",
+        "longitudinal",
+    }
     if unknown:
         raise ValueError(
             f"unknown guidance head(s) {sorted(unknown)} — a head with no "
             "function mapping would train/act as a dead head silently"
         )
     hp = int(head_protect)
+    if "stretch" in etas and "reference_speed" in etas:
+        raise ValueError(
+            "stretch and reference_speed are alternative longitudinal heads"
+        )
     fns = []
     if envelope == "v2":
         # v2 set: ramped lateral target + ramp-and-hold bounded swerve.
@@ -324,6 +410,19 @@ def build_head_composer(
                 enabled=True,
                 scale=stretch_scale,
                 params={"stretch": 1.0 + lambda_spd * etas["stretch"]},
+            )
+        )
+    if "reference_speed" in etas:
+        fns.append(
+            GuidanceConfig(
+                name="reference_speed_push_batched",
+                enabled=True,
+                scale=stretch_scale,
+                params={
+                    "lambda_lon": lambda_lon,
+                    "eta_lon": etas["reference_speed"],
+                    "ramp_steps": ramp_steps,
+                },
             )
         )
     if "longitudinal" in etas:
@@ -443,14 +542,14 @@ class CollisionSwerveV2BatchedGuidance(BaseGuidance):
 
 @register
 class LateralRampBatchedGuidance(BaseGuidance):
-    """Lateral guidance (Eq. 2) with a kinematic feasibility RAMP (v2).
+    """Lateral guidance (Eq. 2) with a kinematic-feasible quintic onset (v2).
 
     The stock ``lateral`` energy demands the full lambda*eta offset at EVERY
     future step including t = 0.1 s — kinematically impossible, producing
     huge near-field gradients (measured: plan-head distortion, backwards-
     bent leading points at low speed, scene-dependent gain 2.3-6.8 m at the
-    same eta). v2 ramps the target linearly from 0 to lambda*eta over
-    ``ramp_steps`` future steps, then holds.
+    same eta). v2 uses a zero-slope/zero-curvature quintic smootherstep from
+    zero to lambda*eta over ``ramp_steps`` future steps, then holds.
 
     Params:
         lambda_lat (float): max lateral offset in metres. Default 3.0.
@@ -488,8 +587,9 @@ class LateralRampBatchedGuidance(BaseGuidance):
         lateral_proj = n_perp_x * dx + n_perp_y * dy  # [B, T]
 
         eta = _as_batch_param(self._eta_lat, B, device)
-        ramp = torch.arange(1, T + 1, device=device, dtype=torch.float32)
-        ramp = (ramp / max(self._ramp_steps, 1)).clamp(max=1.0)  # [T]
+        u = torch.arange(1, T + 1, device=device, dtype=torch.float32)
+        u = (u / max(self._ramp_steps, 1)).clamp(max=1.0)
+        ramp = u**3 * (10.0 - 15.0 * u + 6.0 * u**2)  # quintic smootherstep
         target = (self._lambda_lat * eta)[:, None] * ramp[None, :]  # [B, T]
 
         psi = ((lateral_proj - target) ** 2).mean(dim=-1)
@@ -558,6 +658,22 @@ class FastGuidanceComposer:
 
     def reset_cache(self):
         self._inputs_phys = None
+
+    def set_physical_inputs(self, inputs: dict) -> None:
+        """Install an explicit per-generation physical guidance input view.
+
+        Cached-encoder AWR inference deliberately expands only the four
+        current-state channels consumed by the decoder.  Those compact tensors
+        cannot be passed through the full observation normalizer's inverse
+        (whose ego/neighbor statistics have 10/11 channels).  Guidance sets
+        such as PlannerRFT lateral+stretch only need an already-physical
+        ``reference_trajectory``; callers may install that minimal view here
+        and avoid both the shape mismatch and needless K-way map expansion.
+        A new composer is used for every generation, so this never leaks
+        inputs between scenes.
+        """
+
+        self._inputs_phys = inputs
 
     def _all_inert(self) -> bool:
         for fn in self._functions:

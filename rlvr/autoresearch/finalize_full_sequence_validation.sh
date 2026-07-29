@@ -1,0 +1,121 @@
+#!/bin/sh
+set -eu
+
+# --- precision (2026-07-29 fp32 migration) -------------------------------------
+# The vehicle runs fp32.  bf16 quantises the executed first waypoint onto a 39mm
+# comb and REVERSES the sign of the smoothness delta; TF32 alone costs 6.5x the
+# campaign effect on that axis, and only amp=off + TF32=off makes the 46k eval
+# bit-identical (A/B noise floor exactly zero).  Both are one knob each so a bf16
+# re-run is still reproducible: AMP_DTYPE=bf16 NVIDIA_TF32_OVERRIDE=1 <script>
+AMP_DTYPE=${AMP_DTYPE:-off}
+export NVIDIA_TF32_OVERRIDE=${NVIDIA_TF32_OVERRIDE:-0}
+
+# Persistent post-processing for the formal eight-GPU run.  It intentionally
+# waits for the checkpoint instead of touching the training process, then runs
+# the deployment-default (10-step) deterministic paired evaluation on every
+# filtered validation scene and prepares the report assets/GIF inputs.
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+REPORT=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/reference/external/awr-hdp-original-dp-proposal
+PY=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/.venv/bin/python
+DATA="$ROOT/outputs/data"
+RUN="${RUN_DIR:-$ROOT/outputs/awr_t4_full_sequence_filtered/20260716-112855_full_sequence_filtered_hdp_plain_mse_loader2_single_checkpoint}"
+FINAL="$RUN/epoch_001.pth"
+ARGS="$RUN/model_args.json"
+VALID="$DATA/path_list_valid_sft_balanced_is_skipped_filtered.json"
+CONFIG="$ROOT/rlvr/configs/awr_original_dp_t4_hdp_faithful.json"
+OUT="$ROOT/outputs/awr_t4_full_sequence_filtered"
+BASE_OUT="$OUT/full_validation_baseline_dp10"
+AWR_OUT="$OUT/full_validation_awr_dp10"
+PAIRED="$OUT/full_validation_paired_dp10.json"
+ASSETS="$REPORT/assets/data/full_validation"
+SCENE_ASSETS="$REPORT/assets/scenes/full_paired"
+
+export PYTHONPATH="$ROOT/diffusion_planner:$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+
+while [ ! -s "$FINAL" ]; do
+  sleep 30
+done
+# The checkpoint is written just before the distributed final barrier.  Give
+# the eight training ranks a short, bounded hand-off window before allocating
+# the validation GPUs.
+sleep 30
+while pgrep -f -- "$RUN" >/dev/null 2>&1; do
+  sleep 30
+done
+
+if [ ! -s "$BASE_OUT/summary.json" ]; then
+  mkdir -p "$BASE_OUT"
+  "$PY" -m torch.distributed.run \
+    --standalone --nproc_per_node=8 --master_port="${EVAL_BASE_PORT:-29631}" \
+    "$ROOT/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
+    --model_path /tmp/t4_v5_original_dp/model/best_model.pth \
+    --args_path /tmp/t4_v5_original_dp/model/args.json \
+    --scenes "$VALID" --config "$CONFIG" --output_dir "$BASE_OUT" \
+    --label baseline --batch_size 192 --scene_load_workers 2 \
+    --sample_steps 10 --amp_dtype "${AMP_DTYPE}"
+  "$PY" "$ROOT/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
+    --aggregate --model_path /tmp/t4_v5_original_dp/model/best_model.pth \
+    --args_path /tmp/t4_v5_original_dp/model/args.json --scenes "$VALID" \
+    --config "$CONFIG" --output_dir "$BASE_OUT" --label baseline
+fi
+
+if [ ! -s "$AWR_OUT/summary.json" ]; then
+  mkdir -p "$AWR_OUT"
+  "$PY" -m torch.distributed.run \
+    --standalone --nproc_per_node=8 --master_port="${EVAL_AWR_PORT:-29632}" \
+    "$ROOT/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
+    --model_path "$FINAL" --args_path "$ARGS" --scenes "$VALID" \
+    --config "$CONFIG" --output_dir "$AWR_OUT" --label awr \
+    --batch_size 192 --scene_load_workers 2 --sample_steps 10 --amp_dtype "${AMP_DTYPE}"
+  "$PY" "$ROOT/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
+    --aggregate --model_path "$FINAL" --args_path "$ARGS" --scenes "$VALID" \
+    --config "$CONFIG" --output_dir "$AWR_OUT" --label awr
+fi
+
+"$PY" "$ROOT/rlvr/autoresearch/tools/pair_awr_eval.py" \
+  --baseline "$BASE_OUT/scenes.json" --awr "$AWR_OUT/scenes.json" \
+  --output "$PAIRED"
+"$PY" "$REPORT/build_full_validation_assets.py" \
+  --paired "$PAIRED" --baseline_summary "$BASE_OUT/summary.json" \
+  --awr_summary "$AWR_OUT/summary.json" --out_dir "$ASSETS" --scene_count 6
+
+SCENES="$ASSETS/full_validation_scene_paths.json"
+if [ ! -s "$SCENE_ASSETS/manifest.json" ]; then
+  mkdir -p "$SCENE_ASSETS"
+  CUDA_VISIBLE_DEVICES=0 "$PY" \
+    "$ROOT/rlvr/autoresearch/tools/dump_full_paired_trajectories.py" \
+    --baseline_model /tmp/t4_v5_original_dp/model/best_model.pth \
+    --baseline_args /tmp/t4_v5_original_dp/model/args.json \
+    --awr_model "$FINAL" --awr_args "$ARGS" --scenes "$SCENES" \
+    --output_dir "$SCENE_ASSETS" --config "$CONFIG" --sample_steps 10
+fi
+
+i=0
+while IFS= read -r scene_path; do
+  stem=$(printf 'scene_%03d' "$i")
+  "$PY" "$ROOT/rlvr/autoresearch/tools/render_gate_comparison.py" \
+    --scene "$scene_path" \
+    --base_npz "$SCENE_ASSETS/baseline/$stem.npz" \
+    --repair_npz "$SCENE_ASSETS/awr/$stem.npz" \
+    --reward_config "$CONFIG" \
+    --selection-json "$ASSETS/full_validation_scene_selection.json" \
+    --output "$SCENE_ASSETS/${stem}_paired.png" \
+    --gif --fps 10 --max_frames 80 --max_neighbors 24
+  i=$((i + 1))
+done <<EOF
+$($PY -c 'import json; print("\n".join(json.load(open("'"$SCENES"'"))))')
+EOF
+
+"$PY" "$REPORT/update_full_validation_report.py" \
+  --html "$REPORT/index.html" \
+  --baseline "$BASE_OUT/summary.json" --awr "$AWR_OUT/summary.json" \
+  --paired "$ASSETS/full_validation_paired.json" \
+  --selection "$ASSETS/full_validation_scene_selection.json" \
+  --filter_manifest "$DATA/full_sequence_is_skipped_filter_manifest.json" \
+  --run_dir "$RUN"
+
+touch "$OUT/full_validation_ready.flag"
+echo "Full filtered validation and scene assets are ready: $OUT"

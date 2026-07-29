@@ -25,7 +25,10 @@ Example::
 from __future__ import annotations
 
 import argparse
+import functools
 import json
+import os
+from multiprocessing import Pool
 from pathlib import Path
 
 # Re-exported so existing importers keep working; the implementation lives in the
@@ -46,6 +49,18 @@ def parse_args() -> argparse.Namespace:
         help="root of pose/skip JSON sidecars if not next to the NPZ (e.g. the "
         "pre-padding conversion tree when the padded NPZs dropped their sidecars)",
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=min(os.cpu_count() or 1, 64),
+        help="parallel sidecar readers for large lists (default: min(cpu_count, 64))",
+    )
+    p.add_argument(
+        "--chunksize",
+        type=int,
+        default=256,
+        help="multiprocessing chunk size for sidecar reads",
+    )
     return p.parse_args()
 
 
@@ -54,7 +69,24 @@ def main() -> None:
     scenes = json.loads(args.scenes.read_text())
     if not isinstance(scenes, list):
         raise ValueError(f"{args.scenes} is not a JSON list of npz paths")
-    kept = filter_scene_list(scenes, sidecar_root=args.sidecar_root, label=str(args.scenes))
+    if args.workers <= 1:
+        kept = filter_scene_list(scenes, sidecar_root=args.sidecar_root, label=str(args.scenes))
+    else:
+        # The shared helper remains the source of truth for one path.  This
+        # parallel intake is needed for the 5M-frame corpus: a sequential
+        # sidecar open would turn a pre-pass into an hours-long bottleneck.
+        checker = functools.partial(is_skipped, sidecar_root=args.sidecar_root)
+        # Sidecars live on RDMA storage. A bounded process pool overlaps the
+        # filesystem latency without the 64-worker kernel-I/O pile-up seen on
+        # the first attempt; callers should normally use 8--16 workers.
+        with Pool(processes=args.workers) as pool:
+            flags = list(pool.imap(checker, scenes, chunksize=max(1, args.chunksize)))
+        kept = [scene for scene, skipped in zip(scenes, flags) if not skipped]
+        dropped = sum(bool(flag) for flag in flags)
+        print(
+            f"[skip-filter] {args.scenes}: kept {len(kept)}/{len(scenes)} "
+            f"(dropped {dropped} skip_for_training; workers={args.workers})"
+        )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(kept))
     print(f"wrote {len(kept)} scenes -> {args.out}")

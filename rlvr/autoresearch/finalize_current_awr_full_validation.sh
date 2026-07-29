@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- precision (2026-07-29 fp32 migration) -------------------------------------
+# The vehicle runs fp32.  bf16 quantises the executed first waypoint onto a 39mm
+# comb and REVERSES the sign of the smoothness delta; TF32 alone costs 6.5x the
+# campaign effect on that axis, and only amp=off + TF32=off makes the 46k eval
+# bit-identical (A/B noise floor exactly zero).  Both are one knob each so a bf16
+# re-run is still reproducible: AMP_DTYPE=bf16 NVIDIA_TF32_OVERRIDE=1 <script>
+AMP_DTYPE=${AMP_DTYPE:-off}
+export NVIDIA_TF32_OVERRIDE=${NVIDIA_TF32_OVERRIDE:-0}
+
+# Finish the current faithful Original-DP AWR run without guessing a checkpoint.
+# 1) screen every saved EMA (K=1, zero-noise, 10-step) on the fixed 2,048-scene paired set;
+# 2) full-evaluate up to three lexicographic finalists on all 46,068 scenes;
+# 3) select again by the HDP/NAVSIM mean-score contract on full evidence;
+# 4) render paired real-scene PNG/GIF assets for the selected finalist.
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+DOCS_ROOT=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner
+PY="$DOCS_ROOT/.venv/bin/python"
+RUN=${RUN_DIR:-$ROOT/outputs/awr_t4_full_sequence_filtered/20260717-004516_full_sequence_filtered_hdp_plain_mse_replay_resume_single_checkpoint}
+TRAIN_MATCH=${TRAIN_MATCH:-full_sequence_filtered_hdp_plain_mse_replay_resume_single_checkpoint}
+VALID=${VALID_SCENES:-$ROOT/outputs/data/path_list_valid_sft_balanced_is_skipped_filtered.json}
+CONFIG=${EVAL_CONFIG:-$RUN/effective_config.json}
+SOURCE_MODEL=${SOURCE_MODEL:-/tmp/t4_v5_original_dp/model/best_model.pth}
+SOURCE_ARGS=${SOURCE_ARGS:-/tmp/t4_v5_original_dp/model/args.json}
+MODEL_ARGS=${MODEL_ARGS:-$RUN/model_args.json}
+FINAL_EPOCH=${FINAL_EPOCH:-10}
+WAIT_SEC=${WAIT_SEC:-30}
+BOOTSTRAP=${BOOTSTRAP:-10000}
+FULL_ROOT=${FULL_ROOT:-$RUN/full_validation_dp10}
+ASSET_ROOT=${ASSET_ROOT:-$DOCS_ROOT/docs/t4_conference_assets/final_validation}
+TRAIN_DIAG_REPORT="$RUN/paired_eval_summary.json"
+SCREEN_ROOT="$RUN/deployment_screen_dp10"
+SCREEN_SCENES="$SCREEN_ROOT/scenes.json"
+SCREEN_REPORT="$SCREEN_ROOT/paired_all_epochs.json"
+SCREEN_SELECTION="$SCREEN_ROOT/checkpoint_finalists.json"
+BASE_OUT="$FULL_ROOT/baseline"
+
+export PYTHONPATH="$ROOT/diffusion_planner:$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
+
+final_checkpoint=$(printf '%s/epoch_%03d.pth' "$RUN" "$FINAL_EPOCH")
+while [ ! -s "$final_checkpoint" ]; do
+  sleep "$WAIT_SEC"
+done
+while pgrep -f -- "rlvr.train_awr.*${TRAIN_MATCH}" >/dev/null 2>&1; do
+  sleep "$WAIT_SEC"
+done
+
+manifest_matches_eval_contract() {
+  local manifest=$1
+  local label=$2
+  local model=$3
+  local args=$4
+  local scenes=$5
+  "$PY" -c 'import json,os,sys
+p=json.load(open(sys.argv[1])); label,model,args,scenes,config,amp=sys.argv[2:]
+assert p.get("scene_contract_verified") is True
+assert p.get("actual_scene_count") == p.get("expected_scene_count")
+assert p.get("label") == label
+assert p.get("model") == model and p.get("args") == args
+assert p.get("scenes") == scenes and p.get("config") == config
+assert int(p.get("model_size_bytes", -1)) == os.stat(model).st_size
+assert int(p.get("model_mtime_ns", -1)) == os.stat(model).st_mtime_ns
+assert int(p.get("sample_steps", -1)) == 10
+assert int(p.get("candidate_count", -1)) == 1
+assert float(p.get("noise_scale", -1)) == 0.0
+assert p.get("checkpoint_payload") == "ema_state_dict"
+assert p.get("amp_dtype") == amp, "manifest amp_dtype=" + str(p.get("amp_dtype")) + " expected=" + amp' \
+    "$manifest" "$label" "$model" "$args" "$scenes" "$CONFIG" "$AMP_DTYPE"
+}
+
+run_eval() {
+  local label=$1
+  local model=$2
+  local args=$3
+  local scenes=$4
+  local out=$5
+  local port=$6
+  if [ -s "$out/summary.json" ] && [ -s "$out/scenes.json" ] && [ -s "$out/manifest.json" ] \
+    && manifest_matches_eval_contract "$out/manifest.json" "$label" "$model" "$args" "$scenes"; then
+    return
+  fi
+  mkdir -p "$out"
+  "$PY" -m torch.distributed.run \
+    --standalone --nproc_per_node=8 --master_port="$port" \
+    "$ROOT/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
+    --model_path "$model" --args_path "$args" --scenes "$scenes" \
+    --config "$CONFIG" --output_dir "$out" --label "$label" \
+    --batch_size 192 --scene_load_workers 2 --sample_steps 10 --amp_dtype "${AMP_DTYPE}" \
+    --compile_mode default
+  "$PY" "$ROOT/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
+    --aggregate --model_path "$model" --args_path "$args" --scenes "$scenes" \
+    --config "$CONFIG" --output_dir "$out" --label "$label"
+  manifest_matches_eval_contract "$out/manifest.json" "$label" "$model" "$args" "$scenes"
+}
+
+# Keep the training-time K=10 current-policy sweep as a diagnostic, but do
+# not use it to choose a deployment checkpoint.  Saved checkpoints deploy
+# ``ema_state_dict`` and the final evaluator uses 10 solver steps; screen that
+# exact EMA/K=1/10-step policy for every epoch below.
+"$PY" -m rlvr.autoresearch.tools.paired_eval_report \
+  "$RUN" --bootstrap "$BOOTSTRAP" --seed 3407 --output "$TRAIN_DIAG_REPORT"
+
+mkdir -p "$SCREEN_ROOT"
+"$PY" -c 'import json,sys; rows=json.load(open(sys.argv[1])); json.dump([r["scene_path"] for r in rows],open(sys.argv[2],"w"),indent=2)' \
+  "$RUN/eval_epoch_000/scenes.json" "$SCREEN_SCENES"
+
+run_eval screen_baseline "$SOURCE_MODEL" "$SOURCE_ARGS" "$SCREEN_SCENES" "$SCREEN_ROOT/baseline" 29651
+if [ -n "${SCREEN_EPOCHS:-}" ]; then
+  screen_epochs=$SCREEN_EPOCHS
+else
+  screen_epochs=$("$PY" -c 'import pathlib,re,sys; out=[]
+for p in pathlib.Path(sys.argv[1]).glob("epoch_*.pth"):
+ m=re.fullmatch(r"epoch_(\d+)",p.stem)
+ if m: out.append(int(m.group(1)))
+print(" ".join(map(str,sorted(out))))' "$RUN")
+fi
+screen_reports=()
+screen_port=29652
+for epoch in $screen_epochs; do
+  padded=$(printf '%03d' "$epoch")
+  checkpoint="$RUN/epoch_${padded}.pth"
+  candidate_out="$SCREEN_ROOT/epoch_${padded}"
+  paired_report="$SCREEN_ROOT/paired_epoch_${padded}.json"
+  run_eval "screen_ema_epoch_${padded}" "$checkpoint" "$MODEL_ARGS" "$SCREEN_SCENES" "$candidate_out" "$screen_port"
+  "$PY" -m rlvr.autoresearch.tools.full_paired_eval_report \
+    --baseline "$SCREEN_ROOT/baseline/scenes.json" --candidate "$candidate_out/scenes.json" \
+    --epoch "$epoch" --bootstrap "$BOOTSTRAP" --seed 3407 --output "$paired_report"
+  screen_reports+=("$paired_report")
+  screen_port=$((screen_port + 1))
+done
+"$PY" -m rlvr.autoresearch.tools.merge_paired_eval_reports \
+  "${screen_reports[@]}" --output "$SCREEN_REPORT"
+"$PY" -m rlvr.autoresearch.tools.select_awr_finalists \
+  "$SCREEN_REPORT" --output "$SCREEN_SELECTION" --expected-scene-count 2048 --max-finalists 3
+screen_selected=$("$PY" -c 'import json,sys; p=json.load(open(sys.argv[1])); r=p.get("promotion_recommendation") or p["finalists"][0]; print(r["epoch"])' "$SCREEN_SELECTION")
+"$PY" "$DOCS_ROOT/docs/generate_t4_awr_final_results.py" \
+  "$SCREEN_REPORT" --output-dir "$ASSET_ROOT/deployment_screen" --selected-epoch "$screen_selected"
+
+if [ -n "${EPOCHS:-}" ]; then
+  finalist_epochs=$EPOCHS
+else
+  finalist_epochs=$("$PY" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(" ".join(str(x["epoch"]) for x in p["finalists"]))' "$SCREEN_SELECTION")
+fi
+if [ -z "$finalist_epochs" ]; then
+  echo "No checkpoint finalist was produced" >&2
+  exit 1
+fi
+
+run_eval baseline "$SOURCE_MODEL" "$SOURCE_ARGS" "$VALID" "$BASE_OUT" 29711
+
+reports=()
+port=29712
+for epoch in $finalist_epochs; do
+  padded=$(printf '%03d' "$epoch")
+  checkpoint="$RUN/epoch_${padded}.pth"
+  candidate_out="$FULL_ROOT/epoch_${padded}"
+  paired_report="$FULL_ROOT/paired_epoch_${padded}.json"
+  if [ ! -s "$checkpoint" ]; then
+    echo "Missing finalist checkpoint: $checkpoint" >&2
+    exit 1
+  fi
+  run_eval "awr_epoch_${padded}" "$checkpoint" "$MODEL_ARGS" "$VALID" "$candidate_out" "$port"
+  "$PY" -m rlvr.autoresearch.tools.full_paired_eval_report \
+    --baseline "$BASE_OUT/scenes.json" --candidate "$candidate_out/scenes.json" \
+    --epoch "$epoch" --bootstrap "$BOOTSTRAP" --seed 3407 --output "$paired_report"
+  "$PY" "$DOCS_ROOT/docs/generate_t4_awr_final_results.py" \
+    "$paired_report" --output-dir "$ASSET_ROOT/epoch_${padded}/results" --selected-epoch "$epoch"
+  reports+=("$paired_report")
+  port=$((port + 1))
+done
+
+MERGED_REPORT="$FULL_ROOT/paired_all_finalists.json"
+FULL_SELECTION="$FULL_ROOT/final_selection.json"
+"$PY" -m rlvr.autoresearch.tools.merge_paired_eval_reports \
+  "${reports[@]}" --output "$MERGED_REPORT"
+"$PY" -m rlvr.autoresearch.tools.select_awr_finalists \
+  "$MERGED_REPORT" --output "$FULL_SELECTION" --expected-scene-count 46068 --max-finalists 3
+
+selected_epoch=$("$PY" -c 'import json,sys; p=json.load(open(sys.argv[1])); r=p.get("promotion_recommendation") or p["finalists"][0]; print(r["epoch"])' "$FULL_SELECTION")
+promotion_ok=$("$PY" -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("promotion_recommendation") is not None))' "$FULL_SELECTION")
+selected_padded=$(printf '%03d' "$selected_epoch")
+selected_checkpoint="$RUN/epoch_${selected_padded}.pth"
+selected_out="$FULL_ROOT/epoch_${selected_padded}"
+if [ "$promotion_ok" -eq 1 ]; then
+  promotion_status=aggregate_promotion_passed
+else
+  promotion_status=not_promoted_no_mean_gain
+fi
+
+"$PY" "$DOCS_ROOT/docs/generate_t4_awr_final_results.py" \
+  "$MERGED_REPORT" --output-dir "$ASSET_ROOT/results" --selected-epoch "$selected_epoch"
+
+if [ "$promotion_ok" -eq 1 ]; then
+  ln -sfn "epoch_${selected_padded}.pth" "$RUN/best_model.pth"
+else
+  ln -sfn "epoch_${selected_padded}.pth" "$RUN/full_validation_finalist.pth"
+fi
+printf '%s\n' "$selected_epoch" > "$FULL_ROOT/selected_epoch.txt"
+
+PAIR_ROWS="$FULL_ROOT/paired_selected_rows.json"
+"$PY" -m rlvr.autoresearch.tools.pair_awr_eval \
+  --baseline "$BASE_OUT/scenes.json" --awr "$selected_out/scenes.json" --output "$PAIR_ROWS"
+
+# Keep the large paired JSON bundle and its charts under one final-validation
+# subtree.  The builder intentionally writes charts to ``out.parent.parent``;
+# the extra ``full_validation`` level therefore resolves to
+# ``$ASSET_ROOT/charts`` instead of leaking files into the conference root.
+SCENE_DATA="$ASSET_ROOT/data/full_validation"
+"$PY" "$DOCS_ROOT/reference/external/awr-hdp-original-dp-proposal/build_full_validation_assets.py" \
+  --paired "$PAIR_ROWS" --baseline_summary "$BASE_OUT/summary.json" \
+  --awr_summary "$selected_out/summary.json" --out_dir "$SCENE_DATA" --scene_count 8 \
+  --semantic_audit "$ROOT/outputs/awr_t4_full_sequence_filtered/lane_change_semantic_audit_monitor2048.json"
+
+SCENE_PATHS="$SCENE_DATA/full_validation_scene_paths.json"
+SCENE_ASSETS="$ASSET_ROOT/scenes"
+CUDA_VISIBLE_DEVICES=0 "$PY" \
+  "$ROOT/rlvr/autoresearch/tools/dump_full_paired_trajectories.py" \
+  --baseline_model "$SOURCE_MODEL" --baseline_args "$SOURCE_ARGS" \
+  --awr_model "$selected_checkpoint" --awr_args "$MODEL_ARGS" \
+  --scenes "$SCENE_PATHS" --output_dir "$SCENE_ASSETS" \
+  --config "$CONFIG" --sample_steps 10
+
+i=0
+while IFS= read -r scene_path; do
+  stem=$(printf 'scene_%03d' "$i")
+  output="$SCENE_ASSETS/${stem}_paired.png"
+  "$PY" "$ROOT/rlvr/autoresearch/tools/render_gate_comparison.py" \
+    --scene "$scene_path" \
+    --base_npz "$SCENE_ASSETS/baseline/${stem}.npz" \
+    --repair_npz "$SCENE_ASSETS/awr/${stem}.npz" \
+    --reward_config "$CONFIG" \
+    --selection-json "$SCENE_DATA/full_validation_scene_selection.json" \
+    --promotion-status "$promotion_status" \
+    --output "$output" \
+    --gif --fps 10 --max_frames 80 --max_neighbors 24
+  i=$((i + 1))
+done < <("$PY" -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))))' "$SCENE_PATHS")
+
+touch "$FULL_ROOT/complete.flag"
+echo "Full validation complete. selected_epoch=$selected_epoch aggregate_promotion=$promotion_ok"

@@ -17,6 +17,7 @@ dependencies = [
     "scenario-generation",
     "scipy",
     "torch",
+    "zstandard>=0.23,<1",
 ]
 
 [build-system]

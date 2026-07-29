@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- precision (2026-07-29 fp32 migration) -------------------------------------
+# The vehicle runs fp32.  bf16 quantises the executed first waypoint onto a 39mm
+# comb and REVERSES the sign of the smoothness delta; TF32 alone costs 6.5x the
+# campaign effect on that axis, and only amp=off + TF32=off makes the 46k eval
+# bit-identical (A/B noise floor exactly zero).  Both are one knob each so a bf16
+# re-run is still reproducible: AMP_DTYPE=bf16 NVIDIA_TF32_OVERRIDE=1 <script>
+AMP_DTYPE=${AMP_DTYPE:-off}
+export NVIDIA_TF32_OVERRIDE=${NVIDIA_TF32_OVERRIDE:-0}
+
+# Cheap trust-region line search along the already-computed PlannerRFT-enriched
+# 153,600-scene replay proposal.  The epoch-2 deployable EMA contains roughly
+# 1 - 0.999^100 = 9.52% cumulative new-policy weight.  These interpolation
+# points test smaller accepted updates without another mining/training pass.
+# Checkpoint selection remains fixed-train-selector K=1 mean_det_reward.
+
+ROOT=/mnt/nvme/wangbin/Diffusion-Planner-t4-main
+RUN=${ROOT}/outputs/awr_t4_full_sequence_filtered/plannerrft_enriched_unique153600_replay_pilot/20260720-012915_plannerrft_enriched_unique153600_replay_pilot
+SOURCE=${RUN}/best_train.pth
+CANDIDATE=${RUN}/epoch_002.pth
+ARGS=${RUN}/model_args.json
+CONFIG=${RUN}/effective_config.json
+SELECTOR_SOURCE_ROWS=${RUN}/train_selector_epoch_000/scenes.json
+# Keep the earlier 10-step diagnostic under ema_line_search/.  Checkpoint
+# selection must match the training runner's 5-step selector exactly.
+WORK=${RUN}/ema_line_search_sample_steps5
+CHECKPOINTS=${RUN}/ema_line_search/checkpoints
+SELECTOR_SCENES=${WORK}/selector_scenes.json
+
+cd "${ROOT}"
+mkdir -p "${WORK}" "${CHECKPOINTS}"
+
+active_jobs=$(pgrep -af 'rlvr.train_awr|eval_awr_full_distributed.py' || true)
+if [[ -n ${active_jobs} ]]; then
+  echo "refusing line search while another AWR train/eval job is active:" >&2
+  echo "${active_jobs}" >&2
+  exit 1
+fi
+
+jq '[.[].scene_path]' "${SELECTOR_SOURCE_ROWS}" > "${SELECTOR_SCENES}"
+[[ $(jq 'length' "${SELECTOR_SCENES}") -eq 8192 ]]
+[[ $(jq 'unique | length' "${SELECTOR_SCENES}") -eq 8192 ]]
+
+baseline_dir=${WORK}/train_selector/a0p00
+mkdir -p "${baseline_dir}"
+if [[ ! -s ${baseline_dir}/summary.json ]]; then
+  env PYTHONPATH="${ROOT}" DP_NEIGHBOR_FUTURE_OFFSET=1 \
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+    OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+    "${ROOT}/.venv/bin/torchrun" --standalone --nproc_per_node=8 \
+    "${ROOT}/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
+    --model_path "${SOURCE}" --args_path "${ARGS}" \
+    --scenes "${SELECTOR_SCENES}" --config "${CONFIG}" \
+    --output_dir "${baseline_dir}" \
+    --label plannerrft_unique153600_incumbent_train_selector_s5 \
+    --batch_size 512 --scene_load_workers 1 --sample_steps 5 \
+    --amp_dtype "${AMP_DTYPE}" --compile_mode default
+  PYTHONPATH="${ROOT}" "${ROOT}/.venv/bin/python" \
+    "${ROOT}/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
+    --model_path "${SOURCE}" --args_path "${ARGS}" \
+    --scenes "${SELECTOR_SCENES}" --config "${CONFIG}" \
+    --output_dir "${baseline_dir}" \
+    --label plannerrft_unique153600_incumbent_train_selector_s5 \
+    --batch_size 512 --scene_load_workers 1 --sample_steps 5 \
+    --amp_dtype "${AMP_DTYPE}" --compile_mode default --aggregate
+fi
+BASELINE_ROWS=${baseline_dir}/scenes.json
+
+labels=(a0p10 a0p25 a0p50 a0p75)
+alphas=(0.10 0.25 0.50 0.75)
+
+for i in "${!labels[@]}"; do
+  label=${labels[$i]}
+  alpha=${alphas[$i]}
+  checkpoint=${CHECKPOINTS}/epoch2_${label}.pth
+  eval_dir=${WORK}/train_selector/${label}
+  mkdir -p "${eval_dir}"
+  if [[ ! -s ${checkpoint} ]]; then
+    PYTHONPATH="${ROOT}" "${ROOT}/.venv/bin/python" \
+      -m rlvr.autoresearch.tools.interpolate_awr_checkpoint \
+      --source "${SOURCE}" --candidate "${CANDIDATE}" \
+      --alpha "${alpha}" --output "${checkpoint}"
+  fi
+  if [[ ! -s ${eval_dir}/summary.json ]]; then
+    env PYTHONPATH="${ROOT}" DP_NEIGHBOR_FUTURE_OFFSET=1 \
+      CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+      OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+      "${ROOT}/.venv/bin/torchrun" --standalone --nproc_per_node=8 \
+      "${ROOT}/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
+      --model_path "${checkpoint}" --args_path "${ARGS}" \
+      --scenes "${SELECTOR_SCENES}" --config "${CONFIG}" \
+      --output_dir "${eval_dir}" \
+      --label "plannerrft_unique153600_epoch2_${label}_train_selector" \
+      --batch_size 512 --scene_load_workers 1 --sample_steps 5 \
+      --amp_dtype "${AMP_DTYPE}" --compile_mode default
+    PYTHONPATH="${ROOT}" "${ROOT}/.venv/bin/python" \
+      "${ROOT}/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
+      --model_path "${checkpoint}" --args_path "${ARGS}" \
+      --scenes "${SELECTOR_SCENES}" --config "${CONFIG}" \
+      --output_dir "${eval_dir}" \
+      --label "plannerrft_unique153600_epoch2_${label}_train_selector" \
+      --batch_size 512 --scene_load_workers 1 --sample_steps 5 \
+      --amp_dtype "${AMP_DTYPE}" --compile_mode default --aggregate
+  fi
+done
+
+PYTHONPATH="${ROOT}" "${ROOT}/.venv/bin/python" - \
+  "${WORK}" "${SOURCE}" "${BASELINE_ROWS}" "${CHECKPOINTS}" \
+  "${labels[@]}" -- "${alphas[@]}" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+work = pathlib.Path(sys.argv[1])
+source = pathlib.Path(sys.argv[2])
+baseline_rows = json.loads(pathlib.Path(sys.argv[3]).read_text())
+checkpoints = pathlib.Path(sys.argv[4])
+parts = sys.argv[5:]
+separator = parts.index("--")
+labels = parts[:separator]
+alphas = [float(value) for value in parts[separator + 1 :]]
+assert len(labels) == len(alphas)
+
+baseline = sum(float(row["det_reward"]) for row in baseline_rows) / len(baseline_rows)
+candidates = []
+for label, alpha in zip(labels, alphas, strict=True):
+    summary_path = work / "train_selector" / label / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    checkpoint = checkpoints / f"epoch2_{label}.pth"
+    candidates.append(
+        {
+            "label": label,
+            "alpha_toward_epoch2_ema": alpha,
+            "approximate_cumulative_new_policy_rate": alpha * (1.0 - 0.999**100),
+            "mean_det_reward": float(summary["mean_det_reward"]),
+            "delta_vs_incumbent": float(summary["mean_det_reward"]) - baseline,
+            "checkpoint": str(checkpoint.resolve()),
+            "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+            "summary": str(summary_path.resolve()),
+        }
+    )
+winner = max(candidates, key=lambda row: row["mean_det_reward"])
+promoted = winner if winner["mean_det_reward"] > baseline else None
+selection = {
+    "selection_rule": "fixed_train_selector_k1_mean_det_reward_strict_improvement",
+    "incumbent_mean_det_reward": baseline,
+    "incumbent_checkpoint": str(source.resolve()),
+    "candidates": candidates,
+    "best_line_search_candidate": winner,
+    "promoted_candidate": promoted,
+}
+(work / "selection.json").write_text(json.dumps(selection, indent=2) + "\n")
+print(json.dumps(selection, indent=2))
+PY
+
+best_label=$(jq -r '.best_line_search_candidate.label' "${WORK}/selection.json")
+best_dir=${WORK}/train_selector/${best_label}
+if [[ ! -s ${best_dir}/paired_vs_incumbent.json ]]; then
+  PYTHONPATH="${ROOT}" "${ROOT}/.venv/bin/python" \
+    -m rlvr.autoresearch.tools.full_paired_eval_report \
+    --baseline "${BASELINE_ROWS}" --candidate "${best_dir}/scenes.json" \
+    --epoch 2 --bootstrap 10000 --seed 3407 \
+    --evidence_scope fixed_train_selector_k1 \
+    --metrics det_reward \
+    --output "${best_dir}/paired_vs_incumbent.json"
+fi
+
+echo "line search complete: ${WORK}/selection.json"

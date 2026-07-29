@@ -1,0 +1,22 @@
+{
+  "0": {
+    "id": "road_border_contrast_a",
+    "title": "Road-border contrast: 8 safe candidates, 2 footprint crossings",
+    "claim": "The same real T4 scene contains both feasible and road-border-crossing source-policy candidates, so AWR has a genuine within-scene safety contrast."
+  },
+  "4": {
+    "id": "road_border_contrast_b",
+    "title": "Road-border contrast: safe route-following versus edge cutting",
+    "claim": "Three of ten frozen formal candidates cross the configured 0.20 m road-border margin while seven remain feasible."
+  },
+  "114": {
+    "id": "moving_collision_39",
+    "title": "Moving interaction: one candidate collides at 3.9 s",
+    "claim": "A source-policy candidate overlaps a recorded-neighbor oriented box at the end of the four-second reward horizon while alternatives remain collision-free."
+  },
+  "186": {
+    "id": "moving_collision_28",
+    "title": "Moving interaction: one candidate collides at 2.8 s",
+    "claim": "The formal K=10 group supplies a direct safe-versus-collision contrast using the legacy-neighbor +1 alignment used by training."
+  }
+}

@@ -27,6 +27,12 @@ from planner_metrics.config import RewardConfig  # noqa: F401  (re-export)
 from planner_metrics.geometry import *  # noqa: F401,F403
 from planner_metrics.subscores import *  # noqa: F401,F403
 
+# Scene-data key through which a caller may supply a precomputed
+# ``expert_off_lane`` bit instead of paying for the geometry again.  Leading
+# underscore so it never collides with a model input; a `[1]`/`[B]` tensor so
+# the standard scene slicers carry it through a batch untouched.
+EXPERT_OFF_LANE_KEY = "_expert_off_lane"
+
 
 @dataclass
 class RewardBreakdown:
@@ -60,6 +66,56 @@ class RewardBreakdown:
     # booleans on this dataclass (rb_crossing, lane_crossing, static_crossing):
     # True = violation occurred.
     kinematic_violated: bool = False
+    # Earliest trajectory step at which a configured hard gate fires, or None
+    # when none does.  ``collision_step`` cannot answer this on its own: three
+    # of the four step-indexed gates reach this dataclass only as booleans
+    # (rb_crossing/lane_crossing/static_crossing) and the two whole-trajectory
+    # gates (red_light, kinematic) have no step at all.  A consumer that uses
+    # only a PREFIX of the trajectory needs the step to decide whether the
+    # failure is inside the part it actually uses.  Step 0 is the first
+    # waypoint, so that test is ``step >= steps_consumed`` -- not ``>``.
+    first_hard_gate_step: int | None = None
+
+
+def _first_hard_gate_steps(
+    config: RewardConfig,
+    *,
+    collision_steps: list,
+    rb_crossing_steps: list,
+    lane_crossing_steps: list,
+    sc_crossing_steps: list,
+    whole_trajectory_failed: list[bool],
+) -> list[int | None]:
+    """Earliest step at which any *configured* hard gate fires, per row.
+
+    The enabled/disabled predicates deliberately mirror
+    ``rlvr.train_awr._expert_reward_is_hard_safe`` gate for gate, because this
+    is the step-resolved form of exactly that verdict: a row is safe over the
+    whole trajectory precisely when this returns None.  ``test_reward.py``
+    asserts that equivalence rather than trusting the duplication.
+
+    The two whole-trajectory gates carry no step, so they are reported at step
+    0 -- the conservative reading, since a red light or an infeasible
+    curvature invalidates the first waypoint along with everything after it.
+    They arrive pre-reduced in ``whole_trajectory_failed`` because reading them
+    off the device per row would reintroduce exactly the synchronisations the
+    caller's row packing exists to remove.
+    """
+
+    steps: list[int | None] = []
+    for index in range(len(collision_steps)):
+        candidates = [collision_steps[index]]
+        if config.rb_gate_enabled:
+            candidates.append(rb_crossing_steps[index])
+        if config.lane_gate_enabled:
+            candidates.append(lane_crossing_steps[index])
+        if config.static_collision_enabled and config.sc_gate_enabled:
+            candidates.append(sc_crossing_steps[index])
+        if whole_trajectory_failed[index]:
+            candidates.append(0)
+        fired = [int(step) for step in candidates if step is not None]
+        steps.append(min(fired) if fired else None)
+    return steps
 
 
 def _json_safe_value(value):
@@ -363,36 +419,59 @@ def _hdp_multi_reward_components(
     # complete lane-change detector.  A future T4 profile should additionally
     # consume a validated lane-change sidecar (or indicator/route semantics)
     # before claiming full parity with the HDP paper's lane-change mask.
-    gt = data.get("ego_agent_future")
-    if isinstance(gt, torch.Tensor):
-        if gt.dim() == 3:
-            gt = gt[0]
-        gt = gt[:T]
-        if gt.dim() == 2 and gt.shape[-1] >= 3:
-            if gt.shape[-1] == 3:
-                gt4 = torch.cat([gt[:, :2], torch.cos(gt[:, 2:3]), torch.sin(gt[:, 2:3])], dim=-1)
-            else:
-                gt4 = gt[:, :4]
-            # Only the lane-departure result is needed for the expert off-lane
-            # mask.  Calling compute_subscores_batch here used to
-            # recompute collision, TTC, border, smoothness, feasibility and
-            # red-light metrics for the logged expert on every scene.  That
-            # was mathematically redundant and dominated full-corpus HDP
-            # rollout time.  Reuse the exact lane geometry primitive instead.
-            expert_shape = data.get("ego_shape")
-            if isinstance(expert_shape, torch.Tensor):
-                if expert_shape.dim() == 2:
-                    expert_shape = expert_shape[0]
-                expert_lane = compute_lane_departure_penalty(
-                    gt4.unsqueeze(0), expert_shape[:3].to(device), data, config=config
-                )
-                expert_lane_steps = expert_lane[3]
-            else:
-                expert_lane_steps = [None]
-            if isinstance(expert_lane_steps, list) and expert_lane_steps and expert_lane_steps[0] is not None:
-                lane_score = torch.ones_like(lane_score)
+    cached = data.get(EXPERT_OFF_LANE_KEY)
+    if isinstance(cached, torch.Tensor) and cached.numel():
+        is_off_lane = bool(cached.flatten()[0])
+    else:
+        is_off_lane = expert_off_lane(data, T, config)
+    if is_off_lane:
+        lane_score = torch.ones_like(lane_score)
 
     return risk_score, follow_score, lane_score
+
+
+def expert_off_lane(data: dict, horizon_steps: int, config: RewardConfig) -> bool:
+    """Did the LOGGED expert leave the union of nearby lane polygons?
+
+    Only the lane-departure result is needed for the expert off-lane mask.
+    Calling compute_subscores_batch here used to recompute collision, TTC,
+    border, smoothness, feasibility and red-light metrics for the logged expert
+    on every scene.  That was mathematically redundant and dominated
+    full-corpus HDP rollout time.  Reuse the exact lane geometry primitive
+    instead.
+
+    Nothing here depends on the policy: this is a pure function of the logged
+    future, the ego shape, the map geometry and the lane config, yet it costs
+    about half of a live ``hdp_pdm`` reward call and every mine of every cycle
+    recomputes it from scratch.  Callers that can persist it across cycles
+    should hand the answer back through ``EXPERT_OFF_LANE_KEY``.
+    """
+
+    gt = data.get("ego_agent_future")
+    if not isinstance(gt, torch.Tensor):
+        return False
+    if gt.dim() == 3:
+        gt = gt[0]
+    gt = gt[:horizon_steps]
+    if gt.dim() != 2 or gt.shape[-1] < 3:
+        return False
+    if gt.shape[-1] == 3:
+        gt4 = torch.cat([gt[:, :2], torch.cos(gt[:, 2:3]), torch.sin(gt[:, 2:3])], dim=-1)
+    else:
+        gt4 = gt[:, :4]
+    expert_shape = data.get("ego_shape")
+    if not isinstance(expert_shape, torch.Tensor):
+        return False
+    if expert_shape.dim() == 2:
+        expert_shape = expert_shape[0]
+    expert_lane_steps = compute_lane_departure_penalty(
+        gt4.unsqueeze(0), expert_shape[:3].to(gt4.device), data, config=config
+    )[3]
+    return (
+        isinstance(expert_lane_steps, list)
+        and bool(expert_lane_steps)
+        and expert_lane_steps[0] is not None
+    )
 
 
 @torch.no_grad()
@@ -910,6 +989,20 @@ def _shape_reward(
         dim=1,
     ).detach().cpu().tolist()
 
+    first_hard_gate_steps = _first_hard_gate_steps(
+        config,
+        collision_steps=collision_steps,
+        rb_crossing_steps=rb_crossing_steps,
+        lane_crossing_steps=lane_crossing_steps,
+        sc_crossing_steps=sc_crossing_steps,
+        whole_trajectory_failed=(
+            ((red_light_scores < -0.5) | (kinematic_gate < 0.5))
+            .detach()
+            .cpu()
+            .tolist()
+        ),
+    )
+
     results: list[RewardBreakdown] = []
     for i, row in enumerate(packed_rows):
         (
@@ -962,6 +1055,7 @@ def _shape_reward(
                 sc_min_dist=float(sc_min_value),
                 sc_n_stopped=sc_n_stopped_scene,
                 kinematic_violated=bool(kinematic_gate_value < 0.5),
+                first_hard_gate_step=first_hard_gate_steps[i],
             )
         )
 

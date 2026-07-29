@@ -61,6 +61,78 @@ def test_append_keeps_scene_major_order_and_zero_weights_unsafe_expert() -> None
     )
 
 
+def test_a_zero_secondary_weight_is_byte_identical_to_the_single_slot_path() -> None:
+    # The knob ships off, and the live arm's ranks can be restarted elastically
+    # onto this module, so the default must not change a single number.
+    targets, weights, experts, safe = _targets()
+    base, base_weights = _inject_expert_anchor_batch(
+        targets, weights, experts, safe,
+        group_size=3, expert_weight=0.75, replace_worst=False,
+    )
+    output, output_weights = _inject_expert_anchor_batch(
+        targets, weights, experts, safe,
+        group_size=3, expert_weight=0.75, replace_worst=False,
+        secondary_weight=0.0,
+    )
+    assert torch.equal(output, base)
+    assert torch.equal(output_weights, base_weights)
+
+
+def test_the_secondary_slot_appends_a_second_expert_at_its_own_weight() -> None:
+    targets, weights, experts, safe = _targets()
+    output, output_weights = _inject_expert_anchor_batch(
+        targets, weights, experts, safe,
+        group_size=3, expert_weight=0.75, replace_worst=False,
+        secondary_weight=0.4,
+    )
+    # K+2, still scene-major: candidates, primary anchor, secondary anchor.
+    assert output.flatten().tolist() == [
+        0.0, 1.0, 2.0, 99.0, 99.0, 10.0, 11.0, 12.0, 199.0, 199.0
+    ]
+    assert output_weights.tolist() == pytest.approx(
+        [0.4, 0.1, 0.3, 0.75, 0.4, 0.2, 0.6, 0.5, 0.0, 0.0]
+    )
+
+
+def test_the_secondary_slot_takes_its_own_admission_mask() -> None:
+    # A step-scoped verdict only justifies the horizon it was scoped to, so a
+    # row the rescope rescued must carry the truncated anchor and NOT the
+    # untruncated one -- otherwise the objective trains toward a human that
+    # turns unsafe later in the plan.
+    targets, weights, experts, _ = _targets()
+    output, output_weights = _inject_expert_anchor_batch(
+        targets, weights, experts,
+        torch.tensor([True, True]),          # both rescued at step 1
+        group_size=3, expert_weight=0.75, replace_worst=False,
+        secondary_weight=0.4,
+        secondary_safe=torch.tensor([True, False]),   # only one safe to step 80
+    )
+    assert output_weights.tolist() == pytest.approx(
+        [0.4, 0.1, 0.3, 0.75, 0.4, 0.2, 0.6, 0.5, 0.75, 0.0]
+    )
+
+
+def test_the_secondary_slot_rejects_a_wrong_shaped_admission_mask() -> None:
+    targets, weights, experts, safe = _targets()
+    with pytest.raises(ValueError, match="secondary expert safe mask"):
+        _inject_expert_anchor_batch(
+            targets, weights, experts, safe,
+            group_size=3, expert_weight=0.75, replace_worst=False,
+            secondary_weight=0.4,
+            secondary_safe=torch.tensor([True, False, True]),
+        )
+
+
+def test_the_secondary_slot_is_incompatible_with_replace_worst() -> None:
+    targets, weights, experts, safe = _targets()
+    with pytest.raises(ValueError, match="incompatible with expert_anchor_replace_worst"):
+        _inject_expert_anchor_batch(
+            targets, weights, experts, safe,
+            group_size=3, expert_weight=0.75, replace_worst=True,
+            secondary_weight=0.4,
+        )
+
+
 def test_anchor_shape_mismatch_fails_closed() -> None:
     targets, weights, experts, safe = _targets()
     with pytest.raises(ValueError, match="group shape mismatch"):
@@ -123,6 +195,7 @@ def test_collect_only_can_persist_expert_sidecar_without_injecting_anchor(
     expert = torch.full((1, 4, 4), 7.0)
     expert_reward = torch.tensor([0.9])
     expert_safe = torch.tensor([True])
+    expert_gate_step = torch.tensor([4.0])
     monkeypatch.setattr(
         train_awr_module,
         "rollout_and_score_scene",
@@ -131,7 +204,12 @@ def test_collect_only_can_persist_expert_sidecar_without_injecting_anchor(
     monkeypatch.setattr(
         train_awr_module,
         "_score_expert_anchor_batch",
-        lambda *args, **kwargs: (expert, expert_reward, expert_safe),
+        lambda *args, **kwargs: (
+            expert,
+            expert_reward,
+            expert_safe,
+            expert_gate_step,
+        ),
     )
 
     _, collected = _train_scene(
@@ -166,6 +244,13 @@ def test_collect_only_can_persist_expert_sidecar_without_injecting_anchor(
     assert torch.equal(
         collected.reward_data[train_awr_module._REPLAY_EXPERT_SAFE_KEY],
         expert_safe.float(),
+    )
+    # The step-resolved verdict must ride along with the mine.  Recomputing it
+    # at replay time is impossible -- it needs the map and the actors, which the
+    # buffer does not carry -- so a mine that drops it costs a full re-mine.
+    assert torch.equal(
+        collected.reward_data[train_awr_module._REPLAY_EXPERT_GATE_STEP_KEY],
+        expert_gate_step,
     )
 
 
@@ -313,18 +398,39 @@ def test_expert_gates_are_applied_to_merged_breakdowns() -> None:
     """The merged route must gate identically to the standalone one."""
 
     config = RewardConfig(rb_gate_enabled=True)
-    experts = torch.zeros(3, 1, 1)
-    _, rewards, safe = _expert_anchor_from_rewards(
+    experts = torch.zeros(3, 80, 4)
+    _, rewards, safe, gate_step = _expert_anchor_from_rewards(
         experts,
         [
             _breakdown(0.8),
-            _breakdown(0.5, collision_step=2),
-            _breakdown(0.7, rb_crossing=True),
+            _breakdown(0.5, collision_step=2, first_hard_gate_step=2),
+            _breakdown(0.7, rb_crossing=True, first_hard_gate_step=57),
         ],
         config,
     )
     assert rewards.tolist() == pytest.approx([0.8, 0.5, 0.7])
     assert safe.tolist() == [True, False, False]
+    # future_len is the "never gates" sentinel, so the safe row reconstructs to
+    # safe at every horizon while the other two carry their real step.
+    assert gate_step.tolist() == pytest.approx([80.0, 2.0, 57.0])
+
+
+def test_a_breakdown_without_a_gate_step_cannot_resurrect_an_unsafe_row() -> None:
+    """Missing step information must read as "fails on the executed step".
+
+    ``first_hard_gate_step`` defaults to None on the dataclass, and None is also
+    how a genuinely safe row reports itself.  A caller holding a breakdown that
+    predates the field would otherwise hand every unsafe row the "never gates"
+    sentinel, and a step-scoped verdict would then train on all of them.
+    """
+
+    _, _, safe, gate_step = _expert_anchor_from_rewards(
+        torch.zeros(2, 80, 4),
+        [_breakdown(0.8), _breakdown(0.5, collision_step=2)],
+        RewardConfig(rb_gate_enabled=True),
+    )
+    assert safe.tolist() == [True, False]
+    assert gate_step.tolist() == pytest.approx([80.0, 0.0])
 
 
 def test_expert_anchor_requires_one_scored_expert_per_scene() -> None:

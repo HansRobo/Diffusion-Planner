@@ -24,6 +24,30 @@ _ROAD_BORDER_SEGMENT_LEN_EPS = 1e-9
 _ROAD_BORDER_CLOSEST_POINT_CHUNK_SIZE = 32768
 
 
+def _first_true_steps(mask: torch.Tensor, *, offset: int = 0) -> list[int | None]:
+    """Return the first true index per row with one device-to-host transfer.
+
+    Metric callers need Python ``None`` for rows with no event because that is
+    the stable public diagnostic ABI.  Reading ``mask[i]`` and ``first[i]`` in
+    a Python loop makes every CUDA scalar a separate synchronisation.  Packing
+    the presence bit and argmax index preserves the exact list semantics while
+    amortising the transfer across the whole candidate group.
+    """
+
+    if mask.dim() != 2:
+        raise ValueError(
+            f"_first_true_steps expects a 2-D mask, got {tuple(mask.shape)}"
+        )
+    if mask.shape[1] == 0:
+        return [None] * int(mask.shape[0])
+    has_event = mask.any(dim=1)
+    first = mask.to(dtype=torch.uint8).argmax(dim=1)
+    packed = torch.stack(
+        (has_event.to(dtype=torch.int64), first.to(dtype=torch.int64)), dim=1
+    ).detach().cpu().tolist()
+    return [int(index) + offset if present else None for present, index in packed]
+
+
 @torch.no_grad()
 def compute_ego_neighbor_signed_clearance(
     ego_trajs: torch.Tensor,
@@ -193,7 +217,6 @@ def compute_safety_score_batch(
 
     has_collision_at_t = collision_mask.any(dim=1)  # (N, T)
     has_collision = has_collision_at_t.any(dim=1)  # (N,)
-    first_t = has_collision_at_t.float().argmax(dim=1)  # (N,)
 
     # Proximity penalty: soft penalty for being close to any agent without
     # colliding. Min signed distance across all neighbors per timestep.
@@ -211,12 +234,7 @@ def compute_safety_score_batch(
         -proximity_penalty,
     )
 
-    collision_steps: list[int | None] = []
-    for i in range(N):
-        if has_collision[i]:
-            collision_steps.append(int(first_t[i].item()))
-        else:
-            collision_steps.append(None)
+    collision_steps = _first_true_steps(has_collision_at_t)
 
     return scores, collision_steps
 
@@ -294,16 +312,8 @@ def compute_ttc_score_batch(
     # Score: fraction of safe timesteps
     ttc_score = 1.0 - ttc_unsafe_at_t.float().mean(dim=1)  # (N,)
 
-    has_unsafe = ttc_unsafe_at_t.any(dim=1)
-    first_unsafe_t = ttc_unsafe_at_t.float().argmax(dim=1)
-    has_collision = collision_at_t.any(dim=1)
-    first_collision_t = collision_at_t.float().argmax(dim=1)
-
-    first_unsafe_steps: list[int | None] = []
-    first_collision_steps: list[int | None] = []
-    for i in range(N):
-        first_unsafe_steps.append(int(first_unsafe_t[i].item()) if has_unsafe[i] else None)
-        first_collision_steps.append(int(first_collision_t[i].item()) if has_collision[i] else None)
+    first_unsafe_steps = _first_true_steps(ttc_unsafe_at_t)
+    first_collision_steps = _first_true_steps(collision_at_t)
 
     return {
         "score": ttc_score,
@@ -988,9 +998,9 @@ def compute_road_border_penalty(
     seg_p2_all = border_xy[:, 1:].reshape(-1, 2)[idx]  # (E, 2)
 
     # Build ego perimeter points (20 per side = 80 total)
-    wb = ego_shape[0].item()
-    length = ego_shape[1].item()
-    width = ego_shape[2].item()
+    wb, length, width = (
+        float(value) for value in ego_shape[:3].detach().cpu().tolist()
+    )
     ro = (length - wb) / 2
     _PTS_PER_SIDE = 20
     local_pts = []
@@ -1090,14 +1100,7 @@ def compute_road_border_penalty(
     crossing_gate = (~has_crossing).float()  # (N,) 1.0=safe, 0.0=crossing
 
     # First crossing timestep per trajectory (among t>=1).
-    first_crossing_steps: list[int | None] = []
-    for i in range(N):
-        if has_crossing[i]:
-            first_crossing_steps.append(
-                int(is_crossing[i, 1:].nonzero(as_tuple=True)[0][0].item()) + 1
-            )
-        else:
-            first_crossing_steps.append(None)
+    first_crossing_steps = _first_true_steps(is_crossing[:, 1:], offset=1)
 
     # Exclusive categories: crossing > near > wide > safe. No double counting.
     is_not_crossing = ~is_crossing[:, 1:]  # (N, T-1)
@@ -1319,13 +1322,7 @@ def compute_static_collision_penalty(
     has_crossing = is_crossing_gated.any(dim=1)
     crossing_gate = (~has_crossing).float()
 
-    first_crossing_steps: list[int | None] = []
-    for i in range(N):
-        if has_crossing[i]:
-            idx = is_crossing_gated[i].nonzero(as_tuple=True)[0][0]
-            first_crossing_steps.append(int(idx.item()))
-        else:
-            first_crossing_steps.append(None)
+    first_crossing_steps = _first_true_steps(is_crossing_gated)
 
     # Staged categories (among t>=1, ego moving, not crossing).
     valid_steps = gate_steps & ~is_crossing_full  # (N, T) — non-crossing scoreable
@@ -1595,9 +1592,9 @@ def compute_lane_departure_penalty(
     outer_outward = outward_all[is_outer]
 
     # --- Step 4: Sample ego perimeter points at each timestep ---
-    wb = ego_shape[0].item()
-    length = ego_shape[1].item()
-    width = ego_shape[2].item()
+    wb, length, width = (
+        float(value) for value in ego_shape[:3].detach().cpu().tolist()
+    )
     ro = (length - wb) / 2
     lp_list = []
     for j in range(_LANE_PTS_PER_SIDE):
@@ -1669,10 +1666,7 @@ def compute_lane_departure_penalty(
     is_crossing_ts = per_ts_max_signed > -lane_cross_thresh  # (N, T), full for diag
     has_crossing = is_crossing_ts[:, 1:].any(dim=1)  # t=0 excluded from gate
     crossing_gate = (~has_crossing).float()
-    first_idx = is_crossing_ts[:, 1:].float().argmax(dim=1)
-    lane_crossing_steps: list[int | None] = [
-        int(first_idx[i].item()) + 1 if has_crossing[i] else None for i in range(N)
-    ]
+    lane_crossing_steps = _first_true_steps(is_crossing_ts[:, 1:], offset=1)
 
     # --- Step 6: Exclusive zone categories (skip t=0) ---
     # OUT > NEAR > WIDE > SAFE. "In-lane" = signed distance below -cross_thresh

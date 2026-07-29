@@ -88,16 +88,34 @@ latest_best_checkpoint() {
     -printf '%T@\t%p\n' 2>/dev/null | sort -nr | head -n 1
 }
 
+process_is_stopped() {
+  # A SIGSTOPped process answers kill -0, so "alive" is not the same as
+  # "working".  Freezing the campaign to hand its GPUs to an A/B arm is a
+  # deliberate state and must not be mistaken for a stall.
+  local pid=$1 state
+  [[ ${pid} =~ ^[1-9][0-9]*$ ]] || return 1
+  state=$(ps -o stat= -p "${pid}" 2>/dev/null | tr -d ' ')
+  [[ ${state} == T* ]]
+}
+
 terminate_stalled_work() {
-  local supervisor_pid=${1:-} pids=()
-  mapfile -t pids < <(pgrep -f '(^|/)torchrun ' || true)
-  if (( ${#pids[@]} > 0 )); then
-    kill -TERM "${pids[@]}" 2>/dev/null || true
-    return
+  # Scope the kill to the supervisor's own process group.  An unscoped
+  # `pgrep -f torchrun` is machine-wide: on 2026-07-28 it SIGTERMed a
+  # hand-launched A/B arm that lives in the same experiment tree but runs in
+  # its own session, costing 13 minutes of training.  A path scope cannot
+  # separate the two; the supervisor launches every torchrun inline (no
+  # setsid), so its work is exactly its process group.
+  local supervisor_pid=${1:-} pids=() pgid=''
+  [[ ${supervisor_pid} =~ ^[1-9][0-9]*$ ]] || return
+  pgid=$(ps -o pgid= -p "${supervisor_pid}" 2>/dev/null | tr -d ' ')
+  if [[ ${pgid} =~ ^[1-9][0-9]*$ ]]; then
+    mapfile -t pids < <(pgrep -g "${pgid}" -f '(^|/)torchrun ' || true)
+    if (( ${#pids[@]} > 0 )); then
+      kill -TERM "${pids[@]}" 2>/dev/null || true
+      return
+    fi
   fi
-  if [[ ${supervisor_pid} =~ ^[1-9][0-9]*$ ]]; then
-    kill -TERM "${supervisor_pid}" 2>/dev/null || true
-  fi
+  kill -TERM "${supervisor_pid}" 2>/dev/null || true
 }
 
 previous_health=unknown
@@ -176,6 +194,12 @@ while true; do
   if (( disk_available_kib < MIN_DISK_AVAILABLE_KIB )); then
     health=critical
     reason=low_disk
+  elif process_is_stopped "${supervisor_pid}"; then
+    # Frozen on purpose: progress cannot advance and never will until someone
+    # sends SIGCONT, so every stall test below would be true forever and
+    # recovery would fire once per cooldown.  Suspend recovery instead.
+    health=paused
+    reason=supervisor_deliberately_stopped
   elif [[ ! -s ${COMPLETION} && ${owner_alive} -eq 0 && ${supervisor_alive} -eq 0 ]]; then
     health=critical
     reason=owner_and_supervisor_absent
@@ -204,6 +228,9 @@ while true; do
         disk_available_kib:$disk_available_kib}')
     if [[ ${health} == healthy ]]; then
       emit_event info health_recovered "campaign health is normal" "${details}"
+    elif [[ ${health} == paused ]]; then
+      emit_event info campaign_paused \
+        "supervisor is stopped; automatic recovery suspended" "${details}"
     else
       emit_event critical "${reason}" "campaign health requires automatic recovery" "${details}"
     fi

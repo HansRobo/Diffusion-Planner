@@ -58,7 +58,11 @@ def _parse_args() -> argparse.Namespace:
         default=10,
         help="deployment solver steps; 10 is the original DP checkpoint default (training uses HDP's 5)",
     )
-    parser.add_argument("--amp_dtype", choices=["off", "bf16", "fp16"], default="bf16")
+    # Default is the precision the VEHICLE runs.  bf16 quantises the executed first
+    # waypoint onto a 39mm comb and reverses the sign of the smoothness delta, so a
+    # caller that omits this flag must not silently get a number the car cannot
+    # reproduce.  Pass --amp_dtype bf16 explicitly to reproduce pre-2026-07-29 runs.
+    parser.add_argument("--amp_dtype", choices=["off", "bf16", "fp16"], default="off")
     parser.add_argument(
         "--use_policy_state",
         action="store_true",
@@ -97,6 +101,43 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, float]:
             result[f"mean_{key}"] = float(np.mean(values))
             result[f"p50_{key}"] = float(np.median(values))
     return result
+
+
+# Standstill steering jitter, the metric the cycle non-regression gate vetoes
+# on.  The rollout already computes it (rlvr.awr._first_waypoint_gate_and_
+# diagnostics_batch), so copy it rather than recompute: this eval and
+# train_awr's per-epoch eval then report the same numbers by construction.
+#
+# Without it, the only artifacts carrying the diagnostic are train_awr's
+# per-epoch evals, so the gate could only be applied to a raw epoch checkpoint
+# -- never to the alpha-scaled policy a cycle actually commits.
+#
+# The three lateral/speed keys are the axis that reaches the vehicle: it
+# replans at 10 Hz and executes only the first waypoint, where the model sits
+# 40x the logged human at standstill (4.25 mm vs 0.106 mm).  Implied steer
+# cannot stand in for them -- it divides by step**2, so the human's own first
+# step scores 1.11 rad, over the 0.64 bar.  low_speed is also what separates
+# the 7.5% stop-turn population the veto watches from the 7.1% that is
+# low-speed but not turning.  The rollout already computes all three; only the
+# copy was missing, so this costs nothing at eval time.
+_JITTER_DIAGNOSTIC_KEYS = (
+    "stop_turn_scene",
+    "stop_turn_first_waypoint_implied_steer_p95_rad",
+    "first_waypoint_implied_steer_p95_rad",
+    "first_waypoint_gate_low_speed",
+    "first_waypoint_lateral_abs_p95_m",
+    "first_waypoint_displacement_p95_m",
+)
+
+
+def _jitter_diagnostics(diagnostics: dict[str, float] | None) -> dict[str, float]:
+    if not diagnostics:
+        return {}
+    return {
+        key: float(diagnostics[key])
+        for key in _JITTER_DIAGNOSTIC_KEYS
+        if key in diagnostics
+    }
 
 
 def _configured_safe(reward: Any, config: RewardConfig) -> bool:
@@ -216,6 +257,7 @@ def _evaluate_rank(args: argparse.Namespace) -> None:
                     "det_smoothness": float(reward.smoothness),
                     "configured_safe": float(_configured_safe(reward, reward_config)),
                     **metrics,
+                    **_jitter_diagnostics(rollout.diagnostics),
                 }
             )
         del data, rollouts

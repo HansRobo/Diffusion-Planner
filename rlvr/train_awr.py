@@ -35,6 +35,7 @@ import shutil
 import time
 import zipfile
 from collections import deque
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, fields
 from datetime import datetime, timedelta
@@ -2072,7 +2073,9 @@ def _resolve_amp_dtype(requested: str, device: torch.device) -> str:
     return "bf16" if capability[0] >= 8 else "fp16"
 
 
-def _configure_cuda_runtime(device: torch.device) -> dict[str, Any]:
+def _configure_cuda_runtime(
+    device: torch.device, tf32: bool | None = None
+) -> dict[str, Any]:
     """Enable the safe, high-throughput CUDA switches used by T4 training.
 
     The AWR loop has fixed tensor shapes (80 future steps and 321 agents), so
@@ -2097,9 +2100,18 @@ def _configure_cuda_runtime(device: torch.device) -> dict[str, Any]:
                 [cuda_bin_str, *[entry for entry in path_entries if entry]]
             )
 
-    torch.set_float32_matmul_precision("high")
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    # NVIDIA_TF32_OVERRIDE=0 disables TF32 in the driver, underneath these flags.
+    # Setting them True anyway records tf32_matmul=True for a run whose kernels are
+    # true fp32, so the manifest would claim a precision the run did not use.  Honour
+    # the override here so the flags, the record and the kernels agree.
+    # Every config already carries an `acceleration.tf32` key that nothing read, so
+    # setting it false bought nothing.  It is honoured now; the driver override still
+    # wins, because it is the only thing that can disable TF32 inside cuBLAS.
+    tf32_env_override = os.environ.get("NVIDIA_TF32_OVERRIDE")
+    tf32_allowed = (True if tf32 is None else bool(tf32)) and tf32_env_override != "0"
+    torch.set_float32_matmul_precision("high" if tf32_allowed else "highest")
+    torch.backends.cuda.matmul.allow_tf32 = tf32_allowed
+    torch.backends.cudnn.allow_tf32 = tf32_allowed
     # The planner contains MultiheadAttention.  Keep the fused SDPA kernels
     # enabled; PyTorch will select the kernel supported by the active dtype and
     # sequence length.
@@ -2114,6 +2126,8 @@ def _configure_cuda_runtime(device: torch.device) -> dict[str, Any]:
         "device": str(device),
         "tf32_matmul": bool(torch.backends.cuda.matmul.allow_tf32),
         "tf32_cudnn": bool(torch.backends.cudnn.allow_tf32),
+        "tf32_env_override": tf32_env_override,
+        "tf32_requested": tf32,
         "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
         "nvcc": shutil.which("nvcc"),
         "flash_sdp": bool(torch.backends.cuda.flash_sdp_enabled())
@@ -3273,11 +3287,23 @@ _REPLAY_EXPERT_SCHEMA = "logged_ego_future_hard_gate_v1"
 _REPLAY_EXPERT_TRAJECTORY_KEY = "_replay_expert_trajectory"
 _REPLAY_EXPERT_REWARD_KEY = "_replay_expert_reward"
 _REPLAY_EXPERT_SAFE_KEY = "_replay_expert_safe"
+#: Step at which the logged human's first configured hard gate fires, with
+#: ``future_len`` meaning "never".  ``expert_safe`` is the same verdict
+#: collapsed to a bool over the whole 8 s future, which is the wrong scope for
+#: a truncated anchor: it rejects a human whose collision is at 4 s even when
+#: only step 0 is consumed.  Sentinel ``future_len`` makes the reconstruction
+#: exact -- ``step >= horizon`` at ``horizon == future_len`` is True precisely
+#: for the rows ``expert_safe`` already marks safe.
+_REPLAY_EXPERT_GATE_STEP_KEY = "_replay_expert_hard_gate_step"
 _REPLAY_EXPERT_KEYS = (
     _REPLAY_EXPERT_TRAJECTORY_KEY,
     _REPLAY_EXPERT_REWARD_KEY,
     _REPLAY_EXPERT_SAFE_KEY,
 )
+#: Written by a mine that carries the step-resolved verdict, absent from every
+#: buffer mined before it.  Kept out of ``_REPLAY_EXPERT_KEYS`` so the
+#: pre-write completeness check keeps passing on the older schema.
+_REPLAY_EXPERT_GATE_STEP_ARRAY = "expert_hard_gate_step"
 
 
 def _shared_decoder_context_contract(
@@ -3576,7 +3602,10 @@ def _shared_expert_anchor_contract(
         "expert_safe",
     }
     names = expert_manifest.get("arrays", {})
-    if set(names) != expected_names:
+    # Subset, not equality: a mine that also recorded the step-resolved gate
+    # verdict writes one extra array, and rejecting it would invalidate the
+    # newer schema rather than the older one this check was written for.
+    if not expected_names <= set(names):
         raise RuntimeError(
             "shared expert anchor sidecar is incomplete: "
             f"{sorted(names)}"
@@ -3586,6 +3615,9 @@ def _shared_expert_anchor_contract(
         "expert_rewards": (scene_count,),
         "expert_safe": (scene_count,),
     }
+    if _REPLAY_EXPERT_GATE_STEP_ARRAY in names:
+        expected_names = expected_names | {_REPLAY_EXPERT_GATE_STEP_ARRAY}
+        expected_shapes[_REPLAY_EXPERT_GATE_STEP_ARRAY] = (scene_count,)
     array_paths: dict[str, str] = {}
     array_shapes: dict[str, list[int]] = {}
     for name in sorted(expected_names):
@@ -3960,6 +3992,9 @@ class _DiskReplayWriter:
             )
             self._create_expert_array("expert_rewards", (self.expected_count,))
             self._create_expert_array("expert_safe", (self.expected_count,))
+            self._create_expert_array(
+                _REPLAY_EXPERT_GATE_STEP_ARRAY, (self.expected_count,)
+            )
         if self.shared_scene_encoding_path is not None:
             shared_encoding = np.load(
                 self.shared_scene_encoding_path, mmap_mode="r"
@@ -4136,6 +4171,16 @@ class _DiskReplayWriter:
                 "expert_rewards": self._to_numpy(expert_reward),
                 "expert_safe": self._to_numpy(expert_safe),
             }
+            gate_step = rollout.reward_data.get(_REPLAY_EXPERT_GATE_STEP_KEY)
+            if gate_step is not None:
+                if tuple(gate_step.shape) != (batch_size,):
+                    raise ValueError(
+                        "replay expert gate-step shape mismatch: "
+                        f"expected={(batch_size,)}, got={tuple(gate_step.shape)}"
+                    )
+                expert_values[_REPLAY_EXPERT_GATE_STEP_ARRAY] = self._to_numpy(
+                    gate_step
+                )
 
         encoding = rollout.scene_encoding
         if encoding is not None:
@@ -4454,11 +4499,16 @@ class _DiskReplayReader:
                 "expert_rewards",
                 "expert_safe",
             }
-            if set(array_names) != expected_expert_arrays:
+            # Subset, not equality -- see the shared-sidecar loader above.
+            if not expected_expert_arrays <= set(array_names):
                 raise RuntimeError(
                     "replay expert sidecar arrays are incomplete: "
                     f"{sorted(array_names)}"
                 )
+            if _REPLAY_EXPERT_GATE_STEP_ARRAY in array_names:
+                expected_expert_arrays = expected_expert_arrays | {
+                    _REPLAY_EXPERT_GATE_STEP_ARRAY
+                }
             self.expert_anchor = (
                 {
                     name: np.load(
@@ -4478,7 +4528,18 @@ class _DiskReplayReader:
                     name: np.load(
                         self.rank_dir / str(array_names[name]), mmap_mode="r"
                     )
-                    for name in ("expert_rewards", "expert_safe")
+                    for name in (
+                        "expert_rewards",
+                        "expert_safe",
+                        # A scalar per scene, so it belongs with the other two
+                        # rather than behind the large-row decode the compressed
+                        # path may skip for a zero-gradient scene.
+                        *(
+                            (_REPLAY_EXPERT_GATE_STEP_ARRAY,)
+                            if _REPLAY_EXPERT_GATE_STEP_ARRAY in array_names
+                            else ()
+                        ),
+                    )
                 }
             expected_shapes = {
                 "expert_trajectories": (
@@ -4489,6 +4550,10 @@ class _DiskReplayReader:
                 "expert_rewards": (self.scene_count,),
                 "expert_safe": (self.scene_count,),
             }
+            if _REPLAY_EXPERT_GATE_STEP_ARRAY in array_names:
+                expected_shapes[_REPLAY_EXPERT_GATE_STEP_ARRAY] = (
+                    self.scene_count,
+                )
             if self.compressed_context is None:
                 for name, expected_shape in expected_shapes.items():
                     array = self.expert_anchor[name]
@@ -4662,6 +4727,10 @@ class _DiskReplayReader:
                     ),
                 }
             )
+            if _REPLAY_EXPERT_GATE_STEP_ARRAY in self.expert_anchor_scalars:
+                replay_context[_REPLAY_EXPERT_GATE_STEP_KEY] = torch.from_numpy(
+                    compressed_materialize(_REPLAY_EXPERT_GATE_STEP_ARRAY)
+                )
         elif self.expert_anchor:
             replay_context.update(
                 {
@@ -4676,6 +4745,10 @@ class _DiskReplayReader:
                     ),
                 }
             )
+            if _REPLAY_EXPERT_GATE_STEP_ARRAY in self.expert_anchor:
+                replay_context[_REPLAY_EXPERT_GATE_STEP_KEY] = torch.from_numpy(
+                    materialize(self.expert_anchor[_REPLAY_EXPERT_GATE_STEP_ARRAY])
+                )
         reward_array = materialize(self.rewards)
         finite_reward = np.isfinite(reward_array)
         zero_reward = finite_reward & (np.abs(reward_array) <= 1e-8)
@@ -5082,6 +5155,10 @@ def _iter_prefetched_scene_batches(
                     "expert_rewards": _REPLAY_EXPERT_REWARD_KEY,
                     "expert_safe": _REPLAY_EXPERT_SAFE_KEY,
                 }
+                if _REPLAY_EXPERT_GATE_STEP_ARRAY in shared_expert_anchor:
+                    expected_names[_REPLAY_EXPERT_GATE_STEP_ARRAY] = (
+                        _REPLAY_EXPERT_GATE_STEP_KEY
+                    )
                 if set(shared_expert_anchor) != set(expected_names):
                     raise RuntimeError(
                         "shared expert-anchor arrays are incomplete: "
@@ -5536,7 +5613,7 @@ def _expert_anchor_from_rewards(
     expert: torch.Tensor,
     scene_rewards: list[Any],
     reward_config: RewardConfig,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Apply the configured hard gates to one scored expert per scene.
 
     Shared by both scoring routes -- the merged one that rides along in the
@@ -5549,12 +5626,22 @@ def _expert_anchor_from_rewards(
         raise ValueError(
             f"expected one scored expert per scene: {len(scene_rewards)} != {batch_size}"
         )
+    future_len = int(expert.shape[1])
     rewards = torch.empty(batch_size, device=expert.device, dtype=torch.float32)
     safe = torch.zeros(batch_size, device=expert.device, dtype=torch.bool)
+    gate_step = torch.empty(batch_size, device=expert.device, dtype=torch.float32)
     for scene_index, scene_reward in enumerate(scene_rewards):
         rewards[scene_index] = float(scene_reward.total)
         safe[scene_index] = _expert_reward_is_hard_safe(scene_reward, reward_config)
-    return expert, rewards, safe
+        step = getattr(scene_reward, "first_hard_gate_step", None)
+        if step is None and not bool(safe[scene_index]):
+            # On a real breakdown ``step is None`` and "hard safe" are the same
+            # statement, so landing here means the field is missing or stale.
+            # Report the gate on the executed step: a caller that cannot say
+            # WHEN the human fails must not be able to resurrect the row.
+            step = 0
+        gate_step[scene_index] = future_len if step is None else float(step)
+    return expert, rewards, safe, gate_step
 
 
 @torch.no_grad()
@@ -5562,7 +5649,7 @@ def _score_expert_anchor_batch(
     data: dict[str, torch.Tensor],
     future_len: int,
     reward_config: RewardConfig,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
     """Build and independently hard-score one logged target per scene.
 
     Reward geometry cannot be broadcast across scenes because map, actors,
@@ -5598,8 +5685,20 @@ def _inject_expert_anchor_batch(
     group_size: int,
     expert_weight: float,
     replace_worst: bool,
+    secondary_weight: float = 0.0,
+    secondary_safe: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Insert safe experts scene-major without mixing different groups."""
+    """Insert safe experts scene-major without mixing different groups.
+
+    ``secondary_weight`` appends the logged expert a *second* time so a truncated
+    anchor can be concentrated at the executed waypoint without giving up the
+    full-horizon smoothing.  Each target is a mean over its own horizon, so a
+    single truncated anchor does not merely move its pull -- it deletes it from
+    every other step, and the objective then asks for the human at step 1 and the
+    candidate mean from step 2.  Two slots make the two jobs independent.
+    ``secondary_safe`` admits the untruncated slot separately, because a
+    step-scoped mask only justifies the horizon it was scoped to.
+    """
 
     batch_size = int(expert_trajectories.shape[0])
     group_size = int(group_size)
@@ -5621,6 +5720,14 @@ def _inject_expert_anchor_batch(
     safe = expert_safe.to(device=weights.device, dtype=torch.bool)
     experts = expert_trajectories.to(device=trajectories.device, dtype=trajectories.dtype)
     if replace_worst:
+        if float(secondary_weight) > 0.0:
+            # replace_worst overwrites an existing column instead of appending
+            # one, so there is no second slot to carry the untruncated anchor.
+            raise ValueError(
+                "expert_anchor_secondary_weight requires the appended-slot "
+                "anchor path; it is incompatible with "
+                "expert_anchor_replace_worst"
+            )
         trajectories = trajectories.clone()
         weights = weights.clone()
         rows = torch.arange(batch_size, device=weights.device)[safe]
@@ -5639,7 +5746,82 @@ def _inject_expert_anchor_batch(
         )
         trajectories = torch.cat([trajectories, experts[:, None]], dim=1)
         weights = torch.cat([weights, anchor_weights[:, None]], dim=1)
+        if float(secondary_weight) > 0.0:
+            sec = safe if secondary_safe is None else secondary_safe.to(
+                device=weights.device, dtype=torch.bool
+            )
+            if sec.shape != (batch_size,):
+                raise ValueError(
+                    f"secondary expert safe mask must be [{batch_size}], "
+                    f"got {tuple(sec.shape)}"
+                )
+            secondary_weights = torch.where(
+                sec,
+                torch.full_like(sec, float(secondary_weight), dtype=weights.dtype),
+                torch.zeros_like(sec, dtype=weights.dtype),
+            )
+            trajectories = torch.cat([trajectories, experts[:, None]], dim=1)
+            weights = torch.cat([weights, secondary_weights[:, None]], dim=1)
     return trajectories.flatten(0, 1), weights.flatten()
+
+
+def validate_expert_anchor_secondary_config(
+    train_config: Mapping[str, Any],
+    *,
+    future_len: int,
+) -> tuple[float, int]:
+    """Resolve the second anchor slot's ``(weight, horizon)``, or refuse.
+
+    The truncated anchor is a trade -- it buys the executed waypoint by deleting
+    the anchor everywhere else -- and a second untruncated slot is how we stop
+    paying for it.  Public and called twice on purpose: once at launch, so a bad
+    combination dies in seconds, and once per replay step, so a value that
+    arrives from a config file rather than the CLI is checked too.  The launch
+    call matters because the replay step is reached only after the epoch-0 eval,
+    which is ~10 minutes of eight idle GPUs.
+    """
+
+    future_len = int(future_len)
+    weight = float(train_config.get("expert_anchor_secondary_weight", 0.0))
+    if weight < 0.0:
+        raise ValueError(
+            f"expert_anchor_secondary_weight must be non-negative, got {weight}"
+        )
+    horizon = int(train_config.get("expert_anchor_secondary_horizon", 0)) or future_len
+    if not 1 <= horizon <= future_len:
+        raise ValueError(
+            "expert_anchor_secondary_horizon must be 0 or lie inside the model "
+            f"future: horizon={horizon}, T={future_len}"
+        )
+    if weight <= 0.0:
+        return 0.0, horizon
+    primary = int(train_config.get("expert_anchor_loss_horizon", 0)) or future_len
+    if horizon <= primary:
+        # Two slots at the same or a shorter horizon are just one slot at a
+        # larger weight, and reading that as "the tail is covered" would be
+        # wrong -- past reward_horizon_steps the anchor is the only supervision.
+        raise ValueError(
+            "expert_anchor_secondary_horizon must exceed "
+            "expert_anchor_loss_horizon for the second slot to supervise "
+            f"anything new: secondary={horizon}, primary={primary}"
+        )
+    if float(train_config.get("expert_anchor_loss_horizon_max_speed", 0.0)) > 0.0:
+        # On a scene the speed mask exempts, the primary reverts to the full
+        # horizon and the two slots collapse into one anchor at twice the
+        # weight -- a silent 2x on BC mass, on part of the corpus only.  Refuse
+        # rather than thread a per-row secondary weight nobody has asked for.
+        raise ValueError(
+            "expert_anchor_secondary_weight is incompatible with "
+            "expert_anchor_loss_horizon_max_speed: on an exempted scene the "
+            "primary anchor reverts to the full horizon and the two slots "
+            "collapse into one at double the weight"
+        )
+    if bool(train_config.get("expert_anchor_replace_worst", False)):
+        raise ValueError(
+            "expert_anchor_secondary_weight requires the appended-slot anchor "
+            "path; it is incompatible with expert_anchor_replace_worst"
+        )
+    return weight, horizon
 
 
 def _build_awr_target_loss_horizons(
@@ -5652,8 +5834,46 @@ def _build_awr_target_loss_horizons(
     deterministic_first: bool,
     expert_safe: torch.Tensor | None,
     expert_replace_worst: bool,
+    expert_horizon: int | None = None,
+    expert_short_horizon_mask: torch.Tensor | None = None,
+    secondary_horizon: int | None = None,
 ) -> torch.Tensor:
-    """Assign scorer-supported horizons while retaining full-horizon anchors."""
+    """Assign scorer-supported horizons while retaining full-horizon anchors.
+
+    ``expert_horizon`` truncates the logged-expert anchor alone.  Both terms are
+    weighted means over their own horizon, so a short anchor raises its
+    *effective* weight at the steps it keeps by ``candidate_horizon /
+    expert_horizon`` while removing its pull everywhere else -- which is the
+    only way to reach the one waypoint the vehicle executes.  ``None`` keeps the
+    full horizon.
+
+    ``secondary_horizon`` is the horizon of the *second* anchor slot appended by
+    ``_inject_expert_anchor_batch(secondary_weight=...)``, which exists so the
+    truncation above does not have to be paid for.  Measured on the cycle01
+    overlay: a lone ``expert_horizon=1`` raises the fixed point's jerk over the
+    scored window by +9.73% because the objective asks for the human at step 1
+    and the candidate mean from step 2; a second untruncated slot at the same
+    weight cuts that to +1.06% while keeping the executed-waypoint gain.
+
+    Two claims in an earlier revision of this docstring were wrong, and both are
+    worth stating because they were priced into three separate decisions.  There
+    is no "8 s tail the reward is supposed to own": ``reward_horizon_steps`` is
+    40, so det_reward never scores steps 41-80.  And the candidates do not
+    supervise that tail either -- ``deterministic_first`` gives candidate 0 the
+    only full-length candidate horizon, but ``positive_advantage_only`` sets its
+    weight to ``behavior_anchor_weight`` (0.0), so it is zero-weight on 100% of
+    rows and this branch is inert.  Steps 41-80 are therefore the anchor's alone,
+    and a truncated anchor leaves them with no supervision at all.
+
+    ``expert_short_horizon_mask`` restricts that truncation to the scenes that
+    need it.  The logged expert is the *smoothest* target available (jerk -0.49
+    against the policy's -2.30), so truncating it everywhere gives up that
+    smoothing across the whole corpus -- worth -1.6e-3 det_reward, about 3x the
+    largest per-cycle gain ever measured.  The executed-waypoint dispersion it
+    buys is entirely a low-speed defect, so masking the truncation to low-speed
+    scenes keeps 100% of the gain at ~0 reward cost.  ``None`` truncates every
+    anchored row.
+    """
 
     expected = int(batch_size) * int(group_size)
     if target_weights.numel() != expected:
@@ -5667,6 +5887,46 @@ def _build_awr_target_loss_horizons(
         raise ValueError(
             "candidate loss horizon must lie inside the model future: "
             f"horizon={candidate_horizon}, T={future_len}"
+        )
+    expert_horizon = future_len if expert_horizon is None else int(expert_horizon)
+    if not 1 <= expert_horizon <= future_len:
+        raise ValueError(
+            "expert anchor loss horizon must lie inside the model future: "
+            f"horizon={expert_horizon}, T={future_len}"
+        )
+    if secondary_horizon is not None:
+        secondary_horizon = int(secondary_horizon)
+        if not 1 <= secondary_horizon <= future_len:
+            raise ValueError(
+                "secondary expert anchor loss horizon must lie inside the model "
+                f"future: horizon={secondary_horizon}, T={future_len}"
+            )
+        if expert_replace_worst:
+            raise ValueError(
+                "a secondary expert anchor horizon requires the appended-slot "
+                "anchor path; it is incompatible with expert_replace_worst"
+            )
+    # One horizon per scene, so the truncation can be masked to the scenes that
+    # need it without changing the graph shape.
+    row_horizon = torch.full(
+        (int(batch_size),),
+        expert_horizon,
+        dtype=torch.long,
+        device=target_weights.device,
+    )
+    if expert_short_horizon_mask is not None:
+        if expert_short_horizon_mask.shape != (int(batch_size),):
+            raise ValueError(
+                "expert short-horizon mask must match the loss-horizon scene "
+                f"batch: expected={(int(batch_size),)}, "
+                f"got={tuple(expert_short_horizon_mask.shape)}"
+            )
+        row_horizon = torch.where(
+            expert_short_horizon_mask.to(
+                device=target_weights.device, dtype=torch.bool
+            ),
+            row_horizon,
+            torch.full_like(row_horizon, future_len),
         )
     horizons = torch.full(
         (int(batch_size), int(group_size)),
@@ -5691,23 +5951,166 @@ def _build_awr_target_loss_horizons(
             columns = torch.argmin(
                 target_weights.reshape(int(batch_size), int(group_size)), dim=1
             )[rows]
-            horizons[rows, columns] = future_len
+            horizons[rows, columns] = row_horizon[rows]
         return horizons.flatten()
     # The expert injection keeps a fixed K+1 graph shape; an unsafe expert is
     # zero-weight but still occupies its final slot.  Giving every such slot
-    # the full horizon keeps the horizon vector exactly shape-aligned.
-    return torch.cat(
-        [
-            horizons,
-            torch.full(
-                (int(batch_size), 1),
-                future_len,
-                dtype=torch.long,
-                device=target_weights.device,
-            ),
-        ],
-        dim=1,
-    ).flatten()
+    # the same horizon keeps the horizon vector exactly shape-aligned.
+    columns = [horizons, row_horizon[:, None]]
+    if secondary_horizon is not None:
+        columns.append(torch.full_like(row_horizon[:, None], secondary_horizon))
+    return torch.cat(columns, dim=1).flatten()
+
+
+def _build_awr_target_loss_starts(
+    target_weights: torch.Tensor,
+    *,
+    batch_size: int,
+    group_size: int,
+    candidate_start: int,
+    expert_safe: torch.Tensor | None,
+    expert_replace_worst: bool,
+    has_secondary: bool,
+) -> torch.Tensor:
+    """Per-target first supervised step, shape-aligned with the horizon vector.
+
+    Only the reward-ranked candidates are offset; every expert-anchor slot keeps
+    ``start=0`` because the executed waypoint is the one step the anchor exists
+    to reach.  Measured on the cycle01 overlay, a candidate start of 1 moves the
+    step-1 fixed point onto the anchor-only objective's *exactly* -- command
+    jerk 3.5643 -> 2.4699 mm against a 2.3955 mm human floor -- while leaving the
+    40-step path length at the dual anchor's +1.12% rather than anchor-only's
+    +1.93%.  ``start=2`` and ``start=4`` add nothing over ``start=1``, because
+    the executed command is a function of step 1 alone.
+
+    This mirrors ``_build_awr_target_loss_horizons``'s slot layout deliberately
+    rather than deriving it, so the two vectors cannot drift apart in shape.
+    """
+
+    candidate_start = int(candidate_start)
+    if candidate_start < 0:
+        raise ValueError(
+            f"awr candidate loss start must be non-negative: {candidate_start}"
+        )
+    starts = torch.full(
+        (int(batch_size), int(group_size)),
+        candidate_start,
+        dtype=torch.long,
+        device=target_weights.device,
+    )
+    if expert_safe is None:
+        return starts.flatten()
+    safe = expert_safe.to(device=target_weights.device, dtype=torch.bool)
+    if expert_replace_worst:
+        # The anchor overwrites a candidate slot in place, so that slot is an
+        # anchor now and must keep the executed step.
+        rows = torch.arange(int(batch_size), device=target_weights.device)[safe]
+        if rows.numel() > 0:
+            columns = torch.argmin(
+                target_weights.reshape(int(batch_size), int(group_size)), dim=1
+            )[rows]
+            starts[rows, columns] = 0
+        return starts.flatten()
+    zeros = torch.zeros(
+        (int(batch_size), 1), dtype=torch.long, device=target_weights.device
+    )
+    columns = [starts, zeros]
+    if has_secondary:
+        columns.append(zeros.clone())
+    return torch.cat(columns, dim=1).flatten()
+
+
+def _low_speed_scene_mask(
+    data: dict[str, Any],
+    *,
+    threshold: float,
+    flag_name: str,
+) -> torch.Tensor | None:
+    """Per-scene ``|v| < threshold`` mask, or ``None`` when the knob is off.
+
+    Two separate anchor knobs gate on the same physical fact -- that the
+    executed-waypoint defect exists only when the vehicle is barely moving --
+    so they read the speed through one function rather than diverging.
+    """
+
+    if threshold <= 0.0:
+        return None
+    state = data.get("ego_current_state")
+    if not isinstance(state, torch.Tensor) or state.shape[-1] <= 4:
+        raise ValueError(
+            f"{flag_name} needs ego_current_state with a velocity column; "
+            "the batch does not carry one"
+        )
+    return state.reshape(-1, state.shape[-1])[:, 4].abs() < threshold
+
+
+def _expert_safe_over_consumed_horizon(
+    expert_safe: torch.Tensor,
+    expert_anchor: torch.Tensor,
+    *,
+    max_step_m: float,
+    horizon: int,
+    short_horizon_mask: torch.Tensor | None,
+    gate_step: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Re-scope the expert's safety verdict to the steps the anchor consumes.
+
+    ``expert_safe`` judges the logged human's *whole* 8 s future: it fails on a
+    collision at 4 s or a border crossing at 6 s.  A truncated anchor never
+    sees those steps, so the verdict is being applied at the wrong scope.  On
+    the standstill population the human's first step is under 5 mm on 92.6% of
+    rows -- the target is "stay where you are", which cannot collide with or
+    cross anything -- yet the full-horizon verdict excludes some of them, and
+    those rows hold the entire executed-waypoint tail: p99 33.3 mm and a 630 mm
+    maximum, against a logged human at 1.2 mm.
+
+    A row therefore also counts as safe when the human barely moves across the
+    steps actually scored.  Only truncated rows qualify; where the anchor spans
+    the full future the stored verdict already has the right scope.
+
+    ``gate_step`` is the exact form of the same re-scoping and supersedes the
+    displacement proxy wherever the mine recorded it.  The proxy can only
+    recognise a human that is *stationary*; measured on 400k overlay rows, 84.5%
+    of the rows the anchor should reach have a human that is moving forward in a
+    straight line -- a perfectly safe step-1 target that no displacement
+    threshold can accept.  The proxy reaches 15.5% of that population and
+    ``gate_step`` reaches all of it.  They are OR-ed rather than exclusive so a
+    buffer without the sidecar keeps the proxy's behaviour unchanged.
+    """
+
+    full_horizon = horizon >= int(expert_anchor.shape[1])
+    if full_horizon or (max_step_m <= 0.0 and gate_step is None):
+        # At the full horizon the stored verdict is already correctly scoped and
+        # ``gate_step >= horizon`` is provably equivalent to it, so returning
+        # early keeps the default configuration bit-identical.
+        return expert_safe
+    if expert_anchor.shape[0] != expert_safe.shape[0]:
+        raise ValueError(
+            "expert anchor and safety verdict disagree on the scene batch: "
+            f"anchor={tuple(expert_anchor.shape)}, "
+            f"safe={tuple(expert_safe.shape)}"
+        )
+    safe = expert_safe.to(dtype=torch.bool)
+    if gate_step is not None:
+        if gate_step.shape[0] != expert_safe.shape[0]:
+            raise ValueError(
+                "expert gate step and safety verdict disagree on the scene "
+                f"batch: gate_step={tuple(gate_step.shape)}, "
+                f"safe={tuple(expert_safe.shape)}"
+            )
+        # Step 0 is the first waypoint, so a gate there is inside a one-step
+        # anchor: the test is ``>=`` and never ``>``.
+        outside = gate_step.to(device=safe.device) >= float(horizon)
+        safe = safe | outside
+    if max_step_m > 0.0:
+        # Ego-frame futures, so the position at step t is the displacement by
+        # step t; the max over consumed steps is the conservative reading.
+        travel = expert_anchor[:, :horizon, :2].norm(dim=-1).amax(dim=1)
+        trivial = travel < max_step_m
+        if short_horizon_mask is not None:
+            trivial = trivial & short_horizon_mask.to(device=trivial.device)
+        safe = safe.to(device=trivial.device) | trivial
+    return safe
 
 
 def _mask_expert_anchor_to_active_awr_groups(
@@ -5716,8 +6119,21 @@ def _mask_expert_anchor_to_active_awr_groups(
     *,
     batch_size: int,
     group_size: int,
+    keep_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Keep expert retention only where the same scene has an AWR signal."""
+    """Keep expert retention only where the same scene has an AWR signal.
+
+    ``keep_mask`` exempts scenes from that gate.  The gate exists to stop the
+    anchor cloning the 8 s tail on scenes the reward cannot rank -- but at
+    standstill the reward can rank *nothing*: all ten candidates share the same
+    first waypoint, so the positive-advantage margin clears the whole group to
+    zero weight, and the row trains on no gradient at all.  That is exactly the
+    population whose executed waypoint is worst, so the gate is suppressing the
+    anchor precisely where it is needed most.  Exempting those scenes re-arms
+    it, and because the horizon mask truncates the anchor to one step at the
+    same speeds, it buys the executed waypoint without reinstating the tail
+    cloning the gate was protecting against.  ``None`` gates every scene.
+    """
 
     if expert_safe.shape != (int(batch_size),):
         raise ValueError(
@@ -5732,6 +6148,14 @@ def _mask_expert_anchor_to_active_awr_groups(
     active = candidate_weights.reshape(int(batch_size), int(group_size)).gt(0).any(
         dim=1
     )
+    if keep_mask is not None:
+        if keep_mask.shape != (int(batch_size),):
+            raise ValueError(
+                "expert anchor keep mask must match the AWR scene batch: "
+                f"expected={(int(batch_size),)}, "
+                f"got={tuple(keep_mask.shape)}"
+            )
+        active = active | keep_mask.to(device=active.device, dtype=torch.bool)
     return expert_safe.to(device=active.device, dtype=torch.bool) & active
 
 
@@ -5889,6 +6313,7 @@ def _train_scene(
     _stage_start = time.perf_counter()
     expert_anchor_batch: torch.Tensor | None = None
     expert_anchor_safe: torch.Tensor | None = None
+    expert_anchor_gate_step: torch.Tensor | None = None
     if expert_anchor_weight > 0.0 or (
         collect_only and cache_replay_expert_anchor
     ):
@@ -5924,10 +6349,31 @@ def _train_scene(
                     "cached replay expert safe shape mismatch: "
                     f"{tuple(expert_anchor_safe.shape)}"
                 )
+            cached_gate_step = data.get(_REPLAY_EXPERT_GATE_STEP_KEY)
+            if cached_gate_step is None:
+                # Mined before the step-resolved verdict existed.  Reconstruct
+                # the only thing such a buffer knows: safe rows never gate,
+                # unsafe rows are assumed to gate at step 0.  ``step >=
+                # horizon`` then reproduces ``expert_safe`` at EVERY horizon,
+                # so an old buffer under the new flag behaves exactly as if the
+                # flag were off rather than recovering rows it cannot justify.
+                cached_gate_step = torch.where(
+                    expert_anchor_safe,
+                    torch.full_like(
+                        expert_rewards, float(int(model_args.future_len))
+                    ),
+                    torch.zeros_like(expert_rewards),
+                )
+            elif tuple(cached_gate_step.shape) != (len(scene_paths),):
+                raise RuntimeError(
+                    "cached replay expert gate-step shape mismatch: "
+                    f"{tuple(cached_gate_step.shape)}"
+                )
             scored_experts = (
                 expert_anchor_batch,
                 expert_rewards,
                 expert_anchor_safe,
+                cached_gate_step.float(),
             )
             result["expert_anchor_cache_hit"] = 1.0
         elif merged_expert_rewards is not None:
@@ -5956,7 +6402,12 @@ def _train_scene(
             )
             result["expert_anchor_cache_hit"] = 0.0
         if scored_experts is not None:
-            expert_anchor_batch, expert_rewards, expert_anchor_safe = scored_experts
+            (
+                expert_anchor_batch,
+                expert_rewards,
+                expert_anchor_safe,
+                expert_anchor_gate_step,
+            ) = scored_experts
             safe_count = int(expert_anchor_safe.sum().item())
             result["expert_anchor_count"] = float(safe_count)
             result["expert_anchor_used"] = safe_count / max(1, len(scene_paths))
@@ -6003,6 +6454,10 @@ def _train_scene(
             rollout.reward_data[_REPLAY_EXPERT_SAFE_KEY] = (
                 expert_anchor_safe.detach().to(dtype=torch.float32)
             )
+            if expert_anchor_gate_step is not None:
+                rollout.reward_data[_REPLAY_EXPERT_GATE_STEP_KEY] = (
+                    expert_anchor_gate_step.detach().to(dtype=torch.float32)
+                )
         result.update(
             {
                 "skipped": 0.0,
@@ -6019,6 +6474,57 @@ def _train_scene(
         stage_end("replay_context", _stage_start)
         return result, rollout
 
+    # Widen the verdict before the active-group gate reads it, not after: the
+    # gate ANDs, so a row resurrected afterwards would bypass the gate at every
+    # speed instead of only where the anchor is truncated.
+    # A step-scoped verdict only justifies the horizon it was scoped to, so the
+    # untruncated second anchor slot keeps the full-horizon verdict.  Intersecting
+    # rather than branching preserves every gate applied downstream.
+    expert_anchor_safe_full_horizon = (
+        expert_anchor_safe.clone()
+        if expert_anchor_safe is not None
+        and float(train_config.get("expert_anchor_secondary_weight", 0.0)) > 0.0
+        else None
+    )
+    if expert_anchor_safe is not None and expert_anchor_batch is not None:
+        rescoped_max_step = float(
+            train_config.get("expert_anchor_safe_max_consumed_step_m", 0.0)
+        )
+        # The exact verdict needs a mine that recorded it.  Requiring the array
+        # rather than erroring keeps the flag safe to leave on across a buffer
+        # generation: an older buffer reconstructs a gate step that reproduces
+        # ``expert_safe`` at every horizon, so the flag becomes a no-op instead
+        # of silently recovering rows the mine never justified.
+        step_scoped = (
+            bool(train_config.get("expert_anchor_safe_step_scoped", False))
+            and expert_anchor_gate_step is not None
+        )
+        if rescoped_max_step > 0.0 or step_scoped:
+            rescoped_horizon = int(
+                train_config.get("expert_anchor_loss_horizon", 0)
+            ) or int(model_args.future_len)
+            safe_before_rescope = int(expert_anchor_safe.sum().item())
+            expert_anchor_safe = _expert_safe_over_consumed_horizon(
+                expert_anchor_safe,
+                expert_anchor_batch,
+                max_step_m=rescoped_max_step,
+                horizon=rescoped_horizon,
+                short_horizon_mask=_low_speed_scene_mask(
+                    data,
+                    threshold=float(
+                        train_config.get(
+                            "expert_anchor_loss_horizon_max_speed", 0.0
+                        )
+                    ),
+                    flag_name="expert_anchor_loss_horizon_max_speed",
+                ),
+                gate_step=expert_anchor_gate_step if step_scoped else None,
+            )
+            result["expert_anchor_safe_rescoped_count"] = float(
+                int(expert_anchor_safe.sum().item()) - safe_before_rescope
+            )
+            result["expert_anchor_safe_step_scoped"] = float(step_scoped)
+
     if (
         expert_anchor_safe is not None
         and bool(train_config.get("expert_anchor_active_groups_only", False))
@@ -6029,6 +6535,15 @@ def _train_scene(
             rollout.weights,
             batch_size=len(scene_paths),
             group_size=int(rollout_config.n_trajectories),
+            keep_mask=_low_speed_scene_mask(
+                data,
+                threshold=float(
+                    train_config.get(
+                        "expert_anchor_active_groups_only_min_speed", 0.0
+                    )
+                ),
+                flag_name="expert_anchor_active_groups_only_min_speed",
+            ),
         )
         active_safe_count = int(expert_anchor_safe.sum().item())
         result["expert_anchor_safe_before_active_group_gate"] = float(
@@ -6078,9 +6593,39 @@ def _train_scene(
             "awr_candidate_loss_horizon must be 0 or lie inside the model "
             f"future: horizon={candidate_loss_horizon}, T={T}"
         )
+    candidate_loss_start = int(train_config.get("awr_candidate_loss_start", 0))
+    if not 0 <= candidate_loss_start < candidate_loss_horizon:
+        raise ValueError(
+            "awr_candidate_loss_start must lie in [0, awr_candidate_loss_horizon): "
+            f"start={candidate_loss_start}, horizon={candidate_loss_horizon}"
+        )
+    expert_anchor_loss_horizon = int(
+        train_config.get("expert_anchor_loss_horizon", 0)
+    )
+    if expert_anchor_loss_horizon == 0:
+        expert_anchor_loss_horizon = T
+    if not 1 <= expert_anchor_loss_horizon <= T:
+        raise ValueError(
+            "expert_anchor_loss_horizon must be 0 or lie inside the model "
+            f"future: horizon={expert_anchor_loss_horizon}, T={T}"
+        )
+    # Truncating the anchor costs the expert's smoothing everywhere it applies,
+    # but only buys executed-waypoint accuracy where the vehicle is slow enough
+    # for the defect to exist.  A speed ceiling keeps the whole gain and pays
+    # almost none of the cost; 0 disables the mask and truncates everywhere.
+    expert_short_horizon_mask = _low_speed_scene_mask(
+        data,
+        threshold=float(
+            train_config.get("expert_anchor_loss_horizon_max_speed", 0.0)
+        ),
+        flag_name="expert_anchor_loss_horizon_max_speed",
+    )
     initial_group_size = int(rollout_config.n_trajectories)
     replace_expert_worst = bool(
         train_config.get("expert_anchor_replace_worst", False)
+    )
+    secondary_anchor_weight, secondary_anchor_horizon = (
+        validate_expert_anchor_secondary_config(train_config, future_len=T)
     )
     target_loss_horizons = _build_awr_target_loss_horizons(
         target_weights,
@@ -6095,6 +6640,36 @@ def _train_scene(
             else None
         ),
         expert_replace_worst=replace_expert_worst,
+        expert_horizon=expert_anchor_loss_horizon,
+        expert_short_horizon_mask=expert_short_horizon_mask,
+        secondary_horizon=(
+            secondary_anchor_horizon
+            if expert_anchor_batch is not None
+            and expert_anchor_safe is not None
+            and secondary_anchor_weight > 0.0
+            else None
+        ),
+    )
+    target_loss_starts = (
+        _build_awr_target_loss_starts(
+            target_weights,
+            batch_size=len(scene_paths),
+            group_size=initial_group_size,
+            candidate_start=candidate_loss_start,
+            expert_safe=(
+                expert_anchor_safe
+                if expert_anchor_batch is not None and expert_anchor_safe is not None
+                else None
+            ),
+            expert_replace_worst=replace_expert_worst,
+            has_secondary=(
+                expert_anchor_batch is not None
+                and expert_anchor_safe is not None
+                and secondary_anchor_weight > 0.0
+            ),
+        )
+        if candidate_loss_start > 0
+        else None
     )
     n_steps = max(1, int(train_config.get("diffusion_k_steps", 4)))
     t_min, t_max = (float(x) for x in train_config.get("diffusion_t_range", (0.05, 0.95)))
@@ -6108,7 +6683,29 @@ def _train_scene(
             group_size=int(rollout_config.n_trajectories),
             expert_weight=expert_anchor_weight,
             replace_worst=replace_expert_worst,
+            secondary_weight=secondary_anchor_weight,
+            # A step-scoped verdict only justifies the horizon it was scoped to,
+            # so the untruncated slot is admitted on the full-horizon mask --
+            # never on a row the rescope rescued by looking at step 1 alone.
+            secondary_safe=(
+                expert_anchor_safe & expert_anchor_safe_full_horizon
+                if expert_anchor_safe_full_horizon is not None
+                else None
+            ),
         )
+        if secondary_anchor_weight > 0.0:
+            secondary_admitted = (
+                expert_anchor_safe & expert_anchor_safe_full_horizon
+                if expert_anchor_safe_full_horizon is not None
+                else expert_anchor_safe
+            )
+            result["expert_anchor_secondary_weight"] = secondary_anchor_weight
+            result["expert_anchor_secondary_horizon_steps"] = float(
+                secondary_anchor_horizon
+            )
+            result["expert_anchor_secondary_used"] = float(
+                int(secondary_admitted.sum().item())
+            ) / max(1, len(scene_paths))
     bc_weight = float(train_config.get("bc_weight", 0.0))
     if bc_weight > 0.0 and target_weights.numel() > 0:
         # HDP's BC term is a retention prior against exploration collapse.  In
@@ -6121,9 +6718,16 @@ def _train_scene(
             target_weights[::effective_group_size] + bc_weight
         )
         target_loss_horizons[::effective_group_size] = T
+        if target_loss_starts is not None:
+            # bc_weight promotes the deterministic sample to a full-horizon
+            # retention target, so it stops being a reward-ranked candidate and
+            # keeps the executed step like any other anchor.
+            target_loss_starts = target_loss_starts.clone()
+            target_loss_starts[::effective_group_size] = 0
         result["bc_weight"] = bc_weight
 
     result["candidate_loss_horizon_steps"] = float(candidate_loss_horizon)
+    result["candidate_loss_start_steps"] = float(candidate_loss_start)
     result["full_loss_horizon_target_fraction"] = float(
         (target_loss_horizons == T).float().mean().item()
     )
@@ -6188,6 +6792,8 @@ def _train_scene(
         target_loss_horizons = target_loss_horizons.index_select(
             0, model_indices
         )
+        if target_loss_starts is not None:
+            target_loss_starts = target_loss_starts.index_select(0, model_indices)
         active_weights = target_weights.index_select(0, active_indices)
         if model_indices.numel() > active_indices.numel():
             active_weights = torch.cat(
@@ -6261,6 +6867,7 @@ def _train_scene(
             use_prefix_mask=bool(train_config.get("awr_use_prefix_mask", True)),
             awr_loss_type=str(train_config.get("awr_loss_type", "dp_geometry")),
             ego_loss_horizons=target_loss_horizons,
+            ego_loss_starts=target_loss_starts,
         )
         local_loss_finite = bool(torch.isfinite(per_trajectory_loss).all())
         global_loss_finite = local_loss_finite
@@ -6907,6 +7514,123 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--awr_candidate_loss_start",
+        type=int,
+        default=None,
+        help=(
+            "first step the sampled AWR candidates supervise; 0 keeps every "
+            "step.  1 hands the executed waypoint to the expert anchor alone, "
+            "which is worth taking because the candidates are a measured NULL "
+            "there (-0.55 +-1.20%% of executed command jerk against the raw "
+            "policy) while still holding ~8%% of the step-1 target mass, and "
+            "that share varies frame to frame down a replan chain.  Measured on "
+            "the cycle01 overlay: command jerk 3.5643 -> 2.4699 mm, the full gap "
+            "to an anchor-only objective, at the dual anchor's 40-step path "
+            "length rather than anchor-only's.  Values above 1 add nothing -- "
+            "the executed command is a function of step 1 alone.  Anchor slots "
+            "are never offset"
+        ),
+    )
+    parser.add_argument(
+        "--expert_anchor_loss_horizon",
+        type=int,
+        default=None,
+        help=(
+            "ego-loss horizon for the logged-expert anchor alone; 0 keeps the "
+            "full model horizon.  1 scores only the waypoint the vehicle "
+            "actually executes at 10 Hz, which raises the anchor's effective "
+            "weight there by awr_candidate_loss_horizon.  It also removes the "
+            "anchor from every later step, and past reward_horizon_steps the "
+            "anchor is the only target with any weight, so truncating leaves "
+            "the tail with no supervision and no veto axis that can see it -- "
+            "pair with --expert_anchor_secondary_weight to keep both"
+        ),
+    )
+    parser.add_argument(
+        "--expert_anchor_loss_horizon_max_speed",
+        type=float,
+        default=None,
+        help=(
+            "apply expert_anchor_loss_horizon only to scenes whose ego speed "
+            "is below this m/s; 0 truncates every anchored scene.  The logged "
+            "expert is the smoothest available target, so truncating it "
+            "everywhere gives that smoothing up corpus-wide, while the "
+            "executed-waypoint dispersion it buys is purely a low-speed "
+            "defect: a 1.0 ceiling keeps the full gain at ~0 reward cost"
+        ),
+    )
+    parser.add_argument(
+        "--expert_anchor_active_groups_only_min_speed",
+        type=float,
+        default=None,
+        help=(
+            "apply expert_anchor_active_groups_only only at or above this ego "
+            "speed in m/s; 0 gates every scene.  At standstill the reward can "
+            "rank nothing -- all candidates share the same first waypoint, so "
+            "the positive-advantage margin zeroes the whole group and the row "
+            "trains on no gradient -- which is exactly where the executed "
+            "waypoint is worst.  Pair with expert_anchor_loss_horizon_max_speed "
+            "so the re-armed anchor is one step, not a tail clone"
+        ),
+    )
+    parser.add_argument(
+        "--expert_anchor_safe_max_consumed_step_m",
+        type=float,
+        default=None,
+        help=(
+            "also treat a logged expert as safe when it travels less than this "
+            "far over the steps the anchor actually scores; 0 keeps the stored "
+            "whole-future verdict.  That verdict fails on a collision at 4 s or "
+            "a border crossing at 6 s, which a truncated anchor never sees, and "
+            "the rows it wrongly excludes hold the entire executed-waypoint "
+            "tail.  Only applies where the horizon is truncated"
+        ),
+    )
+    parser.add_argument(
+        "--expert_anchor_safe_step_scoped",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "judge the logged expert safe when its first hard gate fires at or "
+            "after the last step the anchor scores, using the step the mine "
+            "recorded.  This is the exact form of "
+            "--expert_anchor_safe_max_consumed_step_m, which can only recognise "
+            "a human that is standing still: on 400k overlay rows 84.5% of the "
+            "rows an anchor should reach have a human moving forward in a "
+            "straight line, so the displacement proxy reaches 15.5% of them and "
+            "this reaches all of them.  Requires a buffer mined with the "
+            "step-resolved verdict; on an older buffer it is a no-op"
+        ),
+    )
+    parser.add_argument(
+        "--expert_anchor_secondary_weight",
+        type=float,
+        default=None,
+        help=(
+            "append the logged expert a SECOND time at "
+            "--expert_anchor_secondary_horizon, so a truncated primary anchor "
+            "stops being a trade.  Effective step-1 weight becomes "
+            "primary/h + secondary/H while steps 2..H keep secondary/H, so at "
+            "secondary == expert_anchor_weight the untruncated objective is "
+            "retained exactly and the executed-waypoint pull is added on top.  "
+            "Measured on 689k overlay rows: |step-1 lateral| of the loss's "
+            "fixed point 5.890 -> 2.029 mm (-65.6%) at +1.06% within-plan jerk, "
+            "against +9.73% for truncation alone.  The cost is anchor mass: "
+            "0.40 -> 0.80, i.e. 6.9% -> 34.2% of total loss mass.  0 disables "
+            "it and reproduces the single-slot objective exactly"
+        ),
+    )
+    parser.add_argument(
+        "--expert_anchor_secondary_horizon",
+        type=int,
+        default=None,
+        help=(
+            "ego-loss horizon for the second anchor slot; 0 keeps the full "
+            "model horizon, which is the only value that restores tail "
+            "supervision.  Must exceed --expert_anchor_loss_horizon"
+        ),
+    )
+    parser.add_argument(
         "--expert_anchor_replace_worst",
         action="store_true",
         help="replace the lowest-weight candidate with a safe logged-expert anchor (keeps K fixed)",
@@ -7085,6 +7809,13 @@ def main() -> None:
     raw_config, rollout_config, reward_config = _load_config(args.config)
     train_config = dict(raw_config.get("training", raw_config))
     acceleration_config = dict(raw_config.get("acceleration", {}))
+    # The config is parsed after the CUDA flags are set, so re-apply them once the
+    # acceleration block is known.  Every switch it touches is idempotent; this only
+    # lets `acceleration.tf32: false` actually reach the backend and the record.
+    if "tf32" in acceleration_config:
+        runtime_acceleration = _configure_cuda_runtime(
+            device, bool(acceleration_config["tf32"])
+        )
     plannerrft_config = dict(raw_config.get("plannerrft", {}))
     if args.amp_dtype is not None:
         acceleration_config["amp_dtype"] = args.amp_dtype
@@ -7222,11 +7953,66 @@ def main() -> None:
         )
     if args.expert_anchor_weight is not None:
         train_config["expert_anchor_weight"] = args.expert_anchor_weight
+    if args.awr_candidate_loss_start is not None:
+        if args.awr_candidate_loss_start < 0:
+            raise ValueError("awr_candidate_loss_start must be non-negative")
+        train_config["awr_candidate_loss_start"] = int(args.awr_candidate_loss_start)
     if args.awr_candidate_loss_horizon is not None:
         if args.awr_candidate_loss_horizon < 0:
             raise ValueError("awr_candidate_loss_horizon must be non-negative")
         train_config["awr_candidate_loss_horizon"] = int(
             args.awr_candidate_loss_horizon
+        )
+    if args.expert_anchor_active_groups_only_min_speed is not None:
+        if args.expert_anchor_active_groups_only_min_speed < 0.0:
+            raise ValueError(
+                "expert_anchor_active_groups_only_min_speed must be "
+                "non-negative"
+            )
+        train_config["expert_anchor_active_groups_only_min_speed"] = float(
+            args.expert_anchor_active_groups_only_min_speed
+        )
+    if args.expert_anchor_safe_max_consumed_step_m is not None:
+        if args.expert_anchor_safe_max_consumed_step_m < 0.0:
+            raise ValueError(
+                "expert_anchor_safe_max_consumed_step_m must be non-negative"
+            )
+        train_config["expert_anchor_safe_max_consumed_step_m"] = float(
+            args.expert_anchor_safe_max_consumed_step_m
+        )
+    if args.expert_anchor_safe_step_scoped is not None:
+        train_config["expert_anchor_safe_step_scoped"] = bool(
+            args.expert_anchor_safe_step_scoped
+        )
+    if args.expert_anchor_loss_horizon_max_speed is not None:
+        if args.expert_anchor_loss_horizon_max_speed < 0.0:
+            raise ValueError(
+                "expert_anchor_loss_horizon_max_speed must be non-negative"
+            )
+        train_config["expert_anchor_loss_horizon_max_speed"] = float(
+            args.expert_anchor_loss_horizon_max_speed
+        )
+    if args.expert_anchor_loss_horizon is not None:
+        if args.expert_anchor_loss_horizon < 0:
+            raise ValueError("expert_anchor_loss_horizon must be non-negative")
+        train_config["expert_anchor_loss_horizon"] = int(
+            args.expert_anchor_loss_horizon
+        )
+    if args.expert_anchor_secondary_weight is not None:
+        if args.expert_anchor_secondary_weight < 0.0:
+            raise ValueError(
+                "expert_anchor_secondary_weight must be non-negative"
+            )
+        train_config["expert_anchor_secondary_weight"] = float(
+            args.expert_anchor_secondary_weight
+        )
+    if args.expert_anchor_secondary_horizon is not None:
+        if args.expert_anchor_secondary_horizon < 0:
+            raise ValueError(
+                "expert_anchor_secondary_horizon must be non-negative"
+            )
+        train_config["expert_anchor_secondary_horizon"] = int(
+            args.expert_anchor_secondary_horizon
         )
     if args.expert_anchor_replace_worst:
         train_config["expert_anchor_replace_worst"] = True
@@ -7874,7 +8660,24 @@ def main() -> None:
     if is_main:
         effective_config["awr"]["inference_amp_dtype"] = amp_dtype
         _write_json(run_dir / "effective_config.json", effective_config)
+    # Refuse a bad anchor composition here rather than at the first replay step,
+    # which is on the far side of the epoch-0 eval and therefore ~10 minutes of
+    # eight idle GPUs.  Every rank checks, so an elastic restart cannot silently
+    # disagree with the launch.
+    secondary_anchor_launch_weight, secondary_anchor_launch_horizon = (
+        validate_expert_anchor_secondary_config(
+            train_config, future_len=int(model_args.future_len)
+        )
+    )
     if is_main:
+        if secondary_anchor_launch_weight > 0.0:
+            print(
+                "Dual expert anchor: primary h="
+                f"{int(train_config.get('expert_anchor_loss_horizon', 0)) or int(model_args.future_len)}"
+                f" w={float(train_config.get('expert_anchor_weight', 0.0)):.3f}"
+                f"; secondary h={secondary_anchor_launch_horizon}"
+                f" w={secondary_anchor_launch_weight:.3f}"
+            )
         print(
             f"Original DP validated: agents={model_args.agent_num}, predicted_neighbors={model_args.predicted_neighbor_num}, "
             f"future={model_args.future_len}, DPM steps={model.decoder._sample_steps}"

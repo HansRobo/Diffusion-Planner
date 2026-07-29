@@ -14,6 +14,15 @@
 
 set -Eeuo pipefail
 
+# --- precision (2026-07-29 fp32 migration) -------------------------------------
+# The vehicle runs fp32.  bf16 quantises the executed first waypoint onto a 39mm
+# comb and REVERSES the sign of the smoothness delta; TF32 alone costs 6.5x the
+# campaign effect on that axis, and only amp=off + TF32=off makes the 46k eval
+# bit-identical (A/B noise floor exactly zero).  Both are one knob each so a bf16
+# re-run is still reproducible: AMP_DTYPE=bf16 NVIDIA_TF32_OVERRIDE=1 <script>
+AMP_DTYPE=${AMP_DTYPE:-off}
+export NVIDIA_TF32_OVERRIDE=${NVIDIA_TF32_OVERRIDE:-0}
+
 if [[ $# -ne 5 ]]; then
   echo "usage: $0 REPLAY_RUN SOURCE_CHECKPOINT FIRST_EPOCH LAST_EPOCH CYCLE" >&2
   exit 2
@@ -182,6 +191,77 @@ for epoch in range(first, last + 1):
         "checkpoint": str(checkpoint.resolve()),
     })
 direction = max(candidates, key=lambda row: (row["mean_det_reward"], -row["epoch"]))
+
+
+def validation_ladder_pick():
+    """What this same argmax would pick on the deployment corpus instead.
+
+    Measured over three cycles that wrote both ladders: this selector's per-epoch
+    ordering predicts the 46k validation corpus at pooled rho +0.539, while
+    validation predicts its own held-out half at +0.794 — and the epoch this rule
+    picks earned a mean +1.6e-04 there against +6.1e-04 for a validation-half-A
+    pick (2/3 cycles better, 3/3 positive).  Suggestive, not settled: n=3, and one
+    cycle dominates the gap.  The `eval_epoch_*` ladder that answers it is already
+    on disk before this script runs, so record the comparison every cycle and let
+    it accumulate to a decision.
+
+    RECORDED ONLY — nothing here feeds `direction`.  Acting on it would move
+    selection onto the corpus the non-regression veto measures, and the
+    argmax-over-epochs bias (~+1.5e-04) would then inflate a guardrail whose
+    cycle01 margin was +3.1e-05.  That needs the veto moved to half B in the same
+    change; until then selection stays disjoint from validation.
+
+    Never raises.  This is a diagnostic on the critical path of every cycle, so a
+    missing or half-written eval must cost the commit nothing.
+    """
+    # The baseline artifact is always epoch_000 whatever its logical label.
+    base_epoch = int(baseline_rows_path.parent.name.rsplit("_", 1)[1])
+    order, mask, means = None, None, {}
+    for epoch in [base_epoch] + list(range(first, last + 1)):
+        scenes_path = run / f"eval_epoch_{epoch:03d}" / "scenes.json"
+        if not scenes_path.is_file():
+            return {"unavailable": f"no eval_epoch_{epoch:03d}/scenes.json"}
+        by_path = {str(r["scene_path"]): r.get("det_reward")
+                   for r in json.loads(scenes_path.read_text())}
+        if order is None:
+            order = sorted(k for k, v in by_path.items() if v is not None)
+            # blake2b of the path, never index parity: scene_index correlates
+            # with drive/log, so parity halves would not be exchangeable.
+            mask = [hashlib.blake2b(k.encode(), digest_size=8).digest()[-1] & 1 == 0
+                    for k in order]
+        vals = [by_path.get(k) for k in order]
+        if any(v is None for v in vals):
+            return {"unavailable": f"eval_epoch_{epoch:03d} misses baseline scenes"}
+        a = [v for v, m in zip(vals, mask) if m]
+        b = [v for v, m in zip(vals, mask) if not m]
+        means[epoch] = (sum(a) / len(a), sum(b) / len(b))
+    base_a, base_b = means[base_epoch]
+    ladder = [{"epoch": e,
+               "delta_half_a": means[e][0] - base_a,
+               "delta_half_b": means[e][1] - base_b}
+              for e in range(first, last + 1)]
+    # Picked on half A, so the pick's half-B delta is an unbiased estimate of what
+    # the alternative rule would have earned — comparable to the same field on
+    # whichever epoch `selected_direction` names.
+    pick = max(ladder, key=lambda row: (row["delta_half_a"], -row["epoch"]))
+    return {
+        "scenes": len(order),
+        "half_a_scenes": sum(mask),
+        "ladder": ladder,
+        "pick_epoch": pick["epoch"],
+        "pick_delta_half_b": pick["delta_half_b"],
+        "current_rule_epoch": direction["epoch"],
+        "current_rule_delta_half_b": next(
+            (r["delta_half_b"] for r in ladder
+             if r["epoch"] == direction["epoch"]), None),
+    }
+
+
+try:
+    validation_ladder = validation_ladder_pick()
+except Exception as exc:  # a diagnostic must never block a commit
+    validation_ladder = {"error": f"{type(exc).__name__}: {exc}"}
+
 # This block used to assert direction <= baseline, because it was only reachable
 # when formal replay had failed to beat the selector.  The ladder now always
 # runs — committing the unscaled policy needs an explicit opt-in — so an
@@ -194,6 +274,7 @@ direction_path.write_text(json.dumps({
     "candidate_epochs": candidates,
     "selected_direction": direction,
     "direction_improved_selector": improved_direction,
+    "observability_validation_ladder": validation_ladder,
 }, indent=2, sort_keys=True) + "\n")
 PY
 
@@ -227,14 +308,14 @@ for index in "${!labels[@]}"; do
       --output_dir "${eval_dir}" \
       --label "cycle$(printf '%02d' "${CYCLE}")_line_${label}_train_selector" \
       --batch_size 512 --scene_load_workers "${EVAL_SCENE_LOAD_WORKERS}" --sample_steps 10 \
-      --amp_dtype bf16 --compile_mode default
+      --amp_dtype "${AMP_DTYPE}" --compile_mode default
     "${PYTHON}" "${ROOT}/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
       --aggregate --model_path "${checkpoint}" --args_path "${ARGS}" \
       --scenes "${SELECTOR_SCENES}" --config "${CONFIG}" \
       --output_dir "${eval_dir}" \
       --label "cycle$(printf '%02d' "${CYCLE}")_line_${label}_train_selector" \
       --batch_size 512 --scene_load_workers "${EVAL_SCENE_LOAD_WORKERS}" --sample_steps 10 \
-      --amp_dtype bf16 --compile_mode default
+      --amp_dtype "${AMP_DTYPE}" --compile_mode default
   fi
 done
 

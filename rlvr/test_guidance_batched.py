@@ -139,6 +139,68 @@ def test_stretch_batched_per_sample():
     assert (fwd_grad[2] >= 0).all() and fwd_grad[2].sum() > 0  # speed up
 
 
+def test_reference_speed_push_is_zero_centred_and_signed():
+    horizon = 20
+    x = torch.zeros(3, 1, horizon + 1, 4, requires_grad=True)
+    ref = torch.zeros(3, horizon, 4)
+    ref[..., 0] = torch.arange(1, horizon + 1) * 0.5
+    ref[..., 2] = 1.0
+    fn = _swerve(
+        "reference_speed_push_batched",
+        lambda_lon=0.25,
+        eta_lon=torch.tensor([-1.0, 0.0, 1.0]),
+        ramp_steps=horizon,
+    )
+    grad = torch.autograd.grad(
+        fn._compute(x, {"reference_trajectory": ref}).sum(), x
+    )[0]
+    forward = grad[:, 0, 1:, 0]
+    lateral = grad[:, 0, 1:, 1]
+    assert (forward[0] < 0).all()
+    assert torch.equal(forward[1], torch.zeros_like(forward[1]))
+    assert (forward[2] > 0).all()
+    torch.testing.assert_close(forward[0], -forward[2])
+    assert torch.equal(lateral, torch.zeros_like(lateral))
+
+
+def test_reference_speed_push_uses_quintic_onset_and_reference_step():
+    horizon = 20
+    x = torch.zeros(1, 1, horizon + 1, 4, requires_grad=True)
+    ref = torch.zeros(1, horizon, 4)
+    ref[..., 0] = torch.arange(1, horizon + 1) * 2.0
+    ref[..., 2] = 1.0
+    fn = _swerve(
+        "reference_speed_push_batched",
+        lambda_lon=0.25,
+        eta_lon=1.0,
+        ramp_steps=horizon,
+    )
+    grad = torch.autograd.grad(
+        fn._compute(x, {"reference_trajectory": ref}).sum(), x
+    )[0][0, 0, 1:, 0]
+    u = torch.arange(1, horizon + 1, dtype=torch.float32) / horizon
+    ramp = u**3 * (10.0 - 15.0 * u + 6.0 * u**2)
+    torch.testing.assert_close(grad, 0.25 * 2.0 * ramp)
+    assert grad[0] / grad[-1] < 0.002
+
+
+def test_reference_speed_builder_is_opt_in_and_excludes_candidate_stretch():
+    from rlvr.guidance_batched import build_head_composer
+
+    reference = build_head_composer(
+        {"lateral": 0.0, "reference_speed": torch.tensor([0.5])},
+        envelope="v2",
+    )
+    assert any(
+        fn.name == "reference_speed_push_batched"
+        for fn in reference._functions
+    )
+    with pytest.raises(ValueError, match="alternative longitudinal heads"):
+        build_head_composer(
+            {"stretch": torch.tensor([0.5]), "reference_speed": torch.tensor([0.5])}
+        )
+
+
 def test_lateral_batched_matches_stock_when_unprotected():
     from diffusion_planner.model.guidance.lateral_guidance import LateralGuidance
 
@@ -165,6 +227,28 @@ def test_head_protect_zeroes_early_gradient():
     grad = torch.autograd.grad(out.sum(), x)[0]
     assert torch.all(grad[:, 0, 1:6, :] == 0), "first 5 future steps must carry no gradient"
     assert grad[:, 0, 6:, :].abs().sum() > 0
+
+
+def test_lateral_ramp_uses_quintic_smootherstep_onset():
+    horizon = 20
+    x = torch.zeros(1, 1, horizon + 1, 4, requires_grad=True)
+    ref = torch.zeros(1, horizon, 4)
+    ref[..., 2] = 1.0
+    fn = _swerve(
+        "lateral_ramp_batched",
+        lambda_lat=2.5,
+        eta_lat=1.0,
+        ramp_steps=horizon,
+    )
+
+    grad = torch.autograd.grad(fn._compute(x, {"reference_trajectory": ref}).sum(), x)[0]
+    lateral = grad[0, 0, 1:, 1]
+    u = torch.arange(1, horizon + 1, dtype=torch.float32) / horizon
+    expected = u**3 * (10.0 - 15.0 * u + 6.0 * u**2)
+
+    assert torch.all(lateral > 0)
+    assert torch.allclose(lateral / lateral[-1], expected, atol=1e-6)
+    assert lateral[0] / lateral[-1] < 0.002
 
 
 # ---------------------------------------------------------------------------
