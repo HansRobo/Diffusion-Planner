@@ -25,7 +25,8 @@ class TrainConfig:
     save_dir: str
     train_set_list: str
     valid_set_list: str
-    train_subsample_step: int
+
+    train_subsample_step: int = 1
 
     # ---------------------------------------------------------
     # Data Dimensions
@@ -77,7 +78,7 @@ class TrainConfig:
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True
-    ego_history_dropout_rate: float = 0.6
+    ego_history_dropout_rate: float = 0.4
     use_turn_indicators: bool = True
 
     # Loss Coefficients
@@ -165,7 +166,7 @@ class TrainConfig:
     closed_loop_search_radius: float = 1.5
     closed_loop_warmup_steps: int = 0
     closed_loop_unstick_after: int = 300
-    closed_loop_unstick_advance_m: float = 2.5
+    closed_loop_unstick_advance_m: float = 5.0
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)

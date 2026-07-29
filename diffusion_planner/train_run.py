@@ -80,8 +80,6 @@ def main() -> None:
         str(Path(args.valid_set_list).resolve()),
         "--use_wandb",
         "True",
-        "--diffusion_model_type",
-        "x_start",
         "--save_dir",
         str(save_path),
         "--train_epochs",
