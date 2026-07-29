@@ -33,27 +33,28 @@ from __future__ import annotations
 
 import argparse
 
-# Kept in sync with scenario_generation.wandb_closed_loop by hand (importing it would pull in
-# the heavier torch/matplotlib deps this module doesn't otherwise need).
-#
-# Score keys split into two groups for the objects-ablation dashboard:
+from scenario_generation.closed_loop_score_keys import (
+    COMPARISON_OVERVIEW_SUM_KEYS,
+    COMPARISON_SCORE_KEYS,
+    OBJECTS_ONLY_OVERVIEW_SUM_KEYS,
+    OBJECTS_ONLY_SCORE_KEYS,
+)
+
+# Panel groups for the objects-ablation dashboard, derived from the single source of truth in
+# closed_loop_score_keys (dependency-free, so importing it here doesn't pull in the heavier
+# torch/matplotlib deps scenario_generation.wandb_closed_loop needs):
 # - COMPARISON: meaningful in both objects and empty-world ("__noobj") mode — one panel per
 #   metric, objects and noobj overlaid as separate lines via metric_regex (no site enumeration
 #   needed, so a newly added site is picked up automatically).
 # - OBJECTS-ONLY: structurally 0 with no traffic to react to (collision counts) — plotted with
 #   an explicit y=[...] list of ONLY the objects labels, so the noobj line (always 0) doesn't
 #   show up as a flat, meaningless addition to the panel.
-_COMPARISON_SCORE_KEYS = ("mean_route_completion", "total_curb_hits", "total_snaps")
-_OBJECTS_ONLY_SCORE_KEYS = ("total_collision_events",)
-
-# Cross-site overview keys (see build_sites_aggregate_log): same comparison/objects-only split.
-_COMPARISON_OVERVIEW_KEYS = (
-    "route_completion",
-    "total_curb_hits",
-    "total_snaps",
-    "n_segments_diverged",
-)
-_OBJECTS_ONLY_OVERVIEW_KEYS = ("total_collision_events",)
+#
+# The overview panel list additionally includes "route_completion" -- build_sites_aggregate_log
+# computes it as its own segment-weighted-average key, not part of the generic sum loop
+# COMPARISON_OVERVIEW_SUM_KEYS drives.
+_COMPARISON_OVERVIEW_KEYS = ("route_completion", *COMPARISON_OVERVIEW_SUM_KEYS)
+_OBJECTS_ONLY_OVERVIEW_KEYS = OBJECTS_ONLY_OVERVIEW_SUM_KEYS
 
 
 def build_closed_loop_workspace(
@@ -106,7 +107,7 @@ def build_closed_loop_workspace(
     # comparable in the same chart.
     comparison_score_panels = [
         wr.LinePlot(title=metric, metric_regex=rf"^closed_loop_scores/{metric}/.*$")
-        for metric in _COMPARISON_SCORE_KEYS
+        for metric in COMPARISON_SCORE_KEYS
     ]
     # Objects-only group: explicit y=[...] over objects_labels ONLY (no regex) — a noobj line
     # here would just be a flat, meaningless 0 (no traffic to collide with by construction).
@@ -115,7 +116,7 @@ def build_closed_loop_workspace(
             title=metric,
             y=[f"closed_loop_scores/{metric}/{label}" for label in objects_labels],
         )
-        for metric in _OBJECTS_ONLY_SCORE_KEYS
+        for metric in OBJECTS_ONLY_SCORE_KEYS
     ]
 
     # Two SEPARATE sections (not just two panel types in one section): the colormap gallery

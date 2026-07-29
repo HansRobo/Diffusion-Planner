@@ -6,15 +6,13 @@ import math
 from pathlib import Path
 
 import wandb
+from scenario_generation.closed_loop_score_keys import (
+    COMPARISON_OVERVIEW_SUM_KEYS,
+    OBJECTS_ONLY_OVERVIEW_SUM_KEYS,
+    SCORE_KEYS,
+    extract_score,
+)
 from scenario_generation.trajectory_colormap import METRIC_CHOICES, render_trajectory_colormaps
-
-# Per-site summary count keys summed across ALL labels (objects + "__noobj" ablation) by
-# build_sites_aggregate_log for the overview — meaningful in either mode.
-_OVERVIEW_SUM_KEYS = ("total_curb_hits", "total_snaps", "n_segments_diverged")
-# Summed across objects-labeled sites ONLY (see _is_noobj_label) — these are structurally 0 for
-# the empty-world ablation (no traffic to collide with), so mixing "__noobj" labels in would
-# just dilute the objects-mode signal with meaningless zeros.
-_OVERVIEW_OBJECTS_ONLY_SUM_KEYS = ("total_collision_events",)
 
 
 def _is_noobj_label(label: str) -> bool:
@@ -22,24 +20,6 @@ def _is_noobj_label(label: str) -> bool:
     exclude ablation labels from collision-style aggregates that are 0 by construction in that
     mode."""
     return label.endswith("__noobj")
-
-
-# Maps each small headline score key to where it now lives in a (segment or summary) dict, since
-# closed_loop_eval's nested-metrics categories (object/road_border/reproducer) replaced the old
-# flat n_collision_events/n_curb_hits/total_*/snap_count keys. mean_route_completion and
-# n_segments_diverged have no nested category of their own and stay flat.
-SCORE_EXTRACTORS = {
-    "mean_route_completion": lambda d: d.get("mean_route_completion"),
-    "n_segments_diverged": lambda d: d.get("n_segments_diverged"),
-    "total_collision_events": lambda d: d.get("object", {}).get("collision_count"),
-    "total_curb_hits": lambda d: d.get("road_border", {}).get("collision_count"),
-    "total_snaps": lambda d: d.get("reproducer", {}).get("snap_count"),
-}
-
-
-def extract_score(d: dict, key: str):
-    """Resolve one of the small headline score keys from a segment or summary dict."""
-    return SCORE_EXTRACTORS[key](d)
 
 
 def _segment_paths(out_dir: str | Path, row: dict) -> tuple[Path, Path]:
@@ -85,6 +65,8 @@ EPISODE_TABLE_COLUMNS = [
     "n_collision_events",
     "n_curb_hits",
     "n_snaps",
+    "n_red_light_violations",
+    "n_strong_brakes",
     "progress_m",
     "video_path",
 ]
@@ -105,6 +87,8 @@ def _episode_row(table: wandb.Table, site: str, r: dict, out_dir: str | Path | N
         int(extract_score(r, "total_collision_events") or 0),
         int(extract_score(r, "total_curb_hits") or 0),
         int(extract_score(r, "total_snaps") or 0),
+        int(extract_score(r, "total_red_light_violations") or 0),
+        int(extract_score(r, "total_strong_brakes") or 0),
         float(r.get("progress_m", 0.0)),
         video_path,
     )
@@ -146,7 +130,7 @@ def build_sites_aggregate_log(summaries: dict[str, dict]) -> dict:
     segment-rates / min-clearances / means (those stay in each site's summary.json only).
 
     ``summaries`` is keyed by site LABEL — a ``{site}__noobj`` label is excluded from
-    collision-style sums (``_OVERVIEW_OBJECTS_ONLY_SUM_KEYS``), since those are 0 by
+    collision-style sums (``OBJECTS_ONLY_OVERVIEW_SUM_KEYS``), since those are 0 by
     construction in the empty-world ablation and would just dilute the objects-mode number
     with zeros.
     """
@@ -168,27 +152,14 @@ def build_sites_aggregate_log(summaries: dict[str, dict]) -> dict:
         comp_num / total_segments if total_segments else 0.0
     )
 
-    for key in _OVERVIEW_SUM_KEYS:
+    for key in COMPARISON_OVERVIEW_SUM_KEYS:
         log[f"closed_loop_overview/{key}"] = sum(int(extract_score(s, key) or 0) for s in values)
-    for key in _OVERVIEW_OBJECTS_ONLY_SUM_KEYS:
+    for key in OBJECTS_ONLY_OVERVIEW_SUM_KEYS:
         log[f"closed_loop_overview/{key}"] = sum(
             int(extract_score(s, key) or 0) for s in objects_values
         )
 
     return {k: v for k, v in log.items() if _wandb_scalar(v) or isinstance(v, int)}
-
-
-# Per-site scalar trends worth a line chart over epochs — the deliberately small, non-saturating
-# set: route_completion (↑, the headline "getting better" signal) plus event COUNTS (↓). The
-# saturating segment-rates and worst-moment min-clearances, and the mean_* metrics, are NOT
-# shown (still in summary.json / episode table for reference) — they either pin to 0/1 on a
-# hard site or were judged not worth the panel by the user.
-_SCORE_KEYS = (
-    "mean_route_completion",
-    "total_collision_events",
-    "total_curb_hits",
-    "total_snaps",
-)
 
 
 def _site_label(site: str | None) -> str:
@@ -222,7 +193,7 @@ def build_full_closed_loop_wandb_log(
     """
     label = _site_label(site)
     log: dict = {}
-    for key in _SCORE_KEYS:
+    for key in SCORE_KEYS:
         val = extract_score(summary, key)
         if _wandb_scalar(val):
             log[f"closed_loop_scores/{key}/{label}"] = val

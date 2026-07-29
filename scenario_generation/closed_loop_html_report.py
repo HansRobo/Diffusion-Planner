@@ -14,8 +14,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from scenario_generation.closed_loop_score_keys import extract_score
 from scenario_generation.trajectory_colormap import METRIC_CHOICES, render_trajectory_colormaps
-from scenario_generation.wandb_closed_loop import extract_score
 
 # Shown first in each card's metric dropdown when available (the rest follow METRIC_CHOICES
 # order) — clearance is the most broadly useful default view.
@@ -60,6 +60,8 @@ def collect_site_data(
                 "total_collision_events": extract_score(s, "total_collision_events") or 0,
                 "total_curb_hits": extract_score(s, "total_curb_hits") or 0,
                 "total_snaps": extract_score(s, "total_snaps") or 0,
+                "total_red_light_violations": extract_score(s, "total_red_light_violations") or 0,
+                "total_strong_brakes": extract_score(s, "total_strong_brakes") or 0,
                 "n_segments_diverged": s.get("n_segments_diverged", 0),
             }
         )
@@ -115,6 +117,9 @@ def collect_site_data(
                         "n_collision_events": extract_score(r, "total_collision_events") or 0,
                         "n_curb_hits": extract_score(r, "total_curb_hits") or 0,
                         "n_snaps": extract_score(r, "total_snaps") or 0,
+                        "n_red_light_violations": extract_score(r, "total_red_light_violations")
+                        or 0,
+                        "n_strong_brakes": extract_score(r, "total_strong_brakes") or 0,
                         "progress_m": round(r.get("progress_m", 0.0), 1),
                         "video_path": f"{site_name}/{video_name}" if video_path.is_file() else None,
                         "colormap_paths": colormap_paths,
@@ -168,7 +173,7 @@ _TEMPLATE = """<!DOCTYPE html>
 
 <h2>Per-Site Summary</h2>
 <table id="summaryTable">
-<tr><th>Site</th><th>segments</th><th>Route Completion</th><th>Collisions</th><th>Curb Hits</th><th>Stuck (snaps)</th><th>Diverged</th></tr>
+<tr><th>Site</th><th>segments</th><th>Route Completion</th><th>Collisions</th><th>Curb Hits</th><th>Stuck (snaps)</th><th>Red Light</th><th>Strong Brake</th><th>Diverged</th></tr>
 </table>
 
 <h2>Episodes</h2>
@@ -205,6 +210,8 @@ for (const s of SUMMARY) {
     <td>${s.total_collision_events}</td>
     <td>${s.total_curb_hits}</td>
     <td>${s.total_snaps}</td>
+    <td>${s.total_red_light_violations}</td>
+    <td>${s.total_strong_brakes}</td>
     <td>${s.n_segments_diverged}</td>`;
   summaryTable.appendChild(tr);
 }
@@ -225,6 +232,7 @@ function card(item) {
   const div = document.createElement('div');
   div.className = 'card';
   const coll = item.n_collision_events || 0, curb = item.n_curb_hits || 0, snaps = item.n_snaps || 0;
+  const redLight = item.n_red_light_violations || 0, brakes = item.n_strong_brakes || 0;
   const completion = ((item.route_completion || 0)*100).toFixed(0)+'%';
   const c = siteColor[item.site] || '#888';
   const videoTag = item.video_path
@@ -255,6 +263,8 @@ function card(item) {
         <span class="${coll>0?'flag':''}">Collisions: <b>${coll}</b></span>
         <span class="${curb>0?'flag':''}">Curb hits: <b>${curb}</b></span>
         <span class="${snaps>0?'flag':''}">Stuck: <b>${snaps}</b></span>
+        <span class="${redLight>0?'flag':''}">Red light: <b>${redLight}</b></span>
+        <span class="${brakes>0?'flag':''}">Strong brake: <b>${brakes}</b></span>
         <span>steps: <b>${item.n_steps_run}</b></span>
         <span>progress: <b>${item.progress_m}m</b></span>
         <span class="${item.terminated==='diverged'?'flag':''}">terminated: <b>${item.terminated}</b></span>
