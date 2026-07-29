@@ -121,7 +121,7 @@ Launchers live in `diffusion_planner/slurm/`. Submit with the staged commit pinn
 
 ```bash
 sbatch --export=ALL,HDP_EXPECTED_COMMIT=<sha> \
-  diffusion_planner/slurm/run_hdp_ego_only_base80_node02.sbatch
+  diffusion_planner/slurm/run_hdp_ego_only_base80.sbatch
 ```
 
 - **Commit guard.** `HDP_EXPECTED_COMMIT` is mandatory and must equal the staged checkout's

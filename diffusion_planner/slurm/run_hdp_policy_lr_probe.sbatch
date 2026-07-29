@@ -2,14 +2,14 @@
 #SBATCH --job-name=hdp-lr-probe
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
-#SBATCH --nodelist=node02
+#SBATCH --nodelist=node01,node02
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=224
 #SBATCH --mem=1900G
 #SBATCH --gres=gpu:h100:8
 #SBATCH --exclusive
-#SBATCH --output=/mnt/nvme/Diffusion-Planner-hdp-lr-sweep-20260721/slurm-%j.out
-#SBATCH --error=/mnt/nvme/Diffusion-Planner-hdp-lr-sweep-20260721/slurm-%j.err
+#SBATCH --output=/mnt/storage_rdma/workspaces/wang/slurm/%x-%j.out
+#SBATCH --error=/mnt/storage_rdma/workspaces/wang/slurm/%x-%j.err
 
 set -euo pipefail
 
@@ -28,7 +28,7 @@ BASE_RUN=${HDP_BASE_RUN:?set HDP_BASE_RUN}
 VALID_PROBE=${HDP_VALID_PROBE:?set HDP_VALID_PROBE}
 EXTRA_ROOT=${HDP_EXTRA_ROOT:?set HDP_EXTRA_ROOT}
 ROOT=${HDP_OUTPUT_ROOT:-/mnt/nvme/Diffusion-Planner-hdp-lr-sweep-20260721}
-PYTHON=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/.venv/bin/python
+PYTHON=${SOURCE_REPO}/.venv/bin/python
 TRAIN_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260707_vehicle_params_with_mirror/path_list_train_concatenated.json
 EXTRA_1=${EXTRA_ROOT}/path_list_train_unprotected_right_turn_is_skipped_filtered.json
 EXTRA_2=${EXTRA_ROOT}/path_list_unprotected_right_turn_xx1_is_skipped_filtered.json

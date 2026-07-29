@@ -2,15 +2,15 @@
 #SBATCH --job-name=hdp-route-base60
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
-#SBATCH --nodelist=node01
+#SBATCH --nodelist=node01,node02
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=224
 #SBATCH --mem=1900G
 #SBATCH --gres=gpu:h100:8
 #SBATCH --exclusive
 #SBATCH --requeue
-#SBATCH --output=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base60_causal_red_light_v2_fullrt_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512/slurm-%j.out
-#SBATCH --error=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_base60_causal_red_light_v2_fullrt_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512/slurm-%j.err
+#SBATCH --output=/mnt/storage_rdma/workspaces/wang/slurm/%x-%j.out
+#SBATCH --error=/mnt/storage_rdma/workspaces/wang/slurm/%x-%j.err
 
 set -euo pipefail
 
@@ -23,7 +23,21 @@ if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
   exit 20
 fi
 
-REPO=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner
+# Local-NVMe checkout on whichever of our two nodes the job landed on, node01 first.
+# Every launcher here requires HDP_EXPECTED_COMMIT, so landing on a node whose checkout
+# sits at another commit aborts rather than training stale code.
+REPO=${HDP_REPO:-}
+for candidate in \
+  /mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner \
+  /mnt/nvme/Diffusion-Planner-hyper-diffusion-planner; do
+  if [[ -z "${REPO}" && -r "${candidate}/diffusion_planner/train_predictor.py" ]]; then
+    REPO=${candidate}
+  fi
+done
+if [[ -z "${REPO}" ]]; then
+  echo "FATAL: no checkout on $(hostname -s); pass HDP_REPO" >&2
+  exit 10
+fi
 RUN_NAME=hdp_ego_only_route_adaln_base60_causal_red_light_v2_fullrt_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with --export=ALL,HDP_EXPECTED_COMMIT=<commit>}

@@ -21,16 +21,24 @@ gave 8 ranks 8 iteration orders, and no HDP-RL replay epoch could finish under D
 
 | Stage | Launcher | Notes |
 | --- | --- | --- |
-| Base (80-token, ego-only) | `run_hdp_ego_only_base80_node02.sbatch` | Full vehicle-parameter corpus, no SFT init. Three `is_skipped`-filtered right-turn manifests, each repeated ×10. Source lists are immutable inputs; the job never rewrites them. |
-| Base (node01 variant) | `run_hdp_ego_only_base_node01.sbatch` | |
-| SFT | `run_hdp_ego_only_sft_node01.sbatch` | Asserts `BASE_RUN/latest.pth` is at the expected epoch. |
-| Staged SFT | `run_hdp_staged_sft_node02.sbatch` | Stage 1 removes signal feedback and adapts only the trajectory planner; stage 2 trains the turn-indicator head. Each stage hands its `latest.pth` EMA to the next. |
+| Base (80-token, ego-only) | `run_hdp_ego_only_base80.sbatch` | Full vehicle-parameter corpus, no SFT init. Three `is_skipped`-filtered right-turn manifests, each repeated ×10. Source lists are immutable inputs; the job never rewrites them. |
+| Base (60-token, ego-only) | `run_hdp_ego_only_base.sbatch` | Causal red-light corpus with the full right-turn repeat and recovery augmentation. |
+| SFT | `run_hdp_ego_only_sft.sbatch` | Asserts `BASE_RUN/latest.pth` is at the expected epoch. |
+| Staged SFT | `run_hdp_staged_sft.sbatch` | Stage 1 removes signal feedback and adapts only the trajectory planner; stage 2 trains the turn-indicator head. Each stage hands its `latest.pth` EMA to the next. |
 | RL post-training | `run_hdp_rl.sbatch` | Same three manifests at the same ×10 repeat as Base, re-checked by the trainer, so an RL delta is attributable to the objective and not to a distribution shift. |
-| Turn-indicator head | `run_hdp_turn_indicator_head_node01.sbatch` | Safe to run **concurrently** with RL — see below. |
-| LR probe | `run_hdp_policy_lr_probe_node02.sbatch` | |
+| Turn-indicator head | `run_hdp_turn_indicator_head.sbatch` | Safe to run **concurrently** with RL — see below. |
+| LR probe | `run_hdp_policy_lr_probe.sbatch` | |
 
 Entry points: `train_predictor.py`, `train_hdp_rl_predictor.py`, `valid_predictor.py`,
 `valid_predictor_closed_loop.py`.
+
+No launcher is tied to a node. The `gpu` partition spans twelve nodes, most of them other
+teams', and none carries a Slurm feature to select on, so each launcher requests
+`--nodelist=node01,node02` as a candidate pool with node01 leading. The repository path,
+venv and output root resolve at runtime from the allocated node's local NVMe; Slurm's own
+stdout/stderr go to shared storage because they must exist before the job starts. Every
+launcher requires `HDP_EXPECTED_COMMIT`, which is what makes floating safe: the checkouts
+on the two nodes sit at different commits, and landing on the wrong one aborts.
 
 ## Turn-indicator head
 
@@ -55,11 +63,8 @@ the epoch-6 `latest.pth` by balanced accuracy 0.8121 vs 0.7934, active-F1 0.8229
 0.8059 and direction accuracy 0.7345 vs 0.7046. `valid_loss_ego` is 2.3241 in both, which
 is the check that the head stayed detached from the planner.
 
-`turn_indicator_label_smoothing` is detected by the launcher with its own grep, because a
-source pinned before it existed would be handed an unknown flag by argparse. A pin that
-predates any of these flags now aborts rather than running: with the defaults no longer
-equal to the legacy probe's, omitting the flags would train a different architecture than
-the run records.
+The launcher passes all four explicitly, so the run records the architecture it trained
+rather than inheriting a default.
 
 Running the head concurrently with RL is safe by construction. Per
 `configure_rl_trainable_parameters` (`train_hdp_rl_predictor.py:87-95`),
@@ -98,9 +103,9 @@ exactly zero, which is what makes small paired contrasts readable at all.
 - The turn-indicator head loss is gated by `training_stage == "turn_indicator"`
   (`train_epoch.py:189-190`), so policy-only Base/SFT never evaluates it. Head-side
   changes cannot affect base reproducibility.
-- `_FINGERPRINT_RETIRED` pins retired reward fields, so all 32 historical
-  `reward_fingerprint` values still reproduce byte-for-byte and a resume of a ~2.1 TB
-  mined cycle reads its cache instead of aborting on drift.
+- `reward_fingerprint` records every field the reward path reads, and only those. A
+  mined cycle is multi-terabyte, so the check is fail-closed: a cache written under
+  different reward flags is re-mined rather than trained on.
 - `effective_config.json` records 208 keys including anchor horizons, precision,
   `world_size` and lr — but **not** `model_path`, `seed`, `start_epoch` or `epochs`.
 - Treat `batch_size // world_size` as load-bearing: bf16 went non-finite at local batch

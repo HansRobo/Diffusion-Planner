@@ -9,12 +9,12 @@ validation-proxy selector (`valid_epdms_total`, `valid_loss_ego`) measured on a 
 split that does not predict closed-loop or real-vehicle behaviour. The whole pipeline
 is built on the last weights instead:
 
-- `run_hdp_ego_only_base_node01.sbatch` and `run_hdp_ego_only_base80_node02.sbatch`
+- `run_hdp_ego_only_base.sbatch` and `run_hdp_ego_only_base80.sbatch`
   strict-resume from `${SAVE_DIR}/latest.pth` and verify the final epoch through it;
-- `run_hdp_ego_only_sft_node01.sbatch` initializes from `${BASE_RUN}/latest.pth` and
+- `run_hdp_ego_only_sft.sbatch` initializes from `${BASE_RUN}/latest.pth` and
   asserts that checkpoint is at the expected epoch with an EMA policy present;
-- `run_hdp_staged_sft_node02.sbatch` hands each stage's `latest.pth` EMA to the next
-  stage, and `run_hdp_policy_lr_probe_node02.sbatch` initializes from
+- `run_hdp_staged_sft.sbatch` hands each stage's `latest.pth` EMA to the next
+  stage, and `run_hdp_policy_lr_probe.sbatch` initializes from
   `${BASE_RUN}/latest.pth`;
 - `valid_run.sh` evaluates `${MODEL_DIR}/latest.pth`.
 

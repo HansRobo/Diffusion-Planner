@@ -2,6 +2,7 @@
 #SBATCH --job-name=hdp-rl
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
+#SBATCH --nodelist=node01,node02
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512G
@@ -18,7 +19,21 @@ if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
   exit 20
 fi
 
-REPO=${HDP_RL_REPO:-/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner}
+# Local-NVMe checkout on whichever of our two nodes the job landed on, node01 first.
+# Every launcher here requires HDP_EXPECTED_COMMIT, so landing on a node whose checkout
+# sits at another commit aborts rather than training stale code.
+REPO=${HDP_RL_REPO:-}
+for candidate in \
+  /mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner \
+  /mnt/nvme/Diffusion-Planner-hyper-diffusion-planner; do
+  if [[ -z "${REPO}" && -r "${candidate}/diffusion_planner/train_predictor.py" ]]; then
+    REPO=${candidate}
+  fi
+done
+if [[ -z "${REPO}" ]]; then
+  echo "FATAL: no checkout on $(hostname -s); pass HDP_RL_REPO" >&2
+  exit 10
+fi
 NNODES=${SLURM_NNODES:-1}
 NPROC_PER_NODE=${HDP_RL_NPROC_PER_NODE:-${HDP_RL_NPROC:-8}}
 WORLD_SIZE=$((NNODES * NPROC_PER_NODE))

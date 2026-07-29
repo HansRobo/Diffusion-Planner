@@ -2,7 +2,7 @@
 #SBATCH --job-name=hdp-staged-sft
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
-#SBATCH --nodelist=node02
+#SBATCH --nodelist=node01,node02
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=224
 #SBATCH --mem=1900G
@@ -10,8 +10,8 @@
 #SBATCH --exclusive
 #SBATCH --requeue
 #SBATCH --chdir=/tmp
-#SBATCH --output=/mnt/nvme/Diffusion-Planner-hdp-staged-20260721/slurm-%j.out
-#SBATCH --error=/mnt/nvme/Diffusion-Planner-hdp-staged-20260721/slurm-%j.err
+#SBATCH --output=/mnt/storage_rdma/workspaces/wang/slurm/%x-%j.out
+#SBATCH --error=/mnt/storage_rdma/workspaces/wang/slurm/%x-%j.err
 
 set -euo pipefail
 
@@ -51,7 +51,7 @@ EXTRA_1=${EXTRA_ROOT}/path_list_train_unprotected_right_turn_is_skipped_filtered
 EXTRA_2=${EXTRA_ROOT}/path_list_unprotected_right_turn_xx1_is_skipped_filtered.json
 EXTRA_3=${EXTRA_ROOT}/path_list_unprotected_right_turn_xx1_psim_is_skipped_filtered.json
 NORMALIZATION=${SOURCE_REPO}/diffusion_planner/normalization.json
-PYTHON=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/.venv/bin/python
+PYTHON=${SOURCE_REPO}/.venv/bin/python
 BASE_WEIGHTS=${POLICY_INIT_RUN}/latest.pth
 BASE_ARGS_JSON=${BASE_RUN}/args.json
 PORT=${HDP_MASTER_PORT:-22657}

@@ -2,15 +2,21 @@
 #SBATCH --job-name=hdp-turn-head
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
-#SBATCH --nodelist=node01
+#SBATCH --nodelist=node01,node02
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=96
 #SBATCH --mem=450G
 #SBATCH --gres=gpu:h100:4
 #SBATCH --requeue
 #SBATCH --chdir=/tmp
-#SBATCH --output=/mnt/nvme/wangbin/Diffusion-Planner-hdp-turn-indicator-20260729/slurm-%j.out
-#SBATCH --error=/mnt/nvme/wangbin/Diffusion-Planner-hdp-turn-indicator-20260729/slurm-%j.err
+#SBATCH --output=/mnt/storage_rdma/workspaces/wang/slurm/%x-%j.out
+#SBATCH --error=/mnt/storage_rdma/workspaces/wang/slurm/%x-%j.err
+
+# The `gpu` partition spans twelve nodes, ten of which belong to other teams, and no node
+# carries a Slurm feature to select on. `--nodelist` is therefore the only way to say "one
+# of ours": it is a candidate pool, node01 leading, so the job can never land on a foreign
+# node. Slurm's own stdout/stderr must exist before the job starts and so live on shared
+# storage; everything the training writes stays on the allocated node's local NVMe.
 
 set -euo pipefail
 
@@ -26,7 +32,7 @@ set -euo pipefail
 #     additionally freezes every non-head parameter, so the trainable count is the head
 #     alone: 939,523 for the legacy probe, 2,323,203 at num_queries=4 num_layers=2.
 #
-# Deliberate deltas from run_hdp_staged_sft_node02.sbatch:
+# Deliberate deltas from run_hdp_staged_sft.sbatch:
 #
 #   * enable_epdms_eval=False. In a head-only stage the trajectory policy is frozen,
 #     so the EPDMS proxy re-scores identical trajectories every epoch. Measured on the
@@ -38,27 +44,6 @@ set -euo pipefail
 #     the GENERATED trajectory (validate_model.py).
 #   * warm_up_epoch=0 makes LinearWarmupConstantLR a pure constant, so the per-epoch
 #     validation curve carries no schedule confound and each epoch is comparable.
-#
-# One design question was settled by measurement before launch rather than by taste:
-#
-#   * class-weighted CE is REJECTED. Sampling 4,000 scenes of each list gives a prior of
-#     DISABLE 60.5% / LEFT 21.0% / RIGHT 18.5% on train (65.1/18.2/16.7 on valid), so
-#     inverse-frequency weights are only 0.55/1.59/1.80 -- a 3.3x ratio. That cannot
-#     explain the observed disable_acc 0.9734 vs left 0.7827 / right 0.7688, so the OFF
-#     bias is not a frequency artifact. More importantly a class weight and the state
-#     machine's activation_threshold move the SAME OFF/ON operating point, and the
-#     threshold is a free offline sweep over dumped logits while a loss weight costs a
-#     full run per operating point. Keep the loss calibrated; move the operating point
-#     downstream.
-#
-# The A/B this launcher runs is ARCHITECTURE, selected by SOURCE_REPO:
-#   CONTROL  legacy pin (pre-33306cc8): single-query single-layer cross-attention over a
-#            summed traj+proprio+route query, no normalization, dropout hardcoded 0.
-#   NEW      pin >=33306cc8: input LayerNorms, concat-project context (a sum cannot
-#            represent a conjunction of the three conditions), configurable multi-query
-#            multi-layer pre-LN attention, real dropout, and label smoothing.
-# Everything else -- data lists, seed 3407, augmentation, lr, epochs, global batch,
-# rank count, precision -- is identical between the arms.
 
 REQUIRED_USER=${HDP_REQUIRED_USER:-wang}
 if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
@@ -66,13 +51,27 @@ if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
   exit 20
 fi
 
-# The pinned worktree the node02 RL campaign runs from. Read-only here: job 1528 still
-# re-checks `git diff --quiet` against it, so nothing may be written inside it.
-# Pinned at the redesigned-head commit. The previous pin (hdp-rl-d848517b, commit
-# 8b0336e9) predates --turn_indicator_head_* and would reject those flags outright.
-SOURCE_REPO=${HDP_SOURCE_REPO:-/mnt/storage_rdma/workspaces/wang/hdp-head-33306cc8}
-EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:-40fcd6c92fff423236977a0079e21f6a133e9cc1}
-ROOT=${HDP_OUTPUT_ROOT:-/mnt/nvme/wangbin/Diffusion-Planner-hdp-turn-indicator-20260729}
+# Runs from a checkout on the allocated node's local NVMe. The candidate list is ordered,
+# so node01's path is the default and node02's is the fallback; the checkouts there sit at
+# different commits, which is exactly why HDP_EXPECTED_COMMIT is required rather than
+# defaulted -- a floating job must not silently train whatever that node happens to hold.
+SOURCE_REPO=${HDP_SOURCE_REPO:-}
+if [[ -z "${SOURCE_REPO}" ]]; then
+  for candidate in \
+    /mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner \
+    /mnt/nvme/Diffusion-Planner-hyper-diffusion-planner; do
+    if [[ -r "${candidate}/diffusion_planner/train_predictor.py" ]]; then
+      SOURCE_REPO=${candidate}
+      break
+    fi
+  done
+fi
+if [[ -z "${SOURCE_REPO}" ]]; then
+  echo "FATAL: no checkout found on $(hostname -s); pass HDP_SOURCE_REPO" >&2
+  exit 10
+fi
+EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
+ROOT=${HDP_OUTPUT_ROOT:-${SOURCE_REPO}}
 
 POLICY_CKPT_DIR=${HDP_POLICY_CKPT_DIR:-/mnt/storage_rdma/diffusion_planner/checkpoints/hdp_base80_data_robust_v1_no_roadborder_e80_latest}
 POLICY_EPOCH=${HDP_POLICY_EPOCH:-80}
@@ -90,7 +89,7 @@ INIT_WEIGHTS=${POLICY_CKPT_DIR}/latest.pth
 HEAD_EPOCHS=${HDP_HEAD_EPOCHS:-2}
 HEAD_WARMUP=${HDP_HEAD_WARMUP:-0}
 HEAD_LR=${HDP_HEAD_LR:-3e-4}
-RUN_NAME=${HDP_RUN_NAME:-hdp_turn_indicator_head${HEAD_EPOCHS}ep_lr${HEAD_LR}_from_base80_e${POLICY_EPOCH}_node01_8gpu_bf16_bs512}
+RUN_NAME=${HDP_RUN_NAME:-hdp_turn_indicator_head${HEAD_EPOCHS}ep_lr${HEAD_LR}_from_base80_e${POLICY_EPOCH}_bf16_bs512}
 SAVE_DIR=${ROOT}/outputs/${RUN_NAME}
 
 # Data contract copied verbatim from the RL campaign's args.json so the head is trained
@@ -325,56 +324,20 @@ TRAIN_ARGS=(
   --port "${PORT}"
 )
 
-# The redesigned-head flags exist only from commit 33306cc8 on, and a source pinned
-# before that is handed a hard argparse error, so append them only where they parse.
-# The defaults below are now the winning arm rather than the legacy probe, so a legacy
-# pin can no longer reproduce them: it aborts unless the resolved values are exactly the
-# 1/1/0.0 that omitting the flags actually produces. Comparing the resolved value, not
-# merely "was the variable set", is what keeps a default-valued launch from silently
-# training a different architecture than the one it records.
+# Head architecture and label smoothing are passed explicitly so the run records the
+# values it trained rather than inheriting whatever the defaults happen to be. The
+# defaults here are the same ones `TrainConfig` carries.
 HEAD_NUM_QUERIES=${HDP_HEAD_NUM_QUERIES:-4}
 HEAD_NUM_LAYERS=${HDP_HEAD_NUM_LAYERS:-2}
 HEAD_DROPOUT=${HDP_HEAD_DROPOUT:-0.1}
-HEAD_ARCH_FLAGS=(
+LABEL_SMOOTHING=${HDP_LABEL_SMOOTHING:-0.05}
+TRAIN_ARGS+=(
   --turn_indicator_head_num_queries "${HEAD_NUM_QUERIES}"
   --turn_indicator_head_num_layers "${HEAD_NUM_LAYERS}"
   --turn_indicator_head_dropout "${HEAD_DROPOUT}"
+  --turn_indicator_label_smoothing "${LABEL_SMOOTHING}"
 )
-if grep -q "turn_indicator_head_num_queries" \
-    "${SOURCE_REPO}/diffusion_planner/train_predictor.py"; then
-  TRAIN_ARGS+=("${HEAD_ARCH_FLAGS[@]}")
-  log "redesigned-head flags: ${HEAD_ARCH_FLAGS[*]}"
-else
-  for spec in "HEAD_NUM_QUERIES=1" "HEAD_NUM_LAYERS=1" "HEAD_DROPOUT=0.0"; do
-    name=${spec%%=*}
-    if [[ "${!name}" != "${spec#*=}" ]]; then
-      echo "FATAL: resolved ${name}=${!name} but ${SOURCE_REPO} predates the redesigned" >&2
-      echo "       head and can only train ${spec#*=}. Set HDP_${name}=${spec#*=} to run" >&2
-      echo "       the legacy probe there deliberately." >&2
-      exit 23
-    fi
-  done
-  log "legacy source pin: omitting redesigned-head flags (legacy probe)"
-fi
-
-# Label smoothing is detected on its own and not folded into the check above: it landed
-# later than the head-arch flags, so there is a range of pinned sources that HAVE those and
-# do NOT have this one. A combined check would pass the arch grep and then hand an unknown
-# flag to argparse.
-LABEL_SMOOTHING=${HDP_LABEL_SMOOTHING:-0.05}
-if grep -q "turn_indicator_label_smoothing" \
-    "${SOURCE_REPO}/diffusion_planner/train_predictor.py"; then
-  TRAIN_ARGS+=(--turn_indicator_label_smoothing "${LABEL_SMOOTHING}")
-  log "label smoothing: ${LABEL_SMOOTHING}"
-else
-  if [[ "${LABEL_SMOOTHING}" != "0.0" ]]; then
-    echo "FATAL: resolved LABEL_SMOOTHING=${LABEL_SMOOTHING} but ${SOURCE_REPO} has no" >&2
-    echo "       --turn_indicator_label_smoothing. Running it there would silently train" >&2
-    echo "       at 0.0 and be recorded as the smoothed arm." >&2
-    exit 23
-  fi
-  log "source pin lacks --turn_indicator_label_smoothing: omitting it"
-fi
+log "head: q=${HEAD_NUM_QUERIES} l=${HEAD_NUM_LAYERS} dropout=${HEAD_DROPOUT} ls=${LABEL_SMOOTHING}"
 
 checkpoint_epoch() {
   "${PYTHON}" - "$1" <<'PY'

@@ -175,7 +175,7 @@ frozen and skipped while the trajectory policy adapts to removal of the signal
 input. The second phase initializes from that phase's latest EMA and uses
 `--supervised_training_stage turn_indicator`: the complete planner is frozen and
 only the three-state head is trained on final DPM and expert trajectories. See
-`diffusion_planner/slurm/run_hdp_staged_sft_node02.sbatch` for the hash-locked
+`diffusion_planner/slurm/run_hdp_staged_sft.sbatch` for the hash-locked
 protocol.
 
 Do not change from velocity representation to waypoint representation between base and SFT.

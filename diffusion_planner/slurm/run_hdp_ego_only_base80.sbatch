@@ -7,7 +7,7 @@
 #SBATCH --job-name=hdp-base80
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
-#SBATCH --nodelist=node02
+#SBATCH --nodelist=node01,node02
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=224
 #SBATCH --mem=1900G
@@ -15,8 +15,8 @@
 #SBATCH --exclusive
 #SBATCH --requeue
 #SBATCH --chdir=/tmp
-#SBATCH --output=/mnt/nvme/Diffusion-Planner-hdp-node02-current/outputs/hdp_ego_only_route_adaln_base80_data_robust_v1_vehicle_params_mirror_rightturnx10_node02_8gpu_bf16_bs512_no_roadborder/slurm-%j.out
-#SBATCH --error=/mnt/nvme/Diffusion-Planner-hdp-node02-current/outputs/hdp_ego_only_route_adaln_base80_data_robust_v1_vehicle_params_mirror_rightturnx10_node02_8gpu_bf16_bs512_no_roadborder/slurm-%j.err
+#SBATCH --output=/mnt/storage_rdma/workspaces/wang/slurm/%x-%j.out
+#SBATCH --error=/mnt/storage_rdma/workspaces/wang/slurm/%x-%j.err
 
 set -euo pipefail
 
@@ -29,7 +29,21 @@ if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
   exit 20
 fi
 
-REPO=${HDP_REPO:-/mnt/nvme/Diffusion-Planner-hdp-node02-current}
+# Local-NVMe checkout on whichever of our two nodes the job landed on, node01 first.
+# Every launcher here requires HDP_EXPECTED_COMMIT, so landing on a node whose checkout
+# sits at another commit aborts rather than training stale code.
+REPO=${HDP_REPO:-}
+for candidate in \
+  /mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner \
+  /mnt/nvme/Diffusion-Planner-hyper-diffusion-planner; do
+  if [[ -z "${REPO}" && -r "${candidate}/diffusion_planner/train_predictor.py" ]]; then
+    REPO=${candidate}
+  fi
+done
+if [[ -z "${REPO}" ]]; then
+  echo "FATAL: no checkout on $(hostname -s); pass HDP_REPO" >&2
+  exit 10
+fi
 RUN_NAME=${HDP_RUN_NAME:-hdp_ego_only_route_adaln_base80_data_robust_v1_vehicle_params_mirror_rightturnx10_node02_8gpu_bf16_bs512_no_roadborder}
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with --export=ALL,HDP_EXPECTED_COMMIT=<commit>}
@@ -44,7 +58,7 @@ EXTRA_X2=${HDP_EXTRA_X2:-${RIGHT_TURN_DIR}/path_list_train_unprotected_right_tur
 EXTRA_XX1=${HDP_EXTRA_XX1:-${RIGHT_TURN_DIR}/path_list_unprotected_right_turn_xx1_is_skipped_filtered.json}
 EXTRA_PSIM=${HDP_EXTRA_PSIM:-${RIGHT_TURN_DIR}/path_list_unprotected_right_turn_xx1_psim_is_skipped_filtered.json}
 # This venv is shared on the GPU nodes and contains the pinned CUDA/PyTorch stack.
-PYTHON=${HDP_PYTHON:-/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/.venv/bin/python}
+PYTHON=${HDP_PYTHON:-${REPO}/.venv/bin/python}
 PORT=${HDP_PORT:-22633}
 MAX_ATTEMPTS=${HDP_MAX_ATTEMPTS:-3}
 FRESH_WANDB_RUN_ID=${HDP_WANDB_RUN_ID:-hdp-base80-no-road-border-${SLURM_JOB_ID}}
