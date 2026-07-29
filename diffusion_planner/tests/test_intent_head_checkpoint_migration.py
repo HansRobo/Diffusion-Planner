@@ -6,10 +6,9 @@ head is a routine operation. It must reinitialize the head as a unit while keepi
 strict loading for the policy.
 """
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
-
 from diffusion_planner.train import load_weights_only
 
 HEAD = "decoder.turn_indicator_predictor."
@@ -22,13 +21,13 @@ class _Stub(nn.Module):
         super().__init__()
         self.policy = nn.Parameter(torch.zeros(4))
         self._head_keys = dict(head_keys)
-        for i, (name, shape) in enumerate(head_keys.items()):
+        for i, (_name, shape) in enumerate(head_keys.items()):
             self.register_parameter(f"h{i}", nn.Parameter(torch.zeros(*shape)))
         self._names = [f"h{i}" for i in range(len(head_keys))]
 
     def state_dict(self, *a, **k):  # noqa: D102
         out = {"decoder.policy": self.policy.detach()}
-        for name, key in zip(self._names, self._head_keys):
+        for name, key in zip(self._names, self._head_keys, strict=True):
             out[key] = getattr(self, name).detach()
         return out
 

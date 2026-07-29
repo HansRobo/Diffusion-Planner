@@ -340,7 +340,6 @@ HEAD_ARCH_FLAGS=(
   --turn_indicator_head_num_queries "${HDP_HEAD_NUM_QUERIES:-1}"
   --turn_indicator_head_num_layers "${HDP_HEAD_NUM_LAYERS:-1}"
   --turn_indicator_head_dropout "${HDP_HEAD_DROPOUT:-0.0}"
-  --turn_indicator_label_smoothing "${HDP_LABEL_SMOOTHING:-0.0}"
 )
 if grep -q "turn_indicator_head_num_queries" \
     "${SOURCE_REPO}/diffusion_planner/train_predictor.py"; then
@@ -348,7 +347,7 @@ if grep -q "turn_indicator_head_num_queries" \
   log "redesigned-head flags: ${HEAD_ARCH_FLAGS[*]}"
 else
   for spec in "HDP_HEAD_NUM_QUERIES=1" "HDP_HEAD_NUM_LAYERS=1" \
-              "HDP_HEAD_DROPOUT=0.0" "HDP_LABEL_SMOOTHING=0.0"; do
+              "HDP_HEAD_DROPOUT=0.0"; do
     name=${spec%%=*}
     if [[ -n "${!name:-}" && "${!name}" != "${spec#*=}" ]]; then
       echo "FATAL: ${name}=${!name} but ${SOURCE_REPO} predates the redesigned head." >&2

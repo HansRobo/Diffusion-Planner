@@ -7,7 +7,6 @@ surviving the input LayerNorm.
 
 import pytest
 import torch
-
 from diffusion_planner.model.module.decoder import TurnIndicatorHead
 
 HIDDEN = 32

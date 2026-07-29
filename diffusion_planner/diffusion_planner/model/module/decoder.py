@@ -16,6 +16,7 @@ from diffusion_planner.loss import (
     normalize_ego_state,
     normalize_ego_velocity,
     sample_diffusion_time,
+    turn_indicator_objective,
     velocity_to_waypoints,
     waypoints_to_velocity,
 )
@@ -87,9 +88,7 @@ class TurnIndicatorHead(nn.Module):
             nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout, batch_first=True)
             for _ in range(num_layers)
         )
-        self.attention_norms = nn.ModuleList(
-            nn.LayerNorm(hidden_dim) for _ in range(num_layers)
-        )
+        self.attention_norms = nn.ModuleList(nn.LayerNorm(hidden_dim) for _ in range(num_layers))
         self.ffn_norms = nn.ModuleList(nn.LayerNorm(hidden_dim) for _ in range(num_layers))
         self.ffns = nn.ModuleList(
             Mlp(
@@ -148,7 +147,7 @@ class TurnIndicatorHead(nn.Module):
         )
         queries = context[:, None] + self.query_embedding[None]
         for attention, attention_norm, ffn_norm, ffn in zip(
-            self.attention_layers, self.attention_norms, self.ffn_norms, self.ffns
+            self.attention_layers, self.attention_norms, self.ffn_norms, self.ffns, strict=True
         ):
             attended = attention(
                 attention_norm(queries),
@@ -160,9 +159,7 @@ class TurnIndicatorHead(nn.Module):
             queries = queries + attended
             queries = queries + ffn(ffn_norm(queries))
         readout = self.readout_norm(queries).flatten(1)
-        head_input = torch.cat(
-            [readout, route, trajectory_embedding, proprio_embedding], dim=-1
-        )
+        head_input = torch.cat([readout, route, trajectory_embedding, proprio_embedding], dim=-1)
         return self.classifier(head_input)
 
 
@@ -374,11 +371,11 @@ def compute_training_loss(
         "turn_indicator_expert_logit", turn_indicator_logit
     ).float()
     turn_indicator_gt = make_turn_indicator_gt(inputs["turn_indicators"])  # [B,]
-    generated_turn_indicator_loss = nn.functional.cross_entropy(
-        turn_indicator_logit, turn_indicator_gt, reduction="none"
+    generated_turn_indicator_loss, turn_indicator_diagnostics = turn_indicator_objective(
+        turn_indicator_logit, turn_indicator_gt, ego_future, args
     )
-    expert_turn_indicator_loss = nn.functional.cross_entropy(
-        turn_indicator_expert_logit, turn_indicator_gt, reduction="none"
+    expert_turn_indicator_loss, _ = turn_indicator_objective(
+        turn_indicator_expert_logit, turn_indicator_gt, ego_future, args
     )
     # The generated branch consumes x_start predicted at the sampled diffusion time;
     # near t=1 that trajectory is close to the conditional mean and teaches the head
@@ -411,6 +408,7 @@ def compute_training_loss(
         loss["turn_indicator_accuracy"] = generated_accuracy
         loss["turn_indicator_generated_accuracy"] = generated_accuracy
         loss["turn_indicator_expert_accuracy"] = expert_accuracy
+        loss.update(turn_indicator_diagnostics)
 
     non_finite_losses = [
         key
@@ -469,19 +467,21 @@ def compute_turn_indicator_head_training_loss(
 
     expert_logit = decoder_output["turn_indicator_expert_logit"].float()
     target = make_turn_indicator_gt(inputs["turn_indicators"])
-    label_smoothing = float(getattr(args, "turn_indicator_label_smoothing", 0.0))
-    expert_loss = nn.functional.cross_entropy(
-        expert_logit, target, label_smoothing=label_smoothing
+    expert_sample_loss, expert_diagnostics = turn_indicator_objective(
+        expert_logit, target, ego_future, args
     )
+    expert_loss = expert_sample_loss.mean()
+    turn_indicator_diagnostics = expert_diagnostics
     if training_mode == "expert":
         total = expert_loss
         generated_logit = None
         generated_loss = None
     else:
         generated_logit = decoder_output["turn_indicator_logit"].float()
-        generated_loss = nn.functional.cross_entropy(
-            generated_logit, target, label_smoothing=label_smoothing
+        generated_sample_loss, turn_indicator_diagnostics = turn_indicator_objective(
+            generated_logit, target, ego_future, args
         )
+        generated_loss = generated_sample_loss.mean()
         generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
         expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
         total = (generated_weight * generated_loss + expert_weight * expert_loss) / max(
@@ -502,6 +502,9 @@ def compute_turn_indicator_head_training_loss(
         "turn_indicator_expert_loss": expert_loss.detach(),
         "turn_indicator_accuracy": accuracy,
         "turn_indicator_expert_accuracy": expert_accuracy,
+        # Diagnostics follow the branch this stage deploys: the generated trajectory when
+        # one exists, otherwise the expert trajectory the head is being pretrained on.
+        **turn_indicator_diagnostics,
     }
     if generated_loss is not None:
         result["turn_indicator_generated_loss"] = generated_loss.detach()

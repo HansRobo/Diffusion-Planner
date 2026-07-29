@@ -29,6 +29,10 @@ EPDMS_DT = 0.1
 MULTISAMPLE_ADE_THRESHOLD_M = 4.0
 MULTISAMPLE_FDE_THRESHOLD_M = 8.0
 TURN_INDICATOR_CLASS_NAMES = ("disable", "enable_left", "enable_right")
+# Reliability-diagram resolution for the intent head. The deployment state machine gates
+# on absolute probabilities, so how well those probabilities mean what they say is a
+# first-class metric here, not a post-hoc curiosity.
+TURN_INDICATOR_CALIBRATION_BINS = 10
 
 
 def turn_indicator_metrics_from_confusion(confusion: list[int]) -> dict[str, float]:
@@ -78,6 +82,61 @@ def turn_indicator_metrics_from_confusion(confusion: list[int]) -> dict[str, flo
             (matrix[1][1] + matrix[2][2]) / active_true if active_true else 0.0
         ),
     }
+
+
+def turn_indicator_calibration_counts(
+    logit: torch.Tensor,  # [B, TURN_INDICATOR_OUTPUT_DIM]
+    target: torch.Tensor,  # [B] dense OFF/LEFT/RIGHT labels
+) -> list[float]:
+    """Reliability increments for one batch, laid out as a flat all-reducible list.
+
+    Layout: ``[samples, nll_sum, per-bin count..., per-bin confidence sum...,
+    per-bin correct count...]``, binned on the top-class probability the state machine
+    actually thresholds.
+    """
+    probabilities = torch.softmax(logit.detach().float(), dim=-1)
+    confidence, prediction = probabilities.max(dim=-1)
+    nll_sum = float(
+        -probabilities.clamp_min(torch.finfo(probabilities.dtype).tiny)
+        .log()
+        .gather(1, target.view(-1, 1))
+        .sum()
+    )
+    bins = TURN_INDICATOR_CALIBRATION_BINS
+    # A confidence of exactly 1.0 belongs to the last bin, not to a nonexistent bin+1.
+    index = (confidence * bins).long().clamp(max=bins - 1)
+    counts = torch.bincount(index, minlength=bins).double()
+    confidence_sums = torch.bincount(index, weights=confidence.double(), minlength=bins)
+    correct = (prediction == target).double()
+    correct_sums = torch.bincount(index, weights=correct, minlength=bins)
+    return [
+        float(target.numel()),
+        nll_sum,
+        *(
+            value
+            for tensor in (counts, confidence_sums, correct_sums)
+            for value in tensor.cpu().tolist()
+        ),
+    ]
+
+
+def turn_indicator_calibration_metrics(counts: list[float]) -> dict[str, float]:
+    """Mean NLL and expected calibration error from accumulated reliability counts."""
+    bins = TURN_INDICATOR_CALIBRATION_BINS
+    if len(counts) != 2 + 3 * bins:
+        raise ValueError(f"Expected {2 + 3 * bins} calibration entries, got {len(counts)}")
+    samples, nll_sum = counts[0], counts[1]
+    bin_counts = counts[2 : 2 + bins]
+    bin_confidence = counts[2 + bins : 2 + 2 * bins]
+    bin_correct = counts[2 + 2 * bins :]
+    if samples <= 0:
+        return {"turn_indicator_nll": 0.0, "turn_indicator_ece": 0.0}
+    ece = sum(
+        abs(bin_correct[index] - bin_confidence[index]) / samples
+        for index in range(bins)
+        if bin_counts[index] > 0
+    )
+    return {"turn_indicator_nll": nll_sum / samples, "turn_indicator_ece": ece}
 
 
 def _valid_xy(points: np.ndarray) -> np.ndarray:
@@ -403,6 +462,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
 
     total_result_dict = defaultdict(list)
     turn_indicator_confusion = [0] * (TURN_INDICATOR_OUTPUT_DIM**2)
+    turn_indicator_calibration = [0.0] * (2 + 3 * TURN_INDICATOR_CALIBRATION_BINS)
 
     total_batches = len(val_loader)
     pbar = tqdm(total=total_batches, desc="validate", disable=ddp.get_rank() != 0)
@@ -495,6 +555,13 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
                 old + int(new)
                 for old, new in zip(turn_indicator_confusion, batch_confusion, strict=False)
             ]
+            batch_calibration = turn_indicator_calibration_counts(
+                turn_indicator_logit, turn_indicator_gt
+            )
+            turn_indicator_calibration = [
+                old + new
+                for old, new in zip(turn_indicator_calibration, batch_calibration, strict=True)
+            ]
         if return_pred:
             predictions.append(prediction.cpu())
             if evaluate_turn_indicator:
@@ -578,6 +645,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             turn_indicators = torch.empty(0, dtype=torch.long)
             turn_indicator_logits = torch.empty(0, TURN_INDICATOR_OUTPUT_DIM)
     turn_metrics = turn_indicator_metrics_from_confusion(turn_indicator_confusion)
+    turn_metrics.update(turn_indicator_calibration_metrics(turn_indicator_calibration))
     return {
         "avg_loss_ego": avg_loss_ego,
         "avg_loss_neighbor": avg_loss_neighbor,
@@ -595,6 +663,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         "_loss_neighbor_sum": total_loss_neighbor,
         "_samples_neighbor": total_samples_neighbor,
         "_turn_confusion": turn_indicator_confusion,
+        "_turn_calibration": turn_indicator_calibration,
         "_turn_indicator_evaluated": evaluate_turn_indicator,
         **total_result_dict,
     }
@@ -618,6 +687,10 @@ def aggregate_valid_metrics(valid_dict, device):
     turn_confusion = [
         int(value) for value in ddp.all_reduce_sum_values(valid_dict["_turn_confusion"], device)
     ]
+    turn_calibration = ddp.all_reduce_sum_values(
+        valid_dict.get("_turn_calibration", [0.0] * (2 + 3 * TURN_INDICATOR_CALIBRATION_BINS)),
+        device,
+    )
     turn_indicator_evaluated = bool(valid_dict.get("_turn_indicator_evaluated", True))
     turn_matrix = [
         turn_confusion[row * TURN_INDICATOR_OUTPUT_DIM : (row + 1) * TURN_INDICATOR_OUTPUT_DIM]
@@ -683,6 +756,7 @@ def aggregate_valid_metrics(valid_dict, device):
         "avg_loss_ego": loss_ego_sum / max(samples_ego, 1),
         "avg_loss_neighbor": loss_nei_sum / max(samples_nei, 1),
         **turn_indicator_metrics_from_confusion(turn_confusion),
+        **turn_indicator_calibration_metrics(turn_calibration),
         "turn_indicator_class_accuracy": turn_class_accuracy,
         "turn_indicator_class_count": turn_class_count,
         "turn_indicator_evaluated": turn_indicator_evaluated,

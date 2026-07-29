@@ -112,10 +112,34 @@ class TrainConfig:
     turn_indicator_head_num_queries: int = 1
     turn_indicator_head_num_layers: int = 1
     turn_indicator_head_dropout: float = 0.0
-    # Soft target for the intent CE. Whether a human has ALREADY flipped the stalk at a
-    # given point on the approach is partly arbitrary, so a fraction of the label is
-    # irreducible noise that a hard target asks the head to fit exactly.
-    turn_indicator_label_smoothing: float = 0.0
+    # Cost-sensitive intent objective. Both terms below are available but default OFF,
+    # so the shipped objective is exactly the plain cross entropy every turn-indicator
+    # checkpoint on disk was trained under. At 0.0 the opposite-direction term is
+    # skipped and the target stays one-hot, which makes `turn_indicator_objective`
+    # bit-identical to `cross_entropy` -- that is what keeps the architecture A/B
+    # (jobs 1540/1541) comparable to the head it selected. Enabling either is an
+    # explicit experimental arm, to be priced on held-out cost before it becomes a
+    # default; the uniform-soft-label variant was already measured and refuted (only
+    # 0.300% of frames sit at a label transition, so the operating point belongs in the
+    # deployment state machine, not in the loss).
+    #
+    # Cross entropy prices a LEFT/RIGHT swap exactly like a late signal even though the
+    # first commands the opposite maneuver. This is the expected cost of opposite-
+    # direction probability mass on active ground truth.
+    turn_indicator_opposite_direction_weight: float = 0.0
+    # The Base80 audit measured a median 3.5 s (1.6-6.4 s p10-p90 left, 1.4-6.8 s right)
+    # from lever to motion, so an OFF frame whose expert future already turns is a late
+    # annotation, not a negative. Move at most this much target mass from OFF onto the
+    # geometrically implied direction, ramped by evidence strength. Mass never moves
+    # between LEFT and RIGHT, and active labels stay one-hot.
+    turn_indicator_implied_intent_smoothing: float = 0.0
+    # Evidence bars, in the same quantities the audit tool reports. The weak pair is the
+    # audit's own activation-confirmation bar; the strong pair is its next bucket.
+    turn_indicator_implied_intent_min_yaw_deg: float = 5.0
+    turn_indicator_implied_intent_full_yaw_deg: float = 20.0
+    turn_indicator_implied_intent_min_lateral_m: float = 0.5
+    turn_indicator_implied_intent_full_lateral_m: float = 2.0
+
     # The production SFT contract is deliberately staged: ``policy`` adapts the
     # trajectory planner without evaluating or updating the auxiliary head, then
     # ``turn_indicator`` freezes the planner and trains the detached head below.
