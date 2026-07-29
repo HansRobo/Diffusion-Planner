@@ -255,6 +255,11 @@ def evaluate_trajectory(
         "first_rb_cross_step": first_rb_cross,
         "stopped_steps": int((speeds < 0.1).sum()),
         "stopped_frac": float((speeds < 0.1).mean()) if len(speeds) > 0 else 0,
+        # Per-step series, not just the summary quantiles above: the closed-loop segment-row
+        # schema needs the raw distances to build the road_border block (event counts with
+        # falling-edge debounce, and clearance stats shared with the reproducer path).
+        # Empty array when the map ships no road-border polylines.
+        "rb_dists": rb_dists,
     }
 
 
