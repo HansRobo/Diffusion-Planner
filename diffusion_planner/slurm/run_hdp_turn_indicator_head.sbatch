@@ -49,25 +49,21 @@ if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
   exit 20
 fi
 
-# Runs from a checkout on the allocated node's local NVMe. The candidate list is ordered,
-# so node01's path is the default and node02's is the fallback; the checkouts there sit at
-# different commits, which is exactly why HDP_EXPECTED_COMMIT is required rather than
-# defaulted -- a floating job must not silently train whatever that node happens to hold.
-SOURCE_REPO=${HDP_SOURCE_REPO:-}
-if [[ -z "${SOURCE_REPO}" ]]; then
-  for candidate in \
-    /mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner \
-    /mnt/nvme/Diffusion-Planner-hyper-diffusion-planner; do
-    if [[ -r "${candidate}/diffusion_planner/train_predictor.py" ]]; then
-      SOURCE_REPO=${candidate}
-      break
-    fi
-  done
-fi
-if [[ -z "${SOURCE_REPO}" ]]; then
-  echo "FATAL: no checkout found on $(hostname -s); pass HDP_SOURCE_REPO" >&2
+# The repository is on shared storage, so one checkout serves whichever node the job lands
+# on. Slurm copies this script into its spool directory, so it cannot locate itself;
+# SLURM_SUBMIT_DIR is the checkout sbatch was invoked from. Submit from the repository
+# root, or pass HDP_SOURCE_REPO. HDP_EXPECTED_COMMIT stays required -- a checkout can sit
+# at any commit, and a floating job must not silently train whatever it happens to hold.
+SOURCE_REPO=${HDP_SOURCE_REPO:-${SLURM_SUBMIT_DIR:-${PWD}}}
+if [[ ! -r "${SOURCE_REPO}/diffusion_planner/train_predictor.py" ]]; then
+  echo "FATAL: ${SOURCE_REPO} is not a checkout of this repository; submit from the" >&2
+  echo "       repository root, or pass HDP_SOURCE_REPO=<checkout>" >&2
   exit 10
 fi
+
+# Compile cache and scratch files stay on the allocated node's local disk: an inductor cache
+# on shared storage is slower than recompiling, and two nodes must not share one.
+SCRATCH=${HDP_SCRATCH:-${SLURM_TMPDIR:-/tmp}/hdp-$(id -un)}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
 ROOT=${HDP_OUTPUT_ROOT:-${SOURCE_REPO}}
 
@@ -132,7 +128,8 @@ fi
 # The allocated node (224 CPUs, 2 TB) also carries other users' non-Slurm work, which
 # Slurm does not account for, so this job requests half the node rather than all of it:
 # 96 CPUs and 450 GB leaves headroom instead of overcommitting real memory.
-mkdir -p "${ROOT}" "${ROOT}/outputs" "${ROOT}/tmp" "${ROOT}/cache" "${ROOT}/wandb_cache" "${SAVE_DIR}"
+mkdir -p "${ROOT}" "${ROOT}/outputs" "${SAVE_DIR}" \
+  "${SCRATCH}/tmp" "${SCRATCH}/cache" "${SCRATCH}/wandb_cache"
 
 log() {
   printf '[%s] %s\n' "$(date '+%F %T %Z')" "$*"
@@ -224,16 +221,16 @@ if len(head_tensors) != 16:
 print(f"verified policy-init epoch {expected_epoch} EMA with an untrained 16-tensor intent head")
 PY
 
-export HOME=${HDP_JOB_HOME:-/mnt/storage_rdma/workspaces/wang/home}
+export HOME=${HDP_JOB_HOME:-${SOURCE_REPO%/*}/home}
 export NETRC=${HOME}/.netrc
 if [[ ! -r "${NETRC}" ]]; then
   echo "FATAL: W&B credentials are not readable at ${NETRC}" >&2
   exit 13
 fi
-export TMPDIR=${ROOT}/tmp
-export XDG_CACHE_HOME=${ROOT}/cache
+export TMPDIR=${SCRATCH}/tmp
+export XDG_CACHE_HOME=${SCRATCH}/cache
 export WANDB_DIR=${ROOT}
-export WANDB_CACHE_DIR=${ROOT}/wandb_cache
+export WANDB_CACHE_DIR=${SCRATCH}/wandb_cache
 export WANDB_ENTITY=advanced-technology-department
 export WANDB_PROJECT=Diffusion-Planner-Temporal
 export WANDB_LOG_DATASET_ARTIFACT=0
@@ -246,7 +243,7 @@ export OMP_NUM_THREADS=1
 export PYTHONPATH=${SOURCE_REPO}:${SOURCE_REPO}/diffusion_planner:${PYTHONPATH:-}
 # Per-run inductor cache: two arms compile concurrently on the same node and must not
 # share a cache directory.
-export TORCHINDUCTOR_CACHE_DIR=${ROOT}/cache/torchinductor-${EXPECTED_COMMIT:0:12}-${RUN_NAME}
+export TORCHINDUCTOR_CACHE_DIR=${SCRATCH}/cache/torchinductor-${EXPECTED_COMMIT:0:12}-${RUN_NAME}
 export TORCHINDUCTOR_COMPILE_THREADS=${HDP_COMPILE_THREADS:-$((SLURM_CPUS_PER_TASK / 8))}
 mkdir -p "${TORCHINDUCTOR_CACHE_DIR}"
 

@@ -23,21 +23,21 @@ if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
   exit 20
 fi
 
-# Local-NVMe checkout on whichever of our two nodes the job landed on, node01 first.
-# Every launcher here requires HDP_EXPECTED_COMMIT, so landing on a node whose checkout
-# sits at another commit aborts rather than training stale code.
-REPO=${HDP_REPO:-}
-for candidate in \
-  /mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner \
-  /mnt/nvme/Diffusion-Planner-hyper-diffusion-planner; do
-  if [[ -z "${REPO}" && -r "${candidate}/diffusion_planner/train_predictor.py" ]]; then
-    REPO=${candidate}
-  fi
-done
-if [[ -z "${REPO}" ]]; then
-  echo "FATAL: no checkout on $(hostname -s); pass HDP_REPO" >&2
+# The repository is on shared storage, so one checkout serves whichever node the job lands on.
+# Slurm copies this script into its spool directory, so it cannot locate itself; SLURM_SUBMIT_DIR
+# is the checkout sbatch was invoked from and resolves every repository path below. Submit from
+# the repository root, or pass HDP_REPO. HDP_EXPECTED_COMMIT stays required -- a checkout can
+# sit at any commit, and the wrong one has to abort rather than train stale code.
+REPO=${HDP_REPO:-${SLURM_SUBMIT_DIR:-${PWD}}}
+if [[ ! -r "${REPO}/diffusion_planner/train_predictor.py" ]]; then
+  echo "FATAL: ${REPO} is not a checkout of this repository; submit from the repository" >&2
+  echo "       root, or pass HDP_REPO=<checkout>" >&2
   exit 10
 fi
+
+# Compile cache and scratch files stay on the allocated node's local disk: an inductor cache on
+# shared storage is slower than recompiling, and two nodes must not share one.
+SCRATCH=${HDP_SCRATCH:-${SLURM_TMPDIR:-/tmp}/hdp-$(id -un)}
 SOURCE_REPO=${HDP_SOURCE_REPO:?submit with an immutable HDP_SOURCE_REPO worktree}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT}
 RUN_NAME=${HDP_RUN_NAME:-hdp_sft20_from_base80}
@@ -64,9 +64,9 @@ WANDB_RUN_ID=${HDP_WANDB_RUN_ID:-hdp-route-sft-${SLURM_JOB_ID}}
 
 mkdir -p \
   "${SAVE_DIR}" \
-  "${REPO}/tmp" \
-  "${REPO}/cache/torchinductor-sft-${EXPECTED_COMMIT:0:12}" \
-  "${REPO}/wandb_cache"
+  "${SCRATCH}/tmp" \
+  "${SCRATCH}/cache/torchinductor-sft-${EXPECTED_COMMIT:0:12}" \
+  "${SCRATCH}/wandb_cache"
 HEALTH_LOG=${SAVE_DIR}/health_monitor.log
 TRAIN_LOG=${SAVE_DIR}/train_stdout.log
 
@@ -150,7 +150,7 @@ if checkpoint.get("ema_state_dict") is None:
 print("verified Base epoch-80 latest.pth EMA policy")
 PY
 
-export HOME=${HDP_JOB_HOME:-${REPO}/home}
+export HOME=${HDP_JOB_HOME:-${REPO%/*}/home}
 export NETRC=${HOME}/.netrc
 mkdir -p "${HOME}"
 if [[ ! -r "${NETRC}" ]]; then
@@ -158,12 +158,12 @@ if [[ ! -r "${NETRC}" ]]; then
   echo "       $(id -un), or point HDP_JOB_HOME at a directory that has one." >&2
   exit 13
 fi
-export TMPDIR=${REPO}/tmp
-export XDG_CACHE_HOME=${REPO}/cache
-export TORCHINDUCTOR_CACHE_DIR=${REPO}/cache/torchinductor-sft-${EXPECTED_COMMIT:0:12}
+export TMPDIR=${SCRATCH}/tmp
+export XDG_CACHE_HOME=${SCRATCH}/cache
+export TORCHINDUCTOR_CACHE_DIR=${SCRATCH}/cache/torchinductor-sft-${EXPECTED_COMMIT:0:12}
 export TORCHINDUCTOR_COMPILE_THREADS=${HDP_COMPILE_THREADS:-$((SLURM_CPUS_PER_TASK / 8))}
 export WANDB_DIR=${SAVE_DIR}
-export WANDB_CACHE_DIR=${REPO}/wandb_cache
+export WANDB_CACHE_DIR=${SCRATCH}/wandb_cache
 export WANDB_ENTITY=advanced-technology-department
 export WANDB_PROJECT=Diffusion-Planner-Temporal
 export WANDB_LOG_DATASET_ARTIFACT=0

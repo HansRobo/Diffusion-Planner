@@ -27,7 +27,7 @@ prevent old checkpoints from loading. Start the new ego-only Base from scratch; 
 legacy encoder mode in this branch.
 
 ```bash
-cd /mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/diffusion_planner
+cd diffusion_planner   # from the repository root
 source ../.venv/bin/activate
 
 python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_predictor.py \

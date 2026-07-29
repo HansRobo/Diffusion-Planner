@@ -24,7 +24,15 @@ if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
   exit 20
 fi
 
-SOURCE_REPO=${HDP_SOURCE_REPO:?set HDP_SOURCE_REPO to the immutable source worktree}
+SOURCE_REPO=${HDP_SOURCE_REPO:-${SLURM_SUBMIT_DIR:-${PWD}}}
+if [[ ! -r "${SOURCE_REPO}/diffusion_planner/train_predictor.py" ]]; then
+  echo "FATAL: ${SOURCE_REPO} is not a checkout of this repository; submit from the" >&2
+  echo "       repository root, or pass HDP_SOURCE_REPO=<checkout>" >&2
+  exit 10
+fi
+# Compile cache and scratch files stay on the allocated node's local disk: an inductor cache
+# on shared storage is slower than recompiling, and two nodes must not share one.
+SCRATCH=${HDP_SCRATCH:-${SLURM_TMPDIR:-/tmp}/hdp-$(id -un)}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?set HDP_EXPECTED_COMMIT}
 BASE_RUN=${HDP_BASE_RUN:?set HDP_BASE_RUN to the Base80 data-contract run}
 BASE_EPOCH=${HDP_BASE_EPOCH:-72}
@@ -56,7 +64,8 @@ BASE_WEIGHTS=${POLICY_INIT_RUN}/latest.pth
 BASE_ARGS_JSON=${BASE_RUN}/args.json
 PORT=${HDP_MASTER_PORT:-22657}
 
-mkdir -p "${ROOT}" "${ROOT}/outputs" "${ROOT}/tmp" "${ROOT}/cache" "${ROOT}/wandb_cache"
+mkdir -p "${ROOT}" "${ROOT}/outputs" \
+  "${SCRATCH}/tmp" "${SCRATCH}/cache" "${SCRATCH}/wandb_cache"
 
 log() {
   printf '[%s] %s\n' "$(date '+%F %T %Z')" "$*"
@@ -166,7 +175,7 @@ if checkpoint.get("ema_state_dict") is None:
 print(f"verified policy-init epoch {expected_epoch} EMA and exact Base80 data contract")
 PY
 
-export HOME=${HDP_JOB_HOME:-${ROOT}/home}
+export HOME=${HDP_JOB_HOME:-${SOURCE_REPO%/*}/home}
 export NETRC=${HOME}/.netrc
 mkdir -p "${HOME}"
 if [[ ! -r "${NETRC}" ]]; then
@@ -174,10 +183,10 @@ if [[ ! -r "${NETRC}" ]]; then
   echo "       $(id -un), or point HDP_JOB_HOME at a directory that has one." >&2
   exit 13
 fi
-export TMPDIR=${ROOT}/tmp
-export XDG_CACHE_HOME=${ROOT}/cache
+export TMPDIR=${SCRATCH}/tmp
+export XDG_CACHE_HOME=${SCRATCH}/cache
 export WANDB_DIR=${ROOT}
-export WANDB_CACHE_DIR=${ROOT}/wandb_cache
+export WANDB_CACHE_DIR=${SCRATCH}/wandb_cache
 export WANDB_ENTITY=advanced-technology-department
 export WANDB_PROJECT=Diffusion-Planner-Temporal
 export WANDB_LOG_DATASET_ARTIFACT=0
@@ -281,7 +290,7 @@ run_stage() {
   local train_log=${save_dir}/train_stdout.log
 
   mkdir -p "${save_dir}"
-  export TORCHINDUCTOR_CACHE_DIR=${ROOT}/cache/torchinductor-${EXPECTED_COMMIT:0:12}-${phase}
+  export TORCHINDUCTOR_CACHE_DIR=${SCRATCH}/cache/torchinductor-${EXPECTED_COMMIT:0:12}-${phase}
   export TORCHINDUCTOR_COMPILE_THREADS=${HDP_COMPILE_THREADS:-$((SLURM_CPUS_PER_TASK / 8))}
   mkdir -p "${TORCHINDUCTOR_CACHE_DIR}"
 

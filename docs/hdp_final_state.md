@@ -34,11 +34,21 @@ Entry points: `train_predictor.py`, `train_hdp_rl_predictor.py`, `valid_predicto
 
 No launcher is tied to a node. The `gpu` partition spans twelve nodes, most of them other
 teams', and none carries a Slurm feature to select on, so each launcher requests
-`--nodelist=node01,node02` as a candidate pool with node01 leading. The repository path,
-venv and output root resolve at runtime from the allocated node's local NVMe; Slurm's own
-stdout/stderr go to shared storage because they must exist before the job starts. Every
-launcher requires `HDP_EXPECTED_COMMIT`, which is what makes floating safe: the checkouts
-on the two nodes sit at different commits, and landing on the wrong one aborts.
+`--nodelist=node01,node02` as a candidate pool with node01 leading.
+
+Nothing in a launcher names a checkout. Slurm copies the batch script into its spool
+directory, so the script cannot locate itself; the repository, venv and output root all
+resolve from `SLURM_SUBMIT_DIR`, which means **submit from the repository root** (or pass
+`HDP_REPO` / `HDP_SOURCE_REPO` / `HDP_RL_REPO`). This works on either node only because the
+repository is on shared storage — one checkout, one commit, both nodes. Slurm's own
+stdout/stderr paths stay absolute because they must exist before the job starts. Every
+launcher still requires `HDP_EXPECTED_COMMIT`: a checkout can sit at any commit, and landing
+on the wrong one has to abort rather than train stale code.
+
+Compile caches and temporary files go the other way, to `HDP_SCRATCH`
+(default `${SLURM_TMPDIR:-/tmp}/hdp-$(id -un)`) on the allocated node's local disk. A
+torchinductor cache on shared storage is slower than recompiling, and two nodes must not
+write into the same one. Nothing there is an artifact; deleting it costs one recompile.
 
 Run names carry only what still varies: the stage, its epoch count, and what it initialized
 from. Settled choices are identical in every launcher — ego-only, adaLN route conditioning,

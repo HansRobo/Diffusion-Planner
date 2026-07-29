@@ -22,7 +22,15 @@ if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
   exit 20
 fi
 
-SOURCE_REPO=${HDP_SOURCE_REPO:?set HDP_SOURCE_REPO}
+SOURCE_REPO=${HDP_SOURCE_REPO:-${SLURM_SUBMIT_DIR:-${PWD}}}
+if [[ ! -r "${SOURCE_REPO}/diffusion_planner/train_predictor.py" ]]; then
+  echo "FATAL: ${SOURCE_REPO} is not a checkout of this repository; submit from the" >&2
+  echo "       repository root, or pass HDP_SOURCE_REPO=<checkout>" >&2
+  exit 10
+fi
+# Compile cache and scratch files stay on the allocated node's local disk: an inductor cache
+# on shared storage is slower than recompiling, and two nodes must not share one.
+SCRATCH=${HDP_SCRATCH:-${SLURM_TMPDIR:-/tmp}/hdp-$(id -un)}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?set HDP_EXPECTED_COMMIT}
 BASE_RUN=${HDP_BASE_RUN:?set HDP_BASE_RUN}
 VALID_PROBE=${HDP_VALID_PROBE:?set HDP_VALID_PROBE}
@@ -37,7 +45,8 @@ NORMALIZATION=${SOURCE_REPO}/diffusion_planner/normalization.json
 BASE_WEIGHTS=${BASE_RUN}/latest.pth
 read -r -a LR_VALUES <<<"${HDP_LR_VALUES:-1e-5 3e-5 5e-5}"
 
-mkdir -p "${ROOT}/outputs" "${ROOT}/tmp" "${ROOT}/cache" "${ROOT}/wandb_cache"
+mkdir -p "${ROOT}/outputs" \
+  "${SCRATCH}/tmp" "${SCRATCH}/cache" "${SCRATCH}/wandb_cache"
 
 if [[ "$(git -C "${SOURCE_REPO}" rev-parse HEAD)" != "${EXPECTED_COMMIT}" ]]; then
   echo "source commit mismatch" >&2
@@ -63,7 +72,7 @@ if checkpoint.get("epoch") != 72 or checkpoint.get("ema_state_dict") is None:
     )
 PY
 
-export HOME=${HDP_JOB_HOME:-${ROOT}/home}
+export HOME=${HDP_JOB_HOME:-${SOURCE_REPO%/*}/home}
 export NETRC=${HOME}/.netrc
 mkdir -p "${HOME}"
 if [[ ! -r "${NETRC}" ]]; then
@@ -71,10 +80,10 @@ if [[ ! -r "${NETRC}" ]]; then
   echo "       $(id -un), or point HDP_JOB_HOME at a directory that has one." >&2
   exit 13
 fi
-export TMPDIR=${ROOT}/tmp
-export XDG_CACHE_HOME=${ROOT}/cache
+export TMPDIR=${SCRATCH}/tmp
+export XDG_CACHE_HOME=${SCRATCH}/cache
 export WANDB_DIR=${ROOT}
-export WANDB_CACHE_DIR=${ROOT}/wandb_cache
+export WANDB_CACHE_DIR=${SCRATCH}/wandb_cache
 export WANDB_ENTITY=advanced-technology-department
 export WANDB_PROJECT=Diffusion-Planner-Temporal
 export WANDB_LOG_DATASET_ARTIFACT=0
@@ -84,7 +93,7 @@ export NCCL_P2P_LEVEL=NVL
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export OMP_NUM_THREADS=1
 export PYTHONPATH=${SOURCE_REPO}:${SOURCE_REPO}/diffusion_planner:${PYTHONPATH:-}
-export TORCHINDUCTOR_CACHE_DIR=${ROOT}/cache/torchinductor-${EXPECTED_COMMIT:0:12}-policy
+export TORCHINDUCTOR_CACHE_DIR=${SCRATCH}/cache/torchinductor-${EXPECTED_COMMIT:0:12}-policy
 export TORCHINDUCTOR_COMPILE_THREADS=${HDP_COMPILE_THREADS:-28}
 
 COMMON_ARGS=(

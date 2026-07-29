@@ -29,21 +29,21 @@ if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
   exit 20
 fi
 
-# Local-NVMe checkout on whichever of our two nodes the job landed on, node01 first.
-# Every launcher here requires HDP_EXPECTED_COMMIT, so landing on a node whose checkout
-# sits at another commit aborts rather than training stale code.
-REPO=${HDP_REPO:-}
-for candidate in \
-  /mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner \
-  /mnt/nvme/Diffusion-Planner-hyper-diffusion-planner; do
-  if [[ -z "${REPO}" && -r "${candidate}/diffusion_planner/train_predictor.py" ]]; then
-    REPO=${candidate}
-  fi
-done
-if [[ -z "${REPO}" ]]; then
-  echo "FATAL: no checkout on $(hostname -s); pass HDP_REPO" >&2
+# The repository is on shared storage, so one checkout serves whichever node the job lands on.
+# Slurm copies this script into its spool directory, so it cannot locate itself; SLURM_SUBMIT_DIR
+# is the checkout sbatch was invoked from and resolves every repository path below. Submit from
+# the repository root, or pass HDP_REPO. HDP_EXPECTED_COMMIT stays required -- a checkout can
+# sit at any commit, and the wrong one has to abort rather than train stale code.
+REPO=${HDP_REPO:-${SLURM_SUBMIT_DIR:-${PWD}}}
+if [[ ! -r "${REPO}/diffusion_planner/train_predictor.py" ]]; then
+  echo "FATAL: ${REPO} is not a checkout of this repository; submit from the repository" >&2
+  echo "       root, or pass HDP_REPO=<checkout>" >&2
   exit 10
 fi
+
+# Compile cache and scratch files stay on the allocated node's local disk: an inductor cache on
+# shared storage is slower than recompiling, and two nodes must not share one.
+SCRATCH=${HDP_SCRATCH:-${SLURM_TMPDIR:-/tmp}/hdp-$(id -un)}
 RUN_NAME=${HDP_RUN_NAME:-hdp_base80_vehparams}
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with --export=ALL,HDP_EXPECTED_COMMIT=<commit>}
@@ -68,9 +68,9 @@ FRESH_WANDB_RUN_ID=${HDP_WANDB_RUN_ID:-hdp-base80-no-road-border-${SLURM_JOB_ID}
 # to make a deliberate scancel stick.
 REQUEUE_ON_SIGTERM=${HDP_REQUEUE_ON_SIGTERM:-1}
 
-TORCHINDUCTOR_RUN_CACHE=${SAVE_DIR}/torchinductor_cache
-mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${TORCHINDUCTOR_RUN_CACHE}" \
-  "${REPO}/wandb_cache" "${REPO}/wandb_config" "${REPO}/home"
+TORCHINDUCTOR_RUN_CACHE=${SCRATCH}/cache/torchinductor-${RUN_NAME}
+mkdir -p "${SAVE_DIR}" "${SCRATCH}/tmp" "${TORCHINDUCTOR_RUN_CACHE}" \
+  "${SCRATCH}/wandb_cache" "${SCRATCH}/wandb_config"
 HEALTH_LOG=${SAVE_DIR}/health_monitor.log
 TRAIN_LOG=${SAVE_DIR}/train_stdout.log
 
@@ -145,7 +145,7 @@ log_health "train_list=${TRAIN_LIST} valid_list=${VALID_LIST}"
 log_health "right_turn_lists=${EXTRA_X2},${EXTRA_XX1},${EXTRA_PSIM} repeat=10"
 log_health "train_bytes=$(stat -c %s "${TRAIN_LIST}") valid_bytes=$(stat -c %s "${VALID_LIST}")"
 
-export HOME=${HDP_JOB_HOME:-${REPO}/home}
+export HOME=${HDP_JOB_HOME:-${REPO%/*}/home}
 export NETRC=${HOME}/.netrc
 mkdir -p "${HOME}"
 # Fail loudly on unreadable credentials instead of depending on a world-readable
@@ -158,14 +158,14 @@ if [[ ! -r "${NETRC}" ]]; then
 fi
 export CUDA_HOME=/usr/local/cuda
 export PATH=${CUDA_HOME}/bin:/usr/local/cuda-12.8/bin:${PATH}
-export XDG_CONFIG_HOME=${REPO}/config
-export TMPDIR=${REPO}/tmp
-export XDG_CACHE_HOME=${REPO}/cache
+export XDG_CONFIG_HOME=${SCRATCH}/config
+export TMPDIR=${SCRATCH}/tmp
+export XDG_CACHE_HOME=${SCRATCH}/cache
 export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_RUN_CACHE}
 export TORCHINDUCTOR_COMPILE_THREADS=${HDP_COMPILE_THREADS:-$((SLURM_CPUS_PER_TASK / 8))}
 export WANDB_DIR=${SAVE_DIR}
-export WANDB_CACHE_DIR=${REPO}/wandb_cache
-export WANDB_CONFIG_DIR=${REPO}/wandb_config
+export WANDB_CACHE_DIR=${SCRATCH}/wandb_cache
+export WANDB_CONFIG_DIR=${SCRATCH}/wandb_config
 export WANDB_ENTITY=advanced-technology-department
 export WANDB_PROJECT=Diffusion-Planner-Temporal
 export WANDB_LOG_DATASET_ARTIFACT=0

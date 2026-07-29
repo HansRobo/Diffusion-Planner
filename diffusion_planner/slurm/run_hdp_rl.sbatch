@@ -19,21 +19,21 @@ if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
   exit 20
 fi
 
-# Local-NVMe checkout on whichever of our two nodes the job landed on, node01 first.
-# Every launcher here requires HDP_EXPECTED_COMMIT, so landing on a node whose checkout
-# sits at another commit aborts rather than training stale code.
-REPO=${HDP_RL_REPO:-}
-for candidate in \
-  /mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner \
-  /mnt/nvme/Diffusion-Planner-hyper-diffusion-planner; do
-  if [[ -z "${REPO}" && -r "${candidate}/diffusion_planner/train_predictor.py" ]]; then
-    REPO=${candidate}
-  fi
-done
-if [[ -z "${REPO}" ]]; then
-  echo "FATAL: no checkout on $(hostname -s); pass HDP_RL_REPO" >&2
+# The repository is on shared storage, so one checkout serves whichever node the job lands on.
+# Slurm copies this script into its spool directory, so it cannot locate itself; SLURM_SUBMIT_DIR
+# is the checkout sbatch was invoked from and resolves every repository path below. Submit from
+# the repository root, or pass HDP_RL_REPO. HDP_EXPECTED_COMMIT stays required -- a checkout can
+# sit at any commit, and the wrong one has to abort rather than train stale code.
+REPO=${HDP_RL_REPO:-${SLURM_SUBMIT_DIR:-${PWD}}}
+if [[ ! -r "${REPO}/diffusion_planner/train_predictor.py" ]]; then
+  echo "FATAL: ${REPO} is not a checkout of this repository; submit from the repository" >&2
+  echo "       root, or pass HDP_RL_REPO=<checkout>" >&2
   exit 10
 fi
+
+# Compile cache and scratch files stay on the allocated node's local disk: an inductor cache on
+# shared storage is slower than recompiling, and two nodes must not share one.
+SCRATCH=${HDP_SCRATCH:-${SLURM_TMPDIR:-/tmp}/hdp-$(id -un)}
 NNODES=${SLURM_NNODES:-1}
 NPROC_PER_NODE=${HDP_RL_NPROC_PER_NODE:-${HDP_RL_NPROC:-8}}
 WORLD_SIZE=$((NNODES * NPROC_PER_NODE))
@@ -308,15 +308,11 @@ for stationary_mode in "${STATIONARY_PROGRESS_MODE}" "${EVAL_STATIONARY_PROGRESS
       ;;
   esac
 done
-if ((NNODES > 1)) && [[ "${SAVE_ROOT}" == /mnt/nvme/* ]]; then
-  echo "multi-node RL requires a shared HDP_RL_SAVE_ROOT, not local NVMe: ${SAVE_ROOT}" >&2
-  exit 2
-fi
 SAVE_DIR=${SAVE_ROOT}/${RUN_NAME}
 MASTER_ADDR=$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | head -n 1)
 PORT=$((24000 + SLURM_JOB_ID % 10000))
 
-mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache/torchinductor"
+mkdir -p "${SAVE_DIR}" "${SCRATCH}/tmp" "${SCRATCH}/cache/torchinductor"
 if [[ -f "${SAVE_DIR}/RL_RUN_OK" && -z "${RESUME_CKPT}" ]]; then
   echo "RL run is already complete: ${SAVE_DIR}"
   exit 0
@@ -480,7 +476,7 @@ if [[ "${VERIFY_MODE}" == resume ]]; then
   trap 'rm -f "${VERIFY_SOURCE_CKPT}"' EXIT
 fi
 
-export HOME=${HDP_JOB_HOME:-${REPO}/home}
+export HOME=${HDP_JOB_HOME:-${REPO%/*}/home}
 export NETRC=${HOME}/.netrc
 mkdir -p "${HOME}"
 if [[ ! -r "${NETRC}" ]]; then
@@ -488,9 +484,9 @@ if [[ ! -r "${NETRC}" ]]; then
   echo "       $(id -un), or point HDP_JOB_HOME at a directory that has one." >&2
   exit 13
 fi
-export TMPDIR=${REPO}/tmp
-export XDG_CACHE_HOME=${REPO}/cache
-export TORCHINDUCTOR_CACHE_DIR=${REPO}/cache/torchinductor
+export TMPDIR=${SCRATCH}/tmp
+export XDG_CACHE_HOME=${SCRATCH}/cache
+export TORCHINDUCTOR_CACHE_DIR=${SCRATCH}/cache/torchinductor
 export TORCHINDUCTOR_COMPILE_THREADS=${COMPILE_THREADS}
 export PYTHONPATH=${REPO}:${REPO}/diffusion_planner
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -499,7 +495,7 @@ export OMP_NUM_THREADS=1
 export PYTHONWARNINGS=error
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-export REPO NNODES NPROC_PER_NODE MASTER_ADDR PORT SAVE_DIR
+export REPO SCRATCH NNODES NPROC_PER_NODE MASTER_ADDR PORT SAVE_DIR
 export EXPECTED_TREE INPUT_FINGERPRINT PYTHON_ENV_FINGERPRINT
 export TRAIN_LIST VALID_LIST SOURCE_CKPT EXTRA_LISTS
 
@@ -548,7 +544,15 @@ srun --kill-on-bad-exit=1 --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-
       echo "$(hostname -s): RL input fingerprint mismatch" >&2
       exit 2
     }
-    mkdir -p "${SAVE_DIR}" "${REPO}/tmp" "${REPO}/cache/torchinductor"
+    # The batch host created SAVE_DIR before this preflight ran, so every other allocated host
+    # must already see it. A node-local save root would instead give each node its own private
+    # copy, which is why this tests visibility rather than matching the path against a list of
+    # known local mountpoints.
+    [[ -d "${SAVE_DIR}" ]] || {
+      echo "$(hostname -s): ${SAVE_DIR} is not visible; multi-node RL needs a shared HDP_RL_SAVE_ROOT" >&2
+      exit 2
+    }
+    mkdir -p "${SCRATCH}/tmp" "${SCRATCH}/cache/torchinductor"
   '
 
 TRAIN_ARGS=(
