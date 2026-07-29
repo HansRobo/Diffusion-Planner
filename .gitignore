@@ -1,25 +1,36 @@
 *.pyc
-extension_ws/
+*.egg-info
 *.code-workspace
+extension_ws/
+*/.agents/
+*dpo_experiment
+sample*
 
 .claude/
 .cursor
-*dpo_experiment
-sample*
-.vscode
+.vscode/
 .datasets/
-
-*/.agents/
-
-rlvr/configs/autoresearch/
 CLAUDE.md
 program.md
-ros_scripts/convert_all_v4.sh
-.claude/
-CLAUDE.md
 memory/
 wandb/
 
-.vscode/
-*.egg-info
+rlvr/configs/autoresearch/
+ros_scripts/convert_all_v4.sh
 control_panel/_dev_presets.py
+
+# large local run artifacts -- outputs/ alone is 12 TB, never committable
+outputs/
+artifacts/
+.tokensave/
+
+# MCP tooling deps, not part of this project
+node_modules/
+package.json
+package-lock.json
+
+# rollback copies taken during the fp32 migration
+*.pre_fp32.bak
+
+# stray eval-log scratch dir from the fp32 A/B
+fwprec/
