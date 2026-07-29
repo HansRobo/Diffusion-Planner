@@ -13,6 +13,7 @@ sampling/
 ├── sampling.py                   # Balanced sampling from cluster result JSON
 ├── visualize_cluster.py          # Visualize clustering results as trajectory plots
 ├── visualize_cluster_report.py   # HTML diagnostic report with BEV videos per cluster
+├── replay_repeats.py             # Offline replay of a run's sampler → repeat-draw counts
 ├── utils/
 │   ├── elbow.py                  # WCSS computation, elbow detection, KMeans fitting
 │   └── pipeline.py               # Feature extraction, ClusteringStrategy interface, and pipeline
@@ -27,6 +28,7 @@ sampling/
 | `sampling.py` | Reads the cluster result JSON and samples an equal number of files from each cluster (equal to the smallest cluster size). Outputs a JSON list suitable for `train_run.py`. |
 | `visualize_cluster.py` | Reads the result JSON from `cluster.py` and produces a grid of subplots, one per cluster, showing overlaid ego future trajectories. |
 | `visualize_cluster_report.py` | Generates an HTML diagnostic report with cluster stats, sampling weights, and BEV video examples per cluster via clip-review-tool. Supports `--standalone` mode for self-contained shareable HTML with embedded GIFs. |
+| `replay_repeats.py` | Replays a finished or in-flight run's `ClusterWeightedDistributedSampler` offline (CPU only, opens no NPZ files) and reports per-epoch repeat draws and forced-augmentation row counts that training never logged. |
 | `utils/elbow.py` | Utilities for computing WCSS (within-cluster sum of squares), finding the elbow point, and fitting KMeans. |
 | `utils/pipeline.py` | Feature extraction from NPZ files (`extract_features`, `extract_features_enriched`), the `ClusteringStrategy` abstract interface, the `ElbowKMeansStrategy` concrete implementation, and the `cluster_trajectories` / `cluster_trajectories_enriched` pipeline functions. |
 
@@ -270,6 +272,65 @@ order decide the applied cluster while `matched_count` still reported a full mat
 Note that canonicalization anchors on the first `train`/`valid` path component, so
 two NPZs under different dataset roots that share a `location/split/date/time/frame`
 layout collide and trip the same check.
+
+### Recovering Repeat-Draw Counts After the Fact (`replay_repeats.py`)
+
+Training does not log how many rows `--force_aug_on_repeat` actually forced.
+The sampler is fully deterministic, so the number is exactly reconstructible
+offline — no GPU, no rerun, and **no NPZ reads** (`_compute_weights` only parses
+the cluster JSON and canonicalizes path strings), which makes this safe to run on
+a training server without competing for NVMe I/O. 80 epochs over a 150,000-sample
+list at world size 8 takes ~17 s and ~640 MB RSS.
+
+```bash
+cd diffusion_planner
+uv run --no-sync python sampling/replay_repeats.py \
+  --run_dir /mnt/nvme/training_result/20260722-101500_my_exp \
+  --world_size 8 \
+  --json /mnt/nvme/training_result/20260722-101500_my_exp/repeat_replay.json
+```
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--run_dir` | | — | Run directory holding `args.json`. Supplies `cluster_json`, `train_set_list`, `train_subsample_step`, `seed`, `cluster_weight_alpha`, `batch_size`, `train_epochs`, and the forced-aug flags. |
+| `--world_size` | ✓ | — | DDP world size of the original run. **Not recorded anywhere in the run dir** — `TrainConfig` has no such field, and `train_run.py` passes `--nproc-per-node=gpu_count()` straight to `torchrun`. Recover it with `grep -o 'global_rank=[0-9]*' <run_dir>/train_log.txt \| sort -u \| wc -l`. |
+| `--epochs` / `--start_epoch` | | `train_epochs` / `0` | Epoch range to replay. Set `--start_epoch` for a resumed run (train.py iterates `range(init_epoch, train_epochs)`). |
+| `--batch_size` | | from `args.json` | Global batch size, used to model the training DataLoader's `drop_last=True`. |
+| `--cluster_json`, `--train_set_list`, `--train_subsample_step`, `--seed`, `--cluster_weight_alpha`, `--repeat_aug_pool`, `--force_aug_on_repeat` | | from `args.json` | Override any resolved value, or replay a hypothetical config with no `--run_dir` at all. |
+| `--json` | | — | Also write machine-readable results here. |
+| `--allow_data_list_mismatch` | | off | Downgrade the `cluster_sampling.json` data-list-size cross-check to a warning. |
+
+Every number is **global** across all DDP ranks: the sampler assigns repeat
+ordinals on the global draw list *before* sharding, so a sample drawn on rank 0
+and rank 3 in the same step is one first occurrence and one repeat. The replay
+iterates the real sampler once per rank, reassembles the global draw list from the
+shards, and recomputes the flags on it independently — a mismatch raises instead of
+printing plausible numbers.
+
+```
+ epoch   total_draws     distinct      repeats  repeat_frac   forced_rows  per_pool_member
+------------------------------------------------------------------------------------------
+     0       150,000       66,028       83,972       0.5598        83,893         20,973.2
+     1       150,000       65,915       84,085       0.5606        84,002         21,000.5
+   ...
+    79       150,000       65,920       84,080       0.5605        83,995         20,998.8
+------------------------------------------------------------------------------------------
+ TOTAL    12,000,000      150,000    6,713,192       0.5594     6,706,575      1,676,643.8
+```
+
+`forced_rows` is smaller than `repeats` on purpose. The training DataLoader uses
+`drop_last=True` with `batch_size // world_size` rows per rank, so each rank's
+partial tail batch is never delivered and `ForcedAugmentationSelector` never
+consumes its flags. `repeats` is the draw-level count (an upper bound);
+`forced_rows` is what actually got augmented. Without a resolvable `batch_size`
+the tool reports draw-level counts only and says so.
+
+`per_pool_member` is `forced_rows / len(pool)`: the selector picks one pool member
+uniformly per forced row, so each member's expected share is an equal split.
+
+The reconstruction is cross-checked against `cluster_sampling.json` when the run
+wrote one. A `data_list_size` mismatch is a hard error — it means `--train_set_list`
+or `--train_subsample_step` is wrong, and every count would be wrong with it.
 
 ### Step 4: Trajectory Visualization (`visualize_cluster.py`)
 
