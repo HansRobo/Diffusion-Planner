@@ -136,8 +136,7 @@ rollout-candidate augmentation verbatim: for the first N epochs, one constant ro
 per candidate (`a, b ~ N(0, std)`, headings untouched), applied before reward and regression so
 both consume the same candidates. Release values are 5 and 0.5 m. Off by default
 (`epochs=0`): our first waypoint is at 0.1 s and is executed directly, so 0.5 m is ~95% of it,
-versus ~20% of the release's 0.5 s waypoint — see
-`docs/hdp_rl_augmentation_multimodality_evidence_20260729.md`. Guided denoising toward a frozen
+versus ~20% of the release's 0.5 s waypoint. Guided denoising toward a frozen
 reference (full PlannerRFT) remains deferred pending the upstream full-scale verdict.
 
 The DAC guard is deliberate: a higher proxy reward must not be accepted if it worsens the binary

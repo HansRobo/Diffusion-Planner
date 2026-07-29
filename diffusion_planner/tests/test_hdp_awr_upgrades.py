@@ -452,7 +452,7 @@ def test_candidate_aug_lands_entirely_on_the_first_step():
     """The measured consequence: a rigid offset is one impulse under velocity actions.
 
     This is why the flag is off by default -- the whole 0.5 m arrives in the executed
-    0.1 s step. See docs/hdp_rl_augmentation_multimodality_evidence_20260729.md.
+    0.1 s step.
     """
     from diffusion_planner.loss import waypoints_to_velocity
 

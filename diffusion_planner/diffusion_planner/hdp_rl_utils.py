@@ -1790,8 +1790,7 @@ def augment_rollout_candidates(
     Know the scale before enabling. This pipeline emits 80 waypoints at 10 Hz and the
     vehicle executes waypoint 1; the release emits 8 at 2 Hz and re-simulates them
     through a controller. The same 0.5 m offset is therefore ~95% of the executed first
-    step here against ~20% of the release's first waypoint. See
-    docs/hdp_rl_augmentation_multimodality_evidence_20260729.md.
+    step here against ~20% of the release's first waypoint.
     """
     zero = ego_world.new_zeros(())
     idle_metrics = {"reward_candidate_aug_offset_abs_mean_m": zero}

@@ -96,8 +96,7 @@ a `PDMSimulator`, so 0.5 m is ~20% of its first waypoint; we emit 80 at 10 Hz an
 first is executed directly (measured 525 mm), so 0.5 m is ~95% of it, and under
 velocity actions a rigid translation lands entirely in that one step. The paper never
 mentions augmentation and `ap:implementation` names its RL devices exhaustively
-without it. Full evidence and the measured multimodality baseline:
-`docs/hdp_rl_augmentation_multimodality_evidence_20260729.md`.
+without it.
 
 
 ## Recommended first RL experiment after the Base80 -> SFT chain

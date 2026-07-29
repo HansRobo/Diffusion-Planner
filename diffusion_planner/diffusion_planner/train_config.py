@@ -278,8 +278,7 @@ class TrainConfig:
     # constant route-frame offset per candidate, applied before reward and regression
     # for the first N epochs. The release uses 5 epochs and std 0.5; 0 disables. Off by
     # default because this pipeline's first waypoint is at 0.1 s and is executed
-    # directly, so 0.5 m is ~95% of it — see
-    # docs/hdp_rl_augmentation_multimodality_evidence_20260729.md.
+    # directly, so 0.5 m is ~95% of it, against ~20% of the release's 0.5 s waypoint.
     rl_candidate_aug_epochs: int = 0
     rl_candidate_aug_std: float = 0.5
     # Tier IV data has no populated static-object tensor, so OCC falls back to

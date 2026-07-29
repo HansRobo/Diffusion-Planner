@@ -375,8 +375,9 @@ _COMMON: tuple[PaperExactSetting, ...] = (
         "sources returns 0 hits, and ap:implementation names the paper's RL devices "
         "exhaustively (group normalization, discard identical-reward samples, EMA) "
         "without it. The released code does apply augment_trajectory_batch for "
-        "epoch < 5; that is a code/paper divergence, measured in "
-        "docs/hdp_rl_augmentation_multimodality_evidence_20260729.md",
+        "epoch < 5; that is a code/paper divergence, and a 0.5 m rigid offset is "
+        "~95% of this pipeline's executed first step against ~20% of the "
+        "release's first waypoint",
     ),
 )
 

@@ -98,8 +98,8 @@ BC_ACTIVE_GROUPS_ONLY=${HDP_RL_BC_ACTIVE_GROUPS_ONLY:-True}
 REWARD_AGGREGATION=${HDP_RL_REWARD_AGGREGATION:-weighted_sum}
 REWARD_HORIZON_STEPS=${HDP_RL_REWARD_HORIZON_STEPS:-0}
 EVAL_DETERMINISTIC=${HDP_RL_EVAL_DETERMINISTIC:-True}
-# The release's candidate augmentation, off by default. See
-# docs/hdp_rl_augmentation_multimodality_evidence_20260729.md before enabling it.
+# The release's candidate augmentation, off by default: a 0.5 m rigid offset is ~95% of
+# this pipeline's executed first step, so know the scale before enabling it.
 # Formal 100-epoch relay: HDP_RL_TRAIN_EPOCHS=100 HDP_RL_ROLLOUT_INTERVAL=10
 # HDP_RL_UPDATES_PER_ROLLOUT=1. Interval 0 keeps the online loop.
 ROLLOUT_INTERVAL=${HDP_RL_ROLLOUT_INTERVAL:-0}

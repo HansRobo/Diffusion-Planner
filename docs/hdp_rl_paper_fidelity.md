@@ -277,9 +277,7 @@ The same line also has a different physical consequence here. The release emits 
 waypoints at 2 Hz and re-simulates them through a `PDMSimulator`, so 0.5 m is ~20% of
 its first waypoint; we emit 80 at 10 Hz and the first waypoint is executed directly
 (measured 525 mm), so 0.5 m is ~95% of it — and under velocity actions a rigid
-translation lands entirely in that one executed step. Measurements and the
-multimodality baseline this was checked against:
-`docs/hdp_rl_augmentation_multimodality_evidence_20260729.md`.
+translation lands entirely in that one executed step.
 
 ## What this mode does not change
 
