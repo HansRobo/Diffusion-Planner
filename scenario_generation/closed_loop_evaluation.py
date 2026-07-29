@@ -186,6 +186,7 @@ class ClosedLoopEvaluation(ABC):
         merging before every other rank has finished writing its ``segments_{rank}.jsonl``
         shard, silently producing a summary built from a partial/incomplete set of ranks.
         """
+        t0 = time.perf_counter()
         partial = self.run()
         if self.ddp_world_size <= 1:
             return partial
@@ -201,7 +202,7 @@ class ClosedLoopEvaluation(ABC):
         if self.ddp_rank != 0:
             return {}
         if partial.get("ddp_shard"):
-            return self.merge_ddp_shards(self.ddp_world_size)
+            return self.merge_ddp_shards(self.ddp_world_size, elapsed_sec=time.perf_counter() - t0)
         return partial
 
     def shard_jobs(self, jobs: list[ClosedLoopJob]) -> list[ClosedLoopJob]:
@@ -279,11 +280,11 @@ class ClosedLoopEvaluation(ABC):
         video_mp4s = sorted(self.out_dir.glob("*.mp4"))
         return JobRunResult(rows=rows, video_mp4s=video_mp4s)
 
-    def merge_ddp_shards(self, world_size: int) -> dict:
+    def merge_ddp_shards(self, world_size: int, *, elapsed_sec: float = 0.0) -> dict:
         """Rank-0: merge shard files, persist artifacts, and return the final summary."""
         result = self.collect_ddp_shards(world_size)
         self.prepare_ddp_merge_artifacts(result)
-        summary = self.build_summary(result, elapsed_sec=result.elapsed_sec)
+        summary = self.build_summary(result, elapsed_sec=elapsed_sec)
         summary["mode"] = self.mode
         summary["ddp_shard"] = True
         summary["ddp_world_size"] = world_size
