@@ -87,7 +87,20 @@ POLICY_CKPT_DIR=${HDP_POLICY_CKPT_DIR:-/mnt/storage_rdma/diffusion_planner/check
 POLICY_EPOCH=${HDP_POLICY_EPOCH:-80}
 INIT_WEIGHTS=${POLICY_CKPT_DIR}/latest.pth
 
-HEAD_EPOCHS=${HDP_HEAD_EPOCHS:-6}
+# Two epochs, measured. Both arms of the 2026-07-29 architecture A/B (jobs 1540/1541)
+# peak at epoch 2 and then decline monotonically on 9 of the 10 validation metrics:
+# CONTROL accuracy .8881 .8885 .8856 .8823, NEW .8985 .8995 .8932; macro_f1 and
+# direction_accuracy turn over at the same epoch in both arms. Epochs 3+ are pure
+# overfitting on this frozen-policy head, and each one costs ~50 min of node01.
+#
+# This shortens training; it does NOT select a checkpoint. The deliverable is still
+# `latest.pth` (../../CLAUDE.md), which after two epochs simply *is* the epoch-2 head.
+# Because HEAD_WARMUP=0 makes LinearWarmupConstantLR a pure MultiplicativeLR(1.0) that
+# ignores total_epochs, and args._train_epochs only ever reaches a wandb log field, this
+# run's epochs 1-2 are identical to the first two epochs of the 6-epoch runs. Raise it
+# with HDP_HEAD_EPOCHS when the head arch or lr changes and the turnover must be
+# re-measured -- the run name carries ${HEAD_EPOCHS}, so a longer run gets its own dir.
+HEAD_EPOCHS=${HDP_HEAD_EPOCHS:-2}
 HEAD_WARMUP=${HDP_HEAD_WARMUP:-0}
 HEAD_LR=${HDP_HEAD_LR:-3e-4}
 HEAD_MODE=${HDP_HEAD_MODE:-deployment}

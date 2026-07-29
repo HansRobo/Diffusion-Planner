@@ -65,7 +65,41 @@ check would hand an unknown flag to argparse.
 | SFT | `run_hdp_ego_only_sft_node01.sbatch` | Asserts `BASE_RUN/latest.pth` is at the expected epoch. |
 | Staged SFT | `run_hdp_staged_sft_node02.sbatch` | Stage 1 removes signal feedback and adapts only the trajectory planner; each stage hands its `latest.pth` EMA to the next. |
 | RL post-training | `run_hdp_rl.sbatch` | Same three manifests at the same ×10 repeat as Base, re-checked by the trainer, so an RL delta is attributable to the objective and not to a distribution shift. |
-| Turn-indicator head | `run_hdp_turn_indicator_head_node01.sbatch` | Safe to run **concurrently** with RL. Per `configure_rl_trainable_parameters` (`train_hdp_rl_predictor.py:87-95`), `--rl_train_scope decoder` trains only `decoder.dit.*` and `decoder.global_route_encoder.*`, and `all` trains everything *except* `decoder.turn_indicator_predictor.*` — so the head is untouched under **both** values. |
+| Turn-indicator head | `run_hdp_turn_indicator_head_node01.sbatch` | Safe to run **concurrently** with RL. Per `configure_rl_trainable_parameters` (`train_hdp_rl_predictor.py:87-95`), `--rl_train_scope decoder` trains only `decoder.dit.*` and `decoder.global_route_encoder.*`, and `all` trains everything *except* `decoder.turn_indicator_predictor.*` — so the head is untouched under **both** values. Default **2 epochs** — see below. |
+
+### Why the head trains for 2 epochs
+
+`HDP_HEAD_EPOCHS` defaults to `2` because that is where the head turns over, measured.
+Both arms of the 2026-07-29 architecture A/B (jobs 1540/1541) peak at epoch 2 and decline
+after it on 9 of 10 validation metrics:
+
+| epoch | CONTROL acc / macro_f1 / dir_acc | NEW acc / macro_f1 / dir_acc |
+| --- | --- | --- |
+| 1 | .8881 / .8455 / .7211 | .8985 / .8625 / .7595 |
+| 2 | **.8885 / .8467 / .7227** | **.8995 / .8640 / .7619** |
+| 3 | .8856 / .8425 / .7135 | .8932 / .8549 / .7460 |
+| 4 | .8823 / .8375 / .7085 | — |
+
+This is a **training-length** change, not a checkpoint selection — the two are not
+interchangeable, and the checkpoint rule below is untouched. The deliverable is still
+`latest.pth`; after two epochs that file simply *is* the epoch-2 head, reached by
+training, not by a selector scanning a validation curve.
+
+Shortening the run cannot change what those epochs contain. `HEAD_WARMUP=0` makes
+`LinearWarmupConstantLR` return `MultiplicativeLR(lr_lambda=1.0)`, which ignores
+`total_epochs` entirely, and `args._train_epochs` reaches exactly one consumer — the
+`train_step/total_epochs` wandb field (`train_epoch.py:126,248`). So a 2-epoch run's
+epochs 1–2 are the 6-epoch runs' epochs 1–2. `HEAD_EPOCHS` is also the only source for
+the run name and both completion guards, so a longer re-measurement gets its own
+directory rather than colliding.
+
+Raise it when the head architecture or lr changes: the turnover epoch is a property of
+that configuration and has only been measured for this one.
+
+The A/B's winner is a **4-way bundle** — `turn_indicator_head_num_queries=4`,
+`num_layers=2`, `head_dropout=0.1`, `label_smoothing=0.05` (936,960 → 2,314,240 head
+parameters). It wins every epoch on every metric, but no single flag in it is separately
+attributed.
 | LR probe | `run_hdp_policy_lr_probe_node02.sbatch` | |
 
 Entry points: `train_predictor.py`, `train_hdp_rl_predictor.py`, `valid_predictor.py`,
@@ -167,7 +201,8 @@ checkpoint alone. Latest packages under `outputs/model_upload/`.
 
 ## Verification
 
-`.venv/bin/python -m pytest` → **633 passed, 15 skipped**;
+`.venv/bin/python -m pytest` from the repo root → **635 passed, 15 skipped** (the
+`diffusion_planner/tests` subdirectory alone collects only 418);
 `.venv/bin/python -m ruff check` → clean. CI runs `pre-commit`, which includes
 `ruff format` — run `pre-commit run --all-files` before pushing. Note the system `python3`
 has neither pytest nor ruff; always use `.venv/bin/python`.
