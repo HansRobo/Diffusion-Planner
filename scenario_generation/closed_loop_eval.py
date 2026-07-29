@@ -25,6 +25,7 @@ from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, mer
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
+from scenario_generation.scenario_sim_metrics import failed_segment_row
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -593,3 +594,189 @@ def run_closed_loop_eval(
                 default=float,
             )
     return summary
+
+
+def enumerate_scenarios(scenario_root) -> list[Path]:
+    """Resolve a scenario input into an ordered list of .xosc files.
+
+    ``scenario_root`` is either a single ``.xosc`` file or a directory tree
+    globbed recursively for ``*.xosc`` (sorted for determinism)."""
+    root = Path(scenario_root)
+    if root.suffix == ".xosc":
+        return [root]
+    paths = sorted(root.rglob("*.xosc"))
+    if not paths:
+        raise FileNotFoundError(f"No .xosc under {scenario_root}")
+    return paths
+
+
+def run_scenario_sim_eval(
+    scenario_root,
+    map_path,
+    out_dir,
+    *,
+    device: str,
+    model_path: str,
+    near_miss_thresh: float = 1.0,
+    replan_interval: int = 1,  # every tick = 10 Hz, matching the production node
+    max_steps: int = 300,
+    warmup_steps: int = 5,
+    fps: float = 10.0,
+    jobs: int = 16,
+    verbose: bool = True,
+) -> dict:
+    """Closed-loop eval over OpenSCENARIO ``.xosc`` scenarios (scenario_sim path).
+
+    Sibling of :func:`run_closed_loop_eval`: instead of replaying NPZ frames it
+    drives each scenario through the in-process C++ interpreter with the model as
+    ego. Reuses :func:`aggregate` and the same ``segments.jsonl`` / ``summary.json``
+    output contract so downstream summaries (``scalar_keys`` / wandb) stay
+    compatible. One scenario == one whole rollout == one row.
+
+    PROCESS-PER-SCENARIO: the C++ ``SimulatorCore`` is a static singleton
+    (1 process = 1 scenario -- reusing it across scenarios leaks nodes and aborts
+    at teardown), so each scenario runs in a FRESH subprocess worker
+    (``python -m scenario_generation.scenario_sim_rollout``). This also gives
+    crash isolation and is the unit of plan/04's process parallelism. Unlike the
+    NPZ path this takes a ``model_path`` (torch ``.pth``), not a live model
+    object, because each worker builds its own model; the checkpoint the closed-loop
+    cadence fires on is exactly what a real worker would load.
+
+    ``jobs`` scenarios run concurrently. The default is the measured knee on an RTX 4090
+    with CUDA MPS enabled (167 tick/s at 16 vs 67 at 1); without MPS concurrent contexts
+    time-slice and the gain is far smaller, and the knee is device-specific -- re-tune it
+
+    Workers run in the current interpreter's environment, so the ss_v2 overlay has to be on the
+    source-chain already (on the production nodes that is the carried-in overlay prefix plus the
+    node's own ``/opt/ros/humble`` -- see ``validator/env/setup_production.bash``).
+    """
+    import sys
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    scenarios = enumerate_scenarios(scenario_root)
+
+    def launch(scenario: Path):
+        work = out_dir / scenario.stem
+        work.mkdir(parents=True, exist_ok=True)
+        row_out = work / "row.json"
+        log = work / "worker.log"
+        worker_args = [
+            "--osc", str(scenario),
+            "--map_path", str(map_path),
+            "--out_dir", str(work),
+            "--row_out", str(row_out),
+            "--device", device,
+            "--replan_interval", str(replan_interval),
+            "--max_steps", str(max_steps),
+            "--warmup_steps", str(warmup_steps),
+            "--near_miss_thresh", str(near_miss_thresh),
+            "--fps", str(fps),
+            "--model_path", str(model_path),
+        ]
+        cmd = [sys.executable, "-m", "scenario_generation.scenario_sim_rollout", *worker_args]
+        # Per-scenario log rather than inherited stdout: with jobs>1 the workers would
+        # interleave into an unreadable stream, and a crash needs its own trace.
+        handle = open(log, "wb")
+        proc = subprocess.Popen(cmd, stdout=handle, stderr=subprocess.STDOUT)
+        return proc, row_out, log, handle
+
+    rows: list[dict | None] = [None] * len(scenarios)
+    pending = list(enumerate(scenarios))
+    running: dict[int, tuple] = {}
+    done = 0
+    t0 = time.perf_counter()
+    with open(out_dir / "segments.jsonl", "w") as fout:
+        while pending or running:
+            while pending and len(running) < max(1, jobs):
+                si, scenario = pending.pop(0)
+                running[si] = launch(scenario)
+            finished = [si for si, (p, *_) in running.items() if p.poll() is not None]
+            if not finished:
+                time.sleep(0.05)
+                continue
+            for si in finished:
+                proc, row_out, log, handle = running.pop(si)
+                handle.close()
+                # The worker's row is authoritative; a nonzero rc at teardown (after the
+                # row is written) must not lose a completed rollout, so key off row.json.
+                if row_out.exists():
+                    metrics = json.loads(row_out.read_text())
+                    status = "ok" if proc.returncode == 0 else f"rc={proc.returncode}(teardown)"
+                else:
+                    metrics = failed_segment_row(
+                        f"worker rc={proc.returncode}, see {log}", near_miss_thresh
+                    )
+                    status = f"FAILED rc={proc.returncode}"
+                row = segment_row_for_json(metrics, route=scenarios[si].stem)
+                rows[si] = row
+                fout.write(json.dumps(row, default=float) + "\n")
+                fout.flush()
+                done += 1
+                if verbose:
+                    print(
+                        f"[{done}/{len(scenarios)}] {row['route']} -> {status} "
+                        f"{metrics.get('terminated')}/{metrics.get('result_kind', '')} "
+                        f"steps={metrics.get('n_steps_run')} "
+                        f"coll={metrics.get('n_collision_steps')} "
+                        f"coord_ok={metrics.get('coord_check_ok')}"
+                    )
+
+    # segments.jsonl above is a progress log in COMPLETION order; the returned/aggregated
+    # rows are in scenario order so summaries are comparable across jobs settings.
+    rows = [r for r in rows if r is not None]
+    summary = aggregate(rows, near_miss_thresh)
+    summary["scenario_root"] = str(scenario_root)
+    summary["map_path"] = str(map_path)
+    summary["n_scenarios"] = len(scenarios)
+    summary["elapsed_sec"] = time.perf_counter() - t0
+    summary["segments"] = rows
+    with open(out_dir / "summary.json", "w") as f:
+        json.dump(
+            metrics_for_json({k: v for k, v in summary.items() if k != "segments"}),
+            f,
+            indent=4,
+        )
+    return summary
+
+
+def main() -> None:
+    """Standalone scenario_sim eval CLI (mirrors valid_predictor_closed_loop.py).
+
+    Runs the scenario_sim closed loop over a scenario root with a torch ``.pth``
+    checkpoint, spawning one worker process per scenario, writing segments.jsonl +
+    summary.json. Training integration (train.py wiring) is a separate task."""
+    import argparse
+
+    p = argparse.ArgumentParser(description="scenario_sim closed-loop eval")
+    p.add_argument("--scenario_root", required=True, help=".xosc file or dir tree")
+    p.add_argument("--map_path", required=True, help="lanelet2 .osm the scenarios reference")
+    p.add_argument("--out_dir", required=True)
+    p.add_argument("--device", default="cpu")
+    p.add_argument(
+        "--model_path", required=True, help="best_model.pth (torch checkpoint)"
+    )
+    p.add_argument("--replan_interval", type=int, default=1,
+                   help="re-plan every N ticks; 1 (default) = every tick = 10 Hz, matching production")
+    p.add_argument("--max_steps", type=int, default=300)
+    p.add_argument("--near_miss_thresh", type=float, default=1.0)
+    p.add_argument("--jobs", type=int, default=16,
+                   help="scenarios to run concurrently on this GPU (tuned for CUDA MPS)")
+    args = p.parse_args()
+
+    summary = run_scenario_sim_eval(
+        args.scenario_root,
+        args.map_path,
+        args.out_dir,
+        device=args.device,
+        model_path=args.model_path,
+        near_miss_thresh=args.near_miss_thresh,
+        replan_interval=args.replan_interval,
+        max_steps=args.max_steps,
+        jobs=args.jobs,
+    )
+    print(json.dumps({k: v for k, v in summary.items() if k != "segments"}, indent=2, default=float))
+
+
+if __name__ == "__main__":
+    main()
