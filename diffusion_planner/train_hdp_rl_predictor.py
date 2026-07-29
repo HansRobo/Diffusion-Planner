@@ -2161,7 +2161,14 @@ def model_training(args):
             source_policy_within_guard = all(
                 value for key, value in source_guards.items() if key != "available"
             )
-            raw_selection_score = selection_score_from_reward_metrics(valid_reward_metrics, args)
+            # Held-out reward metrics only exist on a full-eval epoch. `improves_best`
+            # below already requires one, so an epoch that skipped the eval has no
+            # selection score to compute rather than a missing key to raise on.
+            raw_selection_score = (
+                selection_score_from_reward_metrics(valid_reward_metrics, args)
+                if run_full_eval
+                else float("nan")
+            )
             selection_score = (
                 raw_selection_score if math.isfinite(raw_selection_score) else float("nan")
             )

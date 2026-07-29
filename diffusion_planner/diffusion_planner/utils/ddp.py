@@ -148,10 +148,14 @@ def reduce_and_average_losses(loss_dict, device):
     if not loss_dict and (not dist.is_available() or not dist.is_initialized()):
         return loss_dict
     world_size = dist.get_world_size()
-    keys = list(loss_dict)
-    # Packing relies on identical key order on every rank. Check that contract
-    # before the all-reduce so a rank-divergent diagnostic cannot silently pair
-    # unrelated scalars. This function runs once per epoch, not in the step hot path.
+    # Sort rather than trust insertion order: packing is positional, and a caller
+    # that builds its dict by iterating a set gets a different order on every rank
+    # because torchrun randomizes PYTHONHASHSEED per process. Sorting makes the
+    # check below mean what it says -- a real difference in *which* keys exist.
+    keys = sorted(loss_dict)
+    # Packing relies on identical keys on every rank. Check that contract before the
+    # all-reduce so a rank-divergent diagnostic cannot silently pair unrelated
+    # scalars. This function runs once per epoch, not in the step hot path.
     key_digest = int.from_bytes(
         hashlib.sha256("\0".join(keys).encode("utf-8")).digest()[:8],
         byteorder="little",
@@ -186,9 +190,11 @@ def reduce_scalar_metrics(metric_dict, device, op):
     """Reduce detached scalar diagnostics with the requested distributed operation."""
     if not metric_dict and (not dist.is_available() or not dist.is_initialized()):
         return {}
-    keys = list(metric_dict)
-    # Packing relies on identical key order on every rank. Validate the contract
-    # before reducing so a rank-divergent diagnostic cannot silently pair values.
+    keys = sorted(metric_dict)
+    # Sorted for the same reason as `reduce_and_average_losses`: packing is
+    # positional and insertion order is not a rank-stable property. Validate the
+    # remaining contract before reducing so a rank-divergent diagnostic cannot
+    # silently pair values.
     key_digest = int.from_bytes(
         hashlib.sha256("\0".join(keys).encode("utf-8")).digest()[:8],
         byteorder="little",
