@@ -16,9 +16,6 @@ import torch
 from scenario_generation.scene_context import Agent, AgentType, MapData, SceneContext
 from scenario_generation.simulate import (
     _cat_tensor_dicts,
-    _predict_batch,
-    _save_and_close,
-    advance_scene,
 )
 from scenario_generation.tensor_converter import (
     _NUM_LANES,

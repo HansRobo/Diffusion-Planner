@@ -280,7 +280,9 @@ def test_rl_update_microbatches_preserve_full_group_objective_and_gradient(monke
             super().__init__()
             self.scale = torch.nn.Parameter(torch.tensor(1.5))
 
-    def fake_policy_loss(model, _inputs, target, _args, _encoding=None, _time=None, _noise=None):
+    def fake_policy_loss(
+        model, _inputs, target, _args, _encoding=None, _time=None, _noise=None, **_kwargs
+    ):
         per_sample = model.scale * target[:, 0, 0]
         mean = per_sample.mean()
         return {
@@ -399,11 +401,11 @@ def test_checkpoint_bool_uses_recorded_source_value(tmp_path):
     run_dir = tmp_path / "run"
     nested = run_dir / "epoch0001"
     nested.mkdir(parents=True)
-    (run_dir / "args.json").write_text(
-        '{"rl_validate_before_training": false}', encoding="utf-8"
-    )
+    (run_dir / "args.json").write_text('{"rl_validate_before_training": false}', encoding="utf-8")
 
-    assert _checkpoint_bool(str(nested / "latest.pth"), "rl_validate_before_training", True) is False
+    assert (
+        _checkpoint_bool(str(nested / "latest.pth"), "rl_validate_before_training", True) is False
+    )
     assert _checkpoint_bool(str(nested / "latest.pth"), "missing", True) is True
 
 
@@ -670,6 +672,9 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         rl_rollout_steps=6,
         diffusion_sample_steps=5,
         ddp=False,
+        # This test verifies candidate-count weighting of the stochastic metrics; the
+        # deterministic deployment pass has its own coverage.
+        rl_eval_deterministic=False,
     )
 
     metrics = validate_hdp_reward_policy([batch(2), batch(1)], torch.nn.Linear(1, 1), args)

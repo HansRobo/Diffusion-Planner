@@ -205,14 +205,14 @@ def plot_route_heatmap(ax, pts, bin_segments, bin_values, title, vmin, vmax, cma
     ax.set_aspect("equal")
     ax.plot(pts[:, 0], pts[:, 1], color="#cccccc", lw=1.0, zorder=1)
     valid_segs, valid_vals = [], []
-    for segs, v in zip(bin_segments, bin_values):
+    for segs, v in zip(bin_segments, bin_values, strict=False):
         if segs is None or np.isnan(v):
             continue
         valid_segs.append(segs)
         valid_vals.append(v)
     if valid_vals:
         lc_lines, lc_colors = [], []
-        for segs, v in zip(valid_segs, valid_vals):
+        for segs, v in zip(valid_segs, valid_vals, strict=False):
             for i in range(len(segs) - 1):
                 lc_lines.append([segs[i], segs[i + 1]])
                 lc_colors.append(v)

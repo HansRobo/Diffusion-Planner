@@ -67,9 +67,11 @@ TEST(BuildRouteJsonTest, BasicFieldsPresent)
   const SkippingInfo info = SkippingInfo::accepted();
   timestamp_stats::TimestampStatsMap stats_map({});  // empty map
 
-  const nlohmann::json j = build_route_json(42, 150.5, 1000000LL, 2000000LL, info, stats_map);
+  const nlohmann::json j =
+    build_route_json(42, 150.5, 1000000LL, 2000000LL, info, stats_map, false);
 
   EXPECT_FALSE(j["is_skipped"].get<bool>());
+  EXPECT_FALSE(j["goal_pose_overwritten"].get<bool>());
   EXPECT_EQ(j["num_frames"].get<int64_t>(), 42);
   EXPECT_DOUBLE_EQ(j["traveled_distance_m"].get<double>(), 150.5);
   EXPECT_EQ(j["start_timestamp"].get<int64_t>(), 1000000LL);
@@ -82,9 +84,10 @@ TEST(BuildRouteJsonTest, SkippedRouteFieldsPresent)
   const SkippingInfo info = SkippingInfo::insufficient_frames(100, 1700);
   timestamp_stats::TimestampStatsMap stats_map({});
 
-  const nlohmann::json j = build_route_json(100, 10.0, 0LL, 1000LL, info, stats_map);
+  const nlohmann::json j = build_route_json(100, 10.0, 0LL, 1000LL, info, stats_map, true);
 
   EXPECT_TRUE(j["is_skipped"].get<bool>());
+  EXPECT_TRUE(j["goal_pose_overwritten"].get<bool>());
   EXPECT_EQ(
     j["skipping_info"]["label"].get<int>(), static_cast<int>(SkippingLabel::InsufficientFrames));
 }

@@ -379,7 +379,7 @@ def score_step_batched(
 
     # All valid neighbors across all segments -> one transfer -> one corner build.
     nb_all = np.concatenate(
-        [nb[v] for nb, v in zip(neighbors_list, valids) if v.any()], axis=0
+        [nb[v] for nb, v in zip(neighbors_list, valids, strict=False) if v.any()], axis=0
     )  # (K, 11)
     rects = torch.tensor(
         np.stack(
@@ -1355,121 +1355,120 @@ def render_segment(
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
     # goal is the recorded GT end pose `poses[end-1]`, which a diverging closed-loop ego may never
     # reach). One JSONL line per step + a start header + a terminated line, next to the PNGs.
-    dbg = open(out_dir / "rollout.jsonl", "w", buffering=1)
-    dbg.write(
-        json.dumps(
-            {
-                "event": "start",
-                "start": int(start),
-                "end": int(end),
-                "goal_idx": int(end - 1),
-                "goal": [float(s.goal_xy[0]), float(s.goal_xy[1])],
-                "goal_reach_m": float(s.goal_reach_m),
-                "max_steps": int(cap),
-                "unstick_after": int(s.unstick_after),
-                "len_tl": int(len(tl)),
-            }
+    with open(out_dir / "rollout.jsonl", "w", buffering=1, encoding="utf-8") as dbg:
+        dbg.write(
+            json.dumps(
+                {
+                    "event": "start",
+                    "start": int(start),
+                    "end": int(end),
+                    "goal_idx": int(end - 1),
+                    "goal": [float(s.goal_xy[0]), float(s.goal_xy[1])],
+                    "goal_reach_m": float(s.goal_reach_m),
+                    "max_steps": int(cap),
+                    "unstick_after": int(s.unstick_after),
+                    "len_tl": int(len(tl)),
+                }
+            )
+            + "\n"
         )
-        + "\n"
-    )
-    while not s.done:
-        k = s.k
-        pre = _pre_step(s)
-        if pre is None:
+        while not s.done:
+            k = s.k
+            pre = _pre_step(s)
+            if pre is None:
+                dbg.write(
+                    json.dumps(
+                        {
+                            "event": "terminated",
+                            "k": k,
+                            "reason": s.terminated,
+                            "ego": [float(s.live_pose[0]), float(s.live_pose[1])],
+                            "dist_goal": float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)),
+                            "max_idx_reached": int(s.cursor.max_idx_reached),
+                            "n_snaps": int(s.n_snaps),
+                        }
+                    )
+                    + "\n"
+                )
+                break
+            np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
+            # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
+            # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
             dbg.write(
                 json.dumps(
                     {
-                        "event": "terminated",
                         "k": k,
-                        "reason": s.terminated,
-                        "ego": [float(s.live_pose[0]), float(s.live_pose[1])],
-                        "dist_goal": float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)),
+                        "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
+                        "yaw": round(float(s.live_pose[2]), 4),
+                        "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
+                        "speed": round(float(s.dyn.speed), 3),
+                        "rec_idx": int(idx),
                         "max_idx_reached": int(s.cursor.max_idx_reached),
+                        "stuck": int(s.stuck),
+                        "ego_stuck": int(s.ego_stuck),
                         "n_snaps": int(s.n_snaps),
                     }
                 )
                 + "\n"
             )
-            break
-        np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
-        # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
-        # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
-        dbg.write(
-            json.dumps(
-                {
-                    "k": k,
-                    "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
-                    "yaw": round(float(s.live_pose[2]), 4),
-                    "dist_goal": round(float(np.linalg.norm(s.live_pose[:2] - s.goal_xy)), 3),
-                    "speed": round(float(s.dyn.speed), 3),
-                    "rec_idx": int(idx),
-                    "max_idx_reached": int(s.cursor.max_idx_reached),
-                    "stuck": int(s.stuck),
-                    "ego_stuck": int(s.ego_stuck),
-                    "n_snaps": int(s.n_snaps),
-                }
-            )
-            + "\n"
-        )
-        # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
-        # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
-        # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
-        # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
-        # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
-        # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
-        offset = k % replan_interval
-        override = None
-        if plan_world is None or offset == 0:
-            data = _to_torch_batch([np_dict], model_args, device)
-            _, outputs = model(data)
-            pred = outputs["prediction"][0, 0].cpu().numpy()
-            plan_world = _ego_pred_to_world(
-                pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
-            )
-            pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
-            _feed_turn_indicator(s, outputs)
-        else:
-            # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
-            off = min(offset, len(plan_world[0]) - 1)
-            tx, ty, th = (
-                float(plan_world[0][off, 0]),
-                float(plan_world[0][off, 1]),
-                float(plan_world[1][off]),
-            )
-            spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
-            override = (np.array([tx, ty, th], dtype=np.float64), spd)
-            pred_cur = _world_plan_to_ego(
-                plan_world[0][off:],
-                plan_world[1][off:],
-                s.live_pose[0],
-                s.live_pose[1],
-                s.live_pose[2],
-            )
-        nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
-        if interpolate and nids and interp:
-            _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
-        if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
-            _draw_step(
-                np_dict,
-                pred_cur,
-                s.ego_shape,
-                out_dir / f"{k:05d}.png",
-                neighbor_ids=nids if color_by_uuid else None,
-                step=k,
-                total=cap,
-                title_prefix=title_prefix,
-                distance_label_offset_m=distance_label_offset_m,
-                view_half_m=view_half_m,
-            )
-        _score_into(s, neighbors_live, device, timers)
-        snaps_before = s.n_snaps
-        _advance_step(s, pred_cur, idx, device, timers, override=override)
-        if s.n_snaps > snaps_before:
-            # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
-            # world location, so executing it next step would drag the ego right back. Invalidate
-            # it to force a fresh inference at the snapped pose (else the snap never sticks).
-            plan_world = None
-    dbg.close()
+            # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
+            # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
+            # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
+            # PerfectTracker only targets ref[0] in the current heading and cannot follow a multi-step
+            # plan (it diverges), so the ego is placed directly on the plan's predicted world pose at
+            # `offset` (steps since the last inference). The ego still single-steps at 10 Hz.
+            offset = k % replan_interval
+            override = None
+            if plan_world is None or offset == 0:
+                data = _to_torch_batch([np_dict], model_args, device)
+                _, outputs = model(data)
+                pred = outputs["prediction"][0, 0].cpu().numpy()
+                plan_world = _ego_pred_to_world(
+                    pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
+                )
+                pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
+                _feed_turn_indicator(s, outputs)
+            else:
+                # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
+                off = min(offset, len(plan_world[0]) - 1)
+                tx, ty, th = (
+                    float(plan_world[0][off, 0]),
+                    float(plan_world[0][off, 1]),
+                    float(plan_world[1][off]),
+                )
+                spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
+                override = (np.array([tx, ty, th], dtype=np.float64), spd)
+                pred_cur = _world_plan_to_ego(
+                    plan_world[0][off:],
+                    plan_world[1][off:],
+                    s.live_pose[0],
+                    s.live_pose[1],
+                    s.live_pose[2],
+                )
+            nids = slot_uuids or (tl.neighbor_ids(idx) if (color_by_uuid or interpolate) else None)
+            if interpolate and nids and interp:
+                _apply_neighbor_interp(np_dict, nids, s.live_pose, idx, interp)
+            if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
+                _draw_step(
+                    np_dict,
+                    pred_cur,
+                    s.ego_shape,
+                    out_dir / f"{k:05d}.png",
+                    neighbor_ids=nids if color_by_uuid else None,
+                    step=k,
+                    total=cap,
+                    title_prefix=title_prefix,
+                    distance_label_offset_m=distance_label_offset_m,
+                    view_half_m=view_half_m,
+                )
+            _score_into(s, neighbors_live, device, timers)
+            snaps_before = s.n_snaps
+            _advance_step(s, pred_cur, idx, device, timers, override=override)
+            if s.n_snaps > snaps_before:
+                # An unstick teleport just moved the ego; the cached plan is pinned to the PRE-snap
+                # world location, so executing it next step would drag the ego right back. Invalidate
+                # it to force a fresh inference at the snapped pose (else the snap never sticks).
+                plan_world = None
     return _finalize(s, timers).metrics
 
 
@@ -1600,7 +1599,9 @@ def run_segments_batched(
             while active:
                 with timers("input_build"):
                     pre_list = list(pool.map(lambda s: _pre_step(s, gpu_transform), active))
-                live = [(s, pre) for s, pre in zip(active, pre_list) if pre is not None]
+                live = [
+                    (s, pre) for s, pre in zip(active, pre_list, strict=False) if pre is not None
+                ]
                 if live:
                     if gpu_transform:
                         # ONE batched on-device world_to_ego_frame; downstream identical.
@@ -1651,8 +1652,8 @@ def run_segments_batched(
                         score_list = score_step_batched(
                             [b[2] for b in built], [b[0].ego_shape for b in built], device
                         )
-                    for (s, _np, nb, idx, suuid, wbu), (cl, col, _M, collider_slot) in zip(
-                        built, score_list
+                    for (s, _np, _nb, idx, suuid, wbu), (cl, col, _M, collider_slot) in zip(
+                        built, score_list, strict=False
                     ):
                         s.clearances[s.k] = cl
                         s.collisions[s.k] = col
@@ -1732,7 +1733,7 @@ def run_segments_batched(
                                         s.episode_saved = True
                                         s.saved_collision = True  # recorded-mode one-save latch
                                         s.last_collision_uuid = colliding_uuid
-                    for i, (s, _np, nb, idx, _suuid, _wbu) in enumerate(built):
+                    for i, (s, _np, _nb, idx, _suuid, _wbu) in enumerate(built):
                         prev_snaps = s.n_snaps
                         _advance_step(s, preds[i], idx, device, timers)
                         # Feed the model's predicted turn indicator back into the rolling

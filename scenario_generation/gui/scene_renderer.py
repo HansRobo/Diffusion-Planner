@@ -11,6 +11,8 @@ import math
 import matplotlib
 
 matplotlib.use("Agg")
+import contextlib
+
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 import numpy as np
@@ -358,10 +360,8 @@ def render_scene_figure(
         rot_transform = mtrans.Affine2D().rotate_around(center_x, center_y, -rotation)
         for artist in ax.get_children():
             if hasattr(artist, "set_transform"):
-                try:
+                with contextlib.suppress(Exception):
                     artist.set_transform(rot_transform + artist.get_transform())
-                except Exception:
-                    pass
         # Expand limits to cover rotated content
         margin = abs(math.sin(rotation)) + abs(math.cos(rotation))
         xl, xr = ax.get_xlim()

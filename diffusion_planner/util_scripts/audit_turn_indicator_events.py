@@ -106,7 +106,7 @@ def _scan_range(bounds: tuple[int, int]) -> dict[str, Any]:
                 if values.size == 0:
                     raise ValueError("turn_indicators is empty")
                 values = values.astype(np.int64, copy=False)
-                for value, count in zip(*np.unique(values, return_counts=True)):
+                for value, count in zip(*np.unique(values, return_counts=True), strict=False):
                     if int(value) not in VALID_REPORT_STATES:
                         invalid[int(value)] += int(count)
 
@@ -157,7 +157,9 @@ def _quantiles(values: list[float | None]) -> dict[str, float] | None:
     result.update(
         {
             key: float(value)
-            for key, value in zip(("min", "p10", "p25", "p50", "p75", "p90", "max"), points)
+            for key, value in zip(
+                ("min", "p10", "p25", "p50", "p75", "p90", "max"), points, strict=False
+            )
         }
     )
     return result
@@ -172,6 +174,7 @@ def _counter_quantiles(values: Counter[int]) -> dict[str, float] | None:
     for name, quantile in zip(
         ("min", "p10", "p25", "p50", "p75", "p90", "max"),
         (0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0),
+        strict=False,
     ):
         target = quantile * (total - 1)
         cumulative = 0
@@ -218,7 +221,7 @@ def _reconstruct_episodes(
     non_monotonic = 0
     uncertain_transitions = 0
 
-    for index, (path, state_value) in enumerate(zip(paths, states)):
+    for index, (path, state_value) in enumerate(zip(paths, states, strict=False)):
         parsed = _parse_frame(path)
         state = int(state_value)
         if parsed is None:

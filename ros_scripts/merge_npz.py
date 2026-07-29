@@ -36,7 +36,7 @@ if __name__ == "__main__":
         assert len(npz_list1) == len(npz_list2), f"{len(npz_list1)} != {len(npz_list2)}"
         n = len(npz_list1)
 
-        for f1, f2 in tqdm(zip(npz_list1, npz_list2), total=n):
+        for f1, f2 in tqdm(zip(npz_list1, npz_list2, strict=False), total=n):
             npz1 = np.load(f1)
             npz2 = np.load(f2)
 
@@ -46,7 +46,7 @@ if __name__ == "__main__":
             merged_data = {}
 
             # npz1のデータをコピー
-            for key in npz1.keys():
+            for key in npz1:
                 merged_data[key] = npz1[key]
 
             # 特定のkeyだけnpz2のデータで上書き

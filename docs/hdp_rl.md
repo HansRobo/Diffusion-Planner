@@ -97,9 +97,13 @@ RL starts from the SFT EMA checkpoint with `--init_weights_path`; `--resume_mode
 continuing the exact same RL run. The production Slurm launcher fingerprints code, manifests,
 normalization, checkpoint, and Python/CUDA/NCCL environment before starting distributed training.
 
-Experiments use the same SFT-derived training and validation manifests, including the separate
-unprotected-right-turn list. Traffic-light features are kept unchanged, and manifest paths are not
-rewritten by the RL loader.
+By default RL uses the shared precomputed SFT manifests:
+`/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_sft_is_skipped_filtered.json`
+and
+`/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_valid_sft_balanced_is_skipped_filtered.json`.
+They are already `is_skipped`-filtered, so the launcher does not rescan sidecars. Traffic-light
+features are kept unchanged, and manifest paths are not rewritten by the RL loader. Alternate
+right-turn or causal manifests must be passed explicitly as an experiment override.
 
 ## Selection Guards
 
@@ -108,6 +112,36 @@ selection reward while respecting source-relative guards for risk, safety, colli
 red-light compliance, TTC, THW, occupancy, comfort, collision rates, and EPDMS. When the direct
 road-border term and EPDMS are enabled, continuous border reward and binary `valid_epdms_dac` are
 also required not to regress beyond `rl_max_valid_epdms_regression`.
+
+Checkpoint selection defaults to the deterministic deployment reward
+(`rl_selection_metric=deterministic`): validation additionally scores one zero-noise plan per scene
+(`deterministic_mean`), which is exactly what the deployed planner executes. One objective per
+run: the deterministic selection score uses the run's own training reward (native or
+`pdm_port`), matching the source repository's train-and-select discipline. The frozen
+`rl_eval_*` stochastic metrics are report-only diagnostics for comparing arms; acceptance is
+protected by the independent EPDMS/DAC/safety source guards, which are deployment metrics, not
+a second reward.
+
+## AWR upgrades from the original-DP post-training audits (2026-07-23)
+
+See `docs/hdp_awr_rl_upgrade_20260723.md` for the evidence record. In brief: a first-waypoint
+candidate gate with a mandatory 5 cm tangent floor excludes low-speed standstill-jump candidates
+from both the advantage statistics and the weights; `rl_reward_aggregation=gated_product` offers
+the PDM-style bounded multiplicative-gate objective; `rl_reward_horizon_steps` scores a prefix with
+the candidate regression horizon following it (regressing the unscored tail is a known-negative
+configuration and is rejected); `rl_diffusion_t_min/max` restrict the reweighted regression's
+diffusion-time draw; and the optional expert anchor applies only to scenes with an active reward
+group. Training-objective defaults are unchanged; only checkpoint selection switched to the
+deterministic metric.
+
+`rl_candidate_aug_*` adds HDP's own rollout-candidate augmentation in the velocity-safe form:
+route-frame offsets with a mandatory ~2 s minimum-jerk onset (a constant offset is a first-delta
+impulse under velocity actions and is rejected), an optional PlannerRFT candidate stretch that
+scales per-step displacements (natively smooth for velocity actions), an unaugmented on-policy
+anchor per group, and a low-speed skip guard. Candidates are perturbed before reward and
+regression, so AWR can rank and internalize behavior beyond the policy's own support. Off by
+default; the exploration arm of the experiment ladder enables it. Guided denoising toward a
+frozen reference (full PlannerRFT) remains deferred pending the upstream full-scale verdict.
 
 The DAC guard is deliberate: a higher proxy reward must not be accepted if it worsens the binary
 drivable-area-compliance metric that motivated this experiment.

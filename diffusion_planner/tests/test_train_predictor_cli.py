@@ -37,9 +37,10 @@ def test_training_cli_accepts_hdp_defaults():
     assert args.ego_history_frames == 21
     assert args.use_velocity_representation is True
     assert args.diffusion_model_type == "x_start"
+    assert args.align_legacy_neighbor_futures is False
     assert args.policy_uses_turn_indicator_history is False
     assert args.turn_indicator_output_dim == 3
-    assert args.supervised_training_stage == "joint"
+    assert args.supervised_training_stage == "policy"
     assert args.turn_indicator_head_training_mode == "deployment"
 
 

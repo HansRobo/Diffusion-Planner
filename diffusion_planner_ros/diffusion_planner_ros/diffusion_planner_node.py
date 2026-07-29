@@ -383,7 +383,7 @@ class DiffusionPlannerNode(Node):
         }
         if self.batch_size > 1:
             # copy the input dict for batch size
-            for key in input_dict.keys():
+            for key in input_dict:
                 if key == "turn_indicator":
                     # Special handling for turn_indicator (1D tensor)
                     input_dict[key] = input_dict[key].repeat(self.batch_size)
@@ -395,7 +395,7 @@ class DiffusionPlannerNode(Node):
         input_dict = self.config_obj.observation_normalizer(input_dict)
 
         if self.backend == "ONNXRUNTIME":
-            for key in input_dict.keys():
+            for key in input_dict:
                 input_dict[key] = input_dict[key].cpu().numpy()
 
             input_dict["lanes_has_speed_limit"] = input_dict["lanes_has_speed_limit"].astype(

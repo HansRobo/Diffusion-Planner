@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,7 +43,10 @@ class TestParallelSaves:
         paths = [tmp_path / f"fig_{i:02d}.png" for i in range(n)]
 
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(_save_and_close, fig, path) for fig, path in zip(figs, paths)]
+            futures = [
+                pool.submit(_save_and_close, fig, path)
+                for fig, path in zip(figs, paths, strict=False)
+            ]
             for f in futures:
                 f.result()
 
@@ -64,7 +66,10 @@ class TestParallelSaves:
         paths = [tmp_path / f"fig_{i}.png" for i in range(len(sizes))]
 
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(_save_and_close, fig, path) for fig, path in zip(figs, paths)]
+            futures = [
+                pool.submit(_save_and_close, fig, path)
+                for fig, path in zip(figs, paths, strict=False)
+            ]
             for f in futures:
                 f.result()
 

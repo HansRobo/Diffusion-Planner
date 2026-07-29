@@ -59,7 +59,7 @@ def _rect_corners(rect: torch.Tensor) -> torch.Tensor:
     B = rect.shape[0]
     xy, cos_h, sin_h, lw = rect[:, :2], rect[:, 2], rect[:, 3], rect[:, 4:]
     rot = torch.stack([cos_h, -sin_h, sin_h, cos_h], dim=1).reshape(B, 2, 2)
-    signs = torch.tensor([[1.0, 1], [-1, 1], [-1, -1], [1, -1]], device=lw.device)
+    signs = lw.new_tensor([[1.0, 1], [-1, 1], [-1, -1], [1, -1]])
     local = torch.einsum("bj,ij->bij", lw / 2, signs)  # [B, 4, 2]
     local = torch.einsum("bij,bkj->bik", local, rot)  # [B, 4, 2]
     return xy[:, None, :] + local
@@ -174,6 +174,12 @@ class StatePerturbation:
         ).clamp(1.0 - 2 * W, 1.0 + 2 * W)
         ego_past_aug = inputs["ego_agent_past"].clone()
         ego_past_aug[..., :2] *= scale
+        # Keep the observed (blue) history in its current-ego frame.  The sampled
+        # pose is a hypothetical current-state offset relative to the scene, not a
+        # request to synthesize/interpolate a new history.  This preserves the
+        # online contract that the last history pose is the current origin; the
+        # optional history transform in centric_transform remains available to
+        # callers that explicitly need a rigid scene transform.
         inputs["ego_agent_past"] = torch.where(
             aug_flag[:, None, None], ego_past_aug, inputs["ego_agent_past"]
         )
@@ -181,7 +187,18 @@ class StatePerturbation:
         scale_1d = scale.squeeze(-1)
         aug_ego_current_state[:, 4:6] *= scale_1d
         aug_ego_current_state[:, 6:8] *= scale_1d
-        wheel_base = inputs["ego_shape"][:, 0]
+        if "ego_shape" in inputs:
+            ego_shape = inputs["ego_shape"]
+            if ego_shape.ndim != 2 or ego_shape.shape != (aug_ego_current_state.shape[0], 3):
+                raise ValueError(
+                    f"ego_shape must have shape {(aug_ego_current_state.shape[0], 3)} "
+                    f"for augmentation, got {tuple(ego_shape.shape)}"
+                )
+            wheel_base = ego_shape[:, 0]
+        else:
+            wheel_base = aug_ego_current_state.new_full(
+                (aug_ego_current_state.shape[0],), self._wheel_base
+            )
         speed = aug_ego_current_state[:, 4].abs()
         steering = torch.atan(
             aug_ego_current_state[:, 9] * wheel_base / speed.clamp_min(0.2)
@@ -197,7 +214,12 @@ class StatePerturbation:
         )
         ego_future = torch.where(aug_flag[:, None, None], interpolated_ego_future, ego_future)
 
-        return self.centric_transform(inputs, ego_future, neighbors_future)
+        return self.centric_transform(
+            inputs,
+            ego_future,
+            neighbors_future,
+            transform_ego_history=False,
+        )
 
     def augment(self, inputs):
         # Only aug current state
@@ -265,17 +287,6 @@ class StatePerturbation:
         device = aug_ego_state.device
         dtype = aug_ego_state.dtype
 
-        # ego_shape: [B, 3] = (wheelbase, length, width)
-        ego_shape = inputs["ego_shape"].to(device=device, dtype=dtype)
-        ego_length = ego_shape[:, 1:2]  # [B, 1]
-        ego_width = ego_shape[:, 2:3]  # [B, 1]
-
-        heading = aug_ego_state[:, 2:4]
-        heading = heading / torch.linalg.norm(heading, dim=-1, keepdim=True).clamp_min(1e-6)
-        # Ego poses are rear-axle referenced while collision boxes are center referenced.
-        # Match the convention used by training penalties and planner metrics.
-        ego_center = aug_ego_state[:, :2] + heading * (ego_shape[:, 0:1] * 0.5)
-        ego_rect = torch.cat([ego_center, heading, ego_length, ego_width], dim=-1)
         collision = torch.zeros(B, dtype=torch.bool, device=device)
 
         # ── 1. Neighbour agent polygon collision ──────────────────────────────
@@ -283,15 +294,37 @@ class StatePerturbation:
             nbr = inputs["neighbor_agents_past"][:, :, -1, :]  # [B, N, 11]
             N = nbr.shape[1]
             valid = torch.any(nbr[:, :, :4] != 0, dim=-1)  # [B, N]
-            # neighbor_agents_past layout: x,y,cos,sin (0:4), width (6), length (7)
-            nbr_rect = torch.cat(
-                [nbr[:, :, :4], nbr[:, :, 7:8], nbr[:, :, 6:7]], dim=-1
-            )  # [B, N, 6]  — (x,y,cos,sin,length,width)
-            dists = _sat_signed_distance(
-                _rect_corners(ego_rect.unsqueeze(1).expand(-1, N, -1).reshape(B * N, 6)),
-                _rect_corners(nbr_rect.reshape(B * N, 6)),
-            ).reshape(B, N)
-            collision = collision | ((dists < 0) & valid).any(dim=1)
+            if valid.any():
+                if "ego_shape" not in inputs:
+                    raise KeyError(
+                        "ego_shape is required for augmentation collision checks when "
+                        "neighbor_agents_past contains a valid agent"
+                    )
+                ego_shape = inputs["ego_shape"].to(device=device, dtype=dtype)
+                if ego_shape.ndim != 2 or ego_shape.shape != (B, 3):
+                    raise ValueError(
+                        f"ego_shape must have shape {(B, 3)} for augmentation, "
+                        f"got {tuple(ego_shape.shape)}"
+                    )
+                ego_length = ego_shape[:, 1:2]  # [B, 1]
+                ego_width = ego_shape[:, 2:3]  # [B, 1]
+
+                heading = aug_ego_state[:, 2:4]
+                heading = heading / torch.linalg.norm(heading, dim=-1, keepdim=True).clamp_min(1e-6)
+                # Ego poses are rear-axle referenced while collision boxes are center
+                # referenced. Match the convention used by training penalties and
+                # planner metrics.
+                ego_center = aug_ego_state[:, :2] + heading * (ego_shape[:, 0:1] * 0.5)
+                ego_rect = torch.cat([ego_center, heading, ego_length, ego_width], dim=-1)
+                # neighbor_agents_past layout: x,y,cos,sin (0:4), width (6), length (7)
+                nbr_rect = torch.cat(
+                    [nbr[:, :, :4], nbr[:, :, 7:8], nbr[:, :, 6:7]], dim=-1
+                )  # [B, N, 6]  — (x,y,cos,sin,length,width)
+                dists = _sat_signed_distance(
+                    _rect_corners(ego_rect.unsqueeze(1).expand(-1, N, -1).reshape(B * N, 6)),
+                    _rect_corners(nbr_rect.reshape(B * N, 6)),
+                ).reshape(B, N)
+                collision = collision | ((dists < 0) & valid).any(dim=1)
 
         return collision
 
@@ -319,6 +352,8 @@ class StatePerturbation:
         inputs: torch.Tensor,
         ego_future: torch.Tensor,
         neighbors_future: torch.Tensor,
+        *,
+        transform_ego_history: bool = True,
     ):
         cur_state = inputs["ego_current_state"].clone()
         center_xy = cur_state[:, :2]
@@ -362,19 +397,20 @@ class StatePerturbation:
         # Raw 3-column ego poses use (0, 0, 0) for a valid origin. Only a
         # converted 4-column tensor can use the all-zero padding sentinel.
         ego_past_mask = None if ego_past_is_heading else pose_padding_mask(inputs["ego_agent_past"])
-        inputs["ego_agent_past"][..., :2] = vector_transform(
-            inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
-        )
-        if ego_past_is_heading:
-            inputs["ego_agent_past"][..., 2] = heading_transform(
-                inputs["ego_agent_past"][..., 2], transform_matrix
+        if transform_ego_history:
+            inputs["ego_agent_past"][..., :2] = vector_transform(
+                inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
             )
-        else:
-            inputs["ego_agent_past"][..., 2:4] = vector_transform(
-                inputs["ego_agent_past"][..., 2:4], transform_matrix
-            )
-        if ego_past_mask is not None:
-            inputs["ego_agent_past"].masked_fill_(ego_past_mask.unsqueeze(-1), 0.0)
+            if ego_past_is_heading:
+                inputs["ego_agent_past"][..., 2] = heading_transform(
+                    inputs["ego_agent_past"][..., 2], transform_matrix
+                )
+            else:
+                inputs["ego_agent_past"][..., 2:4] = vector_transform(
+                    inputs["ego_agent_past"][..., 2:4], transform_matrix
+                )
+            if ego_past_mask is not None:
+                inputs["ego_agent_past"].masked_fill_(ego_past_mask.unsqueeze(-1), 0.0)
 
         if self._use_smoothing_future_trajectory:
             smoothing_ego_past = inputs["ego_agent_past"]
@@ -532,14 +568,19 @@ class StatePerturbation:
             ego_future_heading = ego_future
 
         P = self.num_refine
-        if P >= ego_future.shape[1]:
+        if ego_future.shape[1] <= P:
             raise ValueError(
                 f"num_refine ({P}) must be smaller than the future horizon ({ego_future.shape[1]})"
             )
         dt = self.time_interval
         B = aug_current_state.shape[0]
-        M_t = self.t_matrix.unsqueeze(0).expand(B, -1, -1)
-        A = self.coeff_matrix.unsqueeze(0).expand(B, -1, -1)
+        # The training path is float32, but this utility is also used directly by
+        # diagnostics and exporters. Adapt the cached constants rather than letting
+        # a valid double/other-dtype caller fail at matmul with a mixed-dtype error.
+        M_t = self.t_matrix.to(device=aug_current_state.device, dtype=aug_current_state.dtype)
+        M_t = M_t.unsqueeze(0).expand(B, -1, -1)
+        A = self.coeff_matrix.to(device=aug_current_state.device, dtype=aug_current_state.dtype)
+        A = A.unsqueeze(0).expand(B, -1, -1)
 
         # state: [x, y, heading, velocity, acceleration, yaw_rate]
 

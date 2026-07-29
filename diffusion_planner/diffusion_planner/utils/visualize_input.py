@@ -9,24 +9,30 @@ import numpy as np
 import torch
 from matplotlib.collections import LineCollection
 
-from diffusion_planner.dimensions import *
+from diffusion_planner.dimensions import (
+    TRAFFIC_LIGHT,
+    TRAFFIC_LIGHT_GREEN,
+    TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT,
+    TRAFFIC_LIGHT_RED,
+    TRAFFIC_LIGHT_WHITE,
+    TRAFFIC_LIGHT_YELLOW,
+)
 
 
 def get_traffic_light_color(traffic_light):
     """Get traffic light color from traffic light array."""
     if traffic_light[TRAFFIC_LIGHT_GREEN - TRAFFIC_LIGHT] == 1:
         return "green"
-    elif traffic_light[TRAFFIC_LIGHT_YELLOW - TRAFFIC_LIGHT] == 1:
+    if traffic_light[TRAFFIC_LIGHT_YELLOW - TRAFFIC_LIGHT] == 1:
         return "yellow"
-    elif traffic_light[TRAFFIC_LIGHT_RED - TRAFFIC_LIGHT] == 1:
+    if traffic_light[TRAFFIC_LIGHT_RED - TRAFFIC_LIGHT] == 1:
         return "red"
-    elif traffic_light[TRAFFIC_LIGHT_WHITE - TRAFFIC_LIGHT] == 1:
+    if traffic_light[TRAFFIC_LIGHT_WHITE - TRAFFIC_LIGHT] == 1:
         return "purple"
-    elif traffic_light[TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT - TRAFFIC_LIGHT] == 1:
+    if traffic_light[TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT - TRAFFIC_LIGHT] == 1:
         return "black"
-    else:
-        return "purple"
-        # raise ValueError(f"Unknown traffic light state: {traffic_light}")
+    return "purple"
+    # raise ValueError(f"Unknown traffic light state: {traffic_light}")
 
 
 _RAW_TURN_INDICATOR_LABELS = {

@@ -989,7 +989,7 @@ def dac_from_road_borders(
     if mls.is_empty:
         return 1.0
 
-    T = poses.shape[0]
+    poses.shape[0]
     heading = np.arctan2(poses[:, 3], poses[:, 2])
     cx = poses[:, 0] + center_offset * np.cos(heading)
     cy = poses[:, 1] + center_offset * np.sin(heading)

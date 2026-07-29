@@ -9,7 +9,7 @@ from torch.distributed import init_process_group
 
 
 def ddp_setup_universal(verbose=False, args=None):
-    if args.ddp == False:
+    if not args.ddp:
         print(f"DDP disabled; using {args.device}")
         return 0, 0, 1
 
@@ -28,7 +28,7 @@ def ddp_setup_universal(verbose=False, args=None):
         gpu = rank % torch.cuda.device_count()
         world_size = int(os.environ["SLURM_NTASKS"])
         node_list = os.environ["SLURM_NODELIST"]
-        num_gpus = torch.cuda.device_count()
+        torch.cuda.device_count()
         addr = subprocess.getoutput(f"scontrol show hostname {node_list} | head -n1")
         os.environ["MASTER_PORT"] = str(args.port)
         os.environ["MASTER_ADDR"] = addr
@@ -95,16 +95,13 @@ def get_rank():
 def get_model(model, use_ddp):
     if use_ddp:
         return model.module
-    else:
-        return model
+    return model
 
 
 def is_dist_avail_and_initialized():
     if not dist.is_available():
         return False
-    if not dist.is_initialized():
-        return False
-    return True
+    return dist.is_initialized()
 
 
 def cleanup():
@@ -151,10 +148,14 @@ def reduce_and_average_losses(loss_dict, device):
     if not loss_dict and (not dist.is_available() or not dist.is_initialized()):
         return loss_dict
     world_size = dist.get_world_size()
-    keys = list(loss_dict)
-    # Packing relies on identical key order on every rank. Check that contract
-    # before the all-reduce so a rank-divergent diagnostic cannot silently pair
-    # unrelated scalars. This function runs once per epoch, not in the step hot path.
+    # Sort rather than trust insertion order: packing is positional, and a caller
+    # that builds its dict by iterating a set gets a different order on every rank
+    # because torchrun randomizes PYTHONHASHSEED per process. Sorting makes the
+    # check below mean what it says -- a real difference in *which* keys exist.
+    keys = sorted(loss_dict)
+    # Packing relies on identical keys on every rank. Check that contract before the
+    # all-reduce so a rank-divergent diagnostic cannot silently pair unrelated
+    # scalars. This function runs once per epoch, not in the step hot path.
     key_digest = int.from_bytes(
         hashlib.sha256("\0".join(keys).encode("utf-8")).digest()[:8],
         byteorder="little",
@@ -189,9 +190,11 @@ def reduce_scalar_metrics(metric_dict, device, op):
     """Reduce detached scalar diagnostics with the requested distributed operation."""
     if not metric_dict and (not dist.is_available() or not dist.is_initialized()):
         return {}
-    keys = list(metric_dict)
-    # Packing relies on identical key order on every rank. Validate the contract
-    # before reducing so a rank-divergent diagnostic cannot silently pair values.
+    keys = sorted(metric_dict)
+    # Sorted for the same reason as `reduce_and_average_losses`: packing is
+    # positional and insertion order is not a rank-stable property. Validate the
+    # remaining contract before reducing so a rank-divergent diagnostic cannot
+    # silently pair values.
     key_digest = int.from_bytes(
         hashlib.sha256("\0".join(keys).encode("utf-8")).digest()[:8],
         byteorder="little",

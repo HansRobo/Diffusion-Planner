@@ -21,7 +21,8 @@ The only encoder implementation in this branch integrates Tier IV PRs
 [#228](https://github.com/tier4/Diffusion-Planner/pull/228). Line-string/polygon geometry
 is mixed as `[x, y, dx, dy]`, while the categorical polygon/line type is injected after
 pooling; valid-point masking and the local robust heading fallback remain enabled. Turn-
-indicator history is categorical one-hot. These changes alter encoder parameter shapes and
+indicator history is retained only as a three-state label for the isolated post-policy head;
+it is not an encoder input. These changes alter encoder parameter shapes and
 prevent old checkpoints from loading. Start the new ego-only Base from scratch; there is no
 legacy encoder mode in this branch.
 
@@ -55,6 +56,7 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_p
   --hybrid_loss_window 10 \
   --turn_indicator_generated_loss_weight 1.0 \
   --turn_indicator_expert_loss_weight 1.0 \
+  --supervised_training_stage policy \
   --diffusion_sample_steps 6 \
   --enable_epdms_eval True \
   --use_wandb True \
@@ -88,6 +90,7 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_p
   --use_velocity_representation True \
   --planning_hybrid_loss 0.01 \
   --hybrid_loss_window 10 \
+  --supervised_training_stage policy \
   --diffusion_sample_steps 6 \
   --enable_epdms_eval True \
   --use_wandb True \
@@ -176,7 +179,7 @@ Important semantics:
 - Reward uses SAT collision, continuous TTC, THW, static/stopped-agent/road-border occupancy clearance, leader-conditioned following, lane-center scoring, lane-change/off-lane masking, rear-end attenuation, and an expert-gated red stop-line constraint. Logged expert motion determines leader identity while each candidate still determines its gap, speed match, and comfort; this prevents a lateral candidate from earning a neutral following score merely by leaving the leader-association corridor. Road-border occupancy uses exact rectangle-to-segment clearance rather than perimeter-point sampling. Red-light scoring uses continuous front-bumper/stop-line intersections and is active only when the logged expert does not cross the associated stop line.
 - Candidate groups with identical or non-finite rewards are discarded before the hybrid loss.
 - `--predicted_neighbor_num` must be `0`. The temporal HDP action head predicts only ego while the encoder and safety reward still consume all logged neighbors.
-- `--align_legacy_neighbor_futures true` fixes the pre-`55eff4f` neighbor-future `t=0` duplication inside each DataLoader worker. Short tracks are identified from their padded tail; rare full-length horizon-boundary cases are shifted only after their second point is verified against the next logged scene, so a legitimate repeated pose is preserved. It never rewrites or migrates shared NPZ files. Disable it for regenerated data.
+- New corpora generated after converter commit `55eff4f` already store neighbor future index 0 at `t+0.1 s`; the default is therefore `--align_legacy_neighbor_futures false`. The legacy correction remains an explicit opt-in for pre-`55eff4f` manifests and is applied only in worker memory; it never rewrites shared NPZ files.
 - `--export_onnx_on_save` defaults to `false` for SFT and RL so synchronous CPU export does not leave the other DDP ranks idle. Use the standalone converter for a strict release export.
 - Six-sample minADE/minFDE is an open-loop diagnostic. EPDMS and pseudo-closed-loop metrics drive safety-oriented model selection; final acceptance requires real-vehicle A/B evaluation.
 - Legacy RL alternatives have been removed from this branch; HDP-RL has a single supported reward-weighted hybrid path.

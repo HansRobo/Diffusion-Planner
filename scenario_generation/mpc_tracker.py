@@ -505,9 +505,8 @@ def postprocess_reference(
     # Step 3: force-stop
     force_stop = False
     for i in range(1, N):
-        if not force_stop:
-            if smoothed[i - 1] > stop_threshold and smoothed[i] <= stop_threshold:
-                force_stop = True
+        if not force_stop and smoothed[i - 1] > stop_threshold and smoothed[i] <= stop_threshold:
+            force_stop = True
         if force_stop:
             ref[i, :2] = ref[i - 1, :2]
             ref[i, 2] = ref[i - 1, 2]

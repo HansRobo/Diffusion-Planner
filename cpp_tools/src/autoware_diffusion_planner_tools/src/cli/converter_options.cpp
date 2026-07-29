@@ -16,6 +16,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include <cmath>
 #include <filesystem>
 #include <string>
 
@@ -72,6 +73,12 @@ void ConverterOptions::add_converter_options(CLI::App & app)
     "--offlane_time_stride", offlane_time_stride,
     "Time stride used when checking the off-lane filter.");
   app.add_option(
+    "--red_light_run_radius_m", red_light_run_radius_m,
+    "Maximum distance from a stop-line crossing to an aligned red route-lane entry.");
+  app.add_option(
+    "--red_light_run_heading_tol_deg", red_light_run_heading_tol_deg,
+    "Maximum heading difference when matching the ego's red route lane.");
+  app.add_option(
     "--write_skipped_npz", write_skipped_npz,
     "Also write npz files for skipped frames when non-zero. "
     "Intended for inspection.");
@@ -117,6 +124,10 @@ ConverterOptions ConverterOptions::default_converter_options()
   options.offlane_max_score = 6.0f;
   options.offlane_time_stride = 1;
 
+  // Match the validated PR #204 geometry-filter defaults.
+  options.red_light_run_radius_m = 12.0f;
+  options.red_light_run_heading_tol_deg = 45.0f;
+
   // Inspection-only: production keeps this off so skipped frames write no npz.
   options.write_skipped_npz = false;
   // Full conversion by default (write npz); --sidecar_only flips to sidecar-only output.
@@ -143,6 +154,14 @@ std::optional<std::string> validate_options(const ConverterOptions & opts)
   if (opts.pack_sequence && opts.sidecar_only) {
     return "--pack_sequence and --sidecar_only are mutually exclusive "
            "(pack_sequence writes one npz per sequence; sidecar_only writes no npz).";
+  }
+  if (!std::isfinite(opts.red_light_run_radius_m) || opts.red_light_run_radius_m < 0.0f) {
+    return "red_light_run_radius_m must be finite and non-negative.";
+  }
+  if (
+    !std::isfinite(opts.red_light_run_heading_tol_deg) ||
+    opts.red_light_run_heading_tol_deg < 0.0f) {
+    return "red_light_run_heading_tol_deg must be finite and non-negative.";
   }
   return std::nullopt;
 }

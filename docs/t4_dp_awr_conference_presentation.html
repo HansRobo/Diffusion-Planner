@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Original DP + AWR on T4 · Conference Presentation</title>
+  <style>
+    :root {
+      --bg: #070b12;
+      --panel: #101925;
+      --panel-2: #162334;
+      --paper: #f6f8fb;
+      --ink: #102033;
+      --muted: #64748b;
+      --line: #d8e0ea;
+      --blue: #3b82f6;
+      --cyan: #22d3ee;
+      --green: #22c55e;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --violet: #a78bfa;
+      --shadow: 0 28px 80px rgba(0,0,0,.32);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    body {
+      color: #e5edf7;
+      background: radial-gradient(circle at 12% 8%, #172944 0, var(--bg) 36%), var(--bg);
+      font-family: Arial, "Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+    }
+    .deck { width: 100%; height: 100%; display: grid; place-items: center; padding: 38px 24px 52px; }
+    .slide {
+      display: none; position: relative; width: min(1280px, 96vw); aspect-ratio: 16 / 9;
+      max-height: calc(100vh - 92px); padding: 46px 58px 42px; overflow: hidden;
+      color: var(--ink); background: var(--paper); border: 1px solid rgba(255,255,255,.22);
+      border-radius: 18px; box-shadow: var(--shadow);
+    }
+    .slide.active { display: flex; flex-direction: column; }
+    .slide.dark { color: #edf5ff; background: linear-gradient(135deg, #0d1a2a, #11253d 62%, #102a43); }
+    .slide.dark:after { content: ""; position: absolute; width: 460px; height: 460px; right: -190px; top: -205px; border-radius: 50%; border: 1px solid rgba(255,255,255,.12); box-shadow: 0 0 0 34px rgba(255,255,255,.025), 0 0 0 68px rgba(255,255,255,.025); pointer-events:none; }
+    .kicker { color: #6b7f96; letter-spacing: .13em; text-transform: uppercase; font-size: 11px; font-weight: 800; margin-bottom: 9px; }
+    .dark .kicker { color: #8eb5dd; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: clamp(34px, 4.35vw, 66px); line-height: .99; letter-spacing: -.045em; max-width: 760px; margin: 0 0 20px; }
+    h2 { font-size: clamp(26px, 3vw, 43px); line-height: 1.04; letter-spacing: -.035em; margin: 0 0 10px; }
+    h3 { font-size: 19px; line-height: 1.14; margin: 0 0 7px; }
+    p { font-size: 15px; line-height: 1.46; color: #34465c; }
+    .dark p { color: #c8d7e8; }
+    .subtitle { font-size: 20px; line-height: 1.38; max-width: 720px; color: #c7d8ea; }
+    .small { font-size: 11px; line-height: 1.35; color: var(--muted); }
+    .dark .small { color: #9db3ca; }
+    .micro { font-size: 10px; line-height: 1.32; color: #708198; }
+    .topline { display: flex; justify-content: space-between; gap: 18px; align-items: start; position: relative; z-index: 1; }
+    .topline .section { font-size: 12px; font-weight: 800; letter-spacing: .08em; color: #58718e; text-transform: uppercase; }
+    .dark .topline .section { color: #8db2d7; }
+    .rule { height: 1px; background: var(--line); margin: 3px 0 18px; }
+    .dark .rule { background: rgba(255,255,255,.15); }
+    .grid { display: grid; gap: 16px; }
+    .g2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .g3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+    .g4 { grid-template-columns: repeat(4, minmax(0,1fr)); }
+    .grow { flex: 1; min-height: 0; }
+    .card { background: white; border: 1px solid var(--line); border-radius: 13px; padding: 17px 18px; }
+    .dark .card { background: rgba(255,255,255,.075); border-color: rgba(255,255,255,.14); }
+    .card p { margin-bottom: 0; }
+    .accent { border-left: 4px solid var(--blue); }
+    .accent.green { border-left-color: var(--green); }
+    .accent.amber { border-left-color: var(--amber); }
+    .accent.red { border-left-color: var(--red); }
+    .accent.violet { border-left-color: var(--violet); }
+    .pill { display: inline-block; border-radius: 999px; padding: 4px 9px; font-size: 11px; line-height: 1; font-weight: 800; background: #e9f2ff; color: #1d4ed8; margin: 0 4px 5px 0; }
+    .pill.green { background: #eafaf0; color: #15803d; }
+    .pill.amber { background: #fff7df; color: #a16207; }
+    .pill.red { background: #fff0f0; color: #b91c1c; }
+    .pill.violet { background: #f3efff; color: #6d28d9; }
+    .dark .pill { background: rgba(59,130,246,.18); color: #b9d7ff; }
+    .dark .pill.green { background: rgba(34,197,94,.16); color: #b9f6ca; }
+    .dark .pill.amber { background: rgba(245,158,11,.16); color: #ffe1a1; }
+    .dark .pill.red { background: rgba(239,68,68,.16); color: #ffc1c1; }
+    .stat { padding: 16px 17px; background: #fff; border: 1px solid var(--line); border-radius: 13px; }
+    .dark .stat { background: rgba(0,0,0,.18); border-color: rgba(255,255,255,.12); }
+    .stat .v { font-size: 31px; line-height: 1; font-weight: 850; letter-spacing: -.04em; margin: 5px 0 6px; }
+    .stat .l { font-weight: 800; font-size: 12px; color: #40536a; }
+    .dark .stat .l { color: #c3d6e9; }
+    .stat .n { font-size: 11px; line-height: 1.28; color: var(--muted); }
+    .dark .stat .n { color: #9db3ca; }
+    .roadmap { margin-top: 15px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,.14); position: relative; z-index: 1; }
+    .roadmap-title { margin-bottom: 7px; color: #9db3ca; font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    .roadmap-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; }
+    .roadmap-step { display: grid; grid-template-columns: 24px 1fr; gap: 8px; align-items: center; min-height: 42px; padding: 7px 9px; background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.12); border-radius: 9px; }
+    .roadmap-step .rn { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; color: #07111d; background: var(--cyan); font-size: 10px; font-weight: 900; }
+    .roadmap-step:nth-child(2) .rn { background: var(--green); }
+    .roadmap-step:nth-child(3) .rn { background: var(--amber); }
+    .roadmap-step:nth-child(4) .rn { background: var(--violet); }
+    .roadmap-step b { display: block; color: #eef7ff; font-size: 11px; line-height: 1.15; }
+    .roadmap-step span { display: block; margin-top: 2px; color: #9db3ca; font-size: 9px; line-height: 1.18; }
+    .chapter-label { margin-left: 10px; color: #9db3ca; }
+    .hero-layout { display: grid; grid-template-columns: 1.04fr .96fr; gap: 34px; align-items: center; flex: 1; min-height: 0; position: relative; z-index: 1; }
+    .hero-img { width: 100%; max-height: 480px; object-fit: contain; border-radius: 12px; background: #fff; box-shadow: 0 16px 38px rgba(0,0,0,.26); }
+    .badge { display: inline-flex; padding: 6px 10px; border: 1px solid rgba(34,211,238,.38); color: #a9f3ff; background: rgba(34,211,238,.11); border-radius: 999px; font-size: 12px; font-weight: 800; margin-bottom: 18px; }
+    .bottom { position: absolute; bottom: 16px; left: 58px; right: 58px; display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #728298; z-index: 2; }
+    .dark .bottom { color: #8ea5bd; }
+    .bottom a { color: inherit; }
+    .flow { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 11px; align-items: stretch; margin-top: 20px; }
+    .flow .node { position: relative; padding: 17px 14px; border-radius: 13px; background: #fff; border: 1px solid var(--line); min-height: 120px; }
+    .flow .node:not(:last-child):after { content: "→"; position: absolute; right: -17px; top: 42px; color: var(--blue); font-size: 24px; font-weight: 800; z-index: 2; }
+    .flow .n { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; background: var(--ink); color: #fff; font-size: 13px; font-weight: 800; margin-bottom: 11px; }
+    .flow h3 { font-size: 15px; }
+    .flow p { font-size: 11px; line-height: 1.32; margin: 0; }
+    .quote { border-left: 4px solid var(--cyan); padding: 12px 17px; background: #eafaff; color: #17324d; border-radius: 0 11px 11px 0; font-size: 16px; line-height: 1.38; }
+    .dark .quote { background: rgba(34,211,238,.09); color: #ddfaff; }
+    .figure-shell { height: 100%; min-height: 0; background: #fff; border: 1px solid #ccd7e5; border-radius: 12px; padding: 8px; overflow: hidden; }
+    .figure-shell img { display: block; width: 100%; height: 100%; object-fit: contain; border-radius: 7px; }
+    .scene-layout { display: grid; grid-template-columns: minmax(0,1.62fr) minmax(0,.78fr); gap: 17px; flex: 1; min-height: 0; }
+    .scene-side { display: flex; flex-direction: column; gap: 11px; min-height: 0; }
+    .scene-side .figure-shell { flex: 1; min-height: 0; }
+    .scene-side .card { flex: none; }
+    .scene-side p { font-size: 12px; margin: 0; }
+    .gif-label { font-size: 10px; color: var(--muted); margin: 0 4px 4px; font-weight: 700; }
+    .compare { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; min-height: 0; flex: 1; }
+    .compare > div { display: flex; flex-direction: column; min-height: 0; }
+    .compare .figure-shell { flex: 1; }
+    .multimodality-layout { display: grid; grid-template-columns: minmax(0,1.55fr) minmax(250px,.75fr); gap: 15px; flex: 1; min-height: 0; }
+    .multimodality-layout > .figure-shell { min-height: 0; }
+    .multi-evidence { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+    .multi-evidence .figure-shell { flex: 1; min-height: 185px; }
+    .multi-evidence .card { flex: none; }
+    .multi-evidence .card p { font-size: 12px; line-height: 1.35; }
+    .multi-evidence .note { font-size: 11px; }
+    .metric-map { display: grid; grid-template-columns: 1.05fr 1fr 1fr; gap: 14px; flex: 1; min-height: 0; }
+    .metric-map .card { min-height: 0; }
+    .metric-map h3 { font-size: 16px; }
+    .metric-map ul { margin: 8px 0 0 17px; padding: 0; }
+    .metric-map li { font-size: 12px; line-height: 1.34; margin: 6px 0; }
+    .two-lane { display: grid; grid-template-columns: 1fr 1fr; gap: 17px; flex: 1; min-height: 0; }
+    .lane { border-radius: 15px; padding: 20px; border: 1px solid var(--line); background: #fff; position: relative; overflow: hidden; }
+    .lane:before { content: ""; position:absolute; left:0; top:0; bottom:0; width:6px; background: var(--blue); }
+    .lane.override:before { background: var(--violet); }
+    .lane h3 { margin-left: 5px; }
+    .lane p, .lane li { font-size: 13px; }
+    .lane ol { margin: 13px 0 0 26px; padding: 0; }
+    .lane li { margin: 8px 0; line-height: 1.34; }
+    .formula { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #1d4ed8; background: #edf4ff; padding: 10px 12px; border-radius: 8px; font-size: 13px; margin: 9px 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
+    th, td { padding: 8px 9px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: #edf3f8; color: #1f334a; font-weight: 800; }
+    tr:last-child td { border-bottom: 0; }
+    .ok { color: #15803d; font-weight: 800; }
+    .hold { color: #b45309; font-weight: 800; }
+    .no { color: #b91c1c; font-weight: 800; }
+    .note { font-size: 12px; line-height: 1.38; padding: 11px 13px; color: #52657b; background: #f2f6fa; border-radius: 10px; }
+    .dark .note { color: #bdd0e3; background: rgba(255,255,255,.07); }
+    .controls { position: fixed; left: 24px; right: 24px; bottom: 14px; display: flex; justify-content: space-between; align-items: center; color: #93a4b9; font-size: 11px; z-index: 20; }
+    .controls button { color: #cfdeee; background: rgba(15,27,42,.88); border: 1px solid rgba(255,255,255,.18); border-radius: 7px; padding: 6px 9px; cursor: pointer; }
+    .controls button:hover { background: #1d3553; }
+    .progress { position: fixed; bottom: 0; left: 0; height: 3px; width: 0; background: linear-gradient(90deg, var(--cyan), var(--blue)); z-index: 30; transition: width .25s ease; }
+    .notes { display: none; position: fixed; left: 20px; top: 20px; max-width: 420px; padding: 14px 16px; color: #dbeafe; background: rgba(7,11,18,.94); border: 1px solid rgba(255,255,255,.2); border-radius: 10px; z-index: 25; font-size: 12px; line-height: 1.4; }
+    body.notes-on .notes { display: block; }
+    @media (max-width: 980px) {
+      html, body { overflow: auto; }
+      .deck { display: block; padding: 14px; }
+      .slide, .slide.active { display: flex; width: 100%; max-height: none; min-height: 640px; aspect-ratio: auto; margin: 0 0 16px; border-radius: 12px; overflow: visible; }
+      .flow, .metric-map, .two-lane, .scene-layout, .compare, .hero-layout, .multimodality-layout { grid-template-columns: 1fr; }
+      .roadmap-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .flow .node:not(:last-child):after { display: none; }
+      .figure-shell { min-height: 300px; }
+      .controls, .progress, .notes { display: none; }
+    }
+    @media print {
+      html, body { overflow: visible; background: white; }
+      .deck { display: block; padding: 0; }
+      .slide, .slide.active { display: flex; width: 100vw; height: 56.25vw; max-height: none; aspect-ratio: 16/9; border: 0; border-radius: 0; box-shadow: none; page-break-after: always; }
+      .controls, .progress, .notes { display: none !important; }
+    }
+  </style>
+</head>
+<body>
+<main class="deck">
+  <section class="slide dark active" data-chapter="A · understand" data-notes="开场先说清楚边界：目标是让一个可直接替换原模型的普通 DP checkpoint 变好；HDP 是已经证明有效的训练生命周期参考，不是要把模型换成 HDP。">
+    <div class="hero-layout">
+      <div>
+        <div class="badge">CONFERENCE MATERIAL · T4 POST-TRAINING</div>
+        <div class="kicker">Original Diffusion Planner × HDP-style AWR</div>
+        <h1>让原始 DP<br>学会从自己的错误里变好</h1>
+        <p class="subtitle">AWR post-training proposal for the full Tier-IV dataset — with real scene evidence, OBB geometry, candidate diversity, and an honest promotion gate.</p>
+        <div style="margin-top:26px"><span class="pill green">原始 DP 仍是部署模型</span><span class="pill">8×H100 full run</span><span class="pill amber">full result pending</span></div>
+        <p class="small" style="margin-top:23px">2026-07-16 · prepared from local code, full-data manifests, paper TeX, reference implementations, and T4 NPZ scenes</p>
+      </div>
+      <div><img class="hero-img" src="t4_conference_assets/awr_colleague_hdp_aug/scene_001.png" alt="Original DP AWR moving-neighbor scene with real route, road borders, neighbor oriented boxes, sampled trajectories and endpoint inset"></div>
+    </div>
+    <div class="bottom"><span>Original DP + AWR on T4</span><span>01 / 15</span></div>
+  </section>
+
+  <section class="slide dark" data-chapter="A · understand" data-notes="这一页只讲三件会议上最重要的事：方案已经按全量数据正式启动；场景图证明评分器和候选不是抽象统计；最终能否替换模型必须等待 held-out before/after。">
+    <div class="topline"><div><div class="kicker">01 · executive summary</div><h2>三句话先把提案讲完</h2></div><div class="section">what is proven / what is not</div></div>
+    <div class="rule"></div>
+    <div class="grid g3 grow" style="align-content:center">
+      <div class="card accent green"><span class="pill green">目标</span><h3>普通 DP 直接 post-train</h3><p>保留原始 DP checkpoint ABI 和 decoder-only 结构。AWR 只改变训练中“哪些完整轨迹更值得学”，不换模型。</p></div>
+      <div class="card accent"><span class="pill">方法</span><h3>忠实吸收 HDP 的闭环</h3><p>同场景采样 K 条候选 → OBB/route/reward 评分 → 组内权重 → plain diffusion regression → replay / refresh / EMA。</p></div>
+      <div class="card accent amber"><span class="pill amber">证据纪律</span><h3>目前不提前宣布提升</h3><p>全量 4.578M scenes 的 8 卡 run 仍在进行。训练 reward 不是成功证明；只有固定 valid、分层场景和 source-relative gates 通过才可替换。</p></div>
+    </div>
+    <div class="grid g4" style="margin-top:16px">
+      <div class="stat"><div class="l">filtered train scenes</div><div class="v">4.578M</div><div class="n">is_skipped 已应用</div></div>
+      <div class="stat"><div class="l">valid scenes</div><div class="v">46,068</div><div class="n">固定列表与 provenance</div></div>
+      <div class="stat"><div class="l">baseline reward</div><div class="v">0.9255</div><div class="n">2048 valid deterministic subset</div></div>
+      <div class="stat"><div class="l">promotion unit</div><div class="v">1 ckpt</div><div class="n">不是一组临时场景补丁</div></div>
+    </div>
+    <div class="roadmap">
+      <div class="roadmap-title">the talk follows one path</div>
+      <div class="roadmap-grid">
+        <div class="roadmap-step"><div class="rn">1</div><div><b>Understand</b><span>scene · reward · AWR</span></div></div>
+        <div class="roadmap-step"><div class="rn">2</div><div><b>Reproduce HDP</b><span>lifecycle on ordinary DP</span></div></div>
+        <div class="roadmap-step"><div class="rn">3</div><div><b>See the scenes</b><span>bbox · GIF · multimodality</span></div></div>
+        <div class="roadmap-step"><div class="rn">4</div><div><b>Make the decision</b><span>AWR + R2LPL + gate</span></div></div>
+      </div>
+    </div>
+    <div class="bottom"><span>结论先行：全量训练已经开始，最终结论尚待验证</span><span>02 / 15</span></div>
+  </section>
+
+  <section class="slide" data-chapter="A · understand" data-notes="对零基础读者用一道驾驶题的类比：scene 是题目，DP 是答题者，trajectory 是完整答案，reward 是考官，AWR 是让高分答案在下一次更容易出现。">
+    <div class="topline"><div><div class="kicker">02 · from zero</div><h2>先不用懂 RL：它其实是一道驾驶考试</h2></div><div class="section">scene → candidates → score → learn</div></div>
+    <div class="rule"></div>
+    <p class="lead" style="font-size:18px;max-width:900px">同一个道路场景，模型不只写一份答案，而是写出 K 份未来路线。评分器逐条检查“撞没撞、越没越界、是不是沿正确路线、是否舒适”，AWR 让高分答案获得更大的训练权重。</p>
+    <div class="flow grow">
+      <div class="node"><div class="n">1</div><h3>Scene · 题目</h3><p>地图、route、ego 历史、红灯、记录邻车及其未来。</p></div>
+      <div class="node"><div class="n">2</div><h3>DP · 答题者</h3><p>原始 diffusion planner 从噪声生成完整未来轨迹。</p></div>
+      <div class="node"><div class="n">3</div><h3>K 条答案</h3><p>同一题的多个 stochastic plans：走、停、让、转弯等可能性。</p></div>
+      <div class="node"><div class="n">4</div><h3>Evaluator · 考官</h3><p>真实 OBB、道路边界、TTC/THW、progress、lane、comfort。</p></div>
+      <div class="node"><div class="n">5</div><h3>AWR · 复习</h3><p>高分答案的 diffusion loss 权重大；低分答案不被强行模仿。</p></div>
+    </div>
+    <div class="quote">关键限制：如果 K 条答案全都撞车，AWR 没有安全答案可以学习。那不是把 β 调大就能解决的，而是 candidate coverage failure，需要 repair / retrieval 或更强的探索。</div>
+    <div class="bottom"><span>普通 DP 兼容：输入、checkpoint、输出接口都不变</span><span>03 / 15</span></div>
+  </section>
+
+  <section class="slide dark" data-chapter="B · reproduce HDP" data-notes="这页介绍原版 HDP RL，而不是我们先前的实现。强调它不是 PPO critic loop，而是 trajectory-level reward-weighted regression；它依赖同场景多候选、组内标准化、EMA 和 replay。">
+    <div class="topline"><div><div class="kicker">03 · original HDP RL</div><h2>原版 HDP 的 RL：完整轨迹是 action</h2></div><div class="section">faithful reference</div></div>
+    <div class="rule"></div>
+    <div class="grid g2 grow">
+      <div>
+        <div class="card accent green" style="margin-bottom:13px"><h3>它到底优化什么？</h3><p>HDP 对同一 scene 采样一组完整 plans，使用 PDM-style safety / progress / lane / comfort evaluator 排序，然后做 reward-weighted diffusion regression。目标直觉可以写成：</p><div class="formula">π_new(τ | s) ∝ π_old(τ | s) · exp(β · R(s,τ))</div><p class="small">更新靠近旧策略，但更偏向高 reward 的整条轨迹。</p></div>
+        <div class="card accent amber"><h3>为什么是组内比较？</h3><p>直路和复杂路口的 raw reward 范围不同。HDP 在同一 scene 的 K 条候选内做 mean/std normalization，再变成 AWR weights；常数 reward group 没有方向，应被记录/跳过。</p></div>
+      </div>
+      <div class="grid g2" style="align-content:center">
+        <div class="stat"><div class="l">sample</div><div class="v">K</div><div class="n">同一场景的完整未来轨迹</div></div>
+        <div class="stat"><div class="l">score</div><div class="v">R(τ)</div><div class="n">安全优先，行为质量其次</div></div>
+        <div class="stat"><div class="l">update</div><div class="v">AWR</div><div class="n">加权 diffusion loss，不需要 PPO critic</div></div>
+        <div class="stat"><div class="l">stability</div><div class="v">EMA</div><div class="n">慢速更新下一轮采样策略</div></div>
+        <div class="card" style="grid-column:1/-1"><h3>HDP 已证明有效的生命周期</h3><p>全量/分批 rollout mining → 记录 scene/group/weights → replay buffer 混合旧样本 → 周期性 refresh 发现新错误 → EMA checkpoint 继续采样。我们复现的是这个 lifecycle；当前训练目标仍是普通 DP 的 plain MSE。</p></div>
+      </div>
+    </div>
+    <div class="bottom"><span>HDP reference: local paper TeX + open-source RL agent</span><span>04 / 15</span></div>
+  </section>
+
+  <section class="slide" data-chapter="B · reproduce HDP" data-notes="区分‘方法复现’和‘模型复现’：我们没有把 DP 换成 HDP，也没有接入 HDP 专属 velocity/waypoint head。把忠实的部分和必要适配的部分说清楚。">
+    <div class="topline"><div><div class="kicker">04 · target model</div><h2>我们吸收 HDP，但训练对象仍是原始 DP</h2></div><div class="section">same model ABI · new post-training</div></div>
+    <div class="rule"></div>
+    <div class="two-lane grow">
+      <div class="lane"><span class="pill">保持不变</span><h3>Original DP contract</h3><ul><li>原始 DP checkpoint 与 <code>args.json</code></li><li>普通 DP 的 4-channel x-start diffusion interface</li><li>decoder-only 可训练范围；最终是一个可替换 checkpoint</li><li>model 输入保留旧 T4 的 3-channel neighbor future</li></ul></div>
+      <div class="lane override"><span class="pill violet">吸收 HDP</span><h3>AWR lifecycle</h3><ul><li>同 scene 采样 K 条完整轨迹，禁止 guidance 伪造候选</li><li>reward-weighted regression + group normalization</li><li>disk replay、每 10 个 epoch refresh、EMA 0.999</li><li>HDP trajectory augmentation 作为正式探索分支；所有候选仍由同一 reward 打分</li></ul></div>
+    </div>
+    <div class="grid g3" style="margin-top:16px"><div class="card accent"><h3>为什么 plain MSE</h3><p>HDP 的 hybrid waypoint/velocity head 属于 HDP 架构；普通 DP 没有这些输出，不能把论文 loss 名称硬套进来。</p></div><div class="card accent green"><h3>为什么 replay</h3><p>全量 4.5M scenes 不应只在一个 streaming pass 后丢掉；replay 让旧修复继续约束模型，减少遗忘。</p></div><div class="card accent amber"><h3>为什么不先 PPO</h3><p>当前是 logged-neighbor replay、trajectory-level reward；AWR 更短、更稳，也更忠实于 HDP 已验证路径。</p></div></div>
+    <div class="bottom"><span>方法参考 HDP；部署对象是普通 Diffusion Planner</span><span>05 / 15</span></div>
+  </section>
+
+  <section class="slide dark" data-chapter="B · reproduce HDP" data-notes="数据契约是这次实验必须讲清楚的地方：is_skipped 已过滤；训练/valid 数量；旧数据 neighbor future 的 +1 对齐只对当前旧档案使用；8 GPU 和 K10。">
+    <div class="topline"><div><div class="kicker">05 · full-data experiment contract</div><h2>不是小样本 demo：正式实验使用全量过滤数据</h2></div><div class="section">reproducible run identity</div></div>
+    <div class="rule"></div>
+    <div class="grid g4" style="margin:5px 0 17px"><div class="stat"><div class="l">train</div><div class="v">4,578,036</div><div class="n">full sequence scenes after is_skipped filter</div></div><div class="stat"><div class="l">valid</div><div class="v">46,068</div><div class="n">balanced list, filter applied</div></div><div class="stat"><div class="l">hardware</div><div class="v">8×H100</div><div class="n">BF16 · TF32 · decoder compile</div></div><div class="stat"><div class="l">group</div><div class="v">K=10</div><div class="n">5 denoising steps · noise 0.5</div></div></div>
+    <table style="background:rgba(255,255,255,.97)"><thead><tr><th>契约</th><th>正式设置</th><th>为什么必须写在报告里</th></tr></thead><tbody><tr><td><strong>过滤</strong></td><td><code>is_skipped</code> applied; filter manifest recorded</td><td>脏序列不能变成 RL target；数量和 hash 可追溯。</td></tr><tr><td><strong>neighbor future</strong></td><td>旧数据按 <code>raw[t+1] → aligned[t]</code></td><td>当前已知旧档案 bug 的固定约定；reward、训练和可视化必须一致。</td></tr><tr><td><strong>lifecycle</strong></td><td>epoch 1 mining；随后 disk replay；每 10 epoch refresh</td><td>这是 HDP 原版训练节奏的可执行等价，而非只跑一个 epoch。</td></tr><tr><td><strong>promotion</strong></td><td>one checkpoint, source-relative gates</td><td>实车需要一个可回滚、可替换、通过 held-out 保护栏的模型。</td></tr></tbody></table>
+    <div class="note" style="margin-top:15px">Full run output: <code>outputs/awr_t4_full_sequence_filtered/20260716-184121_full_sequence_filtered_hdp_plain_mse_loader2_single_checkpoint/</code> · 当前网页只报告 run identity 和 baseline，不把中途 loss 当最终提升证据。</div>
+    <div class="bottom"><span>数据规模、过滤逻辑、时序对齐和硬件均写入 provenance</span><span>06 / 15</span></div>
+  </section>
+
+  <section class="slide" data-chapter="C · see the scenes" data-notes="这页是给完全不了解指标的人看的。安全不是把所有分数简单相加；先看 hard gate，再在安全候选中看行为和舒适性。每个指标都要在真实场景图里解释。">
+    <div class="topline"><div><div class="kicker">06 · metric guide</div><h2>指标不是一堆数字：它们分别在防什么？</h2></div><div class="section">hard gate first · quality second</div></div>
+    <div class="rule"></div>
+    <div class="metric-map">
+      <div class="card accent red"><span class="pill red">第一层 · 不可补偿</span><h3>Safety / hard constraints</h3><ul><li><strong>Collision / OBB clearance：</strong>ego 与邻车 oriented boxes 是否重叠，signed clearance 是否穿过 0。</li><li><strong>Road-border：</strong>ego footprint 是否越过道路几何边界。</li><li><strong>Red-light：</strong>激活的 stop line 是否被跨越。</li><li><strong>Kinematic：</strong>yaw-rate / curvature / acceleration 是否违反可行性。</li></ul><p class="small">原则：progress 不能用来抵消安全硬错。</p></div>
+      <div class="card accent amber"><span class="pill amber">第二层 · 风险余量</span><h3>TTC / THW / follow</h3><ul><li><strong>TTC：</strong>按当前接近速度，距离可能碰撞还有多久。</li><li><strong>THW：</strong>与前车的时间间隔；停止 leader 不应被 progress 催着追上。</li><li><strong>Follow：</strong>有 leader 时才激活，不能把没有前车的 scene 惩罚成“不会跟车”。</li><li><strong>Coverage：</strong>K 条里有几条真的安全；没有 safe branch 就不能声称 AWR 能修。</li></ul></div>
+      <div class="card accent green"><span class="pill green">第三层 · 行为质量</span><h3>Progress / lane / comfort</h3><ul><li><strong>Route progress：</strong>沿 route 的前进，不是任意向前或直线 shortcut。</li><li><strong>Lane likeness：</strong>正常车道保持要好；expert 明确变道时必须 mask，不能把合法变道当错误。</li><li><strong>Comfort：</strong>平滑、低 jerk、可执行。</li><li><strong>ADE/FDE：</strong>只说明像不像 logged expert，不是安全证明。</li></ul></div>
+    </div>
+    <div class="quote" style="margin-top:15px"><strong>报告每个指标都必须回答：</strong>触发条件是什么？在什么场景应该激活？怎样画出 bbox/轨迹证明它？如果指标没有触发或 candidate coverage 为 0，就报告为“未覆盖”，不把它包装成成功。</div>
+    <div class="bottom"><span>metric guide：红色硬约束 → 琥珀色风险余量 → 绿色行为质量</span><span>07 / 15</span></div>
+  </section>
+
+  <section class="slide" data-chapter="C · see the scenes" data-notes="红灯图必须看左边真实 BEV 和右边动态 GIF。重点不是说这个 checkpoint 已经解决红灯，而是证明 evaluator 真的看到路缘、route、邻车 OBB 和候选 endpoint；这一组原始采样在该场景高度收缩，正是 coverage 风险。">
+    <div class="topline"><div><div class="kicker">07 · real scene evidence</div><h2>场景一：红灯停车——“前进”不能赢过 stop line</h2></div><div class="section">K=16 diagnostic · formal K=10</div></div>
+    <div class="rule"></div>
+    <div class="scene-layout grow">
+      <div class="figure-shell"><img src="t4_conference_assets/awr_colleague_hdp_aug/scene_000.png" alt="Red light scene from colleague grpo_viz running the AWR sampler on a source original-DP checkpoint, with route, road borders, neighbor oriented boxes, candidate trajectories and endpoint inset"></div>
+      <div class="scene-side"><div class="figure-shell"><div class="gif-label">DIAGNOSTIC DYNAMICS · 80 frames × 10 Hz · neighbours +1 aligned</div><img src="t4_conference_assets/awr_colleague_hdp_aug/scene_000.gif" alt="Animated K=16 diagnostic red light scene with ego candidate boxes and recorded neighbor boxes"></div><div class="card accent red"><span class="pill red">读图</span><p>红色粗线是 road border，蓝色是 route，虚线是 logged expert，彩色细线是 K=16 diagnostic candidate。endpoint inset 显示这组候选几乎塌缩：<strong>μ pair ≈ 1.01m</strong>；表格中 <code>Total</code> 是 gate feasibility audit 分数，不是驾驶动作标签；<code>Red</code> 是红灯约束，<code>C/K/RB</code> 明确显示碰撞 / 动力学 / road-border。主要问题可能是 exploration/coverage，而不是权重函数大小。</p></div><div class="card"><p class="small"><strong>证据边界：</strong>本图只证明局部 evaluator、+1 对齐和采样覆盖的行为；正式全量 AWR 是 K=10，不能由此单独证明红灯率已经下降。</p></div></div>
+    </div>
+    <div class="bottom"><span>source: T4 NPZ · colleague grpo_viz.py + original-DP AWR mode · seed 3407</span><span>08 / 15</span></div>
+  </section>
+
+  <section class="slide" data-chapter="C · see the scenes" data-notes="移动冲突是最能说明 reward 意义的一页：同一个场景中记录邻车未来以虚线推进，ego candidate 有不同终点/速度分支。endpoint inset 的 modes 是固定阈值的可审计聚类，不等于自动驾驶语义动作。">
+    <div class="topline"><div><div class="kicker">08 · real scene evidence</div><h2>场景二：移动邻车穿越——progress 不能掩盖 corridor conflict</h2></div><div class="section">K=16 diagnostic · +1 replay OBB</div></div>
+    <div class="rule"></div>
+    <div class="scene-layout grow">
+      <div class="figure-shell"><img src="t4_conference_assets/awr_colleague_hdp_aug/scene_001.png" alt="Moving neighbor crossing scene with all candidates sampled by the AWR path from a source original-DP checkpoint and oriented bounding boxes"></div>
+      <div class="scene-side"><div class="figure-shell"><div class="gif-label">DIAGNOSTIC DYNAMICS · 80 frames × 10 Hz · fixed camera + replayed OBBs</div><img src="t4_conference_assets/awr_colleague_hdp_aug/scene_001.gif" alt="Animated K=16 diagnostic moving neighbor crossing scene with candidate ego boxes and replayed neighbor trajectory"></div><div class="card accent amber"><span class="pill amber">读图</span><p>红色边界和蓝色 route 把“可走的 corridor”画出来；邻车的彩色 OBB 沿记录 future 移动。这个单独的 K=16 diagnostic render 有 endpoint pairwise mean ≈ <strong>1.68m</strong>、max ≈ <strong>4.75m</strong>；表格的 <code>Total</code> 是 feasibility audit 分数，不是 maneuver label；<code>C/K/RB</code> 是碰撞 / 动力学 / road-border；它不是下一页 seed-paired multimodality audit 的同一随机 draw。</p></div><div class="card"><p class="small"><strong>选择原则：</strong>先以 OBB collision / clearance 和 TTC 过滤，再在安全候选中比较 route progress 和 comfort；不要让“走得更远”直接压过让行。正式 run 使用 K=10。</p></div></div>
+    </div>
+    <div class="bottom"><span>动态 GIF 是 open-loop geometry audit，不是 closed-loop success claim</span><span>09 / 15</span></div>
+  </section>
+
+  <section class="slide" data-chapter="C · see the scenes" data-notes="回答 lane-change 问题：lane metric 不是所有场景都强制保持原 lane。必须按 expert route/turn/lane-change semantics mask；tight turn 看 route/border，stopped leader 看 follow/occupancy，不能只看 lane crossing。">
+    <div class="topline"><div><div class="kicker">09 · scene semantics</div><h2>车道保持不是“永远不许变道”</h2></div><div class="section">lane is conditional · K=16 diagnostic</div></div>
+    <div class="rule"></div>
+    <div class="compare grow">
+      <div><div class="figure-shell"><img src="t4_conference_assets/awr_colleague_hdp_aug/scene_002.png" alt="Stopped leader scene with recorded neighbor oriented boxes and candidates sampled by the AWR path from a source original-DP checkpoint"></div><p class="small" style="margin:7px 3px 0"><strong>Stopped leader：</strong>如果 leader 停着，progress 不能催 ego tailgate；先看 OBB clearance/THW/follow。没有可用 leader 时，follow 应该 neutral，而不是惩罚。</p></div>
+      <div><div class="figure-shell"><img src="t4_conference_assets/awr_colleague_hdp_aug/scene_003.png" alt="Tight right turn scene with route geometry, road borders, oriented boxes and candidates sampled by the AWR path from a source original-DP checkpoint"></div><p class="small" style="margin:7px 3px 0"><strong>Tight right turn：</strong>route centerline 和 border 是几何约束；合法转弯的 lateral movement 不能被简单的“lane crossing”判错，真正要查的是 route likeness、border 和 kinematic feasibility。</p></div>
+    </div>
+    <div class="grid g3" style="margin-top:13px"><div class="card accent green"><h3>lane mask</h3><p>expert 明确发生 lane change / turn 时，关闭保持原 lane 的惩罚，保留 route 和 border。</p></div><div class="card accent amber"><h3>progress mode</h3><p>moving scene 看 route progress；red light / stopped leader 看 stationary distance 与 safety gate。</p></div><div class="card accent red"><h3>hard safety</h3><p>无论是否变道，collision、road-border、kinematic violation 都不能被行为分数抵消。</p></div></div>
+    <div class="bottom"><span>每个指标都要按场景语义激活，避免“lane 一刀切” · amber=stopped, red=hard violation</span><span>10 / 15</span></div>
+  </section>
+
+  <section class="slide dark" data-chapter="C · see the scenes" data-notes="这一页现在把多模态作为主证据而不是一个统计数字。左上和右上是同一个 moving-crossing T4 scene 的 16 条真实 future；每条线、endpoint、bbox 和下方时间展开都可追溯。raw 与 augmentation 使用配对 seed。注意：endpoint component 是几何审计，不是自动命名的 yield/go/lane-change 语义。">
+    <div class="topline"><div><div class="kicker">10 · multimodality evidence</div><h2>多模态不是一个数字：看 16 条未来怎样分开</h2></div><div class="section">K=16 diagnostic · formal K=10</div></div>
+    <div class="rule"></div>
+    <div class="multimodality-layout grow">
+      <div class="figure-shell"><img src="t4_conference_assets/awr_multimodality_compare/scene_001_multimodality.png" alt="Paired raw and HDP-style augmented AWR-sampler audit on a source original-DP checkpoint, showing 16 trajectory fans, oriented boxes, endpoint pairing and time expansion"></div>
+      <div class="multi-evidence">
+        <div class="card accent violet"><span class="pill violet">读图 · 1</span><h3>每条线都是一份完整未来</h3><p>左/右上是同一个真实 scene：K=16；轨迹上的矩形是 ego oriented bbox；下方 endpoint pairing 连接同一 seed 的 raw → augmented 输出。</p></div>
+        <div class="figure-shell"><div class="gif-label">DYNAMICS · 80 frames × 100 ms · raw / augmentation side by side</div><img src="t4_conference_assets/awr_multimodality_compare/scene_001_multimodality.gif" alt="Animated side-by-side raw and augmented original DP trajectory fans with candidate oriented boxes and replayed neighbor"></div>
+        <div class="card accent amber"><span class="pill amber">读图 · 2</span><p><strong>raw:</strong> endpoint pair 1.51m，1m components 2；<strong>augmentation:</strong> 1.83m，1m components 3。这个变化说明候选覆盖增大；component 仍只是几何聚类，不是自动驾驶动作标签。注意：这是 K=16 诊断，正式全量 AWR 使用 K=10。</p></div>
+        <div class="note"><strong>科学边界：</strong>tight-turn 对照场景仍近似单模态。我们要的是“难场景出现可审计分支”，不是把所有 jitter 包装成多模态。</div>
+      </div>
+    </div>
+    <div class="bottom"><span>all panels generated by colleague grpo_viz.py extended for original-DP AWR</span><span>11 / 15</span></div>
+  </section>
+
+  <section class="slide" data-chapter="D · make the decision" data-notes="R2LPL 是同事提出的 override scene 方法，不能丢掉。它解决的是候选全坏或模型与 expert 明显不一致的场景：reproduce → detect → retrieve/repair → train → re-mine。主干普通场景仍由 AWR；R2LPL 是覆盖缺失的第二条 lane。">
+    <div class="topline"><div><div class="kicker">11 · absorb R2LPL</div><h2>R2LPL 不替代 AWR：它修复 AWR 无法覆盖的 override scene</h2></div><div class="section">rollout–retrieval lifelong policy learning</div></div>
+    <div class="rule"></div>
+    <div class="grid g2 grow">
+      <div class="figure-shell"><img src="../reference/external/Learning-from-Mistakes-Rollout-Retrieval-Lifelong-Policy-Learning-for-Autonomous-Driving/docs/assets/r2lpl_framework.png" alt="R2LPL framework reference diagram"></div>
+      <div class="grid" style="align-content:center;gap:12px">
+        <div class="card accent violet"><span class="pill violet">R2LPL 核心</span><h3>它解决什么？</h3><p>当前模型在 semi-closed-loop 复现真实 drive，发现 collision / border violation 或 expert disagreement；对错误 credit window 检索/生成一个可行 repair target，再 supervised train，随后用新 checkpoint re-mine。</p></div>
+        <div class="card"><h3>如何接到我们的主算法</h3><p>普通 scene：<strong>AWR</strong> 用模型自身 K samples 做全量 post-training。override scene：当 safe-candidate coverage 低、或 closed-loop disagreement 持续出现时，进入 <strong>R2LPL repair lane</strong>，修复 pair 进入 bounded replay memory。</p></div>
+        <div class="note"><strong>Provenance rule：</strong>open-loop collision、downstream closed-loop label、expert disagreement 必须分开记录；不能把所有 moving-collision window 都写成“模型在 credit frame 撞了”。</div>
+      </div>
+    </div>
+    <div class="bottom"><span>R2LPL paper/code is a targeted coverage repair mechanism, not a reason to abandon AWR</span><span>12 / 15</span></div>
+  </section>
+
+  <section class="slide dark" data-chapter="D · make the decision" data-notes="这是最终算法 proposal：两条 lane，共享同一 evaluator 和 replay。普通数据先走 AWR；只有 coverage failure/closed-loop violation/disagreement 才进入 repair。这样既保持大规模 post-training 的吞吐，也吸收 R2LPL 对 override scene 的优势。">
+    <div class="topline"><div><div class="kicker">12 · strongest proposal</div><h2>最终提案：大规模 AWR 主干 + R2LPL 纠错支路</h2></div><div class="section">two-lane training system</div></div>
+    <div class="rule"></div>
+    <div class="two-lane grow">
+      <div class="lane" style="background:#102337;border-color:rgba(255,255,255,.15);color:#edf5ff"><span class="pill">LANE A · broad post-training</span><h3 style="color:#fff">Original DP AWR</h3><ol><li>全量 filtered T4 scene，旧数据 neighbor future 按 +1。</li><li>每 scene K=10 unguided DP plans；不注入 anchor guidance。</li><li>Safety gate → risk margin → route/progress/comfort；组内 normalize。</li><li>plain diffusion MSE + disk replay + EMA；每 10 epoch refresh。</li><li>每轮输出 candidate coverage、ESS、reward concentration 和分层 metrics。</li></ol></div>
+      <div class="lane override" style="background:#1b1730;border-color:rgba(255,255,255,.15);color:#edf5ff"><span class="pill violet">LANE B · override repair</span><h3 style="color:#fff">R2LPL retrieval / repair</h3><ol><li>semi-closed-loop reproduction：ego closed-loop，邻车按记录 replay。</li><li>区分 realized violation 与 open-loop expert disagreement。</li><li>取 violation 前 credit window；K candidates 规则过滤，必要时加入 GT-informed morph。</li><li>只保留 rule-feasible repair；无可行 target 就丢弃并计数。</li><li>repair pairs 进入 bounded replay；新 checkpoint 继续 re-mine。</li></ol></div>
+    </div>
+    <div class="quote" style="margin-top:16px">共享原则：<strong>同一个 OBB-aware evaluator、同一个数据 provenance、同一个 promotion gate。</strong> AWR 负责“整体分布向更好候选移动”，R2LPL 负责“候选集合根本没有正确答案时补答案”。</div>
+    <div class="bottom"><span>proposal: preserve scalability, add targeted coverage recovery</span><span>13 / 15</span></div>
+  </section>
+
+  <section class="slide" data-chapter="D · make the decision" data-notes="promotion gate 是这次实车前最关键的工程纪律：不是 reward 上升就替换。先与固定 2048 valid deterministic baseline 做 paired comparison，再在全量/分层 valid 上做风险 guard；如果安全退化，保留原 checkpoint。">
+    <div class="topline"><div><div class="kicker">13 · evidence and promotion</div><h2>什么结果才足以替换旧模型？</h2></div><div class="section">source-relative, slice-aware, reversible</div></div>
+    <div class="rule"></div>
+    <div class="grid g2 grow">
+      <div>
+        <h3>固定 baseline · original DP</h3>
+        <table><thead><tr><th>指标</th><th>baseline</th><th>方向</th></tr></thead><tbody><tr><td>deterministic reward</td><td>0.92550</td><td class="ok">higher</td></tr><tr><td>best-group reward</td><td>0.93480</td><td class="ok">higher</td></tr><tr><td>collision</td><td>0.00146</td><td class="ok">lower</td></tr><tr><td>road-border crossing</td><td>0.02490</td><td class="ok">lower</td></tr><tr><td>kinematic violation</td><td>0.00049</td><td class="ok">lower</td></tr><tr><td>ADE / FDE</td><td>2.6208 / 5.7692m</td><td class="ok">lower, but not alone</td></tr><tr><td>safe candidate count</td><td>9.689 / 10</td><td class="ok">higher</td></tr></tbody></table>
+      </div>
+      <div class="grid" style="align-content:start;gap:11px">
+        <div class="card accent red"><h3>hard safety guard</h3><p>collision、kinematic、road-border、red-light violation 和 zero-clearance tail 不能显著变差；安全指标优先级高于 reward gain。</p></div>
+        <div class="card accent amber"><h3>behavior guard</h3><p>moving/stationary progress 分开；lane-change mask 正确；follow/THW、comfort、ADE/FDE 不允许用冻结或漂移换来安全表面提升。</p></div>
+        <div class="card accent green"><h3>distribution guard</h3><p>按 red-light、moving conflict、stopped leader、turn、lane-change、hard/normal slices 分层；至少一个更交互的 replay/closed-loop branch 复核。</p></div>
+        <div class="note"><strong>最终规则：</strong>只在固定 valid paired evaluation、全量分层 evaluation 和 provenance 检查都通过后，才把单一 AWR checkpoint 交给实车；否则保留原 DP，并用失败 slice 进入 R2LPL repair。</div>
+      </div>
+    </div>
+    <div class="bottom"><span>reward 是训练信号；promotion gate 才是产品决策</span><span>14 / 15</span></div>
+  </section>
+
+  <section class="slide dark" data-chapter="D · make the decision" data-notes="最后给会议一个清晰 handoff：全量训练正在运行；我们已经把可视化和评估链路固定下来；训练结束后只需要按同一套页面补 before/after 和置信区间。不要把当前局部 scene 的漂亮图当成全量提升结论。">
+    <div class="topline"><div><div class="kicker">14 · handoff</div><h2>现在已经完成什么，下一步只等什么？</h2></div><div class="section">honest conclusion</div></div>
+    <div class="rule"></div>
+    <div class="grid g3 grow" style="align-content:center">
+      <div class="card accent green"><span class="pill green">已完成</span><h3>可运行的原始 DP AWR</h3><p>全量 filtered list、+1 legacy alignment、8-GPU run、BF16/TF32/compile、replay/refresh/EMA identity 已固定。</p></div>
+      <div class="card accent"><span class="pill">已完成</span><h3>会议级场景诊断证据</h3><p>同事 `grpo_viz.py` 基础上扩展：真实 route、road border、neighbor future、oriented bbox、reward breakdown、endpoint clusters 和 GIF。它审计采样/evaluator；不是正式 full-run 成绩。</p></div>
+      <div class="card accent amber"><span class="pill amber">等待</span><h3>before / after 全量证明</h3><p>训练完成后在同一 valid slices 上评估新单 checkpoint；只有 safety + behavior + distribution gates 全部通过，才能说“有利于整体性能”。</p></div>
+    </div>
+    <div class="quote"><strong>最终结论（此刻）：</strong>方案已经具备大规模 post-training 的实验闭环和真实场景可解释性，但“已在大规模数据上证明提升”必须等正式 full run 完成并通过 source-relative evaluation。当前不提前宣称。</div>
+    <div class="grid g2" style="margin-top:16px"><div class="note">Code basis: <code>Diffusion-Planner-t4-main/rlvr/autoresearch/tools/grpo_viz.py</code> · output manifest: <code>docs/t4_conference_assets/awr_colleague_hdp_aug/manifest.json</code></div><div class="note">Detailed know-how and paper/code references: <a href="t4_dp_awr_material_ja.html">t4_dp_awr_material_ja.html</a> · visual evidence contract: <a href="t4_dp_awr_visual_assets_ja.html">t4_dp_awr_visual_assets_ja.html</a></div></div>
+    <div class="bottom"><span>谢谢 · questions / decisions: promotion threshold, repair-lane budget, full-run checkpoint</span><span>15 / 15</span></div>
+  </section>
+</main>
+
+<div class="notes" id="notes"></div>
+<div class="controls"><div><button id="prev">← previous</button> <button id="next">next →</button> <button id="notesBtn">speaker notes</button></div><div>Arrow keys / PageUp / PageDown · <span id="chapterLabel" class="chapter-label">A · understand</span> · <span id="counter">1 / 15</span></div></div>
+<div class="progress" id="progress"></div>
+<script>
+  const slides = [...document.querySelectorAll('.slide')];
+  let current = 0;
+  const counter = document.getElementById('counter');
+  const chapterLabel = document.getElementById('chapterLabel');
+  const progress = document.getElementById('progress');
+  const notes = document.getElementById('notes');
+  function show(i) {
+    current = Math.max(0, Math.min(slides.length - 1, i));
+    slides.forEach((s, j) => s.classList.toggle('active', j === current));
+    counter.textContent = `${current + 1} / ${slides.length}`;
+    chapterLabel.textContent = slides[current].dataset.chapter || '';
+    progress.style.width = `${((current + 1) / slides.length) * 100}%`;
+    notes.textContent = slides[current].dataset.notes || '';
+    window.location.hash = `slide-${current + 1}`;
+  }
+  document.getElementById('prev').onclick = () => show(current - 1);
+  document.getElementById('next').onclick = () => show(current + 1);
+  document.getElementById('notesBtn').onclick = () => document.body.classList.toggle('notes-on');
+  document.addEventListener('keydown', (e) => {
+    if (['ArrowRight', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); show(current + 1); }
+    if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); show(current - 1); }
+    if (e.key.toLowerCase() === 'n') document.body.classList.toggle('notes-on');
+    if (e.key === 'Home') show(0);
+    if (e.key === 'End') show(slides.length - 1);
+  });
+  const hash = Number((window.location.hash.match(/slide-(\d+)/) || [])[1]);
+  show(Number.isFinite(hash) && hash > 0 ? hash - 1 : 0);
+</script>
+</body>
+</html>

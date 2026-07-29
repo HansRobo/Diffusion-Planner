@@ -75,9 +75,10 @@ class TrainConfig:
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True
-    # The 2026-06 Tier IV corpus predates converter commit 55eff4f and duplicates t=0 in
-    # short neighbor futures. Keep this on for that corpus; disable it for regenerated data.
-    align_legacy_neighbor_futures: bool = True
+    # New corpora generated after converter commit 55eff4f already start neighbor futures
+    # at t+0.1 s.  The legacy +1 correction is opt-in for old manifests only; keeping it
+    # enabled by default silently moves valid stationary/short tracks in the new corpus.
+    align_legacy_neighbor_futures: bool = False
 
     # ---------------------------------------------------------
     # Training Parameters
@@ -99,14 +100,34 @@ class TrainConfig:
     # history remains a separate, shorter six-frame perception window.
     ego_history_frames: int = 21
     ego_history_dropout_rate: float = 0.4
-    # The turn head sees generated trajectories at inference. Train it on both the detached
-    # model x-start trajectory and the expert trajectory; the normalized combination keeps the
-    # historical loss scale while removing pure teacher-forcing exposure bias.
+    # The turn head sees generated trajectories at inference. In the production staged
+    # contract these weights are consumed only by the later head stage (or an explicit
+    # joint ablation), never by policy-only Base/SFT.
     turn_indicator_generated_loss_weight: float = 1.0
     turn_indicator_expert_loss_weight: float = 1.0
-    # ``policy`` adapts the planner without evaluating the auxiliary head;
-    # ``turn_indicator`` freezes the planner and trains the head in the mode below.
-    supervised_training_stage: Literal["joint", "policy", "turn_indicator"] = "joint"
+    # Cost-sensitive intent objective. Cross entropy stays the calibration backbone
+    # because the deployment state machine gates on absolute probabilities, but plain
+    # cross entropy prices a LEFT/RIGHT swap exactly like a late signal even though the
+    # first commands the opposite maneuver. This is the expected cost of opposite-
+    # direction probability mass on active ground truth; 0.0 restores plain CE.
+    turn_indicator_opposite_direction_weight: float = 1.0
+    # The Base80 audit measured a median 3.5 s (1.6-6.4 s p10-p90 left, 1.4-6.8 s right)
+    # from lever to motion, so an OFF frame whose expert future already turns is a late
+    # annotation, not a negative. Move at most this much target mass from OFF onto the
+    # geometrically implied direction, ramped by evidence strength. Mass never moves
+    # between LEFT and RIGHT, and active labels stay one-hot. 0.0 restores hard labels.
+    turn_indicator_implied_intent_smoothing: float = 0.2
+    # Evidence bars, in the same quantities the audit tool reports. The weak pair is the
+    # audit's own activation-confirmation bar; the strong pair is its next bucket.
+    turn_indicator_implied_intent_min_yaw_deg: float = 5.0
+    turn_indicator_implied_intent_full_yaw_deg: float = 20.0
+    turn_indicator_implied_intent_min_lateral_m: float = 0.5
+    turn_indicator_implied_intent_full_lateral_m: float = 2.0
+    # The production SFT contract is deliberately staged: ``policy`` adapts the
+    # trajectory planner without evaluating or updating the auxiliary head, then
+    # ``turn_indicator`` freezes the planner and trains the detached head below.
+    # ``joint`` remains an explicit ablation only; it is never the safe default.
+    supervised_training_stage: Literal["joint", "policy", "turn_indicator"] = "policy"
     # Expert pretraining avoids the expensive DPM rollout while the randomly initialized
     # head learns clean intent features. Deployment fine-tuning then exposes it to the
     # exact final DPM trajectory used online.
@@ -185,17 +206,36 @@ class TrainConfig:
     rl_eval_stopped_neighbor_disp_thresh: float = 0.5
     rl_eval_red_light_constraint: bool = True
     rl_eval_red_light_lane_tolerance_m: float = 2.0
+    # Held-out selection stays on one frozen objective while the training aggregation,
+    # scoring horizon, or gate are swept.
+    rl_eval_reward_aggregation: Literal["weighted_sum", "gated_product"] = "weighted_sum"
+    rl_eval_reward_horizon_steps: int = 0
+    # The deployed planner executes one zero-noise plan. Selection measures that exact
+    # trajectory under the run's OWN training objective (one reward per run, the
+    # source repository's discipline). The frozen rl_eval_* stochastic metrics are
+    # report-only cross-arm diagnostics; acceptance safety comes from the independent
+    # EPDMS/DAC/safety source guards, never from a second reward.
+    rl_eval_deterministic: bool = True
+    rl_selection_metric: Literal["deterministic", "mean"] = "deterministic"
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
-    # The released NAVSIM trainer uses diffusion_repeat_size=1 per replay-buffer draw. Our full
-    # 5.6M-scene stream likewise uses one noising/update per draw; values above one intentionally
-    # reuse the same actions immediately and remain ablations.
+    # The released NAVSIM trainer performs one noising per replay draw, but each mined
+    # group is drawn ~9x across its replay epochs — so ~9 updates per rollout is the
+    # released schedule's effective yield. Online, values > 1 reproduce that
+    # amortization (fresh diffusion noise per update; reward/weights/encoding reused).
+    # The production launcher sets 9; 1 remains the strict one-update-per-draw form.
     rl_updates_per_rollout: int = 1
     # Keep full reward groups but cap differentiable candidate batches. With 64 scenes/rank,
     # G=32 remains one 2,048-candidate update; G=64 becomes two accumulated 2,048-candidate
     # forwards feeding one exact optimizer update.
     rl_update_max_candidates_per_rank: int = 2048
+    # 100-epoch relay state machine (the source repository's schedule): epochs
+    # 1, 1+interval, ... are rollout-only mining passes that freeze a per-rank
+    # disk replay cache; the remaining epochs train exclusively from it with
+    # weights/validity frozen at mine time. 0 keeps the online loop.
+    rl_rollout_interval: int = 0
+    rl_replay_dir: Optional[str] = None
     rl_init_use_ema: bool = True
     # Optional direct collision term. Zero omits the standalone safety component; positive values
     # test whether active=1/rear=0.3 safety prevents progress-risk Pareto regressions.
@@ -213,6 +253,67 @@ class TrainConfig:
     # extension that prevents follow/lane/progress from compensating for a collision;
     # ``risk`` also suppresses those terms for near misses.
     rl_behavior_gate: Literal["none", "safety", "risk"] = "safety"
+    # ``pdm_port`` swaps the whole training reward for the verbatim port of the audited
+    # original-DP ``hdp_pdm`` objective (Col x DAC binary gates x (5*TTC + 5*EP +
+    # 2*lane + 2*comfort)/14 on the shared planner_metrics layer). Held-out selection
+    # always stays on the frozen native objective.
+    rl_reward_source: Literal["native", "pdm_port"] = "native"
+    # T4 scenes carry traffic-light semantics the source data lacked; the ported
+    # reward gates red-light violations by default (ablatable to exact-faithful).
+    rl_pdm_red_light_gate: bool = True
+    # ``gated_product`` is the PDM-style bounded objective behind the audited original-DP
+    # AWR gains: multiplicative collision/red-light/border gates times a normalized
+    # risk/follow/lane/progress quality mix. ``weighted_sum`` preserves the historical
+    # additive objective exactly.
+    rl_reward_aggregation: Literal["weighted_sum", "gated_product"] = "weighted_sum"
+    # Score only the first N steps of each candidate (0 = full horizon). The original-DP
+    # AWR profile scored a 4 s prefix (40 steps) of the 8 s plan.
+    rl_reward_horizon_steps: int = 0
+    # Candidates regressed on the scored prefix only; 0 follows rl_reward_horizon_steps.
+    # Regressing the unscored tail was significantly negative in the original-DP audits.
+    rl_candidate_loss_horizon: int = 0
+    # Restrict the reweighted regression's diffusion-time draw. The original-DP ablation
+    # preferred [0.001, 0.2] over the full range; defaults preserve the historical
+    # [eps, 1] distribution exactly.
+    rl_diffusion_t_min: float = 0.0
+    rl_diffusion_t_max: float = 1.0
+    # HDP rollout-candidate augmentation (the exploration mechanism of HDP's own RL,
+    # `augment_trajectory_batch`): perturb sampled candidates before reward/regression
+    # so AWR can rank and internalize behavior beyond the policy's own support. Applied
+    # in the velocity-safe form: route-frame offsets with a mandatory minimum-jerk
+    # onset ramp (a constant offset is a first-delta impulse under velocity actions and
+    # is rejected), plus an optional PlannerRFT candidate stretch that scales per-step
+    # displacements — natively smooth for velocity actions. Off by default; the
+    # experiment ladder enables it explicitly.
+    rl_candidate_aug_prob: float = 0.0
+    # Gaussian scheme: route-frame offset std in metres (released HDP uses 0.5).
+    # stratified_beta scheme: support half-width (PlannerRFT lambda; upstream used 1.0).
+    rl_candidate_aug_std: float = 0.5
+    rl_candidate_aug_eta_scheme: Literal["gaussian", "stratified_beta"] = "gaussian"
+    # softplus(0) + 1: the PlannerRFT zero-init exploration-head concentration.
+    rl_candidate_aug_beta_concentration: float = 1.6931471805599454
+    # PlannerRFT candidate stretch half-width; per-step displacements scale by
+    # 1 + stretch * eta (upstream lambda_lon = 0.25). Zero disables the stretch.
+    rl_candidate_aug_stretch: float = 0.0
+    # ~2 s minimum-jerk onset: bounds every per-step velocity increment to
+    # ~1.875/ramp_steps of the sampled offset (0.5 m over 20 steps ≈ 0.47 m/s peak).
+    rl_candidate_aug_ramp_steps: int = 20
+    # Unaugmented on-policy anchors kept at the front of every group.
+    rl_candidate_aug_keep: int = 1
+    # Skip near-stationary scenes: offsetting a standstill trajectory manufactures the
+    # exact jump failure the first-waypoint gate exists to catch (upstream guard: 2.0).
+    rl_candidate_aug_speed_min_mps: float = 2.0
+    # Reject low-speed candidates whose first waypoint jumps away from the current pose
+    # (audited original-DP failure: reward-blind standstill jumps winning the advantage).
+    # The 5 cm tangent floor is mandatory — without it a numerically-zero standstill step
+    # reads as 90 degrees off-tangent and entire low-speed groups are silently discarded.
+    rl_first_waypoint_gate: bool = True
+    rl_first_waypoint_gate_speed_max_mps: float = 1.0
+    rl_first_waypoint_gate_max_step_m: float = 0.25
+    rl_first_waypoint_gate_max_lateral_m: float = 0.20
+    rl_first_waypoint_gate_max_backward_m: float = 0.05
+    rl_first_waypoint_gate_max_tangent_deg: float = 75.0
+    rl_first_waypoint_gate_tangent_min_step_m: float = 0.05
     # Tier IV data has no populated static-object tensor, so OCC falls back to
     # stopped actors and, when none exist, HD-map road borders. Keep this ablatable
     # because road borders are a practical proxy rather than literal occupancy.
@@ -222,6 +323,9 @@ class TrainConfig:
     # The EMA policy boundary already limits drift. Real-data and recovery-set ablations found
     # that an additional expert anchor slows reward learning without improving robustness.
     rl_bc_weight: float = 0.0
+    # When the anchor is enabled, restrict it to scenes with an active reward group; a
+    # broad every-scene anchor was significantly negative in the original-DP AWR audits.
+    rl_bc_active_groups_only: bool = True
     # Commit the live proposal into the frozen rollout policy once per policy iteration.
     rl_ema_update_rate: float = 0.05
     # The paper does not publish the numerical speed-adaptive shaping functions.

@@ -92,7 +92,7 @@ if __name__ == "__main__":
         data_dict[time_Str][f"kinematic_state_time"] = []
         data_dict[time_Str][f"pos_x"] = []
         data_dict[time_Str][f"pos_y"] = []
-        for i, kinematic_state_msg in enumerate(kinematic_state_msgs[::50]):
+        for _i, kinematic_state_msg in enumerate(kinematic_state_msgs[::50]):
             pose = kinematic_state_msg.pose.pose
             time = parse_timestamp(kinematic_state_msg.header.stamp)
             pose = parse_pose(pose)

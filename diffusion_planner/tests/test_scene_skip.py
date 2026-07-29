@@ -116,7 +116,8 @@ def test_prepare_filtered_manifests_reuses_run_cache(tmp_path):
         is_master=True,
         workers=2,
     )
-    assert json.loads(open(first[0], encoding="utf-8").read()) == []
+    with open(first[0], encoding="utf-8") as handle:
+        assert json.load(handle) == []
     second = prepare_filtered_manifests(
         train_set_list=str(train_list),
         valid_set_list=str(valid_list),
@@ -144,7 +145,8 @@ def test_prepare_filtered_manifest_reuses_training_effective_path(tmp_path):
         workers=2,
     )
     assert stats["dropped_count"] == 1
-    assert json.loads(open(filtered, encoding="utf-8").read()) == []
+    with open(filtered, encoding="utf-8") as handle:
+        assert json.load(handle) == []
     # A standalone evaluator receives the effective path from args.json. It must
     # not create valid_valid.json and rescan the corpus a second time.
     same, second_stats = prepare_filtered_manifest(

@@ -13,11 +13,14 @@ _CHECKOUT_SOURCE = Path(__file__).resolve().parents[1] / "diffusion_planner"
 if _CHECKOUT_SOURCE.is_dir():
     sys.path.insert(0, str(_CHECKOUT_SOURCE))
 
-import numpy as np
-import torch
-from diffusion_planner.dimensions import *
-from diffusion_planner.train_epoch import heading_to_cos_sin
-from diffusion_planner.utils.onnx_export import (
+import numpy as np  # noqa: E402  (import follows the sys.path bootstrap above)
+import torch  # noqa: E402  (import follows the sys.path bootstrap above)
+from diffusion_planner.dimensions import (  # noqa: E402  (import follows the sys.path bootstrap above)
+    OUTPUT_T,
+    POSE_DIM,
+)
+from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
+from diffusion_planner.utils.onnx_export import (  # noqa: E402  (import follows the sys.path bootstrap above)
     DECODER_INPUT_NAMES,
     ENCODER_INPUT_NAMES,
     FULL_INPUT_NAMES,

@@ -50,7 +50,7 @@ markers = [
 line-length = 100
 
 [tool.ruff.lint]
-select=["I"]
+select=["B", "E", "F", "I", "RET", "SIM", "W"]
 extend-ignore=["ANN", "D", "FBT", "FIX", "PLR", "TD", "UP"]
 ignore=[
     "B904",

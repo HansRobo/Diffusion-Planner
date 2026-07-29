@@ -56,7 +56,7 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
     std::cout << "No training samples will be generated from this rosbag." << std::endl;
     save_route_json(
       paths.save_dir, rosbag_dir_name, "missing_topics", 0, 0.0, 0, 0, missing_topics_skip.value(),
-      bag_data.timestamp_stats_map);
+      bag_data.timestamp_stats_map, false);
     return 0;
   }
 

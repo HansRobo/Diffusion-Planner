@@ -1,11 +1,7 @@
 import argparse
-import json
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
-from diffusion_planner.dimensions import *
-from tqdm import tqdm
 
 
 def parse_args() -> argparse.Namespace:

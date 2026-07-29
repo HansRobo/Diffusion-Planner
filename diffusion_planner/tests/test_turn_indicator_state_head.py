@@ -1,11 +1,17 @@
 """Three-state turn-intent head and temporal output stabilization."""
 
+import math
 from unittest.mock import patch
 
 import pytest
 import torch
 from diffusion_planner.dimensions import TURN_INDICATOR_OUTPUT_DIM
-from diffusion_planner.loss import make_turn_indicator_gt
+from diffusion_planner.loss import (
+    make_turn_indicator_gt,
+    turn_indicator_geometry_evidence,
+    turn_indicator_objective,
+    turn_indicator_soft_targets,
+)
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.model.module.decoder import (
     Decoder,
@@ -25,11 +31,23 @@ from diffusion_planner.utils.onnx_export import (
 from diffusion_planner.utils.turn_indicator import (
     TurnIndicatorStateMachine,
     TurnIndicatorStateMachineConfig,
+    fit_probability_temperature,
 )
 from diffusion_planner.validate_model import (
+    TURN_INDICATOR_CALIBRATION_BINS,
     TURN_INDICATOR_CLASS_NAMES,
+    turn_indicator_calibration_counts,
+    turn_indicator_calibration_metrics,
     turn_indicator_metrics_from_confusion,
 )
+
+# The audit tool's activation-confirmation bar and its next stronger bucket.
+_EVIDENCE_BARS = {
+    "min_yaw_rad": math.radians(5.0),
+    "full_yaw_rad": math.radians(20.0),
+    "min_lateral_m": 0.5,
+    "full_lateral_m": 2.0,
+}
 
 
 def _hdp_config(**overrides):
@@ -224,7 +242,8 @@ def test_full_policy_inference_needs_no_signal_input_and_is_signal_invariant():
 
 def test_training_loss_updates_only_the_intent_head_for_indicator_loss():
     torch.manual_seed(0)
-    args = _encoder_config()
+    # Joint mode is an explicit ablation; production Base/SFT defaults to policy.
+    args = _encoder_config(supervised_training_stage="joint")
     model = Diffusion_Planner(args).train()
     batch = 2
     inputs = _encoder_inputs(batch)
@@ -339,6 +358,8 @@ def test_expert_head_stage_skips_diffusion_and_only_updates_head():
     assert torch.isfinite(loss["turn_indicator_loss"])
     assert "turn_indicator_generated_loss" not in loss
     assert "turn_indicator_generated_accuracy" not in loss
+    assert torch.isfinite(loss["turn_indicator_opposite_probability"])
+    assert torch.isfinite(loss["turn_indicator_implied_intent_mass"])
     loss["turn_indicator_loss"].backward()
     assert all(parameter.grad is None for parameter in model.encoder.parameters())
     assert all(parameter.grad is None for parameter in model.decoder.dit.parameters())
@@ -370,6 +391,178 @@ def test_onnx_policy_inputs_have_no_signal_feedback_and_head_has_proprioception(
         "ego_current_state",
     ]
     assert "turn_indicators" not in build_dummy_inputs()
+
+
+def _turning_future(batch: int, *, yaw_rad: float, lateral_m: float, steps: int = 80):
+    """Ego-frame future that ramps linearly to ``yaw_rad`` and ``lateral_m``."""
+    ramp = torch.linspace(0.0, 1.0, steps)
+    yaw = yaw_rad * ramp
+    return torch.stack(
+        [
+            torch.stack([ramp * 10.0, lateral_m * ramp, yaw.cos(), yaw.sin()], dim=-1)
+            for _ in range(batch)
+        ]
+    )
+
+
+def test_geometry_evidence_reads_the_committed_turn_direction():
+    left = turn_indicator_geometry_evidence(
+        _turning_future(1, yaw_rad=0.7, lateral_m=3.0), **_EVIDENCE_BARS
+    )
+    assert left[0].tolist() == [1]
+    assert left[1].tolist() == pytest.approx([1.0])
+
+    right = turn_indicator_geometry_evidence(
+        _turning_future(1, yaw_rad=-0.7, lateral_m=-3.0), **_EVIDENCE_BARS
+    )
+    assert right[0].tolist() == [2]
+    assert right[1].tolist() == pytest.approx([1.0])
+
+    straight = turn_indicator_geometry_evidence(
+        _turning_future(1, yaw_rad=0.0, lateral_m=0.0), **_EVIDENCE_BARS
+    )
+    assert straight[0].tolist() == [0]
+    assert straight[1].tolist() == [0.0]
+
+
+def test_geometry_evidence_discounts_a_future_that_swerves_and_returns():
+    steps = 80
+    ramp = torch.linspace(0.0, 1.0, steps)
+    # Out-and-back: peak lateral offset of 1.5 m with equal left and right heading.
+    lateral = 1.5 * torch.sin(math.pi * ramp)
+    yaw = 0.2 * torch.sin(2.0 * math.pi * ramp)
+    swerve = torch.stack([ramp * 10.0, lateral, yaw.cos(), yaw.sin()], dim=-1)[None]
+    direction, strength = turn_indicator_geometry_evidence(swerve, **_EVIDENCE_BARS)
+    committed = turn_indicator_geometry_evidence(
+        _turning_future(1, yaw_rad=0.2, lateral_m=1.5), **_EVIDENCE_BARS
+    )
+    assert direction.tolist() == [1]
+    # Same peak excursion, but the opposite-side evidence removes most of the strength.
+    assert 0.0 < float(strength) < 0.5 * float(committed[1])
+
+
+def test_soft_targets_relax_late_off_labels_without_mixing_directions():
+    target = torch.tensor([0, 0, 1])
+    implied = torch.tensor([1, 2, 2])
+    strength = torch.tensor([1.0, 0.5, 1.0])
+    soft, moved = turn_indicator_soft_targets(target, implied, strength, smoothing=0.2)
+    assert soft[0].tolist() == pytest.approx([0.8, 0.2, 0.0])
+    assert soft[1].tolist() == pytest.approx([0.9, 0.0, 0.1])
+    # An active label is never relaxed, so no mass reaches the opposite direction.
+    assert soft[2].tolist() == pytest.approx([0.0, 1.0, 0.0])
+    assert moved.tolist() == pytest.approx([0.2, 0.1, 0.0])
+    assert soft.sum(dim=-1).tolist() == pytest.approx([1.0, 1.0, 1.0])
+
+
+def test_objective_reproduces_plain_cross_entropy_at_legacy_settings():
+    torch.manual_seed(3)
+    args = _hdp_config(
+        turn_indicator_opposite_direction_weight=0.0,
+        turn_indicator_implied_intent_smoothing=0.0,
+    )
+    logit = torch.randn(6, 3)
+    target = torch.tensor([0, 1, 2, 0, 1, 2])
+    loss, diagnostics = turn_indicator_objective(
+        logit, target, _turning_future(6, yaw_rad=0.7, lateral_m=3.0), args
+    )
+    torch.testing.assert_close(
+        loss, torch.nn.functional.cross_entropy(logit, target, reduction="none")
+    )
+    assert diagnostics["turn_indicator_implied_intent_mass"] == 0.0
+    # The diagnostic still reports opposite-direction mass even when it is not priced.
+    assert diagnostics["turn_indicator_opposite_probability"] > 0.0
+
+
+def test_objective_prices_opposite_direction_mass_only_on_active_labels():
+    args = _hdp_config(
+        turn_indicator_opposite_direction_weight=2.0,
+        turn_indicator_implied_intent_smoothing=0.0,
+    )
+    # Row 0 is OFF ground truth, row 1 is LEFT ground truth; both put half their mass on
+    # RIGHT, which is an opposite-direction error only for row 1.
+    logit = torch.tensor([[0.0, 0.0, math.log(2.0)], [0.0, 0.0, math.log(2.0)]])
+    target = torch.tensor([0, 1])
+    loss, diagnostics = turn_indicator_objective(logit, target, None, args)
+    baseline = torch.nn.functional.cross_entropy(logit, target, reduction="none")
+    torch.testing.assert_close(loss[0], baseline[0])
+    torch.testing.assert_close(loss[1], baseline[1] + 2.0 * 0.5)
+    assert float(diagnostics["turn_indicator_opposite_probability"]) == pytest.approx(0.5)
+
+
+def test_objective_stops_punishing_an_early_signal_on_a_turning_future():
+    args = _hdp_config(
+        turn_indicator_opposite_direction_weight=0.0,
+        turn_indicator_implied_intent_smoothing=0.2,
+    )
+    # OFF ground truth on a future that clearly turns left: the head predicts LEFT.
+    logit = torch.tensor([[0.0, 2.0, 0.0]])
+    target = torch.tensor([0])
+    turning, _ = turn_indicator_objective(
+        logit, target, _turning_future(1, yaw_rad=0.7, lateral_m=3.0), args
+    )
+    straight, _ = turn_indicator_objective(
+        logit, target, _turning_future(1, yaw_rad=0.0, lateral_m=0.0), args
+    )
+    baseline = torch.nn.functional.cross_entropy(logit, target, reduction="none")
+    torch.testing.assert_close(straight, baseline)
+    assert float(turning) < float(straight)
+
+
+def test_calibration_metrics_match_a_hand_built_reliability_diagram():
+    logit = torch.tensor(
+        [
+            [math.log(0.7), math.log(0.2), math.log(0.1)],
+            [math.log(0.4), math.log(0.5), math.log(0.1)],
+        ]
+    )
+    target = torch.tensor([0, 0])
+    metrics = turn_indicator_calibration_metrics(turn_indicator_calibration_counts(logit, target))
+    assert metrics["turn_indicator_nll"] == pytest.approx(
+        -(math.log(0.7) + math.log(0.4)) / 2, rel=1e-6
+    )
+    # Bin 0.7: one sample, confidence 0.7, accuracy 1.0. Bin 0.5: confidence 0.5, accuracy 0.
+    assert metrics["turn_indicator_ece"] == pytest.approx(0.3 / 2 + 0.5 / 2, rel=1e-6)
+
+
+def test_empty_calibration_accumulator_is_reported_as_unevaluated_zeros():
+    metrics = turn_indicator_calibration_metrics([0.0] * (2 + 3 * TURN_INDICATOR_CALIBRATION_BINS))
+    assert metrics == {"turn_indicator_nll": 0.0, "turn_indicator_ece": 0.0}
+
+
+def test_fit_probability_temperature_recovers_a_known_over_confidence():
+    probabilities = [0.6, 0.25, 0.15]
+    labels = torch.tensor([0] * 60 + [1] * 25 + [2] * 15)
+    calibrated = torch.tensor([[math.log(value) for value in probabilities]]).repeat(100, 1)
+    assert fit_probability_temperature(calibrated, labels) == pytest.approx(1.0, rel=1e-4)
+    # Sharpening the same logits by 3x is exactly a temperature-3 miscalibration.
+    assert fit_probability_temperature(3.0 * calibrated, labels) == pytest.approx(3.0, rel=1e-4)
+
+
+def test_deployment_temperature_moves_the_gate_without_moving_the_argmax():
+    logit = torch.tensor([0.3, 0.5, 0.2]).log()
+    uncalibrated = TurnIndicatorStateMachine(
+        TurnIndicatorStateMachineConfig(probability_ema_alpha=1.0, activation_seconds=0.3)
+    )
+    # The head is right about the direction but never reaches the 0.60 activation gate.
+    assert [uncalibrated.update(logit) for _ in range(10)] == [0] * 10
+    sharpened = TurnIndicatorStateMachine(
+        TurnIndicatorStateMachineConfig(
+            probability_ema_alpha=1.0, activation_seconds=0.3, probability_temperature=0.5
+        )
+    )
+    assert [sharpened.update(logit) for _ in range(3)] == [0, 0, 1]
+    # Feeding probabilities instead of logits must scale identically.
+    equivalent = TurnIndicatorStateMachine(
+        TurnIndicatorStateMachineConfig(
+            probability_ema_alpha=1.0, activation_seconds=0.3, probability_temperature=0.5
+        )
+    )
+    assert [equivalent.update(logit.exp(), logits=False) for _ in range(3)] == [0, 0, 1]
+
+
+def test_state_machine_rejects_an_unusable_temperature():
+    with pytest.raises(ValueError, match="probability_temperature"):
+        TurnIndicatorStateMachineConfig(probability_temperature=0.0)
 
 
 def test_state_machine_debounces_activation_and_holds_minimum_duration():

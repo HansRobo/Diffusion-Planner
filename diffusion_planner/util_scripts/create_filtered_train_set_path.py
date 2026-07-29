@@ -46,7 +46,7 @@ def load_time_ranges(filter_json_path: Path) -> list[tuple[int, int]]:
 
     # Extract time ranges from time_series
     if "time_series" in data:
-        for time_key, time_data in data["time_series"].items():
+        for _time_key, time_data in data["time_series"].items():
             # Support both old format ("scenes") and new format ("whitelist_scenes")
             if "whitelist_scenes" in time_data:
                 scenes = time_data["whitelist_scenes"]
@@ -95,39 +95,39 @@ if __name__ == "__main__":
     save_path = args.save_path
     time_filter_json = args.time_filter_json
 
-    log = open(save_path.with_suffix(".log"), "w")
+    with open(save_path.with_suffix(".log"), "w", encoding="utf-8") as log:
+        # Collect all npz files from root_dir
+        root_dir = root_dir.resolve()
 
-    # Collect all npz files from root_dir
-    root_dir = root_dir.resolve()
+        all_list = sorted(root_dir.rglob("*.npz"))
+        print(f"Found {len(all_list)} npz files in {root_dir}.")
+        log.write(f"Found {len(all_list)} npz files in {root_dir}.\n")
 
-    all_list = sorted(root_dir.rglob("*.npz"))
-    print(f"Found {len(all_list)} npz files in {root_dir}.")
-    log.write(f"Found {len(all_list)} npz files in {root_dir}.\n")
+        # Apply time filter
+        time_filter_json = time_filter_json.resolve()
+        print(f"Loading time ranges from {time_filter_json}...")
+        log.write(f"Loading time ranges from {time_filter_json}...\n")
 
-    # Apply time filter
-    time_filter_json = time_filter_json.resolve()
-    print(f"Loading time ranges from {time_filter_json}...")
-    log.write(f"Loading time ranges from {time_filter_json}...\n")
+        time_ranges = load_time_ranges(time_filter_json)
+        print(f"Loaded {len(time_ranges)} time ranges")
+        log.write(f"Loaded {len(time_ranges)} time ranges\n")
 
-    time_ranges = load_time_ranges(time_filter_json)
-    print(f"Loaded {len(time_ranges)} time ranges")
-    log.write(f"Loaded {len(time_ranges)} time ranges\n")
+        filtered_list = []
+        for file_path in all_list:
+            timestamp = extract_timestamp_from_path(file_path)
+            if is_timestamp_in_ranges(timestamp, time_ranges):
+                filtered_list.append(file_path)
 
-    filtered_list = []
-    for file_path in all_list:
-        timestamp = extract_timestamp_from_path(file_path)
-        if is_timestamp_in_ranges(timestamp, time_ranges):
-            filtered_list.append(file_path)
+        print(f"Filtered: {len(filtered_list)} files in time range out of {len(all_list)} total")
+        log.write(
+            f"Filtered: {len(filtered_list)} files in time range out of {len(all_list)} total\n"
+        )
 
-    print(f"Filtered: {len(filtered_list)} files in time range out of {len(all_list)} total")
-    log.write(f"Filtered: {len(filtered_list)} files in time range out of {len(all_list)} total\n")
+        all_list = filtered_list
 
-    all_list = filtered_list
+        # Save the final list
+        with open(save_path, "w") as f:
+            json.dump([str(npz_file) for npz_file in all_list], f, indent=4)
 
-    # Save the final list
-    with open(save_path, "w") as f:
-        json.dump([str(npz_file) for npz_file in all_list], f, indent=4)
-
-    print(f"Saved path list to {save_path}")
-    log.write(f"Saved path list to {save_path}\n")
-    log.close()
+        print(f"Saved path list to {save_path}")
+        log.write(f"Saved path list to {save_path}\n")

@@ -235,7 +235,7 @@ def convert_tracked_objects_to_tensor(
 
     tracked_objs = dict(sorted(tracked_objs.items(), key=sort_key))
 
-    for i, (object_id_bytes, tracked_obj) in enumerate(tracked_objs.items()):
+    for i, (_object_id_bytes, tracked_obj) in enumerate(tracked_objs.items()):
         if i >= max_num_objects:
             break
         label_in_model = tracked_obj.class_label

@@ -96,6 +96,39 @@ def test_bridge_state_perturbation_rejects_invalid_constructor_values():
         BridgeStatePerturbation(dense_sample_ds=float("nan"))
 
 
+def test_bridge_rejects_infeasible_candidate_instead_of_returning_it():
+    """Adaptive bridge search must never return a candidate that failed its limits."""
+    past_len, future_len = 6, 80
+    past_x = torch.arange(-past_len + 1, 1, dtype=torch.float32) * 0.5
+    ego_past = torch.stack(
+        [past_x, torch.zeros_like(past_x), torch.ones_like(past_x), torch.zeros_like(past_x)],
+        dim=-1,
+    )
+    current = _ego_state(1, vx=5.0)[0]
+    future_x = torch.arange(1, future_len + 1, dtype=torch.float32) * 0.5
+    ego_future = torch.stack(
+        [future_x, torch.zeros_like(future_x), torch.zeros_like(future_x)], dim=-1
+    )
+    augmentor = BridgeStatePerturbation(
+        max_lateral_accel_mps2=0.0,
+        max_bridge_speed_gap_mps=0.0,
+        max_bridge_jerk_mps3=0.0,
+        device="cpu",
+    )
+
+    with pytest.raises(RuntimeError, match="feasibility limits"):
+        augmentor._search_feasible_sample(
+            ego_past=ego_past,
+            ego_current_state=current,
+            ego_future=ego_future,
+            wheel_base=torch.tensor(2.75),
+            lateral_offset=torch.tensor(0.5),
+            heading_offset=torch.tensor(0.1),
+            initial_past_connect_time_s=augmentor._past_bridge_sec,
+            initial_future_recover_time_s=augmentor._future_bridge_sec,
+        )
+
+
 # ─────────────────────────────── helpers ────────────────────────────────────
 
 
@@ -161,8 +194,8 @@ def _make_inputs(B: int = 1, N_nbr: int = 3, T_past: int = 5, T_fut: int = 80):
 def test_vector_transform_identity():
     B = 2
     v = torch.randn(B, 5, 2)
-    I = torch.eye(2).unsqueeze(0).expand(B, -1, -1).clone()
-    out = vector_transform(v, I)
+    identity = torch.eye(2).unsqueeze(0).expand(B, -1, -1).clone()
+    out = vector_transform(v, identity)
     assert torch.allclose(out, v, atol=ATOL), (
         f"Identity rotation changed vectors (max diff {(out - v).abs().max():.2e})"
     )
@@ -184,8 +217,8 @@ def test_vector_transform_with_bias():
     """Bias is subtracted before rotation (identity rotation)."""
     v = torch.tensor([[[3.0, 0.0]]])  # (1, 1, 2)
     bias = torch.tensor([[1.0, 0.0]])  # (1, 2)
-    I = torch.eye(2).unsqueeze(0)
-    out = vector_transform(v, I, bias)
+    identity = torch.eye(2).unsqueeze(0)
+    out = vector_transform(v, identity, bias)
     assert torch.allclose(out, torch.tensor([[[2.0, 0.0]]]), atol=ATOL), (
         f"Bias subtraction failed: got {out}"
     )
@@ -214,6 +247,21 @@ def test_transform_matrix_preserves_input_dtype():
     )
     state = _ego_state(1).double()
     assert perturbation.get_transform_matrix_batch(state).dtype == torch.float64
+
+
+def test_interpolation_preserves_double_input_dtype():
+    perturbation = StatePerturbation(
+        augment_prob=0.0,
+        num_refine=3,
+        device="cpu",
+        use_smoothing_future_trajectory=False,
+    )
+    current = _ego_state(1, vx=5.0).double()
+    future = torch.zeros(1, 80, 3, dtype=torch.float64)
+    future[..., 0] = torch.arange(1, 81, dtype=torch.float64) * 0.5
+    output = perturbation.interpolation_future_trajectory(current, future)
+    assert output.dtype == torch.float64
+    assert torch.isfinite(output).all()
 
 
 def test_bridge_context_time_axes_have_exact_sample_counts_and_vehicle_wheelbase():
@@ -271,8 +319,8 @@ def test_bridge_context_time_axes_have_exact_sample_counts_and_vehicle_wheelbase
 def test_heading_transform_identity():
     B = 2
     h = (torch.rand(B, 5) * 2.0 - 1.0) * torch.pi
-    I = torch.eye(2).unsqueeze(0).expand(B, -1, -1).clone()
-    out = heading_transform(h, I)
+    identity = torch.eye(2).unsqueeze(0).expand(B, -1, -1).clone()
+    out = heading_transform(h, identity)
     assert out.shape == h.shape
     assert torch.allclose(out, h, atol=1e-5), (
         f"Identity heading transform changed values (max diff {(out - h).abs().max():.2e})"
@@ -398,8 +446,8 @@ def test_get_transform_matrix_batch_identity():
     cur_state[:, 2] = 1.0
     cur_state[:, 3] = 0.0
     mat = aug.get_transform_matrix_batch(cur_state)
-    I = torch.eye(2).unsqueeze(0).expand(2, -1, -1)
-    assert torch.allclose(mat, I, atol=1e-5), (
+    identity = torch.eye(2).unsqueeze(0).expand(2, -1, -1)
+    assert torch.allclose(mat, identity, atol=1e-5), (
         f"Identity heading produced non-identity matrix:\n{mat}"
     )
     print("  [PASS] get_transform_matrix_batch identity")
@@ -691,6 +739,64 @@ def test_centric_transform_ego_xy_zeroed():
         f"Ego xy not zeroed after centric_transform: got {ego_xy.tolist()}"
     )
     print("  [PASS] centric_transform ego xy zeroed")
+
+
+def test_augmented_history_remains_anchored_at_perturbed_current_pose():
+    """The augmented ego history and current state must share the same origin.
+
+    The training pipeline converts ego history to (x, y, cos, sin) before calling
+    StatePerturbation.  A quintic perturbation moves the hypothetical current/future
+    state while the observed blue history stays in the current-ego frame.  In
+    particular, the last history sample must remain at (0, 0); otherwise the
+    smoothing action space and temporal ego encoder receive two current poses.
+    """
+    torch.manual_seed(7)
+    inputs, ego_future, neighbors_future = _make_inputs(B=1, N_nbr=3, T_past=5, T_fut=80)
+    ego_past = inputs["ego_agent_past"]
+    ego_past[:, -1, :3] = 0.0
+    inputs["ego_agent_past"] = torch.cat(
+        [ego_past[..., :2], torch.cos(ego_past[..., 2:3]), torch.sin(ego_past[..., 2:3])], dim=-1
+    )
+    # In the converted four-column contract an all-zero row is padding.  It must
+    # remain padding through the augmented scene transform.
+    inputs["ego_agent_past"][0, 1] = 0.0
+    ego_past_reference = inputs["ego_agent_past"].clone()
+    inputs["ego_shape"] = _EGO_SHAPE_DEFAULT.clone()
+    augmentor = StatePerturbation(
+        augment_prob=1.0,
+        num_refine=20,
+        device="cpu",
+        ego_past_noise_std=0.0,
+        use_smoothing_future_trajectory=True,
+    )
+
+    transformed, _, _ = augmentor(inputs, ego_future, neighbors_future)
+
+    torch.testing.assert_close(
+        transformed["ego_current_state"][0, :2],
+        torch.zeros(2),
+        atol=1e-5,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        transformed["ego_agent_past"][0, -1, :2],
+        torch.zeros(2),
+        atol=1e-5,
+        rtol=0,
+    )
+    torch.testing.assert_close(
+        transformed["ego_agent_past"][0, -1, 2:4],
+        torch.tensor([1.0, 0.0]),
+        atol=1e-5,
+        rtol=0,
+    )
+    torch.testing.assert_close(transformed["ego_agent_past"], ego_past_reference, atol=1e-5, rtol=0)
+    torch.testing.assert_close(
+        transformed["ego_agent_past"][0, 1],
+        torch.zeros(4),
+        atol=1e-6,
+        rtol=0,
+    )
 
 
 # ─────────────────────── collision-detection helpers ────────────────────────
@@ -1098,6 +1204,7 @@ ALL_TESTS = [
     test_centric_transform_zero_mask_preserved,
     test_centric_transform_translation,
     test_centric_transform_ego_xy_zeroed,
+    test_augmented_history_remains_anchored_at_perturbed_current_pose,
     # ── _rect_corners ──
     test_rect_corners_shape,
     test_rect_corners_heading_zero,

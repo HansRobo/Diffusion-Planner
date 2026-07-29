@@ -45,7 +45,6 @@ Examples:
 import argparse
 import json
 import math
-import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -177,9 +176,8 @@ def _heading_in_range(heading: float, hmin: float, hmax: float) -> bool:
     """
     if hmin <= hmax:
         return hmin <= heading <= hmax
-    else:
-        # Wraparound: e.g., heading in [170, 180) or [-180, -170]
-        return heading >= hmin or heading <= hmax
+    # Wraparound: e.g., heading in [170, 180) or [-180, -170]
+    return heading >= hmin or heading <= hmax
 
 
 def filter_heading(index: list[dict], hmin: float, hmax: float) -> list[dict]:
@@ -332,7 +330,7 @@ def group_sequences(entries: list[dict], max_gap_frames: int = 5) -> list[list[d
         bags[prefix].append((frame, entry))
 
     groups = []
-    for prefix, items in bags.items():
+    for _prefix, items in bags.items():
         items.sort(key=lambda x: x[0])
         current_group = [items[0]]
         for i in range(1, len(items)):

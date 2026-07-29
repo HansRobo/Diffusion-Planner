@@ -36,7 +36,7 @@ nlohmann::json build_frame_json(
 nlohmann::json build_route_json(
   const int64_t num_frames, const double traveled_distance_m, const int64_t start_timestamp,
   const int64_t end_timestamp, const SkippingInfo & skipping_info,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map);
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten);
 
 // ---------------------------------------------------------------------------
 // File-writing wrappers — call the builders above, then persist to disk.
@@ -51,7 +51,7 @@ void save_route_json(
   const std::string & output_path, const std::string & rosbag_dir_name,
   const std::string & identifier, const int64_t num_frames, const double traveled_distance_m,
   const int64_t start_timestamp, const int64_t end_timestamp, const SkippingInfo & skipping_info,
-  const timestamp_stats::TimestampStatsMap & timestamp_stats_map);
+  const timestamp_stats::TimestampStatsMap & timestamp_stats_map, const bool goal_pose_overwritten);
 
 // Pack-sequence mode: write all of a sequence's per-frame json objects (in frame order) as a
 // single <rosbag>_<sequence_id>.json array. Each element is a build_frame_json object.

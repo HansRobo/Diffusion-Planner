@@ -57,12 +57,9 @@ if __name__ == "__main__":
                 continue
             # add batch size axis
             data[key] = torch.tensor(np.expand_dims(value, axis=0))
-        data["goal_pose"] = heading_to_cos_sin(
-            data["goal_pose"], preserve_zero_padding=True
-        )
-        data["ego_agent_past"] = heading_to_cos_sin(
-            data["ego_agent_past"], preserve_zero_padding=True
-        )
+        # An all-zero ego-frame pose can be the valid current origin.
+        data["goal_pose"] = heading_to_cos_sin(data["goal_pose"])
+        data["ego_agent_past"] = heading_to_cos_sin(data["ego_agent_past"])
 
         annotation, annotation_color = build_annotation(input_path)
         visualize_inputs(

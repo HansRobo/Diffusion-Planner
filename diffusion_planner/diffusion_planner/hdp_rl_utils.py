@@ -24,7 +24,6 @@ from diffusion_planner.loss import (
     hybrid_waypoint_loss,
     inverse_normalize_ego_velocity,
     normalize_ego_velocity,
-    sample_diffusion_time,
     waypoints_to_velocity,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
@@ -88,7 +87,9 @@ class HDPRewardConfig:
             "road_border_critical_m",
             "road_border_safe_m",
         )
-        non_finite = [name for name in finite_fields if not math.isfinite(float(getattr(self, name)))]
+        non_finite = [
+            name for name in finite_fields if not math.isfinite(float(getattr(self, name)))
+        ]
         if non_finite:
             raise ValueError(f"HDP reward fields must be finite: {non_finite}")
         if self.dt <= 0.0:
@@ -143,12 +144,8 @@ def _hdp_reward_config(args) -> HDPRewardConfig:
         occupancy_critical_m=float(getattr(args, "rl_occupancy_critical_m", 0.25)),
         occupancy_safe_m=float(getattr(args, "rl_occupancy_safe_m", 2.0)),
         occupancy_speed_gain_s=float(getattr(args, "rl_occupancy_speed_gain_s", 0.10)),
-        stopped_neighbor_vel_thresh=float(
-            getattr(args, "rl_stopped_neighbor_vel_thresh", 0.1)
-        ),
-        stopped_neighbor_disp_thresh=float(
-            getattr(args, "rl_stopped_neighbor_disp_thresh", 0.5)
-        ),
+        stopped_neighbor_vel_thresh=float(getattr(args, "rl_stopped_neighbor_vel_thresh", 0.1)),
+        stopped_neighbor_disp_thresh=float(getattr(args, "rl_stopped_neighbor_disp_thresh", 0.5)),
         lane_half_width_m=float(getattr(args, "rl_lane_half_width_m", 1.75)),
         leader_lateral_margin_m=float(getattr(args, "rl_leader_lateral_margin_m", 0.75)),
         stationary_reference_threshold_m=float(
@@ -310,10 +307,7 @@ def _batched_road_border_clearance(
 
 
 def _trajectory_speed(xy: torch.Tensor, dt: float, initial_xy: torch.Tensor | None = None):
-    if initial_xy is None:
-        first = torch.zeros_like(xy[..., :1, :])
-    else:
-        first = initial_xy[..., None, :]
+    first = torch.zeros_like(xy[..., :1, :]) if initial_xy is None else initial_xy[..., None, :]
     step = torch.diff(torch.cat([first, xy], dim=-2), dim=-2)
     return step.norm(dim=-1) / dt
 
@@ -1010,9 +1004,7 @@ def _nearest_lane_distance(
     seg_end = center[..., 1:, :].reshape(-1, 2)
     flat_points = points.reshape(-1, 2)
     if seg_start.shape[0] == 0:
-        return torch.full(
-            points.shape[:-1], float("inf"), dtype=points.dtype, device=points.device
-        )
+        return torch.full(points.shape[:-1], float("inf"), dtype=points.dtype, device=points.device)
     max_distance_elements = 10_000_000
     chunk_size = max(1, max_distance_elements // seg_start.shape[0])
     chunks = []
@@ -1047,9 +1039,7 @@ def _nearest_lane_distance_batch(
     segment_end = center[..., 1:, :].flatten(1, 2)
     flat_points = points.reshape(batch_size, -1, 2)
     if segment_start.shape[1] == 0:
-        return torch.full(
-            points.shape[:-1], float("inf"), dtype=points.dtype, device=points.device
-        )
+        return torch.full(points.shape[:-1], float("inf"), dtype=points.dtype, device=points.device)
 
     max_distance_elements = 10_000_000
     elements_per_query = max(batch_size * segment_start.shape[1], 1)
@@ -1275,6 +1265,15 @@ def compute_hdp_reward(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute the real-vehicle-oriented HDP reward on Tier IV scene tensors."""
     config = _hdp_reward_config(args)
+    horizon = int(getattr(args, "rl_reward_horizon_steps", 0) or 0)
+    if horizon > 0 and horizon < ego_world.shape[1]:
+        # Score only the near-term prefix (the original-DP AWR profile scores 4 s of the
+        # 8 s plan). All time-indexed inputs are truncated together so collision, TTC,
+        # progress and red-light terms stay mutually consistent on the same window.
+        ego_world = ego_world[:, :horizon]
+        neighbors_future = neighbors_future[:, :, :horizon]
+        scene_inputs = dict(scene_inputs)
+        scene_inputs["ego_agent_future"] = scene_inputs["ego_agent_future"][:, :horizon]
     ego_group = ego_world.reshape(num_scenes, n, ego_world.shape[1], ego_world.shape[2])
     if neighbors_future.shape[0] != num_scenes:
         raise ValueError(
@@ -1456,12 +1455,39 @@ def compute_hdp_reward(
         + args.rl_reward_w_lane * lane_scores
         + getattr(args, "rl_reward_w_progress", 0.0) * progress_scores
     )
-    reward_group = (
-        getattr(args, "rl_reward_w_safety", 0.0) * safety
-        + args.rl_reward_w_risk * risk
-        + behavior_reward * behavior_gate
-        + road_border_weight * road_border_score
-    )
+    aggregation = getattr(args, "rl_reward_aggregation", "weighted_sum")
+    if aggregation == "gated_product":
+        # PDM-style bounded objective (the aggregation behind the audited original-DP
+        # AWR gains): continuous multiplicative safety gates times a normalized quality
+        # mix, so no behavior term can buy back an unsafe candidate and the reward stays
+        # in [0, 1]. The safety weight is unused here because safety *is* the gate.
+        quality_weight_sum = (
+            args.rl_reward_w_risk
+            + args.rl_reward_w_follow
+            + args.rl_reward_w_lane
+            + getattr(args, "rl_reward_w_progress", 0.0)
+        )
+        if quality_weight_sum <= 0.0:
+            raise ValueError(
+                "rl_reward_aggregation='gated_product' requires a positive "
+                "risk/follow/lane/progress weight sum"
+            )
+        quality = (
+            args.rl_reward_w_risk * risk
+            + args.rl_reward_w_follow * scene_term_tensors["follow"]
+            + args.rl_reward_w_lane * lane_scores
+            + getattr(args, "rl_reward_w_progress", 0.0) * progress_scores
+        ) / quality_weight_sum
+        reward_group = collision_safety * red_light_score * road_border_score * quality
+    elif aggregation == "weighted_sum":
+        reward_group = (
+            getattr(args, "rl_reward_w_safety", 0.0) * safety
+            + args.rl_reward_w_risk * risk
+            + behavior_reward * behavior_gate
+            + road_border_weight * road_border_score
+        )
+    else:
+        raise ValueError(f"Unsupported rl_reward_aggregation={aggregation!r}")
     ttc_min = scene_term_tensors["ttc"].amin(dim=-1)
     thw_min = scene_term_tensors["thw"].amin(dim=-1)
     occupancy_min = occupancy.amin(dim=-1)
@@ -1680,7 +1706,7 @@ def sample_group(
         ):
             if scene_norm_inputs is not None:
                 scene_count = scene_norm_inputs["ego_current_state"].shape[0]
-                if B != scene_count * group_size:
+                if scene_count * group_size != B:
                     raise ValueError(
                         f"Expanded rollout batch {B} does not match {scene_count} scenes * "
                         f"group_size {group_size}"
@@ -1740,6 +1766,262 @@ def sample_group(
     return ego_world
 
 
+def _quintic_onset_ramp(future_len: int, ramp_steps: int, device, dtype) -> torch.Tensor:
+    """Minimum-jerk onset r(k) for k = 1..T: zero at the current state, saturating at 1.
+
+    Under HDP's velocity (per-step displacement) actions the regression target picks up
+    the *increment* r(k) - r(k-1) of any waypoint-space offset. A constant offset puts
+    the entire displacement into the first delta (an audited-broken configuration: a
+    0.5 m offset reads as a 5 m/s first-step impulse); this onset bounds every per-step
+    increment by ~1.875/ramp_steps of the sampled offset.
+    """
+    u = (torch.arange(1, future_len + 1, device=device, dtype=dtype) / float(ramp_steps)).clamp(
+        0.0, 1.0
+    )
+    return u.pow(3) * (10.0 - 15.0 * u + 6.0 * u.pow(2))
+
+
+def _bounded_eta(
+    num_scenes: int,
+    n: int,
+    scheme: str,
+    concentration: float,
+    device,
+    generator=None,
+) -> torch.Tensor:
+    """Draw exploration magnitudes eta in [-1, 1] per candidate.
+
+    ``stratified_beta`` reproduces the PlannerRFT fixed-explorer prior (symmetric Beta
+    with the zero-init exploration-head concentration) with one draw per
+    equal-probability CDF stratum, shuffled per scene, so a small group cannot miss an
+    entire maneuver region. ``gaussian`` draws a clamped unit normal.
+    """
+    if scheme == "gaussian":
+        eta = torch.randn(num_scenes, n, device=device, generator=generator)
+        return eta.clamp(-1.0, 1.0)
+    if scheme != "stratified_beta":
+        raise ValueError(f"Unsupported candidate augmentation eta scheme {scheme!r}")
+    from scipy import special
+
+    uniforms = torch.rand(num_scenes, n, device=device, generator=generator)
+    strata = torch.arange(n, device=device, dtype=uniforms.dtype)
+    stratified = (strata[None, :] + uniforms) / float(n)
+    shuffle = torch.argsort(torch.rand(num_scenes, n, device=device, generator=generator), dim=1)
+    stratified = torch.gather(stratified, 1, shuffle)
+    beta_values = torch.from_numpy(
+        special.betaincinv(
+            float(concentration), float(concentration), stratified.cpu().double().numpy()
+        )
+    ).to(device=device, dtype=torch.float32)
+    return 2.0 * beta_values - 1.0
+
+
+@torch.no_grad()
+def augment_rollout_candidates(
+    ego_world: torch.Tensor,
+    ego_speed: torch.Tensor,
+    num_scenes: int,
+    n: int,
+    args,
+    generator=None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """HDP rollout-candidate augmentation in the velocity-safe waypoint form.
+
+    This is the exploration mechanism of HDP's own RL (`augment_trajectory_batch`),
+    absent from this pipeline until now: candidates are perturbed *before* reward and
+    regression, so the reward ranks alternatives beyond the policy's own support and
+    AWR can internalize them. Public HDP applies the transform in waypoint space and
+    re-encodes to model actions afterwards — exactly this pipeline's order, since the
+    loss converts these waypoints back to per-step velocities.
+
+    Two audited components, both state-continuous for velocity actions:
+    - a route-frame (per-waypoint local heading) offset pair with a mandatory
+      minimum-jerk onset ramp (the constant released transform is the audited-broken
+      first-delta impulse under `diff`/velocity actions and is rejected up front);
+    - an optional PlannerRFT candidate stretch: per-step displacements scaled by
+      ``1 + stretch * eta``, which is exactly a smooth speed-profile perturbation in
+      velocity space (headings unchanged, no first-step discontinuity).
+
+    The first ``rl_candidate_aug_keep`` candidates per scene stay untouched as
+    on-policy anchors, and low-speed scenes are skipped entirely (offsetting a
+    near-stationary trajectory manufactures the standstill-jump failure the
+    first-waypoint gate exists to catch).
+    """
+    zero = ego_world.new_zeros(())
+    idle_metrics = {
+        "reward_candidate_aug_scene_fraction": zero,
+        "reward_candidate_aug_offset_abs_mean_m": zero,
+        "reward_candidate_aug_stretch_abs_mean": zero,
+    }
+    prob = float(getattr(args, "rl_candidate_aug_prob", 0.0))
+    if prob <= 0.0:
+        return ego_world, idle_metrics
+    if ego_world.shape[0] != num_scenes * n:
+        raise ValueError(
+            f"candidate augmentation expects {num_scenes * n} candidates, got {ego_world.shape[0]}"
+        )
+    if ego_speed.shape != (num_scenes,):
+        raise ValueError(
+            f"candidate augmentation expects one speed per scene {(num_scenes,)}, "
+            f"got {tuple(ego_speed.shape)}"
+        )
+    ramp_steps = int(getattr(args, "rl_candidate_aug_ramp_steps", 20))
+    if ramp_steps < 1:
+        raise ValueError(
+            "rl_candidate_aug_ramp_steps must be >= 1: the constant (unramped) HDP "
+            "offset is a first-delta impulse under velocity actions and is not allowed"
+        )
+    std = float(getattr(args, "rl_candidate_aug_std", 0.5))
+    stretch_scale = float(getattr(args, "rl_candidate_aug_stretch", 0.0))
+    if std <= 0.0 and stretch_scale <= 0.0:
+        return ego_world, idle_metrics
+    keep = int(getattr(args, "rl_candidate_aug_keep", 1))
+    if not 0 <= keep < n:
+        raise ValueError(f"rl_candidate_aug_keep must be in [0, {n - 1}], got {keep}")
+    speed_min = float(getattr(args, "rl_candidate_aug_speed_min_mps", 2.0))
+    scheme = str(getattr(args, "rl_candidate_aug_eta_scheme", "gaussian"))
+    concentration = float(getattr(args, "rl_candidate_aug_beta_concentration", 1.6931471805599454))
+    if concentration <= 0.0:
+        raise ValueError("rl_candidate_aug_beta_concentration must be positive")
+
+    device = ego_world.device
+    future_len = ego_world.shape[1]
+    scene_active = ego_speed.abs() >= speed_min
+    if prob < 1.0:
+        scene_draw = torch.rand(num_scenes, device=device, generator=generator) < prob
+        scene_active = scene_active & scene_draw
+    if not scene_active.any():
+        return ego_world, idle_metrics
+    candidate_active = scene_active[:, None].expand(num_scenes, n).clone()
+    if keep > 0:
+        candidate_active[:, :keep] = False
+
+    grouped = ego_world.view(num_scenes, n, future_len, 4)
+    augmented = grouped.clone()
+    active_f = candidate_active.to(grouped.dtype)[..., None]  # [S, n, 1]
+
+    if stretch_scale > 0.0:
+        eta_stretch = _bounded_eta(num_scenes, n, scheme, concentration, device, generator)
+        stretch = 1.0 + stretch_scale * eta_stretch * candidate_active.to(grouped.dtype)
+        # Per-step displacements scale by s, so cumulative waypoints scale by s too;
+        # heading channels stay exact because the path direction is unchanged.
+        augmented[..., :2] = augmented[..., :2] * stretch[..., None, None]
+    else:
+        eta_stretch = torch.zeros(num_scenes, n, device=device, dtype=grouped.dtype)
+
+    if std > 0.0:
+        if scheme == "gaussian":
+            along = torch.randn(num_scenes, n, device=device, generator=generator) * std
+            lateral = torch.randn(num_scenes, n, device=device, generator=generator) * std
+        else:
+            # In the bounded scheme ``std`` is the support half-width (PlannerRFT lambda).
+            along = _bounded_eta(num_scenes, n, scheme, concentration, device, generator) * std
+            lateral = _bounded_eta(num_scenes, n, scheme, concentration, device, generator) * std
+        along = along * candidate_active.to(grouped.dtype)
+        lateral = lateral * candidate_active.to(grouped.dtype)
+        ramp = _quintic_onset_ramp(future_len, ramp_steps, device, grouped.dtype)
+        a = along[..., None] * ramp  # [S, n, T]
+        b = lateral[..., None] * ramp
+        cos_yaw = augmented[..., 2]
+        sin_yaw = augmented[..., 3]
+        # Released HDP route-frame transform: the offset follows each waypoint's own
+        # heading. Heading channels are preserved (the audited-robust mode; tangent
+        # reconstruction from stochastic x/y is a known failure).
+        augmented[..., 0] = augmented[..., 0] + a * cos_yaw - b * sin_yaw
+        augmented[..., 1] = augmented[..., 1] + a * sin_yaw + b * cos_yaw
+        offset_abs = (along.abs() + lateral.abs()) * 0.5
+    else:
+        offset_abs = torch.zeros(num_scenes, n, device=device, dtype=grouped.dtype)
+
+    result = torch.where(active_f[..., None].bool(), augmented, grouped)
+    active_count = candidate_active.sum().clamp_min(1)
+    metrics = {
+        "reward_candidate_aug_scene_fraction": scene_active.float().mean(),
+        "reward_candidate_aug_offset_abs_mean_m": offset_abs.sum() / active_count,
+        "reward_candidate_aug_stretch_abs_mean": (
+            stretch_scale * eta_stretch * candidate_active.to(grouped.dtype)
+        )
+        .abs()
+        .sum()
+        / active_count,
+    }
+    return result.reshape(num_scenes * n, future_len, 4), metrics
+
+
+@torch.no_grad()
+def first_waypoint_candidate_gate(
+    ego_world: torch.Tensor,
+    ego_speed: torch.Tensor,
+    num_scenes: int,
+    n: int,
+    args,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Reject low-speed candidates whose first waypoint jumps away from the current pose.
+
+    Ported from the audited original-DP AWR gate (2026-07-23 form). Sampled diffusion
+    candidates can place their first waypoint far from the vehicle while the scene is
+    (near) stationary; those candidates are dynamically infeasible yet often earn a
+    high advantage because the reward is blind to near-field continuity. The gate is
+    active only below a speed threshold, and the off-tangent test applies only when the
+    first step has real displacement (the 5 cm floor): a millimetre-scale standstill
+    step has no meaningful direction and must never fail the tangent test.
+
+    ``ego_world`` is in the current-ego frame (origin = current rear axle, +x = current
+    heading), so the first waypoint itself is the first step. Returns a per-candidate
+    boolean mask [num_scenes * n] (True = keep) and scalar diagnostics.
+    """
+    if ego_world.shape[0] != num_scenes * n:
+        raise ValueError(
+            f"first-waypoint gate expects {num_scenes * n} candidates, got {ego_world.shape[0]}"
+        )
+    if ego_speed.shape != (num_scenes,):
+        raise ValueError(
+            f"first-waypoint gate expects one speed per scene {(num_scenes,)}, "
+            f"got {tuple(ego_speed.shape)}"
+        )
+    device = ego_world.device
+    keep = torch.ones(num_scenes * n, dtype=torch.bool, device=device)
+    if not bool(getattr(args, "rl_first_waypoint_gate", True)):
+        zero = ego_world.new_zeros(())
+        return keep, {
+            "reward_first_waypoint_gated_fraction": zero,
+            "reward_first_waypoint_gate_active_scene_fraction": zero,
+        }
+    speed_max = float(getattr(args, "rl_first_waypoint_gate_speed_max_mps", 1.0))
+    max_step = float(getattr(args, "rl_first_waypoint_gate_max_step_m", 0.25))
+    max_lateral = float(getattr(args, "rl_first_waypoint_gate_max_lateral_m", 0.20))
+    max_backward = float(getattr(args, "rl_first_waypoint_gate_max_backward_m", 0.05))
+    max_tangent_deg = float(getattr(args, "rl_first_waypoint_gate_max_tangent_deg", 75.0))
+    tangent_min_step = float(getattr(args, "rl_first_waypoint_gate_tangent_min_step_m", 0.05))
+
+    low_speed_scene = ego_speed.abs() < speed_max  # [S]
+    step = ego_world[:, 0, :2]  # [S*n, 2] — displacement from the current pose
+    step_norm = step.norm(dim=-1)
+    forward = step[:, 0]
+    lateral = step[:, 1].abs()
+    # The tangent test is measurable only when the step has real displacement. Without
+    # this floor a numerically-zero standstill step reads as 90° off-tangent and the
+    # gate silently discards entire low-speed groups (audited original-DP failure).
+    tangent_measurable = step_norm >= tangent_min_step
+    tangent_rad = torch.atan2(lateral, forward.clamp_min(1e-9))
+    off_tangent = tangent_measurable & (tangent_rad > math.radians(max_tangent_deg))
+    reject = (
+        (step_norm > max_step) | (lateral > max_lateral) | (forward < -max_backward) | off_tangent
+    )
+    reject = reject & low_speed_scene.repeat_interleave(n)
+    keep = ~reject
+    gated_fraction = reject.float().mean()
+    active_scene_fraction = (
+        reject.view(num_scenes, n).any(dim=1).float().mean()
+        if num_scenes > 0
+        else ego_world.new_zeros(())
+    )
+    return keep, {
+        "reward_first_waypoint_gated_fraction": gated_fraction,
+        "reward_first_waypoint_gate_active_scene_fraction": active_scene_fraction,
+    }
+
+
 def compute_reward_weights(
     reward: torch.Tensor,
     num_scenes: int,
@@ -1748,6 +2030,7 @@ def compute_reward_weights(
     beta: float,
     eps: float,
     use_ddp: bool = False,
+    candidate_valid_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if reward.ndim != 1:
         raise ValueError(f"RL reward tensor must be 1-D, got shape {tuple(reward.shape)}")
@@ -1763,24 +2046,53 @@ def compute_reward_weights(
     if not math.isfinite(float(eps)) or eps <= 0.0:
         raise ValueError("RL reward normalization epsilon must be finite and > 0")
     grouped = reward.view(num_scenes, n)
-    group_std = grouped.std(dim=1, keepdim=True)
-    finite_group = torch.isfinite(grouped).all(dim=1, keepdim=True)
-    # This filter is part of the paper's RL procedure, independently of the normalization
-    # ablation: a scene with identical candidate rewards contains no action preference signal.
-    valid_group = finite_group & torch.isfinite(group_std) & (group_std > eps)
+    if candidate_valid_mask is None:
+        candidate_keep = torch.ones_like(grouped, dtype=torch.bool)
+        group_mean = grouped.mean(dim=1, keepdim=True)
+        group_std = grouped.std(dim=1, keepdim=True)
+        finite_group = torch.isfinite(grouped).all(dim=1, keepdim=True)
+        # This filter is part of the paper's RL procedure, independently of the normalization
+        # ablation: a scene with identical candidate rewards contains no action preference
+        # signal.
+        valid_group = finite_group & torch.isfinite(group_std) & (group_std > eps)
+    else:
+        if candidate_valid_mask.shape != reward.shape:
+            raise ValueError(
+                "candidate_valid_mask must match the flattened reward shape "
+                f"{tuple(reward.shape)}, got {tuple(candidate_valid_mask.shape)}"
+            )
+        if candidate_valid_mask.dtype != torch.bool:
+            raise TypeError("candidate_valid_mask must be a boolean tensor")
+        # Gate-rejected candidates are excluded from the group statistics as well as
+        # from the weights; otherwise an infeasible candidate still shifts every other
+        # candidate's advantage. A group needs at least two surviving candidates to
+        # carry a preference signal.
+        candidate_keep = candidate_valid_mask.view(num_scenes, n)
+        keep_f = candidate_keep.to(grouped.dtype)
+        valid_count = keep_f.sum(dim=1, keepdim=True)
+        safe = torch.where(candidate_keep, grouped, torch.zeros_like(grouped))
+        group_mean = safe.sum(dim=1, keepdim=True) / valid_count.clamp_min(1.0)
+        variance = ((safe - group_mean).square() * keep_f).sum(dim=1, keepdim=True) / (
+            valid_count - 1.0
+        ).clamp_min(1.0)
+        group_std = variance.clamp_min(0.0).sqrt()
+        finite_group = (torch.isfinite(grouped) | ~candidate_keep).all(dim=1, keepdim=True)
+        valid_group = (
+            finite_group & (valid_count >= 2.0) & torch.isfinite(group_std) & (group_std > eps)
+        )
+    group_valid_sample = (valid_group.expand(-1, n) & candidate_keep).reshape(-1)
     if normalize == "group":
-        mean = grouped.mean(dim=1, keepdim=True)
         # The HDP paper discards scenes whose candidate actions all receive the
         # same reward. Keeping them at exp(0) == 1 silently turns those scenes
         # into unweighted self-distillation and can dominate the useful groups.
         reward_norm = torch.where(
             valid_group,
-            (grouped - mean) / (group_std + eps),
+            (grouped - group_mean) / (group_std + eps),
             torch.zeros_like(grouped),
         ).reshape(-1)
-        valid_sample = valid_group.expand(-1, n).reshape(-1)
+        valid_sample = group_valid_sample
     elif normalize == "batch":
-        valid_sample = valid_group.expand(-1, n).reshape(-1)
+        valid_sample = group_valid_sample
         moment_dtype = (
             torch.float64
             if reward.dtype in (torch.float16, torch.bfloat16, torch.float32)
@@ -1812,7 +2124,7 @@ def compute_reward_weights(
             reward_norm = torch.zeros_like(reward)
     elif normalize == "none":
         reward_norm = reward
-        valid_sample = valid_group.expand(-1, n).reshape(-1)
+        valid_sample = group_valid_sample
     else:
         raise ValueError(f"Unsupported rl_reward_normalize={normalize!r}")
     reward_norm = torch.nan_to_num(reward_norm, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1855,6 +2167,7 @@ def _compute_policy_ego_loss_per_sample(
     cached_encoding: torch.Tensor | None = None,
     diffusion_time: torch.Tensor | None = None,
     diffusion_noise: torch.Tensor | None = None,
+    loss_horizon: int | None = None,
 ) -> dict[str, torch.Tensor]:
     if not args.use_velocity_representation:
         raise ValueError("HDP RL requires velocity representation")
@@ -1871,16 +2184,22 @@ def _compute_policy_ego_loss_per_sample(
     eps = 1e-3
     if (diffusion_time is None) != (diffusion_noise is None):
         raise ValueError("diffusion_time and diffusion_noise must be provided together")
-    t = (
-        sample_diffusion_time(
-            B,
-            device,
-            eps,
-            getattr(args, "diffusion_time_sample_method", "uniform"),
-        )
-        if diffusion_time is None
-        else diffusion_time
-    )
+    if diffusion_time is None:
+        method = getattr(args, "diffusion_time_sample_method", "uniform")
+        if method != "uniform":
+            raise ValueError(f"Unsupported diffusion_time_sample_method={method!r}")
+        # The original-DP AWR ablation found restricting the reweighted regression to
+        # low noise levels beats the full range; the default keeps the historical
+        # [eps, 1] distribution exactly.
+        t_lo = max(float(getattr(args, "rl_diffusion_t_min", 0.0)), eps)
+        t_hi = min(float(getattr(args, "rl_diffusion_t_max", 1.0)), 1.0)
+        if not (eps <= t_lo < t_hi <= 1.0):
+            raise ValueError(
+                f"Invalid RL diffusion time range [{t_lo}, {t_hi}]; need eps <= lo < hi <= 1"
+            )
+        t = torch.rand(B, device=device) * (t_hi - t_lo) + t_lo
+    else:
+        t = diffusion_time
     t_broadcast = t.view(B, 1, 1, 1)
     z = torch.randn_like(gt_future) if diffusion_noise is None else diffusion_noise
     if t.shape != (B,) or z.shape != gt_future.shape:
@@ -1930,7 +2249,10 @@ def _compute_policy_ego_loss_per_sample(
         W=args.hybrid_loss_window,
     )
     ego_reconstruction = ego_diffusion_loss + args.planning_hybrid_loss * ego_waypoint_loss
-    ego_loss_per_sample = ego_reconstruction[:, : args.ego_prediction_horizon].mean(dim=-1)
+    horizon = args.ego_prediction_horizon if loss_horizon is None else int(loss_horizon)
+    if not 1 <= horizon <= ego_reconstruction.shape[1]:
+        raise ValueError(f"loss horizon {horizon} outside [1, {ego_reconstruction.shape[1]}]")
+    ego_loss_per_sample = ego_reconstruction[:, :horizon].mean(dim=-1)
 
     return {
         "ego_loss_per_sample": ego_loss_per_sample,
@@ -1958,6 +2280,7 @@ def compute_reward_weighted_loss(
     include_bc: bool = True,
     policy_diffusion_time: torch.Tensor | None = None,
     policy_diffusion_noise: torch.Tensor | None = None,
+    bc_scene_active_mask: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     if reward_weights is None or valid_sample is None:
         reward_weights, valid_sample = compute_reward_weights(
@@ -1985,6 +2308,13 @@ def compute_reward_weighted_loss(
     )
     bc_weight = float(getattr(args, "rl_bc_weight", 0.0))
     zero = reward.new_zeros(())
+    # A candidate scored on a short reward prefix must also be regressed on that prefix:
+    # the original-DP AWR ablation showed full-horizon regression of prefix-scored
+    # candidates is significantly negative (the unscored tail is pure noise imitation).
+    candidate_loss_horizon = int(getattr(args, "rl_candidate_loss_horizon", 0) or 0)
+    if candidate_loss_horizon <= 0:
+        candidate_loss_horizon = int(getattr(args, "rl_reward_horizon_steps", 0) or 0)
+    candidate_horizon = candidate_loss_horizon if candidate_loss_horizon > 0 else None
     # With a BC anchor, keep the candidate forward in every step so DDP static_graph sees the
     # same graph even in the rare case where every reward group is constant.
     if has_valid_group or bc_weight > 0.0:
@@ -1996,6 +2326,7 @@ def compute_reward_weighted_loss(
             cached_encoding,
             policy_diffusion_time,
             policy_diffusion_noise,
+            loss_horizon=candidate_horizon,
         )
         ego_loss_per_sample = loss_terms["ego_loss_per_sample"]
         if has_valid_group:
@@ -2021,6 +2352,8 @@ def compute_reward_weighted_loss(
     if bc_weight > 0.0 and include_bc:
         if expert_norm_inputs is None or expert_ego_gt is None:
             raise ValueError("rl_bc_weight > 0 requires expert observations and trajectories")
+        # The expert anchor keeps the full supervision horizon on purpose; only reward-
+        # scored candidates are restricted to the scored prefix.
         expert_terms = _compute_policy_ego_loss_per_sample(
             model,
             expert_norm_inputs,
@@ -2029,14 +2362,35 @@ def compute_reward_weighted_loss(
             expert_cached_encoding,
         )
         expert_per_sample = expert_terms["ego_loss_per_sample"]
-        expert_count = expert_per_sample.new_tensor(float(expert_per_sample.numel()))
+        active_mask = bc_scene_active_mask
+        if active_mask is None and bool(getattr(args, "rl_bc_active_groups_only", True)):
+            if expert_per_sample.shape[0] != num_scenes:
+                raise ValueError(
+                    "rl_bc_active_groups_only requires bc_scene_active_mask when the "
+                    "expert batch does not match the local candidate scene count"
+                )
+            active_mask = valid_sample.view(num_scenes, n).any(dim=1)
+        if active_mask is not None:
+            # Anchoring every scene ("broad SFT") was significantly negative in the
+            # original-DP AWR ablations; the retained recipe anchors only scenes that
+            # still carry an active reward group.
+            if active_mask.shape != expert_per_sample.shape:
+                raise ValueError(
+                    f"BC active-scene mask shape {tuple(active_mask.shape)} must match "
+                    f"expert loss shape {tuple(expert_per_sample.shape)}"
+                )
+            active_f = active_mask.to(expert_per_sample.dtype)
+            expert_per_sample = expert_per_sample * active_f
+            expert_count = active_f.sum()
+        else:
+            expert_count = expert_per_sample.new_tensor(float(expert_per_sample.numel()))
         if (
             bool(getattr(args, "ddp", False))
             and torch.distributed.is_available()
             and torch.distributed.is_initialized()
         ):
             torch.distributed.all_reduce(expert_count, op=torch.distributed.ReduceOp.SUM)
-        bc_loss = expert_per_sample.sum() * float(ddp_world_size) / expert_count
+        bc_loss = expert_per_sample.sum() * float(ddp_world_size) / expert_count.clamp_min(1.0)
 
     loss = rl_loss + bc_weight * bc_loss
 

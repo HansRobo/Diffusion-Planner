@@ -19,6 +19,7 @@ NOT skipped.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import os
@@ -187,14 +188,10 @@ def _atomic_json_dump(value: object, path: Path) -> None:
         if fd >= 0:
             # ``fdopen`` closes the descriptor in either branch; this is only a
             # guard for an exception raised before the context manager is entered.
-            try:
+            with contextlib.suppress(OSError):
                 os.close(fd)
-            except OSError:
-                pass
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary_name)
-        except FileNotFoundError:
-            pass
 
 
 def filter_manifest_file(

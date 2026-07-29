@@ -22,8 +22,16 @@ fi
 ((COMPILE_THREADS >= 1)) || COMPILE_THREADS=1
 NUM_WORKERS=${HDP_RL_NUM_WORKERS:-8}
 TRAIN_SUBSAMPLE_STEP=${HDP_RL_TRAIN_SUBSAMPLE_STEP:-1}
-TRAIN_LIST=${HDP_RL_TRAIN_LIST:?submit with HDP_RL_TRAIN_LIST=<manifest>}
+DEFAULT_RL_TRAIN_LIST=${HDP_DEFAULT_RL_TRAIN_LIST:-${HDP_DEFAULT_SFT_TRAIN_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260707_vehicle_params_with_mirror/path_list_train_concatenated.json}}
+TRAIN_LIST=${HDP_RL_TRAIN_LIST:-${DEFAULT_RL_TRAIN_LIST}}
 VALID_LIST=${HDP_RL_VALID_LIST:?submit with HDP_RL_VALID_LIST=<manifest>}
+if [[ -n "${HDP_RL_FILTER_SKIPPED+x}" ]]; then
+  FILTER_SKIPPED=${HDP_RL_FILTER_SKIPPED}
+elif [[ "${TRAIN_LIST}" == "${DEFAULT_RL_TRAIN_LIST}" ]]; then
+  FILTER_SKIPPED=False
+else
+  FILTER_SKIPPED=True
+fi
 EXTRA_LISTS=${HDP_RL_EXTRA_LISTS:-}
 EXTRA_REPEAT=${HDP_RL_EXTRA_REPEAT:-0}
 INIT_CKPT=${HDP_RL_INIT_CKPT:-}
@@ -59,6 +67,33 @@ STOPPED_NEIGHBOR_DISP_THRESH=${HDP_RL_STOPPED_NEIGHBOR_DISP_THRESH:-0.5}
 RED_LIGHT_CONSTRAINT=${HDP_RL_RED_LIGHT_CONSTRAINT:-True}
 RED_LIGHT_LANE_TOLERANCE_M=${HDP_RL_RED_LIGHT_LANE_TOLERANCE_M:-2.0}
 BC_WEIGHT=${HDP_RL_BC_WEIGHT:-0.0}
+BC_ACTIVE_GROUPS_ONLY=${HDP_RL_BC_ACTIVE_GROUPS_ONLY:-True}
+# AWR upgrades ported from the audited original-DP post-training pipeline. Defaults
+# preserve the historical objective exactly; the gated_product/prefix-horizon/t-range
+# profile is enabled per experiment.
+REWARD_AGGREGATION=${HDP_RL_REWARD_AGGREGATION:-weighted_sum}
+REWARD_HORIZON_STEPS=${HDP_RL_REWARD_HORIZON_STEPS:-0}
+CANDIDATE_LOSS_HORIZON=${HDP_RL_CANDIDATE_LOSS_HORIZON:-0}
+DIFFUSION_T_MIN=${HDP_RL_DIFFUSION_T_MIN:-0.0}
+DIFFUSION_T_MAX=${HDP_RL_DIFFUSION_T_MAX:-1.0}
+FIRST_WAYPOINT_GATE=${HDP_RL_FIRST_WAYPOINT_GATE:-True}
+SELECTION_METRIC=${HDP_RL_SELECTION_METRIC:-deterministic}
+EVAL_DETERMINISTIC=${HDP_RL_EVAL_DETERMINISTIC:-True}
+# HDP rollout-candidate augmentation (velocity-safe ramped form). Off by default;
+# the recommended exploration arm sets CANDIDATE_AUG_PROB=1.0.
+# Formal 100-epoch relay: HDP_RL_TRAIN_EPOCHS=100 HDP_RL_ROLLOUT_INTERVAL=10
+# HDP_RL_UPDATES_PER_ROLLOUT=1. Interval 0 keeps the online loop.
+ROLLOUT_INTERVAL=${HDP_RL_ROLLOUT_INTERVAL:-0}
+REPLAY_DIR=${HDP_RL_REPLAY_DIR:-${REPO}/outputs/rl_replay_${SLURM_JOB_ID:-manual}}
+REWARD_SOURCE=${HDP_RL_REWARD_SOURCE:-native}
+PDM_RED_LIGHT_GATE=${HDP_RL_PDM_RED_LIGHT_GATE:-True}
+CANDIDATE_AUG_PROB=${HDP_RL_CANDIDATE_AUG_PROB:-0.0}
+CANDIDATE_AUG_STD=${HDP_RL_CANDIDATE_AUG_STD:-0.5}
+CANDIDATE_AUG_ETA_SCHEME=${HDP_RL_CANDIDATE_AUG_ETA_SCHEME:-gaussian}
+CANDIDATE_AUG_STRETCH=${HDP_RL_CANDIDATE_AUG_STRETCH:-0.0}
+CANDIDATE_AUG_RAMP_STEPS=${HDP_RL_CANDIDATE_AUG_RAMP_STEPS:-20}
+CANDIDATE_AUG_KEEP=${HDP_RL_CANDIDATE_AUG_KEEP:-1}
+CANDIDATE_AUG_SPEED_MIN=${HDP_RL_CANDIDATE_AUG_SPEED_MIN:-2.0}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-1.5}
 EVAL_NOISE_SCALE=${HDP_RL_EVAL_NOISE_SCALE:-0.5}
@@ -81,7 +116,10 @@ EVAL_RED_LIGHT_LANE_TOLERANCE_M=${HDP_RL_EVAL_RED_LIGHT_LANE_TOLERANCE_M:-2.0}
 ROAD_BORDER_CRITICAL=${HDP_RL_ROAD_BORDER_CRITICAL_M:-0.20}
 ROAD_BORDER_SAFE=${HDP_RL_ROAD_BORDER_SAFE_M:-0.60}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
-UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-1}
+# 9 updates per sampled group matches the released HDP replay schedule's update
+# yield (each mined group is drawn ~9x across replay epochs) and amortizes the
+# dominant rollout cost ~3.5x; reward/weights/encoding are computed once per group.
+UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-9}
 UPDATE_MAX_CANDIDATES=${HDP_RL_UPDATE_MAX_CANDIDATES_PER_RANK:-2048}
 COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-True}
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
@@ -340,7 +378,10 @@ TRAIN_ARGS=(
   --save_dir "${SAVE_DIR}" \
   --train_set_list "${TRAIN_LIST}" \
   --valid_set_list "${VALID_LIST}" \
+  --filter_skipped "${FILTER_SKIPPED}" \
+  --skip_filter_workers "${HDP_RL_SKIP_FILTER_WORKERS:-32}" \
   "${EXTRA_ARGS[@]}" \
+  --align_legacy_neighbor_futures False \
   --normalization_file_path "${REPO}/diffusion_planner/normalization.json" \
   --num_workers "${NUM_WORKERS}" \
   --train_subsample_step "${TRAIN_SUBSAMPLE_STEP}" \
@@ -401,6 +442,26 @@ TRAIN_ARGS=(
   --rl_red_light_constraint "${RED_LIGHT_CONSTRAINT}" \
   --rl_red_light_lane_tolerance_m "${RED_LIGHT_LANE_TOLERANCE_M}" \
   --rl_bc_weight "${BC_WEIGHT}" \
+  --rl_bc_active_groups_only "${BC_ACTIVE_GROUPS_ONLY}" \
+  --rl_reward_aggregation "${REWARD_AGGREGATION}" \
+  --rl_reward_horizon_steps "${REWARD_HORIZON_STEPS}" \
+  --rl_candidate_loss_horizon "${CANDIDATE_LOSS_HORIZON}" \
+  --rl_diffusion_t_min "${DIFFUSION_T_MIN}" \
+  --rl_diffusion_t_max "${DIFFUSION_T_MAX}" \
+  --rl_first_waypoint_gate "${FIRST_WAYPOINT_GATE}" \
+  --rl_selection_metric "${SELECTION_METRIC}" \
+  --rl_eval_deterministic "${EVAL_DETERMINISTIC}" \
+  --rl_rollout_interval "${ROLLOUT_INTERVAL}" \
+  --rl_replay_dir "${REPLAY_DIR}" \
+  --rl_reward_source "${REWARD_SOURCE}" \
+  --rl_pdm_red_light_gate "${PDM_RED_LIGHT_GATE}" \
+  --rl_candidate_aug_prob "${CANDIDATE_AUG_PROB}" \
+  --rl_candidate_aug_std "${CANDIDATE_AUG_STD}" \
+  --rl_candidate_aug_eta_scheme "${CANDIDATE_AUG_ETA_SCHEME}" \
+  --rl_candidate_aug_stretch "${CANDIDATE_AUG_STRETCH}" \
+  --rl_candidate_aug_ramp_steps "${CANDIDATE_AUG_RAMP_STEPS}" \
+  --rl_candidate_aug_keep "${CANDIDATE_AUG_KEEP}" \
+  --rl_candidate_aug_speed_min_mps "${CANDIDATE_AUG_SPEED_MIN}" \
   --rl_ema_update_rate "${EMA_UPDATE_RATE}" \
   --rl_init_use_ema True \
   --rl_train_scope "${TRAIN_SCOPE}" \

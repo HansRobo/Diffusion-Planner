@@ -36,11 +36,10 @@ if __name__ == "__main__":
     if not detail:
         sys.exit(0)
 
-    f = open(root_dir / "detail.txt", "w", encoding="utf-8")
-
-    for subdir in subdirs:
-        sub_sub_dirs = sorted([p for p in subdir.iterdir() if p.is_dir()])
-        for sub_sub_dir in sub_sub_dirs:
-            npz_path_list = sorted(sub_sub_dir.rglob("*.npz"))
-            print(f"  {sub_sub_dir.name} {len(npz_path_list)} 件")
-            f.write(f"{subdir.name} {sub_sub_dir.name} {len(npz_path_list)}\n")
+    with open(root_dir / "detail.txt", "w", encoding="utf-8") as f:
+        for subdir in subdirs:
+            sub_sub_dirs = sorted([p for p in subdir.iterdir() if p.is_dir()])
+            for sub_sub_dir in sub_sub_dirs:
+                npz_path_list = sorted(sub_sub_dir.rglob("*.npz"))
+                print(f"  {sub_sub_dir.name} {len(npz_path_list)} 件")
+                f.write(f"{subdir.name} {sub_sub_dir.name} {len(npz_path_list)}\n")

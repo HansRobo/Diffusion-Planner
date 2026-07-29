@@ -10,7 +10,22 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
-from diffusion_planner.dimensions import *
+from diffusion_planner.dimensions import (
+    INPUT_T,
+    LINE_STRING_TYPE_NUM,
+    MAX_NUM_NEIGHBORS,
+    NUM_LINE_STRINGS,
+    NUM_POLYGONS,
+    NUM_SEGMENTS_IN_LANE,
+    NUM_SEGMENTS_IN_ROUTE,
+    OUTPUT_T,
+    POINTS_PER_LANELET,
+    POINTS_PER_LINE_STRING,
+    POINTS_PER_POLYGON,
+    POLYGON_TYPE_NUM,
+    POSE_DIM,
+    SEGMENT_POINT_DIM,
+)
 from tqdm import tqdm
 
 

@@ -4,7 +4,6 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 # カラーパレットを定義
 colors = plt.cm.tab10.colors  # 10色のカラーパレット
@@ -35,7 +34,7 @@ npz_list2 = [f for f in npz_list2 if f.name in and_list]
 result_map = defaultdict(list)
 
 itr = 0
-for f1, f2 in zip(npz_list1, npz_list2):
+for f1, f2 in zip(npz_list1, npz_list2, strict=False):
     npz1 = np.load(f1)
     npz2 = np.load(f2)
 
@@ -45,7 +44,7 @@ for f1, f2 in zip(npz_list1, npz_list2):
     itr += 1
     plt.figure(figsize=(12, 9))  # デフォルト(8, 6)から(8, 12)に変更
 
-    for key in npz1.keys():
+    for key in npz1:
         if key == "map_name" or key == "token":
             continue
         # if key != "neighbor_agents_past" and key != "neighbor_agents_future":

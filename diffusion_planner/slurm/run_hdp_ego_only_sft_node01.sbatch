@@ -9,22 +9,30 @@
 #SBATCH --gres=gpu:h100:8
 #SBATCH --exclusive
 #SBATCH --requeue
-#SBATCH --output=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsvisible_allveh_x10_adamw_nodecay_node01_8gpu_bf16_bs512_from_base20/slurm-%j.out
-#SBATCH --error=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsvisible_allveh_x10_adamw_nodecay_node01_8gpu_bf16_bs512_from_base20/slurm-%j.err
+#SBATCH --output=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_sft20_no_signal_feedback_3state_node01_8gpu_bf16_bs512_from_base80/slurm-%j.out
+#SBATCH --error=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner/outputs/hdp_ego_only_route_adaln_sft20_no_signal_feedback_3state_node01_8gpu_bf16_bs512_from_base80/slurm-%j.err
 
 set -euo pipefail
 
-REPO=/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner
+REPO=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner
 SOURCE_REPO=${HDP_SOURCE_REPO:?submit with an immutable HDP_SOURCE_REPO worktree}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT}
-RUN_NAME=hdp_ego_only_route_adaln_sft20_filteredbase_afterentry_tlsvisible_allveh_x10_adamw_nodecay_node01_8gpu_bf16_bs512_from_base20
+RUN_NAME=hdp_ego_only_route_adaln_sft20_no_signal_feedback_3state_node01_8gpu_bf16_bs512_from_base80
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
-BASE_RUN=${REPO}/outputs/hdp_ego_only_route_adaln_base20_filtered_afterentry_tlsvisible_3veh_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512
+BASE_RUN=${HDP_SFT_BASE_RUN:?submit with HDP_SFT_BASE_RUN=<Base output directory>}
 INIT_WEIGHTS=${BASE_RUN}/latest.pth
 INIT_ARGS=${BASE_RUN}/args.json
-TRAIN_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_sft_exclude_unprotected_right_turn_after_entry_all_vehicles.json
-EXTRA_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_unprotected_right_turn_after_entry_all_vehicles.json
-VALID_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_valid_sft_balanced.json
+DEFAULT_SFT_TRAIN_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_train_sft_is_skipped_filtered.json
+TRAIN_LIST=${HDP_SFT_TRAIN_LIST:-${DEFAULT_SFT_TRAIN_LIST}}
+DEFAULT_SFT_VALID_LIST=/mnt/storage_rdma/diffusion_planner/dataset/20260623_full_sequence/path_list_valid_sft_balanced_is_skipped_filtered.json
+VALID_LIST=${HDP_SFT_VALID_LIST:-${DEFAULT_SFT_VALID_LIST}}
+if [[ -n "${HDP_SFT_FILTER_SKIPPED+x}" ]]; then
+  FILTER_SKIPPED=${HDP_SFT_FILTER_SKIPPED}
+elif [[ "${TRAIN_LIST}" == "${DEFAULT_SFT_TRAIN_LIST}" ]]; then
+  FILTER_SKIPPED=False
+else
+  FILTER_SKIPPED=True
+fi
 NORMALIZATION=${SOURCE_REPO}/diffusion_planner/normalization.json
 PYTHON=${REPO}/.venv/bin/python
 PORT=22641
@@ -57,7 +65,6 @@ check_sha256() {
 for required in \
   "${SOURCE_REPO}" \
   "${TRAIN_LIST}" \
-  "${EXTRA_LIST}" \
   "${VALID_LIST}" \
   "${NORMALIZATION}" \
   "${INIT_WEIGHTS}" \
@@ -79,9 +86,12 @@ if ! git -C "${SOURCE_REPO}" diff --quiet || ! git -C "${SOURCE_REPO}" diff --ca
   exit 12
 fi
 
-check_sha256 39e4f71957bf73dc7b7ec0c28c8abed5938c38d27a0748e55da91fb0630172eb "${TRAIN_LIST}"
-check_sha256 1e8393e49f9461018a359ab953d628e06e792153ba9b9863cd9d81e014413ec6 "${EXTRA_LIST}"
-check_sha256 ef129d5052db364aa5bd8bda16cce0f03237bc1afded6969ce13e3259e4668bf "${VALID_LIST}"
+if [[ "${TRAIN_LIST}" == "${DEFAULT_SFT_TRAIN_LIST}" ]]; then
+  check_sha256 5bc69ff4d18449cf5fe394f0d11e27efffe9a7f3db40ff398706befd82c1a3d1 "${TRAIN_LIST}"
+fi
+if [[ "${VALID_LIST}" == "${DEFAULT_SFT_VALID_LIST}" ]]; then
+  check_sha256 979266f1a767949953f6c437e77bafdb144b1ff69b824451670981edc2dc2f70 "${VALID_LIST}"
+fi
 
 "${PYTHON}" - "${INIT_ARGS}" "${INIT_WEIGHTS}" <<'PY' | tee -a "${HEALTH_LOG}"
 import json
@@ -102,6 +112,7 @@ expected = {
     "planning_hybrid_loss": 0.01,
     "coeff_road_border_loss": 0.0,
     "coeff_neighbor_collision_loss": 0.0,
+    "supervised_training_stage": "policy",
 }
 for key, value in expected.items():
     if args.get(key) != value:
@@ -109,11 +120,11 @@ for key, value in expected.items():
 if weights_path.stat().st_size < 100_000_000:
     raise RuntimeError(f"Base checkpoint is unexpectedly small: {weights_path.stat().st_size} bytes")
 checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
-if checkpoint.get("epoch") != 20:
-    raise RuntimeError(f"Base latest.pth is epoch {checkpoint.get('epoch')!r}, expected epoch 20")
+if checkpoint.get("epoch") != 80:
+    raise RuntimeError(f"Base latest.pth is epoch {checkpoint.get('epoch')!r}, expected epoch 80")
 if checkpoint.get("ema_state_dict") is None:
-    raise RuntimeError("Base epoch-20 latest.pth has no EMA policy for SFT initialization")
-print("verified Base epoch-20 latest.pth EMA policy")
+    raise RuntimeError("Base epoch-80 latest.pth has no EMA policy for SFT initialization")
+print("verified Base epoch-80 latest.pth EMA policy")
 PY
 
 export HOME=/home/ubuntu
@@ -141,9 +152,9 @@ BASE_ARGS=(
   --exp_name "${RUN_NAME}"
   --save_dir "${SAVE_DIR}"
   --train_set_list "${TRAIN_LIST}"
-  --extra_train_set_list "${EXTRA_LIST}"
-  --extra_train_set_repeat 10
   --valid_set_list "${VALID_LIST}"
+  --filter_skipped "${FILTER_SKIPPED}"
+  --skip_filter_workers "${HDP_SFT_SKIP_FILTER_WORKERS:-64}"
   --train_subsample_step 1
   --align_legacy_neighbor_futures True
   --normalization_file_path "${NORMALIZATION}"
@@ -152,7 +163,7 @@ BASE_ARGS=(
   --learning_rate 1e-4
   --weight_decay 0.01
   --adamw_no_decay True
-  --warm_up_epoch 5
+  --warm_up_epoch 2
   --train_epochs 20
   --save_utd 5
   --num_workers 16
@@ -199,6 +210,7 @@ BASE_ARGS=(
   --hybrid_loss_window 10
   --turn_indicator_generated_loss_weight 1.0
   --turn_indicator_expert_loss_weight 1.0
+  --supervised_training_stage policy
   --coeff_road_border_loss 0.0
   --road_border_margin 0.25
   --road_border_n_interp 2
@@ -245,7 +257,7 @@ while (( attempt <= MAX_ATTEMPTS )); do
     log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: strict resume from latest.pth"
   else
     START_ARGS=(--wandb_run_id "${WANDB_RUN_ID}")
-    log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: initialize from Base epoch-20 latest EMA with W&B ${WANDB_RUN_ID}"
+    log_health "Attempt ${attempt}/${MAX_ATTEMPTS}: initialize from Base epoch-80 latest EMA with W&B ${WANDB_RUN_ID}"
   fi
 
   set +e
