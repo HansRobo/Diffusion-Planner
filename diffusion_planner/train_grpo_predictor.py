@@ -707,8 +707,15 @@ def model_training(args):
                 )
                 # Closed-loop validation on the checkpoint-save cadence; videos + metrics land next
                 # to the saved weights and are logged to wandb at step=epoch+1.
+                is_final_save = (epoch + 1 - init_epoch) // save_utd == (
+                    train_epochs - init_epoch
+                ) // save_utd
                 closed_loop_validate(
-                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
+                    diffusion_planner,
+                    args,
+                    epoch,
+                    os.path.join(curr_dir, "closed_loop"),
+                    is_final_save=is_final_save,
                 )
 
             if train_reward > best_reward:

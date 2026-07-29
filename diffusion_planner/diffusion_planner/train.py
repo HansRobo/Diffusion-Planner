@@ -137,7 +137,9 @@ def _object_mode_pairs(modes: list[str]) -> tuple[tuple[str, bool], ...]:
     return tuple((m, _OBJECT_MODE_DROP_FLAGS[m]) for m in ("objects", "noobj") if m in modes)
 
 
-def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
+def closed_loop_validate(
+    model, args, epoch: int, out_dir: str, *, is_final_save: bool = False
+) -> None:
     """Closed-loop rendered rollout; logs metrics + videos to wandb.
 
     Runs one :class:`~scenario_generation.closed_loop_evaluation.FullRouteClosedLoopEvaluation`
@@ -150,19 +152,15 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
     pass the unwrapped model; it is switched to eval for the rollout (so the diffusion sampler
     runs and produces ``prediction``) and restored afterwards.
 
-    Video/PNG/colormap rendering only happens on the LAST call (``epoch + 1 >= args.train_epochs``)
+    Per-step matplotlib rendering (PNGs/video/colormap images) is the dominant per-call cost, so
+    it's deferred to the last call only (``is_final_save=True``, computed by the caller as "is
+    this the last time the checkpoint-save cadence fires in this run" -- NOT simply
+    ``epoch == train_epochs - 1``, since train_epochs may not land on a save_utd-multiple)
     -- every other call still runs the full rollout and logs metrics/wandb scalars, just without
-    the dominant per-step matplotlib-render cost.
+    that cost.
     """
     if not args.closed_loop_npz_root and not args.closed_loop_sites_npz_root:
         return
-
-    # Per-step matplotlib rendering (PNGs/video/colormap images) is the dominant per-call cost;
-    # skip it on every call except the last one, since it's purely for human review and metrics/
-    # wandb scalars are unaffected either way. Only correct when train_epochs lands on a
-    # save_utd-multiple epoch (the usual case) -- if it doesn't, no call here is ever the "final"
-    # one and no media is ever produced.
-    is_final_epoch = epoch + 1 >= args.train_epochs
 
     from scenario_generation.closed_loop_evaluation import (
         ClosedLoopEvalConfig,
@@ -196,7 +194,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
                     unstick_advance_m=args.closed_loop_unstick_advance_m,
                     unstick_radius_mult=args.closed_loop_unstick_radius_mult,
                     unstick_teleport_after=args.closed_loop_unstick_teleport_after,
-                    draw_every=args.closed_loop_draw_every if is_final_epoch else None,
+                    draw_every=args.closed_loop_draw_every if is_final_save else None,
                     replan_interval=args.closed_loop_replan_interval,
                     abort_deviation_m=args.closed_loop_abort_deviation_m,
                     abort_after=args.closed_loop_abort_after,
@@ -220,7 +218,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
             colormap_metrics=args.closed_loop_colormap_metrics,
             near_miss_thresh=args.closed_loop_near_miss_thresh,
             report_base_url=args.closed_loop_report_base_url or None,
-            render_media=is_final_epoch,
+            render_media=is_final_save,
         )
         print(
             f"closed-loop{site_label} @epoch {epoch + 1}: {summary['n_segments']} seg in "
@@ -704,8 +702,15 @@ def model_training(args: TrainConfig):
                 )
                 # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
                 # (videos + metrics) land next to the saved weights they correspond to.
+                is_final_save = (epoch + 1 - init_epoch) // save_utd == (
+                    train_epochs - init_epoch
+                ) // save_utd
                 closed_loop_validate(
-                    diffusion_planner, args, epoch, os.path.join(curr_dir, "closed_loop")
+                    diffusion_planner,
+                    args,
+                    epoch,
+                    os.path.join(curr_dir, "closed_loop"),
+                    is_final_save=is_final_save,
                 )
 
             if valid_loss_ego_position_lat_loss < best_loss:
