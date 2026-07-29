@@ -9,10 +9,20 @@
 #SBATCH --gres=gpu:h100:8
 #SBATCH --exclusive
 #SBATCH --requeue
+#SBATCH --chdir=/tmp
 #SBATCH --output=/mnt/nvme/Diffusion-Planner-hdp-staged-20260721/slurm-%j.out
 #SBATCH --error=/mnt/nvme/Diffusion-Planner-hdp-staged-20260721/slurm-%j.err
 
 set -euo pipefail
+
+# Slurm runs these jobs as a dedicated account; every path below is provisioned for it.
+# Running as anyone else silently produces unreadable credentials and unwritable outputs,
+# so fail immediately and say so instead of dying deep inside training.
+REQUIRED_USER=${HDP_REQUIRED_USER:-wang}
+if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
+  echo "FATAL: this job must run as ${REQUIRED_USER}, got $(id -un)" >&2
+  exit 20
+fi
 
 SOURCE_REPO=${HDP_SOURCE_REPO:?set HDP_SOURCE_REPO to the immutable source worktree}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?set HDP_EXPECTED_COMMIT}
@@ -26,6 +36,7 @@ POLICY_EPOCHS=${HDP_POLICY_EPOCHS:-20}
 POLICY_WARMUP=${HDP_POLICY_WARMUP:-2}
 POLICY_LR=${HDP_POLICY_LR:-1e-4}
 RUN_POLICY_STAGE=${HDP_RUN_POLICY_STAGE:-True}
+RUN_DEPLOYMENT_STAGE=${HDP_RUN_DEPLOYMENT_STAGE:-True}
 HEAD_EXPERT_EPOCHS=${HDP_HEAD_EXPERT_EPOCHS:-1}
 HEAD_EXPERT_WARMUP=${HDP_HEAD_EXPERT_WARMUP:-0}
 HEAD_EXPERT_LR=${HDP_HEAD_EXPERT_LR:-3e-4}
@@ -85,12 +96,16 @@ for required in \
   fi
 done
 
-ACTUAL_COMMIT=$(git -C "${SOURCE_REPO}" rev-parse HEAD)
+# The staged source may be checked out by a different account than the job runs as;
+# scope the exception to this path instead of trusting it globally.
+GIT_SAFE_ARGS=(-c "safe.directory=${SOURCE_REPO}")
+ACTUAL_COMMIT=$(git "${GIT_SAFE_ARGS[@]}" -C "${SOURCE_REPO}" rev-parse HEAD)
 if [[ "${ACTUAL_COMMIT}" != "${EXPECTED_COMMIT}" ]]; then
   log "FATAL: expected source commit ${EXPECTED_COMMIT}, found ${ACTUAL_COMMIT}"
   exit 11
 fi
-if ! git -C "${SOURCE_REPO}" diff --quiet || ! git -C "${SOURCE_REPO}" diff --cached --quiet; then
+if ! git "${GIT_SAFE_ARGS[@]}" -C "${SOURCE_REPO}" diff --quiet ||
+  ! git "${GIT_SAFE_ARGS[@]}" -C "${SOURCE_REPO}" diff --cached --quiet; then
   log "FATAL: immutable source worktree differs from ${EXPECTED_COMMIT}"
   exit 12
 fi
@@ -158,7 +173,14 @@ if checkpoint.get("ema_state_dict") is None:
 print(f"verified policy-init epoch {expected_epoch} EMA and exact Base80 data contract")
 PY
 
-export HOME=/home/ubuntu
+export HOME=${HDP_JOB_HOME:-${ROOT}/home}
+export NETRC=${HOME}/.netrc
+mkdir -p "${HOME}"
+if [[ ! -r "${NETRC}" ]]; then
+  echo "FATAL: W&B credentials are not readable at ${NETRC}. Provision that file for" >&2
+  echo "       $(id -un), or point HDP_JOB_HOME at a directory that has one." >&2
+  exit 13
+fi
 export TMPDIR=${ROOT}/tmp
 export XDG_CACHE_HOME=${ROOT}/cache
 export WANDB_DIR=${ROOT}
@@ -355,9 +377,22 @@ run_stage turn-expert turn_indicator expert \
 
 # Stage 3: calibrate on exact final six-step DPM trajectories. The scene encoder is
 # still evaluated only once per batch and its output is reused by every DPM step.
-run_stage turn-deployment turn_indicator deployment \
-  "${HEAD_DEPLOYMENT_NAME}" "${HEAD_DEPLOYMENT_DIR}" "${HEAD_EXPERT_DIR}/latest.pth" \
-  "${HEAD_DEPLOYMENT_EPOCHS}" "${HEAD_DEPLOYMENT_WARMUP}" "${HEAD_DEPLOYMENT_LR}" 1
+# Skippable on its own so the expert head can be inspected before paying for the
+# DPM-trajectory calibration pass.
+case "${RUN_DEPLOYMENT_STAGE}" in
+  True|true|1)
+    run_stage turn-deployment turn_indicator deployment \
+      "${HEAD_DEPLOYMENT_NAME}" "${HEAD_DEPLOYMENT_DIR}" "${HEAD_EXPERT_DIR}/latest.pth" \
+      "${HEAD_DEPLOYMENT_EPOCHS}" "${HEAD_DEPLOYMENT_WARMUP}" "${HEAD_DEPLOYMENT_LR}" 1
+    ;;
+  False|false|0)
+    log "turn-deployment: stage disabled; expert head at ${HEAD_EXPERT_DIR} is the final artifact"
+    ;;
+  *)
+    log "FATAL: HDP_RUN_DEPLOYMENT_STAGE must be True or False, got ${RUN_DEPLOYMENT_STAGE}"
+    exit 22
+    ;;
+esac
 
 touch "${ROOT}/RUN_COMPLETE"
 log "All staged SFT training completed"
