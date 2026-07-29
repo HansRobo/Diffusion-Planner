@@ -101,17 +101,21 @@ class TrainConfig:
     ego_history_dropout_rate: float = 0.4
 
     # Intent-head capacity. The head is a probe on frozen policy features, so its own
-    # depth is the only capacity knob available without retraining the policy. Defaults
-    # reproduce the single-query single-layer probe.
-    turn_indicator_head_num_queries: int = 1
-    turn_indicator_head_num_layers: int = 1
-    turn_indicator_head_dropout: float = 0.0
+    # depth is the only capacity knob available without retraining the policy. These
+    # defaults are the winning arm of the 6-epoch architecture A/B against the original
+    # single-query single-layer probe: it leads at all six epochs on every headline
+    # metric, and on the epoch-6 `latest.pth` by balanced accuracy +0.0187, macro-F1
+    # +0.0119, active-F1 +0.0170 and turn-direction accuracy +0.0299. `valid_loss_ego`
+    # is unchanged to four decimals, as it must be for a detached head.
+    turn_indicator_head_num_queries: int = 4
+    turn_indicator_head_num_layers: int = 2
+    turn_indicator_head_dropout: float = 0.1
 
     # Uniform label smoothing for the head's cross-entropy. Unlike an inference-time
     # temperature this is not a no-op under an argmax consumer: it changes the training
-    # gradient, so it changes the learned weights. 0.0 is bit-identical to plain
-    # cross_entropy, so the default reproduces every run on disk.
-    turn_indicator_label_smoothing: float = 0.0
+    # gradient, so it changes the learned weights. It was varied together with the
+    # capacity knobs above and belongs to the same winning arm.
+    turn_indicator_label_smoothing: float = 0.05
 
     # The production SFT contract is deliberately staged: ``policy`` adapts the
     # trajectory planner without evaluating or updating the auxiliary head, then

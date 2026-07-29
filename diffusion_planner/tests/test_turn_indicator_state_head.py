@@ -1,5 +1,6 @@
 """Three-state turn-intent head and temporal output stabilization."""
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -404,13 +405,21 @@ _SMOOTHING_UNSET = object()
 
 def _head_loss_at_smoothing(smoothing):
     """Head loss on a fixed batch. ``_SMOOTHING_UNSET`` omits the field entirely, which is
-    how a checkpoint trained before the flag existed is configured."""
+    how a checkpoint trained before the flag existed is configured.
+
+    Omitting it has to be done on a namespace copy, not by ``delattr`` on the dataclass:
+    a dataclass default lives on the class, so deleting the instance attribute leaves
+    ``getattr`` resolving to that default and the read site's own fallback is never
+    reached. ``Config`` builds its attributes from args.json alone, so a pre-flag
+    checkpoint really has no attribute at any level -- that is what this reproduces."""
     torch.manual_seed(0)
     args = _encoder_config(
         supervised_training_stage="turn_indicator",
     )
     if smoothing is _SMOOTHING_UNSET:
-        delattr(args, "turn_indicator_label_smoothing")
+        fields = dict(vars(args))
+        del fields["turn_indicator_label_smoothing"]
+        args = SimpleNamespace(**fields)
     else:
         args.turn_indicator_label_smoothing = smoothing
     model = Diffusion_Planner(args)

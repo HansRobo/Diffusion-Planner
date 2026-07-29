@@ -45,11 +45,21 @@ turnover epoch belongs to the architecture and lr, so re-measure it if either ch
 is a training-length default and not a checkpoint selection — the deliverable is still
 `latest.pth`, which after two epochs simply *is* the epoch-2 head.
 
-Architecture and regularization are set per run by `HDP_HEAD_NUM_QUERIES`,
-`HDP_HEAD_NUM_LAYERS`, `HDP_HEAD_DROPOUT` and `HDP_LABEL_SMOOTHING`; the code defaults
-reproduce a single-query single-layer probe. `turn_indicator_label_smoothing` is detected
-by the launcher with its own grep, because a source pinned before it existed would be
-handed an unknown flag by argparse.
+Architecture and regularization default to 4 queries, 2 layers, dropout 0.1 and label
+smoothing 0.05, overridable per run by `HDP_HEAD_NUM_QUERIES`, `HDP_HEAD_NUM_LAYERS`,
+`HDP_HEAD_DROPOUT` and `HDP_LABEL_SMOOTHING`. Those values are the winning arm of a
+6-epoch A/B against the original single-query single-layer probe, both arms trained from
+the same frozen `base80` epoch-80 policy: the redesigned head leads at **all six epochs**
+on accuracy, balanced accuracy, macro-F1, active-F1 and turn-direction accuracy, and on
+the epoch-6 `latest.pth` by balanced accuracy 0.8121 vs 0.7934, active-F1 0.8229 vs
+0.8059 and direction accuracy 0.7345 vs 0.7046. `valid_loss_ego` is 2.3241 in both, which
+is the check that the head stayed detached from the planner.
+
+`turn_indicator_label_smoothing` is detected by the launcher with its own grep, because a
+source pinned before it existed would be handed an unknown flag by argparse. A pin that
+predates any of these flags now aborts rather than running: with the defaults no longer
+equal to the legacy probe's, omitting the flags would train a different architecture than
+the run records.
 
 Running the head concurrently with RL is safe by construction. Per
 `configure_rl_trainable_parameters` (`train_hdp_rl_predictor.py:87-95`),

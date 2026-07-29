@@ -325,44 +325,50 @@ TRAIN_ARGS=(
   --port "${PORT}"
 )
 
-# The redesigned-head flags exist only from commit 33306cc8 on. The legacy pin is a
-# legitimate SOURCE_REPO -- it is the control arm of the architecture A/B -- and passing
-# unknown flags to it is a hard argparse error, so append them only where they parse.
-# Silently dropping a non-default value would turn the treatment arm into a second
-# control, so that case aborts instead.
+# The redesigned-head flags exist only from commit 33306cc8 on, and a source pinned
+# before that is handed a hard argparse error, so append them only where they parse.
+# The defaults below are now the winning arm rather than the legacy probe, so a legacy
+# pin can no longer reproduce them: it aborts unless the resolved values are exactly the
+# 1/1/0.0 that omitting the flags actually produces. Comparing the resolved value, not
+# merely "was the variable set", is what keeps a default-valued launch from silently
+# training a different architecture than the one it records.
+HEAD_NUM_QUERIES=${HDP_HEAD_NUM_QUERIES:-4}
+HEAD_NUM_LAYERS=${HDP_HEAD_NUM_LAYERS:-2}
+HEAD_DROPOUT=${HDP_HEAD_DROPOUT:-0.1}
 HEAD_ARCH_FLAGS=(
-  --turn_indicator_head_num_queries "${HDP_HEAD_NUM_QUERIES:-1}"
-  --turn_indicator_head_num_layers "${HDP_HEAD_NUM_LAYERS:-1}"
-  --turn_indicator_head_dropout "${HDP_HEAD_DROPOUT:-0.0}"
+  --turn_indicator_head_num_queries "${HEAD_NUM_QUERIES}"
+  --turn_indicator_head_num_layers "${HEAD_NUM_LAYERS}"
+  --turn_indicator_head_dropout "${HEAD_DROPOUT}"
 )
 if grep -q "turn_indicator_head_num_queries" \
     "${SOURCE_REPO}/diffusion_planner/train_predictor.py"; then
   TRAIN_ARGS+=("${HEAD_ARCH_FLAGS[@]}")
   log "redesigned-head flags: ${HEAD_ARCH_FLAGS[*]}"
 else
-  for spec in "HDP_HEAD_NUM_QUERIES=1" "HDP_HEAD_NUM_LAYERS=1" \
-              "HDP_HEAD_DROPOUT=0.0"; do
+  for spec in "HEAD_NUM_QUERIES=1" "HEAD_NUM_LAYERS=1" "HEAD_DROPOUT=0.0"; do
     name=${spec%%=*}
-    if [[ -n "${!name:-}" && "${!name}" != "${spec#*=}" ]]; then
-      echo "FATAL: ${name}=${!name} but ${SOURCE_REPO} predates the redesigned head." >&2
-      echo "       Running it there would silently produce a second control arm." >&2
+    if [[ "${!name}" != "${spec#*=}" ]]; then
+      echo "FATAL: resolved ${name}=${!name} but ${SOURCE_REPO} predates the redesigned" >&2
+      echo "       head and can only train ${spec#*=}. Set HDP_${name}=${spec#*=} to run" >&2
+      echo "       the legacy probe there deliberately." >&2
       exit 23
     fi
   done
-  log "legacy source pin: omitting redesigned-head flags (control arm)"
+  log "legacy source pin: omitting redesigned-head flags (legacy probe)"
 fi
 
 # Label smoothing is detected on its own and not folded into the check above: it landed
 # later than the head-arch flags, so there is a range of pinned sources that HAVE those and
 # do NOT have this one. A combined check would pass the arch grep and then hand an unknown
 # flag to argparse.
+LABEL_SMOOTHING=${HDP_LABEL_SMOOTHING:-0.05}
 if grep -q "turn_indicator_label_smoothing" \
     "${SOURCE_REPO}/diffusion_planner/train_predictor.py"; then
-  TRAIN_ARGS+=(--turn_indicator_label_smoothing "${HDP_LABEL_SMOOTHING:-0.0}")
-  log "label smoothing: ${HDP_LABEL_SMOOTHING:-0.0}"
+  TRAIN_ARGS+=(--turn_indicator_label_smoothing "${LABEL_SMOOTHING}")
+  log "label smoothing: ${LABEL_SMOOTHING}"
 else
-  if [[ -n "${HDP_LABEL_SMOOTHING:-}" && "${HDP_LABEL_SMOOTHING}" != "0.0" ]]; then
-    echo "FATAL: HDP_LABEL_SMOOTHING=${HDP_LABEL_SMOOTHING} but ${SOURCE_REPO} has no" >&2
+  if [[ "${LABEL_SMOOTHING}" != "0.0" ]]; then
+    echo "FATAL: resolved LABEL_SMOOTHING=${LABEL_SMOOTHING} but ${SOURCE_REPO} has no" >&2
     echo "       --turn_indicator_label_smoothing. Running it there would silently train" >&2
     echo "       at 0.0 and be recorded as the smoothed arm." >&2
     exit 23
