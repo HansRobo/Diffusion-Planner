@@ -46,7 +46,6 @@ _FINGERPRINT_FIELDS = (
     "rl_reward_w_road_border",
     "rl_behavior_gate",
     "rl_pdm_red_light_gate",
-    "rl_first_waypoint_gate",
     "rl_candidate_aug_prob",
     "rl_candidate_aug_std",
     "rl_candidate_aug_stretch",
@@ -56,9 +55,17 @@ _FINGERPRINT_FIELDS = (
 )
 
 
+# Fields that no longer exist but are frozen into caches mined before their removal.
+# Dropping them outright would change every historical fingerprint and abort the
+# resume of an otherwise-valid multi-terabyte cache. `rl_first_waypoint_gate` was
+# False in every run ever mined (32/32 args.json), so pinning it reproduces them all.
+_FINGERPRINT_RETIRED = {"rl_first_waypoint_gate": repr(False)}
+
+
 def reward_fingerprint(args) -> dict:
     """The frozen-cache contract: everything that shapes mined groups/weights."""
-    return {name: repr(getattr(args, name, None)) for name in _FINGERPRINT_FIELDS}
+    current = {name: repr(getattr(args, name, None)) for name in _FINGERPRINT_FIELDS}
+    return {**current, **_FINGERPRINT_RETIRED}
 
 
 def relay_epoch(trainer_epoch: int) -> int:

@@ -1,9 +1,9 @@
 """Tests for the AWR pipeline upgrades ported from the original-DP post-training audits.
 
-Covers the first-waypoint candidate gate (with the mandatory 5 cm tangent floor), the
-gate-aware advantage statistics, prefix reward/loss horizons, the gated-product reward
-aggregation, the restricted diffusion-time draw, the active-groups-only expert anchor,
-and deterministic deployment-aligned checkpoint selection.
+Covers the gate-aware advantage statistics, prefix reward/loss horizons, the
+gated-product reward aggregation, the restricted diffusion-time draw, the
+active-groups-only expert anchor, and deterministic deployment-aligned checkpoint
+selection.
 """
 
 import math
@@ -16,86 +16,10 @@ from diffusion_planner.hdp_rl_utils import (
     compute_hdp_reward,
     compute_reward_weighted_loss,
     compute_reward_weights,
-    first_waypoint_candidate_gate,
 )
 from train_hdp_rl_predictor import selection_score_from_reward_metrics
 
 from diffusion_planner import hdp_rl_utils
-
-# ─────────────────────────── first-waypoint gate ────────────────────────────
-
-
-def _gate_args(**overrides):
-    defaults = dict(
-        rl_first_waypoint_gate=True,
-        rl_first_waypoint_gate_speed_max_mps=1.0,
-        rl_first_waypoint_gate_max_step_m=0.25,
-        rl_first_waypoint_gate_max_lateral_m=0.20,
-        rl_first_waypoint_gate_max_backward_m=0.05,
-        rl_first_waypoint_gate_max_tangent_deg=75.0,
-        rl_first_waypoint_gate_tangent_min_step_m=0.05,
-    )
-    defaults.update(overrides)
-    return SimpleNamespace(**defaults)
-
-
-def _candidates(first_steps):
-    ego = torch.zeros(len(first_steps), 4, 4)
-    for index, (x, y) in enumerate(first_steps):
-        ego[index, 0, 0] = x
-        ego[index, 0, 1] = y
-    ego[..., 2] = 1.0
-    return ego
-
-
-def test_gate_rejects_standstill_jump_and_keeps_small_steps():
-    ego = _candidates([(0.05, 0.0), (1.0, 0.0)])
-    keep, metrics = first_waypoint_candidate_gate(
-        ego, torch.zeros(1), num_scenes=1, n=2, args=_gate_args()
-    )
-    assert keep.tolist() == [True, False]
-    assert metrics["reward_first_waypoint_gated_fraction"].item() == pytest.approx(0.5)
-    assert metrics["reward_first_waypoint_gate_active_scene_fraction"].item() == pytest.approx(1.0)
-
-
-def test_gate_tangent_floor_keeps_millimetre_standstill_steps():
-    # 3 mm purely-lateral step: without the floor this reads as 90° off-tangent and the
-    # candidate is silently discarded, which was the audited original-DP failure mode.
-    ego = _candidates([(0.0, 0.003), (0.0, 0.1)])
-    keep, _ = first_waypoint_candidate_gate(
-        ego, torch.zeros(1), num_scenes=1, n=2, args=_gate_args()
-    )
-    assert keep.tolist() == [True, False]
-
-
-def test_gate_rejects_backward_first_step():
-    ego = _candidates([(0.05, 0.0), (-0.1, 0.0)])
-    keep, _ = first_waypoint_candidate_gate(
-        ego, torch.zeros(1), num_scenes=1, n=2, args=_gate_args()
-    )
-    assert keep.tolist() == [True, False]
-
-
-def test_gate_inactive_above_speed_threshold():
-    ego = _candidates([(1.0, 0.0), (0.0, 1.0)])
-    keep, _ = first_waypoint_candidate_gate(
-        ego, torch.tensor([5.0]), num_scenes=1, n=2, args=_gate_args()
-    )
-    assert keep.all()
-
-
-def test_gate_disabled_keeps_everything():
-    ego = _candidates([(1.0, 0.0), (0.0, 1.0)])
-    keep, metrics = first_waypoint_candidate_gate(
-        ego,
-        torch.zeros(1),
-        num_scenes=1,
-        n=2,
-        args=_gate_args(rl_first_waypoint_gate=False),
-    )
-    assert keep.all()
-    assert metrics["reward_first_waypoint_gated_fraction"].item() == 0.0
-
 
 # ─────────────────────── gate-aware advantage weights ───────────────────────
 

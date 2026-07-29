@@ -162,7 +162,6 @@ def test_awr_objective_has_no_repo_only_terms():
     args = _paper_args()
     assert args.rl_bc_weight == 0.0  # no behaviour-cloning anchor in the paper
     assert args.rl_candidate_aug_prob == 0.0  # candidates come from pi^{k-1} only
-    assert args.rl_first_waypoint_gate is False  # no candidate rejection in the paper
     assert args.rl_noise_scale == 1.0  # pi^{k-1} sampled at its own temperature
     assert args.rl_diffusion_t_min == 0.0  # expectation over the full t range
     assert args.rl_diffusion_t_max == 1.0

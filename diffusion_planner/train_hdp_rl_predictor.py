@@ -793,48 +793,6 @@ def get_args(argv: list[str] | None = None):
         help="skip augmentation below this ego speed",
     )
     parser.add_argument(
-        "--rl_first_waypoint_gate",
-        type=boolean,
-        default=_train_config_default("rl_first_waypoint_gate"),
-        help="reject low-speed candidates whose first waypoint jumps from the current pose",
-    )
-    parser.add_argument(
-        "--rl_first_waypoint_gate_speed_max_mps",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_speed_max_mps"),
-        help="gate applies only below this ego speed",
-    )
-    parser.add_argument(
-        "--rl_first_waypoint_gate_max_step_m",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_max_step_m"),
-        help="maximum first-step displacement at low speed",
-    )
-    parser.add_argument(
-        "--rl_first_waypoint_gate_max_lateral_m",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_max_lateral_m"),
-        help="maximum first-step lateral offset at low speed",
-    )
-    parser.add_argument(
-        "--rl_first_waypoint_gate_max_backward_m",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_max_backward_m"),
-        help="maximum first-step reverse displacement at low speed",
-    )
-    parser.add_argument(
-        "--rl_first_waypoint_gate_max_tangent_deg",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_max_tangent_deg"),
-        help="maximum first-step off-tangent angle when the step is measurable",
-    )
-    parser.add_argument(
-        "--rl_first_waypoint_gate_tangent_min_step_m",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_tangent_min_step_m"),
-        help="tangent test applies only above this displacement (5 cm floor is mandatory)",
-    )
-    parser.add_argument(
         "--rl_paper_exact",
         type=boolean,
         default=_train_config_default("rl_paper_exact"),
@@ -1329,17 +1287,6 @@ def get_args(argv: list[str] | None = None):
         )
     if not 0.0 <= args.rl_diffusion_t_min < args.rl_diffusion_t_max <= 1.0:
         raise ValueError("--rl_diffusion_t_min/--rl_diffusion_t_max must satisfy 0 <= lo < hi <= 1")
-    for gate_name in (
-        "rl_first_waypoint_gate_speed_max_mps",
-        "rl_first_waypoint_gate_max_step_m",
-        "rl_first_waypoint_gate_max_lateral_m",
-        "rl_first_waypoint_gate_max_backward_m",
-        "rl_first_waypoint_gate_max_tangent_deg",
-        "rl_first_waypoint_gate_tangent_min_step_m",
-    ):
-        gate_value = float(getattr(args, gate_name))
-        if not math.isfinite(gate_value) or gate_value <= 0.0:
-            raise ValueError(f"--{gate_name} must be finite and positive")
     if args.rl_selection_metric == "deterministic" and not args.rl_eval_deterministic:
         raise ValueError(
             "--rl_selection_metric deterministic requires --rl_eval_deterministic true"

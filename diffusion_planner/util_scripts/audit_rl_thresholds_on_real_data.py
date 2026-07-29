@@ -1,12 +1,10 @@
 """CPU proof-of-concept audit of the 2026-07-23 RL upgrades on real NPZ scenes.
 
-Runs without any model or GPU. Three questions, answered on logged data:
+Runs without any model or GPU. Two questions, answered on logged data:
 
-1. Gate calibration: does the first-waypoint gate (with/without the 5 cm tangent
-   floor) falsely reject logged expert futures, especially at low speed?
-2. Augmentation calibration: are the ramped offsets/stretch velocity-safe in the
-   per-step action-normalization units, and do augmented candidates pass the gate?
-3. Reward discrimination: on groups of one expert plus augmented variants, do the
+1. Augmentation calibration: are the ramped offsets/stretch velocity-safe in the
+   per-step action-normalization units?
+2. Reward discrimination: on groups of one expert plus augmented variants, do the
    three training objectives (native weighted_sum, native gated_product, ported
    hdp_pdm) produce valid preference signal (group std > eps), sane weight
    concentration (ESS), and expert-consistent rankings?
@@ -32,7 +30,6 @@ from diffusion_planner.hdp_rl_utils import (
     augment_rollout_candidates,
     compute_hdp_reward,
     compute_reward_weights,
-    first_waypoint_candidate_gate,
 )
 from diffusion_planner.pdm_reward_port import compute_pdm_port_reward
 
@@ -74,13 +71,6 @@ def _neighbors_world(neighbor_future: torch.Tensor) -> torch.Tensor:
     out = torch.cat([xy, torch.cos(heading), torch.sin(heading)], dim=-1)
     padding = xy.abs().sum(dim=-1, keepdim=True) <= 1e-6
     return out.masked_fill(padding, 0.0)
-
-
-def _gate_args(tangent_floor: float) -> SimpleNamespace:
-    return SimpleNamespace(
-        rl_first_waypoint_gate=True,
-        rl_first_waypoint_gate_tangent_min_step_m=tangent_floor,
-    )
 
 
 def main() -> None:
@@ -130,20 +120,11 @@ def main() -> None:
 
     report: dict = {"num_scenes": len(scenes), "group_size": n, "seed": args.seed}
 
-    # ── Part 1: gate on logged experts ────────────────────────────────────
     experts = torch.stack([_expert_world(s["ego_agent_future"][:80]) for s in scenes])
     speeds = torch.stack([s["ego_current_state"][4:6].norm() for s in scenes])
-    low_speed = speeds < 1.0
-    for name, floor in (("floored_5cm", 0.05), ("unfloored", 1e-9)):
-        keep, _ = first_waypoint_candidate_gate(experts, speeds, len(scenes), 1, _gate_args(floor))
-        rejected = ~keep
-        report[f"gate_{name}_expert_reject_fraction"] = rejected.float().mean().item()
-        report[f"gate_{name}_expert_reject_fraction_low_speed"] = (
-            rejected[low_speed].float().mean().item() if low_speed.any() else 0.0
-        )
-    report["low_speed_scene_fraction"] = low_speed.float().mean().item()
+    report["low_speed_scene_fraction"] = (speeds < 1.0).float().mean().item()
 
-    # ── Part 2: augmentation calibration in action-normalization units ────
+    # ── Part 1: augmentation calibration in action-normalization units ────
     groups = experts.repeat_interleave(n, dim=0)
     augmented, aug_metrics = augment_rollout_candidates(
         groups.clone(), speeds, len(scenes), n, aug_args, generator=generator
@@ -161,12 +142,8 @@ def main() -> None:
     report["aug_max_step_increment_sigma_p99"] = (
         sigma.amax(dim=(1, 2))[changed].quantile(0.99).item() if changed.any() else 0.0
     )
-    gate_keep, _ = first_waypoint_candidate_gate(
-        augmented, speeds, len(scenes), n, _gate_args(0.05)
-    )
-    report["aug_gate_pass_fraction"] = gate_keep.float().mean().item()
 
-    # ── Part 3: reward discrimination on expert+augmented groups ──────────
+    # ── Part 2: reward discrimination on expert+augmented groups ──────────
     rewards: dict[str, list[torch.Tensor]] = {"native": [], "gated": [], "pdm": []}
     failures = {"native": 0, "gated": 0, "pdm": 0}
     for index, scene in enumerate(scenes):

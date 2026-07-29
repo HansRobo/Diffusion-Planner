@@ -102,7 +102,6 @@ REWARD_HORIZON_STEPS=${HDP_RL_REWARD_HORIZON_STEPS:-0}
 CANDIDATE_LOSS_HORIZON=${HDP_RL_CANDIDATE_LOSS_HORIZON:-0}
 DIFFUSION_T_MIN=${HDP_RL_DIFFUSION_T_MIN:-0.0}
 DIFFUSION_T_MAX=${HDP_RL_DIFFUSION_T_MAX:-1.0}
-FIRST_WAYPOINT_GATE=${HDP_RL_FIRST_WAYPOINT_GATE:-True}
 SELECTION_METRIC=${HDP_RL_SELECTION_METRIC:-deterministic}
 EVAL_DETERMINISTIC=${HDP_RL_EVAL_DETERMINISTIC:-True}
 # HDP rollout-candidate augmentation (velocity-safe ramped form). Off by default;
@@ -225,7 +224,6 @@ case "${PAPER_EXACT}" in
     # Real-vehicle extensions of this repository, off.
     paper_pin BC_WEIGHT HDP_RL_BC_WEIGHT 0.0
     paper_pin CANDIDATE_AUG_PROB HDP_RL_CANDIDATE_AUG_PROB 0.0
-    paper_pin FIRST_WAYPOINT_GATE HDP_RL_FIRST_WAYPOINT_GATE False
     paper_pin DIFFUSION_T_MIN HDP_RL_DIFFUSION_T_MIN 0.0
     paper_pin DIFFUSION_T_MAX HDP_RL_DIFFUSION_T_MAX 1.0
     ;;
@@ -596,7 +594,6 @@ TRAIN_ARGS=(
   --rl_candidate_loss_horizon "${CANDIDATE_LOSS_HORIZON}" \
   --rl_diffusion_t_min "${DIFFUSION_T_MIN}" \
   --rl_diffusion_t_max "${DIFFUSION_T_MAX}" \
-  --rl_first_waypoint_gate "${FIRST_WAYPOINT_GATE}" \
   --rl_selection_metric "${SELECTION_METRIC}" \
   --rl_eval_deterministic "${EVAL_DETERMINISTIC}" \
   --rl_rollout_interval "${ROLLOUT_INTERVAL}" \

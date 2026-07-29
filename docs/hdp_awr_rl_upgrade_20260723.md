@@ -23,6 +23,15 @@ profile's semantics and stay unchanged.
 ## Ported (defaults preserve the historical objective unless noted)
 
 1. **First-waypoint candidate gate** (`rl_first_waypoint_gate`, default on).
+   > **REMOVED 2026-07-29.** This item did not survive. The 5 cm tangent floor
+   > described below sits *above* the standstill regime it polices (stop-turn
+   > first-step p95 is 0.039 m), so the gate rejected nothing across four cycles,
+   > and it was superseded upstream on 2026-07-25. It was never enabled in any HDP
+   > run (32/32 `args.json` False) while defaulting to True, which advertised a
+   > safeguard that was not there. Deleted, with the measured replacement criterion
+   > recorded for a future cycle in
+   > `docs/hdp_rl_first_waypoint_gate_removal_20260729.md`.
+
    Low-speed candidates whose first waypoint jumps from the current pose are
    excluded from both the advantage statistics and the weights. Includes the
    mandatory 5 cm tangent floor (`rl_first_waypoint_gate_tangent_min_step_m`):

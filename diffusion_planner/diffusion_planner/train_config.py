@@ -317,17 +317,6 @@ class TrainConfig:
     # Skip near-stationary scenes: offsetting a standstill trajectory manufactures the
     # exact jump failure the first-waypoint gate exists to catch (upstream guard: 2.0).
     rl_candidate_aug_speed_min_mps: float = 2.0
-    # Reject low-speed candidates whose first waypoint jumps away from the current pose
-    # (audited original-DP failure: reward-blind standstill jumps winning the advantage).
-    # The 5 cm tangent floor is mandatory — without it a numerically-zero standstill step
-    # reads as 90 degrees off-tangent and entire low-speed groups are silently discarded.
-    rl_first_waypoint_gate: bool = True
-    rl_first_waypoint_gate_speed_max_mps: float = 1.0
-    rl_first_waypoint_gate_max_step_m: float = 0.25
-    rl_first_waypoint_gate_max_lateral_m: float = 0.20
-    rl_first_waypoint_gate_max_backward_m: float = 0.05
-    rl_first_waypoint_gate_max_tangent_deg: float = 75.0
-    rl_first_waypoint_gate_tangent_min_step_m: float = 0.05
     # Tier IV data has no populated static-object tensor, so OCC falls back to
     # stopped actors and, when none exist, HD-map road borders. Keep this ablatable
     # because road borders are a practical proxy rather than literal occupancy.

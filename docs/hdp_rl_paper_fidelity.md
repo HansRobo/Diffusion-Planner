@@ -111,7 +111,12 @@ without a replay cache would silently train ten epochs on nothing.
 | `rl_candidate_loss_horizon` | 0 | 0 | the regression covers the whole action `tau^v_0` |
 | `rl_diffusion_t_min` / `rl_diffusion_t_max` | 0.0 / 1.0 | 0.0 / 1.0 | expectation over the full `t` range |
 | `rl_candidate_aug_prob` | 0.0 | 0.0 | see "deliberate non-verbatim item" below |
-| `rl_first_waypoint_gate` | True | **False** | a real-vehicle candidate filter; not in the paper and not in the released agent |
+
+`rl_first_waypoint_gate` used to be listed here (repo default True, paper-exact
+False). The mechanism was **removed** on 2026-07-29 — it was never enabled in any
+run and its implementation was a superseded form measured to reject nothing. See
+`docs/hdp_rl_first_waypoint_gate_removal_20260729.md`. Paper-exact mode no longer
+has to switch it off, because it no longer exists.
 
 ## Three contradictions between the sources
 

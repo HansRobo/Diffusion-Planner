@@ -403,12 +403,6 @@ _COMMON: tuple[PaperExactSetting, ...] = (
         "constant waypoint offset, which is a first-step impulse under this "
         "repository's velocity actions -- see docs/hdp_rl_paper_fidelity.md",
     ),
-    PaperExactSetting(
-        "rl_first_waypoint_gate",
-        False,
-        "not in neurips_2026.tex nor dp_vla_rl_agent.py -- real-vehicle "
-        "candidate filter of this repository",
-    ),
 )
 
 # Appendix app:rewards, "Total Training Reward":

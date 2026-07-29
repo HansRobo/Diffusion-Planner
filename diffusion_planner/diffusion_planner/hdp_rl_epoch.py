@@ -24,7 +24,6 @@ from diffusion_planner.hdp_rl_utils import (
     compute_reward_weights,
     distributed_valid_sample_count,
     expand_batch,
-    first_waypoint_candidate_gate,
     sample_group,
 )
 from diffusion_planner.loss import sample_diffusion_time
@@ -583,13 +582,6 @@ def _hdp_rl_step(
     if not torch.isfinite(reward).all():
         raise FloatingPointError("Non-finite HDP reward returned for RL rollout")
     reward_metrics.update(candidate_aug_metrics)
-    # The reward is blind to near-field continuity, so a dynamically infeasible
-    # standstill-jump candidate can otherwise win the group advantage. Rejected
-    # candidates are excluded from both the group statistics and the weights.
-    gate_mask, gate_metrics = first_waypoint_candidate_gate(
-        ego_world, ego_speed, num_scenes, n, args
-    )
-    reward_metrics.update(gate_metrics)
     if timing_events is not None:
         timing_events[2].record()
 
@@ -601,7 +593,6 @@ def _hdp_rl_step(
         getattr(args, "rl_reward_beta", 0.5),
         args.advantage_eps,
         use_ddp=bool(getattr(args, "ddp", False)),
-        candidate_valid_mask=gate_mask,
     )
     global_valid_count, ddp_world_size = distributed_valid_sample_count(
         valid_sample,
@@ -792,10 +783,6 @@ def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, rollout_generator
     if not torch.isfinite(reward).all():
         raise FloatingPointError("Non-finite HDP reward returned while mining replay")
     reward_metrics.update(aug_metrics)
-    gate_mask, gate_metrics = first_waypoint_candidate_gate(
-        ego_world, ego_speed, num_scenes, n, args
-    )
-    reward_metrics.update(gate_metrics)
     reward_weights, valid_sample = compute_reward_weights(
         reward,
         num_scenes,
@@ -804,7 +791,6 @@ def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, rollout_generator
         getattr(args, "rl_reward_beta", 0.5),
         args.advantage_eps,
         use_ddp=bool(getattr(args, "ddp", False)),
-        candidate_valid_mask=gate_mask,
     )
     shard = {
         "ego_world": ego_world,
