@@ -434,6 +434,80 @@ def test_hdp_pdm_reward_responds_to_neighbor_clearance():
     assert total(2.6, False) == total(8.0, False)
 
 
+def test_expert_off_lane_bit_may_be_supplied_instead_of_recomputed():
+    """The lane-change mask must be cacheable without changing the reward.
+
+    ``hdp_pdm`` masks its lane term whenever the LOGGED expert leaves the lane
+    union.  That mask is policy-independent -- a pure function of the logged
+    future, the ego shape and the map -- yet evaluating ego perimeter
+    containment over the whole horizon is 54% of a live reward call (measured on
+    32 real scenes: 34.6 ms -> 15.8 ms per call), and every mine of every cycle
+    recomputes it.  So callers may precompute it and hand it back through
+    ``EXPERT_OFF_LANE_KEY``.
+
+    Pin all three properties that makes it safe: the supplied bit is honoured,
+    the primitive agrees with the uncached path, and a wrong bit visibly moves
+    the reward -- the last one is what stops a misaligned cross-cycle sidecar
+    from failing silently.
+    """
+    from rlvr.reward import EXPERT_OFF_LANE_KEY, compute_reward_batch, expert_off_lane
+
+    T = 80
+    # The candidate runs parallel to the lane but 3 m off its centerline, so the
+    # lane term is well below 1 and masking it is observable.  Do not push this
+    # further out: past a few metres the centerline term stops finding a lane at
+    # all and goes neutral, which would silently defeat the assertion below.
+    offset = _minimal_scene_data(K=2, T=T)[1:].repeat(2, 1, 1)
+    offset[:, :, 1] = 3.0
+    # The logged expert drives down the middle of the lane, i.e. genuinely
+    # on-lane, so the honest bit here is False.  Start 10 m in so that the
+    # vehicle's rear perimeter stays inside the lane's longitudinal extent --
+    # at x=0 the rear corners hang off the end of the polygon and the mask
+    # (correctly) fires.
+    expert = _minimal_scene_data(K=2, T=T)[1]
+    expert[:, 0] += 10.0
+
+    # _trivial_lane() leaves the boundary-offset channels at zero, which
+    # collapses the lane polygon onto its centerline and makes every vehicle
+    # off-lane.  Give this one real boundaries at +/-2 m.
+    lane = _trivial_lane().clone()
+    lane[..., 4:6] = torch.tensor([0.0, 2.0])
+    lane[..., 6:8] = torch.tensor([0.0, -2.0])
+
+    cfg = RewardConfig(
+        reward_profile="hdp_pdm",
+        reward_mode="gate",
+        enable_lane_departure=False,
+        rb_gate_enabled=False,
+    )
+
+    def scene(bit: bool | None) -> dict:
+        data = {
+            "ego_agent_future": expert.clone(),
+            "neighbor_agents_future": torch.zeros(0, T, 4),
+            "neighbor_agents_past": torch.zeros(0, 21, 11),
+            "lanes": lane,
+            "route_lanes": lane,
+            "line_strings": torch.zeros(0, 20, 4),
+            "polygons": torch.zeros(0, 20, 3),
+            "goal_pose": torch.zeros(3),
+            "ego_shape": torch.tensor([3.0, 5.0, 2.0]),
+        }
+        if bit is not None:
+            data[EXPERT_OFF_LANE_KEY] = torch.tensor([float(bit)])
+        return data
+
+    def total(bit: bool | None) -> float:
+        return float(compute_reward_batch(offset, scene(bit), cfg)[0].total)
+
+    assert expert_off_lane(scene(None), T, cfg) is False, "this expert is on-lane"
+    assert total(False) == total(None), "the primitive disagrees with the uncached path"
+    assert total(True) > total(False), (
+        "masking the lane term did not change the reward, so this scene cannot "
+        "detect a wrong cached bit"
+    )
+
+
 def test_low_speed_steer_penalty_prefers_the_smoother_first_step():
     """A standstill first step that implies steering lock must score below a straight one.
 
