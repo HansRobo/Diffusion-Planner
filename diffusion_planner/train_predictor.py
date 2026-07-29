@@ -226,9 +226,18 @@ def get_args(args_list=None):
         "--plantf_head_type",
         type=str,
         default="mlp",
-        choices=["mlp", "cross_attn"],
-        help="trajectory head: 'mlp' (reshape ego token) or 'cross_attn' (K mode "
-        "queries cross-attend to all encoder tokens)",
+        choices=["mlp", "cross_attn", "basis", "gru"],
+        help="trajectory head: 'mlp' (reshape ego token), 'cross_attn' (K mode "
+        "queries cross-attend to all encoder tokens), 'basis' (mlp head that "
+        "regresses Bezier control points expanded over time = temporal smoothness), "
+        "or 'gru' (recurrent head that unrolls the waypoints; experimental)",
+    )
+    parser.add_argument(
+        "--plantf_basis_control_points",
+        type=int,
+        default=8,
+        help="number of Bezier control points for --plantf_head_type basis "
+        "(fewer=smoother/stiffer, more=more expressive; ignored otherwise)",
     )
     parser.add_argument(
         "--plantf_route_rerank",

@@ -13,7 +13,9 @@ from diffusion_planner.dimensions import (
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.model.module.plantf_decoder import (
     PlanTFCrossAttnHead,
+    PlanTFGRUHead,
     PlanTFTrajectoryHead,
+    bezier_basis,
     compute_plantf_training_loss,
 )
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
@@ -659,6 +661,110 @@ def test_tail_weighted_smoothness_changes_smoothness_loss():
     weighted = run(3.0)
     assert base > 0
     assert not torch.isclose(base, weighted)
+
+
+def test_bezier_basis_partition_of_unity():
+    # Bernstein weights sum to 1 at every timestep and reproduce the endpoints
+    # exactly (first control point at t=0, last at t=1).
+    basis = bezier_basis(num_control_points=8, num_steps=OUTPUT_T)
+    assert basis.shape == (8, OUTPUT_T)
+    assert torch.allclose(basis.sum(dim=0), torch.ones(OUTPUT_T), atol=1e-5)
+    assert torch.allclose(basis[:, 0], torch.tensor([1.0] + [0.0] * 7), atol=1e-5)
+    assert torch.allclose(basis[:, -1], torch.tensor([0.0] * 7 + [1.0]), atol=1e-5)
+
+
+def test_basis_head_shapes_and_control_points():
+    # The basis head regresses n_ctrl*C values internally but exposes the same
+    # [B, K, T, C] contract as the flat head.
+    torch.manual_seed(0)
+    n_ctrl = 6
+    head = PlanTFTrajectoryHead(
+        embed_dim=HIDDEN_DIM,
+        num_modes=NUM_MODES,
+        future_steps=OUTPUT_T,
+        out_channels=4,
+        num_control_points=n_ctrl,
+    )
+    assert head.loc[-1].out_features == n_ctrl * 4  # coefficients, not T*4
+    loc, pi = head(torch.randn(2, HIDDEN_DIM))
+    assert loc.shape == (2, NUM_MODES, OUTPUT_T, 4)
+    assert pi.shape == (2, NUM_MODES)
+
+
+def test_basis_head_is_structurally_smoother_than_flat():
+    # With identical random weights the Bezier expansion produces a far smaller
+    # xy second-difference (curvature) than the flat per-step head — the whole
+    # point of the temporal basis.
+    torch.manual_seed(0)
+    x = torch.randn(4, HIDDEN_DIM)
+
+    def curvature(head):
+        loc, _ = head(x)
+        xy = loc[..., :2]
+        d2 = xy[:, :, 2:] - 2 * xy[:, :, 1:-1] + xy[:, :, :-2]
+        return d2.abs().mean()
+
+    torch.manual_seed(1)
+    flat = PlanTFTrajectoryHead(HIDDEN_DIM, NUM_MODES, OUTPUT_T, out_channels=4)
+    torch.manual_seed(1)
+    basis = PlanTFTrajectoryHead(
+        HIDDEN_DIM, NUM_MODES, OUTPUT_T, out_channels=4, num_control_points=8
+    )
+    assert curvature(basis) < 0.25 * curvature(flat)
+
+
+def test_basis_decoder_contract_and_zero_init():
+    # End-to-end: plantf_head_type="basis" preserves the prediction contract, and
+    # the shared zero-init still zeroes the trajectory (control points -> 0).
+    config = _config_with(plantf_head_type="basis", plantf_basis_control_points=8)
+    model = Diffusion_Planner(config).eval()
+    assert model.decoder.trajectory_head.num_control_points == 8
+    assert torch.count_nonzero(model.decoder.trajectory_head.loc[-1].weight) == 0
+    _, outputs = model(_inputs())
+    assert outputs["prediction"].shape == (2, 1 + MAX_NUM_NEIGHBORS, OUTPUT_T, POSE_DIM)
+    assert outputs["trajectory"].shape == (2, NUM_MODES, OUTPUT_T, 4)
+
+
+def test_basis_head_with_velocity_and_backward():
+    # basis + velocity representation trains (loss finite, gradients flow).
+    config = _config_with(
+        plantf_head_type="basis",
+        plantf_basis_control_points=8,
+        use_velocity_representation=True,
+    )
+    loss = _run_loss(config)
+    total = loss["ego_planning_loss"] + loss["neighbor_prediction_loss"] + loss["mode_cls_loss"]
+    assert torch.isfinite(total)
+    total.backward()
+
+
+def test_gru_head_shapes():
+    torch.manual_seed(0)
+    head = PlanTFGRUHead(
+        embed_dim=HIDDEN_DIM, num_modes=NUM_MODES, future_steps=OUTPUT_T, out_channels=4
+    )
+    loc, pi = head(torch.randn(2, HIDDEN_DIM))
+    assert loc.shape == (2, NUM_MODES, OUTPUT_T, 4)
+    assert pi.shape == (2, NUM_MODES)
+
+
+def test_gru_decoder_contract_and_zero_init():
+    config = _config_with(plantf_head_type="gru")
+    model = Diffusion_Planner(config).eval()
+    assert isinstance(model.decoder.trajectory_head, PlanTFGRUHead)
+    # shared zero-init still zeroes the final loc Linear -> zero trajectory prior
+    assert torch.count_nonzero(model.decoder.trajectory_head.loc[-1].weight) == 0
+    _, outputs = model(_inputs())
+    assert outputs["prediction"].shape == (2, 1 + MAX_NUM_NEIGHBORS, OUTPUT_T, POSE_DIM)
+    assert outputs["trajectory"].shape == (2, NUM_MODES, OUTPUT_T, 4)
+
+
+def test_gru_head_with_velocity_and_backward():
+    config = _config_with(plantf_head_type="gru", use_velocity_representation=True)
+    loss = _run_loss(config)
+    total = loss["ego_planning_loss"] + loss["neighbor_prediction_loss"] + loss["mode_cls_loss"]
+    assert torch.isfinite(total)
+    total.backward()
 
 
 def test_route_rerank_falls_back_without_normalizer():

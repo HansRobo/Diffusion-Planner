@@ -154,8 +154,19 @@ class TrainConfig:
     # Trajectory head architecture. "mlp" (default): reshape the single ego token
     # into K modes. "cross_attn": K mode queries cross-attend to ALL encoder
     # tokens (map/agents/route), giving the head scene context the single-token
-    # bottleneck lacks (candidate fix for tail divergence).
-    plantf_head_type: Literal["mlp", "cross_attn"] = "mlp"
+    # bottleneck lacks (candidate fix for tail divergence). "basis": the mlp head
+    # but the trajectory is a Bezier curve of plantf_basis_control_points control
+    # points expanded over time — a temporal inductive bias (structural C∞
+    # smoothness) the flat per-step head lacks, while keeping mlp's deploy
+    # robustness and ONNX-triviality (fixed basis matmul, no recurrence).
+    # "gru": recurrent head that unrolls the waypoints with a GRU (temporal
+    # recurrence in the architecture). Experimental — RNN heads are more
+    # deploy-fragile than mlp/basis; not the deploy default.
+    plantf_head_type: Literal["mlp", "cross_attn", "basis", "gru"] = "mlp"
+    # Number of Bezier control points for plantf_head_type="basis" (ignored
+    # otherwise). Fewer = smoother/stiffer, more = more expressive. 8 is a good
+    # default for an 8s / 80-step horizon.
+    plantf_basis_control_points: int = 8
     # Inference mode selection. When True, pick the ego mode by route adherence
     # among the top-k pi modes instead of argmax(pi). Recovers oracle-ish modes
     # for the smooth (velocity-rep) head at zero training cost. Applies to the
