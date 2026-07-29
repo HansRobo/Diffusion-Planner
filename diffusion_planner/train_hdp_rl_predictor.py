@@ -1525,8 +1525,6 @@ def turn_indicator_metrics(agg):
             "turn_indicator_active_recall",
             "turn_indicator_active_f1",
             "turn_indicator_direction_accuracy",
-            "turn_indicator_nll",
-            "turn_indicator_ece",
         )
     } | {
         **{
