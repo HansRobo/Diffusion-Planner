@@ -147,6 +147,34 @@ ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
 UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-9}
 UPDATE_MAX_CANDIDATES=${HDP_RL_UPDATE_MAX_CANDIDATES_PER_RANK:-2048}
 COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-True}
+# Precision. bf16 halves activation memory and roughly doubles H100 throughput, and
+# it is harmless for IL, where the target is a known human trajectory and the error
+# budget is centimetres. It is NOT harmless for AWR. At the one waypoint the vehicle
+# executes, the longitudinal displacement (~0.4 m) sits in the bf16 binade whose grid
+# spacing is 1.953 mm, while the K candidates of a group differ by only ~1.1 mm — so
+# 100% of step-1 x values land exactly on the comb, the candidates collide, and the
+# ranking AWR needs on that axis does not exist. Lateral is ~24x clear, which is why
+# a bf16 campaign moves lane-keeping and comfort but not ego_progress.
+# Flip BOTH together for a true-fp32 arm: TF32 alone costs 6.5x the campaign's own
+# smoothness effect, and only amp=off AND tf32=False makes the eval bit-identical.
+# Defaults preserve the bf16 behaviour every existing launcher was measured under.
+AMP_DTYPE=${HDP_RL_AMP_DTYPE:-bf16}
+TF32=${HDP_RL_TF32:-True}
+case "${AMP_DTYPE}" in
+  off | bf16) ;;
+  *)
+    echo "HDP_RL_AMP_DTYPE must be off or bf16; got ${AMP_DTYPE}" >&2
+    exit 2
+    ;;
+esac
+case "${TF32}" in
+  True | true | 1) TF32=True ;;
+  False | false | 0) TF32=False ;;
+  *)
+    echo "HDP_RL_TF32 must be True or False; got ${TF32}" >&2
+    exit 2
+    ;;
+esac
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
 ENCODER_DROP_PATH_RATE=${HDP_RL_ENCODER_DROP_PATH_RATE:-0.1}
 DECODER_DROP_PATH_RATE=${HDP_RL_DECODER_DROP_PATH_RATE:-0.1}
@@ -374,10 +402,15 @@ PYTHON_ENV_FINGERPRINT=$(
     'import numpy, torch; print(torch.__version__, torch.version.cuda, torch.cuda.nccl.version(), numpy.__version__)'
 )
 PROVENANCE_PATH=${SAVE_DIR}/run_provenance.json
+# Numerics belong in the provenance record. Nothing else here would catch resuming a
+# bf16 run with --amp_dtype off: the checkpoint loads fine and the mixed-precision
+# history is then silently baked into the artifact. A partial migration is worse than
+# no migration, so this is fail-closed like the tree and data fingerprints.
+PRECISION_FINGERPRINT="amp=${AMP_DTYPE} tf32=${TF32}"
 "${REPO}/.venv/bin/python" - \
   "${PROVENANCE_PATH}" "${VERIFY_MODE}" "${EXPECTED_COMMIT_FULL}" "${EXPECTED_TREE}" \
-  "${DATA_FINGERPRINT}" "${PYTHON_ENV_FINGERPRINT}" "${SOURCE_CKPT}" \
-  "${SOURCE_CKPT_SHA256}" "${data_paths[@]}" <<'PY'
+  "${DATA_FINGERPRINT}" "${PYTHON_ENV_FINGERPRINT}" "${PRECISION_FINGERPRINT}" \
+  "${SOURCE_CKPT}" "${SOURCE_CKPT_SHA256}" "${data_paths[@]}" <<'PY'
 import json
 import os
 import pathlib
@@ -390,6 +423,7 @@ import sys
     tree,
     data_fingerprint,
     python_environment,
+    precision,
     source_checkpoint,
     source_checkpoint_sha256,
     *data_paths,
@@ -401,12 +435,19 @@ current = {
     "code_tree": tree,
     "data_fingerprint": data_fingerprint,
     "python_environment": python_environment,
+    "precision": precision,
     "data_paths": data_paths,
 }
 if path.exists():
     with path.open(encoding="utf-8") as f:
         recorded = json.load(f)
     checked = ("code_tree", "data_fingerprint", "python_environment")
+    # "precision" postdates the runs already on disk. Compare it only when the record
+    # carries it: a missing key is a gap in the record, not evidence of a match, and
+    # refusing to resume every pre-existing run would be a worse failure than the one
+    # this guard exists to catch.
+    if "precision" in recorded:
+        checked += ("precision",)
     mismatches = {
         key: {"recorded": recorded.get(key), "current": current[key]}
         for key in checked
@@ -634,8 +675,8 @@ TRAIN_ARGS=(
   --coeff_neighbor_collision_loss 0.0 \
   --use_ema True \
   --ddp True \
-  --tf32 True \
-  --amp_dtype bf16 \
+  --tf32 "${TF32}" \
+  --amp_dtype "${AMP_DTYPE}" \
   --fused_optimizer True \
   --ddp_static_graph True \
   --compile_model "${COMPILE_MODEL}" \
