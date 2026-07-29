@@ -14,10 +14,12 @@ ever run for real:
 """
 
 import json
+from types import SimpleNamespace
 
 from rlvr.autoresearch.tools.enforce_cycle_non_regression import (
     JITTER_SCENE_KEY,
     STOP_TURN_FLAG_KEY,
+    _resolve_jitter_sources,
     evaluate,
     stop_turn_exceed_fraction,
 )
@@ -125,3 +127,64 @@ def test_reward_must_be_a_real_improvement():
     )
     assert result["verdict"] == "veto"
     assert "det_reward_improved" in result["failed_checks"]
+
+
+def _args(candidate, baseline):
+    return SimpleNamespace(candidate_scenes=candidate, baseline_scenes=baseline)
+
+
+def test_jitter_falls_back_to_the_direction_when_the_commit_lacks_the_diagnostic(
+    tmp_path,
+):
+    """Today's artifacts: only train_awr's per-epoch evals carry the metric.
+
+    The deployment evaluator gained the diagnostic on 2026-07-28; audits written
+    before that do not have it, so the tool must keep reading the caller's
+    --candidate-scenes rather than silently losing the check.
+    """
+
+    direction = _scenes(tmp_path / "epoch010.json", [1.5, 0.0])
+    baseline = _scenes(tmp_path / "epoch000.json", [0.0, 0.0])
+    commit = _scenes(tmp_path / "commit.json", [0.0, 0.0], include_key=False)
+    audit = {"candidate": str(commit), "baseline": str(tmp_path / "absent.json")}
+
+    sources = _resolve_jitter_sources(audit, _args(direction, baseline))
+    assert sources["candidate"] == direction
+    assert sources["baseline"] == baseline
+    assert sources["candidate_is_committed_policy"] is False
+    assert "unscaled direction" in sources["note"]
+
+
+def test_jitter_prefers_the_committed_policy_when_both_sides_carry_it(tmp_path):
+    """The gate must bound the policy being committed, not a 20x larger step.
+
+    Cycle 1 of the jitterfix campaign was vetoed because the exceed-fraction was
+    read from the unscaled epoch-10 direction while the reward it was weighed
+    against came from the alpha=0.05 commit.
+    """
+
+    direction = _scenes(tmp_path / "epoch010.json", [1.5, 1.5])
+    baseline = _scenes(tmp_path / "epoch000.json", [0.0, 0.0])
+    commit = _scenes(tmp_path / "commit.json", [0.0, 1.5])
+    audit_baseline = _scenes(tmp_path / "audit_baseline.json", [0.0, 0.0])
+    audit = {"candidate": str(commit), "baseline": str(audit_baseline)}
+
+    sources = _resolve_jitter_sources(audit, _args(direction, baseline))
+    assert sources["candidate"] == commit
+    assert sources["baseline"] == audit_baseline
+    assert sources["candidate_is_committed_policy"] is True
+
+
+def test_a_diagnostic_only_on_the_commit_side_says_what_to_regenerate(tmp_path):
+    """One-sided evidence must not become a cross-evaluator comparison."""
+
+    direction = _scenes(tmp_path / "epoch010.json", [1.5])
+    baseline = _scenes(tmp_path / "epoch000.json", [0.0])
+    commit = _scenes(tmp_path / "commit.json", [0.0])
+    stale = _scenes(tmp_path / "audit_baseline.json", [0.0], include_key=False)
+    audit = {"candidate": str(commit), "baseline": str(stale)}
+
+    sources = _resolve_jitter_sources(audit, _args(direction, baseline))
+    assert sources["candidate"] == direction
+    assert sources["candidate_is_committed_policy"] is False
+    assert "regenerate the baseline eval" in sources["note"]
