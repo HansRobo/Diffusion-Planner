@@ -18,7 +18,14 @@ dependencies = [
 dev = ["pre-commit==4.6.0", "pytest>=8.0.0", "ruff==0.15.16"]
 
 [tool.uv]
-exclude-newer = "7 days"
+# uv wants a full RFC 3339 timestamp here, not a duration ("YYYY-MM-DD" alone is also rejected).
+# "7 days" failed to parse and uv then discarded this WHOLE [tool.uv] table -- silently dropping
+# constraint-dependencies and the flatt index below, and leaving re-locks unbounded. That is how
+# a torch upgrade slipped in and broke the CUDA bundle (libcudnn.so.9 not found).
+# The value below is the cutoff uv.lock already records, so fixing the parse does not force a
+# re-resolution. Bump it deliberately, together with `uv lock`, when a dependency needs something
+# newer -- a dry run at 2026-07-27 moves ~40 packages including the cuda ones.
+exclude-newer = "0001-01-01T00:00:00Z"
 constraint-dependencies = ["idna==3.15", "aiohttp==3.14.1", "starlette==1.0.1"]
 
 [[tool.uv.index]]
