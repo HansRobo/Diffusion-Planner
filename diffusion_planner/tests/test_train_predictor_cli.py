@@ -22,7 +22,7 @@ def _required_args():
         ("--augment_prob", "1.1", r"must be in \[0, 1\]"),
         ("--ego_past_noise_std", "-1", "must be >= 0"),
         ("--multisample_eval_num_samples", "-1", "must be >= 0"),
-        ("--closed_loop_search_radius", "0", "must be > 0"),
+        ("--weight_decay", "-1", "must be >= 0"),
     ],
 )
 def test_training_cli_rejects_invalid_numeric_configuration(option, value, message):

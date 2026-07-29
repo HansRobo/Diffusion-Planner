@@ -56,14 +56,6 @@ from diffusion_planner.utils.data_augmentation import (
     heading_transform,
     vector_transform,
 )
-from diffusion_planner.utils.data_augmentation_bridge import (
-    StatePerturbation as BridgeStatePerturbation,
-)
-from diffusion_planner.utils.data_augmentation_bridge import (
-    assemble_augmented_sample_from_segments_torch,
-    augment_segment_prepared_torch,
-    prepare_bidirectional_context_torch,
-)
 from diffusion_planner.utils.unicycle_accel_curvature import (
     UnicycleAccelCurvatureActionSpace,
     construct_DTD,
@@ -87,46 +79,6 @@ ATOL = 1e-5
 def test_state_perturbation_rejects_invalid_constructor_values(kwargs, message):
     with pytest.raises(ValueError, match=message):
         StatePerturbation(**kwargs)
-
-
-def test_bridge_state_perturbation_rejects_invalid_constructor_values():
-    with pytest.raises(ValueError, match="past_bridge_sec"):
-        BridgeStatePerturbation(past_bridge_sec=0.0)
-    with pytest.raises(ValueError, match="dense_sample_ds"):
-        BridgeStatePerturbation(dense_sample_ds=float("nan"))
-
-
-def test_bridge_rejects_infeasible_candidate_instead_of_returning_it():
-    """Adaptive bridge search must never return a candidate that failed its limits."""
-    past_len, future_len = 6, 80
-    past_x = torch.arange(-past_len + 1, 1, dtype=torch.float32) * 0.5
-    ego_past = torch.stack(
-        [past_x, torch.zeros_like(past_x), torch.ones_like(past_x), torch.zeros_like(past_x)],
-        dim=-1,
-    )
-    current = _ego_state(1, vx=5.0)[0]
-    future_x = torch.arange(1, future_len + 1, dtype=torch.float32) * 0.5
-    ego_future = torch.stack(
-        [future_x, torch.zeros_like(future_x), torch.zeros_like(future_x)], dim=-1
-    )
-    augmentor = BridgeStatePerturbation(
-        max_lateral_accel_mps2=0.0,
-        max_bridge_speed_gap_mps=0.0,
-        max_bridge_jerk_mps3=0.0,
-        device="cpu",
-    )
-
-    with pytest.raises(RuntimeError, match="feasibility limits"):
-        augmentor._search_feasible_sample(
-            ego_past=ego_past,
-            ego_current_state=current,
-            ego_future=ego_future,
-            wheel_base=torch.tensor(2.75),
-            lateral_offset=torch.tensor(0.5),
-            heading_offset=torch.tensor(0.1),
-            initial_past_connect_time_s=augmentor._past_bridge_sec,
-            initial_future_recover_time_s=augmentor._future_bridge_sec,
-        )
 
 
 # ─────────────────────────────── helpers ────────────────────────────────────
@@ -262,55 +214,6 @@ def test_interpolation_preserves_double_input_dtype():
     output = perturbation.interpolation_future_trajectory(current, future)
     assert output.dtype == torch.float64
     assert torch.isfinite(output).all()
-
-
-def test_bridge_context_time_axes_have_exact_sample_counts_and_vehicle_wheelbase():
-    """Bridge time axes must not depend on floating-point arange stop rounding."""
-    past_len, future_len = 3, 5
-    x = torch.arange(-2.0, 7.0)
-    y = 0.1 * x.square()
-    heading = torch.atan2(0.2 * x, torch.ones_like(x))
-    ego_past = torch.stack(
-        [x[:past_len], y[:past_len], torch.cos(heading[:past_len]), torch.sin(heading[:past_len])],
-        dim=-1,
-    )
-    current = torch.tensor(
-        [
-            x[past_len],
-            y[past_len],
-            torch.cos(heading[past_len]),
-            torch.sin(heading[past_len]),
-            5.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ]
-    )
-    ego_future = torch.stack(
-        [x[past_len + 1 :], y[past_len + 1 :], heading[past_len + 1 :]], dim=-1
-    )
-    context = prepare_bidirectional_context_torch(ego_past, current, ego_future, 0.05)
-    assert context.past_segment.segment_time.shape == (past_len,)
-    assert context.future_segment.segment_time.shape == (future_len + 1,)
-    assert context.full_time.shape == (past_len + future_len,)
-
-    past = augment_segment_prepared_torch(
-        context.past_segment, torch.tensor(0.0), torch.tensor(0.0), 0.2
-    )
-    future = augment_segment_prepared_torch(
-        context.future_segment, torch.tensor(0.0), torch.tensor(0.0), 0.2
-    )
-    short_wheelbase = assemble_augmented_sample_from_segments_torch(
-        context, current, past, future, 0.2, 0.2, 2.0
-    )
-    long_wheelbase = assemble_augmented_sample_from_segments_torch(
-        context, current, past, future, 0.2, 0.2, 4.0
-    )
-    assert not torch.isclose(
-        short_wheelbase.aug_current_state[8], long_wheelbase.aug_current_state[8]
-    )
 
 
 # ──────────────────────────── heading_transform ─────────────────────────────

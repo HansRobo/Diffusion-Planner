@@ -23,7 +23,6 @@ class Config:
             "diffusion_time_sample_method": "uniform",
             "diffusion_sample_steps": 6,
             "num_generations": 8,
-            "rl_reward_normalize": getattr(self, "official_reward_normalize", "group"),
             "rl_reward_beta": getattr(self, "official_reward_beta", 0.5),
             "rl_noise_scale": 1.5,
             "rl_eval_noise_scale": 0.5,

@@ -9,15 +9,11 @@ import numpy as np
 import torch
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.data_augmentation_bridge import (
-    StatePerturbation as BridgeStatePerturbation,
-)
 from diffusion_planner.utils.visualize_input import visualize_inputs
 
 parser = argparse.ArgumentParser()
 parser.add_argument("target_npz", type=Path)
 parser.add_argument("save_dir", type=Path)
-parser.add_argument("--augment_type", choices=["quintic", "bridge"], default="quintic")
 parser.add_argument(
     "--no_smoothing_future_trajectory",
     action="store_true",
@@ -43,16 +39,13 @@ for key, value in loaded.items():
 ego_future = torch.tensor(loaded["ego_agent_future"]).unsqueeze(0)
 neighbors_future = torch.tensor(loaded["neighbor_agents_future"]).unsqueeze(0)
 
-if args.augment_type == "quintic":
-    aug = StatePerturbation(
-        augment_prob=1.0,
-        num_refine=10,
-        device="cpu",
-        ego_past_noise_std=0.1,
-        use_smoothing_future_trajectory=not args.no_smoothing_future_trajectory,
-    )
-else:
-    aug = BridgeStatePerturbation(augment_prob=1.0, device="cpu")
+aug = StatePerturbation(
+    augment_prob=1.0,
+    num_refine=10,
+    device="cpu",
+    ego_past_noise_std=0.1,
+    use_smoothing_future_trajectory=not args.no_smoothing_future_trajectory,
+)
 
 # Save original data visualization with augmentation range rectangle
 original_save_path = save_dir / "original.png"
@@ -62,7 +55,6 @@ fig, ax = plt.subplots(figsize=(10, 10))
 view_range = 30
 visualize_inputs(deepcopy(data), save_path=None, ax=ax, view_ranges=[view_range])
 
-# Quintic stores flat bounds while the bridge augmentor keeps a singleton batch axis.
 lo = aug._low.detach().cpu().numpy().reshape(-1)
 hi = aug._high.detach().cpu().numpy().reshape(-1)
 if lo.size != 9 or hi.size != 9:

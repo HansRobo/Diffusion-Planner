@@ -36,7 +36,6 @@ _FINGERPRINT_FIELDS = (
     "rl_reward_source",
     "rl_reward_aggregation",
     "rl_reward_horizon_steps",
-    "rl_reward_normalize",
     "rl_reward_beta",
     "rl_reward_w_safety",
     "rl_reward_w_risk",
@@ -46,9 +45,7 @@ _FINGERPRINT_FIELDS = (
     "rl_reward_w_road_border",
     "rl_behavior_gate",
     "rl_pdm_red_light_gate",
-    "rl_candidate_aug_prob",
     "rl_candidate_aug_std",
-    "rl_candidate_aug_stretch",
     "num_generations",
     "rl_noise_scale",
     "rl_rollout_steps",
@@ -57,15 +54,33 @@ _FINGERPRINT_FIELDS = (
 
 # Fields that no longer exist but are frozen into caches mined before their removal.
 # Dropping them outright would change every historical fingerprint and abort the
-# resume of an otherwise-valid multi-terabyte cache. `rl_first_waypoint_gate` was
-# False in every run ever mined (32/32 args.json), so pinning it reproduces them all.
-_FINGERPRINT_RETIRED = {"rl_first_waypoint_gate": repr(False)}
+# resume of an otherwise-valid multi-terabyte cache, so each is pinned to the value it
+# held in every run ever mined: `rl_first_waypoint_gate` False (32/32 args.json),
+# `rl_reward_normalize` "group" (the only value ever launched, now the sole code path
+# per ap:implementation), and the two candidate-augmentation knobs that were superseded
+# by `rl_candidate_aug_epochs` at their off defaults (0.0 in every args.json).
+_FINGERPRINT_RETIRED = {
+    "rl_first_waypoint_gate": repr(False),
+    "rl_reward_normalize": repr("group"),
+    "rl_candidate_aug_prob": repr(0.0),
+    "rl_candidate_aug_stretch": repr(0.0),
+}
+
+# Fields added after caches already existed. Recording one unconditionally would
+# invalidate every historical fingerprint, so it is recorded only when it deviates from
+# the value history implies -- which is exactly when the cache genuinely differs.
+_FINGERPRINT_ADDED_DEFAULTS = {"rl_candidate_aug_epochs": 0}
 
 
 def reward_fingerprint(args) -> dict:
     """The frozen-cache contract: everything that shapes mined groups/weights."""
     current = {name: repr(getattr(args, name, None)) for name in _FINGERPRINT_FIELDS}
-    return {**current, **_FINGERPRINT_RETIRED}
+    added = {
+        name: repr(getattr(args, name, default))
+        for name, default in _FINGERPRINT_ADDED_DEFAULTS.items()
+        if getattr(args, name, default) != default
+    }
+    return {**current, **_FINGERPRINT_RETIRED, **added}
 
 
 def relay_epoch(trainer_epoch: int) -> int:

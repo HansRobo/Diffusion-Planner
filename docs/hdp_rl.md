@@ -30,7 +30,6 @@ exp(beta * normalized_reward) * hybrid_diffusion_loss
 The temporary tuning defaults are:
 
 ```text
-rl_reward_normalize=group
 rl_reward_beta=0.5
 rl_reward_w_risk=1.0
 rl_reward_w_follow=3.0
@@ -113,9 +112,9 @@ red-light compliance, TTC, THW, occupancy, comfort, collision rates, and EPDMS. 
 road-border term and EPDMS are enabled, continuous border reward and binary `valid_epdms_dac` are
 also required not to regress beyond `rl_max_valid_epdms_regression`.
 
-Checkpoint selection defaults to the deterministic deployment reward
-(`rl_selection_metric=deterministic`): validation additionally scores one zero-noise plan per scene
-(`deterministic_mean`), which is exactly what the deployed planner executes. One objective per
+Checkpoint selection uses the deterministic deployment reward: validation additionally scores
+one zero-noise plan per scene (`deterministic_mean`), which is exactly what the deployed planner
+executes. One objective per
 run: the deterministic selection score uses the run's own training reward (native or
 `pdm_port`), matching the source repository's train-and-select discipline. The frozen
 `rl_eval_*` stochastic metrics are report-only diagnostics for comparing arms; acceptance is
@@ -129,19 +128,18 @@ candidate gate with a mandatory 5 cm tangent floor excludes low-speed standstill
 from both the advantage statistics and the weights; `rl_reward_aggregation=gated_product` offers
 the PDM-style bounded multiplicative-gate objective; `rl_reward_horizon_steps` scores a prefix with
 the candidate regression horizon following it (regressing the unscored tail is a known-negative
-configuration and is rejected); `rl_diffusion_t_min/max` restrict the reweighted regression's
-diffusion-time draw; and the optional expert anchor applies only to scenes with an active reward
-group. Training-objective defaults are unchanged; only checkpoint selection switched to the
-deterministic metric.
+configuration and is rejected); and the optional expert anchor applies only to scenes with an
+active reward group. Training-objective defaults are unchanged; only checkpoint selection
+switched to the deterministic metric.
 
-`rl_candidate_aug_*` adds HDP's own rollout-candidate augmentation in the velocity-safe form:
-route-frame offsets with a mandatory ~2 s minimum-jerk onset (a constant offset is a first-delta
-impulse under velocity actions and is rejected), an optional PlannerRFT candidate stretch that
-scales per-step displacements (natively smooth for velocity actions), an unaugmented on-policy
-anchor per group, and a low-speed skip guard. Candidates are perturbed before reward and
-regression, so AWR can rank and internalize behavior beyond the policy's own support. Off by
-default; the exploration arm of the experiment ladder enables it. Guided denoising toward a
-frozen reference (full PlannerRFT) remains deferred pending the upstream full-scale verdict.
+`--rl_candidate_aug_epochs` / `--rl_candidate_aug_std` reproduce HDP's released
+rollout-candidate augmentation verbatim: for the first N epochs, one constant route-frame offset
+per candidate (`a, b ~ N(0, std)`, headings untouched), applied before reward and regression so
+both consume the same candidates. Release values are 5 and 0.5 m. Off by default
+(`epochs=0`): our first waypoint is at 0.1 s and is executed directly, so 0.5 m is ~95% of it,
+versus ~20% of the release's 0.5 s waypoint — see
+`docs/hdp_rl_augmentation_multimodality_evidence_20260729.md`. Guided denoising toward a frozen
+reference (full PlannerRFT) remains deferred pending the upstream full-scale verdict.
 
 The DAC guard is deliberate: a higher proxy reward must not be accepted if it worsens the binary
 drivable-area-compliance metric that motivated this experiment.

@@ -207,7 +207,6 @@ _BASE_DATA_FIELDS: tuple[str, ...] = (
 _BASE_AUGMENT_FIELDS: tuple[str, ...] = (
     "use_data_augment",
     "augment_prob",
-    "augment_type",
     "num_refine",
     "ego_past_noise_std",
     "use_smoothing_future_trajectory",
@@ -287,12 +286,6 @@ _COMMON: tuple[PaperExactSetting, ...] = (
     ),
     # ---- Eq. (awr_hybrid) + Algorithm 2 + _rl_train_step -------------------
     PaperExactSetting(
-        "rl_reward_normalize",
-        "group",
-        "neurips_2026.tex Sec. RL 'we apply reward group normalization'; "
-        "dp_vla_rl_agent.py _rl_train_step group-relative normalisation",
-    ),
-    PaperExactSetting(
         "advantage_eps",
         1e-6,
         "code_rl.tex Algorithm 2 r.std() + 1e-6; dp_vla_rl_agent.py "
@@ -303,16 +296,6 @@ _COMMON: tuple[PaperExactSetting, ...] = (
         0.0,
         "neurips_2026.tex eq:awr_hybrid -- the RL loss is the weighted "
         "regression alone; no expert-anchor term",
-    ),
-    PaperExactSetting(
-        "rl_diffusion_t_min",
-        0.0,
-        "neurips_2026.tex eq:awr_hybrid -- expectation over the full t range",
-    ),
-    PaperExactSetting(
-        "rl_diffusion_t_max",
-        1.0,
-        "neurips_2026.tex eq:awr_hybrid -- expectation over the full t range",
     ),
     # ---- Appendix app:rewards, "Total Training Reward" ---------------------
     PaperExactSetting(
@@ -362,11 +345,6 @@ _COMMON: tuple[PaperExactSetting, ...] = (
         "neurips_2026.tex app:rewards -- every reward is 'evaluated on the "
         "candidate trajectory over the planning horizon of L steps'",
     ),
-    PaperExactSetting(
-        "rl_candidate_loss_horizon",
-        0,
-        "neurips_2026.tex eq:awr_hybrid -- the regression covers the whole action tau^v_0",
-    ),
     # ---- Released implementation: rollout / replay schedule ----------------
     PaperExactSetting(
         "rl_rollout_steps",
@@ -397,11 +375,14 @@ _COMMON: tuple[PaperExactSetting, ...] = (
     ),
     # ---- Mechanisms absent from both sources -------------------------------
     PaperExactSetting(
-        "rl_candidate_aug_prob",
-        0.0,
-        "not in neurips_2026.tex; the released augment_trajectory_batch adds a "
-        "constant waypoint offset, which is a first-step impulse under this "
-        "repository's velocity actions -- see docs/hdp_rl_paper_fidelity.md",
+        "rl_candidate_aug_epochs",
+        0,
+        "grep -rnEi 'augment|perturb|noise injection|data aug' over all three tex "
+        "sources returns 0 hits, and ap:implementation names the paper's RL devices "
+        "exhaustively (group normalization, discard identical-reward samples, EMA) "
+        "without it. The released code does apply augment_trajectory_batch for "
+        "epoch < 5; that is a code/paper divergence, measured in "
+        "docs/hdp_rl_augmentation_multimodality_evidence_20260729.md",
     ),
 )
 

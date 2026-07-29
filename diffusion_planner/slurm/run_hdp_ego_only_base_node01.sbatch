@@ -203,7 +203,6 @@ BASE_ARGS=(
   --road_border_n_interp 2
   --coeff_neighbor_collision_loss 0.0
   --use_ema True
-  --export_onnx_on_save False
   --port "${PORT}"
 )
 

@@ -503,6 +503,7 @@ def _hdp_rl_step(
     args,
     ema,
     aug,
+    epoch,
     profile=False,
     rollout_generator=None,
 ):
@@ -566,13 +567,11 @@ def _hdp_rl_step(
         timing_events[1].record()
     _set_hdp_rl_train_mode(model, args)
 
-    # HDP's own RL perturbs rollout candidates before reward and regression — that is
-    # the exploration mechanism that lets AWR rank and internalize behavior beyond the
-    # policy's own support. Applied here in the velocity-safe ramped waypoint form; the
-    # reward, gate, and regression all consume the augmented candidates consistently.
-    ego_speed = raw_inputs["ego_current_state"][:, 4:6].norm(dim=-1)
+    # The release perturbs rollout candidates before reward and regression, so the
+    # reward and the regression consume the same augmented candidates. Off by default
+    # (rl_candidate_aug_epochs=0).
     ego_world, candidate_aug_metrics = augment_rollout_candidates(
-        ego_world, ego_speed, num_scenes, n, args, generator=rollout_generator
+        ego_world, num_scenes, n, epoch, args, generator=rollout_generator
     )
     # The training objective may use the ported original-DP hdp_pdm reward; held-out
     # selection deliberately stays on the frozen native objective either way.
@@ -594,10 +593,8 @@ def _hdp_rl_step(
         reward,
         num_scenes,
         n,
-        args.rl_reward_normalize,
         getattr(args, "rl_reward_beta", 0.5),
         args.advantage_eps,
-        use_ddp=bool(getattr(args, "ddp", False)),
     )
     global_valid_count, ddp_world_size = distributed_valid_sample_count(
         valid_sample,
@@ -744,7 +741,7 @@ def _hdp_rl_step(
 
 
 @torch.no_grad()
-def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, rollout_generator):
+def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, epoch, rollout_generator):
     """Rollout + reward + frozen weights for one batch — the mining half of a step."""
     n = args.num_generations
     raw_inputs = dict(raw_inputs)
@@ -773,9 +770,8 @@ def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, rollout_generator
         return_encoding=True,
         generator=rollout_generator,
     )
-    ego_speed = raw_inputs["ego_current_state"][:, 4:6].norm(dim=-1)
     ego_world, aug_metrics = augment_rollout_candidates(
-        ego_world, ego_speed, num_scenes, n, args, generator=rollout_generator
+        ego_world, num_scenes, n, epoch, args, generator=rollout_generator
     )
     if getattr(args, "rl_reward_source", "native") == "pdm_port":
         reward, reward_metrics = compute_pdm_port_reward(
@@ -792,10 +788,8 @@ def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, rollout_generator
         reward,
         num_scenes,
         n,
-        args.rl_reward_normalize,
         getattr(args, "rl_reward_beta", 0.5),
         args.advantage_eps,
-        use_ddp=bool(getattr(args, "ddp", False)),
     )
     shard = {
         "ego_world": ego_world,
@@ -921,7 +915,7 @@ def _train_cycle_epoch(data_loader, model, optimizer, trainable_params, args, em
                 key: value.to(args.device, non_blocking=True) for key, value in raw_inputs.items()
             }
             shard, metrics, _ = _mine_groups_from_batch(
-                raw_inputs, model, args, ema, aug, rollout_generator
+                raw_inputs, model, args, ema, aug, epoch, rollout_generator
             )
             writer.append(shard)
             metrics["loss"] = shard["reward"].new_zeros(())
@@ -1022,6 +1016,7 @@ def train_hdp_rl_epoch(data_loader, model, optimizer, trainable_params, args, em
             args,
             ema,
             aug,
+            epoch,
             profile=profile_step,
             rollout_generator=rollout_generator,
         )

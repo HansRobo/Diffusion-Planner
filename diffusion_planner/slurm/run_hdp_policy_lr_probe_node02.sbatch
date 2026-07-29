@@ -114,7 +114,6 @@ COMMON_ARGS=(
   --ddp_static_graph True
   --compile_model True
   --use_data_augment True
-  --augment_type quintic
   --augment_prob 0.5
   --num_refine 20
   --ego_past_noise_std 0.1
@@ -150,7 +149,6 @@ COMMON_ARGS=(
   --coeff_neighbor_collision_loss 0.0
   --supervised_training_stage policy
   --use_ema True
-  --export_onnx_on_save False
   --warm_up_epoch 0
   --train_epochs 1
   --save_utd 1

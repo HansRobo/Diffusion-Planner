@@ -102,9 +102,6 @@ def get_args(args_list=None):
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, help="augmentation probability", default=0.5)
     parser.add_argument(
-        "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
-    )
-    parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
     )
     parser.add_argument(
@@ -387,68 +384,6 @@ def get_args(args_list=None):
         default=_train_config_default("compile_model"),
         help="compile the encoder and decoder with TorchInductor",
     )
-    parser.add_argument(
-        "--export_onnx_on_save",
-        type=boolean,
-        default=_train_config_default("export_onnx_on_save"),
-        help="export ONNX synchronously at checkpoint cadence; disabled by default to avoid DDP idle time",
-    )
-
-    # per-epoch closed-loop validation (rendered rollout + wandb video).
-    # Disabled unless --closed_loop_npz_root is given (dir tree of one route's NPZ frames).
-    parser.add_argument(
-        "--closed_loop_npz_root",
-        type=str,
-        default="",
-        help="dir tree of route NPZ frames for closed-loop validation, run on the checkpoint-save "
-        "cadence (save_utd). Empty = disabled. One route per trial.",
-    )
-    parser.add_argument(
-        "--closed_loop_seg_len",
-        type=int,
-        default=100000,
-        help="frames per segment; large => one route = one segment = one trial",
-    )
-    parser.add_argument(
-        "--closed_loop_replan_interval",
-        type=int,
-        default=40,
-        help="re-plan every N steps; 1 = forward every step (slow, ~minutes/epoch). 40 default",
-    )
-    parser.add_argument(
-        "--closed_loop_draw_every",
-        type=int,
-        default=4,
-        help="render 1 of every N steps (matplotlib render is the dominant cost)",
-    )
-    parser.add_argument("--closed_loop_fps", type=int, default=10)
-    parser.add_argument("--closed_loop_near_miss_thresh", type=float, default=0.5)
-    parser.add_argument("--closed_loop_search_radius", type=float, default=1.5)
-    parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
-    parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
-    parser.add_argument(
-        "--closed_loop_unstick_advance_m",
-        type=float,
-        default=_train_config_default("closed_loop_unstick_advance_m"),
-    )
-    parser.add_argument(
-        "--closed_loop_classification_json",
-        type=str,
-        default="",
-        help="scenario classification JSON for grouped closed-loop evaluation",
-    )
-    parser.add_argument(
-        "--closed_loop_scenario_dataset_name",
-        type=str,
-        default="",
-        help="dataset-relative name used to auto-resolve a scenario classification JSON",
-    )
-    parser.add_argument(
-        "--closed_loop_grouped_wandb_max_videos",
-        type=int,
-        default=_train_config_default("closed_loop_grouped_wandb_max_videos"),
-        help="maximum grouped episode videos uploaded to W&B per evaluation",
-    )
 
     args = parser.parse_args(args_list)
     # Persist the fixed indicator architecture in args.json so an old four-class,
@@ -461,8 +396,6 @@ def get_args(args_list=None):
         raise ValueError("--batch_size must be >= 1")
     if args.save_utd < 1:
         raise ValueError("--save_utd must be >= 1")
-    if args.closed_loop_grouped_wandb_max_videos < 0:
-        raise ValueError("--closed_loop_grouped_wandb_max_videos must be >= 0")
     finite_fields = (
         "augment_prob",
         "ego_past_noise_std",
@@ -481,9 +414,6 @@ def get_args(args_list=None):
         "neighbor_collision_margin_bicycle",
         "multisample_eval_noise_scale",
         "planning_hybrid_loss",
-        "closed_loop_near_miss_thresh",
-        "closed_loop_search_radius",
-        "closed_loop_unstick_advance_m",
     )
     non_finite = [name for name in finite_fields if not math.isfinite(getattr(args, name))]
     if non_finite:
@@ -551,12 +481,6 @@ def get_args(args_list=None):
         raise ValueError("--extra_train_set_repeat must be >= 0")
     if args.extra_train_set_repeat > 0 and not args.extra_train_set_list:
         raise ValueError("--extra_train_set_list is required when repeat is positive")
-    if args.closed_loop_search_radius <= 0.0:
-        raise ValueError("--closed_loop_search_radius must be > 0")
-    if args.closed_loop_near_miss_thresh < 0.0:
-        raise ValueError("--closed_loop_near_miss_thresh must be >= 0")
-    if args.closed_loop_unstick_advance_m < 0.0:
-        raise ValueError("--closed_loop_unstick_advance_m must be >= 0")
     if args.predicted_neighbor_num != 0:
         raise ValueError("HDP is ego-only; --predicted_neighbor_num must be 0")
     if not args.use_velocity_representation:

@@ -122,7 +122,6 @@ python3 -m torch.distributed.run --nproc_per_node=8 --master_port=<PORT> train_h
   --normalization_file_path ./normalization.json \
   --learning_rate 1e-7 \
   --weight_decay 0 \
-  --rl_reward_normalize group \
   --rl_reward_beta 0.5 \
   --rl_reward_w_risk 1.0 \
   --rl_reward_w_follow 3.0 \
@@ -178,7 +177,7 @@ Important semantics:
 - Candidate groups with identical or non-finite rewards are discarded before the hybrid loss.
 - `--predicted_neighbor_num` must be `0`. The temporal HDP action head predicts only ego while the encoder and safety reward still consume all logged neighbors.
 - New corpora generated after converter commit `55eff4f` already store neighbor future index 0 at `t+0.1 s`; the default is therefore `--align_legacy_neighbor_futures false`. The legacy correction remains an explicit opt-in for pre-`55eff4f` manifests and is applied only in worker memory; it never rewrites shared NPZ files.
-- `--export_onnx_on_save` defaults to `false` for SFT and RL so synchronous CPU export does not leave the other DDP ranks idle. Use the standalone converter for a strict release export.
+- Training never exports ONNX inline; a synchronous CPU export would leave the other DDP ranks idle. Use the standalone converter for a release export.
 - Six-sample minADE/minFDE is an open-loop diagnostic. EPDMS and pseudo-closed-loop metrics drive safety-oriented model selection; final acceptance requires real-vehicle A/B evaluation.
 - Legacy RL alternatives have been removed from this branch; HDP-RL has a single supported reward-weighted hybrid path.
 - SFT trains the turn-indicator head on both the detached model-generated x-start trajectory and the expert trajectory. Their normalized weighted mean preserves loss scale; validation reports generated-path overall, change-only, and per-class metrics.

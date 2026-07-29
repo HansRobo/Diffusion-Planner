@@ -1,13 +1,10 @@
 """CPU proof-of-concept audit of the 2026-07-23 RL upgrades on real NPZ scenes.
 
-Runs without any model or GPU. Two questions, answered on logged data:
-
-1. Augmentation calibration: are the ramped offsets/stretch velocity-safe in the
-   per-step action-normalization units?
-2. Reward discrimination: on groups of one expert plus augmented variants, do the
-   three training objectives (native weighted_sum, native gated_product, ported
-   hdp_pdm) produce valid preference signal (group std > eps), sane weight
-   concentration (ESS), and expert-consistent rankings?
+Runs without any model or GPU. One question, answered on logged data: on groups of
+one logged expert plus offset variants of it, do the three training objectives
+(native weighted_sum, native gated_product, ported hdp_pdm) produce valid preference
+signal (group std > eps), sane weight concentration (ESS), and expert-consistent
+rankings?
 
 Usage:
   python util_scripts/audit_rl_thresholds_on_real_data.py \
@@ -100,15 +97,7 @@ def main() -> None:
 
     n = args.group_size
     generator = torch.Generator().manual_seed(args.seed)
-    aug_args = SimpleNamespace(
-        rl_candidate_aug_prob=1.0,
-        rl_candidate_aug_std=0.5,
-        rl_candidate_aug_eta_scheme="gaussian",
-        rl_candidate_aug_stretch=0.25,
-        rl_candidate_aug_ramp_steps=20,
-        rl_candidate_aug_keep=1,
-        rl_candidate_aug_speed_min_mps=2.0,
-    )
+    aug_args = SimpleNamespace(rl_candidate_aug_epochs=1, rl_candidate_aug_std=0.5)
     native_args = SimpleNamespace(
         rl_reward_w_risk=1.0,
         rl_reward_w_follow=3.0,
@@ -124,26 +113,19 @@ def main() -> None:
     speeds = torch.stack([s["ego_current_state"][4:6].norm() for s in scenes])
     report["low_speed_scene_fraction"] = (speeds < 1.0).float().mean().item()
 
-    # ── Part 1: augmentation calibration in action-normalization units ────
+    # Synthesize a candidate group per scene: the logged expert plus n-1 offset
+    # variants. Index 0 of every group is left unperturbed so the expert-ranking
+    # metric below has a known-best member.
     groups = experts.repeat_interleave(n, dim=0)
     augmented, aug_metrics = augment_rollout_candidates(
-        groups.clone(), speeds, len(scenes), n, aug_args, generator=generator
+        groups.clone(), len(scenes), n, 0, aug_args, generator=generator
     )
-    delta = augmented[..., :2] - groups[..., :2]
-    increments = torch.diff(torch.cat([torch.zeros_like(delta[:, :1]), delta], dim=1), dim=1)
-    # Per-step action normalization: ego_velocity std (0.5 m dx, 0.25 m dy).
-    sigma = increments.abs() / torch.tensor([0.5, 0.25])
-    changed = delta.abs().sum(dim=(1, 2)) > 1e-6
-    report["aug_scene_fraction"] = aug_metrics["reward_candidate_aug_scene_fraction"].item()
-    report["aug_changed_candidate_fraction"] = changed.float().mean().item()
-    report["aug_max_step_increment_m_p99"] = (
-        increments.norm(dim=-1).amax(dim=1)[changed].quantile(0.99).item() if changed.any() else 0.0
-    )
-    report["aug_max_step_increment_sigma_p99"] = (
-        sigma.amax(dim=(1, 2))[changed].quantile(0.99).item() if changed.any() else 0.0
-    )
+    augmented = augmented.view(len(scenes), n, *augmented.shape[1:])
+    augmented[:, 0] = experts
+    augmented = augmented.reshape(len(scenes) * n, *augmented.shape[2:])
+    report["aug_offset_abs_mean_m"] = aug_metrics["reward_candidate_aug_offset_abs_mean_m"].item()
 
-    # ── Part 2: reward discrimination on expert+augmented groups ──────────
+    # ── Reward discrimination on expert+offset groups ──────────────────────
     rewards: dict[str, list[torch.Tensor]] = {"native": [], "gated": [], "pdm": []}
     failures = {"native": 0, "gated": 0, "pdm": 0}
     for index, scene in enumerate(scenes):
@@ -175,9 +157,7 @@ def main() -> None:
         report[f"reward_{name}_expert_wins_fraction"] = (
             (usable[:, 0] >= usable.max(dim=1).values - 1e-9).float().mean().item()
         )
-        weights, valid = compute_reward_weights(
-            usable.reshape(-1), usable.shape[0], n, "group", 1.0, 1e-6
-        )
+        weights, valid = compute_reward_weights(usable.reshape(-1), usable.shape[0], n, 1.0, 1e-6)
         w = weights.view(-1, n)
         ess = (w.sum(dim=1).square() / w.square().sum(dim=1).clamp_min(1e-12)) / n
         active = valid.view(-1, n).any(dim=1)

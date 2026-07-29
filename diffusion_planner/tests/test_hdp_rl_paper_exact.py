@@ -55,7 +55,6 @@ _BASE_ARGS = {
     "train_subsample_step": 1,
     "align_legacy_neighbor_futures": False,
     "use_data_augment": True,
-    "augment_type": "quintic",
     "augment_prob": 0.5,
     "num_refine": 20,
     "ego_past_noise_std": 0.1,
@@ -146,7 +145,6 @@ def test_rewards_cover_the_full_planning_horizon():
     """app:rewards: every reward is "evaluated ... over the planning horizon of L steps"."""
     args = _paper_args()
     assert args.rl_reward_horizon_steps == 0  # 0 == full horizon
-    assert args.rl_candidate_loss_horizon == 0
 
 
 def test_released_rollout_schedule_is_reproduced():
@@ -161,17 +159,14 @@ def test_awr_objective_has_no_repo_only_terms():
     """eq:awr_hybrid is exp(beta*r) times the hybrid loss and nothing else."""
     args = _paper_args()
     assert args.rl_bc_weight == 0.0  # no behaviour-cloning anchor in the paper
-    assert args.rl_candidate_aug_prob == 0.0  # candidates come from pi^{k-1} only
+    assert args.rl_candidate_aug_epochs == 0  # candidates come from pi^{k-1} only
     assert args.rl_noise_scale == 1.0  # pi^{k-1} sampled at its own temperature
-    assert args.rl_diffusion_t_min == 0.0  # expectation over the full t range
-    assert args.rl_diffusion_t_max == 1.0
     assert args.rl_reward_source == "native"
 
 
 def test_group_normalization_and_ema_come_from_the_paper():
     """ap:implementation: group normalization, constant-group discard, EMA."""
     args = _paper_args()
-    assert args.rl_reward_normalize == "group"
     assert args.advantage_eps == 1e-6  # the 1e-6 of code_rl.tex Algorithm 2
     assert args.rl_init_use_ema is True
 
@@ -345,7 +340,6 @@ def test_a_different_corpus_than_the_base_is_rejected(option, value):
     [
         ("--use_data_augment", "False"),
         ("--augment_prob", "0.25"),
-        ("--augment_type", "bridge"),
         ("--num_refine", "5"),
         ("--ego_past_noise_std", "0.0"),
         ("--use_smoothing_future_trajectory", "False"),
@@ -399,14 +393,7 @@ def _algorithm_2_weights(r, beta, eps=1e-6):
 
 def test_group_weights_reproduce_algorithm_2():
     reward = torch.tensor([0.10, 0.40, 0.35, 0.90])
-    weights, valid = compute_reward_weights(
-        reward,
-        num_scenes=1,
-        n=4,
-        normalize="group",
-        beta=1.0,
-        eps=1e-6,
-    )
+    weights, valid = compute_reward_weights(reward, num_scenes=1, n=4, beta=1.0, eps=1e-6)
     assert bool(valid.all())
     torch.testing.assert_close(weights, _algorithm_2_weights(reward, beta=1.0))
 
@@ -414,18 +401,14 @@ def test_group_weights_reproduce_algorithm_2():
 def test_beta_enters_the_exponent_exactly_once():
     reward = torch.tensor([0.10, 0.40, 0.35, 0.90])
     for beta in (0.5, 1.0, 2.0):
-        weights, _ = compute_reward_weights(
-            reward, num_scenes=1, n=4, normalize="group", beta=beta, eps=1e-6
-        )
+        weights, _ = compute_reward_weights(reward, num_scenes=1, n=4, beta=beta, eps=1e-6)
         torch.testing.assert_close(weights, _algorithm_2_weights(reward, beta=beta))
 
 
 def test_constant_reward_group_is_discarded():
     """ap:implementation: "we discard samples in which all actions receive identical rewards"."""
     reward = torch.tensor([0.5, 0.5, 0.5, 0.5, 0.1, 0.9, 0.2, 0.8])
-    weights, valid = compute_reward_weights(
-        reward, num_scenes=2, n=4, normalize="group", beta=1.0, eps=1e-6
-    )
+    weights, valid = compute_reward_weights(reward, num_scenes=2, n=4, beta=1.0, eps=1e-6)
     assert not bool(valid[:4].any())  # constant group dropped, not left at exp(0) == 1
     assert bool(valid[4:].all())
     assert float(weights[:4].abs().sum()) == 0.0
@@ -453,7 +436,6 @@ def test_reward_weighted_loss_matches_algorithm_2(monkeypatch):
         num_scenes=1,
         n=4,
         args=SimpleNamespace(
-            rl_reward_normalize="group",
             rl_reward_beta=1.0,
             advantage_eps=1e-6,
             ddp=False,

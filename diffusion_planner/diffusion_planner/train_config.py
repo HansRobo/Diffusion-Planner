@@ -68,7 +68,6 @@ class TrainConfig:
     # ---------------------------------------------------------
     use_data_augment: bool = True
     augment_prob: float = 0.5
-    augment_type: Literal["quintic", "bridge"] = "quintic"
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
     use_smoothing_future_trajectory: bool = True
@@ -144,8 +143,10 @@ class TrainConfig:
     enable_epdms_eval: bool = False
     epdms_eval_use_agent_boxes: bool = True
     epdms_eval_use_road_border: bool = True
-    # HDP open-loop protocol: six stochastic trajectories, minADE/minFDE, six DPM steps.
-    # Set num_samples=0 for a fast deterministic-only validation pass.
+    # The paper's open-loop multimodality protocol: minADE/minFDE over num_samples
+    # stochastic trajectories plus the Divergence Score of ap:metrics
+    # (mean ||endpoint - group centroid||). num_samples=0 takes the fast
+    # deterministic-only validation pass.
     multisample_eval_num_samples: int = 6
     multisample_eval_noise_scale: float = 0.1
     multisample_eval_sample_steps: int = 6
@@ -185,7 +186,6 @@ class TrainConfig:
     # trusting the launcher to match by convention.
     rl_base_corpus_check: bool = True
     num_generations: int = 8
-    rl_reward_normalize: Literal["group", "batch", "none"] = "group"
     rl_reward_beta: float = 0.5
     # Real Tier IV sweeps found that 1.5 supplies useful group diversity with G=8 while the
     # held-out/deployment comparison remains fixed at the public-policy temperature 0.5.
@@ -226,7 +226,6 @@ class TrainConfig:
     # report-only cross-arm diagnostics; acceptance safety comes from the independent
     # EPDMS/DAC/safety source guards, never from a second reward.
     rl_eval_deterministic: bool = True
-    rl_selection_metric: Literal["deterministic", "mean"] = "deterministic"
     # Keep the RL rollout budget independent from validation/export so it can be profiled
     # explicitly. Six integration steps plus denoise-to-zero are seven decoder forwards.
     rl_rollout_steps: int = 6
@@ -279,40 +278,14 @@ class TrainConfig:
     # Score only the first N steps of each candidate (0 = full horizon). The original-DP
     # AWR profile scored a 4 s prefix (40 steps) of the 8 s plan.
     rl_reward_horizon_steps: int = 0
-    # Candidates regressed on the scored prefix only; 0 follows rl_reward_horizon_steps.
-    # Regressing the unscored tail was significantly negative in the original-DP audits.
-    rl_candidate_loss_horizon: int = 0
-    # Restrict the reweighted regression's diffusion-time draw. The original-DP ablation
-    # preferred [0.001, 0.2] over the full range; defaults preserve the historical
-    # [eps, 1] distribution exactly.
-    rl_diffusion_t_min: float = 0.0
-    rl_diffusion_t_max: float = 1.0
-    # HDP rollout-candidate augmentation (the exploration mechanism of HDP's own RL,
-    # `augment_trajectory_batch`): perturb sampled candidates before reward/regression
-    # so AWR can rank and internalize behavior beyond the policy's own support. Applied
-    # in the velocity-safe form: route-frame offsets with a mandatory minimum-jerk
-    # onset ramp (a constant offset is a first-delta impulse under velocity actions and
-    # is rejected), plus an optional PlannerRFT candidate stretch that scales per-step
-    # displacements — natively smooth for velocity actions. Off by default; the
-    # experiment ladder enables it explicitly.
-    rl_candidate_aug_prob: float = 0.0
-    # Gaussian scheme: route-frame offset std in metres (released HDP uses 0.5).
-    # stratified_beta scheme: support half-width (PlannerRFT lambda; upstream used 1.0).
+    # The release's rollout-candidate augmentation (`augment_trajectory_batch`): a
+    # constant route-frame offset per candidate, applied before reward and regression
+    # for the first N epochs. The release uses 5 epochs and std 0.5; 0 disables. Off by
+    # default because this pipeline's first waypoint is at 0.1 s and is executed
+    # directly, so 0.5 m is ~95% of it — see
+    # docs/hdp_rl_augmentation_multimodality_evidence_20260729.md.
+    rl_candidate_aug_epochs: int = 0
     rl_candidate_aug_std: float = 0.5
-    rl_candidate_aug_eta_scheme: Literal["gaussian", "stratified_beta"] = "gaussian"
-    # softplus(0) + 1: the PlannerRFT zero-init exploration-head concentration.
-    rl_candidate_aug_beta_concentration: float = 1.6931471805599454
-    # PlannerRFT candidate stretch half-width; per-step displacements scale by
-    # 1 + stretch * eta (upstream lambda_lon = 0.25). Zero disables the stretch.
-    rl_candidate_aug_stretch: float = 0.0
-    # ~2 s minimum-jerk onset: bounds every per-step velocity increment to
-    # ~1.875/ramp_steps of the sampled offset (0.5 m over 20 steps ≈ 0.47 m/s peak).
-    rl_candidate_aug_ramp_steps: int = 20
-    # Unaugmented on-policy anchors kept at the front of every group.
-    rl_candidate_aug_keep: int = 1
-    # Skip near-stationary scenes: offsetting a standstill trajectory manufactures the
-    # exact jump failure the first-waypoint gate exists to catch (upstream guard: 2.0).
-    rl_candidate_aug_speed_min_mps: float = 2.0
     # Tier IV data has no populated static-object tensor, so OCC falls back to
     # stopped actors and, when none exist, HD-map road borders. Keep this ablatable
     # because road borders are a practical proxy rather than literal occupancy.
@@ -358,7 +331,6 @@ class TrainConfig:
     rl_max_valid_safety_regression: float = 0.001
     rl_max_valid_epdms_regression: float = 0.001
     rl_best_score_min_delta: float = 0.0001
-    rl_early_stop_patience: int = 0
 
     # ---------------------------------------------------------
     # Throughput knobs. Defaults ON after live verification on 2026-07-07
@@ -370,7 +342,6 @@ class TrainConfig:
     fused_optimizer: bool = True
     ddp_static_graph: bool = True
     compile_model: bool = True
-    export_onnx_on_save: bool = False
 
     device: str = "cuda"
     tf32: bool = True
@@ -402,27 +373,6 @@ class TrainConfig:
     ddp: bool = True
     find_unused_parameters: bool = False
     port: str = "22323"
-
-    # ---------------------------------------------------------
-    # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
-    # (``save_utd``). Disabled unless ``closed_loop_npz_root`` is set (dir tree of route NPZ frames,
-    # one route).
-    # ---------------------------------------------------------
-    closed_loop_npz_root: str = ""
-    closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
-    # Re-plan every N steps: replan=1 is a model forward EVERY step (~minutes/epoch over a full
-    # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
-    closed_loop_replan_interval: int = 40
-    closed_loop_draw_every: int = 4  # render 1 of every N steps (matplotlib is the dominant cost)
-    closed_loop_fps: int = 10
-    closed_loop_near_miss_thresh: float = 0.5
-    closed_loop_search_radius: float = 1.5
-    closed_loop_warmup_steps: int = 0
-    closed_loop_unstick_after: int = 300
-    closed_loop_unstick_advance_m: float = 2.5
-    closed_loop_classification_json: str = ""
-    closed_loop_scenario_dataset_name: str = ""
-    closed_loop_grouped_wandb_max_videos: int = 24
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)

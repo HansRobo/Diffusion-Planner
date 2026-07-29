@@ -732,33 +732,3 @@ def export_checkpoint_onnx(
         opset_version,
         external_data,
     )
-
-
-def export_checkpoint_onnx_guarded(
-    config_json_path: str,
-    ckpt_path: str,
-    output_dir: Path,
-    output_prefix: str,
-    use_ema: bool,
-    use_simplify: bool,
-    opset_version: int,
-    external_data: bool,
-) -> None:
-    """Same as :func:`export_checkpoint_onnx`, but never raises.
-
-    Intended for the training loops, where an ONNX export is a convenience artifact and must not
-    bring the run down. Any failure is reported and swallowed.
-    """
-    try:
-        export_checkpoint_onnx(
-            config_json_path,
-            ckpt_path,
-            output_dir,
-            output_prefix,
-            use_ema,
-            use_simplify,
-            opset_version,
-            external_data,
-        )
-    except Exception as exc:
-        print(f"WARNING: ONNX export failed for {ckpt_path}: {exc}")

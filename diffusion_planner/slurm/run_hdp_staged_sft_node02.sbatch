@@ -131,7 +131,6 @@ expected = {
     "train_subsample_step": 1,
     "align_legacy_neighbor_futures": False,
     "use_data_augment": True,
-    "augment_type": "quintic",
     "augment_prob": 0.5,
     "num_refine": 20,
     "ego_past_noise_std": 0.1,
@@ -219,7 +218,6 @@ COMMON_ARGS=(
   --ddp_static_graph True
   --compile_model True
   --use_data_augment True
-  --augment_type quintic
   --augment_prob 0.5
   --num_refine 20
   --ego_past_noise_std 0.1
@@ -254,7 +252,6 @@ COMMON_ARGS=(
   --road_border_n_interp 2
   --coeff_neighbor_collision_loss 0.0
   --use_ema True
-  --export_onnx_on_save False
   --port "${PORT}"
 )
 

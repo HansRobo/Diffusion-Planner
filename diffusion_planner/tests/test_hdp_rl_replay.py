@@ -13,6 +13,7 @@ from diffusion_planner.hdp_rl_replay import (
     cycle_index,
     is_mine_epoch,
     relay_epoch,
+    reward_fingerprint,
 )
 
 from diffusion_planner import hdp_rl_epoch
@@ -24,7 +25,6 @@ def _args(**overrides):
         rl_reward_source="native",
         rl_reward_aggregation="weighted_sum",
         rl_reward_horizon_steps=0,
-        rl_reward_normalize="group",
         rl_reward_beta=1.0,
         rl_reward_w_safety=0.0,
         rl_reward_w_risk=1.0,
@@ -34,9 +34,8 @@ def _args(**overrides):
         rl_reward_w_road_border=0.0,
         rl_behavior_gate="safety",
         rl_pdm_red_light_gate=True,
-        rl_candidate_aug_prob=0.0,
+        rl_candidate_aug_epochs=0,
         rl_candidate_aug_std=0.5,
-        rl_candidate_aug_stretch=0.0,
         rl_noise_scale=1.5,
         rl_rollout_steps=6,
         ddp=False,
@@ -111,6 +110,21 @@ def test_fingerprint_keeps_the_retired_first_waypoint_gate_field(tmp_path):
     meta = json.loads((tmp_path / "cycle_000" / _META).read_text())
     assert meta["fingerprint"]["rl_first_waypoint_gate"] == repr(False)
     CycleReplayReader(tmp_path, cycle=0, rank=0, args=args)  # must not raise
+
+
+def test_fingerprint_is_unchanged_by_the_default_candidate_augmentation():
+    """The off default must be invisible; enabling it must invalidate the cache.
+
+    `rl_candidate_aug_epochs` was added after multi-terabyte caches existed, so
+    recording it unconditionally would abort every historical resume. It is recorded
+    only when it deviates from off -- exactly when the mined groups really differ.
+    """
+    off = reward_fingerprint(_args())
+    assert "rl_candidate_aug_epochs" not in off
+    assert reward_fingerprint(_args(rl_candidate_aug_epochs=0)) == off
+    on = reward_fingerprint(_args(rl_candidate_aug_epochs=5))
+    assert on["rl_candidate_aug_epochs"] == repr(5)
+    assert on != off
 
 
 def test_reader_fails_closed_on_contract_mismatch(tmp_path):

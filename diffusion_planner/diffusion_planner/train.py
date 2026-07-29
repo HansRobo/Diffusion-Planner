@@ -16,9 +16,6 @@ from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.data_augmentation_bridge import (
-    StatePerturbation as BridgeStatePerturbation,
-)
 from diffusion_planner.utils.dataset import (
     BatchAlignedDistributedSampler,
     DiffusionPlannerData,
@@ -31,7 +28,6 @@ from diffusion_planner.utils.metric_logging import (
     select_valid_loss_dashboard_metrics,
 )
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
-from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.scene_skip import prepare_filtered_manifests
 from diffusion_planner.utils.train_utils import (
     ModelEma,
@@ -394,7 +390,6 @@ def assert_checkpoint_compatible(
             "align_legacy_neighbor_futures",
             "use_data_augment",
             "augment_prob",
-            "augment_type",
             "num_refine",
             "ego_past_noise_std",
             "use_smoothing_future_trajectory",
@@ -434,7 +429,6 @@ def assert_checkpoint_compatible(
             "ego_history_dropout_rate",
             "num_generations",
             "rl_train_scope",
-            "rl_reward_normalize",
             "rl_reward_beta",
             "rl_noise_scale",
             "rl_eval_noise_scale",
@@ -476,7 +470,6 @@ def assert_checkpoint_compatible(
             "rl_max_valid_safety_regression",
             "rl_max_valid_epdms_regression",
             "rl_best_score_min_delta",
-            "rl_early_stop_patience",
             "rl_reward_dt",
             "rl_ttc_critical_s",
             "rl_ttc_safe_s",
@@ -618,102 +611,6 @@ def mean_epdms_metric(loss_dict):
     return result
 
 
-def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
-    """Run grouped or full-route closed-loop evaluation on checkpoint-save cadence."""
-    if not args.closed_loop_npz_root:
-        return
-
-    from scenario_generation.scenario_classification import resolve_classification_json
-    from scenario_generation.wandb_closed_loop import (
-        build_full_closed_loop_wandb_log,
-        build_grouped_closed_loop_wandb_log,
-    )
-
-    explicit_classification = getattr(args, "closed_loop_classification_json", "")
-    classification_json = resolve_classification_json(
-        args.closed_loop_npz_root,
-        explicit_classification or None,
-        dataset_name=getattr(args, "closed_loop_scenario_dataset_name", "") or None,
-    )
-    if explicit_classification and classification_json is None:
-        raise FileNotFoundError(
-            f"closed-loop classification JSON does not exist: {explicit_classification}"
-        )
-
-    net = ddp.get_model(model, args.ddp)
-    was_training = net.training
-    net.eval()
-    try:
-        if classification_json is not None:
-            from scenario_generation.grouped_closed_loop_eval import run_grouped_closed_loop_eval
-
-            summary = run_grouped_closed_loop_eval(
-                net,
-                args,
-                args.closed_loop_npz_root,
-                classification_json,
-                os.path.join(out_dir, "grouped"),
-                device=args.device,
-                near_miss_thresh=args.closed_loop_near_miss_thresh,
-                search_radius=args.closed_loop_search_radius,
-                warmup_steps=args.closed_loop_warmup_steps,
-                unstick_after=args.closed_loop_unstick_after,
-                unstick_advance_m=args.closed_loop_unstick_advance_m,
-                draw_every=args.closed_loop_draw_every,
-                fps=float(args.closed_loop_fps),
-                verbose=False,
-            )
-            log = build_grouped_closed_loop_wandb_log(
-                summary,
-                max_videos=getattr(args, "closed_loop_grouped_wandb_max_videos", 24),
-            )
-        else:
-            from scenario_generation.closed_loop_eval import run_closed_loop_eval
-
-            summary = run_closed_loop_eval(
-                net,
-                args,
-                args.closed_loop_npz_root,
-                out_dir,
-                seg_len=args.closed_loop_seg_len,
-                device=args.device,
-                near_miss_thresh=args.closed_loop_near_miss_thresh,
-                search_radius=args.closed_loop_search_radius,
-                warmup_steps=args.closed_loop_warmup_steps,
-                unstick_after=args.closed_loop_unstick_after,
-                unstick_advance_m=args.closed_loop_unstick_advance_m,
-                fps=args.closed_loop_fps,
-                replan_interval=args.closed_loop_replan_interval,
-                draw_every=args.closed_loop_draw_every,
-                neighbor_history_mode="recorded",
-                verbose=False,
-            )
-            log = build_full_closed_loop_wandb_log(summary)
-    finally:
-        net.train(was_training)
-
-    if getattr(args, "use_wandb", False):
-        optimizer_step = getattr(args, "_wandb_global_step", None)
-        if optimizer_step is not None:
-            log["optimizer_step"] = int(optimizer_step)
-        wandb.log(log)
-    if classification_json is not None:
-        grouped = summary["grouped_summary"]
-        print(
-            f"grouped closed-loop @epoch {epoch + 1}: "
-            f"{summary['n_episodes']}/{summary['n_episodes_expected']} episodes, "
-            f"{summary['n_bags']}/{summary['n_bags_expected']} bags in "
-            f"{summary['elapsed_sec']:.1f}s, "
-            f"reported={grouped['n_segments_total']}"
-        )
-    else:
-        print(
-            f"closed-loop @epoch {epoch + 1}: {summary['n_segments']} seg in "
-            f"{summary['elapsed_sec']:.1f}s  coll_seg_rate={summary['collision_segment_rate']:.3f}  "
-            f"min_clr={summary['global_min_clearance']:.2f}"
-        )
-
-
 def model_training(args: TrainConfig):
     # Reduce CUDA allocator fragmentation for the many small per-step tensors this
     # training loop produces. setdefault so operators can override from the launcher.
@@ -818,16 +715,13 @@ def model_training(args: TrainConfig):
 
     # set up data loaders
     if args.use_data_augment:
-        if args.augment_type == "bridge":
-            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
-        else:
-            aug = StatePerturbation(
-                augment_prob=args.augment_prob,
-                num_refine=args.num_refine,
-                device=args.device,
-                ego_past_noise_std=args.ego_past_noise_std,
-                use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
-            )
+        aug = StatePerturbation(
+            augment_prob=args.augment_prob,
+            num_refine=args.num_refine,
+            device=args.device,
+            ego_past_noise_std=args.ego_past_noise_std,
+            use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
+        )
     else:
         aug = None
 
@@ -1269,8 +1163,8 @@ def model_training(args: TrainConfig):
             }
             atomic_torch_save(model_dict, f"{save_path}/latest.pth")
 
-            # Keep checkpoint and closed-loop cadence anchored to the absolute epoch.
-            # A resume from (for example) epoch 7 must still save at epochs 10 and 20.
+            # Keep the checkpoint cadence anchored to the absolute epoch. A resume from
+            # (for example) epoch 7 must still save at epochs 10 and 20.
             if (epoch + 1) % save_utd == 0:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
@@ -1279,20 +1173,6 @@ def model_training(args: TrainConfig):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
-                if args.export_onnx_on_save:
-                    export_checkpoint_onnx_guarded(
-                        config_json_path=os.path.join(curr_dir, "args.json"),
-                        ckpt_path=f"{curr_dir}/best_model.pth",
-                        output_dir=Path(curr_dir),
-                        output_prefix="diffusion_planner",
-                        use_ema=model_ema is not None,
-                        use_simplify=False,
-                        opset_version=20,
-                        external_data=False,
-                    )
-                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
-                # (videos + metrics) land next to the saved weights they correspond to.
-                closed_loop_validate(eval_model, args, epoch, os.path.join(curr_dir, "closed_loop"))
 
             valid_epdms_total = float(mean_epdms_dict.get("valid_epdms/total", float("nan")))
             if math.isfinite(valid_epdms_total) and valid_epdms_total > best_epdms:
@@ -1317,17 +1197,6 @@ def model_training(args: TrainConfig):
                     json.dump(curr_data, f, indent=4)
                 with open(os.path.join(curr_dir, "args.json"), "w", encoding="utf-8") as f:
                     json.dump(args_dict, f, indent=4)
-                if args.export_onnx_on_save:
-                    export_checkpoint_onnx_guarded(
-                        config_json_path=os.path.join(curr_dir, "args.json"),
-                        ckpt_path=f"{curr_dir}/best_model.pth",
-                        output_dir=Path(curr_dir),
-                        output_prefix="diffusion_planner",
-                        use_ema=model_ema is not None,
-                        use_simplify=False,
-                        opset_version=20,
-                        external_data=False,
-                    )
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()

@@ -71,7 +71,6 @@ that a future default change cannot silently break a paper-exact run.
 | `planning_hybrid_loss` (ω) | 0.01 | *inherited from the frozen IL base* | `tab:param` publishes 0.1 — see contradiction 2 and "The one pair not taken from the paper" |
 | `hybrid_loss_window` (W) | 10 | *inherited from the frozen IL base* | hybrid-loss appendix publishes W = L−1 — see contradiction 3 and the section below |
 | `advantage_eps` | 1e-6 | 1e-6 | `code_rl.tex` `r.std() + 1e-6` |
-| `rl_reward_normalize` | `group` | `group` | `ap:implementation`, reward group normalization |
 | `rl_init_use_ema` | True | True | Sec. RL, `pi^0` is the hybrid-loss imitation model |
 
 ### The reward (`app:rewards`)
@@ -108,9 +107,7 @@ without a replay cache would silently train ten epochs on nothing.
 | Field | Repo default | Paper-exact | Why |
 | --- | --- | --- | --- |
 | `rl_bc_weight` | 0.0 | 0.0 | `eq:awr_hybrid` is the weighted regression alone |
-| `rl_candidate_loss_horizon` | 0 | 0 | the regression covers the whole action `tau^v_0` |
-| `rl_diffusion_t_min` / `rl_diffusion_t_max` | 0.0 / 1.0 | 0.0 / 1.0 | expectation over the full `t` range |
-| `rl_candidate_aug_prob` | 0.0 | 0.0 | see "deliberate non-verbatim item" below |
+| `rl_candidate_aug_epochs` | 0 | 0 | see "deliberate non-verbatim item" below |
 
 ## Three contradictions between the sources
 
@@ -234,7 +231,7 @@ compares the run against the base's `args.json` and refuses a mismatch:
   since the same artifact has a different absolute path in each checkout),
   `extra_train_set_repeat`, `filter_skipped`, `train_subsample_step`,
   `align_legacy_neighbor_futures`;
-- perturbation: `use_data_augment`, `augment_type`, `augment_prob`, `num_refine`,
+- perturbation: `use_data_augment`, `augment_prob`, `num_refine`,
   `ego_past_noise_std`, `use_smoothing_future_trajectory`;
 - the normalizer, compared by **resolved content** rather than by path.
 
@@ -268,18 +265,22 @@ follows the paper — but they are worth knowing when comparing runs.
 `dp_vla_rl_agent.py:534-535` augments rollout candidates while `current_epoch < 5`
 with `augment_trajectory_batch` (`scoring.py:131`), which adds a **constant
 along-track / lateral offset** (both drawn at σ = 0.5, `scoring.py:139-140`) to the
-whole waypoint sequence. Paper-exact mode leaves
-`rl_candidate_aug_prob = 0.0`, i.e. it does not reproduce that augmentation.
+whole waypoint sequence. `augment_rollout_candidates` reproduces that transform
+verbatim, but paper-exact mode leaves `rl_candidate_aug_epochs = 0`, i.e. off.
 
-Reason: the released agent's action is a waypoint sequence, where a constant offset
-is a rigid translation of the trajectory. Our action is the **velocity** sequence
-(`use_velocity_representation`), where the same constant offset applied to the action
-is a first-step impulse followed by nothing — a physically different perturbation,
-and one this repository's `augment_rollout_candidates` explicitly rejects
-(`hdp_rl_utils.py:1820` hard-fails on `ramp_steps < 1` for exactly this reason).
-Reproducing the *code* here would not reproduce the *perturbation*. The augmentation
-is also absent from `neurips_2026.tex`, so switching it off is the paper-faithful
-choice; a ramped equivalent remains available outside paper-exact mode.
+Reason: the augmentation is absent from all three `.tex` sources — `grep -rnEi
+'augment|perturb|noise injection|data aug'` returns 0 hits — and `ap:implementation`
+names the paper's RL devices exhaustively (reward group normalization, discarding
+identical-reward samples, EMA) without it. Following the paper is this mode's rule
+wherever the sources disagree.
+
+The same line also has a different physical consequence here. The release emits 8
+waypoints at 2 Hz and re-simulates them through a `PDMSimulator`, so 0.5 m is ~20% of
+its first waypoint; we emit 80 at 10 Hz and the first waypoint is executed directly
+(measured 525 mm), so 0.5 m is ~95% of it — and under velocity actions a rigid
+translation lands entirely in that one executed step. Measurements and the
+multimodality baseline this was checked against:
+`docs/hdp_rl_augmentation_multimodality_evidence_20260729.md`.
 
 ## What this mode does not change
 

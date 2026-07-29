@@ -156,7 +156,6 @@ def test_tuned_hdp_rl_defaults_are_consistent():
     assert fields["rl_bc_weight"].default == 0.0
     assert fields["rl_reward_beta"].default == 0.5
     assert fields["rl_rollout_steps"].default == 6
-    assert fields["rl_early_stop_patience"].default == 0
     assert fields["rl_behavior_gate"].default == "safety"
     assert fields["rl_eval_behavior_gate"].default == "safety"
     assert fields["rl_occupancy_use_road_border"].default is True
@@ -895,9 +894,7 @@ def test_detached_integral_preserves_forward_and_limits_gradient_window():
 
 def test_reward_weights_discard_identical_and_nonfinite_groups():
     reward = torch.tensor([0.4, 0.4, 0.4, 0.4, 0.1, 0.2, 0.3, 0.4, 0.1, float("nan"), 0.3, 0.4])
-    weights, valid = compute_reward_weights(
-        reward, num_scenes=3, n=4, normalize="group", beta=1.0, eps=1e-6
-    )
+    weights, valid = compute_reward_weights(reward, num_scenes=3, n=4, beta=1.0, eps=1e-6)
 
     assert not valid[:4].any()
     assert valid[4:8].all()
@@ -909,9 +906,7 @@ def test_reward_weights_discard_identical_and_nonfinite_groups():
 
 def test_reward_weights_remain_finite_for_extreme_temperature():
     reward = torch.tensor([-1.0, 0.0, 1.0, 2.0])
-    weights, valid = compute_reward_weights(
-        reward, num_scenes=1, n=4, normalize="none", beta=1e30, eps=1e-6
-    )
+    weights, valid = compute_reward_weights(reward, num_scenes=1, n=4, beta=1e30, eps=1e-6)
     assert valid.all()
     assert torch.isfinite(weights).all()
 
@@ -927,63 +922,7 @@ def test_reward_weights_remain_finite_for_extreme_temperature():
 )
 def test_reward_weight_api_rejects_invalid_contracts(reward, num_scenes, n, beta, eps, message):
     with pytest.raises(ValueError, match=message):
-        compute_reward_weights(reward, num_scenes, n, "group", beta, eps)
-
-
-@pytest.mark.parametrize("normalize", ["batch", "none"])
-def test_reward_weight_ablations_still_discard_groups_without_preferences(normalize):
-    reward = torch.tensor([0.4, 0.4, 0.1, 0.3])
-    weights, valid = compute_reward_weights(
-        reward, num_scenes=2, n=2, normalize=normalize, beta=1.0, eps=1e-6
-    )
-
-    assert not valid[:2].any()
-    assert valid[2:].all()
-    torch.testing.assert_close(weights[:2], torch.zeros(2), rtol=0, atol=0)
-
-
-def test_batch_reward_normalization_uses_global_ddp_moments(monkeypatch):
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-
-    def add_remote_moments(moments, op):
-        assert op == torch.distributed.ReduceOp.SUM
-        moments.add_(torch.tensor([2.0, 24.0, 296.0]))  # remote rewards: [10, 14]
-
-    monkeypatch.setattr(torch.distributed, "all_reduce", add_remote_moments)
-    reward = torch.tensor([0.0, 2.0])
-    weights, valid = compute_reward_weights(
-        reward,
-        num_scenes=1,
-        n=2,
-        normalize="batch",
-        beta=1.0,
-        eps=1e-6,
-        use_ddp=True,
-    )
-
-    global_rewards = torch.tensor([0.0, 2.0, 10.0, 14.0])
-    expected = torch.exp((reward - global_rewards.mean()) / (global_rewards.std() + 1e-6))
-    assert valid.all()
-    torch.testing.assert_close(weights, expected)
-
-
-def test_batch_reward_normalization_preserves_small_valid_variance():
-    reward = torch.tensor([7.0, 7.0001, 7.0002, 7.0003])
-
-    weights, valid = compute_reward_weights(
-        reward,
-        num_scenes=1,
-        n=4,
-        normalize="batch",
-        beta=1.0,
-        eps=1e-6,
-    )
-
-    expected = torch.exp(
-        (reward.double() - reward.double().mean()) / (reward.double().std() + 1e-6)
-    )
-    assert valid.all()
-    torch.testing.assert_close(weights, expected.float())
+        compute_reward_weights(reward, num_scenes, n, beta, eps)
 
 
 def test_road_border_penalty_keeps_valid_segment_at_ego_origin():
@@ -1015,7 +954,6 @@ def test_hdp_behavior_cloning_anchor_uses_one_expert_target_per_scene(monkeypatc
 
     monkeypatch.setattr(hdp_rl_utils, "_compute_policy_ego_loss_per_sample", fake_policy_loss)
     args = SimpleNamespace(
-        rl_reward_normalize="group",
         rl_reward_beta=1.0,
         advantage_eps=1e-6,
         rl_bc_weight=0.25,

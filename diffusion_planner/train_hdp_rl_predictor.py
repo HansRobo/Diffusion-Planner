@@ -47,16 +47,12 @@ from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import (
     _checkpoint_args_path,
     assert_checkpoint_compatible,
-    closed_loop_validate,
     load_weights_only,
 )
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.cli import boolean, dataclass_default
 from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.data_augmentation_bridge import (
-    StatePerturbation as BridgeStatePerturbation,
-)
 from diffusion_planner.utils.dataset import (
     BatchAlignedDistributedSampler,
     DiffusionPlannerData,
@@ -65,7 +61,6 @@ from diffusion_planner.utils.dataset import (
 from diffusion_planner.utils.lr_schedule import LinearWarmupConstantLR
 from diffusion_planner.utils.metric_logging import select_epdms_dashboard_metrics
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
-from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.scene_skip import prepare_filtered_manifests
 from diffusion_planner.utils.train_utils import (
     ModelEma,
@@ -373,9 +368,6 @@ def get_args(argv: list[str] | None = None):
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, default=0.5, help="augmentation probability")
     parser.add_argument(
-        "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
-    )
-    parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
     )
     parser.add_argument(
@@ -434,12 +426,6 @@ def get_args(argv: list[str] | None = None):
         type=float,
         default=_train_config_default("rl_best_score_min_delta"),
         help="minimum validation-score improvement required to replace the best model",
-    )
-    parser.add_argument(
-        "--rl_early_stop_patience",
-        type=int,
-        default=_train_config_default("rl_early_stop_patience"),
-        help="stop after this many full evaluations without a best-score improvement; 0 disables",
     )
     parser.add_argument("--learning_rate", type=float, default=1e-7)
     parser.add_argument(
@@ -582,12 +568,6 @@ def get_args(argv: list[str] | None = None):
         help="also evaluate the single zero-noise deployment trajectory per scene",
     )
     parser.add_argument(
-        "--rl_selection_metric",
-        choices=["deterministic", "mean"],
-        default=_train_config_default("rl_selection_metric"),
-        help="checkpoint selection on the deterministic deployment reward or the K-sample mean",
-    )
-    parser.add_argument(
         "--rl_rollout_steps",
         type=int,
         default=_train_config_default("rl_rollout_steps"),
@@ -727,70 +707,16 @@ def get_args(argv: list[str] | None = None):
         help="score only the first N candidate steps (0 = full horizon)",
     )
     parser.add_argument(
-        "--rl_candidate_loss_horizon",
+        "--rl_candidate_aug_epochs",
         type=int,
-        default=_train_config_default("rl_candidate_loss_horizon"),
-        help="candidate regression horizon; 0 follows rl_reward_horizon_steps",
-    )
-    parser.add_argument(
-        "--rl_diffusion_t_min",
-        type=float,
-        default=_train_config_default("rl_diffusion_t_min"),
-        help="lower bound of the reweighted-regression diffusion time draw",
-    )
-    parser.add_argument(
-        "--rl_diffusion_t_max",
-        type=float,
-        default=_train_config_default("rl_diffusion_t_max"),
-        help="upper bound of the reweighted-regression diffusion time draw",
-    )
-    parser.add_argument(
-        "--rl_candidate_aug_prob",
-        type=float,
-        default=_train_config_default("rl_candidate_aug_prob"),
-        help="per-scene probability of HDP rollout-candidate augmentation (0 disables)",
+        default=_train_config_default("rl_candidate_aug_epochs"),
+        help="apply the released candidate augmentation while epoch < N (release: 5; 0 disables)",
     )
     parser.add_argument(
         "--rl_candidate_aug_std",
         type=float,
         default=_train_config_default("rl_candidate_aug_std"),
-        help="route-frame offset std in metres (gaussian) or support half-width (beta)",
-    )
-    parser.add_argument(
-        "--rl_candidate_aug_eta_scheme",
-        choices=["gaussian", "stratified_beta"],
-        default=_train_config_default("rl_candidate_aug_eta_scheme"),
-        help="offset magnitude distribution; stratified_beta is the PlannerRFT explorer",
-    )
-    parser.add_argument(
-        "--rl_candidate_aug_beta_concentration",
-        type=float,
-        default=_train_config_default("rl_candidate_aug_beta_concentration"),
-        help="symmetric Beta concentration for the stratified scheme",
-    )
-    parser.add_argument(
-        "--rl_candidate_aug_stretch",
-        type=float,
-        default=_train_config_default("rl_candidate_aug_stretch"),
-        help="PlannerRFT candidate-stretch half-width for per-step displacements",
-    )
-    parser.add_argument(
-        "--rl_candidate_aug_ramp_steps",
-        type=int,
-        default=_train_config_default("rl_candidate_aug_ramp_steps"),
-        help="minimum-jerk onset steps for the offset (>=1; constant offsets rejected)",
-    )
-    parser.add_argument(
-        "--rl_candidate_aug_keep",
-        type=int,
-        default=_train_config_default("rl_candidate_aug_keep"),
-        help="unaugmented on-policy anchor candidates kept at the front of each group",
-    )
-    parser.add_argument(
-        "--rl_candidate_aug_speed_min_mps",
-        type=float,
-        default=_train_config_default("rl_candidate_aug_speed_min_mps"),
-        help="skip augmentation below this ego speed",
+        help="route-frame offset std in metres (release: 0.5)",
     )
     parser.add_argument(
         "--rl_paper_exact",
@@ -823,15 +749,6 @@ def get_args(argv: list[str] | None = None):
         help="under --rl_paper_exact, require the corpus and the input perturbation to "
         "be the ones the frozen IL base was trained on; set False only to post-train "
         "on a deliberately different distribution",
-    )
-    parser.add_argument(
-        "--rl_reward_normalize",
-        "--official_reward_normalize",
-        dest="rl_reward_normalize",
-        type=str,
-        choices=["group", "batch", "none"],
-        default=_train_config_default("rl_reward_normalize"),
-        help="reward normalization before HDP exponential weighting",
     )
     parser.add_argument(
         "--rl_reward_beta",
@@ -1039,46 +956,6 @@ def get_args(argv: list[str] | None = None):
         default=_train_config_default("amp_dtype"),
         help="bf16 autocasts ONLY the model forward; noising/SDE/losses stay fp32",
     )
-    parser.add_argument(
-        "--export_onnx_on_save",
-        type=boolean,
-        default=False,
-        help="export ONNX synchronously at checkpoint cadence; disabled by default to avoid DDP idle time",
-    )
-
-    # Closed-loop validation (rendered rollout + wandb video), run on the checkpoint-save cadence
-    # (save_utd). Disabled unless --closed_loop_npz_root is given (dir tree of one route's NPZ).
-    parser.add_argument(
-        "--closed_loop_npz_root",
-        type=str,
-        default="",
-        help="dir tree of route NPZ frames for closed-loop validation, run on the checkpoint-save "
-        "cadence (save_utd). Empty = disabled. One route per trial.",
-    )
-    parser.add_argument(
-        "--closed_loop_seg_len",
-        type=int,
-        default=100000,
-        help="frames per segment; large => one route = one segment = one trial",
-    )
-    parser.add_argument(
-        "--closed_loop_replan_interval",
-        type=int,
-        default=40,
-        help="re-plan every N steps; 1 = forward every step (slow, ~minutes/epoch). 40 default",
-    )
-    parser.add_argument(
-        "--closed_loop_draw_every",
-        type=int,
-        default=4,
-        help="render 1 of every N steps (matplotlib render is the dominant cost)",
-    )
-    parser.add_argument("--closed_loop_fps", type=int, default=10)
-    parser.add_argument("--closed_loop_near_miss_thresh", type=float, default=0.5)
-    parser.add_argument("--closed_loop_search_radius", type=float, default=1.5)
-    parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
-    parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
-    parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=2.5)
 
     args = parser.parse_args(argv)
     # This metadata is an invariant of the model, not a command-line mode.
@@ -1275,24 +1152,12 @@ def get_args(argv: list[str] | None = None):
         raise ValueError("At least one RL held-out reward weight must be positive")
     if args.rl_bc_weight < 0.0:
         raise ValueError("--rl_bc_weight must be non-negative")
-    for horizon_name in ("rl_reward_horizon_steps", "rl_candidate_loss_horizon"):
-        horizon_value = int(getattr(args, horizon_name))
-        if horizon_value < 0 or horizon_value > args.future_len:
-            raise ValueError(f"--{horizon_name} must be in [0, {args.future_len}]")
-    if (
-        args.rl_candidate_loss_horizon > 0
-        and args.rl_reward_horizon_steps > 0
-        and args.rl_candidate_loss_horizon > args.rl_reward_horizon_steps
-    ):
+    if not 0 <= args.rl_reward_horizon_steps <= args.future_len:
+        raise ValueError(f"--rl_reward_horizon_steps must be in [0, {args.future_len}]")
+    if not args.rl_eval_deterministic:
         raise ValueError(
-            "--rl_candidate_loss_horizon must not exceed --rl_reward_horizon_steps: "
-            "regressing the unscored tail is a known-negative configuration"
-        )
-    if not 0.0 <= args.rl_diffusion_t_min < args.rl_diffusion_t_max <= 1.0:
-        raise ValueError("--rl_diffusion_t_min/--rl_diffusion_t_max must satisfy 0 <= lo < hi <= 1")
-    if args.rl_selection_metric == "deterministic" and not args.rl_eval_deterministic:
-        raise ValueError(
-            "--rl_selection_metric deterministic requires --rl_eval_deterministic true"
+            "checkpoint selection uses the deterministic deployment reward and therefore "
+            "requires --rl_eval_deterministic true"
         )
     if args.rl_rollout_interval < 0:
         raise ValueError("--rl_rollout_interval must be >= 0")
@@ -1310,28 +1175,12 @@ def get_args(argv: list[str] | None = None):
                 "cycle mode's replay epochs are the rollout amortization; "
                 "set --rl_updates_per_rollout 1"
             )
-    if not 0.0 <= args.rl_candidate_aug_prob <= 1.0:
-        raise ValueError("--rl_candidate_aug_prob must be in [0, 1]")
-    if args.rl_candidate_aug_prob > 0.0:
-        if args.rl_candidate_aug_ramp_steps < 1:
-            raise ValueError(
-                "--rl_candidate_aug_ramp_steps must be >= 1: a constant offset is a "
-                "first-delta impulse under velocity actions (audited-broken upstream)"
-            )
-        if args.rl_candidate_aug_std < 0.0:
-            raise ValueError("--rl_candidate_aug_std must be non-negative")
-        if not 0.0 <= args.rl_candidate_aug_stretch < 1.0:
-            raise ValueError("--rl_candidate_aug_stretch must be in [0, 1)")
-        if args.rl_candidate_aug_std == 0.0 and args.rl_candidate_aug_stretch == 0.0:
-            raise ValueError(
-                "candidate augmentation is enabled but both the offset std and the stretch are zero"
-            )
-        if not 0 <= args.rl_candidate_aug_keep < args.num_generations:
-            raise ValueError(f"--rl_candidate_aug_keep must be in [0, {args.num_generations - 1}]")
-        if args.rl_candidate_aug_beta_concentration <= 0.0:
-            raise ValueError("--rl_candidate_aug_beta_concentration must be positive")
-        if args.rl_candidate_aug_speed_min_mps <= 0.0:
-            raise ValueError("--rl_candidate_aug_speed_min_mps must be positive")
+    if args.rl_candidate_aug_epochs < 0:
+        raise ValueError("--rl_candidate_aug_epochs must be >= 0 (0 disables)")
+    if args.rl_candidate_aug_epochs > 0 and args.rl_candidate_aug_std <= 0.0:
+        raise ValueError(
+            "candidate augmentation is enabled but --rl_candidate_aug_std is not positive"
+        )
     if args.predicted_neighbor_num != 0:
         raise ValueError("HDP-RL is ego-only; --predicted_neighbor_num must be 0")
     if args.rl_full_eval_utd < 1:
@@ -1344,8 +1193,6 @@ def get_args(argv: list[str] | None = None):
         raise ValueError("--rl_max_valid_epdms_regression must be non-negative")
     if args.rl_best_score_min_delta < 0.0:
         raise ValueError("--rl_best_score_min_delta must be non-negative")
-    if args.rl_early_stop_patience < 0:
-        raise ValueError("--rl_early_stop_patience must be non-negative")
     if not args.use_ema:
         raise ValueError("HDP-RL requires --use_ema True for the frozen previous-policy snapshot")
     if not 0.0 < args.rl_ema_update_rate <= 1.0:
@@ -1418,12 +1265,11 @@ def scalar(value):
 def selection_score_from_reward_metrics(reward_metrics, args) -> float:
     """Checkpoint-selection scalar from the held-out reward metrics.
 
-    The deployed planner executes one zero-noise plan, so ``deterministic`` selects on
-    exactly that trajectory's reward; the K-sample stochastic mean remains reported as
-    a distribution diagnostic (and stays selectable for legacy comparisons).
+    The deployed planner executes one zero-noise plan, so selection is on exactly that
+    trajectory's reward; the K-sample stochastic mean stays reported as a distribution
+    diagnostic only.
     """
-    metric = getattr(args, "rl_selection_metric", "deterministic")
-    key = "deterministic_mean" if metric == "deterministic" else "mean"
+    key = "deterministic_mean"
     if key not in reward_metrics:
         raise KeyError(f"Held-out reward metrics are missing selection key {key!r}")
     return scalar(reward_metrics[key])
@@ -1712,18 +1558,15 @@ def model_training(args):
 
     # StatePerturbation data augmentation (same as the supervised trainer).
     if args.use_data_augment:
-        if args.augment_type == "bridge":
-            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
-        else:
-            aug = StatePerturbation(
-                augment_prob=args.augment_prob,
-                num_refine=args.num_refine,
-                device=args.device,
-                ego_past_noise_std=args.ego_past_noise_std,
-                use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
-            )
+        aug = StatePerturbation(
+            augment_prob=args.augment_prob,
+            num_refine=args.num_refine,
+            device=args.device,
+            ego_past_noise_std=args.ego_past_noise_std,
+            use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
+        )
         if global_rank == 0:
-            print(f"Data augmentation enabled: type={args.augment_type} prob={args.augment_prob}")
+            print(f"Data augmentation enabled: prob={args.augment_prob}")
     else:
         aug = None
 
@@ -1929,7 +1772,6 @@ def model_training(args):
             "valid_reward/*",
             "valid_turn_indicator/*",
             "valid_multisample/*",
-            "closed_loop/*",
         ):
             wandb.define_metric(metric_prefix, step_metric="optimizer_step")
         wandb.define_metric("lr", step_metric="optimizer_step")
@@ -2118,7 +1960,6 @@ def model_training(args):
         write_json_atomic(baseline_metrics, baseline_metrics_path)
 
     for epoch in range(init_epoch, train_epochs):
-        stop_requested = False
         train_sampler.set_epoch(epoch)
         if args.ddp:
             torch.distributed.barrier()
@@ -2223,10 +2064,6 @@ def model_training(args):
                 full_evals_without_improvement = (
                     0 if improves_best else full_evals_without_improvement + 1
                 )
-                stop_requested = (
-                    args.rl_early_stop_patience > 0
-                    and full_evals_without_improvement >= args.rl_early_stop_patience
-                )
             if improves_best:
                 best_valid_score = selection_score
             logged_best_valid_score = best_valid_score if math.isfinite(best_valid_score) else None
@@ -2329,52 +2166,17 @@ def model_training(args):
                 atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
                 write_json_atomic(args_dict, os.path.join(curr_dir, "args.json"))
                 write_json_atomic(curr_data, os.path.join(curr_dir, "best_model_info.json"))
-                if args.export_onnx_on_save:
-                    export_checkpoint_onnx_guarded(
-                        config_json_path=os.path.join(save_path, "args.json"),
-                        ckpt_path=f"{curr_dir}/best_model.pth",
-                        output_dir=curr_dir,
-                        output_prefix="diffusion_planner",
-                        use_ema=model_ema is not None,
-                        use_simplify=False,
-                        opset_version=20,
-                        external_data=False,
-                    )
 
             write_train_log_atomic(data_list, os.path.join(save_path, "train_log.tsv"))
             atomic_torch_save(model_dict, f"{save_path}/latest.pth")
 
-            # Resume must not shift the configured checkpoint/closed-loop cadence.
+            # Keep the checkpoint cadence anchored to the absolute epoch. A resume from
+            # (for example) epoch 7 must still save at epochs 10 and 20.
             if (epoch + 1) % save_utd == 0:
                 curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
                 os.makedirs(curr_dir, exist_ok=True)
                 atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
                 write_json_atomic(args_dict, os.path.join(curr_dir, "args.json"))
-                if args.export_onnx_on_save:
-                    export_checkpoint_onnx_guarded(
-                        config_json_path=os.path.join(save_path, "args.json"),
-                        ckpt_path=f"{curr_dir}/best_model.pth",
-                        output_dir=curr_dir,
-                        output_prefix="diffusion_planner",
-                        use_ema=model_ema is not None,
-                        use_simplify=False,
-                        opset_version=20,
-                        external_data=False,
-                    )
-                # Closed-loop validation on the checkpoint-save cadence; videos + metrics land next
-                # to the saved weights and are logged to wandb at step=epoch+1.
-                closed_loop_validate(eval_model, args, epoch, os.path.join(curr_dir, "closed_loop"))
-
-        stop_tensor = torch.tensor(int(stop_requested), device=args.device)
-        if args.ddp:
-            torch.distributed.broadcast(stop_tensor, src=0)
-        if bool(stop_tensor.item()):
-            if global_rank == 0:
-                print(
-                    "RL early stopping: no meaningful full-validation improvement for "
-                    f"{full_evals_without_improvement} evaluations"
-                )
-            break
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
