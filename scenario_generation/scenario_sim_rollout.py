@@ -85,8 +85,11 @@ class RolloutConfig:
     max_steps: int = 300
     warmup_steps: int = 5  # skip scoring until the history buffer is warm
     near_miss_thresh: float = 1.0
-    # Ego bounding box fallback when the sim does not report one. wheelbase is
-    # derived as ``ego_wheelbase_ratio * length`` when not otherwise known.
+    # Feeds ``Agent.wheelbase`` ONLY -- whose contract is the real axle spacing
+    # (scene_context.Agent: "Distance between front and rear axles ... ~0.65 * length when
+    # not available"), consumed as such by the bicycle model in simulate.py. The metric
+    # geometry does NOT use this: it needs twice the bbox-centre offset, which the sim
+    # reports exactly -- see :func:`_ego_metric_box`.
     ego_wheelbase_ratio: float = 0.65
     # LaneletSceneBuilder map/route window params (mirror replay.py defaults).
     max_map_lanelets: int = 140
@@ -141,9 +144,40 @@ class _HistoryBuffers:
 
 
 def _entity_shape(state: dict, cfg: RolloutConfig) -> tuple[float, float, float]:
+    """``(length, width, axle_wheelbase)`` for ``Agent`` -- model input, not metrics.
+
+    The third value follows ``Agent.wheelbase``'s contract (real axle spacing) and keeps the
+    documented ``~0.65 * length`` estimate, because what the model input has to match is the
+    convention its training data was built with. Metric geometry uses
+    :func:`_ego_metric_box` instead -- the two want different numbers for the same vehicle.
+    """
     dims = state["bounding_box"]["dimensions"]
     length, width = float(dims["x"]), float(dims["y"])
     return length, width, cfg.ego_wheelbase_ratio * length
+
+
+def _ego_metric_box(state: dict) -> tuple[float, float, float]:
+    """``(length, width, box_wheelbase)`` for the metric OBB builders.
+
+    ``box_wheelbase`` is deliberately NOT the axle spacing. Both metric builders
+    (``_build_ego_bbox_corners`` behind ``score_object_step`` for object clearance, and
+    ``obb_corners`` behind ``evaluate_trajectory`` for the road border) treat the reported
+    pose as the rear-axle midpoint and derive the box from ``length`` plus a ``wheelbase``
+    argument **assuming symmetric overhangs**, which places the box centre exactly
+    ``wheelbase/2`` ahead of the pose. So the value they need is twice the true box-centre
+    offset, and the simulator reports that offset directly: the pybind always fills
+    ``bounding_box.center`` (``openscenario_python.cpp::boundingBoxToDict``). Nothing is
+    estimated here.
+
+    Why this matters: the webauto suite's ego is bus-shaped with markedly asymmetric
+    overhangs (length 7.2369, centre offset 2.0927, i.e. 1.53 m behind vs 3.04 m ahead of the
+    axles), so the ``0.65 * length`` estimate that ``Agent.wheelbase`` uses would put the box
+    0.259 m too far forward -- the same order as the near-miss margin itself. It biases
+    clearance in opposite directions fore and aft, so it cannot be corrected after the fact.
+    """
+    bbox = state["bounding_box"]
+    dims = bbox["dimensions"]
+    return float(dims["x"]), float(dims["y"]), 2.0 * float(bbox["center"]["x"])
 
 
 def _build_scene(
@@ -308,16 +342,16 @@ def _ego_plan_to_map_trajectory(
 
 
 def _score_neighbors(
-    scene, ego_state: dict, ex: float, ey: float, eh: float, cfg: RolloutConfig, device: str
+    scene, ego_state: dict, ex: float, ey: float, eh: float, device: str
 ) -> tuple[float, bool]:
     """Instantaneous (min_clearance, collision) from raw ego-frame neighbor OBBs."""
     R = _rotation_matrix(eh)
     neighbors_live = _build_neighbor_agents_past(
         scene, EGO_NAME, R, np.array([ex, ey], dtype=np.float64), eh
     )[0, :, -1, :]
-    ego_shape = np.array(_entity_shape(ego_state, cfg), dtype=np.float32)[
+    ego_shape = np.array(_ego_metric_box(ego_state), dtype=np.float32)[
         [2, 0, 1]
-    ]  # (wheelbase, length, width)
+    ]  # (box_wheelbase, length, width) -- see _ego_metric_box, not _entity_shape
     min_clr, coll, _ = score_object_step(neighbors_live, ego_shape, device)
     return min_clr, coll
 
@@ -392,7 +426,7 @@ def _finalize_row(
     (output_dir / "trajectory_log.json").write_text(json.dumps(trajectory_log))
 
     ego_len, ego_w, ego_wb = (
-        _entity_shape(ego_state, cfg) if ego_state is not None else (4.0, 1.8, 2.6)
+        _ego_metric_box(ego_state) if ego_state is not None else (4.0, 1.8, 2.6)
     )
     rb = evaluate_trajectory(
         trajectory_log, load_border_segments(str(map_path)), ego_len, ego_w, ego_wb
@@ -498,7 +532,7 @@ def run_scenario_sim_rollout(
             runner.set_ego_turn_indicator(int(ti_cmd), ego_ref=EGO_NAME)
 
             if buffers.age[EGO_NAME] >= cfg.warmup_steps:
-                clr, coll = _score_neighbors(scene, ego_state, ex, ey, eh, cfg, device)
+                clr, coll = _score_neighbors(scene, ego_state, ex, ey, eh, device)
                 clearances.append(clr)
                 collisions.append(coll)
 
