@@ -4,6 +4,12 @@ Infrastructure for Group Relative Policy Optimization (GRPO) training of the Dif
 Generates N diverse trajectories per scene, scores them with a rule-based reward function,
 and computes group-relative normalized advantages.
 
+Implementation note for future HDP/AWR work: [HDP trajectory augmentation: representation compatibility and DP adaptation](../docs/hdp_augmentation_dp_representation_pitfall.md). It records why the released constant waypoint offset is unsafe for absolute x-start DP targets, the observed failure metrics, the quintic-onset adaptation, and mandatory anchor/cache checks.
+
+Method-change audit: [AWR suggestion audit: zero-risk changes versus new experiments](../docs/awr_zero_risk_improvement_audit_20260718.md). It records which HDP/PlannerRFT/R2LPL suggestions are already implemented, which changes only improve observability/reproducibility, and which require isolated experiments because they alter the training objective.
+
+Formal original-DP full-data launcher: [`autoresearch/run_full_sequence_awr_group_relative_ramp.sh`](autoresearch/run_full_sequence_awr_group_relative_ramp.sh). It fails closed unless the untouched v5 best checkpoint is used and keeps the current legacy neighbor-future `+1` correction explicit.
+
 ## Credits
 
 The logprob GRPO implementation is based on **DiffusionDriveV2** by Li et al.:

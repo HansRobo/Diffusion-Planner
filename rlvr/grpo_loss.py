@@ -257,14 +257,37 @@ def _mean_over_ego_loss_horizons(
     *,
     default_horizon: int,
     loss_horizons: torch.Tensor | None,
+    timestep_weights: torch.Tensor | None = None,
+    loss_starts: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Average ``[N,T]`` losses over an explicit per-target horizon.
+
+    ``loss_starts`` makes the window half-open ``[start, horizon)`` instead of
+    ``[0, horizon)``, so a target can be excluded from the leading steps it has
+    no business supervising.  It exists for exactly one measured reason: the
+    reward-ranked candidates are a *null* on the executed waypoint (-0.55 +-
+    1.20% of command jerk against the raw policy) yet they still hold ~8% of the
+    step-1 target mass, and that 8% varies frame to frame down a replan chain.
+    Dropping the candidates' step 1 alone moves the step-1 fixed point onto the
+    anchor's exactly -- command jerk 3.5643 -> 2.4699 mm, the full gap to an
+    anchor-only objective -- while costing nothing on the 40-step path length
+    (+1.12% either way) because the candidates keep steps 2-40.  Raising the
+    anchor weight 10x instead buys only 82% of the same gap.  ``None`` keeps the
+    historical ``[0, horizon)`` window.
 
     Reward-ranked AWR targets may only be justified over the scorer horizon,
     while a logged-expert retention target remains justified over the full
     planner horizon.  Keeping the horizon per target lets one compiled batch
     express both objectives without treating an unscored stochastic tail as
     reward-supervised.  ``None`` preserves the historical full-horizon mean.
+
+    ``timestep_weights`` is the ``coeff_timestep`` profile already folded into
+    ``per_timestep``; it is needed again here for the *denominator*.  A batch
+    mixes a 40-step candidate target with an 80-step anchor target, so dividing
+    a front-loaded weighted sum by a plain step count would silently rescale
+    the two objectives against each other by the ratio of their weight mass.
+    Dividing by the mass actually applied keeps this a weighted mean, and with
+    uniform weights it reduces to the historical step-count division exactly.
     """
 
     if per_timestep.ndim != 2:
@@ -279,8 +302,22 @@ def _mean_over_ego_loss_horizons(
             f"horizon={default_horizon}, T={available_horizon}"
         )
     values = per_timestep[:, :default_horizon]
+    weights = (
+        None
+        if timestep_weights is None
+        else timestep_weights[:default_horizon].to(
+            device=values.device, dtype=values.dtype
+        )
+    )
     if loss_horizons is None:
-        return values.mean(dim=-1)
+        if loss_starts is not None:
+            raise ValueError(
+                "ego loss starts require per-target horizons; pass "
+                "loss_horizons alongside loss_starts"
+            )
+        if weights is None:
+            return values.mean(dim=-1)
+        return values.sum(dim=-1) / weights.sum().clamp_min(1e-12)
     if loss_horizons.shape != (target_count,):
         raise ValueError(
             "ego loss horizons must have one value per target: "
@@ -295,13 +332,36 @@ def _mean_over_ego_loss_horizons(
             f"min={int(horizons.min().item())}, "
             f"max={int(horizons.max().item())}, default={default_horizon}"
         )
-    mask = (
-        torch.arange(default_horizon, device=values.device)[None, :]
-        < horizons[:, None]
+    steps = torch.arange(default_horizon, device=values.device)[None, :]
+    mask = steps < horizons[:, None]
+    if loss_starts is None:
+        span = horizons
+    else:
+        if loss_starts.shape != (target_count,):
+            raise ValueError(
+                "ego loss starts must have one value per target: "
+                f"expected={(target_count,)}, got={tuple(loss_starts.shape)}"
+            )
+        starts = loss_starts.to(device=values.device, dtype=torch.long)
+        if bool((starts < 0).any().item()) or bool((starts >= horizons).any().item()):
+            # An empty window would divide by zero and silently drop the target
+            # from the objective, which is exactly the failure this window is
+            # meant to make explicit.
+            raise ValueError(
+                "ego loss starts must lie in [0, horizon) per target: "
+                f"min={int(starts.min().item())}, "
+                f"max={int(starts.max().item())}, "
+                f"min_horizon={int(horizons.min().item())}"
+            )
+        mask = mask & (steps >= starts[:, None])
+        span = horizons - starts
+    mask_f = mask.to(dtype=values.dtype)
+    denominator = (
+        span.to(dtype=values.dtype)
+        if weights is None
+        else (mask_f * weights[None, :]).sum(dim=-1).clamp_min(1e-12)
     )
-    return (values * mask.to(dtype=values.dtype)).sum(dim=-1) / horizons.to(
-        dtype=values.dtype
-    )
+    return (values * mask_f).sum(dim=-1) / denominator
 
 
 def compute_batched_trajectory_losses(
@@ -321,6 +381,7 @@ def compute_batched_trajectory_losses(
     use_prefix_mask: bool = True,
     awr_loss_type: str = "dp_geometry",
     ego_loss_horizons: torch.Tensor | None = None,
+    ego_loss_starts: torch.Tensor | None = None,
 ):
     """Compute diffusion losses for N trajectories in ONE forward pass.
 
@@ -584,23 +645,45 @@ def compute_batched_trajectory_losses(
             f"T={T}, len={len(timestep_coeff)}"
         )
     unit = max(1, T // len(timestep_coeff))
+    # coeff_timestep used to be applied only to the geometry decomposition, so
+    # every plain_mse run silently ignored it -- and plain_mse is what the
+    # PlannerRFT campaigns actually run.  That mattered: the vehicle replans at
+    # 10 Hz and executes one step of each plan, but squared error grows ~5,500x
+    # across the 8 s horizon, so under a flat profile the executed step carries
+    # 0.0009% of the ego loss and the never-executed 6-8 s tail carries 64.9%.
+    # Build the profile once and apply it to whichever per-timestep tensor this
+    # loss type produced.  len(coeff_timestep) == T gives per-step weights.
+    timestep_weights = torch.ones(T, device=ego_output.device, dtype=torch.float32)
+    for index, coefficient in enumerate(timestep_coeff):
+        start = index * unit
+        end = T if index == len(timestep_coeff) - 1 else (index + 1) * unit
+        timestep_weights[start:end] = coefficient
+    uniform_timestep_weights = all(
+        coefficient == timestep_coeff[0] for coefficient in timestep_coeff
+    )
     if loss_type not in {"plain_mse", "mse", "hdp_mse"}:
-        for index, coefficient in enumerate(timestep_coeff):
-            start = index * unit
-            end = T if index == len(timestep_coeff) - 1 else (index + 1) * unit
-            position_lat_loss[:, start:end] *= coefficient
-            position_lon_loss[:, start:end] *= coefficient
-            heading_l2_loss[:, start:end] *= coefficient
+        scale = timestep_weights.to(dtype=position_lat_loss.dtype)
+        position_lat_loss = position_lat_loss * scale
+        position_lon_loss = position_lon_loss * scale
+        heading_l2_loss = heading_l2_loss * scale
         per_timestep_ego = (
             float(getattr(model_args, "coeff_position_lat_loss", 1.0)) * position_lat_loss
             + float(getattr(model_args, "coeff_position_lon_loss", 1.0)) * position_lon_loss
             + float(getattr(model_args, "coeff_heading_l2_loss", 1.0)) * heading_l2_loss
+        )
+    else:
+        per_timestep_ego = per_timestep_ego * timestep_weights.to(
+            dtype=per_timestep_ego.dtype
         )
     ego_horizon = min(T, int(getattr(model_args, "ego_prediction_horizon", T)))
     per_traj_ego_loss = _mean_over_ego_loss_horizons(
         per_timestep_ego,
         default_horizon=ego_horizon,
         loss_horizons=ego_loss_horizons,
+        loss_starts=ego_loss_starts,
+        # A uniform profile keeps the historical step-count denominator, so
+        # every existing run stays bit-identical.
+        timestep_weights=None if uniform_timestep_weights else timestep_weights,
     )
 
     # Optional HDP-style kinematic auxiliary for the original x-start model.
@@ -631,6 +714,7 @@ def compute_batched_trajectory_losses(
             hybrid_position_loss,
             default_horizon=ego_horizon,
             loss_horizons=ego_loss_horizons,
+            loss_starts=ego_loss_starts,
         )
 
     # Neighbor regularization loss: per-trajectory MSE on valid neighbor predictions.

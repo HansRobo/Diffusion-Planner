@@ -637,6 +637,12 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--scenes", required=True, help="JSON file containing list of NPZ paths.")
     p.add_argument(
+        "--scenes_key",
+        default=None,
+        help="Optional key selecting a list from a JSON object (for example "
+        "'valid' in a trainer scene_selection.json).",
+    )
+    p.add_argument(
         "--output", required=True, help="Output JSON file with per-scene predictions + summary."
     )
     p.add_argument(
@@ -693,6 +699,12 @@ def main() -> None:
 
     with open(args.scenes) as f:
         all_scenes = json.load(f)
+    if args.scenes_key is not None:
+        if not isinstance(all_scenes, dict) or args.scenes_key not in all_scenes:
+            raise SystemExit(
+                f"--scenes_key={args.scenes_key!r} is missing from JSON object in {args.scenes}"
+            )
+        all_scenes = all_scenes[args.scenes_key]
     if not isinstance(all_scenes, list):
         raise SystemExit("--scenes must contain a JSON list of NPZ paths")
 
@@ -740,6 +752,7 @@ def main() -> None:
             {
                 "config": {
                     "scenes": args.scenes,
+                    "scenes_key": args.scenes_key,
                     "n_random": args.n_random,
                     "seed": args.seed,
                     "lookahead_m": args.lookahead_m,
