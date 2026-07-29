@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,7 @@ import torch
 
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.metrics.object import score_object_step
+from scenario_generation.perf_timer import Timers
 from scenario_generation.scenario_sim_metrics import build_segment_row
 from scenario_generation.scene_context import Agent, AgentType, SceneContext
 from scenario_generation.simulate import _ego_to_world, _predict_batch
@@ -255,6 +257,25 @@ def _build_scene(
 # --------------------------------------------------------------------------- #
 # Route resolution (interim: LaneletSceneBuilder shortestPath / find_route).
 # --------------------------------------------------------------------------- #
+def map_from_osc(osc_path: str | Path) -> str:
+    """The lanelet2 map this scenario declares, from its ``RoadNetwork/LogicFile``.
+
+    Single source of truth for the map, on purpose. The C++ interpreter resolves the map from
+    exactly this element (``Interpreter::makeCurrentConfiguration``), so deriving the
+    Python-side map the same way makes it impossible for the two to disagree. Passing a map in
+    from the caller cannot offer that guarantee: a suite spanning several maps (the webauto
+    suite spans three) would then have the route, centreline and road-border geometry computed
+    against a different map than the one the simulator actually ran, with no error -- just
+    plausible, wrong numbers.
+    """
+    root = ET.parse(str(osc_path)).getroot()
+    for node in root.iter("LogicFile"):
+        path = node.attrib.get("filepath")
+        if path:
+            return path
+    raise ValueError(f"No RoadNetwork/LogicFile filepath in {osc_path}")
+
+
 def _parse_goal_lanelet(osc_path: str | Path) -> int | None:
     """Best-effort goal lanelet id from an OpenSCENARIO AcquirePositionAction
     LanePosition. Returns None when the scenario authors no routing goal (then
@@ -468,6 +489,7 @@ def run_scenario_sim_rollout(
     config: RolloutConfig | None = None,
     device: str = "cpu",
     verbose: bool = True,
+    timers: Timers | None = None,
 ) -> dict:
     """Run one closed-loop OpenSCENARIO rollout and return an aggregate-ready row.
 
@@ -484,7 +506,14 @@ def run_scenario_sim_rollout(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Always-on stage timing, shared with the npz path (perf_timer.Timers) so both
+    # closed-loop paths report the same shape. One process runs one scenario, so these
+    # totals ARE this scenario's profile -- see the timing note in main().
+    timers = timers or Timers()
+    _t_rollout = time.perf_counter()
+    _t = time.perf_counter()
     builder = LaneletSceneBuilder(str(map_path))
+    timers.add("map_build", time.perf_counter() - _t)
     buffers = _HistoryBuffers()
     trajectory_log: list[dict] = []
     clearances: list[float] = []
@@ -497,47 +526,59 @@ def run_scenario_sim_rollout(
     ego_state: dict | None = None  # last tick's ego truth (for finalize ego shape)
     terminated_reason = "max_steps"
 
+    _t = time.perf_counter()
     with osp.HeadlessRunner(
         osc_path=str(osc_path),
         output_directory=str(output_dir / "osp_out"),
         local_frame_rate=cfg.fps,
     ) as runner:
+        timers.add("sim_open", time.perf_counter() - _t)
+        _t = time.perf_counter()
         ego_route_ids, goal_pose = _start_and_resolve_route(
             runner, builder, osc_path, cfg, verbose
         )
+        timers.add("route_resolve", time.perf_counter() - _t)
         goal_xy = goal_pose[:2]
 
         for step in range(cfg.max_steps):
-            states = runner.get_entity_states()
+            with timers("sim_get_states"):
+                states = runner.get_entity_states()
             if EGO_NAME not in states:
                 raise RuntimeError(f"Sim reports no '{EGO_NAME}' entity")
             ego_state = states[EGO_NAME]
             ex, ey, eh = _pose_xyh(ego_state)
 
-            _update_history(buffers, states)
-            scene = _build_scene(
-                states, buffers, builder, ego_route_ids, goal_pose, cfg, EGO_NAME
-            )
-            map_cache = MapTensorCache(scene.map_data)
+            with timers("scene_build"):
+                _update_history(buffers, states)
+                scene = _build_scene(
+                    states, buffers, builder, ego_route_ids, goal_pose, cfg, EGO_NAME
+                )
+                map_cache = MapTensorCache(scene.map_data)
 
             # Replan every ``replan_interval`` ticks; consume the cached plan open-loop between.
             if cached_plan_ego is None or step % cfg.replan_interval == 0:
-                cached_plan_ego, ti_model = _predict_ego_plan(
-                    model, model_args, scene, device, map_cache
-                )
+                # The first call also pays torch.compile; a separate stage keeps the cold
+                # cost from being averaged into the steady-state ms/call (and vice versa).
+                with timers("predict_cold" if cached_plan_ego is None else "predict"):
+                    cached_plan_ego, ti_model = _predict_ego_plan(
+                        model, model_args, scene, device, map_cache
+                    )
                 ti_cmd = _map_turn_indicator(ti_model, ti_cmd)
 
-            pts = _ego_plan_to_map_trajectory(cached_plan_ego, ex, ey, eh)
-            runner.set_ego_trajectory(pts, ego_ref=EGO_NAME)
-            runner.set_ego_turn_indicator(int(ti_cmd), ego_ref=EGO_NAME)
+            with timers("sim_set_traj"):
+                pts = _ego_plan_to_map_trajectory(cached_plan_ego, ex, ey, eh)
+                runner.set_ego_trajectory(pts, ego_ref=EGO_NAME)
+                runner.set_ego_turn_indicator(int(ti_cmd), ego_ref=EGO_NAME)
 
             if buffers.age[EGO_NAME] >= cfg.warmup_steps:
-                clr, coll = _score_neighbors(scene, ego_state, ex, ey, eh, device)
+                with timers("score_objects"):
+                    clr, coll = _score_neighbors(scene, ego_state, ex, ey, eh, device)
                 clearances.append(clr)
                 collisions.append(coll)
 
             # step() is the sole integrator: it advances BOTH the ego and the NPCs.
-            outcome = runner.step()
+            with timers("sim_step"):
+                outcome = runner.step()
 
             ego_after = runner.get_ego_state(ego_ref=EGO_NAME)
             trajectory_log.append(_traj_entry(step, ego_after, goal_xy))
@@ -557,10 +598,17 @@ def run_scenario_sim_rollout(
 
         result_kind = runner.result_kind()
 
-    return _finalize_row(
+    _t = time.perf_counter()
+    row = _finalize_row(
         output_dir, map_path, trajectory_log, ego_state, cfg, clearances, collisions,
         terminated_reason, result_kind, coord_ok, coord_err,
     )
+    timers.add("finalize", time.perf_counter() - _t)
+    # `sim_close` is not timed separately: teardown happens in HeadlessRunner.__exit__, so it
+    # lands in the gap between the loop and here and shows up in rollout_s minus the parts.
+    timers.add("rollout_total", time.perf_counter() - _t_rollout)
+    row["timing"] = timers.as_dict()
+    return row
 
 
 def main() -> int:
@@ -574,7 +622,12 @@ def main() -> int:
 
     p = argparse.ArgumentParser(description="scenario_sim single-scenario worker")
     p.add_argument("--osc", required=True)
-    p.add_argument("--map_path", required=True)
+    p.add_argument(
+        "--map_path",
+        default=None,
+        help="lanelet2 .osm; defaults to the scenario's own RoadNetwork/LogicFile, which is "
+        "also where the C++ interpreter reads it from -- override only to test a substitute map",
+    )
     p.add_argument("--out_dir", required=True)
     p.add_argument("--row_out", required=True, help="write the metrics row JSON here")
     p.add_argument("--device", default="cpu")
@@ -589,7 +642,10 @@ def main() -> int:
 
     from scenario_generation.simulate import load_model
 
-    model, model_args = load_model(a.model_path, a.device)
+    timers = Timers()
+    t_proc = time.perf_counter()
+    with timers("model_load"):
+        model, model_args = load_model(a.model_path, a.device)
     # T_fwd 26 -> 14.4 ms, bitwise identical to eager. Must come after load_state_dict
     # (compiling rewrites key names). Compiling the DPM loop as one graph is faster
     # single-stream (12.5 ms) but SLOWER under MPS, which is how eval actually runs --
@@ -598,6 +654,7 @@ def main() -> int:
     model.encoder = _CloneEncoderOutput(
         torch.compile(model.encoder, mode="reduce-overhead")
     )
+    map_path = a.map_path or map_from_osc(a.osc)
     cfg = RolloutConfig(
         fps=a.fps,
         replan_interval=a.replan_interval,
@@ -606,8 +663,17 @@ def main() -> int:
         near_miss_thresh=a.near_miss_thresh,
     )
     row = run_scenario_sim_rollout(
-        model, model_args, a.osc, a.map_path, a.out_dir, config=cfg, device=a.device
+        model, model_args, a.osc, map_path, a.out_dir,
+        config=cfg, device=a.device, timers=timers,
     )
+    # With one process per scenario, the pre-rollout costs are paid once per scenario -- a
+    # full suite pays them hundreds of times -- so they belong in the same breakdown as the
+    # per-tick sums. Otherwise a run dominated by startup is indistinguishable from one
+    # dominated by inference. `torch.compile` is deliberately not a stage of its own: the
+    # compile happens on the first forward, which is why `predict_cold` is separate.
+    timers.add("worker_process", time.perf_counter() - t_proc)
+    row["timing"] = timers.as_dict()
+    row["map_path"] = str(map_path)
     Path(a.row_out).write_text(json.dumps(row, default=float))
     return 0
 

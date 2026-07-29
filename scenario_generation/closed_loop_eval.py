@@ -610,6 +610,21 @@ def enumerate_scenarios(scenario_root) -> list[Path]:
     return paths
 
 
+def _scenario_key(scenario: Path, root: Path) -> str:
+    """Unique, filesystem-safe id for a scenario within ``root``.
+
+    Stems are NOT unique across a suite: the yaml->xosc converter emits flat
+    ``scenario_<n>.xosc`` names inside each scenario's own directory, so the webauto suite has
+    84 different ``scenario_0.xosc``. Keying the work directory (and the row's ``route``) on
+    the stem alone would put many workers in one directory, overwriting each other's
+    ``row.json`` and logs, and would collapse distinct scenarios into one route name.
+    """
+    root = Path(root)
+    if root.is_file():
+        return scenario.stem
+    return "__".join(scenario.relative_to(root).with_suffix("").parts)
+
+
 def run_scenario_sim_eval(
     scenario_root,
     map_path,
@@ -617,6 +632,7 @@ def run_scenario_sim_eval(
     *,
     device: str,
     model_path: str,
+    gpus: list[int] | None = None,
     near_miss_thresh: float = 1.0,
     replan_interval: int = 1,  # every tick = 10 Hz, matching the production node
     max_steps: int = 300,
@@ -650,20 +666,36 @@ def run_scenario_sim_eval(
     source-chain already (on the production nodes that is the carried-in overlay prefix plus the
     node's own ``/opt/ros/humble`` -- see ``validator/env/setup_production.bash``).
     """
+    import os
     import sys
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     scenarios = enumerate_scenarios(scenario_root)
+    # `jobs` workers are spread round-robin over these devices. Default: every GPU the job
+    # was allocated, which is what makes a full-suite run use the whole node rather than
+    # piling all workers onto cuda:0.
+    gpu_ids: list[int] = []
+    if device.startswith("cuda"):
+        if gpus is not None:
+            gpu_ids = list(gpus)
+        else:
+            import torch
 
-    def launch(scenario: Path):
-        work = out_dir / scenario.stem
+            gpu_ids = list(range(torch.cuda.device_count()))
+    if verbose:
+        print(
+            f"[scenario_sim] {len(scenarios)} scenarios, jobs={jobs}, "
+            f"gpus={gpu_ids or '(none: ' + device + ')'}"
+        )
+
+    def launch(scenario: Path, slot: int):
+        work = out_dir / _scenario_key(scenario, Path(scenario_root))
         work.mkdir(parents=True, exist_ok=True)
         row_out = work / "row.json"
         log = work / "worker.log"
         worker_args = [
             "--osc", str(scenario),
-            "--map_path", str(map_path),
             "--out_dir", str(work),
             "--row_out", str(row_out),
             "--device", device,
@@ -674,30 +706,52 @@ def run_scenario_sim_eval(
             "--fps", str(fps),
             "--model_path", str(model_path),
         ]
+        # No --map_path unless explicitly overridden: the worker reads the scenario's own
+        # RoadNetwork/LogicFile, the same element the C++ interpreter resolves the map from,
+        # so a suite spanning several maps cannot silently measure one map's geometry
+        # against another's simulation.
+        if map_path is not None:
+            worker_args += ["--map_path", str(map_path)]
         cmd = [sys.executable, "-m", "scenario_generation.scenario_sim_rollout", *worker_args]
+        # Fan out over the allocated GPUs. CUDA_VISIBLE_DEVICES rather than `--device cuda:N`
+        # so each worker's "cuda:0" is unambiguous and a stray .cuda() cannot land on a
+        # neighbour's device. Copy the parent env -- dropping it would lose
+        # TORCHINDUCTOR_CACHE_DIR and give every worker a cold compile.
+        env = os.environ.copy()
+        if gpu_ids:
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[slot % len(gpu_ids)])
         # Per-scenario log rather than inherited stdout: with jobs>1 the workers would
         # interleave into an unreadable stream, and a crash needs its own trace.
         handle = open(log, "wb")
-        proc = subprocess.Popen(cmd, stdout=handle, stderr=subprocess.STDOUT)
-        return proc, row_out, log, handle
+        proc = subprocess.Popen(cmd, stdout=handle, stderr=subprocess.STDOUT, env=env)
+        return proc, row_out, log, handle, time.perf_counter()
 
     rows: list[dict | None] = [None] * len(scenarios)
     pending = list(enumerate(scenarios))
     running: dict[int, tuple] = {}
+    # A worker keeps its slot for its whole life and hands it back on exit, so slot -> GPU is
+    # stable and the per-GPU load stays even however unevenly the scenarios finish.
+    free_slots: list[int] = list(range(max(1, jobs)))
+    slot_of: dict[int, int] = {}
     done = 0
     t0 = time.perf_counter()
     with open(out_dir / "segments.jsonl", "w") as fout:
         while pending or running:
             while pending and len(running) < max(1, jobs):
                 si, scenario = pending.pop(0)
-                running[si] = launch(scenario)
+                slot = free_slots.pop()
+                slot_of[si] = slot
+                running[si] = launch(scenario, slot)
             finished = [si for si, (p, *_) in running.items() if p.poll() is not None]
             if not finished:
                 time.sleep(0.05)
                 continue
             for si in finished:
-                proc, row_out, log, handle = running.pop(si)
+                proc, row_out, log, handle, t_launch = running.pop(si)
                 handle.close()
+                slot = slot_of.pop(si)
+                free_slots.append(slot)
+                worker_wall = time.perf_counter() - t_launch
                 # The worker's row is authoritative; a nonzero rc at teardown (after the
                 # row is written) must not lose a completed rollout, so key off row.json.
                 if row_out.exists():
@@ -708,7 +762,16 @@ def run_scenario_sim_eval(
                         f"worker rc={proc.returncode}, see {log}", near_miss_thresh
                     )
                     status = f"FAILED rc={proc.returncode}"
-                row = segment_row_for_json(metrics, route=scenarios[si].stem)
+                row = segment_row_for_json(
+                    metrics, route=_scenario_key(scenarios[si], Path(scenario_root))
+                )
+                # Parent-side timing: worker_wall includes process start, model load and
+                # teardown, so `worker_wall_s` minus the worker's own `timing.rollout_total`
+                # is the process overhead this design pays 1x per scenario. gpu/slot are
+                # recorded so an uneven per-device load is visible after the fact.
+                row["worker_wall_s"] = round(worker_wall, 3)
+                row["slot"] = slot
+                row["gpu"] = gpu_ids[slot % len(gpu_ids)] if gpu_ids else None
                 rows[si] = row
                 fout.write(json.dumps(row, default=float) + "\n")
                 fout.flush()
@@ -727,9 +790,21 @@ def run_scenario_sim_eval(
     rows = [r for r in rows if r is not None]
     summary = aggregate(rows, near_miss_thresh)
     summary["scenario_root"] = str(scenario_root)
-    summary["map_path"] = str(map_path)
+    # Each worker resolves its own map, so record the set actually used rather than a single
+    # path -- for a multi-map suite a scalar `map_path` would be a lie.
+    summary["map_override"] = str(map_path) if map_path is not None else None
+    summary["maps_used"] = sorted({m for r in rows if (m := r.get("map_path"))})
     summary["n_scenarios"] = len(scenarios)
+    summary["jobs"] = jobs
+    summary["gpus"] = gpu_ids
     summary["elapsed_sec"] = time.perf_counter() - t0
+    # Sum of per-scenario wall over elapsed = achieved concurrency. Below `jobs` means the
+    # pool was starved (ramp-up/tail) rather than the devices being the limit.
+    _wall = [r["worker_wall_s"] for r in rows if "worker_wall_s" in r]
+    summary["worker_wall_sum_s"] = round(sum(_wall), 3)
+    summary["mean_concurrency"] = (
+        round(sum(_wall) / summary["elapsed_sec"], 2) if summary["elapsed_sec"] > 0 else None
+    )
     summary["segments"] = rows
     with open(out_dir / "summary.json", "w") as f:
         json.dump(
@@ -750,7 +825,10 @@ def main() -> None:
 
     p = argparse.ArgumentParser(description="scenario_sim closed-loop eval")
     p.add_argument("--scenario_root", required=True, help=".xosc file or dir tree")
-    p.add_argument("--map_path", required=True, help="lanelet2 .osm the scenarios reference")
+    p.add_argument("--map_path", default=None,
+                   help="override the map for EVERY scenario; omit so each worker uses its\nown RoadNetwork/LogicFile (required for a suite spanning several maps)")
+    p.add_argument("--gpus", default=None,
+                   help="comma-separated GPU indices to fan workers over; default all visible")
     p.add_argument("--out_dir", required=True)
     p.add_argument("--device", default="cpu")
     p.add_argument(
@@ -770,6 +848,7 @@ def main() -> None:
         args.out_dir,
         device=args.device,
         model_path=args.model_path,
+        gpus=[int(g) for g in args.gpus.split(",")] if args.gpus else None,
         near_miss_thresh=args.near_miss_thresh,
         replan_interval=args.replan_interval,
         max_steps=args.max_steps,
