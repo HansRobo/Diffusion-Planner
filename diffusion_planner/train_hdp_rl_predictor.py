@@ -1098,18 +1098,19 @@ def get_args(argv: list[str] | None = None):
         raise ValueError("--resume_model_path and --init_weights_path are mutually exclusive")
     if args.resume_model_path is None and args.init_weights_path is None:
         raise ValueError("HDP-RL requires --init_weights_path or --resume_model_path")
+    # Read the frozen IL base's own args.json. This runs after the mutual-exclusion
+    # checks above so the checkpoint it reads is unambiguous.
+    base_path = args.init_weights_path or args.resume_model_path
+    base_args_path = _checkpoint_args_path(base_path)
+    base_args = None
+    if base_args_path is not None:
+        with open(base_args_path, "r", encoding="utf-8") as handle:
+            base_args = json.load(handle)
+    base_label = str(base_args_path) if base_args_path is not None else base_path
     if args.rl_paper_exact:
         # omega and W are the geometry of the norm the frozen IL base was fitted in,
         # and IL is never retrained, so they are inherited from that base rather than
-        # pinned to Table 3. This runs after the mutual-exclusion checks above so the
-        # checkpoint it reads is unambiguous.
-        base_path = args.init_weights_path or args.resume_model_path
-        base_args_path = _checkpoint_args_path(base_path)
-        base_args = None
-        if base_args_path is not None:
-            with open(base_args_path, "r", encoding="utf-8") as handle:
-                base_args = json.load(handle)
-        base_label = str(base_args_path) if base_args_path is not None else base_path
+        # pinned to Table 3.
         args.rl_paper_exact_changes += apply_frozen_base_hybrid(
             args,
             base_args,
@@ -1117,10 +1118,12 @@ def get_args(argv: list[str] | None = None):
             explicit_paper_exact_dests(parser, argv, fields=HYBRID_FIELDS),
             ablation=args.rl_hybrid_ablation,
         )
-        # A resume compares against its own args.json, where the corpus is by
-        # construction the one this check already passed on the fresh run.
-        if args.rl_base_corpus_check and base_args is not None and args.init_weights_path:
-            assert_base_corpus_identical(args, base_args, base_label)
+    # Every RL run post-trains a frozen IL base, not just the paper-exact one, so the
+    # corpus and the input perturbation must match that base in every arm. A resume
+    # compares against its own args.json, where the corpus is by construction the one
+    # this check already passed on the fresh run.
+    if args.rl_base_corpus_check and base_args is not None and args.init_weights_path:
+        assert_base_corpus_identical(args, base_args, base_label)
     if args.train_subsample_step < 1:
         raise ValueError("--train_subsample_step must be >= 1")
     if args.extra_train_set_repeat < 0:

@@ -256,7 +256,7 @@ def assert_base_corpus_identical(args: Any, base_args: Mapping[str, Any], base_l
     mismatches = base_corpus_mismatches(args, base_args)
     if mismatches:
         raise ValueError(
-            "--rl_paper_exact post-trains a frozen IL base, so the corpus and the input "
+            "HDP-RL post-trains a frozen IL base, so the corpus and the input "
             f"perturbation must be the ones that base was trained on ({base_label}). "
             "These differ:\n"
             + "\n".join(mismatches)
