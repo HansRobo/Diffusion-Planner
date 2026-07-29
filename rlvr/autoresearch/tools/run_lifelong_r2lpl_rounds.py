@@ -332,6 +332,8 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     }
     if repair.get("prototypes_path"):
         repair_cfg["prototypes_path"] = str(repair["prototypes_path"])
+    if repair.get("enable_depart_morph"):
+        repair_cfg["enable_depart_morph"] = bool(repair["enable_depart_morph"])
     missing_repair = [k for k in ("ego_shape", "min_margin") if not repair_cfg.get(k)]
     if missing_repair:
         raise ValueError(
@@ -426,6 +428,11 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "epochs_per_round": int(_first_non_null(rounds.get("epochs_per_round"), 1)),
         "model_path": str(contract["model_path"]),
         "val_scenes": str(val_scenes),
+        "training_normal_scene_list": (
+            str(training_section["normal_scene_list"])
+            if training_section.get("normal_scene_list")
+            else None
+        ),
         "reward_config": str(reward_config),
         "threshold_config": str(threshold_config),
         "credit_window_config": str(credit_window_config),
@@ -478,6 +485,10 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         ),
         "validate_on_repaired_targets": bool(workflow.get("validate_on_repaired_targets", False)),
         "count_rear_end_collisions": _workflow_count_rear_end_collisions(judgement),
+        "realized_reward": bool(workflow.get("realized_reward", False)),
+        "final_round_mining": bool(
+            workflow.get("final_round_mining", workflow.get("realized_reward", False))
+        ),
         "perception_mining": perception_mining,
         "repair_refresh_every_epochs": int(
             _first_non_null(
@@ -894,6 +905,11 @@ def _perception_mining_cmd(
     if bool(cfg.get("count_rear_end_collisions", False)):
         # Keep realized-event mining rear-end-consistent with the repair side.
         cmd.append("--count_rear_end_collisions")
+    if bool(cfg.get("realized_reward", False)) or bool(mining.get("realized_reward", False)):
+        # Compute the realized closed-loop reward on the driven trajectory in the
+        # same rollout (no extra sim, no disk save/reload) and write it to the
+        # mining summary. The reward reflects the checkpoint THIS mine ran with.
+        cmd.append("--realized_reward")
     return cmd, danger_save_dir
 
 
@@ -1063,7 +1079,7 @@ def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
     stay zero, so the trainer's validity mask is preserved); 4-col scenes pass
     through by original path.
     """
-    from scenario_generation.reproducer_rollout import _future_to_4col
+    from planner_metrics.scene_format import future_to_4col as _future_to_4col
 
     out: list[str] = []
     for path in paths:
@@ -1088,6 +1104,104 @@ def _ensure_4col_neighbor_futures(paths: list[str], out_dir: Path) -> list[str]:
         np.savez_compressed(dst, **data)
         out.append(str(dst))
     return out
+
+
+def _validate_normal_scene_list_config(cfg: dict[str, Any]) -> None:
+    """Fail at STARTUP on normal_scene_list misconfiguration, not after mining.
+
+    training.normal_scene_list is only wired into the ranked-SFT backend (the
+    base_sft counterpart is training.anchor), and the prob/normal split it
+    enables requires explicit n_prob_scenes / n_normal_scenes in the training
+    config — run_experiment raises otherwise, but only at the train phase,
+    after the expensive mine + repair phases. n_prob_scenes also caps how many
+    repaired scenes train, so it must be sized >= the expected repaired count
+    per round or repairs are silently subsampled.
+    """
+    normal_list = cfg.get("training_normal_scene_list")
+    if not normal_list:
+        return
+    backend = str(cfg.get("training_backend", "base_sft"))
+    if backend == "base_sft":
+        raise ValueError(
+            "training.normal_scene_list is only wired into the ranked-SFT backend; "
+            "for base_sft use training.anchor instead"
+        )
+    if not Path(normal_list).exists():
+        raise ValueError(f"training.normal_scene_list does not exist: {normal_list}")
+    try:
+        entries = json.loads(Path(normal_list).read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"training.normal_scene_list is not valid JSON: {normal_list}") from exc
+    if not isinstance(entries, list) or not entries or not all(isinstance(e, str) for e in entries):
+        raise ValueError(
+            f"training.normal_scene_list must be a non-empty JSON list of scene "
+            f"paths: {normal_list}"
+        )
+    missing_scenes = [e for e in entries if not Path(e).exists()]
+    if missing_scenes:
+        preview = ", ".join(missing_scenes[:3])
+        raise ValueError(
+            f"training.normal_scene_list references {len(missing_scenes)}/{len(entries)} "
+            f"missing scene files (first: {preview}); a broken entry would otherwise "
+            "only fail in the 4-col conversion after the mine+repair phases"
+        )
+    payload = _training_config_payload(cfg["training_config"])
+    missing = [k for k in ("n_prob_scenes", "n_normal_scenes") if k not in payload]
+    if missing:
+        raise ValueError(
+            "training.normal_scene_list enables the prob/normal split, which requires "
+            f"explicit {missing} in the training config (n_prob_scenes must be >= the "
+            "expected repaired scenes per round — smaller values silently subsample "
+            "the repairs)"
+        )
+    n_prob = payload["n_prob_scenes"]
+    n_normal = payload["n_normal_scenes"]
+    if not isinstance(n_prob, int) or n_prob < 1:
+        raise ValueError(f"n_prob_scenes must be a positive integer, got {n_prob!r}")
+    if not isinstance(n_normal, int) or n_normal < 0:
+        raise ValueError(f"n_normal_scenes must be a non-negative integer, got {n_normal!r}")
+
+
+def _rsft_scene_args(
+    cfg: dict[str, Any],
+    *,
+    repaired_paths: list[str],
+    repaired_list_json: Path,
+    rdir: Path,
+    round_idx: int,
+) -> list[str]:
+    """Scene args for the ranked-SFT training call of one round.
+
+    With training.normal_scene_list the round trains a prob/normal split
+    (repaired = prob, real normals = normal) so curated rounds can mix real
+    scenes; without it, the legacy combined-list path is kept. The normal
+    scenes are homogenized to 4-col neighbor futures (raw logged scenes may
+    carry 3-col ones, and a mixed batch cannot collate — same incompatibility
+    as the base_sft anchor slice) into a per-round resolved list.
+    """
+    normal_list = cfg.get("training_normal_scene_list")
+    if not normal_list:
+        return ["--train_scenes", str(repaired_list_json)]
+    n_prob = _training_config_payload(cfg["training_config"])["n_prob_scenes"]
+    if n_prob < len(repaired_paths):
+        raise ValueError(
+            f"[round {round_idx}] n_prob_scenes={n_prob} < {len(repaired_paths)} "
+            "repaired scenes: run_experiment would silently subsample the "
+            "repairs (min(n_prob, len(prob)) sampling). Raise n_prob_scenes to "
+            "cover the largest expected repaired count per round."
+        )
+    normal_paths = _ensure_4col_neighbor_futures(
+        [str(p) for p in _read_json_list(Path(normal_list))],
+        rdir / "normal_scenes_4col",
+    )
+    resolved_normals = rdir / "normal_scenes_resolved.json"
+    resolved_normals.write_text(json.dumps(normal_paths, indent=2))
+    return [
+        "--prob_scenes",
+        str(repaired_list_json),
+        "--normal_scenes",
+        str(resolved_normals),
+    ]
 
 
 def _validate_anchor_config(cfg: dict[str, Any]) -> None:
@@ -1533,12 +1647,11 @@ def _run_closed_loop_probe(
     shutil.copy2(summary_path, gdir / "closed_loop_summary.json")
     keep = (
         "n_segments",
-        "collision_segment_rate",
-        "collision_step_rate",
-        "near_miss_segment_rate",
-        "global_min_clearance",
-        "mean_segment_min_clearance",
-        "total_snaps",
+        "object",
+        "road_border",
+        "red_light_violation",
+        "strong_brake",
+        "reproducer",
     )
     picked = {k: summary[k] for k in keep if k in summary}
     picked["run_dir"] = str(new_dirs[-1])
@@ -1620,6 +1733,8 @@ def _repair_cmd(
         cmd.extend(["--expert_morph_max_jerk", str(repair_cfg["expert_morph_max_jerk"])])
     if "expert_stop_anchor" in repair_cfg:
         cmd.extend(["--expert_stop_anchor", str(repair_cfg["expert_stop_anchor"])])
+    if bool(repair_cfg.get("enable_depart_morph", False)):
+        cmd.append("--enable_depart_morph")
     if repair_cfg.get("prototypes_path"):
         cmd.extend(["--prototypes_path", str(repair_cfg["prototypes_path"])])
     if cfg.get("repair_labels"):
@@ -1792,17 +1907,30 @@ def _base_train_invocation(
     if train_scene_count < 1:
         raise ValueError(f"{train_list} is empty; refusing to launch base training")
 
+    # Device-aware launch: on CPU (device=cpu, e.g. a CPU-only host or --device cpu) a
+    # torch.distributed.run / DDP launch drives NCCL + torch.cuda.set_device and dies
+    # with "No CUDA GPUs are available". Launch train_predictor directly with ddp=false
+    # there; keep the DDP launcher on CUDA.
+    device = str(overrides.get("device", base_args.get("device", "cuda"))).lower()
+    cpu = device == "cpu"
+    launcher = (
+        [sys.executable, "-m", "train_predictor"]
+        if cpu
+        else [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--nproc_per_node",
+            str(nproc),
+            "--standalone",
+            "--master_port",
+            master_port,
+            "-m",
+            "train_predictor",
+        ]
+    )
     cmd = [
-        sys.executable,
-        "-m",
-        "torch.distributed.run",
-        "--nproc_per_node",
-        str(nproc),
-        "--standalone",
-        "--master_port",
-        master_port,
-        "-m",
-        "train_predictor",
+        *launcher,
         "--exp_name",
         f"r2lpl_round_{round_idx:03d}",
         "--save_dir",
@@ -1835,6 +1963,7 @@ def _base_train_invocation(
         "seed",
         "device",
         "use_ema",
+        "ema_decay",
         "use_ego_history",
         "ego_history_dropout_rate",
         "use_turn_indicators",
@@ -1886,7 +2015,7 @@ def _base_train_invocation(
     )
     merged = {k: base_args[k] for k in passthrough if k in base_args}
     merged.update(overrides)
-    merged["ddp"] = True
+    merged["ddp"] = not cpu  # single-process on CPU; DDP on CUDA
     merged["port"] = master_port
     if "batch_size" in merged:
         merged["batch_size"] = max(1, min(int(merged["batch_size"]), train_scene_count))
@@ -1963,6 +2092,18 @@ def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
         "elapsed_sec": max((float(s.get("elapsed_sec", 0.0)) for s in summaries), default=0.0),
         "shards": summaries,
     }
+    # Realized closed-loop reward: pose-count-weighted mean across shards (each shard
+    # scored a disjoint set of poses). Without this the sharded/multi-GPU summary would
+    # drop the field the single-GPU path emits.
+    rr_poses = sum(int(s.get("realized_cl_reward_poses", 0)) for s in summaries)
+    if rr_poses > 0:
+        rr_sum = sum(
+            float(s.get("realized_cl_reward", 0.0)) * int(s.get("realized_cl_reward_poses", 0))
+            for s in summaries
+            if s.get("realized_cl_reward") is not None
+        )
+        aggregate["realized_cl_reward"] = rr_sum / rr_poses
+        aggregate["realized_cl_reward_poses"] = rr_poses
     _write_json(output, aggregate)
     return aggregate
 
@@ -2485,6 +2626,12 @@ def _summarize_round(
         "phase_peak_memory_mb": {k: None for k in sorted(phase_times)},
         "next_model_path": str(next_model_path),
     }
+    # Propagate the realized closed-loop reward (from this round's mining, i.e. the
+    # incoming checkpoint) into the round summary so workflow_summary.json can compare
+    # per-round checkpoints. None when --realized_reward was not enabled.
+    if mining_summary.get("realized_cl_reward") is not None:
+        summary["realized_cl_reward"] = mining_summary["realized_cl_reward"]
+        summary["realized_cl_reward_poses"] = int(mining_summary.get("realized_cl_reward_poses", 0))
     if guard_metrics is not None:
         summary["guards"] = guard_metrics
     _write_json(rdir / "round_summary.json", summary)
@@ -2506,6 +2653,7 @@ def main() -> None:
     _validate_anchor_config(cfg)
     _validate_guards_config(cfg)
     _validate_repair_generation_config(cfg)
+    _validate_normal_scene_list_config(cfg)
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -2636,6 +2784,13 @@ def main() -> None:
             round_training_config = _round_training_config(
                 cfg, rdir=rdir, anchor_model_path=model_path
             )
+            scene_args = _rsft_scene_args(
+                cfg,
+                repaired_paths=repaired_paths,
+                repaired_list_json=repaired_list_json,
+                rdir=rdir,
+                round_idx=round_idx,
+            )
             train_cmd = [
                 sys.executable,
                 "-m",
@@ -2646,8 +2801,7 @@ def main() -> None:
                 name,
                 "--model_path",
                 str(model_path),
-                "--train_scenes",
-                str(repaired_list_json),
+                *scene_args,
                 "--replay_scenes",
                 str(replay_json),
                 "--val_scenes",
@@ -2687,8 +2841,41 @@ def main() -> None:
         workflow_summary.append(_load_json(rdir / "round_summary.json"))
         print(f"[round {round_idx}] next model: {model_path}")
 
+    # Final-round mining: one closed-loop mine with the LAST round's checkpoint so
+    # its residual problem-scene count AND realized closed-loop reward are recorded
+    # (every earlier round's final model is already covered by the next round's mine;
+    # the last round has no successor, so it needs this pass). Enabled whenever
+    # realized-reward is on, or explicitly via final_round_mining.
+    want_final_mine = bool(cfg.get("final_round_mining", cfg.get("realized_reward", False)))
+    final_round = None
+    if not args.dry_run and want_final_mine and not str(cfg.get("training_backend")) == "none":
+        fdir = out / "final_round_mine"
+        fdir.mkdir(parents=True, exist_ok=True)
+        print(f"[final] mining residual problems + realized reward with {model_path}")
+        _run_mining_phase(cfg, model_path, fdir, _gpu_ids_from_config(cfg))
+        fsum = _load_json(fdir / "perception_direct_summary.json")
+        # Represent the final-round mine in the operator-facing summary contract, not
+        # just stdout: the last round's checkpoint has no successor mine, so this is the
+        # only place its residual counts + realized reward appear.
+        final_round = {
+            "checkpoint": str(model_path),
+            "residual_credit_rows": int(fsum.get("credit_rows", 0)),
+            "residual_event_count_by_label": _derive_event_counts_from_credit_rows(
+                _read_jsonl(fdir / "credit_windows.jsonl")
+            ),
+            "realized_cl_reward": fsum.get("realized_cl_reward"),
+            "realized_cl_reward_poses": int(fsum.get("realized_cl_reward_poses", 0)),
+        }
+        print(
+            f"[final] residual credit_rows={final_round['residual_credit_rows']} "
+            f"realized_cl_reward={final_round['realized_cl_reward']}"
+        )
+
     if not args.dry_run:
-        _write_json(out / "workflow_summary.json", {"rounds": workflow_summary})
+        workflow_out = {"rounds": workflow_summary}
+        if final_round is not None:
+            workflow_out["final_round_mine"] = final_round
+        _write_json(out / "workflow_summary.json", workflow_out)
         if reference_metrics is not None and guard_rows:
             report = _selection_report(reference_metrics, guard_rows)
             _write_json(out / "selection_report.json", report)

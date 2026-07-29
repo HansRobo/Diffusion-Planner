@@ -1,0 +1,13 @@
+{
+  "name": "sensitivity_candidate",
+  "extends": "probe.json",
+  "sweep": {
+    "plannerrft_reference_mode": ["zero_noise", "stochastic"],
+    "plannerrft_longitudinal_mode": ["candidate_stretch", "reference_speed_push"],
+    "plannerrft_lambda_lat": [1.0, 1.5, 2.5]
+  },
+  "train": {
+    "output_dir": "runs/sensitivity_candidate",
+    "exp_name": "sensitivity_candidate"
+  }
+}

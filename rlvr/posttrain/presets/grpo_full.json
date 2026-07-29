@@ -1,0 +1,21 @@
+{
+  "name": "grpo_full",
+  "extends": "site.json",
+  "entrypoint": "rlvr.train_grpo",
+  "comment": [
+    "Full GRPO: its own rollout and optimization loop, so it is a separate trainer",
+    "rather than a weighting objective. Everything it needs is in the config JSON;",
+    "swap that file for a different variant (see rlvr/configs/grpo_*.json).",
+    "For the weighted-loss reduction that runs inside the AWR trainer, use grpo.json."
+  ],
+  "launch": {
+    "launcher": "direct"
+  },
+  "train": {
+    "model_path": "runs/base_model/model.pth",
+    "config": "rlvr/configs/grpo_onpolicy.json",
+    "exp_name": "grpo_full",
+    "args_path": null,
+    "resume_replay_root": null
+  }
+}

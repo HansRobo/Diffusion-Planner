@@ -48,7 +48,9 @@ from rlvr.grpo_trainer import GRPOTrainer
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
+    """The flag surface, without parsing: ``rlvr.posttrain`` validates specs against it."""
+
     parser = argparse.ArgumentParser(description="GRPO Training for Diffusion Planner")
 
     parser.add_argument(
@@ -67,7 +69,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", type=str, choices=["rule", "gui"], default="rule")
     parser.add_argument("--port", type=int, default=7863)
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def _find_lora_dir(search_dir: Path) -> Path | None:

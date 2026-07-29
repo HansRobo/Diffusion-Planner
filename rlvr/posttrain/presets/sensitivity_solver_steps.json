@@ -1,0 +1,9 @@
+{
+  "name": "sensitivity_solver_steps",
+  "extends": "probe.json",
+  "sweep": {"sample_steps": [5, 10]},
+  "train": {
+    "output_dir": "runs/sensitivity_solver_steps",
+    "exp_name": "sensitivity_solver_steps"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "dual_anchor_sweep",
+  "extends": "dual.json",
+  "train": {"epochs": 12},
+  "sweep": {
+    "expert_anchor_weight": [0.2, 0.4, 0.8],
+    "expert_anchor_secondary_weight": [0.2, 0.4]
+  }
+}

@@ -365,6 +365,225 @@ def test_underprogress_baseline_accepts_python_scalar():
         assert len(breakdowns) == K
 
 
+# ---------------------------------------------------------------------------
+# hdp_pdm — the profile the AWR campaigns actually run
+# ---------------------------------------------------------------------------
+
+
+def _neighbor_at(lateral_m: float, T: int = 80, dt: float = 0.1, speed: float = 5.0):
+    """One neighbour driving straight alongside the ego at a fixed lateral offset."""
+    xs = torch.arange(T, dtype=torch.float32) * dt * speed
+    future = torch.stack(
+        [xs, torch.full((T,), lateral_m), torch.ones(T), torch.zeros(T)], dim=-1
+    ).unsqueeze(0)  # (1, T, 4)
+    past = torch.zeros(1, 21, 11)
+    past[:, :, 0] = xs[0]
+    past[:, :, 1] = lateral_m
+    past[:, :, 6] = 2.0  # width
+    past[:, :, 7] = 5.0  # length
+    return future, past
+
+
+def test_hdp_pdm_reward_responds_to_neighbor_clearance():
+    """The campaign profile must not be blind to other vehicles.
+
+    Measured on 300 mined scenes x 10 candidates, ``hdp_pdm``'s only
+    neighbour-aware terms were saturated: TTC was exactly 1.0 on 99.67% of
+    candidates and collision fired on 0.00%, while ``risk`` and ``follow`` were
+    computed and discarded.  AWR was therefore ranking candidates on
+    progress/lane/comfort alone -- reward rose while clearance fell.  Grading
+    ``ttc_min_clearance`` into the TTC slot is what restores the pressure, so
+    pin the behaviour: a close pass must score below a wide pass, and the
+    ``hdp_risk_use_clearance`` switch must still turn it off.
+    """
+    from rlvr.reward import compute_reward_batch
+
+    T = 80
+    ego_trajs = _minimal_scene_data(K=2, T=T)[1:].repeat(2, 1, 1)  # both 5 m/s straight
+
+    def total(lateral_m: float, use_clearance: bool) -> float:
+        future, past = _neighbor_at(lateral_m, T=T)
+        data = {
+            "ego_agent_future": torch.zeros(T, 4),
+            "neighbor_agents_future": future,
+            "neighbor_agents_past": past,
+            "lanes": _trivial_lane(),
+            "route_lanes": _trivial_lane(),
+            "line_strings": torch.zeros(0, 20, 4),
+            "polygons": torch.zeros(0, 20, 3),
+            "goal_pose": torch.zeros(3),
+            "ego_shape": torch.tensor([3.0, 5.0, 2.0]),
+        }
+        cfg = RewardConfig(
+            reward_profile="hdp_pdm",
+            reward_mode="gate",
+            hdp_risk_use_clearance=use_clearance,
+            hdp_risk_clearance_safe_m=2.0,
+            enable_lane_departure=False,
+            rb_gate_enabled=False,
+        )
+        return float(compute_reward_batch(ego_trajs, data, cfg)[0].total)
+
+    close, wide = total(2.6, True), total(8.0, True)
+    assert close < wide, (
+        f"hdp_pdm is blind to neighbour clearance: passing 2.6 m away scored "
+        f"{close:.6f}, passing 8 m away scored {wide:.6f}"
+    )
+    # The switch must still disable it, or the flag is a lie and every historical
+    # run's reward silently changed meaning.
+    assert total(2.6, False) == total(8.0, False)
+
+
+def test_expert_off_lane_bit_may_be_supplied_instead_of_recomputed():
+    """The lane-change mask must be cacheable without changing the reward.
+
+    ``hdp_pdm`` masks its lane term whenever the LOGGED expert leaves the lane
+    union.  That mask is policy-independent -- a pure function of the logged
+    future, the ego shape and the map -- yet evaluating ego perimeter
+    containment over the whole horizon is 54% of a live reward call (measured on
+    32 real scenes: 34.6 ms -> 15.8 ms per call), and every mine of every cycle
+    recomputes it.  So callers may precompute it and hand it back through
+    ``EXPERT_OFF_LANE_KEY``.
+
+    Pin all three properties that makes it safe: the supplied bit is honoured,
+    the primitive agrees with the uncached path, and a wrong bit visibly moves
+    the reward -- the last one is what stops a misaligned cross-cycle sidecar
+    from failing silently.
+    """
+    from rlvr.reward import EXPERT_OFF_LANE_KEY, compute_reward_batch, expert_off_lane
+
+    T = 80
+    # The candidate runs parallel to the lane but 3 m off its centerline, so the
+    # lane term is well below 1 and masking it is observable.  Do not push this
+    # further out: past a few metres the centerline term stops finding a lane at
+    # all and goes neutral, which would silently defeat the assertion below.
+    offset = _minimal_scene_data(K=2, T=T)[1:].repeat(2, 1, 1)
+    offset[:, :, 1] = 3.0
+    # The logged expert drives down the middle of the lane, i.e. genuinely
+    # on-lane, so the honest bit here is False.  Start 10 m in so that the
+    # vehicle's rear perimeter stays inside the lane's longitudinal extent --
+    # at x=0 the rear corners hang off the end of the polygon and the mask
+    # (correctly) fires.
+    expert = _minimal_scene_data(K=2, T=T)[1]
+    expert[:, 0] += 10.0
+
+    # _trivial_lane() leaves the boundary-offset channels at zero, which
+    # collapses the lane polygon onto its centerline and makes every vehicle
+    # off-lane.  Give this one real boundaries at +/-2 m.
+    lane = _trivial_lane().clone()
+    lane[..., 4:6] = torch.tensor([0.0, 2.0])
+    lane[..., 6:8] = torch.tensor([0.0, -2.0])
+
+    cfg = RewardConfig(
+        reward_profile="hdp_pdm",
+        reward_mode="gate",
+        enable_lane_departure=False,
+        rb_gate_enabled=False,
+    )
+
+    def scene(bit: bool | None) -> dict:
+        data = {
+            "ego_agent_future": expert.clone(),
+            "neighbor_agents_future": torch.zeros(0, T, 4),
+            "neighbor_agents_past": torch.zeros(0, 21, 11),
+            "lanes": lane,
+            "route_lanes": lane,
+            "line_strings": torch.zeros(0, 20, 4),
+            "polygons": torch.zeros(0, 20, 3),
+            "goal_pose": torch.zeros(3),
+            "ego_shape": torch.tensor([3.0, 5.0, 2.0]),
+        }
+        if bit is not None:
+            data[EXPERT_OFF_LANE_KEY] = torch.tensor([float(bit)])
+        return data
+
+    def total(bit: bool | None) -> float:
+        return float(compute_reward_batch(offset, scene(bit), cfg)[0].total)
+
+    assert expert_off_lane(scene(None), T, cfg) is False, "this expert is on-lane"
+    assert total(False) == total(None), "the primitive disagrees with the uncached path"
+    assert total(True) > total(False), (
+        "masking the lane term did not change the reward, so this scene cannot "
+        "detect a wrong cached bit"
+    )
+
+
+def test_low_speed_steer_penalty_prefers_the_smoother_first_step():
+    """A standstill first step that implies steering lock must score below a straight one.
+
+    This is the real-vehicle symptom: measured over 40,847 low-speed mined
+    scenes the deployed candidate implied a median 1.47 rad front-wheel angle on
+    33.4% of them and still collected a full comfort slot, and only 5.9% of those
+    scenes had any candidate clearing AWR's advantage margin -- low-speed
+    behaviour was untrained.  The gate cannot fix it because it never rejects the
+    anchor, so the reward has to.  Also pin that the term is inert at speed and
+    when switched off, or every historical run's reward changed meaning.
+    """
+    from rlvr.reward import compute_reward_batch
+
+    T = 80
+
+    def totals(speed_mps: float, weight: float, lateral: float = 0.01) -> list[float]:
+        # Both candidates barely move; candidate 1 puts `lateral` of offset on a
+        # 4 cm first step.  At the 1 cm default the bicycle model reads that as
+        # near steering lock (delta = atan(3.0 * 2 * 0.01 / 0.04**2) = 1.55 rad).
+        straight = torch.zeros(T, 4)
+        straight[:, 0] = torch.arange(T, dtype=torch.float32) * 0.04
+        straight[:, 2] = 1.0
+        jitter = straight.clone()
+        jitter[0, 1] = lateral
+        ego_trajs = torch.stack([straight, jitter])
+        state = torch.zeros(8)
+        state[4] = speed_mps
+        data = {
+            "ego_agent_future": torch.zeros(T, 4),
+            "neighbor_agents_future": torch.zeros(0, T, 4),
+            "neighbor_agents_past": torch.zeros(0, 21, 11),
+            "lanes": _trivial_lane(),
+            "route_lanes": _trivial_lane(),
+            "line_strings": torch.zeros(0, 20, 4),
+            "polygons": torch.zeros(0, 20, 3),
+            "goal_pose": torch.zeros(3),
+            "ego_shape": torch.tensor([3.0, 5.0, 2.0]),
+            "ego_current_state": state,
+        }
+        cfg = RewardConfig(
+            reward_profile="hdp_pdm",
+            reward_mode="gate",
+            low_speed_steer_penalty=weight,
+            low_speed_steer_max_rad=0.64,
+            low_speed_steer_speed_mps=1.0,
+            enable_lane_departure=False,
+            rb_gate_enabled=False,
+        )
+        return [float(b.total) for b in compute_reward_batch(ego_trajs, data, cfg)]
+
+    # An executable creeping turn must cost nothing.  The penalty grades only the
+    # excess over the physical steering limit, so a radius the vehicle can
+    # actually drive is not taxed for turning -- measured on real low-speed mined
+    # candidates, a ramp-from-zero form also saturated 100% of the unexecutable
+    # ones at full penalty, leaving AWR no way to prefer the least infeasible.
+    wheel_base, radius, step_m = 3.0, 8.0, 0.04
+    assert math.atan(wheel_base / radius) < 0.64, "test radius is not executable"
+    turn_y = step_m**2 / (2.0 * radius)
+    assert totals(0.0, 1.0, lateral=turn_y) == totals(0.0, 0.0, lateral=turn_y)
+
+    straight, jitter = totals(0.0, 1.0)
+    off_straight, off_jitter = totals(0.0, 0.0)
+    assert jitter < straight, (
+        f"a standstill step implying steering lock scored {jitter:.6f}, no worse "
+        f"than the straight step's {straight:.6f}"
+    )
+    # Non-vacuous: without the term the pair is not separated by this much.  The
+    # existing smoothness term does see the lateral jog, so the check is that the
+    # *gap* widens, not that the old gap was zero.
+    assert (straight - jitter) > (off_straight - off_jitter) + 1e-4
+
+    # Inert above the speed threshold: same trajectories, weight on vs off.  The
+    # trajectories themselves differ at any speed, so compare across weights.
+    assert totals(5.0, 1.0) == totals(5.0, 0.0)
+
+
 if __name__ == "__main__":
     import pytest
 

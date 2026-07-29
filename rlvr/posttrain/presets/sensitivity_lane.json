@@ -1,0 +1,15 @@
+{
+  "name": "sensitivity_lane",
+  "extends": "probe.json",
+  "comment": [
+    "Paired probe on the lane channel. The road-border gate is graded (near/wide",
+    "scales above zero) while the lane channel's soft scales default to zero, so",
+    "a lane exit costs the policy nothing in the gradient even though the",
+    "evaluator counts it. This tests the graded penalty, not a hard gate: a gate",
+    "zeroes the reward outright and can silence the signal on whole scenes.",
+    "Mirror rb_near_scale for the on arm."
+  ],
+  "sweep": {
+    "reward.lane_near_scale": [0.0, 3.0]
+  }
+}

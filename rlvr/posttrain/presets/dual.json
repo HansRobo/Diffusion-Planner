@@ -1,0 +1,41 @@
+{
+  "name": "dual",
+  "extends": "base.json",
+  "comment": [
+    "Step-1 anchor plus a full-horizon secondary slot, gate off.",
+    "Continues the mine rather than starting beside it. The rollout schedule makes",
+    "every epoch where (epoch - 1) is a multiple of the config's hdp_rollout_interval",
+    "a refresh epoch that re-samples the whole corpus, so epoch 1 belongs to the mine",
+    "arm and this one starts at epoch 2 -- starting it at 1 would throw away the",
+    "buffer that was just mined and pay to mine it again.",
+    "Both switches resolve out of the mine's output directory, so there is no stamp to",
+    "copy by hand: the mine writes a single epoch_001.pth and this reads it. That",
+    "checkpoint carries a live policy and an optimizer, so the two inherited resume",
+    "switches apply unchanged -- the mine takes no optimizer step, so what they",
+    "restore is the base model's own state.",
+    "A refresh epoch clears the buffer and re-samples the SAME scene list with the",
+    "current policy, into this run's own cache directory rather than truncating the one",
+    "it resumed from. So a refresh buys fresher candidate trajectories, not more scenes,",
+    "and it charges a full mine of wall-clock during which no optimizer step is taken",
+    "plus a second buffer's worth of disk that lives until the run ends. The interval",
+    "set here is larger than any epoch budget, so none fires and every epoch is a",
+    "gradient epoch: the anchor term regresses on the logged trajectory, which no",
+    "refresh can make fresher, and it is the term that moves the executed waypoint.",
+    "Do not lower it below the epoch count to buy a refresh: a refresh epoch puts the",
+    "arm back on the mining path, which scores group-relative and therefore refuses the",
+    "candidate weighting this arm exists to apply. Preflight rejects that combination",
+    "rather than letting it abort every rank once the refresh epoch arrives. To sample",
+    "fresher candidates, mine again with the mine spec and resume from the new buffer.",
+    "To continue an interrupted run, point both switches at runs/dual instead; that is",
+    "what the runner's --supervise does on every relaunch."
+  ],
+  "train": {
+    "model_path": {"latest_epoch": "runs/mine"},
+    "start_epoch": {"resume_after_latest_epoch": "runs/mine"},
+    "output_dir": "runs/dual",
+    "exp_name": "dual",
+    "hdp_rollout_interval": 1000,
+    "expert_anchor_secondary_weight": 0.4,
+    "expert_anchor_secondary_horizon": 80
+  }
+}

@@ -4,6 +4,19 @@ Infrastructure for Group Relative Policy Optimization (GRPO) training of the Dif
 Generates N diverse trajectories per scene, scores them with a rule-based reward function,
 and computes group-relative normalized advantages.
 
+**Running the AWR-RL post-training campaign:
+[AWR-RL post-training on original DP — operator's guide](AWR_RL_POST_TRAINING.md).**
+This file covers the *code*; that one covers the campaign — the pipeline stages, the twelve
+launchers, which knobs are settled and why, how to judge a run against the executed waypoint
+rather than the open-loop proxies, and the traps (precision, `latest.pth`, DDP metric order)
+that have each already cost a run.
+
+Three notes that used to live here pointed at files this branch no longer carries; their
+operative content is in the guide above. Two of them still matter at every call site: the T4
+NPZs need the legacy neighbour-future `+1` correction (**ego** future is index 0, neighbour
+futures need offset 1 — opposite conventions in one file), and the released constant waypoint
+offset is unsafe for absolute x-start DP targets.
+
 ## Credits
 
 The logprob GRPO implementation is based on **DiffusionDriveV2** by Li et al.:

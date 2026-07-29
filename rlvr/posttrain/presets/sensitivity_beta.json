@@ -1,0 +1,24 @@
+{
+  "name": "sensitivity_beta",
+  "extends": "probe.json",
+  "sweep": {"awr_beta": [0.5, 1.0, 2.0]},
+  "prepare": [
+    {
+      "creates": "{resume_replay_root}",
+      "argv": [
+        "python", "-m", "rlvr.autoresearch.tools.build_positive_anchor_replay_overlay",
+        "--source-replay", "runs/mine/replay_buffer",
+        "--output-replay", "{creates}",
+        "--beta", "{awr_beta}",
+        "--margin", "0.01",
+        "--behavior-anchor-weight", "0",
+        "--unsafe-behavior-anchor-weight", "0"
+      ]
+    }
+  ],
+  "train": {
+    "resume_replay_root": "runs/sensitivity_beta/overlay_beta{awr_beta}",
+    "output_dir": "runs/sensitivity_beta",
+    "exp_name": "sensitivity_beta"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "grpo",
+  "extends": "dual.json",
+  "objective": "grpo",
+  "train": {
+    "positive_advantage_only": false,
+    "output_dir": "runs/grpo",
+    "exp_name": "grpo"
+  }
+}

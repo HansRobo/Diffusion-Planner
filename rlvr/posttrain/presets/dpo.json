@@ -1,0 +1,10 @@
+{
+  "name": "dpo",
+  "extends": "dual.json",
+  "objective": "dpo",
+  "train": {
+    "awr_beta": 0.5,
+    "output_dir": "runs/dpo",
+    "exp_name": "dpo"
+  }
+}

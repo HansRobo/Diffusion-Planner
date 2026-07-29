@@ -163,6 +163,31 @@ class RewardConfig:
     # to 1 while preserving the existing binary collision gate.
     hdp_risk_use_clearance: bool = False
     hdp_risk_clearance_safe_m: float = 2.0
+    # Low-speed steering feasibility.  A first step of arc length ``s`` ending
+    # ``y`` off the current heading implies a front-wheel angle
+    # ``atan(wheel_base * 2|y| / s**2)``; at standstill a 1 cm offset over a 4 cm
+    # step is a steering-lock command.  AWR's first-waypoint gate rejects such
+    # candidates but never the deterministic anchor, and nothing rewarded the
+    # smoother of two survivors, so low-speed behaviour was effectively untrained
+    # while the deployed output itself implied a median 1.47 rad on the third of
+    # low-speed scenes where it exceeded the limit.
+    #
+    # ``low_speed_steer_max_rad`` is the physical steering limit, and only the
+    # *excess* over it is penalised, normalised by ``pi/2 - limit`` (the implied
+    # angle is an ``atan``, so that is the full infeasible range).  Two measured
+    # reasons not to ramp from zero instead: it taxes executable creeping turns
+    # (an 8 m radius costs 0.048 against a typical 0.013 within-group headroom,
+    # on a corpus that oversamples right turns x10), and it saturated 100% of
+    # unexecutable candidates at full penalty -- within-group spread exactly
+    # 0.0000 -- so AWR could not prefer the least infeasible of two.  Hinging
+    # takes low-speed trainable scenes from 8.5% (term off) to 24.1% versus
+    # 17.9% for the ramp, at the same rate of selecting an unexecutable
+    # candidate.  Weight 0 disables.  Thresholds mirror
+    # rlvr/campaign_contract.py's gate.
+    low_speed_steer_penalty: float = 1.0
+    low_speed_steer_max_rad: float = 0.64
+    low_speed_steer_speed_mps: float = 1.0
+    low_speed_steer_min_step_m: float = 0.005
 
 
 __all__ = [

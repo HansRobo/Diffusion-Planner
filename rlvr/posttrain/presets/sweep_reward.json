@@ -1,0 +1,9 @@
+{
+  "name": "dual_reward_sweep",
+  "extends": "dual.json",
+  "train": {"epochs": 12},
+  "sweep": {
+    "reward.low_speed_steer_penalty": [1.0, 2.0],
+    "reward.reward_horizon_steps": [40, 80]
+  }
+}

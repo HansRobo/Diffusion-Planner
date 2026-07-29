@@ -1,0 +1,11 @@
+{
+  "name": "h1",
+  "extends": "base.json",
+  "comment": "Step-1 anchor alone. Closes executed error but its lane cost compounds.",
+  "train": {
+    "model_path": {"latest_epoch": "runs/warmup"},
+    "start_epoch": {"resume_after_latest_epoch": "runs/warmup"},
+    "output_dir": "runs/h1",
+    "exp_name": "h1"
+  }
+}

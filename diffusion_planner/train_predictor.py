@@ -176,6 +176,14 @@ def get_args(args_list=None):
     parser.add_argument("--device", type=str, help="run on which device", default="cuda")
 
     parser.add_argument("--use_ema", default=True, type=boolean)
+    parser.add_argument(
+        "--ema_decay",
+        type=float,
+        default=0.999,
+        help="ModelEma decay; 0.999 (default) needs ~3000 steps to absorb a "
+        "behavior change — lower for short fine-tune rounds (e.g. 0.996 for "
+        "~800-step rounds).",
+    )
 
     # Model
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)
@@ -235,12 +243,6 @@ def get_args(args_list=None):
         "cadence (save_utd). Empty = disabled. One route per trial.",
     )
     parser.add_argument(
-        "--closed_loop_seg_len",
-        type=int,
-        default=100000,
-        help="frames per segment; large => one route = one segment = one trial",
-    )
-    parser.add_argument(
         "--closed_loop_replan_interval",
         type=int,
         default=4,
@@ -258,6 +260,30 @@ def get_args(args_list=None):
     parser.add_argument("--closed_loop_warmup_steps", type=int, default=0)
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=5.0)
+
+    # Scenario-based Open-loop validation. The list selects samples per metric; metric parameters
+    # are regular TrainConfig fields.
+    parser.add_argument(
+        "--scenario_based_open_loop_list",
+        type=str,
+        default="",
+        help="JSON mapping Scenario-based Open-loop metric names to NPZ path lists. Empty = disabled.",
+    )
+    parser.add_argument(
+        "--scenario_centerline_horizon_seconds",
+        type=float,
+        default=_train_config_default("scenario_centerline_horizon_seconds"),
+    )
+    parser.add_argument(
+        "--scenario_departure_horizon_seconds",
+        type=float,
+        default=_train_config_default("scenario_departure_horizon_seconds"),
+    )
+    parser.add_argument(
+        "--scenario_departure_minimum_displacement_m",
+        type=float,
+        default=_train_config_default("scenario_departure_minimum_displacement_m"),
+    )
 
     # Deterministic
     parser.add_argument(

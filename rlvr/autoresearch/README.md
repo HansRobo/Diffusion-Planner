@@ -4,6 +4,10 @@ Tools for running and evaluating GRPO reinforcement fine-tuning experiments
 on the Diffusion Planner model. Designed for automated experiment loops
 (autoresearch) where an AI agent or human iterates on hyperparameters.
 
+This file is the tool inventory. For **which** of these to run, in what order, with which
+settled knobs, and how to read the result, see
+[AWR-RL post-training on original DP — operator's guide](../AWR_RL_POST_TRAINING.md).
+
 ## Quick Start
 
 ```bash

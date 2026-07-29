@@ -449,7 +449,8 @@ class TestBatchedTrajectoryLossesValidation:
         # B=3 is neither 1 nor N=4
         data = _make_scene_data(B=3, P=5, T=80)
 
-        with pytest.raises(ValueError, match="expected 1 or N=4"):
+        # B=3 does not divide N=4 either, so the divisor path cannot accept it.
+        with pytest.raises(ValueError, match=r"has B=3, expected 1, N=4"):
             compute_batched_trajectory_losses(
                 model,
                 data,

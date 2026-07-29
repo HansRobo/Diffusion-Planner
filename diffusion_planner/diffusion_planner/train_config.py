@@ -25,7 +25,8 @@ class TrainConfig:
     save_dir: str
     train_set_list: str
     valid_set_list: str
-    train_subsample_step: int
+
+    train_subsample_step: int = 1
 
     # ---------------------------------------------------------
     # Data Dimensions
@@ -77,7 +78,7 @@ class TrainConfig:
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True
-    ego_history_dropout_rate: float = 0.6
+    ego_history_dropout_rate: float = 0.4
     use_turn_indicators: bool = True
 
     # Loss Coefficients
@@ -117,6 +118,9 @@ class TrainConfig:
     guidance_scale: float = 0.5
     device: str = "cuda"
     use_ema: bool = True
+    # ModelEma decay; 0.999 needs ~3000 steps to absorb a behavior change —
+    # lower for short fine-tune rounds (e.g. 0.996 for ~800-step rounds).
+    ema_decay: float = 0.999
 
     # ---------------------------------------------------------
     # Model Architecture
@@ -153,7 +157,6 @@ class TrainConfig:
     # one route).
     # ---------------------------------------------------------
     closed_loop_npz_root: str = ""
-    closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
     # Re-plan every N steps: replan=1 is a model forward EVERY step (~minutes/epoch over a full
     # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
     closed_loop_replan_interval: int = 4
@@ -163,7 +166,13 @@ class TrainConfig:
     closed_loop_search_radius: float = 1.5
     closed_loop_warmup_steps: int = 0
     closed_loop_unstick_after: int = 300
-    closed_loop_unstick_advance_m: float = 2.5
+    closed_loop_unstick_advance_m: float = 5.0
+
+    # Scenario-based Open-loop validation. The list JSON maps metric names to NPZ paths.
+    scenario_based_open_loop_list: str = ""
+    scenario_centerline_horizon_seconds: float = 8.0
+    scenario_departure_horizon_seconds: float = 3.0
+    scenario_departure_minimum_displacement_m: float = 2.0
 
     # ---------------------------------------------------------
     # Normalizers (Placeholders to be initialized and set during training execution)

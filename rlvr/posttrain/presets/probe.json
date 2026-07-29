@@ -1,0 +1,18 @@
+{
+  "name": "probe",
+  "extends": "base.json",
+  "comment": "Short paired probe from a frozen checkpoint. Parent for the sweeps.",
+  "train": {
+    "model_path": "runs/base_model/model.pth",
+    "config": "rlvr/configs/awr_original_dp_t4_plannerrft_anchored.json",
+    "replay_updates_per_epoch": 3546,
+    "expert_anchor_secondary_weight": 0.4,
+    "expert_anchor_secondary_horizon": 80,
+    "use_policy_state": null,
+    "resume_optimizer_state": null,
+    "start_epoch": 2,
+    "epochs": 3,
+    "max_valid_scenes": 8,
+    "scene_load_workers": 16
+  }
+}

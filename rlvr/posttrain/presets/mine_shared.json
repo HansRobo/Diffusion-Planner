@@ -1,0 +1,32 @@
+{
+  "name": "mine_shared",
+  "extends": "mine.json",
+  "comment": [
+    "A mine that links the decoder context out of an already finished buffer",
+    "(runs/shared_cache) instead of rebuilding it. Those arrays are the loader's own",
+    "output, so they do not depend on the policy -- but they are not independent of",
+    "the representation either: neighbor time alignment, the geometry correction,",
+    "model cardinalities and scene order all have to match the consuming run.",
+    "The trainer enforces that by hashing the whole staged model args file on both",
+    "sides and refusing anything but a byte-for-byte match. So this arm applies to",
+    "re-mining the SAME base -- after a reward change, say, or a resumed order epoch",
+    "-- and not to a new base checkpoint, whose args differ in at least its own",
+    "bookkeeping even when every shape agrees. There is no partial credit and no way",
+    "to narrow the check from a preset: a new base means a cold mine.",
+    "Two roots are deliberately left off, because sharing either is undetectable",
+    "when it is wrong -- the shapes still agree and nothing downstream complains:",
+    "  shared_replay_encoding_root is the frozen encoder's OUTPUT. Reusing it across",
+    "  a different base checkpoint feeds the new decoder the old model's features.",
+    "  Add it only when the encoder weights are byte-identical, never merely because",
+    "  the two args.json agree on shapes.",
+    "  shared_replay_expert_anchor_root links the logged expert arrays, which really",
+    "  are policy-independent -- but a source mined before the anchor gate existed",
+    "  has no expert_hard_gate_step.npy, and linking it silently produces a buffer",
+    "  that expert_anchor_safe_step_scoped cannot use. Recomputing the expert arrays",
+    "  is cheap next to scoring candidates, so prefer letting the mine write them."
+  ],
+  "train": {
+    "shared_replay_context_root": "runs/shared_cache",
+    "shared_replay_order_epoch": 1
+  }
+}

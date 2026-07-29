@@ -17,6 +17,7 @@ dependencies = [
     "scenario-generation",
     "scipy",
     "torch",
+    "zstandard>=0.23,<1",
 ]
 
 [build-system]
@@ -30,11 +31,13 @@ packages = [
     "rlvr.autoresearch.tests",
     "rlvr.autoresearch.tools",
     "rlvr.closed_loop",
+    "rlvr.posttrain",
+    "rlvr.posttrain.tests",
 ]
 package-dir = { "rlvr" = "." }
 
 [tool.setuptools.package-data]
-rlvr = ["configs/*.json", "*.npy"]
+rlvr = ["configs/*.json", "*.npy", "posttrain/presets/*.json"]
 
 [tool.uv.sources]
 diffusion-planner = { workspace = true }

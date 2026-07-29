@@ -1,0 +1,19 @@
+{
+  "name": "site",
+  "comment": [
+    "The only file you edit. Everything else is method, not location.",
+    "Paths are project-relative; keep datasets outside the tree and symlink",
+    "them in as datasets/ (git-ignored). Runs land under runs/<arm>/.",
+    "resume_replay_root globs for the buffer rather than naming it: the mine writes",
+    "into a timestamped directory of its own, so an arm that reads it cannot know the",
+    "path in advance, and naming one would mean a symlink somebody has to make by",
+    "hand between the two runs. Name a path here if you keep several buffers around."
+  ],
+  "train": {
+    "args_path": "runs/base_model/model_args.json",
+    "config": "rlvr/configs/awr_original_dp_t4_plannerrft_clean_sft.json",
+    "train_npz_list": "datasets/path_list_train.json",
+    "valid_npz_list": "datasets/path_list_valid.json",
+    "resume_replay_root": {"newest": "runs/mine/*/replay_buffer"}
+  }
+}

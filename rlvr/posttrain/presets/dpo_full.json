@@ -1,0 +1,25 @@
+{
+  "name": "dpo_full",
+  "extends": "site.json",
+  "entrypoint": "preference_optimization.train_dpo",
+  "comment": [
+    "Full DPO: the log-ratio objective against a frozen reference, so it needs its",
+    "own trainer. Flags are flat here, not a config JSON. For the weighted-loss",
+    "reduction that runs inside the AWR trainer, use dpo.json."
+  ],
+  "launch": {
+    "launcher": "direct"
+  },
+  "train": {
+    "model_path": "runs/base_model/model.pth",
+    "exp_name": "dpo_full",
+    "preference_mode": "rule",
+    "beta": 0.1,
+    "train_epochs": 3,
+    "batch_size": 32,
+    "learning_rate": 0.00001,
+    "args_path": null,
+    "config": null,
+    "resume_replay_root": null
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "name": "mine",
+  "extends": "base.json",
+  "comment": [
+    "Mines the replay buffer every other arm reads. One update-free refresh epoch:",
+    "it samples the frozen base policy, scores each candidate and writes",
+    "<output_dir>/<stamp>_mine/replay_buffer. No optimizer or EMA step happens, so",
+    "the buffer belongs to the checkpoint it started from -- re-mine whenever that",
+    "checkpoint changes, and never delete a finished one to save disk, because",
+    "reproducing it costs the full mine again.",
+    "start_epoch == epochs is what makes this a mine and not a training epoch; the",
+    "config's hdp_rollout_interval decides which epochs are allowed to be one",
+    "(start_epoch - 1 must be a multiple of it).",
+    "Point the arm's resume_replay_root at the buffer this writes.",
+    "The four candidate-weighting flags below are dropped rather than set: guided",
+    "enrichment scores its candidates group-relative, so candidate-0 behaviour-anchor",
+    "semantics are not available while mining and the trainer refuses the combination.",
+    "The arm applies them at replay time instead, which is the whole point of caching",
+    "rewards rather than weights -- one buffer serves any weighting rule."
+  ],
+  "train": {
+    "model_path": "runs/base_model/model.pth",
+    "positive_advantage_only": null,
+    "positive_advantage_margin": null,
+    "behavior_anchor_weight": null,
+    "unsafe_behavior_anchor_weight": null,
+    "output_dir": "runs/mine",
+    "exp_name": "mine",
+    "start_epoch": 1,
+    "epochs": 1,
+    "resume_replay_root": null,
+    "use_policy_state": null,
+    "resume_optimizer_state": null,
+    "max_valid_scenes": 8,
+    "train_selector_scenes": 128,
+    "rollout_scene_batch_size": 192,
+    "rollout_scene_load_workers": 1,
+    "rollout_prefetch_batches": 1,
+    "scene_load_workers": 16
+  }
+}

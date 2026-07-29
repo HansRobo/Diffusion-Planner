@@ -26,7 +26,10 @@ from diffusion_planner.utils.data_augmentation_bridge import (
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
-from diffusion_planner.utils.neighbor_db import NeighborPatternDB
+from diffusion_planner.utils.neighbor_db import (
+    DEFAULT_NEIGHBOR_DB_PATH,
+    NeighborPatternDB,
+)
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.synthetic_neighbors import SyntheticColliderInjector
@@ -229,7 +232,7 @@ def get_args():
     parser.add_argument(
         "--neighbor_db_path",
         type=str,
-        default="/mnt/storage_rdma/diffusion_planner/dataset/basic_dataset/neighbor_db.npz",
+        default=DEFAULT_NEIGHBOR_DB_PATH,
         help="path to a neighbor-pattern DB (built by neighbor_db.py); "
         "empty = use the synthetic collider generator instead",
     )
@@ -328,12 +331,6 @@ def get_args():
         default="",
         help="dir tree of route NPZ frames for closed-loop validation, run on the checkpoint-save "
         "cadence (save_utd). Empty = disabled. One route per trial.",
-    )
-    parser.add_argument(
-        "--closed_loop_seg_len",
-        type=int,
-        default=100000,
-        help="frames per segment; large => one route = one segment = one trial",
     )
     parser.add_argument(
         "--closed_loop_replan_interval",
@@ -521,7 +518,13 @@ def model_training(args):
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
         diffusion_planner, optimizer, scheduler, init_epoch, wandb_id, model_ema = resume_model(
-            args.resume_model_path, diffusion_planner, optimizer, scheduler, model_ema, args.device
+            args.resume_model_path,
+            diffusion_planner,
+            optimizer,
+            scheduler,
+            model_ema,
+            args.device,
+            use_ddp=args.ddp,
         )
         # GRPO restarts the LR schedule from the configured base rate.
         for param_group in optimizer.param_groups:

@@ -27,6 +27,12 @@ from planner_metrics.config import RewardConfig  # noqa: F401  (re-export)
 from planner_metrics.geometry import *  # noqa: F401,F403
 from planner_metrics.subscores import *  # noqa: F401,F403
 
+# Scene-data key through which a caller may supply a precomputed
+# ``expert_off_lane`` bit instead of paying for the geometry again.  Leading
+# underscore so it never collides with a model input; a `[1]`/`[B]` tensor so
+# the standard scene slicers carry it through a batch untouched.
+EXPERT_OFF_LANE_KEY = "_expert_off_lane"
+
 
 @dataclass
 class RewardBreakdown:
@@ -60,6 +66,80 @@ class RewardBreakdown:
     # booleans on this dataclass (rb_crossing, lane_crossing, static_crossing):
     # True = violation occurred.
     kinematic_violated: bool = False
+    # Earliest trajectory step at which a configured hard gate fires, or None
+    # when none does.  ``collision_step`` cannot answer this on its own: three
+    # of the four step-indexed gates reach this dataclass only as booleans
+    # (rb_crossing/lane_crossing/static_crossing) and the two whole-trajectory
+    # gates (red_light, kinematic) have no step at all.  A consumer that uses
+    # only a PREFIX of the trajectory needs the step to decide whether the
+    # failure is inside the part it actually uses.  Step 0 is the first
+    # waypoint, so that test is ``step >= steps_consumed`` -- not ``>``.
+    first_hard_gate_step: int | None = None
+    # Per-axis first-crossing step, which ``first_hard_gate_step`` cannot give
+    # back: it is a min over the *configured* gates, and ``lane_gate_enabled``
+    # is False, so the lane step never reaches it at all.  Keeping the step and
+    # not just the boolean makes every window question (the whole trajectory,
+    # the eval's 1..40, the near prefix the vehicle actually runs) a threshold
+    # at read time rather than another re-score -- which is what the crossing
+    # brake needs.  Both are None past ``reward_horizon_steps``: the tail is not
+    # scored, so "no crossing" there is absence of evidence, not evidence.
+    #
+    # These two are the ONLY step fields here that are never 0.  Both gates
+    # aggregate over ``[:, 1:]``, excluding index 0 -- their comments call that
+    # "the starting position", but this trajectory is 80 FUTURE steps with no
+    # current pose prepended, so index 0 is the first predicted waypoint, the
+    # one the vehicle executes.  So a step of 1 means the SECOND waypoint, and
+    # a crossing at the executed waypoint alone is reported as no crossing.
+    # Measured over 3,000 mine scenes x 10 candidates plus the logged human:
+    # the excluded step changes the verdict on 0.10% of candidates (lane) and
+    # 0.03% (rb) -- those cross at the executed waypoint and nowhere in the
+    # remaining 79 steps.  Real, but one to three orders below anything the
+    # campaign moves, and the logged human is caught at the same rate (0.07% /
+    # 0.03%), so it is not a policy defect.  Do not "fix" the slice: it would
+    # redefine the reward and force a re-mine to buy that.
+    rb_crossing_step: int | None = None
+    lane_crossing_step: int | None = None
+
+
+def _first_hard_gate_steps(
+    config: RewardConfig,
+    *,
+    collision_steps: list,
+    rb_crossing_steps: list,
+    lane_crossing_steps: list,
+    sc_crossing_steps: list,
+    whole_trajectory_failed: list[bool],
+) -> list[int | None]:
+    """Earliest step at which any *configured* hard gate fires, per row.
+
+    The enabled/disabled predicates deliberately mirror
+    ``rlvr.train_awr._expert_reward_is_hard_safe`` gate for gate, because this
+    is the step-resolved form of exactly that verdict: a row is safe over the
+    whole trajectory precisely when this returns None.  ``test_reward.py``
+    asserts that equivalence rather than trusting the duplication.
+
+    The two whole-trajectory gates carry no step, so they are reported at step
+    0 -- the conservative reading, since a red light or an infeasible
+    curvature invalidates the first waypoint along with everything after it.
+    They arrive pre-reduced in ``whole_trajectory_failed`` because reading them
+    off the device per row would reintroduce exactly the synchronisations the
+    caller's row packing exists to remove.
+    """
+
+    steps: list[int | None] = []
+    for index in range(len(collision_steps)):
+        candidates = [collision_steps[index]]
+        if config.rb_gate_enabled:
+            candidates.append(rb_crossing_steps[index])
+        if config.lane_gate_enabled:
+            candidates.append(lane_crossing_steps[index])
+        if config.static_collision_enabled and config.sc_gate_enabled:
+            candidates.append(sc_crossing_steps[index])
+        if whole_trajectory_failed[index]:
+            candidates.append(0)
+        fired = [int(step) for step in candidates if step is not None]
+        steps.append(min(fired) if fired else None)
+    return steps
 
 
 def _json_safe_value(value):
@@ -160,6 +240,69 @@ def _expert_route_progress_ratio(
         (raw_progress / reference_progress).clamp(0.0, 1.0),
         torch.ones(N, device=device),
     )
+
+
+def _low_speed_steer_penalty(
+    ego_trajs: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    config: RewardConfig,
+) -> torch.Tensor:
+    """Bounded [0, 1] penalty on how far past the steering limit the first step is.
+
+    ``delta = atan(wheel_base * 2|y| / s**2)`` is the front-wheel angle implied by
+    a first step of arc length ``s`` ending ``y`` off the current heading -- the
+    same criterion AWR's first-waypoint gate uses.  Penalise only the *excess*
+    over ``low_speed_steer_max_rad``, which is the physical steering limit:
+
+    * Below the limit the command is executable, so a genuine creeping turn of
+      radius ``R`` (which implies exactly ``atan(wheel_base / R)``) is not taxed
+      for turning correctly.  Ramping from zero instead would cost an 8 m radius
+      creep turn 0.048 reward against a typical within-group headroom of 0.013,
+      and this corpus oversamples unprotected right turns x10.
+    * ``delta`` is an ``atan``, so it is bounded by ``pi/2``; normalising the
+      excess by ``pi/2 - limit`` maps the whole infeasible range onto [0, 1]
+      without saturating.  That matters because the deployed candidate's median
+      low-speed implied steer is 1.4716 rad: under a ramp-from-zero form every
+      bad candidate clamps to 1.0, and AWR cannot prefer the least infeasible of
+      two -- exactly the discrimination this term exists to create.
+
+    Only active below ``low_speed_steer_speed_mps``; steps shorter than
+    ``low_speed_steer_min_step_m`` are sampler noise whose geometry is
+    meaningless and score zero.  Returns zeros when the weight is zero or the
+    scene carries no ego velocity, so no existing profile changes silently.
+    """
+
+    N = ego_trajs.shape[0]
+    device = ego_trajs.device
+    zero = torch.zeros(N, device=device, dtype=ego_trajs.dtype)
+    weight = float(getattr(config, "low_speed_steer_penalty", 0.0))
+    if weight <= 0.0 or ego_trajs.shape[1] == 0:
+        return zero
+
+    state = data.get("ego_current_state")
+    if not isinstance(state, torch.Tensor) or state.shape[-1] <= 4:
+        return zero
+    speed = float(state.reshape(-1, state.shape[-1])[0, 4].abs().item())
+    if not math.isfinite(speed) or speed >= float(config.low_speed_steer_speed_mps):
+        return zero
+
+    wheel_base = 2.79
+    shape = data.get("ego_shape")
+    if isinstance(shape, torch.Tensor) and shape.numel():
+        candidate = float(shape.reshape(-1)[0].item())
+        if math.isfinite(candidate) and candidate > 0.0:
+            wheel_base = candidate
+
+    first_xy = ego_trajs[:, 0, :2].to(dtype=torch.float32)
+    step = first_xy.norm(dim=-1)
+    min_step = max(float(config.low_speed_steer_min_step_m), 1e-6)
+    steer = torch.atan(
+        wheel_base * 2.0 * first_xy[:, 1].abs() / step.clamp_min(min_step).pow(2)
+    )
+    steer = torch.where(step >= min_step, steer, torch.zeros_like(steer))
+    limit = min(max(float(config.low_speed_steer_max_rad), 1e-6), math.pi / 2.0 - 1e-6)
+    excess = (steer - limit) / (math.pi / 2.0 - limit)
+    return (weight * excess.clamp(0.0, 1.0)).to(dtype=ego_trajs.dtype)
 
 
 def _hdp_multi_reward_components(
@@ -300,36 +443,59 @@ def _hdp_multi_reward_components(
     # complete lane-change detector.  A future T4 profile should additionally
     # consume a validated lane-change sidecar (or indicator/route semantics)
     # before claiming full parity with the HDP paper's lane-change mask.
-    gt = data.get("ego_agent_future")
-    if isinstance(gt, torch.Tensor):
-        if gt.dim() == 3:
-            gt = gt[0]
-        gt = gt[:T]
-        if gt.dim() == 2 and gt.shape[-1] >= 3:
-            if gt.shape[-1] == 3:
-                gt4 = torch.cat([gt[:, :2], torch.cos(gt[:, 2:3]), torch.sin(gt[:, 2:3])], dim=-1)
-            else:
-                gt4 = gt[:, :4]
-            # Only the lane-departure result is needed for the expert off-lane
-            # mask.  Calling compute_subscores_batch here used to
-            # recompute collision, TTC, border, smoothness, feasibility and
-            # red-light metrics for the logged expert on every scene.  That
-            # was mathematically redundant and dominated full-corpus HDP
-            # rollout time.  Reuse the exact lane geometry primitive instead.
-            expert_shape = data.get("ego_shape")
-            if isinstance(expert_shape, torch.Tensor):
-                if expert_shape.dim() == 2:
-                    expert_shape = expert_shape[0]
-                expert_lane = compute_lane_departure_penalty(
-                    gt4.unsqueeze(0), expert_shape[:3].to(device), data, config=config
-                )
-                expert_lane_steps = expert_lane[3]
-            else:
-                expert_lane_steps = [None]
-            if isinstance(expert_lane_steps, list) and expert_lane_steps and expert_lane_steps[0] is not None:
-                lane_score = torch.ones_like(lane_score)
+    cached = data.get(EXPERT_OFF_LANE_KEY)
+    if isinstance(cached, torch.Tensor) and cached.numel():
+        is_off_lane = bool(cached.flatten()[0])
+    else:
+        is_off_lane = expert_off_lane(data, T, config)
+    if is_off_lane:
+        lane_score = torch.ones_like(lane_score)
 
     return risk_score, follow_score, lane_score
+
+
+def expert_off_lane(data: dict, horizon_steps: int, config: RewardConfig) -> bool:
+    """Did the LOGGED expert leave the union of nearby lane polygons?
+
+    Only the lane-departure result is needed for the expert off-lane mask.
+    Calling compute_subscores_batch here used to recompute collision, TTC,
+    border, smoothness, feasibility and red-light metrics for the logged expert
+    on every scene.  That was mathematically redundant and dominated
+    full-corpus HDP rollout time.  Reuse the exact lane geometry primitive
+    instead.
+
+    Nothing here depends on the policy: this is a pure function of the logged
+    future, the ego shape, the map geometry and the lane config, yet it costs
+    about half of a live ``hdp_pdm`` reward call and every mine of every cycle
+    recomputes it from scratch.  Callers that can persist it across cycles
+    should hand the answer back through ``EXPERT_OFF_LANE_KEY``.
+    """
+
+    gt = data.get("ego_agent_future")
+    if not isinstance(gt, torch.Tensor):
+        return False
+    if gt.dim() == 3:
+        gt = gt[0]
+    gt = gt[:horizon_steps]
+    if gt.dim() != 2 or gt.shape[-1] < 3:
+        return False
+    if gt.shape[-1] == 3:
+        gt4 = torch.cat([gt[:, :2], torch.cos(gt[:, 2:3]), torch.sin(gt[:, 2:3])], dim=-1)
+    else:
+        gt4 = gt[:, :4]
+    expert_shape = data.get("ego_shape")
+    if not isinstance(expert_shape, torch.Tensor):
+        return False
+    if expert_shape.dim() == 2:
+        expert_shape = expert_shape[0]
+    expert_lane_steps = compute_lane_departure_penalty(
+        gt4.unsqueeze(0), expert_shape[:3].to(gt4.device), data, config=config
+    )[3]
+    return (
+        isinstance(expert_lane_steps, list)
+        and bool(expert_lane_steps)
+        and expert_lane_steps[0] is not None
+    )
 
 
 @torch.no_grad()
@@ -667,6 +833,19 @@ def _shape_reward(
         comfort_score = comfort_score * torch.exp(feasibility_scores.clamp(min=-10.0, max=0.0))
         comfort_score = comfort_score.clamp(0.0, 1.0)
 
+        # Low-speed steering feasibility.  ``smoothness_scores`` is computed from
+        # the whole 8 s horizon and cannot see a standstill first step: the
+        # deployed candidate implies a median 1.47 rad front-wheel angle on a
+        # third of low-speed scenes and still scores a full comfort slot.  AWR's
+        # first-waypoint gate rejects such candidates but is powerless against
+        # the anchor, and without a reward term the smoother of two survivors was
+        # never preferred -- which is why low-speed behaviour never improved
+        # across a campaign while the real vehicle jittered at a stop.
+        comfort_score = comfort_score - _low_speed_steer_penalty(
+            ego_trajs, data, config
+        )
+        comfort_score = comfort_score.clamp(0.0, 1.0)
+
         # HDP's released NAVSIM agent uses the PDM scorer.  Its weighted
         # terms are EP=5, TTC=5, lane-keeping=2 and history comfort=2; the
         # speed-limit term belongs to other PlannerRFT variants and must not
@@ -679,17 +858,47 @@ def _shape_reward(
             ego_trajs, data, subs, config
         )
         driving_direction_score = torch.ones(N, device=device)
+
+        # The bare PDM TTC indicator is dead signal on this corpus: measured over
+        # 300 mined scenes x 10 candidates it was exactly 1.0 on 99.67% of
+        # candidates and varied within a candidate group on 0.33% of scenes,
+        # while collision fired on 0.00%.  Those are the *only* neighbour-aware
+        # terms in this profile -- risk and follow are computed and discarded --
+        # so AWR was ranking candidates on progress/lane/comfort alone and had no
+        # reason to keep clear of other vehicles.  That is the reward-up /
+        # collisions-up trade, not an inherent property of the method.
+        #
+        # ``hdp_risk_use_clearance`` already means "grade near misses before they
+        # become collisions"; it just only reached the hdp_multi profile.  Grade
+        # the same clearance here and take the min, so a real TTC failure still
+        # lands and the clearance term can only ever tighten.  Non-saturated on
+        # 26.0% of scenes and discriminative within the candidate group on 25.7%,
+        # which moves the selected candidate on 16.3% of scenes.  Deliberately
+        # the clearance alone and not the composite ``risk_score``: that also
+        # folds in road-border proximity, which this profile already gates
+        # separately, and only the clearance version was measured.
+        ttc_term = ttc_scores.clamp(0.0, 1.0)
+        clearance = subs.get("ttc_min_clearance")
+        if bool(getattr(config, "hdp_risk_use_clearance", False)) and isinstance(
+            clearance, torch.Tensor
+        ) and clearance.dim() == 2:
+            safe_m = max(float(getattr(config, "hdp_risk_clearance_safe_m", 2.0)), 1e-3)
+            clearance_score = (
+                clearance.to(dtype=ttc_term.dtype) / safe_m
+            ).clamp(0.0, 1.0).min(dim=-1).values
+            ttc_term = torch.minimum(ttc_term, clearance_score)
         pdm_quality = (
-            5.0 * ttc_scores.clamp(0.0, 1.0)
+            5.0 * ttc_term
             + 5.0 * ep_score
             + 2.0 * lane_score.clamp(0.0, 1.0)
             + 2.0 * comfort_score
         ) / 14.0
 
-        # Col×DAC terminal product, with survival credit for the first failure
-        # time when requested (the HDP open-loop scorer's key hard-scene
-        # stabilization).  A road-border cross is DAC=0 regardless of whether
-        # the custom profile's optional rb gate is enabled.
+        # Col×DAC terminal product.  ``survival`` is an optional
+        # PlannerRFT-style hard-scene ablation that adds first-failure-time
+        # credit; it is not part of HDP's published max-collision / risk
+        # reward.  A road-border cross is DAC=0 regardless of whether the
+        # custom profile's optional rb gate is enabled.
         pdm_terminal = collision_gate * rb_crossing_gate * driving_direction_score
         if config.reward_mode == "survival":
             pdm_survival_frac = torch.ones(N, device=device)
@@ -768,35 +977,111 @@ def _shape_reward(
     on_road_factor = 1.0 - off_road_fractions
     adjusted_progress = progress_scores * on_road_factor
 
+    # Materialise every scalar diagnostic with one device-to-host transfer.
+    #
+    # The rollout miner calls this function once per scene with K candidates.
+    # Converting each field with ``float(cuda_tensor[i])`` in the loop below
+    # used to introduce O(K * fields) independent CUDA synchronisations per
+    # scene.  Packing the already-computed tensors changes no reward math (the
+    # same values, in the same dtype, are merely copied together) while
+    # reducing that boundary to one synchronisation per scene.  Keep the
+    # Python dataclass ABI unchanged for replay writers and diagnostics.
+    packed_rows = torch.stack(
+        (
+            safety_scores,
+            adjusted_progress,
+            smoothness_scores,
+            feasibility_scores,
+            centerline_scores,
+            red_light_scores,
+            totals,
+            off_road_fractions,
+            rb_crossing_gate,
+            rb_near_pen,
+            rb_wide_pen,
+            rb_min_dist_t,
+            lane_crossing_gate,
+            lane_near_frac,
+            lane_wide_frac,
+            sc_crossing_gate,
+            sc_near_pen,
+            sc_wide_pen,
+            sc_cont_pen,
+            sc_min_dist_scalar,
+            kinematic_gate,
+        ),
+        dim=1,
+    ).detach().cpu().tolist()
+
+    first_hard_gate_steps = _first_hard_gate_steps(
+        config,
+        collision_steps=collision_steps,
+        rb_crossing_steps=rb_crossing_steps,
+        lane_crossing_steps=lane_crossing_steps,
+        sc_crossing_steps=sc_crossing_steps,
+        whole_trajectory_failed=(
+            ((red_light_scores < -0.5) | (kinematic_gate < 0.5))
+            .detach()
+            .cpu()
+            .tolist()
+        ),
+    )
+
     results: list[RewardBreakdown] = []
-    for i in range(N):
+    for i, row in enumerate(packed_rows):
+        (
+            safety_value,
+            progress_value,
+            smoothness_value,
+            feasibility_value,
+            centerline_value,
+            red_light_value,
+            total_value,
+            off_road_value,
+            rb_gate_value,
+            rb_near_value,
+            rb_wide_value,
+            rb_min_value,
+            lane_gate_value,
+            lane_near_value,
+            lane_wide_value,
+            sc_gate_value,
+            sc_near_value,
+            sc_wide_value,
+            sc_cont_value,
+            sc_min_value,
+            kinematic_gate_value,
+        ) = row
         results.append(
             RewardBreakdown(
-                safety=float(safety_scores[i]),
-                progress=float(adjusted_progress[i]),
-                smoothness=float(smoothness_scores[i]),
-                feasibility=float(feasibility_scores[i]),
-                centerline=float(centerline_scores[i]),
-                red_light=float(red_light_scores[i]),
-                total=float(totals[i]),
+                safety=float(safety_value),
+                progress=float(progress_value),
+                smoothness=float(smoothness_value),
+                feasibility=float(feasibility_value),
+                centerline=float(centerline_value),
+                red_light=float(red_light_value),
+                total=float(total_value),
                 collision_step=collision_steps[i],
-                off_road_fraction=float(
-                    off_road_fractions[i]
-                ),  # always 0 (polygon disabled); use rb_crossing/rb_near_penalty instead
-                rb_crossing=bool(rb_crossing_gate[i] < 0.5),
-                rb_near_penalty=float(rb_near_pen[i]),
-                rb_wide_penalty=float(rb_wide_pen[i]),
-                rb_min_dist=float(rb_min_dist_t[i].item()),
-                lane_crossing=bool(lane_crossing_gate[i] < 0.5),
-                lane_near_frac=float(lane_near_frac[i]),
-                lane_wide_frac=float(lane_wide_frac[i]),
-                static_crossing=bool(sc_crossing_gate[i] < 0.5),
-                sc_near_penalty=float(sc_near_pen[i]),
-                sc_wide_penalty=float(sc_wide_pen[i]),
-                sc_cont_penalty=float(sc_cont_pen[i]),
-                sc_min_dist=float(sc_min_dist_scalar[i].item()),
+                # Always 0 for the current polygon-disabled profile; retain
+                # it for backward-compatible diagnostics.
+                off_road_fraction=float(off_road_value),
+                rb_crossing=bool(rb_gate_value < 0.5),
+                rb_near_penalty=float(rb_near_value),
+                rb_wide_penalty=float(rb_wide_value),
+                rb_min_dist=float(rb_min_value),
+                lane_crossing=bool(lane_gate_value < 0.5),
+                lane_near_frac=float(lane_near_value),
+                lane_wide_frac=float(lane_wide_value),
+                static_crossing=bool(sc_gate_value < 0.5),
+                sc_near_penalty=float(sc_near_value),
+                sc_wide_penalty=float(sc_wide_value),
+                sc_cont_penalty=float(sc_cont_value),
+                sc_min_dist=float(sc_min_value),
                 sc_n_stopped=sc_n_stopped_scene,
-                kinematic_violated=bool(kinematic_gate[i] < 0.5),
+                kinematic_violated=bool(kinematic_gate_value < 0.5),
+                first_hard_gate_step=first_hard_gate_steps[i],
+                rb_crossing_step=rb_crossing_steps[i],
+                lane_crossing_step=lane_crossing_steps[i],
             )
         )
 

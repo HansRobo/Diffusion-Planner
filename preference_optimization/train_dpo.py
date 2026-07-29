@@ -11,6 +11,8 @@ Or:
     python3 train_dpo.py [args]
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -18,6 +20,7 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 # Ensure parent directory is in path for diffusion_planner imports
 parent_dir = Path(__file__).resolve().parent.parent
@@ -30,16 +33,20 @@ from torch import optim
 from torch.utils.data import DataLoader
 
 from preference_optimization.annotation_gui import collect_preferences
-from preference_optimization.annotation_ros_node import AnnotationRosServer
 from preference_optimization.model_utils import load_model
 from preference_optimization.preference_collection import generate_rule_based_preferences
 from preference_optimization.trainer import DPOTrainer
 
+if TYPE_CHECKING:  # the ROS annotation server pulls in rclpy, which only the
+    # lichtblick preference mode needs; rule mode must run without a ROS install.
+    from preference_optimization.annotation_ros_node import AnnotationRosServer
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
+def build_parser() -> argparse.ArgumentParser:
+    """The flag surface, without parsing: ``rlvr.posttrain`` validates specs against it."""
+
     parser = argparse.ArgumentParser(
         description="Train Diffusion Planner with Direct Preference Optimization"
     )
@@ -144,7 +151,12 @@ def parse_args() -> argparse.Namespace:
         "preserves neighbor predictions and turn signals. 'all' targets all 3 blocks.",
     )
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    return build_parser().parse_args()
 
 
 def _find_lora_dir(search_dir: Path) -> Path | None:
@@ -600,6 +612,8 @@ def main():
 
     ros_node: AnnotationRosServer | None = None
     if args.preference_mode == "lichtblick":
+        from preference_optimization.annotation_ros_node import AnnotationRosServer
+
         ros_node = AnnotationRosServer(
             model_path=checkpoint_path,
             npz_list=args.train_npz_list,
