@@ -105,24 +105,14 @@ class TrainConfig:
     # joint ablation), never by policy-only Base/SFT.
     turn_indicator_generated_loss_weight: float = 1.0
     turn_indicator_expert_loss_weight: float = 1.0
-    # Cost-sensitive intent objective. Cross entropy stays the calibration backbone
-    # because the deployment state machine gates on absolute probabilities, but plain
-    # cross entropy prices a LEFT/RIGHT swap exactly like a late signal even though the
-    # first commands the opposite maneuver. This is the expected cost of opposite-
-    # direction probability mass on active ground truth; 0.0 restores plain CE.
-    turn_indicator_opposite_direction_weight: float = 1.0
-    # The Base80 audit measured a median 3.5 s (1.6-6.4 s p10-p90 left, 1.4-6.8 s right)
-    # from lever to motion, so an OFF frame whose expert future already turns is a late
-    # annotation, not a negative. Move at most this much target mass from OFF onto the
-    # geometrically implied direction, ramped by evidence strength. Mass never moves
-    # between LEFT and RIGHT, and active labels stay one-hot. 0.0 restores hard labels.
-    turn_indicator_implied_intent_smoothing: float = 0.2
-    # Evidence bars, in the same quantities the audit tool reports. The weak pair is the
-    # audit's own activation-confirmation bar; the strong pair is its next bucket.
-    turn_indicator_implied_intent_min_yaw_deg: float = 5.0
-    turn_indicator_implied_intent_full_yaw_deg: float = 20.0
-    turn_indicator_implied_intent_min_lateral_m: float = 0.5
-    turn_indicator_implied_intent_full_lateral_m: float = 2.0
+
+    # Intent-head capacity. The head is a probe on frozen policy features, so its own
+    # depth is the only capacity knob available without retraining the policy. Defaults
+    # reproduce the single-query single-layer probe.
+    turn_indicator_head_num_queries: int = 1
+    turn_indicator_head_num_layers: int = 1
+    turn_indicator_head_dropout: float = 0.0
+
     # The production SFT contract is deliberately staged: ``policy`` adapts the
     # trajectory planner without evaluating or updating the auxiliary head, then
     # ``turn_indicator`` freezes the planner and trains the detached head below.
@@ -174,6 +164,27 @@ class TrainConfig:
 
     # HDP RL objective. The branch intentionally keeps only the official-style
     # reward-weighted RL-Hybrid path.
+    #
+    # ``rl_paper_exact`` pins every field listed in
+    # ``diffusion_planner.hdp_rl_paper_exact`` to its published value (paper Table 3,
+    # Eq. (14)-(17), Appendix "Reward Function Details", and the authors' released
+    # dp_vla_rl_agent). It turns off every real-vehicle extension of this repository and
+    # fails on any explicit flag that contradicts the paper, so a run either reproduces
+    # HDP-RL exactly or refuses to start. See docs/hdp_rl_paper_fidelity.md.
+    rl_paper_exact: bool = False
+    # ``multi`` = lambda_risk r_risk + lambda_follow r_follow + lambda_lane r_lane (HDP-RL);
+    # ``single`` = r_safety alone (HDP-RL dagger, the paper's single-reward baseline).
+    rl_paper_reward: Literal["multi", "single"] = "multi"
+    # The one pair paper-exact does NOT take from the paper. ``planning_hybrid_loss``
+    # and ``hybrid_loss_window`` are the geometry of the norm the IL base was fitted
+    # in, and this pipeline never retrains IL, so paper-exact inherits them from the
+    # checkpoint it post-trains. Setting this True releases them and marks the run as
+    # an omega/W ablation arm -- the only way to reach the published pair.
+    rl_hybrid_ablation: bool = False
+    # RL moves the same policy on the same distribution, so paper-exact compares the
+    # corpus and the input perturbation against the IL base's args.json instead of
+    # trusting the launcher to match by convention.
+    rl_base_corpus_check: bool = True
     num_generations: int = 8
     rl_reward_normalize: Literal["group", "batch", "none"] = "group"
     rl_reward_beta: float = 0.5
@@ -303,17 +314,6 @@ class TrainConfig:
     # Skip near-stationary scenes: offsetting a standstill trajectory manufactures the
     # exact jump failure the first-waypoint gate exists to catch (upstream guard: 2.0).
     rl_candidate_aug_speed_min_mps: float = 2.0
-    # Reject low-speed candidates whose first waypoint jumps away from the current pose
-    # (audited original-DP failure: reward-blind standstill jumps winning the advantage).
-    # The 5 cm tangent floor is mandatory — without it a numerically-zero standstill step
-    # reads as 90 degrees off-tangent and entire low-speed groups are silently discarded.
-    rl_first_waypoint_gate: bool = True
-    rl_first_waypoint_gate_speed_max_mps: float = 1.0
-    rl_first_waypoint_gate_max_step_m: float = 0.25
-    rl_first_waypoint_gate_max_lateral_m: float = 0.20
-    rl_first_waypoint_gate_max_backward_m: float = 0.05
-    rl_first_waypoint_gate_max_tangent_deg: float = 75.0
-    rl_first_waypoint_gate_tangent_min_step_m: float = 0.05
     # Tier IV data has no populated static-object tensor, so OCC falls back to
     # stopped actors and, when none exist, HD-map road borders. Keep this ablatable
     # because road borders are a practical proxy rather than literal occupancy.

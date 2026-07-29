@@ -416,8 +416,6 @@ def run_validation(valid_cfg: ValidConfig):
             "turn_indicator_active_recall",
             "turn_indicator_active_f1",
             "turn_indicator_direction_accuracy",
-            "turn_indicator_nll",
-            "turn_indicator_ece",
         ):
             print(f"{metric}={agg[metric]:.4f}")
         for name, accuracy in agg["turn_indicator_class_accuracy"].items():
@@ -448,8 +446,6 @@ def run_validation(valid_cfg: ValidConfig):
                 "turn_indicator_active_recall",
                 "turn_indicator_active_f1",
                 "turn_indicator_direction_accuracy",
-                "turn_indicator_nll",
-                "turn_indicator_ece",
             )
         },
         **{

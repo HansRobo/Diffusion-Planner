@@ -21,22 +21,10 @@ class TurnIndicatorStateMachineConfig:
     direction_switch_seconds: float = 0.50
     minimum_active_seconds: float = 1.00
     probability_ema_alpha: float = 0.50
-    # Every gate above is an absolute probability, so their meaning depends on how well
-    # the head is calibrated. This is the deployment-side temperature applied to the
-    # logits before the softmax: >1 flattens an over-confident head, <1 sharpens an
-    # under-confident one, and 1.0 leaves the network distribution untouched. Fit it on
-    # sequential validation predictions with ``fit_probability_temperature`` and freeze
-    # it as configuration; it never changes the argmax, only when a gate opens.
-    probability_temperature: float = 1.0
 
     def __post_init__(self):
         if self.frequency_hz <= 0:
             raise ValueError("frequency_hz must be positive")
-        if not math.isfinite(self.probability_temperature) or self.probability_temperature <= 0:
-            raise ValueError(
-                f"probability_temperature must be positive and finite, "
-                f"got {self.probability_temperature}"
-            )
         for name in (
             "activation_threshold",
             "deactivation_threshold",
@@ -117,14 +105,6 @@ class TurnIndicatorStateMachine:
             (probabilities < 0).any() or abs(float(probabilities.sum()) - 1.0) > 1e-4
         ):
             raise ValueError("Probabilities must be non-negative and sum to one")
-        temperature = self.config.probability_temperature
-        if temperature != 1.0:
-            # Softmax is shift-invariant, so re-softmaxing scaled log-probabilities is
-            # exactly softmax(logits / T) and works for either input form.
-            probabilities = torch.softmax(
-                probabilities.clamp_min(torch.finfo(probabilities.dtype).tiny).log() / temperature,
-                dim=0,
-            )
 
         alpha = self.config.probability_ema_alpha
         if self._smoothed_probabilities is None:
@@ -161,57 +141,3 @@ class TurnIndicatorStateMachine:
             self._candidate = candidate
             self._candidate_frames = 0
         return self.state
-
-
-def fit_probability_temperature(
-    logits: torch.Tensor,  # [N, TURN_INDICATOR_OUTPUT_DIM]
-    labels: torch.Tensor,  # [N] dense OFF/LEFT/RIGHT labels
-    *,
-    bounds: tuple[float, float] = (0.05, 20.0),
-    iterations: int = 64,
-) -> float:
-    """Temperature that minimizes validation NLL, for ``probability_temperature``.
-
-    Deterministic golden-section search on a single scalar: no optimizer state, no
-    initialization sensitivity, and identical results across runs. Rescaling logits
-    cannot change the argmax, so every accuracy metric is invariant; what changes is
-    whether the state machine's absolute-probability gates fire when they should.
-    """
-    if logits.ndim != 2 or logits.shape[-1] != TURN_INDICATOR_OUTPUT_DIM:
-        raise ValueError(
-            f"logits must be [N, {TURN_INDICATOR_OUTPUT_DIM}], got {tuple(logits.shape)}"
-        )
-    if labels.shape != logits.shape[:1]:
-        raise ValueError(f"labels must be [{logits.shape[0]}], got {tuple(labels.shape)}")
-    if logits.numel() == 0:
-        raise ValueError("cannot fit a temperature without validation samples")
-    low, high = bounds
-    if not 0 < low < high:
-        raise ValueError(f"require 0 < low < high, got {bounds}")
-    # Accumulate the objective in float64: this runs once over a whole validation split,
-    # so the summation error of a float32 reduction would otherwise dominate the fit.
-    values = logits.detach().double()
-    targets = labels.detach().long()
-
-    def nll(temperature: float) -> float:
-        return float(
-            torch.nn.functional.cross_entropy(values / temperature, targets, reduction="mean")
-        )
-
-    # Search in log-temperature: the objective is far closer to symmetric there, so the
-    # same iteration count brackets both an over- and an under-confident head equally.
-    lo, hi = math.log(low), math.log(high)
-    inverse_phi = (math.sqrt(5.0) - 1.0) / 2.0
-    left = hi - inverse_phi * (hi - lo)
-    right = lo + inverse_phi * (hi - lo)
-    left_value, right_value = nll(math.exp(left)), nll(math.exp(right))
-    for _ in range(max(int(iterations), 1)):
-        if left_value <= right_value:
-            hi, right, right_value = right, left, left_value
-            left = hi - inverse_phi * (hi - lo)
-            left_value = nll(math.exp(left))
-        else:
-            lo, left, left_value = left, right, right_value
-            right = lo + inverse_phi * (hi - lo)
-            right_value = nll(math.exp(right))
-    return math.exp(0.5 * (lo + hi))

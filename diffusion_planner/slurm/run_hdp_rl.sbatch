@@ -9,6 +9,15 @@
 
 set -euo pipefail
 
+# Slurm runs these jobs as a dedicated account; every path below is provisioned for it.
+# Running as anyone else silently produces unreadable credentials and unwritable outputs,
+# so fail immediately and say so instead of dying deep inside training.
+REQUIRED_USER=${HDP_REQUIRED_USER:-wang}
+if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
+  echo "FATAL: this job must run as ${REQUIRED_USER}, got $(id -un)" >&2
+  exit 20
+fi
+
 REPO=${HDP_RL_REPO:-/mnt/nvme/Diffusion-Planner-hyper-diffusion-planner}
 NNODES=${SLURM_NNODES:-1}
 NPROC_PER_NODE=${HDP_RL_NPROC_PER_NODE:-${HDP_RL_NPROC:-8}}
@@ -24,7 +33,8 @@ NUM_WORKERS=${HDP_RL_NUM_WORKERS:-8}
 TRAIN_SUBSAMPLE_STEP=${HDP_RL_TRAIN_SUBSAMPLE_STEP:-1}
 DEFAULT_RL_TRAIN_LIST=${HDP_DEFAULT_RL_TRAIN_LIST:-${HDP_DEFAULT_SFT_TRAIN_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260707_vehicle_params_with_mirror/path_list_train_concatenated.json}}
 TRAIN_LIST=${HDP_RL_TRAIN_LIST:-${DEFAULT_RL_TRAIN_LIST}}
-VALID_LIST=${HDP_RL_VALID_LIST:?submit with HDP_RL_VALID_LIST=<manifest>}
+DEFAULT_RL_VALID_LIST=${HDP_DEFAULT_RL_VALID_LIST:-/mnt/storage_rdma/diffusion_planner/dataset/20260702_basic_dataset/path_list_valid_sft_balanced.json}
+VALID_LIST=${HDP_RL_VALID_LIST:-${DEFAULT_RL_VALID_LIST}}
 if [[ -n "${HDP_RL_FILTER_SKIPPED+x}" ]]; then
   FILTER_SKIPPED=${HDP_RL_FILTER_SKIPPED}
 elif [[ "${TRAIN_LIST}" == "${DEFAULT_RL_TRAIN_LIST}" ]]; then
@@ -32,8 +42,24 @@ elif [[ "${TRAIN_LIST}" == "${DEFAULT_RL_TRAIN_LIST}" ]]; then
 else
   FILTER_SKIPPED=True
 fi
-EXTRA_LISTS=${HDP_RL_EXTRA_LISTS:-}
-EXTRA_REPEAT=${HDP_RL_EXTRA_REPEAT:-0}
+# RL post-trains the IL base on the base's own corpus: same three right-turn
+# manifests at the same x10 repeat, so the RL delta is attributable to the
+# objective and not to a distribution shift. The trainer re-checks this against
+# the base checkpoint's args.json under --rl_paper_exact.
+RIGHT_TURN_DIR=${HDP_RIGHT_TURN_DIR:-${REPO}/artifacts/right_turn_is_skipped_filtered_20260716}
+DEFAULT_EXTRA_LISTS=${RIGHT_TURN_DIR}/path_list_train_unprotected_right_turn_is_skipped_filtered.json:${RIGHT_TURN_DIR}/path_list_unprotected_right_turn_xx1_is_skipped_filtered.json:${RIGHT_TURN_DIR}/path_list_unprotected_right_turn_xx1_psim_is_skipped_filtered.json
+EXTRA_LISTS=${HDP_RL_EXTRA_LISTS-${DEFAULT_EXTRA_LISTS}}
+EXTRA_REPEAT=${HDP_RL_EXTRA_REPEAT:-10}
+# StatePerturbation, identical to the base run. RL applies it before the rollout,
+# so the reward, the gate and the regression all see the same perturbed scene.
+USE_DATA_AUGMENT=${HDP_RL_USE_DATA_AUGMENT:-True}
+AUGMENT_TYPE=${HDP_RL_AUGMENT_TYPE:-quintic}
+AUGMENT_PROB=${HDP_RL_AUGMENT_PROB:-0.5}
+NUM_REFINE=${HDP_RL_NUM_REFINE:-20}
+EGO_PAST_NOISE_STD=${HDP_RL_EGO_PAST_NOISE_STD:-0.1}
+USE_SMOOTHING_FUTURE_TRAJECTORY=${HDP_RL_USE_SMOOTHING_FUTURE_TRAJECTORY:-True}
+HYBRID_ABLATION=${HDP_RL_HYBRID_ABLATION:-False}
+BASE_CORPUS_CHECK=${HDP_RL_BASE_CORPUS_CHECK:-True}
 INIT_CKPT=${HDP_RL_INIT_CKPT:-}
 RESUME_CKPT=${HDP_RL_RESUME_CKPT:-}
 EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:?submit with HDP_EXPECTED_COMMIT=<commit>}
@@ -76,7 +102,6 @@ REWARD_HORIZON_STEPS=${HDP_RL_REWARD_HORIZON_STEPS:-0}
 CANDIDATE_LOSS_HORIZON=${HDP_RL_CANDIDATE_LOSS_HORIZON:-0}
 DIFFUSION_T_MIN=${HDP_RL_DIFFUSION_T_MIN:-0.0}
 DIFFUSION_T_MAX=${HDP_RL_DIFFUSION_T_MAX:-1.0}
-FIRST_WAYPOINT_GATE=${HDP_RL_FIRST_WAYPOINT_GATE:-True}
 SELECTION_METRIC=${HDP_RL_SELECTION_METRIC:-deterministic}
 EVAL_DETERMINISTIC=${HDP_RL_EVAL_DETERMINISTIC:-True}
 # HDP rollout-candidate augmentation (velocity-safe ramped form). Off by default;
@@ -122,6 +147,34 @@ ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
 UPDATES_PER_ROLLOUT=${HDP_RL_UPDATES_PER_ROLLOUT:-9}
 UPDATE_MAX_CANDIDATES=${HDP_RL_UPDATE_MAX_CANDIDATES_PER_RANK:-2048}
 COMPILE_MODEL=${HDP_RL_COMPILE_MODEL:-True}
+# Precision. bf16 halves activation memory and roughly doubles H100 throughput, and
+# it is harmless for IL, where the target is a known human trajectory and the error
+# budget is centimetres. It is NOT harmless for AWR. At the one waypoint the vehicle
+# executes, the longitudinal displacement (~0.4 m) sits in the bf16 binade whose grid
+# spacing is 1.953 mm, while the K candidates of a group differ by only ~1.1 mm — so
+# 100% of step-1 x values land exactly on the comb, the candidates collide, and the
+# ranking AWR needs on that axis does not exist. Lateral is ~24x clear, which is why
+# a bf16 campaign moves lane-keeping and comfort but not ego_progress.
+# Flip BOTH together for a true-fp32 arm: TF32 alone costs 6.5x the campaign's own
+# smoothness effect, and only amp=off AND tf32=False makes the eval bit-identical.
+# Defaults preserve the bf16 behaviour every existing launcher was measured under.
+AMP_DTYPE=${HDP_RL_AMP_DTYPE:-bf16}
+TF32=${HDP_RL_TF32:-True}
+case "${AMP_DTYPE}" in
+  off | bf16) ;;
+  *)
+    echo "HDP_RL_AMP_DTYPE must be off or bf16; got ${AMP_DTYPE}" >&2
+    exit 2
+    ;;
+esac
+case "${TF32}" in
+  True | true | 1) TF32=True ;;
+  False | false | 0) TF32=False ;;
+  *)
+    echo "HDP_RL_TF32 must be True or False; got ${TF32}" >&2
+    exit 2
+    ;;
+esac
 TRAIN_SCOPE=${HDP_RL_TRAIN_SCOPE:-decoder}
 ENCODER_DROP_PATH_RATE=${HDP_RL_ENCODER_DROP_PATH_RATE:-0.1}
 DECODER_DROP_PATH_RATE=${HDP_RL_DECODER_DROP_PATH_RATE:-0.1}
@@ -129,6 +182,114 @@ USE_WANDB=${HDP_RL_USE_WANDB:-True}
 WANDB_PROJECT=${HDP_RL_WANDB_PROJECT:-hdp-rl}
 WANDB_RUN_ID=${HDP_RL_WANDB_RUN_ID:-}
 STEP_LOG_INTERVAL=${HDP_RL_STEP_LOG_INTERVAL:-100}
+PLANNING_HYBRID_LOSS=${HDP_RL_PLANNING_HYBRID_LOSS:-0.01}
+HYBRID_LOSS_WINDOW=${HDP_RL_HYBRID_LOSS_WINDOW:-10}
+
+# ── Published HDP-RL configuration ──────────────────────────────────────────
+# HDP_RL_PAPER_EXACT=True reproduces the paper's RL post-training exactly: every
+# knob below is replaced by its published value, and the trainer then refuses to
+# start if anything still contradicts the paper (docs/hdp_rl_paper_fidelity.md).
+# An env var you set yourself is never silently overwritten -- it is passed
+# through so the trainer can name the conflict together with its citation.
+PAPER_EXACT=${HDP_RL_PAPER_EXACT:-False}
+PAPER_REWARD=${HDP_RL_PAPER_REWARD:-multi}
+
+paper_pin() { # paper_pin <shell-var> <env-var> <published-value>
+  local var=$1 env=$2 value=$3
+  if [[ -n "${!env+set}" ]]; then
+    echo "paper-exact: keeping explicit ${env}=${!env} (published ${value});" \
+      "the trainer rejects it if it conflicts"
+  else
+    printf -v "${var}" '%s' "${value}"
+  fi
+}
+
+case "${PAPER_EXACT}" in
+  True | true | 1)
+    PAPER_EXACT=True
+    case "${PAPER_REWARD}" in
+      multi) # neurips_2026.tex app:rewards, multi-reward setting
+        paper_pin REWARD_W_SAFETY HDP_RL_REWARD_W_SAFETY 0.0
+        paper_pin REWARD_W_RISK HDP_RL_REWARD_W_RISK 1.0
+        paper_pin REWARD_W_FOLLOW HDP_RL_REWARD_W_FOLLOW 3.0
+        paper_pin REWARD_W_LANE HDP_RL_REWARD_W_LANE 2.5
+        ;;
+      single) # neurips_2026.tex app:rewards, r_safety alone (HDP-RL dagger)
+        paper_pin REWARD_W_SAFETY HDP_RL_REWARD_W_SAFETY 1.0
+        paper_pin REWARD_W_RISK HDP_RL_REWARD_W_RISK 0.0
+        paper_pin REWARD_W_FOLLOW HDP_RL_REWARD_W_FOLLOW 0.0
+        paper_pin REWARD_W_LANE HDP_RL_REWARD_W_LANE 0.0
+        ;;
+      *)
+        echo "HDP_RL_PAPER_REWARD must be multi or single; got ${PAPER_REWARD}" >&2
+        exit 2
+        ;;
+    esac
+    # Table 3 and the RL-hybrid loss of Eq. (awr_hybrid).
+    paper_pin NUM_GENERATIONS HDP_RL_NUM_GENERATIONS 32
+    paper_pin REWARD_BETA HDP_RL_REWARD_BETA 1.0
+    paper_pin EMA_UPDATE_RATE HDP_RL_EMA_UPDATE_RATE 0.05
+    # omega and W are deliberately NOT pinned here. They are the geometry of the
+    # norm the frozen IL base was fitted in, IL is never retrained, and the trainer
+    # inherits them from the base checkpoint's args.json. The published pair
+    # (0.1, L-1) is reachable only through HDP_RL_HYBRID_ABLATION=True, which
+    # stamps the run as an ablation arm.
+    # The published reward: a plain weighted sum of the four appendix terms.
+    paper_pin REWARD_SOURCE HDP_RL_REWARD_SOURCE native
+    paper_pin REWARD_AGGREGATION HDP_RL_REWARD_AGGREGATION weighted_sum
+    paper_pin BEHAVIOR_GATE HDP_RL_BEHAVIOR_GATE none
+    paper_pin REWARD_W_PROGRESS HDP_RL_REWARD_W_PROGRESS 0.0
+    paper_pin REWARD_W_ROAD_BORDER HDP_RL_REWARD_W_ROAD_BORDER 0.0
+    paper_pin RED_LIGHT_CONSTRAINT HDP_RL_RED_LIGHT_CONSTRAINT False
+    paper_pin OCCUPANCY_USE_ROAD_BORDER HDP_RL_OCCUPANCY_USE_ROAD_BORDER False
+    paper_pin REWARD_HORIZON_STEPS HDP_RL_REWARD_HORIZON_STEPS 0
+    paper_pin CANDIDATE_LOSS_HORIZON HDP_RL_CANDIDATE_LOSS_HORIZON 0
+    # The released rollout / replay schedule.
+    paper_pin ROLLOUT_STEPS HDP_RL_ROLLOUT_STEPS 5
+    paper_pin ROLLOUT_INTERVAL HDP_RL_ROLLOUT_INTERVAL 10
+    paper_pin UPDATES_PER_ROLLOUT HDP_RL_UPDATES_PER_ROLLOUT 1
+    paper_pin NOISE_SCALE HDP_RL_NOISE_SCALE 1.0
+    # Real-vehicle extensions of this repository, off.
+    paper_pin BC_WEIGHT HDP_RL_BC_WEIGHT 0.0
+    paper_pin CANDIDATE_AUG_PROB HDP_RL_CANDIDATE_AUG_PROB 0.0
+    paper_pin DIFFUSION_T_MIN HDP_RL_DIFFUSION_T_MIN 0.0
+    paper_pin DIFFUSION_T_MAX HDP_RL_DIFFUSION_T_MAX 1.0
+    ;;
+  False | false | 0)
+    PAPER_EXACT=False
+    ;;
+  *)
+    echo "HDP_RL_PAPER_EXACT must be True or False; got ${PAPER_EXACT}" >&2
+    exit 2
+    ;;
+esac
+
+case "${HYBRID_ABLATION}" in
+  True | true | 1) HYBRID_ABLATION=True ;;
+  False | false | 0) HYBRID_ABLATION=False ;;
+  *)
+    echo "HDP_RL_HYBRID_ABLATION must be True or False; got ${HYBRID_ABLATION}" >&2
+    exit 2
+    ;;
+esac
+
+# omega and W are inherited from the IL base under --rl_paper_exact, so the
+# launcher must not hand the trainer its own defaults: argparse cannot tell a
+# default apart from a deliberate flag, and 0.01 / 10 would arrive as an explicit
+# override and be rejected against any base not fitted at that pair. They are
+# passed only when the operator set them, or when this is an ablation arm.
+HYBRID_ARGS=()
+hybrid_arg() { # hybrid_arg <flag> <env-var> <value>
+  local flag=$1 env=$2 value=$3
+  if [[ "${PAPER_EXACT}" == "True" && "${HYBRID_ABLATION}" != "True" && -z "${!env+set}" ]]; then
+    echo "paper-exact: ${flag} inherited from the IL base checkpoint's args.json"
+    return
+  fi
+  HYBRID_ARGS+=("${flag}" "${value}")
+}
+hybrid_arg --planning_hybrid_loss HDP_RL_PLANNING_HYBRID_LOSS "${PLANNING_HYBRID_LOSS}"
+hybrid_arg --hybrid_loss_window HDP_RL_HYBRID_LOSS_WINDOW "${HYBRID_LOSS_WINDOW}"
+
 RUN_NAME=${HDP_RL_RUN_NAME:-hdp_rl_${WORLD_SIZE}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
 SAVE_ROOT=${HDP_RL_SAVE_ROOT:-${REPO}/outputs}
 for gate_name in "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}"; do
@@ -241,10 +402,15 @@ PYTHON_ENV_FINGERPRINT=$(
     'import numpy, torch; print(torch.__version__, torch.version.cuda, torch.cuda.nccl.version(), numpy.__version__)'
 )
 PROVENANCE_PATH=${SAVE_DIR}/run_provenance.json
+# Numerics belong in the provenance record. Nothing else here would catch resuming a
+# bf16 run with --amp_dtype off: the checkpoint loads fine and the mixed-precision
+# history is then silently baked into the artifact. A partial migration is worse than
+# no migration, so this is fail-closed like the tree and data fingerprints.
+PRECISION_FINGERPRINT="amp=${AMP_DTYPE} tf32=${TF32}"
 "${REPO}/.venv/bin/python" - \
   "${PROVENANCE_PATH}" "${VERIFY_MODE}" "${EXPECTED_COMMIT_FULL}" "${EXPECTED_TREE}" \
-  "${DATA_FINGERPRINT}" "${PYTHON_ENV_FINGERPRINT}" "${SOURCE_CKPT}" \
-  "${SOURCE_CKPT_SHA256}" "${data_paths[@]}" <<'PY'
+  "${DATA_FINGERPRINT}" "${PYTHON_ENV_FINGERPRINT}" "${PRECISION_FINGERPRINT}" \
+  "${SOURCE_CKPT}" "${SOURCE_CKPT_SHA256}" "${data_paths[@]}" <<'PY'
 import json
 import os
 import pathlib
@@ -257,6 +423,7 @@ import sys
     tree,
     data_fingerprint,
     python_environment,
+    precision,
     source_checkpoint,
     source_checkpoint_sha256,
     *data_paths,
@@ -268,12 +435,19 @@ current = {
     "code_tree": tree,
     "data_fingerprint": data_fingerprint,
     "python_environment": python_environment,
+    "precision": precision,
     "data_paths": data_paths,
 }
 if path.exists():
     with path.open(encoding="utf-8") as f:
         recorded = json.load(f)
     checked = ("code_tree", "data_fingerprint", "python_environment")
+    # "precision" postdates the runs already on disk. Compare it only when the record
+    # carries it: a missing key is a gap in the record, not evidence of a match, and
+    # refusing to resume every pre-existing run would be a worse failure than the one
+    # this guard exists to catch.
+    if "precision" in recorded:
+        checked += ("precision",)
     mismatches = {
         key: {"recorded": recorded.get(key), "current": current[key]}
         for key in checked
@@ -308,7 +482,14 @@ if [[ "${VERIFY_MODE}" == resume ]]; then
   trap 'rm -f "${VERIFY_SOURCE_CKPT}"' EXIT
 fi
 
-export HOME=/home/ubuntu
+export HOME=${HDP_JOB_HOME:-${REPO}/home}
+export NETRC=${HOME}/.netrc
+mkdir -p "${HOME}"
+if [[ ! -r "${NETRC}" ]]; then
+  echo "FATAL: W&B credentials are not readable at ${NETRC}. Provision that file for" >&2
+  echo "       $(id -un), or point HDP_JOB_HOME at a directory that has one." >&2
+  exit 13
+fi
 export TMPDIR=${REPO}/tmp
 export XDG_CACHE_HOME=${REPO}/cache
 export TORCHINDUCTOR_CACHE_DIR=${REPO}/cache/torchinductor
@@ -383,6 +564,12 @@ TRAIN_ARGS=(
   "${EXTRA_ARGS[@]}" \
   --align_legacy_neighbor_futures False \
   --normalization_file_path "${REPO}/diffusion_planner/normalization.json" \
+  --use_data_augment "${USE_DATA_AUGMENT}" \
+  --augment_type "${AUGMENT_TYPE}" \
+  --augment_prob "${AUGMENT_PROB}" \
+  --num_refine "${NUM_REFINE}" \
+  --ego_past_noise_std "${EGO_PAST_NOISE_STD}" \
+  --use_smoothing_future_trajectory "${USE_SMOOTHING_FUTURE_TRAJECTORY}" \
   --num_workers "${NUM_WORKERS}" \
   --train_subsample_step "${TRAIN_SUBSAMPLE_STEP}" \
   --batch_size "${BATCH_SIZE}" \
@@ -448,7 +635,6 @@ TRAIN_ARGS=(
   --rl_candidate_loss_horizon "${CANDIDATE_LOSS_HORIZON}" \
   --rl_diffusion_t_min "${DIFFUSION_T_MIN}" \
   --rl_diffusion_t_max "${DIFFUSION_T_MAX}" \
-  --rl_first_waypoint_gate "${FIRST_WAYPOINT_GATE}" \
   --rl_selection_metric "${SELECTION_METRIC}" \
   --rl_eval_deterministic "${EVAL_DETERMINISTIC}" \
   --rl_rollout_interval "${ROLLOUT_INTERVAL}" \
@@ -466,7 +652,6 @@ TRAIN_ARGS=(
   --rl_init_use_ema True \
   --rl_train_scope "${TRAIN_SCOPE}" \
   "${CKPT_ARGS[@]}" \
-  --use_data_augment False \
   --enable_epdms_eval True \
   --epdms_eval_use_agent_boxes True \
   --epdms_eval_use_road_border True \
@@ -481,14 +666,17 @@ TRAIN_ARGS=(
   --num_heads 8 \
   --diffusion_sample_steps 6 \
   --use_velocity_representation True \
-  --planning_hybrid_loss 0.01 \
-  --hybrid_loss_window 10 \
+  "${HYBRID_ARGS[@]}" \
+  --rl_paper_exact "${PAPER_EXACT}" \
+  --rl_paper_reward "${PAPER_REWARD}" \
+  --rl_hybrid_ablation "${HYBRID_ABLATION}" \
+  --rl_base_corpus_check "${BASE_CORPUS_CHECK}" \
   --coeff_road_border_loss 0.0 \
   --coeff_neighbor_collision_loss 0.0 \
   --use_ema True \
   --ddp True \
-  --tf32 True \
-  --amp_dtype bf16 \
+  --tf32 "${TF32}" \
+  --amp_dtype "${AMP_DTYPE}" \
   --fused_optimizer True \
   --ddp_static_graph True \
   --compile_model "${COMPILE_MODEL}" \

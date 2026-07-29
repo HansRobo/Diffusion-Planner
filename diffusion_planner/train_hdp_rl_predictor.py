@@ -34,8 +34,18 @@ from diffusion_planner.hdp_rl_epoch import (
     train_hdp_rl_epoch,
     validate_hdp_reward_policy,
 )
+from diffusion_planner.hdp_rl_paper_exact import (
+    HYBRID_FIELDS,
+    PAPER_REWARD_VARIANTS,
+    apply_frozen_base_hybrid,
+    apply_paper_exact_settings,
+    assert_base_corpus_identical,
+    assert_paper_exact,
+    explicit_paper_exact_dests,
+)
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import (
+    _checkpoint_args_path,
     assert_checkpoint_compatible,
     closed_loop_validate,
     load_weights_only,
@@ -235,7 +245,7 @@ def _checkpoint_bool(path: str, key: str, default: bool) -> bool:
     return bool(value)
 
 
-def get_args():
+def get_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="HDP RL training")
     parser.add_argument("--exp_name", type=str, required=True)
     parser.add_argument("--save_dir", type=str, help="save path for model ckpt", required=True)
@@ -783,46 +793,36 @@ def get_args():
         help="skip augmentation below this ego speed",
     )
     parser.add_argument(
-        "--rl_first_waypoint_gate",
+        "--rl_paper_exact",
         type=boolean,
-        default=_train_config_default("rl_first_waypoint_gate"),
-        help="reject low-speed candidates whose first waypoint jumps from the current pose",
+        default=_train_config_default("rl_paper_exact"),
+        help="pin every RL knob to the published HDP-RL configuration and reject "
+        "contradicting overrides; see docs/hdp_rl_paper_fidelity.md",
     )
     parser.add_argument(
-        "--rl_first_waypoint_gate_speed_max_mps",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_speed_max_mps"),
-        help="gate applies only below this ego speed",
+        "--rl_paper_reward",
+        type=str,
+        choices=list(PAPER_REWARD_VARIANTS),
+        default=_train_config_default("rl_paper_reward"),
+        help="published reward setting selected by --rl_paper_exact: 'multi' = "
+        "lambda_risk r_risk + lambda_follow r_follow + lambda_lane r_lane, "
+        "'single' = r_safety alone",
     )
     parser.add_argument(
-        "--rl_first_waypoint_gate_max_step_m",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_max_step_m"),
-        help="maximum first-step displacement at low speed",
+        "--rl_hybrid_ablation",
+        type=boolean,
+        default=_train_config_default("rl_hybrid_ablation"),
+        help="release --planning_hybrid_loss / --hybrid_loss_window from the frozen IL "
+        "base's values and stamp the run as an omega/W ablation arm; the published "
+        "pair is only reachable this way because IL is never retrained",
     )
     parser.add_argument(
-        "--rl_first_waypoint_gate_max_lateral_m",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_max_lateral_m"),
-        help="maximum first-step lateral offset at low speed",
-    )
-    parser.add_argument(
-        "--rl_first_waypoint_gate_max_backward_m",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_max_backward_m"),
-        help="maximum first-step reverse displacement at low speed",
-    )
-    parser.add_argument(
-        "--rl_first_waypoint_gate_max_tangent_deg",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_max_tangent_deg"),
-        help="maximum first-step off-tangent angle when the step is measurable",
-    )
-    parser.add_argument(
-        "--rl_first_waypoint_gate_tangent_min_step_m",
-        type=float,
-        default=_train_config_default("rl_first_waypoint_gate_tangent_min_step_m"),
-        help="tangent test applies only above this displacement (5 cm floor is mandatory)",
+        "--rl_base_corpus_check",
+        type=boolean,
+        default=_train_config_default("rl_base_corpus_check"),
+        help="under --rl_paper_exact, require the corpus and the input perturbation to "
+        "be the ones the frozen IL base was trained on; set False only to post-train "
+        "on a deliberately different distribution",
     )
     parser.add_argument(
         "--rl_reward_normalize",
@@ -1080,14 +1080,47 @@ def get_args():
     parser.add_argument("--closed_loop_unstick_after", type=int, default=300)
     parser.add_argument("--closed_loop_unstick_advance_m", type=float, default=2.5)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     # This metadata is an invariant of the model, not a command-line mode.
     args.policy_uses_turn_indicator_history = False
     args.turn_indicator_output_dim = TURN_INDICATOR_OUTPUT_DIM
+    # Pin the published configuration before any validation runs, so every bound check
+    # below sees the values the run will actually train with.
+    args.rl_paper_exact_changes = []
+    if args.rl_paper_exact:
+        args.rl_paper_exact_changes = apply_paper_exact_settings(
+            args,
+            args.rl_paper_reward,
+            explicit_paper_exact_dests(parser, argv),
+        )
+        assert_paper_exact(args, args.rl_paper_reward)
     if args.resume_model_path is not None and args.init_weights_path is not None:
         raise ValueError("--resume_model_path and --init_weights_path are mutually exclusive")
     if args.resume_model_path is None and args.init_weights_path is None:
         raise ValueError("HDP-RL requires --init_weights_path or --resume_model_path")
+    if args.rl_paper_exact:
+        # omega and W are the geometry of the norm the frozen IL base was fitted in,
+        # and IL is never retrained, so they are inherited from that base rather than
+        # pinned to Table 3. This runs after the mutual-exclusion checks above so the
+        # checkpoint it reads is unambiguous.
+        base_path = args.init_weights_path or args.resume_model_path
+        base_args_path = _checkpoint_args_path(base_path)
+        base_args = None
+        if base_args_path is not None:
+            with open(base_args_path, "r", encoding="utf-8") as handle:
+                base_args = json.load(handle)
+        base_label = str(base_args_path) if base_args_path is not None else base_path
+        args.rl_paper_exact_changes += apply_frozen_base_hybrid(
+            args,
+            base_args,
+            base_label,
+            explicit_paper_exact_dests(parser, argv, fields=HYBRID_FIELDS),
+            ablation=args.rl_hybrid_ablation,
+        )
+        # A resume compares against its own args.json, where the corpus is by
+        # construction the one this check already passed on the fresh run.
+        if args.rl_base_corpus_check and base_args is not None and args.init_weights_path:
+            assert_base_corpus_identical(args, base_args, base_label)
     if args.train_subsample_step < 1:
         raise ValueError("--train_subsample_step must be >= 1")
     if args.extra_train_set_repeat < 0:
@@ -1254,17 +1287,6 @@ def get_args():
         )
     if not 0.0 <= args.rl_diffusion_t_min < args.rl_diffusion_t_max <= 1.0:
         raise ValueError("--rl_diffusion_t_min/--rl_diffusion_t_max must satisfy 0 <= lo < hi <= 1")
-    for gate_name in (
-        "rl_first_waypoint_gate_speed_max_mps",
-        "rl_first_waypoint_gate_max_step_m",
-        "rl_first_waypoint_gate_max_lateral_m",
-        "rl_first_waypoint_gate_max_backward_m",
-        "rl_first_waypoint_gate_max_tangent_deg",
-        "rl_first_waypoint_gate_tangent_min_step_m",
-    ):
-        gate_value = float(getattr(args, gate_name))
-        if not math.isfinite(gate_value) or gate_value <= 0.0:
-            raise ValueError(f"--{gate_name} must be finite and positive")
     if args.rl_selection_metric == "deterministic" and not args.rl_eval_deterministic:
         raise ValueError(
             "--rl_selection_metric deterministic requires --rl_eval_deterministic true"
@@ -1503,8 +1525,6 @@ def turn_indicator_metrics(agg):
             "turn_indicator_active_recall",
             "turn_indicator_active_f1",
             "turn_indicator_direction_accuracy",
-            "turn_indicator_nll",
-            "turn_indicator_ece",
         )
     } | {
         **{
@@ -1577,6 +1597,22 @@ def model_training(args):
 
     if global_rank == 0:
         print("------------- {} -------------".format(args.exp_name))
+        if args.rl_paper_exact:
+            # Print the full pin table so the log itself is the fidelity record: every
+            # field the published configuration overrode, with its previous value.
+            print("HDP-RL paper-exact mode: ON (reward variant: {})".format(args.rl_paper_reward))
+            if args.rl_hybrid_ablation:
+                print(
+                    "  omega/W ablation arm: planning_hybrid_loss={} hybrid_loss_window={} "
+                    "(released from the frozen IL base on purpose)".format(
+                        args.planning_hybrid_loss, args.hybrid_loss_window
+                    )
+                )
+            if args.rl_paper_exact_changes:
+                for change in args.rl_paper_exact_changes:
+                    print("  paper-exact pin: {}".format(change))
+            else:
+                print("  paper-exact pin: none (every controlled field already matched)")
         print("Scenes per step (batch_size): {}".format(args.batch_size))
         print("Validation batch size: {}".format(args.valid_batch_size))
         print("Group size (num_generations): {}".format(args.num_generations))

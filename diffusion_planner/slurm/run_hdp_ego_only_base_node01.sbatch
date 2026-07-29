@@ -14,6 +14,15 @@
 
 set -euo pipefail
 
+# Slurm runs these jobs as a dedicated account; every path below is provisioned for it.
+# Running as anyone else silently produces unreadable credentials and unwritable outputs,
+# so fail immediately and say so instead of dying deep inside training.
+REQUIRED_USER=${HDP_REQUIRED_USER:-wang}
+if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
+  echo "FATAL: this job must run as ${REQUIRED_USER}, got $(id -un)" >&2
+  exit 20
+fi
+
 REPO=/mnt/nvme/wangbin/Diffusion-Planner-hyper-diffusion-planner
 RUN_NAME=hdp_ego_only_route_adaln_base60_causal_red_light_v2_fullrt_x10_recoveryaug_adamw_nodecay_node01_8gpu_bf16_bs512
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
@@ -97,7 +106,14 @@ while [[ -n "$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits
 done
 sleep 30
 
-export HOME=/home/ubuntu
+export HOME=${HDP_JOB_HOME:-${REPO}/home}
+export NETRC=${HOME}/.netrc
+mkdir -p "${HOME}"
+if [[ ! -r "${NETRC}" ]]; then
+  echo "FATAL: W&B credentials are not readable at ${NETRC}. Provision that file for" >&2
+  echo "       $(id -un), or point HDP_JOB_HOME at a directory that has one." >&2
+  exit 13
+fi
 export TMPDIR=${REPO}/tmp
 export XDG_CACHE_HOME=${REPO}/cache
 export TORCHINDUCTOR_CACHE_DIR=${REPO}/cache/torchinductor

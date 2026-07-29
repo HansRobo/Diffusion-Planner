@@ -24,7 +24,6 @@ from diffusion_planner.hdp_rl_utils import (
     compute_reward_weights,
     distributed_valid_sample_count,
     expand_batch,
-    first_waypoint_candidate_gate,
     sample_group,
 )
 from diffusion_planner.loss import sample_diffusion_time
@@ -588,13 +587,6 @@ def _hdp_rl_step(
     if not torch.isfinite(reward).all():
         raise FloatingPointError("Non-finite HDP reward returned for RL rollout")
     reward_metrics.update(candidate_aug_metrics)
-    # The reward is blind to near-field continuity, so a dynamically infeasible
-    # standstill-jump candidate can otherwise win the group advantage. Rejected
-    # candidates are excluded from both the group statistics and the weights.
-    gate_mask, gate_metrics = first_waypoint_candidate_gate(
-        ego_world, ego_speed, num_scenes, n, args
-    )
-    reward_metrics.update(gate_metrics)
     if timing_events is not None:
         timing_events[2].record()
 
@@ -606,7 +598,6 @@ def _hdp_rl_step(
         getattr(args, "rl_reward_beta", 0.5),
         args.advantage_eps,
         use_ddp=bool(getattr(args, "ddp", False)),
-        candidate_valid_mask=gate_mask,
     )
     global_valid_count, ddp_world_size = distributed_valid_sample_count(
         valid_sample,
@@ -797,10 +788,6 @@ def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, rollout_generator
     if not torch.isfinite(reward).all():
         raise FloatingPointError("Non-finite HDP reward returned while mining replay")
     reward_metrics.update(aug_metrics)
-    gate_mask, gate_metrics = first_waypoint_candidate_gate(
-        ego_world, ego_speed, num_scenes, n, args
-    )
-    reward_metrics.update(gate_metrics)
     reward_weights, valid_sample = compute_reward_weights(
         reward,
         num_scenes,
@@ -809,7 +796,6 @@ def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, rollout_generator
         getattr(args, "rl_reward_beta", 0.5),
         args.advantage_eps,
         use_ddp=bool(getattr(args, "ddp", False)),
-        candidate_valid_mask=gate_mask,
     )
     shard = {
         "ego_world": ego_world,
@@ -877,13 +863,18 @@ def _train_cycle_epoch(data_loader, model, optimizer, trainable_params, args, em
         cycle_index,
         cycle_is_replayable,
         is_mine_epoch,
+        relay_epoch,
     )
 
     interval = int(args.rl_rollout_interval)
     replay_root = args.rl_replay_dir
     rank = ddp.get_rank()
     device = torch.device(args.device)
-    cycle = cycle_index(epoch, interval)
+    # The relay is numbered from one; `epoch` is the training loop's zero-based
+    # counter. Without the shift the first epoch of a fresh run asks for cycle -1
+    # and is treated as a replay epoch, so it dies on a cache nothing mined.
+    cycle_epoch = relay_epoch(epoch)
+    cycle = cycle_index(cycle_epoch, interval)
     epoch_loss_sums: dict = {}
     epoch_loss_counts: dict = {}
     model.train()
@@ -897,7 +888,9 @@ def _train_cycle_epoch(data_loader, model, optimizer, trainable_params, args, em
     # steps, so replaying a finalized cache costs nothing scientifically and saves
     # the whole rollout pass. Decide collectively: a rank that mines while its peers
     # replay never reaches the finalize barrier.
-    mine_epoch = is_mine_epoch(epoch, interval)
+    # The test takes the relay-shifted epoch: on the trainer's zero-based counter a
+    # fresh run's epoch 0 reads as a replay epoch and dies on a cache nothing mined.
+    mine_epoch = is_mine_epoch(cycle_epoch, interval)
     if mine_epoch:
         replayable = cycle_is_replayable(replay_root, cycle, rank, args)
         if bool(getattr(args, "ddp", False)):

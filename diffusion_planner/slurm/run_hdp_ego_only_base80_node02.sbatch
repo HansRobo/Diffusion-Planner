@@ -20,6 +20,15 @@
 
 set -euo pipefail
 
+# Slurm runs these jobs as a dedicated account; every path below is provisioned for it.
+# Running as anyone else silently produces unreadable credentials and unwritable outputs,
+# so fail immediately and say so instead of dying deep inside training.
+REQUIRED_USER=${HDP_REQUIRED_USER:-wang}
+if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
+  echo "FATAL: this job must run as ${REQUIRED_USER}, got $(id -un)" >&2
+  exit 20
+fi
+
 REPO=${HDP_REPO:-/mnt/nvme/Diffusion-Planner-hdp-node02-current}
 RUN_NAME=${HDP_RUN_NAME:-hdp_ego_only_route_adaln_base80_data_robust_v1_vehicle_params_mirror_rightturnx10_node02_8gpu_bf16_bs512_no_roadborder}
 SAVE_DIR=${REPO}/outputs/${RUN_NAME}
@@ -122,8 +131,17 @@ log_health "train_list=${TRAIN_LIST} valid_list=${VALID_LIST}"
 log_health "right_turn_lists=${EXTRA_X2},${EXTRA_XX1},${EXTRA_PSIM} repeat=10"
 log_health "train_bytes=$(stat -c %s "${TRAIN_LIST}") valid_bytes=$(stat -c %s "${VALID_LIST}")"
 
-export HOME=${REPO}/home
+export HOME=${HDP_JOB_HOME:-${REPO}/home}
 export NETRC=${HOME}/.netrc
+mkdir -p "${HOME}"
+# Fail loudly on unreadable credentials instead of depending on a world-readable
+# .netrc: the file must be owned by the job account (mode 600), and a permission
+# regression has to stop the launch rather than be papered over by "other" bits.
+if [[ ! -r "${NETRC}" ]]; then
+  echo "FATAL: W&B credentials are not readable at ${NETRC}. Provision that file for" >&2
+  echo "       $(id -un), or point HDP_JOB_HOME at a directory that has one." >&2
+  exit 13
+fi
 export CUDA_HOME=/usr/local/cuda
 export PATH=${CUDA_HOME}/bin:/usr/local/cuda-12.8/bin:${PATH}
 export XDG_CONFIG_HOME=${REPO}/config
@@ -149,7 +167,9 @@ log_health "python=${PYTHON}"
 log_health "nvcc=$(command -v nvcc || echo MISSING)"
 if [[ ! -x "${PYTHON}" || ! -x "${CUDA_HOME}/bin/nvcc" ]]; then
   log_health "FATAL: Python or CUDA compiler is unavailable"
-  exit 13
+  # 13 is reserved for the credential guard above, so the exit code alone
+  # identifies which precondition failed.
+  exit 14
 fi
 
 cd "${REPO}/diffusion_planner"

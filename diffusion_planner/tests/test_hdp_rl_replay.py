@@ -1,15 +1,18 @@
 """Tests for the 100-epoch mine/replay relay state machine."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
 import torch
 from diffusion_planner.hdp_rl_replay import (
+    _META,
     CycleReplayReader,
     CycleReplayWriter,
     cleanup_previous_cycle,
     cycle_index,
     is_mine_epoch,
+    relay_epoch,
 )
 
 from diffusion_planner import hdp_rl_epoch
@@ -31,7 +34,6 @@ def _args(**overrides):
         rl_reward_w_road_border=0.0,
         rl_behavior_gate="safety",
         rl_pdm_red_light_gate=True,
-        rl_first_waypoint_gate=True,
         rl_candidate_aug_prob=0.0,
         rl_candidate_aug_std=0.5,
         rl_candidate_aug_stretch=0.0,
@@ -63,6 +65,22 @@ def test_relay_schedule_is_ten_cycles_of_ten():
     assert cycle_index(100, 10) == 9  # the last replay epoch trains cycle 9's cache
 
 
+def test_trainer_epoch_zero_mines_cycle_zero():
+    """The training loop counts from zero; the relay is numbered from one.
+
+    Without the shift, a fresh run's first epoch resolves to cycle -1 and reads as
+    a replay epoch, so it aborts on a cache that no mining pass ever wrote.
+    """
+    assert is_mine_epoch(relay_epoch(0), 10)
+    assert cycle_index(relay_epoch(0), 10) == 0
+    assert not is_mine_epoch(relay_epoch(1), 10)
+    assert cycle_index(relay_epoch(9), 10) == 0
+    assert is_mine_epoch(relay_epoch(10), 10)
+    assert cycle_index(relay_epoch(10), 10) == 1
+    trainer_mine_epochs = [e for e in range(100) if is_mine_epoch(relay_epoch(e), 10)]
+    assert trainer_mine_epochs == [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
+
+
 def test_writer_reader_roundtrip_preserves_frozen_weights(tmp_path):
     args = _args()
     writer = CycleReplayWriter(tmp_path, cycle=0, rank=0, args=args)
@@ -76,6 +94,23 @@ def test_writer_reader_roundtrip_preserves_frozen_weights(tmp_path):
     torch.testing.assert_close(loaded["reward_weights"], shard["reward_weights"])
     torch.testing.assert_close(loaded["ego_world"], shard["ego_world"])
     assert loaded["valid_sample"].dtype in (torch.bool, torch.float32)
+
+
+def test_fingerprint_keeps_the_retired_first_waypoint_gate_field(tmp_path):
+    """A cache mined before `rl_first_waypoint_gate` was deleted must still load.
+
+    Every cache ever mined carries the field (it was False in all 32 runs), so
+    dropping it from the fingerprint would turn 'False' into 'None' and abort the
+    resume of an otherwise-valid multi-terabyte cycle instead of reading it.
+    """
+    args = _args()
+    assert not hasattr(args, "rl_first_waypoint_gate")
+    writer = CycleReplayWriter(tmp_path, cycle=0, rank=0, args=args)
+    writer.append(_shard())
+    writer.finalize(use_ddp=False)
+    meta = json.loads((tmp_path / "cycle_000" / _META).read_text())
+    assert meta["fingerprint"]["rl_first_waypoint_gate"] == repr(False)
+    CycleReplayReader(tmp_path, cycle=0, rank=0, args=args)  # must not raise
 
 
 def test_reader_fails_closed_on_contract_mismatch(tmp_path):

@@ -87,7 +87,15 @@ def load_weights_only(path: str, model, device, *, prefer_ema: bool = False):
     removed_signal_prefix = f"{root}encoder.turn_indicator_encoder."
     head_prefix = f"{root}decoder.turn_indicator_predictor."
     removed_signal_keys = [key for key in state if key.startswith(removed_signal_prefix)]
-    head_shape_mismatch = any(
+    # The intent head is reinitialized as one unit whenever its tensor contract differs
+    # from the checkpoint's, which covers BOTH a shape change and a change in the key
+    # set. Keying off shapes alone was not enough: a head restructured at constant
+    # widths (e.g. scene_attention -> attention_layers.0 at num_queries=1) leaves every
+    # shared shape intact, so the mismatch went undetected and the load died on
+    # disallowed missing/unexpected keys instead of migrating.
+    checkpoint_head_keys = {key for key in state if key.startswith(head_prefix)}
+    model_head_keys = {key for key in model_state if key.startswith(head_prefix)}
+    head_shape_mismatch = checkpoint_head_keys != model_head_keys or any(
         key.startswith(head_prefix)
         and key in model_state
         and tuple(value.shape) != tuple(model_state[key].shape)
@@ -156,8 +164,6 @@ def _turn_indicator_validation_metrics(agg: dict) -> tuple[float | None, dict, d
         "turn_indicator_active_recall",
         "turn_indicator_active_f1",
         "turn_indicator_direction_accuracy",
-        "turn_indicator_nll",
-        "turn_indicator_ece",
     )
     metrics = {
         f"valid_turn_indicator/{key.removeprefix('turn_indicator_')}": agg[key]
@@ -418,12 +424,6 @@ def assert_checkpoint_compatible(
             "turn_indicator_expert_loss_weight",
             "supervised_training_stage",
             "turn_indicator_head_training_mode",
-            "turn_indicator_opposite_direction_weight",
-            "turn_indicator_implied_intent_smoothing",
-            "turn_indicator_implied_intent_min_yaw_deg",
-            "turn_indicator_implied_intent_full_yaw_deg",
-            "turn_indicator_implied_intent_min_lateral_m",
-            "turn_indicator_implied_intent_full_lateral_m",
             "use_ema",
             "amp_dtype",
             "tf32",
@@ -498,24 +498,8 @@ def assert_checkpoint_compatible(
             "rl_road_border_critical_m",
             "rl_road_border_safe_m",
         )
-        # The cost-sensitive intent-objective fields postdate the first head checkpoints.
-        # A checkpoint written before them was trained at the documented legacy setting
-        # (both weights 0.0), so absence is meaningful rather than corrupt; an explicit
-        # value must still match exactly.
-        objective_migration_fields = {
-            "turn_indicator_opposite_direction_weight",
-            "turn_indicator_implied_intent_smoothing",
-            "turn_indicator_implied_intent_min_yaw_deg",
-            "turn_indicator_implied_intent_full_yaw_deg",
-            "turn_indicator_implied_intent_min_lateral_m",
-            "turn_indicator_implied_intent_full_lateral_m",
-        }
         missing_training_fields = [
-            field
-            for field in training_fields
-            if hasattr(args, field)
-            and field not in ckpt_args
-            and field not in objective_migration_fields
+            field for field in training_fields if hasattr(args, field) and field not in ckpt_args
         ]
         if missing_training_fields:
             raise RuntimeError(
