@@ -1995,10 +1995,17 @@ def test_shared_expert_anchor_contract_binds_data_reward_and_geometry(
     assert contract["scene_count"] == 2
     assert contract["future_len"] == 4
     assert contract["expert_anchor_schema"] == "logged_ego_future_hard_gate_v1"
+    # The gate-step array is created unconditionally alongside the anchor, so a
+    # buffer written by a producer that does not supply gate steps (as this
+    # rollout does not) still carries it, zero-filled.  Zero means "gates at the
+    # executed waypoint", which no horizon can clear, so the omission degrades
+    # to the un-scoped verdict instead of resurrecting rows -- see
+    # ``test_awr_loss_horizons.py`` for that inertness proof.
     assert set(contract["array_paths"]) == {
         "expert_trajectories",
         "expert_rewards",
         "expert_safe",
+        train_awr_module._REPLAY_EXPERT_GATE_STEP_ARRAY,
     }
 
     changed_reward = copy.copy(reward_config)
