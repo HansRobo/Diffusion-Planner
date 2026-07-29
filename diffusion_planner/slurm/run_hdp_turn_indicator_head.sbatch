@@ -105,18 +105,17 @@ PYTHON=${SOURCE_REPO}/.venv/bin/python
 PORT=${HDP_MASTER_PORT:-22671}
 MAX_ATTEMPTS=${HDP_MAX_ATTEMPTS:-3}
 
-# Rank count follows the allocation so two 4-GPU arms can share node01. batch_size is
+# Rank count follows the allocation so two 4-GPU arms can share one node. batch_size is
 # GLOBAL: train.py:853 sets local_batch_size = batch_size // world_size, so two arms at
 # the same batch_size carry no learning-rate confound whatever rank count they run at.
 #
-# The LOCAL batch is not a free variable, though. Job 1533 (8 ranks, local 64) validated
-# all 91 batches finite, while jobs 1538 and 1539 (4 ranks, local 128, args.json
-# otherwise byte-identical) both died in the pre-training validation on 3/3 attempts with
-# "prediction_finite=False" on several ranks at once. A frozen policy cannot become
-# unstable from rank count alone, so the local shape is the suspect: under
-# --amp_dtype bf16 a different local batch selects different matmul kernels, and bf16's
-# 8-bit mantissa can round an intermediate denominator to exactly zero. Keep
-# batch_size // NPROC at the value that has actually been observed finite (64).
+# The LOCAL batch is not a free variable, though. At 8 ranks (local 64) validation is
+# finite; at 4 ranks (local 128) with an otherwise byte-identical args.json it died in
+# pre-training validation with "prediction_finite=False" on several ranks at once, 6/6
+# attempts. A frozen policy cannot become unstable from rank count alone, so the local
+# shape is the suspect: under --amp_dtype bf16 a different local batch selects different
+# matmul kernels, and bf16's 8-bit mantissa can round an intermediate denominator to
+# exactly zero. Keep batch_size // NPROC at the value observed finite (64).
 NPROC=${HDP_NPROC:-$(nvidia-smi --list-gpus | wc -l)}
 BATCH_SIZE=${HDP_BATCH_SIZE:-512}
 if [[ ! "${NPROC}" =~ ^[1-8]$ ]] || (( BATCH_SIZE % NPROC != 0 )); then
@@ -127,7 +126,7 @@ LOCAL_BATCH=$((BATCH_SIZE / NPROC))
 if (( LOCAL_BATCH > 64 )); then
   echo "FATAL: local batch ${LOCAL_BATCH} (${BATCH_SIZE}/${NPROC}) exceeds the 64 that" >&2
   echo "       validated finite; local 128 reproduced non-finite predictions on 6/6" >&2
-  echo "       attempts across jobs 1538 and 1539. Override with HDP_ALLOW_LOCAL_BATCH=1" >&2
+  echo "       attempts. Override with HDP_ALLOW_LOCAL_BATCH=1" >&2
   echo "       only together with a precision change that explains the fix." >&2
   [[ "${HDP_ALLOW_LOCAL_BATCH:-0}" == "1" ]] || exit 22
 fi

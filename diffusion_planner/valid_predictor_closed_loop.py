@@ -23,7 +23,7 @@ default to ``<model_path dir>/closed_loop/``. Example::
     NPZ=/path/to/closed_loop_npz_dir
 
     python3 valid_predictor_closed_loop.py \
-        --model_path /mnt/nvme/training_result/hdp_rl_run/epoch0001/best_model.pth \
+        --model_path /path/to/run_dir/latest.pth \
         --npz_root ${NPZ}
 """
 

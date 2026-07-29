@@ -113,11 +113,11 @@ exactly zero, which is what makes small paired contrasts readable at all.
 
 ## Reading a result
 
-- **Never compare across reward definitions.** Job 1564 uses
-  `rl_reward_aggregation: gated_product`; job 1519 used paper-exact. Their
-  `valid_reward_deterministic_mean` are 0.6525 and 4.29598 — that is a definition change,
-  not a regression. Compare on definition-independent evaluator flags
-  (`epdms_no_at_fault_collision`, `collision_active`, `collision_rear`).
+- **Never compare across reward definitions.** `rl_reward_aggregation` changes the scale
+  of `valid_reward_deterministic_mean` by nearly an order of magnitude, so two runs on
+  different aggregations differ by a definition change and not by a regression. Compare on
+  definition-independent evaluator flags (`epdms_no_at_fault_collision`,
+  `collision_active`, `collision_rear`).
 - **Never judge a cycle before its last epoch.** One campaign was negative for 6 epochs
   and then jumped positive.
 - **Never quote one replicate.** Same-checkpoint eval sd is 7.29e-05; per-flag net sd is
