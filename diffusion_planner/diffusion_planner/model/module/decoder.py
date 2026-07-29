@@ -370,11 +370,18 @@ def compute_training_loss(
         "turn_indicator_expert_logit", turn_indicator_logit
     ).float()
     turn_indicator_gt = make_turn_indicator_gt(inputs["turn_indicators"])  # [B,]
+    label_smoothing = float(getattr(args, "turn_indicator_label_smoothing", 0.0))
     generated_turn_indicator_loss = nn.functional.cross_entropy(
-        turn_indicator_logit, turn_indicator_gt, reduction="none"
+        turn_indicator_logit,
+        turn_indicator_gt,
+        reduction="none",
+        label_smoothing=label_smoothing,
     )
     expert_turn_indicator_loss = nn.functional.cross_entropy(
-        turn_indicator_expert_logit, turn_indicator_gt, reduction="none"
+        turn_indicator_expert_logit,
+        turn_indicator_gt,
+        reduction="none",
+        label_smoothing=label_smoothing,
     )
     # The generated branch consumes x_start predicted at the sampled diffusion time;
     # near t=1 that trajectory is close to the conditional mean and teaches the head
@@ -465,14 +472,17 @@ def compute_turn_indicator_head_training_loss(
 
     expert_logit = decoder_output["turn_indicator_expert_logit"].float()
     target = make_turn_indicator_gt(inputs["turn_indicators"])
-    expert_loss = nn.functional.cross_entropy(expert_logit, target)
+    label_smoothing = float(getattr(args, "turn_indicator_label_smoothing", 0.0))
+    expert_loss = nn.functional.cross_entropy(expert_logit, target, label_smoothing=label_smoothing)
     if training_mode == "expert":
         total = expert_loss
         generated_logit = None
         generated_loss = None
     else:
         generated_logit = decoder_output["turn_indicator_logit"].float()
-        generated_loss = nn.functional.cross_entropy(generated_logit, target)
+        generated_loss = nn.functional.cross_entropy(
+            generated_logit, target, label_smoothing=label_smoothing
+        )
         generated_weight = float(getattr(args, "turn_indicator_generated_loss_weight", 1.0))
         expert_weight = float(getattr(args, "turn_indicator_expert_loss_weight", 1.0))
         total = (generated_weight * generated_loss + expert_weight * expert_loss) / max(

@@ -113,6 +113,12 @@ class TrainConfig:
     turn_indicator_head_num_layers: int = 1
     turn_indicator_head_dropout: float = 0.0
 
+    # Uniform label smoothing for the head's cross-entropy. Unlike an inference-time
+    # temperature this is not a no-op under an argmax consumer: it changes the training
+    # gradient, so it changes the learned weights. 0.0 is bit-identical to plain
+    # cross_entropy, so the default reproduces every run on disk.
+    turn_indicator_label_smoothing: float = 0.0
+
     # The production SFT contract is deliberately staged: ``policy`` adapts the
     # trajectory planner without evaluating or updating the auxiliary head, then
     # ``turn_indicator`` freezes the planner and trains the detached head below.

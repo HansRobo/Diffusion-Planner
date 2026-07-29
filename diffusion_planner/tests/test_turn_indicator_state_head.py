@@ -436,3 +436,46 @@ def test_weights_only_init_migrates_old_signal_encoder_and_four_class_head(tmp_p
     torch.testing.assert_close(model.policy.bias, torch.ones_like(model.policy.bias))
     for key, value in original_head.items():
         torch.testing.assert_close(model.state_dict()[key], value)
+
+
+_SMOOTHING_UNSET = object()
+
+
+def _head_loss_at_smoothing(smoothing):
+    """Head loss on a fixed batch. ``_SMOOTHING_UNSET`` omits the field entirely, which is
+    how a checkpoint trained before the flag existed is configured."""
+    torch.manual_seed(0)
+    args = _encoder_config(
+        supervised_training_stage="turn_indicator",
+        turn_indicator_head_training_mode="expert",
+    )
+    if smoothing is _SMOOTHING_UNSET:
+        delattr(args, "turn_indicator_label_smoothing")
+    else:
+        args.turn_indicator_label_smoothing = smoothing
+    model = Diffusion_Planner(args)
+    model.eval()
+    batch = 2
+    inputs = _encoder_inputs(batch)
+    inputs["ego_current_state"] = torch.randn(batch, 10)
+    heading = torch.randn(batch, 80, 2)
+    heading = heading / heading.norm(dim=-1, keepdim=True)
+    ego_future = torch.cat([torch.randn(batch, 80, 2), heading], dim=-1)
+    with torch.no_grad():
+        loss = compute_turn_indicator_head_training_loss(model, inputs, ego_future, args)
+    return loss["turn_indicator_loss"]
+
+
+def test_label_smoothing_zero_reproduces_plain_cross_entropy():
+    # The default must be bit-identical to a config that predates the flag, otherwise
+    # restoring it would silently redefine every turn-indicator run already on disk.
+    torch.testing.assert_close(
+        _head_loss_at_smoothing(0.0), _head_loss_at_smoothing(_SMOOTHING_UNSET), rtol=0, atol=0
+    )
+
+
+def test_label_smoothing_actually_changes_the_loss():
+    # Unlike an inference-time temperature, which cannot change an argmax, smoothing changes
+    # the training objective. If this ever becomes a no-op the flag is dead and must be
+    # deleted rather than left wired.
+    assert not torch.allclose(_head_loss_at_smoothing(0.0), _head_loss_at_smoothing(0.05))

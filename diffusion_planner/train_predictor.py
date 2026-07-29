@@ -186,6 +186,12 @@ def get_args(args_list=None):
         default=_train_config_default("turn_indicator_head_dropout"),
     )
     parser.add_argument(
+        "--turn_indicator_label_smoothing",
+        type=float,
+        default=_train_config_default("turn_indicator_label_smoothing"),
+        help="uniform label smoothing for the head's cross-entropy; 0.0 is plain cross_entropy",
+    )
+    parser.add_argument(
         "--supervised_training_stage",
         choices=("joint", "policy", "turn_indicator"),
         default=_train_config_default("supervised_training_stage"),
@@ -484,6 +490,7 @@ def get_args(args_list=None):
         "turn_indicator_generated_loss_weight",
         "turn_indicator_expert_loss_weight",
         "turn_indicator_head_dropout",
+        "turn_indicator_label_smoothing",
         "coeff_road_border_loss",
         "road_border_margin",
         "coeff_neighbor_collision_loss",
@@ -550,6 +557,8 @@ def get_args(args_list=None):
         raise ValueError("--turn_indicator_head_num_layers must be >= 1")
     if not 0.0 <= args.turn_indicator_head_dropout < 1.0:
         raise ValueError("--turn_indicator_head_dropout must be in [0, 1)")
+    if not 0.0 <= args.turn_indicator_label_smoothing < 1.0:
+        raise ValueError("--turn_indicator_label_smoothing must be in [0, 1)")
     if args.learning_rate <= 0.0:
         raise ValueError("--learning_rate must be > 0")
     if args.weight_decay < 0.0:

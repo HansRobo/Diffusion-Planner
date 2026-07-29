@@ -358,6 +358,25 @@ else
   log "legacy source pin: omitting redesigned-head flags (control arm)"
 fi
 
+# Label smoothing is detected on its own and not folded into the check above. The flag was
+# removed from the branch while #308 made it a no-op, then restored once that revert put
+# nn.functional.cross_entropy back, so there is a range of pinned sources that DO have the
+# head-arch flags and do NOT have this one. A combined check would pass the arch grep and
+# then hand an unknown flag to argparse.
+if grep -q "turn_indicator_label_smoothing" \
+    "${SOURCE_REPO}/diffusion_planner/train_predictor.py"; then
+  TRAIN_ARGS+=(--turn_indicator_label_smoothing "${HDP_LABEL_SMOOTHING:-0.0}")
+  log "label smoothing: ${HDP_LABEL_SMOOTHING:-0.0}"
+else
+  if [[ -n "${HDP_LABEL_SMOOTHING:-}" && "${HDP_LABEL_SMOOTHING}" != "0.0" ]]; then
+    echo "FATAL: HDP_LABEL_SMOOTHING=${HDP_LABEL_SMOOTHING} but ${SOURCE_REPO} has no" >&2
+    echo "       --turn_indicator_label_smoothing. Running it there would silently train" >&2
+    echo "       at 0.0 and be recorded as the smoothed arm." >&2
+    exit 23
+  fi
+  log "source pin lacks --turn_indicator_label_smoothing: omitting it"
+fi
+
 checkpoint_epoch() {
   "${PYTHON}" - "$1" <<'PY'
 import sys
