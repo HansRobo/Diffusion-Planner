@@ -33,7 +33,6 @@ _MARKER = "MINE_COMPLETE"
 _META = "meta.json"
 
 _FINGERPRINT_FIELDS = (
-    "rl_reward_source",
     "rl_reward_aggregation",
     "rl_reward_horizon_steps",
     "rl_reward_beta",
@@ -44,7 +43,6 @@ _FINGERPRINT_FIELDS = (
     "rl_reward_w_progress",
     "rl_reward_w_road_border",
     "rl_behavior_gate",
-    "rl_pdm_red_light_gate",
     "rl_candidate_aug_std",
     "num_generations",
     "rl_noise_scale",
@@ -57,13 +55,17 @@ _FINGERPRINT_FIELDS = (
 # resume of an otherwise-valid multi-terabyte cache, so each is pinned to the value it
 # held in every run ever mined: `rl_first_waypoint_gate` False (32/32 args.json),
 # `rl_reward_normalize` "group" (the only value ever launched, now the sole code path
-# per ap:implementation), and the two candidate-augmentation knobs that were superseded
-# by `rl_candidate_aug_epochs` at their off defaults (0.0 in every args.json).
+# per ap:implementation), the two candidate-augmentation knobs that were superseded by
+# `rl_candidate_aug_epochs` at their off defaults (0.0 in every args.json), and the two
+# knobs of the ported hdp_pdm objective, which no run ever selected. The comparison is
+# dict equality, so these need only reproduce the recorded values, not their position.
 _FINGERPRINT_RETIRED = {
     "rl_first_waypoint_gate": repr(False),
     "rl_reward_normalize": repr("group"),
     "rl_candidate_aug_prob": repr(0.0),
     "rl_candidate_aug_stretch": repr(0.0),
+    "rl_reward_source": repr("native"),
+    "rl_pdm_red_light_gate": repr(True),
 }
 
 # Fields added after caches already existed. Recording one unconditionally would

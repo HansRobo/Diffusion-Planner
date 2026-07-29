@@ -161,7 +161,6 @@ def test_awr_objective_has_no_repo_only_terms():
     assert args.rl_bc_weight == 0.0  # no behaviour-cloning anchor in the paper
     assert args.rl_candidate_aug_epochs == 0  # candidates come from pi^{k-1} only
     assert args.rl_noise_scale == 1.0  # pi^{k-1} sampled at its own temperature
-    assert args.rl_reward_source == "native"
 
 
 def test_group_normalization_and_ema_come_from_the_paper():

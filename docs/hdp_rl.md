@@ -114,9 +114,8 @@ also required not to regress beyond `rl_max_valid_epdms_regression`.
 
 Checkpoint selection uses the deterministic deployment reward: validation additionally scores
 one zero-noise plan per scene (`deterministic_mean`), which is exactly what the deployed planner
-executes. One objective per
-run: the deterministic selection score uses the run's own training reward (native or
-`pdm_port`), matching the source repository's train-and-select discipline. The frozen
+executes. The deterministic selection score uses the run's own training reward,
+matching the source repository's train-and-select discipline. The frozen
 `rl_eval_*` stochastic metrics are report-only diagnostics for comparing arms; acceptance is
 protected by the independent EPDMS/DAC/safety source guards, which are deployment metrics, not
 a second reward.

@@ -22,7 +22,6 @@ from diffusion_planner import hdp_rl_epoch
 def _args(**overrides):
     defaults = dict(
         num_generations=4,
-        rl_reward_source="native",
         rl_reward_aggregation="weighted_sum",
         rl_reward_horizon_steps=0,
         rl_reward_beta=1.0,
@@ -33,7 +32,6 @@ def _args(**overrides):
         rl_reward_w_progress=3.0,
         rl_reward_w_road_border=0.0,
         rl_behavior_gate="safety",
-        rl_pdm_red_light_gate=True,
         rl_candidate_aug_epochs=0,
         rl_candidate_aug_std=0.5,
         rl_noise_scale=1.5,

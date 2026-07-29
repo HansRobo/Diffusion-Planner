@@ -299,12 +299,6 @@ _COMMON: tuple[PaperExactSetting, ...] = (
     ),
     # ---- Appendix app:rewards, "Total Training Reward" ---------------------
     PaperExactSetting(
-        "rl_reward_source",
-        "native",
-        "neurips_2026.tex app:rewards -- the published reward set, not the "
-        "ported original-DP PDM objective",
-    ),
-    PaperExactSetting(
         "rl_reward_aggregation",
         "weighted_sum",
         "neurips_2026.tex app:rewards -- r is a weighted sum of the components",

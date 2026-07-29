@@ -88,7 +88,6 @@ that a future default change cannot silently break a paper-exact run.
 | `rl_red_light_constraint` | True | **False** | ditto | neither r_safety nor r_risk has a traffic-light factor |
 | `rl_occupancy_use_road_border` | True | **False** | ditto | OCC is "occupancy distance to static/uncertain regions", not HD-map border geometry |
 | `rl_reward_horizon_steps` | 0 (full) | 0 | ditto | rewards are "evaluated … over the planning horizon of L steps" |
-| `rl_reward_source` | `native` | `native` | ditto | the published reward set, not the ported original-DP PDM objective |
 
 ### The rollout / replay schedule (`dp_vla_rl_agent.yaml`, `dp_vla_rl_agent.py`)
 

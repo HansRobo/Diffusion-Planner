@@ -104,8 +104,6 @@ EVAL_DETERMINISTIC=${HDP_RL_EVAL_DETERMINISTIC:-True}
 # HDP_RL_UPDATES_PER_ROLLOUT=1. Interval 0 keeps the online loop.
 ROLLOUT_INTERVAL=${HDP_RL_ROLLOUT_INTERVAL:-0}
 REPLAY_DIR=${HDP_RL_REPLAY_DIR:-${REPO}/outputs/rl_replay_${SLURM_JOB_ID:-manual}}
-REWARD_SOURCE=${HDP_RL_REWARD_SOURCE:-native}
-PDM_RED_LIGHT_GATE=${HDP_RL_PDM_RED_LIGHT_GATE:-True}
 CANDIDATE_AUG_EPOCHS=${HDP_RL_CANDIDATE_AUG_EPOCHS:-0}
 CANDIDATE_AUG_STD=${HDP_RL_CANDIDATE_AUG_STD:-0.5}
 EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
@@ -224,7 +222,6 @@ case "${PAPER_EXACT}" in
     # (0.1, L-1) is reachable only through HDP_RL_HYBRID_ABLATION=True, which
     # stamps the run as an ablation arm.
     # The published reward: a plain weighted sum of the four appendix terms.
-    paper_pin REWARD_SOURCE HDP_RL_REWARD_SOURCE native
     paper_pin REWARD_AGGREGATION HDP_RL_REWARD_AGGREGATION weighted_sum
     paper_pin BEHAVIOR_GATE HDP_RL_BEHAVIOR_GATE none
     paper_pin REWARD_W_PROGRESS HDP_RL_REWARD_W_PROGRESS 0.0
@@ -618,8 +615,6 @@ TRAIN_ARGS=(
   --rl_eval_deterministic "${EVAL_DETERMINISTIC}" \
   --rl_rollout_interval "${ROLLOUT_INTERVAL}" \
   --rl_replay_dir "${REPLAY_DIR}" \
-  --rl_reward_source "${REWARD_SOURCE}" \
-  --rl_pdm_red_light_gate "${PDM_RED_LIGHT_GATE}" \
   --rl_candidate_aug_epochs "${CANDIDATE_AUG_EPOCHS}" \
   --rl_candidate_aug_std "${CANDIDATE_AUG_STD}" \
   --rl_ema_update_rate "${EMA_UPDATE_RATE}" \

@@ -28,7 +28,19 @@ confirmed; no adjustment needed.
 - **100% of augmented candidates pass the first-waypoint gate**, confirming the
   ramp's near-zero onset guarantee on real data. Defaults confirmed.
 
-## Reward discrimination — all three objectives work; pdm_port is best aligned
+## Reward discrimination — all three objectives work
+
+> **Correction, 2026-07-30.** The mechanism this section names is wrong, and with it
+> the conclusion. Native's progress score has been `progress_ratio.clamp(0.0, 1.0)`
+> since `a0cfcd70` (2026-07-12), eleven days *before* this audit ran — it is capped at
+> the expert exactly like pdm's EP ratio, so "the native progress term rewards
+> overtaking the expert endpoint" was never true here. The 91.2% is instead a property
+> of the candidate distribution: these groups are rigid ±0.5 m offset copies of the
+> logged human, and pdm's *binary* terminal gate zeroes any copy shoved across a road
+> border, handing the win to the unperturbed human. The policy does not produce those
+> candidates (policy-only step-1 border crossings measure 1 in 3,000), so the number
+> does not transfer to ranking real rollouts. `rl_reward_source` was removed on
+> 2026-07-30; the paragraphs below are kept as the record of what was measured.
 
 | Objective | Failures | Valid-group fraction | ESS | Expert wins its group |
 |---|---:|---:|---:|---:|
@@ -55,8 +67,11 @@ confirmed; no adjustment needed.
 
 ## Consequence for the experiment ladder
 
-`rl_reward_source=pdm_port` is promoted to a first-class arm (it is the
-verbatim port of the objective behind both audited positive results, and the
-only one of the three whose group ranking is strongly expert-consistent on our
-data). Native arms remain for comparison; held-out selection stays frozen on
-the native evaluation objective for all arms.
+*Superseded 2026-07-30.* This audit promoted `rl_reward_source=pdm_port` to a
+first-class arm on the strength of the 91.2%. With that number explained away above,
+nothing measured on our data favours the ported objective, and its structure points
+away from the real-vehicle goal: it weights progress at 5/14 while the shipped arm
+weights it at 0, keeps only TTC of the three risk channels, drops the
+leader-conditioned following term, and cuts lane from 38% to 14%. The ported reward
+was deleted. `gated_product` — the same source's bounded-product aggregation, with
+continuous rather than binary gates — is what the shipped arm uses.

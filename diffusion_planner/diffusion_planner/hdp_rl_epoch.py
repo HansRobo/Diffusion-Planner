@@ -27,7 +27,6 @@ from diffusion_planner.hdp_rl_utils import (
     sample_group,
 )
 from diffusion_planner.loss import sample_diffusion_time
-from diffusion_planner.pdm_reward_port import compute_pdm_port_reward
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
@@ -573,16 +572,9 @@ def _hdp_rl_step(
     ego_world, candidate_aug_metrics = augment_rollout_candidates(
         ego_world, num_scenes, n, epoch, args, generator=rollout_generator
     )
-    # The training objective may use the ported original-DP hdp_pdm reward; held-out
-    # selection deliberately stays on the frozen native objective either way.
-    if getattr(args, "rl_reward_source", "native") == "pdm_port":
-        reward, reward_metrics = compute_pdm_port_reward(
-            ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
-        )
-    else:
-        reward, reward_metrics = compute_hdp_reward(
-            ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
-        )
+    reward, reward_metrics = compute_hdp_reward(
+        ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
+    )
     if not torch.isfinite(reward).all():
         raise FloatingPointError("Non-finite HDP reward returned for RL rollout")
     reward_metrics.update(candidate_aug_metrics)
@@ -773,14 +765,9 @@ def _mine_groups_from_batch(raw_inputs, model, args, ema, aug, epoch, rollout_ge
     ego_world, aug_metrics = augment_rollout_candidates(
         ego_world, num_scenes, n, epoch, args, generator=rollout_generator
     )
-    if getattr(args, "rl_reward_source", "native") == "pdm_port":
-        reward, reward_metrics = compute_pdm_port_reward(
-            ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
-        )
-    else:
-        reward, reward_metrics = compute_hdp_reward(
-            ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
-        )
+    reward, reward_metrics = compute_hdp_reward(
+        ego_world, raw_inputs, reward_neighbors_raw, num_scenes, n, args
+    )
     if not torch.isfinite(reward).all():
         raise FloatingPointError("Non-finite HDP reward returned while mining replay")
     reward_metrics.update(aug_metrics)
@@ -1251,14 +1238,9 @@ def validate_hdp_reward_policy(data_loader, model, args):
                     # The frozen rl_eval_* stochastic metrics above remain report-only
                     # diagnostics for cross-arm comparison; acceptance is protected by
                     # the independent EPDMS/DAC/safety source guards, not a second reward.
-                    if getattr(args, "rl_reward_source", "native") == "pdm_port":
-                        det_reward, _ = compute_pdm_port_reward(
-                            det_world, raw_inputs, reward_neighbors, num_scenes, 1, args
-                        )
-                    else:
-                        det_reward, _ = compute_hdp_reward(
-                            det_world, raw_inputs, reward_neighbors, num_scenes, 1, args
-                        )
+                    det_reward, _ = compute_hdp_reward(
+                        det_world, raw_inputs, reward_neighbors, num_scenes, 1, args
+                    )
                     finite_det = torch.isfinite(det_reward)
                     totals[6] += (
                         torch.where(finite_det, det_reward, torch.zeros_like(det_reward))

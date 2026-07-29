@@ -262,14 +262,6 @@ class TrainConfig:
     # extension that prevents follow/lane/progress from compensating for a collision;
     # ``risk`` also suppresses those terms for near misses.
     rl_behavior_gate: Literal["none", "safety", "risk"] = "safety"
-    # ``pdm_port`` swaps the whole training reward for the verbatim port of the audited
-    # original-DP ``hdp_pdm`` objective (Col x DAC binary gates x (5*TTC + 5*EP +
-    # 2*lane + 2*comfort)/14 on the shared planner_metrics layer). Held-out selection
-    # always stays on the frozen native objective.
-    rl_reward_source: Literal["native", "pdm_port"] = "native"
-    # T4 scenes carry traffic-light semantics the source data lacked; the ported
-    # reward gates red-light violations by default (ablatable to exact-faithful).
-    rl_pdm_red_light_gate: bool = True
     # ``gated_product`` is the PDM-style bounded objective behind the audited original-DP
     # AWR gains: multiplicative collision/red-light/border gates times a normalized
     # risk/follow/lane/progress quality mix. ``weighted_sum`` preserves the historical

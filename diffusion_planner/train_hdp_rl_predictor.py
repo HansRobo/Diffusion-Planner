@@ -683,18 +683,6 @@ def get_args(argv: list[str] | None = None):
         help="local-NVMe directory for the frozen per-cycle replay shards",
     )
     parser.add_argument(
-        "--rl_reward_source",
-        choices=["native", "pdm_port"],
-        default=_train_config_default("rl_reward_source"),
-        help="native Tier IV reward or the verbatim port of the audited hdp_pdm objective",
-    )
-    parser.add_argument(
-        "--rl_pdm_red_light_gate",
-        type=boolean,
-        default=_train_config_default("rl_pdm_red_light_gate"),
-        help="gate red-light violations in the ported reward (T4 extension; ablatable)",
-    )
-    parser.add_argument(
         "--rl_reward_aggregation",
         choices=["weighted_sum", "gated_product"],
         default=_train_config_default("rl_reward_aggregation"),

@@ -138,7 +138,7 @@ if self.current_epoch < 5:
 | 第一个点的时间 | t = 0.5 s | t = 0.1 s |
 | 第一个点的位移量级 | ~2.5 m（5 m/s 下） | **实测 525 mm**（见 §3） |
 | 0.5 m 刚体偏移相当于第一个点的 | **~20%** | **~95%** |
-| 打分路径 | 交给 `PDMSimulator` 用自行车模型 + 控制器重新积分（`dp_vla_rl_agent.py:698` 传 `train_simulator_ref`）；偏移被控制器吸收 | 直接对 waypoint 打分（`compute_pdm_port_reward(ego_world, ...)`），没有 simulator |
+| 打分路径 | 交给 `PDMSimulator` 用自行车模型 + 控制器重新积分（`dp_vla_rl_agent.py:698` 传 `train_simulator_ref`）；偏移被控制器吸收 | 直接对 waypoint 打分（`compute_hdp_reward(ego_world, ...)`），没有 simulator |
 | 车实际执行哪个点 | 都不执行（navsim 只算 PDM 分） | **直接执行第 1 点** |
 
 所以原版那 0.5 m 是"整条 4 秒参考路径平移 0.5 m，再让控制器去跟"，

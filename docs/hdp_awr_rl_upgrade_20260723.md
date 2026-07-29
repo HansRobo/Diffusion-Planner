@@ -105,19 +105,13 @@ without it. Full evidence and the measured multimodality baseline:
 Same SFT checkpoint, frozen `rl_eval_*` selection, one arm per change:
 
 1. Baseline: historical `weighted_sum` objective (gate on, deterministic selection).
-2. **Ported objective arm:** `rl_reward_source=pdm_port
+2. **Bounded objective arm:** `rl_reward_aggregation=gated_product
    rl_reward_horizon_steps=40 rl_reward_beta=1.0` (beta acts on dimensionless
    group z-scores, so the source value transfers directly; our 0.5 default is a
-   local choice that halves weight contrast vs public HDP). The verbatim port of
-   the objective behind both audited positive results; on the 512-scene real-data audit
-   (`docs/rl_threshold_audit_20260723.md`) it is far more expert-consistent than
-   the native reward (expert wins its group 91% vs 64% — the native progress term
-   rewards overtaking the expert endpoint, the pdm EP ratio is capped at 1).
-3. Native alternative: `rl_reward_aggregation=gated_product` +
-   `rl_reward_horizon_steps=40`, if (2) underperforms the native baseline.
-4. Road-border reward sweep `rl_reward_w_road_border in {0, 0.25, 0.5, 1.0}` on the
-   best of 1-3 (the SFT objective no longer contains a road-border term; note the
-   pdm_port objective already hard-gates border crossings).
+   local choice that halves weight contrast vs public HDP). This is the shipped
+   arm.
+3. Road-border reward sweep `rl_reward_w_road_border in {0, 0.25, 0.5, 1.0}` on the
+   best of 1-2 (the SFT objective no longer contains a road-border term).
 
 Compare the deterministic deployment reward plus DAC/EPDMS, border distance, lane
 keeping, progress, comfort, collision and red-light metrics; a higher training

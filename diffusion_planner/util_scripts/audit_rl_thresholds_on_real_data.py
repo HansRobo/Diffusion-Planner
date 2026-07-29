@@ -1,10 +1,14 @@
 """CPU proof-of-concept audit of the 2026-07-23 RL upgrades on real NPZ scenes.
 
 Runs without any model or GPU. One question, answered on logged data: on groups of
-one logged expert plus offset variants of it, do the three training objectives
-(native weighted_sum, native gated_product, ported hdp_pdm) produce valid preference
-signal (group std > eps), sane weight concentration (ESS), and expert-consistent
-rankings?
+one logged expert plus offset variants of it, do both training aggregations
+(weighted_sum, gated_product) produce valid preference signal (group std > eps),
+sane weight concentration (ESS), and expert-consistent rankings?
+
+Caveat that cost us a wrong conclusion once: the groups here are rigid offset copies
+of the logged human, a candidate distribution the policy does not produce. An
+"expert wins its group" rate measured on them says how harshly an objective punishes
+out-of-distribution perturbation, not how well it ranks real rollouts.
 
 Usage:
   python util_scripts/audit_rl_thresholds_on_real_data.py \
@@ -28,7 +32,6 @@ from diffusion_planner.hdp_rl_utils import (
     compute_hdp_reward,
     compute_reward_weights,
 )
-from diffusion_planner.pdm_reward_port import compute_pdm_port_reward
 
 SCENE_KEYS = (
     "ego_current_state",
@@ -105,7 +108,6 @@ def main() -> None:
         rl_reward_w_progress=3.0,
     )
     gated_args = SimpleNamespace(**vars(native_args), rl_reward_aggregation="gated_product")
-    pdm_args = SimpleNamespace(rl_pdm_red_light_gate=True, rl_reward_horizon_steps=40)
 
     report: dict = {"num_scenes": len(scenes), "group_size": n, "seed": args.seed}
 
@@ -126,8 +128,8 @@ def main() -> None:
     report["aug_offset_abs_mean_m"] = aug_metrics["reward_candidate_aug_offset_abs_mean_m"].item()
 
     # ── Reward discrimination on expert+offset groups ──────────────────────
-    rewards: dict[str, list[torch.Tensor]] = {"native": [], "gated": [], "pdm": []}
-    failures = {"native": 0, "gated": 0, "pdm": 0}
+    rewards: dict[str, list[torch.Tensor]] = {"native": [], "gated": []}
+    failures = {"native": 0, "gated": 0}
     for index, scene in enumerate(scenes):
         candidates = augmented[index * n : (index + 1) * n]
         batch = {key: value.unsqueeze(0) for key, value in scene.items()}
@@ -135,7 +137,6 @@ def main() -> None:
         for name, fn, fn_args in (
             ("native", compute_hdp_reward, native_args),
             ("gated", compute_hdp_reward, gated_args),
-            ("pdm", compute_pdm_port_reward, pdm_args),
         ):
             try:
                 value, _ = fn(candidates, batch, neighbors, 1, n, fn_args)
@@ -164,23 +165,23 @@ def main() -> None:
         report[f"reward_{name}_weight_ess_mean"] = (
             ess[active].mean().item() if active.any() else 0.0
         )
-    # Rank agreement between objectives on mutually finite groups.
+    # Rank agreement between the two aggregations on mutually finite groups.
     native = torch.stack(rewards["native"])
-    pdm = torch.stack(rewards["pdm"])
-    both = torch.isfinite(native).all(dim=1) & torch.isfinite(pdm).all(dim=1)
+    gated = torch.stack(rewards["gated"])
+    both = torch.isfinite(native).all(dim=1) & torch.isfinite(gated).all(dim=1)
     if both.any():
         a = native[both].argsort(dim=1).argsort(dim=1).float()
-        b = pdm[both].argsort(dim=1).argsort(dim=1).float()
+        b = gated[both].argsort(dim=1).argsort(dim=1).float()
         num = ((a - a.mean(1, keepdim=True)) * (b - b.mean(1, keepdim=True))).sum(1)
         den = (a.std(1) * b.std(1) * (n - 1)).clamp_min(1e-9)
-        report["reward_native_vs_pdm_spearman_mean"] = (num / den).mean().item()
+        report["reward_weighted_sum_vs_gated_spearman_mean"] = (num / den).mean().item()
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
-    if not math.isfinite(report.get("reward_pdm_valid_group_fraction", float("nan"))):
-        raise SystemExit("pdm reward produced no usable groups")
+    if not math.isfinite(report.get("reward_gated_valid_group_fraction", float("nan"))):
+        raise SystemExit("gated_product reward produced no usable groups")
 
 
 if __name__ == "__main__":
