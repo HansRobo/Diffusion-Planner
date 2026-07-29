@@ -30,9 +30,8 @@ when checking whether a scene-level claim is actually supported by the image.
 ## Engineering references
 
 - [`hdp_final_state.md`](hdp_final_state.md) — **start here for HDP.** The single branch, the
-  pipeline and its launchers, the checkpoint rule, what was removed and why, how to read a
-  result without repeating a known measurement error, and the archive tags that hold every
-  unmerged experiment.
+  pipeline and its launchers, the checkpoint rule, how to read a result without repeating a
+  known measurement error, and the archive tags that hold every unmerged experiment.
 - [`hdp_rl.md`](hdp_rl.md) — current HDP-RL experiment contract.
 - [`hyper_diffusion_planner.md`](hyper_diffusion_planner.md) — current HDP model contract.
 - [`hdp_audit_verification_20260714.md`](hdp_audit_verification_20260714.md) and

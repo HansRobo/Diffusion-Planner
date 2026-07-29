@@ -33,19 +33,13 @@ set -euo pipefail
 #     node02 lr2e5 lineage it produced 0.8605571 then 0.8605341 across two stages -- a
 #     2.3e-05 bf16 wobble -- while costing 17-21 min per validation pass out of a 65 min
 #     stage. It is pure wall-clock with no information in it.
-#   * a single turn_indicator round on expert trajectories, and no DPM-trajectory round.
-#     The head used to also be trained on the policy's own six-step DPM trajectory.
-#     Measured over full epochs of jobs 1540/1541 the two branches agree to 0.08
-#     accuracy points (expert 0.96982 vs generated 0.96911 at epoch 4; expert CE is
-#     lower by 0.0016 of ~0.25, i.e. 0.6% relative), so the second branch paid for the
-#     sampler to produce a near-duplicate gradient. Dropping it does not weaken the
-#     test: validation still scores turn_indicator_logit, the head applied to the
-#     GENERATED trajectory (validate_model.py), so any expert/deployment drift would
-#     show up in exactly the metrics this launcher reads.
+#   * a single turn_indicator round. The head trains on the expert future, so DiT is not
+#     evaluated at all; validation still scores turn_indicator_logit, the head applied to
+#     the GENERATED trajectory (validate_model.py).
 #   * warm_up_epoch=0 makes LinearWarmupConstantLR a pure constant, so the per-epoch
 #     validation curve carries no schedule confound and each epoch is comparable.
 #
-# Two design questions were settled by measurement before launch rather than by taste:
+# One design question was settled by measurement before launch rather than by taste:
 #
 #   * class-weighted CE is REJECTED. Sampling 4,000 scenes of each list gives a prior of
 #     DISABLE 60.5% / LEFT 21.0% / RIGHT 18.5% on train (65.1/18.2/16.7 on valid), so
@@ -56,11 +50,6 @@ set -euo pipefail
 #     threshold is a free offline sweep over dumped logits while a loss weight costs a
 #     full run per operating point. Keep the loss calibrated; move the operating point
 #     downstream.
-#   * the generated/expert loss blend is GONE, not tuned. The open question was whether
-#     supervising on the ground-truth path (which never exists on the vehicle) mistrains
-#     the head. The answer is that it does not matter: the head reaches the same answer
-#     from either input on ~97% of samples, and where they differ the expert branch is
-#     the cleaner target. A weight sweep would have been sweeping a duplicate.
 #
 # The A/B this launcher runs is ARCHITECTURE, selected by SOURCE_REPO:
 #   CONTROL  legacy pin (pre-33306cc8): single-query single-layer cross-attention over a
@@ -89,19 +78,15 @@ POLICY_CKPT_DIR=${HDP_POLICY_CKPT_DIR:-/mnt/storage_rdma/diffusion_planner/check
 POLICY_EPOCH=${HDP_POLICY_EPOCH:-80}
 INIT_WEIGHTS=${POLICY_CKPT_DIR}/latest.pth
 
-# Two epochs, measured. Both arms of the 2026-07-29 architecture A/B (jobs 1540/1541)
-# peak at epoch 2 and then decline monotonically on 9 of the 10 validation metrics:
-# CONTROL accuracy .8881 .8885 .8856 .8823, NEW .8985 .8995 .8932; macro_f1 and
-# direction_accuracy turn over at the same epoch in both arms. Epochs 3+ are pure
-# overfitting on this frozen-policy head, and each one costs ~50 min of node01.
-#
-# This shortens training; it does NOT select a checkpoint. The deliverable is still
-# `latest.pth` (../../CLAUDE.md), which after two epochs simply *is* the epoch-2 head.
-# Because HEAD_WARMUP=0 makes LinearWarmupConstantLR a pure MultiplicativeLR(1.0) that
-# ignores total_epochs, and args._train_epochs only ever reaches a wandb log field, this
-# run's epochs 1-2 are identical to the first two epochs of the 6-epoch runs. Raise it
-# with HDP_HEAD_EPOCHS when the head arch or lr changes and the turnover must be
-# re-measured -- the run name carries ${HEAD_EPOCHS}, so a longer run gets its own dir.
+# Two epochs: this frozen-policy head turns over at epoch 2 on this configuration, and
+# epochs 3+ only overfit at ~50 min of node01 each. This is a training LENGTH, not a
+# checkpoint selection -- the deliverable is still `latest.pth` (../../CLAUDE.md), which
+# after two epochs simply *is* the epoch-2 head. Because HEAD_WARMUP=0 makes
+# LinearWarmupConstantLR a pure MultiplicativeLR(1.0) that ignores total_epochs, and
+# args._train_epochs only ever reaches a wandb log field, shortening the run cannot change
+# what those epochs contain. Raise it with HDP_HEAD_EPOCHS when the head arch or lr changes
+# and the turnover must be re-measured -- the run name carries ${HEAD_EPOCHS}, so a longer
+# run gets its own directory.
 HEAD_EPOCHS=${HDP_HEAD_EPOCHS:-2}
 HEAD_WARMUP=${HDP_HEAD_WARMUP:-0}
 HEAD_LR=${HDP_HEAD_LR:-3e-4}
@@ -369,11 +354,10 @@ else
   log "legacy source pin: omitting redesigned-head flags (control arm)"
 fi
 
-# Label smoothing is detected on its own and not folded into the check above. The flag was
-# removed from the branch while #308 made it a no-op, then restored once that revert put
-# nn.functional.cross_entropy back, so there is a range of pinned sources that DO have the
-# head-arch flags and do NOT have this one. A combined check would pass the arch grep and
-# then hand an unknown flag to argparse.
+# Label smoothing is detected on its own and not folded into the check above: it landed
+# later than the head-arch flags, so there is a range of pinned sources that HAVE those and
+# do NOT have this one. A combined check would pass the arch grep and then hand an unknown
+# flag to argparse.
 if grep -q "turn_indicator_label_smoothing" \
     "${SOURCE_REPO}/diffusion_planner/train_predictor.py"; then
   TRAIN_ARGS+=(--turn_indicator_label_smoothing "${HDP_LABEL_SMOOTHING:-0.0}")

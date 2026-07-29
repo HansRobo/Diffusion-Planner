@@ -4,57 +4,18 @@ Entry point for the Hyper Diffusion Planner work as of **2026-07-29**. Read this
 `hyper_diffusion_planner.md` is the model-contract detail and `hdp_rl.md` is the RL
 reference.
 
-Two things this document exists to prevent:
-
-1. Concluding that experiments were lost because `git branch -a | grep hdp` shows one
-   branch. Nothing was lost — see [Archive tags](#archive-tags).
-2. Re-proposing a mechanism that was already tried and refused on measurement. Every
-   "why not X" below is a measured result, not a preference.
-
 ## The branch
 
 There is exactly one: **`feature/hyper-diffusion-planner`**. Seven remote and thirteen
 local HDP branches were deleted on 2026-07-29 after everything unmerged was pushed as an
-annotated tag.
+annotated tag — nothing was lost, see [Archive tags](#archive-tags).
 
-| PR | Outcome | Basis |
-| --- | --- | --- |
-| #305 | merged | It *is* the branch; every artifact on disk derives from it. |
-| #317 | merged | Hard blocker. A metric dict built from a set literal gave 8 ranks 8 iteration orders, so **no HDP-RL replay epoch could finish under DDP**. Fix is `sorted(...)` in `utils/ddp.py`. Its second half survives a restart that lands on a mine epoch, saving a ~3h re-mine. |
-| #310 | closed, superseded | `--rl_paper_exact` ships here: `a8e55afc`, `c3611a52`, `8871aa8f`, `d848517b` are all ancestors. Opt-in, default-off. |
-| #308 | merged then **fully reverted** (`3d15a2e3`) | Premise contradicted by the deployment target — see below. |
+`--rl_paper_exact` ships here (`a8e55afc`, `c3611a52`, `8871aa8f`, `d848517b`), opt-in and
+default-off.
 
-### Why #308 was reverted
-
-Its three knobs assumed the node gates on absolute probabilities. It does not: per
-`node_turn_indicator_manager_review_20260729.md`, the C++ manager is **per-cycle argmax
-plus a time window — no softmax, no EMA, no probability threshold**. Therefore
-
-- `fit_probability_temperature` is a **provable no-op**: dividing all logits by one
-  positive scalar is monotone and cannot change an argmax.
-- `turn_indicator_opposite_direction_weight` prices probability *mass* that an argmax
-  consumer is invariant to.
-- `turn_indicator_implied_intent_smoothing` is a soft-label mechanism already refuted for
-  this head: only **0.300%** of frames sit at a label transition.
-
-Shipping it inert at `0.0/0.0` was also rejected — three flags that are argparse'd,
-validated and sbatch-passed but cannot change a result are the same defect class this
-branch had just finished removing. **Do not re-propose it.** Move the operating point
-downstream, in the C++ manager.
-
-**`turn_indicator_label_smoothing` is *not* part of that refusal**, and the distinction is
-the whole test. The refuted mechanism is a *transition-aware* soft label — deriving targets
-from temporal proximity to a switch, which is pointless when 0.300% of frames sit at a
-transition. Uniform label smoothing is a plain regularizer on
-`nn.functional.cross_entropy`, and unlike the refused knobs it **changes the training
-gradient**, so it changes the learned weights; an argmax consumer is not invariant to it.
-Default `0.0` is bit-identical to unsmoothed (pinned at `rtol=0, atol=0`).
-
-The flag has a scar worth knowing: it was removed during the consolidation because #308's
-merge had made it dead, then restored in `15749d68` once the #308 revert put
-`cross_entropy` back. The launcher therefore detects it with **its own** grep — a source
-pinned between those two commits has the head-arch flags but not this one, so a combined
-check would hand an unknown flag to argparse.
+One line of merged code is easy to mistake for a stylistic choice and is not:
+`sorted(...)` over the metric dict in `utils/ddp.py` (#317). Built from a set literal it
+gave 8 ranks 8 iteration orders, and no HDP-RL replay epoch could finish under DDP.
 
 ## Pipeline
 
@@ -63,94 +24,38 @@ check would hand an unknown flag to argparse.
 | Base (80-token, ego-only) | `run_hdp_ego_only_base80_node02.sbatch` | Full vehicle-parameter corpus, no SFT init. Three `is_skipped`-filtered right-turn manifests, each repeated ×10. Source lists are immutable inputs; the job never rewrites them. |
 | Base (node01 variant) | `run_hdp_ego_only_base_node01.sbatch` | |
 | SFT | `run_hdp_ego_only_sft_node01.sbatch` | Asserts `BASE_RUN/latest.pth` is at the expected epoch. |
-| Staged SFT | `run_hdp_staged_sft_node02.sbatch` | Stage 1 removes signal feedback and adapts only the trajectory planner; each stage hands its `latest.pth` EMA to the next. |
+| Staged SFT | `run_hdp_staged_sft_node02.sbatch` | Stage 1 removes signal feedback and adapts only the trajectory planner; stage 2 trains the turn-indicator head. Each stage hands its `latest.pth` EMA to the next. |
 | RL post-training | `run_hdp_rl.sbatch` | Same three manifests at the same ×10 repeat as Base, re-checked by the trainer, so an RL delta is attributable to the objective and not to a distribution shift. |
-| Turn-indicator head | `run_hdp_turn_indicator_head_node01.sbatch` | Safe to run **concurrently** with RL. Per `configure_rl_trainable_parameters` (`train_hdp_rl_predictor.py:87-95`), `--rl_train_scope decoder` trains only `decoder.dit.*` and `decoder.global_route_encoder.*`, and `all` trains everything *except* `decoder.turn_indicator_predictor.*` — so the head is untouched under **both** values. Default **2 epochs**, on expert trajectories only — see below. |
+| Turn-indicator head | `run_hdp_turn_indicator_head_node01.sbatch` | Safe to run **concurrently** with RL — see below. |
 | LR probe | `run_hdp_policy_lr_probe_node02.sbatch` | |
-
-### Why the head trains for 2 epochs
-
-`HDP_HEAD_EPOCHS` defaults to `2` because that is where the head turns over, measured.
-Both arms of the 2026-07-29 architecture A/B (jobs 1540/1541) peak at epoch 2 and decline
-after it on 9 of 10 validation metrics:
-
-| epoch | CONTROL acc / macro_f1 / dir_acc | NEW acc / macro_f1 / dir_acc |
-| --- | --- | --- |
-| 1 | .8881 / .8455 / .7211 | .8985 / .8625 / .7595 |
-| 2 | **.8885 / .8467 / .7227** | **.8995 / .8640 / .7619** |
-| 3 | .8856 / .8425 / .7135 | .8932 / .8549 / .7460 |
-| 4 | .8823 / .8375 / .7085 | — |
-
-This is a **training-length** change, not a checkpoint selection — the two are not
-interchangeable, and the checkpoint rule below is untouched. The deliverable is still
-`latest.pth`; after two epochs that file simply *is* the epoch-2 head, reached by
-training, not by a selector scanning a validation curve.
-
-Shortening the run cannot change what those epochs contain. `HEAD_WARMUP=0` makes
-`LinearWarmupConstantLR` return `MultiplicativeLR(lr_lambda=1.0)`, which ignores
-`total_epochs` entirely, and `args._train_epochs` reaches exactly one consumer — the
-`train_step/total_epochs` wandb field (`train_epoch.py:126,248`). So a 2-epoch run's
-epochs 1–2 are the 6-epoch runs' epochs 1–2. `HEAD_EPOCHS` is also the only source for
-the run name and both completion guards, so a longer re-measurement gets its own
-directory rather than colliding.
-
-Raise it when the head architecture or lr changes: the turnover epoch is a property of
-that configuration and has only been measured for this one.
-
-The A/B's winner is a **4-way bundle** — `turn_indicator_head_num_queries=4`,
-`num_layers=2`, `head_dropout=0.1`, `label_smoothing=0.05` (936,960 → 2,314,240 head
-parameters). It wins every epoch on every metric, but no single flag in it is separately
-attributed.
-
-### Why the head trains on expert trajectories only
-
-The `turn_indicator` stage conditions the head on the clean expert future and skips
-diffusion sampling entirely: the frozen scene encoder runs once per batch and DiT is not
-evaluated. There used to be a second, selectable pass — `--turn_indicator_head_training_mode
-deployment`, plus stage 3 of the staged-SFT launcher — that ran the full six-step DPM
-sampler and added a cross-entropy on the head applied to the policy's *own* generated
-trajectory, blended with the expert term by two tunable weights. It is gone.
-
-It was removed because the two branches turned out to be near-duplicates. Both arms of the
-same A/B log the head's expert-conditioned and generated-conditioned predictions every
-step, and over a full epoch they agree to **0.08 accuracy points**:
-
-| arm, epoch 4 | expert | generated |
-| --- | --- | --- |
-| NEW — accuracy | .96982 | .96911 |
-| NEW — cross-entropy | .25102 | .25258 |
-| CONTROL — accuracy | .97117 | .96996 |
-| CONTROL — cross-entropy | .07316 | .07627 |
-
-The expert cross-entropy is the *lower* of the two in both arms, and batch accuracy is
-bit-identical in 31.8% (NEW) / 74.5% (CONTROL) of logged steps. The second pass was
-therefore buying a near-duplicate gradient at the sampler's price — six DPM evaluations
-per batch.
-
-Two properties make the removal safe rather than merely cheaper:
-
-- **Validation is still deployment-faithful.** `validate_model.py` scores
-  `outputs["turn_indicator_logit"]` — the head applied to the *generated* trajectory. It
-  never reads `turn_indicator_expert_logit`. Exposure drift between training input and
-  inference input would still appear in the metrics we read, whatever the training mode.
-- **Base reproducibility is untouched.** The two loss-weight flags were only ever read
-  inside the head's loss path; `decoder.py` early-returns for `training_stage == "policy"`,
-  which is what every base, SFT and probe launcher passes. They were inert in all of them,
-  and every configuration on disk set them 1.0/1.0 — the value the surviving `joint` blend
-  is now hard-coded to.
-
-The intended weight sweep (`…_expertw0p0` / `…_expertw1p0`) is **not** the evidence here:
-both of those runs carry `RUN_FAILED` with zero epochs and no `train_log.tsv`. The numbers
-above come from the per-branch training metrics in the A/B runs' own wandb records.
-
-Strict resume stays backward compatible. `assert_checkpoint_compatible` compares a field
-only when the current config still has it, so a checkpoint whose `args.json` carries the
-three retired keys loads without complaint (pinned by
-`test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only`). Passing the
-flags on a command line now fails loudly instead of being ignored.
 
 Entry points: `train_predictor.py`, `train_hdp_rl_predictor.py`, `valid_predictor.py`,
 `valid_predictor_closed_loop.py`.
+
+## Turn-indicator head
+
+The head is a detached probe on frozen policy features. `supervised_training_stage=turn_indicator`
+freezes the planner, keeps it in eval mode, and conditions the head on the expert future;
+diffusion sampling is skipped entirely, so the scene encoder runs once per batch and DiT is
+not evaluated. Validation scores `turn_indicator_logit` — the head applied to the
+*generated* trajectory — which is what the vehicle sees.
+
+`HDP_HEAD_EPOCHS` defaults to **2**, where the head turns over on this configuration; the
+turnover epoch belongs to the architecture and lr, so re-measure it if either changes. This
+is a training-length default and not a checkpoint selection — the deliverable is still
+`latest.pth`, which after two epochs simply *is* the epoch-2 head.
+
+Architecture and regularization are set per run by `HDP_HEAD_NUM_QUERIES`,
+`HDP_HEAD_NUM_LAYERS`, `HDP_HEAD_DROPOUT` and `HDP_LABEL_SMOOTHING`; the code defaults
+reproduce a single-query single-layer probe. `turn_indicator_label_smoothing` is detected
+by the launcher with its own grep, because a source pinned before it existed would be
+handed an unknown flag by argparse.
+
+Running the head concurrently with RL is safe by construction. Per
+`configure_rl_trainable_parameters` (`train_hdp_rl_predictor.py:87-95`),
+`--rl_train_scope decoder` trains only `decoder.dit.*` and `decoder.global_route_encoder.*`,
+and `all` trains everything *except* `decoder.turn_indicator_predictor.*` — the head is
+untouched under **both** values.
 
 ## Checkpoint rule — always `latest.pth`
 
@@ -176,32 +81,6 @@ reward term on 67.5% of rows. `amp_dtype: "auto"` is bf16 in disguise. With AMP 
 both off, a 46k-scene eval is byte-identical across replicates and the A/B noise floor is
 exactly zero, which is what makes small paired contrasts readable at all.
 
-## What was removed, and why it changes no result
-
-`rl_first_waypoint_gate` and its six threshold flags are gone
-(`hdp_rl_first_waypoint_gate_removal_20260729.md`). It was **never on** — all 32 `args.json`
-on disk carry `False` — and its 5 cm tangent floor sat *above* the phenomenon it had to
-police (stop-turn first-step p95 is 0.039 m), so `mean_first_waypoint_gate_rejected_fraction`
-was 0 across cycles 1–4.
-
-Cache safety is explicit: the field is pinned in
-`_FINGERPRINT_RETIRED = {"rl_first_waypoint_gate": repr(False)}`, so all 32 historical
-`reward_fingerprint` values reproduce byte-for-byte and a resume of a ~2.1 TB mined cycle
-still reads instead of aborting on drift.
-
-If the gate is ever wanted back, judge standstill on **absolute lateral offset**, not
-direction: below ~9 cm the logged human's own implied steer averages 50°, so direction
-there is localization noise. A `|y| > 5 mm` low-speed cap rejects 0.004% of human
-standstill rows. `compute_reward_weights(candidate_valid_mask=...)` is retained as the
-integration point and currently has no caller.
-
-`--turn_indicator_head_training_mode`, `--turn_indicator_generated_loss_weight` and
-`--turn_indicator_expert_loss_weight` are gone with the head's generated-trajectory pass
-(stage 3 of staged SFT). The two weights were dead in every base/SFT/probe launcher —
-`decoder.py` early-returns before reading them for `training_stage == "policy"` — and the
-`joint` blend that did read them is now the even mean those launchers' 1.0/1.0 already
-produced. See "Why the head trains on expert trajectories only" for the measurement.
-
 ## Reproducibility contract
 
 - **Base is not retrained.** It is a fixed premise, not a tuning knob.
@@ -209,6 +88,9 @@ produced. See "Why the head trains on expert trajectories only" for the measurem
 - The turn-indicator head loss is gated by `training_stage == "turn_indicator"`
   (`train_epoch.py:189-190`), so policy-only Base/SFT never evaluates it. Head-side
   changes cannot affect base reproducibility.
+- `_FINGERPRINT_RETIRED` pins retired reward fields, so all 32 historical
+  `reward_fingerprint` values still reproduce byte-for-byte and a resume of a ~2.1 TB
+  mined cycle reads its cache instead of aborting on drift.
 - `effective_config.json` records 208 keys including anchor horizons, precision,
   `world_size` and lr — but **not** `model_path`, `seed`, `start_epoch` or `epochs`.
 - Treat `batch_size // world_size` as load-bearing: bf16 went non-finite at local batch

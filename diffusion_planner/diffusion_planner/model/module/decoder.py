@@ -392,9 +392,8 @@ def compute_training_loss(
         generated_turn_indicator_loss * generated_quality
     ).sum() / generated_quality.sum().clamp_min(1e-6)
     expert_turn_indicator_loss = expert_turn_indicator_loss.mean()
-    # An even mean. This is the `joint` stage, which no launcher runs; the two tunable
-    # blend weights are gone with the head's deployment mode, and every configuration on
-    # disk set them 1.0/1.0, so this reproduces all of them exactly.
+    # An even mean, matching every `joint` configuration on disk. This is the `joint`
+    # stage, which no production launcher runs.
     turn_indicator_loss = (generated_turn_indicator_loss + expert_turn_indicator_loss) / 2.0
     loss["turn_indicator_loss"] = turn_indicator_loss
     loss["turn_indicator_generated_loss"] = generated_turn_indicator_loss.detach()
@@ -436,12 +435,9 @@ def compute_turn_indicator_head_training_loss(
     entirely: the scene encoder runs once per batch and the head learns intent from the
     clean expert future, retaining gradients only for its own detached inputs.
 
-    Also conditioning the head on the policy's own six-step DPM trajectory was measured
-    and dropped: over a full epoch the two branches agree to 0.08 accuracy points
-    (0.96982 expert vs 0.96911 generated, jobs 1540/1541), so the second branch spent the
-    sampler's wall clock on a near-duplicate gradient. Removing it does not weaken the
-    test -- validation stays deployment-faithful, scoring `turn_indicator_logit` (the head
-    on the *generated* trajectory) in `validate_model.py`, never the expert logit.
+    Validation stays deployment-faithful independently of this: it scores
+    `turn_indicator_logit`, the head on the *generated* trajectory (`validate_model.py`),
+    never the expert logit.
     """
     if getattr(args, "supervised_training_stage", "policy") != "turn_indicator":
         raise ValueError("head-only loss requires supervised_training_stage='turn_indicator'")

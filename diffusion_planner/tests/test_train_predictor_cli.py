@@ -58,8 +58,7 @@ def test_training_cli_selects_sequential_supervised_stages():
     ),
 )
 def test_training_cli_rejects_the_removed_generated_trajectory_knobs(option):
-    """The head trains on expert trajectories only. These three flags configured a second
-    pass over the policy's own DPM trajectory, which measured as a near-duplicate gradient.
-    Fail loudly rather than silently ignoring a launcher that still passes them."""
+    """A launcher pinned to an older source may still pass these. Fail loudly rather than
+    silently training something other than what the command line asked for."""
     with pytest.raises(SystemExit):
         get_args(_required_args() + [option, "1.0"])

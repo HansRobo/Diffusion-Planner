@@ -361,15 +361,8 @@ esac
 
 # Stage 2, and the last one: train the head on expert trajectories. This evaluates the
 # frozen encoder once per batch and entirely skips the diffusion policy. The expert head
-# at ${HEAD_EXPERT_DIR} is the final artifact.
-#
-# There used to be a stage 3 that re-calibrated this head on the policy's own six-step
-# DPM trajectories, on the theory that supervising from a ground-truth path the vehicle
-# never has would mistrain it. Measured, it does not: over full epochs of jobs 1540/1541
-# the head's expert-conditioned and generated-conditioned predictions agree to 0.08
-# accuracy points, and the expert CE is the lower of the two. Stage 3 paid for six DPM
-# steps per batch to re-learn what stage 2 already knew. Validation is unchanged and
-# still scores the generated trajectory, so a regression here would still be visible.
+# at ${HEAD_EXPERT_DIR} is the final artifact. Validation still scores the head applied to
+# the generated trajectory, so exposure drift would show up in the metrics either way.
 run_stage turn-expert turn_indicator \
   "${HEAD_EXPERT_NAME}" "${HEAD_EXPERT_DIR}" "${POLICY_DIR}/latest.pth" \
   "${HEAD_EXPERT_EPOCHS}" "${HEAD_EXPERT_WARMUP}" "${HEAD_EXPERT_LR}" 1

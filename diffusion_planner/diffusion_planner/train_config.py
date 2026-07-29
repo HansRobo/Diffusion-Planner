@@ -118,11 +118,8 @@ class TrainConfig:
     # trajectory planner without evaluating or updating the auxiliary head, then
     # ``turn_indicator`` freezes the planner and trains the detached head below.
     # ``joint`` remains an explicit ablation only; it is never the safe default.
-    # The ``turn_indicator`` stage always trains the head on expert trajectories, which
-    # skips the DPM rollout entirely. A second pass on the policy's own generated
-    # trajectory used to be selectable and was dropped: the two branches agreed to 0.08
-    # accuracy points over a full epoch, so it bought a near-duplicate gradient at the
-    # sampler's price. Validation is unchanged and still scores the generated trajectory.
+    # ``turn_indicator`` trains the head on expert trajectories, skipping the DPM rollout
+    # entirely; validation still scores the head on the generated trajectory.
     supervised_training_stage: Literal["joint", "policy", "turn_indicator"] = "policy"
     # Architecture provenance, persisted in args.json. These are deliberately
     # not user-tunable modes: the policy never consumes indicator history and

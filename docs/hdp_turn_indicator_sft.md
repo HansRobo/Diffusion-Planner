@@ -34,9 +34,9 @@ maneuver make that target partially unobservable. The network therefore predicts
 state probabilities; temporal stability is handled after the network.
 
 The exact default SFT manifest was audited independently: all 4,578,036 samples
-are valid, with 62.07% disable, 20.34% left, and 17.59% right. This distribution
-does not justify the old 10x active-state class weighting; ordinary per-sample
-cross entropy preserves calibration for the output state machine.
+are valid, with 62.07% disable, 20.34% left, and 17.59% right. That distribution is
+close enough to balanced that ordinary per-sample cross entropy is used unweighted,
+which preserves calibration for the output state machine.
 
 ## Model contract
 
@@ -79,16 +79,8 @@ The staged training protocol is:
    latest EMA, freeze the complete planner, keep it in evaluation mode, and train
    only the head. The encoder runs once per batch and DiT is not evaluated.
 
-There used to be a third stage, selected by a `deployment` head mode, that re-trained
-the same head on the detached final six-step DPM trajectory so that its inputs matched
-inference exposure. It was removed after being measured. Over full epochs of the
-2026-07-29 head architecture A/B (jobs 1540/1541), the head's expert-conditioned and
-generated-conditioned predictions agree to 0.08 accuracy points — 0.96982 vs 0.96911 —
-and the expert cross-entropy is the *lower* of the two (0.25102 vs 0.25258). The extra
-stage paid for six DPM steps per batch to re-learn what the expert stage already knew.
-Removing it does not weaken the check: validation is unchanged and still scores
-`turn_indicator_logit`, the head applied to the *generated* trajectory
-(`validate_model.py`), so exposure drift would still be visible in the metrics.
+Validation scores `turn_indicator_logit`, the head applied to the *generated*
+trajectory (`validate_model.py`), which is the input it has on the vehicle.
 
 A persistent encoder-feature cache is deliberately not used. The full Base80 data
 would require roughly 1.8 TB even in bf16, and cached features would no longer match
@@ -98,8 +90,7 @@ keeps exact augmented inputs without redundant encoder evaluations.
 The joint mode remains available for controlled experiments. In that mode, the
 generated per-sample loss is weighted by `(1-t)`, and the generated and expert
 cross-entropies are combined as an even mean. The production staged run does not use
-joint training. No stale four-class weights or transition-onset multiplier is used in
-any mode.
+joint training.
 
 Both stages use the exact Base80 data contract: the 20260707 vehicle-parameter and
 mirror manifest, the same three `is_skipped`-filtered right-turn manifests repeated
@@ -124,8 +115,7 @@ state machine returns internal state 0/1/2; `raw_report_state` maps it to 1/2/3.
 
 ## Validation
 
-Exact 0.1 s transition-frame accuracy is intentionally removed from W&B. It
-measures annotator timing more than usable intent quality. Log:
+W&B logs:
 
 - overall accuracy;
 - balanced accuracy and macro-F1;
