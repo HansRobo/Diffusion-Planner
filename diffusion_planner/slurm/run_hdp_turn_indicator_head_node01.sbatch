@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --nodelist=node01
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=112
-#SBATCH --mem=900G
+#SBATCH --cpus-per-task=96
+#SBATCH --mem=450G
 #SBATCH --gres=gpu:h100:4
 #SBATCH --requeue
 #SBATCH --chdir=/tmp
@@ -23,7 +23,8 @@ set -euo pipefail
 #     excluded under BOTH rl_trainable_scope values, so the head is untouched there.
 #   * TurnIndicatorHead detaches all four of its inputs, so head training sends no
 #     gradient into the encoder or the policy. supervised_training_stage=turn_indicator
-#     additionally freezes every non-head parameter (939,523 of 18,916,743 trainable).
+#     additionally freezes every non-head parameter, so the trainable count is the head
+#     alone: 939,523 for the legacy probe, 2,323,203 at num_queries=4 num_layers=2.
 #
 # Deliberate deltas from run_hdp_staged_sft_node02.sbatch:
 #
@@ -51,12 +52,22 @@ set -euo pipefail
 #     threshold is a free offline sweep over dumped logits while a loss weight costs a
 #     full run per operating point. Keep the loss calibrated; move the operating point
 #     downstream.
-#   * turn_indicator_expert_loss_weight is a real open question, so it is an A/B rather
-#     than a guess. At inference the head only ever sees the policy's own DPM trajectory
-#     (turn_indicator_logit); turn_indicator_expert_logit is computed from the ground
-#     truth expert path, which never exists on the vehicle. The node02 lineage weighted
-#     those 1.0/1.0, i.e. half the gradient came from an input distribution that does
-#     not occur at deployment. Arm A reproduces 1.0/1.0; arm B sets expert weight 0.0.
+#   * turn_indicator_expert_loss_weight is a real open question. At inference the head
+#     only ever sees the policy's own DPM trajectory (turn_indicator_logit);
+#     turn_indicator_expert_logit is computed from the ground truth expert path, which
+#     never exists on the vehicle. The node02 lineage weighted those 1.0/1.0, i.e. half
+#     the gradient came from an input distribution that does not occur at deployment.
+#     It is held at 1.0/1.0 here so that the only variable is the architecture; the
+#     weight sweep is a follow-up on whichever architecture wins.
+#
+# The A/B this launcher runs is ARCHITECTURE, selected by SOURCE_REPO:
+#   CONTROL  legacy pin (pre-33306cc8): single-query single-layer cross-attention over a
+#            summed traj+proprio+route query, no normalization, dropout hardcoded 0.
+#   NEW      pin >=33306cc8: input LayerNorms, concat-project context (a sum cannot
+#            represent a conjunction of the three conditions), configurable multi-query
+#            multi-layer pre-LN attention, real dropout, and label smoothing.
+# Everything else -- data lists, seed 3407, augmentation, lr, epochs, global batch,
+# rank count, precision -- is identical between the arms.
 
 REQUIRED_USER=${HDP_REQUIRED_USER:-wang}
 if [[ "$(id -un)" != "${REQUIRED_USER}" ]]; then
@@ -69,7 +80,7 @@ fi
 # Pinned at the redesigned-head commit. The previous pin (hdp-rl-d848517b, commit
 # 8b0336e9) predates --turn_indicator_head_* and would reject those flags outright.
 SOURCE_REPO=${HDP_SOURCE_REPO:-/mnt/storage_rdma/workspaces/wang/hdp-head-33306cc8}
-EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:-33306cc888df3173666a2211664afb6499498b85}
+EXPECTED_COMMIT=${HDP_EXPECTED_COMMIT:-40fcd6c92fff423236977a0079e21f6a133e9cc1}
 ROOT=${HDP_OUTPUT_ROOT:-/mnt/nvme/wangbin/Diffusion-Planner-hdp-turn-indicator-20260729}
 
 POLICY_CKPT_DIR=${HDP_POLICY_CKPT_DIR:-/mnt/storage_rdma/diffusion_planner/checkpoints/hdp_base80_data_robust_v1_no_roadborder_e80_latest}
@@ -96,16 +107,36 @@ PYTHON=${SOURCE_REPO}/.venv/bin/python
 PORT=${HDP_MASTER_PORT:-22671}
 MAX_ATTEMPTS=${HDP_MAX_ATTEMPTS:-3}
 
-# Rank count follows the allocation so two 4-GPU arms can share node01. batch_size stays
-# 512 and train.py:853 divides it by world_size (local_batch_size = batch_size //
-# world_size), so the GLOBAL batch is identical at 4 or 8 ranks and an arm run at 4 GPUs
-# carries no learning-rate confound against the 8-GPU node02 lineage.
+# Rank count follows the allocation so two 4-GPU arms can share node01. batch_size is
+# GLOBAL: train.py:853 sets local_batch_size = batch_size // world_size, so two arms at
+# the same batch_size carry no learning-rate confound whatever rank count they run at.
+#
+# The LOCAL batch is not a free variable, though. Job 1533 (8 ranks, local 64) validated
+# all 91 batches finite, while jobs 1538 and 1539 (4 ranks, local 128, args.json
+# otherwise byte-identical) both died in the pre-training validation on 3/3 attempts with
+# "prediction_finite=False" on several ranks at once. A frozen policy cannot become
+# unstable from rank count alone, so the local shape is the suspect: under
+# --amp_dtype bf16 a different local batch selects different matmul kernels, and bf16's
+# 8-bit mantissa can round an intermediate denominator to exactly zero. Keep
+# batch_size // NPROC at the value that has actually been observed finite (64).
 NPROC=${HDP_NPROC:-$(nvidia-smi --list-gpus | wc -l)}
-if [[ ! "${NPROC}" =~ ^[1-8]$ ]] || (( 512 % NPROC != 0 )); then
-  echo "FATAL: NPROC=${NPROC} must be 1-8 and divide batch_size 512" >&2
+BATCH_SIZE=${HDP_BATCH_SIZE:-512}
+if [[ ! "${NPROC}" =~ ^[1-8]$ ]] || (( BATCH_SIZE % NPROC != 0 )); then
+  echo "FATAL: NPROC=${NPROC} must be 1-8 and divide batch_size ${BATCH_SIZE}" >&2
   exit 21
 fi
+LOCAL_BATCH=$((BATCH_SIZE / NPROC))
+if (( LOCAL_BATCH > 64 )); then
+  echo "FATAL: local batch ${LOCAL_BATCH} (${BATCH_SIZE}/${NPROC}) exceeds the 64 that" >&2
+  echo "       validated finite; local 128 reproduced non-finite predictions on 6/6" >&2
+  echo "       attempts across jobs 1538 and 1539. Override with HDP_ALLOW_LOCAL_BATCH=1" >&2
+  echo "       only together with a precision change that explains the fix." >&2
+  [[ "${HDP_ALLOW_LOCAL_BATCH:-0}" == "1" ]] || exit 22
+fi
 
+# Two arms share node01 (224 CPUs, 2 TB) alongside other users' non-Slurm work, which
+# Slurm does not account for, so the per-arm request is half the node rather than all of
+# it: 96 CPUs and 450 GB each leaves headroom instead of overcommitting real memory.
 mkdir -p "${ROOT}" "${ROOT}/outputs" "${ROOT}/tmp" "${ROOT}/cache" "${ROOT}/wandb_cache" "${SAVE_DIR}"
 
 log() {
@@ -231,10 +262,6 @@ TRAIN_ARGS=(
   --turn_indicator_head_training_mode "${HEAD_MODE}"
   --turn_indicator_generated_loss_weight "${HDP_GENERATED_LOSS_WEIGHT:-1.0}"
   --turn_indicator_expert_loss_weight "${HDP_EXPERT_LOSS_WEIGHT:-1.0}"
-  --turn_indicator_head_num_queries "${HDP_HEAD_NUM_QUERIES:-1}"
-  --turn_indicator_head_num_layers "${HDP_HEAD_NUM_LAYERS:-1}"
-  --turn_indicator_head_dropout "${HDP_HEAD_DROPOUT:-0.0}"
-  --turn_indicator_label_smoothing "${HDP_LABEL_SMOOTHING:-0.0}"
   --learning_rate "${HEAD_LR}"
   --warm_up_epoch "${HEAD_WARMUP}"
   --train_epochs "${HEAD_EPOCHS}"
@@ -250,7 +277,7 @@ TRAIN_ARGS=(
   --train_subsample_step 1
   --align_legacy_neighbor_futures False
   --normalization_file_path "${NORMALIZATION}"
-  --batch_size 512
+  --batch_size "${BATCH_SIZE}"
   --weight_decay 0.01
   --adamw_no_decay True
   --num_workers 16
@@ -303,6 +330,34 @@ TRAIN_ARGS=(
   --export_onnx_on_save False
   --port "${PORT}"
 )
+
+# The redesigned-head flags exist only from commit 33306cc8 on. The legacy pin is a
+# legitimate SOURCE_REPO -- it is the control arm of the architecture A/B -- and passing
+# unknown flags to it is a hard argparse error, so append them only where they parse.
+# Silently dropping a non-default value would turn the treatment arm into a second
+# control, so that case aborts instead.
+HEAD_ARCH_FLAGS=(
+  --turn_indicator_head_num_queries "${HDP_HEAD_NUM_QUERIES:-1}"
+  --turn_indicator_head_num_layers "${HDP_HEAD_NUM_LAYERS:-1}"
+  --turn_indicator_head_dropout "${HDP_HEAD_DROPOUT:-0.0}"
+  --turn_indicator_label_smoothing "${HDP_LABEL_SMOOTHING:-0.0}"
+)
+if grep -q "turn_indicator_head_num_queries" \
+    "${SOURCE_REPO}/diffusion_planner/train_predictor.py"; then
+  TRAIN_ARGS+=("${HEAD_ARCH_FLAGS[@]}")
+  log "redesigned-head flags: ${HEAD_ARCH_FLAGS[*]}"
+else
+  for spec in "HDP_HEAD_NUM_QUERIES=1" "HDP_HEAD_NUM_LAYERS=1" \
+              "HDP_HEAD_DROPOUT=0.0" "HDP_LABEL_SMOOTHING=0.0"; do
+    name=${spec%%=*}
+    if [[ -n "${!name:-}" && "${!name}" != "${spec#*=}" ]]; then
+      echo "FATAL: ${name}=${!name} but ${SOURCE_REPO} predates the redesigned head." >&2
+      echo "       Running it there would silently produce a second control arm." >&2
+      exit 23
+    fi
+  done
+  log "legacy source pin: omitting redesigned-head flags (control arm)"
+fi
 
 checkpoint_epoch() {
   "${PYTHON}" - "$1" <<'PY'
