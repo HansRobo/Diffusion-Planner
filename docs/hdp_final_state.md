@@ -42,6 +42,20 @@ validated and sbatch-passed but cannot change a result are the same defect class
 branch had just finished removing. **Do not re-propose it.** Move the operating point
 downstream, in the C++ manager.
 
+**`turn_indicator_label_smoothing` is *not* part of that refusal**, and the distinction is
+the whole test. The refuted mechanism is a *transition-aware* soft label — deriving targets
+from temporal proximity to a switch, which is pointless when 0.300% of frames sit at a
+transition. Uniform label smoothing is a plain regularizer on
+`nn.functional.cross_entropy`, and unlike the refused knobs it **changes the training
+gradient**, so it changes the learned weights; an argmax consumer is not invariant to it.
+Default `0.0` is bit-identical to unsmoothed (pinned at `rtol=0, atol=0`).
+
+The flag has a scar worth knowing: it was removed during the consolidation because #308's
+merge had made it dead, then restored in `15749d68` once the #308 revert put
+`cross_entropy` back. The launcher therefore detects it with **its own** grep — a source
+pinned between those two commits has the head-arch flags but not this one, so a combined
+check would hand an unknown flag to argparse.
+
 ## Pipeline
 
 | Stage | Launcher | Notes |
