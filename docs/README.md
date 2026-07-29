@@ -34,16 +34,19 @@ when checking whether a scene-level claim is actually supported by the image.
   known measurement error, and the archive tags that hold every unmerged experiment.
 - [`hdp_rl.md`](hdp_rl.md) — current HDP-RL experiment contract.
 - [`hyper_diffusion_planner.md`](hyper_diffusion_planner.md) — current HDP model contract.
-- [`hdp_audit_verification_20260714.md`](hdp_audit_verification_20260714.md) and
-  [`hdp_code_review_20260712.md`](hdp_code_review_20260712.md) — consolidated implementation
-  review and verification findings.
-- [`code_review_findings_20260711.md`](code_review_findings_20260711.md) — earlier finalised
-  findings referenced by the fourth-round review.
-- [`hdp_sft_model_comparison_20260713.md`](hdp_sft_model_comparison_20260713.md) — model/SFT
-  comparison needed when explaining why this AWR run targets Original DP.
+- [`hdp_rl_paper_fidelity.md`](hdp_rl_paper_fidelity.md) — clause-by-clause correspondence
+  between the RL implementation and the paper, and what `--rl_paper_exact` pins.
+- [`hdp_turn_indicator_sft.md`](hdp_turn_indicator_sft.md) — turn-intent head training and
+  its deployment contract.
+- [`checkpoint_selection.md`](checkpoint_selection.md) — why every downstream consumer takes
+  `latest.pth`.
 - [`causal_red_light_candidate_audit_20260715.md`](causal_red_light_candidate_audit_20260715.md)
-  and [`upstream_dev_backport_audit_20260716.md`](upstream_dev_backport_audit_20260716.md) —
-  current data-quality and upstream-scope audits.
+  — the audit note linked from the visual-evidence library above; kept because that page
+  cites it as the provenance of the red-light candidate figure.
+
+Point-in-time review and audit records are deliberately not kept here. They pin line numbers
+and findings to a HEAD that has since moved, so a reader cannot tell a live constraint from a
+closed one. What survived those reviews is stated in the contract pages above.
 
 ## Generators and publication helpers
 

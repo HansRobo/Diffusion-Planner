@@ -120,12 +120,10 @@ matching the source repository's train-and-select discipline. The frozen
 protected by the independent EPDMS/DAC/safety source guards, which are deployment metrics, not
 a second reward.
 
-## AWR upgrades from the original-DP post-training audits (2026-07-23)
+## AWR upgrades from the original-DP post-training audits
 
-See `docs/hdp_awr_rl_upgrade_20260723.md` for the evidence record. In brief: a first-waypoint
-candidate gate with a mandatory 5 cm tangent floor excludes low-speed standstill-jump candidates
-from both the advantage statistics and the weights; `rl_reward_aggregation=gated_product` offers
-the PDM-style bounded multiplicative-gate objective; `rl_reward_horizon_steps` scores a prefix with
+`rl_reward_aggregation=gated_product` offers the
+PDM-style bounded multiplicative-gate objective; `rl_reward_horizon_steps` scores a prefix with
 the candidate regression horizon following it (regressing the unscored tail is a known-negative
 configuration and is rejected); and the optional expert anchor applies only to scenes with an
 active reward group. Training-objective defaults are unchanged; only checkpoint selection
