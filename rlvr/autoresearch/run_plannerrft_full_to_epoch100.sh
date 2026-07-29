@@ -8,6 +8,17 @@
 
 set -Eeuo pipefail
 
+# --- precision: TRUE fp32 (2026-07-29) ----------------------------------------
+# Corrected COPY of run_plannerrft_full_to_epoch100.sh, made because pid 1983198 is
+# SIGSTOPped mid-execution of the original and bash re-reads a running script by byte
+# offset.  Differences from the original are exactly three:
+#   (1) AMP_DTYPE/NVIDIA_TF32_OVERRIDE default to the vehicle's precision
+#   (2) --amp_dtype is taken from AMP_DTYPE instead of the bf16 literal
+#   (3) BASELINE_DP10 is fail-closed instead of defaulting to a bf16 baseline
+AMP_DTYPE=${AMP_DTYPE:-off}
+export NVIDIA_TF32_OVERRIDE=${NVIDIA_TF32_OVERRIDE:-0}
+
+
 ROOT=/mnt/nvme/wangbin/Diffusion-Planner-t4-main
 PYTHON=${ROOT}/.venv/bin/python
 TORCHRUN=${ROOT}/.venv/bin/torchrun
@@ -58,6 +69,18 @@ REPLAY_BETA=${REPLAY_BETA:-1.0}
 BEHAVIOR_ANCHOR_WEIGHT=${BEHAVIOR_ANCHOR_WEIGHT:-0.0}
 AWR_CANDIDATE_LOSS_HORIZON=${AWR_CANDIDATE_LOSS_HORIZON:-40}
 EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY=${EXPERT_ANCHOR_ACTIVE_GROUPS_ONLY:-1}
+# --- the dual anchor: the only arm that moved the waypoint the vehicle executes ---------
+# One frame is one plan step, so the car only ever executes step 1; steps 2-80 are thrown
+# away by the next replan.  Measured over a paired 9-epoch cycle on ~46k scenes, an RL cycle
+# WITHOUT a step-1 anchor closes -0.4% of the model's step-1 lateral excess over the logged
+# human -- dead flat at every epoch.  Anchoring at horizon 1 closes 16.9%, monotone across
+# all 9 epochs, still falling at the last one.  Horizon 1 alone costs det_progress, so the
+# secondary full-horizon slot pays that back; that pair is the arm this campaign selected.
+# These were passed by hand for the arm comparison and existed nowhere in the repo, so a
+# resume silently reverted to the flat-executed-axis configuration.
+EXPERT_ANCHOR_LOSS_HORIZON=${EXPERT_ANCHOR_LOSS_HORIZON:-1}
+EXPERT_ANCHOR_SECONDARY_HORIZON=${EXPERT_ANCHOR_SECONDARY_HORIZON:-80}
+EXPERT_ANCHOR_SECONDARY_WEIGHT=${EXPERT_ANCHOR_SECONDARY_WEIGHT:-0.4}
 # 71% of mined groups have no candidate that beats the deployed deterministic
 # output, so AWR trains nothing on them and replay epochs are nearly inert
 # (+0.00024 selection reward over 9 epochs in the last full cycle).  The logged
@@ -147,7 +170,11 @@ fi
 # The entrypoint derives these from the actual corpus (base list + right-turn
 # oversampling) and exports them; fall back to the un-augmented literals so a
 # standalone invocation still validates.
-BASELINE_DP10=${BASELINE_DP10:-${ROOT}/outputs/awr_t4_full_sequence_filtered/20260718-201206_full_sequence_20260707_group_relative_ramp20_preserve_e100/deployment_full10/e004_a0p05/scenes.json}
+# A default here silently compares an fp32 arm against a bf16 baseline -- the exact
+# failure that vetoed every campaign from 2026-07-27 (the 0.0631 det_reward offset was
+# 318x the largest cycle delta).  Fail closed instead: the caller must name a baseline
+# produced at THIS precision.
+: "${BASELINE_DP10:?set BASELINE_DP10 to a scenes.json evaluated at AMP_DTYPE=${AMP_DTYPE} (no bf16 default)}"
 # Keep the same fail-closed reserve as the formal Cycle-1 launcher.  Later
 # refreshes symlink the multi-terabyte policy-independent encoding/context,
 # but a stale contract or future schema change must never be allowed to fill
@@ -683,7 +710,7 @@ deployment_audit() {
       --scenes "${VALID}" --config "${run}/effective_config.json" \
       --output_dir "${output}" --label "cycle$(printf '%02d' "${cycle}")_selected_policy_dp10" \
       --batch_size 512 --scene_load_workers "${EVAL_SCENE_LOAD_WORKERS}" --sample_steps 10 \
-      --amp_dtype bf16 --compile_mode default \
+      --amp_dtype "${AMP_DTYPE}" --compile_mode default \
       > "${run}/deployment_full10/eval.log" 2>&1
     "${PYTHON}" "${ROOT}/rlvr/autoresearch/tools/eval_awr_full_distributed.py" \
       --aggregate --model_path "${checkpoint}" --args_path "${run}/model_args.json" \
@@ -888,6 +915,9 @@ run_replay() {
     --awr_beta "${REPLAY_BETA}" --positive_advantage_only --positive_advantage_margin 0.01 \
     --behavior_anchor_weight 0 --unsafe_behavior_anchor_weight 0 \
     --expert_anchor_weight 0.4 \
+    --expert_anchor_loss_horizon "${EXPERT_ANCHOR_LOSS_HORIZON}" \
+    --expert_anchor_secondary_horizon "${EXPERT_ANCHOR_SECONDARY_HORIZON}" \
+    --expert_anchor_secondary_weight "${EXPERT_ANCHOR_SECONDARY_WEIGHT}" \
     --awr_candidate_loss_horizon "${AWR_CANDIDATE_LOSS_HORIZON}" \
     "${expert_scope_arg}" \
     --drop_all_zero_groups \

@@ -4,18 +4,21 @@
     "mode": "default",
     "encoder": false,
     "decoder": true,
-    "amp_dtype": "bf16",
-    "tf32": true,
+    "amp_dtype": "off",
+    "tf32": false,
     "cudnn_benchmark": true
   },
   "awr": {
     "n_trajectories": 10,
     "sample_steps": 5,
-    "noise_scale_range": [0.5, 0.5],
+    "noise_scale_range": [
+      0.5,
+      0.5
+    ],
     "beta": 1.0,
     "weight_clip": 1000000000.0,
     "normalize_weights": false,
-    "min_group_std": 0.000001,
+    "min_group_std": 1e-06,
     "safe_only": false,
     "structured_exploration": false,
     "deterministic_first": true,
@@ -50,10 +53,13 @@
     "eval_sample_steps": 10,
     "rollback_rejected_epoch": false,
     "diffusion_k_steps": 1,
-    "diffusion_t_range": [0.001, 0.999],
+    "diffusion_t_range": [
+      0.001,
+      0.999
+    ],
     "denoising_discount": 1.0,
     "denoising_steps": 1,
-    "learning_rate": 0.000001,
+    "learning_rate": 1e-06,
     "weight_decay": 0.0001,
     "grad_clip_norm": 0.5,
     "neighbor_loss_weight": 0.0,
@@ -81,7 +87,7 @@
     "gradient_accumulation_scenes": 1,
     "ema_decay": 0.999,
     "ema_per_epoch": false,
-    "amp_dtype": "auto",
+    "amp_dtype": "off",
     "fused_adamw": true,
     "log_interval": 64,
     "save_rollouts": 0
