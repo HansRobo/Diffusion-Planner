@@ -701,7 +701,24 @@ def main() -> int:
     p.add_argument("--warmup_steps", type=int, default=5)
     p.add_argument("--near_miss_thresh", type=float, default=1.0)
     p.add_argument("--fps", type=float, default=10.0)
+    p.add_argument(
+        "--watchdog_sec", type=float, default=0.0,
+        help="dump every thread's stack and exit after this many seconds (0 = off). The "
+             "parent sets it just under its own kill deadline so a hang leaves a stack behind",
+    )
     a = p.parse_args()
+
+    # Armed before anything heavy so it also covers model load and torch.compile. A full-suite
+    # run met a worker that sat 64 minutes in futex_wait_queue_me with 246 threads, no CPU and
+    # no GPU, ignored SIGTERM and needed SIGKILL -- and left no stack, so the cause is still
+    # unknown (plan/11 9m). faulthandler's watchdog runs on its own native thread and writes
+    # straight to the fd, so it can dump even when the main thread is wedged in C without the
+    # GIL, which is exactly that failure mode. `exit=True` makes it _exit() afterwards.
+    if a.watchdog_sec > 0:
+        import faulthandler
+
+        faulthandler.enable()
+        faulthandler.dump_traceback_later(a.watchdog_sec, exit=True)
 
     from scenario_generation.simulate import load_model
 
