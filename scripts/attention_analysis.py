@@ -21,6 +21,7 @@ Usage:
 """
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -159,6 +160,7 @@ def main():
     p.add_argument("--move_min_m", type=float, default=5.0)
     p.add_argument("--turn_deg", type=float, default=15.0)
     p.add_argument("--device", default="cpu")
+    p.add_argument("--out_json", default="", help="write aggregated results to this JSON file")
     args = p.parse_args()
 
     model, cfg = load_model(Path(args.run_dir), args.device)
@@ -248,6 +250,36 @@ def main():
             for bi in range(len(DIST_BINS)):
                 lane_bin_share[bi] += torch.stack(per_layer_lane_bins[bi]).mean(dim=0).tolist()
                 nbr_bin_share[bi] += torch.stack(per_layer_nbr_bins[bi]).mean(dim=0).tolist()
+
+    # ---------------- aggregate ----------------
+    r_route = np.array(route_share_per_sample)
+    results = {
+        "n_samples": len(idxs),
+        "n_turning": int(turning.sum()),
+        "n_layers": n_layers,
+        "classes": [c for c, _ in CLASSES],
+        "count_share": {c: float(np.mean(count_share[c])) for c, _ in CLASSES},
+        "ego_share_per_layer": {
+            c: [float(np.mean(ego_share[li][c])) for li in range(n_layers)] for c, _ in CLASSES
+        },
+        "all_share_avg": {
+            c: float(np.mean([np.mean(all_share[li][c]) for li in range(n_layers)]))
+            for c, _ in CLASSES
+        },
+        "vw_share_avg": {
+            c: float(np.mean([np.mean(vw_share[li][c]) for li in range(n_layers)]))
+            for c, _ in CLASSES
+        },
+        "dist_bins": ["0-25m", "25-50m", "50-100m", "100m+"],
+        "lane_bin_share": [float(np.mean(x)) for x in lane_bin_share],
+        "nbr_bin_share": [float(np.mean(x)) for x in nbr_bin_share],
+        "route_share_turning": float(r_route[turning].mean()) if turning.any() else None,
+        "route_share_straight": float(r_route[~turning].mean()) if (~turning).any() else None,
+    }
+    if args.out_json:
+        with open(args.out_json, "w") as f:
+            json.dump(results, f, indent=1)
+        print(f"wrote {args.out_json}", flush=True)
 
     # ---------------- report ----------------
     def pct(x):
