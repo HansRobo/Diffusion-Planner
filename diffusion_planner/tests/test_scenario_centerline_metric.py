@@ -1,8 +1,12 @@
-"""Tests for route-centerline distance, ADE, and FDE metrics."""
+"""Tests for route-centerline distance and lateral error metrics."""
 
 import torch
 
-from planner_metrics.centerline import compute_centerline_distance_batch, evaluate_centerline
+from planner_metrics.centerline import (
+    compute_centerline_distance_batch,
+    compute_centerline_error_components_batch,
+    evaluate_centerline,
+)
 
 
 def test_centerline_metric_projects_to_segments():
@@ -20,8 +24,8 @@ def test_centerline_metric_projects_to_segments():
     torch.testing.assert_allclose(distances, torch.tensor([[1.0, 2.0]]))
 
 
-def test_centerline_metric_returns_ade_and_fde_at_requested_horizon():
-    """Compute ADE/FDE using only the configured prediction horizon."""
+def test_centerline_metric_returns_lateral_errors_at_requested_horizon():
+    """Compute average/final lateral errors using the configured horizon."""
     prediction = torch.tensor([[[0.0, 1.0, 1.0, 0.0], [1.0, 2.0, 1.0, 0.0], [2.0, 3.0, 1.0, 0.0]]])
     # [batch, singleton context, lane, point, feature]
     route_lanes = torch.zeros((1, 1, 1, 4, 8))
@@ -34,5 +38,21 @@ def test_centerline_metric_returns_ade_and_fde_at_requested_horizon():
         {"horizon_seconds": 0.2},
     )
 
-    torch.testing.assert_allclose(values["ade_m"], torch.tensor([1.5]))
-    torch.testing.assert_allclose(values["fde_m"], torch.tensor([2.0]))
+    torch.testing.assert_allclose(values["average_lateral_error_m"], torch.tensor([1.5]))
+    torch.testing.assert_allclose(values["final_lateral_error_m"], torch.tensor([2.0]))
+
+
+def test_centerline_error_components_separate_endpoint_overshoot():
+    """Endpoint overshoot is longitudinal, not lateral, error."""
+    prediction = torch.tensor([[[4.0, 0.0], [5.0, 1.0]]])
+    route_lanes = torch.zeros((1, 2, 8))
+    route_lanes[0, :, 0] = torch.tensor([0.0, 3.0])
+    route_lanes[0, :, 2] = 1.0
+
+    values = compute_centerline_error_components_batch(
+        prediction,
+        {"route_lanes": route_lanes},
+    )
+
+    torch.testing.assert_allclose(values["lateral_error_m"], torch.tensor([[0.0, 1.0]]))
+    torch.testing.assert_allclose(values["longitudinal_error_m"], torch.tensor([[1.0, 2.0]]))
