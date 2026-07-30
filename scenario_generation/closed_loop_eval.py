@@ -638,6 +638,7 @@ def run_scenario_sim_eval(
     device: str,
     model_path: str,
     gpus: list[int] | None = None,
+    max_cases: int | None = None,
     worker_timeout_sec: float = 2400.0,
     near_miss_thresh: float = 1.0,
     replan_interval: int = 1,  # every tick = 10 Hz, matching the production node
@@ -678,6 +679,21 @@ def run_scenario_sim_eval(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     scenarios = enumerate_scenarios(scenario_root)
+    n_available = len(scenarios)
+    # Sampling for measurement runs. Per-stage ms/call needs a full worker pool held for a while,
+    # not the whole suite: a few waves of `jobs` cases already give tens of thousands of timed
+    # calls at the same contention, and a shared cluster is occupied for correspondingly less
+    # time. Evenly spaced rather than the first N, because the sorted order groups by scenario id
+    # -- the first N would be a handful of scenarios on a single map.
+    sample_stride = 1.0
+    if max_cases is not None and 0 < max_cases < n_available:
+        sample_stride = n_available / max_cases
+        scenarios = [scenarios[int(i * sample_stride)] for i in range(max_cases)]
+        if verbose:
+            print(
+                f"[scenario_sim] SAMPLED {len(scenarios)}/{n_available} cases "
+                f"(every ~{sample_stride:.1f}th) -- aggregate metrics are NOT the suite's"
+            )
     # `jobs` workers are spread round-robin over these devices. Default: every GPU the job
     # was allocated, which is what makes a full-suite run use the whole node rather than
     # piling all workers onto cuda:0.
@@ -854,6 +870,10 @@ def run_scenario_sim_eval(
     summary["map_override"] = str(map_path) if map_path is not None else None
     summary["maps_used"] = sorted({m for r in rows if (m := r.get("map_path"))})
     summary["n_scenarios"] = len(scenarios)
+    # Marked explicitly: a sampled summary must not be read as the suite's result.
+    summary["n_scenarios_available"] = n_available
+    summary["sampled"] = len(scenarios) < n_available
+    summary["sample_stride"] = round(sample_stride, 3)
     summary["jobs"] = jobs
     summary["gpus"] = gpu_ids
     summary["elapsed_sec"] = time.perf_counter() - t0
@@ -899,6 +919,11 @@ def main() -> None:
     p.add_argument("--near_miss_thresh", type=float, default=1.0)
     p.add_argument("--jobs", type=int, default=16,
                    help="scenarios to run concurrently on this GPU (tuned for CUDA MPS)")
+    p.add_argument("--max_cases", type=int, default=None,
+                   help="run an evenly spaced subset of this many cases. For timing runs: "
+                        "per-stage ms/call converges long before the suite does, and a subset "
+                        "occupies the cluster for correspondingly less time. The summary is "
+                        "marked sampled=true -- do not read its metrics as the suite's")
     p.add_argument("--worker_timeout_sec", type=float, default=2400.0,
                    help="reclaim a worker's slot after this long. Sized against the measured "
                         "p99 of 820 s (max 834 s) at max_steps=1700/jobs=64 -- raise it if you "
@@ -916,6 +941,7 @@ def main() -> None:
         replan_interval=args.replan_interval,
         max_steps=args.max_steps,
         jobs=args.jobs,
+        max_cases=args.max_cases,
         worker_timeout_sec=args.worker_timeout_sec,
     )
     print(json.dumps({k: v for k, v in summary.items() if k != "segments"}, indent=2, default=float))
