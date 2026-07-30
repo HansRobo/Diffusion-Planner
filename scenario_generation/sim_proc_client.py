@@ -42,6 +42,8 @@ class RemoteRunner:
         self._output_directory = str(output_directory)
         self._fps = float(local_frame_rate)
         self._proc: subprocess.Popen | None = None
+        self._log = None
+        self._log_path: Path | None = None
         self._conn: Connection | None = None
         self._sock: socket.socket | None = None
 
@@ -60,8 +62,21 @@ class RemoteRunner:
             sys.executable, "-c", boot,
             str(child.fileno()), self._osc_path, self._output_directory, str(self._fps),
         ]
+        # The child gets its own log. Inheriting the worker's stdout loses the distinction between
+        # "the simulator said something" and "the worker did", and a child that dies silently is
+        # then indistinguishable from one that never spoke -- which is exactly what happened on
+        # the one transient death in job 1689: a BrokenPipe in the parent and no child output at all.
+        self._log_path = Path(self._output_directory).parent / "sim_child.log"
         try:
-            self._proc = subprocess.Popen(argv, pass_fds=(child.fileno(),), env=os.environ.copy())
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log = open(self._log_path, "ab", buffering=0)  # unbuffered: a death must not eat it
+        except OSError:
+            self._log = None
+        try:
+            self._proc = subprocess.Popen(
+                argv, pass_fds=(child.fileno(),), env=os.environ.copy(),
+                stdout=self._log, stderr=subprocess.STDOUT,
+            )
         finally:
             child.close()  # the child owns its end now; keeping it open would hide its exit
         self._sock = parent
@@ -100,22 +115,39 @@ class RemoteRunner:
                     self._proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     pass
-        for closer in (self._conn, self._sock):
+        for closer in (self._conn, self._sock, self._log):
             try:
                 if closer is not None:
                     closer.close()
             except OSError:
                 pass
-        self._conn = self._sock = None
+        self._conn = self._sock = self._log = None
 
     # -- the forwarded surface ---------------------------------------------------------
+    def _died(self, name: str, why: str) -> RemoteSimError:
+        """Describe a dead child in terms someone can act on: signal or exit code, plus its log."""
+        rc = None
+        if self._proc is not None:
+            try:
+                rc = self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                rc = self._proc.poll()
+        how = "still running" if rc is None else (
+            f"killed by signal {-rc}" if rc < 0 else f"exited rc={rc}")
+        tail = ""
+        if self._log_path is not None and self._log_path.exists():
+            lines = self._log_path.read_text(errors="replace").splitlines()[-6:]
+            tail = ("\n  child log tail:\n    " + "\n    ".join(lines)) if lines else \
+                   f"\n  child log is empty: {self._log_path}"
+        return RemoteSimError(f"simulator process died during {name}() ({why}); {how}{tail}")
+
     def _call(self, name: str, *args, **kwargs):
         if self._conn is None:
             raise RemoteSimError(f"simulator process is gone; cannot call {name}()")
         try:
             self._conn.send((name, args, kwargs))
         except (OSError, BrokenPipeError) as e:
-            raise RemoteSimError(f"simulator process died before {name}(): {e}") from e
+            raise self._died(name, repr(e)) from e
         if not self._conn.poll(_CALL_TIMEOUT_S):
             rc = self._proc.poll() if self._proc else None
             raise RemoteSimError(
@@ -124,8 +156,7 @@ class RemoteRunner:
         try:
             kind, payload, *rest = self._conn.recv()
         except EOFError as e:
-            rc = self._proc.poll() if self._proc else None
-            raise RemoteSimError(f"simulator process exited during {name}() (rc={rc})") from e
+            raise self._died(name, "EOF on the connection") from e
         if kind != "ok":
             raise RemoteSimError(f"{name}() failed in the simulator process: {payload}\n"
                                  f"{''.join(rest)}")
