@@ -607,10 +607,20 @@ def run_scenario_sim_rollout(
     ego_state: dict | None = None  # last tick's ego truth (for finalize ego shape)
     terminated_reason = "max_steps"
 
+    # The interpreter writes its JUnit result here, and that file is the ONLY place the reason a
+    # scenario was rejected survives: on_configure wraps everything in withExceptionHandler,
+    # which records the exception via set<common::junit::Error>(type, what()) and returns
+    # FAILURE, so the caller sees only the lifecycle state "unconfigured". write_to() silently
+    # does nothing when the directory is missing, and nothing was creating it -- a full-suite run
+    # produced zero result.junit.xml for 464 cases, which is why 11 rejected scenarios have been
+    # unexplained since 2026-07-24 (plan/11 9m).
+    osp_out = output_dir / "osp_out"
+    osp_out.mkdir(parents=True, exist_ok=True)
+
     _t = time.perf_counter()
     with osp.HeadlessRunner(
         osc_path=str(osc_path),
-        output_directory=str(output_dir / "osp_out"),
+        output_directory=str(osp_out),
         local_frame_rate=cfg.fps,
     ) as runner:
         timers.add("sim_open", time.perf_counter() - _t)
