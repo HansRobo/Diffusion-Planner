@@ -157,19 +157,12 @@ def test_tuned_hdp_rl_defaults_are_consistent():
     assert fields["rl_reward_beta"].default == 0.5
     assert fields["rl_rollout_steps"].default == 6
     assert fields["rl_behavior_gate"].default == "safety"
-    assert fields["rl_eval_behavior_gate"].default == "safety"
     assert fields["rl_occupancy_use_road_border"].default is True
-    assert fields["rl_eval_occupancy_use_road_border"].default is True
     assert fields["rl_stationary_progress_mode"].default == "distance"
-    assert fields["rl_eval_stationary_progress_mode"].default == "distance"
     assert fields["rl_stationary_reference_threshold_m"].default == 1.0
-    assert fields["rl_eval_stationary_reference_threshold_m"].default == 1.0
     assert fields["rl_stationary_progress_tolerance_m"].default == 2.0
-    assert fields["rl_eval_stationary_progress_tolerance_m"].default == 2.0
     assert fields["rl_red_light_constraint"].default is True
-    assert fields["rl_eval_red_light_constraint"].default is True
     assert fields["rl_red_light_lane_tolerance_m"].default == 2.0
-    assert fields["rl_eval_red_light_lane_tolerance_m"].default == 2.0
 
 
 def test_non_risk_behavior_reward_is_attenuated_by_collision_safety():
@@ -2816,21 +2809,13 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
 
     for field, value in (
         ("rl_reward_w_safety", 1.0),
-        ("rl_eval_reward_w_safety", 1.0),
         ("rl_behavior_gate", "risk"),
-        ("rl_eval_behavior_gate", "risk"),
         ("rl_occupancy_use_road_border", False),
-        ("rl_eval_occupancy_use_road_border", False),
         ("rl_stationary_progress_mode", "constant"),
-        ("rl_eval_stationary_progress_mode", "constant"),
         ("rl_stationary_reference_threshold_m", 0.5),
-        ("rl_eval_stationary_reference_threshold_m", 0.5),
         ("rl_stationary_progress_tolerance_m", 4.0),
-        ("rl_eval_stationary_progress_tolerance_m", 4.0),
         ("rl_red_light_constraint", False),
-        ("rl_eval_red_light_constraint", False),
         ("rl_red_light_lane_tolerance_m", 3.0),
-        ("rl_eval_red_light_lane_tolerance_m", 3.0),
         ("diffusion_sample_steps", 4),
         ("enable_epdms_eval", True),
         ("epdms_eval_use_agent_boxes", False),
@@ -2843,8 +2828,6 @@ def test_checkpoint_compatibility_is_strict_for_resume_but_allows_weights_only(t
         ("supervised_training_stage", "policy"),
         ("rl_stopped_neighbor_vel_thresh", 0.2),
         ("rl_stopped_neighbor_disp_thresh", 0.8),
-        ("rl_eval_stopped_neighbor_vel_thresh", 0.2),
-        ("rl_eval_stopped_neighbor_disp_thresh", 0.8),
         ("advantage_eps", 1e-4),
         ("rl_full_eval_utd", 2),
         ("decoder_drop_path_rate", 0.0),

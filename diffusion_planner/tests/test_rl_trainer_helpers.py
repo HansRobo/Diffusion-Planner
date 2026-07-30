@@ -649,25 +649,13 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         rl_reward_w_follow=8.0,
         rl_reward_w_lane=7.0,
         rl_reward_w_progress=6.0,
-        rl_eval_reward_w_safety=0.0,
-        rl_eval_reward_w_risk=1.0,
-        rl_eval_reward_w_follow=3.0,
-        rl_eval_reward_w_lane=2.5,
-        rl_eval_reward_w_progress=3.0,
         rl_behavior_gate="none",
-        rl_eval_behavior_gate="risk",
         rl_occupancy_use_road_border=False,
-        rl_eval_occupancy_use_road_border=True,
         rl_stationary_progress_mode="constant",
         rl_stationary_reference_threshold_m=0.5,
         rl_stationary_progress_tolerance_m=4.0,
-        rl_eval_stationary_progress_mode="distance",
-        rl_eval_stationary_reference_threshold_m=1.0,
-        rl_eval_stationary_progress_tolerance_m=2.0,
         rl_red_light_constraint=False,
         rl_red_light_lane_tolerance_m=4.0,
-        rl_eval_red_light_constraint=True,
-        rl_eval_red_light_lane_tolerance_m=2.0,
         amp_dtype="off",
         rl_rollout_steps=6,
         diffusion_sample_steps=5,
@@ -690,11 +678,15 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     assert metrics["stationary_progress_group_range"].item() == pytest.approx(8.0 / 15.0)
     assert observed_noise_scales == [0.25, 0.25]
     assert observed_sample_steps == [5, 5]
-    assert observed_reward_weights == [(0.0, 1.0, 3.0, 2.5, 3.0)] * 2
-    assert observed_behavior_gates == ["risk", "risk"]
-    assert observed_road_border_settings == [True, True]
-    assert observed_stationary_settings == [("distance", 1.0, 2.0)] * 2
-    assert observed_red_light_settings == [(True, 2.0)] * 2
+    # Held-out selection scores the objective the update optimizes: the reward definition
+    # comes from the training args, never from a separate evaluation set. A mismatch here
+    # once made a progress-weight disagreement (0.0 training, 3.0 selection) look like
+    # reward hacking in the logs.
+    assert observed_reward_weights == [(5.0, 9.0, 8.0, 7.0, 6.0)] * 2
+    assert observed_behavior_gates == ["none", "none"]
+    assert observed_road_border_settings == [False, False]
+    assert observed_stationary_settings == [("constant", 0.5, 4.0)] * 2
+    assert observed_red_light_settings == [(False, 4.0)] * 2
     assert args.rl_reward_w_safety == 5.0
     assert args.rl_reward_w_risk == 9.0
     assert args.rl_behavior_gate == "none"

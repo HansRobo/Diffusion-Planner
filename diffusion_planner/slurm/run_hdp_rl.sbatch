@@ -129,22 +129,6 @@ EMA_UPDATE_RATE=${HDP_RL_EMA_UPDATE_RATE:-0.05}
 NOISE_SCALE=${HDP_RL_NOISE_SCALE:-1.5}
 EVAL_NOISE_SCALE=${HDP_RL_EVAL_NOISE_SCALE:-0.5}
 EVAL_NUM_GENERATIONS=${HDP_RL_EVAL_NUM_GENERATIONS:-32}
-EVAL_REWARD_W_SAFETY=${HDP_RL_EVAL_REWARD_W_SAFETY:-0.0}
-EVAL_REWARD_W_RISK=${HDP_RL_EVAL_REWARD_W_RISK:-1.0}
-EVAL_REWARD_W_FOLLOW=${HDP_RL_EVAL_REWARD_W_FOLLOW:-3.0}
-EVAL_REWARD_W_LANE=${HDP_RL_EVAL_REWARD_W_LANE:-2.5}
-EVAL_REWARD_W_PROGRESS=${HDP_RL_EVAL_REWARD_W_PROGRESS:-3.0}
-EVAL_REWARD_W_ROAD_BORDER=${HDP_RL_EVAL_REWARD_W_ROAD_BORDER:-0.0}
-EVAL_REWARD_W_COMFORT=${HDP_RL_EVAL_REWARD_W_COMFORT:-0.0}
-EVAL_BEHAVIOR_GATE=${HDP_RL_EVAL_BEHAVIOR_GATE:-safety}
-EVAL_OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_EVAL_OCCUPANCY_USE_ROAD_BORDER:-True}
-EVAL_STATIONARY_PROGRESS_MODE=${HDP_RL_EVAL_STATIONARY_PROGRESS_MODE:-distance}
-EVAL_STATIONARY_REFERENCE_THRESHOLD_M=${HDP_RL_EVAL_STATIONARY_REFERENCE_THRESHOLD_M:-1.0}
-EVAL_STATIONARY_PROGRESS_TOLERANCE_M=${HDP_RL_EVAL_STATIONARY_PROGRESS_TOLERANCE_M:-2.0}
-EVAL_STOPPED_NEIGHBOR_VEL_THRESH=${HDP_RL_EVAL_STOPPED_NEIGHBOR_VEL_THRESH:-0.1}
-EVAL_STOPPED_NEIGHBOR_DISP_THRESH=${HDP_RL_EVAL_STOPPED_NEIGHBOR_DISP_THRESH:-0.5}
-EVAL_RED_LIGHT_CONSTRAINT=${HDP_RL_EVAL_RED_LIGHT_CONSTRAINT:-True}
-EVAL_RED_LIGHT_LANE_TOLERANCE_M=${HDP_RL_EVAL_RED_LIGHT_LANE_TOLERANCE_M:-2.0}
 ROAD_BORDER_CRITICAL=${HDP_RL_ROAD_BORDER_CRITICAL_M:-0.20}
 ROAD_BORDER_SAFE=${HDP_RL_ROAD_BORDER_SAFE_M:-0.60}
 ROLLOUT_STEPS=${HDP_RL_ROLLOUT_STEPS:-6}
@@ -298,7 +282,7 @@ hybrid_arg --hybrid_loss_window HDP_RL_HYBRID_LOSS_WINDOW "${HYBRID_LOSS_WINDOW}
 
 RUN_NAME=${HDP_RL_RUN_NAME:-hdp_rl_${WORLD_SIZE}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
 SAVE_ROOT=${HDP_RL_SAVE_ROOT:-${REPO}/outputs}
-for gate_name in "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}"; do
+for gate_name in "${BEHAVIOR_GATE}"; do
   case "${gate_name}" in
     none | safety | risk) ;;
     *)
@@ -307,7 +291,7 @@ for gate_name in "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}"; do
       ;;
   esac
 done
-for stationary_mode in "${STATIONARY_PROGRESS_MODE}" "${EVAL_STATIONARY_PROGRESS_MODE}"; do
+for stationary_mode in "${STATIONARY_PROGRESS_MODE}"; do
   case "${stationary_mode}" in
     constant | distance) ;;
     *)
@@ -599,22 +583,6 @@ TRAIN_ARGS=(
   --rl_noise_scale "${NOISE_SCALE}" \
   --rl_eval_noise_scale "${EVAL_NOISE_SCALE}" \
   --rl_eval_num_generations "${EVAL_NUM_GENERATIONS}" \
-  --rl_eval_reward_w_safety "${EVAL_REWARD_W_SAFETY}" \
-  --rl_eval_reward_w_risk "${EVAL_REWARD_W_RISK}" \
-  --rl_eval_reward_w_follow "${EVAL_REWARD_W_FOLLOW}" \
-  --rl_eval_reward_w_lane "${EVAL_REWARD_W_LANE}" \
-  --rl_eval_reward_w_progress "${EVAL_REWARD_W_PROGRESS}" \
-  --rl_eval_reward_w_road_border "${EVAL_REWARD_W_ROAD_BORDER}" \
-  --rl_eval_reward_w_comfort "${EVAL_REWARD_W_COMFORT}" \
-  --rl_eval_behavior_gate "${EVAL_BEHAVIOR_GATE}" \
-  --rl_eval_occupancy_use_road_border "${EVAL_OCCUPANCY_USE_ROAD_BORDER}" \
-  --rl_eval_stationary_progress_mode "${EVAL_STATIONARY_PROGRESS_MODE}" \
-  --rl_eval_stationary_reference_threshold_m "${EVAL_STATIONARY_REFERENCE_THRESHOLD_M}" \
-  --rl_eval_stationary_progress_tolerance_m "${EVAL_STATIONARY_PROGRESS_TOLERANCE_M}" \
-  --rl_eval_stopped_neighbor_vel_thresh "${EVAL_STOPPED_NEIGHBOR_VEL_THRESH}" \
-  --rl_eval_stopped_neighbor_disp_thresh "${EVAL_STOPPED_NEIGHBOR_DISP_THRESH}" \
-  --rl_eval_red_light_constraint "${EVAL_RED_LIGHT_CONSTRAINT}" \
-  --rl_eval_red_light_lane_tolerance_m "${EVAL_RED_LIGHT_LANE_TOLERANCE_M}" \
   --rl_road_border_critical_m "${ROAD_BORDER_CRITICAL}" \
   --rl_road_border_safe_m "${ROAD_BORDER_SAFE}" \
   --rl_rollout_steps "${ROLLOUT_STEPS}" \
@@ -705,9 +673,8 @@ srun --kill-on-bad-exit=1 --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-
 
 "${REPO}/.venv/bin/python" - \
   "${VERIFY_SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" \
-  "${TRAIN_EPOCHS}" "${BEHAVIOR_GATE}" "${EVAL_BEHAVIOR_GATE}" \
-  "${OCCUPANCY_USE_ROAD_BORDER}" "${EVAL_OCCUPANCY_USE_ROAD_BORDER}" \
-  "${RED_LIGHT_CONSTRAINT}" "${EVAL_RED_LIGHT_CONSTRAINT}" <<'PY'
+  "${TRAIN_EPOCHS}" "${BEHAVIOR_GATE}" \
+  "${OCCUPANCY_USE_ROAD_BORDER}" "${RED_LIGHT_CONSTRAINT}" <<'PY'
 import csv
 import json
 import math
@@ -722,11 +689,8 @@ scope = sys.argv[3]
 mode = sys.argv[4]
 expected_epoch = int(sys.argv[5])
 expected_behavior_gate = sys.argv[6]
-expected_eval_behavior_gate = sys.argv[7]
-expected_occupancy_use_road_border = sys.argv[8].lower() == "true"
-expected_eval_occupancy_use_road_border = sys.argv[9].lower() == "true"
-expected_red_light_constraint = sys.argv[10].lower() == "true"
-expected_eval_red_light_constraint = sys.argv[11].lower() == "true"
+expected_occupancy_use_road_border = sys.argv[7].lower() == "true"
+expected_red_light_constraint = sys.argv[8].lower() == "true"
 source = torch.load(initial_path, map_location="cpu", weights_only=True)
 if mode == "resume":
     initial_live = source["model"]
@@ -790,14 +754,8 @@ assert len(rows) == completed_epoch
 with (save_dir / "args.json").open(encoding="utf-8") as f:
     run_args = json.load(f)
 assert run_args["rl_behavior_gate"] == expected_behavior_gate
-assert run_args["rl_eval_behavior_gate"] == expected_eval_behavior_gate
 assert run_args["rl_occupancy_use_road_border"] is expected_occupancy_use_road_border
-assert (
-    run_args["rl_eval_occupancy_use_road_border"]
-    is expected_eval_occupancy_use_road_border
-)
 assert run_args["rl_red_light_constraint"] is expected_red_light_constraint
-assert run_args["rl_eval_red_light_constraint"] is expected_eval_red_light_constraint
 required = (
     "train_reward_mean",
     "train_reward_std",

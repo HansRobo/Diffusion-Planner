@@ -481,86 +481,6 @@ def get_args(argv: list[str] | None = None):
         default=_train_config_default("rl_eval_num_generations"),
         help="fixed held-out candidate count, independent of the training group size",
     )
-    for reward_name, help_name in (
-        ("safety", "direct active/rear collision safety"),
-        ("risk", "risk/safety"),
-        ("follow", "leader-conditioned following"),
-        ("lane", "lane keeping"),
-        ("progress", "anti-stopping progress"),
-        ("road_border", "direct HD-map road-border clearance"),
-    ):
-        parser.add_argument(
-            f"--rl_eval_reward_w_{reward_name}",
-            type=float,
-            default=_train_config_default(f"rl_eval_reward_w_{reward_name}"),
-            help=f"fixed held-out {help_name} weight, independent of optimization weights",
-        )
-    parser.add_argument(
-        "--rl_eval_behavior_gate",
-        choices=["none", "safety", "risk"],
-        default=_train_config_default("rl_eval_behavior_gate"),
-        help="behavior gate used only by the fixed held-out reward objective",
-    )
-    parser.add_argument(
-        "--rl_eval_occupancy_use_road_border",
-        type=boolean,
-        default=_train_config_default("rl_eval_occupancy_use_road_border"),
-        help="use HD-map road borders as OCC fallback in the fixed held-out objective",
-    )
-    parser.add_argument(
-        "--rl_eval_stationary_progress_mode",
-        choices=["constant", "distance"],
-        default=_train_config_default("rl_eval_stationary_progress_mode"),
-        help="stopped-expert progress scoring used only by the fixed held-out objective",
-    )
-    parser.add_argument(
-        "--rl_eval_stationary_reference_threshold_m",
-        type=float,
-        default=_train_config_default("rl_eval_stationary_reference_threshold_m"),
-        help="held-out maximum expert displacement treated as a stopped reference",
-    )
-    parser.add_argument(
-        "--rl_eval_stationary_progress_tolerance_m",
-        type=float,
-        default=_train_config_default("rl_eval_stationary_progress_tolerance_m"),
-        help="held-out endpoint error where stopped-reference progress reaches zero",
-    )
-    parser.add_argument(
-        "--rl_eval_stopped_neighbor_vel_thresh",
-        type=float,
-        default=_train_config_default("rl_eval_stopped_neighbor_vel_thresh"),
-        help="held-out stationary-neighbor initial speed threshold",
-    )
-    parser.add_argument(
-        "--rl_eval_stopped_neighbor_disp_thresh",
-        type=float,
-        default=_train_config_default("rl_eval_stopped_neighbor_disp_thresh"),
-        help="held-out stationary-neighbor maximum displacement threshold",
-    )
-    parser.add_argument(
-        "--rl_eval_red_light_constraint",
-        type=boolean,
-        default=_train_config_default("rl_eval_red_light_constraint"),
-        help="apply the expert-gated red stop-line constraint in the fixed held-out objective",
-    )
-    parser.add_argument(
-        "--rl_eval_red_light_lane_tolerance_m",
-        type=float,
-        default=_train_config_default("rl_eval_red_light_lane_tolerance_m"),
-        help="held-out maximum distance used to associate a red route lane with a stop line",
-    )
-    parser.add_argument(
-        "--rl_eval_reward_aggregation",
-        choices=["weighted_sum", "gated_product"],
-        default=_train_config_default("rl_eval_reward_aggregation"),
-        help="held-out reward aggregation; frozen while the training objective is swept",
-    )
-    parser.add_argument(
-        "--rl_eval_reward_horizon_steps",
-        type=int,
-        default=_train_config_default("rl_eval_reward_horizon_steps"),
-        help="held-out scoring horizon (0 = full); frozen while training scoring is swept",
-    )
     parser.add_argument(
         "--rl_eval_deterministic",
         type=boolean,
@@ -651,12 +571,6 @@ def get_args(argv: list[str] | None = None):
             "longitudinal comfort weight in the gated-product quality mix "
             "(the original HDP reward's comfortable_weight); zero disables it"
         ),
-    )
-    parser.add_argument(
-        "--rl_eval_reward_w_comfort",
-        type=float,
-        default=_train_config_default("rl_eval_reward_w_comfort"),
-        help="comfort weight for held-out policy selection; keep equal to --rl_reward_w_comfort",
     )
     parser.add_argument(
         "--rl_stationary_progress_mode",
@@ -1055,17 +969,8 @@ def get_args(argv: list[str] | None = None):
         "rl_red_light_lane_tolerance_m",
         "rl_road_border_critical_m",
         "rl_road_border_safe_m",
-        "rl_eval_stopped_neighbor_vel_thresh",
-        "rl_eval_stopped_neighbor_disp_thresh",
-        "rl_eval_stationary_reference_threshold_m",
-        "rl_eval_stationary_progress_tolerance_m",
-        "rl_eval_red_light_lane_tolerance_m",
         *(
             f"rl_reward_w_{name}"
-            for name in ("safety", "risk", "follow", "lane", "progress", "road_border")
-        ),
-        *(
-            f"rl_eval_reward_w_{name}"
             for name in ("safety", "risk", "follow", "lane", "progress", "road_border")
         ),
     )
@@ -1142,18 +1047,6 @@ def get_args(argv: list[str] | None = None):
         raise ValueError("--rl_road_border_critical_m must be >= 0")
     if args.rl_road_border_safe_m <= args.rl_road_border_critical_m:
         raise ValueError("--rl_road_border_safe_m must exceed the critical threshold")
-    eval_reward_weights = (
-        args.rl_eval_reward_w_safety,
-        args.rl_eval_reward_w_risk,
-        args.rl_eval_reward_w_follow,
-        args.rl_eval_reward_w_lane,
-        args.rl_eval_reward_w_progress,
-        args.rl_eval_reward_w_road_border,
-    )
-    if any(weight < 0.0 for weight in eval_reward_weights):
-        raise ValueError("RL held-out reward weights must be non-negative")
-    if sum(eval_reward_weights) <= 0.0:
-        raise ValueError("At least one RL held-out reward weight must be positive")
     if args.rl_bc_weight < 0.0:
         raise ValueError("--rl_bc_weight must be non-negative")
     if not 0 <= args.rl_reward_horizon_steps <= args.future_len:
@@ -1229,18 +1122,8 @@ def get_args(argv: list[str] | None = None):
         raise ValueError("--rl_stationary_reference_threshold_m must be > 0")
     if args.rl_stationary_progress_tolerance_m <= 0.0:
         raise ValueError("--rl_stationary_progress_tolerance_m must be > 0")
-    if args.rl_eval_stationary_reference_threshold_m <= 0.0:
-        raise ValueError("--rl_eval_stationary_reference_threshold_m must be > 0")
-    if args.rl_eval_stationary_progress_tolerance_m <= 0.0:
-        raise ValueError("--rl_eval_stationary_progress_tolerance_m must be > 0")
-    if args.rl_eval_stopped_neighbor_vel_thresh < 0.0:
-        raise ValueError("--rl_eval_stopped_neighbor_vel_thresh must be >= 0")
-    if args.rl_eval_stopped_neighbor_disp_thresh < 0.0:
-        raise ValueError("--rl_eval_stopped_neighbor_disp_thresh must be >= 0")
     if args.rl_red_light_lane_tolerance_m <= 0.0:
         raise ValueError("--rl_red_light_lane_tolerance_m must be > 0")
-    if args.rl_eval_red_light_lane_tolerance_m <= 0.0:
-        raise ValueError("--rl_eval_red_light_lane_tolerance_m must be > 0")
     if not args.use_velocity_representation:
         raise ValueError("HDP-RL requires --use_velocity_representation true")
     if args.diffusion_model_type != "x_start" or args.diffusion_supervision_type != "x_start":
@@ -1502,33 +1385,6 @@ def model_training(args):
         print("Rollout sampling temperature: {}".format(args.rl_noise_scale))
         print("Held-out policy sampling temperature: {}".format(args.rl_eval_noise_scale))
         print("Held-out policy candidate count: {}".format(args.rl_eval_num_generations))
-        print(
-            "Held-out reward weights (safety/risk/follow/lane/progress/road-border): "
-            f"{args.rl_eval_reward_w_safety}/{args.rl_eval_reward_w_risk}/"
-            f"{args.rl_eval_reward_w_follow}/"
-            f"{args.rl_eval_reward_w_lane}/{args.rl_eval_reward_w_progress}/"
-            f"{args.rl_eval_reward_w_road_border}"
-        )
-        print("Held-out behavior reward gate: {}".format(args.rl_eval_behavior_gate))
-        print(
-            "Held-out road-border OCC fallback: {}".format(args.rl_eval_occupancy_use_road_border)
-        )
-        print(
-            "Held-out stopped-reference progress (mode/threshold/tolerance): "
-            f"{args.rl_eval_stationary_progress_mode}/"
-            f"{args.rl_eval_stationary_reference_threshold_m}/"
-            f"{args.rl_eval_stationary_progress_tolerance_m}"
-        )
-        print(
-            "Held-out stopped-neighbor occupancy thresholds (velocity/displacement): "
-            f"{args.rl_eval_stopped_neighbor_vel_thresh}/"
-            f"{args.rl_eval_stopped_neighbor_disp_thresh}"
-        )
-        print(
-            "Held-out red stop-line constraint (enabled/lane tolerance): "
-            f"{args.rl_eval_red_light_constraint}/"
-            f"{args.rl_eval_red_light_lane_tolerance_m}"
-        )
         print("RL rollout DPM steps: {}".format(args.rl_rollout_steps))
         print("RL updates per rollout: {}".format(args.rl_updates_per_rollout))
         print(
@@ -2041,8 +1897,6 @@ def model_training(args):
                 max_safety_regression=args.rl_max_valid_safety_regression,
                 max_epdms_regression=args.rl_max_valid_epdms_regression,
                 require_epdms=configured_epdms,
-                require_road_border=args.rl_eval_reward_w_road_border > 0.0,
-                require_dac=args.rl_eval_reward_w_road_border > 0.0 and configured_epdms,
             )
             source_policy_within_guard = all(
                 value for key, value in source_guards.items() if key != "available"

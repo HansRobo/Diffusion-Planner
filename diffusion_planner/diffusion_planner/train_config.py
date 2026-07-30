@@ -200,31 +200,13 @@ class TrainConfig:
     rl_eval_num_generations: int = 32
     # Keep checkpoint selection comparable when the optimization reward weights are swept.
     # This is the current real-vehicle objective: paper multi-reward plus anti-stopping progress.
-    rl_eval_reward_w_safety: float = 0.0
-    rl_eval_reward_w_risk: float = 1.0
-    rl_eval_reward_w_follow: float = 3.0
-    rl_eval_reward_w_lane: float = 2.5
-    rl_eval_reward_w_progress: float = 3.0
-    rl_eval_reward_w_road_border: float = 0.0
-    rl_eval_reward_w_comfort: float = 0.0
     # Keep held-out policy selection on one safety-aware objective even when the
     # optimization gate is ablated against the exact published reward sum.
-    rl_eval_behavior_gate: Literal["none", "safety", "risk"] = "safety"
-    rl_eval_occupancy_use_road_border: bool = True
     # A stopped logged expert is usually waiting at a red light or behind traffic. The legacy
     # progress proxy assigned every candidate the same full score in those scenes. Keep held-out
     # evaluation on the distance-aware objective even when the training behavior is ablated.
-    rl_eval_stationary_progress_mode: Literal["constant", "distance"] = "distance"
-    rl_eval_stationary_reference_threshold_m: float = 1.0
-    rl_eval_stationary_progress_tolerance_m: float = 2.0
-    rl_eval_stopped_neighbor_vel_thresh: float = 0.1
-    rl_eval_stopped_neighbor_disp_thresh: float = 0.5
-    rl_eval_red_light_constraint: bool = True
-    rl_eval_red_light_lane_tolerance_m: float = 2.0
     # Held-out selection stays on one frozen objective while the training aggregation,
     # scoring horizon, or gate are swept.
-    rl_eval_reward_aggregation: Literal["weighted_sum", "gated_product"] = "weighted_sum"
-    rl_eval_reward_horizon_steps: int = 0
     # The deployed planner executes one zero-noise plan. Selection measures that exact
     # trajectory under the run's OWN training objective (one reward per run, the
     # source repository's discipline). The frozen rl_eval_* stochastic metrics are

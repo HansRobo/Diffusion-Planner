@@ -27,7 +27,6 @@ from diffusion_planner.hdp_rl_utils import (
     sample_group,
 )
 from diffusion_planner.loss import sample_diffusion_time
-from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.masks import neighbor_future_padding_mask
@@ -1087,87 +1086,11 @@ def validate_hdp_reward_policy(data_loader, model, args):
     n = int(args.rl_eval_num_generations)
     device = torch.device(args.device)
     eval_reward_args = copy.copy(args)
-    for name in (
-        "safety",
-        "risk",
-        "follow",
-        "lane",
-        "progress",
-        "road_border",
-        "comfort",
-    ):
-        default = TrainConfig.__dataclass_fields__[f"rl_eval_reward_w_{name}"].default
-        setattr(
-            eval_reward_args,
-            f"rl_reward_w_{name}",
-            float(getattr(args, f"rl_eval_reward_w_{name}", default)),
-        )
-    gate_default = TrainConfig.__dataclass_fields__["rl_eval_behavior_gate"].default
-    eval_reward_args.rl_behavior_gate = getattr(args, "rl_eval_behavior_gate", gate_default)
-    road_border_default = TrainConfig.__dataclass_fields__[
-        "rl_eval_occupancy_use_road_border"
-    ].default
-    eval_reward_args.rl_occupancy_use_road_border = getattr(
-        args, "rl_eval_occupancy_use_road_border", road_border_default
-    )
-    stationary_default = TrainConfig.__dataclass_fields__[
-        "rl_eval_stationary_progress_mode"
-    ].default
-    eval_reward_args.rl_stationary_progress_mode = getattr(
-        args, "rl_eval_stationary_progress_mode", stationary_default
-    )
-    stationary_threshold_default = TrainConfig.__dataclass_fields__[
-        "rl_eval_stationary_reference_threshold_m"
-    ].default
-    eval_reward_args.rl_stationary_reference_threshold_m = getattr(
-        args,
-        "rl_eval_stationary_reference_threshold_m",
-        stationary_threshold_default,
-    )
-    stationary_tolerance_default = TrainConfig.__dataclass_fields__[
-        "rl_eval_stationary_progress_tolerance_m"
-    ].default
-    eval_reward_args.rl_stationary_progress_tolerance_m = getattr(
-        args,
-        "rl_eval_stationary_progress_tolerance_m",
-        stationary_tolerance_default,
-    )
-    stopped_neighbor_vel_default = TrainConfig.__dataclass_fields__[
-        "rl_eval_stopped_neighbor_vel_thresh"
-    ].default
-    eval_reward_args.rl_stopped_neighbor_vel_thresh = getattr(
-        args,
-        "rl_eval_stopped_neighbor_vel_thresh",
-        stopped_neighbor_vel_default,
-    )
-    stopped_neighbor_disp_default = TrainConfig.__dataclass_fields__[
-        "rl_eval_stopped_neighbor_disp_thresh"
-    ].default
-    eval_reward_args.rl_stopped_neighbor_disp_thresh = getattr(
-        args,
-        "rl_eval_stopped_neighbor_disp_thresh",
-        stopped_neighbor_disp_default,
-    )
-    red_light_default = TrainConfig.__dataclass_fields__["rl_eval_red_light_constraint"].default
-    eval_reward_args.rl_red_light_constraint = getattr(
-        args, "rl_eval_red_light_constraint", red_light_default
-    )
-    red_light_tolerance_default = TrainConfig.__dataclass_fields__[
-        "rl_eval_red_light_lane_tolerance_m"
-    ].default
-    eval_reward_args.rl_red_light_lane_tolerance_m = getattr(
-        args,
-        "rl_eval_red_light_lane_tolerance_m",
-        red_light_tolerance_default,
-    )
-    aggregation_default = TrainConfig.__dataclass_fields__["rl_eval_reward_aggregation"].default
-    eval_reward_args.rl_reward_aggregation = getattr(
-        args, "rl_eval_reward_aggregation", aggregation_default
-    )
-    horizon_default = TrainConfig.__dataclass_fields__["rl_eval_reward_horizon_steps"].default
-    eval_reward_args.rl_reward_horizon_steps = int(
-        getattr(args, "rl_eval_reward_horizon_steps", horizon_default)
-    )
+    # Held-out selection must score the objective the update optimizes. Overriding the
+    # reward definition here once let training and evaluation disagree -- progress was
+    # weighted 0.0 in the update and 3.0 in selection -- which reads as reward hacking in
+    # the logs while being nothing but a definition mismatch. eval_reward_args now differs
+    # from args only in sampling: candidate count, determinism and noise scale.
     # The deployed planner runs one zero-noise plan, so checkpoint selection should
     # measure exactly that trajectory rather than only the sampling distribution.
     eval_deterministic = bool(getattr(args, "rl_eval_deterministic", True))

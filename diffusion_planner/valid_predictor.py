@@ -392,14 +392,15 @@ def run_validation(valid_cfg: ValidConfig):
         reward_args.rl_eval_num_generations = valid_cfg.reward_eval_num_generations
         reward_args.rl_eval_noise_scale = valid_cfg.reward_eval_noise_scale
         reward_args.diffusion_sample_steps = valid_cfg.reward_eval_sample_steps
-        reward_args.rl_eval_behavior_gate = valid_cfg.reward_eval_behavior_gate
-        reward_args.rl_eval_occupancy_use_road_border = (
-            valid_cfg.reward_eval_occupancy_use_road_border
-        )
+        # validate_hdp_reward_policy reads the reward definition from the training fields so
+        # that RL selection always scores the objective the update optimizes. This tool is a
+        # standalone analysis entry point, so it sets those fields on its own args copy.
+        reward_args.rl_behavior_gate = valid_cfg.reward_eval_behavior_gate
+        reward_args.rl_occupancy_use_road_border = valid_cfg.reward_eval_occupancy_use_road_border
         for reward_name in ("safety", "risk", "follow", "lane", "progress", "road_border"):
             setattr(
                 reward_args,
-                f"rl_eval_reward_w_{reward_name}",
+                f"rl_reward_w_{reward_name}",
                 getattr(valid_cfg, f"reward_eval_w_{reward_name}"),
             )
         reward_args.rl_road_border_critical_m = valid_cfg.reward_eval_road_border_critical_m
