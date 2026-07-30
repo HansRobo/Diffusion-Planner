@@ -20,6 +20,8 @@
 #   attention_n<N>.json
 #   token_analysis_n<N>.executed.ipynb
 #   token_analysis_n<N>.html  (single-file, embedded images)
+#   token_analysis_en_n<N>.executed.ipynb
+#   token_analysis_en_n<N>.html  (English)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,9 +98,11 @@ ATTENTION_JSON="$OUT/attention_n${N}.json"
   --out_json "$ATTENTION_JSON" \
   2>&1 | tee "$OUT/attention_analysis_n${N}.log"
 
-echo "=== [3/3] execute notebook and build portable HTML ==="
+echo "=== [3/3] execute Japanese/English notebooks and build portable HTML ==="
 EXECUTED_NOTEBOOK="$OUT/token_analysis_n${N}.executed.ipynb"
 REPORT_HTML="$OUT/token_analysis_n${N}.html"
+EXECUTED_NOTEBOOK_EN="$OUT/token_analysis_en_n${N}.executed.ipynb"
+REPORT_HTML_EN="$OUT/token_analysis_en_n${N}.html"
 KERNEL_PREFIX="$OUT/.jupyter-kernel"
 KERNEL_NAME="diffusion-planner-token-report"
 
@@ -118,23 +122,40 @@ export TOKEN_REPORT_MOVE_MIN_M="$MOVE_MIN_M"
 export TOKEN_REPORT_TURN_DEG="$TURN_DEG"
 export JUPYTER_PATH="$KERNEL_PREFIX/share/jupyter${JUPYTER_PATH:+:$JUPYTER_PATH}"
 
-"$PYTHON_BIN" -m jupyter nbconvert \
-  --execute \
-  --to notebook \
-  --ExecutePreprocessor.kernel_name="$KERNEL_NAME" \
-  --ExecutePreprocessor.timeout=1200 \
-  --output "$(basename "$EXECUTED_NOTEBOOK")" \
-  --output-dir "$(dirname "$EXECUTED_NOTEBOOK")" \
-  "$REPO_ROOT/notebook/token_analysis.ipynb"
+build_report() {
+  local source_notebook="$1"
+  local executed_notebook="$2"
+  local report_html="$3"
 
-"$PYTHON_BIN" -m jupyter nbconvert \
-  --to html \
-  --template-file "$REPO_ROOT/notebook/portable_html.j2" \
-  --HTMLExporter.embed_images=True \
-  --output "$(basename "$REPORT_HTML")" \
-  --output-dir "$(dirname "$REPORT_HTML")" \
-  "$EXECUTED_NOTEBOOK"
+  "$PYTHON_BIN" -m jupyter nbconvert \
+    --execute \
+    --to notebook \
+    --ExecutePreprocessor.kernel_name="$KERNEL_NAME" \
+    --ExecutePreprocessor.timeout=1200 \
+    --output "$(basename "$executed_notebook")" \
+    --output-dir "$(dirname "$executed_notebook")" \
+    "$source_notebook"
+
+  "$PYTHON_BIN" -m jupyter nbconvert \
+    --to html \
+    --template-file "$REPO_ROOT/notebook/portable_html.j2" \
+    --HTMLExporter.embed_images=True \
+    --output "$(basename "$report_html")" \
+    --output-dir "$(dirname "$report_html")" \
+    "$executed_notebook"
+}
+
+build_report \
+  "$REPO_ROOT/notebook/token_analysis.ipynb" \
+  "$EXECUTED_NOTEBOOK" \
+  "$REPORT_HTML"
+build_report \
+  "$REPO_ROOT/notebook/token_analysis_en.ipynb" \
+  "$EXECUTED_NOTEBOOK_EN" \
+  "$REPORT_HTML_EN"
 
 echo "done"
 echo "  executed notebook: $EXECUTED_NOTEBOOK"
 echo "  portable HTML:     $REPORT_HTML"
+echo "  English notebook:  $EXECUTED_NOTEBOOK_EN"
+echo "  English HTML:      $REPORT_HTML_EN"
