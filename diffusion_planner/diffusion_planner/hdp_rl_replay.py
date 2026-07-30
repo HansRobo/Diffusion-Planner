@@ -71,7 +71,7 @@ _FINGERPRINT_RETIRED = {
 # Fields added after caches already existed. Recording one unconditionally would
 # invalidate every historical fingerprint, so it is recorded only when it deviates from
 # the value history implies -- which is exactly when the cache genuinely differs.
-_FINGERPRINT_ADDED_DEFAULTS = {"rl_candidate_aug_epochs": 0}
+_FINGERPRINT_ADDED_DEFAULTS = {"rl_candidate_aug_epochs": 0, "rl_reward_w_comfort": 0.0}
 
 
 def reward_fingerprint(args) -> dict:

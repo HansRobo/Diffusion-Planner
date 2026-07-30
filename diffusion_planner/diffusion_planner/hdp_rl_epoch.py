@@ -1087,7 +1087,15 @@ def validate_hdp_reward_policy(data_loader, model, args):
     n = int(args.rl_eval_num_generations)
     device = torch.device(args.device)
     eval_reward_args = copy.copy(args)
-    for name in ("safety", "risk", "follow", "lane", "progress", "road_border"):
+    for name in (
+        "safety",
+        "risk",
+        "follow",
+        "lane",
+        "progress",
+        "road_border",
+        "comfort",
+    ):
         default = TrainConfig.__dataclass_fields__[f"rl_eval_reward_w_{name}"].default
         setattr(
             eval_reward_args,

@@ -644,6 +644,21 @@ def get_args(argv: list[str] | None = None):
         help="direct road-border clearance reward weight; zero disables this real-vehicle extension",
     )
     parser.add_argument(
+        "--rl_reward_w_comfort",
+        type=float,
+        default=_train_config_default("rl_reward_w_comfort"),
+        help=(
+            "longitudinal comfort weight in the gated-product quality mix "
+            "(the original HDP reward's comfortable_weight); zero disables it"
+        ),
+    )
+    parser.add_argument(
+        "--rl_eval_reward_w_comfort",
+        type=float,
+        default=_train_config_default("rl_eval_reward_w_comfort"),
+        help="comfort weight for held-out policy selection; keep equal to --rl_reward_w_comfort",
+    )
+    parser.add_argument(
         "--rl_stationary_progress_mode",
         choices=["constant", "distance"],
         default=_train_config_default("rl_stationary_progress_mode"),
@@ -1117,6 +1132,7 @@ def get_args(argv: list[str] | None = None):
         args.rl_reward_w_lane,
         args.rl_reward_w_progress,
         args.rl_reward_w_road_border,
+        args.rl_reward_w_comfort,
     )
     if any(weight < 0.0 for weight in reward_weights):
         raise ValueError("RL reward weights must be non-negative")

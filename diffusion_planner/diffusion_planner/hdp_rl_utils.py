@@ -1466,17 +1466,19 @@ def compute_hdp_reward(
             + args.rl_reward_w_follow
             + args.rl_reward_w_lane
             + getattr(args, "rl_reward_w_progress", 0.0)
+            + getattr(args, "rl_reward_w_comfort", 0.0)
         )
         if quality_weight_sum <= 0.0:
             raise ValueError(
                 "rl_reward_aggregation='gated_product' requires a positive "
-                "risk/follow/lane/progress weight sum"
+                "risk/follow/lane/progress/comfort weight sum"
             )
         quality = (
             args.rl_reward_w_risk * risk
             + args.rl_reward_w_follow * scene_term_tensors["follow"]
             + args.rl_reward_w_lane * lane_scores
             + getattr(args, "rl_reward_w_progress", 0.0) * progress_scores
+            + getattr(args, "rl_reward_w_comfort", 0.0) * scene_term_tensors["comfort"]
         ) / quality_weight_sum
         reward_group = collision_safety * red_light_score * road_border_score * quality
     elif aggregation == "weighted_sum":

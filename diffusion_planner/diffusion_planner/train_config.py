@@ -206,6 +206,7 @@ class TrainConfig:
     rl_eval_reward_w_lane: float = 2.5
     rl_eval_reward_w_progress: float = 3.0
     rl_eval_reward_w_road_border: float = 0.0
+    rl_eval_reward_w_comfort: float = 0.0
     # Keep held-out policy selection on one safety-aware objective even when the
     # optimization gate is ablated against the exact published reward sum.
     rl_eval_behavior_gate: Literal["none", "safety", "risk"] = "safety"
@@ -262,6 +263,11 @@ class TrainConfig:
     # Optional real-vehicle extension: direct ego-footprint clearance to HD-map borders.
     # Zero preserves the paper-style reward without this extra term.
     rl_reward_w_road_border: float = 0.0
+    # Longitudinal comfort, the original HDP reward's ``comfortable_weight``. Our port
+    # computed the score but recorded it as an observation only; it enters the
+    # gated-product quality mix when positive. Zero keeps every existing cache
+    # replayable, so raising it is an explicit change of objective.
+    rl_reward_w_comfort: float = 0.0
     # The published multi-reward formula uses no gate. ``safety`` is our real-vehicle
     # extension that prevents follow/lane/progress from compensating for a collision;
     # ``risk`` also suppresses those terms for near misses.

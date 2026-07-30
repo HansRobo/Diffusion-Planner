@@ -96,6 +96,7 @@ REWARD_W_FOLLOW=${HDP_RL_REWARD_W_FOLLOW:-3.0}
 REWARD_W_LANE=${HDP_RL_REWARD_W_LANE:-2.5}
 REWARD_W_PROGRESS=${HDP_RL_REWARD_W_PROGRESS:-3.0}
 REWARD_W_ROAD_BORDER=${HDP_RL_REWARD_W_ROAD_BORDER:-0.0}
+REWARD_W_COMFORT=${HDP_RL_REWARD_W_COMFORT:-0.0}
 BEHAVIOR_GATE=${HDP_RL_BEHAVIOR_GATE:-safety}
 OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_OCCUPANCY_USE_ROAD_BORDER:-True}
 STATIONARY_PROGRESS_MODE=${HDP_RL_STATIONARY_PROGRESS_MODE:-distance}
@@ -131,6 +132,7 @@ EVAL_REWARD_W_FOLLOW=${HDP_RL_EVAL_REWARD_W_FOLLOW:-3.0}
 EVAL_REWARD_W_LANE=${HDP_RL_EVAL_REWARD_W_LANE:-2.5}
 EVAL_REWARD_W_PROGRESS=${HDP_RL_EVAL_REWARD_W_PROGRESS:-3.0}
 EVAL_REWARD_W_ROAD_BORDER=${HDP_RL_EVAL_REWARD_W_ROAD_BORDER:-0.0}
+EVAL_REWARD_W_COMFORT=${HDP_RL_EVAL_REWARD_W_COMFORT:-0.0}
 EVAL_BEHAVIOR_GATE=${HDP_RL_EVAL_BEHAVIOR_GATE:-safety}
 EVAL_OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_EVAL_OCCUPANCY_USE_ROAD_BORDER:-True}
 EVAL_STATIONARY_PROGRESS_MODE=${HDP_RL_EVAL_STATIONARY_PROGRESS_MODE:-distance}
@@ -241,6 +243,9 @@ case "${PAPER_EXACT}" in
     paper_pin BEHAVIOR_GATE HDP_RL_BEHAVIOR_GATE none
     paper_pin REWARD_W_PROGRESS HDP_RL_REWARD_W_PROGRESS 0.0
     paper_pin REWARD_W_ROAD_BORDER HDP_RL_REWARD_W_ROAD_BORDER 0.0
+    # The published reward is a weighted sum; comfort only enters the gated-product
+    # quality mix, so paper-exact pins it off rather than at the original 2.0.
+    paper_pin REWARD_W_COMFORT HDP_RL_REWARD_W_COMFORT 0.0
     paper_pin RED_LIGHT_CONSTRAINT HDP_RL_RED_LIGHT_CONSTRAINT False
     paper_pin OCCUPANCY_USE_ROAD_BORDER HDP_RL_OCCUPANCY_USE_ROAD_BORDER False
     paper_pin REWARD_HORIZON_STEPS HDP_RL_REWARD_HORIZON_STEPS 0
@@ -597,6 +602,7 @@ TRAIN_ARGS=(
   --rl_eval_reward_w_lane "${EVAL_REWARD_W_LANE}" \
   --rl_eval_reward_w_progress "${EVAL_REWARD_W_PROGRESS}" \
   --rl_eval_reward_w_road_border "${EVAL_REWARD_W_ROAD_BORDER}" \
+  --rl_eval_reward_w_comfort "${EVAL_REWARD_W_COMFORT}" \
   --rl_eval_behavior_gate "${EVAL_BEHAVIOR_GATE}" \
   --rl_eval_occupancy_use_road_border "${EVAL_OCCUPANCY_USE_ROAD_BORDER}" \
   --rl_eval_stationary_progress_mode "${EVAL_STATIONARY_PROGRESS_MODE}" \
@@ -618,6 +624,7 @@ TRAIN_ARGS=(
   --rl_reward_w_lane "${REWARD_W_LANE}" \
   --rl_reward_w_progress "${REWARD_W_PROGRESS}" \
   --rl_reward_w_road_border "${REWARD_W_ROAD_BORDER}" \
+  --rl_reward_w_comfort "${REWARD_W_COMFORT}" \
   --rl_behavior_gate "${BEHAVIOR_GATE}" \
   --rl_occupancy_use_road_border "${OCCUPANCY_USE_ROAD_BORDER}" \
   --rl_stationary_progress_mode "${STATIONARY_PROGRESS_MODE}" \
