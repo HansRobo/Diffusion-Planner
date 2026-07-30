@@ -14,9 +14,7 @@ the per-segment MP4 paths (for wandb upload).
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -617,51 +615,6 @@ def enumerate_scenarios(scenario_root) -> list[Path]:
 _KILL_GRACE_SEC = 20.0
 
 
-def _stage_checkpoint(model_path: str | Path, stage_dir: str | Path | None) -> str:
-    """Copy the checkpoint to node-local disk once so the workers do not each pull it over NFS.
-
-    Measured on the production node: with 32 workers ``model_load`` cost 7.2 s per case; with 64
-    it cost 18.5 s -- a 2.55x inflation from doubling the readers, against 1.14x for the
-    CPU-bound map parse over the same change. 64 processes each pulling a 218 MB tensor file off
-    the same NFS mount is the one cost here that scales with reader count rather than with work,
-    and it made the fixed per-case cost grow from 30% to 36% of worker time as GPUs were added
-    (plan/11 9o). Staging turns 64 reads into one.
-
-    Node-local because that is the point; ``/var/tmp`` rather than ``/mnt/nvme``, which is not
-    user-writable on these nodes. An existing copy of the same size is reused, so repeated jobs
-    on a node pay nothing. Any failure falls back to the original path with a warning -- a slow
-    run is much better than a run that does not start.
-    """
-    src = Path(model_path)
-    if stage_dir is None or str(stage_dir) == "":
-        return str(src)
-    try:
-        # A DIRECTORY, not just the file: load_model reads its config from
-        # `Path(model_path).parent / "args.json"`, so the checkpoint's siblings are part of what
-        # a checkpoint path means. Staging the .pth alone gives a worker a FileNotFoundError on
-        # args.json. Keyed on the source directory name plus size so different checkpoints (and
-        # different epochs of one run) never collide.
-        dst_dir = Path(stage_dir) / f"{src.parent.name}-{src.stat().st_size}"
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        dst = dst_dir / src.name
-        for f in (src, src.parent / "args.json"):
-            if not f.exists():
-                continue  # let the worker report a genuinely missing file, not a staging artefact
-            out = dst_dir / f.name
-            if out.exists() and out.stat().st_size == f.stat().st_size:
-                continue
-            # Copy to a unique temp then rename: the replace is atomic, so a worker can never
-            # observe a partially written file even if two jobs stage concurrently.
-            tmp = out.with_suffix(out.suffix + f".tmp{os.getpid()}")
-            shutil.copyfile(f, tmp)
-            os.replace(tmp, out)
-        return str(dst)
-    except OSError as e:
-        print(f"[scenario_sim][WARN] could not stage the checkpoint to {stage_dir} ({e}); "
-              f"workers will read it from {src}")
-        return str(src)
-
-
 def _scenario_key(scenario: Path, root: Path) -> str:
     """Unique, filesystem-safe id for a scenario within ``root``.
 
@@ -686,7 +639,6 @@ def run_scenario_sim_eval(
     model_path: str,
     gpus: list[int] | None = None,
     max_cases: int | None = None,
-    stage_dir: str | None = None,
     worker_timeout_sec: float = 2400.0,
     near_miss_thresh: float = 1.0,
     replan_interval: int = 1,  # every tick = 10 Hz, matching the production node
@@ -721,6 +673,7 @@ def run_scenario_sim_eval(
     source-chain already (on the production nodes that is the carried-in overlay prefix plus the
     node's own ``/opt/ros/humble`` -- see ``validator/env/setup_production.bash``).
     """
+    import os
     import sys
 
     out_dir = Path(out_dir)
@@ -744,12 +697,6 @@ def run_scenario_sim_eval(
     # `jobs` workers are spread round-robin over these devices. Default: every GPU the job
     # was allocated, which is what makes a full-suite run use the whole node rather than
     # piling all workers onto cuda:0.
-    _t_stage = time.perf_counter()
-    model_path = _stage_checkpoint(model_path, stage_dir)
-    if verbose:
-        print(f"[scenario_sim] checkpoint: {model_path} "
-              f"(staged in {time.perf_counter() - _t_stage:.1f}s)")
-
     # Cores this process may actually use (respects cgroup/affinity, unlike cpu_count()).
     threads_per_worker = max(1, len(os.sched_getaffinity(0)) // max(1, jobs))
     gpu_ids: list[int] = []
@@ -977,9 +924,6 @@ def main() -> None:
                         "per-stage ms/call converges long before the suite does, and a subset "
                         "occupies the cluster for correspondingly less time. The summary is "
                         "marked sampled=true -- do not read its metrics as the suite's")
-    p.add_argument("--stage_dir", default=f"/var/tmp/{os.environ.get('USER', 'validator')}/validator-stage",
-                   help="node-local directory to copy the checkpoint into before launching "
-                        "workers, so they do not each read it over NFS. Empty string disables it")
     p.add_argument("--worker_timeout_sec", type=float, default=2400.0,
                    help="reclaim a worker's slot after this long. Sized against the measured "
                         "p99 of 820 s (max 834 s) at max_steps=1700/jobs=64 -- raise it if you "
@@ -998,7 +942,6 @@ def main() -> None:
         max_steps=args.max_steps,
         jobs=args.jobs,
         max_cases=args.max_cases,
-        stage_dir=args.stage_dir,
         worker_timeout_sec=args.worker_timeout_sec,
     )
     print(json.dumps({k: v for k, v in summary.items() if k != "segments"}, indent=2, default=float))
