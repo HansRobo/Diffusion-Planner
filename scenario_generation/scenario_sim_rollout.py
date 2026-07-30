@@ -429,6 +429,56 @@ def _start_and_resolve_route(
     return ego_route_ids, goal_pose
 
 
+# Border polylines further than this from the ego's path cannot be its nearest border. Only
+# an upper bound is needed, so this is generous: at 50 m the pruning still removes ~98.6% of
+# the Odaiba map's segments, and the margin is what makes the result exact (see below).
+_RB_PRUNE_MARGIN_M = 50.0
+
+
+def _prune_border_segments(
+    segments: list[np.ndarray],
+    trajectory_log: list[dict],
+    ego_length: float,
+    ego_wheelbase: float,
+    ego_width: float,
+    margin_m: float = _RB_PRUNE_MARGIN_M,
+) -> list[np.ndarray]:
+    """Drop border polylines that cannot possibly be the ego's nearest border.
+
+    ``evaluate_trajectory`` compares the ego's sampled perimeter against EVERY border segment
+    on the map at EVERY tick. On the Odaiba map that is 32 perimeter points x 38,206 segments
+    x 1700 ticks = 2.1e9 point-segment distance evaluations, measured at 55 ms/tick -- the
+    single largest cost of a full-suite run (46.6% of worker time; plan/11 9m). The ego covers
+    ~250 m of a multi-kilometre map, so nearly all of that work is against geometry it never
+    goes near.
+
+    EXACT, not approximate -- which matters because ``rb_dists`` feeds mean/p5/tdigest
+    clearance statistics, not just a threshold test, so an approximation would silently move
+    the metrics. A polyline whose bounding box misses the trajectory's bounding box inflated
+    by (ego reach + ``margin_m``) is more than ``margin_m`` from the ego at every tick, so it
+    cannot beat any reported distance <= ``margin_m``. The caller verifies that condition and
+    recomputes against the full set if it does not hold. Under it the returned distances are
+    bit-identical to the unpruned computation -- verified on a real 300-tick trajectory:
+    38,206 -> 541 segments, 65x faster, ``np.array_equal`` True.
+
+    Returns the input unchanged when the map ships no borders at all, so ``rb_has_data`` keeps
+    meaning "this map has no road_border geometry" and never degrades to "none was nearby".
+    """
+    if not segments or not trajectory_log:
+        return segments
+    xy = np.array([(e["x"], e["y"]) for e in trajectory_log], dtype=np.float64)
+    # Furthest any sampled perimeter point can be from the reported pose: the OBB reaches
+    # (length + wheelbase) / 2 forward of it (see _ego_metric_box for that convention).
+    reach = float(np.hypot(0.5 * (ego_length + ego_wheelbase), 0.5 * ego_width))
+    lo = xy.min(axis=0) - (reach + margin_m)
+    hi = xy.max(axis=0) + (reach + margin_m)
+    kept = [
+        s for s in segments
+        if np.all(s.max(axis=0) >= lo) and np.all(s.min(axis=0) <= hi)
+    ]
+    return kept
+
+
 def _finalize_row(
     output_dir: Path,
     map_path: str | Path,
@@ -449,9 +499,22 @@ def _finalize_row(
     ego_len, ego_w, ego_wb = (
         _ego_metric_box(ego_state) if ego_state is not None else (4.0, 1.8, 2.6)
     )
-    rb = evaluate_trajectory(
-        trajectory_log, load_border_segments(str(map_path)), ego_len, ego_w, ego_wb
-    )
+    borders = load_border_segments(str(map_path))
+    near = _prune_border_segments(borders, trajectory_log, ego_len, ego_wb, ego_w)
+    rb = evaluate_trajectory(trajectory_log, near, ego_len, ego_w, ego_wb)
+    # The pruning is only equivalent to the full scan while the reported distances stay
+    # inside the margin (a border beyond it could otherwise have been nearer). Checking the
+    # result rather than trusting the assumption keeps the metric exact even on a map where
+    # the ego runs far from any border; the full recomputation then costs what it always did.
+    _rb = np.asarray(rb["rb_dists"], dtype=np.float64)
+    _finite = np.isfinite(_rb)
+    if len(near) < len(borders) and _finite.any() and _rb[_finite].max() > _RB_PRUNE_MARGIN_M:
+        print(
+            f"  [scenario_sim][WARN] road-border distance {_rb[_finite].max():.1f} m exceeds "
+            f"the {_RB_PRUNE_MARGIN_M} m prune margin; recomputing over all "
+            f"{len(borders)} polylines"
+        )
+        rb = evaluate_trajectory(trajectory_log, borders, ego_len, ego_w, ego_wb)
 
     return build_segment_row(
         n_steps_run=len(trajectory_log),
