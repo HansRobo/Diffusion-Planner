@@ -98,6 +98,10 @@ class RolloutConfig:
     map_mask_range_m: float = 100.0
     route_window_segments: int = 25
     find_route_min_len_m: float = 120.0
+    # Run the interpreter in its own process instead of this one. The SimulatorCore singleton is
+    # the only reason a worker is per-scenario; moving it out is what would let the model, CUDA
+    # context, compiled graphs and parsed map be reused across scenarios (plan/11 9s).
+    sim_in_subprocess: bool = False
     # Coordinate-contract sanity check: after the first stepped tick, the ego's
     # realized pose must land within this tolerance (m) of the injected plan's
     # first future point. Larger = looser; a gross frame mismatch blows past it.
@@ -581,8 +585,6 @@ def run_scenario_sim_rollout(
     ``closed_loop_eval.aggregate`` consumes, plus post-hoc ``rb_*`` road-border
     metrics, ``result_kind``, and the coordinate-contract check outcome.
     """
-    import openscenario_python as osp  # requires the SSV2_HEADLESS_EGO overlay
-
     cfg = config or RolloutConfig()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -617,8 +619,17 @@ def run_scenario_sim_rollout(
     osp_out = output_dir / "osp_out"
     osp_out.mkdir(parents=True, exist_ok=True)
 
+    if cfg.sim_in_subprocess:
+        from scenario_generation.sim_proc_client import RemoteRunner as _Runner
+    else:
+        import openscenario_python as osp  # requires the SSV2_HEADLESS_EGO overlay
+
+        _Runner = osp.HeadlessRunner
+
     _t = time.perf_counter()
-    with osp.HeadlessRunner(
+    # RemoteRunner is duck-type compatible for the calls below, so the tick loop is identical
+    # either way -- deliberately: the loop is where fidelity lives.
+    with _Runner(
         osc_path=str(osc_path),
         output_directory=str(osp_out),
         local_frame_rate=cfg.fps,
@@ -731,6 +742,8 @@ def main() -> int:
     p.add_argument("--warmup_steps", type=int, default=5)
     p.add_argument("--near_miss_thresh", type=float, default=1.0)
     p.add_argument("--fps", type=float, default=10.0)
+    p.add_argument("--sim_in_subprocess", action="store_true",
+                   help="run the OpenSCENARIO interpreter in a child process instead of this one")
     p.add_argument(
         "--watchdog_sec", type=float, default=0.0,
         help="dump every thread's stack and exit after this many seconds (0 = off). The "
@@ -771,6 +784,7 @@ def main() -> int:
         max_steps=a.max_steps,
         warmup_steps=a.warmup_steps,
         near_miss_thresh=a.near_miss_thresh,
+        sim_in_subprocess=a.sim_in_subprocess,
     )
     row = run_scenario_sim_rollout(
         model, model_args, a.osc, map_path, a.out_dir,
