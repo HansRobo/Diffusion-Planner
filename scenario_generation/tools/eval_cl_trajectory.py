@@ -156,15 +156,49 @@ def _min_dist_vectorized(
         proj = s_starts[None, :, :] + t[:, :, None] * ab[None, :, :]  # (K, B, 2)
         delta = points[:, None, :] - proj
         dist = np.sqrt((delta * delta).sum(axis=2))  # (K, B)
-        # Degenerate (zero-length) segments fall back to point distance.
-        dist_deg = np.linalg.norm(points[:, None, :] - s_starts[None, :, :], axis=2)
-        dist = np.where(ab_len2[None, :] < 1e-12, dist_deg, dist)
+        # Degenerate (zero-length) segments fall back to point distance. Only pay for that
+        # fallback when a block actually holds one: it is a full (K, B, 2) norm, and computing it
+        # unconditionally was ~40% of this function's cost on real maps, which have none
+        # (measured: 2.84 s -> 1.63 s on a 1700-tick case, bit-identical). The `ab_len2_safe`
+        # divide already drives `proj` to `s_starts` for a degenerate segment, so the two agree
+        # mathematically -- the branch is kept because `np.linalg.norm` and
+        # `sqrt(sum(d*d))` need not round identically, and rb_dists feeds clearance statistics.
+        degenerate = ab_len2 < 1e-12
+        if degenerate.any():
+            dist_deg = np.linalg.norm(points[:, None, :] - s_starts[None, :, :], axis=2)
+            dist = np.where(degenerate[None, :], dist_deg, dist)
 
         block_min = float(dist.min())
         if block_min < min_dist:
             min_dist = block_min
 
     return min_dist
+
+
+# A whole trajectory covers ~250 m, so narrowing the segment set once for all of it still leaves
+# every tick paying for geometry hundreds of metres away. 50 ticks is ~5 s of driving -- a window
+# small enough that the narrowing bites (measured 1073 -> 270 segments per tick on a real case) and
+# large enough that the narrowing itself stays negligible. Below ~25 the returns flatten.
+_TICK_BLOCK = 50
+# Segments beyond this from the block's path cannot be the nearest, PROVIDED the distances the
+# block reports stay inside it -- which is checked, not assumed (see the fallback below). Same
+# bound and same argument as scenario_sim_rollout._prune_border_segments, one level finer.
+_BLOCK_MARGIN_M = 50.0
+
+
+def _block_segment_mask(
+    seg_starts: np.ndarray,
+    seg_ends: np.ndarray,
+    xy: np.ndarray,
+    reach: float,
+    margin: float = _BLOCK_MARGIN_M,
+) -> np.ndarray:
+    """Which segments could be within ``margin`` of the ego anywhere in this block of ticks."""
+    lo = xy.min(axis=0) - (reach + margin)
+    hi = xy.max(axis=0) + (reach + margin)
+    return (np.maximum(seg_starts, seg_ends) >= lo).all(axis=1) & (
+        np.minimum(seg_starts, seg_ends) <= hi
+    ).all(axis=1)
 
 
 def evaluate_trajectory(
@@ -175,36 +209,77 @@ def evaluate_trajectory(
     ego_wheelbase: float,
     rb_cross_thresh: float = 0.20,
 ) -> dict:
-    """Compute metrics for a single CL trajectory."""
+    """Compute metrics for a single CL trajectory.
+
+    The road-border distance is exact: the per-block narrowing below only ever drops segments
+    that provably cannot be the nearest one, and falls back to the full set for any block whose
+    result would depend on that being true.
+    """
     half_l = ego_length / 2
     half_w = ego_width / 2
 
     seg_starts, seg_ends = _flatten_segments(border_segments)
     has_borders = seg_starts.shape[0] > 0
+    # Furthest a sampled perimeter point can be from the reported pose (the OBB reaches
+    # (length + wheelbase) / 2 forward of it -- see scenario_sim_rollout._ego_metric_box).
+    reach = float(np.hypot(0.5 * (ego_length + ego_wheelbase), 0.5 * ego_width))
 
-    rb_dists = []
+    rb_dists: list[float] = []
     speeds = []
     positions = []
 
     for entry in traj:
-        x, y, h = entry["x"], entry["y"], entry["heading"]
-        speed = entry["speed"]
-        positions.append((x, y))
-        speeds.append(speed)
+        positions.append((entry["x"], entry["y"]))
+        speeds.append(entry["speed"])
 
-        if has_borders:
-            # Sample the full OBB perimeter, not just corners: a border that
-            # pierces the middle of a vehicle edge can leave every corner
-            # outside rb_cross_thresh but still be a true crossing.
-            perimeter = _compute_ego_perimeter(
-                x,
-                y,
-                h,
-                half_l,
-                half_w,
-                ego_wheelbase,
+    if has_borders:
+        for b0 in range(0, len(traj), _TICK_BLOCK):
+            block = traj[b0:b0 + _TICK_BLOCK]
+            mask = _block_segment_mask(
+                seg_starts, seg_ends, np.asarray(positions[b0:b0 + _TICK_BLOCK]), reach
             )
-            rb_dists.append(_min_dist_vectorized(perimeter, seg_starts, seg_ends))
+            b_starts, b_ends = seg_starts[mask], seg_ends[mask]
+
+            block_dists = []
+            for entry in block:
+                # Sample the full OBB perimeter, not just corners: a border that
+                # pierces the middle of a vehicle edge can leave every corner
+                # outside rb_cross_thresh but still be a true crossing.
+                perimeter = _compute_ego_perimeter(
+                    entry["x"],
+                    entry["y"],
+                    entry["heading"],
+                    half_l,
+                    half_w,
+                    ego_wheelbase,
+                )
+                block_dists.append(_min_dist_vectorized(perimeter, b_starts, b_ends))
+
+            # The narrowing is equivalent to the full scan only while the distances it produces
+            # stay inside the margin; a segment beyond it could otherwise have been nearer.
+            # Checking the result rather than trusting the assumption is what keeps this exact --
+            # and it costs the full scan only for the blocks that need it.
+            #
+            # "No finite distance" needs the fallback too, and is the easier case to get wrong:
+            # a block that runs more than the margin from every border keeps NO segments, and
+            # `_min_dist_vectorized` then returns inf for each of its ticks. Treating that as
+            # "nothing to check" would report inf where the true distance is a large number --
+            # not a rounding difference but a different value, and one that then propagates into
+            # rb_dist_min/med/p5 as a silent inf.
+            finite = [d for d in block_dists if math.isfinite(d)]
+            narrowed = len(b_starts) < len(seg_starts)
+            if narrowed and (not finite or max(finite) > _BLOCK_MARGIN_M):
+                block_dists = [
+                    _min_dist_vectorized(
+                        _compute_ego_perimeter(
+                            e["x"], e["y"], e["heading"], half_l, half_w, ego_wheelbase
+                        ),
+                        seg_starts,
+                        seg_ends,
+                    )
+                    for e in block
+                ]
+            rb_dists.extend(block_dists)
 
     rb_dists = np.array(rb_dists)
     speeds = np.array(speeds)
@@ -263,8 +338,28 @@ def evaluate_trajectory(
     }
 
 
+# map path -> its road_border polylines. Parsing a 46 MB lanelet2 map costs ~7 s and this is
+# called once per SCENARIO from the rollout's finalize step, where 378 of the suite's 464 cases
+# share one map -- the same per-map/per-scenario mismatch that `LaneletSceneBuilder` already
+# caches around (scenario_sim_pool.py:120-124). It made `finalize` 9.19 s/case = 20% of a full
+# run's cost (plan/11 9v/9x). Keyed by resolved path, and unbounded because the number of distinct
+# maps a process sees is the number of maps in the suite (3), not the number of scenarios.
+_BORDER_SEGMENT_CACHE: dict[str, list[np.ndarray]] = {}
+
+
 def load_border_segments(map_path: str) -> list[np.ndarray]:
-    """Load road border polylines from a lanelet2 map."""
+    """Load road border polylines from a lanelet2 map (cached per map).
+
+    Returns a fresh list each call, so a caller may filter it in place (see
+    ``scenario_sim_rollout._prune_border_segments``, which does not, but whose result feeds
+    metrics -- a shared list that someone later trims would move ``rb_dists`` silently). The
+    ARRAYS are shared, and must be treated as read-only; every current consumer only reads them.
+    """
+    key = str(Path(map_path).resolve())
+    cached = _BORDER_SEGMENT_CACHE.get(key)
+    if cached is not None:
+        return list(cached)
+
     import lanelet2
     from autoware_lanelet2_extension_python.projection import MGRSProjector
 
@@ -281,7 +376,8 @@ def load_border_segments(map_path: str) -> list[np.ndarray]:
             if len(pts) >= 2:
                 segments.append(pts)
     print(f"Loaded {len(segments)} road border segments from map")
-    return segments
+    _BORDER_SEGMENT_CACHE[key] = segments
+    return list(segments)
 
 
 def _positive_float(value: str) -> float:
