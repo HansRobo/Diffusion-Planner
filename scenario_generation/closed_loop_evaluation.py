@@ -46,6 +46,8 @@ class RolloutParams:
     prefetch_ahead: int = 2
     # Diagnostic: save the first N raw predictions for an eager-vs-compiled comparison.
     dump_predictions: int = 0
+    # Diagnostic: cut the rollout short. None = the usual 3x segment length.
+    max_steps: int | None = None
     near_miss_thresh: float = 0.5
     search_radius: float = 1.5
     warmup_steps: int = 0
@@ -83,6 +85,7 @@ class RolloutParams:
             "metrics_device": self.metrics_device,
             "prefetch_ahead": self.prefetch_ahead,
             "dump_predictions": self.dump_predictions,
+            "max_steps": self.max_steps,
             "near_miss_thresh": self.near_miss_thresh,
             "search_radius": self.search_radius,
             "warmup_steps": self.warmup_steps,
