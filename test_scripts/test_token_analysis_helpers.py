@@ -43,3 +43,15 @@ def test_onnx_model_returns_prediction_on_requested_device():
     _, outputs = model({"ego_current_state": torch.zeros(2, 10)})
 
     assert outputs["prediction"].device.type == "cpu"
+
+
+def test_token_occupancy_statistics_include_capacity_and_utilization():
+    attention_analysis = _load_script("attention_analysis")
+
+    stats = attention_analysis.occupancy_stats([0, 1, 2, 4], slots=8)
+
+    assert stats["mean"] == 1.75
+    assert stats["max"] == 4
+    assert stats["mean_utilization_pct"] == 21.875
+    assert stats["p95_capacity"] == 4
+    assert stats["p99_capacity"] == 4

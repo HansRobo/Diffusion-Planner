@@ -152,6 +152,23 @@ def lane_dist(lanes):
     return d.min(dim=-1).values
 
 
+def occupancy_stats(values, slots):
+    """Summarize valid-token counts for one token class."""
+    a = np.asarray(values)
+    p50, p95, p99 = (float(np.percentile(a, q)) for q in (50, 95, 99))
+    return {
+        "slots": slots,
+        "mean": float(a.mean()),
+        "p50": p50,
+        "p95": p95,
+        "p99": p99,
+        "max": int(a.max()),
+        "mean_utilization_pct": float(a.mean() / slots * 100),
+        "p95_capacity": int(np.ceil(p95)),
+        "p99_capacity": int(np.ceil(p99)),
+    }
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--run_dir", required=True)
@@ -198,6 +215,8 @@ def main():
     all_share = [{c: [] for c, _ in CLASSES} for _ in range(n_layers)]
     vw_share = [{c: [] for c, _ in CLASSES} for _ in range(n_layers)]
     count_share = {c: [] for c, _ in CLASSES}
+    valid_count = {c: [] for c, _ in CLASSES}
+    total_valid_count = []
     lane_bin_share = [[] for _ in DIST_BINS]  # conditional on class presence
     nbr_bin_share = [[] for _ in DIST_BINS]
     route_share_per_sample = []  # ego-query, layer-averaged (for turning split)
@@ -214,10 +233,13 @@ def main():
             valid = ~store[0]["mask"]  # [B, N] True=valid
             vf = valid.float()
             n_valid = vf.sum(dim=1)  # [B]
+            total_valid_count += n_valid.tolist()
 
             for c, _ in CLASSES:
                 s, e = OFFSETS[c]
-                count_share[c] += (vf[:, s:e].sum(dim=1) / n_valid).tolist()
+                class_count = vf[:, s:e].sum(dim=1)
+                valid_count[c] += class_count.tolist()
+                count_share[c] += (class_count / n_valid).tolist()
 
             per_layer_route = []
             per_layer_lane_bins = [[] for _ in DIST_BINS]
@@ -267,6 +289,11 @@ def main():
         "n_turning": int(turning.sum()),
         "n_layers": n_layers,
         "classes": [c for c, _ in CLASSES],
+        "token_occupancy": {
+            "description": "Valid token counts over the selected moving evaluation samples",
+            "total": occupancy_stats(total_valid_count, TOKEN_NUM),
+            "by_class": {c: occupancy_stats(valid_count[c], slots) for c, slots in CLASSES},
+        },
         "count_share": {c: float(np.mean(count_share[c])) for c, _ in CLASSES},
         "ego_share_per_layer": {
             c: [float(np.mean(ego_share[li][c])) for li in range(n_layers)] for c, _ in CLASSES
