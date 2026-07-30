@@ -183,6 +183,59 @@ def build_model(args, variant: str, device: str, seed: int = 0):
     return model
 
 
+def run_sequence(args, a) -> None:
+    """Compare K consecutive calls on DIFFERENT inputs, eager vs each other variant.
+
+    The single-input comparison the rest of this script does cannot distinguish "the arithmetic
+    is the same" from "the arithmetic is the same the first time". A rollout calls the model
+    over a thousand times, on a new input each replan, with other GPU work allocating in
+    between -- and that is where the closed-loop metrics were seen to move. This reproduces
+    that shape: K distinct inputs, replayed in the same order for every variant, compared call
+    by call, with a scratch allocation between calls to stand in for the per-step scorers.
+    """
+    k = a.sequence
+    n = a.neighbors[0]
+    print(f"\n=== sequence check: {k} consecutive calls, n_neighbors={n} ===")
+
+    def run(variant: str) -> list[torch.Tensor]:
+        torch.set_float32_matmul_precision("high" if "tf32" in variant else "highest")
+        model = build_model(args, variant, a.device, seed=a.seed)
+        out = []
+        with torch.no_grad():
+            for i in range(k):
+                torch.manual_seed(a.seed + 1000 + i)
+                data = build_inputs(a.batch, n, a.device)
+                torch.compiler.cudagraph_mark_step_begin()
+                torch.manual_seed(a.seed)
+                _, o = model(data)
+                out.append(o["prediction"].detach().float().cpu().clone())
+                # Stand-in for the per-step scorers: allocate and free between inferences, so
+                # the caching allocator is exercised the way it is during a rollout.
+                scratch = torch.randn(1 << 20, device=a.device)
+                del scratch
+        del model
+        torch.cuda.empty_cache()
+        return out
+
+    ref = run(a.variants[0])
+    for variant in a.variants[1:]:
+        got = run(variant)
+        first_bad = None
+        worst = 0.0
+        for i, (x, y) in enumerate(zip(ref, got)):
+            if not torch.equal(x, y):
+                first_bad = i if first_bad is None else first_bad
+                worst = max(worst, float((x - y).abs().max()))
+        if first_bad is None:
+            print(f"  {variant:14s} all {k} calls BIT-IDENTICAL")
+        else:
+            n_bad = sum(1 for x, y in zip(ref, got) if not torch.equal(x, y))
+            print(
+                f"  {variant:14s} first differing call: #{first_bad} of {k} "
+                f"({n_bad} differ)  worst max|d|={worst:.3e}"
+            )
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     # Required rather than defaulted: the production args.json lives outside the repo
@@ -207,6 +260,14 @@ def main() -> None:
         help="eager | compile (torch.compile the DiT) | bf16 (autocast) | compile_bf16",
     )
     p.add_argument("--seed", type=int, default=1234, help="weights + inputs, so outputs compare")
+    p.add_argument(
+        "--sequence",
+        type=int,
+        default=0,
+        help="compare K CONSECUTIVE calls on DIFFERENT inputs, the way a rollout calls the model "
+        "(one comparison on one input cannot see a difference that only appears once a graph has "
+        "been replayed, or once other work has allocated between replays)",
+    )
     p.add_argument("--json_out", default=None)
     a = p.parse_args()
 
@@ -224,6 +285,10 @@ def main() -> None:
         print("!" * 78)
 
     print(f"torch {torch.__version__} / {torch.cuda.get_device_name(0)}")
+
+    if a.sequence:
+        run_sequence(args, a)
+        return
 
     results: dict[str, dict] = {}
     reference: dict[int, torch.Tensor] = {}
