@@ -256,6 +256,26 @@ class RouteTimeline:
             if 0 <= i < n:
                 self.npz(i)
 
+    def neighbor_last(self, idx: int) -> np.ndarray:
+        """``neighbor_agents_past[:, -1]`` for one frame, without disturbing the frame cache.
+
+        The track-anchor build scans EVERY frame of the route but reads only this one array.
+        Going through ``npz()`` decompresses every key in ``_NEEDED_KEYS`` -- roughly twice this
+        array's bytes -- and, because a route is far longer than the 768-frame cache, the scan
+        evicts exactly the frames the step loop is about to ask for. Both passes then pay full
+        decompression for the same frames. Reading just this member (npz members decompress
+        lazily) and NOT caching it keeps both the extra bytes and the eviction out of the way.
+        """
+        with self._cache_lock:
+            cached = self._npz_cache.get(idx)
+            if cached is not None:
+                self._npz_cache.move_to_end(idx)  # LRU touch
+        if cached is not None:
+            return cached["neighbor_agents_past"][:, -1]
+        with self.timers("timeline_load_nbr"):
+            with np.load(self.npz_paths[idx], allow_pickle=True) as z:
+                return z["neighbor_agents_past"][:, -1]
+
     def pose(self, idx: int) -> np.ndarray:
         """World ego pose [x, y, yaw] at recorded frame ``idx``."""
         return self.poses[idx]
