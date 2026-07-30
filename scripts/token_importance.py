@@ -1,10 +1,11 @@
 """Token-group importance via input ablation (feature-importance analog).
 
-Zeroing raw input rows makes the encoder mask those tokens (verified: padding
-masks propagate through normalizer -> encoder -> fusion -> decoder cross-attn),
-so "remove token group and measure metric degradation" is a clean permutation-
-importance analog. Groups: input class (drop:*), nearest-K sweeps for
-neighbors / lanes / line_strings, and 100m distance cutoffs.
+Zeroing raw rows removes variable input information. Variable-size classes
+(neighbors/maps) become padding and are masked by the encoder. Fixed-size
+classes (goal pose/turn indicators) remain present as constant-valued tokens,
+so their results are input-information ablations rather than token-removal
+experiments. Groups: input class (drop:*), nearest-K sweeps for neighbors /
+lanes / line_strings, and distance cutoffs.
 
 Usage (CPU, sshfs checkpoint):
   uv run python scripts/token_importance.py \
@@ -71,6 +72,7 @@ class OnnxModel:
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
         self.sess = ort.InferenceSession(onnx_path, providers=providers)
         self.input_specs = self.sess.get_inputs()
+        self.device = device
         print(f"onnxruntime providers: {self.sess.get_providers()}", flush=True)
 
     def __call__(self, feed: dict):
@@ -87,7 +89,7 @@ class OnnxModel:
             else:
                 onnx_feed[si.name] = np.zeros(shp, dtype=dtype)
         pred = self.sess.run(["prediction"], onnx_feed)[0]
-        return None, {"prediction": torch.from_numpy(np.asarray(pred))}
+        return None, {"prediction": torch.from_numpy(np.asarray(pred)).to(self.device)}
 
 
 def latest_ckpt(run_dir: Path) -> Path:
@@ -120,8 +122,12 @@ def load_model(run_dir: Path, device: str):
 
 
 def _neighbor_dist(nbr: torch.Tensor) -> torch.Tensor:
-    """nbr: [B, N, T, 11] raw. Distance of current position; inf for padding."""
-    valid = (nbr[..., :8] != 0).any(dim=(2, 3))  # [B, N]
+    """Distance at the current step; inf for slots masked by NeighborEncoder.
+
+    NeighborEncoder discards all but the last six history rows before building
+    its padding mask, so the analysis must use the same temporal window.
+    """
+    valid = (nbr[:, :, -6:, :8] != 0).any(dim=(2, 3))  # [B, N]
     d = nbr[:, :, -1, :2].norm(dim=-1)  # [B, N]
     return torch.where(valid, d, torch.full_like(d, float("inf")))
 
