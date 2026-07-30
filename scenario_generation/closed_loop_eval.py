@@ -664,6 +664,8 @@ def _run_pooled(
             "--replan_interval", str(replan_interval), "--max_steps", str(max_steps),
             "--warmup_steps", str(warmup_steps), "--near_miss_thresh", str(near_miss_thresh),
             "--fps", str(fps), "--watchdog_sec", str(max(60.0, worker_timeout_sec - 120.0)),
+            "--slot", str(slot),
+            "--gpu", str(gpu_ids[slot % len(gpu_ids)] if gpu_ids else -1),
         ]
         procs.append((slot, subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env), log))
 

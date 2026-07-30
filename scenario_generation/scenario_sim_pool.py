@@ -66,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--fps", type=float, default=10.0)
     p.add_argument("--watchdog_sec", type=float, default=0.0,
                    help="per-SCENARIO deadline; the dump is re-armed for each one")
+    p.add_argument("--slot", type=int, default=-1, help="this worker's pool slot")
+    p.add_argument("--gpu", type=int, default=-1, help="the GPU this slot was assigned")
     a = p.parse_args(argv)
 
     faulthandler.enable()
@@ -127,6 +129,12 @@ def main(argv: list[str] | None = None) -> int:
             # The parent needs a per-scenario wall to compute achieved concurrency; in the
             # per-scenario-process design it measured that itself, and it cannot here.
             row["worker_wall_s"] = round(time.perf_counter() - _t_case, 3)
+            # The same stamps the per-scenario-process path put on its rows. Without them the
+            # summary cannot report which maps were used or whether the GPUs were loaded evenly --
+            # and per-GPU balance is exactly what a run spread over 8 devices needs to show.
+            row["map_path"] = str(map_path)
+            row["slot"] = a.slot if a.slot >= 0 else None
+            row["gpu"] = a.gpu if a.gpu >= 0 else None
             row["pool_pid"] = os.getpid()
             row["pool_seq"] = done  # 0 = this worker's first scenario, which absorbs the warmups
             (out / "row.json").write_text(json.dumps(row, default=float))
