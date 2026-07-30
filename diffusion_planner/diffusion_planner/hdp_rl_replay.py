@@ -42,6 +42,8 @@ _FINGERPRINT_FIELDS = (
     "rl_reward_w_lane",
     "rl_reward_w_progress",
     "rl_reward_w_road_border",
+    "rl_reward_w_comfort",
+    "rl_candidate_aug_epochs",
     "rl_candidate_aug_std",
     "num_generations",
     "rl_noise_scale",
