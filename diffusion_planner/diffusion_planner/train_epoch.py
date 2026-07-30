@@ -69,7 +69,10 @@ def train_epoch(
         # Bind this epoch's repeat flags on the first batch, never before. repeat_flags
         # is regenerated inside the sampler's __iter__, which the DataLoader only calls
         # once iteration starts -- binding in train.py would read the previous epoch's.
-        if aug_selector is not None and not aug_selector.is_bound:
+        # Gate on bound_epoch, NOT is_bound: is_bound only records that a bind has ever
+        # happened, so epoch 2 kept epoch 1's flags and cursor and died on its first
+        # batch. Comparing epochs rebinds once per epoch, for the whole run.
+        if aug_selector is not None and aug_selector.bound_epoch != args.current_epoch:
             if train_sampler is None:
                 raise RuntimeError(
                     "forced augmentation needs a sampler exposing repeat_flags, but the "

@@ -151,6 +151,12 @@ class ForcedAugmentationSelector:
         # False until this epoch's flags are bound. train_epoch binds lazily on the
         # first batch and uses this to do it exactly once per epoch.
         self.is_bound = False
+        # Which epoch the currently-bound flags belong to, or None if unbound. This is
+        # what callers must gate on -- NOT is_bound, which only records that a bind has
+        # happened at some point. A bare is_bound check made epoch 2 reuse epoch 1's
+        # flags and cursor, so the first batch of epoch 2 always overran the flag list
+        # and every run died there.
+        self.bound_epoch: int | None = None
         self._flags: list[bool] | None = None
         self._generator: torch.Generator | None = None
 
@@ -160,8 +166,14 @@ class ForcedAugmentationSelector:
         repeat_flags: list[bool] | None,
         repeat_flags_epoch: int | None,
     ) -> None:
-        """Bind this epoch's flags. Must be called after the loader's iterator exists."""
+        """Bind this epoch's flags. Must be called after the loader's iterator exists.
+
+        Safe to call once per epoch for the whole run: it resets the cursor, the
+        counters and the choice generator, so binding epoch N never inherits epoch
+        N-1's state.
+        """
         self.is_bound = False
+        self.bound_epoch = None
         if repeat_flags is None:
             raise ValueError(
                 "sampler produced no repeat_flags; construct "
@@ -184,6 +196,7 @@ class ForcedAugmentationSelector:
         self._generator = torch.Generator()
         self._generator.manual_seed(self.seed + epoch)
         self.is_bound = True
+        self.bound_epoch = epoch
 
     def masks_for_batch(self, batch_size: int, device) -> dict[str, torch.Tensor]:
         if self._flags is None or self._generator is None:
@@ -193,9 +206,12 @@ class ForcedAugmentationSelector:
         if end > len(self._flags):
             raise RuntimeError(
                 f"reading past the end of repeat_flags: need rows "
-                f"[{self.rows_consumed}, {end}) of {len(self._flags)}. The loader "
-                f"delivered more rows than the sampler drew -- most likely a second "
-                f"DataLoader iterator was created within one epoch."
+                f"[{self.rows_consumed}, {end}) of {len(self._flags)} "
+                f"(bound_epoch={self.bound_epoch}). The cursor has consumed more rows "
+                f"than the sampler drew for the bound epoch. Most likely start_epoch "
+                f"was not called for the current epoch, so this epoch is reusing the "
+                f"previous epoch's flags and cursor -- gate the bind on "
+                f"`bound_epoch != epoch`, not on `is_bound`."
             )
         flags = self._flags[self.rows_consumed : end]
         self.rows_consumed = end

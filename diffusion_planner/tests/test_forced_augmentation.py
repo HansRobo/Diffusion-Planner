@@ -155,6 +155,65 @@ class TestForcedAugmentationSelector:
         sel.start_epoch(0, [True], 0)
         assert sel.is_bound
 
+    def test_bound_epoch_tracks_which_epoch_is_bound(self):
+        sel = self._selector()
+        assert sel.bound_epoch is None
+        sel.start_epoch(0, [True], 0)
+        assert sel.bound_epoch == 0
+        sel.start_epoch(1, [True], 1)
+        assert sel.bound_epoch == 1
+
+    def test_multi_epoch_loop_gated_on_bound_epoch_survives(self):
+        """Regression: every run died on the first batch of epoch 2.
+
+        `is_bound` is a permanent latch, so gating the bind on it meant epoch 2 kept
+        epoch 1's flags and cursor. With drop_last the cursor was already near the end
+        of the flag list, so the next batch always overran it. Gating on `bound_epoch`
+        rebinds once per epoch. This drives several epochs the way train_epoch does.
+        """
+        sel = self._selector(pool=("flip",))
+        flags_per_epoch = {
+            0: [True, False, True, False],
+            1: [False, True, True, True],
+            2: [True] * 4,
+        }
+        batch_size = 2
+
+        for epoch in range(3):
+            flags = flags_per_epoch[epoch]
+            for batch_index in range(len(flags) // batch_size):
+                # Exactly train_epoch's guard.
+                if sel.bound_epoch != epoch:
+                    sel.start_epoch(epoch, flags, epoch)
+                masks = sel.masks_for_batch(batch_size, torch.device("cpu"))
+                expected = flags[batch_index * batch_size : (batch_index + 1) * batch_size]
+                assert masks["flip"].tolist() == expected, (epoch, batch_index)
+            assert sel.bound_epoch == epoch
+            assert sel.rows_consumed == len(flags)
+
+    def test_is_bound_gate_would_have_crashed_on_epoch_two(self):
+        """Pins WHY the gate changed: the old `is_bound` check still fails here.
+
+        If someone reverts to gating on `is_bound`, this test fails, naming the exact
+        production failure rather than an abstract state bug.
+        """
+        sel = self._selector(pool=("flip",))
+        flags = [True, False, True, False]
+        batch_size = 2
+
+        # Epoch 0 under the OLD guard: binds once, consumes the whole flag list.
+        for _ in range(len(flags) // batch_size):
+            if not sel.is_bound:  # the old, buggy guard
+                sel.start_epoch(0, flags, 0)
+            sel.masks_for_batch(batch_size, torch.device("cpu"))
+        assert sel.rows_consumed == len(flags)
+
+        # Epoch 1 under the OLD guard: is_bound is still True, so no rebind happens and
+        # the cursor is already exhausted.
+        assert sel.is_bound
+        with pytest.raises(RuntimeError, match="reading past the end of repeat_flags"):
+            sel.masks_for_batch(batch_size, torch.device("cpu"))
+
     def test_exactly_one_aug_forced_per_repeat_row(self):
         sel = self._selector()
         flags = [False, True, True, False, True]
