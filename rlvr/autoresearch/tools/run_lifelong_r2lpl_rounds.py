@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from diffusion_planner.utils.ddp import ddp_file_store_path
 
 _CONFIG_REQUIRED = {
     "rounds",
@@ -54,7 +55,10 @@ _RSFT_TRAINING_KEYS = {
     "replay_der_coef",
 }
 _MINING_TOOL = "direct_reproducer_chunks"
-_TORCH_DDP_FILE_STORE = Path("/tmp/tmp_dist_init")
+# Single source of truth for the per-user DDP rendezvous file — a fixed /tmp
+# name collided across users on shared nodes (another user's leftover file
+# raised EPERM here, killing the round at the training stage).
+_TORCH_DDP_FILE_STORE = Path(ddp_file_store_path())
 _REPAIR_REFRESH_SCOPES = {"unrepaired", "all"}
 
 

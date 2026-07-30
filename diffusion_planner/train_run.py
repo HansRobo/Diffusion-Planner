@@ -17,6 +17,7 @@ from pathlib import Path
 from diffusion_planner.scenario_based_open_loop.open_loop import (
     load_scenario_based_open_loop_settings,
 )
+from diffusion_planner.utils.ddp import ddp_file_store_path
 from run_utils import NCCL_ENV, gpu_count, tee_run
 
 
@@ -71,7 +72,10 @@ def main() -> None:
     if args.wandb_project_name:
         optional += ["--wandb_project_name", args.wandb_project_name]
 
-    Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
+    # Per-user store path (see diffusion_planner.utils.ddp.ddp_file_store_path):
+    # a fixed /tmp name collided across users on shared nodes and EPERM is NOT
+    # suppressed by missing_ok, so another user's leftover file broke launches.
+    Path(ddp_file_store_path()).unlink(missing_ok=True)
 
     cmd = [
         sys.executable,

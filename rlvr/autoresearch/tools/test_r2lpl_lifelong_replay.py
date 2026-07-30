@@ -1514,6 +1514,10 @@ def test_round_runner_cli_dry_run_uses_multiple_visible_gpus_or_skips(tmp_path):
                     "min_margin": 0.3,
                     "candidate_count_per_scene": 2,
                 },
+                # capacity became required after this fixture was written; without
+                # it the runner fails loudly and the test only "passed" where it
+                # skipped (needs >= 2 visible CUDA devices).
+                "replay_memory": {"capacity": 10},
                 "training": {"val_scenes": str(tmp_path / "val.json")},
                 "rounds": {"rounds": 1, "epochs_per_round": 1},
             }
@@ -4710,6 +4714,12 @@ def test_ensure_4col_neighbor_futures_caches_across_calls(tmp_path):
     # reconverted — the cache is path-keyed but stamped with size+mtime.
     three["neighbor_agents_future"][0, :, 1] = 5.0
     np.savez(p3, **three)
+    # np.savez of same-shaped data keeps the byte size identical, so the stamp
+    # rides on mtime alone; two writes can land within one filesystem timestamp
+    # tick and flake. Force a distinct mtime — this pins the test to the
+    # content-changed semantics, not the filesystem's clock granularity.
+    st = p3.stat()
+    os.utime(p3, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
     fourth = round_runner._ensure_4col_neighbor_futures([str(p3)], out_dir)
     assert fourth == first
     with np.load(fourth[0]) as d:
