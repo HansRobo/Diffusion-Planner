@@ -42,6 +42,8 @@ class RolloutParams:
     device: str = "cuda"
     # Where the per-step metric scorers run. None = wherever the model runs.
     metrics_device: str | None = None
+    # Frames decompressed ahead on a background thread. 0 disables; results are identical.
+    prefetch_ahead: int = 2
     near_miss_thresh: float = 0.5
     search_radius: float = 1.5
     warmup_steps: int = 0
@@ -77,6 +79,7 @@ class RolloutParams:
         return {
             "device": self.device,
             "metrics_device": self.metrics_device,
+            "prefetch_ahead": self.prefetch_ahead,
             "near_miss_thresh": self.near_miss_thresh,
             "search_radius": self.search_radius,
             "warmup_steps": self.warmup_steps,
