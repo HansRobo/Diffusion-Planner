@@ -24,6 +24,7 @@ import faulthandler
 import json
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -73,10 +74,21 @@ def main(argv: list[str] | None = None) -> int:
 
     from scenario_generation.simulate import load_model
 
+    # Costs recorded at WORKER level, not folded into whichever scenario happened to be first.
+    # The stage timers live inside the rollout, so with a pooled worker they attribute a
+    # once-per-worker cost (the checkpoint, the compile, a map parse) to one scenario and report
+    # ~0 for the rest -- true per call, but useless for telling a per-job cost from a per-scenario
+    # one. That separation is the whole point of this file's profile output.
+    prof: dict = {"pid": os.getpid(), "map_parse_s": {}, "scenarios": []}
+    _t_proc = time.perf_counter()
+    _t = time.perf_counter()
     model, model_args = load_model(a.model_path, a.device)
+    prof["model_load_s"] = time.perf_counter() - _t
+    _t = time.perf_counter()
     # Same compile setup as the single-scenario worker, so per-tick numbers stay comparable.
     model.decoder.dit = torch.compile(model.decoder.dit, mode="reduce-overhead")
     model.encoder = _CloneEncoderOutput(torch.compile(model.encoder, mode="reduce-overhead"))
+    prof["compile_setup_s"] = time.perf_counter() - _t
 
     cfg = RolloutConfig(
         fps=a.fps,
@@ -100,14 +112,23 @@ def main(argv: list[str] | None = None) -> int:
         # fire in the middle of an unrelated scenario.
         if a.watchdog_sec > 0:
             faulthandler.dump_traceback_later(a.watchdog_sec, exit=True)
+        _t_case = time.perf_counter()
         try:
             map_path = map_from_osc(osc_path)
             if map_path not in builders:
+                _t = time.perf_counter()
                 builders[map_path] = LaneletSceneBuilder(map_path)
+                # Per MAP, not per scenario: 378 of the suite's 464 cases share one map.
+                prof["map_parse_s"][map_path] = time.perf_counter() - _t
             row = run_scenario_sim_rollout(
                 model, model_args, osc_path, map_path, out,
                 config=cfg, device=a.device, builder=builders[map_path], verbose=True,
             )
+            # The parent needs a per-scenario wall to compute achieved concurrency; in the
+            # per-scenario-process design it measured that itself, and it cannot here.
+            row["worker_wall_s"] = round(time.perf_counter() - _t_case, 3)
+            row["pool_pid"] = os.getpid()
+            row["pool_seq"] = done  # 0 = this worker's first scenario, which absorbs the warmups
             (out / "row.json").write_text(json.dumps(row, default=float))
             done += 1
         except BaseException as e:  # noqa: BLE001
@@ -120,7 +141,13 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             if a.watchdog_sec > 0:
                 faulthandler.cancel_dump_traceback_later()
-    print(f"[pool] worker {os.getpid()} finished {done} scenarios")
+            prof["scenarios"].append(
+                {"index": index, "osc": osc_path, "wall_s": round(time.perf_counter() - _t_case, 3)}
+            )
+    prof["worker_total_s"] = round(time.perf_counter() - _t_proc, 3)
+    prof["n_scenarios"] = done
+    (claim_dir.parent / f"profile-{os.getpid()}.json").write_text(json.dumps(prof, indent=1))
+    print(f"[pool] worker {os.getpid()} finished {done} scenarios in {prof['worker_total_s']:.0f}s")
     return 0
 
 
