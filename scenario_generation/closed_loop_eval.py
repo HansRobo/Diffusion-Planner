@@ -538,6 +538,7 @@ def run_closed_loop_eval(
                 abort_after=abort_after,
                 abort_max_snaps=abort_max_snaps,
                 drop_objects=drop_objects,
+                timers=timers,
             )
             row = {"route": key, **metrics}
             # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so
@@ -581,6 +582,10 @@ def run_closed_loop_eval(
     summary["n_routes"] = len(route_keys)
     summary["elapsed_sec"] = time.perf_counter() - t0
     summary["video_mp4s"] = video_mp4s
+    # as_dict() is plain floats/ints, so summary.json stays serializable.
+    summary["timers"] = timers.as_dict()
+    if verbose:
+        print(timers.report(sum(int(r["n_steps_run"]) for r in rows)))
 
     # A sharded worker leaves the merged summary.json to the parent driver (which aggregates every
     # shard's segments_*.jsonl); it only owns its own segments_{rank}.jsonl, written above.

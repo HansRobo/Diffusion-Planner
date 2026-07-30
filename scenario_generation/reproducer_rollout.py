@@ -1375,6 +1375,7 @@ def render_segment(
     abort_after: int = 30,
     abort_max_snaps: int = 0,
     drop_objects: bool = False,
+    timers: Timers | None = None,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1449,7 +1450,7 @@ def render_segment(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cap = max_steps if max_steps is not None else 3 * (end - start)
-    timers = Timers()
+    timers = timers or Timers()
     s = _seed_state(
         tl,
         start,
@@ -1508,7 +1509,9 @@ def render_segment(
     )
     while not s.done:
         k = s.k
-        pre = _pre_step(s)
+        # ``input_build`` contains the nested ``cursor_step``, as in run_segments_batched.
+        with timers("input_build"):
+            pre = _pre_step(s)
         if pre is None:
             dbg.write(
                 json.dumps(
@@ -1580,6 +1583,8 @@ def render_segment(
 
         # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
         # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.
+        # add() rather than a with-block so the JSON payload below is not reindented.
+        jsonl_t0 = time.perf_counter()
         dbg.write(
             json.dumps(
                 {
@@ -1612,6 +1617,7 @@ def render_segment(
             )
             + "\n"
         )
+        timers.add("rollout_jsonl", time.perf_counter() - jsonl_t0)
         # Re-plan every `replan_interval` steps. On a replan step (offset 0) run the model and
         # drive the ego with the tracker exactly as the per-step rollout does (so replan_interval=1
         # is identical to the baseline). On the in-between steps execute the cached plan open-loop:
@@ -1621,9 +1627,12 @@ def render_segment(
         offset = k % replan_interval
         override = None
         if plan_world is None or offset == 0:
-            data = _to_torch_batch([np_dict], model_args, device)
-            _, outputs = model(data)
-            pred = outputs["prediction"][0, 0].cpu().numpy()
+            with timers("to_torch"):
+                data = _to_torch_batch([np_dict], model_args, device)
+            # Includes the synchronising D2H below, so this is wall time, not launch time.
+            with timers("model_forward"):
+                _, outputs = model(data)
+                pred = outputs["prediction"][0, 0].cpu().numpy()
             plan_world = _ego_pred_to_world(
                 pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
             )
@@ -1668,18 +1677,19 @@ def render_segment(
             and (window is None or (window[0] <= k <= window[1]))
             and k % draw_every == 0
         ):
-            _draw_step(
-                np_dict,
-                pred_cur,
-                s.ego_shape,
-                out_dir / f"{k:05d}.png",
-                neighbor_ids=nids if color_by_uuid else None,
-                step=k,
-                total=cap,
-                title_prefix=title_prefix,
-                distance_label_offset_m=distance_label_offset_m,
-                view_half_m=view_half_m,
-            )
+            with timers("draw"):
+                _draw_step(
+                    np_dict,
+                    pred_cur,
+                    s.ego_shape,
+                    out_dir / f"{k:05d}.png",
+                    neighbor_ids=nids if color_by_uuid else None,
+                    step=k,
+                    total=cap,
+                    title_prefix=title_prefix,
+                    distance_label_offset_m=distance_label_offset_m,
+                    view_half_m=view_half_m,
+                )
         snaps_before = s.snap_count
         _advance_step(s, pred_cur, idx, device, timers, override=override)
         if s.snap_count > snaps_before:
@@ -1688,7 +1698,8 @@ def render_segment(
             # it to force a fresh inference at the snapped pose (else the snap never sticks).
             plan_world = None
     dbg.close()
-    return _finalize(s)
+    with timers("finalize"):
+        return _finalize(s)
 
 
 @torch.no_grad()

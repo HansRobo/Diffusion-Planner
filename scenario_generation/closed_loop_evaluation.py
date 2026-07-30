@@ -362,6 +362,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         )
         self.npz_root = npz_root
         self.seg_len = seg_len
+        # ONE Timers for the whole run, not one per job: merge_job_result keeps the LAST value
+        # for a non-list/dict/int key, so a per-job instance would report only the final route.
+        self.timers = Timers() if config.profile else None
 
     @classmethod
     def from_checkpoint(
@@ -431,7 +434,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
     ) -> JobRunResult:
         assert isinstance(job, FullRouteRouteJob)
         params = self.config.params
-        timers = Timers() if self.config.profile else None
+        timers = self.timers
         tl = RouteTimeline(job.route_paths, sidecar_dir=job.npz_root, timers=timers)
         rows: list[dict] = []
         video_mp4s: list[Path] = []
@@ -446,6 +449,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 end,
                 png_dir,
                 **params.render_kwargs(),
+                timers=timers,
             )
             row = {"route": job.route_key, **metrics}
             if segments_file is not None:
@@ -508,6 +512,11 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         summary["elapsed_sec"] = elapsed_sec
         summary["video_mp4s"] = result.video_mp4s
         summary["segments"] = result.rows
+        if self.timers is not None:
+            # as_dict() is plain floats/ints, so summary.json stays serializable.
+            summary["timers"] = self.timers.as_dict()
+            if self.config.verbose:
+                print(self.timers.report(sum(int(r["n_steps_run"]) for r in result.rows)))
         return summary
 
     def write_artifacts(self, summary: dict, result: JobRunResult) -> None:
