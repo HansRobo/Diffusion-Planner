@@ -91,6 +91,8 @@ class OnnxModel:
 
 
 def latest_ckpt(run_dir: Path) -> Path:
+    if (run_dir / "best_model.pth").exists():
+        return run_dir / "best_model.pth"
     epoch_dirs = sorted(
         (d for d in run_dir.iterdir() if re.fullmatch(r"epoch\d+", d.name)),
         key=lambda d: int(d.name[5:]),
