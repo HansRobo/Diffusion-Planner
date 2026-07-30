@@ -1,7 +1,8 @@
 """Scan a dataset of npz files and measure token-slot occupancy per input type.
 
 Occupancy definition mirrors the encoder's mask_p:
-- neighbors: a slot is valid if any timestep row has a nonzero value (dims :8)
+- neighbors: a slot is valid if any of the last 6 history rows has a nonzero
+  value (dims :8)
 - lanes/route: valid if any of the 20 points has nonzero geometry (dims :8)
 - polygons/line_strings: valid if any point is nonzero (all dims)
 - static: nonzero row
@@ -41,7 +42,8 @@ for i, f in enumerate(files):
         for k, (name, slots) in keys.items():
             x = d[k]
             if k == "neighbor_agents_past":  # (320, T, 11)
-                valid = (x[..., :8] != 0).any(axis=(1, 2))
+                # NeighborEncoder zeros all earlier history before masking.
+                valid = (x[:, -6:, :8] != 0).any(axis=(1, 2))
             elif k in ("lanes", "route_lanes"):  # (P, 20, D)
                 valid = (x[..., :8] != 0).any(axis=(1, 2))
             elif k in ("polygons", "line_strings"):  # (P, V, D)

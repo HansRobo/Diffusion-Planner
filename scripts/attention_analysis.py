@@ -139,7 +139,8 @@ def value_norms(block, kv):
 
 
 def neighbor_dist(nbr):
-    valid = (nbr[..., :8] != 0).any(dim=(2, 3))
+    # Match NeighborEncoder, which retains only the last six history rows.
+    valid = (nbr[:, :, -6:, :8] != 0).any(dim=(2, 3))
     d = nbr[:, :, -1, :2].norm(dim=-1)
     return torch.where(valid, d, torch.full_like(d, float("inf")))
 
@@ -197,7 +198,7 @@ def main():
     all_share = [{c: [] for c, _ in CLASSES} for _ in range(n_layers)]
     vw_share = [{c: [] for c, _ in CLASSES} for _ in range(n_layers)]
     count_share = {c: [] for c, _ in CLASSES}
-    lane_bin_share = [[] for _ in DIST_BINS]  # ego-query, layer-averaged
+    lane_bin_share = [[] for _ in DIST_BINS]  # conditional on class presence
     nbr_bin_share = [[] for _ in DIST_BINS]
     route_share_per_sample = []  # ego-query, layer-averaged (for turning split)
 
@@ -242,10 +243,16 @@ def main():
                 for bi, (lo, hi) in enumerate(DIST_BINS):
                     lm = (l_dist >= lo) & (l_dist < hi)
                     nm = (n_dist >= lo) & (n_dist < hi)
-                    lt = lane_w.sum(dim=1).clamp(min=1e-9)
-                    nt = nbr_w.sum(dim=1).clamp(min=1e-9)
-                    per_layer_lane_bins[bi].append((lane_w * lm).sum(dim=1) / lt)
-                    per_layer_nbr_bins[bi].append((nbr_w * nm).sum(dim=1) / nt)
+                    lt = lane_w.sum(dim=1)
+                    nt = nbr_w.sum(dim=1)
+                    per_layer_lane_bins[bi].append(
+                        torch.where(
+                            lt > 0, (lane_w * lm).sum(dim=1) / lt.clamp(min=1e-9), torch.nan
+                        )
+                    )
+                    per_layer_nbr_bins[bi].append(
+                        torch.where(nt > 0, (nbr_w * nm).sum(dim=1) / nt.clamp(min=1e-9), torch.nan)
+                    )
                 rs, re_ = OFFSETS["route"]
                 per_layer_route.append(ego_w[:, rs:re_].sum(dim=1))
             route_share_per_sample += torch.stack(per_layer_route).mean(dim=0).tolist()
@@ -273,8 +280,8 @@ def main():
             for c, _ in CLASSES
         },
         "dist_bins": ["0-25m", "25-50m", "50-100m", "100m+"],
-        "lane_bin_share": [float(np.mean(x)) for x in lane_bin_share],
-        "nbr_bin_share": [float(np.mean(x)) for x in nbr_bin_share],
+        "lane_bin_share": [float(np.nanmean(x)) for x in lane_bin_share],
+        "nbr_bin_share": [float(np.nanmean(x)) for x in nbr_bin_share],
         "route_share_turning": float(r_route[turning].mean()) if turning.any() else None,
         "route_share_straight": float(r_route[~turning].mean()) if (~turning).any() else None,
     }
@@ -285,7 +292,7 @@ def main():
 
     # ---------------- report ----------------
     def pct(x):
-        return f"{100 * np.mean(x):5.1f}%"
+        return f"{100 * np.nanmean(x):5.1f}%"
 
     print("\n=== class attention share (ego-token query), per fusion layer ===")
     hdr = (
