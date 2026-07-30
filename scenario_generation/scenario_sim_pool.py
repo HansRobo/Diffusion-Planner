@@ -37,6 +37,7 @@ from scenario_generation.scenario_sim_rollout import (
     map_from_osc,
     run_scenario_sim_rollout,
 )
+from scenario_generation.tools.eval_cl_trajectory import load_border_segments
 
 
 def _claim(claim_dir: Path, index: int) -> bool:
@@ -81,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     # once-per-worker cost (the checkpoint, the compile, a map parse) to one scenario and report
     # ~0 for the rest -- true per call, but useless for telling a per-job cost from a per-scenario
     # one. That separation is the whole point of this file's profile output.
-    prof: dict = {"pid": os.getpid(), "map_parse_s": {}, "scenarios": []}
+    prof: dict = {"pid": os.getpid(), "map_parse_s": {}, "border_parse_s": {}, "scenarios": []}
     _t_proc = time.perf_counter()
     _t = time.perf_counter()
     model, model_args = load_model(a.model_path, a.device)
@@ -122,6 +123,15 @@ def main(argv: list[str] | None = None) -> int:
                 builders[map_path] = LaneletSceneBuilder(map_path)
                 # Per MAP, not per scenario: 378 of the suite's 464 cases share one map.
                 prof["map_parse_s"][map_path] = time.perf_counter() - _t
+                # The metrics path parses the SAME map a second time, for its road_border
+                # polylines (load_border_segments, called from _finalize_row). That made
+                # `finalize` 9.19 s/case -- 20% of a full run (plan/11 9v/9x). It is cached per
+                # map now; warming it HERE rather than letting the worker's first scenario absorb
+                # the parse keeps the cost where it belongs, in A (once per worker per map),
+                # instead of inflating one scenario's B and reporting ~0 for the rest.
+                _t = time.perf_counter()
+                load_border_segments(map_path)
+                prof["border_parse_s"][map_path] = time.perf_counter() - _t
             row = run_scenario_sim_rollout(
                 model, model_args, osc_path, map_path, out,
                 config=cfg, device=a.device, builder=builders[map_path], verbose=True,
