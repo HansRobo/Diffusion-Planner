@@ -53,6 +53,45 @@ def load_model(model_path: str | Path, device: str = "cuda"):
     return model, args
 
 
+class _CloneEncoderOutput(torch.nn.Module):
+    """Clone the encoder's output so the DiT's next cudagraph replay cannot overwrite it.
+
+    The encoding is computed once and then read by every DPM-solver step, but under
+    ``mode="reduce-overhead"`` the encoder's output lives in a cudagraph-managed buffer that the
+    DiT's replay reuses. Without the clone the decoder reads a buffer that has already been
+    written over.
+    """
+
+    def __init__(self, inner: torch.nn.Module):
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, *a, **kw):
+        return self.inner(*a, **kw).clone()
+
+
+def compile_for_inference(model):
+    """``torch.compile`` the encoder and the DiT for closed-loop inference. In place.
+
+    The DiT is what the DPM solver calls once per solver step, so it is where per-inference cost
+    lives; the encoder runs once per inference and is untouched by compiling the DiT alone.
+
+    Three things about this are load-bearing:
+
+    - Call it AFTER ``load_state_dict``: compiling rewrites parameter key names.
+    - The caller must run inference under ``no_grad``. Outputs carrying an autograd graph drop
+      compile off the CUDA-graph fast path silently, giving the whole speedup back.
+    - The caller must call ``torch.compiler.cudagraph_mark_step_begin()`` once per inference.
+
+    Compiling the DPM loop as a single graph instead is faster on one stream but slower under
+    MPS, which is how a multi-worker eval actually runs; ``max-autotune`` costs minutes of cold
+    warmup for less than ``reduce-overhead`` delivers.
+    """
+    model.decoder.dit = torch.compile(model.decoder.dit, mode="reduce-overhead")
+    model.encoder = _CloneEncoderOutput(torch.compile(model.encoder, mode="reduce-overhead"))
+    return model
+
+
 class _OnnxModel:
     """Adapter that makes an exported ``diffusion_planner.onnx`` usable in the closed-loop
     rollout exactly like the torch ``Diffusion_Planner`` (callable ``model(data) -> (_, outputs)``

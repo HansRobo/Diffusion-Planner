@@ -1647,6 +1647,8 @@ def render_segment(
                 data = _to_torch_batch([np_dict], model_args, device)
             # Includes the synchronising D2H below, so this is wall time, not launch time.
             with timers("model_forward"):
+                # No-op unless the model was compiled with cudagraphs; one inference is one step.
+                torch.compiler.cudagraph_mark_step_begin()
                 _, outputs = model(data)
                 pred = outputs["prediction"][0, 0].cpu().numpy()
             plan_world = _ego_pred_to_world(
