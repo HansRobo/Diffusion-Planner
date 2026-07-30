@@ -14,6 +14,7 @@ the per-segment MP4 paths (for wandb upload).
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -615,6 +616,76 @@ def enumerate_scenarios(scenario_root) -> list[Path]:
 _KILL_GRACE_SEC = 20.0
 
 
+def _run_pooled(
+    scenarios, out_dir: Path, scenario_root, *, device: str, model_path: str, jobs: int,
+    gpu_ids: list[int], threads_per_worker: int, replan_interval: int, max_steps: int,
+    warmup_steps: int, near_miss_thresh: float, fps: float, worker_timeout_sec: float,
+    verbose: bool,
+) -> dict[int, Path]:
+    """Run every scenario through ``jobs`` PERSISTENT workers; return ``{index: row_out}``.
+
+    The alternative to a process per scenario. A worker loads the model, compiles it and parses a
+    map once and then takes scenarios until they run out, which is only possible because the
+    interpreter -- the singleton -- now lives in a child of the worker (``sim_proc_client``). At
+    job 1665 the per-scenario fixed cost this removes was 45.2 s of a 90.5 s case.
+
+    Work is claimed through files rather than handed out over a socket: each worker creates
+    ``claims/<index>`` with O_EXCL and runs what it wins. Dynamic, so the threefold spread in
+    scenario duration does not leave a tail, and there is no queue to drain if a worker dies --
+    its unclaimed work is simply still unclaimed.
+    """
+    import sys
+
+    work_dir = out_dir / "_pool"
+    claim_dir = work_dir / "claims"
+    claim_dir.mkdir(parents=True, exist_ok=True)
+    row_of: dict[int, Path] = {}
+    work = []
+    for si, scenario in enumerate(scenarios):
+        d = out_dir / _scenario_key(scenario, Path(scenario_root))
+        row_of[si] = d / "row.json"
+        work.append([str(d), str(scenario)])
+    work_list = work_dir / "work.json"
+    work_list.write_text(json.dumps(work))
+
+    procs = []
+    for slot in range(max(1, jobs)):
+        env = os.environ.copy()
+        if gpu_ids:
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[slot % len(gpu_ids)])
+        for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+            env.setdefault(var, str(threads_per_worker))
+        env.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
+        log = open(work_dir / f"worker{slot:02d}.log", "wb")
+        cmd = [
+            sys.executable, "-m", "scenario_generation.scenario_sim_pool",
+            "--work_list", str(work_list), "--claim_dir", str(claim_dir),
+            "--model_path", str(model_path), "--device", device,
+            "--replan_interval", str(replan_interval), "--max_steps", str(max_steps),
+            "--warmup_steps", str(warmup_steps), "--near_miss_thresh", str(near_miss_thresh),
+            "--fps", str(fps), "--watchdog_sec", str(max(60.0, worker_timeout_sec - 120.0)),
+        ]
+        procs.append((slot, subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env), log))
+
+    if verbose:
+        print(f"[scenario_sim] {len(procs)} persistent workers over {len(work)} scenarios")
+    t0 = time.perf_counter()
+    seen = 0
+    while any(p.poll() is None for _, p, _ in procs):
+        time.sleep(1.0)
+        n = sum(1 for r in row_of.values() if r.exists())
+        if verbose and n != seen:
+            seen = n
+            print(f"[scenario_sim] {n}/{len(work)} rows after {time.perf_counter() - t0:.0f}s",
+                  flush=True)
+    for slot, p, log in procs:
+        log.close()
+        if p.returncode != 0:
+            print(f"[scenario_sim][WARN] pool worker {slot} exited rc={p.returncode} "
+                  f"(see {work_dir}/worker{slot:02d}.log)")
+    return row_of
+
+
 def _scenario_key(scenario: Path, root: Path) -> str:
     """Unique, filesystem-safe id for a scenario within ``root``.
 
@@ -639,6 +710,7 @@ def run_scenario_sim_eval(
     model_path: str,
     gpus: list[int] | None = None,
     max_cases: int | None = None,
+    pooled: bool = False,
     worker_timeout_sec: float = 2400.0,
     near_miss_thresh: float = 1.0,
     replan_interval: int = 1,  # every tick = 10 Hz, matching the production node
@@ -673,7 +745,6 @@ def run_scenario_sim_eval(
     source-chain already (on the production nodes that is the carried-in overlay prefix plus the
     node's own ``/opt/ros/humble`` -- see ``validator/env/setup_production.bash``).
     """
-    import os
     import sys
 
     out_dir = Path(out_dir)
@@ -697,6 +768,7 @@ def run_scenario_sim_eval(
     # `jobs` workers are spread round-robin over these devices. Default: every GPU the job
     # was allocated, which is what makes a full-suite run use the whole node rather than
     # piling all workers onto cuda:0.
+    t_start = time.perf_counter()
     # Cores this process may actually use (respects cgroup/affinity, unlike cpu_count()).
     threads_per_worker = max(1, len(os.sched_getaffinity(0)) // max(1, jobs))
     gpu_ids: list[int] = []
@@ -760,6 +832,51 @@ def run_scenario_sim_eval(
         handle = open(log, "wb")
         proc = subprocess.Popen(cmd, stdout=handle, stderr=subprocess.STDOUT, env=env)
         return proc, row_out, log, handle, time.perf_counter()
+
+    if pooled:
+        # Persistent workers: the interpreter runs in a child of each worker, so model, compiled
+        # graphs and parsed maps are paid per worker instead of per scenario.
+        row_of = _run_pooled(
+            scenarios, out_dir, scenario_root, device=device, model_path=model_path, jobs=jobs,
+            gpu_ids=gpu_ids, threads_per_worker=threads_per_worker,
+            replan_interval=replan_interval, max_steps=max_steps, warmup_steps=warmup_steps,
+            near_miss_thresh=near_miss_thresh, fps=fps,
+            worker_timeout_sec=worker_timeout_sec, verbose=verbose,
+        )
+        rows = []
+        with open(out_dir / "segments.jsonl", "w") as fout:
+            for si, scenario in enumerate(scenarios):
+                key = _scenario_key(scenario, Path(scenario_root))
+                rp = row_of[si]
+                if rp.exists():
+                    metrics = json.loads(rp.read_text())
+                else:
+                    err = (rp.parent / "error.txt")
+                    metrics = failed_segment_row(
+                        err.read_text().splitlines()[0] if err.exists()
+                        else f"no row produced, see {rp.parent}",
+                        near_miss_thresh,
+                    )
+                row = segment_row_for_json(metrics, route=key)
+                rows.append(row)
+                fout.write(json.dumps(row, default=float) + "\n")
+        summary = aggregate(rows, near_miss_thresh)
+        summary["scenario_root"] = str(scenario_root)
+        summary["map_override"] = str(map_path) if map_path is not None else None
+        summary["maps_used"] = sorted({m for r in rows if (m := r.get("map_path"))})
+        summary["n_scenarios"] = len(scenarios)
+        summary["n_scenarios_available"] = n_available
+        summary["sampled"] = len(scenarios) < n_available
+        summary["sample_stride"] = round(sample_stride, 3)
+        summary["jobs"] = jobs
+        summary["gpus"] = gpu_ids
+        summary["pooled"] = True
+        summary["elapsed_sec"] = time.perf_counter() - t_start
+        summary["segments"] = rows
+        with open(out_dir / "summary.json", "w") as f:
+            json.dump(metrics_for_json({k: v for k, v in summary.items() if k != "segments"}),
+                      f, indent=4)
+        return summary
 
     rows: list[dict | None] = [None] * len(scenarios)
     pending = list(enumerate(scenarios))
@@ -924,6 +1041,9 @@ def main() -> None:
                         "per-stage ms/call converges long before the suite does, and a subset "
                         "occupies the cluster for correspondingly less time. The summary is "
                         "marked sampled=true -- do not read its metrics as the suite's")
+    p.add_argument("--pooled", action="store_true",
+                   help="run persistent workers that keep the model, compiled graphs and parsed "
+                        "maps across scenarios (requires the interpreter in a child process)")
     p.add_argument("--worker_timeout_sec", type=float, default=2400.0,
                    help="reclaim a worker's slot after this long. Sized against the measured "
                         "p99 of 820 s (max 834 s) at max_steps=1700/jobs=64 -- raise it if you "
@@ -942,6 +1062,7 @@ def main() -> None:
         max_steps=args.max_steps,
         jobs=args.jobs,
         max_cases=args.max_cases,
+        pooled=args.pooled,
         worker_timeout_sec=args.worker_timeout_sec,
     )
     print(json.dumps({k: v for k, v in summary.items() if k != "segments"}, indent=2, default=float))
