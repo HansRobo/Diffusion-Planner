@@ -54,6 +54,7 @@ import json
 import math
 import os
 import random
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
@@ -1196,6 +1197,21 @@ _STATIC_NPC_VIZ_THRESH_M = 2.0
 _CLEARANCE_LOG_MAX_M = 30.0
 
 
+def stable_palette_index(agent_id: str) -> int:
+    """Palette slot for an agent id: ``npc_5`` -> 5, anything else -> a hash of the id.
+
+    The hash MUST NOT be the builtin ``hash()``: ``PYTHONHASHSEED`` is randomised per
+    interpreter, so the same id would take a different slot in every process — a different
+    colour on every run, and a different colour in each rendering worker. ``zlib.crc32`` is
+    fixed by the standard. See ``test_stable_palette_index.py``.
+    """
+    if "_" in agent_id:
+        suffix = agent_id.rsplit("_", 1)[-1]
+        if suffix.isdigit():
+            return int(suffix)
+    return zlib.crc32(agent_id.encode())
+
+
 def _draw_lane_network(ax, map_data, alpha: float = 0.7) -> None:
     """Draw lane centerlines **and** left/right borders from the 33-dim tensor.
 
@@ -1600,16 +1616,7 @@ def save_step_figure(
     def _stable_color(agent) -> str:
         if agent.id == scene.ego_agent_id:
             return _EGO_COLOR
-        # npc_5 → 5; falls back to Python hash otherwise.
-        sid = agent.id
-        idx = None
-        if "_" in sid:
-            suffix = sid.rsplit("_", 1)[-1]
-            if suffix.isdigit():
-                idx = int(suffix)
-        if idx is None:
-            idx = abs(hash(sid))
-        return _agent_color(agent.agent_type, idx)
+        return _agent_color(agent.agent_type, stable_palette_index(agent.id))
 
     for agent in scene.agents:
         is_ego = agent.id == scene.ego_agent_id
