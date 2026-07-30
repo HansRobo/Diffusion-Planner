@@ -106,6 +106,10 @@ def time_synced(fn, iters: int) -> list[float]:
 
 VARIANTS = (
     "eager",
+    # CUDA graphs WITHOUT inductor: the same eager kernels in the same order, replayed from a
+    # captured graph. Only launch overhead goes away, so unlike the inductor variants the
+    # arithmetic -- and therefore the output -- cannot change.
+    "cudagraphs",
     "compile",
     "compile_all",  # torch.compile, default mode
     "compile_ro",
@@ -126,17 +130,30 @@ VARIANTS = (
 _COMPILE_MODES = {"_ro": "reduce-overhead", "_ma": "max-autotune"}
 
 
-def build_model(args, variant: str, device: str):
-    """Fresh model per variant so compilation of one cannot leak into another."""
+def build_model(args, variant: str, device: str, seed: int = 0):
+    """Fresh model per variant so compilation of one cannot leak into another.
+
+    Seeded, because the weights are random and comparing two variants' OUTPUTS requires every
+    variant to hold the same ones.
+    """
     from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 
     # One implementation of the clone, shared with the rollout that ships it.
     from scenario_generation.scenario_sim_rollout import _CloneEncoderOutput
 
+    torch.manual_seed(seed)
     model = Diffusion_Planner(args).to(device).eval()
     # Match the validator path exactly: guidance is disabled there
     # (simulate.py:632 sets ``model.decoder._guidance_fn = None``).
     model.decoder._guidance_fn = None
+    if variant == "cudagraphs":
+        # Same two modules as the inductor variants, and the same clone around the encoder:
+        # compiling the WHOLE model into one graph fails with "accessing tensor output of
+        # CUDAGraphs that has been overwritten by a subsequent run" -- the encoding is held
+        # across all DPM steps, which is exactly what _CloneEncoderOutput exists to fix.
+        model.decoder.dit = torch.compile(model.decoder.dit, backend="cudagraphs")
+        model.encoder = _CloneEncoderOutput(torch.compile(model.encoder, backend="cudagraphs"))
+        return model
     mode = next((m for sfx, m in _COMPILE_MODES.items() if variant.endswith(sfx)), None)
     kw = {"mode": mode} if mode else {}
     if variant == "compile_whole_ro":
@@ -189,6 +206,7 @@ def main() -> None:
         choices=VARIANTS,
         help="eager | compile (torch.compile the DiT) | bf16 (autocast) | compile_bf16",
     )
+    p.add_argument("--seed", type=int, default=1234, help="weights + inputs, so outputs compare")
     p.add_argument("--json_out", default=None)
     a = p.parse_args()
 
@@ -208,11 +226,13 @@ def main() -> None:
     print(f"torch {torch.__version__} / {torch.cuda.get_device_name(0)}")
 
     results: dict[str, dict] = {}
+    reference: dict[int, torch.Tensor] = {}
+    equality: dict[str, dict] = {v: {} for v in a.variants}
     for variant in a.variants:
         # TF32 is a global matmul-precision switch, so set it per variant rather
         # than leaking the previous variant's setting into the next one.
         torch.set_float32_matmul_precision("high" if "tf32" in variant else "highest")
-        model = build_model(args, variant, a.device)
+        model = build_model(args, variant, a.device, seed=a.seed)
         bf16 = "bf16" in variant
         warmup = a.compile_warmup if "compile" in variant else a.warmup
         if variant == a.variants[0]:
@@ -230,6 +250,7 @@ def main() -> None:
         results[variant] = {}
         with torch.no_grad():
             for n in a.neighbors:
+                torch.manual_seed(a.seed + n)
                 data = build_inputs(a.batch, n, a.device)
                 ctx = (
                     torch.autocast("cuda", dtype=torch.bfloat16)
@@ -258,12 +279,30 @@ def main() -> None:
                 # 10 steps with no early exit, so NaNs would not change the timing --
                 # but assert finiteness anyway so a reader does not have to re-derive
                 # that argument to trust the numbers.
+                torch.compiler.cudagraph_mark_step_begin()
+                torch.manual_seed(a.seed)  # the sampler draws noise; pin it to compare outputs
                 with ctx:
                     _, out = model(data)
                 assert torch.isfinite(out["prediction"]).all(), (
                     f"non-finite prediction at n_neighbors={n}; timing is still "
                     "shape-determined but investigate before trusting the model output"
                 )
+                # Same weights, same inputs, same sampler noise -- so any difference here is the
+                # variant's arithmetic, which is what decides whether it can be adopted without
+                # re-baselining every metric.
+                pred = out["prediction"].detach().float().cpu().clone()
+                if variant == a.variants[0]:
+                    reference[n] = pred
+                    equality[variant][n] = {"bit_identical": True, "max_abs_diff": 0.0}
+                else:
+                    ref = reference.get(n)
+                    same = ref is not None and torch.equal(ref, pred)
+                    mad = float((ref - pred).abs().max()) if ref is not None else float("nan")
+                    equality[variant][n] = {"bit_identical": bool(same), "max_abs_diff": mad}
+                    print(
+                        f"n_neighbors={n:4d}  vs {a.variants[0]}: "
+                        f"{'BIT-IDENTICAL' if same else f'DIFFERS  max|d|={mad:.3e}'}"
+                    )
 
                 full_ms = time_synced(full, a.iters)
                 enc_ms = time_synced(encoder_only, a.iters)
@@ -317,6 +356,15 @@ def main() -> None:
                 v = results[variant][n]["full_median_ms"]
                 print(f"  {variant:14s} n={n:4d}: {b:6.2f} -> {v:6.2f} ms  ({b / v:.2f}x)")
 
+    if len(a.variants) > 1:
+        print(f"\n=== output vs {a.variants[0]} (same weights, inputs and sampler noise) ===")
+        for variant in a.variants[1:]:
+            for n, e in equality[variant].items():
+                verdict = (
+                    "BIT-IDENTICAL" if e["bit_identical"] else f"max|d|={e['max_abs_diff']:.3e}"
+                )
+                print(f"  {variant:14s} n={n:4d}: {verdict}")
+
     if a.json_out:
         with open(a.json_out, "w") as f:
             json.dump(
@@ -329,6 +377,7 @@ def main() -> None:
                     "gpu_contention": others,
                     "variants": a.variants,
                     "results": results,
+                    "equality_vs_first_variant": equality,
                 },
                 f,
                 indent=2,
