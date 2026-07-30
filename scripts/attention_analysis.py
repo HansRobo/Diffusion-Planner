@@ -89,7 +89,9 @@ def load_model(run_dir: Path, device: str):
     cfg.ddp = False
     model = Diffusion_Planner(cfg).to(device)
     state = torch.load(latest_ckpt(run_dir), map_location=device)
-    model.load_state_dict(state["model"] if "model" in state else state)
+    state = state["model"] if "model" in state else state
+    state = {k.removeprefix("module."): v for k, v in state.items()}  # DDP-saved ckpt
+    model.load_state_dict(state)
     model.eval()
     return model, cfg
 
