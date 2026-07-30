@@ -70,7 +70,7 @@ class _CloneEncoderOutput(torch.nn.Module):
         return self.inner(*a, **kw).clone()
 
 
-def compile_for_inference(model):
+def compile_for_inference(model, backend: str | None = None):
     """``torch.compile`` the encoder and the DiT for closed-loop inference. In place.
 
     The DiT is what the DPM solver calls once per solver step, so it is where per-inference cost
@@ -87,8 +87,11 @@ def compile_for_inference(model):
     MPS, which is how a multi-worker eval actually runs; ``max-autotune`` costs minutes of cold
     warmup for less than ``reduce-overhead`` delivers.
     """
-    model.decoder.dit = torch.compile(model.decoder.dit, mode="reduce-overhead")
-    model.encoder = _CloneEncoderOutput(torch.compile(model.encoder, mode="reduce-overhead"))
+    # ``backend="cudagraphs"`` captures and replays the SAME eager kernels in the same order,
+    # so it cannot change the arithmetic; the default (inductor, reduce-overhead) also fuses.
+    kw = {"backend": backend} if backend else {"mode": "reduce-overhead"}
+    model.decoder.dit = torch.compile(model.decoder.dit, **kw)
+    model.encoder = _CloneEncoderOutput(torch.compile(model.encoder, **kw))
     return model
 
 
