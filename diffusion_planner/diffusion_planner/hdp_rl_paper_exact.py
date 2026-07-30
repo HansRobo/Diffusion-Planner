@@ -304,12 +304,6 @@ _COMMON: tuple[PaperExactSetting, ...] = (
         "neurips_2026.tex app:rewards -- r is a weighted sum of the components",
     ),
     PaperExactSetting(
-        "rl_behavior_gate",
-        "none",
-        "neurips_2026.tex app:rewards -- the published sum applies no gate to "
-        "the car-following / lane-keeping terms",
-    ),
-    PaperExactSetting(
         "rl_reward_w_progress",
         0.0,
         "neurips_2026.tex app:rewards -- the published reward has no progress "

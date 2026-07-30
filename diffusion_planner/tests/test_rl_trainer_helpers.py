@@ -574,7 +574,6 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     observed_noise_scales = []
     observed_sample_steps = []
     observed_reward_weights = []
-    observed_behavior_gates = []
     observed_road_border_settings = []
     observed_stationary_settings = []
     observed_red_light_settings = []
@@ -589,7 +588,6 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     def fake_reward(_ego, _inputs, _neighbors, num_scenes, n, _args):
         nonlocal reward_call_count
         reward_call_count += 1
-        observed_behavior_gates.append(_args.rl_behavior_gate)
         observed_road_border_settings.append(_args.rl_occupancy_use_road_border)
         observed_stationary_settings.append(
             (
@@ -649,7 +647,6 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
         rl_reward_w_follow=8.0,
         rl_reward_w_lane=7.0,
         rl_reward_w_progress=6.0,
-        rl_behavior_gate="none",
         rl_occupancy_use_road_border=False,
         rl_stationary_progress_mode="constant",
         rl_stationary_reference_threshold_m=0.5,
@@ -683,13 +680,11 @@ def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):
     # once made a progress-weight disagreement (0.0 training, 3.0 selection) look like
     # reward hacking in the logs.
     assert observed_reward_weights == [(5.0, 9.0, 8.0, 7.0, 6.0)] * 2
-    assert observed_behavior_gates == ["none", "none"]
     assert observed_road_border_settings == [False, False]
     assert observed_stationary_settings == [("constant", 0.5, 4.0)] * 2
     assert observed_red_light_settings == [(False, 4.0)] * 2
     assert args.rl_reward_w_safety == 5.0
     assert args.rl_reward_w_risk == 9.0
-    assert args.rl_behavior_gate == "none"
     assert args.rl_occupancy_use_road_border is False
     assert args.rl_stationary_progress_mode == "constant"
     assert args.rl_stationary_reference_threshold_m == 0.5

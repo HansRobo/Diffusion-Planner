@@ -443,7 +443,6 @@ def assert_checkpoint_compatible(
             "rl_reward_w_lane",
             "rl_reward_w_progress",
             "rl_reward_w_road_border",
-            "rl_behavior_gate",
             "rl_occupancy_use_road_border",
             "rl_stationary_progress_mode",
             "rl_red_light_constraint",

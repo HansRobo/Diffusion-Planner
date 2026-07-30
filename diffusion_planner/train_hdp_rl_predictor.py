@@ -546,12 +546,6 @@ def get_args(argv: list[str] | None = None):
         help="anti-stopping reward weight for signed progress relative to the logged expert",
     )
     parser.add_argument(
-        "--rl_behavior_gate",
-        choices=["none", "safety", "risk"],
-        default=_train_config_default("rl_behavior_gate"),
-        help="gate follow/lane/progress by none (paper), collision safety, or continuous risk",
-    )
-    parser.add_argument(
         "--rl_occupancy_use_road_border",
         type=boolean,
         default=_train_config_default("rl_occupancy_use_road_border"),
@@ -1356,7 +1350,6 @@ def model_training(args):
         print("RL reward: HDP safety/risk/follow/lane with Tier IV occupancy proxies")
         print("RL direct safety reward weight: {}".format(args.rl_reward_w_safety))
         print("RL progress reward weight: {}".format(args.rl_reward_w_progress))
-        print("RL behavior reward gate: {}".format(args.rl_behavior_gate))
         print("RL road-border OCC fallback: {}".format(args.rl_occupancy_use_road_border))
         print(
             "RL direct road-border reward (weight/critical/safe): "

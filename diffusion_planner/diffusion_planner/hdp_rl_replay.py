@@ -42,7 +42,6 @@ _FINGERPRINT_FIELDS = (
     "rl_reward_w_lane",
     "rl_reward_w_progress",
     "rl_reward_w_road_border",
-    "rl_behavior_gate",
     "rl_candidate_aug_std",
     "num_generations",
     "rl_noise_scale",
@@ -50,39 +49,14 @@ _FINGERPRINT_FIELDS = (
 )
 
 
-# Fields that no longer exist but are frozen into caches mined before their removal.
-# Dropping them outright would change every historical fingerprint and abort the
-# resume of an otherwise-valid multi-terabyte cache, so each is pinned to the value it
-# held in every run ever mined: `rl_first_waypoint_gate` False (32/32 args.json),
-# `rl_reward_normalize` "group" (the only value ever launched, now the sole code path
-# per ap:implementation), the two candidate-augmentation knobs that were superseded by
-# `rl_candidate_aug_epochs` at their off defaults (0.0 in every args.json), and the two
-# knobs of the ported hdp_pdm objective, which no run ever selected. The comparison is
-# dict equality, so these need only reproduce the recorded values, not their position.
-_FINGERPRINT_RETIRED = {
-    "rl_first_waypoint_gate": repr(False),
-    "rl_reward_normalize": repr("group"),
-    "rl_candidate_aug_prob": repr(0.0),
-    "rl_candidate_aug_stretch": repr(0.0),
-    "rl_reward_source": repr("native"),
-    "rl_pdm_red_light_gate": repr(True),
-}
-
-# Fields added after caches already existed. Recording one unconditionally would
-# invalidate every historical fingerprint, so it is recorded only when it deviates from
-# the value history implies -- which is exactly when the cache genuinely differs.
-_FINGERPRINT_ADDED_DEFAULTS = {"rl_candidate_aug_epochs": 0, "rl_reward_w_comfort": 0.0}
-
-
 def reward_fingerprint(args) -> dict:
-    """The frozen-cache contract: everything that shapes mined groups/weights."""
-    current = {name: repr(getattr(args, name, None)) for name in _FINGERPRINT_FIELDS}
-    added = {
-        name: repr(getattr(args, name, default))
-        for name, default in _FINGERPRINT_ADDED_DEFAULTS.items()
-        if getattr(args, name, default) != default
-    }
-    return {**current, **_FINGERPRINT_RETIRED, **added}
+    """The frozen-cache contract: everything that shapes mined groups/weights.
+
+    Every field the reward path reads is recorded unconditionally, so the fingerprint
+    describes only caches this tree mined. A cache written under different reward flags
+    fails the contract check and is re-mined rather than trained on.
+    """
+    return {name: repr(getattr(args, name, None)) for name in _FINGERPRINT_FIELDS}
 
 
 def relay_epoch(trainer_epoch: int) -> int:

@@ -100,7 +100,6 @@ REWARD_W_COMFORT=${HDP_RL_REWARD_W_COMFORT:-0.0}
 # Linear warmup length. The original HDP RL config pairs its lr with a 10-epoch warmup;
 # this launcher hardcoded 1, so the two could not be moved together.
 WARM_UP_EPOCH=${HDP_RL_WARM_UP_EPOCH:-1}
-BEHAVIOR_GATE=${HDP_RL_BEHAVIOR_GATE:-safety}
 OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_OCCUPANCY_USE_ROAD_BORDER:-True}
 STATIONARY_PROGRESS_MODE=${HDP_RL_STATIONARY_PROGRESS_MODE:-distance}
 STATIONARY_REFERENCE_THRESHOLD_M=${HDP_RL_STATIONARY_REFERENCE_THRESHOLD_M:-1.0}
@@ -282,15 +281,6 @@ hybrid_arg --hybrid_loss_window HDP_RL_HYBRID_LOSS_WINDOW "${HYBRID_LOSS_WINDOW}
 
 RUN_NAME=${HDP_RL_RUN_NAME:-hdp_rl_${WORLD_SIZE}gpu_n${NUM_GENERATIONS}_${SLURM_JOB_ID}}
 SAVE_ROOT=${HDP_RL_SAVE_ROOT:-${REPO}/outputs}
-for gate_name in "${BEHAVIOR_GATE}"; do
-  case "${gate_name}" in
-    none | safety | risk) ;;
-    *)
-      echo "behavior gate must be one of none, safety, or risk; got ${gate_name}" >&2
-      exit 2
-      ;;
-  esac
-done
 for stationary_mode in "${STATIONARY_PROGRESS_MODE}"; do
   case "${stationary_mode}" in
     constant | distance) ;;
@@ -596,7 +586,6 @@ TRAIN_ARGS=(
   --rl_reward_w_progress "${REWARD_W_PROGRESS}" \
   --rl_reward_w_road_border "${REWARD_W_ROAD_BORDER}" \
   --rl_reward_w_comfort "${REWARD_W_COMFORT}" \
-  --rl_behavior_gate "${BEHAVIOR_GATE}" \
   --rl_occupancy_use_road_border "${OCCUPANCY_USE_ROAD_BORDER}" \
   --rl_stationary_progress_mode "${STATIONARY_PROGRESS_MODE}" \
   --rl_stationary_reference_threshold_m "${STATIONARY_REFERENCE_THRESHOLD_M}" \
@@ -673,8 +662,7 @@ srun --kill-on-bad-exit=1 --nodes="${NNODES}" --ntasks="${NNODES}" --ntasks-per-
 
 "${REPO}/.venv/bin/python" - \
   "${VERIFY_SOURCE_CKPT}" "${SAVE_DIR}" "${TRAIN_SCOPE}" "${VERIFY_MODE}" \
-  "${TRAIN_EPOCHS}" "${BEHAVIOR_GATE}" \
-  "${OCCUPANCY_USE_ROAD_BORDER}" "${RED_LIGHT_CONSTRAINT}" <<'PY'
+  "${TRAIN_EPOCHS}" "${OCCUPANCY_USE_ROAD_BORDER}" "${RED_LIGHT_CONSTRAINT}" <<'PY'
 import csv
 import json
 import math
@@ -688,9 +676,8 @@ save_dir = pathlib.Path(sys.argv[2])
 scope = sys.argv[3]
 mode = sys.argv[4]
 expected_epoch = int(sys.argv[5])
-expected_behavior_gate = sys.argv[6]
-expected_occupancy_use_road_border = sys.argv[7].lower() == "true"
-expected_red_light_constraint = sys.argv[8].lower() == "true"
+expected_occupancy_use_road_border = sys.argv[6].lower() == "true"
+expected_red_light_constraint = sys.argv[7].lower() == "true"
 source = torch.load(initial_path, map_location="cpu", weights_only=True)
 if mode == "resume":
     initial_live = source["model"]
@@ -753,7 +740,6 @@ with (save_dir / "train_log.tsv").open(newline="", encoding="utf-8") as f:
 assert len(rows) == completed_epoch
 with (save_dir / "args.json").open(encoding="utf-8") as f:
     run_args = json.load(f)
-assert run_args["rl_behavior_gate"] == expected_behavior_gate
 assert run_args["rl_occupancy_use_road_border"] is expected_occupancy_use_road_border
 assert run_args["rl_red_light_constraint"] is expected_red_light_constraint
 required = (

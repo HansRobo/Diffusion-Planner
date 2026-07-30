@@ -1,12 +1,11 @@
 """Tests for the 100-epoch mine/replay relay state machine."""
 
-import json
 from types import SimpleNamespace
 
 import pytest
 import torch
 from diffusion_planner.hdp_rl_replay import (
-    _META,
+    _FINGERPRINT_FIELDS,
     CycleReplayReader,
     CycleReplayWriter,
     cleanup_previous_cycle,
@@ -31,7 +30,6 @@ def _args(**overrides):
         rl_reward_w_lane=2.5,
         rl_reward_w_progress=3.0,
         rl_reward_w_road_border=0.0,
-        rl_behavior_gate="safety",
         rl_candidate_aug_epochs=0,
         rl_candidate_aug_std=0.5,
         rl_noise_scale=1.5,
@@ -93,36 +91,15 @@ def test_writer_reader_roundtrip_preserves_frozen_weights(tmp_path):
     assert loaded["valid_sample"].dtype in (torch.bool, torch.float32)
 
 
-def test_fingerprint_keeps_the_retired_first_waypoint_gate_field(tmp_path):
-    """A cache mined before `rl_first_waypoint_gate` was deleted must still load.
+def test_fingerprint_records_only_the_live_reward_fields():
+    """Every recorded key must be a field the reward path still reads.
 
-    Every cache ever mined carries the field (it was False in all 32 runs), so
-    dropping it from the fingerprint would turn 'False' into 'None' and abort the
-    resume of an otherwise-valid multi-terabyte cycle instead of reading it.
+    A key no longer read cannot invalidate a cache for a real reason, and a key that is
+    read must be able to. Recording exactly the fields tuple is what makes the
+    fail-closed check mean what it says.
     """
-    args = _args()
-    assert not hasattr(args, "rl_first_waypoint_gate")
-    writer = CycleReplayWriter(tmp_path, cycle=0, rank=0, args=args)
-    writer.append(_shard())
-    writer.finalize(use_ddp=False)
-    meta = json.loads((tmp_path / "cycle_000" / _META).read_text())
-    assert meta["fingerprint"]["rl_first_waypoint_gate"] == repr(False)
-    CycleReplayReader(tmp_path, cycle=0, rank=0, args=args)  # must not raise
-
-
-def test_fingerprint_is_unchanged_by_the_default_candidate_augmentation():
-    """The off default must be invisible; enabling it must invalidate the cache.
-
-    `rl_candidate_aug_epochs` was added after multi-terabyte caches existed, so
-    recording it unconditionally would abort every historical resume. It is recorded
-    only when it deviates from off -- exactly when the mined groups really differ.
-    """
-    off = reward_fingerprint(_args())
-    assert "rl_candidate_aug_epochs" not in off
-    assert reward_fingerprint(_args(rl_candidate_aug_epochs=0)) == off
-    on = reward_fingerprint(_args(rl_candidate_aug_epochs=5))
-    assert on["rl_candidate_aug_epochs"] == repr(5)
-    assert on != off
+    fingerprint = reward_fingerprint(_args())
+    assert set(fingerprint) == set(_FINGERPRINT_FIELDS)
 
 
 def test_reader_fails_closed_on_contract_mismatch(tmp_path):

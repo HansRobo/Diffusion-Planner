@@ -134,7 +134,6 @@ def test_total_reward_is_a_plain_weighted_sum():
     """The appendix total reward has no gate, no progress term, no road-border term."""
     args = _paper_args()
     assert args.rl_reward_aggregation == "weighted_sum"
-    assert args.rl_behavior_gate == "none"
     assert args.rl_reward_w_progress == 0.0
     assert args.rl_reward_w_road_border == 0.0
     assert args.rl_red_light_constraint is False
@@ -185,7 +184,6 @@ def test_applied_changes_are_recorded_for_the_run_log():
     args = _paper_args()
     changed = {line.split(":", 1)[0] for line in args.rl_paper_exact_changes}
     assert "num_generations" in changed
-    assert "rl_behavior_gate" in changed
     # Every recorded line carries its citation.
     assert all("  [" in line for line in args.rl_paper_exact_changes)
 
@@ -195,7 +193,6 @@ def test_applied_changes_are_recorded_for_the_run_log():
     [
         ("--num_generations", "8"),
         ("--rl_reward_beta", "0.5"),
-        ("--rl_behavior_gate", "safety"),
     ],
 )
 def test_explicit_flag_contradicting_the_paper_is_rejected(option, value):

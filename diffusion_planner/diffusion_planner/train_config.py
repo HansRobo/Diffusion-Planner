@@ -253,11 +253,6 @@ class TrainConfig:
     # The published multi-reward formula uses no gate. ``safety`` is our real-vehicle
     # extension that prevents follow/lane/progress from compensating for a collision;
     # ``risk`` also suppresses those terms for near misses.
-    rl_behavior_gate: Literal["none", "safety", "risk"] = "safety"
-    # ``gated_product`` is the PDM-style bounded objective behind the audited original-DP
-    # AWR gains: multiplicative collision/red-light/border gates times a normalized
-    # risk/follow/lane/progress quality mix. ``weighted_sum`` preserves the historical
-    # additive objective exactly.
     rl_reward_aggregation: Literal["weighted_sum", "gated_product"] = "weighted_sum"
     # Score only the first N steps of each candidate (0 = full horizon). The original-DP
     # AWR profile scored a 4 s prefix (40 steps) of the 8 s plan.

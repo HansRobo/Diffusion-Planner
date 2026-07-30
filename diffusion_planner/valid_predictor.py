@@ -164,11 +164,6 @@ def get_args(args_list=None):
             default=_valid_config_default(f"reward_eval_w_{reward_name}"),
         )
     parser.add_argument(
-        "--reward_eval_behavior_gate",
-        choices=["none", "safety", "risk"],
-        default=_valid_config_default("reward_eval_behavior_gate"),
-    )
-    parser.add_argument(
         "--reward_eval_occupancy_use_road_border",
         type=boolean,
         default=_valid_config_default("reward_eval_occupancy_use_road_border"),
@@ -395,7 +390,6 @@ def run_validation(valid_cfg: ValidConfig):
         # validate_hdp_reward_policy reads the reward definition from the training fields so
         # that RL selection always scores the objective the update optimizes. This tool is a
         # standalone analysis entry point, so it sets those fields on its own args copy.
-        reward_args.rl_behavior_gate = valid_cfg.reward_eval_behavior_gate
         reward_args.rl_occupancy_use_road_border = valid_cfg.reward_eval_occupancy_use_road_border
         for reward_name in ("safety", "risk", "follow", "lane", "progress", "road_border"):
             setattr(
