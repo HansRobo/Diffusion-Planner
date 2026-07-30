@@ -610,6 +610,11 @@ def enumerate_scenarios(scenario_root) -> list[Path]:
     return paths
 
 
+# How long to wait after SIGTERM before SIGKILL. Short on purpose: a worker that ignores
+# SIGTERM is already wedged, and the slot is what we are trying to get back.
+_KILL_GRACE_SEC = 20.0
+
+
 def _scenario_key(scenario: Path, root: Path) -> str:
     """Unique, filesystem-safe id for a scenario within ``root``.
 
@@ -633,6 +638,7 @@ def run_scenario_sim_eval(
     device: str,
     model_path: str,
     gpus: list[int] | None = None,
+    worker_timeout_sec: float = 2400.0,
     near_miss_thresh: float = 1.0,
     replan_interval: int = 1,  # every tick = 10 Hz, matching the production node
     max_steps: int = 300,
@@ -675,6 +681,8 @@ def run_scenario_sim_eval(
     # `jobs` workers are spread round-robin over these devices. Default: every GPU the job
     # was allocated, which is what makes a full-suite run use the whole node rather than
     # piling all workers onto cuda:0.
+    # Cores this process may actually use (respects cgroup/affinity, unlike cpu_count()).
+    threads_per_worker = max(1, len(os.sched_getaffinity(0)) // max(1, jobs))
     gpu_ids: list[int] = []
     if device.startswith("cuda"):
         if gpus is not None:
@@ -686,7 +694,8 @@ def run_scenario_sim_eval(
     if verbose:
         print(
             f"[scenario_sim] {len(scenarios)} scenarios, jobs={jobs}, "
-            f"gpus={gpu_ids or '(none: ' + device + ')'}"
+            f"gpus={gpu_ids or '(none: ' + device + ')'}, "
+            f"threads/worker={threads_per_worker}, worker_timeout={worker_timeout_sec:.0f}s"
         )
 
     def launch(scenario: Path, slot: int):
@@ -705,6 +714,9 @@ def run_scenario_sim_eval(
             "--near_miss_thresh", str(near_miss_thresh),
             "--fps", str(fps),
             "--model_path", str(model_path),
+            # Self-dump before the parent's hard deadline, so a hang leaves a stack even when
+            # the process is past responding to signals.
+            "--watchdog_sec", str(max(60.0, worker_timeout_sec - 120.0)),
         ]
         # No --map_path unless explicitly overridden: the worker reads the scenario's own
         # RoadNetwork/LogicFile, the same element the C++ interpreter resolves the map from,
@@ -720,6 +732,13 @@ def run_scenario_sim_eval(
         env = os.environ.copy()
         if gpu_ids:
             env["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[slot % len(gpu_ids)])
+        # Thread budget. Unset, torch takes one thread per core (112 on the production node)
+        # and inductor compiles with 32 -- times `jobs` workers that is thousands of threads
+        # over ~112 cores. The workers ARE the parallelism here; each one wants a slice, not
+        # the whole machine. setdefault so an explicit export still wins.
+        for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+            env.setdefault(var, str(threads_per_worker))
+        env.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
         # Per-scenario log rather than inherited stdout: with jobs>1 the workers would
         # interleave into an unreadable stream, and a crash needs its own trace.
         handle = open(log, "wb")
@@ -733,6 +752,7 @@ def run_scenario_sim_eval(
     # stable and the per-GPU load stays even however unevenly the scenarios finish.
     free_slots: list[int] = list(range(max(1, jobs)))
     slot_of: dict[int, int] = {}
+    timed_out: dict[int, float] = {}   # scenario index -> when SIGTERM was sent
     done = 0
     t0 = time.perf_counter()
     with open(out_dir / "segments.jsonl", "w") as fout:
@@ -742,6 +762,31 @@ def run_scenario_sim_eval(
                 slot = free_slots.pop()
                 slot_of[si] = slot
                 running[si] = launch(scenario, slot)
+            # Deadline enforcement. One hung worker held a slot for the entire 65-minute run
+            # of the full suite -- 0.8% CPU, no GPU, 246 threads in futex_wait_queue_me -- and
+            # with no timeout here the job would have sat until its Slurm --time expired. The
+            # parent owns the slot, so the parent is what has to reclaim it. SIGTERM is tried
+            # first for a clean teardown but is NOT trusted: that worker ignored it and needed
+            # SIGKILL (measured), which is why the escalation is unconditional after the grace.
+            now = time.perf_counter()
+            for si, (proc, _row_out, _log, _handle, t_launch) in list(running.items()):
+                if proc.poll() is not None:
+                    continue
+                over = now - t_launch - worker_timeout_sec
+                if over < 0:
+                    continue
+                if si not in timed_out:
+                    timed_out[si] = now
+                    print(
+                        f"[scenario_sim][WARN] {_scenario_key(scenarios[si], Path(scenario_root))} "
+                        f"exceeded {worker_timeout_sec:.0f}s -> SIGTERM (see its worker.log for "
+                        f"the watchdog's thread dump)"
+                    )
+                    proc.terminate()
+                elif now - timed_out[si] > _KILL_GRACE_SEC:
+                    print(f"[scenario_sim][WARN]   still alive after SIGTERM -> SIGKILL")
+                    proc.kill()
+
             finished = [si for si, (p, *_) in running.items() if p.poll() is not None]
             if not finished:
                 time.sleep(0.05)
@@ -752,9 +797,23 @@ def run_scenario_sim_eval(
                 slot = slot_of.pop(si)
                 free_slots.append(slot)
                 worker_wall = time.perf_counter() - t_launch
-                # The worker's row is authoritative; a nonzero rc at teardown (after the
-                # row is written) must not lose a completed rollout, so key off row.json.
-                if row_out.exists():
+                # A worker we interrupted is NOT a measurement of its scenario, so its row is
+                # discarded even when one exists. It usually does: SIGTERM reaches the C++
+                # interpreter, which ends the scenario as `sim_terminated`, and the rollout then
+                # finalises and writes a row for the ticks it happened to complete -- a
+                # truncated run that is indistinguishable in the aggregate from a scenario that
+                # genuinely ended early (measured: rows with steps=1 and steps=175 out of 300).
+                if si in timed_out:
+                    metrics = failed_segment_row(
+                        f"worker exceeded {worker_timeout_sec:.0f}s and was killed "
+                        f"(rc={proc.returncode}); any partial row was discarded, see {log}",
+                        near_miss_thresh,
+                    )
+                    metrics["terminated"] = "worker_timeout"
+                    status = f"TIMEOUT rc={proc.returncode}"
+                # Otherwise the worker's row is authoritative; a nonzero rc at teardown (after
+                # the row is written) must not lose a completed rollout, so key off row.json.
+                elif row_out.exists():
                     metrics = json.loads(row_out.read_text())
                     status = "ok" if proc.returncode == 0 else f"rc={proc.returncode}(teardown)"
                 else:
@@ -840,6 +899,10 @@ def main() -> None:
     p.add_argument("--near_miss_thresh", type=float, default=1.0)
     p.add_argument("--jobs", type=int, default=16,
                    help="scenarios to run concurrently on this GPU (tuned for CUDA MPS)")
+    p.add_argument("--worker_timeout_sec", type=float, default=2400.0,
+                   help="reclaim a worker's slot after this long. Sized against the measured "
+                        "p99 of 820 s (max 834 s) at max_steps=1700/jobs=64 -- raise it if you "
+                        "raise max_steps or run at higher contention")
     args = p.parse_args()
 
     summary = run_scenario_sim_eval(
@@ -853,6 +916,7 @@ def main() -> None:
         replan_interval=args.replan_interval,
         max_steps=args.max_steps,
         jobs=args.jobs,
+        worker_timeout_sec=args.worker_timeout_sec,
     )
     print(json.dumps({k: v for k, v in summary.items() if k != "segments"}, indent=2, default=float))
 
