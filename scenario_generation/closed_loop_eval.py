@@ -872,6 +872,13 @@ def run_scenario_sim_eval(
         summary["gpus"] = gpu_ids
         summary["pooled"] = True
         summary["elapsed_sec"] = time.perf_counter() - t_start
+        # The pooled workers measure their own per-scenario wall (the parent cannot: it does not
+        # see scenario boundaries), so concurrency is still reportable.
+        _w = [r["worker_wall_s"] for r in rows if "worker_wall_s" in r]
+        summary["worker_wall_sum_s"] = round(sum(_w), 3)
+        summary["mean_concurrency"] = (
+            round(sum(_w) / summary["elapsed_sec"], 2) if summary["elapsed_sec"] > 0 else None
+        )
         summary["segments"] = rows
         with open(out_dir / "summary.json", "w") as f:
             json.dump(metrics_for_json({k: v for k, v in summary.items() if k != "segments"}),
