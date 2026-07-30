@@ -61,7 +61,7 @@ _INPUT_T_PLUS_1 = 31  # tensor_converter._INPUT_T + 1 (history length the model 
 # 1 DISABLE / 2 ENABLE_LEFT / 3 ENABLE_RIGHT. KEEP -> retain previous command.
 _TI_MODEL_TO_SIM = {0: 0, 1: 1, 2: 2, 3: 3}
 
-EGO_NAME = "ego"  # the headless EgoEntity is always named "ego"
+_SIM_TYPE_EGO = 0  # get_entity_states()["type"]: 0=EGO 1=VEHICLE 2=PEDESTRIAN 3=MISC_OBJECT
 
 
 class _CloneEncoderOutput(torch.nn.Module):
@@ -107,6 +107,25 @@ class RolloutConfig:
 # --------------------------------------------------------------------------- #
 # Scene construction from sim truth.
 # --------------------------------------------------------------------------- #
+def _resolve_ego_name(states: dict) -> str:
+    """The ego's entity name as the simulator reports it.
+
+    Identified by type, not by name: ``openscenario_python.cpp`` exposes ``type`` with 0 = EGO,
+    which is authoritative whatever the scenario chose to call the entity ("ego", "Ego", ...).
+    Matching on the name instead fails at spawn time with a message that points at the symptom
+    rather than the cause.
+    """
+    egos = [name for name, st in states.items() if int(st["type"]) == _SIM_TYPE_EGO]
+    if len(egos) == 1:
+        return egos[0]
+    if not egos:
+        raise RuntimeError(
+            f"no ego-typed (type={_SIM_TYPE_EGO}) entity spawned; entities="
+            + str({n: st["type"] for n, st in states.items()})
+        )
+    raise RuntimeError(f"more than one ego-typed entity: {egos}")
+
+
 def _sim_type_to_agent_type(sim_type: int) -> AgentType | None:
     """Map ``get_entity_states`` type (0=EGO 1=VEHICLE 2=PED 3=MISC) to AgentType.
 
@@ -338,17 +357,19 @@ def _map_turn_indicator(ti_model: int, prev_cmd: int) -> int:
 
 
 @torch.no_grad()
-def _predict_ego_plan(model, model_args, scene, device, map_cache) -> tuple[np.ndarray, int]:
+def _predict_ego_plan(
+    model, model_args, scene, device, map_cache, ego_name: str
+) -> tuple[np.ndarray, int]:
     """Run the model as ego -> (ego-frame plan ``(future_len, 4)``, turn-indicator class).
 
     ``no_grad`` is load-bearing, not an optimisation: outputs carrying an autograd graph
     silently drop compile off the CUDA-graph fast path and give the whole 1.8x back."""
     torch.compiler.cudagraph_mark_step_begin()  # one inference == one cudagraph step
     preds, tis = _predict_batch(
-        model, model_args, scene, [EGO_NAME], device,
+        model, model_args, scene, [ego_name], device,
         map_cache=map_cache, return_turn_indicators=True,
     )
-    return preds[EGO_NAME], int(tis.get(EGO_NAME, 0))
+    return preds[ego_name], int(tis.get(ego_name, 0))
 
 
 def _ego_plan_to_map_trajectory(
@@ -363,12 +384,12 @@ def _ego_plan_to_map_trajectory(
 
 
 def _score_neighbors(
-    scene, ego_state: dict, ex: float, ey: float, eh: float, device: str
+    scene, ego_state: dict, ex: float, ey: float, eh: float, device: str, ego_name: str
 ) -> tuple[float, bool]:
     """Instantaneous (min_clearance, collision) from raw ego-frame neighbor OBBs."""
     R = _rotation_matrix(eh)
     neighbors_live = _build_neighbor_agents_past(
-        scene, EGO_NAME, R, np.array([ex, ey], dtype=np.float64), eh
+        scene, ego_name, R, np.array([ex, ey], dtype=np.float64), eh
     )[0, :, -1, :]
     ego_shape = np.array(_ego_metric_box(ego_state), dtype=np.float32)[
         [2, 0, 1]
@@ -393,14 +414,14 @@ def _traj_entry(step: int, ego_state: dict, goal_xy: np.ndarray) -> dict:
 
 def _start_and_resolve_route(
     runner, builder: LaneletSceneBuilder, osc_path: str | Path, cfg: RolloutConfig, verbose: bool
-) -> tuple[list[int], np.ndarray]:
-    """Configure+activate the sim, verify the ego spawned, and resolve its route.
+) -> tuple[str, list[int], np.ndarray]:
+    """Configure+activate the sim, resolve the ego's name, and resolve its route.
 
     A scenario the interpreter rejects at parse time leaves configure() at
     "unconfigured" (the on_configure exception is swallowed by withExceptionHandler
     -> FAILURE); proceeding to get_entity_states() on an unconfigured SimulatorCore
     dereferences a null core and SEGFAULTS, so we bail cleanly on a bad transition.
-    Returns ``(ego_route_lanelet_ids, goal_pose)``."""
+    Returns ``(ego_name, ego_route_lanelet_ids, goal_pose)``."""
     st_cfg = runner.configure()
     if st_cfg != "inactive":
         raise RuntimeError(
@@ -410,12 +431,9 @@ def _start_and_resolve_route(
     st_act = runner.activate()
     if st_act != "active":
         raise RuntimeError(f"activate() did not reach 'active' (got '{st_act}'): {osc_path}")
-    if EGO_NAME not in runner.get_entity_states():
-        raise RuntimeError(
-            f"'{EGO_NAME}' entity not spawned; entities={list(runner.get_entity_states())}"
-        )
+    ego_name = _resolve_ego_name(runner.get_entity_states())
 
-    ego0 = runner.get_ego_state(ego_ref=EGO_NAME)
+    ego0 = runner.get_ego_state(ego_ref=ego_name)
     ego0_xy = np.array([ego0["pose"]["x"], ego0["pose"]["y"]], dtype=np.float32)
     ego_route_ids = _resolve_route(builder, ego0_xy, osc_path, cfg)
     if not ego_route_ids:
@@ -426,7 +444,7 @@ def _start_and_resolve_route(
             f"  [scenario_sim] route={len(ego_route_ids)} lanelets, "
             f"start_ll={ego_route_ids[0]}, goal_ll={ego_route_ids[-1]}"
         )
-    return ego_route_ids, goal_pose
+    return ego_name, ego_route_ids, goal_pose
 
 
 # Border polylines further than this from the ego's path cannot be its nearest border. Only
@@ -597,7 +615,7 @@ def run_scenario_sim_rollout(
     ) as runner:
         timers.add("sim_open", time.perf_counter() - _t)
         _t = time.perf_counter()
-        ego_route_ids, goal_pose = _start_and_resolve_route(
+        ego_name, ego_route_ids, goal_pose = _start_and_resolve_route(
             runner, builder, osc_path, cfg, verbose
         )
         timers.add("route_resolve", time.perf_counter() - _t)
@@ -606,15 +624,15 @@ def run_scenario_sim_rollout(
         for step in range(cfg.max_steps):
             with timers("sim_get_states"):
                 states = runner.get_entity_states()
-            if EGO_NAME not in states:
-                raise RuntimeError(f"Sim reports no '{EGO_NAME}' entity")
-            ego_state = states[EGO_NAME]
+            if ego_name not in states:
+                raise RuntimeError(f"Sim stopped reporting the ego entity '{ego_name}'")
+            ego_state = states[ego_name]
             ex, ey, eh = _pose_xyh(ego_state)
 
             with timers("scene_build"):
                 _update_history(buffers, states)
                 scene = _build_scene(
-                    states, buffers, builder, ego_route_ids, goal_pose, cfg, EGO_NAME
+                    states, buffers, builder, ego_route_ids, goal_pose, cfg, ego_name
                 )
                 map_cache = MapTensorCache(scene.map_data)
 
@@ -624,18 +642,20 @@ def run_scenario_sim_rollout(
                 # cost from being averaged into the steady-state ms/call (and vice versa).
                 with timers("predict_cold" if cached_plan_ego is None else "predict"):
                     cached_plan_ego, ti_model = _predict_ego_plan(
-                        model, model_args, scene, device, map_cache
+                        model, model_args, scene, device, map_cache, ego_name
                     )
                 ti_cmd = _map_turn_indicator(ti_model, ti_cmd)
 
             with timers("sim_set_traj"):
                 pts = _ego_plan_to_map_trajectory(cached_plan_ego, ex, ey, eh)
-                runner.set_ego_trajectory(pts, ego_ref=EGO_NAME)
-                runner.set_ego_turn_indicator(int(ti_cmd), ego_ref=EGO_NAME)
+                runner.set_ego_trajectory(pts, ego_ref=ego_name)
+                runner.set_ego_turn_indicator(int(ti_cmd), ego_ref=ego_name)
 
-            if buffers.age[EGO_NAME] >= cfg.warmup_steps:
+            if buffers.age[ego_name] >= cfg.warmup_steps:
                 with timers("score_objects"):
-                    clr, coll = _score_neighbors(scene, ego_state, ex, ey, eh, device)
+                    clr, coll = _score_neighbors(
+                        scene, ego_state, ex, ey, eh, device, ego_name
+                    )
                 clearances.append(clr)
                 collisions.append(coll)
 
@@ -643,7 +663,7 @@ def run_scenario_sim_rollout(
             with timers("sim_step"):
                 outcome = runner.step()
 
-            ego_after = runner.get_ego_state(ego_ref=EGO_NAME)
+            ego_after = runner.get_ego_state(ego_ref=ego_name)
             trajectory_log.append(_traj_entry(step, ego_after, goal_xy))
             if coord_ok is None:  # first stepped tick: verify the frame contract
                 ax, ay, _ = _pose_xyh(ego_after)
