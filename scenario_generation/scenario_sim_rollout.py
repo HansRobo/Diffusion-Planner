@@ -575,6 +575,7 @@ def run_scenario_sim_rollout(
     device: str = "cpu",
     verbose: bool = True,
     timers: Timers | None = None,
+    builder: LaneletSceneBuilder | None = None,
 ) -> dict:
     """Run one closed-loop OpenSCENARIO rollout and return an aggregate-ready row.
 
@@ -595,7 +596,11 @@ def run_scenario_sim_rollout(
     timers = timers or Timers()
     _t_rollout = time.perf_counter()
     _t = time.perf_counter()
-    builder = LaneletSceneBuilder(str(map_path))
+    # A caller that outlives one scenario passes its cached builder: parsing a 46 MB lanelet2 map
+    # costs 7.5 s per case (job 1665) and 378 of the suite's 464 cases share one map, so this is
+    # per-map work that a per-scenario process was paying per scenario.
+    if builder is None:
+        builder = LaneletSceneBuilder(str(map_path))
     timers.add("map_build", time.perf_counter() - _t)
     buffers = _HistoryBuffers()
     trajectory_log: list[dict] = []
