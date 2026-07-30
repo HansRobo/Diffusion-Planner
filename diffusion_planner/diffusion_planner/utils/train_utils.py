@@ -394,8 +394,6 @@ def resume_model(
         init_epoch = 0
     if isinstance(ckpt, dict) and "global_step" in ckpt:
         model._resume_global_step = int(ckpt["global_step"])
-    if isinstance(ckpt, dict) and ckpt.get("best_valid_score") is not None:
-        model._resume_best_valid_score = float(ckpt["best_valid_score"])
 
     wandb_id = ckpt.get("wandb_id") if isinstance(ckpt, dict) else None
     if wandb_id is not None:

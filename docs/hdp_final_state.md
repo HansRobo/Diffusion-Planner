@@ -101,9 +101,10 @@ expects. Full reasoning in `checkpoint_selection.md` and `../CLAUDE.md`.
 If a validation metric peaked early, report it — that is a fact about overfitting. It is
 not a reason to change the checkpoint.
 
-Two non-exceptions: `epochNNNN/best_model.pth` is a filename quirk for a periodic
-snapshot, and `best_model/` inside `train_hdp_rl_predictor.py` is internal trainer state
-(last *accepted* RL policy + `best_valid_score` bookkeeping for strict resume).
+One non-exception: `epochNNNN/best_model.pth` is a filename quirk for a periodic
+snapshot. The RL trainer no longer writes a `best_model/` directory at all -- selection
+guards were removed, so `latest.pth` is the only checkpoint it commits besides those
+snapshots.
 
 ## Precision: fp32, and TF32 off
 

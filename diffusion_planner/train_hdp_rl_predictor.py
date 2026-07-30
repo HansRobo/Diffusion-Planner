@@ -136,30 +136,6 @@ def validate_compiled_candidate_batch(
     return candidates_per_rank
 
 
-def best_valid_score_from_rows(rows: list[dict]) -> float:
-    # New logs persist the accepted cumulative best. This must take precedence over raw epoch
-    # rewards because a high-reward epoch may have been rejected by a source-policy guard.
-    for row in reversed(rows):
-        raw_best = row.get("best_valid_score", float("nan"))
-        accepted_best = float(raw_best) if pd.notna(raw_best) else float("nan")
-        if math.isfinite(accepted_best):
-            return accepted_best
-
-    # Legacy logs predate the cumulative field and accepted every finite full-eval reward.
-    best = -float("inf")
-    for row in rows:
-        full_eval = row.get("valid_full_eval", False)
-        if isinstance(full_eval, str):
-            full_eval = full_eval.strip().lower() in {"1", "true", "yes"}
-        if not pd.notna(full_eval) or not bool(full_eval):
-            continue
-        raw_reward = row.get("valid_reward_mean", float("nan"))
-        reward = float(raw_reward) if pd.notna(raw_reward) else float("nan")
-        if math.isfinite(reward):
-            best = max(best, reward)
-    return best
-
-
 def load_resume_train_rows(path: Path, init_epoch: int) -> list[dict]:
     """Load only rows committed by the checkpoint and reject gaps in epoch history."""
     if not path.is_file():
@@ -399,33 +375,6 @@ def get_args(argv: list[str] | None = None):
         type=boolean,
         default=_train_config_default("rl_validate_before_training"),
         help="validate and preserve the source SFT policy before the first RL update",
-    )
-    parser.add_argument(
-        "--rl_max_valid_loss_regression",
-        type=float,
-        default=_train_config_default("rl_max_valid_loss_regression"),
-        help="maximum relative ego validation-loss increase allowed for best-model selection",
-    )
-    parser.add_argument(
-        "--rl_max_valid_safety_regression",
-        type=float,
-        default=_train_config_default("rl_max_valid_safety_regression"),
-        help=(
-            "maximum absolute decrease in source-policy risk and collision-safety scores "
-            "allowed for best-model selection"
-        ),
-    )
-    parser.add_argument(
-        "--rl_max_valid_epdms_regression",
-        type=float,
-        default=_train_config_default("rl_max_valid_epdms_regression"),
-        help=("maximum absolute decrease in source-policy EPDMS allowed for best-model selection"),
-    )
-    parser.add_argument(
-        "--rl_best_score_min_delta",
-        type=float,
-        default=_train_config_default("rl_best_score_min_delta"),
-        help="minimum validation-score improvement required to replace the best model",
     )
     parser.add_argument("--learning_rate", type=float, default=1e-7)
     parser.add_argument(
@@ -936,10 +885,6 @@ def get_args(argv: list[str] | None = None):
         "ego_history_dropout_rate",
         "planning_hybrid_loss",
         "multisample_eval_noise_scale",
-        "rl_max_valid_loss_regression",
-        "rl_max_valid_safety_regression",
-        "rl_max_valid_epdms_regression",
-        "rl_best_score_min_delta",
         "rl_noise_scale",
         "rl_eval_noise_scale",
         "advantage_eps",
@@ -1076,14 +1021,6 @@ def get_args(argv: list[str] | None = None):
         raise ValueError("HDP-RL is ego-only; --predicted_neighbor_num must be 0")
     if args.rl_full_eval_utd < 1:
         raise ValueError("--rl_full_eval_utd must be >= 1")
-    if args.rl_max_valid_loss_regression < 0.0:
-        raise ValueError("--rl_max_valid_loss_regression must be non-negative")
-    if args.rl_max_valid_safety_regression < 0.0:
-        raise ValueError("--rl_max_valid_safety_regression must be non-negative")
-    if args.rl_max_valid_epdms_regression < 0.0:
-        raise ValueError("--rl_max_valid_epdms_regression must be non-negative")
-    if args.rl_best_score_min_delta < 0.0:
-        raise ValueError("--rl_best_score_min_delta must be non-negative")
     if not args.use_ema:
         raise ValueError("HDP-RL requires --use_ema True for the frozen previous-policy snapshot")
     if not 0.0 < args.rl_ema_update_rate <= 1.0:
@@ -1163,85 +1100,6 @@ def finite_scalar_metrics(metrics):
         if math.isfinite(number):
             result[key] = number
     return result
-
-
-def source_policy_selection_guards(
-    source_metrics,
-    valid_reward_metrics,
-    valid_epdms_total,
-    *,
-    valid_epdms_metrics=None,
-    max_safety_regression,
-    max_epdms_regression,
-    require_epdms,
-    require_road_border=False,
-    require_dac=False,
-):
-    """Return source-relative gates used before accepting an RL best checkpoint."""
-    higher_is_better = (
-        "risk",
-        "safety",
-        "collision_safety",
-        "red_light",
-        "ttc",
-        "thw",
-        "occupancy",
-        "comfort",
-    )
-    lower_is_better = ("collision_active", "collision_rear", "red_light_violation_fraction")
-    if require_road_border:
-        higher_is_better = higher_is_better + ("road_border",)
-    guard_names = higher_is_better + lower_is_better
-    if not source_metrics or not bool(source_metrics.get("baseline_available", True)):
-        return {"available": False, **dict.fromkeys((*guard_names, "epdms"), True)}
-
-    required_source = tuple(f"valid_reward_{name}" for name in guard_names)
-    if require_epdms:
-        required_source += ("valid_epdms_total",)
-    missing = [key for key in required_source if key not in source_metrics]
-    if missing:
-        raise ValueError(f"Source-policy metrics are missing required selection guards: {missing}")
-
-    def finite(value):
-        try:
-            return math.isfinite(float(value))
-        except (TypeError, ValueError):
-            return False
-
-    guards = {"available": True}
-    for name in higher_is_better:
-        source = source_metrics[f"valid_reward_{name}"]
-        current = valid_reward_metrics.get(name)
-        guards[name] = (
-            finite(source)
-            and finite(current)
-            and float(current) >= float(source) - max_safety_regression
-        )
-    for name in lower_is_better:
-        source = source_metrics[f"valid_reward_{name}"]
-        current = valid_reward_metrics.get(name)
-        guards[name] = (
-            finite(source)
-            and finite(current)
-            and float(current) <= float(source) + max_safety_regression
-        )
-    guards["epdms"] = True
-    if require_epdms:
-        source_epdms = source_metrics["valid_epdms_total"]
-        guards["epdms"] = (
-            finite(source_epdms)
-            and finite(valid_epdms_total)
-            and float(valid_epdms_total) >= float(source_epdms) - max_epdms_regression
-        )
-    if require_dac:
-        source_dac = source_metrics.get("valid_epdms_dac")
-        current_dac = (valid_epdms_metrics or {}).get("dac")
-        guards["dac"] = (
-            finite(source_dac)
-            and finite(current_dac)
-            and float(current_dac) >= float(source_dac) - max_epdms_regression
-        )
-    return guards
 
 
 def turn_indicator_metrics(agg):
@@ -1643,8 +1501,6 @@ def model_training(args):
     train_log_path = os.path.join(save_path, "train_log.tsv") if global_rank == 0 else None
     baseline_metrics_path = os.path.join(args.save_dir, "source_baseline_metrics.json")
     data_list = []
-    best_valid_score = -float("inf")
-    full_evals_without_improvement = 0
     baseline_valid_loss = float("inf")
     baseline_metrics = {"baseline_available": False}
     configured_multisample_count = args.multisample_eval_num_samples
@@ -1693,45 +1549,9 @@ def model_training(args):
                 f"Strict RL resume is missing train_log.tsv beside {args.resume_model_path}"
             )
         data_list = load_resume_train_rows(resume_train_log, init_epoch)
-        best_valid_score = best_valid_score_from_rows(data_list)
-        checkpoint_best = float(
-            getattr(diffusion_planner, "_resume_best_valid_score", -float("inf"))
-        )
-        if math.isfinite(checkpoint_best):
-            best_valid_score = max(best_valid_score, checkpoint_best)
-        best_checkpoint_path = Path(save_path) / "best_model" / "best_model.pth"
-        if best_checkpoint_path.is_file():
-            best_checkpoint = torch.load(
-                best_checkpoint_path, map_location="cpu", weights_only=True
-            )
-            artifact_checkpoint_best = best_checkpoint.get("best_valid_score", float("nan"))
-            if artifact_checkpoint_best is not None:
-                artifact_checkpoint_best = float(artifact_checkpoint_best)
-                if math.isfinite(artifact_checkpoint_best):
-                    best_valid_score = max(best_valid_score, artifact_checkpoint_best)
-            del best_checkpoint
-        best_info_path = Path(save_path) / "best_model" / "best_model_info.json"
-        if best_info_path.is_file():
-            with best_info_path.open(encoding="utf-8") as f:
-                best_info = json.load(f)
-            artifact_best = best_info.get(
-                "valid_selection_score", best_info.get("selection_score", float("nan"))
-            )
-            if artifact_best is not None:
-                artifact_best = float(artifact_best)
-                if math.isfinite(artifact_best):
-                    best_valid_score = max(best_valid_score, artifact_best)
-        if data_list:
-            raw_patience = data_list[-1].get("full_evals_without_improvement", 0)
-            if pd.notna(raw_patience):
-                full_evals_without_improvement = int(raw_patience)
         baseline_metrics = resume_baseline_data
         if bool(baseline_metrics.get("baseline_available", True)):
             baseline_valid_loss = float(baseline_metrics["valid_loss_ego"])
-            best_valid_score = max(
-                best_valid_score,
-                float(baseline_metrics["selection_score"]),
-            )
         if resume_baseline_metrics is None or resume_baseline_metrics != Path(
             baseline_metrics_path
         ):
@@ -1752,9 +1572,7 @@ def model_training(args):
         baseline_selection_score = selection_score_from_reward_metrics(
             baseline_reward_metrics, args
         )
-        baseline_rng_states = gather_rng_states()
         if global_rank == 0:
-            best_valid_score = baseline_selection_score
             baseline_metrics = {
                 "epoch": 0,
                 "baseline_available": True,
@@ -1772,23 +1590,6 @@ def model_training(args):
                 "source_checkpoint": args.init_weights_path,
             }
             write_json_atomic(baseline_metrics, baseline_metrics_path)
-            baseline_checkpoint = {
-                "epoch": 0,
-                "model": diffusion_planner.state_dict(),
-                "ema_state_dict": model_ema.ema.state_dict() if model_ema is not None else None,
-                "optimizer": optimizer.state_dict(),
-                "schedule": scheduler.state_dict(),
-                "loss": baseline_valid_loss,
-                "wandb_id": wandb_id,
-                "global_step": args._wandb_global_step,
-                "best_valid_score": baseline_selection_score,
-                "rng_states": baseline_rng_states,
-            }
-            best_dir = os.path.join(save_path, "best_model")
-            os.makedirs(best_dir, exist_ok=True)
-            atomic_torch_save(baseline_checkpoint, os.path.join(best_dir, "best_model.pth"))
-            write_json_atomic(args_dict, os.path.join(best_dir, "args.json"))
-            write_json_atomic(baseline_metrics, os.path.join(best_dir, "best_model_info.json"))
             if args.use_wandb:
                 wandb.run.summary["source/valid_loss_ego"] = baseline_valid_loss
                 for key, value in select_epdms_dashboard_metrics(baseline_epdms_metrics).items():
@@ -1879,24 +1680,6 @@ def model_training(args):
                 epoch_summary.append(f"valid_multisample_minFDE={valid_multisample['minFDE']:.4f}")
             print("\n".join(epoch_summary))
 
-            loss_within_guard = valid_loss_ego <= baseline_valid_loss * (
-                1.0 + args.rl_max_valid_loss_regression
-            )
-            source_guards = source_policy_selection_guards(
-                baseline_metrics,
-                valid_reward_metrics,
-                valid_epdms_total,
-                valid_epdms_metrics=valid_epdms_metrics,
-                max_safety_regression=args.rl_max_valid_safety_regression,
-                max_epdms_regression=args.rl_max_valid_epdms_regression,
-                require_epdms=configured_epdms,
-            )
-            source_policy_within_guard = all(
-                value for key, value in source_guards.items() if key != "available"
-            )
-            # Held-out reward metrics only exist on a full-eval epoch. `improves_best`
-            # below already requires one, so an epoch that skipped the eval has no
-            # selection score to compute rather than a missing key to raise on.
             raw_selection_score = (
                 selection_score_from_reward_metrics(valid_reward_metrics, args)
                 if run_full_eval
@@ -1905,20 +1688,6 @@ def model_training(args):
             selection_score = (
                 raw_selection_score if math.isfinite(raw_selection_score) else float("nan")
             )
-            improves_best = (
-                run_full_eval
-                and loss_within_guard
-                and source_policy_within_guard
-                and selection_score > best_valid_score + args.rl_best_score_min_delta
-            )
-            if run_full_eval:
-                full_evals_without_improvement = (
-                    0 if improves_best else full_evals_without_improvement + 1
-                )
-            if improves_best:
-                best_valid_score = selection_score
-            logged_best_valid_score = best_valid_score if math.isfinite(best_valid_score) else None
-
             if args.use_wandb:
                 wandb.log(
                     {
@@ -1937,18 +1706,7 @@ def model_training(args):
                             for key, value in valid_reward_metrics.items()
                         },
                         "valid/full_eval": float(run_full_eval),
-                        "valid/within_source_loss_guard": float(loss_within_guard),
-                        "valid/source_policy_guard_available": float(source_guards["available"]),
-                        **{
-                            f"valid/within_source_{key}_guard": float(value)
-                            for key, value in source_guards.items()
-                            if key != "available"
-                        },
-                        "valid/within_source_policy_guard": float(source_policy_within_guard),
                         "valid/selection_score": selection_score,
-                        "valid/best_selection_score": logged_best_valid_score,
-                        "valid/improves_best": float(improves_best),
-                        "valid/full_evals_without_improvement": full_evals_without_improvement,
                         **{
                             f"valid_turn_indicator/{key}": value
                             for key, value in valid_turn_metrics.items()
@@ -1975,18 +1733,7 @@ def model_training(args):
                 **{f"valid_epdms_{key}": value for key, value in logged_epdms_metrics.items()},
                 **{f"valid_reward_{key}": value for key, value in valid_reward_metrics.items()},
                 "valid_full_eval": run_full_eval,
-                "valid_within_source_loss_guard": loss_within_guard,
-                "valid_source_policy_guard_available": source_guards["available"],
-                **{
-                    f"valid_within_source_{key}_guard": value
-                    for key, value in source_guards.items()
-                    if key != "available"
-                },
-                "valid_within_source_policy_guard": source_policy_within_guard,
                 "valid_selection_score": selection_score,
-                "valid_improves_best": improves_best,
-                "best_valid_score": best_valid_score,
-                "full_evals_without_improvement": full_evals_without_improvement,
                 **{
                     f"valid_turn_indicator_{key}": value
                     for key, value in valid_turn_metrics.items()
@@ -2004,20 +1751,12 @@ def model_training(args):
                 "loss": valid_loss_ego,
                 "wandb_id": wandb_id,
                 "global_step": args._wandb_global_step,
-                "best_valid_score": logged_best_valid_score,
                 "rng_states": rng_states,
             }
 
             # Save a newly accepted policy before committing the epoch through latest.pth. If
             # interruption occurs, resume can never observe a committed best score without its
             # corresponding atomic best checkpoint already being present.
-            if improves_best:
-                curr_dir = os.path.join(save_path, "best_model")
-                os.makedirs(curr_dir, exist_ok=True)
-                atomic_torch_save(model_dict, f"{curr_dir}/best_model.pth")
-                write_json_atomic(args_dict, os.path.join(curr_dir, "args.json"))
-                write_json_atomic(curr_data, os.path.join(curr_dir, "best_model_info.json"))
-
             write_train_log_atomic(data_list, os.path.join(save_path, "train_log.tsv"))
             atomic_torch_save(model_dict, f"{save_path}/latest.pth")
 

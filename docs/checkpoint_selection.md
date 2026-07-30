@@ -26,13 +26,10 @@ If a validation metric peaked early, report it — that is a real fact about
 overfitting, and it may be a reason to change the *epoch budget* of the next run. It
 is not a reason to change which checkpoint is used.
 
-Two things that look like exceptions but are not:
+One thing looks like an exception and is not:
 
 - `epochNNNN/best_model.pth` is a filename quirk. Those are plain periodic epoch
   snapshots, not a selection. The rule is about never picking the `best_model/`
   directory.
-- In `train_hdp_rl_predictor.py`, `best_model/` holds the last *accepted* RL policy
-  and the `best_valid_score` bookkeeping that strict resume restores. That is internal
-  trainer state, not a checkpoint-selection knob.
 
 Any new tool or script that takes a checkpoint must default to `latest.pth`.

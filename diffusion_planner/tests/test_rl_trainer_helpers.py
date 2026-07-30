@@ -16,13 +16,11 @@ from diffusion_planner.hdp_rl_epoch import (
 )
 from train_hdp_rl_predictor import (
     _checkpoint_bool,
-    best_valid_score_from_rows,
     configure_rl_trainable_parameters,
     find_checkpoint_run_artifact,
     finite_scalar_metrics,
     initialize_fresh_rl_policy_and_ema,
     load_resume_train_rows,
-    source_policy_selection_guards,
     validate_compiled_candidate_batch,
     write_train_log_atomic,
 )
@@ -333,58 +331,6 @@ def test_rl_update_microbatches_preserve_full_group_objective_and_gradient(monke
     assert result["update_chunk_count"].item() == 2
 
 
-def test_resume_best_score_ignores_nan_and_non_full_eval_rows():
-    score = best_valid_score_from_rows(
-        [
-            {"valid_full_eval": float("nan"), "valid_epdms_total": 0.99},
-            {"valid_full_eval": "False", "valid_epdms_total": 0.98},
-            {"valid_full_eval": True, "valid_epdms_total": float("nan"), "valid_loss_ego": 0.4},
-            {"valid_full_eval": "true", "valid_epdms_total": 0.75, "valid_loss_ego": 0.5},
-            {
-                "valid_full_eval": True,
-                "valid_reward_mean": 7.2,
-                "valid_epdms_total": 0.99,
-                "valid_loss_ego": 0.3,
-            },
-        ]
-    )
-
-    assert score == 7.2
-    assert best_valid_score_from_rows(
-        [
-            {
-                "valid_full_eval": True,
-                "valid_reward_mean": float("nan"),
-                "valid_epdms_total": 0.99,
-                "valid_loss_ego": 0.1,
-            }
-        ]
-    ) == -float("inf")
-
-
-def test_resume_best_score_does_not_promote_guard_rejected_reward():
-    assert (
-        best_valid_score_from_rows(
-            [
-                {
-                    "valid_full_eval": True,
-                    "valid_reward_mean": 7.2,
-                    "valid_improves_best": True,
-                    "best_valid_score": 7.2,
-                },
-                {
-                    "valid_full_eval": True,
-                    "valid_reward_mean": 7.5,
-                    "valid_improves_best": False,
-                    "valid_within_source_risk_guard": False,
-                    "best_valid_score": 7.2,
-                },
-            ]
-        )
-        == 7.2
-    )
-
-
 def test_find_checkpoint_run_artifact_handles_latest_and_nested_checkpoints(tmp_path):
     run_dir = tmp_path / "run"
     nested = run_dir / "epoch0002"
@@ -415,159 +361,6 @@ def test_finite_scalar_metrics_excludes_invalid_json_values():
     )
 
     assert metrics == {"finite": 0.75}
-
-
-def test_source_policy_selection_guards_require_safety_and_epdms_non_regression():
-    source = {
-        "baseline_available": True,
-        "valid_reward_risk": 0.4,
-        "valid_reward_safety": 0.98,
-        "valid_reward_collision_safety": 0.985,
-        "valid_reward_red_light": 0.995,
-        "valid_reward_ttc": 0.5,
-        "valid_reward_thw": 0.8,
-        "valid_reward_occupancy": 0.9,
-        "valid_reward_comfort": 0.99,
-        "valid_reward_collision_active": 0.02,
-        "valid_reward_collision_rear": 0.03,
-        "valid_reward_red_light_violation_fraction": 0.005,
-        "valid_epdms_total": 0.85,
-    }
-    improved = {
-        "risk": 0.41,
-        "safety": 0.99,
-        "collision_safety": 0.99,
-        "red_light": 0.999,
-        "ttc": 0.51,
-        "thw": 0.81,
-        "occupancy": 0.91,
-        "comfort": 1.0,
-        "collision_active": 0.01,
-        "collision_rear": 0.02,
-        "red_light_violation_fraction": 0.001,
-    }
-    kwargs = {
-        "max_safety_regression": 0.0,
-        "max_epdms_regression": 0.0,
-        "require_epdms": True,
-    }
-
-    guards = source_policy_selection_guards(source, improved, 0.86, **kwargs)
-    assert guards["available"]
-    assert all(value for key, value in guards.items() if key != "available")
-    for name, regressed in (
-        ("risk", 0.39),
-        ("safety", 0.97),
-        ("collision_safety", 0.98),
-        ("red_light", 0.99),
-        ("ttc", 0.49),
-        ("thw", 0.79),
-        ("occupancy", 0.89),
-        ("comfort", 0.98),
-        ("collision_active", 0.03),
-        ("collision_rear", 0.04),
-        ("red_light_violation_fraction", 0.006),
-    ):
-        current = dict(improved)
-        current[name] = regressed
-        assert not source_policy_selection_guards(source, current, 0.86, **kwargs)[name]
-    assert not source_policy_selection_guards(source, improved, 0.84, **kwargs)["epdms"]
-
-
-def test_source_policy_selection_guards_honor_tolerance_and_unavailable_baseline():
-    source = {
-        "valid_reward_risk": 0.4,
-        "valid_reward_safety": 0.98,
-        "valid_reward_collision_safety": 0.985,
-        "valid_reward_red_light": 0.995,
-        "valid_reward_ttc": 0.5,
-        "valid_reward_thw": 0.8,
-        "valid_reward_occupancy": 0.9,
-        "valid_reward_comfort": 0.99,
-        "valid_reward_collision_active": 0.02,
-        "valid_reward_collision_rear": 0.03,
-        "valid_reward_red_light_violation_fraction": 0.005,
-        "valid_epdms_total": 0.85,
-    }
-    guards = source_policy_selection_guards(
-        source,
-        {
-            "risk": 0.3995,
-            "safety": 0.9795,
-            "collision_safety": 0.9845,
-            "red_light": 0.9945,
-            "ttc": 0.4995,
-            "thw": 0.7995,
-            "occupancy": 0.8995,
-            "comfort": 0.9895,
-            "collision_active": 0.0205,
-            "collision_rear": 0.0305,
-            "red_light_violation_fraction": 0.0055,
-        },
-        0.8495,
-        max_safety_regression=0.001,
-        max_epdms_regression=0.001,
-        require_epdms=True,
-    )
-    assert guards["available"]
-    assert all(value for key, value in guards.items() if key != "available")
-    unavailable = source_policy_selection_guards(
-        {"baseline_available": False},
-        {},
-        float("nan"),
-        max_safety_regression=0.0,
-        max_epdms_regression=0.0,
-        require_epdms=True,
-    )
-    assert not unavailable["available"]
-    assert all(value for key, value in unavailable.items() if key != "available")
-
-
-def test_source_policy_selection_guards_require_dac_when_road_border_is_enabled():
-    source = {
-        "baseline_available": True,
-        "valid_reward_risk": 0.4,
-        "valid_reward_safety": 0.98,
-        "valid_reward_collision_safety": 0.985,
-        "valid_reward_red_light": 0.995,
-        "valid_reward_ttc": 0.5,
-        "valid_reward_thw": 0.8,
-        "valid_reward_occupancy": 0.9,
-        "valid_reward_comfort": 0.99,
-        "valid_reward_road_border": 0.8,
-        "valid_reward_collision_active": 0.02,
-        "valid_reward_collision_rear": 0.03,
-        "valid_reward_red_light_violation_fraction": 0.005,
-        "valid_epdms_total": 0.85,
-        "valid_epdms_dac": 0.95,
-    }
-    current = {
-        "risk": 0.4,
-        "safety": 0.98,
-        "collision_safety": 0.985,
-        "red_light": 0.995,
-        "ttc": 0.5,
-        "thw": 0.8,
-        "occupancy": 0.9,
-        "comfort": 0.99,
-        "road_border": 0.8,
-        "collision_active": 0.02,
-        "collision_rear": 0.03,
-        "red_light_violation_fraction": 0.005,
-    }
-    kwargs = dict(
-        valid_epdms_metrics={"dac": 0.9495},
-        max_safety_regression=0.0,
-        max_epdms_regression=0.001,
-        require_epdms=True,
-        require_road_border=True,
-        require_dac=True,
-    )
-    guards = source_policy_selection_guards(source, current, 0.85, **kwargs)
-    assert guards["road_border"]
-    assert guards["dac"]
-    kwargs["valid_epdms_metrics"] = {"dac": 0.948}
-    assert not source_policy_selection_guards(source, current, 0.85, **kwargs)["dac"]
 
 
 def test_reward_validation_weights_tail_batches_by_candidate_count(monkeypatch):

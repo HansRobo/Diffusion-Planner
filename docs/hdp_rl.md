@@ -104,13 +104,19 @@ They are already `is_skipped`-filtered, so the launcher does not rescan sidecars
 features are kept unchanged, and manifest paths are not rewritten by the RL loader. Alternate
 right-turn or causal manifests must be passed explicitly as an experiment override.
 
-## Selection Guards
+## Selection
 
-The source SFT policy is evaluated before the first update. A replacement must improve the held-out
-selection reward while respecting source-relative guards for risk, safety, collision-only safety,
-red-light compliance, TTC, THW, occupancy, comfort, collision rates, and EPDMS. When the direct
-road-border term and EPDMS are enabled, continuous border reward and binary `valid_epdms_dac` are
-also required not to regress beyond `rl_max_valid_epdms_regression`.
+The source SFT policy is evaluated before the first update and written to
+`source_baseline_metrics.json`. That baseline is an observation, not a gate: it is what
+every paired comparison is measured against, since bf16 and TF32 leave two runs' baselines
+differing by ~1e-5.
+
+The trainer commits `latest.pth` and the periodic epoch snapshots, and nothing else. It
+runs no source-relative guards and keeps no accepted-policy directory -- the original HDP
+RL does neither, its `on_train_epoch_end` is `pass`, and this repository takes
+`latest.pth` for every downstream use, so a guard could only ever gate an artifact nothing
+reads. `valid_selection_score` stays as a logged column because reading a trend off it is
+useful; it decides nothing.
 
 Checkpoint selection uses the deterministic deployment reward: validation additionally scores
 one zero-noise plan per scene (`deterministic_mean`), which is exactly what the deployed planner
