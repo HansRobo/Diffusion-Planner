@@ -97,6 +97,9 @@ REWARD_W_LANE=${HDP_RL_REWARD_W_LANE:-2.5}
 REWARD_W_PROGRESS=${HDP_RL_REWARD_W_PROGRESS:-3.0}
 REWARD_W_ROAD_BORDER=${HDP_RL_REWARD_W_ROAD_BORDER:-0.0}
 REWARD_W_COMFORT=${HDP_RL_REWARD_W_COMFORT:-0.0}
+# Linear warmup length. The original HDP RL config pairs its lr with a 10-epoch warmup;
+# this launcher hardcoded 1, so the two could not be moved together.
+WARM_UP_EPOCH=${HDP_RL_WARM_UP_EPOCH:-1}
 BEHAVIOR_GATE=${HDP_RL_BEHAVIOR_GATE:-safety}
 OCCUPANCY_USE_ROAD_BORDER=${HDP_RL_OCCUPANCY_USE_ROAD_BORDER:-True}
 STATIONARY_PROGRESS_MODE=${HDP_RL_STATIONARY_PROGRESS_MODE:-distance}
@@ -591,7 +594,7 @@ TRAIN_ARGS=(
   --learning_rate "${LEARNING_RATE}" \
   --weight_decay "${WEIGHT_DECAY}" \
   --adamw_no_decay True \
-  --warm_up_epoch 1 \
+  --warm_up_epoch "${WARM_UP_EPOCH}" \
   --num_generations "${NUM_GENERATIONS}" \
   --rl_noise_scale "${NOISE_SCALE}" \
   --rl_eval_noise_scale "${EVAL_NOISE_SCALE}" \
