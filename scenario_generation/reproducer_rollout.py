@@ -681,29 +681,31 @@ def _score_into(
     *,
     object_cl: float | None = None,
     object_col: bool | None = None,
+    metrics_device: str | None = None,
 ):
     """Score this step's object / road-border / red-light metrics into the segment state.
 
     When ``object_cl`` / ``object_col`` are provided (batched path already scored
     neighbors), reuse them instead of calling ``score_object_step`` again.
     """
+    dev = metrics_device or device
     with timers("score"):
         if object_cl is not None and object_col is not None:
             s.clearances[s.k] = object_cl
             s.collisions[s.k] = object_col
         else:
             with timers("score_object"):
-                cl, col, _ = score_object_step(neighbors_live, s.ego_shape, device)
+                cl, col, _ = score_object_step(neighbors_live, s.ego_shape, dev)
             s.clearances[s.k] = cl
             s.collisions[s.k] = col
         if np_dict is not None:
             with timers("score_road_border"):
-                rb = score_road_border_step(np_dict, device=device)
+                rb = score_road_border_step(np_dict, device=dev)
             s.rb_dists[s.k] = float(rb["rb_dist_m"])
             with timers("score_red_light"):
                 red = score_red_light_step(
                     np_dict,
-                    device=device,
+                    device=dev,
                     ego_speed_mps=float(s.dyn.speed),
                     live_pose=np.asarray(s.live_pose, dtype=np.float64),
                     ego_hist=np.asarray(s.ego_hist),
@@ -1380,6 +1382,7 @@ def render_segment(
     drop_objects: bool = False,
     timers: Timers | None = None,
     prefetch_ahead: int = 2,
+    metrics_device: str | None = None,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1595,7 +1598,7 @@ def render_segment(
         # Scored here (before the replan/draw below) so this step's clearance/collision/
         # road-border-distance are available for the per-step trace line right below — used by
         # trajectory_colormap.py to color the rendered path by risk.
-        _score_into(s, neighbors_live, device, timers, np_dict)
+        _score_into(s, neighbors_live, device, timers, np_dict, metrics_device=metrics_device)
 
         # Logged with the SAME live_pose the goal test in _pre_step just used (the ego only moves
         # in _advance_step below), so `dist_goal < goal_reach_m` here == the termination condition.

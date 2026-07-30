@@ -40,6 +40,8 @@ class RolloutParams:
     """Rollout knobs for full-route segment evaluation."""
 
     device: str = "cuda"
+    # Where the per-step metric scorers run. None = wherever the model runs.
+    metrics_device: str | None = None
     near_miss_thresh: float = 0.5
     search_radius: float = 1.5
     warmup_steps: int = 0
@@ -74,6 +76,7 @@ class RolloutParams:
     def render_kwargs(self) -> dict[str, Any]:
         return {
             "device": self.device,
+            "metrics_device": self.metrics_device,
             "near_miss_thresh": self.near_miss_thresh,
             "search_radius": self.search_radius,
             "warmup_steps": self.warmup_steps,
