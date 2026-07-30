@@ -72,6 +72,8 @@ DIST_BINS = [(0, 25), (25, 50), (50, 100), (100, float("inf"))]
 
 
 def latest_ckpt(run_dir: Path) -> Path:
+    if (run_dir / "best_model.pth").exists():
+        return run_dir / "best_model.pth"
     epoch_dirs = sorted(
         (d for d in run_dir.iterdir() if re.fullmatch(r"epoch\d+", d.name)),
         key=lambda d: int(d.name[5:]),
@@ -195,8 +197,8 @@ def main():
 
     with torch.no_grad():
         for raw in loader:
-            l_dist = lane_dist(raw["lanes"])  # [B, P] raw metres
-            n_dist = neighbor_dist(raw["neighbor_agents_past"])
+            l_dist = lane_dist(raw["lanes"]).to(args.device)  # [B, P] raw metres
+            n_dist = neighbor_dist(raw["neighbor_agents_past"]).to(args.device)
             inputs_n = prepare_inputs(dict(raw), cfg, args.device)
             store.clear()
             model(inputs_n)
