@@ -1383,6 +1383,7 @@ def render_segment(
     timers: Timers | None = None,
     prefetch_ahead: int = 2,
     metrics_device: str | None = None,
+    dump_predictions: int = 0,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1493,6 +1494,7 @@ def render_segment(
         if interpolate and neighbor_history_mode != "sim"
         else {}
     )
+    pred_dump: list[np.ndarray] = []
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
     deviation_streak = 0  # consecutive steps the live ego has been > abort_deviation_m from GT
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
@@ -1654,6 +1656,10 @@ def render_segment(
                 torch.compiler.cudagraph_mark_step_begin()
                 _, outputs = model(data)
                 pred = outputs["prediction"][0, 0].cpu().numpy()
+            if dump_predictions and len(pred_dump) < dump_predictions:
+                # The real graph on real data: what the harness could not reproduce, because it
+                # builds `delay` with a different shape and dtype than _add_static_inputs does.
+                pred_dump.append(np.asarray(pred, dtype=np.float64).copy())
             plan_world = _ego_pred_to_world(
                 pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
             )
@@ -1721,6 +1727,8 @@ def render_segment(
     dbg.close()
     if pool is not None:
         pool.shutdown(wait=False, cancel_futures=True)
+    if dump_predictions and pred_dump:
+        np.save(Path(out_dir) / "pred_dump.npy", np.stack(pred_dump))
     with timers("finalize"):
         return _finalize(s)
 

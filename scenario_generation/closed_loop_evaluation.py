@@ -44,6 +44,8 @@ class RolloutParams:
     metrics_device: str | None = None
     # Frames decompressed ahead on a background thread. 0 disables; results are identical.
     prefetch_ahead: int = 2
+    # Diagnostic: save the first N raw predictions for an eager-vs-compiled comparison.
+    dump_predictions: int = 0
     near_miss_thresh: float = 0.5
     search_radius: float = 1.5
     warmup_steps: int = 0
@@ -80,6 +82,7 @@ class RolloutParams:
             "device": self.device,
             "metrics_device": self.metrics_device,
             "prefetch_ahead": self.prefetch_ahead,
+            "dump_predictions": self.dump_predictions,
             "near_miss_thresh": self.near_miss_thresh,
             "search_radius": self.search_radius,
             "warmup_steps": self.warmup_steps,
