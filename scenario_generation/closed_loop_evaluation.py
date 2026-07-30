@@ -482,7 +482,13 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     print(f"  [{job.route_key}] segment [{start},{end}] -> 0 frames, no video")
                 continue
             seg_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
-            build_mp4(png_dir, seg_mp4, self.config.fps)
+            # ffmpeg is a subprocess, so unlike the per-step drawing this one COULD overlap --
+            # but only if it is worth overlapping, which needs measuring first.
+            if timers is not None:
+                with timers("build_mp4"):
+                    build_mp4(png_dir, seg_mp4, self.config.fps)
+            else:
+                build_mp4(png_dir, seg_mp4, self.config.fps)
             video_mp4s.append(seg_mp4)
             if self.config.verbose:
                 obj = metrics["object"]

@@ -1384,6 +1384,7 @@ def render_segment(
     prefetch_ahead: int = 2,
     metrics_device: str | None = None,
     dump_predictions: int = 0,
+    draw_workers: int = 0,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1453,7 +1454,7 @@ def render_segment(
 
     Returns the segment metrics dict.
     """
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
     from pathlib import Path
 
     out_dir = Path(out_dir)
@@ -1464,6 +1465,18 @@ def render_segment(
     # comes off the critical path -- the same thing run_segments_batched does with its build
     # pool. Cache warming only: identical results with it on or off (prefetch_ahead=0).
     pool = ThreadPoolExecutor(max_workers=1) if prefetch_ahead > 0 else None
+    # Drawing is matplotlib, i.e. CPU-bound Python: a thread pool cannot overlap it (the GIL),
+    # but separate processes can, and the box running this has two orders of magnitude more
+    # cores than the rollout uses. Spawn rather than fork: this process holds a CUDA context and
+    # the workers must not inherit it.
+    draw_pool = None
+    draw_futures: list = []
+    if draw_workers > 0 and draw_every is not None:
+        import multiprocessing as _mp
+
+        draw_pool = ProcessPoolExecutor(
+            max_workers=draw_workers, mp_context=_mp.get_context("spawn")
+        )
     s = _seed_state(
         tl,
         start,
@@ -1704,19 +1717,27 @@ def render_segment(
             and (window is None or (window[0] <= k <= window[1]))
             and k % draw_every == 0
         ):
-            with timers("draw"):
-                _draw_step(
-                    np_dict,
-                    pred_cur,
-                    s.ego_shape,
-                    out_dir / f"{k:05d}.png",
-                    neighbor_ids=nids if color_by_uuid else None,
-                    step=k,
-                    total=cap,
-                    title_prefix=title_prefix,
-                    distance_label_offset_m=distance_label_offset_m,
-                    view_half_m=view_half_m,
-                )
+            draw_args = (
+                np_dict,
+                pred_cur,
+                s.ego_shape,
+                out_dir / f"{k:05d}.png",
+            )
+            draw_kwargs = dict(
+                neighbor_ids=nids if color_by_uuid else None,
+                step=k,
+                total=cap,
+                title_prefix=title_prefix,
+                distance_label_offset_m=distance_label_offset_m,
+                view_half_m=view_half_m,
+            )
+            if draw_pool is not None:
+                # Hands off ~900 kB of arrays instead of spending ~66 ms rendering them.
+                with timers("draw_submit"):
+                    draw_futures.append(draw_pool.submit(_draw_step, *draw_args, **draw_kwargs))
+            else:
+                with timers("draw"):
+                    _draw_step(*draw_args, **draw_kwargs)
         snaps_before = s.snap_count
         _advance_step(s, pred_cur, idx, device, timers, override=override)
         if s.snap_count > snaps_before:
@@ -1727,6 +1748,14 @@ def render_segment(
     dbg.close()
     if pool is not None:
         pool.shutdown(wait=False, cancel_futures=True)
+    if draw_pool is not None:
+        # The PNGs must all exist before the caller globs the directory for ffmpeg, so this is
+        # the one place the rollout waits for them -- by which point the workers have had the
+        # whole segment to keep up.
+        with timers("draw_join"):
+            for f in draw_futures:
+                f.result()
+        draw_pool.shutdown(wait=True)
     if dump_predictions and pred_dump:
         np.save(Path(out_dir) / "pred_dump.npy", np.stack(pred_dump))
     with timers("finalize"):
