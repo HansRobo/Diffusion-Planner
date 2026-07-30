@@ -482,7 +482,6 @@ class LaneletSceneBuilder:
         self._ls_pack = _pack_cache(self._line_strings_cache, POINTS_PER_LINE_STRING)
         self._poly_pack = _pack_cache(self._polygons_cache, POINTS_PER_POLYGON)
 
-
     # ── 33-dim conversion ────────────────────────────────────────────────
 
     def lanelet_ids(self) -> list[int]:
