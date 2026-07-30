@@ -692,19 +692,22 @@ def _score_into(
             s.clearances[s.k] = object_cl
             s.collisions[s.k] = object_col
         else:
-            cl, col, _ = score_object_step(neighbors_live, s.ego_shape, device)
+            with timers("score_object"):
+                cl, col, _ = score_object_step(neighbors_live, s.ego_shape, device)
             s.clearances[s.k] = cl
             s.collisions[s.k] = col
         if np_dict is not None:
-            rb = score_road_border_step(np_dict, device=device)
+            with timers("score_road_border"):
+                rb = score_road_border_step(np_dict, device=device)
             s.rb_dists[s.k] = float(rb["rb_dist_m"])
-            red = score_red_light_step(
-                np_dict,
-                device=device,
-                ego_speed_mps=float(s.dyn.speed),
-                live_pose=np.asarray(s.live_pose, dtype=np.float64),
-                ego_hist=np.asarray(s.ego_hist),
-            )
+            with timers("score_red_light"):
+                red = score_red_light_step(
+                    np_dict,
+                    device=device,
+                    ego_speed_mps=float(s.dyn.speed),
+                    live_pose=np.asarray(s.live_pose, dtype=np.float64),
+                    ego_hist=np.asarray(s.ego_hist),
+                )
             s.red_light[s.k] = bool(red["red_light_violation"])
 
 
@@ -1376,6 +1379,7 @@ def render_segment(
     abort_max_snaps: int = 0,
     drop_objects: bool = False,
     timers: Timers | None = None,
+    prefetch_ahead: int = 2,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1445,12 +1449,17 @@ def render_segment(
 
     Returns the segment metrics dict.
     """
+    from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cap = max_steps if max_steps is not None else 3 * (end - start)
     timers = timers or Timers()
+    # Background decompression of the frames this segment is about to visit, so the np.load
+    # comes off the critical path -- the same thing run_segments_batched does with its build
+    # pool. Cache warming only: identical results with it on or off (prefetch_ahead=0).
+    pool = ThreadPoolExecutor(max_workers=1) if prefetch_ahead > 0 else None
     s = _seed_state(
         tl,
         start,
@@ -1529,6 +1538,13 @@ def render_segment(
             )
             break
         np_dict, neighbors_live, idx, slot_uuids, _wbu = pre
+        if pool is not None:
+            nxt = (
+                min(int(s.start + s.k + 1), int(s.end - 1))
+                if s.replay_mode == "clock"
+                else s.cursor.max_idx_reached + 1
+            )
+            pool.submit(s.tl.prefetch, range(nxt, nxt + prefetch_ahead))
 
         if drop_objects:
             # Empty-world ablation: no other traffic (dynamic neighbors + static objects), map
@@ -1698,6 +1714,8 @@ def render_segment(
             # it to force a fresh inference at the snapped pose (else the snap never sticks).
             plan_world = None
     dbg.close()
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
     with timers("finalize"):
         return _finalize(s)
 
