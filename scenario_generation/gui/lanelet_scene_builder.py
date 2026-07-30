@@ -265,6 +265,29 @@ class _CachedLanelet:
 # ── Main builder class ───────────────────────────────────────────────────────
 
 
+def _pack_cache(
+    cache: list[tuple[np.ndarray, int]], num_points: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Pack a ``[(pts, type_idx), ...]`` cache into ``(pts, lengths, types)`` arrays.
+
+    ``pts`` is ``(N, num_points, 2)`` float32 padded with ``+inf``, which is what makes the
+    padding invisible to both consumers: an ``+inf`` coordinate fails the ``< x_max`` half of the
+    AABB test, and contributes ``+inf`` to a min-distance, so a short entry behaves exactly as if
+    its missing points were not there. Padding with zeros would instead place phantom points at
+    the map origin.
+    """
+    n = len(cache)
+    pts = np.full((max(n, 1), num_points, 2), np.inf, dtype=np.float32)
+    lens = np.zeros(max(n, 1), dtype=np.int64)
+    types = np.zeros(max(n, 1), dtype=np.int64)
+    for i, (p, type_idx) in enumerate(cache):
+        k = min(len(p), num_points)
+        pts[i, :k] = p[:k, :2]
+        lens[i] = k
+        types[i] = type_idx
+    return pts[:n], lens[:n], types[:n]
+
+
 class LaneletSceneBuilder:
     """Loads a Lanelet2 map and generates synthetic SceneContext objects."""
 
@@ -449,6 +472,16 @@ class LaneletSceneBuilder:
             f"LaneletSceneBuilder: cached {len(self._cache)} lanelets "
             f"({n_v} drivable), routing graph built"
         )
+        # Same idea as the anchors above, for the line-string and polygon caches.
+        # _build_line_or_polygon_tensor used to walk those caches with a PYTHON loop, doing a
+        # handful of tiny numpy ops per entry. At 4015 line-string tiles that cost ~3.7 us per
+        # entry -- overhead of the numpy calls on 20-element arrays, not arithmetic -- so
+        # 15 ms of every 16 ms tick of _build_map_data went there, which was 91% of scene_build
+        # and ~32% of all worker time after MPS (plan/11 9n). Packing into one contiguous array
+        # lets the same computation run as a handful of whole-array ops.
+        self._ls_pack = _pack_cache(self._line_strings_cache, POINTS_PER_LINE_STRING)
+        self._poly_pack = _pack_cache(self._polygons_cache, POINTS_PER_POLYGON)
+
 
     # ── 33-dim conversion ────────────────────────────────────────────────
 
@@ -1422,7 +1455,7 @@ class LaneletSceneBuilder:
         ``autoware_diffusion_planner/src/preprocessing/lane_segments.cpp:347``.
         """
         return self._build_line_or_polygon_tensor(
-            self._polygons_cache,
+            self._poly_pack,
             center_xy,
             max_n,
             POINTS_PER_POLYGON,
@@ -1461,7 +1494,7 @@ class LaneletSceneBuilder:
             [3]: one-hot road_border
         """
         return self._build_line_or_polygon_tensor(
-            self._line_strings_cache,
+            self._ls_pack,
             center_xy,
             max_n,
             POINTS_PER_LINE_STRING,
@@ -1471,7 +1504,7 @@ class LaneletSceneBuilder:
 
     def _build_line_or_polygon_tensor(
         self,
-        cache: list[tuple[np.ndarray, int]],
+        pack: tuple[np.ndarray, np.ndarray, np.ndarray],
         center_xy: np.ndarray,
         max_n: int,
         num_points: int,
@@ -1481,32 +1514,30 @@ class LaneletSceneBuilder:
         """Shared implementation for ``build_polygons_tensor`` and
         ``build_line_strings_tensor``. AABB pre-filter + min-distance sort +
         top-N truncate, matching the C++ ``create_line_tensor`` template."""
+        all_pts, lens, types = pack
+        out = np.zeros((max_n, num_points, 2 + num_types), dtype=np.float32)
+        if all_pts.shape[0] == 0:
+            return out
+
         cx, cy = float(center_xy[0]), float(center_xy[1])
         x_min, x_max = cx - mask_range, cx + mask_range
         y_min, y_max = cy - mask_range, cy + mask_range
 
-        scored: list[tuple[float, np.ndarray, int]] = []
-        for pts, type_idx in cache:
-            inside = (
-                (pts[:, 0] > x_min)
-                & (pts[:, 0] < x_max)
-                & (pts[:, 1] > y_min)
-                & (pts[:, 1] < y_max)
-            ).any()
-            if not inside:
-                continue
-            dx = pts[:, 0] - cx
-            dy = pts[:, 1] - cy
-            min_d = float(np.sqrt(dx * dx + dy * dy).min())
-            scored.append((min_d, pts, type_idx))
-        scored.sort(key=lambda t: t[0])
+        xs, ys = all_pts[:, :, 0], all_pts[:, :, 1]
+        inside = ((xs > x_min) & (xs < x_max) & (ys > y_min) & (ys < y_max)).any(axis=1)
+        # sqrt-then-min, per row, exactly as the previous per-entry code did. (Both orders agree
+        # bitwise for IEEE sqrt, but keeping the order removes the need to argue about it.)
+        min_d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2).min(axis=1)
 
-        out = np.zeros((max_n, num_points, 2 + num_types), dtype=np.float32)
-        for i, (_, pts, type_idx) in enumerate(scored[:max_n]):
-            n = min(len(pts), num_points)
-            out[i, :n, 0] = pts[:n, 0]
-            out[i, :n, 1] = pts[:n, 1]
-            out[i, :n, 2 + type_idx] = 1.0
+        cand = np.flatnonzero(inside)
+        # `stable` so entries with equal distance keep cache order, matching list.sort before.
+        order = cand[np.argsort(min_d[cand], kind="stable")][:max_n]
+
+        for i, j in enumerate(order):
+            k = int(lens[j])
+            out[i, :k, 0] = all_pts[j, :k, 0]
+            out[i, :k, 1] = all_pts[j, :k, 1]
+            out[i, :k, 2 + int(types[j])] = 1.0
         return out
 
     # ── Route segment selection (match C++ Autoware) ─────────────────────
