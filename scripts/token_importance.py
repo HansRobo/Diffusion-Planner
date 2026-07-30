@@ -293,17 +293,18 @@ def main():
     # Spread sample selection across the whole valid set (avoid one clip),
     # keeping only "moving" scenes so map/agent inputs actually matter.
     dataset = DiffusionPlannerData(args.valid_set_list)
-    probe = DataLoader(dataset, batch_size=1, shuffle=False)
     stride = max(1, len(dataset) // (args.n_samples * 2))
+    cand = list(range(0, len(dataset), stride))
+    probe = DataLoader(Subset(dataset, cand), batch_size=1, shuffle=False)
     idxs = []
-    for i, s in enumerate(probe):
-        if i % stride:
-            continue
+    for i, s in zip(cand, probe):
         if float(np.linalg.norm(s["ego_agent_future"][0, -1, :2])) >= args.move_min_m:
             idxs.append(i)
         if len(idxs) >= args.n_samples:
             break
-    print(f"selected {len(idxs)} moving samples (stride={stride})")
+    print(
+        f"selected {len(idxs)} moving samples (stride={stride}, dataset={len(dataset)})", flush=True
+    )
 
     loader = DataLoader(Subset(dataset, idxs), batch_size=args.batch_size, shuffle=False)
     batches = [{k: v for k, v in b.items()} for b in loader]

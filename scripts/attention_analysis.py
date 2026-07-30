@@ -171,12 +171,11 @@ def main():
     print(f"patched {n_layers} fusion blocks, token_num={TOKEN_NUM}", flush=True)
 
     dataset = DiffusionPlannerData(args.valid_set_list)
-    probe = DataLoader(dataset, batch_size=1, shuffle=False)
     stride = max(1, len(dataset) // (args.n_samples * 2))
+    cand = list(range(0, len(dataset), stride))
+    probe = DataLoader(Subset(dataset, cand), batch_size=1, shuffle=False)
     idxs, turning = [], []
-    for i, s in enumerate(probe):
-        if i % stride:
-            continue
+    for i, s in zip(cand, probe):
         fut = s["ego_agent_future"][0]
         if float(np.linalg.norm(fut[-1, :2])) < args.move_min_m:
             continue
@@ -186,7 +185,10 @@ def main():
         if len(idxs) >= args.n_samples:
             break
     turning = np.array(turning)
-    print(f"selected {len(idxs)} moving samples ({int(turning.sum())} turning)", flush=True)
+    print(
+        f"selected {len(idxs)} moving samples ({int(turning.sum())} turning, dataset={len(dataset)})",
+        flush=True,
+    )
 
     loader = DataLoader(Subset(dataset, idxs), batch_size=args.batch_size, shuffle=False)
 
