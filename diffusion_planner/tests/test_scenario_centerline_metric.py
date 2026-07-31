@@ -21,7 +21,22 @@ def test_centerline_metric_projects_to_segments():
         {"route_lanes": route_lanes},
     )
 
-    torch.testing.assert_allclose(distances, torch.tensor([[1.0, 2.0]]))
+    torch.testing.assert_close(distances, torch.tensor([[1.0, 2.0]]))
+
+
+def test_centerline_metric_ignores_duplicate_point_segments():
+    """A duplicate centerline point must not report a spurious zero error."""
+    prediction = torch.tensor([[[10.0, 0.0]]])
+    route_lanes = torch.zeros((1, 3, 8))
+    route_lanes[0, :, 0] = torch.tensor([0.0, 0.0, 3.0])
+    route_lanes[0, :, 2] = 1.0
+
+    distances = compute_centerline_distance_batch(prediction, {"route_lanes": route_lanes})
+    components = compute_centerline_error_components_batch(prediction, {"route_lanes": route_lanes})
+
+    torch.testing.assert_close(distances, torch.tensor([[7.0]]))
+    torch.testing.assert_close(components["lateral_error_m"], torch.tensor([[0.0]]))
+    torch.testing.assert_close(components["longitudinal_error_m"], torch.tensor([[7.0]]))
 
 
 def test_centerline_metric_returns_lateral_errors_at_requested_horizon():
@@ -38,8 +53,8 @@ def test_centerline_metric_returns_lateral_errors_at_requested_horizon():
         {"horizon_seconds": 0.2},
     )
 
-    torch.testing.assert_allclose(values["average_lateral_error_m"], torch.tensor([1.5]))
-    torch.testing.assert_allclose(values["final_lateral_error_m"], torch.tensor([2.0]))
+    torch.testing.assert_close(values["average_lateral_error_m"], torch.tensor([1.5]))
+    torch.testing.assert_close(values["final_lateral_error_m"], torch.tensor([2.0]))
 
 
 def test_centerline_error_components_separate_endpoint_overshoot():
@@ -54,5 +69,5 @@ def test_centerline_error_components_separate_endpoint_overshoot():
         {"route_lanes": route_lanes},
     )
 
-    torch.testing.assert_allclose(values["lateral_error_m"], torch.tensor([[0.0, 1.0]]))
-    torch.testing.assert_allclose(values["longitudinal_error_m"], torch.tensor([[1.0, 2.0]]))
+    torch.testing.assert_close(values["lateral_error_m"], torch.tensor([[0.0, 1.0]]))
+    torch.testing.assert_close(values["longitudinal_error_m"], torch.tensor([[1.0, 2.0]]))

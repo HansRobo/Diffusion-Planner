@@ -11,6 +11,7 @@ from planner_metrics.geometry import (
 )
 
 _PREDICTION_TIMESTEP_SECONDS = 0.1
+_CENTERLINE_SEGMENT_MIN_LENGTH = 1e-6
 
 
 def _centerline_segments(lanes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -19,6 +20,8 @@ def _centerline_segments(lanes: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     centerlines = lanes[..., :2]
     valid_points = lanes[..., :4].abs().sum(dim=-1) > 1e-6
     valid_segments = valid_points[:, :-1] & valid_points[:, 1:]
+    segment_lengths = (centerlines[:, 1:] - centerlines[:, :-1]).norm(dim=-1)
+    valid_segments &= segment_lengths > _CENTERLINE_SEGMENT_MIN_LENGTH
     if not valid_segments.any():
         raise ValueError("centerline metric found no valid route-centerline segments")
     return (
