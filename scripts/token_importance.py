@@ -15,18 +15,64 @@ Usage (CPU, sshfs checkpoint):
 """
 
 import argparse
+import os
 import re
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from torch.utils.data import DataLoader, Subset
+
+METRIC_KEYS = ("fde_top", "ade_top", "min_fde", "min_ade")
+
+
+def init_distributed(requested_device: str):
+    """Initialize torchrun data parallelism and return device/rank metadata."""
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    device = requested_device
+    if world_size > 1:
+        if requested_device.startswith("cuda"):
+            device = f"cuda:{local_rank}"
+            torch.cuda.set_device(local_rank)
+            backend = "nccl"
+        else:
+            backend = "gloo"
+        dist.init_process_group(backend=backend)
+    return device, rank, local_rank, world_size
+
+
+def select_moving_indices(dataset, n_samples, move_min_m):
+    """Select moving scenes across the full list; run on rank 0 only."""
+    stride = max(1, len(dataset) // (n_samples * 2))
+    # Check one evenly spaced pass first, then the remaining offsets as needed.
+    # This preserves broad dataset coverage without silently stopping after only
+    # about 2 * n_samples candidates when moving scenes are sparse.
+    cand = [index for offset in range(stride) for index in range(offset, len(dataset), stride)]
+    probe = DataLoader(Subset(dataset, cand), batch_size=1, shuffle=False)
+    idxs = []
+    for index, sample in zip(cand, probe):
+        if float(np.linalg.norm(sample["ego_agent_future"][0, -1, :2])) >= move_min_m:
+            idxs.append(index)
+        if len(idxs) >= n_samples:
+            break
+    return idxs, stride
+
+
+def broadcast_indices(indices, world_size):
+    if world_size == 1:
+        return indices
+    payload = [indices]
+    dist.broadcast_object_list(payload, src=0)
+    return payload[0]
 
 
 def prepare_inputs(inputs: dict, cfg, device: str):
@@ -237,7 +283,8 @@ CONFIGS = [
 
 @torch.no_grad()
 def eval_config(model, cfg, batches, device, name):
-    fde_top, ade_top, min_fde, min_ade = [], [], [], []
+    totals = {key: 0.0 for key in METRIC_KEYS}
+    count = 0
     for raw in batches:
         inputs = apply_ablation(raw, name)
         inputs_n, ego_future = prepare_inputs(inputs, cfg, device)
@@ -253,22 +300,31 @@ def eval_config(model, cfg, batches, device, name):
             fde_k = err[..., -1]  # [B,K]
             top = outputs["probability"].argmax(dim=-1)  # [B]
             bidx = torch.arange(gt.shape[0], device=fde_k.device)
-            fde_top += fde_k[bidx, top].tolist()
-            ade_top += ade_k[bidx, top].tolist()
-            min_fde += fde_k.min(dim=-1).values.tolist()
-            min_ade += ade_k.min(dim=-1).values.tolist()
+            totals["fde_top"] += float(fde_k[bidx, top].sum())
+            totals["ade_top"] += float(ade_k[bidx, top].sum())
+            totals["min_fde"] += float(fde_k.min(dim=-1).values.sum())
+            totals["min_ade"] += float(ade_k.min(dim=-1).values.sum())
         else:
             pred = outputs["prediction"][:, 0, :, :2]  # [B,T,2] metres
             err = (pred - gt).norm(dim=-1)
-            fde_top += err[:, -1].tolist()
-            ade_top += err.mean(dim=-1).tolist()
-            min_fde += err[:, -1].tolist()
-            min_ade += err.mean(dim=-1).tolist()
+            totals["fde_top"] += float(err[:, -1].sum())
+            totals["ade_top"] += float(err.mean(dim=-1).sum())
+            totals["min_fde"] += float(err[:, -1].sum())
+            totals["min_ade"] += float(err.mean(dim=-1).sum())
+        count += gt.shape[0]
+    return totals, count
+
+
+def reduce_metric_totals(totals, count, device, world_size):
+    values = [totals[key] for key in METRIC_KEYS] + [float(count)]
+    reduced = torch.tensor(values, dtype=torch.float64, device=device)
+    if world_size > 1:
+        dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+    global_count = int(reduced[-1].item())
+    if global_count == 0:
+        raise RuntimeError("no evaluation samples were assigned")
     return {
-        "fde_top": float(np.mean(fde_top)),
-        "ade_top": float(np.mean(ade_top)),
-        "min_fde": float(np.mean(min_fde)),
-        "min_ade": float(np.mean(min_ade)),
+        key: float(reduced[index].item() / global_count) for index, key in enumerate(METRIC_KEYS)
     }
 
 
@@ -282,62 +338,94 @@ def main():
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--move_min_m", type=float, default=5.0)
     p.add_argument("--device", default="cpu")
+    p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--out_tsv", default="token_importance.tsv")
     args = p.parse_args()
 
+    args.device, rank, local_rank, world_size = init_distributed(args.device)
+    is_main = rank == 0
     if args.onnx:
+        if world_size > 1:
+            raise ValueError("distributed execution is supported only for the PyTorch backend")
         args_json = args.args_json or str(Path(args.onnx).parent / "args.json")
         cfg = Config(args_json)
         cfg.device = args.device
         cfg.ddp = False
         model = OnnxModel(args.onnx, args.device)
-        print(f"loaded ONNX: {args.onnx} (normalizer from {args_json})", flush=True)
+        if is_main:
+            print(f"loaded ONNX: {args.onnx} (normalizer from {args_json})", flush=True)
     else:
         model, cfg, ckpt = load_model(Path(args.run_dir), args.device)
-        print(f"loaded: {ckpt}")
+        if is_main:
+            print(f"loaded: {ckpt}")
+            print(
+                f"data parallel: world_size={world_size}, per-rank batch={args.batch_size}, "
+                f"workers/rank={args.num_workers}",
+                flush=True,
+            )
 
     # Spread sample selection across the whole valid set (avoid one clip),
     # keeping only "moving" scenes so map/agent inputs actually matter.
     dataset = DiffusionPlannerData(args.valid_set_list)
-    stride = max(1, len(dataset) // (args.n_samples * 2))
-    cand = list(range(0, len(dataset), stride))
-    probe = DataLoader(Subset(dataset, cand), batch_size=1, shuffle=False)
-    idxs = []
-    for i, s in zip(cand, probe):
-        if float(np.linalg.norm(s["ego_agent_future"][0, -1, :2])) >= args.move_min_m:
-            idxs.append(i)
-        if len(idxs) >= args.n_samples:
-            break
-    print(
-        f"selected {len(idxs)} moving samples (stride={stride}, dataset={len(dataset)})", flush=True
-    )
+    if is_main:
+        idxs, stride = select_moving_indices(dataset, args.n_samples, args.move_min_m)
+    else:
+        idxs, stride = None, None
+    idxs = broadcast_indices(idxs, world_size)
+    if not idxs:
+        if world_size > 1:
+            dist.destroy_process_group()
+        raise RuntimeError(
+            f"no samples moved at least {args.move_min_m} m in the evaluation dataset"
+        )
+    local_idxs = idxs[rank::world_size]
+    if is_main:
+        print(
+            f"selected {len(idxs)} moving samples (stride={stride}, dataset={len(dataset)})",
+            flush=True,
+        )
 
-    loader = DataLoader(Subset(dataset, idxs), batch_size=args.batch_size, shuffle=False)
+    loader = DataLoader(
+        Subset(dataset, local_idxs),
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=args.device.startswith("cuda"),
+    )
     batches = [{k: v for k, v in b.items()} for b in loader]
+    print(
+        f"[rank {rank}/{world_size}, local_rank={local_rank}] cached {len(local_idxs)} samples",
+        flush=True,
+    )
 
     rows = []
     base = None
     for name in CONFIGS:
         t0 = time.time()
-        m = eval_config(model, cfg, batches, args.device, name)
+        totals, count = eval_config(model, cfg, batches, args.device, name)
+        m = reduce_metric_totals(totals, count, args.device, world_size)
         if name == "baseline":
             base = m
         d = {f"d_{k}": m[k] - base[k] for k in m}
-        rows.append({"config": name, **m, **d})
-        print(
-            f"{name:<22} fde_top={m['fde_top']:6.2f} ({d['d_fde_top']:+5.2f})  "
-            f"ade_top={m['ade_top']:5.2f} ({d['d_ade_top']:+5.2f})  "
-            f"min_fde={m['min_fde']:6.2f} ({d['d_min_fde']:+5.2f})  "
-            f"[{time.time() - t0:.0f}s]",
-            flush=True,
-        )
+        if is_main:
+            rows.append({"config": name, **m, **d})
+            print(
+                f"{name:<22} fde_top={m['fde_top']:6.2f} ({d['d_fde_top']:+5.2f})  "
+                f"ade_top={m['ade_top']:5.2f} ({d['d_ade_top']:+5.2f})  "
+                f"min_fde={m['min_fde']:6.2f} ({d['d_min_fde']:+5.2f})  "
+                f"[{time.time() - t0:.0f}s]",
+                flush=True,
+            )
 
-    cols = list(rows[0].keys())
-    with open(args.out_tsv, "w") as f:
-        f.write("\t".join(cols) + "\n")
-        for r in rows:
-            f.write("\t".join(str(r[c]) for c in cols) + "\n")
-    print(f"wrote {args.out_tsv}")
+    if is_main:
+        cols = list(rows[0].keys())
+        with open(args.out_tsv, "w") as f:
+            f.write("\t".join(cols) + "\n")
+            for row in rows:
+                f.write("\t".join(str(row[column]) for column in cols) + "\n")
+        print(f"wrote {args.out_tsv}")
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

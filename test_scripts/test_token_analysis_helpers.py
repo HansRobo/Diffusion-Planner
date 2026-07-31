@@ -55,3 +55,47 @@ def test_token_occupancy_statistics_include_capacity_and_utilization():
     assert stats["mean_utilization_pct"] == 21.875
     assert stats["p95_capacity"] == 4
     assert stats["p99_capacity"] == 4
+
+
+def test_metric_totals_are_converted_to_sample_weighted_means():
+    token_importance = _load_script("token_importance")
+    totals = {
+        "fde_top": 9.0,
+        "ade_top": 6.0,
+        "min_fde": 3.0,
+        "min_ade": 1.5,
+    }
+
+    metrics = token_importance.reduce_metric_totals(totals, count=3, device="cpu", world_size=1)
+
+    assert metrics == {
+        "fde_top": 3.0,
+        "ade_top": 2.0,
+        "min_fde": 1.0,
+        "min_ade": 0.5,
+    }
+
+
+def test_attention_payload_merge_preserves_rank_local_alignment():
+    attention_analysis = _load_script("attention_analysis")
+
+    def payload(value, turning):
+        return {
+            "turning": [turning],
+            "ego_share": [{name: [value] for name, _ in attention_analysis.CLASSES}],
+            "all_share": [{name: [value + 1] for name, _ in attention_analysis.CLASSES}],
+            "vw_share": [{name: [value + 2] for name, _ in attention_analysis.CLASSES}],
+            "count_share": {name: [value + 3] for name, _ in attention_analysis.CLASSES},
+            "valid_count": {name: [value + 4] for name, _ in attention_analysis.CLASSES},
+            "total_valid_count": [value + 5],
+            "lane_bin_share": [[value] for _ in attention_analysis.DIST_BINS],
+            "nbr_bin_share": [[value + 1] for _ in attention_analysis.DIST_BINS],
+            "route_share_per_sample": [value + 6],
+        }
+
+    merged = attention_analysis.merge_payloads([payload(10, False), payload(20, True)], n_layers=1)
+
+    assert merged["turning"] == [False, True]
+    assert merged["route_share_per_sample"] == [16, 26]
+    assert merged["ego_share"][0]["neighbors"] == [10, 20]
+    assert merged["valid_count"]["lanes"] == [14, 24]
