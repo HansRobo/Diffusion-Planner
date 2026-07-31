@@ -1,6 +1,7 @@
 """Regression tests for the token-analysis helper functions."""
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -10,9 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_script(name):
-    spec = importlib.util.spec_from_file_location(name, ROOT / "scripts" / f"{name}.py")
+    script_path = ROOT / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, script_path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(script_path.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
     return module
 
 
@@ -99,3 +105,36 @@ def test_attention_payload_merge_preserves_rank_local_alignment():
     assert merged["route_share_per_sample"] == [16, 26]
     assert merged["ego_share"][0]["neighbors"] == [10, 20]
     assert merged["valid_count"]["lanes"] == [14, 24]
+
+
+def test_all_token_visualization_layout_and_non_spatial_records():
+    visualization = _load_script("visualize_all_token_attention")
+    sample = {
+        "neighbor_agents_past": np.zeros((320, 31, 11), dtype=np.float32),
+        "static_objects": np.zeros((5, 10), dtype=np.float32),
+        "lanes": np.zeros((140, 20, 33), dtype=np.float32),
+        "route_lanes": np.zeros((25, 20, 33), dtype=np.float32),
+        "polygons": np.zeros((10, 40, 3), dtype=np.float32),
+        "line_strings": np.zeros((60, 20, 4), dtype=np.float32),
+        "goal_pose": np.array([3.0, 4.0, 0.0], dtype=np.float32),
+    }
+    layout = visualization.token_layout(sample)
+    scores = np.zeros(564, dtype=np.float32)
+    valid = np.zeros(564, dtype=bool)
+    selected = [0, 1, 561, 562, 563]
+    valid[selected] = True
+    scores[selected] = 0.2
+
+    records = visualization.token_records(sample, scores, valid)
+
+    assert layout[-1] == ("turn_indicator", 563, 564)
+    assert [record["class"] for record in records] == [
+        "ego",
+        "neighbors",
+        "goal_pose",
+        "ego_shape",
+        "turn_indicator",
+    ]
+    goal = next(record for record in records if record["class"] == "goal_pose")
+    assert goal["distance_m"] == 5.0
+    assert not next(record for record in records if record["class"] == "ego_shape")["spatial"]

@@ -12,7 +12,8 @@ runs and visualizes:
 - Attention analysis inside the Fusion Encoder;
 - valid-token counts and slot utilization by class;
 - data-parallel sample sharding and result aggregation across multiple GPUs;
-- per-scene neighbor-token Attention overlays and continuous MP4 visualization;
+- per-scene neighbor-only and all-token Attention overlays, plus continuous
+  neighbor-Attention MP4 visualization;
 - numerical tables and graphs for FDE, ADE, min FDE, and min ADE in an HTML report.
 
 The model architecture and training procedure are unchanged. These are offline
@@ -27,9 +28,13 @@ analysis tools that operate on a saved checkpoint and an evaluation dataset.
 | `scripts/token_occupancy_scan.py` | Independently scans an NPZ dataset to summarize token-slot occupancy |
 | `scripts/visualize_neighbor_attention.py` | Draws a large bird's-eye-view overlay in which neighbor-token color and marker area represent Attention |
 | `scripts/visualize_neighbor_attention_video.py` | Renders consecutive overlay frames with one global Attention scale and encodes an MP4 |
+| `scripts/visualize_all_token_attention.py` | Draws Attention for every valid Fusion token, including non-spatial tokens in the ranking and JSON |
+| `scripts/visualize_all_token_attention_video.py` | Renders consecutive all-token overlays with one global Attention scale and encodes an MP4 |
 | `run_token_analysis.sh` | Runs both PyTorch analyses, executes the Japanese and English Notebooks, and builds portable HTML reports |
 | `run_neighbor_attention_visualization.sh` | Selects or fixes one scene and generates the neighbor-Attention PNG and JSON |
 | `run_neighbor_attention_video.sh` | Generates a neighbor-Attention MP4 and frame-level JSON around one dataset index |
+| `run_all_token_attention_visualization.sh` | Selects or fixes one scene and generates the all-token Attention PNG and JSON |
+| `run_all_token_attention_video.sh` | Generates an all-token Attention MP4 and frame-level JSON around one dataset index |
 | `notebook/token_analysis.ipynb` | Japanese explanation of the experiment, metrics, complete numerical results, graphs, and interpretation |
 | `notebook/token_analysis_en.ipynb` | English version of the same analysis |
 | `notebook/generate_english_notebook.py` | Generates the English Notebook while keeping its code cells synchronized with the Japanese source |
@@ -364,6 +369,150 @@ and `KEEP_FRAMES=1` retains the intermediate PNG files.
 <OUT_DIR>/<OUTPUT_NAME>_frames/   # only with KEEP_FRAMES=1
 ```
 
+## Per-Scene All-Token Attention Visualization
+
+The all-token visualization uses the same ego-query Fusion Attention as the
+neighbor-only tool but includes every valid encoder token:
+
+- ego;
+- neighbors;
+- static objects;
+- lanes;
+- route lanes;
+- polygons;
+- line strings;
+- goal pose;
+- ego shape;
+- turn indicator.
+
+Spatial tokens are drawn on the bird's-eye view using a different marker shape
+for each class. Color and marker area represent the token's percentage of
+ego-query Attention over all valid tokens. The Top-K chart ranks spatial and
+non-spatial tokens together. Ego shape and turn indicator have no scene
+coordinate, so they appear in the chart and JSON but not as map markers.
+
+The representative positions follow the Encoder definition: current position
+for neighbors and static objects, the middle point for lane/route/polygon/line
+tokens, the goal coordinate for goal pose, and the origin for ego.
+
+### Run with a Fixed Scene
+
+The Shell runner is the simplest entry point:
+
+```bash
+MODEL_DIR=/path/to/best_model \
+DATADIR=/path/to/dataset \
+VALID_LIST=/path/to/path_list_valid.json \
+SAMPLE_INDEX=996 \
+DEVICE=cuda \
+./run_all_token_attention_visualization.sh
+```
+
+`SAMPLE_INDEX` is the zero-based position in `VALID_LIST`. The command writes:
+
+```text
+<OUT_DIR>/<OUTPUT_NAME>.png
+<OUT_DIR>/<OUTPUT_NAME>.json
+```
+
+The same operation can be run directly:
+
+```bash
+.venv/bin/python scripts/visualize_all_token_attention.py \
+  --run_dir /path/to/best_model \
+  --valid_set_list /path/to/path_list_valid.json \
+  --sample_index 996 \
+  --layer mean \
+  --top_k 20 \
+  --view_range 80 \
+  --colormap plasma \
+  --marker_size_min 25 \
+  --marker_size_max 700 \
+  --device cuda \
+  --out_png all_token_attention.png \
+  --out_json all_token_attention.json
+```
+
+### Automatically Select a Scene
+
+Without `SAMPLE_INDEX`, the runner searches moving scenes and selects the scene
+containing the strongest eligible token:
+
+```bash
+SELECT_CLASS=any \
+TURN_ONLY=1 \
+CANDIDATE_COUNT=128 \
+./run_all_token_attention_visualization.sh
+```
+
+To search by one token class:
+
+```bash
+SELECT_CLASS=route ./run_all_token_attention_visualization.sh
+SELECT_CLASS=goal_pose ./run_all_token_attention_visualization.sh
+SELECT_CLASS=polygons ./run_all_token_attention_visualization.sh
+```
+
+`SELECT_CLASS` accepts `any`, `ego`, `neighbors`, `static`, `lanes`, `route`,
+`polygons`, `line_strings`, `goal_pose`, `ego_shape`, or `turn_indicator`.
+Class selection affects scene search only; the generated report always contains
+all valid classes.
+
+### Display Parameters
+
+| Environment variable | Default | Description |
+|---|---:|---|
+| `LAYER` | `mean` | `mean`, `last`, or a zero-based Fusion layer index |
+| `TOP_K` | `20` | Number of tokens ranked and map annotations attempted |
+| `VIEW_RANGE` | `80` | Bird's-eye-view range in meters |
+| `COLORMAP` | `plasma` | Sequential Matplotlib colormap |
+| `MARKER_SIZE_MIN` | `25` | Marker area at zero Attention |
+| `MARKER_SIZE_MAX` | `700` | Marker area at the maximum Attention value |
+| `SELECT_CLASS` | `any` | Token class used for automatic scene selection |
+| `TURN_ONLY` | `1` | Restrict automatic selection to turning scenes |
+| `CANDIDATE_COUNT` | `128` | Number of candidate moving scenes |
+| `OUTPUT_NAME` | `all_token_attention` | PNG/JSON basename |
+
+The JSON contains:
+
+- total valid-token count and Attention sum;
+- valid-token count and total Attention by class;
+- global token index and class-local index;
+- Attention value and percentage;
+- representative position and distance for spatial tokens;
+- neighbor subclass for neighbor tokens.
+
+The percentages over all valid tokens should sum to approximately 100%, apart
+from floating-point rounding. A high-ranked token indicates where the ego query
+read strongly in the selected Fusion layer or layer average. It does not prove
+that the token caused the final trajectory; compare the result with ablation
+metrics and scene context.
+
+### Create an All-Token MP4
+
+The video runner uses the same all-token records as the static visualization and
+keeps one Attention color/size scale across every frame:
+
+```bash
+CENTER_INDEX=996 \
+FRAMES_BEFORE=20 \
+FRAMES_AFTER=40 \
+FPS=10 \
+VIDEO_WIDTH=1920 \
+VIDEO_HEIGHT=1080 \
+DEVICE=cuda \
+./run_all_token_attention_video.sh
+```
+
+The script writes `all_token_attention_index996.mp4` and its JSON metadata under
+`OUT_DIR`. It requires `ffmpeg`, accepts the same `LAYER`, `TOP_K`, `VIEW_RANGE`,
+`COLORMAP`, `MARKER_SIZE_MIN`, and `MARKER_SIZE_MAX` settings as the static
+runner, and supports `STEP` and `KEEP_FRAMES=1`. Frames are scaled and padded
+to preserve the figure aspect ratio and encoded as BT.709 limited-range
+`yuv420p` with a 1:1 sample aspect ratio. As with the neighbor video, the
+selected list must be chronological within one log directory for the sequence
+to represent time.
+
 ## Outputs
 
 By default, `eval_<dataset name>/` is created next to `MODEL_DIR`.
@@ -526,12 +675,14 @@ also uses the PyTorch checkpoint.
 
 - Python syntax checks
 - Ruff lint and format
-- Five regression tests
+- Six regression tests
 - NCCL distributed execution on two A100 80GB GPUs, with 64 of 128 samples per rank
 - `all_reduce` aggregation for all 24 feature-importance configurations
 - Rank-0 aggregation of Attention statistics
 - Static neighbor-token Attention PNG/JSON generation
 - Continuous H.264 MP4/JSON generation with a global Attention scale
+- Static all-token Attention PNG/JSON generation with class-level totals
+- Continuous all-token H.264 MP4/JSON generation with a global Attention scale
 - Notebook JSON validation
 - Sequential execution of every Notebook code cell
 - Conversion to HTML with embedded images
