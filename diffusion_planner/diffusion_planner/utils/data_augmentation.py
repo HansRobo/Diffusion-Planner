@@ -261,6 +261,16 @@ class StatePerturbation:
         ego_current_state[:, 8] = steering_angle
         ego_current_state[:, 9] = new_yaw_rate
 
+        # ay is the lateral (centripetal) acceleration, which kinematically equals
+        # vx * yaw_rate. Perturbing vx by up to +-1 m/s while carrying ay over unchanged
+        # breaks that relation by dvx * yaw_rate — up to +-0.48 m/s^2 at yaw_rate 0.48 rad/s,
+        # i.e. several times the +-0.1 m/s^2 the ay perturbation itself is allowed. Rebuild ay
+        # from the perturbed speed and keep the sampled ay noise on top. steering_angle above
+        # is already recomputed the same way.
+        ego_current_state[:, 7] = (
+            ego_current_state[:, 4] * new_yaw_rate + scaled_random_tensor[:, 6]
+        )
+
         # Discard augmentations that cause collisions
         collision = self._check_aug_validity(ego_current_state, inputs)
         aug_flag = aug_flag & ~collision
