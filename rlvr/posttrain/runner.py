@@ -154,7 +154,9 @@ def resume_spec(spec: Spec) -> Spec:
     return replace(spec, train=train)
 
 
-def run_until_complete(spec: Spec, *, max_stalls: int = 3, **kwargs) -> int:
+def run_until_complete(
+    spec: Spec, *, max_stalls: int = 3, retry_seconds: int = 60, **kwargs
+) -> int:
     """Relaunch an arm until it reaches its target epoch.
 
     Long post-training runs die for reasons that have nothing to do with the
@@ -163,6 +165,12 @@ def run_until_complete(spec: Spec, *, max_stalls: int = 3, **kwargs) -> int:
     What is *not* a resume is a run that comes back and writes no new epoch: that
     is a real failure repeating itself, so identical stalls are counted and the
     supervisor gives up rather than burning the GPUs in a crash loop.
+
+    An attempt that stalls before the trainer starts, though, is usually a race
+    rather than a verdict -- an artifact from the arm ahead still landing, a node
+    whose scheduler has not come back yet -- and retrying inside the same second
+    spends the whole allowance before any of that could have resolved.  So a
+    stalled attempt waits, and waits longer each time.
     """
 
     if kwargs.get("detach"):
@@ -195,6 +203,8 @@ def run_until_complete(spec: Spec, *, max_stalls: int = 3, **kwargs) -> int:
         if stalls >= max_stalls:
             print(f"{spec.name}: giving up at epoch {after}/{target}")
             return code or 1
+        if retry_seconds > 0:
+            time.sleep(retry_seconds * stalls)
 
 
 def wait_for_path(pattern: str | Path, poll_seconds: int = 60) -> None:

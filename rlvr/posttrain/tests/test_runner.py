@@ -101,7 +101,10 @@ def test_a_run_that_finishes_no_epoch_is_not_retried_forever(tmp_path, monkeypat
         return 1
 
     monkeypatch.setattr(runner, "run", fake_run)
-    assert runner.run_until_complete(arm(tmp_path, epochs=3), max_stalls=2) == 1
+    assert (
+        runner.run_until_complete(arm(tmp_path, epochs=3), max_stalls=2, retry_seconds=0)
+        == 1
+    )
     assert len(calls) == 2
 
 
@@ -118,8 +121,26 @@ def test_progress_clears_the_stall_count(tmp_path, monkeypatch):
         return writer(spec, **kwargs)
 
     monkeypatch.setattr(runner, "run", flaky)
-    assert runner.run_until_complete(arm(tmp_path, epochs=3), max_stalls=2) == 0
+    assert (
+        runner.run_until_complete(arm(tmp_path, epochs=3), max_stalls=2, retry_seconds=0)
+        == 0
+    )
     assert completed_epoch(tmp_path / "dual") == 3
+
+
+def test_a_stalled_attempt_waits_before_the_next_one(tmp_path, monkeypatch):
+    """The artifact an arm resumes from can still be landing when it first tries.
+
+    Three attempts inside the same second exhaust the allowance before a race
+    could have resolved, so the wait is what makes the retries worth having.
+    """
+
+    slept: list[float] = []
+    monkeypatch.setattr(runner.time, "sleep", slept.append)
+    monkeypatch.setattr(runner, "run", lambda spec, **kwargs: 78)
+    assert runner.run_until_complete(arm(tmp_path, epochs=3), max_stalls=3) == 78
+    # Backs off between attempts, and does not wait after the last one.
+    assert slept == [60, 120]
 
 
 def test_waiting_for_an_existing_path_does_not_block(tmp_path):

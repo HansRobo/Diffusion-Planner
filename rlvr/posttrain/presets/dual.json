@@ -26,6 +26,11 @@
     "candidate weighting this arm exists to apply. Preflight rejects that combination",
     "rather than letting it abort every rank once the refresh epoch arrives. To sample",
     "fresher candidates, mine again with the mine spec and resume from the new buffer.",
+    "The objective weights the candidate columns only: both anchor slots are appended after",
+    "it at the weights set here, and because each column is scored as a mean over its own",
+    "horizon, the step-1 slot spends its whole weight on the one step the vehicle executes.",
+    "That is the half that moves the executed waypoint, so swapping --awr_objective for grpo",
+    "or dpo changes the candidate half and leaves this one as it is.",
     "To continue an interrupted run, point both switches at runs/dual instead; that is",
     "what the runner's --supervise does on every relaunch."
   ],

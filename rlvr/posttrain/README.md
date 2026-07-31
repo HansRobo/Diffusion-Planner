@@ -25,10 +25,15 @@ relaunches the arm against its **own** newest checkpoint — new `model_path`, n
 `start_epoch`, both resume switches on. A node reboot, a preempted job or a transient
 CUDA fault is a resume, not a decision. An attempt that comes back having finished no
 epoch is a real failure repeating, so identical stalls are counted and it stops rather
-than burning GPUs in a crash loop. Detach the supervisor itself, not the attempts.
+than burning GPUs in a crash loop — with a growing pause between them, because a stall
+before the trainer even starts is usually something still landing rather than a verdict.
+Detach the supervisor itself, not the attempts.
 
 `--after` waits for a path before starting, which is how one arm follows the artifact
 another arm produces without either knowing the timestamped directory the other picked.
+It resolves the specs it was given *before* it waits, so the presets are read at launch:
+edit an arm the supervisor is already parked on and restart it, or it will run the version
+it started with.
 
 ## Methods
 
@@ -41,6 +46,20 @@ independently and it is worth keeping them apart:
 Anchors, guidance and reward overrides are neither: they are flags, and they compose with
 any objective. The bundled `dual` and `h1` arms are both `objective: awr` and differ only
 in their anchor flags, not in method — see **Bundled arms** below.
+
+They do not compose as equal halves at the first waypoint, though, which is worth knowing
+before swapping either one. An anchor is a target column appended to the group holding the
+logged trajectory, carrying `expert_anchor_weight` as written
+(`_inject_expert_anchor_batch`; with `expert_anchor_replace_worst` it overwrites the
+weakest column instead of appending). The objective never sees that column and cannot
+scale it, and since every column is scored as a mean over its own horizon, the weight a
+column spends *per step* is its weight over its horizon: a horizon-1 anchor puts all of it
+on the one step the vehicle executes, while a candidate — and a full-horizon anchor —
+spreads the same weight over the whole plan. So the anchor flags are what move the executed
+waypoint, and swapping `awr` for `grpo` or `dpo` re-weights the candidates around them.
+Anchor weights are therefore read as multiples of an average candidate weight, not as
+absolute numbers: the objective normalises its own columns to mean `|w| = 1` and the anchor
+column is appended after that.
 
 **Candidate-weighting objectives** run inside `rlvr.train_awr`. It reduces
 `(per_candidate_loss * weights).sum()` over a scene group, so an objective is just a rule
@@ -210,6 +229,11 @@ your own preset if you want it.
 The trainer reduces `(per_candidate_loss * weights).sum()` over a scene group,
 so an objective is a function from that group's rewards to per-candidate
 weights. Register one and it is selectable; nothing else changes.
+
+"Nothing else" includes the anchors: an objective governs the candidate
+columns only, and the expert-anchor columns are appended after it at their
+configured weight (**Methods**). A new rule is measured alongside them, not in
+place of them, so compare two objectives at fixed anchor flags.
 
 ```python
 from rlvr.posttrain.objectives import objective, diagnostics
