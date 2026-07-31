@@ -187,15 +187,11 @@ class StatePerturbation:
     def __call__(self, inputs, ego_future, neighbors_future):
         aug_flag, aug_ego_current_state = self.augment(inputs)
 
-        # Interpolate future trajectory
-        interpolated_ego_future = self.interpolation_future_trajectory(
-            aug_ego_current_state, ego_future
-        )
-
-        inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
-        ego_future[aug_flag] = interpolated_ego_future[aug_flag]
-
-        # Scale past trajectory and current state velocity/acceleration
+        # Scale past trajectory and current state velocity/acceleration.
+        # This has to happen BEFORE the future is interpolated: the interpolation uses the
+        # current velocity/acceleration as its start boundary condition, so scaling the state
+        # afterwards left the state reporting a speed the target trajectory does not start
+        # with (up to +-20%, i.e. +-1.6 m/s at 8 m/s).
         B_aug = aug_flag.sum().item()
         if B_aug > 0:
             W = self._ego_past_noise_std
@@ -209,8 +205,16 @@ class StatePerturbation:
             inputs["ego_agent_past"][aug_flag] = ego_past_aug
 
             scale_1d = scale.squeeze(-1)  # (B_aug, 1)
-            inputs["ego_current_state"][aug_flag, 4:6] *= scale_1d  # vx, vy
-            inputs["ego_current_state"][aug_flag, 6:8] *= scale_1d  # ax, ay
+            aug_ego_current_state[aug_flag, 4:6] *= scale_1d  # vx, vy
+            aug_ego_current_state[aug_flag, 6:8] *= scale_1d  # ax, ay
+
+        # Interpolate future trajectory
+        interpolated_ego_future = self.interpolation_future_trajectory(
+            aug_ego_current_state, ego_future
+        )
+
+        inputs["ego_current_state"][aug_flag] = aug_ego_current_state[aug_flag]
+        ego_future[aug_flag] = interpolated_ego_future[aug_flag]
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
