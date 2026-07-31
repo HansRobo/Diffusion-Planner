@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from diffusion_planner.utils.dist_init import dist_init_file_path
 from run_utils import NCCL_ENV, gpu_count, tee_run
 
 
@@ -48,12 +49,16 @@ def main() -> None:
     save_path = Path("/mnt/nvme/training_result") / f"{datetime.now():%Y%m%d-%H%M%S}_{exp_name}"
     save_path.mkdir(parents=True, exist_ok=True)
 
-    for name, cmd in (("git_show.txt", ["git", "show", "-s"]), ("git_diff.txt", ["git", "diff"])):
-        (save_path / name).write_text(
-            subprocess.run(cmd, cwd=here, capture_output=True, text=True).stdout
-        )
+    def git_output(cmd: list[str]) -> str:
+        return subprocess.run(cmd, cwd=here, capture_output=True, text=True).stdout
 
-    Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
+    branch = git_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    (save_path / "git_show.txt").write_text(
+        f"branch: {branch}\n\n" + git_output(["git", "show", "-s", "--decorate"])
+    )
+    (save_path / "git_diff.txt").write_text(git_output(["git", "diff"]))
+
+    dist_init_file_path().unlink(missing_ok=True)
 
     cmd = [
         sys.executable,

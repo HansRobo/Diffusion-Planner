@@ -59,11 +59,15 @@ def enumerate_routes(npz_root: Path) -> dict[str, list[Path]]:
 def resolve_npz_roots(npz_root) -> list[Path]:
     """Resolve a closed-loop npz input into the list of root directories to enumerate.
 
-    The input is either a single directory tree of NPZ frames (globbed recursively), or a
-    ``.json`` file holding a list of such directory paths (one route dir per entry) -- the same
-    "path list" form as ``--train_set_list`` / ``--valid_set_list``. A directory is returned as a
-    one-element list; a JSON list is returned verbatim (each entry a ``Path``).
+    The input is a single directory tree of NPZ frames (globbed recursively), a ``.json`` file
+    holding a list of such directory paths (one route dir per entry) -- the same "path list"
+    form as ``--train_set_list`` / ``--valid_set_list`` -- or an already-resolved list of paths
+    (e.g. from ``site_discovery.discover_sites_from_json``, which does its own per-site
+    grouping). A directory is returned as a one-element list; a JSON list or a pre-resolved
+    list is returned verbatim (each entry a ``Path``).
     """
+    if isinstance(npz_root, (list, tuple)):
+        return [Path(p) for p in npz_root]
     npz_root = Path(npz_root)
     if npz_root.suffix == ".json":
         entries = json.loads(npz_root.read_text())
@@ -73,6 +77,30 @@ def resolve_npz_roots(npz_root) -> list[Path]:
             raise ValueError(f"{npz_root} is an empty path list")
         return [Path(e) for e in entries]
     return [npz_root]
+
+
+def enumerate_multi_root_routes(npz_root) -> tuple[dict[str, list[Path]], dict[str, Path]]:
+    """Merge routes from every root in ``resolve_npz_roots(npz_root)`` into one route dict.
+
+    Disambiguates any bag-prefix key that collides across roots (via ``route_label``, then a
+    numeric suffix as a last resort) and remembers the source root of each route, so a
+    downstream pose-sidecar fallback stays scoped to the correct tree. Returns
+    ``(routes, route_sidecar_dir)``, both keyed by the final (disambiguated) route key.
+    """
+    roots = resolve_npz_roots(npz_root)
+    routes: dict[str, list[Path]] = {}
+    route_sidecar_dir: dict[str, Path] = {}
+    for root in roots:
+        for key, paths in enumerate_routes(root).items():
+            # Key each route by its <location>_<date>_<time>_<idx> label so the per-segment PNG
+            # dirs and MP4s carry the site + date, not just the ambiguous time-of-day bag prefix.
+            label = route_label(paths[0], key)
+            uniq, n = label, 1
+            while uniq in routes:
+                uniq, n = f"{label}#{n}", n + 1
+            routes[uniq] = paths
+            route_sidecar_dir[uniq] = root
+    return routes, route_sidecar_dir
 
 
 def _require_block(row: dict, category: str) -> dict:
@@ -287,6 +315,20 @@ def aggregate(
     n_seg = len(rows)
     total_steps = sum(int(r["n_steps_run"]) for r in rows)
 
+    # Graded (non-saturating) headline metrics: these improve smoothly as the model trains,
+    # unlike the binary *_segment_rate / worst-moment *_min_clearance keys nested below.
+    completions = [r["route_completion"] for r in rows if "route_completion" in r]
+    # gt-deviation pooled across all steps (weight each segment's mean by its step count, which
+    # equals that segment's gt-deviation sample count), so long routes aren't under-weighted.
+    dev_num = sum(
+        r["mean_gt_deviation_m"] * r["n_steps_run"]
+        for r in rows
+        if np.isfinite(r.get("mean_gt_deviation_m", float("inf")))
+    )
+    dev_den = sum(
+        r["n_steps_run"] for r in rows if np.isfinite(r.get("mean_gt_deviation_m", float("inf")))
+    )
+
     term_counts: dict[str, int] = {}
     for r in rows:
         term = r["terminated"]
@@ -335,9 +377,14 @@ def aggregate(
     normal = sum(int(_require_block(r, "reproducer")["normal_steps"]) for r in rows)
     repeat = sum(int(_require_block(r, "reproducer")["repeat_steps"]) for r in rows)
 
+    n_seg_diverged = term_counts.get("diverged", 0)
     return {
         "n_segments": n_seg,
         "total_steps": total_steps,
+        "mean_route_completion": float(np.mean(completions)) if completions else 0.0,
+        "mean_gt_deviation_m": float(dev_num / dev_den) if dev_den else float("inf"),
+        "n_segments_diverged": n_seg_diverged,
+        "diverged_segment_rate": n_seg_diverged / n_seg if n_seg else 0.0,
         "object": obj,
         "road_border": rb,
         "red_light_violation": red,
@@ -410,6 +457,10 @@ def run_closed_loop_eval(
     yaw_gate: bool = True,
     verbose: bool = True,
     shard: tuple[int, int] | None = None,
+    abort_deviation_m: float = 0.0,
+    abort_after: int = 30,
+    abort_max_snaps: int = 0,
+    drop_objects: bool = False,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
 
@@ -431,8 +482,10 @@ def run_closed_loop_eval(
     the input history each step, held across cached-plan steps when ``replan_interval`` > 1
     (see ``render_segment``).
 
-    Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-route MP4)
-    and ``elapsed_sec``.
+    ``drop_objects``: empty-world ablation, forwarded to ``render_segment`` (see its docstring).
+
+    Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-route MP4),
+    ``segments`` (list[row]), and ``elapsed_sec``.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -449,22 +502,11 @@ def run_closed_loop_eval(
         prev_ego_prediction_from_control = decoder._ego_prediction_from_control
         decoder._ego_prediction_from_control = ego_prediction_from_control
 
-    # npz_root is either one directory tree or a JSON path list of route dirs; enumerate each and
-    # merge, disambiguating any bag-prefix key that collides across roots and remembering the source
+    # npz_root is either one directory tree, a JSON path list of route dirs, or an
+    # already-resolved list of roots -- enumerate_multi_root_routes merges them all,
+    # disambiguating any bag-prefix key that collides across roots and remembering the source
     # root of each route so its pose-sidecar fallback stays scoped to that tree.
-    roots = resolve_npz_roots(npz_root)
-    routes: dict[str, list[Path]] = {}
-    route_sidecar_dir: dict[str, Path] = {}
-    for root in roots:
-        for key, paths in enumerate_routes(root).items():
-            # Key each route by its <location>_<date>_<time>_<idx> label so the per-segment PNG dirs
-            # and MP4s carry the site + date, not just the ambiguous time-of-day bag prefix.
-            label = route_label(paths[0], key)
-            uniq, n = label, 1
-            while uniq in routes:
-                uniq, n = f"{label}#{n}", n + 1
-            routes[uniq] = paths
-            route_sidecar_dir[uniq] = root
+    routes, route_sidecar_dir = enumerate_multi_root_routes(npz_root)
     route_keys = sorted(routes)
     if shard is not None:
         rank, world_size = shard
@@ -505,6 +547,10 @@ def run_closed_loop_eval(
                 tracker_mode=tracker_mode,
                 strong_brake_mps2=strong_brake_mps2,
                 yaw_gate=yaw_gate,
+                abort_deviation_m=abort_deviation_m,
+                abort_after=abort_after,
+                abort_max_snaps=abort_max_snaps,
+                drop_objects=drop_objects,
             )
             row = {"route": key, **metrics}
             # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so
