@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.dimensions import INPUT_T, POSE_DIM
+from diffusion_planner.dimensions import INPUT_T, output_dim_for_mode
 from diffusion_planner.model.guidance.collision import (
     batch_signed_distance_rect,
     center_rect_to_points,
