@@ -114,6 +114,10 @@
   <li><a href="#lowspeed">低速・停車〜発進問題への影響評価</a></li>
   <li><a href="#actions">推奨アクション</a></li>
   <li><a href="#todo">未検証の確認事項（データが必要）</a></li>
+<<<<<<< Updated upstream
+=======
+  <li><a href="#reference">参照実装 <code>trajectory_data_augmentation_test</code> との比較</a></li>
+>>>>>>> Stashed changes
 </ol>
 </div>
 
@@ -1268,13 +1272,225 @@ print("neighbor_agents_future 列数:", dict(widths))   # 3 == (x,y,heading) / 4
 <p>優先度 1・2 の各修正を個別に、停車〜発進シーンのみを抜いた評価セットで
 closed-loop（<code>closed_loop_validate</code>）比較する。単独で効くのがどれか切り分ける。</p>
 
+<<<<<<< Updated upstream
+=======
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="reference">11. 参照実装（<code>yukkysaito/trajectory_data_augmentation_test</code>）との比較</h2>
+
+<p class="sub" style="margin-top:0">
+対象: <code>github.com/yukkysaito/trajectory_data_augmentation_test</code> @ <code>bf84180</code>
+（<code>trajectory_augmentation/core.py</code> 1567 行 / <code>cli.py</code> 470 行 / <code>visualization.py</code> 546 行、
+依存は numpy + plotly のみ）。<code>docs/algorithm_and_parameters.md</code> に日本語の詳細仕様がある。
+</p>
+
+<h3>11.1 位置づけ: tier4 の bridge 版の<u>上流リファレンス実装</u></h3>
+<ul>
+  <li>コミット列が bridge 版の機能とそのまま対応する:
+      <code>dbb7249</code> "Implement state-matched merge augmentation" →
+      <code>1bdd07f</code> "Add lateral acceleration feasibility search" →
+      <code>87d1bc9</code> "Add bridge speed and jerk feasibility constraints" →
+      <code>b6df52f</code> "Add history decorrelation: M/N randomization and past-history bump"。</li>
+  <li>関数対応もほぼ 1:1 —
+      <code>augment_directed_segment</code> ↔ <code>augment_segment_prepared_torch</code>、
+      <code>plan_recovery_path</code> / <code>solve_merge_centerline_s</code> ↔ 同名の <code>_torch</code> 版、
+      <code>build_merge_path</code> ↔ <code>build_offset_path_torch</code>、
+      <code>augment_trajectory_bidirectional</code> ↔ <code>_build_augmented_sample</code>。</li>
+  <li>README 自身が
+      "This makes it easier to reuse the augmentation logic and visualization helpers from other
+      repositories such as <code>Diffusion-Planner</code>" と述べている。</li>
+  <li>学習コードは無く、<strong>合成 GT 15 パターン（形状 3 × 速度 5）＋ Plotly 可視化 ＋ unittest による
+      アルゴリズム検証専用のテストベンチ</strong>。</li>
+</ul>
+
+<h3>11.2 同一の部分 — 数値まで一致することを実測</h3>
+<div class="tw"><table>
+<thead><tr><th>要素</th><th>参照実装</th><th>tier4 bridge 版</th></tr></thead>
+<tbody>
+<tr><td>横オフセット減衰</td>
+    <td>5 次多項式。境界条件 <code>l(0)=offset, l'(0)=tan(yaw), l''(0)=0, l(L)=l'(L)=l''(L)=0</code> を連立で解く</td>
+    <td>同じ BVP の<strong>解析解をハードコード</strong>（<code>1−10u³+15u⁴−6u⁵</code>, <code>u−6u³+8u⁴−3u⁵</code>）→ 数学的に同一</td></tr>
+<tr><td>合流点探索</td><td>距離バジェット内に収まる最大 <code>s_merge</code> を二分法（50 反復, tol 1e-3, <code>dense_ds</code> 0.05）</td><td>同一</td></tr>
+<tr><td>速度整合</td><td>進捗ベース。merge 後は GT の時刻-距離関係を合流点基準でシフトして流用</td><td>同一</td></tr>
+<tr><td>双方向化</td><td>過去は時間反転セグメント、heading offset は符号反転</td><td>同一</td></tr>
+<tr><td>制約</td><td>横加速度 3.0 m/s² / ブリッジ速度乖離 0.5 m/s / ブリッジジャーク 5.0 m/s³</td><td>同一（既定値も同じ）</td></tr>
+<tr><td>適応探索</td><td>N 延長 → (M,N) 総当たり、0.1 s グリッド</td><td>同一</td></tr>
+</tbody>
+</table></div>
+
+<div class="box ok">
+<p class="hd">実測: 同一入力で両実装を走らせると未来 8 s の全 80 点で<u>最大差 0.000 m</u></p>
+<p>
+参照の合成 GT（<code>test_patterns/*.csv</code>）を読み込み、同一の (offset, yaw, M, N) を与えて
+参照実装と tier4 の <code>_build_augmented_sample</code> を実行し比較した
+（<code>straight_constant</code> / <code>curve_decelerating</code> / <code>straight_stopping</code> /
+<code>straight_stop8s</code> / <code>s_curve_constant</code>、offset 0.5〜5.0 m、M=1.0 s, N=1.5〜2.0 s）。
+</p>
+<p>
+全ケースで <strong>最大位置差 0.000 m</strong>、終端速度・弧長も一致。<strong>移植は忠実</strong>である。
+オフセット 3.0 m での GT との終端ラグ（参照 0.218 m / tier4 0.218 m）も一致した。
+</p>
+</div>
+
+<h3>11.3 参照にあって tier4 に<u>移植されていない</u>もの</h3>
+
+<h4>(1) ホライズン余裕 — 参照は 過去 5 s / 未来 10 s の GT で 過去 3 s / 未来 8 s を出力</h4>
+<p>tier4 は学習テンソルそのまま（<strong>過去 2.0 s / 未来 8.0 s</strong>）で余裕ゼロ。実測での影響:</p>
+<ul>
+  <li><strong>未来側は影響なし。</strong> 合流点は距離バジェットを<em>縮める</em>方向に探索されるため
+      <code>merge_time ≤ connect_time</code> となり、<code>shifted_gt_time</code> が上限に当たらない
+      （実測: offset 2〜5 m で δ = −0.01〜−0.13 s）。末尾の凍結も発生しない。</li>
+  <li><strong>過去側は制限される。</strong> <code>M ≤ 2.0 s</code>（参照は <code>M ≤ 5.0 s</code>）。
+      M=3/4/5 s を要求した場合、過去軌跡が最大 <strong>0.75 / 1.21 / 1.52 m</strong> 食い違う（t0 直前 0.5 s は一致）。</li>
+  <li>さらに tier4 の<strong>実効オフセット上限（±0.75 m）＋ yaw 10° の時点で、
+      curve / s_curve では採用 M が既に 2.0 s ＝ 上限に張り付く</strong>（実測）。過去側の余裕が無い。</li>
+</ul>
+
+<h4>(2) ショートカット学習（copycat）対策 2 種 — 参照の最新コミットで追加、tier4 未移植</h4>
+<p>参照の docs / README は問題をこう明記している:
+「過去ブリッジは<strong>離脱の形を履歴に符号化する</strong>ため、モデルが地図を見ずに
+自車履歴の外挿だけで復帰軌道を当てられてしまう恐れがある」。対策:</p>
+<div class="tw"><table>
+<thead><tr><th>対策</th><th>内容</th><th>tier4</th></tr></thead>
+<tbody>
+<tr><td><strong>M/N ランダム化</strong></td>
+    <td>最小実行可能 M/N の上に <code>U(0, 1.5 s)</code> を上乗せして 0.1 s グリッドにスナップ。
+        同じ過去に複数の復帰が対応するようにする。毎回制約を再検証（最大 10 回再抽選）</td>
+    <td><span class="tag t-bad">無し</span></td></tr>
+<tr><td><strong>過去履歴バンプ</strong></td>
+    <td>過去（条件付け側）にのみ <code>sin³</code> 窓の横バンプ 1 個を注入して離脱シグネチャを壊す。
+        振幅 0.05–0.20 m（符号ランダム）、持続 1.0–2.0 s、開始は t0 から 0.3 s 以前。
+        <code>sin³</code> は両端で値・1 階・2 階微分がゼロなので C2 連続。
+        <strong>未来ターゲットには適用しない。</strong> 制約違反なら再抽選（最大 20 回）</td>
+    <td><span class="tag t-bad">無し</span></td></tr>
+</tbody>
+</table></div>
+<p>
+<strong>tier4 の quintic 版・bridge 版どちらにもこの対策は無い。</strong>
+quintic 版は過去を座標変換すらしていない（#C）ため離脱シグネチャは履歴に出ないが、
+それは「対策済み」ではなく「過去と地図の整合が崩れている」別の問題である。
+</p>
+
+<h4>(3) 制約不成立時の扱い</h4>
+<div class="box bad">
+<p class="hd">参照は診断を返して呼び出し側に委ねる / tier4 は違反サンプルを<u>そのまま採用する</u></p>
+<p>
+参照は <code>FeasibilitySearchDiagnostics</code> を返し、CLI は "No feasible candidate" と報告する。
+一方 tier4 の <code>_search_feasible_sample</code> は探索が全滅すると<strong>初期 M/N の結果を無条件で返し</strong>、
+<code>augment()</code> は <code>RuntimeError</code> 以外では棄却しない（<code>:1347-1372</code>）。
+つまり <code>passes</code> を確認せずに学習へ流す。
+</p>
+<p>実測（offset 3.0 m, 初期 M/N = 1.0/1.5）: 探索は失敗し初期値が採用され、</p>
+<div class="tw"><table>
+<thead><tr><th>pattern</th><th>横加速度（上限 3.0）</th><th>速度乖離（上限 0.5）</th><th>ジャーク（上限 5.0）</th><th>判定</th></tr></thead>
+<tbody>
+<tr><td>straight_constant</td><td class="num">15.27</td><td class="num">0.00</td><td class="num">0.04</td><td><span class="tag t-bad">FAIL</span></td></tr>
+<tr><td>curve_decelerating</td><td class="num">16.86</td><td class="num">1.19</td><td class="num"><strong>58.59</strong></td><td><span class="tag t-bad">FAIL</span></td></tr>
+<tr><td>s_curve_constant</td><td class="num">16.45</td><td class="num">0.76</td><td class="num">37.80</td><td><span class="tag t-bad">FAIL</span></td></tr>
+</tbody>
+</table></div>
+<p>
+現行の <code>±0.75 m</code> サンプリング範囲では探索が成功する（実測で全パターン PASS）ため到達しないが、
+<strong>オフセット範囲を広げた瞬間に踏む</strong>。<code>passes</code> を見て <code>aug_flag=False</code> にすべき。
+</p>
+</div>
+
+<h4>(4) 細部</h4>
+<ul>
+  <li>参照は <code>solve_merge_centerline_s</code> にオフセットゼロの早期リターンを持つ。tier4 は <code>valid_offset</code> チェックで代替。</li>
+  <li>参照は <code>0 &lt; connect_time_s ≤ segment.t[-1]</code> を <code>ValueError</code> で弾く。tier4 は clamp（黙って縮める）。</li>
+  <li>参照は <code>wheel_base</code> を使わない。tier4 は固定値 2.75 をコンストラクタに持つ（#K）。</li>
+</ul>
+
+<h3>11.4 tier4 側にあって参照に無いもの</h3>
+<ul>
+  <li><strong>衝突・境界チェック</strong>（quintic の <code>_check_aug_validity</code>）。
+      参照は運動学制約のみで他車・縁石を見ない（自車軌跡単体のテストベンチなので当然）。</li>
+  <li><strong><code>ego_current_state</code>（v, a, steering, yaw_rate）の再導出</strong>。
+      参照は (x, y, yaw) と速度／加速度／ジャークのプロファイルだけを扱い、状態ベクトルを作らない。
+      → <strong>§6 で指摘した速度・加速度の不整合はすべて tier4 側のグルーコードに起因し、参照実装には存在しない。</strong></li>
+  <li>地図・neighbor・goal_pose・static objects 等の全チャネル座標変換（§3.5 のゼロマスク問題も tier4 固有）。</li>
+  <li><strong>quintic 版（5 次エルミート補間）は参照実装に対応物が無い完全な別方式。</strong>
+      §5.2・§6.1〜6.4 で定量化した欠陥はすべてこちら側にあり、参照実装とは無関係。
+      <strong>既定が quintic であることが最大の乖離</strong>。</li>
+</ul>
+
+<h3>11.5 低速・停車問題の観点での比較</h3>
+
+<div class="box bad">
+<p class="hd">参照実装も「t0 で停車している」ケースを解いていない</p>
+<ul>
+  <li>15 パターンすべて <strong>t0 で 8〜10 m/s 出ている</strong>（<code>build_speed_profile</code>）。
+      <code>stopping</code> は t=+5 s で停止、<code>stop8s</code> は t=+8 s で停止＝<strong>いずれも t0 では走行中</strong>。
+      「t0 で停車 → 発進」はテストパターンに存在しない。</li>
+  <li>手法上の理由は明快: 横オフセットを<strong>弧長</strong>で減衰させる方式なので、停車中は
+      <code>distance_budget_m ≈ 0</code>（弧長ゼロ）でオフセットを吸収する距離が無く、原理的に成立しない。
+      <strong>tier4 の <code>|vx| ≥ 2.0 m/s</code> ゲートはこの制約の裏返し</strong>であり、恣意的な閾値ではない。</li>
+  <li>参照側も停止シーンには注意を払っている:
+      <ul>
+        <li><code>stopping</code> / <code>stop8s</code> は曲率テストから除外（<code>tests/test_augmentation.py:142</code>）</li>
+        <li>バンプは弧長 0.5 m 未満（ほぼ停止中）ならスキップ（<code>min_bump_length_m</code>）</li>
+        <li><code>test_stop8s_fixed_bridge_keeps_terminal_speed_above_gt</code> で
+            <strong>「停止シーンでは拡張軌跡の終端速度が GT より高い（＝まだ走っている）」ことを仕様として固定</strong>している。
+            進捗保存方式の必然的な帰結を、バグではなく仕様として受け入れている。</li>
+      </ul>
+  </li>
+</ul>
+<p>
+つまり<strong>低速・停車域の augmentation は上流でも未解決課題</strong>である。
+tier4 の 2 m/s ゲートを外すには、閾値をいじるのではなく方式自体の拡張が必要。
+</p>
+</div>
+
+<div class="box">
+<p class="hd">参照 docs が挙げる未実装候補が、低速問題に対する最も筋の良い案</p>
+<p>
+<code>docs/algorithm_and_parameters.md</code> §6「既知の限界と今後の候補」に
+<strong>「過去履歴の剛体シフトモード」</strong>が未実装候補として挙げられている
+（履歴全体を平行にオフセットして離脱の手がかり自体を消す。自己位置推定誤差の模擬として自然）。
+</p>
+<p>
+これは<strong>弧長を必要としないので停車中にも適用できる</strong>。
+「停車していて、かつ横に 0.5 m ずれている」状態を、future を書き換えずに作れる
+（自己位置推定誤差の模擬なので future の目標は変わらないのが正しい）。
+§9 の優先度 1-3「低速専用の軽い augmentation」の具体案として、これがそのまま使える。
+</p>
+</div>
+
+<h3>11.6 まとめ</h3>
+<div class="tw"><table>
+<thead><tr><th>観点</th><th>評価</th></tr></thead>
+<tbody>
+<tr><td>bridge 版の移植品質</td>
+    <td><span class="tag t-ok">良好</span> 同一入力で最大差 0.000 m。アルゴリズムは忠実に移植されている</td></tr>
+<tr><td>過去ホライズン</td>
+    <td><span class="tag t-warn">不足</span> M ≤ 2.0 s（参照 5.0 s）。実効オフセット上限で既に上限に張り付く</td></tr>
+<tr><td>copycat 対策</td>
+    <td><span class="tag t-bad">未移植</span> M/N ランダム化・過去バンプのどちらも無い</td></tr>
+<tr><td>制約違反時の扱い</td>
+    <td><span class="tag t-bad">要修正</span> 参照は呼び出し側に委ねるが、tier4 は違反サンプルを黙って採用する</td></tr>
+<tr><td>既定が quintic</td>
+    <td><span class="tag t-bad">最大の乖離</span> 実際に使われている quintic は参照実装に対応物が無い別方式で、
+        §5.2・§6 の欠陥はすべてそこにある。bridge を既定にできれば大半が解消する
+        （ただし §4.2 の実行速度・衝突チェック未実装が障壁）</td></tr>
+<tr><td>低速・停車</td>
+    <td><span class="tag t-warn">上流も未解決</span> 参照も t0 停車をスコープ外にしている。
+        剛体シフトモードが有力候補</td></tr>
+</tbody>
+</table></div>
+
+>>>>>>> Stashed changes
 <div class="foot">
 検証スクリプト:
 <code>scratchpad/exp_smoothing.py</code>（§5.1）,
 <code>scratchpad/exp_quintic.py</code>（§5.2）,
 <code>scratchpad/exp_kinematics.py</code>（§6.1-6.4）,
 <code>scratchpad/exp_padmask.py</code>（§3.5）,
+<<<<<<< Updated upstream
 <code>scratchpad/exp_nbrfuture.py</code>（§7.1）。
+=======
+<code>scratchpad/exp_nbrfuture.py</code>（§7.1）,
+<code>scratchpad/exp_compare_ref.py</code> / <code>exp_compare_sweep.py</code> / <code>exp_compare_past.py</code> / <code>exp_t4_search.py</code>（§11）。
+>>>>>>> Stashed changes
 すべて dev の worktree (<code>git worktree add --detach &lt;dir&gt; dev</code>) 上で実行し、tier4-main 版と同一の結果を確認済み。
 いずれも合成軌跡のみで実データ不要のため再実行可能。
 </div>
