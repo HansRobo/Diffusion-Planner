@@ -997,6 +997,55 @@ def _args_json_for_model(model_path: Path) -> Path:
     raise FileNotFoundError(f"Could not find args.json next to {model_path}")
 
 
+_EMA_INFER_CACHE: dict[str, Path] = {}
+# Set in main() to <output_dir>/ema_infer_cache; used when the checkpoint's own
+# directory is not writable (e.g. a shared base model owned by another user).
+_EMA_INFER_FALLBACK_ROOT: Path | None = None
+
+
+def _ema_inference_model_path(model_path: Path | str) -> Path:
+    """Weights for closed-loop inference phases (mining / repair / guards).
+
+    Base-training checkpoints store the raw optimizer iterates under "model" and
+    the deployable EMA under "ema_state_dict"; simulate.load_model reads "model",
+    so handing the training checkpoint straight to an inference phase silently
+    drives the raw iterates. Extract the EMA once, next to the checkpoint, and
+    return that path. Checkpoints without an EMA pass through unchanged.
+    Training resume must keep the original checkpoint (it needs optimizer/EMA
+    state), so only inference call sites go through here.
+    """
+    import shutil
+
+    model_path = Path(model_path).resolve()
+    key = str(model_path)
+    if key in _EMA_INFER_CACHE:
+        return _EMA_INFER_CACHE[key]
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    if not (isinstance(ckpt, dict) and "ema_state_dict" in ckpt):
+        _EMA_INFER_CACHE[key] = model_path
+        return model_path
+    out_dir = model_path.parent / f"{model_path.stem}_ema_infer"
+    if not os.access(model_path.parent, os.W_OK):
+        if _EMA_INFER_FALLBACK_ROOT is None:
+            raise PermissionError(
+                f"cannot write EMA extraction next to read-only checkpoint {model_path} "
+                "and no fallback cache root is set"
+            )
+        digest = hashlib.sha1(key.encode()).hexdigest()[:12]
+        out_dir = _EMA_INFER_FALLBACK_ROOT / f"{model_path.stem}_{digest}_ema_infer"
+    out = out_dir / "best_model.pth"
+    if not out.exists():
+        out_dir.mkdir(parents=True, exist_ok=True)
+        state = {k.replace("module.", ""): v for k, v in ckpt["ema_state_dict"].items()}
+        tmp = out_dir / "best_model.pth.tmp"
+        torch.save({"model": state}, tmp)
+        tmp.replace(out)
+        shutil.copy2(_args_json_for_model(model_path), out_dir / "args.json")
+    print(f"[ema] closed-loop inference weights: {out} (EMA of {model_path})")
+    _EMA_INFER_CACHE[key] = out
+    return out
+
+
 def _checkpoint_epoch(model_path: Path) -> int:
     try:
         ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
@@ -2755,6 +2804,8 @@ def main() -> None:
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    global _EMA_INFER_FALLBACK_ROOT
+    _EMA_INFER_FALLBACK_ROOT = out / "ema_infer_cache"
     model_path = Path(cfg["model_path"])
     previous_memory: Path | None = None
     checkpoint_policy = str(cfg.get("checkpoint_policy", "latest"))
@@ -2786,7 +2837,9 @@ def main() -> None:
                 )
         else:
             print("[round 0] guards on the starting model (reference row)")
-            reference_metrics = _run_guard_phase(cfg, model_path, gdir0, gpu_ids0, tag="round_000")
+            reference_metrics = _run_guard_phase(
+                cfg, _ema_inference_model_path(model_path), gdir0, gpu_ids0, tag="round_000"
+            )
     guard_rows: list[tuple[int, dict[str, Any]]] = []
     training_backend = str(cfg.get("training_backend", "base_sft"))
     if training_backend != "base_sft" and not isinstance(
@@ -2844,10 +2897,11 @@ def main() -> None:
             _print_dry_run_plan(cfg, model_path, rdir, gpu_ids, memory_cmd, round_idx)
             continue
 
+        infer_model = _ema_inference_model_path(model_path)
         print(f"[round {round_idx}] perception_mine")
-        phase_times["perception_mine"] = _run_mining_phase(cfg, model_path, rdir, gpu_ids)
+        phase_times["perception_mine"] = _run_mining_phase(cfg, infer_model, rdir, gpu_ids)
         print(f"[round {round_idx}] repair")
-        phase_times["repair"] = _run_repair_phase(cfg, model_path, rdir, gpu_ids)
+        phase_times["repair"] = _run_repair_phase(cfg, infer_model, rdir, gpu_ids)
         print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
         phase_times["memory"] = _run(memory_cmd, rdir / "memory.log")
 
@@ -2924,7 +2978,11 @@ def main() -> None:
             print(f"[round {round_idx}] guards")
             t0 = time.perf_counter()
             guard_metrics = _run_guard_phase(
-                cfg, model_path, rdir / "guards", gpu_ids, tag=f"round_{round_idx:03d}"
+                cfg,
+                _ema_inference_model_path(model_path),
+                rdir / "guards",
+                gpu_ids,
+                tag=f"round_{round_idx:03d}",
             )
             phase_times["guards"] = time.perf_counter() - t0
             guard_rows.append((round_idx, guard_metrics))
@@ -2954,7 +3012,9 @@ def main() -> None:
         fdir = out / "final_round_mine"
         fdir.mkdir(parents=True, exist_ok=True)
         print(f"[final] mining residual problems + realized reward with {model_path}")
-        _run_mining_phase(cfg, model_path, fdir, _gpu_ids_from_config(cfg))
+        _run_mining_phase(
+            cfg, _ema_inference_model_path(model_path), fdir, _gpu_ids_from_config(cfg)
+        )
         fsum = _load_json(fdir / "perception_direct_summary.json")
         # Represent the final-round mine in the operator-facing summary contract, not
         # just stdout: the last round's checkpoint has no successor mine, so this is the

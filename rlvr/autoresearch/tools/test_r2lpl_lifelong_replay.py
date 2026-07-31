@@ -5331,3 +5331,60 @@ def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
         _, n_second = finalize()  # no new data
         assert n_first > 0
         assert n_second == n_first, "second finalize must not re-score cleared buffers"
+
+
+def test_ema_inference_model_path_extracts_ema_and_passes_through(tmp_path, monkeypatch):
+    """Closed-loop phases must drive the deployable EMA, never the raw iterates.
+
+    A training checkpoint (has ema_state_dict) is extracted to a sibling dir as a
+    {"model": ema} checkpoint; an inference-only checkpoint passes through; a
+    read-only checkpoint dir falls back to the campaign cache root.
+    """
+    monkeypatch.setattr(round_runner, "_EMA_INFER_CACHE", {})
+    monkeypatch.setattr(round_runner, "_EMA_INFER_FALLBACK_ROOT", tmp_path / "cache")
+
+    ckpt_dir = tmp_path / "base_train"
+    ckpt_dir.mkdir()
+    (ckpt_dir / "args.json").write_text("{}")
+    ckpt = ckpt_dir / "latest.pth"
+    torch.save(
+        {
+            "model": {"module.layer.weight": torch.zeros(2)},
+            "ema_state_dict": {"module.layer.weight": torch.ones(2)},
+            "optimizer": {},
+        },
+        ckpt,
+    )
+    out = round_runner._ema_inference_model_path(ckpt)
+    assert out != ckpt.resolve()
+    loaded = torch.load(out, weights_only=False)
+    assert set(loaded) == {"model"}
+    assert "layer.weight" in loaded["model"], "module. prefix must be stripped"
+    assert float(loaded["model"]["layer.weight"].sum()) == 2.0, "must be the EMA weights"
+    assert (out.parent / "args.json").exists(), "args.json must sit next to the extraction"
+    assert round_runner._ema_inference_model_path(ckpt) == out, "cached + idempotent"
+
+    plain = tmp_path / "best_model.pth"
+    torch.save({"model": {"layer.weight": torch.ones(2)}}, plain)
+    assert round_runner._ema_inference_model_path(plain) == plain.resolve()
+
+
+def test_ema_inference_model_path_read_only_dir_uses_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(round_runner, "_EMA_INFER_CACHE", {})
+    ro = tmp_path / "shared"
+    ro.mkdir()
+    (ro / "args.json").write_text("{}")
+    ckpt = ro / "best_model.pth"
+    torch.save({"model": {"w": torch.zeros(2)}, "ema_state_dict": {"w": torch.ones(2)}}, ckpt)
+    ro.chmod(0o500)
+    try:
+        monkeypatch.setattr(round_runner, "_EMA_INFER_FALLBACK_ROOT", None)
+        with pytest.raises(PermissionError):
+            round_runner._ema_inference_model_path(ckpt)
+        round_runner._EMA_INFER_CACHE.clear()
+        monkeypatch.setattr(round_runner, "_EMA_INFER_FALLBACK_ROOT", tmp_path / "cache")
+        out = round_runner._ema_inference_model_path(ckpt)
+        assert str(out).startswith(str(tmp_path / "cache"))
+        assert float(torch.load(out, weights_only=False)["model"]["w"].sum()) == 2.0
+    finally:
+        ro.chmod(0o700)
