@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -12,10 +13,10 @@ from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
+from diffusion_planner.config import TrainConfig
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.scenario_based_open_loop.validate import scenario_based_open_loop_validate
-from diffusion_planner.config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
@@ -127,7 +128,14 @@ def wandb_epdms_metrics(epdms_means):
 
 
 def closed_loop_validate(
-    model, args, epoch: int, out_dir: str, global_rank: int, world_size: int, *, is_final_save: bool = False
+    model,
+    args,
+    epoch: int,
+    out_dir: str,
+    global_rank: int = 0,
+    world_size: int = 1,
+    *,
+    is_final_save: bool = False,
 ) -> None:
     """Closed-loop rendered rollout; logs metrics + videos to wandb.
 
@@ -184,7 +192,7 @@ def model_training(args: TrainConfig):
 
     # init ddp
     global_rank, rank, world_size = ddp.ddp_setup_universal(True, args)
-    print(f"{global_rank=}, {rank=}")
+    print(f"{global_rank=}, {rank=}, {world_size=}")
 
     if global_rank == 0:
         # Logging
@@ -594,21 +602,6 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
-                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
-                # (videos + metrics) land next to the saved weights they correspond to.
-                is_final_save = (epoch + 1 - init_epoch) // save_utd == (
-                    train_epochs - init_epoch
-                ) // save_utd
-                closed_loop_validate(
-                    diffusion_planner,
-                    args,
-                    epoch,
-                    os.path.join(curr_dir, "closed_loop"),
-                    global_rank,
-                    world_size,
-                    is_final_save=is_final_save,
-                )
-
             if valid_loss_ego_position_lat_loss < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")
                 os.makedirs(curr_dir, exist_ok=True)
@@ -630,6 +623,26 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
+
+        # Runs on the checkpoint-save cadence, outside the `global_rank == 0` block on purpose:
+        # the rollouts are sharded over every rank, so all ranks must reach this call. The cadence
+        # condition uses only rank-invariant values, so they agree without communicating.
+        if (epoch + 1 - init_epoch) % save_utd == 0:
+            # args.save_dir, not save_path: the latter is None off rank-0, and every rank writes
+            # its shard into the same per-epoch directory.
+            curr_dir = os.path.join(args.save_dir, f"epoch{epoch + 1:04d}")
+            is_final_save = (epoch + 1 - init_epoch) // save_utd == (
+                train_epochs - init_epoch
+            ) // save_utd
+            closed_loop_validate(
+                diffusion_planner,
+                args,
+                epoch,
+                os.path.join(curr_dir, "closed_loop"),
+                global_rank,
+                world_size if args.ddp else 1,
+                is_final_save=is_final_save,
+            )
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)

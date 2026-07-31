@@ -278,59 +278,123 @@ def run_closed_loop_main(
 
     modes = object_modes or ["objects", "noobj"]
 
-    # When ``shard`` is set, jobs are round-robin split across ``world_size``
-    # ranks: every rank runs its own subset in-process on its own GPU (via DDP),
-    # rank 0 aggregates the on-disk results afterwards. shard=None means run
-    # everything sequentially (CLI mode).
-    rank, world_size = (shard if shard is not None else (0, 1))
+    # When ``shard`` is set and model is provided (in-process DDP), jobs are pooled
+    # across all groups/combos and balanced with cost-weighted LPT via run_evaluations_ddp.
+    # Otherwise (CLI subprocess mode or single worker), jobs run sequentially or round-robin.
+    rank, world_size = shard if shard is not None else (0, 1)
 
-    # Triple loop: json_name -> group_name -> mode
-    i = 0
-    for json_name, groups in resolved.items():
-        json_out_dir = out_root / json_name
-        json_out_dir.mkdir(parents=True, exist_ok=True)
+    if model is not None and world_size > 1:
+        from scenario_generation.closed_loop_evaluation import (
+            ClosedLoopEvalConfig,
+            FullRouteClosedLoopEvaluation,
+            RolloutParams,
+            run_evaluations_ddp,
+        )
 
-        for group_name, npz_paths in groups.items():
-            for mode in modes:
-                if i % world_size != rank:
+        evaluators: list[FullRouteClosedLoopEvaluation] = []
+        for json_name, groups in resolved.items():
+            json_out_dir = out_root / json_name
+            json_out_dir.mkdir(parents=True, exist_ok=True)
+
+            for group_name, npz_paths in groups.items():
+                for mode in modes:
+                    drop_objects = mode == "noobj"
+                    if mode == "objects":
+                        mode_out_dir = json_out_dir / group_name
+                        summary_key = _make_summary_key(json_name, group_name)
+                    else:  # noobj
+                        json_mode_name = f"{json_name}__noobj"
+                        mode_out_dir = out_root / json_mode_name / group_name
+                        summary_key = _make_summary_key(json_mode_name, group_name)
+
+                    if len(npz_paths) > 1:
+                        mode_out_dir.mkdir(parents=True, exist_ok=True)
+                        npz_root_arg = mode_out_dir / "_npz_roots.json"
+                        npz_root_arg.write_text(json.dumps([str(p) for p in npz_paths]))
+                    else:
+                        npz_root_arg = npz_paths[0]
+
+                    evaluator = FullRouteClosedLoopEvaluation(
+                        model,
+                        args,
+                        ClosedLoopEvalConfig(
+                            out_dir=mode_out_dir,
+                            params=RolloutParams(
+                                device=args.device,
+                                near_miss_thresh=args.closed_loop_near_miss_thresh,
+                                search_radius=args.closed_loop_search_radius,
+                                warmup_steps=args.closed_loop_warmup_steps,
+                                unstick_after=args.closed_loop_unstick_after,
+                                unstick_advance_m=args.closed_loop_unstick_advance_m,
+                                unstick_radius_mult=args.closed_loop_unstick_radius_mult,
+                                unstick_teleport_after=args.closed_loop_unstick_teleport_after,
+                                draw_every=args.closed_loop_draw_every if render_media else None,
+                                replan_interval=args.closed_loop_replan_interval,
+                                abort_deviation_m=args.closed_loop_abort_deviation_m,
+                                abort_after=args.closed_loop_abort_after,
+                                abort_max_snaps=args.closed_loop_abort_max_snaps,
+                                draw_workers=args.closed_loop_draw_workers,
+                                drop_objects=drop_objects,
+                            ),
+                            fps=float(args.closed_loop_fps),
+                            verbose=False,
+                        ),
+                        npz_root_arg,
+                        seg_len=args.closed_loop_seg_len,
+                        ddp_rank=rank,
+                        ddp_world_size=world_size,
+                    )
+                    evaluators.append(evaluator)
+
+        run_evaluations_ddp(evaluators, rank=rank, world_size=world_size, verbose=True)
+    else:
+        # Sequential (world_size=1) or CLI subprocess execution
+        i = 0
+        for json_name, groups in resolved.items():
+            json_out_dir = out_root / json_name
+            json_out_dir.mkdir(parents=True, exist_ok=True)
+
+            for group_name, npz_paths in groups.items():
+                for mode in modes:
+                    if i % world_size != rank:
+                        i += 1
+                        continue
                     i += 1
-                    continue
-                i += 1
 
-                if mode == "objects":
-                    mode_out_dir = json_out_dir / group_name
-                    summary_key = _make_summary_key(json_name, group_name)
-                else:  # noobj
-                    json_mode_name = f"{json_name}__noobj"
-                    mode_out_dir = out_root / json_mode_name / group_name
-                    summary_key = _make_summary_key(json_mode_name, group_name)
+                    if mode == "objects":
+                        mode_out_dir = json_out_dir / group_name
+                        summary_key = _make_summary_key(json_name, group_name)
+                    else:  # noobj
+                        json_mode_name = f"{json_name}__noobj"
+                        mode_out_dir = out_root / json_mode_name / group_name
+                        summary_key = _make_summary_key(json_mode_name, group_name)
 
-                print(f"=== [{summary_key}] npz={npz_paths} -> out={mode_out_dir} ===")
+                    print(f"=== [{summary_key}] npz={npz_paths} -> out={mode_out_dir} ===")
 
-                run_one_group(
-                    model,
-                    npz_paths,
-                    mode_out_dir,
-                    args,
-                    group_name=summary_key,
-                    mode=mode,
-                    render_media=render_media,
+                    run_one_group(
+                        model,
+                        npz_paths,
+                        mode_out_dir,
+                        args,
+                        group_name=summary_key,
+                        mode=mode,
+                        render_media=render_media,
+                    )
+
+        # Under DDP, every rank must reach this point before rank 0 reads the on-disk
+        # results: without a barrier, rank 0 could start aggregating before a slower
+        # rank has finished writing its shard's summary.json/segments.jsonl, silently
+        # producing a summary built from a partial set of groups.
+        if world_size > 1:
+            import torch.distributed as dist
+
+            if not (dist.is_available() and dist.is_initialized()):
+                raise RuntimeError(
+                    f"run_closed_loop_main: shard world_size={world_size} > 1 but "
+                    "torch.distributed is not initialized -- refusing to aggregate without "
+                    "a barrier to guarantee every rank finished writing its shard first."
                 )
-
-    # Under DDP, every rank must reach this point before rank 0 reads the on-disk
-    # results: without a barrier, rank 0 could start aggregating before a slower
-    # rank has finished writing its shard's summary.json/segments.jsonl, silently
-    # producing a summary built from a partial set of groups.
-    if world_size > 1:
-        import torch.distributed as dist
-
-        if not (dist.is_available() and dist.is_initialized()):
-            raise RuntimeError(
-                f"run_closed_loop_main: shard world_size={world_size} > 1 but "
-                "torch.distributed is not initialized -- refusing to aggregate without "
-                "a barrier to guarantee every rank finished writing its shard first."
-            )
-        dist.barrier()
+            dist.barrier()
 
     # Aggregate on rank 0 only (shard=None -> rank 0; DDP -> rank 0 only).
     if rank == 0:
