@@ -145,6 +145,21 @@ class RewardConfig:
     # Col×DAC×(5*TTC + 5*EP + 2*C + 4*Speed)/16.  The default keeps the
     # repository's historical signed custom shaping for backwards parity.
     reward_profile: str = "custom"
+    # hdp_exact only: which of the reference implementation's two aggregations
+    # composes the vendored reward. "weighted_sum" is the paper-exact form its
+    # historical runs used -- collisions reach the total only through the risk
+    # term (~10% of the weight mass) because w_safety is zero there.
+    # "gated_product" is that codebase's own fix: collision, red light and
+    # road border multiply the whole reward, i.e. real hard gates.
+    hdp_exact_aggregation: str = "weighted_sum"
+    # hdp_exact only: reward-term overrides mirroring the reference codebase's
+    # own knobs. Defaults reproduce its historical validated runs; the
+    # "border" variant (its first measured CLIMBING configuration) sets
+    # w_progress 0, w_road_border 1, red light off, occupancy-border off.
+    hdp_exact_w_progress: float = 3.0
+    hdp_exact_w_road_border: float = 0.0
+    hdp_exact_red_light_constraint: bool = True
+    hdp_exact_occupancy_use_road_border: bool = True
     pdm_comfort_scale: float = 10.0
     # Original HDP multi-reward post-training profile.  These are the weights
     # reported in the HDP paper (risk, car-following, lane robustness).  The

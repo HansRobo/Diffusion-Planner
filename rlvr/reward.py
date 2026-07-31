@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -498,6 +499,162 @@ def expert_off_lane(data: dict, horizon_steps: int, config: RewardConfig) -> boo
     )
 
 
+# The parameter set of the reference implementation's newest validated RL run
+# (identical on every train-reward key to its epoch-20 checkpoint args). The
+# "hdp_exact" profile exists to reproduce that reward bit-for-bit, so these are
+# constants, not knobs: change one and the profile no longer measures what it
+# claims to. ``weighted_sum`` aggregation and the full-horizon score (no
+# ``rl_reward_horizon_steps``) are that run's implicit defaults, made explicit.
+_HDP_EXACT_VALIDATED_ARGS: dict[str, Any] = {
+    "rl_reward_dt": 0.1,
+    "rl_ttc_critical_s": 0.5,
+    "rl_ttc_safe_s": 3.0,
+    "rl_thw_critical_s": 0.5,
+    "rl_thw_safe_s": 2.0,
+    "rl_occupancy_critical_m": 0.25,
+    "rl_occupancy_safe_m": 2.0,
+    "rl_occupancy_speed_gain_s": 0.1,
+    "rl_stopped_neighbor_vel_thresh": 0.1,
+    "rl_stopped_neighbor_disp_thresh": 0.5,
+    "rl_lane_half_width_m": 1.75,
+    "rl_leader_lateral_margin_m": 0.75,
+    "rl_stationary_reference_threshold_m": 1.0,
+    "rl_stationary_progress_tolerance_m": 2.0,
+    "rl_stationary_progress_mode": "distance",
+    "rl_red_light_constraint": True,
+    "rl_red_light_lane_tolerance_m": 2.0,
+    "rl_road_border_critical_m": 0.2,
+    "rl_road_border_safe_m": 0.6,
+    "rl_occupancy_use_road_border": True,
+    "rl_reward_aggregation": "weighted_sum",
+    "rl_reward_horizon_steps": 0,
+    "rl_reward_w_risk": 1.0,
+    "rl_reward_w_follow": 3.0,
+    "rl_reward_w_lane": 2.5,
+    "rl_reward_w_progress": 3.0,
+    "rl_reward_w_safety": 0.0,
+    "rl_reward_w_road_border": 0.0,
+}
+
+_HDP_EXACT_SCENE_KEYS = (
+    "ego_current_state",
+    "ego_shape",
+    "ego_agent_future",
+    "neighbor_agents_past",
+    "lanes",
+    "route_lanes",
+    "line_strings",
+    "static_objects",
+    "turn_indicators",
+)
+
+
+@torch.no_grad()
+def _hdp_exact_reward_batch(
+    ego_trajs: torch.Tensor,
+    data: dict[str, torch.Tensor],
+    config: RewardConfig,
+) -> list[RewardBreakdown]:
+    """Score one scene's candidates with the vendored reference reward.
+
+    The reward values come from ``rlvr.hdp_exact_reward.compute_hdp_reward``
+    verbatim; this function only marshals this pipeline's per-scene ``data``
+    dict into that interface and folds the per-candidate outputs into
+    ``RewardBreakdown`` so the trainer's gates and the eval's diagnostics keep
+    working:
+
+    * ``collision_step``/``red_light`` carry the reference reward's own safety
+      notion (``min(collision, red light)``), which is also what its trainer
+      gates behavior on -- so the anchor-safety gate here matches its
+      semantics.
+    * The reference ``weighted_sum`` profile has NO hard gates (its validated
+      run set ``w_safety`` and ``w_road_border`` to zero), so a run spec using
+      this profile should disable rb/lane/sc gates; ``rb_crossing`` is still
+      populated for eval columns.
+    * Fields with no reference counterpart (feasibility, centerline,
+      smoothness) stay neutral -- their eval columns are vacuous under this
+      profile.
+    """
+    from rlvr.hdp_exact_reward import (
+        compute_hdp_reward,
+        heading_to_cos_sin as _their_heading_to_cos_sin,
+        neighbor_future_world,
+    )
+
+    raw = data.get("neighbor_agents_future_raw")
+    neighbor_future = raw if isinstance(raw, torch.Tensor) else data.get("neighbor_agents_future")
+    if not isinstance(neighbor_future, torch.Tensor):
+        raise ValueError("hdp_exact reward requires neighbor_agents_future in the scene data")
+    scene_inputs = {
+        key: data[key] for key in _HDP_EXACT_SCENE_KEYS if isinstance(data.get(key), torch.Tensor)
+    }
+    if neighbor_future.shape[-1] == 3 or bool(torch.all(neighbor_future == 0, dim=-1).any()):
+        # Raw layout (or a 4-channel layout that still carries all-zero
+        # padding): the vendored conversion applies verbatim.
+        neighbors_future = neighbor_future_world(neighbor_future)
+    else:
+        # Already converted by ``reward_compatible_data``-style callers that
+        # did not keep the raw view: this pipeline's ``heading_to_cos_sin``
+        # rewrites an all-zero padding row as (0, 0, 1, 0), so rebuild the
+        # raw-layout "observed" test -- a row was raw-zero iff it is exactly
+        # that ghost pose -- and reapply the reference trainer's contiguous
+        # tail mask.
+        ghost = (
+            (neighbor_future[..., 0] == 0)
+            & (neighbor_future[..., 1] == 0)
+            & (neighbor_future[..., 2] == 1)
+            & (neighbor_future[..., 3] == 0)
+        )
+        observed = ~ghost
+        time_index = torch.arange(
+            1, neighbor_future.shape[-2] + 1, device=neighbor_future.device
+        ).reshape(*([1] * (observed.ndim - 1)), -1)
+        valid_length = torch.where(observed, time_index, 0).amax(dim=-1, keepdim=True)
+        mask = time_index > valid_length
+        neighbors_future = _their_heading_to_cos_sin(neighbor_future)
+        neighbors_future.masked_fill_(mask.unsqueeze(-1), 0.0)
+    args = SimpleNamespace(**_HDP_EXACT_VALIDATED_ARGS)
+    aggregation = str(getattr(config, "hdp_exact_aggregation", "weighted_sum"))
+    if aggregation not in ("weighted_sum", "gated_product"):
+        raise ValueError(f"unsupported hdp_exact_aggregation: {aggregation!r}")
+    args.rl_reward_aggregation = aggregation
+    args.rl_reward_w_progress = float(getattr(config, "hdp_exact_w_progress", 3.0))
+    args.rl_reward_w_road_border = float(getattr(config, "hdp_exact_w_road_border", 0.0))
+    args.rl_red_light_constraint = bool(getattr(config, "hdp_exact_red_light_constraint", True))
+    args.rl_occupancy_use_road_border = bool(
+        getattr(config, "hdp_exact_occupancy_use_road_border", True)
+    )
+    n = int(ego_trajs.shape[0])
+    reward_flat, metrics = compute_hdp_reward(
+        ego_trajs, scene_inputs, neighbors_future, 1, n, args
+    )
+    collision_safety = metrics["percand_collision_safety"]
+    red_light = metrics["percand_red_light"]
+    rb_violation = metrics["percand_road_border_violation"]
+    safety = metrics["percand_safety"]
+    progress = metrics["percand_progress"]
+    breakdowns: list[RewardBreakdown] = []
+    for i in range(n):
+        collided = float(collision_safety[i]) <= 0.0
+        red_ok = float(red_light[i]) > 0.0
+        breakdowns.append(
+            RewardBreakdown(
+                safety=float(safety[i]),
+                progress=float(progress[i]),
+                smoothness=0.0,
+                feasibility=0.0,
+                centerline=0.0,
+                red_light=0.0 if red_ok else -10.0,
+                total=float(reward_flat[i]),
+                collision_step=0 if collided else None,
+                off_road_fraction=float(rb_violation[i]),
+                rb_crossing=bool(float(rb_violation[i]) > 0.0),
+                first_hard_gate_step=None if (not collided and red_ok) else 0,
+            )
+        )
+    return breakdowns
+
+
 @torch.no_grad()
 def compute_reward_batch(
     ego_trajs: torch.Tensor,
@@ -520,6 +677,11 @@ def compute_reward_batch(
     Returns:
         List of N RewardBreakdown instances.
     """
+    if getattr(config, "reward_profile", "") == "hdp_exact":
+        # The vendored reference reward owns its horizon handling (its
+        # validated run scores the full plan), so it bypasses this function's
+        # slicing entirely.
+        return _hdp_exact_reward_batch(ego_trajs, data, config)
     horizon = int(getattr(config, "reward_horizon_steps", 0))
     if 0 < horizon < ego_trajs.shape[1]:
         reward_trajs = ego_trajs[:, :horizon]

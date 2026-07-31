@@ -1544,6 +1544,9 @@ def _load_config(path: Path) -> tuple[dict[str, Any], AWRRolloutConfig, RewardCo
             awr_raw.get("unsafe_behavior_anchor_weight", 1.0)
         ),
         drop_all_zero_groups=bool(awr_raw.get("drop_all_zero_groups", False)),
+        drop_constant_reward_groups=bool(
+            awr_raw.get("drop_constant_reward_groups", False)
+        ),
         plannerrft_guided_exploration=bool(
             awr_raw.get("plannerrft_guided_exploration", False)
         ),
@@ -7422,6 +7425,11 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
     )
+    parser.add_argument(
+        "--drop_constant_reward_groups",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument("--diffusion_k_steps", type=int, default=None)
     parser.add_argument("--diffusion_t_range", type=float, nargs=2, default=None)
     parser.add_argument("--neighbor_loss_weight", type=float, default=None)
@@ -8214,6 +8222,8 @@ def main() -> None:
         )
     if args.drop_all_zero_groups is not None:
         rollout_config.drop_all_zero_groups = args.drop_all_zero_groups
+    if args.drop_constant_reward_groups is not None:
+        rollout_config.drop_constant_reward_groups = args.drop_constant_reward_groups
     if args.safe_only:
         rollout_config.safe_only = True
     if args.structured_exploration:
@@ -10401,9 +10411,13 @@ def main() -> None:
                 stage_window_start = time.perf_counter()
             if (
                 not hdp_rollout_phase
-                and optimizer_step
+                and is_accumulation_end
                 and not ema_per_epoch
             ):
+                # ``is_accumulation_end`` is the same value handed to
+                # ``_train_scene(optimizer_step=...)`` above; the old name
+                # survived a refactor only because every path since then was
+                # either a rollout phase (short-circuited) or the replay loop.
                 update_ema(behavior_model, model, ema_decay)
 
         if faithful_disk_replay and hdp_rollout_phase:

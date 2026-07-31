@@ -154,6 +154,15 @@ class AWRRolloutConfig:
     behavior_anchor_weight: float = 1.0
     unsafe_behavior_anchor_weight: float = 1.0
     drop_all_zero_groups: bool = False
+    # The HDP reference discards every group whose surviving candidates score
+    # within eps of one another (or number fewer than two) -- not only the
+    # all-zero stratum -- because a constant group carries no preference
+    # direction and exp(0)=1 would silently turn it into unweighted
+    # self-distillation.  ``drop_all_zero_groups`` covers only the terminal
+    # tied stratum of the gated reward; this flag restores the full reference
+    # rule for reward profiles without hard gates, where constant groups are
+    # not necessarily zero.
+    drop_constant_reward_groups: bool = False
     # PlannerRFT-style low-reward candidate enrichment.  Native K is always
     # generated and scored first.  Only groups whose best native reward is
     # below the trigger receive a second guided K bank; the top K of the union
@@ -751,6 +760,12 @@ def reward_compatible_data(data: dict[str, torch.Tensor]) -> dict[str, torch.Ten
     out = dict(data)
     future = out.get("neighbor_agents_future")
     if isinstance(future, torch.Tensor) and future.shape[-1] == 3:
+        # Keep the raw layout reachable: ``heading_to_cos_sin`` turns an
+        # all-zero padding row into (0, 0, 1, 0), which destroys the
+        # information "this row was padding".  The hdp_exact profile computes
+        # its padding mask on the raw layout, exactly as the reference
+        # trainer does.  A shallow reference, so no copy cost.
+        out["neighbor_agents_future_raw"] = future
         out["neighbor_agents_future"] = heading_to_cos_sin(future)
     return out
 
@@ -1903,6 +1918,7 @@ def rollout_and_score_scene_batch(
             behavior_anchor_weight=rollout_config.behavior_anchor_weight,
             unsafe_behavior_anchor_weight=rollout_config.unsafe_behavior_anchor_weight,
             drop_all_zero_groups=rollout_config.drop_all_zero_groups,
+            drop_constant_reward_groups=rollout_config.drop_constant_reward_groups,
             candidate_valid_mask=native_valid_by_scene[scene_index],
         )
         diagnostics = dict(diagnostics)
@@ -2004,6 +2020,7 @@ def compute_awr_weights(
     behavior_anchor_weight: float = 1.0,
     unsafe_behavior_anchor_weight: float = 1.0,
     drop_all_zero_groups: bool = False,
+    drop_constant_reward_groups: bool = False,
     candidate_valid_mask: torch.Tensor | np.ndarray | list[bool] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Convert one scene's rewards to stable positive AWR weights.
@@ -2124,6 +2141,15 @@ def compute_awr_weights(
     # subsequently assigned no gradient.  Keeping unit weights is available
     # only as an explicit retention ablation.
     valid_group = bool(finite_totals.size > 0)
+    if drop_constant_reward_groups and (
+        finite_totals.size < 2
+        or not math.isfinite(std)
+        or std <= max(float(min_group_std), 1e-8)
+    ):
+        # Reference rule: a group needs at least two surviving candidates and
+        # a reward spread above eps to carry a preference signal; otherwise
+        # the whole group gets zero weight rather than exp(0)=1 everywhere.
+        valid_group = False
 
     weights = np.zeros_like(totals, dtype=np.float32)
     if valid_group:
@@ -2248,6 +2274,7 @@ def rollout_and_score_scene(
         behavior_anchor_weight=rollout_config.behavior_anchor_weight,
         unsafe_behavior_anchor_weight=rollout_config.unsafe_behavior_anchor_weight,
         drop_all_zero_groups=rollout_config.drop_all_zero_groups,
+        drop_constant_reward_groups=rollout_config.drop_constant_reward_groups,
         candidate_valid_mask=candidate_valid,
     )
     weights = weights_cpu.to(device=device, dtype=torch.float32)
