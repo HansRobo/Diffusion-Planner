@@ -541,13 +541,14 @@ class StatePerturbation:
 
         # state: [x, y, heading, velocity, acceleration, yaw_rate]
 
+        # theta0 is the heading of the (perturbed) current state, not the chord direction to
+        # a point 1 s ahead. The chord lags the tangent by roughly half the heading change
+        # over that second (~7 deg at 8 m/s on a 0.03 1/m curve), and it ignores the heading
+        # perturbation entirely, so the bridged trajectory used to start off-tangent.
         x0, y0, theta0, v0, a0, omega0 = (
             aug_current_state[:, 0],
             aug_current_state[:, 1],
-            torch.atan2(
-                (ego_future[:, int(P / 2), 1] - aug_current_state[:, 1]),
-                (ego_future[:, int(P / 2), 0] - aug_current_state[:, 0]),
-            ),
+            torch.atan2(aug_current_state[:, 3], aug_current_state[:, 2]),
             torch.norm(aug_current_state[:, 4:6], dim=-1),
             torch.norm(aug_current_state[:, 6:8], dim=-1),
             aug_current_state[:, 9],
