@@ -398,7 +398,6 @@ def assert_checkpoint_compatible(
             "seed",
             "batch_size",
             "valid_batch_size",
-            "learning_rate",
             "weight_decay",
             "adamw_no_decay",
             "warm_up_epoch",
@@ -484,6 +483,18 @@ def assert_checkpoint_compatible(
         ]
         if training_mismatches:
             raise RuntimeError(f"Checkpoint training configuration mismatch: {training_mismatches}")
+
+        # Decaying the rate for the later epochs of a run is a normal operation, so it sits
+        # with train_epochs as a deliberate change rather than a mismatch. Everything that
+        # would make it unsound stays strict: the trainer refuses the override if the
+        # checkpoint carries optimizer moments tuned to the old rate.
+        checkpoint_lr = ckpt_args.get("learning_rate")
+        if checkpoint_lr is not None and float(checkpoint_lr) != float(args.learning_rate):
+            print(
+                "WARNING: changing the learning rate on strict resume: "
+                f"checkpoint={checkpoint_lr}, current={args.learning_rate}. "
+                "Model, optimizer, scheduler, EMA, and completed epoch state remain strict."
+            )
 
         checkpoint_train_epochs = int(ckpt_args.get("train_epochs", args.train_epochs))
         if checkpoint_train_epochs != int(args.train_epochs):
