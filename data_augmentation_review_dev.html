@@ -1,0 +1,1284 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Augmentation ロジック整理と監査（dev ブランチ） — Diffusion Planner</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#1a1d21; --muted:#5c6570; --line:#e3e7ec;
+    --card:#f7f9fb; --code-bg:#f2f4f7; --accent:#0b6bcb;
+    --ok:#1a7f4b; --ok-bg:#e8f6ee; --warn:#9a6700; --warn-bg:#fdf6e3;
+    --bad:#b32d2e; --bad-bg:#fdecec; --info:#0b6bcb; --info-bg:#eaf2fc;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#14171a; --fg:#e6e9ec; --muted:#9aa4ae; --line:#2b3238;
+      --card:#1b1f23; --code-bg:#21262c; --accent:#5aa9f7;
+      --ok:#63d19a; --ok-bg:#152a20; --warn:#e3b341; --warn-bg:#2a2312;
+      --bad:#ff8785; --bad-bg:#2c1717; --info:#5aa9f7; --info-bg:#152233;
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#ffffff; --fg:#1a1d21; --muted:#5c6570; --line:#e3e7ec;
+    --card:#f7f9fb; --code-bg:#f2f4f7; --accent:#0b6bcb;
+    --ok:#1a7f4b; --ok-bg:#e8f6ee; --warn:#9a6700; --warn-bg:#fdf6e3;
+    --bad:#b32d2e; --bad-bg:#fdecec; --info:#0b6bcb; --info-bg:#eaf2fc;
+  }
+  :root[data-theme="dark"]{
+    --bg:#14171a; --fg:#e6e9ec; --muted:#9aa4ae; --line:#2b3238;
+    --card:#1b1f23; --code-bg:#21262c; --accent:#5aa9f7;
+    --ok:#63d19a; --ok-bg:#152a20; --warn:#e3b341; --warn-bg:#2a2312;
+    --bad:#ff8785; --bad-bg:#2c1717; --info:#5aa9f7; --info-bg:#152233;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Hiragino Kaku Gothic ProN","Noto Sans JP",Meiryo,sans-serif;
+    line-height:1.75; font-size:15.5px; overflow-x:hidden;
+  }
+  .wrap{max-width:1080px; margin:0 auto; padding:2.5rem 1.25rem 6rem}
+  h1{font-size:1.75rem; line-height:1.35; margin:0 0 .4rem; letter-spacing:-.01em}
+  .sub{color:var(--muted); font-size:.9rem; margin:0 0 2.5rem}
+  h2{font-size:1.25rem; margin:3rem 0 .9rem; padding-bottom:.4rem; border-bottom:2px solid var(--line)}
+  h3{font-size:1.02rem; margin:2rem 0 .5rem}
+  h4{font-size:.94rem; margin:1.4rem 0 .35rem; color:var(--muted); font-weight:600}
+  p{margin:.6rem 0}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.87em;
+       background:var(--code-bg); padding:.12em .38em; border-radius:4px}
+  pre{background:var(--code-bg); border:1px solid var(--line); border-radius:8px;
+      padding:.85rem 1rem; overflow-x:auto; font-size:.82rem; line-height:1.6}
+  pre code{background:none; padding:0}
+  a{color:var(--accent)}
+  .tw{overflow-x:auto; margin:1rem 0; border:1px solid var(--line); border-radius:8px}
+  table{border-collapse:collapse; width:100%; font-size:.86rem; min-width:640px}
+  th,td{text-align:left; padding:.55rem .7rem; border-bottom:1px solid var(--line); vertical-align:top}
+  th{background:var(--card); font-weight:600; white-space:nowrap}
+  tbody tr:last-child td{border-bottom:none}
+  td.num{text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap}
+  .tag{display:inline-block; font-size:.72rem; font-weight:700; padding:.1rem .45rem;
+       border-radius:4px; white-space:nowrap; letter-spacing:.02em}
+  .t-bad{background:var(--bad-bg); color:var(--bad)}
+  .t-warn{background:var(--warn-bg); color:var(--warn)}
+  .t-ok{background:var(--ok-bg); color:var(--ok)}
+  .t-info{background:var(--info-bg); color:var(--info)}
+  .box{border:1px solid var(--line); border-left:4px solid var(--accent);
+       background:var(--card); border-radius:6px; padding:.9rem 1.1rem; margin:1.2rem 0}
+  .box.bad{border-left-color:var(--bad)}
+  .box.warn{border-left-color:var(--warn)}
+  .box.ok{border-left-color:var(--ok)}
+  .box p:first-child{margin-top:0} .box p:last-child{margin-bottom:0}
+  .box .hd{font-weight:700; margin-bottom:.3rem}
+  ul,ol{padding-left:1.4rem; margin:.6rem 0}
+  li{margin:.3rem 0}
+  .flow{display:flex; flex-direction:column; gap:.35rem; margin:1.2rem 0;
+        font-size:.84rem; font-family:ui-monospace,Menlo,Consolas,monospace}
+  .step{display:flex; gap:.6rem; align-items:flex-start; border:1px solid var(--line);
+        background:var(--card); border-radius:6px; padding:.5rem .7rem}
+  .step .n{flex:0 0 auto; font-weight:700; color:var(--accent); min-width:2.2em}
+  .step.hl{border-color:var(--bad); background:var(--bad-bg)}
+  .step.dim{opacity:.62}
+  .arrow{text-align:center; color:var(--muted); font-size:.8rem; line-height:1}
+  .kv{display:grid; grid-template-columns:auto 1fr; gap:.2rem 1rem; font-size:.86rem; margin:.7rem 0}
+  .kv dt{color:var(--muted); white-space:nowrap}
+  .kv dd{margin:0}
+  .foot{margin-top:4rem; padding-top:1rem; border-top:1px solid var(--line);
+        color:var(--muted); font-size:.82rem}
+  .toc{background:var(--card); border:1px solid var(--line); border-radius:8px; padding:1rem 1.3rem; font-size:.9rem}
+  .toc ol{margin:.3rem 0}
+  .sev{font-weight:700}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Data Augmentation ロジック整理と監査<br><small style="font-size:.62em;color:var(--muted)">対象ブランチ: dev</small></h1>
+<p class="sub">
+  対象: <code>diffusion_planner/utils/data_augmentation.py</code>（quintic 版） /
+  <code>data_augmentation_bridge.py</code>（bridge 版） /
+  <code>utils/unicycle_accel_curvature.py</code>（GT 平滑化）<br>
+  目的: 不適切な augmentation の有無の確認。特に <strong>低速域・停車〜発進で適切な計画が出ない</strong>問題との関連調査。<br>
+  branch <strong><code>dev</code></strong> @ <code>3d9f30d4</code> / 2026-07-29（<code>tier4-main</code> @ <code>cb6984c4</code> 版との差分は §1.5）
+</p>
+
+<div class="toc">
+<strong>目次</strong>
+<ol>
+  <li><a href="#summary">結論サマリ</a>（<a href="#devdiff">1.5 dev と tier4-main の差分</a>）</li>
+  <li><a href="#flow">全体データフロー：augmentation はどこで何をしているか</a></li>
+  <li><a href="#quintic">quintic 版 StatePerturbation の逐次ロジック</a></li>
+  <li><a href="#bridge">bridge 版 StatePerturbation の逐次ロジック</a></li>
+  <li><a href="#exp">数値検証の結果</a></li>
+  <li><a href="#kinematics">速度・加速度ノイズの運動学的整合性</a></li>
+  <li><a href="#findings">発見された問題点一覧</a>（<a href="#nbrfuture">7.1 dev 固有: neighbor future 破壊</a>）</li>
+  <li><a href="#lowspeed">低速・停車〜発進問題への影響評価</a></li>
+  <li><a href="#actions">推奨アクション</a></li>
+  <li><a href="#todo">未検証の確認事項（データが必要）</a></li>
+</ol>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="summary">1. 結論サマリ</h2>
+
+<div class="box bad">
+<p class="hd">A. 「低速データに不適切な augmentation が掛かっている」という仮説は<u>直接的には否定</u>される</p>
+<p>
+quintic 版・bridge 版のいずれも <code>aug_flag</code> に <strong><code>|vx| &ge; 2.0 m/s</code>（7.2 km/h）</strong>のゲートがあり、
+低速・停車サンプルは<strong>摂動対象から完全に除外</strong>されている
+(<code>data_augmentation.py:223-225</code>, <code>data_augmentation_bridge.py:1339</code>)。
+したがって「停車中のサンプルの GT が摂動で壊されている」という筋ではない。
+</p>
+<p>
+停車サンプルに実際に適用されるのは <code>centric_transform</code>（このとき変換行列は恒等）と
+<strong>GT future の unicycle 再構成（平滑化）</strong>だけである。後者は本調査で数値検証し、
+停車・停車→発進・減速停止のいずれも<strong>誤差 &le; 3 cm、発進タイミングのずれ 0.00 s</strong> で、
+GT を壊していないことを確認した（§5）。→ <span class="tag t-ok">この経路はシロ</span>
+</p>
+</div>
+
+<div class="box warn">
+<p class="hd">B. ただし augmentation 側に低速挙動を劣化させうる<u>間接的な</u>経路が 4 つある</p>
+<ol>
+  <li><strong>低速域に augmentation が一切かからない</strong>（設計上の穴）。停車〜発進域では状態多様性・復帰データがゼロで、
+      GT 分布をそのまま模倣するしかない。GT 側に「停車継続」が多く含まれていれば、そのバイアスを緩和する仕組みが無い。</li>
+  <li><strong>速度・加速度ノイズが運動学的に整合していない</strong>
+      （vx ±1.0 m/s, vy ±0.5 m/s, ax ±0.2, ay ±0.1, さらに ego_past と v,a に ±10〜20% のスケール）。
+      しかも <code>vx,vy,ax,ay</code> は<strong>モデル入力ではない</strong>ため、これらのノイズは入力ではなく
+      <strong>教師（GT 軌跡）を汚染する</strong>形で効く。詳細は §6。</li>
+  <li><strong>quintic の境界条件が現在状態と整合していない</strong>。摂動ゼロでも GT が最大 0.18〜0.49 m 書き換わる（§5.2）。
+      発進直後の 2〜4 m/s 帯では相対誤差が大きい（0.5 s で進行距離の +12%）。</li>
+  <li><strong>ego_agent_past の座標変換が quintic 版でコメントアウトされている</strong>
+      (<code>data_augmentation.py:397-403</code>)。摂動後の自車位置・方位に対して past だけが旧フレームに残り、
+      地図と past の幾何整合が崩れる。bridge 版では正しく変換されている（<code>:1403-1410</code>）。</li>
+</ol>
+</div>
+
+<div class="box">
+<p class="hd">C. 低速問題の主犯候補として、augmentation の外に優先確認すべき 2 点</p>
+<ol>
+  <li><strong><code>goal_pose</code> の無効値マスクが死んでいる</strong>（<code>goal_pose</code> が 3 列で保存されたコーパスの場合）。
+      <code>heading_to_cos_sin</code> により <code>(0,0,0)</code> が <code>(0,0,1,0)</code> になるため、
+      <code>centric_transform</code> のゼロ判定マスクが<strong>常に False</strong>。
+      「goal 無し」が「<u>自車の現在位置が goal</u>」として入力される。これは停止を強く教える信号になり得る。
+      マスク自体は <code>a72126ab</code>（branch 到達 2026-07-28）で追加された新しいコードだが、
+      <strong>それ以前もマスクが無かったため挙動は同じ</strong>＝ regression ではなく積み残し。→ §7-F, §8.1</li>
+  <li><strong>IL 学習は <code>skip_for_training</code> フレームをフィルタしない</strong>。
+      <code>train.py</code> は <code>scene_skip.filter_scene_list</code> を呼んでいない
+      (RLVR/PO 側の intake は呼んでいる)。変換器が <code>--write_skipped_npz=1</code> で
+      「赤信号停車」「future 進行なし」フレームを出力し、それが学習リストに入っていると、
+      <strong>「停車していて 8 秒間動かない」教師データを直接学習する</strong>。→ §10-1</li>
+</ol>
+</div>
+
+<h3 id="devdiff">1.5 dev と tier4-main の差分（この監査に関係する範囲）</h3>
+
+<p>
+<code>dev</code>(<code>3d9f30d4</code>) と <code>tier4-main</code>(<code>cb6984c4</code>) の merge-base は <code>df1543a6</code> で、
+両者はかなり分岐している。augmentation 関連ファイルの差分は以下。
+</p>
+
+<div class="tw"><table>
+<thead><tr><th>ファイル</th><th>差分 (dev→tier4-main)</th><th>この監査への影響</th></tr></thead>
+<tbody>
+<tr><td><code>utils/data_augmentation.py</code></td><td class="num">+7 −1</td>
+    <td><strong>neighbor future の 4 列対応のみ</strong>（tier4-main で追加）。→ dev 固有の問題として §7-M</td></tr>
+<tr><td><code>utils/data_augmentation_bridge.py</code></td><td class="num">+7 −1</td><td>同上</td></tr>
+<tr><td><code>utils/unicycle_accel_curvature.py</code></td><td>同一</td><td>なし（§5.1 の結論そのまま）</td></tr>
+<tr><td><code>utils/normalizer.py</code></td><td>同一</td><td>なし</td></tr>
+<tr><td><code>normalization.json</code></td><td>同一</td><td>なし（goal_pose の <code>std=[20,20,1,1]</code> も同じ）</td></tr>
+<tr><td><code>train_epoch.py</code></td><td class="num">+4 −2</td><td>行番号のみ。<code>aug</code> の呼び方・マスク定義は同一</td></tr>
+<tr><td><code>train.py</code></td><td class="num">+115 −52</td><td><code>aug</code> 生成部は同一（<code>:228-240</code>）。<code>scene_skip</code> 未使用も同じ</td></tr>
+<tr><td><code>train_config.py</code></td><td class="num">+7 −6</td><td><strong>augmentation 既定値は完全に同一</strong></td></tr>
+<tr><td><code>model/module/encoder.py</code></td><td class="num">+42 −54</td>
+    <td>validity 判定の書き方が一部異なる（§3.5 の表）。<strong>ego 履歴スライス <code>ego[:, :6]</code> は同一</strong></td></tr>
+<tr><td><code>model/module/decoder.py</code></td><td class="num">+87 −31</td>
+    <td><code>ego_current_state</code> の使い方は同一（姿勢 + loss 重みのみ）</td></tr>
+<tr><td><code>validate_model.py</code></td><td class="num">+29 −5</td><td>aug / smoothing を通さない点は同じ</td></tr>
+<tr><td><code>ros_scripts/convert_cpp_bin_to_python_npz.py</code></td><td>同一</td>
+    <td><strong>goal_pose を 3 列で書き出す</strong>ことを確認（§7-F の前提が dev で確定）</td></tr>
+<tr><td><code>diffusion_planner_ros/utils.py</code>, <code>diffusion_planner_node.py</code>, <code>utils/scene_skip.py</code></td>
+    <td>同一</td><td>なし</td></tr>
+</tbody>
+</table></div>
+
+<div class="box">
+<p class="hd">数値検証はすべて dev の worktree で再実行し、結果が完全に一致することを確認した</p>
+<p>
+§5.1（平滑化）・§5.2（quintic 再補間）・§6.1〜6.4（運動学的整合性）・§3.5（padding マスク）の
+全数値は dev でも同一値である。<code>unicycle_accel_curvature.py</code> が同一で、
+<code>data_augmentation.py</code> の差分が neighbor future の 1 箇所だけであることと整合する。
+</p>
+</div>
+
+<div class="box bad">
+<p class="hd">dev 固有の状況 2 点</p>
+<ol>
+  <li><strong><code>goal_pose</code> のマスク修正は dev に入っていない。</strong>
+      位置成分のみで判定する修正は <code>fix/goal_pose_mask</code> ブランチにあり、<code>tier4-main</code> 向け PR 中。
+      dev では全次元判定のまま（<code>:432</code>）＝ §7-F が現役。
+      さらに dev では npz 変換器が goal_pose を<strong>3 列で書き出すことを確認済み</strong>なので、
+      「マスクが発火しない」条件が確定している（§7-F, §8.1）。</li>
+  <li><strong>neighbor future の 4 列レイアウトが dev では壊れる</strong>（tier4-main では修正済み）。→ §7-M</li>
+</ol>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="flow">2. 全体データフロー：augmentation はどこで何をしているか</h2>
+
+<p>学習 1 iteration の流れ（<code>train_epoch.py:48-70</code>）。<span class="tag t-bad">赤</span>は問題を含むステップ。</p>
+
+<div class="flow">
+  <div class="step"><span class="n">1</span><span><code>npz</code> をロード（<code>DiffusionPlannerData</code>）。データは<strong>既に ego 中心</strong>（<code>ego_current_state[:, :4] = (0, 0, 1, 0)</code>）</span></div>
+  <div class="arrow">↓</div>
+  <div class="step"><span class="n">2</span><span><code>heading_to_cos_sin(ego_agent_past)</code>, <code>heading_to_cos_sin(goal_pose)</code> ... (x,y,heading) → (x,y,cos,sin)</span></div>
+  <div class="arrow">↓</div>
+  <div class="step hl"><span class="n">3</span><span><strong><code>aug(inputs, ego_future, neighbors_future)</code></strong> ← <code>StatePerturbation.__call__</code>。<code>use_data_augment=True</code> のときのみ実行</span></div>
+  <div class="arrow">↓</div>
+  <div class="step"><span class="n">4</span><span><code>heading_to_cos_sin(ego_future)</code> → <code>observation_normalizer(inputs)</code> → <code>compute_training_loss</code></span></div>
+</div>
+
+<div class="box warn">
+<p class="hd">重要: augmentation は「摂動」だけでなく、正規化と GT 書き換えも兼ねている</p>
+<p><code>StatePerturbation.__call__</code> は摂動をかけないサンプルにも <code>centric_transform</code> を必ず通す。そこには</p>
+<ul>
+  <li>ego 中心への座標変換（未摂動サンプルでは<strong>恒等変換</strong>）</li>
+  <li><strong><code>smoothing_future_trajectory</code> による GT future の全面書き換え</strong>（バッチ全体、<code>aug_flag</code> 無関係、既定 ON）</li>
+  <li>各テンソルの無効要素ゼロ埋め（マスク）</li>
+</ul>
+<p>が含まれる。結果として:</p>
+<ul>
+  <li><code>use_data_augment=False</code> にすると <strong>centric_transform ごと消える</strong>。
+      ego 中心正規化を skip しても壊れないのは「データが既に ego 中心だから」という暗黙の前提に依存している。</li>
+  <li><strong>validation は <code>aug</code> を通さない</strong>（<code>validate_model.py:61-66</code>）。
+      すなわち <em>学習の教師 = 平滑化された GT</em>、<em>検証の教師 = 生 GT</em> という非対称がある
+      （実測差は cm オーダーなので実害は小さいが、設計上は train/valid ミスマッチ）。</li>
+</ul>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="quintic">3. quintic 版 StatePerturbation の逐次ロジック</h2>
+
+<p>既定値（<code>train_config.py:58-63</code>）: <code>augment_type="quintic"</code>, <code>augment_prob=0.5</code>,
+<code>num_refine=20</code>（= 2.0 s 分をブリッジ）, <code>ego_past_noise_std=0.1</code>,
+<code>use_smoothing_future_trajectory=True</code>。</p>
+
+<h3>3.1 <code>augment()</code> — 現在状態の摂動 (<code>:217-268</code>)</h3>
+
+<h4>ステップ 1: 適用判定 (<code>:223-225</code>)</h4>
+<pre><code>aug_flag = (torch.rand(B) &lt; self._augment_prob) &amp; ~(abs(ego_current_state[:, 4]) &lt; 2.0)</code></pre>
+<p><code>index 4 = vx</code>（ego 前後方向速度）。<strong>|vx| &lt; 2.0 m/s は無条件で除外。</strong></p>
+
+<h4>ステップ 2: 摂動量のサンプリング (<code>:154-155, 227-228</code>)</h4>
+<p>9 次元を一様分布から独立サンプリング（<code>self._low</code> の shape が <code>(1,9)</code> → <code>(9,)</code> に修正済みで、
+以前は 9 成分が完全相関していたというコメントあり）。</p>
+<div class="tw"><table>
+<thead><tr><th>成分</th><th>0: x</th><th>1: y</th><th>2: heading</th><th>3: vx</th><th>4: vy</th><th>5: ax</th><th>6: ay</th><th>7: steer</th><th>8: yaw_rate</th></tr></thead>
+<tbody><tr><td>範囲</td><td class="num">0</td><td class="num">±0.75 m</td><td class="num">±0.2 rad<br>(±11.5°)</td><td class="num">±1.0 m/s</td><td class="num">±0.5 m/s</td><td class="num">±0.2</td><td class="num">±0.1</td><td class="num">0</td><td class="num">0</td></tr></tbody>
+</table></div>
+<ul>
+  <li>縦方向 (x) は摂動しない。横 0.75 m・方位 11.5° の「レーン内オフセット復帰」を狙った設計。</li>
+  <li><strong>vy ±0.5 m/s</strong> は車両として非現実的（2 m/s 走行時に横滑り角 14°）。目標 future には一切反映されないので純粋な入力ノイズ。</li>
+  <li><code>vx</code> は <code>max(vx+Δ, 0)</code> でクリップ (<code>:235</code>)、<code>yaw_rate</code> は ±0.85 でクリップ (<code>:236</code>)。</li>
+</ul>
+
+<h4>ステップ 3: steering / yaw_rate の再計算 (<code>:245-262</code>)</h4>
+<pre><code>mask = |v| &lt; 0.2 → steering = 0, yaw_rate = 0
+else  steering = clamp(atan(yaw_rate * wheel_base / |v|), ±2π/3)</code></pre>
+<p><code>±2π/3 rad = ±120°</code> のクランプは実車の舵角上限（〜±35〜40°）よりはるかに広く、実質無効。</p>
+
+<h4>ステップ 4: 衝突による棄却 (<code>:264-266, 270-344</code>)</h4>
+<p><code>_check_aug_validity</code> は SAT による矩形干渉判定で以下を棄却:</p>
+<ol>
+  <li>摂動後 ego 矩形 × 全 neighbor の<strong>最新フレーム</strong>矩形の重なり</li>
+  <li>摂動後 ego 矩形 × <code>lanes</code> の left/right 境界セグメントの交差</li>
+</ol>
+<p class="sub" style="margin:0">
+制約: (a) neighbor は現在フレームのみで、<strong>future の干渉は見ていない</strong>。
+(b) チェック対象は<strong>現在姿勢だけ</strong>で、ブリッジされた future 軌跡が境界を越えても棄却されない。
+(c) <code>polygons</code> / <code>line_strings</code> / <code>static_objects</code> は判定に使われていない。
+</p>
+
+<h3>3.2 <code>interpolation_future_trajectory()</code> — 5 次補間ブリッジ (<code>:517-610</code>)</h3>
+<p>摂動後の現在状態から GT の <code>t = P·dt = 2.0 s</code> 点へ 5 次エルミート補間で接続し、それ以降は GT をそのまま連結。</p>
+
+<div class="box bad">
+<p class="hd">境界条件の作り方に 3 つの不整合がある (<code>:538-561</code>)</p>
+<pre><code>theta0 = atan2(ego_future[:, P/2, 1] - y0,
+               ego_future[:, P/2, 0] - x0)      # ← ① 摂動後 heading を使っていない
+v0     = torch.norm(aug_current_state[:, 4:6])   # ← ② 符号消失（後退不可）
+a0     = torch.norm(aug_current_state[:, 6:8])   # ← ③ 符号消失（常に「加速中」）
+...
+aT     = norm(fut[P] - 2*fut[P-1] + fut[P-2]) / dt**2   # ← ③ 同様に常に非負</code></pre>
+<ul>
+  <li><strong>①</strong> 初期進行方向を「1.0 s 先の点への弦の向き」で決めており、
+      せっかく摂動した heading（±0.2 rad）と<strong>無関係</strong>。加えて曲線では弦の向きが接線から
+      「1 s 間の方位変化の約半分」ずれる（8 m/s・κ=0.03 で約 6.9°）。</li>
+  <li><strong>②③</strong> <code>norm</code> によって縦加速度の符号が失われ、<strong>減速中のサンプルにも正の加速度が境界条件として与えられる</strong>。
+      始点・終点の両方で起きる。</li>
+</ul>
+<p>結果、摂動量が 0 でもこの補間は恒等写像にならない（§5.2 で定量化）。</p>
+</div>
+
+<h3>3.3 <code>__call__()</code> — ego past のスケーリング (<code>:198-213</code>)</h3>
+<pre><code>W = ego_past_noise_std                      # 既定 0.1
+scale = clamp(N(1.0, W), 1-2W, 1+2W)        # → [0.8, 1.2]
+ego_past[..., :2] *= scale                  # 過去位置を原点(=現在位置)中心にスケール
+ego_current_state[4:6] *= scale             # vx, vy
+ego_current_state[6:8] *= scale             # ax, ay</code></pre>
+<ul>
+  <li>過去の走行距離と現在速度を同率でスケールする「過去速度ノイズ」。<strong>future(教師) は変更されない</strong>ので、
+      「現在 10% 速い」のに「目標は元のまま」という入力／教師の不整合が意図的に作られる。E[scale]=1 で系統偏りは無いが、
+      速度入力への感度を減衰させる方向に働く。</li>
+  <li>位置の乗算スケールなので、曲がった past は<strong>曲率も変わる</strong>（半径がスケールされる）。</li>
+</ul>
+
+<h3>3.4 <code>centric_transform()</code> (<code>:366-515</code>)</h3>
+<p>変換行列は <code>R(-θ)</code>、平行移動は現在位置。数式は正しい（<code>vector_transform</code>/<code>heading_transform</code> を検算済み）。
+未摂動行では恒等変換になる。</p>
+
+<div class="box bad">
+<p class="hd">ego_agent_past の変換だけコメントアウトされている (<code>:397-403</code>)</p>
+<pre><code># inputs["ego_agent_past"][..., :2] = vector_transform(
+#     inputs["ego_agent_past"][..., :2], transform_matrix, center_xy)
+# inputs["ego_agent_past"][..., 2:4] = vector_transform(
+#     inputs["ego_agent_past"][..., 2:4], transform_matrix)</code></pre>
+<p>
+地図（lanes / route_lanes / polygons / line_strings）・neighbors・future は<strong>摂動後フレーム</strong>に変換されるのに、
+ego past だけ<strong>旧フレーム</strong>に留まる。摂動行では past の末端が「摂動後の自車姿勢にぴったり到達した直線的な履歴」に見え、
+横オフセット・方位誤差が<strong>履歴に一切現れない</strong>。地図に対する past の向きは Δheading（最大 ±0.2 rad）、
+位置は Δy（最大 ±0.75 m）ずれる。bridge 版 (<code>:1403-1410</code>) では有効化されており、2 実装で挙動が違う。
+</p>
+</div>
+
+<h4>GT future の平滑化 (<code>:415-418</code>)</h4>
+<pre><code>if self._use_smoothing_future_trajectory:      # 既定 True
+    ego_future4d = smoothing_future_trajectory(ego_past4d, inputs["ego_current_state"], ego_future4d)</code></pre>
+<p><code>unicycle_accel_curvature.py:1237-1254</code>。実体は unicycle(加速度・曲率)モデルへの往復変換:</p>
+<ol>
+  <li><code>theta_smooth</code>: future 方位を 3 階差分正則化つき最小二乗で平滑化（t0 で 0 に固定）</li>
+  <li><code>dxy_theta_to_v</code>: 台形積分の関係から速度列を最小二乗推定。<strong>v(0) は <code>ego_current_state[:, 4]</code> に固定</strong></li>
+  <li><code>_v_to_a</code> → <code>_theta_v_a_to_kappa</code>: 加速度・曲率を平滑化つき最小二乗で抽出</li>
+  <li><code>action_to_traj</code>: <code>(a, κ)</code> を (0,0,方位0) から前進積分して future を再構成</li>
+</ol>
+<p class="sub" style="margin-top:.4rem">
+補足: <code>ego_agent_past</code> はこの関数内では実質未使用（末端位置が 0 である前提と、
+<code>t0_states</code> 明示指定により <code>estimate_t0_states</code> が呼ばれないため）。
+つまり出力は <code>ego_future</code> と <code>ego_current_state[:,4]</code> のみで決まる。
+また <code>n_waypoints=80</code> がハードコードされており、future 長が 80 でないと <code>ValueError</code>。
+</p>
+
+<h3 id="zeromask">3.5 ゼロマスクは何のためにあるのか</h3>
+
+<p><code>centric_transform</code> の各ブロックには例外なく同じ形のマスクが付いている:</p>
+<pre><code>mask = torch.sum(torch.ne(X, 0), dim=-1) == 0   # ← 変換の【前】に「全ゼロか」を記録
+X[..., :2] = vector_transform(X[..., :2], transform_matrix, center_xy)
+...
+X[mask] = 0.0                                    # ← 変換の【後】にゼロへ戻す</code></pre>
+
+<h4>意図: ゼロパディングをアフィン変換に対して不変に保つガード</h4>
+<p>3 つの事実が噛み合っている。</p>
+<ol>
+  <li><strong>これらのテンソルは固定長ゼロパディングである。</strong>
+      <code>lanes</code> = 区間数 × 点数、<code>neighbor_agents_past</code> = <code>MAX_NUM_NEIGHBORS</code> × T、
+      <code>static_objects</code> = <code>NUM_STATIC_OBJECTS</code>、… と枠が固定で、未使用スロットは全ゼロ。</li>
+  <li><strong>パイプライン全体が「全ゼロ ⇒ 無効 / padding」を validity の規約にしている。</strong>
+      各 encoder は attention の <code>key_padding_mask</code> をこの判定から作り、
+      <code>ObservationNormalizer</code> も全ゼロ要素を正規化対象から外し
+      (<code>normalizer.py:59</code>)、neighbor future の loss 有効マスクも同じ判定
+      (<code>train_epoch.py:62</code>)。
+      <div class="tw" style="margin:.6rem 0"><table>
+      <thead><tr><th>encoder</th><th>validity 判定</th><th>centric_transform 側</th><th>一致</th></tr></thead>
+      <tbody>
+      <tr><td>LaneEncoder (<code>:577</code>)</td><td><code>x[..., :8]</code></td><td><code>lanes/route_lanes[..., :8]</code></td><td>✔</td></tr>
+      <tr><td>StaticEncoder (<code>:501</code>)</td><td><code>x[..., :10]</code></td><td><code>static_objects[..., :10]</code></td><td>✔</td></tr>
+      <tr><td>LineEncoder (<code>:665</code>)</td><td><code>x[..., :4]</code></td><td><code>polygons</code>/<code>line_strings</code> 全次元</td><td>✔（実質）</td></tr>
+      <tr><td>NeighborEncoder (<code>:449</code>)</td><td><code>x[..., :8]</code>（+ width, length）</td><td><code>neighbor_agents_past[..., :6]</code></td><td><span class="tag t-warn">不一致</span></td></tr>
+      <tr><td>GoalPoseEncoder (<code>:743</code>)</td><td><code>mask = zeros</code>（常に有効）</td><td><code>goal_pose</code> 全次元</td><td><span class="tag t-warn">概念的に不一致</span></td></tr>
+      </tbody></table></div>
+  </li>
+  <li><strong>ところが <code>vector_transform(x, R, bias=c)</code> は <code>R·(x − c)</code>、つまり線形ではなくアフィン。</strong>
+      よって <code>c ≠ 0</code> のとき padding の <code>(0,0)</code> は <code>R·(−c) ≠ 0</code> へ移る。
+      実測（Δy=0.75 m, Δθ=0.2 rad）: <strong>padding は <code>(−0.149, −0.735)</code> へ移動し非ゼロ化する。</strong></li>
+</ol>
+<p>だから「変換前にゼロだったスロットを記録し、変換後にゼロへ戻す」。
+<strong>マスクを変換の前に計算する順序が本質</strong>である。</p>
+
+<h4>マスクを外すと何が起きるか（実測）</h4>
+<p>有効 2 区間 / 4 枠の lanes、有効 2 台 / 4 枠の neighbors、有効 1 個 / 5 枠の static objects を持つ場面で、
+encoder の validity 判定が「有効」と数えるトークン数:</p>
+<div class="tw"><table>
+<thead><tr><th></th><th>lane 区間</th><th>neighbor</th><th>static</th><th>nbr future 点</th></tr></thead>
+<tbody>
+<tr><td>変換前（真の有効数）</td><td class="num">2</td><td class="num">2</td><td class="num">1</td><td class="num">160</td></tr>
+<tr><td>マスクあり（現状）</td><td class="num">2</td><td class="num">2</td><td class="num">1</td><td class="num">160</td></tr>
+<tr><td><strong>マスクなし</strong></td><td class="num"><strong>4</strong></td><td class="num"><strong>4</strong></td><td class="num"><strong>5</strong></td><td class="num"><strong>320</strong></td></tr>
+</tbody>
+</table></div>
+<ul>
+  <li>padding された lane 区間は、20 点すべてが <code>(−0.149, −0.735)</code> の<strong>同一点に潰れた「長さ 0 の車線」</strong>になる。</li>
+  <li>padding された neighbor は<strong>自車の真横 0.75 m に「大きさ 0・向き未定義 (cos=sin=0) の幽霊車」</strong>として出現する。
+      衝突 loss や road-border loss にそのまま入る。</li>
+  <li>neighbor future の padding 点も非ゼロ化するため、<strong>loss の有効マスクが「幽霊を追跡せよ」という教師に化ける</strong>。</li>
+</ul>
+<div class="box">
+<p class="hd">重要: このマスクが実際に働くのは摂動行だけ</p>
+<p>
+非摂動行は <code>center_xy = (0,0)</code>・<code>R = I</code> なので padding はゼロのまま。
+つまりこのマスクは<strong>「摂動によって平行移動が入る」ことへの対処</strong>であり、
+だからこそ <code>centric_transform</code> の内部に置かれている。
+augmentation を切れば（<code>use_data_augment=False</code>）不要になる、という構造。
+</p>
+</div>
+
+<h4><code>goal_pose</code> の場合は上記の意図が当てはまらない (<code>:432-439</code>)</h4>
+<pre><code>mask = torch.sum(torch.ne(inputs["goal_pose"], 0), dim=-1) == 0
+... 変換 ...
+inputs["goal_pose"][mask] = 0.0</code></pre>
+<ul>
+  <li><code>goal_pose</code> は<strong>固定長リストではなく常に 1 個だけ存在する単一エントリ</strong>
+      (<code>encoder.py:52</code>: <code>goal_pose_num = 1</code>)。<strong>padding という概念が無い。</strong></li>
+  <li><code>GoalPoseEncoder</code> は <code>mask = torch.zeros((B,1), dtype=bool)</code> で
+      <strong>goal トークンを常に有効扱い</strong>する (<code>encoder.py:743</code>)。
+      つまり「無効な goal」を表現する経路が encoder 側に存在しない。</li>
+  <li>したがってあの 1 行は、<strong>直後に続く neighbor / lanes ブロックのパターンをそのまま複製したもの</strong>と読むのが自然
+      （<code>a72126ab</code> の diff は、既存ブロックと同一書式の 10 行を neighbor ブロックの直前に挿入している）。</li>
+  <li>発火条件も <code>goal_pose</code> では意味を持たない:
+      <ul>
+        <li><strong>3 列コーパス</strong>: <code>heading_to_cos_sin</code> で <code>cos=1</code> になるため<strong>絶対に発火しない</strong>（完全に不活性）。</li>
+        <li><strong>4 列コーパス</strong>: <code>(0,0,0,0)</code> で発火するが、これは「自車位置に goal がある」ではなく
+            「goal 無しの sentinel」。ただし encoder がトークンを消さないので、
+            ゼロ化は<strong>「全ゼロという特定の埋め込み」を作るだけ</strong>で、無効化ではない。</li>
+      </ul>
+  </li>
+</ul>
+<p>
+すなわち <code>goal_pose</code> のマスクは、本来の目的（padding 保護）ではなく、
+結果的に「無効 goal の sentinel を素通しする」機能に見える形になっている。
+sentinel 機構として意図的に設計されたのであれば encoder 側の <code>mask</code> も併せて実装されているはずで、
+そうなっていない。→ §7-F, §8.1
+</p>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="bridge">4. bridge 版 StatePerturbation の逐次ロジック</h2>
+<p><code>augment_type="bridge"</code> で選択（既定は quintic なので<strong>通常は未使用</strong>）。
+設計としては quintic 版よりかなり厳密。</p>
+
+<dl class="kv">
+  <dt>既定パラメータ</dt><dd><code>past_bridge_sec=1.0</code>, <code>future_bridge_sec=1.5</code>,
+    <code>max_heading_offset_deg=10</code>, 横オフセット ±0.75 m,
+    <code>max_lateral_accel=3.0 m/s²</code>, <code>max_bridge_speed_gap=0.5 m/s</code>, <code>max_bridge_jerk=5.0 m/s³</code></dd>
+  <dt>適用判定</dt><dd><code>rand &lt; p</code> かつ <code>|vx| &ge; 2.0</code> かつ オフセットが非ゼロ (<code>:1339-1345</code>)</dd>
+</dl>
+
+<h3>4.1 quintic 版に対する改善点</h3>
+<ul>
+  <li><strong>past / future を同一の横オフセットで一貫して作り直す</strong>（past は heading offset を符号反転して逆方向に適用）。
+      現在状態は再構成後の軌跡から中心差分で <code>v, a, yaw_rate</code> を導出するので、状態と軌跡が整合する。</li>
+  <li><strong>縦方向の進行（progress-time 関係）を GT から保存</strong>する。オフセット経路が長くなる分は
+      merge 点を後ろにずらす二分探索で吸収し、速度プロファイルを変えない。</li>
+  <li><strong>実行可能性チェック</strong>: 横加速度 / GT との速度差 / jerk の 3 制約を評価し、
+      通らなければ M/N（ブリッジ時間）を 0.1 s 刻みで延長探索。最後に失敗したらオフセットを半分にして最大 8 回再試行し、
+      それでも駄目なら <code>aug_flag=False</code>（<code>:1347-1372</code>）。</li>
+  <li><code>ego_agent_past</code> を正しく座標変換する。</li>
+  <li>GT future の平滑化を<strong>行わない</strong>。</li>
+</ul>
+
+<h3>4.2 bridge 版の弱点</h3>
+<ul>
+  <li><span class="tag t-warn">性能</span> <code>for batch_index in nonzero(aug_flag)</code> の <strong>Python ループ</strong>内で
+      二分探索（最大 50 回）× dense sampling (<code>ds=0.05 m</code>) を回す。batch 512 の半分に対して毎 iteration 実行するのは
+      現実的でない。これが既定 quintic の理由と推測される。</li>
+  <li><span class="tag t-warn">整合</span> <code>wheel_base=2.75</code> がコンストラクタ引数の固定値で、
+      <code>inputs["ego_shape"]</code> を使わない（quintic 版は <code>ego_shape</code> を使用）。</li>
+  <li><span class="tag t-warn">安全</span> 衝突・境界チェックが<strong>無い</strong>（quintic 版の <code>_check_aug_validity</code> 相当が未実装）。
+      横 0.75 m ずらして他車・縁石に被る可能性を排除していない。</li>
+  <li><code>train.py:230</code> で <code>augment_prob</code> と <code>device</code> のみ渡すため、
+      制約リミットや bridge 時間は<strong>CLI から変更不能</strong>。</li>
+</ul>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="exp">5. 数値検証の結果</h2>
+<p>合成軌跡（dt=0.1 s, T=80 = 8 s）を各関数に通し、GT からの乖離を実測した。</p>
+
+<h3>5.1 <code>smoothing_future_trajectory</code>（全サンプルに適用される GT 書き換え）</h3>
+<div class="tw"><table>
+<thead><tr><th>ケース</th><th>v0(state)</th><th>最大位置誤差</th><th>再構成速度の最小値</th><th>8 s 到達距離 GT / 平滑化</th><th>0.5 m 到達時刻の遅れ</th></tr></thead>
+<tbody>
+<tr><td>停車 8 s</td><td class="num">0.0</td><td class="num">0.000 m</td><td class="num">+0.000</td><td class="num">0.00 / 0.00 m</td><td class="num">—</td></tr>
+<tr><td>1.5 s 停車 → 1.0 m/s² 発進</td><td class="num">0.0</td><td class="num">0.003 m</td><td class="num">−0.009</td><td class="num">20.80 / 20.80 m</td><td class="num">+0.00 s</td></tr>
+<tr><td>即発進 1.0 m/s²</td><td class="num">0.0</td><td class="num">0.003 m</td><td class="num">+0.030</td><td class="num">31.60 / 31.60 m</td><td class="num">+0.00 s</td></tr>
+<tr><td>即発進 1.5 m/s²</td><td class="num">0.0</td><td class="num">0.005 m</td><td class="num">+0.045</td><td class="num">47.40 / 47.40 m</td><td class="num">+0.00 s</td></tr>
+<tr><td>3 → 0 減速停止</td><td class="num">3.0</td><td class="num">0.003 m</td><td class="num">−0.009</td><td class="num">4.65 / 4.65 m</td><td class="num">+0.00 s</td></tr>
+<tr><td>0.5 m/s クリープ</td><td class="num">0.5</td><td class="num">0.000 m</td><td class="num">+0.500</td><td class="num">4.00 / 4.00 m</td><td class="num">+0.00 s</td></tr>
+<tr><td>1.0 m/s・κ=0.1 低速旋回</td><td class="num">1.0</td><td class="num">0.063 m</td><td class="num">+1.000</td><td class="num">8.00 / 8.00 m</td><td class="num">+0.10 s</td></tr>
+<tr><td>8 m/s 巡航</td><td class="num">8.0</td><td class="num">0.002 m</td><td class="num">+8.000</td><td class="num">64.00 / 64.00 m</td><td class="num">+0.00 s</td></tr>
+<tr><td>8 m/s → 5 s で停止</td><td class="num">8.0</td><td class="num">0.005 m</td><td class="num">−0.018</td><td class="num">24.40 / 24.40 m</td><td class="num">+0.00 s</td></tr>
+<tr><td><em>v0 不整合</em>: GT は 1.0 m/s だが state は 0</td><td class="num">0.0</td><td class="num">0.064 m</td><td class="num">+0.397</td><td class="num">8.00 / 7.96 m</td><td class="num">+0.10 s</td></tr>
+<tr><td><em>v0 不整合</em>: GT は停車だが state は 0.5</td><td class="num">0.5</td><td class="num">0.032 m</td><td class="num">−0.069</td><td class="num">0.00 / 0.02 m</td><td class="num">—</td></tr>
+</tbody>
+</table></div>
+
+<div class="box ok">
+<p class="hd">判定: 平滑化は GT をほぼ保存している <span class="tag t-ok">シロ</span></p>
+<p>
+清浄な軌跡に対して誤差は cm オーダーで、<strong>発進タイミングのずれは 0.00 s</strong>。
+「停車 → 発進」の GT が平滑化で潰される、という仮説は成立しない。
+</p>
+<p>
+残る軽微な懸念: (a) <code>action_to_traj</code> の再構成速度に<strong>非負制約が無い</strong>ため、
+停止直後に −0.01〜−0.07 m/s の微小な後退が入る（mm オーダーなので実害なし）。
+(b) <code>ego_current_state[:,4]</code> と GT の初速がずれると先頭 0.2〜0.3 s が引っ張られる
+（v0 差 1.0 m/s で 0.06 m、発進遅れ +0.1 s）。実データのオドメトリ由来 vx にラグがあると効くが、影響は小さい。
+</p>
+</div>
+
+<h3>5.2 <code>interpolation_future_trajectory</code>（<strong>摂動量ゼロ</strong>で実行）</h3>
+<p>摂動を一切与えず、軌跡と完全整合した現在状態を渡した。恒等写像になるべきだが、ならない。
+ここでの乖離は<strong>摂動ではなく境界条件の作り方に起因する純粋な教師データ破壊</strong>である。</p>
+
+<div class="tw"><table>
+<thead><tr><th>ケース (v0 / a0)</th><th>ブリッジ区間 0-2 s の最大位置誤差</th><th>0.5 s 時点の進行距離 GT → 補間</th><th>相対</th></tr></thead>
+<tbody>
+<tr><td>8 m/s 巡航 (a0=0, κ=0)</td><td class="num">0.000 m</td><td class="num">4.000 → 4.000 m</td><td class="num">±0%</td></tr>
+<tr><td>8 → 4 m/s 減速 (a0=−2.0)</td><td class="num"><strong>0.483 m</strong> @1.0 s</td><td class="num">3.800 → 4.045 m</td><td class="num">+6.4%</td></tr>
+<tr><td>3 → 8 m/s 加速 (a0=+2.0)</td><td class="num">0.065 m @1.0 s</td><td class="num">1.700 → 1.745 m</td><td class="num">+2.6%</td></tr>
+<tr><td>5 → 0 m/s 減速停止 (a0=−2.0)</td><td class="num"><strong>0.483 m</strong> @1.1 s</td><td class="num">2.300 → 2.545 m</td><td class="num">+10.7%</td></tr>
+<tr><td>8 m/s・κ=0.03 旋回 (a0=0)</td><td class="num"><strong>0.488 m</strong> @0.8 s</td><td class="num">4.000 → 4.031 m</td><td class="num">+0.8%</td></tr>
+<tr><td>2.2 m/s クリープ (a0=0, κ=0)</td><td class="num">0.000 m</td><td class="num">1.100 → 1.100 m</td><td class="num">±0%</td></tr>
+<tr><td><strong>2.5 → 0 m/s 停止</strong> (a0=−1.5)</td><td class="num">0.181 m @0.8 s</td><td class="num">1.100 → 1.233 m</td><td class="num"><strong>+12.1%</strong></td></tr>
+<tr><td><strong>2.0 → 6 m/s 発進</strong> (a0=+2.0)</td><td class="num">0.065 m @1.0 s</td><td class="num">1.200 → 1.245 m</td><td class="num">+3.8%</td></tr>
+<tr><td><strong>3.0 m/s・κ=0.08 低速旋回</strong></td><td class="num">0.183 m @0.8 s</td><td class="num">1.500 → 1.512 m</td><td class="num">+0.8%</td></tr>
+</tbody>
+</table></div>
+
+<div class="box bad">
+<p class="hd">判定: 摂動ゼロでも教師が壊れる <span class="tag t-bad">クロ</span></p>
+<ul>
+  <li>加速度の符号消失（§3.2 ②③）により、<strong>減速中サンプルは必ず前方へオーバーシュートする教師</strong>になる。
+      0.5 s 時点で +0.13〜0.25 m。ゲート直上の 2.5 m/s 停止シーンでは<strong>進行距離の +12%</strong>。</li>
+  <li>曲線では初期接線の弦近似（同 ①）により、0.8 s 付近で最大 0.49 m の横方向ずれ。
+      「コーナーを内側に切る」向きの系統的バイアス。</li>
+  <li>直線・等速のみ誤差 0。つまり <code>augment_prob=0.5</code> の下で、<strong>加減速中・旋回中のサンプルの半分</strong>が
+      この歪みを受けている。</li>
+</ul>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="kinematics">6. 速度・加速度ノイズの運動学的整合性</h2>
+
+<h3>6.0 前提: 状態量の規約と、そもそも誰が使うのか</h3>
+
+<p><code>ego_current_state</code> = <code>[x, y, cos, sin, vx, vy, ax, ay, steering, yaw_rate]</code>（10 次元、base_link 座標）。
+実機での作り方（<code>diffusion_planner_ros/utils.py:136-162</code>）から規約が確定する:</p>
+<div class="tw"><table>
+<thead><tr><th>成分</th><th>実機のソース</th><th>物理的意味</th><th>典型値</th></tr></thead>
+<tbody>
+<tr><td><code>vx</code></td><td><code>twist.twist.linear.x</code></td><td>車体前後方向速度（＝接線速度）</td><td class="num">0〜</td></tr>
+<tr><td><code>vy</code></td><td><code>twist.twist.linear.y</code></td><td>車体横方向速度（横滑り）</td><td class="num"><strong>≈ 0</strong></td></tr>
+<tr><td><code>ax</code></td><td><code>accel.accel.linear.x</code></td><td><strong>接線加速度（符号付き）</strong></td><td class="num">−3〜+2</td></tr>
+<tr><td><code>ay</code></td><td><code>accel.accel.linear.y</code></td><td><strong>横（向心）加速度 ≈ vx·ω</strong></td><td class="num">v²κ</td></tr>
+<tr><td><code>yaw_rate</code></td><td><code>twist.twist.angular.z</code></td><td>ヨー角速度 ω（|v|&lt;0.2 で 0 に潰す）</td><td class="num">v·κ</td></tr>
+</tbody>
+</table></div>
+
+<div class="box bad">
+<p class="hd">重要: <code>vx, vy, ax, ay, steering, yaw_rate</code> は<u>ネットワークの入力ではない</u></p>
+<ul>
+  <li><strong>encoder</strong> が使う ego 情報は <code>ego_agent_past</code> の <code>(x, y, cos, sin)</code> と <code>ego_shape</code> のみ
+      (<code>model/module/encoder.py:169-177, 208-218</code>)。速度チャネルは存在しない。</li>
+  <li><strong>decoder</strong> は <code>ego_current_state[:, :4]</code>（姿勢＝拡散軌跡の t=0 アンカー）と
+      <code>[:, 4:5]</code> のみを使い、後者は<strong>縦方向 loss の重み</strong>としてしか使われない
+      (<code>decoder.py:58-61, 119-123</code>)。</li>
+</ul>
+<p>
+したがって速度・加速度ノイズは「入力の頑健化」にはならない。実際に効くのは
+<strong>(a) quintic の境界条件経由で目標軌跡を書き換える</strong>、
+<strong>(b) 平滑化の <code>v0</code> 経由で目標軌跡を書き換える</strong>、(c) loss の重みを僅かに変える、の 3 経路のみ。
+つまり<strong>教師データへのノイズ</strong>である。速度に関する入力側の手がかりは
+<code>ego_agent_past</code> の点間隔だけで、これは <code>scale</code>（±10〜20%）で汚染される。
+</p>
+<p class="sub" style="margin-bottom:0">
+（付随して見つかった点: encoder の ego 分岐は <code>ego[:, :6]</code> ＝<strong>最も古い 6 フレーム</strong>を残し、
+現在姿勢を含む新しい 15 フレームをゼロ化している。<code>ego_agent_past</code> は
+「index 0 が最古 / index −1 が現在」（<code>state_update.py:106-115</code>, <code>bridge:792</code>,
+<code>unicycle_accel_curvature.py:1114-1116</code> の 3 箇所で確認）。
+一方 neighbor 分岐は <code>[:, :, -6:]</code>＝最新 6 フレームで、規約が逆。
+コメントは "Only keep the current + first 5 steps" と書かれており、意図と実装が食い違っている疑いが強い。
+augmentation の範囲外だが、<u>自車速度の唯一の手がかりが t = −2.0〜−1.5 s の窓だけになる</u>ため、
+発進判断への影響は大きい。別途確認を推奨。）
+</p>
+</div>
+
+<h3>6.1 <span class="tag t-bad">問題 1</span> <code>a0 = ‖(ax, ay)‖</code> は向心加速度を二重計上している</h3>
+
+<p>quintic の境界条件 (<code>data_augmentation.py:564-586</code>) は</p>
+<pre><code>ẍ(0) = a0·cos θ0 − v0·ω0·sin θ0
+ÿ(0) = a0·sin θ0 + v0·ω0·cos θ0</code></pre>
+<p>これは「<code>a0</code> = <strong>接線</strong>加速度」を前提とした展開で、<strong>向心成分は第 2 項が既に表現している</strong>。
+ところが実装は <code>a0 = torch.norm(aug_current_state[:, 6:8])</code>、すなわち <code>‖(ax, ay)‖</code>。
+<code>ay ≈ v·ω</code> は向心加速度なので、<strong>向心加速度が a0 の中と第 2 項の 2 か所に入る</strong>。
+さらにノルムなので符号も失われる。終端側の <code>aT</code>（位置の 2 階差分のノルム）も同型。</p>
+
+<p>摂動量を完全にゼロにして、状態と GT を厳密に整合させた合成軌跡で、
+ブリッジ区間（0〜2 s）の最大位置誤差を測った。本来は恒等写像なので<strong>すべて 0 になるべき</strong>。</p>
+
+<div class="tw"><table>
+<thead><tr><th>ケース</th><th>真の ax<br>(接線)</th><th>ay<br>(向心)</th><th>a0=‖·‖</th><th>現状</th><th>θ0 のみ修正</th><th>a0/aT のみ修正</th><th>両方修正</th></tr></thead>
+<tbody>
+<tr><td>8 m/s 直線 a=0</td><td class="num">0.00</td><td class="num">0.00</td><td class="num">0.00</td><td class="num">0.000 m</td><td class="num">0.000</td><td class="num">0.000</td><td class="num">0.000</td></tr>
+<tr><td>8 m/s 直線 a=−2（減速）</td><td class="num">−2.00</td><td class="num">0.00</td><td class="num">2.00</td><td class="num"><strong>0.553 m</strong></td><td class="num">0.553</td><td class="num"><strong>0.031</strong></td><td class="num">0.031</td></tr>
+<tr><td>8 m/s κ=0.03 定速旋回</td><td class="num">0.00</td><td class="num">1.92</td><td class="num">1.92</td><td class="num"><strong>0.533 m</strong></td><td class="num">0.243</td><td class="num">0.453</td><td class="num"><strong>0.030</strong></td></tr>
+<tr><td>8 m/s κ=0.06 定速旋回</td><td class="num">0.00</td><td class="num">3.84</td><td class="num">3.84</td><td class="num"><strong>1.102 m</strong></td><td class="num">0.412</td><td class="num">0.903</td><td class="num"><strong>0.065</strong></td></tr>
+<tr><td>3 m/s κ=0.08 低速旋回</td><td class="num">0.00</td><td class="num">0.72</td><td class="num">0.72</td><td class="num">0.200 m</td><td class="num">0.091</td><td class="num">0.170</td><td class="num"><strong>0.011</strong></td></tr>
+<tr><td>2.5 m/s κ=0.05 a=−1.5</td><td class="num">−1.50</td><td class="num">0.31</td><td class="num">1.53</td><td class="num">0.235 m</td><td class="num">0.232</td><td class="num"><strong>0.043</strong></td><td class="num">0.042</td></tr>
+</tbody>
+</table></div>
+<p class="sub" style="margin-top:-.3rem">
+修正版の定義: <code>θ0 = atan2(sin, cos)</code>（現在 heading）, <code>v0 = vx</code>, <code>a0 = ax</code>,
+<code>aT</code> = GT 進行方向へ射影した接線成分。
+</p>
+
+<div class="box bad">
+<p class="hd">読み方</p>
+<ul>
+  <li><strong>定速旋回では真の接線加速度はちょうど 0</strong> なのに、<code>a0 = |ay| = v²κ</code> が入る。
+      8 m/s・κ=0.06（横 G 3.84 m/s²）では「3.84 m/s² で前方加速中」と誤って伝えられ、誤差 <strong>1.10 m</strong>。</li>
+  <li>直線減速は<strong>符号消失のみ</strong>が原因（0.553 → 0.031 m）。旋回は<strong>符号消失・二重計上・θ0 の弦近似の 3 つが重畳</strong>し、
+      両方直して初めて 0.03 m まで落ちる。</li>
+  <li>誤差は <code>a_lat = v²κ</code> に比例して増える。カーブが強い／速い場面で最悪。</li>
+</ul>
+</div>
+
+<h3>6.2 <span class="tag t-bad">問題 2</span> <code>vx</code> 摂動が <code>ay = vx·ω</code> の関係を壊す</h3>
+<p><code>yaw_rate</code>（ω）は摂動範囲 0 で保存され、<code>ay</code> は ±0.1 m/s² しか摂動されない。
+一方 <code>vx</code> は ±1.0 m/s 摂動される。運動学的には <code>ay = vx·ω</code> が成り立つべきなので、
+<code>Δvx·ω</code> ぶんの不整合がそのまま残る。</p>
+
+<div class="tw"><table>
+<thead><tr><th>v [m/s]</th><th>ω [rad/s]</th><th>元の ay</th><th>Δvx</th><th>摂動後 v</th><th>必要な ay</th><th>実際の ay</th><th>不整合</th></tr></thead>
+<tbody>
+<tr><td class="num">3.0</td><td class="num">0.240</td><td class="num">0.720</td><td class="num">−1.0</td><td class="num">2.00</td><td class="num">0.480</td><td class="num">0.720</td><td class="num"><strong>+0.240</strong></td></tr>
+<tr><td class="num">3.0</td><td class="num">0.240</td><td class="num">0.720</td><td class="num">+1.0</td><td class="num">4.00</td><td class="num">0.960</td><td class="num">0.720</td><td class="num"><strong>−0.240</strong></td></tr>
+<tr><td class="num">8.0</td><td class="num">0.240</td><td class="num">1.920</td><td class="num">−1.0</td><td class="num">7.00</td><td class="num">1.680</td><td class="num">1.920</td><td class="num">+0.240</td></tr>
+<tr><td class="num">8.0</td><td class="num">0.480</td><td class="num">3.840</td><td class="num">−1.0</td><td class="num">7.00</td><td class="num">3.360</td><td class="num">3.840</td><td class="num"><strong>+0.480</strong></td></tr>
+<tr><td class="num">8.0</td><td class="num">0.480</td><td class="num">3.840</td><td class="num">+1.0</td><td class="num">9.00</td><td class="num">4.320</td><td class="num">3.840</td><td class="num">−0.480</td></tr>
+</tbody>
+</table></div>
+<ul>
+  <li>不整合量は <strong>ay の摂動幅 ±0.1 の 2.4〜4.8 倍</strong>。つまり「ay を摂動する」設計意図より、
+      「vx を摂動した副作用」のほうが大きい。</li>
+  <li>物理的には「同じ ω・同じ横 G のまま速度だけ変わる」＝ 曲率 <code>κ = ω/v</code> が変わったのに向心加速度が変わらない、という状態。
+      3 m/s → 2 m/s の例では κ が 1.5 倍になるのに ay がそのままで、<strong>ありえない状態</strong>。</li>
+  <li>一方 <code>steering</code> は <code>atan(L·ω/|v_new|)</code> で<strong>再計算されており自転車モデルとしては整合している</strong>
+      (<code>:253-258</code>)。ay だけが取り残されている。</li>
+</ul>
+
+<h3>6.3 <span class="tag t-bad">問題 3</span> heading 摂動が暗黙に「カニ歩き（サイドスリップ）」を注入する</h3>
+<p>摂動は<strong>旧フレーム</strong>で加えられ、その後 <code>centric_transform</code> が全ベクトルを
+<strong>新（heading 摂動後）フレーム</strong>へ回転する。したがって <code>Δvy = 0</code> にしても、
+速度ベクトルは旧進行方向を向いたまま車体だけ回るため、新フレームで <code>vy = −|v|·sin Δθ</code> が発生する。</p>
+
+<div class="tw"><table>
+<thead><tr><th>v [m/s]</th><th>Δθ [rad]</th><th>変換後の vy [m/s]</th><th>横滑り角 β [deg]</th></tr></thead>
+<tbody>
+<tr><td class="num">2.2</td><td class="num">0.10</td><td class="num">−0.220</td><td class="num">5.7</td></tr>
+<tr><td class="num">2.2</td><td class="num">0.20</td><td class="num">−0.437</td><td class="num">11.5</td></tr>
+<tr><td class="num">5.0</td><td class="num">0.20</td><td class="num">−0.993</td><td class="num">11.5</td></tr>
+<tr><td class="num">8.0</td><td class="num">0.20</td><td class="num"><strong>−1.589</strong></td><td class="num">11.5</td></tr>
+<tr><td class="num">12.0</td><td class="num">0.20</td><td class="num"><strong>−2.384</strong></td><td class="num">11.5</td></tr>
+</tbody>
+</table></div>
+<ul>
+  <li>β は Δθ に等しくなる（＝ heading 摂動がそのまま横滑り角になる）。<strong>Δθ=0.2 rad で β=11.5°</strong>。
+      乗用車の限界横滑り角は乾燥路で数度程度なので、明確に非現実的。</li>
+  <li>実機の <code>vy</code> は <code>twist.linear.y ≈ 0</code>。そこへ<strong>さらに Δvy = ±0.5 m/s が上乗せ</strong>される
+      （2.2 m/s なら単独で β=12.8°）。実運用で絶対に現れない状態。</li>
+  <li><code>ax, ay</code> も同じ回転を受けるので、直線減速 <code>ax=−2</code> が Δθ=0.2 で <code>ay</code> に
+      <strong>+0.40 m/s²</strong> 漏れ出す。</li>
+  <li>本来の意図（レーン内で横にずれ、方位もずれた状態からの復帰）を表すなら、
+      <strong>速度ベクトルも heading と一緒に回して新 body frame で vy≈0 を保つ</strong>のが正しい。
+      現状は「車体だけ回して速度は旧方向」＝ カニ歩きの状態を作っている。</li>
+</ul>
+
+<h3>6.4 <span class="tag t-bad">問題 4</span> <code>scale</code> の適用順により、状態の速度と目標軌跡の初速が食い違う</h3>
+<pre><code># data_augmentation.py:187-213
+aug_flag, aug_ego_current_state = self.augment(inputs)
+interpolated_ego_future = self.interpolation_future_trajectory(   # ← scale【前】の v,a で目標を作る
+    aug_ego_current_state, ego_future)
+...
+inputs["ego_current_state"][aug_flag, 4:6] *= scale_1d            # ← その後で状態だけ scale
+inputs["ego_current_state"][aug_flag, 6:8] *= scale_1d</code></pre>
+<div class="tw"><table>
+<thead><tr><th>scale</th><th>平滑化</th><th>状態の vx</th><th>目標軌跡の初速</th><th>乖離</th></tr></thead>
+<tbody>
+<tr><td class="num">0.8</td><td>OFF</td><td class="num">6.40 m/s</td><td class="num">8.00 m/s</td><td class="num"><strong>−1.60 m/s</strong></td></tr>
+<tr><td class="num">0.8</td><td>ON</td><td class="num">6.40 m/s</td><td class="num">7.03 m/s</td><td class="num">−0.63 m/s</td></tr>
+<tr><td class="num">0.9</td><td>OFF</td><td class="num">7.20 m/s</td><td class="num">8.00 m/s</td><td class="num">−0.80 m/s</td></tr>
+<tr><td class="num">1.1</td><td>OFF</td><td class="num">8.80 m/s</td><td class="num">8.00 m/s</td><td class="num">+0.80 m/s</td></tr>
+<tr><td class="num">1.2</td><td>OFF</td><td class="num">9.60 m/s</td><td class="num">8.00 m/s</td><td class="num"><strong>+1.60 m/s</strong></td></tr>
+<tr><td class="num">1.2</td><td>ON</td><td class="num">9.60 m/s</td><td class="num">8.97 m/s</td><td class="num">+0.63 m/s</td></tr>
+</tbody>
+</table></div>
+<ul>
+  <li>8 m/s のとき、状態は 6.4〜9.6 m/s を主張するのに目標軌跡は 8.0 m/s から始まる。<strong>最大 ±20% の食い違い</strong>。</li>
+  <li>平滑化 ON では <code>v0 = scale 後の vx</code> で future を再構成するため、乖離は約 4 割まで縮む代わりに
+      <strong>past のノイズが GT の縦位置へ漏れ出す</strong>（＝教師そのものが scale ノイズで動く）。</li>
+  <li>ノイズを入れたいのが「過去の速度」なら、目標を作る<u>前</u>に scale を適用すべき（順序バグ）。</li>
+</ul>
+
+<h3>6.5 <span class="tag t-ok">整合していた点</span></h3>
+<ul>
+  <li><strong><code>scale</code> による past 位置 / v / a のスケーリングは相似変換として自己整合している。</strong>
+      位置を s 倍すると弧長も s 倍 → 固定時間格子では <code>v ∝ s</code>, <code>ax ∝ s</code>。
+      曲率は <code>1/s</code> 倍になるので <code>ω = v·κ</code> は不変 → <strong>ω をスケールしないのが正しい</strong>（実装もそうなっている）。
+      横加速度 <code>v²κ ∝ s</code> なので <code>ay ∝ s</code> → これも正しい。
+      さらに相似変換は各点の接線方向を変えないので、past の <code>(cos, sin)</code> を触らないのも正しい。</li>
+  <li><strong><code>steering</code> の再計算</strong> <code>δ = atan(L·ω/|v|)</code> は自転車モデルとして正しく、
+      <code>vx</code> を下げれば舵角が増える方向に整合する。実機 <code>utils.py:147</code> と同一式。</li>
+  <li><strong><code>vx</code> のゼロクリップ</strong> <code>max(vx+Δ, 0)</code> は後退状態を作らない安全側の処理。
+      ただし quintic 側が <code>v0 = ‖(vx,vy)‖</code> を取るため、後退そのものは元々表現不能。</li>
+  <li><strong>低速時の <code>ω, δ</code> ゼロ化しきい値 0.2 m/s</strong> は実機 <code>utils.py:142</code> と一致している。</li>
+</ul>
+
+<div class="box warn">
+<p class="hd">6.6 まとめ — 速度ノイズは運動学的に「適切」とは言えない</p>
+<ol>
+  <li><strong>ノイズの入れ先が間違っている。</strong> <code>vx,vy,ax,ay</code> はモデル入力ではないので、
+      入力の頑健化にならず、代わりに quintic と平滑化を通じて<strong>教師軌跡を歪める</strong>だけになっている。</li>
+  <li><strong>接線／向心加速度の分解ができていない。</strong> <code>norm</code> により符号消失に加えて
+      向心加速度を二重計上し、定速旋回で最大 1.10 m の目標誤差を生む（§6.1）。</li>
+  <li><strong>成分間の運動学的関係が保たれていない。</strong> <code>ay = vx·ω</code> が
+      <code>vx</code> 摂動で最大 ±0.48 m/s² 破れる（§6.2）。</li>
+  <li><strong>heading 摂動が非現実的な横滑りを生む。</strong> β が Δθ と同じだけ発生し、
+      さらに ±0.5 m/s の vy が上乗せされる（§6.3）。</li>
+  <li><strong>適用順のバグで状態速度と目標初速が最大 ±20% 食い違う</strong>（§6.4）。</li>
+</ol>
+<p>逆に、<code>scale</code> の相似変換としての整合性と <code>steering</code> の再計算は正しい（§6.5）。</p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="findings">7. 発見された問題点一覧</h2>
+
+<div class="tw"><table>
+<thead><tr><th>#</th><th>問題</th><th>場所</th><th>重大度</th><th>低速問題との関連</th></tr></thead>
+<tbody>
+<tr>
+  <td>A</td>
+  <td><strong>quintic の境界条件で <code>norm</code> により (i) 加速度・速度の符号が消失し、(ii) 向心加速度が二重計上される</strong>。
+      定速旋回でも「前方加速中」と誤って伝わる（§6.1）</td>
+  <td><code>data_augmentation.py:545-546, 555-560</code></td>
+  <td class="sev"><span class="tag t-bad">高</span></td>
+  <td>間接（摂動ゼロでも目標が 0.20〜1.10 m 歪む。2〜4 m/s 帯で +12% オーバーシュート）</td>
+</tr>
+<tr>
+  <td>A2</td>
+  <td><strong><code>ay = vx·ω</code> の関係が <code>vx</code> 摂動で破れる</strong>。ω は不変・ay の摂動幅 ±0.1 に対し、不整合は最大 ±0.48 m/s²（§6.2）</td>
+  <td><code>data_augmentation.py:227-242</code></td>
+  <td class="sev"><span class="tag t-warn">中</span></td>
+  <td>間接（旋回中の境界条件がさらに崩れる）</td>
+</tr>
+<tr>
+  <td>A3</td>
+  <td><strong>heading 摂動が横滑り角 β=Δθ（最大 11.5°, vy 最大 −2.4 m/s）を注入</strong>。速度ベクトルを旧フレームで摂動してから回転するため。実機の vy は ≈ 0（§6.3）</td>
+  <td><code>data_augmentation.py:238-241</code> + <code>:385-391</code></td>
+  <td class="sev"><span class="tag t-bad">高</span></td>
+  <td>間接（実運用に存在しない状態を学習）</td>
+</tr>
+<tr>
+  <td>A4</td>
+  <td><strong><code>scale</code> が目標軌跡を作った<u>後</u>に適用される順序バグ</strong>。状態の速度と目標初速が最大 ±20%（±1.6 m/s）食い違う（§6.4）</td>
+  <td><code>data_augmentation.py:187-213</code></td>
+  <td class="sev"><span class="tag t-bad">高</span></td>
+  <td>間接（速度と計画の対応関係を壊す）</td>
+</tr>
+<tr>
+  <td>B</td>
+  <td><strong>初期進行方向 θ0 を「1 s 先への弦」で決めており、摂動後 heading と無関係</strong>。曲線で最大 0.49 m ずれ</td>
+  <td><code>data_augmentation.py:541-544</code></td>
+  <td class="sev"><span class="tag t-bad">高</span></td>
+  <td>間接（低速旋回の教師が歪む）</td>
+</tr>
+<tr>
+  <td>C</td>
+  <td><strong><code>ego_agent_past</code> の座標変換がコメントアウト</strong>。摂動後は past と地図の幾何が不整合。bridge 版とも非対称</td>
+  <td><code>data_augmentation.py:397-403</code></td>
+  <td class="sev"><span class="tag t-bad">高</span></td>
+  <td>間接（履歴に横ずれが現れないので復帰を学べない）</td>
+</tr>
+<tr>
+  <td>D</td>
+  <td><strong>低速域 (|vx| &lt; 2.0 m/s) は augmentation が完全に無効</strong>。停車〜発進の状態多様性がゼロ</td>
+  <td><code>:223-225</code> / bridge <code>:1339</code></td>
+  <td class="sev"><span class="tag t-bad">高</span></td>
+  <td><strong>直接</strong>（該当域の汎化・復帰能力が育たない）</td>
+</tr>
+<tr>
+  <td>E</td>
+  <td><strong>速度・加速度ノイズが「入力の頑健化」になっていない</strong>。<code>vx,vy,ax,ay</code> はモデル入力ではなく（encoder は <code>ego_agent_past</code> のみ、decoder は姿勢と loss 重みのみ）、
+      ノイズは quintic と平滑化を通じて<strong>教師軌跡を汚染する</strong>経路でしか効かない（§6.0）</td>
+  <td><code>:154-155, 199-213</code> + <code>encoder.py:169-177</code>, <code>decoder.py:58-61</code></td>
+  <td class="sev"><span class="tag t-bad">高</span></td>
+  <td><strong>直接寄与しうる</strong>（速度と計画の対応が教師レベルでランダム化される）</td>
+</tr>
+<tr>
+  <td>E2</td>
+  <td>（augmentation 外・要確認）<strong>encoder の ego 分岐が最も古い 6 フレームを残し、現在姿勢を含む新しい 15 フレームをゼロ化</strong>。
+      neighbor 分岐は最新 6 フレームで規約が逆。コメントの意図とも食い違う</td>
+  <td><code>model/module/encoder.py:172-176</code></td>
+  <td class="sev"><span class="tag t-bad">高</span></td>
+  <td><strong>直接寄与しうる</strong>（自車速度の唯一の手がかりが t=−2.0〜−1.5 s の窓のみになる）</td>
+</tr>
+<tr>
+  <td>F</td>
+  <td><strong><code>goal_pose</code> の無効値マスクが機能しない</strong>。<code>heading_to_cos_sin</code> で <code>(0,0,0)→(0,0,1,0)</code> になるため <code>ne(...,0)</code> 判定が常に真 → 「goal 無し」が「自車位置 = goal」として残る。
+      <strong>dev では npz 変換器が goal_pose を 3 列で書き出すことを確認済み</strong>
+      （<code>convert_cpp_bin_to_python_npz.py:194-198</code>: <code># goal_pose (4,) -&gt; (3,)</code>）なので、
+      マスクが発火しない条件は<strong>確定</strong>。残る未知はゼロが実際に出現するかだけ。
+      <strong>変更 <code>a72126ab</code> 以前も同じ挙動</strong>で regression ではなく積み残し（§8.1）</td>
+  <td><code>train_epoch.py:51</code> + <code>data_augmentation.py:432-439</code></td>
+  <td class="sev"><span class="tag t-bad">高</span></td>
+  <td><strong>直接（要データ確認：ゼロ率）</strong>停止を強く教える入力になり得る。
+      <strong>修正は dev に未適用</strong>（<code>fix/goal_pose_mask</code> にあり）</td>
+</tr>
+<tr>
+  <td>M</td>
+  <td><strong>［dev 固有］4 列 <code>(x,y,cos,sin)</code> の neighbor future が <code>centric_transform</code> で壊れる</strong>。
+      <code>neighbors_future[..., 2]</code>（＝<code>cos</code>）を <code>heading_transform</code> に渡しており、
+      index 3 の <code>sin</code> は回転されない。tier4-main は <code>shape[-1] == 4</code> 分岐で修正済み（§7.1）</td>
+  <td><code>data_augmentation.py:455-461</code>, bridge <code>:1441-1447</code></td>
+  <td class="sev"><span class="tag t-bad">高</span></td>
+  <td>低〜中（neighbor 予測の教師が壊れる。ego 計画への直接影響は間接的）</td>
+</tr>
+<tr>
+  <td>F2</td>
+  <td>（<code>a72126ab</code> で修正済み・記録用）変更前は <code>goal_pose</code> が摂動前フレームに置き去りで、
+      <strong>goal の方位がサンプルごとに ±11.5° ランダム回転</strong>していた。横誤差は goal 距離の最大 20〜35%（§8.1）</td>
+  <td><code>data_augmentation.py:431-439</code>（追加箇所）</td>
+  <td class="sev"><span class="tag t-ok">修正済</span></td>
+  <td>低（横成分限定。縦＝goal 距離は 2% しかずれず、破損は <code>|vx|≥2</code> 限定）</td>
+</tr>
+<tr>
+  <td>G</td>
+  <td>同型のマスク死: bridge 版 <code>ego_past_mask</code> も <code>[...,:4]</code> 判定で <code>cos=1</code> のため常に無効</td>
+  <td><code>data_augmentation_bridge.py:1403</code></td>
+  <td class="sev"><span class="tag t-info">低</span></td>
+  <td>低（ego past は通常全フレーム有効）</td>
+</tr>
+<tr>
+  <td>G2</td>
+  <td>validity 判定スライスの不一致: <code>centric_transform</code> は neighbor を <code>[...,:6]</code> で、
+      encoder は <code>[...,:8]</code>（+ width, length）で判定（§3.5）。真の padding は全ゼロなので実害は無いが、
+      「位置・速度ゼロで形状のみ入る」スロットがあると解釈が食い違う</td>
+  <td><code>data_augmentation.py:442</code> vs <code>encoder.py:449</code></td>
+  <td class="sev"><span class="tag t-info">低</span></td>
+  <td>低</td>
+</tr>
+<tr>
+  <td>H</td>
+  <td><strong>GT 平滑化が <code>aug_flag</code> と無関係にバッチ全体へ適用</strong>。かつ validation では適用されない → train/valid で教師定義が違う</td>
+  <td><code>:415-418</code>, <code>validate_model.py:61-66</code></td>
+  <td class="sev"><span class="tag t-warn">中</span></td>
+  <td>低（実測差は cm）</td>
+</tr>
+<tr>
+  <td>I</td>
+  <td><code>use_data_augment=False</code> にすると <strong>ego 中心正規化ごと消える</strong>。augmentation と前処理が同一クラスに混在</td>
+  <td><code>train_epoch.py:56-57</code></td>
+  <td class="sev"><span class="tag t-warn">中</span></td>
+  <td>低（A/B 実験の妥当性に影響）</td>
+</tr>
+<tr>
+  <td>J</td>
+  <td>衝突チェックが<strong>現在姿勢・現在フレームのみ</strong>。ブリッジされた future の境界逸脱・neighbor future との干渉は未検査。<code>static_objects</code>/<code>polygons</code> も未使用</td>
+  <td><code>:270-344</code></td>
+  <td class="sev"><span class="tag t-warn">中</span></td>
+  <td>低〜中（衝突・逸脱を許容する教師が混入）</td>
+</tr>
+<tr>
+  <td>K</td>
+  <td>bridge 版に<strong>衝突/境界チェックが無い</strong>、<code>wheel_base</code> がハードコード、制約値が CLI 非公開、per-sample Python ループで実用速度が出ない</td>
+  <td><code>data_augmentation_bridge.py:989-1373</code></td>
+  <td class="sev"><span class="tag t-warn">中</span></td>
+  <td>—（既定では未使用）</td>
+</tr>
+<tr>
+  <td>L</td>
+  <td>細部: 舵角クランプ ±2π/3 (±120°) が実質無効 / <code>smoothing_future_trajectory</code> の <code>n_waypoints=80</code> ハードコード / <code>action_to_traj</code> の速度に非負制約なし</td>
+  <td>各所</td>
+  <td class="sev"><span class="tag t-info">低</span></td>
+  <td>低</td>
+</tr>
+</tbody>
+</table></div>
+
+<h3 id="nbrfuture">7.1 ［dev 固有］neighbor future の 4 列レイアウト破壊（#M）</h3>
+
+<p>dev の <code>centric_transform</code> は列数を見ずに常に <code>heading_transform</code> を適用する:</p>
+<pre><code># dev: data_augmentation.py:455-461
+mask = torch.sum(torch.ne(neighbors_future[..., :2], 0), dim=-1) == 0
+neighbors_future[..., :2] = vector_transform(neighbors_future[..., :2], transform_matrix, center_xy)
+neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)  # ← 列数を見ない
+neighbors_future[mask] = 0.0</code></pre>
+<p>tier4-main は分岐を追加して修正済み（この 1 箇所が両ブランチの <code>data_augmentation.py</code> の全差分）:</p>
+<pre><code>if neighbors_future.shape[-1] == 4:
+    # Canonical [x, y, cos, sin]: rotate the heading unit vector.
+    neighbors_future[..., 2:4] = vector_transform(neighbors_future[..., 2:4], transform_matrix)
+else:
+    neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)</code></pre>
+
+<p>4 列レイアウトが dev に実在することの根拠:</p>
+<ul>
+  <li><code>dimensions.py:44,46</code>: <code>POSE_DIM = 4</code>、<code>OUTPUT_SHAPE = (1, MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM)</code></li>
+  <li><code>rlvr/grpo_loss.py:344</code> のコメント: <code>nf = batch_data["neighbor_agents_future"]  # [N, Pn, T, 4] x,y,cos,sin (or legacy 3-col)</code></li>
+  <li><code>scenario_generation/tests/test_scene_4col.py</code> が存在し、<code>future_to_4col</code> が <code>scenario_generation</code> / <code>rlvr/autoresearch/tools</code> で使われている</li>
+  <li><code>train_epoch.py:63</code> の <code>heading_to_cos_sin</code> は 4 列入力に対して no-op なので、
+      4 列コーパスでは <strong>aug が壊した値がそのまま教師になる</strong></li>
+</ul>
+
+<h4>実測（neighbor の heading 0.30 rad、ego heading を +0.20 rad 摂動 → 期待値 0.10 rad）</h4>
+<div class="tw"><table>
+<thead><tr><th>レイアウト</th><th>変換後の値</th><th>復元 heading</th><th>誤差</th><th><code>|(cos,sin)|</code></th></tr></thead>
+<tbody>
+<tr><td>3 列 <code>(x,y,heading)</code></td><td><code>[+19.9490, −2.2583, +0.1000]</code></td><td class="num">+0.1000 rad</td><td class="num">+0.0°</td><td class="num">—</td></tr>
+<tr><td><strong>4 列 <code>(x,y,cos,sin)</code></strong></td><td><code>[+19.9490, −2.2583, +0.7553, +0.2955]</code></td><td class="num">+0.3729 rad</td><td class="num"><strong>+15.6°</strong></td><td class="num"><strong>0.8111</strong></td></tr>
+</tbody>
+</table></div>
+<ul>
+  <li>4 列では heading が <strong>15.6° ずれ</strong>、しかも <code>(cos, sin)</code> が<strong>単位ベクトルでなくなる</strong>（0.811）。
+      <code>cos</code> を角度として <code>atan2</code> に通した結果が <code>cos</code> 列に、元の <code>sin</code> がそのまま <code>sin</code> 列に残るため。</li>
+  <li>影響を受けるのは <code>aug_flag</code> が立つ行のみ（<code>augment_prob 0.5</code> × <code>|vx| ≥ 2 m/s</code>）。
+      非摂動行は変換行列が恒等なので <code>heading_transform</code> も恒等に近く、実害は出ない。</li>
+  <li>壊れるのは <strong>neighbor 予測の教師</strong>であり、ego 計画への影響は間接的
+      （<code>neighbor_prediction_loss</code> 経由で共有エンコーダに雑音が入る）。</li>
+</ul>
+<div class="box">
+<p class="hd">対処</p>
+<p>
+tier4-main の分岐を dev に取り込むのが最短。3 列コーパスしか使っていないなら実害はないので、
+まず <code>neighbor_agents_future</code> の列数を実測して判断する（§10-7）。
+</p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="lowspeed">8. 低速・停車〜発進問題への影響評価</h2>
+
+<p>「発進していいときに発進しない」に対する各経路の判定。</p>
+
+<div class="tw"><table>
+<thead><tr><th>仮説</th><th>判定</th><th>根拠</th></tr></thead>
+<tbody>
+<tr>
+  <td>停車サンプルの GT が状態摂動で壊されている</td>
+  <td><span class="tag t-ok">否定</span></td>
+  <td><code>|vx| &lt; 2.0</code> ゲートで摂動対象外（§3.1）。摂動・past スケーリングともに <code>aug_flag</code> 配下</td>
+</tr>
+<tr>
+  <td>停車サンプルの GT future が平滑化で潰されている</td>
+  <td><span class="tag t-ok">否定</span></td>
+  <td>停車・停車→発進・減速停止で誤差 &le; 3 cm、発進遅れ 0.00 s（§5.1）</td>
+</tr>
+<tr>
+  <td>低速域に augmentation が無いこと自体が原因</td>
+  <td><span class="tag t-bad">有力</span></td>
+  <td>該当域は生 GT の完全模倣。GT に「停車継続」が多ければ緩和機構が無い（#D）。§10-1 と併せて確認</td>
+</tr>
+<tr>
+  <td>速度ノイズが速度と計画の対応を壊している</td>
+  <td><span class="tag t-warn">寄与しうる</span></td>
+  <td>速度は入力ではなく<strong>教師</strong>を汚染する（#E, §6.0）。状態速度と目標初速が最大 ±20% 食い違う（#A4）</td>
+</tr>
+<tr>
+  <td>モデルが現在速度をほとんど観測できていない</td>
+  <td><span class="tag t-bad">有力・要確認</span></td>
+  <td>encoder が ego past の最古 6 フレームのみ残す疑い（#E2）。「今止まっているが発進していい」の判断材料が欠ける</td>
+</tr>
+<tr>
+  <td>発進直後（2〜4 m/s）の教師が歪んでいる</td>
+  <td><span class="tag t-warn">寄与しうる</span></td>
+  <td>加速度符号消失で 0.5 s あたり +12% の前方オーバーシュート（#A, §5.2）。ただし方向は「出過ぎ」側で、症状と逆</td>
+</tr>
+<tr>
+  <td><code>goal_pose</code> が「自車位置」として入力されている</td>
+  <td><span class="tag t-bad">有力・要確認</span></td>
+  <td>マスク不成立をコードで確認済み（#F）。実データに <code>goal_pose=(0,0,0)</code> が存在するかは未検証</td>
+</tr>
+<tr>
+  <td><code>skip_for_training</code> フレームが学習に混入</td>
+  <td><span class="tag t-bad">有力・要確認</span></td>
+  <td><code>train.py</code> はフィルタしない。赤信号停車・future 進行なしフレームが混入していれば「停車継続」を直接学習（§10-1）</td>
+</tr>
+</tbody>
+</table></div>
+
+<div class="box">
+<p class="hd">読み方</p>
+<p>
+augmentation が停車データを直接壊しているわけではない。問題は<strong>「低速域が augmentation の対象外である」という設計の穴</strong>と、
+<strong>速度・加速度ノイズが教師を汚染していること</strong>であり、加えて augmentation 外の 2 点
+（encoder の ego 履歴スライス・skip フレーム混入）が症状を素直に説明する。
+まず §10 のデータ確認を実施し、その結果で優先順位を決めるのが最短経路。
+</p>
+</div>
+
+<h3 id="goalpose-timeline">8.1 goal_pose 変更（<code>a72126ab</code>）との時系列整合</h3>
+
+<p><code>centric_transform</code> の goal_pose ブロックは<strong>ごく最近追加されたもの</strong>で、低速問題はそれ以前から報告されている。
+時系列を整理する。</p>
+
+<div class="tw"><table>
+<thead><tr><th>ブランチ</th><th>commit</th><th>author date</th><th>branch 到達</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><strong><code>dev</code></strong></td><td><code>a72126ab</code></td><td class="num">2026-07-22</td><td class="num">2026-07-22</td>
+    <td>"Fixed centric_transform to also transform goal_pose" —
+        <strong>座標変換とゼロマスクを含むブロック全体（10 行）を新規追加</strong>。quintic / bridge 両方。</td></tr>
+<tr><td><code>tier4-main</code></td><td><code>8b63f8ab</code></td><td class="num">2026-07-22</td><td class="num">2026-07-28</td>
+    <td>同内容が tier4-main へ（別コミット。<code>dev</code> の祖先ではない）</td></tr>
+</tbody>
+</table></div>
+<p class="sub" style="margin-top:-.3rem">
+つまり <strong>dev では 2026-07-22 からこのブロックが存在する</strong>。tier4-main には 07-28 に到達した。
+どちらにしても低速問題の報告より後、あるいはほぼ同時期であり、
+「この変更が原因で低速問題が発生した」という筋にはならない。
+</p>
+
+<div class="box bad">
+<p class="hd">変更前は「マスクが無かった」だけでなく、<u>goal_pose の座標変換ごと無かった</u></p>
+<p>
+つまり変更前は、地図・neighbors・future・ego 状態がすべて<strong>摂動後フレーム</strong>へ再アンカーされるのに、
+<code>goal_pose</code> だけが<strong>摂動前フレームに置き去り</strong>にされていた。
+摂動は横 Δy ∈ ±0.75 m と方位 Δθ ∈ ±0.2 rad なので、これは
+<strong>「goal の方位をサンプルごとにランダムに ±11.5° 回し、さらに横に ±0.75 m ずらす」</strong>のと等価である。
+</p>
+</div>
+
+<h4>変更前の goal_pose 誤差（本来の値 − 与えられた値）</h4>
+<div class="tw"><table>
+<thead><tr><th rowspan="2">goal 距離 d</th><th colspan="3">Δθ=0.1, Δy=0.375（中央値相当）</th><th colspan="3">Δθ=0.2, Δy=0.75（最大）</th><th>横誤差 RMS<br>(摂動分布全体)</th></tr>
+<tr><th>縦</th><th>横</th><th>横/d</th><th>縦</th><th>横</th><th>横/d</th><th></th></tr></thead>
+<tbody>
+<tr><td class="num">5 m</td><td class="num">0.06</td><td class="num">0.87</td><td class="num">17%</td><td class="num">0.25</td><td class="num">1.73</td><td class="num">35%</td><td class="num">0.72 m</td></tr>
+<tr><td class="num">10 m</td><td class="num">0.09</td><td class="num">1.37</td><td class="num">14%</td><td class="num">0.35</td><td class="num">2.72</td><td class="num">27%</td><td class="num">1.23 m</td></tr>
+<tr><td class="num">20 m</td><td class="num">0.14</td><td class="num">2.37</td><td class="num">12%</td><td class="num">0.55</td><td class="num">4.71</td><td class="num">24%</td><td class="num">2.33 m</td></tr>
+<tr><td class="num">50 m</td><td class="num">0.29</td><td class="num">5.36</td><td class="num">11%</td><td class="num">1.15</td><td class="num">10.67</td><td class="num">21%</td><td class="num">5.75 m</td></tr>
+<tr><td class="num">100 m</td><td class="num">0.54</td><td class="num">10.36</td><td class="num">10%</td><td class="num">2.14</td><td class="num">20.60</td><td class="num">21%</td><td class="num">11.47 m</td></tr>
+<tr><td class="num">200 m</td><td class="num">1.04</td><td class="num">20.34</td><td class="num">10%</td><td class="num">4.14</td><td class="num">40.47</td><td class="num">20%</td><td class="num">22.93 m</td></tr>
+</tbody>
+</table></div>
+<p class="sub" style="margin-top:-.3rem">単位 m。横誤差 ≈ <code>d·sinΔθ + Δy·cosΔθ</code>、縦誤差 ≈ <code>d(1−cosΔθ)</code>。</p>
+
+<ul>
+  <li><strong>横成分は距離に比例して壊れる</strong>（最大 d の 20〜35%、RMS で 11.5%）。
+      正規化は <code>mean=[10,0,0,0], std=[20,20,1,1]</code>（<code>normalization.json</code>）なので、
+      正規化後の横チャネル雑音は <code>(0.115d+0.43)/20</code> ≈ d=20 m で 0.12、d=100 m で 0.57。
+      車線内の真の横オフセット（数 m → 正規化後 0.1 前後）を容易に超える。</li>
+  <li><strong>縦成分はほぼ無傷</strong>（誤差は d の約 2%）。「goal までの距離」という情報は保たれていた。</li>
+  <li>対象は <code>aug_flag</code> が立つサンプルのみ = <code>augment_prob 0.5</code> × <code>|vx| ≥ 2 m/s</code>。
+      <strong>低速・停車サンプルでは変換行列が恒等なので、変更前でも goal_pose は正しかった。</strong></li>
+</ul>
+
+<div class="box warn">
+<p class="hd">結論 1: 変更前の bug は「goal 付近の横オフセット」の説明にはなるが、「発進しない」の説明にはなりにくい</p>
+<ul>
+  <li>誤差が横成分にほぼ限定され、発進判断を担う縦成分（goal までの距離）は 2% しかずれない。</li>
+  <li>破損は <code>|vx| ≥ 2 m/s</code> のサンプル限定で、停車サンプルの goal_pose は当時も正しかった。</li>
+  <li>これは commit メッセージ自身の主張（「横成分を無視するようになり、goal で一定の横オフセットが残る」）と一致する。
+      すなわち <code>a72126ab</code> が狙って直したのは<strong>横オフセットの症状</strong>であり、低速発進とは別問題。</li>
+  <li>副作用として、goal の信頼度が<strong>速度域によって非対称</strong>（低速では正確・高速では雑音）になり、
+      共有エンコーダが goal の横チャネルを全体的に減衰させた可能性はある。ただし縦チャネルは入力段で別チャネルなので、
+      必ずしも同時に減衰しない。</li>
+</ul>
+</div>
+
+<div class="box bad">
+<p class="hd">結論 2: 一方「phantom goal（goal 無し → 自車位置が goal）」は変更の前後で<u>全く同じ</u></p>
+<p>
+変更前はマスクも無かったので、<code>goal_pose = (0,0,0)</code> は <code>heading_to_cos_sin</code> で
+<code>(0,0,1,0)</code> になったまま素通りしていた。変更後もマスクは（3 列コーパスでは）発火しないので同じ結果である。
+つまり<strong>この病理は変更によって生まれたものでも、直ったものでもない</strong>。
+</p>
+<ul>
+  <li>したがって #F（phantom goal）仮説は「変更前から同じ問題が出ていた」という事実によって<strong>否定されない</strong>。
+      むしろ変更前から存在していた病理として整合する。</li>
+  <li>逆に <code>a72126ab</code> は phantom goal を直していない。マスクは「あるように見えて効いていない」状態。</li>
+</ul>
+<p><strong>dev では前提が確定している</strong>: マスクが死ぬのは <code>goal_pose</code> が
+3 列 <code>(x, y, heading)</code> で保存されている場合だが、dev の npz 変換器はまさに 3 列で書き出す
+（<code>ros_scripts/convert_cpp_bin_to_python_npz.py:194-198</code>）:</p>
+<pre><code># goal_pose (4,) -&gt; (3,)
+goal_flat = np.array(goal_flat, dtype=np.float32).reshape(1, 4)
+result["goal_pose"] = cos_sin_to_heading(goal_flat).reshape(3)</code></pre>
+<p>
+C++ 側が「goal 無し」を <code>(0,0,0,0)</code> で表していれば <code>cos_sin_to_heading</code> は
+<code>arctan2(0,0) = 0</code> により <code>(0,0,0)</code> を書き出し、学習時に <code>heading_to_cos_sin</code> が
+<code>(0,0,1,0)</code> へ広げる。<strong>経路は完全に追跡できており、マスクは確実に発火しない。</strong>
+残る未知は「変換器が実際にゼロを出力するか」だけ（§10-2）。
+</p>
+</div>
+
+<div class="box">
+<p class="hd">補足: そもそも encoder に「goal 無し」を表現する仕組みが無い</p>
+<ul>
+  <li><code>GoalPoseEncoder.forward</code> は <code>mask = torch.zeros((B, 1), dtype=torch.bool)</code>、
+      すなわち<strong>goal トークンを常に有効として扱う</strong>（<code>encoder.py:743</code>）。
+      <code>centric_transform</code> でゼロ化してもトークンは消えず、「全ゼロという特定の埋め込み」になるだけ。</li>
+  <li>3 列コーパスならマスクは一度も発火していないので、<strong>モデルはゼロ化された goal_pose を学習時に一度も見ていない</strong>。
+      仮に将来マスクを直しても、その入力パターンは未学習である点に注意。</li>
+  <li>推論側は <code>self.route is None</code> で早期 return する（<code>diffusion_planner_node.py:254-255</code>）ので、
+      実機で goal 無しは発生しない。→ <strong>phantom goal は学習データ側だけの問題</strong>。</li>
+</ul>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="actions">9. 推奨アクション</h2>
+
+<h3>優先度 1 — 低速問題に直結（まず確認、次に修正）</h3>
+<ol>
+  <li><strong>まず §10-2 で <code>goal_pose</code> のゼロ率を実測</strong>。
+      dev の変換器は 3 列で書き出すことが確定しているので、ゼロが 1 件でもあれば #F は実害あり。
+      その場合は有効性マスクを位置成分のみの判定に変える:
+<pre><code>mask = torch.sum(torch.ne(inputs["goal_pose"][..., :2], 0), dim=-1) == 0</code></pre>
+      この修正は <code>fix/goal_pose_mask</code> ブランチに quintic / bridge 両方ぶん実装済みで、
+      <code>tier4-main</code> 向けに PR を出している。<strong>dev には未適用なので取り込みが必要。</strong>
+      なお <code>GoalPoseEncoder</code> は goal トークンを常に有効扱いするため、
+      「goal 無し」を表現したいなら encoder 側の <code>mask</code> も併せて直す必要がある。</li>
+  <li><strong>［dev 固有］neighbor future の 4 列対応を取り込む</strong>（#M, §7.1）。
+      §10-7 で列数を確認し、4 列が存在するなら tier4-main の <code>shape[-1] == 4</code> 分岐を
+      quintic / bridge 両方に入れる。</li>
+  <li><strong>学習リストに <code>skip_for_training</code> フレームが混入していないか確認</strong>。
+      混入していれば <code>train.py</code> にも <code>scene_skip.filter_scene_list</code> を通す
+      （RLVR / preference_optimization 側は既に通している）。</li>
+  <li><strong>低速域の augmentation ゲートを見直す</strong>。現在の <code>|vx| &ge; 2.0</code> は
+      「摂動後の future 再構成が低速で数値的に壊れる」ことへの回避策と思われるが、副作用として
+      停車〜発進の全域が augmentation 無しになっている。案:
+      <ul>
+        <li>低速専用の軽い augmentation（横オフセットのみ・future はそのまま／縦方向は摂動しない）を別枠で用意する</li>
+        <li>あるいは bridge 版のように「進行(progress)を保存する」定式化にしてゼロ速度を安全に扱う</li>
+      </ul>
+  </li>
+</ol>
+
+<h3>優先度 2 — 教師データの破壊を止める</h3>
+<ol start="4">
+  <li><strong>quintic の境界条件を「接線成分・符号付き」に直す</strong> (<code>:538-561</code>)。
+      <code>ego_current_state</code> は既に body frame なので、接線成分は射影不要でそのまま取れる:
+<pre><code># θ0: 弦ではなく現在 heading（摂動後）
+theta0 = torch.atan2(aug_current_state[:, 3], aug_current_state[:, 2])
+# v0, a0: body frame の x 成分 = 接線成分（符号付き）。norm は使わない
+v0 = aug_current_state[:, 4]          # vx
+a0 = aug_current_state[:, 6]          # ax（向心成分 ay は第2項が表現するので混ぜない）
+# 終端側も GT 進行方向へ射影して接線成分・符号を保つ
+d2  = (fut[:, P] - 2*fut[:, P-1] + fut[:, P-2])[..., :2] / dt**2
+aT  = d2[:, 0] * torch.cos(thetaT) + d2[:, 1] * torch.sin(thetaT)</code></pre>
+      §6.1 の表のとおり、これで摂動ゼロ時の誤差が 0.20〜1.10 m → 0.01〜0.07 m に落ちる。
+      <strong>「摂動ゼロなら恒等写像」を回帰テストで固定</strong>する（<code>tests/test_data_augmentation.py</code> に追加）。</li>
+  <li><strong>heading 摂動と速度ベクトルを一緒に回す</strong>（§6.3）。
+      摂動を旧フレームで加えて後から回転するのではなく、新 body frame で <code>vy ≈ 0</code> を保つように
+      <code>(vx, vy)</code>・<code>(ax, ay)</code> を Δθ だけ先回りして回す。<code>vy ±0.5 m/s</code> の摂動は縮小か削除
+      （実機 <code>twist.linear.y ≈ 0</code>）。</li>
+  <li><strong><code>ay</code> を <code>vx</code> 摂動と整合させる</strong>（§6.2）。摂動後に
+      <code>ay ← v_new * ω</code>（+ 小さなノイズ）で再計算する。<code>steering</code> は既に同じ流儀で再計算されているので、それに揃える形。</li>
+  <li><strong><code>scale</code> の適用順を目標作成より前に移す</strong>（§6.4）。または
+      <code>ego_past</code> のみをスケールし <code>ego_current_state</code> の v,a は触らない、のどちらかに統一する。</li>
+  <li><strong><code>ego_agent_past</code> の座標変換を有効化</strong> (<code>:397-403</code>)。
+      コメントアウトの経緯を確認のうえ、bridge 版と揃える。無効化が意図的なら理由をコメントに残す。</li>
+  <li><strong>そもそも <code>vx,vy,ax,ay</code> の摂動を残すか判断する</strong>（§6.0）。
+      これらはモデル入力ではないため「入力の頑健化」効果は無く、実質は教師へのノイズである。
+      入力の頑健化が目的なら <code>ego_agent_past</code> 側（＝ <code>scale</code>）に集約するのが筋。</li>
+</ol>
+
+<h3>優先度 3 — 構造の整理</h3>
+<ol start="7">
+  <li><strong>「ego 中心正規化」「GT 平滑化」「摂動」を分離</strong>。
+      現状 <code>use_data_augment=False</code> で前処理まで消えるため、augmentation の A/B 比較が正しく取れない。
+      平滑化は dataset 側または独立の前処理に移し、train/valid で同一適用にする。</li>
+  <li><strong>衝突・境界チェックを future 全体に拡張</strong>し、bridge 版にも同等のチェックを入れる。</li>
+  <li><code>action_to_traj</code> の再構成速度に非負制約（または後退フラグ）を入れる。</li>
+</ol>
+
+<!-- ══════════════════════════════════════════════════════════ -->
+<h2 id="todo">10. 未検証の確認事項（データが必要）</h2>
+<p>本調査環境に npz コーパスが無いため未実施。以下は実データで確認すべき点。</p>
+
+<h4>10-1. skip フレームの混入と低速フレームの GT 分布</h4>
+<pre><code>python - &lt;&lt;'PY'
+import json, numpy as np
+from diffusion_planner.utils.scene_skip import is_skipped
+paths = json.load(open("&lt;train_set_list&gt;.json"))
+n_skip = stop_stay = stop_go = low = 0
+for p in paths[:5000]:
+    if is_skipped(p): n_skip += 1
+    d = np.load(p, allow_pickle=True)
+    v = abs(float(d["ego_current_state"][4]))
+    fut = d["ego_agent_future"][:, :2]
+    prog = float(np.linalg.norm(np.diff(fut, axis=0, prepend=np.zeros((1,2))), axis=1).sum())
+    if v &lt; 0.5:
+        low += 1
+        (stop_stay := stop_stay + 1) if prog &lt; 0.5 else (stop_go := stop_go + 1)
+print(f"skip flagged : {n_skip}/{len(paths[:5000])}")
+print(f"v&lt;0.5 m/s    : {low}")
+print(f"  → 8s で進まない (停車継続): {stop_stay}")
+print(f"  → 8s で発進する          : {stop_go}")
+PY</code></pre>
+<p><strong>見るポイント</strong>: <code>skip flagged &gt; 0</code> なら学習リストが未フィルタ。
+<code>停車継続 : 発進</code> の比が極端（例 10:1 以上）なら、低速の「動かない」バイアスは
+augmentation ではなくデータ不均衡が主因。</p>
+
+<h4>10-2. goal_pose のゼロ率（#F） — dev では列数は 3 列と確定済み</h4>
+<pre><code>import collections
+widths, zero = collections.Counter(), 0
+for p in paths[:5000]:
+    g = np.load(p, allow_pickle=True)["goal_pose"]
+    widths[int(np.asarray(g).reshape(-1).shape[0])] += 1
+    if not np.any(g):
+        zero += 1
+print("goal_pose 列数:", dict(widths))   # 3 == (x,y,heading) / 4 == (x,y,cos,sin)
+print("全ゼロ件数   :", zero)</code></pre>
+<p><strong>判定</strong>: dev の変換器は 3 列で書き出すので、<strong>全ゼロ &gt; 0 なら #F は実害あり</strong>
+（<code>(0,0,0)→(0,0,1,0)</code> となりマスクが発火せず、「goal = 自車位置」として学習される）。
+全ゼロが 0 件なら無効 goal がそもそも存在しないので無害。
+列数の出力は、別経路（scenario_generation など）で作られた 4 列コーパスが混在していないかの確認用。</p>
+
+<h4>10-3. <code>ego_current_state[4]</code> と GT future 初速の整合</h4>
+<p>停車〜発進フレームで両者が乖離していると、平滑化が先頭 0.2〜0.3 s を引っ張る（§5.1 の v0 不整合ケース）。
+乖離が 1 m/s を超えるフレームの割合を測る。</p>
+
+<h4>10-4. augmentation の実効適用率</h4>
+<p>実データでは <code>_check_aug_validity</code> による棄却が加わる。
+狭路・混雑シーンで棄却率が高いと、augmentation が「空いた直線だけに効く」偏りを持つ。
+<code>aug_flag.float().mean()</code> をシーン種別ごとにログ出力して確認する。</p>
+
+<h4>10-5. encoder の ego 履歴スライスの向き（#E2）</h4>
+<pre><code># model/module/encoder.py:170-174
+ego = torch.cat([ego[:, :6], torch.zeros_like(ego[:, 6:])], dim=1)   # 最古 6 フレームを残す
+#   neighbor 側は  [zeros(nb[:, :, :-6]), nb[:, :, -6:]]  ＝ 最新 6 フレーム
+# ego_agent_past は index 0 = 最古 / index -1 = 現在（state_update.py:104-115 ほかで確認済み）</code></pre>
+<p>意図が「現在＋直近 5 ステップ」なら <code>ego[:, -6:]</code> が正しい。
+学習済みモデルの入力感度テスト（ego past の各フレームを摂動して出力変化を見る）で実挙動を確認できる。
+augmentation の議論とは独立だが、低速の発進判断に直結するので優先度は高い。</p>
+
+<h4>10-7. neighbor_agents_future の列数（#M / dev 固有）</h4>
+<pre><code>widths = collections.Counter()
+for p in paths[:5000]:
+    widths[int(np.load(p, allow_pickle=True)["neighbor_agents_future"].shape[-1])] += 1
+print("neighbor_agents_future 列数:", dict(widths))   # 3 == (x,y,heading) / 4 == (x,y,cos,sin)</code></pre>
+<p><strong>判定</strong>: 4 が 1 件でもあれば #M が実害あり（摂動行の neighbor heading が 15.6° ずれ、
+<code>(cos,sin)</code> が単位ベクトルでなくなる）。tier4-main の <code>shape[-1] == 4</code> 分岐を取り込む。</p>
+
+<h4>10-6. 修正の効果検証</h4>
+<p>優先度 1・2 の各修正を個別に、停車〜発進シーンのみを抜いた評価セットで
+closed-loop（<code>closed_loop_validate</code>）比較する。単独で効くのがどれか切り分ける。</p>
+
+<div class="foot">
+検証スクリプト:
+<code>scratchpad/exp_smoothing.py</code>（§5.1）,
+<code>scratchpad/exp_quintic.py</code>（§5.2）,
+<code>scratchpad/exp_kinematics.py</code>（§6.1-6.4）,
+<code>scratchpad/exp_padmask.py</code>（§3.5）,
+<code>scratchpad/exp_nbrfuture.py</code>（§7.1）。
+すべて dev の worktree (<code>git worktree add --detach &lt;dir&gt; dev</code>) 上で実行し、tier4-main 版と同一の結果を確認済み。
+いずれも合成軌跡のみで実データ不要のため再実行可能。
+</div>
+
+</div>
+</body>
+</html>
