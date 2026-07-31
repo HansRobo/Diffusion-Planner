@@ -545,27 +545,37 @@ class StatePerturbation:
         # a point 1 s ahead. The chord lags the tangent by roughly half the heading change
         # over that second (~7 deg at 8 m/s on a 0.03 1/m curve), and it ignores the heading
         # perturbation entirely, so the bridged trajectory used to start off-tangent.
-        x0, y0, theta0, v0, a0, omega0 = (
+        x0, y0, theta0, omega0 = (
             aug_current_state[:, 0],
             aug_current_state[:, 1],
             torch.atan2(aug_current_state[:, 3], aug_current_state[:, 2]),
-            torch.norm(aug_current_state[:, 4:6], dim=-1),
-            torch.norm(aug_current_state[:, 6:8], dim=-1),
             aug_current_state[:, 9],
         )
+        # v0 / a0 are the TANGENTIAL (along-theta0) components, taken with sign.
+        # torch.norm() would (a) drop the sign, so braking became forward acceleration, and
+        # (b) fold the lateral acceleration into a0 — but ay is the centripetal term v*omega,
+        # which the -v0*sin(theta0)*omega0 term below already accounts for, so the norm
+        # double-counted it. On a constant-speed curve the true tangential acceleration is
+        # exactly 0 while ||(ax, ay)|| = v^2*kappa (3.84 m/s^2 at 8 m/s, kappa=0.06).
+        cos0, sin0 = torch.cos(theta0), torch.sin(theta0)
+        v0 = aug_current_state[:, 4] * cos0 + aug_current_state[:, 5] * sin0
+        a0 = aug_current_state[:, 6] * cos0 + aug_current_state[:, 7] * sin0
 
-        xT, yT, thetaT, vT, aT, omegaT = (
+        xT, yT, thetaT, omegaT = (
             ego_future[:, P, 0],
             ego_future[:, P, 1],
             ego_future[:, P, 2],
-            torch.norm(ego_future[:, P, :2] - ego_future[:, P - 1, :2], dim=-1) / dt,
-            torch.norm(
-                ego_future[:, P, :2] - 2 * ego_future[:, P - 1, :2] + ego_future[:, P - 2, :2],
-                dim=-1,
-            )
-            / dt**2,
             self.normalize_angle(ego_future[:, P, 2] - ego_future[:, P - 1, 2]) / dt,
         )
+        # Same treatment at the terminal end: project the finite differences onto the GT
+        # heading instead of taking their magnitude.
+        cosT, sinT = torch.cos(thetaT), torch.sin(thetaT)
+        d1 = (ego_future[:, P, :2] - ego_future[:, P - 1, :2]) / dt
+        d2 = (
+            ego_future[:, P, :2] - 2 * ego_future[:, P - 1, :2] + ego_future[:, P - 2, :2]
+        ) / dt**2
+        vT = d1[:, 0] * cosT + d1[:, 1] * sinT
+        aT = d2[:, 0] * cosT + d2[:, 1] * sinT
 
         # Boundary conditions
         sx = torch.stack(
