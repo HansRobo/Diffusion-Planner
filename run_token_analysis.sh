@@ -32,6 +32,8 @@ DATADIR="${DATADIR:-/home/yamashita/work_hdd/sample/mini_datasets/j6_2231_fullse
 N="${N_SAMPLES:-128}"
 BS="${BATCH_SIZE:-32}"
 DEVICE="${DEVICE:-cuda}"
+NUM_GPUS="${NUM_GPUS:-1}"
+NUM_WORKERS="${NUM_WORKERS:-0}"
 MOVE_MIN_M="${MOVE_MIN_M:-5.0}"
 TURN_DEG="${TURN_DEG:-15.0}"
 TAG="$(basename "$DATADIR")"
@@ -47,6 +49,14 @@ mkdir -p "$MPLCONFIGDIR"
 
 if [ ! -x "$PYTHON_BIN" ]; then
   echo "Python not found or not executable: $PYTHON_BIN" >&2
+  exit 1
+fi
+if [ "$NUM_GPUS" -lt 1 ]; then
+  echo "NUM_GPUS must be at least 1, got: $NUM_GPUS" >&2
+  exit 1
+fi
+if [ "$NUM_GPUS" -gt 1 ] && [[ "$DEVICE" != cuda* ]]; then
+  echo "NUM_GPUS > 1 requires DEVICE=cuda" >&2
   exit 1
 fi
 
@@ -80,20 +90,34 @@ PY
 fi
 VALID_LIST="$(cd "$(dirname "$VALID_LIST")" && pwd)/$(basename "$VALID_LIST")"
 
-echo "=== [1/3] token importance (PyTorch, $DEVICE, n=$N) ==="
+run_analysis() {
+  local script="$1"
+  shift
+  if [ "$NUM_GPUS" -gt 1 ]; then
+    "$PYTHON_BIN" -m torch.distributed.run \
+      --standalone \
+      --nproc_per_node="$NUM_GPUS" \
+      "$script" "$@"
+  else
+    "$PYTHON_BIN" "$script" "$@"
+  fi
+}
+
+echo "=== [1/3] token importance (PyTorch, $DEVICE, gpus=$NUM_GPUS, n=$N) ==="
 IMPORTANCE_TSV="$OUT/token_importance_n${N}.tsv"
-"$PYTHON_BIN" scripts/token_importance.py \
+run_analysis scripts/token_importance.py \
   --run_dir "$MODEL_DIR" \
   --valid_set_list "$VALID_LIST" \
-  --n_samples "$N" --batch_size "$BS" --move_min_m "$MOVE_MIN_M" --device "$DEVICE" \
+  --n_samples "$N" --batch_size "$BS" --num_workers "$NUM_WORKERS" \
+  --move_min_m "$MOVE_MIN_M" --device "$DEVICE" \
   --out_tsv "$IMPORTANCE_TSV" 2>&1 | tee "$OUT/token_importance_n${N}.log"
 
-echo "=== [2/3] attention analysis (PyTorch, $DEVICE, n=$N) ==="
+echo "=== [2/3] attention analysis (PyTorch, $DEVICE, gpus=$NUM_GPUS, n=$N) ==="
 ATTENTION_JSON="$OUT/attention_n${N}.json"
-"$PYTHON_BIN" scripts/attention_analysis.py \
+run_analysis scripts/attention_analysis.py \
   --run_dir "$MODEL_DIR" \
   --valid_set_list "$VALID_LIST" \
-  --n_samples "$N" --batch_size "$BS" \
+  --n_samples "$N" --batch_size "$BS" --num_workers "$NUM_WORKERS" \
   --move_min_m "$MOVE_MIN_M" --turn_deg "$TURN_DEG" --device "$DEVICE" \
   --out_json "$ATTENTION_JSON" \
   2>&1 | tee "$OUT/attention_analysis_n${N}.log"

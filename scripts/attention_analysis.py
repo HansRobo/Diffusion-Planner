@@ -22,11 +22,13 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train_epoch import heading_to_cos_sin
@@ -169,6 +171,206 @@ def occupancy_stats(values, slots):
     }
 
 
+def init_distributed(requested_device: str):
+    """Initialize torchrun data parallelism and return device/rank metadata."""
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    device = requested_device
+    if world_size > 1:
+        if requested_device.startswith("cuda"):
+            device = f"cuda:{local_rank}"
+            torch.cuda.set_device(local_rank)
+            backend = "nccl"
+        else:
+            backend = "gloo"
+        dist.init_process_group(backend=backend)
+    return device, rank, local_rank, world_size
+
+
+def select_moving_indices(dataset, n_samples, move_min_m, turn_deg):
+    """Select moving scenes across the full list; run on rank 0 only."""
+    stride = max(1, len(dataset) // (n_samples * 2))
+    # Check one evenly spaced pass first, then the remaining offsets as needed.
+    # This preserves broad dataset coverage without silently stopping after only
+    # about 2 * n_samples candidates when moving scenes are sparse.
+    cand = [index for offset in range(stride) for index in range(offset, len(dataset), stride)]
+    probe = DataLoader(Subset(dataset, cand), batch_size=1, shuffle=False)
+    idxs, turning = [], []
+    for index, sample in zip(cand, probe):
+        future = sample["ego_agent_future"][0]
+        if float(np.linalg.norm(future[-1, :2])) < move_min_m:
+            continue
+        bearing = abs(np.degrees(np.arctan2(float(future[-1, 1]), float(future[-1, 0]))))
+        idxs.append(index)
+        turning.append(bool(bearing >= turn_deg))
+        if len(idxs) >= n_samples:
+            break
+    return idxs, turning, stride
+
+
+def broadcast_selection(indices, turning, world_size):
+    if world_size == 1:
+        return indices, turning
+    payload = [indices, turning]
+    dist.broadcast_object_list(payload, src=0)
+    return payload
+
+
+def analyze_local(
+    model,
+    cfg,
+    fusion,
+    store,
+    dataset,
+    indices,
+    turning,
+    batch_size,
+    num_workers,
+    device,
+):
+    """Analyze one rank's sample shard and return mergeable Python accumulators."""
+    n_layers = len(fusion.blocks)
+    loader = DataLoader(
+        Subset(dataset, indices),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device.startswith("cuda"),
+    )
+    ego_share = [{c: [] for c, _ in CLASSES} for _ in range(n_layers)]
+    all_share = [{c: [] for c, _ in CLASSES} for _ in range(n_layers)]
+    vw_share = [{c: [] for c, _ in CLASSES} for _ in range(n_layers)]
+    count_share = {c: [] for c, _ in CLASSES}
+    valid_count = {c: [] for c, _ in CLASSES}
+    total_valid_count = []
+    lane_bin_share = [[] for _ in DIST_BINS]
+    nbr_bin_share = [[] for _ in DIST_BINS]
+    route_share_per_sample = []
+
+    with torch.no_grad():
+        for raw in loader:
+            l_dist = lane_dist(raw["lanes"]).to(device)
+            n_dist = neighbor_dist(raw["neighbor_agents_past"]).to(device)
+            inputs_n = prepare_inputs(dict(raw), cfg, device)
+            store.clear()
+            model.encoder(inputs_n)
+            assert len(store) == n_layers
+            valid = ~store[0]["mask"]
+            vf = valid.float()
+            n_valid = vf.sum(dim=1)
+            total_valid_count += n_valid.tolist()
+
+            for class_name, _ in CLASSES:
+                start, end = OFFSETS[class_name]
+                class_count = vf[:, start:end].sum(dim=1)
+                valid_count[class_name] += class_count.tolist()
+                count_share[class_name] += (class_count / n_valid).tolist()
+
+            per_layer_route = []
+            per_layer_lane_bins = [[] for _ in DIST_BINS]
+            per_layer_nbr_bins = [[] for _ in DIST_BINS]
+            for layer_index, record in enumerate(store):
+                weights = record["w"]
+                ego_weights = weights[:, 0]
+                all_query_weights = (weights * vf.unsqueeze(-1)).sum(dim=1) / n_valid.unsqueeze(-1)
+                norms = value_norms(fusion.blocks[layer_index], record["kv"])
+                value_weighted = ego_weights * norms
+                value_weighted /= value_weighted.sum(dim=-1, keepdim=True).clamp(min=1e-9)
+                for class_name, _ in CLASSES:
+                    start, end = OFFSETS[class_name]
+                    ego_share[layer_index][class_name] += (
+                        ego_weights[:, start:end].sum(dim=1).tolist()
+                    )
+                    all_share[layer_index][class_name] += (
+                        all_query_weights[:, start:end].sum(dim=1).tolist()
+                    )
+                    vw_share[layer_index][class_name] += (
+                        value_weighted[:, start:end].sum(dim=1).tolist()
+                    )
+
+                lane_start, lane_end = OFFSETS["lanes"]
+                neighbor_start, neighbor_end = OFFSETS["neighbors"]
+                lane_weights = ego_weights[:, lane_start:lane_end]
+                neighbor_weights = ego_weights[:, neighbor_start:neighbor_end]
+                for bin_index, (lower, upper) in enumerate(DIST_BINS):
+                    lane_mask = (l_dist >= lower) & (l_dist < upper)
+                    neighbor_mask = (n_dist >= lower) & (n_dist < upper)
+                    lane_total = lane_weights.sum(dim=1)
+                    neighbor_total = neighbor_weights.sum(dim=1)
+                    per_layer_lane_bins[bin_index].append(
+                        torch.where(
+                            lane_total > 0,
+                            (lane_weights * lane_mask).sum(dim=1) / lane_total.clamp(min=1e-9),
+                            torch.nan,
+                        )
+                    )
+                    per_layer_nbr_bins[bin_index].append(
+                        torch.where(
+                            neighbor_total > 0,
+                            (neighbor_weights * neighbor_mask).sum(dim=1)
+                            / neighbor_total.clamp(min=1e-9),
+                            torch.nan,
+                        )
+                    )
+                route_start, route_end = OFFSETS["route"]
+                per_layer_route.append(ego_weights[:, route_start:route_end].sum(dim=1))
+
+            route_share_per_sample += torch.stack(per_layer_route).mean(dim=0).tolist()
+            for bin_index in range(len(DIST_BINS)):
+                lane_bin_share[bin_index] += (
+                    torch.stack(per_layer_lane_bins[bin_index]).mean(dim=0).tolist()
+                )
+                nbr_bin_share[bin_index] += (
+                    torch.stack(per_layer_nbr_bins[bin_index]).mean(dim=0).tolist()
+                )
+
+    return {
+        "turning": list(turning),
+        "ego_share": ego_share,
+        "all_share": all_share,
+        "vw_share": vw_share,
+        "count_share": count_share,
+        "valid_count": valid_count,
+        "total_valid_count": total_valid_count,
+        "lane_bin_share": lane_bin_share,
+        "nbr_bin_share": nbr_bin_share,
+        "route_share_per_sample": route_share_per_sample,
+    }
+
+
+def merge_payloads(payloads, n_layers):
+    """Concatenate per-rank accumulators without changing sample weighting."""
+    merged = {
+        "turning": [],
+        "ego_share": [{c: [] for c, _ in CLASSES} for _ in range(n_layers)],
+        "all_share": [{c: [] for c, _ in CLASSES} for _ in range(n_layers)],
+        "vw_share": [{c: [] for c, _ in CLASSES} for _ in range(n_layers)],
+        "count_share": {c: [] for c, _ in CLASSES},
+        "valid_count": {c: [] for c, _ in CLASSES},
+        "total_valid_count": [],
+        "lane_bin_share": [[] for _ in DIST_BINS],
+        "nbr_bin_share": [[] for _ in DIST_BINS],
+        "route_share_per_sample": [],
+    }
+    for payload in payloads:
+        merged["turning"].extend(payload["turning"])
+        merged["total_valid_count"].extend(payload["total_valid_count"])
+        merged["route_share_per_sample"].extend(payload["route_share_per_sample"])
+        for class_name, _ in CLASSES:
+            merged["count_share"][class_name].extend(payload["count_share"][class_name])
+            merged["valid_count"][class_name].extend(payload["valid_count"][class_name])
+            for layer_index in range(n_layers):
+                for key in ("ego_share", "all_share", "vw_share"):
+                    merged[key][layer_index][class_name].extend(
+                        payload[key][layer_index][class_name]
+                    )
+        for bin_index in range(len(DIST_BINS)):
+            merged["lane_bin_share"][bin_index].extend(payload["lane_bin_share"][bin_index])
+            merged["nbr_bin_share"][bin_index].extend(payload["nbr_bin_share"][bin_index])
+    return merged
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--run_dir", required=True)
@@ -178,109 +380,82 @@ def main():
     p.add_argument("--move_min_m", type=float, default=5.0)
     p.add_argument("--turn_deg", type=float, default=15.0)
     p.add_argument("--device", default="cpu")
+    p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--out_json", default="", help="write aggregated results to this JSON file")
     args = p.parse_args()
 
+    args.device, rank, local_rank, world_size = init_distributed(args.device)
+    is_main = rank == 0
     model, cfg = load_model(Path(args.run_dir), args.device)
     fusion = find_fusion(model)
     store = []
     patch_fusion(fusion, store)
     n_layers = len(fusion.blocks)
-    print(f"patched {n_layers} fusion blocks, token_num={TOKEN_NUM}", flush=True)
+    if is_main:
+        print(f"patched {n_layers} fusion blocks, token_num={TOKEN_NUM}", flush=True)
+        print(
+            f"data parallel: world_size={world_size}, per-rank batch={args.batch_size}, "
+            f"workers/rank={args.num_workers}",
+            flush=True,
+        )
 
     dataset = DiffusionPlannerData(args.valid_set_list)
-    stride = max(1, len(dataset) // (args.n_samples * 2))
-    cand = list(range(0, len(dataset), stride))
-    probe = DataLoader(Subset(dataset, cand), batch_size=1, shuffle=False)
-    idxs, turning = [], []
-    for i, s in zip(cand, probe):
-        fut = s["ego_agent_future"][0]
-        if float(np.linalg.norm(fut[-1, :2])) < args.move_min_m:
-            continue
-        bearing = abs(np.degrees(np.arctan2(float(fut[-1, 1]), float(fut[-1, 0]))))
-        idxs.append(i)
-        turning.append(bearing >= args.turn_deg)
-        if len(idxs) >= args.n_samples:
-            break
-    turning = np.array(turning)
+    if is_main:
+        idxs, turning, stride = select_moving_indices(
+            dataset, args.n_samples, args.move_min_m, args.turn_deg
+        )
+    else:
+        idxs, turning, stride = None, None, None
+    idxs, turning = broadcast_selection(idxs, turning, world_size)
+    if not idxs:
+        if world_size > 1:
+            dist.destroy_process_group()
+        raise RuntimeError(
+            f"no samples moved at least {args.move_min_m} m in the evaluation dataset"
+        )
+    local_idxs = idxs[rank::world_size]
+    local_turning = turning[rank::world_size]
+    if is_main:
+        print(
+            f"selected {len(idxs)} moving samples "
+            f"({int(np.sum(turning))} turning, stride={stride}, dataset={len(dataset)})",
+            flush=True,
+        )
     print(
-        f"selected {len(idxs)} moving samples ({int(turning.sum())} turning, dataset={len(dataset)})",
+        f"[rank {rank}/{world_size}, local_rank={local_rank}] analyzing {len(local_idxs)} samples",
         flush=True,
     )
-
-    loader = DataLoader(Subset(dataset, idxs), batch_size=args.batch_size, shuffle=False)
-
-    # accumulators: [layer][class] lists over samples
-    ego_share = [{c: [] for c, _ in CLASSES} for _ in range(n_layers)]
-    all_share = [{c: [] for c, _ in CLASSES} for _ in range(n_layers)]
-    vw_share = [{c: [] for c, _ in CLASSES} for _ in range(n_layers)]
-    count_share = {c: [] for c, _ in CLASSES}
-    valid_count = {c: [] for c, _ in CLASSES}
-    total_valid_count = []
-    lane_bin_share = [[] for _ in DIST_BINS]  # conditional on class presence
-    nbr_bin_share = [[] for _ in DIST_BINS]
-    route_share_per_sample = []  # ego-query, layer-averaged (for turning split)
-
-    with torch.no_grad():
-        for raw in loader:
-            l_dist = lane_dist(raw["lanes"]).to(args.device)  # [B, P] raw metres
-            n_dist = neighbor_dist(raw["neighbor_agents_past"]).to(args.device)
-            inputs_n = prepare_inputs(dict(raw), cfg, args.device)
-            store.clear()
-            model(inputs_n)
-            assert len(store) == n_layers
-            B = store[0]["w"].shape[0]
-            valid = ~store[0]["mask"]  # [B, N] True=valid
-            vf = valid.float()
-            n_valid = vf.sum(dim=1)  # [B]
-            total_valid_count += n_valid.tolist()
-
-            for c, _ in CLASSES:
-                s, e = OFFSETS[c]
-                class_count = vf[:, s:e].sum(dim=1)
-                valid_count[c] += class_count.tolist()
-                count_share[c] += (class_count / n_valid).tolist()
-
-            per_layer_route = []
-            per_layer_lane_bins = [[] for _ in DIST_BINS]
-            per_layer_nbr_bins = [[] for _ in DIST_BINS]
-            for li, rec in enumerate(store):
-                w = rec["w"]  # [B, Q, K], rows over valid keys sum to 1
-                ego_w = w[:, 0]  # [B, K]
-                # all-valid-query mean of attention received per key
-                allq_w = (w * vf.unsqueeze(-1)).sum(dim=1) / n_valid.unsqueeze(-1)
-                vn = value_norms(fusion.blocks[li], rec["kv"])  # [B, K]
-                vw = ego_w * vn
-                vw = vw / vw.sum(dim=-1, keepdim=True).clamp(min=1e-9)
-                for c, _ in CLASSES:
-                    s, e = OFFSETS[c]
-                    ego_share[li][c] += ego_w[:, s:e].sum(dim=1).tolist()
-                    all_share[li][c] += allq_w[:, s:e].sum(dim=1).tolist()
-                    vw_share[li][c] += vw[:, s:e].sum(dim=1).tolist()
-                # distance bins (conditional within class, ego query)
-                ls, le = OFFSETS["lanes"]
-                ns, ne = OFFSETS["neighbors"]
-                lane_w = ego_w[:, ls:le]
-                nbr_w = ego_w[:, ns:ne]
-                for bi, (lo, hi) in enumerate(DIST_BINS):
-                    lm = (l_dist >= lo) & (l_dist < hi)
-                    nm = (n_dist >= lo) & (n_dist < hi)
-                    lt = lane_w.sum(dim=1)
-                    nt = nbr_w.sum(dim=1)
-                    per_layer_lane_bins[bi].append(
-                        torch.where(
-                            lt > 0, (lane_w * lm).sum(dim=1) / lt.clamp(min=1e-9), torch.nan
-                        )
-                    )
-                    per_layer_nbr_bins[bi].append(
-                        torch.where(nt > 0, (nbr_w * nm).sum(dim=1) / nt.clamp(min=1e-9), torch.nan)
-                    )
-                rs, re_ = OFFSETS["route"]
-                per_layer_route.append(ego_w[:, rs:re_].sum(dim=1))
-            route_share_per_sample += torch.stack(per_layer_route).mean(dim=0).tolist()
-            for bi in range(len(DIST_BINS)):
-                lane_bin_share[bi] += torch.stack(per_layer_lane_bins[bi]).mean(dim=0).tolist()
-                nbr_bin_share[bi] += torch.stack(per_layer_nbr_bins[bi]).mean(dim=0).tolist()
+    local_payload = analyze_local(
+        model,
+        cfg,
+        fusion,
+        store,
+        dataset,
+        local_idxs,
+        local_turning,
+        args.batch_size,
+        args.num_workers,
+        args.device,
+    )
+    if world_size > 1:
+        payloads = [None] * world_size if is_main else None
+        dist.gather_object(local_payload, payloads, dst=0)
+    else:
+        payloads = [local_payload]
+    if not is_main:
+        dist.destroy_process_group()
+        return
+    merged = merge_payloads(payloads, n_layers)
+    turning = np.asarray(merged["turning"], dtype=bool)
+    ego_share = merged["ego_share"]
+    all_share = merged["all_share"]
+    vw_share = merged["vw_share"]
+    count_share = merged["count_share"]
+    valid_count = merged["valid_count"]
+    total_valid_count = merged["total_valid_count"]
+    lane_bin_share = merged["lane_bin_share"]
+    nbr_bin_share = merged["nbr_bin_share"]
+    route_share_per_sample = merged["route_share_per_sample"]
 
     # ---------------- aggregate ----------------
     r_route = np.array(route_share_per_sample)
@@ -288,6 +463,7 @@ def main():
         "n_samples": len(idxs),
         "n_turning": int(turning.sum()),
         "n_layers": n_layers,
+        "world_size": world_size,
         "classes": [c for c, _ in CLASSES],
         "token_occupancy": {
             "description": "Valid token counts over the selected moving evaluation samples",
@@ -355,6 +531,8 @@ def main():
     r = np.array(route_share_per_sample)
     print(f"turning  (n={int(turning.sum())}): {100 * r[turning].mean():5.2f}%")
     print(f"straight (n={int((~turning).sum())}): {100 * r[~turning].mean():5.2f}%")
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
