@@ -271,6 +271,23 @@ class StatePerturbation:
             ego_current_state[:, 4] * new_yaw_rate + scaled_random_tensor[:, 6]
         )
 
+        # The perturbed velocity/acceleration above are body-frame quantities, but
+        # centric_transform() will rotate every vector by R(-delta_heading) into the new
+        # (perturbed-heading) frame. Pre-rotate by R(+delta_heading) so those body-frame
+        # components survive the round trip. Without this the velocity vector kept pointing
+        # along the OLD heading while the body turned, which is a sideslip of exactly
+        # delta_heading — 11.5 deg (vy = -1.59 m/s at 8 m/s) at the +-0.2 rad limit, and
+        # -2.38 m/s at 12 m/s. Autoware reports twist.linear.y ~ 0, so that state never
+        # occurs in deployment. It also leaked braking into ay (+0.40 m/s^2 for ax = -2 at
+        # delta_heading = 0.2).
+        cos_h, sin_h = ego_current_state[:, 2].clone(), ego_current_state[:, 3].clone()
+        for lon_idx in (4, 6):  # (vx, vy) then (ax, ay)
+            lat_idx = lon_idx + 1
+            lon = ego_current_state[:, lon_idx].clone()
+            lat = ego_current_state[:, lat_idx].clone()
+            ego_current_state[:, lon_idx] = cos_h * lon - sin_h * lat
+            ego_current_state[:, lat_idx] = sin_h * lon + cos_h * lat
+
         # Discard augmentations that cause collisions
         collision = self._check_aug_validity(ego_current_state, inputs)
         aug_flag = aug_flag & ~collision
