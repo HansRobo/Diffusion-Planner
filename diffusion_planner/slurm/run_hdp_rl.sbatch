@@ -693,7 +693,24 @@ initial_live = bare_state(initial_live)
 initial_shadow = bare_state(initial_shadow)
 live = bare_state(live)
 shadow = bare_state(shadow)
-assert live.keys() == initial_live.keys() == initial_shadow.keys() == shadow.keys()
+# The live and shadow weights of one checkpoint must always agree on their key set.
+assert live.keys() == shadow.keys(), "final live/EMA key sets disagree"
+assert initial_live.keys() == initial_shadow.keys(), "source live/EMA key sets disagree"
+# The source may carry a turn-indicator head of an older architecture, which the trainer
+# reinitializes rather than loads. Requiring an identical key set would then fail on every
+# run started from such a checkpoint, so compare the policy the RL objective actually
+# trains and report the head migration instead of asserting it away.
+head_prefix = "decoder.turn_indicator_predictor."
+policy_final = {k for k in live if not k.startswith(head_prefix)}
+policy_source = {k for k in initial_live if not k.startswith(head_prefix)}
+assert policy_final == policy_source, (
+    f"policy key sets differ outside the turn-indicator head: "
+    f"missing={sorted(policy_source - policy_final)[:4]} "
+    f"extra={sorted(policy_final - policy_source)[:4]}"
+)
+migrated = sorted(set(live) ^ set(initial_live))
+if migrated:
+    print(f"turn-indicator head reinitialized: {len(migrated)} tensors differ from source")
 
 decoder_changed = []
 encoder_changed = []

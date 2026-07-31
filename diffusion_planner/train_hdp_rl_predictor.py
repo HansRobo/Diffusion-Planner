@@ -1436,6 +1436,27 @@ def model_training(args):
             args.device,
             strict_training_state=True,
         )
+        # A resume restores the optimizer and schedule verbatim, so the checkpoint's rate
+        # would silently win over --learning_rate. Decaying the rate for the second half of
+        # a run is a normal operation and has to be expressible: the flag takes precedence.
+        # This is only sound because the policy boundary clears the optimizer state, so no
+        # moment estimate is left coupled to the old rate -- assert that rather than trust
+        # it. The schedule is past warmup here, so its constant segment reads base_lrs.
+        resumed_lr = optimizer.param_groups[0]["lr"]
+        if not math.isclose(resumed_lr, args.learning_rate, rel_tol=1e-9):
+            for state in optimizer.state.values():
+                if state:
+                    raise RuntimeError(
+                        "refusing to override the learning rate on a resume that carries "
+                        "optimizer moments; they were tuned to the checkpoint's rate"
+                    )
+            for group in optimizer.param_groups:
+                group["lr"] = args.learning_rate
+                group["initial_lr"] = args.learning_rate
+            for sched in [scheduler, *getattr(scheduler, "_schedulers", [])]:
+                if hasattr(sched, "base_lrs"):
+                    sched.base_lrs = [args.learning_rate] * len(sched.base_lrs)
+            print(f"Learning rate overridden on resume: {resumed_lr} -> {args.learning_rate}")
         print(
             f"Strict resume at epoch {init_epoch} with optimizer LR "
             f"{optimizer.param_groups[0]['lr']}"
