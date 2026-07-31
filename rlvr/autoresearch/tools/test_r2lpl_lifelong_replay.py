@@ -4603,6 +4603,17 @@ def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
         guarded.append((tag, str(model_path)))
         return {"tag": tag, "model_path": str(model_path), **guard_metric_seq.pop(0)}
 
+    ema_routed: list[str] = []
+
+    def fake_ema(path):
+        # Pass-through recorder: the fake checkpoints are not real torch files,
+        # so extraction itself is covered by the dedicated unit tests; here we
+        # assert the WIRING — closed-loop inference models go through the
+        # extractor, training warm-starts keep the raw checkpoint.
+        ema_routed.append(str(path))
+        return Path(path)
+
+    monkeypatch.setattr(round_runner, "_ema_inference_model_path", fake_ema)
     monkeypatch.setattr(round_runner, "_run_mining_phase", fake_mining)
     monkeypatch.setattr(round_runner, "_run_repair_phase", fake_repair)
     monkeypatch.setattr(round_runner, "_run", fake_run)
@@ -4622,6 +4633,10 @@ def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
     # checkpoints always advance; each round mines with the previous checkpoint
     assert train_warm_starts == [str(initial_model), round1_ckpt]
     assert mining_calls == [str(initial_model), round1_ckpt]
+    # every closed-loop inference model (guards + mining) was routed through
+    # the EMA extractor
+    assert set(mining_calls) <= set(ema_routed)
+    assert {p for _, p in guarded} <= set(ema_routed)
     round1 = json.loads((out_dir / "r2lpl_round_001" / "round_summary.json").read_text())
     round2 = json.loads((out_dir / "r2lpl_round_002" / "round_summary.json").read_text())
     assert round1["guards"]["tag"] == "round_001"
@@ -5388,3 +5403,48 @@ def test_ema_inference_model_path_read_only_dir_uses_fallback(tmp_path, monkeypa
         assert float(torch.load(out, weights_only=False)["model"]["w"].sum()) == 2.0
     finally:
         ro.chmod(0o700)
+
+
+def test_ema_inference_model_path_refreshes_when_source_checkpoint_changes(tmp_path, monkeypatch):
+    """Chunked base-SFT overwrites the same latest.pth; both the in-memory and
+    on-disk caches must be invalidated by the source stamp, and a half-written
+    extraction dir must never be honored as a cache hit."""
+    monkeypatch.setattr(round_runner, "_EMA_INFER_CACHE", {})
+    monkeypatch.setattr(round_runner, "_EMA_INFER_FALLBACK_ROOT", tmp_path / "cache")
+    ckpt_dir = tmp_path / "base_train"
+    ckpt_dir.mkdir()
+    (ckpt_dir / "args.json").write_text("{}")
+    ckpt = ckpt_dir / "latest.pth"
+
+    def save(v: float) -> None:
+        torch.save(
+            {"model": {"w": torch.zeros(1)}, "ema_state_dict": {"w": torch.full((1,), v)}},
+            ckpt,
+        )
+
+    save(1.0)
+    out = round_runner._ema_inference_model_path(ckpt)
+    assert float(torch.load(out, weights_only=False)["model"]["w"]) == 1.0
+
+    save(2.0)
+    os.utime(ckpt, ns=(ckpt.stat().st_atime_ns, ckpt.stat().st_mtime_ns + 1_000_000))
+    out2 = round_runner._ema_inference_model_path(ckpt)
+    assert float(torch.load(out2, weights_only=False)["model"]["w"]) == 2.0, (
+        "overwritten checkpoint must refresh the extraction"
+    )
+
+    # fresh process (empty in-memory cache) trusts a stamped complete dir ...
+    round_runner._EMA_INFER_CACHE.clear()
+    assert (
+        float(
+            torch.load(round_runner._ema_inference_model_path(ckpt), weights_only=False)["model"][
+                "w"
+            ]
+        )
+        == 2.0
+    )
+    # ... but a partial dir (weights present, args.json missing) is rebuilt
+    round_runner._EMA_INFER_CACHE.clear()
+    (out2.parent / "args.json").unlink()
+    out3 = round_runner._ema_inference_model_path(ckpt)
+    assert (out3.parent / "args.json").exists(), "partial cache dir must be rebuilt"

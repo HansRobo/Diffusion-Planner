@@ -997,10 +997,17 @@ def _args_json_for_model(model_path: Path) -> Path:
     raise FileNotFoundError(f"Could not find args.json next to {model_path}")
 
 
-_EMA_INFER_CACHE: dict[str, Path] = {}
+# In-memory cache: source pathname -> (source stamp, resolved inference path).
+_EMA_INFER_CACHE: dict[str, tuple[dict[str, Any], Path]] = {}
 # Set in main() to <output_dir>/ema_infer_cache; used when the checkpoint's own
 # directory is not writable (e.g. a shared base model owned by another user).
 _EMA_INFER_FALLBACK_ROOT: Path | None = None
+_EMA_INFER_STAMP_NAME = "source_stamp.json"
+
+
+def _ema_source_stamp(model_path: Path) -> dict[str, Any]:
+    st = model_path.stat()
+    return {"source": str(model_path), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
 def _ema_inference_model_path(model_path: Path | str) -> Path:
@@ -1009,20 +1016,28 @@ def _ema_inference_model_path(model_path: Path | str) -> Path:
     Base-training checkpoints store the raw optimizer iterates under "model" and
     the deployable EMA under "ema_state_dict"; simulate.load_model reads "model",
     so handing the training checkpoint straight to an inference phase silently
-    drives the raw iterates. Extract the EMA once, next to the checkpoint, and
-    return that path. Checkpoints without an EMA pass through unchanged.
-    Training resume must keep the original checkpoint (it needs optimizer/EMA
-    state), so only inference call sites go through here.
+    drives the raw iterates. Extract the EMA once per source-checkpoint version
+    and return the extraction's path. Checkpoints without an EMA pass through
+    unchanged. Training resume must keep the original checkpoint (it needs
+    optimizer/EMA state), so only inference call sites go through here.
+
+    The cache (in-memory and on-disk) is validated against the source file's
+    size+mtime stamp, because chunked base-SFT overwrites the same latest.pth
+    between calls; the extraction dir is staged fully (weights, args.json,
+    stamp) and published with an atomic rename so a partial dir is never
+    visible as a cache hit.
     """
     import shutil
 
     model_path = Path(model_path).resolve()
     key = str(model_path)
-    if key in _EMA_INFER_CACHE:
-        return _EMA_INFER_CACHE[key]
+    stamp = _ema_source_stamp(model_path)
+    cached = _EMA_INFER_CACHE.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
     ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
     if not (isinstance(ckpt, dict) and "ema_state_dict" in ckpt):
-        _EMA_INFER_CACHE[key] = model_path
+        _EMA_INFER_CACHE[key] = (stamp, model_path)
         return model_path
     out_dir = model_path.parent / f"{model_path.stem}_ema_infer"
     if not os.access(model_path.parent, os.W_OK):
@@ -1034,15 +1049,30 @@ def _ema_inference_model_path(model_path: Path | str) -> Path:
         digest = hashlib.sha1(key.encode()).hexdigest()[:12]
         out_dir = _EMA_INFER_FALLBACK_ROOT / f"{model_path.stem}_{digest}_ema_infer"
     out = out_dir / "best_model.pth"
-    if not out.exists():
-        out_dir.mkdir(parents=True, exist_ok=True)
+    stamp_path = out_dir / _EMA_INFER_STAMP_NAME
+    disk_valid = False
+    if out.exists() and (out_dir / "args.json").exists() and stamp_path.exists():
+        try:
+            disk_valid = json.loads(stamp_path.read_text()) == stamp
+        except (OSError, json.JSONDecodeError):
+            disk_valid = False
+    if not disk_valid:
+        # Stage the complete extraction in a sibling temp dir, then publish it
+        # with a single rename: a crash mid-extraction leaves only temp litter,
+        # never a half-populated cache dir.
         state = {k.replace("module.", ""): v for k, v in ckpt["ema_state_dict"].items()}
-        tmp = out_dir / "best_model.pth.tmp"
-        torch.save({"model": state}, tmp)
-        tmp.replace(out)
-        shutil.copy2(_args_json_for_model(model_path), out_dir / "args.json")
+        staging = out_dir.parent / f".{out_dir.name}.staging{os.getpid()}"
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True)
+        torch.save({"model": state}, staging / "best_model.pth")
+        shutil.copy2(_args_json_for_model(model_path), staging / "args.json")
+        (staging / _EMA_INFER_STAMP_NAME).write_text(json.dumps(stamp))
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        os.rename(staging, out_dir)
     print(f"[ema] closed-loop inference weights: {out} (EMA of {model_path})")
-    _EMA_INFER_CACHE[key] = out
+    _EMA_INFER_CACHE[key] = (stamp, out)
     return out
 
 
@@ -2595,7 +2625,12 @@ def _run_base_sft_training(
         if cycle == last_cycle:
             break
         newly, refresh_elapsed = _refresh_repair(
-            cfg, current_model, rdir, scope=scope, cycle=cycle, gpu_ids=gpu_ids
+            cfg,
+            _ema_inference_model_path(current_model),
+            rdir,
+            scope=scope,
+            cycle=cycle,
+            gpu_ids=gpu_ids,
         )
         total_elapsed += refresh_elapsed
         if newly:
