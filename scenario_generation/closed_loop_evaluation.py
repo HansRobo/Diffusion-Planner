@@ -53,6 +53,9 @@ class RolloutParams:
     # train.py, most epochs) skip the dominant per-epoch cost and only pay it on the one call
     # that actually needs media (e.g. the final epoch).
     draw_every: int | None = 8
+    # draw on this many worker processes instead of in the step loop; no effect if draw_every
+    # is None. 0 = in-loop, the library default because spawn constrains the caller's entry point
+    draw_workers: int = 0
     replan_interval: int = 10
     tracker_mode: str = "mpc"
     neighbor_history_mode: str = "recorded"
@@ -82,6 +85,7 @@ class RolloutParams:
             "unstick_radius_mult": self.unstick_radius_mult,
             "unstick_teleport_after": self.unstick_teleport_after,
             "draw_every": self.draw_every,
+            "draw_workers": self.draw_workers,
             "replan_interval": self.replan_interval,
             "tracker_mode": self.tracker_mode,
             "neighbor_history_mode": self.neighbor_history_mode,

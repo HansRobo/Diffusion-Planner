@@ -288,6 +288,12 @@ def get_args(args_list=None):
         default=4,
         help="render 1 of every N steps (matplotlib render is the dominant cost)",
     )
+    parser.add_argument(
+        "--closed_loop_draw_workers",
+        type=int,
+        default=4,
+        help="render the PNGs on this many worker processes instead of in the rollout loop (0 = in-loop). Output is byte-identical; costs ~780 MB of RSS per worker",
+    )
     parser.add_argument("--closed_loop_fps", type=int, default=10)
     parser.add_argument("--closed_loop_near_miss_thresh", type=float, default=0.5)
     parser.add_argument("--closed_loop_search_radius", type=float, default=1.5)
