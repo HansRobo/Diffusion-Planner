@@ -312,6 +312,19 @@ def compare(base_path: str, cand_path: str, label: str = "") -> None:
             cand["det_exec_lon_err_m"][ci],
             None,
         )
+    # ``det_exec_lon_err_m`` is stored as an absolute value, so it cannot show which
+    # way the executed step is wrong. Signed, the planner is short of the human by
+    # ~2% of the step: a speed deficit, not dispersion, and the axis that grows when
+    # the first-waypoint anchor is pulling on lateral. Reported as a fraction of the
+    # human's own step because that is what a speed controller sees.
+    if "det_exec_lon_m" in base and "gt_exec_lon_m" in base:
+        b_signed = base["det_exec_lon_m"][bi] - base["gt_exec_lon_m"][bi]
+        c_signed = cand["det_exec_lon_m"][ci] - cand["gt_exec_lon_m"][ci]
+        report_axis("signed longitudinal", 1000.0, "mm", b_signed, c_signed, None)
+        step = float(np.nanmean(np.abs(base["gt_exec_lon_m"][bi])))
+        if step > 1e-9:
+            print(f"  {'':<22s} step deficit {100.0*b_signed.mean()/step:+.3f}% -> "
+                  f"{100.0*c_signed.mean()/step:+.3f}% of the human's {step*1000:.1f} mm step")
     if "det_exec_heading_err_rad" in base:
         report_axis(
             "heading error",
@@ -374,6 +387,24 @@ def compare(base_path: str, cand_path: str, label: str = "") -> None:
         )
 
 
+def epoch_rows(arm: str) -> list[str]:
+    """Every ``eval_epoch_*/scenes.json`` under an arm, earliest first.
+
+    A run names its own directory after the moment it started, so an arm holds
+    its epochs one level down, and a run interrupted and resumed holds them
+    under two such directories -- which is exactly when the earliest epoch
+    still has to be the baseline.  Sorting on the path does that: the stamp
+    orders the segments and the epoch number orders within one.  A single run
+    directory passed directly keeps working, so the caller does not have to
+    know which of the two it is holding.
+    """
+
+    return sorted(
+        glob.glob(os.path.join(arm, "eval_epoch_*", "scenes.json"))
+        + glob.glob(os.path.join(arm, "*", "eval_epoch_*", "scenes.json"))
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", help="scenes.json of the reference epoch")
@@ -381,12 +412,13 @@ def main() -> None:
     parser.add_argument(
         "--arm",
         help="an output dir: every eval_epoch_*/scenes.json is compared to the earliest, "
-        "which is how a long run is read while it is still running",
+        "which is how a long run is read while it is still running; either a run "
+        "directory or the arm directory holding them",
     )
     args = parser.parse_args()
 
     if args.arm:
-        found = sorted(glob.glob(os.path.join(args.arm, "eval_epoch_*", "scenes.json")))
+        found = epoch_rows(args.arm)
         if len(found) < 2:
             raise SystemExit(f"need at least two eval_epoch_*/scenes.json under {args.arm}")
         for candidate in found[1:]:

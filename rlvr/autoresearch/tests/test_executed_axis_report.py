@@ -5,12 +5,14 @@ pin that, the stride rule, and the sign convention that makes delta / t / z agre
 """
 
 import math
+from pathlib import Path
 
 import numpy as np
 
 from rlvr.autoresearch.tools.executed_axis_report import (
     _chain_diffs,
     chain_runs,
+    epoch_rows,
     paired,
 )
 
@@ -82,3 +84,25 @@ def test_paired_signs_agree_with_the_direction_of_the_move():
     assert mean > 0 and t > 0 and z > 0
     # 4 of 5 moved one way: |1 - 5/2| / sqrt(5/4).
     assert math.isclose(abs(z), 1.5 / math.sqrt(5 / 4.0), rel_tol=1e-9)
+
+
+def test_an_arm_resumed_into_a_second_run_still_baselines_on_the_first(tmp_path):
+    """A run names its directory after its start, and a resume makes a second one.
+
+    Reading the arm has to see through both, earliest first, or the baseline
+    silently becomes the checkpoint the run resumed from.
+    """
+
+    for stamp, epochs in (("20260101-000000_dual", (0, 2)), ("20260102-000000_dual", (3,))):
+        for epoch in epochs:
+            rows = tmp_path / stamp / f"eval_epoch_{epoch:03d}"
+            rows.mkdir(parents=True)
+            (rows / "scenes.json").write_text("[]")
+    found = epoch_rows(str(tmp_path))
+    assert [Path(p).parent.name for p in found] == [
+        "eval_epoch_000",
+        "eval_epoch_002",
+        "eval_epoch_003",
+    ]
+    # A single run directory is the same read, one level up.
+    assert len(epoch_rows(str(tmp_path / "20260101-000000_dual"))) == 2
