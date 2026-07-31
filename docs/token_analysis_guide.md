@@ -12,6 +12,7 @@ runs and visualizes:
 - Attention analysis inside the Fusion Encoder;
 - valid-token counts and slot utilization by class;
 - data-parallel sample sharding and result aggregation across multiple GPUs;
+- per-scene neighbor-token Attention overlays and continuous MP4 visualization;
 - numerical tables and graphs for FDE, ADE, min FDE, and min ADE in an HTML report.
 
 The model architecture and training procedure are unchanged. These are offline
@@ -24,7 +25,11 @@ analysis tools that operate on a saved checkpoint and an evaluation dataset.
 | `scripts/token_importance.py` | Evaluates input ablation, nearest-first Top-K, and distance cutoffs, then writes FDE / ADE / min FDE / min ADE and deltas from baseline to TSV |
 | `scripts/attention_analysis.py` | Writes class Attention, selectivity, value-weighted share, per-layer share, distance bins, turning/straight comparison, and valid-token statistics to JSON |
 | `scripts/token_occupancy_scan.py` | Independently scans an NPZ dataset to summarize token-slot occupancy |
+| `scripts/visualize_neighbor_attention.py` | Draws a large bird's-eye-view overlay in which neighbor-token color and marker area represent Attention |
+| `scripts/visualize_neighbor_attention_video.py` | Renders consecutive overlay frames with one global Attention scale and encodes an MP4 |
 | `run_token_analysis.sh` | Runs both PyTorch analyses, executes the Japanese and English Notebooks, and builds portable HTML reports |
+| `run_neighbor_attention_visualization.sh` | Selects or fixes one scene and generates the neighbor-Attention PNG and JSON |
+| `run_neighbor_attention_video.sh` | Generates a neighbor-Attention MP4 and frame-level JSON around one dataset index |
 | `notebook/token_analysis.ipynb` | Japanese explanation of the experiment, metrics, complete numerical results, graphs, and interpretation |
 | `notebook/token_analysis_en.ipynb` | English version of the same analysis |
 | `notebook/generate_english_notebook.py` | Generates the English Notebook while keeping its code cells synchronized with the Japanese source |
@@ -241,6 +246,124 @@ DEVICE=cuda \
   without executing the Decoder.
 - Distributed multi-GPU execution is not supported for the ONNX backend.
 
+## Per-Scene Neighbor-Attention Visualization
+
+Dataset-level Attention statistics describe average behavior but do not identify
+which agent the model reads in one scene. The separate visualization tools
+overlay ego-query Fusion Attention directly on neighbor-agent positions.
+
+- Marker shape identifies vehicle, pedestrian, or bicycle tokens.
+- Marker color and area increase with Attention share within valid neighbor
+  tokens.
+- The bird's-eye view is substantially larger than the Top-K bar chart.
+- The bar chart reports each token's Attention share among all valid tokens.
+- `LAYER=mean` averages all Fusion layers. `last` or a zero-based layer index
+  can also be selected.
+- A JSON file preserves the displayed token class, slot, position, distance,
+  aggregate Attention, and per-layer Attention.
+
+This is an additional diagnostic workflow. It is intentionally separate from
+`run_token_analysis.sh` and does not change the dataset-level Notebook report.
+
+### Render One Scene
+
+To automatically select a turning scene using the most-attended neighbor token,
+regardless of object class:
+
+```bash
+MODEL_DIR=/path/to/best_model \
+DATADIR=/path/to/dataset \
+SELECT_CLASS=any \
+TURN_ONLY=1 \
+DEVICE=cuda \
+./run_neighbor_attention_visualization.sh
+```
+
+To select a scene based only on pedestrian tokens:
+
+```bash
+SELECT_CLASS=pedestrian \
+TURN_ONLY=1 \
+CANDIDATE_COUNT=128 \
+./run_neighbor_attention_visualization.sh
+```
+
+`SELECT_CLASS` accepts `any`, `vehicle`, `pedestrian`, or `bicycle`. It affects
+automatic scene selection only; the resulting image always draws every valid
+neighbor class. To render a known entry from the evaluation list:
+
+```bash
+SAMPLE_INDEX=996 \
+OUTPUT_NAME=intersection_right_turn_index996 \
+./run_neighbor_attention_visualization.sh
+```
+
+`SAMPLE_INDEX` is the zero-based position in `VALID_LIST`, not an identifier
+stored inside the NPZ filename.
+
+### Appearance
+
+The sequential Matplotlib colormap and marker-area range are configurable:
+
+```bash
+COLORMAP=plasma \
+MARKER_SIZE_MIN=45 \
+MARKER_SIZE_MAX=950 \
+TOP_K=12 \
+VIEW_RANGE=80 \
+./run_neighbor_attention_visualization.sh
+```
+
+| Environment variable | Default | Description |
+|---|---:|---|
+| `LAYER` | `mean` | `mean`, `last`, or a zero-based Fusion layer index |
+| `TOP_K` | `12` | Number of ranked tokens shown and annotated |
+| `VIEW_RANGE` | `80` | Bird's-eye-view range in meters |
+| `COLORMAP` | `viridis` | Matplotlib sequential colormap |
+| `MARKER_SIZE_MIN` | `45` | Marker area at zero Attention |
+| `MARKER_SIZE_MAX` | `950` | Marker area at the maximum Attention scale |
+| `OUTPUT_NAME` | `neighbor_attention` | PNG/JSON basename |
+
+The static runner writes:
+
+```text
+<OUT_DIR>/<OUTPUT_NAME>.png
+<OUT_DIR>/<OUTPUT_NAME>.json
+```
+
+### Create a Continuous MP4
+
+The video runner uses consecutive entries around a center index:
+
+```bash
+CENTER_INDEX=996 \
+FRAMES_BEFORE=20 \
+FRAMES_AFTER=40 \
+FPS=10 \
+VIDEO_WIDTH=1920 \
+VIDEO_HEIGHT=1080 \
+DEVICE=cuda \
+./run_neighbor_attention_video.sh
+```
+
+`ffmpeg` with the H.264 encoder must be available in `PATH`. All frames use one
+global Attention maximum so that colors and marker areas remain comparable over
+time. Encoding preserves the figure aspect ratio by scaling and padding to the
+requested even-sized frame. The output uses BT.709 limited-range `yuv420p`,
+avoiding the gray colors and half-width distortion caused by ambiguous color
+metadata or an incorrect sample aspect ratio.
+
+The sequence stops before crossing into a different parent directory in the
+data list. A meaningful temporal video therefore requires `VALID_LIST` entries
+to be in chronological order within each log directory. `STEP` can skip entries,
+and `KEEP_FRAMES=1` retains the intermediate PNG files.
+
+```text
+<OUT_DIR>/<OUTPUT_NAME>.mp4
+<OUT_DIR>/<OUTPUT_NAME>.json
+<OUT_DIR>/<OUTPUT_NAME>_frames/   # only with KEEP_FRAMES=1
+```
+
 ## Outputs
 
 By default, `eval_<dataset name>/` is created next to `MODEL_DIR`.
@@ -407,6 +530,8 @@ also uses the PyTorch checkpoint.
 - NCCL distributed execution on two A100 80GB GPUs, with 64 of 128 samples per rank
 - `all_reduce` aggregation for all 24 feature-importance configurations
 - Rank-0 aggregation of Attention statistics
+- Static neighbor-token Attention PNG/JSON generation
+- Continuous H.264 MP4/JSON generation with a global Attention scale
 - Notebook JSON validation
 - Sequential execution of every Notebook code cell
 - Conversion to HTML with embedded images
