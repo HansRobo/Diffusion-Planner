@@ -6,19 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import init_process_group
 
-
-def ddp_file_store_path() -> str:
-    """Per-user rendezvous file for the file:// DDP init.
-
-    /tmp is node-local but shared between users: a fixed path meant any
-    user's leftover store file (the launch wrappers unlink before, never
-    after) broke every OTHER user's DDP init on that node — their pre-launch
-    ``unlink(missing_ok=True)`` does not suppress the EPERM raised on a file
-    they don't own. Keying by uid makes the store private per user; the
-    single source of truth for the path lives here so the wrappers and the
-    lifelong runner can never drift from what ``ddp_setup_universal`` uses.
-    """
-    return f"/tmp/tmp_dist_init_{os.getuid()}"
+from diffusion_planner.utils.dist_init import dist_init_file_path
 
 
 def ddp_setup_universal(verbose=False, args=None):
@@ -53,7 +41,7 @@ def ddp_setup_universal(verbose=False, args=None):
     dist_backend = "nccl"
     # I don't know why but this is needed for DDP to work instead of 'env://'
     dist_url = "file://"
-    file_path = ddp_file_store_path()
+    file_path = str(dist_init_file_path())
     print("| distributed init (rank {}): {}, gpu {}".format(rank, dist_url, gpu), flush=True)
     init_process_group(
         init_method=f"{dist_url}{file_path}",

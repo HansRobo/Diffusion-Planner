@@ -1370,7 +1370,7 @@ def render_segment(
     yaw_gate: bool = True,
     *,
     replan_interval: int = 1,
-    draw_every: int = 1,
+    draw_every: int | None = 1,
     abort_deviation_m: float = 0.0,
     abort_after: int = 30,
     abort_max_snaps: int = 0,
@@ -1392,6 +1392,9 @@ def render_segment(
     at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
     throttled. PNGs are named by step ``k`` (sparse); encoding them at the raw fps makes the video
     play ``draw_every`` x faster (shorter). For real-time playback use ``fps = 10 / draw_every``.
+    ``draw_every=None`` skips the per-step render entirely (no PNGs at all) -- scoring/
+    ``rollout.jsonl`` (and anything downstream that reads it, e.g. trajectory-colormap images)
+    are unaffected, only the video/PNG artifacts disappear.
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
@@ -1427,9 +1430,10 @@ def render_segment(
     fired this many times in one segment — repeated snapping is itself a sign of a bad rollout.
 
     Per-step ``rollout.jsonl`` lines (next to the PNGs) always include ``clearance_m``,
-    ``collision``, and ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
-    carries no lane geometry) alongside the ego pose — see
-    :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer.
+    ``collision``, ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
+    carries no lane geometry), and ``red_light_violation`` alongside the ego pose — see
+    :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer
+    (which also derives a "strong_brake" colormap from consecutive ``speed`` samples).
 
     ``drop_objects``: empty-world ablation — zero out ``neighbor_agents_past`` and
     ``static_objects`` (and the derived ``neighbors_live``) every step, so the model sees no
@@ -1602,6 +1606,7 @@ def render_segment(
                     "rb_dist_m": round(float(s.rb_dists[k]), 4)
                     if np.isfinite(s.rb_dists[k])
                     else None,
+                    "red_light_violation": bool(s.red_light[k]),
                     "gt_deviation_m": round(gt_deviation_m, 3),
                 }
             )
@@ -1658,7 +1663,11 @@ def render_segment(
             )
             spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
             override = (np.array([tx, ty, th], dtype=np.float64), spd)
-        if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
+        if (
+            draw_every is not None
+            and (window is None or (window[0] <= k <= window[1]))
+            and k % draw_every == 0
+        ):
             _draw_step(
                 np_dict,
                 pred_cur,
