@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from diffusion_planner.dimensions import MAX_NUM_AGENTS, MAX_NUM_NEIGHBORS
+from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from matplotlib.lines import Line2D

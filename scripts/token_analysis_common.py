@@ -98,16 +98,16 @@ def polyline_dist(values: torch.Tensor, geom_dims: int | None = None) -> torch.T
 
 
 def patch_fusion(fusion, store):
-    """Capture attention weights, normalized key/value input, and mask."""
+    """Capture the model's pre-norm attention weights, inputs, and mask."""
     for layer_index, block in enumerate(fusion.blocks):
 
         def make_forward(layer, index):
             def forward(x, mask):
-                normalized = layer.norm1(x)
+                query = layer.norm1(x)
                 attention_output, weights = layer.attn(
-                    normalized,
-                    normalized,
-                    normalized,
+                    query,
+                    x,
+                    x,
                     key_padding_mask=mask,
                     need_weights=True,
                     average_attn_weights=True,
@@ -117,7 +117,7 @@ def patch_fusion(fusion, store):
                         "layer": index,
                         "weights": weights.detach(),
                         "w": weights.detach(),
-                        "kv": normalized.detach(),
+                        "kv": x.detach(),
                         "mask": mask.detach(),
                     }
                 )
