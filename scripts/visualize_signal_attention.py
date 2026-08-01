@@ -66,6 +66,8 @@ def draw_signal_report(
     attention_label,
     attention_layer_label,
     attention_vmax=None,
+    prediction=None,
+    show_prediction: bool = False,
 ):
     signals = signal_records(sample, records)
     displayed_signals = signals[:top_k]
@@ -78,6 +80,10 @@ def draw_signal_report(
     visualize_inputs(visual_inputs, ax=scene_ax, view_ranges=[view_range])
     for text_artist in list(scene_ax.texts):
         text_artist.remove()
+    if show_prediction and prediction is not None:
+        from visualize_prediction_overlay import draw_prediction_paths
+
+        draw_prediction_paths(scene_ax, batch, prediction, ego=True, neighbors=True)
 
     max_value = max(
         attention_vmax or 0.0,
