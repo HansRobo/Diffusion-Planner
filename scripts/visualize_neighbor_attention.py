@@ -224,6 +224,8 @@ def draw_report(
     attention_label: str = "Attention from ego query",
     title_prefix: str = "Neighbor-token Attention Overlay",
     attention_layer_label: str | None = None,
+    prediction=None,
+    show_prediction: bool = False,
 ):
     fig, (scene_ax, rank_ax) = plt.subplots(
         1, 2, figsize=(19, 10), gridspec_kw={"width_ratios": [4.2, 1.15]}
@@ -235,6 +237,10 @@ def draw_report(
     # Reserve the map corner for token labels rather than the generic ego-state block.
     for text_artist in list(scene_ax.texts):
         text_artist.remove()
+    if show_prediction and prediction is not None:
+        from visualize_prediction_overlay import draw_prediction_paths
+
+        draw_prediction_paths(scene_ax, batch, prediction, ego=True, neighbors=True)
 
     values = np.array([record["attention_pct_within_neighbors"] for record in records])
     frame_vmax = float(values.max()) if values.size else 0.0
