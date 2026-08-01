@@ -9,45 +9,25 @@ lanes / line_strings, and distance cutoffs.
 
 Usage (CPU, sshfs checkpoint):
   uv run python scripts/token_importance.py \
-    --run_dir /home/isamuyamashita/work/diffusion_plannner/DP_exp/20260725-132546_plantf_V_tail \
-    --valid_set_list /home/isamuyamashita/work/diffusion_plannner/mini_datasets/j6_2231_fullseq_mini_20260707/path_list_valid.json \
+    --run_dir /path/to/run_dir \
+    --valid_set_list /path/to/path_list_valid.json \
     --n_samples 128 --batch_size 8 --out_tsv token_importance_vtail.tsv
 """
 
 import argparse
 import os
-import re
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.distributed as dist
-from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
+from token_analysis_common import init_distributed, load_model, prepare_inputs
 from torch.utils.data import DataLoader, Subset
 
 METRIC_KEYS = ("fde_top", "ade_top", "min_fde", "min_ade")
-
-
-def init_distributed(requested_device: str):
-    """Initialize torchrun data parallelism and return device/rank metadata."""
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    rank = int(os.environ.get("RANK", "0"))
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    device = requested_device
-    if world_size > 1:
-        if requested_device.startswith("cuda"):
-            device = f"cuda:{local_rank}"
-            torch.cuda.set_device(local_rank)
-            backend = "nccl"
-        else:
-            backend = "gloo"
-        dist.init_process_group(backend=backend)
-    return device, rank, local_rank, world_size
 
 
 def select_moving_indices(dataset, n_samples, move_min_m):
@@ -73,24 +53,6 @@ def broadcast_indices(indices, world_size):
     payload = [indices]
     dist.broadcast_object_list(payload, src=0)
     return payload[0]
-
-
-def prepare_inputs(inputs: dict, cfg, device: str):
-    """Mirror validate_model's input prep (self-contained, tier4-main compatible).
-
-    Returns (normalized model inputs, ego_future in metres/cos-sin).
-    """
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    B = inputs["ego_current_state"].shape[0]
-    inputs["sampled_trajectories"] = torch.zeros(
-        B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32, device=device
-    )
-    inputs["delay"] = torch.zeros(B, dtype=torch.float32, device=device)
-    inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-    inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
-    ego_future = heading_to_cos_sin(inputs["ego_agent_future"])
-    inputs = cfg.observation_normalizer(inputs)
-    return inputs, ego_future
 
 
 ONNX_TYPE_MAP = {
@@ -136,32 +98,6 @@ class OnnxModel:
                 onnx_feed[si.name] = np.zeros(shp, dtype=dtype)
         pred = self.sess.run(["prediction"], onnx_feed)[0]
         return None, {"prediction": torch.from_numpy(np.asarray(pred)).to(self.device)}
-
-
-def latest_ckpt(run_dir: Path) -> Path:
-    if (run_dir / "best_model.pth").exists():
-        return run_dir / "best_model.pth"
-    epoch_dirs = sorted(
-        (d for d in run_dir.iterdir() if re.fullmatch(r"epoch\d+", d.name)),
-        key=lambda d: int(d.name[5:]),
-    )
-    if epoch_dirs:
-        return epoch_dirs[-1] / "best_model.pth"
-    return run_dir / "best_model" / "best_model.pth"
-
-
-def load_model(run_dir: Path, device: str):
-    cfg = Config(str(run_dir / "args.json"))
-    cfg.device = device
-    cfg.ddp = False
-    model = Diffusion_Planner(cfg).to(device)
-    ckpt_path = latest_ckpt(run_dir)
-    state = torch.load(ckpt_path, map_location=device)
-    state = state["model"] if "model" in state else state
-    state = {k.removeprefix("module."): v for k, v in state.items()}  # DDP-saved ckpt
-    model.load_state_dict(state)
-    model.eval()
-    return model, cfg, ckpt_path
 
 
 # ---------------------------------------------------------------- ablations
@@ -287,7 +223,7 @@ def eval_config(model, cfg, batches, device, name):
     count = 0
     for raw in batches:
         inputs = apply_ablation(raw, name)
-        inputs_n, ego_future = prepare_inputs(inputs, cfg, device)
+        inputs_n, ego_future = prepare_inputs(inputs, cfg, device, include_future=True)
         _, outputs = model(inputs_n)
         gt = ego_future[..., :2]  # [B,T,2] metres
         if "trajectory" in outputs and "probability" in outputs:

@@ -15,40 +15,40 @@ measures, per layer:
 
 Usage:
   uv run python scripts/attention_analysis.py \
-    --run_dir /home/isamuyamashita/work/diffusion_plannner/DP_exp/20260725-132546_plantf_V_tail \
-    --valid_set_list /home/isamuyamashita/work/diffusion_plannner/mini_datasets/j6_2231_fullseq_mini_20260707/path_list_valid.json \
+    --run_dir /path/to/run_dir \
+    --valid_set_list /path/to/path_list_valid.json \
     --n_samples 128 --batch_size 8
 """
 
 import argparse
 import json
-import os
-import re
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.distributed as dist
-from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train_epoch import heading_to_cos_sin
-from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData
+from token_analysis_common import (
+    find_fusion,
+    init_distributed,
+    neighbor_dist,
+    patch_fusion,
+    polyline_dist,
+    prepare_inputs,
+)
+from token_analysis_common import (
+    load_model as _load_model,
+)
 from torch.utils.data import DataLoader, Subset
 
 
-def prepare_inputs(inputs: dict, cfg, device: str):
-    """Mirror validate_model's input prep (self-contained, tier4-main compatible)."""
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    B = inputs["ego_current_state"].shape[0]
-    inputs["sampled_trajectories"] = torch.zeros(
-        B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, dtype=torch.float32, device=device
-    )
-    inputs["delay"] = torch.zeros(B, dtype=torch.float32, device=device)
-    inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-    inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
-    inputs = cfg.observation_normalizer(inputs)
-    return inputs
+def load_model(run_dir: Path, device: str):
+    model, cfg, _ = _load_model(run_dir, device)
+    return model, cfg
+
+
+def lane_dist(lanes):
+    return polyline_dist(lanes, geom_dims=8)
 
 
 # token layout (dimensions.py defaults, matches V_tail args)
@@ -74,84 +74,12 @@ TOKEN_NUM = _o  # 564
 DIST_BINS = [(0, 25), (25, 50), (50, 100), (100, float("inf"))]
 
 
-def latest_ckpt(run_dir: Path) -> Path:
-    if (run_dir / "best_model.pth").exists():
-        return run_dir / "best_model.pth"
-    epoch_dirs = sorted(
-        (d for d in run_dir.iterdir() if re.fullmatch(r"epoch\d+", d.name)),
-        key=lambda d: int(d.name[5:]),
-    )
-    if epoch_dirs:
-        return epoch_dirs[-1] / "best_model.pth"
-    return run_dir / "best_model" / "best_model.pth"
-
-
-def load_model(run_dir: Path, device: str):
-    cfg = Config(str(run_dir / "args.json"))
-    cfg.device = device
-    cfg.ddp = False
-    model = Diffusion_Planner(cfg).to(device)
-    state = torch.load(latest_ckpt(run_dir), map_location=device)
-    state = state["model"] if "model" in state else state
-    state = {k.removeprefix("module."): v for k, v in state.items()}  # DDP-saved ckpt
-    model.load_state_dict(state)
-    model.eval()
-    return model, cfg
-
-
-def find_fusion(model):
-    for m in model.modules():
-        if type(m).__name__ == "FusionEncoder":
-            return m
-    raise RuntimeError("FusionEncoder not found")
-
-
-def patch_fusion(fusion, store):
-    """Replace each block's forward to capture (attn_weights, kv_input, mask)."""
-    for li, block in enumerate(fusion.blocks):
-
-        def make_fwd(blk, layer_idx):
-            def fwd(x, mask):
-                attn_out, w = blk.attn(
-                    blk.norm1(x),
-                    x,
-                    x,
-                    key_padding_mask=mask,
-                    need_weights=True,
-                    average_attn_weights=True,
-                )
-                store.append(
-                    {"layer": layer_idx, "w": w.detach(), "kv": x.detach(), "mask": mask.detach()}
-                )
-                x = x + blk.drop_path(attn_out)
-                x = x + blk.drop_path(blk.mlp(blk.norm2(x)))
-                return x
-
-            return fwd
-
-        block.forward = make_fwd(block, li)
-
-
 def value_norms(block, kv):
     """||W_v x + b_v|| per token (heads concatenated; out_proj ignored)."""
     E = kv.shape[-1]
     W = block.attn.in_proj_weight[2 * E : 3 * E]
     b = block.attn.in_proj_bias[2 * E : 3 * E]
     return (kv @ W.T + b).norm(dim=-1)  # [B, N]
-
-
-def neighbor_dist(nbr):
-    # Match NeighborEncoder, which retains only the last six history rows.
-    valid = (nbr[:, :, -6:, :8] != 0).any(dim=(2, 3))
-    d = nbr[:, :, -1, :2].norm(dim=-1)
-    return torch.where(valid, d, torch.full_like(d, float("inf")))
-
-
-def lane_dist(lanes):
-    pt_valid = (lanes[..., :8] != 0).any(dim=-1)
-    d = lanes[..., :2].norm(dim=-1)
-    d = torch.where(pt_valid, d, torch.full_like(d, float("inf")))
-    return d.min(dim=-1).values
 
 
 def occupancy_stats(values, slots):
@@ -169,23 +97,6 @@ def occupancy_stats(values, slots):
         "p95_capacity": int(np.ceil(p95)),
         "p99_capacity": int(np.ceil(p99)),
     }
-
-
-def init_distributed(requested_device: str):
-    """Initialize torchrun data parallelism and return device/rank metadata."""
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    rank = int(os.environ.get("RANK", "0"))
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    device = requested_device
-    if world_size > 1:
-        if requested_device.startswith("cuda"):
-            device = f"cuda:{local_rank}"
-            torch.cuda.set_device(local_rank)
-            backend = "nccl"
-        else:
-            backend = "gloo"
-        dist.init_process_group(backend=backend)
-    return device, rank, local_rank, world_size
 
 
 def select_moving_indices(dataset, n_samples, move_min_m, turn_deg):

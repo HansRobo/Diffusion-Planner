@@ -158,11 +158,11 @@ best_model/
 └── best_model.pth
 ```
 
-If the Notebook and HTML dependencies are not installed, install them once:
+The Notebook and HTML dependencies are declared in `pyproject.toml` and pinned
+in `uv.lock`. Set up the environment with:
 
 ```bash
-UV_CACHE_DIR=/tmp/diffusion-planner-uv-cache \
-uv pip install --python .venv/bin/python nbconvert ipykernel
+uv sync
 ```
 
 ## Recommended Usage

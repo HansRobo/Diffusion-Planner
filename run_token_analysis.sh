@@ -12,7 +12,7 @@
 #
 # Usage (from repo root on A100):
 #   ./run_token_analysis.sh
-#   DATADIR=/home/yamashita/work_hdd/sample/il_odaiba_shinagawa_j6_npz \
+#   DATADIR=/path/to/dataset \
 #     N_SAMPLES=1024 BATCH_SIZE=64 ./run_token_analysis.sh
 #
 # Outputs:
@@ -28,7 +28,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
 MODEL_DIR="${MODEL_DIR:-$REPO_ROOT/best_models/20260730/best_model}"
-DATADIR="${DATADIR:-/home/yamashita/work_hdd/sample/mini_datasets/j6_2231_fullseq_mini_20260707}"
+DATADIR="${DATADIR:?DATADIR must be set to a dataset directory}"
 N="${N_SAMPLES:-128}"
 BS="${BATCH_SIZE:-32}"
 DEVICE="${DEVICE:-cuda}"
