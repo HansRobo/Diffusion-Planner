@@ -37,7 +37,7 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
 fi
 
 MODEL_DIR="${MODEL_DIR:-$REPO_ROOT/best_models/20260730/best_model}"
-DATADIR="${DATADIR:-/home/yamashita/work_hdd/sample/mini_datasets/j6_2231_fullseq_mini_20260707}"
+DATADIR="${DATADIR:?DATADIR must be set to a dataset directory}"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 DEVICE="${DEVICE:-cuda}"
 

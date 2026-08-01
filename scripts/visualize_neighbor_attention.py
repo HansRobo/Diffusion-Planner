@@ -21,20 +21,17 @@ Examples:
 
 import argparse
 import json
-import re
 from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from diffusion_planner.dimensions import MAX_NUM_AGENTS, MAX_NUM_NEIGHBORS, OUTPUT_T, POSE_DIM
-from diffusion_planner.model.diffusion_planner import Diffusion_Planner
-from diffusion_planner.train_epoch import heading_to_cos_sin
-from diffusion_planner.utils.config import Config
+from diffusion_planner.dimensions import MAX_NUM_AGENTS, MAX_NUM_NEIGHBORS
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from diffusion_planner.utils.visualize_input import visualize_inputs
 from matplotlib.lines import Line2D
+from token_analysis_common import find_fusion, load_model, patch_fusion, prepare_inputs
 from torch.utils.data import DataLoader, Subset
 
 matplotlib.use("Agg", force=True)
@@ -45,83 +42,9 @@ CLASS_NAMES = ("vehicle", "pedestrian", "bicycle")
 CLASS_MARKERS = {"vehicle": "o", "pedestrian": "P", "bicycle": "^"}
 
 
-def latest_ckpt(run_dir: Path) -> Path:
-    if (run_dir / "best_model.pth").exists():
-        return run_dir / "best_model.pth"
-    epoch_dirs = sorted(
-        (d for d in run_dir.iterdir() if re.fullmatch(r"epoch\d+", d.name)),
-        key=lambda d: int(d.name[5:]),
-    )
-    if epoch_dirs:
-        return epoch_dirs[-1] / "best_model.pth"
-    return run_dir / "best_model" / "best_model.pth"
-
-
 def load_encoder(run_dir: Path, device: str):
-    cfg = Config(str(run_dir / "args.json"))
-    cfg.device = device
-    cfg.ddp = False
-    model = Diffusion_Planner(cfg).to(device)
-    state = torch.load(latest_ckpt(run_dir), map_location=device)
-    state = state["model"] if "model" in state else state
-    state = {k.removeprefix("module."): v for k, v in state.items()}
-    model.load_state_dict(state)
-    model.eval()
+    model, cfg, _ = load_model(run_dir, device)
     return model.encoder, cfg
-
-
-def prepare_inputs(inputs: dict, cfg, device: str):
-    """Apply the same preprocessing used for validation."""
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    batch_size = inputs["ego_current_state"].shape[0]
-    inputs["sampled_trajectories"] = torch.zeros(
-        batch_size,
-        MAX_NUM_AGENTS,
-        OUTPUT_T + 1,
-        POSE_DIM,
-        dtype=torch.float32,
-        device=device,
-    )
-    inputs["delay"] = torch.zeros(batch_size, dtype=torch.float32, device=device)
-    inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
-    inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
-    return cfg.observation_normalizer(inputs)
-
-
-def find_fusion(encoder):
-    for module in encoder.modules():
-        if type(module).__name__ == "FusionEncoder":
-            return module
-    raise RuntimeError("FusionEncoder not found")
-
-
-def patch_fusion(fusion, store):
-    """Capture head-averaged self-attention without changing model parameters."""
-    for layer_index, block in enumerate(fusion.blocks):
-
-        def make_forward(layer, index):
-            def forward(x, mask):
-                attention_output, weights = layer.attn(
-                    layer.norm1(x),
-                    x,
-                    x,
-                    key_padding_mask=mask,
-                    need_weights=True,
-                    average_attn_weights=True,
-                )
-                store.append(
-                    {
-                        "layer": index,
-                        "weights": weights.detach(),
-                        "mask": mask.detach(),
-                    }
-                )
-                x = x + layer.drop_path(attention_output)
-                return x + layer.drop_path(layer.mlp(layer.norm2(x)))
-
-            return forward
-
-        block.forward = make_forward(block, layer_index)
 
 
 def neighbor_valid(neighbors: torch.Tensor) -> torch.Tensor:
