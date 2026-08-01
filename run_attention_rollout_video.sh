@@ -19,6 +19,10 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 MODEL_DIR="$(cd "$MODEL_DIR" && pwd)"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-$OUT_DIR/.matplotlib}"
 mkdir -p "$MPLCONFIGDIR"
+OVERWRITE_ARGS=()
+if [[ "${OVERWRITE_FRAMES:-0}" == "1" ]]; then
+  OVERWRITE_ARGS+=(--overwrite_frames)
+fi
 
 if [ ! -f "$VALID_LIST" ]; then
   VALID_LIST="$OUT_DIR/path_list_all.json"
@@ -53,4 +57,5 @@ fi
   --device "$DEVICE" \
   --out_all_mp4 "$OUT_DIR/${OUTPUT_NAME}_all.mp4" \
   --out_neighbor_mp4 "$OUT_DIR/${OUTPUT_NAME}_neighbor.mp4" \
-  --out_json "$OUT_DIR/${OUTPUT_NAME}.json"
+  --out_json "$OUT_DIR/${OUTPUT_NAME}.json" \
+  "${OVERWRITE_ARGS[@]}"
