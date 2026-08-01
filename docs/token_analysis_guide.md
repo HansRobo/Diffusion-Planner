@@ -14,6 +14,8 @@ runs and visualizes:
 - data-parallel sample sharding and result aggregation across multiple GPUs;
 - per-scene neighbor-only and all-token Attention overlays, plus continuous
   neighbor-Attention MP4 visualization;
+- residual-aware Decoder-to-input Attention rollout overlays and videos;
+- traffic-light-aware lane/route overlays, rankings, and videos;
 - numerical tables and graphs for FDE, ADE, min FDE, and min ADE in an HTML report.
 
 The model architecture and training procedure are unchanged. These are offline
@@ -35,6 +37,14 @@ analysis tools that operate on a saved checkpoint and an evaluation dataset.
 | `run_neighbor_attention_video.sh` | Generates a neighbor-Attention MP4 and frame-level JSON around one dataset index |
 | `run_all_token_attention_visualization.sh` | Selects or fixes one scene and generates the all-token Attention PNG and JSON |
 | `run_all_token_attention_video.sh` | Generates an all-token Attention MP4 and frame-level JSON around one dataset index |
+| `scripts/visualize_attention_rollout.py` | Captures Decoder cross-attention and propagates it through residual Fusion attention to produce all-token and neighbor-only rollout reports |
+| `scripts/visualize_attention_rollout_video.py` | Generates all-token and neighbor-only Decoder rollout videos |
+| `scripts/visualize_signal_attention.py` | Visualizes only lane/route tokens carrying explicit traffic-light attributes |
+| `scripts/visualize_signal_attention_video.py` | Generates Fusion and Decoder-rollout videos for traffic-light-bearing lane/route tokens |
+| `run_attention_rollout_visualization.sh` | Generates Fusion, all-token rollout, and neighbor-only rollout PNG/JSON files |
+| `run_attention_rollout_video.sh` | Generates all-token and neighbor-only Decoder-rollout MP4 files |
+| `run_signal_attention_video.sh` | Generates traffic-light Fusion and Decoder-rollout MP4 files |
+| `run_long_signal_attention_video.sh` | Runs a reduced-resolution long signal video with persistent per-frame PNG saving |
 | `notebook/token_analysis.ipynb` | Japanese explanation of the experiment, metrics, complete numerical results, graphs, and interpretation |
 | `notebook/token_analysis_en.ipynb` | English version of the same analysis |
 | `notebook/generate_english_notebook.py` | Generates the English Notebook while keeping its code cells synchronized with the Japanese source |
@@ -512,6 +522,107 @@ to preserve the figure aspect ratio and encoded as BT.709 limited-range
 `yuv420p` with a 1:1 sample aspect ratio. As with the neighbor video, the
 selected list must be chronological within one log directory for the sequence
 to represent time.
+
+## Decoder-to-Input Attention Rollout
+
+Fusion Attention describes how the ego query reads encoder tokens. The rollout
+tool adds Decoder cross-attention and propagates it backward through the
+residual Fusion self-attention matrices:
+
+```text
+Decoder ego-query attention × Fusion residual rollout = input-token relevance
+```
+
+The Fusion rollout uses `(A + I) / 2` at each layer, followed by row
+normalization. Decoder weights are averaged over decoder layers and diffusion
+steps before multiplication. This makes the result useful for asking which
+input tokens are connected to the final Decoder query, but it is still an
+attention-based diagnostic, not a causal attribution or an ablation result.
+
+### Static rollout visualization
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+MODEL_DIR=/path/to/best_model \
+DATADIR=/path/to/dataset \
+VALID_LIST=/path/to/path_list_valid.json \
+SAMPLE_INDEX=464 \
+DEVICE=cuda \
+OUT_DIR=/tmp/rollout-index464 \
+./run_attention_rollout_visualization.sh
+```
+
+The runner writes Fusion attention, all-token Decoder rollout, neighbor-only
+rollout, and a JSON report. The neighbor-only view is a filtered presentation
+of the same rollout scores; it does not recompute attention among neighbors.
+
+### Rollout videos
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+MODEL_DIR=/path/to/best_model \
+DATADIR=/path/to/dataset \
+VALID_LIST=/path/to/path_list_valid.json \
+CENTER_INDEX=464 \
+FRAMES_BEFORE=20 \
+FRAMES_AFTER=40 \
+FPS=10 \
+DEVICE=cuda \
+./run_attention_rollout_video.sh
+```
+
+This produces separate all-token and neighbor-only MP4 files. Interpret a
+large rollout value as strong Decoder-to-input attention connectivity, not as
+proof that removing the token would change ADE/FDE.
+
+## Traffic-Light-Aware Lane/Route Visualization
+
+Traffic lights are not independent encoder tokens. They are attributes of each
+`lanes` and `route_lanes` token (`x[..., 8:13]`). The signal tool selects lane
+and route tokens with an explicit green, yellow, red, or white signal state;
+`no_signal` and all-zero/unknown attributes are excluded from the signal view.
+
+- solid lines represent `lanes` and dashed lines represent `route_lanes`;
+- line color identifies the signal state;
+- line width, opacity, and marker size represent attention;
+- the ranking uses attention as a percentage of all valid encoder tokens;
+- only the top six signal-bearing tokens are shown by default in static/video
+  reports; set `TOP_K=10` to show ten.
+
+The signal-bearing total is useful for comparing how much of the model's
+attention reaches traffic-regulated road context. It does not establish that
+the model understood the semantic meaning of a red or white signal. Unknown
+attributes should be reported separately as missing/unset data rather than as
+a real signal state.
+
+### Signal video
+
+```bash
+CUDA_VISIBLE_DEVICES=3 \
+MODEL_DIR=/path/to/best_model \
+DATADIR=/path/to/dataset \
+VALID_LIST=/path/to/path_list_valid.json \
+CENTER_INDEX=464 \
+FRAMES_BEFORE=20 \
+FRAMES_AFTER=40 \
+TOP_K=10 \
+VIDEO_WIDTH=640 \
+VIDEO_HEIGHT=360 \
+DEVICE=cuda \
+./run_signal_attention_video.sh
+```
+
+For long sequences, use the persistent-frame runner:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 ./run_long_signal_attention_video.sh
+```
+
+It saves each PNG immediately under `<out_json>.frames/fusion/` and
+`<out_json>.frames/rollout/`, and updates the JSON progress file after every
+frame. If execution is interrupted, completed frames remain available for
+inspection or later encoding. Existing frame directories are protected by
+default; set `OVERWRITE_FRAMES=1` to explicitly replace their PNG files.
 
 ## Outputs
 
