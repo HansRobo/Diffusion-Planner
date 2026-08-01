@@ -221,6 +221,9 @@ def draw_report(
     out_png: Path,
     attention_vmax: float | None = None,
     tight_bbox: bool = True,
+    attention_label: str = "Attention from ego query",
+    title_prefix: str = "Neighbor-token Attention Overlay",
+    attention_layer_label: str | None = None,
 ):
     fig, (scene_ax, rank_ax) = plt.subplots(
         1, 2, figsize=(19, 10), gridspec_kw={"width_ratios": [4.2, 1.15]}
@@ -287,7 +290,7 @@ def draw_report(
     colorbar = fig.colorbar(
         matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap), ax=scene_ax, fraction=0.035, pad=0.02
     )
-    colorbar.set_label("Share within neighbor attention (%) — color and marker area")
+    colorbar.set_label(f"Share within neighbor attention (%) — color and marker area")
     legend = [
         Line2D(
             [0],
@@ -303,8 +306,8 @@ def draw_report(
     ]
     scene_ax.legend(handles=legend, loc="lower left", title="Neighbor class")
     scene_ax.set_title(
-        f"Neighbor-token Attention Overlay — dataset index {sample_index}\n"
-        f"ego-query, Fusion layer={layer}, movement={movement_m:.1f} m, "
+        f"{title_prefix} — dataset index {sample_index}\n"
+        f"ego-query, {attention_layer_label or f'Fusion layer={layer}'}, "
         f"turn proxy={turn_angle_deg:.1f}°"
     )
 
@@ -317,7 +320,7 @@ def draw_report(
     colors = [cmap(norm(record["attention_pct_within_neighbors"])) for record in chart_records]
     rank_ax.barh(range(len(chart_records)), chart_values, color=colors, edgecolor="black")
     rank_ax.set_yticks(range(len(chart_records)), labels)
-    rank_ax.set_xlabel("Attention from ego query (% of all valid tokens)")
+    rank_ax.set_xlabel(f"{attention_label} (% of all valid tokens)")
     rank_ax.set_title(f"Top {len(chart_records)} neighbor tokens")
     rank_ax.grid(axis="x", alpha=0.25)
     rank_ax.tick_params(axis="both", labelsize=8)
