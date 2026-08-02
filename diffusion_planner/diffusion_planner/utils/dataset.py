@@ -21,7 +21,33 @@ class DiffusionPlannerData(Dataset):
         data = np.load(self.data_list[idx], allow_pickle=True)
         data = dict(data)  # npz to dict
         data.pop("version", None)
+        data["neighbor_agents_future"] = _neighbor_future_to_cos_sin(
+            data.get("neighbor_agents_future")
+        )
         return data
+
+
+def _neighbor_future_to_cos_sin(nf):
+    """Normalize neighbor_agents_future to 4 channels (x, y, cos, sin) at load time.
+
+    Some converter versions store it as 3 channels (x, y, heading), others as 4
+    (x, y, cos, sin). ``train_epoch`` applies ``heading_to_cos_sin`` AFTER the
+    DataLoader collate, so a batch mixing 3- and 4-channel datasets fails to
+    collate ("Trying to resize storage that is not resizable"). Converting here —
+    before collation — lets differently-generated datasets (e.g. odaiba 4ch +
+    mini 3ch) be combined. Padded (all-zero) rows stay all-zero so downstream
+    masking is unchanged; already-4-channel data is returned untouched. The
+    result matches what train_epoch would have produced for 3-channel data, so
+    single-dataset behavior is preserved.
+    """
+    if nf is None:
+        return nf
+    nf = np.asarray(nf, dtype=np.float32)
+    if nf.shape[-1] != 3:
+        return nf
+    valid = np.any(nf != 0, axis=-1, keepdims=True)
+    cs = np.concatenate([nf[..., :2], np.cos(nf[..., 2:3]), np.sin(nf[..., 2:3])], axis=-1)
+    return np.where(valid, cs, 0.0).astype(np.float32)
 
 
 class DiffusionPlannerPairData(Dataset):
