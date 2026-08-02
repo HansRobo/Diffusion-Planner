@@ -258,6 +258,11 @@ def _normalize_values(values: list[float]) -> list[float]:
 
 
 def _r2lpl_state_class(source_row: dict[str, Any]) -> str:
+    if "expert_disagreement" not in set(source_row.get("repair_labels", [])):
+        # Collision/road-border rows carry no measured log-deviation; they are
+        # off-log by construction (the realized rollout failed where the log did
+        # not) but not beyond salvage -> the paper's middle class.
+        return "recoverable"
     dev = float(source_row.get("expert_disagreement_max_dev", 0.0))
     if dev <= 1.0:
         return "near_log"
@@ -266,12 +271,22 @@ def _r2lpl_state_class(source_row: dict[str, Any]) -> str:
     return "far_offpolicy"
 
 
-def _r2lpl_weights(state_class: str) -> tuple[float, float]:
+def _r2lpl_weights(state_class: str) -> tuple[float, float, float]:
+    """Paper Eq. 26 weights (w_q rule, w_ref reference-path, w_E expert), matching the
+    reference implementation (R2LPL rollout_cl_generator.py): near-log leans on expert
+    consistency; recoverable/far lean on the rule score + route-path consistency."""
     if state_class == "near_log":
-        return 0.20, 0.80
+        return 0.10, 0.10, 0.80
     if state_class == "recoverable":
-        return 0.95, 0.05
-    return 1.00, 0.00
+        return 0.65, 0.30, 0.05
+    return 0.80, 0.20, 0.00
+
+
+# Reference-implementation near-log expert gate: candidates whose expert consistency
+# falls below max(best - margin, floor) are excluded from near-log selection (unless
+# that would exclude every survivor).
+_NEAR_LOG_EXPERT_MARGIN = 0.05
+_NEAR_LOG_EXPERT_MIN = 0.75
 
 
 def _apply_rear_end_collision_mode(rcfg, *, count_rear_end_collisions: bool) -> None:
@@ -527,6 +542,7 @@ def _best_safe_candidate(
     reference_traj: torch.Tensor | np.ndarray | None = None,
     morph_index: int | None = None,
     depart_index: int | None = None,
+    max_expert_dev_m: float | None = None,
 ) -> tuple[int | None, dict[str, Any]]:
     # Scripted candidates get a per-candidate outcome taxonomy in the meta
     # (selected / lost_selection / gate_rejected) keyed by their prefix.
@@ -553,6 +569,27 @@ def _best_safe_candidate(
             )
             accepted.append((violation_score, deviation_penalty, float(reward_row.total), idx))
 
+    # Trust-region gate: a gate-passing candidate that strays too far from the
+    # expert reference is a worse training target than no target at all — far
+    # off-policy targets measurably degrade closed-loop behavior when imitated.
+    if max_expert_dev_m is not None and accepted:
+        within = [item for item in accepted if item[1] <= max_expert_dev_m]
+        if not within:
+            meta = {
+                "reason": "no_candidate_within_trust_region",
+                "max_expert_dev_m": float(max_expert_dev_m),
+                "min_observed_dev_m": float(min(item[1] for item in accepted)),
+                # keep the unrepaired meta shape of the no_safe_candidate branch
+                "best_total": max(float(r.total) for r in reward_rows),
+                "best_sc_min_dist": max(
+                    float(getattr(r, "sc_min_dist", -99.0)) for r in reward_rows
+                ),
+            }
+            for prefix, _idx_s in scripted.items():
+                meta[f"{prefix}_outcome"] = "trust_region_rejected"
+            return None, meta
+        accepted = within
+
     accepted_indices = {item[3] for item in accepted}
     if not accepted:
         best_total = max(float(r.total) for r in reward_rows)
@@ -570,32 +607,47 @@ def _best_safe_candidate(
             )
         return None, meta
 
-    uses_r2lpl_conflict_selection = "expert_disagreement" in set(
-        source_row.get("repair_labels", [])
-    )
+    # Unified paper-style selection (R2LPL Eq. 26, reference implementation
+    # rollout_cl_generator.py): the SAME three-term score ranks survivors of
+    # EVERY mistake type. y = w_q * rule + w_ref * route-path consistency +
+    # w_E * expert consistency, weights by state class.
     scripted_r2lpl_scores: dict[str, float] = {}
-    if uses_r2lpl_conflict_selection:
-        rule_scores = _normalize_values([item[2] for item in accepted])
-        state_class = _r2lpl_state_class(source_row)
-        rule_weight, expert_weight = _r2lpl_weights(state_class)
-        ranked: list[tuple[float, float, float, int]] = []
-        for item, rule_score in zip(accepted, rule_scores, strict=True):
-            violation_score, deviation_penalty, _reward_total, idx = item
-            expert_score = math.exp(-max(deviation_penalty, 0.0) / 4.0)
-            r2lpl_score = rule_weight * rule_score + expert_weight * expert_score
-            for prefix, idx_s in scripted.items():
-                if idx == idx_s:
-                    scripted_r2lpl_scores[prefix] = float(r2lpl_score)
-            ranked.append((-r2lpl_score, violation_score, deviation_penalty, idx))
-        ranked.sort()
-        neg_r2lpl_score, violation_score, deviation_penalty, idx = ranked[0]
-        selected_r2lpl_score = -float(neg_r2lpl_score)
-        selected_state_class = state_class
-    else:
-        accepted.sort(key=lambda item: (item[0], item[1], item[3]))
-        violation_score, deviation_penalty, _reward_total, idx = accepted[0]
-        selected_r2lpl_score = None
-        selected_state_class = None
+    rule_scores = _normalize_values([item[2] for item in accepted])
+    # Route-path consistency: the reward's centerline component IS the
+    # route-reference-path adherence score (baselink mode), normalized across
+    # survivors like the rule score.
+    ref_scores = _normalize_values(
+        [float(getattr(reward_rows[item[3]], "centerline", 0.0)) for item in accepted]
+    )
+    state_class = _r2lpl_state_class(source_row)
+    rule_weight, ref_weight, expert_weight = _r2lpl_weights(state_class)
+    expert_scores = [math.exp(-max(item[1], 0.0) / 4.0) for item in accepted]
+    # Near-log expert gate (reference impl): drop survivors far below the most
+    # expert-consistent one, unless that would drop everyone.
+    gate_ok = [True] * len(accepted)
+    if state_class == "near_log" and expert_scores:
+        floor = max(max(expert_scores) - _NEAR_LOG_EXPERT_MARGIN, _NEAR_LOG_EXPERT_MIN)
+        gated = [score >= floor for score in expert_scores]
+        if any(gated):
+            gate_ok = gated
+    ranked: list[tuple[float, float, float, int]] = []
+    for item, rule_score, ref_score, expert_score, ok in zip(
+        accepted, rule_scores, ref_scores, expert_scores, gate_ok, strict=True
+    ):
+        violation_score, deviation_penalty, _reward_total, idx = item
+        r2lpl_score = (
+            rule_weight * rule_score + ref_weight * ref_score + expert_weight * expert_score
+        )
+        if not ok:
+            r2lpl_score = -1.0
+        for prefix, idx_s in scripted.items():
+            if idx == idx_s:
+                scripted_r2lpl_scores[prefix] = float(r2lpl_score)
+        ranked.append((-r2lpl_score, violation_score, deviation_penalty, idx))
+    ranked.sort()
+    neg_r2lpl_score, violation_score, deviation_penalty, idx = ranked[0]
+    selected_r2lpl_score = -float(neg_r2lpl_score)
+    selected_state_class = state_class
     reward_row = reward_rows[idx]
     label_row = candidate_rows[idx]
 
@@ -727,6 +779,7 @@ def build_repaired_targets(
     count_rear_end_collisions: bool,
     allow_empty: bool = False,
     target_gt_disagreement_thresh: float = 2.0,
+    max_expert_dev_m: float | None = None,
     repair_expert_gt_candidate: bool = True,
     repair_expert_reference: bool = True,
     expert_morph_w_max: float = 1.0,
@@ -869,10 +922,18 @@ def build_repaired_targets(
                 scoring_data = _expert_reference_scoring_data(
                     data, scene_path=str(row["scene_path"])
                 )
-                reference_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
             else:
                 scoring_data = data
-                reference_traj = _future_to_4col(data["ego_agent_future"].detach().cpu().numpy())
+            # Unified paper-style selection: the expert-consistency term references
+            # the LOGGED EXPERT future for EVERY mistake type (Eq. 26); the mined
+            # window scenes always carry it. Fail loudly if a corpus does not.
+            if "ego_expert_future" not in data:
+                raise ValueError(
+                    f"{row['scene_path']}: mined scene lacks 'ego_expert_future' — "
+                    "the unified R2LPL selection requires the logged expert future "
+                    "for every repaired row (re-mine with a reproducer that saves it)."
+                )
+            reference_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
 
             # The classifier above already ran the full subscore geometry
             # (OBB clearance / road border / lane / centerline) on this exact
@@ -1000,6 +1061,7 @@ def build_repaired_targets(
                     reference_traj=reference_traj,
                     morph_index=morph_index if morph_added else None,
                     depart_index=depart_index if depart_added else None,
+                    max_expert_dev_m=max_expert_dev_m,
                 )
             morph_selected = bool(morph_added and best_idx == morph_index)
             depart_selected = bool(depart_added and best_idx == depart_index)
@@ -1142,6 +1204,14 @@ def main() -> None:
         "which target_gt_disagreement is flagged (R2LPL hard-example signal).",
     )
     ap.add_argument(
+        "--max_expert_dev_m",
+        type=float,
+        default=None,
+        help="trust-region gate: reject gate-passing candidates whose mean-L2 deviation from "
+        "the expert reference exceeds this (m); scenes with no candidate inside the region "
+        "are dropped to unrepaired. Off when omitted.",
+    )
+    ap.add_argument(
         "--repair_expert_gt_candidate",
         dest="repair_expert_gt_candidate",
         action="store_true",
@@ -1248,6 +1318,7 @@ def main() -> None:
         count_rear_end_collisions=bool(args.count_rear_end_collisions),
         allow_empty=bool(args.allow_empty),
         target_gt_disagreement_thresh=float(args.target_gt_disagreement_thresh),
+        max_expert_dev_m=(None if args.max_expert_dev_m is None else float(args.max_expert_dev_m)),
         repair_expert_gt_candidate=bool(args.repair_expert_gt_candidate),
         repair_expert_reference=bool(args.repair_expert_reference),
         expert_morph_w_max=float(args.expert_morph_w_max),

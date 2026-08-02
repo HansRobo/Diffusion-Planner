@@ -334,6 +334,8 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     }
     if repair.get("prototypes_path"):
         repair_cfg["prototypes_path"] = str(repair["prototypes_path"])
+    if repair.get("max_expert_dev_m") is not None:
+        repair_cfg["max_expert_dev_m"] = float(repair["max_expert_dev_m"])
     if repair.get("enable_depart_morph"):
         repair_cfg["enable_depart_morph"] = bool(repair["enable_depart_morph"])
     missing_repair = [k for k in ("ego_shape", "min_margin") if not repair_cfg.get(k)]
@@ -438,6 +440,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "reward_config": str(reward_config),
         "threshold_config": str(threshold_config),
         "credit_window_config": str(credit_window_config),
+        "initial_replay_memory": workflow.get("initial_replay_memory"),
         "replay_memory": {
             "capacity": _required_replay_capacity(replay),
             "alpha": float(_first_non_null(replay.get("alpha"), 0.5)),
@@ -1835,6 +1838,8 @@ def _repair_cmd(
         cmd.append("--enable_depart_morph")
     if repair_cfg.get("prototypes_path"):
         cmd.extend(["--prototypes_path", str(repair_cfg["prototypes_path"])])
+    if repair_cfg.get("max_expert_dev_m") is not None:
+        cmd.extend(["--max_expert_dev_m", str(repair_cfg["max_expert_dev_m"])])
     if cfg.get("repair_labels"):
         cmd.extend(["--labels", ",".join(cfg["repair_labels"])])
     if bool(cfg.get("enable_conflict_detector", False)):
@@ -2756,7 +2761,16 @@ def main() -> None:
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
     model_path = Path(cfg["model_path"])
+    # Cross-campaign lifelong continuity: seed round 1's replay-memory union from a
+    # previous campaign's memory JSON so chained single-round jobs keep retraining
+    # earlier repairs. Absent/None -> fresh memory (single-campaign behavior).
     previous_memory: Path | None = None
+    initial_memory = cfg.get("initial_replay_memory")
+    if initial_memory:
+        initial_memory = Path(initial_memory)
+        if not initial_memory.is_file():
+            raise ValueError(f"initial_replay_memory does not exist: {initial_memory}")
+        previous_memory = initial_memory
     checkpoint_policy = str(cfg.get("checkpoint_policy", "latest"))
     guards_cfg = cfg.get("guards")
     reference_metrics: dict[str, Any] | None = None

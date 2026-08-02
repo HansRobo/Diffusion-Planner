@@ -2558,57 +2558,83 @@ def test_seed_state_tracker_mode_selects_mpc():
     assert state.tracker.__class__.__name__ == "MPCTracker"
 
 
-def test_repair_candidate_selector_breaks_ties_by_lower_deviation():
+def _clean_reward_row(total: float, centerline: float = 0.0) -> SimpleNamespace:
+    return SimpleNamespace(
+        total=total,
+        centerline=centerline,
+        collision_step=None,
+        rb_crossing=False,
+        lane_crossing=False,
+        static_crossing=False,
+        kinematic_violated=False,
+        sc_min_dist=1.0,
+        rb_min_dist=1.0,
+    )
+
+
+_SELECTOR_CANDIDATE_ROWS = [
+    {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+    {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+]
+_SELECTOR_CANDIDATE_TRAJS = [
+    torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
+    torch.tensor([[5.0, 0.0, 1.0, 0.0], [5.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
+]
+_SELECTOR_REFERENCE = torch.tensor(
+    [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]], dtype=torch.float32
+)
+
+
+def test_repair_candidate_selector_unified_recoverable_prefers_rule_score():
+    # Paper Eq. 26, unified across mistake types: a collision/road-border row is a
+    # "recoverable" state (0.65 rule / 0.30 ref / 0.05 expert), so the higher-reward
+    # candidate wins even though the lower-reward one sits nearer the expert.
     source_row = {"repair_labels": ["road_border_crossing"]}
-    candidate_rows = [
-        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
-        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
-    ]
-    reward_rows = [
-        SimpleNamespace(
-            total=1.0,
-            collision_step=None,
-            rb_crossing=False,
-            lane_crossing=False,
-            static_crossing=False,
-            kinematic_violated=False,
-            sc_min_dist=1.0,
-            rb_min_dist=1.0,
-        ),
-        SimpleNamespace(
-            total=10.0,
-            collision_step=None,
-            rb_crossing=False,
-            lane_crossing=False,
-            static_crossing=False,
-            kinematic_violated=False,
-            sc_min_dist=1.0,
-            rb_min_dist=1.0,
-        ),
-    ]
-    candidate_trajs = [
-        torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
-        torch.tensor([[5.0, 0.0, 1.0, 0.0], [5.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
-    ]
-    reference_traj = torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+    reward_rows = [_clean_reward_row(total=1.0), _clean_reward_row(total=10.0)]
 
     idx, meta = _best_safe_candidate(
         source_row,
-        candidate_rows,
+        _SELECTOR_CANDIDATE_ROWS,
         reward_rows,
         min_static_margin=0.3,
         target_gt_disagreement_thresh=2.0,
-        candidate_trajs=candidate_trajs,
-        reference_traj=reference_traj,
+        candidate_trajs=_SELECTOR_CANDIDATE_TRAJS,
+        reference_traj=_SELECTOR_REFERENCE,
     )
 
-    assert idx == 0
-    assert meta["selected_deviation_penalty"] < 1.0
+    assert idx == 1
+    assert meta["selected_r2lpl_state_class"] == "recoverable"
+    assert meta["selected_r2lpl_score"] > 0.0
     # R2LPL hard-example signal is emitted alongside the deviation penalty and is
     # distinct from realized expert_disagreement.
     assert meta["target_gt_disagreement_mean_l2"] == meta["selected_deviation_penalty"]
     assert meta["target_gt_disagreement_max_l2"] >= meta["target_gt_disagreement_mean_l2"]
     assert isinstance(meta["target_gt_disagreement"], bool)
+
+
+def test_repair_candidate_selector_unified_near_log_prefers_expert():
+    # Near-log conflict states weight expert consistency 0.80 and gate out
+    # candidates far below the most expert-consistent one, so the expert-nearest
+    # candidate wins despite a lower reward total.
+    source_row = {
+        "repair_labels": ["expert_disagreement"],
+        "expert_disagreement_max_dev": 0.5,
+    }
+    reward_rows = [_clean_reward_row(total=1.0), _clean_reward_row(total=10.0)]
+
+    idx, meta = _best_safe_candidate(
+        source_row,
+        _SELECTOR_CANDIDATE_ROWS,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=_SELECTOR_CANDIDATE_TRAJS,
+        reference_traj=_SELECTOR_REFERENCE,
+    )
+
+    assert idx == 0
+    assert meta["selected_r2lpl_state_class"] == "near_log"
+    assert meta["selected_deviation_penalty"] < 1.0
 
 
 def test_t0_dirty_source_discards_whole_event_window(monkeypatch):
@@ -3128,12 +3154,14 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
         lanes_has_speed_limit=sim_lanes_has_speed_limit,
         turn_indicators=sim_turn_indicators,
         ego_agent_future=np.full((80, 4), -5.0, dtype=np.float32),
+        ego_expert_future=np.full((80, 4), -5.0, dtype=np.float32),
         origin=np.asarray("sim"),
     )
 
     data = {
         "ego_shape": torch.tensor(sim_ego_shape[None], dtype=torch.float32),
         "ego_agent_future": torch.zeros((80, 4), dtype=torch.float32),
+        "ego_expert_future": torch.zeros((80, 4), dtype=torch.float32),
     }
     selected = torch.zeros((80, 4), dtype=torch.float32)
     selected[:, 0] = torch.arange(80, dtype=torch.float32)
@@ -5331,3 +5359,138 @@ def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
         _, n_second = finalize()  # no new data
         assert n_first > 0
         assert n_second == n_first, "second finalize must not re-score cleared buffers"
+
+
+def test_repair_candidate_selector_trust_region_gate_filters_far_candidates():
+    # A gate-passing candidate beyond max_expert_dev_m must not be selectable even
+    # when its rule score would win the Eq. 26 ranking (campaign finding: imitating
+    # far off-policy winners degrades closed-loop behavior).
+    source_row = {"repair_labels": ["road_border_crossing"]}
+    reward_rows = [_clean_reward_row(total=1.0), _clean_reward_row(total=10.0)]
+
+    idx, meta = _best_safe_candidate(
+        source_row,
+        _SELECTOR_CANDIDATE_ROWS,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=_SELECTOR_CANDIDATE_TRAJS,
+        reference_traj=_SELECTOR_REFERENCE,
+        max_expert_dev_m=4.0,
+    )
+
+    # Without the gate the recoverable weights pick the far high-reward candidate
+    # (see test_repair_candidate_selector_unified_recoverable_prefers_rule_score);
+    # the gate removes it, leaving the near one.
+    assert idx == 0
+    assert meta["selected_deviation_penalty"] <= 4.0
+
+
+def test_repair_candidate_selector_trust_region_rejection_meta_shape():
+    # When no candidate sits inside the trust region the scene must drop to
+    # unrepaired with the SAME meta shape as the no_safe_candidate branch: the
+    # unrepaired logger formats meta["best_total"]/meta["best_sc_min_dist"]
+    # unconditionally (a missing key crashed link 3 of the 2026-08 campaign).
+    source_row = {"repair_labels": ["road_border_crossing"]}
+    reward_rows = [_clean_reward_row(total=1.0), _clean_reward_row(total=10.0)]
+
+    idx, meta = _best_safe_candidate(
+        source_row,
+        _SELECTOR_CANDIDATE_ROWS,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=_SELECTOR_CANDIDATE_TRAJS,
+        reference_traj=_SELECTOR_REFERENCE,
+        max_expert_dev_m=0.01,
+    )
+
+    assert idx is None
+    assert meta["reason"] == "no_candidate_within_trust_region"
+    assert meta["max_expert_dev_m"] == 0.01
+    assert meta["min_observed_dev_m"] > 0.01
+    assert isinstance(meta["best_total"], float)
+    assert isinstance(meta["best_sc_min_dist"], float)
+    # the exact consumer expression in the unrepaired logger must not raise
+    assert f"{meta['best_total']:.1f} {meta['best_sc_min_dist']:.2f}"
+
+
+def test_workflow_contract_forwards_max_expert_dev_m_to_repair_cmd(tmp_path):
+    """Regression pin: the contract whitelist silently dropped
+    repair_generation.max_expert_dev_m, so a configured trust-region gate never
+    reached the build_repaired_targets subprocess (link 2, 2026-08 campaign)."""
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"backend": "base_sft", "train_args": {}}))
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "judgement": {
+                    "reward_config": "/tmp/reward.json",
+                    "threshold_config": "/tmp/thresholds.json",
+                    "credit_window_config": "/tmp/credit.json",
+                    "enabled_labels": ["moving_collision"],
+                },
+                "repair_generation": {
+                    "ego_shape": "2.7,4.3,1.7",
+                    "min_margin": 0.3,
+                    "max_expert_dev_m": 4.0,
+                },
+                "replay_memory": {"capacity": 200},
+                "training": {"val_scenes": "/tmp/valid.json"},
+            }
+        )
+    )
+    cfg = round_runner._config_from_workflow_contract(
+        {
+            "model_path": "/tmp/model.pth",
+            "scene_list": str(scene_list),
+            "workflow_config": str(workflow),
+            "training_config": str(training),
+            "output_dir": str(tmp_path / "auto_research" / "out"),
+        }
+    )
+    assert cfg["repair_config"]["max_expert_dev_m"] == 4.0
+    cmd = round_runner._repair_cmd(
+        cfg, tmp_path / "model.pth", tmp_path / "credit.jsonl", tmp_path / "round"
+    )
+    assert cmd[cmd.index("--max_expert_dev_m") + 1] == "4.0"
+
+
+def test_workflow_contract_passes_initial_replay_memory_through(tmp_path):
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"backend": "base_sft", "train_args": {}}))
+    seed = tmp_path / "prev_memory.json"
+    seed.write_text("[]")
+    base_workflow = {
+        "judgement": {
+            "reward_config": "/tmp/reward.json",
+            "threshold_config": "/tmp/thresholds.json",
+            "credit_window_config": "/tmp/credit.json",
+            "enabled_labels": ["moving_collision"],
+        },
+        "repair_generation": {"ego_shape": "2.7,4.3,1.7", "min_margin": 0.3},
+        "replay_memory": {"capacity": 200},
+        "training": {"val_scenes": "/tmp/valid.json"},
+        "initial_replay_memory": str(seed),
+    }
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(json.dumps(base_workflow))
+    contract = {
+        "model_path": "/tmp/model.pth",
+        "scene_list": str(scene_list),
+        "workflow_config": str(workflow),
+        "training_config": str(training),
+        "output_dir": str(tmp_path / "auto_research" / "out"),
+    }
+    cfg = round_runner._config_from_workflow_contract(contract)
+    assert cfg["initial_replay_memory"] == str(seed)
+
+    del base_workflow["initial_replay_memory"]
+    workflow.write_text(json.dumps(base_workflow))
+    cfg = round_runner._config_from_workflow_contract(contract)
+    assert cfg["initial_replay_memory"] is None
