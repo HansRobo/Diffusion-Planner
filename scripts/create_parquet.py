@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import argcomplete
 import diffusion_planner_data_tools as dpt
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -38,6 +39,7 @@ def main() -> None:
         help="spacing between generated frames [s]; changes only the index sample density, "
         "not the model's internal 0.1 s grid (default: %(default)s)",
     )
+    argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
     map_path = args.map.resolve()

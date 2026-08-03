@@ -1,0 +1,120 @@
+"""Tests for frame adaptation and Plotly figure construction."""
+
+from __future__ import annotations
+
+import unittest
+
+import numpy as np
+
+from diffusion_planner.visualizer import FrameData, FramePlotOptions, plot_frame
+
+
+def make_frame() -> dict[str, np.ndarray]:
+    """Create a compact frame using the production tensor layouts."""
+    ego = np.zeros((3, 6), dtype=np.float32)
+    ego[:, 0] = [-2.0, -1.0, 0.0]
+    ego[:, 2] = 1.0
+
+    neighbors = np.zeros((2, 3, 11), dtype=np.float32)
+    neighbors[0, :, 0] = [3.0, 4.0, 5.0]
+    neighbors[0, :, 1] = 2.0
+    neighbors[0, :, 2] = 1.0
+    neighbors[0, :, 6:8] = [1.8, 4.5]
+    neighbors[0, :, 8] = 1.0
+
+    lanes = np.zeros((2, 3, 26), dtype=np.float32)
+    lanes[0, :, 0] = [0.0, 5.0, 10.0]
+    lanes[0, :, 3] = -2.0
+    lanes[0, :, 5] = 2.0
+    lanes[0, :, 6] = 1.0
+    lanes[0, :, 16] = 1.0
+
+    polygons = np.zeros((1, 4, 3), dtype=np.float32)
+    polygons[0, :, :2] = [[5.0, 5.0], [7.0, 5.0], [7.0, 7.0], [5.0, 7.0]]
+    polygons[0, :, 2] = 1.0
+
+    line_strings = np.zeros((1, 3, 4), dtype=np.float32)
+    line_strings[0, :, :2] = [[8.0, -2.0], [8.0, 0.0], [8.0, 2.0]]
+    line_strings[0, :, 2] = 1.0
+
+    traffic = np.zeros((2, 3, 6), dtype=np.float32)
+    traffic[0, -1, 2] = 1.0
+
+    return {
+        "ego_agent_past": ego,
+        "neighbor_agents_past": neighbors,
+        "lanes": lanes,
+        "lanes_speed_limit": np.array([[10.0], [0.0]], dtype=np.float32),
+        "route_lanes": lanes[:1].copy(),
+        "route_lanes_speed_limit": np.array([[10.0]], dtype=np.float32),
+        "lane_traffic_light_past": traffic,
+        "route_traffic_light_past": traffic[:1].copy(),
+        "polygons": polygons,
+        "line_strings": line_strings,
+        "goal_pose": np.array([20.0, 1.0, 1.0, 0.0], dtype=np.float32),
+        "ego_shape": np.array([2.7, 4.8, 1.8], dtype=np.float32),
+    }
+
+
+class FrameDataTest(unittest.TestCase):
+    """Verify shape normalization and masks."""
+
+    def test_selects_optional_batch_dimension(self) -> None:
+        """An optional leading batch dimension is indexed and removed."""
+        data = make_frame()
+        data["ego_agent_past"] = np.stack((data["ego_agent_past"], data["ego_agent_past"] + 1))
+
+        frame = FrameData.from_mapping(data, batch_index=1)
+
+        self.assertEqual(frame["ego_agent_past"].shape, (3, 6))
+        self.assertEqual(frame["ego_agent_past"][0, 0], -1.0)
+
+    def test_rejects_missing_required_key(self) -> None:
+        """Required visualization inputs are checked eagerly."""
+        data = make_frame()
+        del data["lanes"]
+
+        with self.assertRaisesRegex(KeyError, "lanes"):
+            FrameData.from_mapping(data)
+
+    def test_future_validity_is_per_step(self) -> None:
+        """All-zero future poses are treated as missing observations."""
+        future = np.zeros((2, 4), dtype=np.float32)
+        future[1, 2] = 1.0
+
+        np.testing.assert_array_equal(FrameData.valid_steps(future), [False, True])
+
+
+class PlotFrameTest(unittest.TestCase):
+    """Verify the composed Plotly figure."""
+
+    def test_builds_expected_layers_and_equal_axes(self) -> None:
+        """The default composition contains core layers and equal axes."""
+        figure = plot_frame(make_frame(), options=FramePlotOptions(show_speed_limits=True))
+        trace_names = {trace.name for trace in figure.data}
+
+        self.assertIn("Lanes", trace_names)
+        self.assertIn("Route", trace_names)
+        self.assertIn("Ego past", trace_names)
+        self.assertIn("Neighbors past", trace_names)
+        self.assertIn("Ego footprint", trace_names)
+        self.assertIn("Goal pose", trace_names)
+        self.assertIn("Red light", trace_names)
+        self.assertEqual(figure.layout.yaxis.scaleanchor, "x")
+
+    def test_recovers_lane_boundary_offsets(self) -> None:
+        """Relative lane boundary coordinates are restored to ego coordinates."""
+        figure = plot_frame(make_frame())
+        boundary = next(trace for trace in figure.data if trace.name == "Lanes boundaries")
+
+        self.assertEqual(list(boundary.y[:3]), [-2.0, -2.0, -2.0])
+
+    def test_future_layers_are_optional(self) -> None:
+        """Input-only frames render successfully without training labels."""
+        figure = plot_frame(make_frame())
+
+        self.assertNotIn("Ego future", {trace.name for trace in figure.data})
+
+
+if __name__ == "__main__":
+    unittest.main()

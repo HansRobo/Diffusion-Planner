@@ -7,10 +7,16 @@ requires-python = ">=3.10"
 dependencies = [
     "argcomplete>=3.7.0",
     "numpy>=2.2.6",
+    "plotly>=6.9.0",
     "pyarrow>=25.0.0",
+    "streamlit>=1.48.0",
     "timm>=1.0.28",
     "torch>=2.13.0",
+    "tqdm>=4.70.0",
 ]
+
+[project.scripts]
+diffusion-planner-dashboard = "diffusion_planner_dashboard.cli:main"
 
 [tool.ruff]
 line-length = 100
