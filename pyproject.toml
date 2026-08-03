@@ -1,0 +1,60 @@
+[project]
+name = "diffusion-planner"
+version = "0.1.0"
+description = "Clean implementation of diffusion planner for autonomous driving"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "argcomplete>=3.7.0",
+    "numpy>=2.2.6",
+    "pyarrow>=25.0.0",
+    "timm>=1.0.28",
+    "torch>=2.13.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["ros2_ws"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",   # pyflakes/pycodestyle
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "C4",  # comprehensions
+    "SIM", # simplify
+    "N",   # pep8-naming
+    "D",   # pydocstyle
+]
+ignore = [
+    "D100",
+    "D104",
+    "D105",
+    "D107", # missing docstrings
+    "E501", # handled by formatter
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["diffusion_planner"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pyright]
+extraPaths = [
+    "ros2_ws/install/diffusion_planner_data_tools/local/lib/python3.10/dist-packages",
+
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.1",
+    "ruff>=0.16.1",
+]

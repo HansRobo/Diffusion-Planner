@@ -1,0 +1,6 @@
+topics:
+  kinematic_state: /localization/kinematic_state
+  tracked_objects: /perception/object_recognition/tracking/objects
+  turn_indicators: /vehicle/status/turn_indicators_status
+  traffic_signals: /perception/traffic_light_recognition/traffic_signals
+  route: /planning/mission_planning/route
