@@ -16,7 +16,6 @@
 
 #include "label_builder.hpp"
 
-#include <autoware/vehicle_info_utils/vehicle_info.hpp>
 #include <autoware_lanelet2_extension/projection/mgrs_projector.hpp>
 
 #include <lanelet2_io/Io.h>
@@ -26,20 +25,6 @@
 #include <utility>
 
 namespace autoware::diffusion_planner::data_tools {
-
-VehicleSpec
-make_vehicle_spec(const double wheel_base_m, const double wheel_tread_m,
-                  const double front_overhang_m, const double rear_overhang_m,
-                  const double left_overhang_m, const double right_overhang_m) {
-  autoware::vehicle_info_utils::VehicleInfo info{};
-  info.wheel_base_m = wheel_base_m;
-  info.wheel_tread_m = wheel_tread_m;
-  info.front_overhang_m = front_overhang_m;
-  info.rear_overhang_m = rear_overhang_m;
-  info.left_overhang_m = left_overhang_m;
-  info.right_overhang_m = right_overhang_m;
-  return VehicleSpec(info);
-}
 
 FrameDataCache::FrameDataCache(const size_t reader_capacity,
                                const size_t map_capacity,

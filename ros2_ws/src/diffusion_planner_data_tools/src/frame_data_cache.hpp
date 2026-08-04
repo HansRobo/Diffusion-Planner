@@ -28,13 +28,6 @@
 namespace autoware::diffusion_planner::data_tools {
 
 /**
- * @brief Build a VehicleSpec from the primitive vehicle_info parameters.
- */
-VehicleSpec make_vehicle_spec(double wheel_base_m, double wheel_tread_m,
-                              double front_overhang_m, double rear_overhang_m,
-                              double left_overhang_m, double right_overhang_m);
-
-/**
  * @brief LRU-cached bag readers and map contexts.
  *
  * Intended usage: one instance per DataLoader worker process. Access is

@@ -22,6 +22,7 @@ from diffusion_planner_dashboard.ui.settings import (
     render_plot_options,
     render_vehicle_parameters,
 )
+from diffusion_planner_dashboard.ui.tensor_inspector import render_tensor_inspector
 
 
 @st.cache_data(show_spinner=False)
@@ -106,3 +107,4 @@ def render_frame_browser() -> None:
         key=chart_key,
         config={"responsive": True, "scrollZoom": True},
     )
+    render_tensor_inspector(frame_data)

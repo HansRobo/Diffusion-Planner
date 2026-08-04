@@ -12,9 +12,9 @@ import diffusion_planner_data_tools as dpt
 # DataLoader worker ごとに 1 インスタンス (worker_init_fn で生成)
 cache = dpt.FrameDataCache(reader_capacity=16, map_capacity=4)
 spec = dpt.VehicleSpec(
-    wheel_base_m=2.75, wheel_tread_m=1.59,
-    front_overhang_m=0.8, rear_overhang_m=1.1,
-    left_overhang_m=0.13, right_overhang_m=0.13)
+    base_link_to_front=3.55,
+    vehicle_length=4.65,
+    vehicle_width=1.85)
 
 frame = cache.create_frame_data(
     bag_path="path/to/bag_dir",
@@ -28,9 +28,19 @@ frame = cache.create_frame_data(
 場合は None。
 
 入力キー: `ego_agent_past`, `neighbor_agents_past`, `lanes*`, `route_lanes*`,
-`lane/route_traffic_light_past`, `polygons`, `line_strings`, `goal_pose`,
+`lane/route_traffic_light_past`, `polygons`, `stop_lines`, `road_borders`, `goal_pose`,
 `ego_shape`, `turn_indicators`
 （`sampled_trajectories` (推論専用乱数) と正規化は学習側で行う）
+
+`ego_shape` のshapeは `(3,)`、要素順は
+`[base_link_to_front, vehicle_length, vehicle_width]`。すべて単位はメートル。
+
+地図線要素は種類ごとに独立した座標テンソルとして出力する。type one-hot は持たない。
+
+| キー           | shape       | 内容                                     |
+| -------------- | ----------- | ---------------------------------------- |
+| `stop_lines`   | (30, 2, 2)  | 最大30本、左右端点2点の `[x, y]`         |
+| `road_borders` | (30, 20, 2) | 最大30本、各20点に再サンプリングした座標 |
 
 ラベルキー（未来グリッドは frame_time + (i+1)×0.1s, i = 0..79。座標系は入力と
 同じ frame_time 時点の ego frame）:

@@ -147,11 +147,9 @@ PYBIND11_MODULE(_diffusion_planner_data_tools, m) {
       .def_readwrite("route", &ddt::TopicConfig::route);
 
   py::class_<VehicleSpec>(m, "VehicleSpec")
-      .def(py::init(&ddt::make_vehicle_spec), py::arg("wheel_base_m"),
-           py::arg("wheel_tread_m"), py::arg("front_overhang_m"),
-           py::arg("rear_overhang_m"), py::arg("left_overhang_m"),
-           py::arg("right_overhang_m"))
-      .def_readonly("wheel_base", &VehicleSpec::wheel_base)
+      .def(py::init<double, double, double>(), py::arg("base_link_to_front"),
+           py::arg("vehicle_length"), py::arg("vehicle_width"))
+      .def_readonly("base_link_to_front", &VehicleSpec::base_link_to_front)
       .def_readonly("vehicle_length", &VehicleSpec::vehicle_length)
       .def_readonly("vehicle_width", &VehicleSpec::vehicle_width);
 

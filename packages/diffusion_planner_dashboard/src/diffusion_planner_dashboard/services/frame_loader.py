@@ -12,12 +12,9 @@ from .frame_index import FrameIndexRow
 class VehicleParameters:
     """Primitive parameters accepted by ``diffusion_planner_data_tools.VehicleSpec``."""
 
-    wheel_base_m: float = 2.75
-    wheel_tread_m: float = 1.59
-    front_overhang_m: float = 0.8
-    rear_overhang_m: float = 1.1
-    left_overhang_m: float = 0.13
-    right_overhang_m: float = 0.13
+    base_link_to_front: float = 5.71111
+    vehicle_length: float = 7.2369
+    vehicle_width: float = 2.42741
 
 
 class FrameLoader:
@@ -40,12 +37,9 @@ class FrameLoader:
     def load(self, row: FrameIndexRow, vehicle: VehicleParameters) -> dict[str, Any] | None:
         """Build one model-ready frame from a selected index row."""
         spec = self._dpt.VehicleSpec(
-            wheel_base_m=vehicle.wheel_base_m,
-            wheel_tread_m=vehicle.wheel_tread_m,
-            front_overhang_m=vehicle.front_overhang_m,
-            rear_overhang_m=vehicle.rear_overhang_m,
-            left_overhang_m=vehicle.left_overhang_m,
-            right_overhang_m=vehicle.right_overhang_m,
+            base_link_to_front=vehicle.base_link_to_front,
+            vehicle_length=vehicle.vehicle_length,
+            vehicle_width=vehicle.vehicle_width,
         )
         return self._cache.create_frame_data(
             bag_path=row.bag_path,

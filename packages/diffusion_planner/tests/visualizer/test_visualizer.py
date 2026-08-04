@@ -33,9 +33,11 @@ def make_frame() -> dict[str, np.ndarray]:
     polygons[0, :, :2] = [[5.0, 5.0], [7.0, 5.0], [7.0, 7.0], [5.0, 7.0]]
     polygons[0, :, 2] = 1.0
 
-    line_strings = np.zeros((1, 3, 4), dtype=np.float32)
-    line_strings[0, :, :2] = [[8.0, -2.0], [8.0, 0.0], [8.0, 2.0]]
-    line_strings[0, :, 2] = 1.0
+    stop_lines = np.zeros((1, 2, 2), dtype=np.float32)
+    stop_lines[0] = [[8.0, -2.0], [8.0, 2.0]]
+
+    road_borders = np.zeros((1, 3, 2), dtype=np.float32)
+    road_borders[0] = [[-2.0, -5.0], [0.0, -5.0], [2.0, -5.0]]
 
     traffic = np.zeros((2, 3, 6), dtype=np.float32)
     traffic[0, -1, 2] = 1.0
@@ -50,9 +52,10 @@ def make_frame() -> dict[str, np.ndarray]:
         "lane_traffic_light_past": traffic,
         "route_traffic_light_past": traffic[:1].copy(),
         "polygons": polygons,
-        "line_strings": line_strings,
+        "stop_lines": stop_lines,
+        "road_borders": road_borders,
         "goal_pose": np.array([20.0, 1.0, 1.0, 0.0], dtype=np.float32),
-        "ego_shape": np.array([2.7, 4.8, 1.8], dtype=np.float32),
+        "ego_shape": np.array([3.5, 4.8, 1.8], dtype=np.float32),
     }
 
 
@@ -100,7 +103,12 @@ class PlotFrameTest(unittest.TestCase):
         self.assertIn("Ego footprint", trace_names)
         self.assertIn("Goal pose", trace_names)
         self.assertIn("Red light", trace_names)
+        self.assertIn("Stop lines", trace_names)
+        self.assertIn("Road borders", trace_names)
         self.assertEqual(figure.layout.yaxis.scaleanchor, "x")
+        route = next(trace for trace in figure.data if trace.name == "Route")
+        self.assertEqual(route.fill, "toself")
+        self.assertEqual(route.fillcolor, "rgba(37, 99, 235, 0.18)")
 
     def test_recovers_lane_boundary_offsets(self) -> None:
         """Relative lane boundary coordinates are restored to ego coordinates."""

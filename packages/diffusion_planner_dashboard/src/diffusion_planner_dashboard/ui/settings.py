@@ -32,7 +32,7 @@ def render_frame_selector(index: FrameIndex) -> FrameIndexRow:
     selected_bag_label = st.sidebar.selectbox("Bag", bag_options)
     selected_bag = None if selected_bag_label == "All bags" else selected_bag_label
     indices = index.indices_for_bag(selected_bag)
-    position = st.sidebar.number_input(
+    position = st.sidebar.slider(
         "Frame position",
         min_value=0,
         max_value=len(indices) - 1,
@@ -48,19 +48,19 @@ def render_frame_selector(index: FrameIndex) -> FrameIndexRow:
 def render_vehicle_parameters() -> VehicleParameters:
     """Render editable vehicle dimensions."""
     with st.sidebar.expander("Vehicle parameters"):
-        wheel_base = st.number_input("Wheel base [m]", 0.1, 20.0, 2.75, 0.01)
-        wheel_tread = st.number_input("Wheel tread [m]", 0.1, 10.0, 1.59, 0.01)
-        front_overhang = st.number_input("Front overhang [m]", 0.0, 10.0, 0.8, 0.01)
-        rear_overhang = st.number_input("Rear overhang [m]", 0.0, 10.0, 1.1, 0.01)
-        left_overhang = st.number_input("Left overhang [m]", 0.0, 5.0, 0.13, 0.01)
-        right_overhang = st.number_input("Right overhang [m]", 0.0, 5.0, 0.13, 0.01)
+        base_link_to_front = st.number_input(
+            "Base link to front [m]", 0.1, 20.0, VehicleParameters.base_link_to_front, 0.01
+        )
+        vehicle_length = st.number_input(
+            "Vehicle length [m]", 0.1, 30.0, VehicleParameters.vehicle_length, 0.01
+        )
+        vehicle_width = st.number_input(
+            "Vehicle width [m]", 0.1, 10.0, VehicleParameters.vehicle_width, 0.01
+        )
     return VehicleParameters(
-        wheel_base_m=wheel_base,
-        wheel_tread_m=wheel_tread,
-        front_overhang_m=front_overhang,
-        rear_overhang_m=rear_overhang,
-        left_overhang_m=left_overhang,
-        right_overhang_m=right_overhang,
+        base_link_to_front=base_link_to_front,
+        vehicle_length=vehicle_length,
+        vehicle_width=vehicle_width,
     )
 
 
