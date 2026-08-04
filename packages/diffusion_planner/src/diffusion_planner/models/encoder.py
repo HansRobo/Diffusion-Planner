@@ -1,5 +1,5 @@
 import torch
-from timm.models.layers import MixerBlock
+from timm.models.mlp_mixer import MixerBlock
 from torch import nn
 
 CLASS_TYPE_EGO = 0

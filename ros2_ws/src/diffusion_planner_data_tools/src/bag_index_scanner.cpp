@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -64,6 +65,24 @@ BagFrameIndex scan_bag_index(const std::string &bag_path,
   using autoware_planning_msgs::msg::LaneletRoute;
   using autoware_vehicle_msgs::msg::TurnIndicatorsReport;
   using nav_msgs::msg::Odometry;
+
+  if (!std::isfinite(time_step_s) || time_step_s <= 0.0) {
+    throw std::invalid_argument(
+        "time_step_s must be finite and greater than zero");
+  }
+  if (!std::isfinite(history_window_s) || history_window_s < 0.0) {
+    throw std::invalid_argument(
+        "history_window_s must be finite and non-negative");
+  }
+  if (!std::isfinite(future_horizon_s) || future_horizon_s < 0.0) {
+    throw std::invalid_argument(
+        "future_horizon_s must be finite and non-negative");
+  }
+  if (!std::isfinite(traffic_light_timeout_s) ||
+      traffic_light_timeout_s < 0.0) {
+    throw std::invalid_argument(
+        "traffic_light_timeout_s must be finite and non-negative");
+  }
 
   struct EgoSample {
     float speed_mps;
@@ -120,7 +139,9 @@ BagFrameIndex scan_bag_index(const std::string &bag_path,
       } else if (topic == topics.route) {
         LaneletRoute msg;
         route_serializer.deserialize_message(&raw, &msg);
-        route_stamps.push_back(rclcpp::Time(msg.header.stamp).seconds());
+        if (!msg.segments.empty()) {
+          route_stamps.push_back(rclcpp::Time(msg.header.stamp).seconds());
+        }
       }
     }
   }

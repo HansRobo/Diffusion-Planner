@@ -94,4 +94,15 @@ def render_frame_browser() -> None:
         return
 
     figure = plot_frame(frame_data, options=options)
-    st.plotly_chart(figure, use_container_width=True, config={"scrollZoom": True})
+    chart_key = f"frame-plot::{index.path}::{row.index}::{row.frame_time_ns}"
+    figure.update_layout(
+        autosize=True,
+        uirevision=chart_key,
+    )
+    st.plotly_chart(
+        figure,
+        width="stretch",
+        height=900,
+        key=chart_key,
+        config={"responsive": True, "scrollZoom": True},
+    )

@@ -63,9 +63,13 @@ py::dict to_numpy_dict(const ddt::BagFrameIndex &index) {
   const auto n = static_cast<py::ssize_t>(index.frame_time_ns.size());
   const auto add = [&](const char *key, const auto &values, auto element) {
     using ElementT = decltype(element);
-    py::array_t<ElementT> array(n);
+    // With the pybind11 version shipped by ROS 2 Humble, the scalar-size
+    // constructor creates a zero-stride array. Use an explicit shape container
+    // so that every index row owns a distinct, contiguous element.
+    const std::vector<py::ssize_t> shape{n};
+    py::array_t<ElementT> array(shape);
     for (py::ssize_t i = 0; i < n; ++i) {
-      array.mutable_at(i) =
+      array.mutable_data()[i] =
           static_cast<ElementT>(values[static_cast<size_t>(i)]);
     }
     result[key] = std::move(array);

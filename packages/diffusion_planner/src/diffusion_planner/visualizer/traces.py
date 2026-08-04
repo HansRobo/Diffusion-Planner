@@ -293,7 +293,7 @@ def create_agent_traces(
         )
         if neighbor_past is not None:
             traces.append(neighbor_past)
-        traces.extend(_create_neighbor_markers(neighbors, style))
+        traces.extend(_create_neighbor_boxes(neighbors, style))
 
     if options.show_agent_future:
         ego_future = frame.get("ego_agent_future")
@@ -323,38 +323,62 @@ def create_agent_traces(
     return traces
 
 
-def _create_neighbor_markers(
+def _create_neighbor_boxes(
     neighbors: NDArray[np.generic], style: VisualizerStyle
 ) -> list[go.BaseTraceType]:
+    """Create an oriented footprint box for each neighbor's current state."""
     valid_neighbors = neighbors[FrameData.valid_rows(neighbors)]
     if len(valid_neighbors) == 0:
         return []
     current = valid_neighbors[:, -1]
     labels = np.argmax(current[:, NeighborIndex.IS_VEHICLE : NeighborIndex.IS_BICYCLE + 1], axis=1)
     label_names = np.array(["vehicle", "pedestrian", "bicycle"])
-    customdata = np.column_stack(
-        (
-            label_names[labels],
-            current[:, NeighborIndex.LENGTH],
-            current[:, NeighborIndex.WIDTH],
+    traces: list[go.BaseTraceType] = []
+    for state, label in zip(current, labels, strict=True):
+        x = float(state[NeighborIndex.X])
+        y = float(state[NeighborIndex.Y])
+        cos_yaw = float(state[NeighborIndex.COS_YAW])
+        sin_yaw = float(state[NeighborIndex.SIN_YAW])
+        width = float(state[NeighborIndex.WIDTH])
+        length = float(state[NeighborIndex.LENGTH])
+        if width <= 0.0 or length <= 0.0 or cos_yaw**2 + sin_yaw**2 <= 0.5:
+            continue
+
+        corners = np.array(
+            [
+                [-length / 2, -width / 2],
+                [length / 2, -width / 2],
+                [length / 2, width / 2],
+                [-length / 2, width / 2],
+                [-length / 2, -width / 2],
+            ]
         )
-    )
-    return [
-        go.Scattergl(
-            x=current[:, NeighborIndex.X],
-            y=current[:, NeighborIndex.Y],
-            mode="markers",
-            marker={"size": 7, "color": style.neighbor_color},
-            customdata=customdata,
-            name="Neighbors current",
-            legendgroup="neighbors",
-            showlegend=False,
-            hovertemplate=(
-                "%{customdata[0]}<br>x=%{x:.2f} m<br>y=%{y:.2f} m"
-                "<br>length=%{customdata[1]:.2f} m<br>width=%{customdata[2]:.2f} m<extra></extra>"
-            ),
+        rotation = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]])
+        corners = corners @ rotation.T + np.array([x, y])
+        customdata = np.tile(
+            np.array([label_names[label], x, y, length, width], dtype=object),
+            (len(corners), 1),
         )
-    ]
+        traces.append(
+            go.Scatter(
+                x=corners[:, 0],
+                y=corners[:, 1],
+                mode="lines",
+                fill="toself",
+                fillcolor="rgba(217, 119, 6, 0.25)",
+                line={"color": style.neighbor_color, "width": 1.5},
+                customdata=customdata,
+                name="Neighbors current",
+                legendgroup="neighbors",
+                showlegend=False,
+                hovertemplate=(
+                    "%{customdata[0]}<br>x=%{customdata[1]:.2f} m"
+                    "<br>y=%{customdata[2]:.2f} m<br>length=%{customdata[3]:.2f} m"
+                    "<br>width=%{customdata[4]:.2f} m<extra></extra>"
+                ),
+            )
+        )
+    return traces
 
 
 def create_annotation_traces(

@@ -40,7 +40,9 @@ def render_frame_selector(index: FrameIndex) -> FrameIndexRow:
         step=1,
         key=f"frame-position::{index.path}::{selected_bag_label}",
     )
-    return index.row(int(indices[int(position)]))
+    row = index.row(int(indices[int(position)]))
+    st.sidebar.caption(f"Parquet row: {row.index:,} · Time: {row.frame_time_ns} ns")
+    return row
 
 
 def render_vehicle_parameters() -> VehicleParameters:

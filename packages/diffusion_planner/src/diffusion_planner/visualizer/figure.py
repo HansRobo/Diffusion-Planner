@@ -39,8 +39,8 @@ def plot_frame(
         plot_bgcolor=resolved_style.background_color,
         hovermode="closest",
         legend={"groupclick": "togglegroup"},
-        xaxis={"title": "x [m]", "zeroline": True},
-        yaxis={"title": "y [m]", "zeroline": True},
+        xaxis={"title": "x [m]", "range": [-30, 30], "zeroline": True},
+        yaxis={"title": "y [m]", "range": [-30, 30], "zeroline": True},
         margin={"l": 60, "r": 30, "t": 60, "b": 50},
     )
     if resolved_options.equal_aspect:
