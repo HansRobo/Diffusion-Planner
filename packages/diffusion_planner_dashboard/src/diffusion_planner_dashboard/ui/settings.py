@@ -21,6 +21,7 @@ def render_parquet_settings() -> str | None:
         )
         applied = st.form_submit_button("Apply", use_container_width=True)
     if applied:
+        assert candidate is not None
         st.session_state["configured_parquet_path"] = candidate.strip()
     return st.session_state.get("configured_parquet_path") or None
 
