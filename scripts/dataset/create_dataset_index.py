@@ -15,9 +15,18 @@ import pyarrow.parquet as pq
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from diffusion_planner.data import VEHICLE_COLUMNS, VehicleParameters, build_vehicles
+from diffusion_planner.data import VEHICLE_COLUMNS, VehicleParameters
 
 SPLITS = ("train", "valid", "auto")
+
+
+def build_vehicles(config: DictConfig) -> dict[str, VehicleParameters]:
+    """Instantiate the project id to vehicle mapping stamped into the index.
+
+    Config keys are not necessarily strings, so they are converted to the project ids that
+    the scanned bags report.
+    """
+    return {str(project): hydra.utils.instantiate(node) for project, node in config.items()}
 
 
 def scan_bag(bag_path: Path, map_path: Path, frame_interval_s: float) -> pa.Table:
