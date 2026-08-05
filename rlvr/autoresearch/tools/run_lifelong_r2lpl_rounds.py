@@ -3025,7 +3025,14 @@ def main() -> None:
 
         repaired_paths = [str(p) for p in _read_json_list(repaired_list_json)]
         replay_paths = [str(p) for p in _read_json_list(replay_json)]
-        if bool(cfg.get("replay_refresh")) and replay_paths:
+        # Only targets from EARLIER rounds can be stale. The memory step's replay list also
+        # contains THIS round's repaired targets (memory is updated before it is sampled), and
+        # those were just produced by the current policy: refreshing them is wasted GPU, and
+        # their rows live in this round's jsonl rather than any previous one -- which is what
+        # made the first multi-round smoke abort on the guard below.
+        current_target_set = set(repaired_paths)
+        refreshable = [p for p in replay_paths if p not in current_target_set]
+        if bool(cfg.get("replay_refresh")) and refreshable:
             # Replay memory as a FLOOR, not a leash: a replayed scene's target was chosen by
             # a policy that no longer exists, so re-generate candidates with the CURRENT
             # policy and keep max(frozen, fresh) by reward. Taking the max is what preserves
@@ -3035,14 +3042,18 @@ def main() -> None:
             row_sources = [Path(p) for p in _replay_row_sources(cfg, out, round_idx)]
             if not row_sources:
                 raise RuntimeError(
-                    "replay_refresh is on but no previous-round rows were found "
-                    "(need the replay-seed memory JSON or an earlier round's "
-                    "repaired_targets.jsonl); refusing to silently skip the refresh"
+                    f"replay_refresh is on and {len(refreshable)} replayed scenes come from "
+                    "earlier rounds, but no previous-round rows were found (need the "
+                    "replay-seed memory JSON or an earlier round's repaired_targets.jsonl); "
+                    "refusing to silently skip the refresh"
                 )
             ref_dir = rdir / "replay_refresh"
             ref_dir.mkdir(parents=True, exist_ok=True)
+            # Refresh ONLY the stale subset; this round's own targets pass through untouched.
+            stale_list = ref_dir / "replay_stale.json"
+            _write_json(stale_list, refreshable)
             build_stats = _refresh_build_rows(
-                Path(replay_json), row_sources, ref_dir / "credit_windows.jsonl"
+                stale_list, row_sources, ref_dir / "credit_windows.jsonl"
             )
             print(f"[round {round_idx}] replay_refresh: rows {json.dumps(build_stats)}")
             t_ref = time.perf_counter()
@@ -3051,7 +3062,7 @@ def main() -> None:
                 ref_dir / "repaired_targets.jsonl"
             ]
             join_stats = _refresh_join(
-                Path(replay_json),
+                stale_list,
                 row_sources,
                 list(fresh_rows),
                 ref_dir / "replay_refreshed.json",
@@ -3060,7 +3071,9 @@ def main() -> None:
             )
             phase_times["replay_refresh"] = time.perf_counter() - t_ref
             print(f"[round {round_idx}] replay_refresh: {json.dumps(join_stats)}")
-            replay_paths = [str(p) for p in _read_json_list(ref_dir / "replay_refreshed.json")]
+            # Refreshed stale targets + this round's own targets, which never needed refreshing.
+            refreshed = [str(p) for p in _read_json_list(ref_dir / "replay_refreshed.json")]
+            replay_paths = refreshed + [p for p in replay_paths if p in current_target_set]
         anchor_paths = _anchor_slice_paths(
             cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
         )

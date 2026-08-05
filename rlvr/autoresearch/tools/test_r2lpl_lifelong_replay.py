@@ -5383,3 +5383,148 @@ def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
         _, n_second = finalize()  # no new data
         assert n_first > 0
         assert n_second == n_first, "second finalize must not re-score cleared buffers"
+
+
+def test_main_replay_refresh_keeps_max_of_frozen_and_fresh(tmp_path, monkeypatch):
+    """End-to-end wiring of replay_refresh through main(), not just the join helper.
+
+    Two replayed scenes seeded from a previous link's memory: for one the current policy
+    proposes a better target (must switch to the fresh NPZ), for the other a worse one (must
+    keep the frozen NPZ). Asserts the refresh actually ran, in its own subdirectory, and that
+    the TRAIN LIST is what changed -- the failure mode this guards against is a refresh that
+    computes a list nobody trains on.
+    """
+    manifest, benchmark = _guard_assets(tmp_path)
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text(json.dumps(["/tmp/a.npz"]))
+    out_dir = tmp_path / "auto_research" / "out"
+    initial_model = tmp_path / "initial.pth"
+    torch.save({"model": {}}, initial_model)
+
+    frozen_better = str(tmp_path / "frozen_better.npz")  # policy regressed here
+    frozen_worse = str(tmp_path / "frozen_worse.npz")  # policy improved here
+    src_better, src_worse = str(tmp_path / "src_b.npz"), str(tmp_path / "src_w.npz")
+    fresh_worse = str(tmp_path / "fresh_w.npz")
+    seed_memory = tmp_path / "seed_memory.json"
+    seed_memory.write_text(
+        json.dumps(
+            {
+                "capacity": 10,
+                "entries": [
+                    {
+                        "scene_path": frozen_better,
+                        "source_scene_path": src_better,
+                        "selected_total": -1.0,
+                    },
+                    {
+                        "scene_path": frozen_worse,
+                        "source_scene_path": src_worse,
+                        "selected_total": -3.0,
+                    },
+                ],
+            }
+        )
+    )
+
+    refresh_dirs: list[str] = []
+
+    def fake_repair(cfg, model_path, rdir, gpu_ids):
+        if rdir.name == "replay_refresh":
+            refresh_dirs.append(str(rdir))
+            # the fresh pass must have been handed the SOURCE scenes to re-repair
+            rows = [json.loads(x) for x in (rdir / "credit_windows.jsonl").read_text().splitlines()]
+            assert {r["scene_path"] for r in rows} == {src_better, src_worse}
+            round_runner._write_jsonl(
+                rdir / "repaired_targets.jsonl",
+                [
+                    # worse than frozen -1.0 -> frozen must be kept
+                    {
+                        "scene_path": str(tmp_path / "fresh_b.npz"),
+                        "source_scene_path": src_better,
+                        "selected_total": -2.5,
+                    },
+                    # better than frozen -3.0 -> fresh must win
+                    {
+                        "scene_path": fresh_worse,
+                        "source_scene_path": src_worse,
+                        "selected_total": -0.5,
+                    },
+                ],
+            )
+            return 0.0
+        round_runner._write_json(rdir / "repaired_targets.json", ["/tmp/repaired_a.npz"])
+        round_runner._write_jsonl(
+            rdir / "repaired_targets.jsonl", [{"scene_path": "/tmp/repaired_a.npz"}]
+        )
+        return 0.0
+
+    def fake_run(cmd, log_path, *, cwd=None, env=None):
+        if "--out_memory" in cmd:
+            round_runner._write_json(Path(cmd[cmd.index("--out_memory") + 1]), {"entries": []})
+            # the memory step hands back the two seeded replay scenes
+            round_runner._write_json(
+                Path(cmd[cmd.index("--out_replay_scenes") + 1]), [frozen_better, frozen_worse]
+            )
+        return 0.0
+
+    trained_lists: list[list[str]] = []
+
+    def fake_training(cfg, *, model_path, train_input_list, rdir, round_idx, gpu_ids):
+        trained_lists.append([str(p) for p in json.loads(Path(train_input_list).read_text())])
+        ckpt = rdir / "base_train" / "latest.pth"
+        ckpt.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"model": {}}, ckpt)
+        return 0.0, ckpt
+
+    cfg = {
+        "rounds": 1,
+        "epochs_per_round": 1,
+        "model_path": str(initial_model),
+        "val_scenes": "/tmp/valid.json",
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "credit_window_config": "/tmp/credit.json",
+        "replay_memory": {"capacity": 10},
+        "initial_replay_memory": str(seed_memory),
+        "replay_refresh": True,
+        "training_config": {"train_args": {}},
+        "training_backend": "base_sft",
+        "output_dir": str(out_dir),
+        "checkpoint_policy": "latest",
+        "repair_config": {"ego_shape": "2.7,4.3,1.7", "min_margin": 0.3},
+        "mine_labels": ["expert_disagreement"],
+        "perception_mining": {"scene_list": str(scene_list), "chunk_len": 80},
+        "guards": {"frozen_chunk_manifest": str(manifest), "patience_benchmark": str(benchmark)},
+    }
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps(cfg))
+
+    def fake_mining(cfg, model_path, rdir, gpu_ids):
+        # the runner reads this summary to fail loudly on a zero-chunk mine
+        round_runner._write_json(
+            rdir / "perception_direct_summary.json",
+            {"planned_chunks": 1, "simulated_chunks": 1, "skipped_chunks": 0},
+        )
+        round_runner._write_jsonl(rdir / "credit_windows.jsonl", [{"scene_path": "/tmp/a.npz"}])
+        return 0.0
+
+    monkeypatch.setattr(round_runner, "_run_mining_phase", fake_mining)
+    monkeypatch.setattr(round_runner, "_run_repair_phase", fake_repair)
+    monkeypatch.setattr(round_runner, "_run", fake_run)
+    monkeypatch.setattr(round_runner, "_run_base_sft_training", fake_training)
+    monkeypatch.setattr(round_runner, "_run_guard_phase", lambda *a, **k: {})
+    monkeypatch.setattr(round_runner, "_anchor_slice_paths", lambda *a, **k: [])
+    monkeypatch.setattr(sys, "argv", ["run_lifelong_r2lpl_rounds", "--config", str(cfg_path)])
+    round_runner.main()
+
+    assert refresh_dirs, "replay_refresh was configured but the refresh repair never ran"
+    stats = json.loads(
+        (Path(refresh_dirs[0]) / "refresh_stats.json").read_text()
+    )
+    assert stats["improved_by_fresh"] == 1 and stats["kept_frozen"] == 1
+
+    assert trained_lists, "training never ran"
+    trained = trained_lists[0]
+    assert fresh_worse in trained, "the improved fresh target never reached the train list"
+    assert frozen_better in trained, "the frozen target must survive where the policy regressed"
+    assert frozen_worse not in trained, "the surpassed frozen target must NOT be trained on"
