@@ -18,6 +18,9 @@ from typing import Any
 import numpy as np
 import torch
 
+from rlvr.autoresearch.tools.refresh_replay_targets import build_rows as _refresh_build_rows
+from rlvr.autoresearch.tools.refresh_replay_targets import join as _refresh_join
+
 _CONFIG_REQUIRED = {
     "rounds",
     "epochs_per_round",
@@ -464,6 +467,10 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "threshold_config": str(threshold_config),
         "credit_window_config": str(credit_window_config),
         "initial_replay_memory": workflow.get("initial_replay_memory"),
+        # Replay memory as a floor: re-repair replayed scenes with the CURRENT policy and
+        # keep max(frozen, fresh) by reward (see refresh_replay_targets).
+        "replay_refresh": bool(workflow.get("replay_refresh", False)),
+        "replay_refresh_min_gain": float(workflow.get("replay_refresh_min_gain", 0.0)),
         "reuse_completed_mining": bool(workflow.get("reuse_completed_mining", False)),
         "progress_reference_expert": bool(workflow.get("progress_reference_expert", False)),
         "repair_reward_config": (
@@ -2386,6 +2393,25 @@ def _run_mining_phase(
     return elapsed
 
 
+def _replay_row_sources(cfg: dict[str, Any], out: Path, round_idx: int) -> list[str]:
+    """Artifacts carrying previous rounds' repaired rows, for the replay-refresh join.
+
+    A chain link is handed only the previous link's replay-seed memory JSON (whose
+    ``entries`` carry scene_path / source_scene_path / selected_total); a multi-round run
+    also has its own earlier rounds' ``repaired_targets.jsonl``. Both are accepted, and order
+    does not matter because the join keys on the target path.
+    """
+    sources: list[str] = []
+    seed = cfg.get("initial_replay_memory")
+    if seed and Path(seed).is_file():
+        sources.append(str(seed))
+    for prev in range(1, round_idx):
+        cand = out / f"r2lpl_round_{prev:03d}" / "repaired_targets.jsonl"
+        if cand.is_file():
+            sources.append(str(cand))
+    return sources
+
+
 def _run_repair_phase(
     cfg: dict[str, Any],
     model_path: Path,
@@ -2999,6 +3025,42 @@ def main() -> None:
 
         repaired_paths = [str(p) for p in _read_json_list(repaired_list_json)]
         replay_paths = [str(p) for p in _read_json_list(replay_json)]
+        if bool(cfg.get("replay_refresh")) and replay_paths:
+            # Replay memory as a FLOOR, not a leash: a replayed scene's target was chosen by
+            # a policy that no longer exists, so re-generate candidates with the CURRENT
+            # policy and keep max(frozen, fresh) by reward. Taking the max is what preserves
+            # retention -- if the policy drifted, its fresh candidates are worse and the
+            # frozen fix keeps teaching. The pass reuses the ordinary repair phase, so the
+            # GPU path is the same tested code.
+            row_sources = [Path(p) for p in _replay_row_sources(cfg, out, round_idx)]
+            if not row_sources:
+                raise RuntimeError(
+                    "replay_refresh is on but no previous-round rows were found "
+                    "(need the replay-seed memory JSON or an earlier round's "
+                    "repaired_targets.jsonl); refusing to silently skip the refresh"
+                )
+            ref_dir = rdir / "replay_refresh"
+            ref_dir.mkdir(parents=True, exist_ok=True)
+            build_stats = _refresh_build_rows(
+                Path(replay_json), row_sources, ref_dir / "credit_windows.jsonl"
+            )
+            print(f"[round {round_idx}] replay_refresh: rows {json.dumps(build_stats)}")
+            t_ref = time.perf_counter()
+            _run_repair_phase(cfg, infer_model, ref_dir, gpu_ids)
+            fresh_rows = sorted(ref_dir.glob("repair_shards/shard_*/repaired_targets.jsonl")) or [
+                ref_dir / "repaired_targets.jsonl"
+            ]
+            join_stats = _refresh_join(
+                Path(replay_json),
+                row_sources,
+                list(fresh_rows),
+                ref_dir / "replay_refreshed.json",
+                ref_dir / "refresh_stats.json",
+                min_gain=float(cfg.get("replay_refresh_min_gain", 0.0)),
+            )
+            phase_times["replay_refresh"] = time.perf_counter() - t_ref
+            print(f"[round {round_idx}] replay_refresh: {json.dumps(join_stats)}")
+            replay_paths = [str(p) for p in _read_json_list(ref_dir / "replay_refreshed.json")]
         anchor_paths = _anchor_slice_paths(
             cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
         )
