@@ -1458,8 +1458,16 @@ def main() -> None:
         help="how the R2LPL guidance class (near_log / recoverable / far_offpolicy, paper "
         "Eq. 24) is decided. 'state_dev' = paper Eq. 21: deviation of the ROLLOUT EGO STATE "
         "from the logged expert state (d_xy 1.0/5.0 m, d_yaw 15/45 deg, d_v 2.0 m/s). "
-        "'progress_dev' (default, legacy) = the trajectory-level expert progress gap, which "
-        "is a different quantity and classifies most near-log rows as 'recoverable'.",
+        "'progress_dev' (default) = the trajectory-level expert progress gap, a different "
+        "quantity that classifies most near-log rows as 'recoverable'. NOTE: 'state_dev' is "
+        "paper-faithful but measured WORSE on this project's mining geometry -- chunks restart "
+        "from logged states every 88 frames, so the rollout ego never leaves the log "
+        "(d_xy p50 0.43 m, max 1.85 m => 89% near_log, 0% far_offpolicy) and the 'far' branch "
+        "that makes the paper's rule useful never fires. On a matched-corpus A/B, letting "
+        "Eq. 26 select (state_dev, no forcing) left the closed-loop reward at base (+0.8%) "
+        "while forcing the expert target gained +4.1% on the same rows, with fewer collisions "
+        "and less lagging. Keep 'progress_dev' + an anti-stall lever unless the mining geometry "
+        "changes to long rollouts that genuinely diverge from the log.",
     )
     ap.add_argument(
         "--repair_expert_gt_candidate",
