@@ -418,6 +418,7 @@ def build_realized_reward_scorer(
     device: str,
     horizon: int,
     sample_step: int = 10,
+    progress_reference_expert: bool = False,
 ):
     """Realized closed-loop reward, computed natively during a mining rollout.
 
@@ -461,6 +462,14 @@ def build_realized_reward_scorer(
     teleport_ks: dict[int, set] = {}  # seg -> step indices where an unstick teleport fired
     last_snaps: dict[int, int] = {}
     acc = {"sum": 0.0, "n": 0}  # persistent running total across batches
+    comp = {
+        "centerline": 0.0,
+        "feasibility": 0.0,
+        "progress": 0.0,
+        "collision_poses": 0,
+        "rb_crossing_poses": 0,
+        "kinematic_poses": 0,
+    }  # per-component sums/counts over the SAME scored poses (decomposition of the mean)
 
     def hook(built, preds, data, _device):
         rows = []
@@ -546,15 +555,33 @@ def build_realized_reward_scorer(
                 if nf is not None:
                     sd_gpu["neighbor_agents_future"] = torch.from_numpy(nf[None]).to(tdev)
                 ego = torch.from_numpy(fut[None]).to(tdev)
+                if progress_reference_expert and "ego_expert_future" in sd:
+                    # Underprogress is gated on (N > 1 or a baseline reference); realized
+                    # scoring passes ONE trajectory, so without this the penalty NEVER fires
+                    # and the ruler is blind to lagging (diary #60). Pin it to the expert.
+                    _ef = sd["ego_expert_future"]
+                    _ef = _ef[0] if _ef.dim() == 3 else _ef
+                    _xy = _ef[:, :2]
+                    _valid = _xy.abs().sum(dim=-1) > 0.1
+                    if int(_valid.sum()) >= 2:
+                        _len = torch.diff(_xy[_valid], dim=0).norm(dim=-1).sum()
+                        sd_gpu["baseline_path_len"] = _len.to(tdev)
                 rb = compute_reward_batch(ego, sd_gpu, reward_cfg)
                 acc["sum"] += float(rb[0].total)
                 acc["n"] += 1
+                comp["centerline"] += float(rb[0].centerline)
+                comp["feasibility"] += float(rb[0].feasibility)
+                comp["progress"] += float(rb[0].progress)
+                comp["collision_poses"] += int(rb[0].collision_step is not None)
+                comp["rb_crossing_poses"] += int(bool(rb[0].rb_crossing))
+                comp["kinematic_poses"] += int(bool(getattr(rb[0], "kinematic_violated", False)))
         poses.clear()
         contexts.clear()
         nbr_world.clear()
         slot_uuids_at.clear()
         teleport_ks.clear()
         last_snaps.clear()
+        finalize.components = dict(comp)
         return (acc["sum"] / acc["n"] if acc["n"] else float("nan")), acc["n"]
 
     return hook, finalize

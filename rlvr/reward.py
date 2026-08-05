@@ -309,6 +309,19 @@ def _shape_reward(
             underprogress = torch.relu(config.underprogress_threshold - ratio.clamp(max=1.0))
             progress_penalty = progress_penalty + config.underprogress_penalty * underprogress
 
+            if config.progress_band_continuous:
+                # Symmetric continuous band: inside [threshold, margin] the penalty grows
+                # linearly with |ratio - 1| so matching the reference pace is strictly best;
+                # at the band edges it saturates, and the one-sided penalties above/below
+                # take over, keeping the total continuous. Without this the band is FLAT and
+                # candidate selection has no incentive to match the reference pace at all.
+                dev = (ratio - 1.0).abs()
+                half_low = max(1.0 - config.underprogress_threshold, 1e-6)
+                half_high = max(config.overprogress_margin - 1.0, 1e-6)
+                half = torch.where(ratio < 1.0, torch.full_like(dev, half_low), torch.full_like(dev, half_high))
+                band_dev = torch.minimum(dev, half)
+                progress_penalty = progress_penalty + config.progress_band_penalty * band_dev
+
     # TTC as quality bonus
     ttc_bonus = config.w_safety * (ttc_scores - 0.5) * 2
 

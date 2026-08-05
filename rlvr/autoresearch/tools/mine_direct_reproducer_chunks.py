@@ -475,6 +475,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--realized_reward_sample_step", type=int, default=10)
+    parser.add_argument(
+        "--progress_reference_expert",
+        action="store_true",
+        help="pin the realized-reward underprogress reference to the EXPERT path length. "
+        "Without it the penalty never fires at N=1 (single realized trajectory), so the "
+        "reward is blind to lagging behind the expert.",
+    )
     parser.add_argument("--plan_only", action="store_true")
     parser.add_argument("--chunk_len", type=int, default=80)
     parser.add_argument("--start_stride", type=int, default=80)
@@ -680,6 +687,7 @@ def main() -> None:
             device=device,
             horizon=horizon,
             sample_step=int(args.realized_reward_sample_step),
+            progress_reference_expert=bool(args.progress_reference_expert),
         )
 
     args.segments_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -849,9 +857,11 @@ def main() -> None:
 
     realized_cl_reward = None
     realized_cl_reward_poses = 0
+    realized_cl_reward_components = None
     if realized_reward_finalize is not None:
         t_rew = time.perf_counter()
         realized_cl_reward, realized_cl_reward_poses = realized_reward_finalize()
+        realized_cl_reward_components = getattr(realized_reward_finalize, "components", None)
         print(
             f"[realized_reward] mean={realized_cl_reward:.4f} over "
             f"{realized_cl_reward_poses} poses ({time.perf_counter() - t_rew:.1f}s)"
@@ -878,6 +888,7 @@ def main() -> None:
         "credit_rows": int(n_credit_rows),
         "realized_cl_reward": realized_cl_reward,
         "realized_cl_reward_poses": int(realized_cl_reward_poses),
+        "realized_cl_reward_components": realized_cl_reward_components,
         "elapsed_sec": round(elapsed, 3),
         "chunks_per_sec": n_simulated / elapsed if elapsed > 0 and n_simulated else 0.0,
         "timers": timers.report(max(1, n_simulated)) if n_simulated else "",

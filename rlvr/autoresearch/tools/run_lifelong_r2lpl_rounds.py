@@ -54,7 +54,7 @@ _RSFT_TRAINING_KEYS = {
     "replay_der_coef",
 }
 _MINING_TOOL = "direct_reproducer_chunks"
-_TORCH_DDP_FILE_STORE = Path("/tmp/tmp_dist_init")
+_TORCH_DDP_FILE_STORE = Path(f"/tmp/tmp_dist_init_{os.getuid()}")
 _REPAIR_REFRESH_SCOPES = {"unrepaired", "all"}
 
 
@@ -333,6 +333,32 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     }
     if repair.get("prototypes_path"):
         repair_cfg["prototypes_path"] = str(repair["prototypes_path"])
+    if repair.get("max_expert_dev_m") is not None:
+        repair_cfg["max_expert_dev_m"] = float(repair["max_expert_dev_m"])
+    if repair.get("lagging_expert_target") is not None:
+        v = str(repair["lagging_expert_target"])
+        if v not in ("off", "upweight", "force", "force_or_drop"):
+            raise ValueError(
+                "repair_generation.lagging_expert_target must be "
+                f"off|upweight|force|force_or_drop, got {v!r}"
+            )
+        repair_cfg["lagging_expert_target"] = v
+    if repair.get("progress_reference_expert"):
+        repair_cfg["progress_reference_expert"] = bool(repair["progress_reference_expert"])
+    if repair.get("expert_target_require_clear"):
+        repair_cfg["expert_target_require_clear"] = bool(repair["expert_target_require_clear"])
+    if repair.get("state_class_mode") is not None:
+        v = str(repair["state_class_mode"])
+        if v not in ("progress_dev", "state_dev"):
+            raise ValueError(
+                f"repair_generation.state_class_mode must be progress_dev|state_dev, got {v!r}"
+            )
+        repair_cfg["state_class_mode"] = v
+    if repair.get("save_candidates"):
+        repair_cfg["save_candidates"] = bool(repair["save_candidates"])
+    for _mk in ("expert_morph_w_max", "expert_morph_max_accel", "expert_morph_max_jerk"):
+        if repair.get(_mk) is not None:
+            repair_cfg[_mk] = float(repair[_mk])
     if repair.get("enable_depart_morph"):
         repair_cfg["enable_depart_morph"] = bool(repair["enable_depart_morph"])
     missing_repair = [k for k in ("ego_shape", "min_margin") if not repair_cfg.get(k)]
@@ -437,6 +463,12 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "reward_config": str(reward_config),
         "threshold_config": str(threshold_config),
         "credit_window_config": str(credit_window_config),
+        "initial_replay_memory": workflow.get("initial_replay_memory"),
+        "reuse_completed_mining": bool(workflow.get("reuse_completed_mining", False)),
+        "progress_reference_expert": bool(workflow.get("progress_reference_expert", False)),
+        "repair_reward_config": (
+            str(workflow["repair_reward_config"]) if workflow.get("repair_reward_config") else None
+        ),
         "replay_memory": {
             "capacity": _required_replay_capacity(replay),
             "alpha": float(_first_non_null(replay.get("alpha"), 0.5)),
@@ -911,6 +943,8 @@ def _perception_mining_cmd(
         # same rollout (no extra sim, no disk save/reload) and write it to the
         # mining summary. The reward reflects the checkpoint THIS mine ran with.
         cmd.append("--realized_reward")
+        if bool(cfg.get("progress_reference_expert")):
+            cmd.append("--progress_reference_expert")
     return cmd, danger_save_dir
 
 
@@ -994,6 +1028,55 @@ def _args_json_for_model(model_path: Path) -> Path:
         if candidate.exists():
             return candidate
     raise FileNotFoundError(f"Could not find args.json next to {model_path}")
+
+
+_EMA_INFER_CACHE: dict[str, Path] = {}
+# Set in main() to <output_dir>/ema_infer_cache; used when the checkpoint's own
+# directory is not writable (e.g. a shared base model owned by another user).
+_EMA_INFER_FALLBACK_ROOT: Path | None = None
+
+
+def _ema_inference_model_path(model_path: Path | str) -> Path:
+    """Weights for closed-loop inference phases (mining / repair / guards).
+
+    Base-training checkpoints store the raw optimizer iterates under "model" and
+    the deployable EMA under "ema_state_dict"; simulate.load_model reads "model",
+    so handing the training checkpoint straight to an inference phase silently
+    drives the raw iterates. Extract the EMA once, next to the checkpoint, and
+    return that path. Checkpoints without an EMA pass through unchanged.
+    Training resume must keep the original checkpoint (it needs optimizer/EMA
+    state), so only inference call sites go through here.
+    """
+    import shutil
+
+    model_path = Path(model_path).resolve()
+    key = str(model_path)
+    if key in _EMA_INFER_CACHE:
+        return _EMA_INFER_CACHE[key]
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    if not (isinstance(ckpt, dict) and "ema_state_dict" in ckpt):
+        _EMA_INFER_CACHE[key] = model_path
+        return model_path
+    out_dir = model_path.parent / f"{model_path.stem}_ema_infer"
+    if not os.access(model_path.parent, os.W_OK):
+        if _EMA_INFER_FALLBACK_ROOT is None:
+            raise PermissionError(
+                f"cannot write EMA extraction next to read-only checkpoint {model_path} "
+                "and no fallback cache root is set"
+            )
+        digest = hashlib.sha1(key.encode()).hexdigest()[:12]
+        out_dir = _EMA_INFER_FALLBACK_ROOT / f"{model_path.stem}_{digest}_ema_infer"
+    out = out_dir / "best_model.pth"
+    if not out.exists():
+        out_dir.mkdir(parents=True, exist_ok=True)
+        state = {k.replace("module.", ""): v for k, v in ckpt["ema_state_dict"].items()}
+        tmp = out_dir / "best_model.pth.tmp"
+        torch.save({"model": state}, tmp)
+        tmp.replace(out)
+        shutil.copy2(_args_json_for_model(model_path), out_dir / "args.json")
+    print(f"[ema] closed-loop inference weights: {out} (EMA of {model_path})")
+    _EMA_INFER_CACHE[key] = out
+    return out
 
 
 def _checkpoint_epoch(model_path: Path) -> int:
@@ -1785,7 +1868,7 @@ def _repair_cmd(
         "--scene_rows_jsonl",
         str(credit_jsonl),
         "--config",
-        str(cfg["reward_config"]),
+        str(cfg.get("repair_reward_config") or cfg["reward_config"]),
         "--threshold_config",
         str(cfg["threshold_config"]),
         "--ego_shape",
@@ -1834,6 +1917,18 @@ def _repair_cmd(
         cmd.append("--enable_depart_morph")
     if repair_cfg.get("prototypes_path"):
         cmd.extend(["--prototypes_path", str(repair_cfg["prototypes_path"])])
+    if repair_cfg.get("max_expert_dev_m") is not None:
+        cmd.extend(["--max_expert_dev_m", str(repair_cfg["max_expert_dev_m"])])
+    if repair_cfg.get("lagging_expert_target"):
+        cmd.extend(["--lagging_expert_target", str(repair_cfg["lagging_expert_target"])])
+    if repair_cfg.get("progress_reference_expert"):
+        cmd.append("--progress_reference_expert")
+    if repair_cfg.get("expert_target_require_clear"):
+        cmd.append("--expert_target_require_clear")
+    if repair_cfg.get("state_class_mode"):
+        cmd.extend(["--state_class_mode", str(repair_cfg["state_class_mode"])])
+    if repair_cfg.get("save_candidates"):
+        cmd.append("--save_candidates")
     if cfg.get("repair_labels"):
         cmd.extend(["--labels", ",".join(cfg["repair_labels"])])
     if bool(cfg.get("enable_conflict_detector", False)):
@@ -2201,6 +2296,14 @@ def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
         )
         aggregate["realized_cl_reward"] = rr_sum / rr_poses
         aggregate["realized_cl_reward_poses"] = rr_poses
+        # Sum the per-shard reward-component telemetry so the round summary carries the
+        # decomposition (which reward terms / which gates drive the total), not just the mean.
+        comp_totals: dict[str, float] = {}
+        for shard in summaries:
+            for key, value in (shard.get("realized_cl_reward_components") or {}).items():
+                comp_totals[key] = comp_totals.get(key, 0) + value
+        if comp_totals:
+            aggregate["realized_cl_reward_components"] = comp_totals
     _write_json(output, aggregate)
     return aggregate
 
@@ -2754,8 +2857,19 @@ def main() -> None:
 
     out = Path(cfg["output_dir"]).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    global _EMA_INFER_FALLBACK_ROOT
+    _EMA_INFER_FALLBACK_ROOT = out / "ema_infer_cache"
     model_path = Path(cfg["model_path"])
+    # Cross-campaign lifelong continuity: seed round 1's replay-memory union from a
+    # previous campaign's memory JSON so chained single-round jobs keep retraining
+    # earlier repairs. Absent/None -> fresh memory (single-campaign behavior).
     previous_memory: Path | None = None
+    initial_memory = cfg.get("initial_replay_memory")
+    if initial_memory:
+        initial_memory = Path(initial_memory)
+        if not initial_memory.is_file():
+            raise ValueError(f"initial_replay_memory does not exist: {initial_memory}")
+        previous_memory = initial_memory
     checkpoint_policy = str(cfg.get("checkpoint_policy", "latest"))
     guards_cfg = cfg.get("guards")
     reference_metrics: dict[str, Any] | None = None
@@ -2783,9 +2897,16 @@ def main() -> None:
                     "[round 0] guard_closed_loop: "
                     f"{' '.join(_closed_loop_probe_cmd(cfg, model_path))}"
                 )
+        elif bool(cfg.get("reuse_completed_mining")) and (gdir0 / "guard_metrics.json").is_file():
+            # Crash-resume: the reference row was already measured on the frozen assets in a
+            # previous attempt; re-running would also fail the miner's non-empty-out_dir guard.
+            print(f"[round 0] guards SKIPPED — reusing reference metrics in {gdir0}")
+            reference_metrics = json.loads((gdir0 / "guard_metrics.json").read_text())
         else:
             print("[round 0] guards on the starting model (reference row)")
-            reference_metrics = _run_guard_phase(cfg, model_path, gdir0, gpu_ids0, tag="round_000")
+            reference_metrics = _run_guard_phase(
+                cfg, _ema_inference_model_path(model_path), gdir0, gpu_ids0, tag="round_000"
+            )
     guard_rows: list[tuple[int, dict[str, Any]]] = []
     training_backend = str(cfg.get("training_backend", "base_sft"))
     if training_backend != "base_sft" and not isinstance(
@@ -2843,10 +2964,36 @@ def main() -> None:
             _print_dry_run_plan(cfg, model_path, rdir, gpu_ids, memory_cmd, round_idx)
             continue
 
-        print(f"[round {round_idx}] perception_mine")
-        phase_times["perception_mine"] = _run_mining_phase(cfg, model_path, rdir, gpu_ids)
+        infer_model = _ema_inference_model_path(model_path)
+        # Crash-resume: mining is the most expensive phase and its artifacts are
+        # self-contained, so a re-run that lands in the SAME round dir can reuse a
+        # previous complete mining pass instead of re-simulating the whole slice.
+        mining_complete = (rdir / "perception_direct_summary.json").is_file() and (
+            rdir / "credit_windows.jsonl"
+        ).is_file()
+        if bool(cfg.get("reuse_completed_mining")) and mining_complete:
+            print(
+                f"[round {round_idx}] perception_mine SKIPPED — reusing complete output in {rdir}"
+            )
+            phase_times["perception_mine"] = 0.0
+        else:
+            print(f"[round {round_idx}] perception_mine")
+            phase_times["perception_mine"] = _run_mining_phase(cfg, infer_model, rdir, gpu_ids)
+        # Fail loudly at the SOURCE if mining simulated nothing: --skip_bad_chunks makes the
+        # miner skip unloadable chunks silently, and the only downstream symptom is an empty
+        # credit_windows.jsonl at the repair phase (which hides the real cause).
+        mine_summary_path = rdir / "perception_direct_summary.json"
+        if mine_summary_path.is_file():
+            _ms = json.loads(mine_summary_path.read_text())
+            if int(_ms.get("simulated_chunks") or 0) == 0:
+                raise RuntimeError(
+                    f"mining simulated 0 of {_ms.get('planned_chunks')} planned chunks "
+                    f"({_ms.get('skipped_chunks')} skipped) — the scenes could not be loaded. "
+                    f"Inspect {rdir}/perception_mine_shards/shard_00/segments.skipped.jsonl "
+                    "(a staged/incomplete dataset copy missing sidecar files does this)."
+                )
         print(f"[round {round_idx}] repair")
-        phase_times["repair"] = _run_repair_phase(cfg, model_path, rdir, gpu_ids)
+        phase_times["repair"] = _run_repair_phase(cfg, infer_model, rdir, gpu_ids)
         print(f"[round {round_idx}] memory: {' '.join(memory_cmd)}")
         phase_times["memory"] = _run(memory_cmd, rdir / "memory.log")
 
@@ -2923,7 +3070,11 @@ def main() -> None:
             print(f"[round {round_idx}] guards")
             t0 = time.perf_counter()
             guard_metrics = _run_guard_phase(
-                cfg, model_path, rdir / "guards", gpu_ids, tag=f"round_{round_idx:03d}"
+                cfg,
+                _ema_inference_model_path(model_path),
+                rdir / "guards",
+                gpu_ids,
+                tag=f"round_{round_idx:03d}",
             )
             phase_times["guards"] = time.perf_counter() - t0
             guard_rows.append((round_idx, guard_metrics))
@@ -2953,7 +3104,9 @@ def main() -> None:
         fdir = out / "final_round_mine"
         fdir.mkdir(parents=True, exist_ok=True)
         print(f"[final] mining residual problems + realized reward with {model_path}")
-        _run_mining_phase(cfg, model_path, fdir, _gpu_ids_from_config(cfg))
+        _run_mining_phase(
+            cfg, _ema_inference_model_path(model_path), fdir, _gpu_ids_from_config(cfg)
+        )
         fsum = _load_json(fdir / "perception_direct_summary.json")
         # Represent the final-round mine in the operator-facing summary contract, not
         # just stdout: the last round's checkpoint has no successor mine, so this is the

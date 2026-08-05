@@ -310,3 +310,67 @@ def test_stopped_does_not_fire_without_gt_or_baseline_anchor():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def _straight(scale: float, T: int = 80):
+    import torch
+
+    xs = torch.linspace(0.0, 40.0 * scale, T)
+    return torch.stack([xs, torch.zeros(T), torch.ones(T), torch.zeros(T)], dim=-1)
+
+
+def _band_cfg(continuous: bool):
+    from planner_metrics.config import RewardConfig
+
+    return RewardConfig(
+        w_progress=0.0,
+        enable_overprogress=True,
+        overprogress_margin=1.15,
+        overprogress_penalty=30.0,
+        underprogress_penalty=30.0,
+        underprogress_threshold=0.85,
+        underprogress_reference="baseline",
+        stopped_penalty=0.0,
+        progress_band_continuous=continuous,
+        progress_band_penalty=30.0,
+    )
+
+
+def _band_totals(continuous: bool, scales):
+    import torch
+
+    from rlvr.reward import compute_reward_batch
+
+    gt = torch.stack(
+        [torch.linspace(0.0, 40.0, 80), torch.zeros(80), torch.zeros(80)], dim=-1
+    )
+    data = {
+        "ego_agent_future": gt[None],
+        "baseline_path_len": torch.tensor(40.0),
+        "ego_shape": torch.tensor([4.76, 7.24, 2.29]),
+    }
+    egos = torch.stack([_straight(s) for s in scales])
+    return [row.total for row in compute_reward_batch(egos, data, _band_cfg(continuous))]
+
+
+def test_progress_band_is_flat_by_default():
+    """Historical behaviour: inside [0.85, 1.15] the progress reward is FLAT, so a
+    trajectory trailing the reference by 15% scores the same as one matching it. This is
+    what let candidate selection drift to the cautious edge of the band."""
+    totals = _band_totals(False, [0.85, 0.90, 0.95, 1.00, 1.05])
+    assert max(totals) - min(totals) < 1e-4, totals
+
+
+def test_progress_band_continuous_peaks_at_reference_pace():
+    """Opt-in band: strictly best at ratio 1.0, symmetric, and continuous into the
+    one-sided penalties at both edges."""
+    scales = [0.70, 0.85, 0.95, 1.00, 1.05, 1.15, 1.30]
+    totals = _band_totals(True, scales)
+    by = dict(zip(scales, totals, strict=True))
+    assert by[1.00] == max(totals)
+    assert by[0.95] < by[1.00] and by[1.05] < by[1.00]
+    assert by[0.85] < by[0.95] and by[1.15] < by[1.05]
+    # symmetry: equal deviation costs the same on both sides
+    assert abs((by[1.00] - by[0.95]) - (by[1.00] - by[1.05])) < 0.2, by
+    # continuity: no jump at the band edges (slope 30 per unit ratio on both sides)
+    assert abs((by[0.85] - by[0.70]) - 4.5) < 1.0, by

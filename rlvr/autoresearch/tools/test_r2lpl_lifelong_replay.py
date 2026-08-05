@@ -86,6 +86,27 @@ from scenario_generation.danger_event_selection import (
 from scenario_generation.tools.classify_replay_steps import _decluster as _decluster_replay_steps
 
 
+def _reward_row(total: float = 1.0, **overrides):
+    """Stub of one ``compute_reward_batch`` row.
+
+    The real row carries the per-term subscores that the realized-reward component
+    telemetry reads (centerline / feasibility / progress / gate flags), so a stub with
+    only ``total`` diverges from the production interface and the telemetry raises
+    AttributeError. Keep every field the callers touch here, in ONE place.
+    """
+    fields = {
+        "total": float(total),
+        "centerline": 0.0,
+        "feasibility": 0.0,
+        "progress": 0.0,
+        "collision_step": None,
+        "rb_crossing": False,
+        "kinematic_violated": False,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
 class _IdentityObservationNormalizer:
     def __call__(self, data):
         return data
@@ -2558,57 +2579,83 @@ def test_seed_state_tracker_mode_selects_mpc():
     assert state.tracker.__class__.__name__ == "MPCTracker"
 
 
-def test_repair_candidate_selector_breaks_ties_by_lower_deviation():
+def _clean_reward_row(total: float, centerline: float = 0.0) -> SimpleNamespace:
+    return SimpleNamespace(
+        total=total,
+        centerline=centerline,
+        collision_step=None,
+        rb_crossing=False,
+        lane_crossing=False,
+        static_crossing=False,
+        kinematic_violated=False,
+        sc_min_dist=1.0,
+        rb_min_dist=1.0,
+    )
+
+
+_SELECTOR_CANDIDATE_ROWS = [
+    {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+    {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
+]
+_SELECTOR_CANDIDATE_TRAJS = [
+    torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
+    torch.tensor([[5.0, 0.0, 1.0, 0.0], [5.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
+]
+_SELECTOR_REFERENCE = torch.tensor(
+    [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]], dtype=torch.float32
+)
+
+
+def test_repair_candidate_selector_unified_recoverable_prefers_rule_score():
+    # Paper Eq. 26, unified across mistake types: a collision/road-border row is a
+    # "recoverable" state (0.65 rule / 0.30 ref / 0.05 expert), so the higher-reward
+    # candidate wins even though the lower-reward one sits nearer the expert.
     source_row = {"repair_labels": ["road_border_crossing"]}
-    candidate_rows = [
-        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
-        {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]},
-    ]
-    reward_rows = [
-        SimpleNamespace(
-            total=1.0,
-            collision_step=None,
-            rb_crossing=False,
-            lane_crossing=False,
-            static_crossing=False,
-            kinematic_violated=False,
-            sc_min_dist=1.0,
-            rb_min_dist=1.0,
-        ),
-        SimpleNamespace(
-            total=10.0,
-            collision_step=None,
-            rb_crossing=False,
-            lane_crossing=False,
-            static_crossing=False,
-            kinematic_violated=False,
-            sc_min_dist=1.0,
-            rb_min_dist=1.0,
-        ),
-    ]
-    candidate_trajs = [
-        torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
-        torch.tensor([[5.0, 0.0, 1.0, 0.0], [5.1, 0.0, 1.0, 0.0]], dtype=torch.float32),
-    ]
-    reference_traj = torch.tensor([[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+    reward_rows = [_clean_reward_row(total=1.0), _clean_reward_row(total=10.0)]
 
     idx, meta = _best_safe_candidate(
         source_row,
-        candidate_rows,
+        _SELECTOR_CANDIDATE_ROWS,
         reward_rows,
         min_static_margin=0.3,
         target_gt_disagreement_thresh=2.0,
-        candidate_trajs=candidate_trajs,
-        reference_traj=reference_traj,
+        candidate_trajs=_SELECTOR_CANDIDATE_TRAJS,
+        reference_traj=_SELECTOR_REFERENCE,
     )
 
-    assert idx == 0
-    assert meta["selected_deviation_penalty"] < 1.0
+    assert idx == 1
+    assert meta["selected_r2lpl_state_class"] == "recoverable"
+    assert meta["selected_r2lpl_score"] > 0.0
     # R2LPL hard-example signal is emitted alongside the deviation penalty and is
     # distinct from realized expert_disagreement.
     assert meta["target_gt_disagreement_mean_l2"] == meta["selected_deviation_penalty"]
     assert meta["target_gt_disagreement_max_l2"] >= meta["target_gt_disagreement_mean_l2"]
     assert isinstance(meta["target_gt_disagreement"], bool)
+
+
+def test_repair_candidate_selector_unified_near_log_prefers_expert():
+    # Near-log conflict states weight expert consistency 0.80 and gate out
+    # candidates far below the most expert-consistent one, so the expert-nearest
+    # candidate wins despite a lower reward total.
+    source_row = {
+        "repair_labels": ["expert_disagreement"],
+        "expert_disagreement_max_dev": 0.5,
+    }
+    reward_rows = [_clean_reward_row(total=1.0), _clean_reward_row(total=10.0)]
+
+    idx, meta = _best_safe_candidate(
+        source_row,
+        _SELECTOR_CANDIDATE_ROWS,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=_SELECTOR_CANDIDATE_TRAJS,
+        reference_traj=_SELECTOR_REFERENCE,
+    )
+
+    assert idx == 0
+    assert meta["selected_r2lpl_state_class"] == "near_log"
+    assert meta["selected_deviation_penalty"] < 1.0
 
 
 def test_t0_dirty_source_discards_whole_event_window(monkeypatch):
@@ -3128,12 +3175,14 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
         lanes_has_speed_limit=sim_lanes_has_speed_limit,
         turn_indicators=sim_turn_indicators,
         ego_agent_future=np.full((80, 4), -5.0, dtype=np.float32),
+        ego_expert_future=np.full((80, 4), -5.0, dtype=np.float32),
         origin=np.asarray("sim"),
     )
 
     data = {
         "ego_shape": torch.tensor(sim_ego_shape[None], dtype=torch.float32),
         "ego_agent_future": torch.zeros((80, 4), dtype=torch.float32),
+        "ego_expert_future": torch.zeros((80, 4), dtype=torch.float32),
     }
     selected = torch.zeros((80, 4), dtype=torch.float32)
     selected[:, 0] = torch.arange(80, dtype=torch.float32)
@@ -3198,12 +3247,12 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
     monkeypatch.setattr(
         build_repaired_targets_tool,
         "compute_reward_batch",
-        lambda *_args, **_kwargs: [SimpleNamespace(total=1.0)],
+        lambda *_args, **_kwargs: [_reward_row(1.0)],
     )
     monkeypatch.setattr(
         build_repaired_targets_tool,
         "_shape_reward",
-        lambda *_args, **_kwargs: [SimpleNamespace(total=1.0)],
+        lambda *_args, **_kwargs: [_reward_row(1.0)],
     )
     monkeypatch.setattr(
         build_repaired_targets_tool,
@@ -4510,7 +4559,10 @@ def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
     scene_list.write_text(json.dumps(["/tmp/a.npz"]))
     out_dir = tmp_path / "auto_research" / "out"
     initial_model = tmp_path / "initial.pth"
-    initial_model.write_bytes(b"")
+    # A real (if tiny) checkpoint: inference phases resolve EMA weights through
+    # _ema_inference_model_path, which torch.loads this file. An empty stub only passed
+    # while that resolution step did not exist.
+    torch.save({"model": {}}, initial_model)
     cfg = {
         "rounds": 2,
         "epochs_per_round": 1,
@@ -4567,7 +4619,9 @@ def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
         train_warm_starts.append(str(model_path))
         ckpt = rdir / "base_train" / "latest.pth"
         ckpt.parent.mkdir(parents=True, exist_ok=True)
-        ckpt.write_bytes(b"")
+        # Loadable stub: the next round's inference phases resolve EMA weights from this
+        # checkpoint (see _ema_inference_model_path), so it must be a real torch file.
+        torch.save({"model": {}}, ckpt)
         return 0.0, ckpt
 
     guarded: list[tuple[str, str]] = []
@@ -5252,7 +5306,7 @@ def test_realized_reward_scorer_per_batch_accumulate_and_teleport_skip(monkeypat
     # predict which poses get scored and that teleport windows are excluded.
     def fake_reward(ego, data, cfg):
         xy = ego[0, :, :2].cpu().numpy()
-        return [SimpleNamespace(total=float(abs(xy[-1, 0] - xy[0, 0])))]
+        return [_reward_row(float(abs(xy[-1, 0] - xy[0, 0])))]
 
     monkeypatch.setattr(_reward, "compute_reward_batch", fake_reward)
 
@@ -5305,9 +5359,7 @@ def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
     does not re-score the same poses."""
     import rlvr.reward as _reward
 
-    monkeypatch.setattr(
-        _reward, "compute_reward_batch", lambda ego, data, cfg: [SimpleNamespace(total=1.0)]
-    )
+    monkeypatch.setattr(_reward, "compute_reward_batch", lambda ego, data, cfg: [_reward_row(1.0)])
     import tempfile
     from pathlib import Path as _P
 
