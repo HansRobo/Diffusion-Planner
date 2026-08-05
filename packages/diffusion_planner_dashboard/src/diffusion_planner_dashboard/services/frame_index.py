@@ -9,7 +9,9 @@ import numpy as np
 import pyarrow.parquet as pq
 from numpy.typing import NDArray
 
-REQUIRED_COLUMNS = frozenset({"bag_path", "map_path", "frame_time_ns"})
+from diffusion_planner.data import VEHICLE_COLUMNS, VehicleParameters
+
+REQUIRED_COLUMNS = frozenset({"bag_path", "map_path", "frame_time_ns", *VEHICLE_COLUMNS})
 STAT_COLUMNS = (
     "ego_speed_mps",
     "ego_yaw_rate_rps",
@@ -27,6 +29,7 @@ class FrameIndexRow:
     bag_path: str
     map_path: str
     frame_time_ns: int
+    vehicle: VehicleParameters
     stats: dict[str, object]
 
 
@@ -38,6 +41,7 @@ class FrameIndex:
     bag_paths: NDArray[np.str_]
     map_paths: NDArray[np.str_]
     frame_times_ns: NDArray[np.int64]
+    vehicles: NDArray[np.float64]
     stats: dict[str, NDArray[np.generic]]
 
     def __len__(self) -> int:
@@ -63,12 +67,13 @@ class FrameIndex:
             bag_path=str(self.bag_paths[index]),
             map_path=str(self.map_paths[index]),
             frame_time_ns=int(self.frame_times_ns[index]),
+            vehicle=VehicleParameters(*self.vehicles[index].tolist()),
             stats={key: values[index].item() for key, values in self.stats.items()},
         )
 
 
 def load_frame_index(path: str | Path) -> FrameIndex:
-    """Load and validate an index created by ``scripts/create_parquet.py``."""
+    """Load and validate an index created by the scripts in ``scripts/dataset``."""
     parquet_path = Path(path).expanduser().resolve()
     if not parquet_path.is_file():
         raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
@@ -92,5 +97,9 @@ def load_frame_index(path: str | Path) -> FrameIndex:
         bag_paths=column("bag_path").astype(np.str_),
         map_paths=column("map_path").astype(np.str_),
         frame_times_ns=column("frame_time_ns").astype(np.int64, copy=False),
+        # The ego dimensions are stamped into the index, so the sidebar no longer asks for them.
+        vehicles=np.stack(
+            [column(name).astype(np.float64, copy=False) for name in VEHICLE_COLUMNS], axis=1
+        ),
         stats={name: column(name) for name in STAT_COLUMNS if name in table.column_names},
     )

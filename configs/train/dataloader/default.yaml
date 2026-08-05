@@ -1,0 +1,16 @@
+# The dataset is nested here rather than being its own group: it exists only to feed this
+# loader, and Hydra instantiates it recursively when the loader is built.
+_target_: diffusion_planner.data.build_dataloader
+dataset:
+  # Frame index written by scripts/dataset/create_dataset_index.py. The ego dimensions come
+  # from the index itself, so no vehicle config is needed here.
+  _target_: diffusion_planner.data.PlannerDataset
+  parquet_path: ???
+  reader_capacity: 4
+  map_capacity: 2
+  traffic_light_timeout_s: 0.2
+  neighbor_observation_timeout_s: 0.3
+batch_size: 32
+shuffle: true
+# Each worker holds its own bag readers and parsed maps, so memory grows with this number.
+num_workers: 8

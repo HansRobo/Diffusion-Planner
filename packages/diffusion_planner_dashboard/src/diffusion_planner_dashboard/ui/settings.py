@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 
 from diffusion_planner.visualizer import FramePlotOptions
-from diffusion_planner_dashboard.services import FrameIndex, FrameIndexRow, VehicleParameters
+from diffusion_planner_dashboard.services import FrameIndex, FrameIndexRow
 
 
 def render_parquet_settings() -> str | None:
@@ -46,23 +46,16 @@ def render_frame_selector(index: FrameIndex) -> FrameIndexRow:
     return row
 
 
-def render_vehicle_parameters() -> VehicleParameters:
-    """Render editable vehicle dimensions."""
+def render_vehicle_parameters(row: FrameIndexRow) -> None:
+    """Show the ego dimensions the selected row was indexed with.
+
+    They are stamped into the index at scan time, so editing them here would no longer match
+    what training sees.
+    """
     with st.sidebar.expander("Vehicle parameters"):
-        base_link_to_front = st.number_input(
-            "Base link to front [m]", 0.1, 20.0, VehicleParameters.base_link_to_front, 0.01
-        )
-        vehicle_length = st.number_input(
-            "Vehicle length [m]", 0.1, 30.0, VehicleParameters.vehicle_length, 0.01
-        )
-        vehicle_width = st.number_input(
-            "Vehicle width [m]", 0.1, 10.0, VehicleParameters.vehicle_width, 0.01
-        )
-    return VehicleParameters(
-        base_link_to_front=base_link_to_front,
-        vehicle_length=vehicle_length,
-        vehicle_width=vehicle_width,
-    )
+        st.metric("Base link to front [m]", f"{row.vehicle.base_link_to_front:.3f}")
+        st.metric("Vehicle length [m]", f"{row.vehicle.vehicle_length:.3f}")
+        st.metric("Vehicle width [m]", f"{row.vehicle.vehicle_width:.3f}")
 
 
 def render_plot_options() -> FramePlotOptions:

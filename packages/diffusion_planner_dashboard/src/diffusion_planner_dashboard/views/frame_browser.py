@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import astuple
 from pathlib import Path
 
 import streamlit as st
 
+from diffusion_planner.data import VehicleParameters
 from diffusion_planner.visualizer import plot_frame
 from diffusion_planner_dashboard.services import (
     FrameIndex,
     FrameIndexRow,
     FrameLoader,
-    VehicleParameters,
     load_frame_index,
 )
 from diffusion_planner_dashboard.ui.metadata import render_index_summary, render_row_metadata
@@ -36,16 +37,19 @@ def _frame_loader() -> FrameLoader:
     return FrameLoader()
 
 
+# Cached on primitives so that the key stays stable and cheap to hash.
 @st.cache_data(max_entries=64, show_spinner="Reading frame data from rosbag...")
 def _cached_frame(
     row_index: int,
     bag_path: str,
     map_path: str,
     frame_time_ns: int,
-    vehicle: VehicleParameters,
+    vehicle: tuple[float, float, float],
 ):
-    row = FrameIndexRow(row_index, bag_path, map_path, frame_time_ns, {})
-    return _frame_loader().load(row, vehicle)
+    row = FrameIndexRow(
+        row_index, bag_path, map_path, frame_time_ns, VehicleParameters(*vehicle), {}
+    )
+    return _frame_loader().load(row)
 
 
 def render_frame_browser() -> None:
@@ -73,7 +77,7 @@ def render_frame_browser() -> None:
         st.error("\n\n".join(source_errors))
         return
 
-    vehicle = render_vehicle_parameters()
+    render_vehicle_parameters(row)
     options = render_plot_options()
     try:
         frame_data = _cached_frame(
@@ -81,7 +85,7 @@ def render_frame_browser() -> None:
             row.bag_path,
             row.map_path,
             row.frame_time_ns,
-            vehicle,
+            astuple(row.vehicle),
         )
     except (RuntimeError, ValueError) as error:
         st.error(str(error))

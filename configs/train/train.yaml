@@ -1,0 +1,9 @@
+# @package _global_
+# This config sits in configs/train, so without the package override above everything would
+# be nested under `train`. The group name would also resolve under configs/train, so the
+# leading slash makes it absolute against configs/ and @ binds it to a short key.
+defaults:
+  - /train/dataloader@dataloader: default
+  - _self_
+
+seed: 42

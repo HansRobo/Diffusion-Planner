@@ -1,0 +1,45 @@
+# One vehicle per project id: every project is driven by a single vehicle model.
+#
+# This file is read only by scripts/dataset/create_parquet_rosbag_from_label.py, which stamps
+# the dimensions into every row of the index it writes. Training reads them back from there,
+# so changing this file affects new indexes only. Every project being scanned must appear
+# here, otherwise the scan refuses to start.
+#
+# The numbers below are placeholders. Replace each entry with base_link_to_front /
+# vehicle_length / vehicle_width taken from that project's vehicle_info.param.yaml.
+
+x2_dev:
+  _target_: diffusion_planner.data.VehicleParameters
+  base_link_to_front: 5.71111
+  vehicle_length: 7.2369
+  vehicle_width: 2.42741
+
+prd_jt:
+  _target_: diffusion_planner.data.VehicleParameters
+  base_link_to_front: 5.71111
+  vehicle_length: 7.2369
+  vehicle_width: 2.42741
+
+erga: # Isuzu Erga, a full-size bus: these placeholders are certainly wrong for it.
+  _target_: diffusion_planner.data.VehicleParameters
+  base_link_to_front: 5.71111
+  vehicle_length: 7.2369
+  vehicle_width: 2.42741
+
+rAwaNfK1:
+  _target_: diffusion_planner.data.VehicleParameters
+  base_link_to_front: 5.71111
+  vehicle_length: 7.2369
+  vehicle_width: 2.42741
+
+L3Lm25QG:
+  _target_: diffusion_planner.data.VehicleParameters
+  base_link_to_front: 5.71111
+  vehicle_length: 7.2369
+  vehicle_width: 2.42741
+
+dnjXqf91: # Minibus.
+  _target_: diffusion_planner.data.VehicleParameters
+  base_link_to_front: 5.71111
+  vehicle_length: 7.2369
+  vehicle_width: 2.42741

@@ -2,19 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from .frame_index import FrameIndexRow
-
-
-@dataclass(frozen=True)
-class VehicleParameters:
-    """Primitive parameters accepted by ``diffusion_planner_data_tools.VehicleSpec``."""
-
-    base_link_to_front: float = 5.71111
-    vehicle_length: float = 7.2369
-    vehicle_width: float = 2.42741
 
 
 class FrameLoader:
@@ -34,12 +24,12 @@ class FrameLoader:
             map_capacity=map_capacity,
         )
 
-    def load(self, row: FrameIndexRow, vehicle: VehicleParameters) -> dict[str, Any] | None:
+    def load(self, row: FrameIndexRow) -> dict[str, Any] | None:
         """Build one model-ready frame from a selected index row."""
         spec = self._dpt.VehicleSpec(
-            base_link_to_front=vehicle.base_link_to_front,
-            vehicle_length=vehicle.vehicle_length,
-            vehicle_width=vehicle.vehicle_width,
+            base_link_to_front=row.vehicle.base_link_to_front,
+            vehicle_length=row.vehicle.vehicle_length,
+            vehicle_width=row.vehicle.vehicle_width,
         )
         return self._cache.create_frame_data(
             bag_path=row.bag_path,

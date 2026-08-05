@@ -1,0 +1,20 @@
+# @package _global_
+# This config sits in configs/dataset, so the leading slash below makes the group absolute
+# against configs/ and @ binds it to a short key.
+defaults:
+  - /dataset/vehicles@vehicles: tier4_fleet
+  - _self_
+
+# rosbags_from_label directory to scan. Any level works: the whole download, one project, one
+# dataset, one split, one date, or a single bag directory.
+root: ???
+output: ???
+# One of train, valid or auto.
+split: train
+# Spacing between generated frames [s]; changes only the index sample density, not the
+# model's internal 0.1 s grid.
+frame_interval: 0.3
+# Bags scanned in parallel. The scan is disk bound, so more than ~64 rarely helps.
+jobs: 64
+# Scan only the first N bags, or null for all of them.
+limit: null
