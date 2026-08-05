@@ -108,7 +108,7 @@ void BagFrameReader::open_main_reader() {
   filter.topics = {topics_.kinematic_state, topics_.tracked_objects,
                    topics_.turn_indicators, topics_.traffic_signals};
   reader_->set_filter(filter);
-  last_recv_sec_ = -std::numeric_limits<double>::infinity();
+  pending_message_.reset();
   ego_buffer_.clear();
   objects_buffer_.clear();
   turn_indicators_buffer_.clear();
@@ -127,10 +127,16 @@ void BagFrameReader::ensure_read_until(const double target_sec) {
     last_target_sec_ = std::max(last_target_sec_, target_sec);
   }
 
-  while (last_recv_sec_ <= target_sec + LOOKAHEAD_MARGIN_S &&
-         reader_->has_next()) {
-    const auto bag_msg = reader_->read_next();
-    last_recv_sec_ = static_cast<double>(bag_msg->time_stamp) * 1e-9;
+  const double receive_time_limit = target_sec + LOOKAHEAD_MARGIN_S;
+  while (pending_message_ != nullptr || reader_->has_next()) {
+    const auto bag_msg = pending_message_ != nullptr
+                             ? std::exchange(pending_message_, nullptr)
+                             : reader_->read_next();
+    const double receive_sec = static_cast<double>(bag_msg->time_stamp) * 1e-9;
+    if (receive_sec > receive_time_limit) {
+      pending_message_ = bag_msg;
+      break;
+    }
     rclcpp::SerializedMessage raw(*bag_msg->serialized_data);
     const std::string &topic = bag_msg->topic_name;
 

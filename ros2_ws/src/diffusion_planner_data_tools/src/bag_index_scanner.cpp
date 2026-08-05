@@ -14,6 +14,7 @@
 
 #include "bag_index_scanner.hpp"
 
+#include "skip_index.hpp"
 #include "topic_config.hpp"
 
 #include <rclcpp/serialization.hpp>
@@ -52,41 +53,42 @@ latest_at_or_before(const std::vector<std::pair<double, SampleT>> &samples,
   return &samples[cursor].second;
 }
 
+template <typename SampleT>
+std::vector<double>
+stamps_of(const std::vector<std::pair<double, SampleT>> &samples) {
+  std::vector<double> stamps;
+  stamps.reserve(samples.size());
+  for (const auto &[stamp, _] : samples) {
+    stamps.push_back(stamp);
+  }
+  return stamps;
+}
+
 } // namespace
 
 BagFrameIndex scan_bag_index(const std::string &bag_path,
                              const TopicConfig &topics,
-                             const double time_step_s,
-                             const double history_window_s,
-                             const double future_horizon_s,
-                             const double traffic_light_timeout_s) {
+                             const IndexerParam &param) {
   using autoware_perception_msgs::msg::TrackedObjects;
   using autoware_perception_msgs::msg::TrafficLightGroupArray;
   using autoware_planning_msgs::msg::LaneletRoute;
   using autoware_vehicle_msgs::msg::TurnIndicatorsReport;
   using nav_msgs::msg::Odometry;
 
-  if (!std::isfinite(time_step_s) || time_step_s <= 0.0) {
+  if (!std::isfinite(param.time_step_s) || param.time_step_s <= 0.0) {
     throw std::invalid_argument(
         "time_step_s must be finite and greater than zero");
   }
-  if (!std::isfinite(history_window_s) || history_window_s < 0.0) {
+  if (!std::isfinite(param.min_travel_distance) ||
+      param.min_travel_distance < 0.0) {
     throw std::invalid_argument(
-        "history_window_s must be finite and non-negative");
+        "min_travel_distance must be finite and non-negative");
   }
-  if (!std::isfinite(future_horizon_s) || future_horizon_s < 0.0) {
-    throw std::invalid_argument(
-        "future_horizon_s must be finite and non-negative");
-  }
-  if (!std::isfinite(traffic_light_timeout_s) ||
-      traffic_light_timeout_s < 0.0) {
-    throw std::invalid_argument(
-        "traffic_light_timeout_s must be finite and non-negative");
-  }
-
   struct EgoSample {
     float speed_mps;
     float yaw_rate_rps;
+    double x;
+    double y;
   };
   std::vector<std::pair<double, EgoSample>> ego_samples;
   std::vector<std::pair<double, uint8_t>> turn_samples;
@@ -121,7 +123,8 @@ BagFrameIndex scan_bag_index(const std::string &bag_path,
         ego_samples.emplace_back(
             rclcpp::Time(msg.header.stamp).seconds(),
             EgoSample{static_cast<float>(msg.twist.twist.linear.x),
-                      static_cast<float>(msg.twist.twist.angular.z)});
+                      static_cast<float>(msg.twist.twist.angular.z),
+                      msg.pose.pose.position.x, msg.pose.pose.position.y});
       } else if (topic == topics.tracked_objects) {
         TrackedObjects msg;
         objects_serializer.deserialize_message(&raw, &msg);
@@ -161,25 +164,44 @@ BagFrameIndex scan_bag_index(const std::string &bag_path,
   std::sort(traffic_stamps.begin(), traffic_stamps.end());
   std::sort(route_stamps.begin(), route_stamps.end());
 
+  std::vector<std::pair<double, double>> ego_positions;
+  ego_positions.reserve(ego_samples.size());
+  for (const auto &ego_sample : ego_samples) {
+    ego_positions.emplace_back(ego_sample.second.x, ego_sample.second.y);
+  }
+  if (const auto warning = check_min_travel_distance(
+          ego_positions, param.min_travel_distance)) {
+    index.warnings.push_back(*warning);
+    index.skipped = true;
+    return index;
+  }
+
   const double ego_first_sec = ego_samples.front().first;
   const double ego_last_sec = ego_samples.back().first;
-  const double turn_first_sec =
-      turn_samples.empty() ? ego_last_sec : turn_samples.front().first;
-  const double objects_first_sec =
-      objects_samples.empty() ? ego_last_sec : objects_samples.front().first;
-
   const auto num_frames = static_cast<size_t>(std::floor(
-                              (ego_last_sec - ego_first_sec) / time_step_s)) +
+                              (ego_last_sec - ego_first_sec) / param.time_step_s)) +
                           1;
+
+  // Gap checking works on stamps alone, so extract them once.
+  const std::vector<double> ego_stamps = stamps_of(ego_samples);
+  const std::vector<double> turn_stamps = stamps_of(turn_samples);
+  const std::vector<double> objects_stamps = stamps_of(objects_samples);
 
   index.frame_time_ns.reserve(num_frames);
   size_t ego_cursor = 0;
   size_t turn_cursor = 0;
   size_t objects_cursor = 0;
-  size_t traffic_cursor = 0;
+  size_t invalid_range_cursor = 0;
+  const FrameRange frame_range =
+      calculate_frame_range(topics, param, ego_stamps, turn_stamps,
+                            objects_stamps, traffic_stamps, route_stamps,
+                            num_frames);
+  index.all_frames = num_frames;
+  index.usable_frames = frame_range.usable_frames;
+  index.warnings = frame_range.warnings;
 
   for (size_t i = 0; i < num_frames; ++i) {
-    const double t = ego_first_sec + static_cast<double>(i) * time_step_s;
+    const double t = ego_first_sec + static_cast<double>(i) * param.time_step_s;
 
     // Advance the ZOH cursors even for skipped frames so that they stay
     // consistent across the whole grid.
@@ -187,23 +209,13 @@ BagFrameIndex scan_bag_index(const std::string &bag_path,
     const uint8_t *turn = latest_at_or_before(turn_samples, t, turn_cursor);
     const int32_t *objects =
         latest_at_or_before(objects_samples, t, objects_cursor);
-    while (traffic_cursor + 1 < traffic_stamps.size() &&
-           traffic_stamps[traffic_cursor + 1] <= t) {
-      ++traffic_cursor;
-    }
-    const bool traffic_fresh =
-        !traffic_stamps.empty() && traffic_stamps[traffic_cursor] <= t &&
-        t - traffic_stamps[traffic_cursor] <= traffic_light_timeout_s;
 
-    // Only valid frames are emitted: full past window coverage, full ego
-    // future horizon coverage, and an available route.
-    const bool past_covered = (t - history_window_s >= ego_first_sec) &&
-                              (t - history_window_s >= turn_first_sec) &&
-                              (t - history_window_s >= objects_first_sec);
-    const bool future_covered = ego_last_sec >= t + future_horizon_s;
-    const bool route_available =
-        !route_stamps.empty() && route_stamps.front() <= t + 1e-6;
-    if (!(past_covered && future_covered && route_available)) {
+    if (t > frame_range.last_valid_t) {
+      break;
+    }
+    if (t < frame_range.first_valid_t ||
+        is_frame_invalid(frame_range.invalid_ranges, t,
+                         invalid_range_cursor)) {
       continue;
     }
 
@@ -212,7 +224,6 @@ BagFrameIndex scan_bag_index(const std::string &bag_path,
     index.ego_yaw_rate_rps.push_back(ego != nullptr ? ego->yaw_rate_rps : 0.0f);
     index.turn_indicator.push_back(turn != nullptr ? *turn : 0);
     index.num_objects.push_back(objects != nullptr ? *objects : 0);
-    index.traffic_signal_fresh.push_back(traffic_fresh);
   }
 
   return index;

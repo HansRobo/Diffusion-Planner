@@ -61,14 +61,16 @@ frame = cache.create_frame_data(
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-index = dpt.scan_bag_index(bag_path)   # C++で1パススキャン (numpy配列のdict)
+indexer_param = dpt.IndexerParam()
+indexer_param.time_step_s = 0.1
+index, warnings, stats = dpt.scan_bag_index(bag_path, param=indexer_param)
 n = len(index["frame_time_ns"])
 table = pa.table({"bag_path": [bag_path] * n, "map_path": [map_path] * n, **index})
 pq.write_table(table, "frame_index.parquet")   # 書き込みはPython側
 ```
 
-`scan_bag_index(bag_path, topics=config, frame_interval_s=0.1,
-traffic_light_timeout_s=0.2)`。`frame_interval_s` はフレーム行の生成間隔 [s]
+`scan_bag_index(bag_path, topics=config, param=indexer_param)`。
+`IndexerParam.time_step_s` はフレーム行の生成間隔 [s]
 で、index のサンプル密度を変えるだけ（モデル内部の 0.1s グリッドには影響
 しない）。
 

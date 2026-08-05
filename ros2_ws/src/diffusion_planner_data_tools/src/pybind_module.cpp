@@ -20,7 +20,6 @@
 #include "frame_data_cache.hpp"
 #include "topic_config.hpp"
 
-#include "autoware/diffusion_planner/constants.hpp"
 #include "autoware/diffusion_planner/dimensions.hpp"
 
 #include <pybind11/numpy.h>
@@ -79,7 +78,6 @@ py::dict to_numpy_dict(const ddt::BagFrameIndex &index) {
   add("ego_yaw_rate_rps", index.ego_yaw_rate_rps, float{});
   add("turn_indicator", index.turn_indicator, uint8_t{});
   add("num_objects", index.num_objects, int32_t{});
-  add("traffic_signal_fresh", index.traffic_signal_fresh, bool{});
   return result;
 }
 
@@ -106,21 +104,20 @@ py::object create_frame_data(ddt::FrameDataCache &cache,
   return to_numpy_dict(result.value());
 }
 
-py::dict scan_bag_index(const std::string &bag_path,
-                        const ddt::TopicConfig &topics,
-                        const double frame_interval_s,
-                        const double traffic_light_timeout_s) {
+py::tuple scan_bag_index(const std::string &bag_path,
+                         const ddt::TopicConfig &topics,
+                         const ddt::IndexerParam &param) {
   ddt::BagFrameIndex index;
   {
     py::gil_scoped_release release;
-    constexpr double future_horizon_s =
-        static_cast<double>(autoware::diffusion_planner::OUTPUT_T) *
-        autoware::diffusion_planner::constants::PREDICTION_TIME_STEP_S;
-    index = ddt::scan_bag_index(bag_path, topics, frame_interval_s,
-                                autoware::diffusion_planner::HISTORY_WINDOW_S,
-                                future_horizon_s, traffic_light_timeout_s);
+    index = ddt::scan_bag_index(bag_path, topics, param);
   }
-  return to_numpy_dict(index);
+  py::dict stats;
+  stats["all_frames"] = index.all_frames;
+  stats["usable_frames"] = index.usable_frames;
+  stats["kept_frames"] = index.frame_time_ns.size();
+  stats["skipped"] = index.skipped;
+  return py::make_tuple(to_numpy_dict(index), py::cast(index.warnings), stats);
 }
 
 } // namespace
@@ -146,6 +143,24 @@ PYBIND11_MODULE(_diffusion_planner_data_tools, m) {
       .def_readwrite("traffic_signals", &ddt::TopicConfig::traffic_signals)
       .def_readwrite("route", &ddt::TopicConfig::route);
 
+  py::class_<ddt::TopicDropThresholds>(m, "TopicDropThresholds")
+      .def(py::init<>())
+      .def_readwrite("kinematic_state",
+                     &ddt::TopicDropThresholds::kinematic_state)
+      .def_readwrite("tracked_objects",
+                     &ddt::TopicDropThresholds::tracked_objects)
+      .def_readwrite("turn_indicators",
+                     &ddt::TopicDropThresholds::turn_indicators)
+      .def_readwrite("traffic_signals",
+                     &ddt::TopicDropThresholds::traffic_signals);
+
+  py::class_<ddt::IndexerParam>(m, "IndexerParam")
+      .def(py::init<>())
+      .def_readwrite("time_step_s", &ddt::IndexerParam::time_step_s)
+      .def_readwrite("min_travel_distance",
+                     &ddt::IndexerParam::min_travel_distance)
+      .def_readwrite("topic_drop_thresholds", &ddt::IndexerParam::topic_drop_thresholds);
+
   py::class_<VehicleSpec>(m, "VehicleSpec")
       .def(py::init<double, double, double>(), py::arg("base_link_to_front"),
            py::arg("vehicle_length"), py::arg("vehicle_width"))
@@ -155,12 +170,7 @@ PYBIND11_MODULE(_diffusion_planner_data_tools, m) {
 
   m.def("scan_bag_index", &scan_bag_index, py::arg("bag_path"),
         py::arg("topics") = ddt::load_topic_config(),
-        py::arg("frame_interval_s") =
-            autoware::diffusion_planner::constants::PREDICTION_TIME_STEP_S,
-        py::arg("traffic_light_timeout_s") = 0.2,
-        "Scan a bag once and return the per-frame index columns as numpy "
-        "arrays (valid frames "
-        "only); the caller writes them to Parquet");
+        py::arg("param") = ddt::IndexerParam{});
 
   py::class_<ddt::FrameDataCache>(m, "FrameDataCache")
       .def(py::init<size_t, size_t, ddt::TopicConfig, double>(),

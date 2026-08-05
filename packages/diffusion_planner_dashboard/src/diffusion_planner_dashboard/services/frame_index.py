@@ -17,7 +17,6 @@ STAT_COLUMNS = (
     "ego_yaw_rate_rps",
     "turn_indicator",
     "num_objects",
-    "traffic_signal_fresh",
 )
 
 

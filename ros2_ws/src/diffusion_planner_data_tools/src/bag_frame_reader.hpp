@@ -25,6 +25,7 @@
 
 #include <rclcpp/serialization.hpp>
 #include <rosbag2_cpp/reader.hpp>
+#include <rosbag2_storage/serialized_bag_message.hpp>
 
 #include <autoware_perception_msgs/msg/tracked_objects.hpp>
 #include <autoware_perception_msgs/msg/traffic_light_group_array.hpp>
@@ -127,6 +128,7 @@ private:
   std::string bag_path_;
   TopicConfig topics_;
   std::unique_ptr<rosbag2_cpp::Reader> reader_;
+  rosbag2_storage::SerializedBagMessageSharedPtr pending_message_;
 
   rclcpp::Serialization<Odometry> odom_serializer_;
   rclcpp::Serialization<TrackedObjects> objects_serializer_;
@@ -147,7 +149,6 @@ private:
       [](const TrafficLightGroupArray &m) { return rclcpp::Time(m.stamp); }};
 
   std::vector<std::pair<double, LaneletRoute>> routes_;
-  double last_recv_sec_{-std::numeric_limits<double>::infinity()};
   double last_target_sec_{-std::numeric_limits<double>::infinity()};
 };
 

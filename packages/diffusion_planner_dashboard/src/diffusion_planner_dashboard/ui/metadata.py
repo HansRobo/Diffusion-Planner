@@ -32,7 +32,6 @@ def render_row_metadata(row: FrameIndexRow) -> None:
         "ego_yaw_rate_rps": "Yaw rate [rad/s]",
         "turn_indicator": "Turn indicator",
         "num_objects": "Objects",
-        "traffic_signal_fresh": "Fresh traffic signal",
     }
     for column, (name, value) in zip(columns, row.stats.items(), strict=True):
         column.metric(labels.get(name, name), str(value))

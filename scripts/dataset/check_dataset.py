@@ -55,27 +55,21 @@ class FrameCheck(Dataset):
 
 
 def main() -> None:
-    """Walk the whole index and report every frame that fails to load."""
+    """Walk the whole index and stop at the first frame that fails to load."""
     parser = argparse.ArgumentParser(
-        description="Load every frame of a frame-index parquet and report the ones that fail"
+        description="Load every frame of a frame-index parquet and fail on the first error"
     )
     parser.add_argument("parquet", type=Path, help="frame index to check")
     parser.add_argument(
         "--jobs", type=int, default=8, help="worker processes (default: %(default)s)"
     )
     parser.add_argument("--limit", type=int, default=None, help="check only the first N frames")
-    parser.add_argument(
-        "--max-failures",
-        type=int,
-        default=20,
-        help="stop after this many failures; 0 checks everything (default: %(default)s)",
-    )
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
     if args.jobs < 0:
         parser.error("--jobs must not be negative")
-    dataset = PlannerDataset(args.parquet)
+    dataset = PlannerDataset(args.parquet, map_capacity=10000, reader_capacity=40000)
 
     checked = FrameCheck(dataset)
     total = len(checked) if args.limit is None else min(args.limit, len(checked))
@@ -90,36 +84,23 @@ def main() -> None:
         sampler=range(total),
     )
 
-    failures = 0
-    failed_bags: Counter[str] = Counter()
     signatures: Counter[tuple[tuple[str, tuple[int, ...]], ...]] = Counter()
-    progress = tqdm(total=total, unit="frame", smoothing=0.0)
-    for batch in loader:
-        for verdict in batch:
-            if verdict.ok:
-                signatures[verdict.signature] += 1
-                continue
-            bag_path, frame_time_ns = dataset.source(verdict.index)
-            failures += 1
-            failed_bags[bag_path] += 1
-            print(f"\n{bag_path} @ {frame_time_ns}: {verdict.reason}", file=sys.stderr)
-        progress.update(len(batch))
-        progress.set_postfix(failed=failures)
-        if args.max_failures and failures >= args.max_failures:
-            print(f"\nstopping after {failures} failures", file=sys.stderr)
-            break
-    progress.close()
+    with tqdm(total=total, desc="checking", unit="frame", smoothing=0.0) as progress:
+        for batch in loader:
+            for verdict in batch:
+                if verdict.ok:
+                    signatures[verdict.signature] += 1
+                    continue
+                bag_path, frame_time_ns = dataset.source(verdict.index)
+                print(f"\n{bag_path} @ {frame_time_ns}: {verdict.reason}", file=sys.stderr)
+                sys.exit(1)
+            progress.update(len(batch))
 
-    print(f"\n{total - failures}/{total} frames loaded")
+    print(f"\n{total}/{total} frames loaded")
     if len(signatures) > 1:
         print(f"WARNING: {len(signatures)} different tensor layouts in one index")
         for signature, count in signatures.most_common():
             print(f"  {count} frames: {dict(signature)}")
-    if failures:
-        print(f"{failures} failures over {len(failed_bags)} bag(s):")
-        for bag_path, count in failed_bags.most_common():
-            print(f"  {count:6d}  {bag_path}")
-        sys.exit(1)
 
 
 if __name__ == "__main__":

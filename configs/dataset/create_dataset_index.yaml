@@ -18,3 +18,12 @@ frame_interval: 0.3
 jobs: 64
 # Scan only the first N bags, or null for all of them.
 limit: null
+
+topic_drop_thresholds:
+  kinematic_state: 0.1 # [s]
+  tracked_objects: 0.2 # [s]
+  turn_indicators: 0.2 # [s]
+  traffic_signals: 1.0 # [s]
+
+# Bags whose cumulative ego travel distance is at or below this value are skipped.
+min_travel_distance: 1000.0 # [m]

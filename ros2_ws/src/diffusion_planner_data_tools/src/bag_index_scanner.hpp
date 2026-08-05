@@ -24,6 +24,39 @@ namespace autoware::diffusion_planner::data_tools {
 struct TopicConfig;
 
 /**
+ * @brief Longest publication gap tolerated per topic, in seconds.
+ *
+ * Some bags miss messages, either because a node was down for a while or
+ * because the topic was never recorded. A frame is only emitted if every topic
+ * below has a message at or before the start of the frame window and no gap
+ * longer than its threshold anywhere in that window, so dropouts never reach
+ * the frame data. A non-finite or non-positive value disables the check for
+ * that topic.
+ *
+ * The window is derived from the diffusion planner input/output dimensions
+ * because all four topics feed both the past inputs and the future labels.
+ */
+struct TopicDropThresholds {
+  double kinematic_state{0.5};
+  double tracked_objects{0.5};
+  double turn_indicators{0.5};
+  double traffic_signals{0.5};
+};
+
+/**
+ * @brief Configurable parameters that shape the frame grid and decide which
+ * frames survive.
+ */
+struct IndexerParam {
+  /// Frame grid interval [s].
+  double time_step_s{0.1};
+  /// Minimum cumulative ego travel distance required to keep a bag [m].
+  double min_travel_distance{0.0};
+  /// Longest publication gap tolerated per topic.
+  TopicDropThresholds topic_drop_thresholds{};
+};
+
+/**
  * @brief Per-frame index of one bag, sampled on a fixed time grid anchored at
  * the first ego odometry stamp.
  *
@@ -38,7 +71,10 @@ struct BagFrameIndex {
   std::vector<float> ego_yaw_rate_rps;
   std::vector<uint8_t> turn_indicator;
   std::vector<int32_t> num_objects;
-  std::vector<bool> traffic_signal_fresh;
+  std::vector<std::string> warnings;
+  size_t all_frames{0};
+  size_t usable_frames{0};
+  bool skipped{false};
 };
 
 /**
@@ -46,15 +82,11 @@ struct BagFrameIndex {
  *
  * @param bag_path Path to the rosbag directory.
  * @param topics Topic name configuration.
- * @param time_step_s Frame grid interval.
- * @param history_window_s Required past coverage of ego/turn/objects.
- * @param future_horizon_s Required ego future coverage.
- * @param traffic_light_timeout_s Freshness threshold for traffic_signal_fresh.
+ * @param param Frame grid and validity parameters.
  */
 BagFrameIndex scan_bag_index(const std::string &bag_path,
-                             const TopicConfig &topics, double time_step_s,
-                             double history_window_s, double future_horizon_s,
-                             double traffic_light_timeout_s);
+                             const TopicConfig &topics,
+                             const IndexerParam &param);
 
 } // namespace autoware::diffusion_planner::data_tools
 
