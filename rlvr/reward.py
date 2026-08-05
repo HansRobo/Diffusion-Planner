@@ -318,7 +318,9 @@ def _shape_reward(
                 dev = (ratio - 1.0).abs()
                 half_low = max(1.0 - config.underprogress_threshold, 1e-6)
                 half_high = max(config.overprogress_margin - 1.0, 1e-6)
-                half = torch.where(ratio < 1.0, torch.full_like(dev, half_low), torch.full_like(dev, half_high))
+                half = torch.where(
+                    ratio < 1.0, torch.full_like(dev, half_low), torch.full_like(dev, half_high)
+                )
                 band_dev = torch.minimum(dev, half)
                 progress_penalty = progress_penalty + config.progress_band_penalty * band_dev
 

@@ -470,6 +470,13 @@ def build_realized_reward_scorer(
         "rb_crossing_poses": 0,
         "kinematic_poses": 0,
     }  # per-component sums/counts over the SAME scored poses (decomposition of the mean)
+    # Per-SEGMENT reward samples. The aggregate mean alone hides how wide the per-chunk
+    # spread is, and that spread sets the standard error: without it, model-vs-model
+    # differences of a few percent look meaningful when they are not. Segment identity is a
+    # process-local id() here, so these are exposed as an ORDERED LIST (scoring order) for
+    # computing SD/SE, not as a joinable key -> pair models at shard level instead, which is
+    # deterministic by manifest order and therefore identical across runs.
+    per_segment: dict[int, list[float]] = {}
 
     def hook(built, preds, data, _device):
         rows = []
@@ -569,6 +576,7 @@ def build_realized_reward_scorer(
                 rb = compute_reward_batch(ego, sd_gpu, reward_cfg)
                 acc["sum"] += float(rb[0].total)
                 acc["n"] += 1
+                per_segment.setdefault(int(sid), []).append(float(rb[0].total))
                 comp["centerline"] += float(rb[0].centerline)
                 comp["feasibility"] += float(rb[0].feasibility)
                 comp["progress"] += float(rb[0].progress)
@@ -582,6 +590,9 @@ def build_realized_reward_scorer(
         teleport_ks.clear()
         last_snaps.clear()
         finalize.components = dict(comp)
+        # One mean per segment, in scoring order, so callers can report SD / standard error
+        # of the reward mean instead of quoting it as if it were exact.
+        finalize.per_segment_rewards = [sum(v) / len(v) for v in per_segment.values() if v]
         return (acc["sum"] / acc["n"] if acc["n"] else float("nan")), acc["n"]
 
     return hook, finalize

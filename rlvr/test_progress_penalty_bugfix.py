@@ -341,9 +341,7 @@ def _band_totals(continuous: bool, scales):
 
     from rlvr.reward import compute_reward_batch
 
-    gt = torch.stack(
-        [torch.linspace(0.0, 40.0, 80), torch.zeros(80), torch.zeros(80)], dim=-1
-    )
+    gt = torch.stack([torch.linspace(0.0, 40.0, 80), torch.zeros(80), torch.zeros(80)], dim=-1)
     data = {
         "ego_agent_future": gt[None],
         "baseline_path_len": torch.tensor(40.0),
