@@ -129,3 +129,113 @@ def test_rows_can_come_from_a_replay_memory_json(tmp_path):
     assert stats["rows_written"] == 1
     row = json.loads(out.read_text().strip())
     assert row["scene_path"] == src and row["refresh_frozen_total"] == -1.5
+
+
+def test_join_writes_a_map_of_only_the_improved_scenes(tmp_path):
+    frozen, src, fresh_npz = (
+        str(tmp_path / "f.npz"),
+        str(tmp_path / "s.npz"),
+        str(tmp_path / "n.npz"),
+    )
+    replay = _write(tmp_path / "replay.json", [frozen])
+    prev = _rows(
+        tmp_path / "prev.jsonl",
+        [{"scene_path": frozen, "source_scene_path": src, "selected_total": -2.0}],
+    )
+    fr = _rows(
+        tmp_path / "fresh.jsonl",
+        [{"scene_path": fresh_npz, "source_scene_path": src, "selected_total": -1.0}],
+    )
+    join(
+        replay,
+        [prev],
+        [fr],
+        tmp_path / "o.json",
+        tmp_path / "st.json",
+        out_map=tmp_path / "map.json",
+    )
+    m = json.loads((tmp_path / "map.json").read_text())
+    assert m[frozen]["new_path"] == fresh_npz and m[frozen]["new_total"] == -1.0
+
+
+def test_join_map_excludes_scenes_where_frozen_won(tmp_path):
+    frozen, src = str(tmp_path / "f.npz"), str(tmp_path / "s.npz")
+    replay = _write(tmp_path / "replay.json", [frozen])
+    prev = _rows(
+        tmp_path / "prev.jsonl",
+        [{"scene_path": frozen, "source_scene_path": src, "selected_total": -1.0}],
+    )
+    fr = _rows(
+        tmp_path / "fresh.jsonl",
+        [{"scene_path": str(tmp_path / "n.npz"), "source_scene_path": src, "selected_total": -3.0}],
+    )
+    join(
+        replay,
+        [prev],
+        [fr],
+        tmp_path / "o.json",
+        tmp_path / "st.json",
+        out_map=tmp_path / "map.json",
+    )
+    assert json.loads((tmp_path / "map.json").read_text()) == {}
+
+
+def test_persist_into_memory_moves_path_AND_score_together(tmp_path):
+    """The next round's join compares a fresh candidate against the STORED score, so a path
+    moved without its score would make the following round decide keep/replace on stale data."""
+    from rlvr.autoresearch.tools.refresh_replay_targets import persist_into_memory
+
+    frozen, new = str(tmp_path / "f.npz"), str(tmp_path / "n.npz")
+    mem = _write(
+        tmp_path / "mem.json",
+        {
+            "capacity": 5,
+            "entries": [
+                {
+                    "scene_path": frozen,
+                    "source_scene_path": str(tmp_path / "s.npz"),
+                    "selected_total": -2.0,
+                },
+                {"scene_path": str(tmp_path / "other.npz"), "selected_total": -9.0},
+            ],
+        },
+    )
+    mp = _write(
+        tmp_path / "map.json", {frozen: {"new_path": new, "new_total": -0.5, "frozen_path": frozen}}
+    )
+    out = persist_into_memory(mem, mp)
+    assert out == {"memory_entries": 2, "repointed_to_refreshed": 1}
+    entries = json.loads(mem.read_text())["entries"]
+    assert entries[0]["scene_path"] == new
+    assert entries[0]["selected_total"] == -0.5, "score must move with the path"
+    assert entries[0]["refreshed_from"] == frozen
+    assert entries[1]["scene_path"].endswith("other.npz"), "untouched entries stay put"
+
+
+def test_persist_is_idempotent_and_monotone_across_two_rounds(tmp_path):
+    """Round N+1 must start from the refreshed target, and a second persist must not regress."""
+    from rlvr.autoresearch.tools.refresh_replay_targets import persist_into_memory
+
+    f, n1, n2 = (str(tmp_path / "f.npz"), str(tmp_path / "n1.npz"), str(tmp_path / "n2.npz"))
+    mem = _write(
+        tmp_path / "mem.json",
+        {
+            "entries": [
+                {
+                    "scene_path": f,
+                    "source_scene_path": str(tmp_path / "s.npz"),
+                    "selected_total": -3.0,
+                }
+            ]
+        },
+    )
+    persist_into_memory(mem, _write(tmp_path / "m1.json", {f: {"new_path": n1, "new_total": -2.0}}))
+    e = json.loads(mem.read_text())["entries"][0]
+    assert (e["scene_path"], e["selected_total"]) == (n1, -2.0)
+    # round N+1 improves it again, keyed off the NEW path
+    persist_into_memory(
+        mem, _write(tmp_path / "m2.json", {n1: {"new_path": n2, "new_total": -1.0}})
+    )
+    e = json.loads(mem.read_text())["entries"][0]
+    assert (e["scene_path"], e["selected_total"]) == (n2, -1.0)
+    assert e["selected_total"] > -3.0, "stored target score is monotone non-decreasing"

@@ -121,8 +121,14 @@ def join(
     out_stats: Path,
     *,
     min_gain: float = 0.0,
+    out_map: Path | None = None,
 ) -> dict[str, Any]:
-    """Pick max(frozen, fresh) per replayed scene and write the final replay list."""
+    """Pick max(frozen, fresh) per replayed scene and write the final replay list.
+
+    With ``out_map`` also records {frozen_path: {new_path, new_total}} for the scenes the
+    fresh policy won, which ``persist_into_memory`` uses to carry the gain into later rounds.
+    """
+    improved_map: dict[str, dict[str, Any]] = {}
     replay = _read_json_list(replay_scenes)
     frozen_rows = _read_rows(prev_rows)
     # Fresh rows are keyed by the SOURCE scene they were re-repaired from.
@@ -170,6 +176,12 @@ def join(
             stats["improved_by_fresh"] += 1
             stats["gain_sum"] += float(fresh_total) - float(frozen_total)
             final.append(str(fresh_path))
+            improved_map[scene] = {
+                "new_path": str(fresh_path),
+                "new_total": float(fresh_total),
+                "frozen_path": scene,
+                "frozen_total": float(frozen_total),
+            }
         else:
             stats["kept_frozen"] += 1
             final.append(scene)
@@ -180,7 +192,43 @@ def join(
     )
     Path(out_list).write_text(json.dumps(final, indent=2))
     Path(out_stats).write_text(json.dumps(stats, indent=2))
+    if out_map is not None:
+        Path(out_map).write_text(json.dumps(improved_map, indent=2))
     return stats
+
+
+def persist_into_memory(memory_json: Path, refresh_map: Path) -> dict[str, int]:
+    """Point the replay MEMORY at refreshed targets so the gain carries to later rounds.
+
+    Without this the refresh is per-round scratch: the memory step runs before the refresh
+    (it produces the replay list the refresh consumes), so the memory a link hands to its
+    successor still names the ORIGINAL targets. Every link then re-generates candidates for
+    the same already-improved scenes, and memory never actually rises -- it is re-derived.
+
+    Rewrites BOTH ``scene_path`` and ``selected_total`` together: the next round's join
+    compares a fresh candidate against the stored score, so moving the path without the score
+    would make it compare a new target against the old target's score and keep/replace wrongly.
+
+    Safe by construction: a refreshed target only enters the map when it beat the frozen one
+    on the same frozen ruler, so the stored target is monotone non-decreasing across rounds.
+    """
+    mem_path = Path(memory_json)
+    payload = json.loads(mem_path.read_text())
+    entries = payload.get("entries") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        raise ValueError(f"{mem_path}: expected a memory JSON with 'entries'")
+    mapping = json.loads(Path(refresh_map).read_text())
+    updated = 0
+    for row in entries:
+        hit = mapping.get(str(row.get("scene_path")))
+        if not hit:
+            continue
+        row["scene_path"] = hit["new_path"]
+        row["selected_total"] = hit["new_total"]
+        row["refreshed_from"] = hit.get("frozen_path", row.get("scene_path"))
+        updated += 1
+    mem_path.write_text(json.dumps(payload, indent=2))
+    return {"memory_entries": len(entries), "repointed_to_refreshed": updated}
 
 
 def main() -> None:
@@ -200,6 +248,13 @@ def main() -> None:
     j.add_argument("--out_list", type=Path, required=True)
     j.add_argument("--out_stats", type=Path, required=True)
     j.add_argument(
+        "--out_map",
+        type=Path,
+        default=None,
+        help="record {frozen: {new_path,new_total}} for scenes the fresh policy won, "
+        "for persist-memory to carry the gain into later rounds.",
+    )
+    j.add_argument(
         "--min_gain",
         type=float,
         default=0.0,
@@ -207,7 +262,14 @@ def main() -> None:
         "so near-ties keep the frozen target and memory stays stable across rounds.",
     )
 
+    pm = sub.add_parser("persist-memory", help="repoint replay memory at refreshed targets")
+    pm.add_argument("--memory_json", type=Path, required=True)
+    pm.add_argument("--refresh_map", type=Path, required=True)
+
     args = ap.parse_args()
+    if args.cmd == "persist-memory":
+        print(json.dumps(persist_into_memory(args.memory_json, args.refresh_map), indent=2))
+        return
     if args.cmd == "build-rows":
         out = build_rows(
             args.replay_scenes,
@@ -223,6 +285,7 @@ def main() -> None:
             args.out_list,
             args.out_stats,
             min_gain=float(args.min_gain),
+            out_map=args.out_map,
         )
     print(json.dumps(out, indent=2))
 

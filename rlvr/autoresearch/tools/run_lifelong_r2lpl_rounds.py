@@ -20,6 +20,9 @@ import torch
 
 from rlvr.autoresearch.tools.refresh_replay_targets import build_rows as _refresh_build_rows
 from rlvr.autoresearch.tools.refresh_replay_targets import join as _refresh_join
+from rlvr.autoresearch.tools.refresh_replay_targets import (
+    persist_into_memory as _refresh_persist_memory,
+)
 
 _CONFIG_REQUIRED = {
     "rounds",
@@ -471,6 +474,8 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         # keep max(frozen, fresh) by reward (see refresh_replay_targets).
         "replay_refresh": bool(workflow.get("replay_refresh", False)),
         "replay_refresh_min_gain": float(workflow.get("replay_refresh_min_gain", 0.0)),
+        # repoint the outgoing replay memory at refreshed targets (default on)
+        "replay_refresh_persist": bool(workflow.get("replay_refresh_persist", True)),
         "reuse_completed_mining": bool(workflow.get("reuse_completed_mining", False)),
         "progress_reference_expert": bool(workflow.get("progress_reference_expert", False)),
         "repair_reward_config": (
@@ -2406,9 +2411,25 @@ def _replay_row_sources(cfg: dict[str, Any], out: Path, round_idx: int) -> list[
     if seed and Path(seed).is_file():
         sources.append(str(seed))
     for prev in range(1, round_idx):
-        cand = out / f"r2lpl_round_{prev:03d}" / "repaired_targets.jsonl"
+        prev_dir = out / f"r2lpl_round_{prev:03d}"
+        cand = prev_dir / "repaired_targets.jsonl"
         if cand.is_file():
             sources.append(str(cand))
+        # After a persist, replayed scenes are named by their REFRESHED target paths, whose
+        # rows live in the previous round's memory (persist keeps source_scene_path and
+        # updates selected_total) and in its replay_refresh jsonls — not in
+        # repaired_targets.jsonl, which keys the ORIGINAL paths. Without these the round-3
+        # lookup fails on every repointed scene (caught by the persistence smoke).
+        mem = prev_dir / f"round_{prev}_memory.json"
+        if mem.is_file():
+            sources.append(str(mem))
+        for fresh in sorted(
+            prev_dir.glob("replay_refresh/repair_shards/shard_*/repaired_targets.jsonl")
+        ):
+            sources.append(str(fresh))
+        flat = prev_dir / "replay_refresh" / "repaired_targets.jsonl"
+        if flat.is_file():
+            sources.append(str(flat))
     return sources
 
 
@@ -3068,7 +3089,16 @@ def main() -> None:
                 ref_dir / "replay_refreshed.json",
                 ref_dir / "refresh_stats.json",
                 min_gain=float(cfg.get("replay_refresh_min_gain", 0.0)),
+                out_map=ref_dir / "refresh_map.json",
             )
+            # Carry the gain FORWARD: the memory step runs before the refresh (it produces the
+            # replay list the refresh consumes), so without this the memory handed to the next
+            # link still names the ORIGINAL targets and every link re-generates candidates for
+            # scenes an earlier link already improved. Monotone by construction: a refreshed
+            # target only entered the map by beating the frozen one on the same ruler.
+            if bool(cfg.get("replay_refresh_persist", True)) and memory_json.is_file():
+                persist_stats = _refresh_persist_memory(memory_json, ref_dir / "refresh_map.json")
+                print(f"[round {round_idx}] replay_refresh persist: {json.dumps(persist_stats)}")
             phase_times["replay_refresh"] = time.perf_counter() - t_ref
             print(f"[round {round_idx}] replay_refresh: {json.dumps(join_stats)}")
             # Refreshed stale targets + this round's own targets, which never needed refreshing.
