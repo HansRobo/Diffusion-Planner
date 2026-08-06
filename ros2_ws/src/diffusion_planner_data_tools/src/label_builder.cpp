@@ -88,23 +88,20 @@ xt::xarray<float> create_neighbor_agents_future(
   }
 
   constexpr double stamp_tolerance_s = 1e-6;
-  for (size_t neighbor_idx = 0; neighbor_idx < ordered_histories.size();
+  for (size_t neighbor_idx = 0; neighbor_idx < selected_agents.size();
        ++neighbor_idx) {
-    const std::string &object_id =
-        ordered_histories[neighbor_idx].get_latest_state().object_id;
-    const auto observations_it = observations_map.find(object_id);
-    if (observations_it == observations_map.end()) {
+    const auto &agent_observations = observations[neighbor_idx];
+    if (agent_observations.empty()) {
       continue; // object disappears right after the frame: row stays all-zero
     }
-    const std::vector<Observation> &observations = observations_it->second;
 
     size_t obs_idx = 0; // grid times are increasing, so carry the index forward
     bool has_observation = false;
     for (size_t t = 0; t < num_steps; ++t) {
       const double grid_sec =
           frame_sec + static_cast<double>(t + 1) * params.time_step_s;
-      while (obs_idx + 1 < observations.size() &&
-             observations[obs_idx + 1].stamp_sec <=
+      while (obs_idx + 1 < agent_observations.size() &&
+             agent_observations[obs_idx + 1].stamp_sec <=
                  grid_sec + stamp_tolerance_s) {
         ++obs_idx;
       }
@@ -112,7 +109,7 @@ xt::xarray<float> create_neighbor_agents_future(
           has_observation ||
           agent_observations[obs_idx].stamp_sec <= grid_sec + stamp_tolerance_s;
       const bool valid =
-          has_observation && grid_sec - observations[obs_idx].stamp_sec <=
+          has_observation && grid_sec - agent_observations[obs_idx].stamp_sec <=
                                  params.neighbor_observation_timeout_s;
       if (!valid) {
         continue;
@@ -121,7 +118,7 @@ xt::xarray<float> create_neighbor_agents_future(
       const Eigen::Matrix4d pose_ego =
           map_to_ego_transform *
           utils::pose_to_matrix4d(
-              observations[obs_idx]
+              agent_observations[obs_idx]
                   .object->kinematics.pose_with_covariance.pose);
       const auto [cos_yaw, sin_yaw] =
           utils::rotation_matrix_to_cos_sin(pose_ego.block<3, 3>(0, 0));
