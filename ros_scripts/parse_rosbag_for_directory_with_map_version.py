@@ -39,6 +39,11 @@ def parse_args():
     parser.add_argument("--offlane_time_stride", type=int, default=1)
     parser.add_argument("--write_skipped_npz", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=os.cpu_count() // 2)
+    parser.add_argument(
+        "--conversion_manifest_path",
+        type=Path,
+        help="Write one record per attempted ROSBAG conversion as JSON.",
+    )
     return parser.parse_args()
 
 
@@ -130,17 +135,20 @@ def process_single_bag(args_tuple):
     # train/valid are human-driven -> manual, auto stays auto
     mode = "auto" if train_or_val == "auto" else "manual"
 
-    vector_map_path = _resolve_vector_map_path(bag_path)
-
     save_dir = (save_root / project_name / map_name / mode / date / time).resolve()
 
     if save_dir.is_dir():
         logging.info(f"Already exists: {save_dir}")
-        return f"Skipped (already exists): {save_dir}"
-
-    save_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "status": "skipped",
+            "mode": mode,
+            "bag_path": str(bag_path),
+            "output_dir": str(save_dir),
+        }
 
     try:
+        vector_map_path = _resolve_vector_map_path(bag_path)
+        save_dir.mkdir(parents=True, exist_ok=True)
         parse_rosbag_main_cpp(
             cpp_binary_path,
             rosbag_path=bag_path,
@@ -173,9 +181,16 @@ def process_single_bag(args_tuple):
                 shutil.move(str(entry), str(save_dir / entry.name))
             nested_routes.rmdir()
         logging.info(f"Completed: {save_dir}")
+        return {
+            "status": "converted",
+            "mode": mode,
+            "bag_path": str(bag_path),
+            "output_dir": str(save_dir),
+        }
     except Exception as e:
         error_msg = f"Error processing {bag_path}: {str(e)}"
         logging.error(error_msg)
+        return {"status": "failed", "mode": mode, "bag_path": str(bag_path), "error": str(e)}
 
 
 if __name__ == "__main__":
@@ -254,7 +269,36 @@ if __name__ == "__main__":
         )
 
     with Pool(processes=num_workers) as pool:
-        pool.map(process_single_bag, process_args)
+        results = pool.map(process_single_bag, process_args)
+
+    if args.conversion_manifest_path is not None:
+        manifest_path = args.conversion_manifest_path.resolve()
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "records": results,
+                    "converted_count": sum(
+                        result.get("status") == "converted"
+                        for result in results
+                        if isinstance(result, dict)
+                    ),
+                    "skipped_count": sum(
+                        result.get("status") == "skipped"
+                        for result in results
+                        if isinstance(result, dict)
+                    ),
+                    "failed_count": sum(
+                        result.get("status") == "failed"
+                        for result in results
+                        if isinstance(result, dict)
+                    ),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     elapsed_seconds = int(time.perf_counter() - start_time)
     hours = elapsed_seconds // 3600

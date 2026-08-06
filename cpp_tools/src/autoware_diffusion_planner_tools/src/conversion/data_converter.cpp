@@ -20,16 +20,84 @@
 #include "processing/frame_processor.hpp"
 #include "processing/sequence_builder.hpp"
 #include "rosbag/parsed_bag_data.hpp"
+#include "types/override_segment.hpp"
 
 #include <autoware/diffusion_planner/preprocessing/lane_segments.hpp>
 
 #include <lanelet2_core/LaneletMap.h>
 #include <lanelet2_io/Io.h>
 
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace
+{
+
+bool is_auto_output_dir(const std::string & save_dir)
+{
+  for (const auto & component : std::filesystem::path(save_dir)) {
+    if (component == "auto") {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::vector<OverrideSegment> build_override_segments(
+  const std::vector<ControlModeSample> & control_modes)
+{
+  std::vector<OverrideSegment> segments;
+  if (control_modes.empty()) {
+    return segments;
+  }
+
+  int32_t current_mode = control_modes.front().mode;
+  int64_t start_timestamp = control_modes.front().rosbag_time;
+  int64_t previous_timestamp = control_modes.front().rosbag_time;
+  for (size_t index = 1; index < control_modes.size(); ++index) {
+    const auto & sample = control_modes[index];
+    if (sample.mode != current_mode) {
+      if (current_mode == 4) {
+        segments.push_back({start_timestamp, previous_timestamp});
+      }
+      current_mode = sample.mode;
+      start_timestamp = sample.rosbag_time;
+    }
+    previous_timestamp = sample.rosbag_time;
+  }
+  if (current_mode == 4) {
+    segments.push_back({start_timestamp, previous_timestamp});
+  }
+  return segments;
+}
+
+void save_override_segments_json(
+  const std::string & output_dir, const std::vector<OverrideSegment> & segments)
+{
+  nlohmann::json payload;
+  payload["override_segments"] = nlohmann::json::array();
+  for (const auto & segment : segments) {
+    payload["override_segments"].push_back(
+      {{"start_timestamp_ns", segment.start_timestamp_ns},
+       {"end_timestamp_ns", segment.end_timestamp_ns}});
+  }
+  std::filesystem::create_directories(output_dir);
+  const std::filesystem::path output_path =
+    std::filesystem::path(output_dir) / "override_segments.json";
+  std::ofstream output_file(output_path);
+  if (!output_file.is_open()) {
+    std::cerr << "Failed to open override segment output: " << output_path << std::endl;
+    return;
+  }
+  output_file << std::setw(2) << payload << std::endl;
+}
+
+}  // namespace
 
 int run_data_converter(const ConverterPaths & paths, const ConverterOptions & converter)
 {
@@ -47,7 +115,14 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
   const std::string rosbag_dir_name = paths.get_rosbag_dir_name();
   const BagMetadata bag_metadata = load_bag_metadata(paths.rosbag_path);
 
-  ParsedBagData bag_data = load_rosbag(paths.rosbag_path, converter.limit);
+  const bool is_auto_rosbag = is_auto_output_dir(paths.save_dir);
+  ParsedBagData bag_data = load_rosbag(paths.rosbag_path, converter.limit, is_auto_rosbag);
+  const std::vector<OverrideSegment> override_segments =
+    is_auto_rosbag ? build_override_segments(bag_data.control_modes)
+                   : std::vector<OverrideSegment>{};
+  if (is_auto_rosbag) {
+    save_override_segments_json(paths.save_dir, override_segments);
+  }
 
   const auto missing_topics_skip = check_missing_topics(bag_data);
   if (missing_topics_skip) {
