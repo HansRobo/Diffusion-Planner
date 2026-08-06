@@ -13,6 +13,7 @@ so the launcher and the trainer cannot end up pointing at different directories.
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from diffusion_planner.scenario_based_open_loop.open_loop import (

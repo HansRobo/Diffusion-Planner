@@ -188,3 +188,20 @@ def discover_sites_with_vehicles_from_json(
             for project, group in groups.items():
                 sites[f"{project}__{site}"] = group
     return sites
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Discover site groups from raw data")
+    parser.add_argument(
+        "--input", "-i", required=True, help="Folder, flat JSON, or grouped JSON path"
+    )
+    parser.add_argument("--output", "-o", required=True, help="Output grouped JSON path")
+    args = parser.parse_args()
+
+    groups = discover_sites_from_json(args.input)
+    with open(args.output, "w") as f:
+        json.dump({k: [str(p) for p in v] for k, v in groups.items()}, f, indent=2)
+    print(f"Wrote {len(groups)} groups to {args.output}")
+
