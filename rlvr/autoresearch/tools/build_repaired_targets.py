@@ -721,19 +721,30 @@ def _best_safe_candidate(
         source_row.get("expert_disagreement_reason")
     )
     forced_scope = is_ed_row if lagging_expert_target == "force_or_drop" else is_lagging_row
-    morph_is_clean = (
-        morph_index is None
-        or not expert_target_require_clear
-        or not _candidate_is_interaction_risky(candidate_rows[morph_index])
-    )
-    if (
-        lagging_expert_target in ("force", "force_or_drop")
-        and forced_scope
-        and morph_index is not None
-        and morph_index in {item[3] for item in accepted}
-        and morph_is_clean
-    ):
-        m_item = next(item for item in accepted if item[3] == morph_index)
+
+    def _forced_candidate_ok(idx_s: int | None) -> bool:
+        return (
+            idx_s is not None
+            and idx_s in {item[3] for item in accepted}
+            and (
+                not expert_target_require_clear
+                or not _candidate_is_interaction_risky(candidate_rows[idx_s])
+            )
+        )
+
+    # Forced-target preference: on a LAGGING row the stop-anchored morph re-times the
+    # model's own (stalled) geometry, i.e. it teaches the very stall being repaired; the
+    # depart candidate carries the expert's departure, so when it survived the gates it is
+    # the mechanism-matched forced target. Stop-morph remains the fallback, and remains
+    # the only forced target for expert_wait_model_forward rows (there the ego must slow).
+    forced_index: int | None = None
+    if lagging_expert_target in ("force", "force_or_drop") and forced_scope:
+        if is_lagging_row and _forced_candidate_ok(depart_index):
+            forced_index = depart_index
+        elif _forced_candidate_ok(morph_index):
+            forced_index = morph_index
+    if forced_index is not None:
+        m_item = next(item for item in accepted if item[3] == forced_index)
         violation_score, deviation_penalty, _reward_total, idx = m_item
         reward_row = reward_rows[idx]
         label_row = candidate_rows[idx]
@@ -750,20 +761,23 @@ def _best_safe_candidate(
             "target_gt_disagreement": bool(target_gt_max_l2 >= target_gt_disagreement_thresh),
             "target_gt_disagreement_mean_l2": float(deviation_penalty),
             "target_gt_disagreement_max_l2": target_gt_max_l2,
-            "selected_r2lpl_state_class": "lagging_expert_forced",
+            "selected_r2lpl_state_class": (
+                "lagging_expert_forced_depart"
+                if forced_index == depart_index and depart_index is not None
+                else "lagging_expert_forced"
+            ),
             "selected_r2lpl_score": 1.0,
         }
-        meta["morph_outcome"] = "selected"
         for prefix, idx_s in scripted.items():
-            if prefix != "morph":
-                meta[f"{prefix}_outcome"] = "lost_selection"
+            meta[f"{prefix}_outcome"] = "selected" if idx_s == forced_index else "lost_selection"
         return idx, meta
 
     if lagging_expert_target == "force_or_drop" and is_ed_row:
-        _risky = (
-            expert_target_require_clear
-            and morph_index is not None
-            and _candidate_is_interaction_risky(candidate_rows[morph_index])
+        _risky = expert_target_require_clear and any(
+            idx_s is not None
+            and idx_s in {item[3] for item in accepted}
+            and _candidate_is_interaction_risky(candidate_rows[idx_s])
+            for idx_s in (morph_index, depart_index)
         )
         # Purity mode: a lagging row trains ONLY on the expert-paced target. If the morph is
         # absent or gate-rejected, drop the row instead of teaching the cautious generated

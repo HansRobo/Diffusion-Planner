@@ -5518,9 +5518,7 @@ def test_main_replay_refresh_keeps_max_of_frozen_and_fresh(tmp_path, monkeypatch
     round_runner.main()
 
     assert refresh_dirs, "replay_refresh was configured but the refresh repair never ran"
-    stats = json.loads(
-        (Path(refresh_dirs[0]) / "refresh_stats.json").read_text()
-    )
+    stats = json.loads((Path(refresh_dirs[0]) / "refresh_stats.json").read_text())
     assert stats["improved_by_fresh"] == 1 and stats["kept_frozen"] == 1
 
     assert trained_lists, "training never ran"
@@ -5528,3 +5526,117 @@ def test_main_replay_refresh_keeps_max_of_frozen_and_fresh(tmp_path, monkeypatch
     assert fresh_worse in trained, "the improved fresh target never reached the train list"
     assert frozen_better in trained, "the frozen target must survive where the policy regressed"
     assert frozen_worse not in trained, "the surpassed frozen target must NOT be trained on"
+
+
+def _mk_reward_row(total=5.0):
+    return SimpleNamespace(
+        total=total,
+        collision_step=None,
+        rb_crossing=False,
+        lane_crossing=False,
+        static_crossing=False,
+        kinematic_violated=False,
+        sc_min_dist=1.0,
+        rb_min_dist=1.0,
+    )
+
+
+def _mk_candidate_row():
+    return {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]}
+
+
+def test_forced_target_prefers_depart_on_lagging_row():
+    # A lagging row with BOTH scripted candidates gate-accepted must force-select the
+    # DEPART candidate: the stop-anchored morph re-times the stalled model geometry and
+    # teaches the stall being repaired (FIX_DIARY #104).
+    source_row = {
+        "repair_labels": ["expert_disagreement"],
+        "expert_disagreement_reason": "model_lagging_expert",
+    }
+    candidate_rows = [_mk_candidate_row() for _ in range(3)]
+    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0), _mk_reward_row(3.0)]
+    idx, meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        lagging_expert_target="force_or_drop",
+        morph_index=1,
+        depart_index=2,
+    )
+    assert idx == 2
+    assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced_depart"
+    assert meta["depart_outcome"] == "selected"
+    assert meta["morph_outcome"] == "lost_selection"
+
+
+def test_forced_target_falls_back_to_morph_when_depart_gate_rejected():
+    source_row = {
+        "repair_labels": ["expert_disagreement"],
+        "expert_disagreement_reason": "model_lagging_expert",
+    }
+    candidate_rows = [_mk_candidate_row() for _ in range(3)]
+    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0), _mk_reward_row(-50.0)]
+    # depart candidate fails a hard gate -> not in accepted
+    reward_rows[2].rb_crossing = True
+    idx, meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        lagging_expert_target="force_or_drop",
+        morph_index=1,
+        depart_index=2,
+    )
+    assert idx == 1
+    assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced"
+    assert meta["morph_outcome"] == "selected"
+    assert meta["depart_outcome"] == "lost_selection"
+
+
+def test_forced_target_never_uses_depart_on_wait_rows():
+    # expert_wait_model_forward rows must keep the stop-anchored morph even when a depart
+    # candidate exists (there the ego must slow down, not depart).
+    source_row = {
+        "repair_labels": ["expert_disagreement"],
+        "expert_disagreement_reason": "expert_wait_model_forward",
+    }
+    candidate_rows = [_mk_candidate_row() for _ in range(3)]
+    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0), _mk_reward_row(3.0)]
+    idx, meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        lagging_expert_target="force_or_drop",
+        morph_index=1,
+        depart_index=2,
+    )
+    assert idx == 1
+    assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced"
+
+
+def test_forced_target_drops_when_neither_scripted_candidate_accepted():
+    source_row = {
+        "repair_labels": ["expert_disagreement"],
+        "expert_disagreement_reason": "model_lagging_expert",
+    }
+    candidate_rows = [_mk_candidate_row() for _ in range(3)]
+    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0), _mk_reward_row(3.0)]
+    reward_rows[1].rb_crossing = True
+    reward_rows[2].rb_crossing = True
+    idx, meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        lagging_expert_target="force_or_drop",
+        morph_index=1,
+        depart_index=2,
+    )
+    assert idx is None
+    assert meta["reason"] == "ed_no_expert_target"
