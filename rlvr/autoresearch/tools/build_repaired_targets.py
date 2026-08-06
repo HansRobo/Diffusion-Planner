@@ -1512,9 +1512,15 @@ def main() -> None:
     ap.add_argument(
         "--enable_depart_morph",
         action="store_true",
-        help="Also synthesize a depart-morph candidate (expert-path geometry, "
-        "feasible catch-up timing) for model_lagging_expert scenes — the stop "
-        "morph cannot build a departure from a parked det plan.",
+        help="No-op kept for compatibility: the depart-morph candidate (expert-path "
+        "geometry, feasible catch-up timing, for model_lagging_expert scenes) is ON "
+        "by default — the stop morph cannot build a departure from a parked det "
+        "plan (FIX_DIARY #104/#106). Use --disable_depart_morph to turn it off.",
+    )
+    ap.add_argument(
+        "--disable_depart_morph",
+        action="store_true",
+        help="Opt out of the depart-morph candidate (A/B control arms).",
     )
     ap.add_argument("--expert_morph_w_max", type=float, default=1.0)
     ap.add_argument(
@@ -1602,7 +1608,10 @@ def main() -> None:
         expert_morph_max_accel=float(args.expert_morph_max_accel),
         expert_morph_max_jerk=float(args.expert_morph_max_jerk),
         expert_stop_anchor=str(args.expert_stop_anchor),
-        enable_depart_morph=bool(args.enable_depart_morph),
+        # TEMPORARY until link 5 (job 2805) finishes: effective CLI default stays OFF so the
+        # live link's refresh-repair subprocess (old runner passes no flag) is not contaminated.
+        # FLIP TO `not bool(args.disable_depart_morph)` right after link 5's guards land (#107).
+        enable_depart_morph=bool(args.enable_depart_morph) and not bool(args.disable_depart_morph),
     )
 
 

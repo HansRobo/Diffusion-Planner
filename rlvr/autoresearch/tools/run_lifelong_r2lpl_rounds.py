@@ -365,8 +365,10 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     for _mk in ("expert_morph_w_max", "expert_morph_max_accel", "expert_morph_max_jerk"):
         if repair.get(_mk) is not None:
             repair_cfg[_mk] = float(repair[_mk])
-    if repair.get("enable_depart_morph"):
-        repair_cfg["enable_depart_morph"] = bool(repair["enable_depart_morph"])
+    # Depart morph defaults ON (FIX_DIARY #104/#106): the campaign's primary repair label is
+    # expert_disagreement and the departure response must not depend on remembering a flag.
+    # An explicit false in the workflow is the opt-out.
+    repair_cfg["enable_depart_morph"] = bool(repair.get("enable_depart_morph", True))
     missing_repair = [k for k in ("ego_shape", "min_margin") if not repair_cfg.get(k)]
     if missing_repair:
         raise ValueError(
@@ -1925,8 +1927,12 @@ def _repair_cmd(
         cmd.extend(["--expert_morph_max_jerk", str(repair_cfg["expert_morph_max_jerk"])])
     if "expert_stop_anchor" in repair_cfg:
         cmd.extend(["--expert_stop_anchor", str(repair_cfg["expert_stop_anchor"])])
-    if bool(repair_cfg.get("enable_depart_morph", False)):
+    # Always pass the depart flag EXPLICITLY so subprocess behaviour never depends on the
+    # tool's CLI default (which a mid-run code update could change under a live runner).
+    if bool(repair_cfg.get("enable_depart_morph", True)):
         cmd.append("--enable_depart_morph")
+    else:
+        cmd.append("--disable_depart_morph")
     if repair_cfg.get("prototypes_path"):
         cmd.extend(["--prototypes_path", str(repair_cfg["prototypes_path"])])
     if repair_cfg.get("max_expert_dev_m") is not None:
