@@ -336,7 +336,7 @@ def get_args():
         help="alternative/addition to --closed_loop_npz_root: a curated .json path-list manifest, "
         "grouped into per-site route pools by site_discovery.discover_sites_from_json and evaluated "
         "as independent sites (own npz_root each). Both may be set at once (each fires "
-        "independently).",
+        "independently). Only runs on the final save_utd cadence call of the run.",
     )
     parser.add_argument(
         "--closed_loop_npz_object_modes",
