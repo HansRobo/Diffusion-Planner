@@ -50,11 +50,10 @@ double stamp_sec_of(const std_msgs::msg::Header &header) {
 // Future poses of the neighbors (ordered like neighbor_agents_past) sampled
 // on the future grid by zero-order hold. Steps without a sufficiently fresh
 // observation stay all-zero (= invalid).
-xt::xarray<float>
-create_neighbor_agents_future(const rclcpp::Time &frame_time,
-                              const Eigen::Matrix4d &map_to_ego_transform,
-                              const std::deque<TrackedObjects> &objects_msgs,
-                              const LabelBuilderParams &params) {
+xt::xarray<float> create_neighbor_agents_future(
+    const rclcpp::Time &frame_time, const Eigen::Matrix4d &map_to_ego_transform,
+    const preprocess::MessageView<TrackedObjects> &objects_msgs,
+    const LabelBuilderParams &params) {
   const auto num_steps = static_cast<size_t>(params.num_future_steps);
   xt::xarray<float> future = xt::zeros<float>(
       {static_cast<size_t>(MAX_NUM_NEIGHBORS), num_steps, size_t{4}});
@@ -143,11 +142,13 @@ create_neighbor_agents_future(const rclcpp::Time &frame_time,
 } // namespace
 
 preprocess::InputDataMap create_label_data_map(
-    const rclcpp::Time &frame_time, const std::deque<Odometry> &ego_msgs,
-    const std::deque<TrackedObjects> &objects_msgs,
-    const std::deque<autoware_vehicle_msgs::msg::TurnIndicatorsReport>
-        &turn_indicators_msgs,
-    const std::deque<autoware_perception_msgs::msg::TrafficLightGroupArray>
+    const rclcpp::Time &frame_time,
+    const preprocess::MessageView<Odometry> &ego_msgs,
+    const preprocess::MessageView<TrackedObjects> &objects_msgs,
+    const preprocess::MessageView<
+        autoware_vehicle_msgs::msg::TurnIndicatorsReport> &turn_indicators_msgs,
+    const preprocess::MessageView<
+        autoware_perception_msgs::msg::TrafficLightGroupArray>
         &traffic_signals_msgs,
     const autoware_planning_msgs::msg::LaneletRoute &route,
     const preprocess::LaneSegmentContext &map_context,

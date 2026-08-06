@@ -99,15 +99,17 @@ private:
   // than the frame time must be excluded: the input builder treats the last
   // buffer entry as the current state.
   template <typename MsgT>
-  std::deque<MsgT> window_of(const utils::TimedBuffer<MsgT> &buffer,
-                             const double frame_sec) const {
-    std::deque<MsgT> window;
+  preprocess::MessageView<MsgT>
+  window_of(const utils::TimedBuffer<MsgT> &buffer,
+            const double frame_sec) const {
+    std::vector<const MsgT *> window;
+    window.reserve(buffer.msgs().size());
     for (const MsgT &msg : buffer.msgs()) {
       if (stamp_sec_of(msg) <= frame_sec) {
-        window.push_back(msg);
+        window.push_back(&msg);
       }
     }
-    return window;
+    return preprocess::MessageView<MsgT>(std::move(window));
   }
 
   const LaneletRoute *route_at(double frame_sec) const;

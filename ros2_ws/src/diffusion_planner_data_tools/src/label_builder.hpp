@@ -75,12 +75,13 @@ struct LabelBuilderParams {
  */
 preprocess::InputDataMap create_label_data_map(
     const rclcpp::Time &frame_time,
-    const std::deque<nav_msgs::msg::Odometry> &ego_msgs,
-    const std::deque<autoware_perception_msgs::msg::TrackedObjects>
+    const preprocess::MessageView<nav_msgs::msg::Odometry> &ego_msgs,
+    const preprocess::MessageView<autoware_perception_msgs::msg::TrackedObjects>
         &objects_msgs,
-    const std::deque<autoware_vehicle_msgs::msg::TurnIndicatorsReport>
-        &turn_indicators_msgs,
-    const std::deque<autoware_perception_msgs::msg::TrafficLightGroupArray>
+    const preprocess::MessageView<
+        autoware_vehicle_msgs::msg::TurnIndicatorsReport> &turn_indicators_msgs,
+    const preprocess::MessageView<
+        autoware_perception_msgs::msg::TrafficLightGroupArray>
         &traffic_signals_msgs,
     const autoware_planning_msgs::msg::LaneletRoute &route,
     const preprocess::LaneSegmentContext &map_context,
