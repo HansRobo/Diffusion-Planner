@@ -60,36 +60,31 @@ xt::xarray<float> create_neighbor_agents_future(
 
   const double frame_sec = frame_time.seconds();
 
-  // Reproduce the neighbor ordering of the "neighbor_agents_past" input:
-  // histories from the past window, transformed to ego frame, sorted by
-  // distance and trimmed.
-  std::deque<TrackedObjects> past_msgs;
-  for (const TrackedObjects &msg : objects_msgs) {
-    if (stamp_sec_of(msg.header) <= frame_sec) {
-      past_msgs.push_back(msg);
-    }
-  }
-  const auto ordered_histories = preprocess::transform_and_trim_histories(
-      preprocess::create_agent_histories(past_msgs, frame_time,
-                                         constants::PREDICTION_TIME_STEP_S,
-                                         INPUT_T_WITH_CURRENT),
-      map_to_ego_transform, MAX_NUM_NEIGHBORS);
+  const auto selected_agents = preprocess::select_current_agents(
+      objects_msgs, frame_time, map_to_ego_transform, MAX_NUM_NEIGHBORS);
 
   // Collect future observations (map frame poses) per object id.
   struct Observation {
     double stamp_sec;
     const TrackedObject *object;
   };
-  std::unordered_map<std::string, std::vector<Observation>> observations_map;
+  std::unordered_map<preprocess::AgentId, size_t, preprocess::AgentIdHash>
+      selected_indices;
+  for (size_t i = 0; i < selected_agents.size(); ++i) {
+    selected_indices.emplace(selected_agents[i].object_id, i);
+  }
+  std::vector<std::vector<Observation>> observations(selected_agents.size());
   for (const TrackedObjects &msg : objects_msgs) {
     const double stamp_sec = stamp_sec_of(msg.header);
     if (stamp_sec <= frame_sec) {
       continue;
     }
     for (const TrackedObject &object : msg.objects) {
-      observations_map[autoware_utils_uuid::to_hex_string(object.object_id)]
-          .push_back({stamp_sec, &object});
+      const auto selected = selected_indices.find(object.object_id.uuid);
+      if (selected != selected_indices.end()) {
+        observations[selected->second].push_back({stamp_sec, &object});
     }
+  }
   }
 
   constexpr double stamp_tolerance_s = 1e-6;
@@ -113,8 +108,9 @@ xt::xarray<float> create_neighbor_agents_future(
                  grid_sec + stamp_tolerance_s) {
         ++obs_idx;
       }
-      has_observation = has_observation || observations[obs_idx].stamp_sec <=
-                                               grid_sec + stamp_tolerance_s;
+      has_observation =
+          has_observation ||
+          agent_observations[obs_idx].stamp_sec <= grid_sec + stamp_tolerance_s;
       const bool valid =
           has_observation && grid_sec - observations[obs_idx].stamp_sec <=
                                  params.neighbor_observation_timeout_s;
