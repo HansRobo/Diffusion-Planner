@@ -1608,10 +1608,7 @@ def main() -> None:
         expert_morph_max_accel=float(args.expert_morph_max_accel),
         expert_morph_max_jerk=float(args.expert_morph_max_jerk),
         expert_stop_anchor=str(args.expert_stop_anchor),
-        # TEMPORARY until link 5 (job 2805) finishes: effective CLI default stays OFF so the
-        # live link's refresh-repair subprocess (old runner passes no flag) is not contaminated.
-        # FLIP TO `not bool(args.disable_depart_morph)` right after link 5's guards land (#107).
-        enable_depart_morph=bool(args.enable_depart_morph) and not bool(args.disable_depart_morph),
+        enable_depart_morph=not bool(args.disable_depart_morph),
     )
 
 
