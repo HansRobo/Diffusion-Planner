@@ -50,7 +50,8 @@ preprocess::InputDataResult BagFrameReader::create_input_data(
     const rclcpp::Time &frame_time,
     const preprocess::LaneSegmentContext &map_context,
     const VehicleSpec &vehicle_spec,
-    const preprocess::InputBuilderParams &params) {
+    const preprocess::InputBuilderParams &params,
+    std::vector<preprocess::SelectedAgent> &selected_agents) {
   const double frame_sec = frame_time.seconds();
   ensure_read_until(frame_sec);
 
@@ -73,14 +74,15 @@ preprocess::InputDataResult BagFrameReader::create_input_data(
       window_of(traffic_signals_buffer_, frame_sec),
       *route};
 
-  return preprocess::create_input_data_map(frame_inputs, map_context,
-                                           vehicle_spec, params);
+  return preprocess::create_input_data_map(
+      frame_inputs, map_context, vehicle_spec, params, &selected_agents);
 }
 
 preprocess::InputDataMap BagFrameReader::create_label_data(
     const rclcpp::Time &frame_time,
     const preprocess::LaneSegmentContext &map_context,
-    const LabelBuilderParams &params) {
+    const LabelBuilderParams &params,
+    const std::vector<preprocess::SelectedAgent> &selected_agents) {
   const double frame_sec = frame_time.seconds();
   const double horizon_s =
       static_cast<double>(params.num_future_steps) * params.time_step_s;
@@ -98,7 +100,7 @@ preprocess::InputDataMap BagFrameReader::create_label_data(
                                window_of(objects_buffer_, cutoff_sec),
                                window_of(turn_indicators_buffer_, cutoff_sec),
                                window_of(traffic_signals_buffer_, cutoff_sec),
-                               *route, map_context, params);
+                               *route, map_context, selected_agents, params);
 }
 
 void BagFrameReader::open_main_reader() {

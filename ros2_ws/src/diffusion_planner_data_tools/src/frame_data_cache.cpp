@@ -23,6 +23,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace autoware::diffusion_planner::data_tools {
 
@@ -59,8 +60,9 @@ preprocess::InputDataResult FrameDataCache::create_frame_data(
   preprocess::InputBuilderParams input_params;
   input_params.traffic_light_group_msg_timeout_seconds =
       traffic_light_timeout_s;
+  std::vector<preprocess::SelectedAgent> selected_agents;
   preprocess::InputDataResult result = reader.create_input_data(
-      frame_time, *map_context, vehicle_spec, input_params);
+      frame_time, *map_context, vehicle_spec, input_params, selected_agents);
   if (!result) {
     return result;
   }
@@ -70,8 +72,8 @@ preprocess::InputDataResult FrameDataCache::create_frame_data(
   label_params.neighbor_observation_timeout_s = neighbor_observation_timeout_s;
   label_params.traffic_light_timeout_s = traffic_light_timeout_s;
   try {
-    preprocess::InputDataMap label_data_map =
-        reader.create_label_data(frame_time, *map_context, label_params);
+    preprocess::InputDataMap label_data_map = reader.create_label_data(
+        frame_time, *map_context, label_params, selected_agents);
     for (auto &[key, value] : label_data_map) {
       result.value()[key] = std::move(value);
     }

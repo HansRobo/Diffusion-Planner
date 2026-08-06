@@ -13,7 +13,7 @@ output: ???
 split: train
 # Spacing between generated frames [s]; changes only the index sample density, not the
 # model's internal 0.1 s grid.
-frame_interval: 0.3
+frame_interval: 0.5
 # Bags scanned in parallel. The scan is disk bound, so more than ~64 rarely helps.
 jobs: 64
 # Scan only the first N bags, or null for all of them.

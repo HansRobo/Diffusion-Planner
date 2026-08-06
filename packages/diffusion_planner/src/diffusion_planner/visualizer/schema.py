@@ -35,13 +35,21 @@ class NeighborIndex(IntEnum):
     Y = 1
     COS_YAW = 2
     SIN_YAW = 3
-    VELOCITY_X = 4
-    VELOCITY_Y = 5
-    WIDTH = 6
-    LENGTH = 7
-    IS_VEHICLE = 8
-    IS_PEDESTRIAN = 9
-    IS_BICYCLE = 10
+
+
+class AgentShapeIndex(IntEnum):
+    """Indices in ``agent_shape``."""
+
+    WIDTH = 0
+    LENGTH = 1
+
+
+class AgentLabelIndex(IntEnum):
+    """Indices in ``agent_label``."""
+
+    IS_VEHICLE = 0
+    IS_PEDESTRIAN = 1
+    IS_BICYCLE = 2
 
 
 class LaneIndex(IntEnum):
@@ -70,6 +78,8 @@ class TrafficLightIndex(IntEnum):
 FRAME_KEY_NDIMS: dict[str, int] = {
     "ego_agent_past": 2,
     "neighbor_agents_past": 3,
+    "agent_shape": 2,
+    "agent_label": 2,
     "lanes": 3,
     "lanes_speed_limit": 2,
     "route_lanes": 3,
@@ -93,6 +103,8 @@ REQUIRED_FRAME_KEYS = frozenset(
     {
         "ego_agent_past",
         "neighbor_agents_past",
+        "agent_shape",
+        "agent_label",
         "lanes",
         "route_lanes",
         "polygons",

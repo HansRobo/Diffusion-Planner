@@ -44,16 +44,7 @@ _LANE_FIELDS = (
 )
 _POSE_FIELDS = ("x", "y", "cos_yaw", "sin_yaw")
 _EGO_FIELDS = (*_POSE_FIELDS, "velocity", "yaw_rate")
-_NEIGHBOR_FIELDS = (
-    *_POSE_FIELDS,
-    "velocity_x",
-    "velocity_y",
-    "width",
-    "length",
-    "is_vehicle",
-    "is_pedestrian",
-    "is_bicycle",
-)
+_NEIGHBOR_FIELDS = _POSE_FIELDS
 _TRAFFIC_LIGHT_FIELDS = (
     "green",
     "amber",
@@ -68,6 +59,10 @@ _TENSOR_SPECS: dict[str, TensorDisplaySpec] = {
     "ego_agent_future": TensorDisplaySpec(row_axis="time_index", fields=_EGO_FIELDS),
     "neighbor_agents_past": TensorDisplaySpec(
         leading_axes=("agent",), row_axis="time_index", fields=_NEIGHBOR_FIELDS
+    ),
+    "agent_shape": TensorDisplaySpec(row_axis="agent", fields=("width", "length")),
+    "agent_label": TensorDisplaySpec(
+        row_axis="agent", fields=("is_vehicle", "is_pedestrian", "is_bicycle")
     ),
     "neighbor_agents_future": TensorDisplaySpec(
         leading_axes=("agent",), row_axis="time_index", fields=_POSE_FIELDS

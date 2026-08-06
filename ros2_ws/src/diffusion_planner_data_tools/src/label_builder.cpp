@@ -22,16 +22,10 @@
 #include "autoware/diffusion_planner/utils/utils.hpp"
 
 #include <Eigen/Dense>
-#include <autoware_utils_uuid/uuid_helper.hpp>
 #include <xtensor/xarray.hpp>
 #include <xtensor/xview.hpp>
 
-#include "autoware/diffusion_planner/constants.hpp"
-
-#include <deque>
 #include <stdexcept>
-#include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -39,97 +33,11 @@ namespace autoware::diffusion_planner::data_tools {
 
 namespace {
 
-using autoware_perception_msgs::msg::TrackedObject;
 using autoware_perception_msgs::msg::TrackedObjects;
 using nav_msgs::msg::Odometry;
 
 double stamp_sec_of(const std_msgs::msg::Header &header) {
   return rclcpp::Time(header.stamp).seconds();
-}
-
-// Future poses of the neighbors (ordered like neighbor_agents_past) sampled
-// on the future grid by zero-order hold. Steps without a sufficiently fresh
-// observation stay all-zero (= invalid).
-xt::xarray<float> create_neighbor_agents_future(
-    const rclcpp::Time &frame_time, const Eigen::Matrix4d &map_to_ego_transform,
-    const preprocess::MessageView<TrackedObjects> &objects_msgs,
-    const LabelBuilderParams &params) {
-  const auto num_steps = static_cast<size_t>(params.num_future_steps);
-  xt::xarray<float> future = xt::zeros<float>(
-      {static_cast<size_t>(MAX_NUM_NEIGHBORS), num_steps, size_t{4}});
-
-  const double frame_sec = frame_time.seconds();
-
-  const auto selected_agents = preprocess::select_current_agents(
-      objects_msgs, frame_time, map_to_ego_transform, MAX_NUM_NEIGHBORS);
-
-  // Collect future observations (map frame poses) per object id.
-  struct Observation {
-    double stamp_sec;
-    const TrackedObject *object;
-  };
-  std::unordered_map<preprocess::AgentId, size_t, preprocess::AgentIdHash>
-      selected_indices;
-  for (size_t i = 0; i < selected_agents.size(); ++i) {
-    selected_indices.emplace(selected_agents[i].object_id, i);
-  }
-  std::vector<std::vector<Observation>> observations(selected_agents.size());
-  for (const TrackedObjects &msg : objects_msgs) {
-    const double stamp_sec = stamp_sec_of(msg.header);
-    if (stamp_sec <= frame_sec) {
-      continue;
-    }
-    for (const TrackedObject &object : msg.objects) {
-      const auto selected = selected_indices.find(object.object_id.uuid);
-      if (selected != selected_indices.end()) {
-        observations[selected->second].push_back({stamp_sec, &object});
-    }
-  }
-  }
-
-  constexpr double stamp_tolerance_s = 1e-6;
-  for (size_t neighbor_idx = 0; neighbor_idx < selected_agents.size();
-       ++neighbor_idx) {
-    const auto &agent_observations = observations[neighbor_idx];
-    if (agent_observations.empty()) {
-      continue; // object disappears right after the frame: row stays all-zero
-    }
-
-    size_t obs_idx = 0; // grid times are increasing, so carry the index forward
-    bool has_observation = false;
-    for (size_t t = 0; t < num_steps; ++t) {
-      const double grid_sec =
-          frame_sec + static_cast<double>(t + 1) * params.time_step_s;
-      while (obs_idx + 1 < agent_observations.size() &&
-             agent_observations[obs_idx + 1].stamp_sec <=
-                 grid_sec + stamp_tolerance_s) {
-        ++obs_idx;
-      }
-      has_observation =
-          has_observation ||
-          agent_observations[obs_idx].stamp_sec <= grid_sec + stamp_tolerance_s;
-      const bool valid =
-          has_observation && grid_sec - agent_observations[obs_idx].stamp_sec <=
-                                 params.neighbor_observation_timeout_s;
-      if (!valid) {
-        continue;
-      }
-
-      const Eigen::Matrix4d pose_ego =
-          map_to_ego_transform *
-          utils::pose_to_matrix4d(
-              agent_observations[obs_idx]
-                  .object->kinematics.pose_with_covariance.pose);
-      const auto [cos_yaw, sin_yaw] =
-          utils::rotation_matrix_to_cos_sin(pose_ego.block<3, 3>(0, 0));
-      future(neighbor_idx, t, 0) = static_cast<float>(pose_ego(0, 3));
-      future(neighbor_idx, t, 1) = static_cast<float>(pose_ego(1, 3));
-      future(neighbor_idx, t, 2) = cos_yaw;
-      future(neighbor_idx, t, 3) = sin_yaw;
-    }
-  }
-
-  return future;
 }
 
 } // namespace
@@ -145,6 +53,7 @@ preprocess::InputDataMap create_label_data_map(
         &traffic_signals_msgs,
     const autoware_planning_msgs::msg::LaneletRoute &route,
     const preprocess::LaneSegmentContext &map_context,
+    const std::vector<preprocess::SelectedAgent> &selected_agents,
     const LabelBuilderParams &params) {
   const double frame_sec = frame_time.seconds();
   const double horizon_s =
@@ -185,8 +94,12 @@ preprocess::InputDataMap create_label_data_map(
       frame_time + rclcpp::Duration::from_seconds(horizon_s));
 
   // Neighbor futures, ordered like the neighbor_agents_past input.
-  label_data_map["neighbor_agents_future"] = create_neighbor_agents_future(
-      frame_time, map_to_ego_transform, objects_msgs, params);
+  label_data_map["neighbor_agents_future"] =
+      preprocess::create_neighbor_agent_sequence(
+          objects_msgs, selected_agents, frame_time, map_to_ego_transform,
+          MAX_NUM_NEIGHBORS, static_cast<size_t>(params.num_future_steps),
+          params.time_step_s, preprocess::AgentSequenceDirection::Future,
+          params.neighbor_observation_timeout_s);
 
   // Turn indicator future: zero-order hold on the same future grid.
   label_data_map["turn_indicators_future"] = preprocess::create_turn_indicators(

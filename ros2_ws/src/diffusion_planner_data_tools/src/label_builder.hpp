@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <vector>
 
 namespace autoware::diffusion_planner::data_tools {
 
@@ -85,6 +86,7 @@ preprocess::InputDataMap create_label_data_map(
         &traffic_signals_msgs,
     const autoware_planning_msgs::msg::LaneletRoute &route,
     const preprocess::LaneSegmentContext &map_context,
+    const std::vector<preprocess::SelectedAgent> &selected_agents,
     const LabelBuilderParams &params);
 
 } // namespace autoware::diffusion_planner::data_tools

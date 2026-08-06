@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from numpy.typing import NDArray
 
 from .frame import FrameData
-from .schema import LaneIndex, NeighborIndex, TrafficLightIndex
+from .schema import AgentLabelIndex, AgentShapeIndex, LaneIndex, NeighborIndex, TrafficLightIndex
 from .style import FramePlotOptions, VisualizerStyle
 
 
@@ -365,7 +365,14 @@ def create_agent_traces(
         )
         if neighbor_past is not None:
             traces.append(neighbor_past)
-        traces.extend(_create_neighbor_boxes(neighbors, style))
+        traces.extend(
+            _create_neighbor_boxes(
+                neighbors,
+                frame["agent_shape"],
+                frame["agent_label"],
+                style,
+            )
+        )
 
     if options.show_agent_future:
         ego_future = frame.get("ego_agent_future")
@@ -394,7 +401,10 @@ def create_agent_traces(
 
 
 def _create_neighbor_boxes(
-    neighbors: NDArray[np.generic], style: VisualizerStyle
+    neighbors: NDArray[np.generic],
+    agent_shapes: NDArray[np.generic],
+    agent_labels: NDArray[np.generic],
+    style: VisualizerStyle,
 ) -> list[go.BaseTraceType]:
     """Create an oriented footprint box for each neighbor's current state."""
     valid_indices = np.flatnonzero(FrameData.valid_rows(neighbors))
@@ -402,16 +412,24 @@ def _create_neighbor_boxes(
     if len(valid_neighbors) == 0:
         return []
     current = valid_neighbors[:, -1]
-    labels = np.argmax(current[:, NeighborIndex.IS_VEHICLE : NeighborIndex.IS_BICYCLE + 1], axis=1)
+    shapes = agent_shapes[valid_indices]
+    labels = agent_labels[valid_indices]
     label_names = np.array(["vehicle", "pedestrian", "bicycle"])
     traces: list[go.BaseTraceType] = []
-    for neighbor_index, state, label in zip(valid_indices, current, labels, strict=True):
+    for neighbor_index, state, shape, label_one_hot in zip(
+        valid_indices, current, shapes, labels, strict=True
+    ):
         x = float(state[NeighborIndex.X])
         y = float(state[NeighborIndex.Y])
         cos_yaw = float(state[NeighborIndex.COS_YAW])
         sin_yaw = float(state[NeighborIndex.SIN_YAW])
-        width = float(state[NeighborIndex.WIDTH])
-        length = float(state[NeighborIndex.LENGTH])
+        width = float(shape[AgentShapeIndex.WIDTH])
+        length = float(shape[AgentShapeIndex.LENGTH])
+        label = (
+            label_names[int(np.argmax(label_one_hot))]
+            if np.any(label_one_hot[AgentLabelIndex.IS_VEHICLE : AgentLabelIndex.IS_BICYCLE + 1])
+            else "unknown"
+        )
         if width <= 0.0 or length <= 0.0 or cos_yaw**2 + sin_yaw**2 <= 0.5:
             continue
 
@@ -427,7 +445,7 @@ def _create_neighbor_boxes(
         rotation = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]])
         corners = corners @ rotation.T + np.array([x, y])
         customdata = np.tile(
-            np.array([neighbor_index, label_names[label], x, y, length, width], dtype=object),
+            np.array([neighbor_index, label, x, y, length, width], dtype=object),
             (len(corners), 1),
         )
         traces.append(

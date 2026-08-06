@@ -61,16 +61,18 @@ public:
   create_input_data(const rclcpp::Time &frame_time,
                     const preprocess::LaneSegmentContext &map_context,
                     const VehicleSpec &vehicle_spec,
-                    const preprocess::InputBuilderParams &params);
+                    const preprocess::InputBuilderParams &params,
+                    std::vector<preprocess::SelectedAgent> &selected_agents);
 
   /**
    * @brief Build the label tensors (ego/neighbor futures, turn indicator
    * future) for the given frame time.
    */
-  preprocess::InputDataMap
-  create_label_data(const rclcpp::Time &frame_time,
-                    const preprocess::LaneSegmentContext &map_context,
-                    const LabelBuilderParams &params);
+  preprocess::InputDataMap create_label_data(
+      const rclcpp::Time &frame_time,
+      const preprocess::LaneSegmentContext &map_context,
+      const LabelBuilderParams &params,
+      const std::vector<preprocess::SelectedAgent> &selected_agents);
 
 private:
   using Odometry = nav_msgs::msg::Odometry;
