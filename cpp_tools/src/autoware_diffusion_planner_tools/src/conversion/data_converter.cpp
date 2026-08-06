@@ -88,7 +88,7 @@ void save_override_segments_json(
   }
   std::filesystem::create_directories(output_dir);
   const std::filesystem::path output_path =
-    std::filesystem::path(output_dir) / "override_segments.json";
+    std::filesystem::path(output_dir) / "control_mode_4_intervals.json";
   std::ofstream output_file(output_path);
   if (!output_file.is_open()) {
     std::cerr << "Failed to open override segment output: " << output_path << std::endl;
