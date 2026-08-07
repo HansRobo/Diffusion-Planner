@@ -71,7 +71,7 @@ def main() -> None:
     if args.wandb_project_name:
         optional += ["--wandb_project_name", args.wandb_project_name]
 
-    Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
+    Path(f"/tmp/tmp_dist_init_{os.getuid()}").unlink(missing_ok=True)
 
     cmd = [
         sys.executable,

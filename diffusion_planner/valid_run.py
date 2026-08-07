@@ -9,6 +9,7 @@ per-clip MP4s on rank 0 when --save_predictions_dir is set.
 import argparse
 import sys
 from datetime import datetime
+import os
 from pathlib import Path
 
 from run_utils import gpu_count, tee_run
@@ -60,7 +61,7 @@ def main() -> None:
     save_dir = output_root / "predictions"
 
     here = Path(__file__).resolve().parent
-    Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
+    Path(f"/tmp/tmp_dist_init_{os.getuid()}").unlink(missing_ok=True)
 
     cmd = [
         sys.executable,

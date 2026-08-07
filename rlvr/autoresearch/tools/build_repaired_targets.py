@@ -1244,7 +1244,15 @@ def build_repaired_targets(
             depart_added = False
             depart_index: int | None = None
             depart_diag: dict[str, Any] | None = None
-            if is_expert and (repair_expert_gt_candidate or enable_depart_morph):
+            # Morph eligibility keys on the CONFLICT REASON, not only the mined label:
+            # a stall that ends in a collision/RB event is labelled moving_collision/
+            # road_border_crossing while expert_disagreement_reason still says
+            # model_lagging_expert — and the force_or_drop scope already treats such
+            # rows as ED, so without a morph in the pool they were structurally
+            # unrepairable (smoke_trustfix: 195/195 dropped). Synthesis scope must
+            # match forcing scope.
+            is_ed_like = is_expert or bool(row.get("expert_disagreement_reason"))
+            if is_ed_like and (repair_expert_gt_candidate or enable_depart_morph):
                 stop_anchor_xy = None
                 if repair_expert_gt_candidate:
                     if expert_stop_anchor == "recorded":

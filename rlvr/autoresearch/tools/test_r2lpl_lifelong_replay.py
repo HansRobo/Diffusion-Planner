@@ -5746,3 +5746,40 @@ def test_trust_region_selection_passes_delayed_depart_rejects_far_generated():
     # the generated twin (candidate 0) would have been trust-region rejected.
     assert idx == 1
     assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced_depart"
+
+
+def test_morphs_synthesized_for_reason_only_rows():
+    # A stall that ends in a collision is labelled moving_collision while the conflict
+    # detector still records model_lagging_expert. Forcing already scopes on the reason;
+    # synthesis must too, or the row is structurally unrepairable (smoke_trustfix 195/195).
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_repaired_targets import _best_safe_candidate
+
+    T = 80
+    expert = np.zeros((T, 4), dtype=np.float32)
+    expert[:, 0] = np.linspace(0, 60, T)
+    expert[:, 2] = 1.0
+    delayed = np.zeros((T, 4), dtype=np.float32)
+    delayed[:, 0] = np.concatenate([np.zeros(20), np.linspace(0, 40, 60)])
+    delayed[:, 2] = 1.0
+    source_row = {
+        "repair_labels": ["moving_collision"],  # NOT expert_disagreement
+        "expert_disagreement_reason": "model_lagging_expert",
+    }
+    candidate_rows = [_mk_candidate_row() for _ in range(2)]
+    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0)]
+    idx, meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[delayed, delayed],
+        reference_traj=expert,
+        max_expert_dev_m=4.0,
+        lagging_expert_target="force_or_drop",
+        depart_index=1,
+    )
+    assert idx == 1
+    assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced_depart"

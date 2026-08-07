@@ -57,7 +57,7 @@ def main() -> None:
     )
     (save_path / "git_diff.txt").write_text(git_output(["git", "diff"]))
 
-    Path("/tmp/tmp_dist_init").unlink(missing_ok=True)
+    Path(f"/tmp/tmp_dist_init_{os.getuid()}").unlink(missing_ok=True)
 
     cmd = [
         sys.executable,
