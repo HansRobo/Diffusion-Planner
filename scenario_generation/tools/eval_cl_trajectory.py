@@ -255,6 +255,9 @@ def evaluate_trajectory(
         "first_rb_cross_step": first_rb_cross,
         "stopped_steps": int((speeds < 0.1).sum()),
         "stopped_frac": float((speeds < 0.1).mean()) if len(speeds) > 0 else 0,
+        # Per-step series, not just the summary quantiles above. Empty when the map ships no
+        # road-border polylines.
+        "rb_dists": rb_dists,
     }
 
 
