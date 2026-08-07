@@ -136,6 +136,15 @@ def _future_is_4col(data: dict[str, Any], key: str) -> bool:
     return key not in data or int(data[key].shape[-1]) == 4
 
 
+def _row_is_ed_like(row: dict) -> bool:
+    """Row needs ED treatment: labelled expert_disagreement OR the conflict detector
+    recorded a reason (a stall ending in a collision/RB event is labelled by the
+    violation while the behavioural failure is still the lag). Synthesis, det
+    extraction and forcing must all use THIS predicate or rows fall in the gap
+    (smoke_trustfix: 195/195 stall drops)."""
+    return _row_is_expert_disagreement(row) or bool(row.get("expert_disagreement_reason"))
+
+
 def _row_is_expert_disagreement(row: dict[str, Any]) -> bool:
     return "expert_disagreement" in set(row.get("repair_labels") or [])
 
@@ -1138,7 +1147,7 @@ def build_repaired_targets(
         # Deterministic plan per scene — needed to seed the det-path re-timing morph
         # AND the depart morph (initial speed) for expert_disagreement scenes.
         want_morph = (repair_expert_gt_candidate or enable_depart_morph) and any(
-            _row_is_expert_disagreement(row) for row in kept_rows
+            _row_is_ed_like(row) for row in kept_rows
         )
         det_trajs = None
         if want_morph:
@@ -1220,7 +1229,7 @@ def build_repaired_targets(
             name = _output_name_for_scene(row["scene_path"])
 
             expert_traj = det_traj = None
-            if is_expert and (repair_expert_gt_candidate or enable_depart_morph):
+            if _row_is_ed_like(row) and (repair_expert_gt_candidate or enable_depart_morph):
                 expert_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
                 det_traj = det_trajs[scene_idx].detach().cpu().numpy().astype(np.float32)
             scripted_kwargs = dict(
@@ -1251,7 +1260,7 @@ def build_repaired_targets(
             # rows as ED, so without a morph in the pool they were structurally
             # unrepairable (smoke_trustfix: 195/195 dropped). Synthesis scope must
             # match forcing scope.
-            is_ed_like = is_expert or bool(row.get("expert_disagreement_reason"))
+            is_ed_like = _row_is_ed_like(row)
             if is_ed_like and (repair_expert_gt_candidate or enable_depart_morph):
                 stop_anchor_xy = None
                 if repair_expert_gt_candidate:
