@@ -258,14 +258,12 @@ def evaluate_trajectory(
     }
 
 
-def load_border_segments(map_path: str) -> list[np.ndarray]:
-    """Load road border polylines from a lanelet2 map."""
-    import lanelet2
-    from autoware_lanelet2_extension_python.projection import MGRSProjector
+def border_segments_from_map(ll_map) -> list[np.ndarray]:
+    """Road border polylines out of an already-loaded lanelet2 map.
 
-    projector = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
-    ll_map = lanelet2.io.load(map_path, projector)
-
+    Raw points, not resampled tiles: the road-border metric measures distance to the border
+    as drawn, and resampling would move it.
+    """
     segments = []
     for ls in ll_map.lineStringLayer:
         attrs = ls.attributes
@@ -275,6 +273,20 @@ def load_border_segments(map_path: str) -> list[np.ndarray]:
             pts = np.array([[p.x, p.y] for p in ls], dtype=np.float64)
             if len(pts) >= 2:
                 segments.append(pts)
+    return segments
+
+
+def load_border_segments(map_path: str) -> list[np.ndarray]:
+    """Load road border polylines from a lanelet2 map file.
+
+    For a caller that already holds a parsed map, ``border_segments_from_map`` avoids keeping
+    a second copy of it alive.
+    """
+    import lanelet2
+    from autoware_lanelet2_extension_python.projection import MGRSProjector
+
+    projector = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
+    segments = border_segments_from_map(lanelet2.io.load(map_path, projector))
     print(f"Loaded {len(segments)} road border segments from map")
     return segments
 
