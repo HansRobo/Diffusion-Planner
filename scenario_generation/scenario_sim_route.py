@@ -35,10 +35,7 @@ def map_from_osc(osc_path: str | Path) -> str:
 def _goal_lanelet(osc_path: str | Path) -> int | None:
     """Goal lanelet id from an ``AcquirePositionAction`` LanePosition, if the scenario
     authors one. SSv2 lane ids are lanelet ids."""
-    try:
-        root = ET.parse(str(osc_path)).getroot()
-    except ET.ParseError:
-        return None
+    root = ET.parse(str(osc_path)).getroot()
     for routing in root.iter("AcquirePositionAction"):
         lp = routing.find(".//LanePosition")
         if lp is not None and "laneId" in lp.attrib:

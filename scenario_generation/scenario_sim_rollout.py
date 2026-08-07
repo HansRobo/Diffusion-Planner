@@ -30,7 +30,7 @@ from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.metrics.object import score_object_step
 from scenario_generation.perf_timer import Timers
 from scenario_generation.scenario_sim_metrics import build_segment_row
-from scenario_generation.scenario_sim_route import resolve_route
+from scenario_generation.scenario_sim_route import map_from_osc, resolve_route
 from scenario_generation.scenario_sim_scene import (
     DT,
     HistoryBuffers,
@@ -41,7 +41,11 @@ from scenario_generation.scenario_sim_scene import (
     resolve_ego_name,
     update_history,
 )
-from scenario_generation.simulate import _ego_to_world, _predict_batch
+from scenario_generation.simulate import (
+    _ego_to_world,
+    _predict_batch,
+    resolve_keep_turn_indicator,
+)
 from scenario_generation.tensor_converter import (
     MapTensorCache,
     _build_neighbor_agents_past,
@@ -54,11 +58,6 @@ from scenario_generation.transforms import _rotation_matrix
 
 # Same default the reproducer path uses, so the strong_brake metric is comparable.
 STRONG_BRAKE_MPS2 = -2.5
-
-# Model turn-indicator classes (decode_turn_indicator): 0 NONE / 1 DISABLE / 2 LEFT /
-# 3 RIGHT / 4 KEEP. Sim TurnIndicatorsCommand: 0 NO_COMMAND / 1 DISABLE / 2 ENABLE_LEFT /
-# 3 ENABLE_RIGHT. KEEP has no sim counterpart and retains the previous command.
-_TI_MODEL_TO_SIM = {0: 0, 1: 1, 2: 2, 3: 3}
 
 # Used only when the sim never reported an ego state, i.e. the scenario ended before the
 # first tick and the trajectory log is empty, so the value cannot affect any metric.
@@ -84,10 +83,12 @@ class RolloutConfig:
     coord_check_tol_m: float = 2.0
     scene: SceneConfig = field(default_factory=SceneConfig)
 
-
-def _map_turn_indicator(ti_model: int, prev_cmd: int) -> int:
-    """Model turn-indicator class -> sim command. KEEP retains ``prev_cmd``."""
-    return _TI_MODEL_TO_SIM.get(ti_model, prev_cmd)
+    def __post_init__(self) -> None:
+        # DT drives the plan-point speeds, SceneContext.dt and the acceleration first
+        # difference, while fps drives the simulator. A mismatch produces a complete row with
+        # silently wrong speeds and brake counts, so it has to fail here.
+        if abs(self.fps * DT - 1.0) > 1e-9:
+            raise ValueError(f"fps={self.fps} does not match the model timestep DT={DT}")
 
 
 @torch.no_grad()
@@ -182,6 +183,7 @@ def _start_and_resolve_route(
 
 def _finalize_row(
     output_dir: Path,
+    *,
     map_path: str | Path,
     trajectory_log: list[dict],
     ego_state: dict | None,
@@ -190,7 +192,7 @@ def _finalize_row(
     collisions: list[bool],
     terminated_reason: str,
     result_kind: str,
-    coord_ok: bool | None,
+    coord_ok: bool,
     coord_err: float,
 ) -> dict:
     """Dump the trajectory, compute post-hoc road-border metrics and build the row."""
@@ -219,7 +221,7 @@ def _finalize_row(
         extra={
             "worst_step": int(np.argmin(clearances)) if clearances else -1,
             "rb_has_data": rb["rb_has_data"],
-            "coord_check_ok": bool(coord_ok) if coord_ok is not None else False,
+            "coord_check_ok": coord_ok,
             "coord_check_err_m": coord_err,
         },
     )
@@ -229,8 +231,8 @@ def run_scenario_sim_rollout(
     model,
     model_args,
     osc_path: str | Path,
-    map_path: str | Path,
     output_dir: str | Path,
+    map_path: str | Path | None = None,
     *,
     config: RolloutConfig | None = None,
     device: str = "cpu",
@@ -248,6 +250,10 @@ def run_scenario_sim_rollout(
     """
     import openscenario_python as osp  # requires the SSV2_HEADLESS_EGO overlay
 
+    # Derived from the scenario by default so the Python-side geometry cannot be computed
+    # against a different map than the interpreter loaded. Pass it only to test a substitute.
+    if map_path is None:
+        map_path = map_from_osc(osc_path)
     cfg = config or RolloutConfig()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -266,7 +272,7 @@ def run_scenario_sim_rollout(
     cached_plan_ego: np.ndarray | None = None  # (future_len, 4) ego frame
     ti_cmd = 0  # last sim turn-indicator command (KEEP retains this)
     coord_err: float = float("nan")
-    coord_ok: bool | None = None
+    coord_ok = False
     ego_state: dict | None = None  # last tick's ego truth, for the finalize ego shape
     terminated_reason = "max_steps"
 
@@ -313,7 +319,7 @@ def run_scenario_sim_rollout(
                     cached_plan_ego, ti_model = _predict_ego_plan(
                         model, model_args, scene, device, map_cache, ego_name
                     )
-                ti_cmd = _map_turn_indicator(ti_model, ti_cmd)
+                ti_cmd = resolve_keep_turn_indicator(ti_model, ti_cmd)
 
             with timers("sim_set_traj"):
                 pts = _ego_plan_to_map_trajectory(cached_plan_ego, ex, ey, eh)
@@ -332,7 +338,7 @@ def run_scenario_sim_rollout(
 
             ego_after = runner.get_ego_state(ego_ref=ego_name)
             trajectory_log.append(_traj_entry(step, ego_after, goal_xy))
-            if coord_ok is None:  # first stepped tick: verify the frame contract
+            if step == 0:  # verify the frame contract on the first stepped tick
                 ax, ay, _ = pose_xyh(ego_after)
                 coord_err = float(math.hypot(ax - pts[0, 0], ay - pts[0, 1]))
                 coord_ok = coord_err <= cfg.coord_check_tol_m
@@ -351,16 +357,16 @@ def run_scenario_sim_rollout(
     _t = time.perf_counter()
     row = _finalize_row(
         output_dir,
-        map_path,
-        trajectory_log,
-        ego_state,
-        cfg,
-        clearances,
-        collisions,
-        terminated_reason,
-        result_kind,
-        coord_ok,
-        coord_err,
+        map_path=map_path,
+        trajectory_log=trajectory_log,
+        ego_state=ego_state,
+        cfg=cfg,
+        clearances=clearances,
+        collisions=collisions,
+        terminated_reason=terminated_reason,
+        result_kind=result_kind,
+        coord_ok=coord_ok,
+        coord_err=coord_err,
     )
     timers.add("finalize", time.perf_counter() - _t)
     # Teardown happens in HeadlessRunner.__exit__, so it is not a stage of its own: it lands in

@@ -16,9 +16,10 @@ import numpy as np
 
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.scene_context import Agent, AgentType, SceneContext
+from scenario_generation.tensor_converter import _INPUT_T
 
 DT = 0.1  # sim + model timestep (10 Hz). Must match the interpreter's local_frame_rate.
-_INPUT_T_PLUS_1 = 31  # tensor_converter._INPUT_T + 1: the history length the model sees.
+_HISTORY_LEN = _INPUT_T + 1  # the past the model sees, plus the current pose.
 _SIM_TYPE_EGO = 0  # get_entity_states()["type"]: 0=EGO 1=VEHICLE 2=PEDESTRIAN 3=MISC_OBJECT
 
 
@@ -33,7 +34,7 @@ class SceneConfig:
     # when unavailable) -- what the model input has to match is the convention its training
     # data was built with. Metric geometry uses :func:`ego_metric_box` instead; the two want
     # different numbers for the same vehicle.
-    ego_wheelbase_ratio: float = 0.65
+    wheelbase_ratio: float = 0.65
 
 
 def resolve_ego_name(states: dict) -> str:
@@ -71,7 +72,7 @@ class HistoryBuffers:
     entity has accumulated, so scoring can wait until the history is warm.
     """
 
-    def __init__(self, length: int = _INPUT_T_PLUS_1):
+    def __init__(self, length: int = _HISTORY_LEN):
         self.length = length
         self._buf: dict[str, deque] = {}
         self.age: dict[str, int] = {}
@@ -104,7 +105,7 @@ def entity_shape(state: dict, cfg: SceneConfig) -> tuple[float, float, float]:
     """``(length, width, axle_wheelbase)`` for ``Agent`` -- model input, not metrics."""
     dims = state["bounding_box"]["dimensions"]
     length, width = float(dims["x"]), float(dims["y"])
-    return length, width, cfg.ego_wheelbase_ratio * length
+    return length, width, cfg.wheelbase_ratio * length
 
 
 def ego_metric_box(state: dict) -> tuple[float, float, float]:
@@ -157,7 +158,9 @@ def build_scene(
         )
         or ego_route_ids[: cfg.route_window_segments]
     )
-    route_lanes, route_sl, route_hsl = builder._route_to_33dim(window)
+    route_lanes, route_sl, route_hsl = builder._route_to_33dim(
+        window, max_segments=cfg.route_window_segments
+    )
 
     agents: list[Agent] = []
     for name, st in states.items():
