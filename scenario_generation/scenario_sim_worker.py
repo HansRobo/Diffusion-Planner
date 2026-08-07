@@ -15,9 +15,9 @@ import json
 import time
 from pathlib import Path
 
+from scenario_generation.closed_loop_eval import segment_row_for_json, tdigest_sidecar_row
 from scenario_generation.perf_timer import Timers
 from scenario_generation.scenario_sim_rollout import RolloutConfig, run_scenario_sim_rollout
-from scenario_generation.scenario_sim_route import map_from_osc
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -55,7 +55,6 @@ def main(argv: list[str] | None = None) -> int:
     with timers("model_load"):
         model, model_args = load_model(a.model_path, a.device)
 
-    map_path = a.map_path or map_from_osc(a.osc)
     cfg = RolloutConfig(
         fps=a.fps,
         replan_interval=a.replan_interval,
@@ -68,15 +67,25 @@ def main(argv: list[str] | None = None) -> int:
         model_args,
         a.osc,
         a.out_dir,
-        map_path=map_path,
+        map_path=a.map_path,
         config=cfg,
         device=a.device,
         timers=timers,
     )
     timers.add("worker_process", time.perf_counter() - t_proc)
-    row["timing"] = timers.as_dict()
-    row["map_path"] = str(map_path)
-    Path(a.row_out).write_text(json.dumps(row, default=float))
+
+    # Same split the closed-loop eval writer uses: a human-readable row, with the clearance
+    # digests in a sidecar so a parent can still pool an approximate global p5. ``route`` is
+    # what carries a row's identity through that pair -- ``attach_tdigest_sidecars`` keys the
+    # reattach on it, so a sidecar without one can be written but never read back.
+    route = Path(a.osc).stem
+    row_out = Path(a.row_out)
+    row_out.write_text(
+        json.dumps(segment_row_for_json(row, route=route, timing=timers.as_dict()), default=float)
+    )
+    side = tdigest_sidecar_row({"route": route, **row})
+    if side is not None:
+        row_out.with_suffix(".tdigests.json").write_text(json.dumps(side, default=float))
     return 0
 
 

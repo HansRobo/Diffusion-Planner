@@ -90,6 +90,7 @@ class HistoryBuffers:
 
 
 def pose_xyh(state: dict) -> tuple[float, float, float]:
+    """The one place the simulator's pose dict shape is read."""
     p = state["pose"]
     return float(p["x"]), float(p["y"]), float(p["yaw"])
 
@@ -98,7 +99,7 @@ def update_history(buffers: HistoryBuffers, states: dict) -> None:
     """Append this tick's truth pose to each dynamic entity's rolling buffer."""
     for name, st in states.items():
         if _agent_type(int(st["type"])) is not None:
-            buffers.update(name, st["pose"]["x"], st["pose"]["y"], st["pose"]["yaw"])
+            buffers.update(name, *pose_xyh(st))
 
 
 def entity_shape(state: dict, cfg: SceneConfig) -> tuple[float, float, float]:
@@ -132,8 +133,8 @@ def build_scene(
     ego_name: str,
 ) -> SceneContext:
     """Build a SceneContext snapshot in the map frame from this tick's sim truth."""
-    ego_state = states[ego_name]
-    ego_xy = np.array([ego_state["pose"]["x"], ego_state["pose"]["y"]], dtype=np.float32)
+    ex, ey, _ = pose_xyh(states[ego_name])
+    ego_xy = np.array([ex, ey], dtype=np.float32)
 
     # Closest-N lanelets around the ego, with the ego route pinned first so route context can
     # never be dropped by the distance cut.

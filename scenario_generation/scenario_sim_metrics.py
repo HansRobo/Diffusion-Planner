@@ -7,9 +7,9 @@ produces the same raw series as the reproducer path -- per-step clearance, colli
 road-border distance and speed -- but through a simulator rather than recorded NPZ frames, so
 the mapping onto that schema lives here.
 
-The metric semantics are not re-implemented: ``_clearance_stats``, ``_event_count`` and
-``strong_brake_mask`` come from the shared modules, so the two paths' definitions cannot
-drift apart.
+The blocks themselves are not re-implemented: ``clearance_family_block`` and
+``strong_brake_block`` are the same builders the reproducer path uses, so neither the metric
+semantics nor the key layout can drift apart.
 
 ``mean_gt_deviation_m`` and ``route_completion`` are absent. Both are optional in
 ``aggregate``, and both need a reference this path does not have: the reproducer measures
@@ -20,11 +20,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from scenario_generation.metrics.strong_brake import strong_brake_mask
 from scenario_generation.reproducer_rollout import (
-    RB_COLLISION_THRESH_M,
-    _clearance_stats,
-    _event_count,
+    clearance_family_block,
+    road_border_collision_mask,
+    strong_brake_block,
 )
 
 # scenario_sim has no reproducer cursor: it never expands a window, snaps the ego back or
@@ -50,28 +49,24 @@ def build_segment_row(
     clearances: list[float],
     collisions: list[bool],
     rb_dists: np.ndarray,
-    speeds: list[float],
+    speeds: np.ndarray,
     dt: float,
     near_miss_thresh: float,
     strong_brake_mps2: float,
     progress_m: float,
-    extra: dict | None = None,
 ) -> dict:
     """Build one closed-loop segment row from a scenario_sim rollout's raw series.
 
     ``rb_dists`` may be empty when the map ships no road-border polylines; the road_border
-    block then reports ``inf`` clearances and zero events, which is what ``_clearance_stats``
+    block then reports ``inf`` clearances and zero events, which is what a clearance block
     does for an all-inf series.
+
+    The row is schema-complete as returned. Callers add their own flat diagnostic keys by
+    merging into the result, never through this builder -- nothing here can overwrite a
+    category block.
     """
     cl = np.asarray(clearances, dtype=np.float64)
-    coll = np.asarray(collisions, dtype=bool)
     rb = np.asarray(rb_dists, dtype=np.float64)
-
-    finite = np.isfinite(cl)
-    obj_miss = finite & (cl <= near_miss_thresh)
-    rb_finite = np.isfinite(rb)
-    rb_coll = rb_finite & (rb < RB_COLLISION_THRESH_M)
-    rb_miss = rb_finite & (rb <= near_miss_thresh)
 
     # Speed is logged per tick, so acceleration is a first difference over the sim step, not
     # wall time. Padded to keep the series as long as clearances/collisions -- otherwise
@@ -80,43 +75,22 @@ def build_segment_row(
     accels = np.zeros(sp.size, dtype=np.float64)
     if sp.size >= 2:
         accels[1:] = np.diff(sp) / dt
-    brake_mask = strong_brake_mask(accels, thresh_mps2=float(strong_brake_mps2))
 
-    row = {
+    return {
         "n_steps_run": int(n_steps_run),
         "terminated": terminated,
         "result_kind": result_kind,
         "progress_m": float(progress_m),
-        "object": {
-            "miss_thresh_m": float(near_miss_thresh),
-            "collision_steps": int(coll.sum()),
-            "collision_count": _event_count(coll),
-            "miss_steps": int(obj_miss.sum()),
-            "miss_count": _event_count(obj_miss),
-            **_clearance_stats(cl),
-        },
-        "road_border": {
-            "miss_thresh_m": float(near_miss_thresh),
-            "collision_steps": int(rb_coll.sum()),
-            "collision_count": _event_count(rb_coll),
-            "miss_steps": int(rb_miss.sum()),
-            "miss_count": _event_count(rb_miss),
-            **_clearance_stats(rb),
-        },
+        "object": clearance_family_block(
+            cl, np.asarray(collisions, dtype=bool), miss_thresh=near_miss_thresh
+        ),
+        "road_border": clearance_family_block(
+            rb, road_border_collision_mask(rb), miss_thresh=near_miss_thresh
+        ),
         "red_light_violation": _red_light_block(),
-        "strong_brake": {
-            "thresh_mps2": float(strong_brake_mps2),
-            "strongest_mps2": (
-                float(accels[brake_mask].min()) if brake_mask.any() else float("inf")
-            ),
-            "steps": int(brake_mask.sum()),
-            "count": _event_count(brake_mask),
-        },
+        "strong_brake": strong_brake_block(accels, strong_brake_mps2),
         "reproducer": {**_NO_REPRODUCER_CURSOR, "normal_steps": int(n_steps_run)},
     }
-    if extra:
-        row.update(extra)
-    return row
 
 
 def failed_segment_row(reason: str, near_miss_thresh: float) -> dict:
@@ -129,17 +103,19 @@ def failed_segment_row(reason: str, near_miss_thresh: float) -> dict:
     ``near_miss_thresh`` is the configured threshold, not NaN, because
     ``_event_family_block`` copies it straight into the summary as the run's threshold.
     """
-    return build_segment_row(
-        n_steps_run=0,
-        terminated="worker_failed",
-        result_kind="",
-        clearances=[],
-        collisions=[],
-        rb_dists=np.zeros(0, dtype=np.float64),
-        speeds=[],
-        dt=1.0,  # no samples to difference, so the value cannot reach the row
-        near_miss_thresh=near_miss_thresh,
-        strong_brake_mps2=float("inf"),  # no threshold was applied
-        progress_m=0.0,
-        extra={"error": reason},
-    )
+    return {
+        **build_segment_row(
+            n_steps_run=0,
+            terminated="worker_failed",
+            result_kind="",
+            clearances=[],
+            collisions=[],
+            rb_dists=np.zeros(0, dtype=np.float64),
+            speeds=np.zeros(0, dtype=np.float64),
+            dt=1.0,  # no samples to difference, so the value cannot reach the row
+            near_miss_thresh=near_miss_thresh,
+            strong_brake_mps2=float("inf"),  # no threshold was applied
+            progress_m=0.0,
+        ),
+        "error": reason,
+    }

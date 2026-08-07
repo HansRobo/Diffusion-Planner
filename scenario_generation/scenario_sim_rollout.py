@@ -46,13 +46,10 @@ from scenario_generation.simulate import (
     _predict_batch,
     resolve_keep_turn_indicator,
 )
-from scenario_generation.tensor_converter import (
-    MapTensorCache,
-    _build_neighbor_agents_past,
-)
+from scenario_generation.tensor_converter import _build_neighbor_agents_past
 from scenario_generation.tools.eval_cl_trajectory import (
+    border_segments_from_map,
     evaluate_trajectory,
-    load_border_segments,
 )
 from scenario_generation.transforms import _rotation_matrix
 
@@ -92,17 +89,18 @@ class RolloutConfig:
 
 
 @torch.no_grad()
-def _predict_ego_plan(
-    model, model_args, scene, device, map_cache, ego_name: str
-) -> tuple[np.ndarray, int]:
-    """Run the model as ego -> (ego-frame plan ``(future_len, 4)``, turn-indicator class)."""
+def _predict_ego_plan(model, model_args, scene, device, ego_name: str) -> tuple[np.ndarray, int]:
+    """Run the model as ego -> (ego-frame plan ``(future_len, 4)``, turn-indicator class).
+
+    No ``map_cache`` is passed: the cache only pays off across steps that share one
+    ``map_data``, and this loop rebuilds it around the ego every tick.
+    """
     preds, tis = _predict_batch(
         model,
         model_args,
         scene,
         [ego_name],
         device,
-        map_cache=map_cache,
         return_turn_indicators=True,
     )
     return preds[ego_name], int(tis.get(ego_name, 0))
@@ -119,10 +117,9 @@ def _ego_plan_to_map_trajectory(
     return np.column_stack([world_xy, world_h, speeds]).astype(float)
 
 
-def _score_neighbors(
-    scene, ego_state: dict, ex: float, ey: float, eh: float, device: str, ego_name: str
-) -> tuple[float, bool]:
+def _score_neighbors(scene, ego_state: dict, device: str, ego_name: str) -> tuple[float, bool]:
     """Instantaneous (min_clearance, collision) from raw ego-frame neighbour OBBs."""
+    ex, ey, eh = pose_xyh(ego_state)
     R = _rotation_matrix(eh)
     neighbors_live = _build_neighbor_agents_past(
         scene, ego_name, R, np.array([ex, ey], dtype=np.float64), eh
@@ -167,8 +164,8 @@ def _start_and_resolve_route(
         raise RuntimeError(f"activate() did not reach 'active' (got '{st_act}'): {osc_path}")
     ego_name = resolve_ego_name(runner.get_entity_states())
 
-    ego0 = runner.get_ego_state(ego_ref=ego_name)
-    ego0_xy = np.array([ego0["pose"]["x"], ego0["pose"]["y"]], dtype=np.float32)
+    x0, y0, _ = pose_xyh(runner.get_ego_state(ego_ref=ego_name))
+    ego0_xy = np.array([x0, y0], dtype=np.float32)
     ego_route_ids = resolve_route(builder, ego0_xy, osc_path, min_len_m=cfg.find_route_min_len_m)
     if not ego_route_ids:
         raise RuntimeError("Empty ego route -- cannot build SceneContext")
@@ -184,7 +181,7 @@ def _start_and_resolve_route(
 def _finalize_row(
     output_dir: Path,
     *,
-    map_path: str | Path,
+    builder: LaneletSceneBuilder,
     trajectory_log: list[dict],
     ego_state: dict | None,
     cfg: RolloutConfig,
@@ -192,7 +189,6 @@ def _finalize_row(
     collisions: list[bool],
     terminated_reason: str,
     result_kind: str,
-    coord_ok: bool,
     coord_err: float,
 ) -> dict:
     """Dump the trajectory, compute post-hoc road-border metrics and build the row."""
@@ -201,30 +197,33 @@ def _finalize_row(
     ego_len, ego_w, ego_wb = (
         ego_metric_box(ego_state) if ego_state is not None else _FALLBACK_EGO_BOX
     )
-    borders = load_border_segments(str(map_path))
-    rb = evaluate_trajectory(trajectory_log, borders, ego_len, ego_w, ego_wb)
+    # Borders come off the map the builder already holds. Re-loading the .osm would keep a
+    # second copy of the whole map alive alongside it for the lifetime of the query.
+    borders = border_segments_from_map(builder._lanelet_map)
+    rb, series = evaluate_trajectory(trajectory_log, borders, ego_len, ego_w, ego_wb)
 
-    return build_segment_row(
+    row = build_segment_row(
         n_steps_run=len(trajectory_log),
         terminated=terminated_reason,
         result_kind=result_kind,
         clearances=clearances,
         collisions=collisions,
-        rb_dists=rb["rb_dists"],
-        speeds=[float(t["speed"]) for t in trajectory_log],
+        rb_dists=series["rb_dists"],
+        speeds=series["speeds"],
         dt=DT,
         near_miss_thresh=cfg.near_miss_thresh,
         strong_brake_mps2=STRONG_BRAKE_MPS2,
         progress_m=rb["progress_m"],
-        # scenario_sim-only diagnostics, kept flat (outside the shared category blocks) so
-        # aggregate never sees them as a metric category.
-        extra={
-            "worst_step": int(np.argmin(clearances)) if clearances else -1,
-            "rb_has_data": rb["rb_has_data"],
-            "coord_check_ok": coord_ok,
-            "coord_check_err_m": coord_err,
-        },
     )
+    # scenario_sim-only diagnostics, kept flat (outside the shared category blocks) so
+    # aggregate never sees them as a metric category.
+    return {
+        **row,
+        "worst_step": int(np.argmin(clearances)) if clearances else -1,
+        "rb_has_data": rb["rb_has_data"],
+        "coord_check_ok": bool(coord_err <= cfg.coord_check_tol_m),
+        "coord_check_err_m": coord_err,
+    }
 
 
 def run_scenario_sim_rollout(
@@ -260,10 +259,16 @@ def run_scenario_sim_rollout(
 
     timers = timers or Timers()
     _t_rollout = time.perf_counter()
-    _t = time.perf_counter()
-    if builder is None:
-        builder = LaneletSceneBuilder(str(map_path))
-    timers.add("map_build", time.perf_counter() - _t)
+    with timers("map_build"):
+        if builder is None:
+            builder = LaneletSceneBuilder(str(map_path))
+        elif builder.lanelet_path != str(map_path):
+            # Route, centreline and road-border geometry all come off the builder's map. A
+            # builder carried over from another scenario would compute every one of them
+            # against a map the interpreter did not load.
+            raise ValueError(
+                f"builder holds {builder.lanelet_path}, but this scenario declares {map_path}"
+            )
     buffers = HistoryBuffers()
     trajectory_log: list[dict] = []
     clearances: list[float] = []
@@ -271,8 +276,9 @@ def run_scenario_sim_rollout(
 
     cached_plan_ego: np.ndarray | None = None  # (future_len, 4) ego frame
     ti_cmd = 0  # last sim turn-indicator command (KEEP retains this)
+    # NaN until the first stepped tick; every comparison against the tolerance is then False,
+    # so a rollout that never stepped reports the check as failed rather than as passed.
     coord_err: float = float("nan")
-    coord_ok = False
     ego_state: dict | None = None  # last tick's ego truth, for the finalize ego shape
     terminated_reason = "max_steps"
 
@@ -282,6 +288,8 @@ def run_scenario_sim_rollout(
     osp_out = output_dir / "osp_out"
     osp_out.mkdir(parents=True, exist_ok=True)
 
+    # Measured across the ``with`` header: opening the sim is the constructor plus __enter__,
+    # which no context manager of ours can wrap.
     _t = time.perf_counter()
     with osp.HeadlessRunner(
         osc_path=str(osc_path),
@@ -289,11 +297,10 @@ def run_scenario_sim_rollout(
         local_frame_rate=cfg.fps,
     ) as runner:
         timers.add("sim_open", time.perf_counter() - _t)
-        _t = time.perf_counter()
-        ego_name, ego_route_ids, goal_pose = _start_and_resolve_route(
-            runner, builder, osc_path, cfg, verbose
-        )
-        timers.add("route_resolve", time.perf_counter() - _t)
+        with timers("route_resolve"):
+            ego_name, ego_route_ids, goal_pose = _start_and_resolve_route(
+                runner, builder, osc_path, cfg, verbose
+            )
         goal_xy = goal_pose[:2]
 
         for step in range(cfg.max_steps):
@@ -309,7 +316,6 @@ def run_scenario_sim_rollout(
                 scene = build_scene(
                     states, buffers, builder, ego_route_ids, goal_pose, cfg.scene, ego_name
                 )
-                map_cache = MapTensorCache(scene.map_data)
 
             # Replan every ``replan_interval`` ticks; consume the cached plan in between.
             if cached_plan_ego is None or step % cfg.replan_interval == 0:
@@ -317,7 +323,7 @@ def run_scenario_sim_rollout(
                 # timed as its own stage and kept out of the steady-state ms/call.
                 with timers("predict_cold" if cached_plan_ego is None else "predict"):
                     cached_plan_ego, ti_model = _predict_ego_plan(
-                        model, model_args, scene, device, map_cache, ego_name
+                        model, model_args, scene, device, ego_name
                     )
                 ti_cmd = resolve_keep_turn_indicator(ti_model, ti_cmd)
 
@@ -328,7 +334,7 @@ def run_scenario_sim_rollout(
 
             if buffers.age[ego_name] >= cfg.warmup_steps:
                 with timers("score_objects"):
-                    clr, coll = _score_neighbors(scene, ego_state, ex, ey, eh, device, ego_name)
+                    clr, coll = _score_neighbors(scene, ego_state, device, ego_name)
                 clearances.append(clr)
                 collisions.append(coll)
 
@@ -341,11 +347,11 @@ def run_scenario_sim_rollout(
             if step == 0:  # verify the frame contract on the first stepped tick
                 ax, ay, _ = pose_xyh(ego_after)
                 coord_err = float(math.hypot(ax - pts[0, 0], ay - pts[0, 1]))
-                coord_ok = coord_err <= cfg.coord_check_tol_m
                 if verbose:
+                    verdict = "OK" if coord_err <= cfg.coord_check_tol_m else "FAIL"
                     print(
                         f"  [scenario_sim] coord check: err={coord_err:.3f} m "
-                        f"(tol {cfg.coord_check_tol_m}) -> {'OK' if coord_ok else 'FAIL'}"
+                        f"(tol {cfg.coord_check_tol_m}) -> {verdict}"
                     )
 
             if outcome == "terminated":
@@ -354,29 +360,22 @@ def run_scenario_sim_rollout(
 
         result_kind = runner.result_kind()
 
-    _t = time.perf_counter()
-    row = _finalize_row(
-        output_dir,
-        map_path=map_path,
-        trajectory_log=trajectory_log,
-        ego_state=ego_state,
-        cfg=cfg,
-        clearances=clearances,
-        collisions=collisions,
-        terminated_reason=terminated_reason,
-        result_kind=result_kind,
-        coord_ok=coord_ok,
-        coord_err=coord_err,
-    )
-    timers.add("finalize", time.perf_counter() - _t)
+    with timers("finalize"):
+        row = _finalize_row(
+            output_dir,
+            builder=builder,
+            trajectory_log=trajectory_log,
+            ego_state=ego_state,
+            cfg=cfg,
+            clearances=clearances,
+            collisions=collisions,
+            terminated_reason=terminated_reason,
+            result_kind=result_kind,
+            coord_err=coord_err,
+        )
     # Teardown happens in HeadlessRunner.__exit__, so it is not a stage of its own: it lands in
     # rollout_total minus the parts.
     timers.add("rollout_total", time.perf_counter() - _t_rollout)
+    row["map_path"] = str(map_path)
     row["timing"] = timers.as_dict()
     return row
-
-
-__all__ = [
-    "RolloutConfig",
-    "run_scenario_sim_rollout",
-]
