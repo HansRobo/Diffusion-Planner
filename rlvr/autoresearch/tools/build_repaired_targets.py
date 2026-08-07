@@ -38,6 +38,7 @@ from rlvr.autoresearch.tools.eval_det_avoidance import (
 from rlvr.autoresearch.tools.expert_morph import (
     build_depart_morph_candidate,
     build_expert_morph_candidate,
+    build_unified_morph_candidates,
 )
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
 from rlvr.deviation import rollout_gt_deviation
@@ -1182,77 +1183,74 @@ def build_repaired_targets(
                 device=device,
             )
 
-            # Extra det-path re-timing morph candidate for expert_disagreement scenes.
+            # THE morph (unified, FIX_DIARY #111): ONE GT-schedule re-timing operation.
+            # ``stay_behind`` re-times the det plan's own geometry (rushing rows + fallback);
+            # ``depart`` sources geometry from the expert path (lagging rows — a parked det
+            # plan has no road ahead to re-time, it dies as "infeasible_deceleration").
+            # Legacy flags gate which candidates ENTER the pool; pool order is preserved.
             morph_added = False
             morph_index: int | None = None
             morph_diag: dict[str, Any] | None = None
-            if repair_expert_gt_candidate and is_expert:
-                stop_anchor_xy = None
-                if expert_stop_anchor == "recorded":
-                    if "ego_recorded_future" not in data:
-                        raise ValueError(
-                            f"{row['scene_path']}: --expert_stop_anchor recorded requires "
-                            "'ego_recorded_future' in the mined scene (re-mine with a "
-                            "reproducer that saves it, or run with --expert_stop_anchor "
-                            "pseudo; no silent fallback)."
-                        )
-                    recorded = _future_to_4col(data["ego_recorded_future"].detach().cpu().numpy())
-                    stop_anchor_xy = recorded[-1, :2]
-                elif expert_stop_anchor != "pseudo":
-                    raise ValueError(
-                        f"unknown expert_stop_anchor {expert_stop_anchor!r}; "
-                        "expected 'pseudo' or 'recorded'"
-                    )
-                with timers("morph"):
-                    morph, morph_diag = build_expert_morph_candidate(
-                        det_traj,
-                        expert_traj,
-                        w_max=expert_morph_w_max,
-                        max_accel=expert_morph_max_accel,
-                        max_jerk=expert_morph_max_jerk,
-                        stop_anchor_xy=stop_anchor_xy,
-                        return_diag=True,
-                    )
-                    if morph is not None:
-                        morph_index, scene_trajs = _append_scripted_candidate(
-                            morph,
-                            candidate_rows=candidate_rows,
-                            reward_rows=reward_rows,
-                            scene_trajs=scene_trajs,
-                            **scripted_kwargs,
-                        )
-                        morph_added = True
-
-            # Depart morph for the fail-to-take-off direction: the stop morph
-            # re-times the det plan's own geometry, which cannot synthesize a
-            # departure from a parked plan (no road ahead on a 2 m path) — it
-            # dies as "infeasible_deceleration". The depart morph sources its
-            # geometry from the expert path instead.
             depart_added = False
             depart_index: int | None = None
             depart_diag: dict[str, Any] | None = None
-            if (
-                enable_depart_morph
-                and is_expert
-                and row.get("expert_disagreement_reason") == "model_lagging_expert"
-            ):
+            if is_expert and (repair_expert_gt_candidate or enable_depart_morph):
+                stop_anchor_xy = None
+                if repair_expert_gt_candidate:
+                    if expert_stop_anchor == "recorded":
+                        if "ego_recorded_future" not in data:
+                            raise ValueError(
+                                f"{row['scene_path']}: --expert_stop_anchor recorded requires "
+                                "'ego_recorded_future' in the mined scene (re-mine with a "
+                                "reproducer that saves it, or run with --expert_stop_anchor "
+                                "pseudo; no silent fallback)."
+                            )
+                        recorded = _future_to_4col(
+                            data["ego_recorded_future"].detach().cpu().numpy()
+                        )
+                        stop_anchor_xy = recorded[-1, :2]
+                    elif expert_stop_anchor != "pseudo":
+                        raise ValueError(
+                            f"unknown expert_stop_anchor {expert_stop_anchor!r}; "
+                            "expected 'pseudo' or 'recorded'"
+                        )
                 with timers("morph"):
-                    depart, depart_diag = build_depart_morph_candidate(
+                    unified = build_unified_morph_candidates(
                         det_traj,
                         expert_traj,
+                        row.get("expert_disagreement_reason"),
+                        stop_anchor_xy=stop_anchor_xy,
+                        w_max=expert_morph_w_max,
                         max_accel=expert_morph_max_accel,
                         max_jerk=expert_morph_max_jerk,
-                        return_diag=True,
                     )
-                    if depart is not None:
-                        depart_index, scene_trajs = _append_scripted_candidate(
-                            depart,
-                            candidate_rows=candidate_rows,
-                            reward_rows=reward_rows,
-                            scene_trajs=scene_trajs,
-                            **scripted_kwargs,
-                        )
-                        depart_added = True
+                    for kind, traj, diag in unified:
+                        if kind == "stay_behind":
+                            if not repair_expert_gt_candidate:
+                                continue
+                            morph_diag = diag
+                            if traj is not None:
+                                morph_index, scene_trajs = _append_scripted_candidate(
+                                    traj,
+                                    candidate_rows=candidate_rows,
+                                    reward_rows=reward_rows,
+                                    scene_trajs=scene_trajs,
+                                    **scripted_kwargs,
+                                )
+                                morph_added = True
+                        elif kind == "depart":
+                            if not enable_depart_morph:
+                                continue
+                            depart_diag = diag
+                            if traj is not None:
+                                depart_index, scene_trajs = _append_scripted_candidate(
+                                    traj,
+                                    candidate_rows=candidate_rows,
+                                    reward_rows=reward_rows,
+                                    scene_trajs=scene_trajs,
+                                    **scripted_kwargs,
+                                )
+                                depart_added = True
 
             with timers("select"):
                 best_idx, meta = _best_safe_candidate(

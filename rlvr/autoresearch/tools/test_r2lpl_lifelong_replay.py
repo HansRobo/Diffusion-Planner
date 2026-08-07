@@ -5640,3 +5640,45 @@ def test_forced_target_drops_when_neither_scripted_candidate_accepted():
     )
     assert idx is None
     assert meta["reason"] == "ed_no_expert_target"
+
+
+def test_unified_morph_bit_identical_to_legacy_pair():
+    # THE morph (FIX_DIARY #111): unified entry must be byte-equal to the two legacy
+    # builders on both disagreement classes. Real-data equivalence: 279 lagging + 60
+    # rushing rows, all bit-identical (depart_morph_test/smoke_unified, 2026-08-07).
+    import numpy as np
+
+    from rlvr.autoresearch.tools.expert_morph import (
+        build_depart_morph_candidate,
+        build_expert_morph_candidate,
+        build_unified_morph_candidates,
+    )
+
+    T = 80
+    t = np.arange(T) * 0.1
+    expert = np.zeros((T, 4), dtype=np.float64)
+    expert[:, 0] = 8.0 + np.cumsum(np.minimum(1.5 * t, 7.0) * 0.1)
+    expert[:, 2] = 1.0
+    det = np.zeros((T, 4), dtype=np.float64)
+    det[:, 2] = 1.0
+    anchor = expert[-1, :2]
+
+    for reason, expected_kinds in (
+        ("model_lagging_expert", ["stay_behind", "depart"]),
+        ("expert_wait_model_forward", ["stay_behind"]),
+    ):
+        uni = build_unified_morph_candidates(det, expert, reason, stop_anchor_xy=anchor)
+        assert [k for k, _, _ in uni] == expected_kinds
+        stay, stay_d = build_expert_morph_candidate(
+            det, expert, stop_anchor_xy=anchor, return_diag=True
+        )
+        assert (stay is None) == (uni[0][1] is None)
+        if stay is not None:
+            assert stay.tobytes() == uni[0][1].tobytes()
+        assert stay_d == uni[0][2]
+        if reason == "model_lagging_expert":
+            dep, dep_d = build_depart_morph_candidate(det, expert, return_diag=True)
+            assert (dep is None) == (uni[1][1] is None)
+            if dep is not None:
+                assert dep.tobytes() == uni[1][1].tobytes()
+            assert dep_d == uni[1][2]
