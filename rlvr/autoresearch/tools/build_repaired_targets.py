@@ -148,9 +148,12 @@ def _expert_reference_scoring_data(
 ) -> dict[str, torch.Tensor]:
     """Shallow copy of ``data`` whose ego_agent_future is the LOGGED EXPERT.
 
-    For expert_disagreement scenes reward.py's over/under-progress penalties must
-    reference the logged human expert, not the realized (disagreeing) ego. Fails
-    loudly if the mine did not supply ego_expert_future (no silent fallback).
+    reward.py's over/under-progress penalties must reference the logged human
+    expert, not the realized ego: closed-loop mined windows truncate
+    ego_agent_future at the contact step, so the realized reference is a stub on
+    exactly the rows being repaired (originally ED-only, extended to all rows
+    2026-08-07). Fails loudly if the mine did not supply ego_expert_future (no
+    silent fallback).
     """
     if "ego_expert_future" not in data:
         raise ValueError(
@@ -1108,11 +1111,17 @@ def build_repaired_targets(
         ):
             is_expert = _row_is_expert_disagreement(row)
 
-            # R2 expert-reference scoring fix: for expert_disagreement scenes the
-            # progress / expert-consistency terms must reference the LOGGED EXPERT,
-            # not the realized disagreeing ego. Scoring-only — no mutation of the
-            # original data dict, and the SAVED target is still the selected candidate.
-            if repair_expert_reference and is_expert:
+            # Expert-reference scoring (ALL rows, 2026-08-07): the progress terms must
+            # reference the LOGGED EXPERT for every mistake type, not the realized ego.
+            # In closed-loop mined windows ego_agent_future is truncated at the contact
+            # step (RB/MC rows: median 7 valid steps / 1.7 m of arc measured on link-1
+            # windows), so referencing it either disables the progress discipline
+            # (<10 valid steps) or slams every full-length candidate with overprogress
+            # against a stub, selecting for shortness; underprogress then falls back to
+            # the det plan grading the model against itself. Scoring-only — no mutation
+            # of the original data dict, and the SAVED target is still the selected
+            # candidate.
+            if repair_expert_reference:
                 scoring_data = _expert_reference_scoring_data(
                     data,
                     scene_path=str(row["scene_path"]),
@@ -1149,7 +1158,7 @@ def build_repaired_targets(
             # 3-col (the classifier scores a 4-col-converted copy, the legacy
             # reward path scored the raw arrays).
             reuse_subs = (
-                not (repair_expert_reference and is_expert)
+                not repair_expert_reference
                 and _future_is_4col(data, "ego_agent_future")
                 and _future_is_4col(data, "neighbor_agents_future")
             )
