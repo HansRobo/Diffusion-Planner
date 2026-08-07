@@ -5682,3 +5682,67 @@ def test_unified_morph_bit_identical_to_legacy_pair():
             if dep is not None:
                 assert dep.tobytes() == uni[1][1].tobytes()
             assert dep_d == uni[1][2]
+
+
+def test_trust_region_uses_path_deviation_for_depart_only():
+    # A delayed catch-up ON the expert's path: pointwise L2 is huge (schedule offset),
+    # path deviation ~0. The trust region must pass it as the DEPART candidate and
+    # reject the identical trajectory when it is an ordinary generated candidate.
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_repaired_targets import (
+        _candidate_deviation_penalty,
+        _candidate_path_deviation,
+    )
+
+    T = 80
+    expert = np.zeros((T, 4), dtype=np.float32)
+    expert[:, 0] = np.linspace(0, 60, T)  # cruising expert
+    expert[:, 2] = 1.0
+    delayed = np.zeros((T, 4), dtype=np.float32)
+    delayed[:, 0] = np.concatenate([np.zeros(20), np.linspace(0, 40, 60)])  # waits, then follows
+    delayed[:, 2] = 1.0
+    assert _candidate_deviation_penalty(delayed, expert) > 4.0
+    assert _candidate_path_deviation(delayed, expert) < 0.1
+
+    offset = delayed.copy()
+    offset[:, 1] += 6.0  # genuinely divergent geometry
+    assert _candidate_path_deviation(offset, expert) > 4.0
+
+
+def test_trust_region_selection_passes_delayed_depart_rejects_far_generated():
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_repaired_targets import _best_safe_candidate
+
+    T = 80
+    expert = np.zeros((T, 4), dtype=np.float32)
+    expert[:, 0] = np.linspace(0, 60, T)
+    expert[:, 2] = 1.0
+    delayed = np.zeros((T, 4), dtype=np.float32)
+    delayed[:, 0] = np.concatenate([np.zeros(20), np.linspace(0, 40, 60)])
+    delayed[:, 2] = 1.0
+    source_row = {
+        "repair_labels": ["expert_disagreement"],
+        "expert_disagreement_reason": "model_lagging_expert",
+    }
+    candidate_rows = [_mk_candidate_row() for _ in range(2)]
+    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0)]
+    # candidate 0 = generated with the SAME delayed trajectory; candidate 1 = depart
+    trajs = [delayed, delayed]
+    idx, meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=trajs,
+        reference_traj=expert,
+        max_expert_dev_m=4.0,
+        lagging_expert_target="force_or_drop",
+        depart_index=1,
+    )
+    # depart passes the path-based trust region and is force-selected;
+    # the generated twin (candidate 0) would have been trust-region rejected.
+    assert idx == 1
+    assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced_depart"

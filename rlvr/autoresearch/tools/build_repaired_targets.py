@@ -255,6 +255,43 @@ def _candidate_deviation_penalty(
     return float(np.linalg.norm(cand[:T, :2] - ref[:T, :2], axis=1).mean())
 
 
+def _candidate_path_deviation(
+    candidate_traj: torch.Tensor | np.ndarray | None,
+    reference_traj: torch.Tensor | np.ndarray | None,
+) -> float:
+    """Timing-free deviation: mean distance from candidate points to the reference PATH.
+
+    For the depart candidate the schedule differs from the expert BY DESIGN (a feasible
+    catch-up starts from the stalled ego), so pointwise L2 conflates the intended delay
+    with geometric divergence and the trust region vetoes exactly the rows the candidate
+    exists for (redo link 1: 0.4% of stall rows repaired, 37-53% trust-region drops).
+    This measures what the trust region actually wants to bound — how far the candidate's
+    GEOMETRY strays from the expert's — via the canonical point-to-segment helper.
+    Mirrors ``_candidate_deviation_penalty``'s null handling.
+    """
+    if reference_traj is None or candidate_traj is None:
+        return 0.0
+    from planner_metrics.geometry import _point_to_segments_min_dist
+
+    if isinstance(candidate_traj, torch.Tensor):
+        cand = candidate_traj.detach().cpu().numpy().astype(np.float32, copy=False)
+    else:
+        cand = np.asarray(candidate_traj, dtype=np.float32)
+    ref = _future_to_4col(reference_traj)
+    if cand.ndim != 2 or cand.shape[1] < 2:
+        raise ValueError(f"candidate trajectory must be shaped (T,C), got {cand.shape}")
+    ref_xy = ref[:, :2]
+    # Drop consecutive duplicates (held tail) — zero-length segments carry no path.
+    keep = np.concatenate([[True], np.linalg.norm(np.diff(ref_xy, axis=0), axis=1) > 1e-6])
+    ref_xy = ref_xy[keep]
+    if ref_xy.shape[0] < 2 or cand.shape[0] < 1:
+        return _candidate_deviation_penalty(candidate_traj, reference_traj)
+    pts = torch.from_numpy(np.ascontiguousarray(cand[:, :2], dtype=np.float32))
+    p1 = torch.from_numpy(np.ascontiguousarray(ref_xy[:-1], dtype=np.float32))
+    p2 = torch.from_numpy(np.ascontiguousarray(ref_xy[1:], dtype=np.float32))
+    return float(_point_to_segments_min_dist(pts, p1, p2).mean().item())
+
+
 def _candidate_deviation_max_l2(
     candidate_traj: torch.Tensor | np.ndarray | None,
     reference_traj: torch.Tensor | np.ndarray | None,
@@ -668,10 +705,14 @@ def _best_safe_candidate(
             min_static_margin=min_static_margin,
         ):
             violation_score = _candidate_violation_score(label_row, reward_row)
-            deviation_penalty = _candidate_deviation_penalty(
-                candidate_traj_list[idx] if candidate_traj_list is not None else None,
-                reference_traj,
-            )
+            cand_traj = candidate_traj_list[idx] if candidate_traj_list is not None else None
+            # Depart candidate: geometry-true, timing-free deviation (see
+            # _candidate_path_deviation); every other candidate keeps the strict
+            # pointwise rule that guards against far-off-policy generations.
+            if depart_index is not None and idx == depart_index:
+                deviation_penalty = _candidate_path_deviation(cand_traj, reference_traj)
+            else:
+                deviation_penalty = _candidate_deviation_penalty(cand_traj, reference_traj)
             accepted.append((violation_score, deviation_penalty, float(reward_row.total), idx))
 
     # Trust-region gate: a gate-passing candidate that strays too far from the
