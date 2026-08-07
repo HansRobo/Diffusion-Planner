@@ -174,8 +174,12 @@ def evaluate_trajectory(
     ego_width: float,
     ego_wheelbase: float,
     rb_cross_thresh: float = 0.20,
-) -> dict:
-    """Compute metrics for a single CL trajectory."""
+) -> tuple[dict, dict[str, np.ndarray]]:
+    """Compute metrics for a single CL trajectory -> (summary, per-step series).
+
+    The two are returned separately because they are different kinds of thing: the summary is
+    flat and JSON-writable, the series are arrays a caller feeds into further metrics.
+    """
     half_l = ego_length / 2
     half_w = ego_width / 2
 
@@ -236,7 +240,7 @@ def evaluate_trajectory(
     # distance-valued metrics so they are distinguishable from a real
     # zero-distance crossing in downstream summaries/plots.
     rb_has_data = len(rb_dists) > 0
-    return {
+    summary = {
         "n_steps": len(traj),
         "duration_s": duration_s,
         "path_length_m": path_length,
@@ -256,6 +260,8 @@ def evaluate_trajectory(
         "stopped_steps": int((speeds < 0.1).sum()),
         "stopped_frac": float((speeds < 0.1).mean()) if len(speeds) > 0 else 0,
     }
+    # ``rb_dists`` is empty when the map ships no road-border polylines.
+    return summary, {"rb_dists": rb_dists, "speeds": speeds}
 
 
 def border_segments_from_map(ll_map) -> list[np.ndarray]:
@@ -350,7 +356,7 @@ def main():
             print(f"  SKIP: {e}")
             continue
 
-        metrics = evaluate_trajectory(
+        metrics, _series = evaluate_trajectory(
             traj,
             border_segments,
             args.ego_length,
