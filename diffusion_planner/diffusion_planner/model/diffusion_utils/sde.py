@@ -79,6 +79,10 @@ class VPSDE_linear(SDE):
         drift = $-\frac{\beta(t)}{2} x$
         diffusion = $\sqrt{\beta(t)}$
         """
+        if t.dim() == 1:
+            # One timestep per sample (disable_real_time_chunking); broadcast it over
+            # the trajectory axes. Real-time chunking passes a t already shaped like x.
+            t = t.reshape(-1, *([1] * (x.dim() - 1)))
 
         beta_t = (self._beta_max - self._beta_min) * t + self._beta_min
         drift = -0.5 * beta_t * x
@@ -90,6 +94,10 @@ class VPSDE_linear(SDE):
         """
         Parameters to determine the marginal distribution of the SDE, $p_t(x)$.
         """
+        if t.dim() == 1:
+            # One timestep per sample (disable_real_time_chunking); broadcast it over
+            # the trajectory axes. Real-time chunking passes a t already shaped like x.
+            t = t.reshape(-1, *([1] * (x.dim() - 1)))
         mean_log_coeff = -0.25 * t**2 * (self._beta_max - self._beta_min) - 0.5 * self._beta_min * t
 
         mean = torch.exp(mean_log_coeff) * x

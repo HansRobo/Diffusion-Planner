@@ -34,6 +34,7 @@ from diffusion_planner.loss import (
 )
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.config import model_flag
 from planner_metrics.temporal_stability import (
     compute_curvature_rate_batch,
     compute_mean_abs_jerk_batch,
@@ -65,7 +66,8 @@ def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValida
         dtype=torch.float32,
         device=device,
     )
-    inputs["delay"] = torch.full((batch_size,), delay, dtype=torch.float32, device=device)
+    if not model_flag(args, "disable_real_time_chunking"):
+        inputs["delay"] = torch.full((batch_size,), delay, dtype=torch.float32, device=device)
     inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
     inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
     ego_future = heading_to_cos_sin(inputs["ego_agent_future"])
