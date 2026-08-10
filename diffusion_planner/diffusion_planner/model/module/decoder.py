@@ -24,6 +24,7 @@ from diffusion_planner.model.flow_matching_utils.ode_solver import (
     rk4_integration,
 )
 from diffusion_planner.model.module.dit import DiT
+from diffusion_planner.utils.config import model_flag
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
@@ -286,6 +287,7 @@ class Decoder(nn.Module):
             hidden_dim=config.hidden_dim,
             heads=config.num_heads,
             dropout=dpr,
+            use_cross_attn_mask=model_flag(config, "use_encoder_padding_mask"),
         )
         self.turn_indicator_predictor = nn.Linear(
             2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM

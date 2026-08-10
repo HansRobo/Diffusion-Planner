@@ -5,6 +5,19 @@ import torch
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
+def model_flag(config, name: str) -> bool:
+    """Read an optional model-behaviour flag, defaulting to off.
+
+    ``Config`` only sets the keys its ``args.json`` actually contains, so a checkpoint
+    trained before a flag existed has no such attribute. A plain ``config.<name>`` would
+    therefore break ONNX re-export for every checkpoint predating the flag; this returns
+    False for them, which is the pre-flag behaviour by construction.
+
+    Works for both ``Config`` (attributes set from JSON) and ``TrainConfig`` (dataclass).
+    """
+    return bool(getattr(config, name, False))
+
+
 class Config:
     def __init__(self, args_file, guidance_fn=None):
         with open(args_file, "r") as f:

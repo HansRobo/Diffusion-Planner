@@ -34,7 +34,7 @@ class DiTBlock(nn.Module):
             in_features=dim, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0
         )
 
-    def forward(self, x, cross_c, y, attn_mask):
+    def forward(self, x, cross_c, y, attn_mask, cross_attn_mask=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(
             y
         ).chunk(6, dim=2)
@@ -55,7 +55,18 @@ class DiTBlock(nn.Module):
         modulated_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = x + gate_mlp * self.mlp1(modulated_x)
 
-        x = x + self.cross_attn(self.norm3(x), cross_c, cross_c, need_weights=False)[0]
+        # key_padding_mask=None is what MultiheadAttention defaults to, so the traced
+        # graph is unchanged while the flag is off.
+        x = (
+            x
+            + self.cross_attn(
+                self.norm3(x),
+                cross_c,
+                cross_c,
+                key_padding_mask=cross_attn_mask,
+                need_weights=False,
+            )[0]
+        )
         x = x + self.mlp2(self.norm4(x))
 
         return x
@@ -99,8 +110,11 @@ class DiT(nn.Module):
         heads=6,
         dropout=0.1,
         mlp_ratio=4.0,
+        use_cross_attn_mask=False,
     ):
         super().__init__()
+
+        self._use_cross_attn_mask = use_cross_attn_mask
 
         T = 81
         D = 4
@@ -155,8 +169,10 @@ class DiT(nn.Module):
         ego_mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
         attn_mask = torch.cat([ego_mask, neighbor_current_mask], dim=1)
 
+        cross_attn_mask = torch.all(cross_c == 0, dim=-1) if self._use_cross_attn_mask else None
+
         for block in self.blocks:
-            x = block(x, cross_c, t, attn_mask)
+            x = block(x, cross_c, t, attn_mask, cross_attn_mask)
 
         x = self.final_layer(x, t)  # (B, P, output_dim)
         x = x.reshape(B, P, T, D)
