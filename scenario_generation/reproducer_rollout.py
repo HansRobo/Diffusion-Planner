@@ -991,7 +991,7 @@ def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1
             continue
         pose = tl.poses[idx]
         c, s = math.cos(pose[2]), math.sin(pose[2])
-        nb = tl.npz(idx)["neighbor_agents_past"][:, -1]  # (320, 11) ego frame
+        nb = tl.neighbor_last(idx)  # (320, 11) ego frame — single-key load (fast)
         for slot in range(min(len(ids), nb.shape[0])):
             row = nb[slot]
             if np.abs(row[:6]).sum() == 0:
@@ -1016,6 +1016,42 @@ def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1
             np.unwrap(np.array([k[3] for k in kept])),
         )
     return interp
+
+
+# Track anchors depend only on the recorded data, not on the model or the epoch, yet
+# render_segment rebuilds them on every call that builds them -- one NPZ read per frame of the
+# whole route -- and closed_loop_validate re-evaluates the same routes in the same process.
+#
+# Unbounded on purpose, the same argument the per-map caches use: a process sees as many
+# (route, span) pairs as the suite has routes, not as many as it runs evaluations.
+#
+# No lock needed: the anchors are read-only downstream and the single call site runs before
+# render_segment starts its thread pool.
+_INTERP_ANCHOR_CACHE: dict[tuple, dict] = {}
+
+
+def _neighbor_interp_cached(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1) -> dict:
+    """``_build_neighbor_interp`` memoised per (route, span, sidecar, eps) for the process.
+
+    The sidecar path is part of the key because the same NPZ files paired with a different
+    sidecar directory report different track ids, and so yield different anchors.
+    """
+    key = (
+        str(tl.npz_paths[lo]),
+        str(tl.npz_paths[hi - 1]),
+        str(tl.sidecar_path(lo)),
+        hi - lo,  # the endpoints plus the count pin the file set: npz_paths is sorted
+        eps,
+    )
+    hit = _INTERP_ANCHOR_CACHE.get(key)
+    if hit is not None:
+        # counted so a profile shows the scan was skipped rather than silently missing
+        tl.timers.add("interp_build_cached", 0.0)
+        return hit
+    with tl.timers("interp_build"):
+        anchors = _build_neighbor_interp(tl, lo, hi, eps)
+    _INTERP_ANCHOR_CACHE[key] = anchors
+    return anchors
 
 
 def _interp_pose(anchors: tuple, idx: int) -> tuple[float, float, float]:
@@ -1370,7 +1406,7 @@ def render_segment(
     yaw_gate: bool = True,
     *,
     replan_interval: int = 1,
-    draw_every: int = 1,
+    draw_every: int | None = 1,
     abort_deviation_m: float = 0.0,
     abort_after: int = 30,
     abort_max_snaps: int = 0,
@@ -1392,6 +1428,9 @@ def render_segment(
     at 10 Hz (scoring/advance unaffected); only the matplotlib render — the dominant cost — is
     throttled. PNGs are named by step ``k`` (sparse); encoding them at the raw fps makes the video
     play ``draw_every`` x faster (shorter). For real-time playback use ``fps = 10 / draw_every``.
+    ``draw_every=None`` skips the per-step render entirely (no PNGs at all) -- scoring/
+    ``rollout.jsonl`` (and anything downstream that reads it, e.g. trajectory-colormap images)
+    are unaffected, only the video/PNG artifacts disappear.
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
@@ -1427,9 +1466,10 @@ def render_segment(
     fired this many times in one segment — repeated snapping is itself a sign of a bad rollout.
 
     Per-step ``rollout.jsonl`` lines (next to the PNGs) always include ``clearance_m``,
-    ``collision``, and ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
-    carries no lane geometry) alongside the ego pose — see
-    :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer.
+    ``collision``, ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
+    carries no lane geometry), and ``red_light_violation`` alongside the ego pose — see
+    :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer
+    (which also derives a "strong_brake" colormap from consecutive ``speed`` samples).
 
     ``drop_objects``: empty-world ablation — zero out ``neighbor_agents_past`` and
     ``static_objects`` (and the derived ``neighbors_live``) every step, so the model sees no
@@ -1470,10 +1510,12 @@ def render_segment(
     )
     # Build per-track interpolation anchors over the frames this render visits.
     # The cursor maps sim steps to recorded frames in ~[start, end]; a small
-    # margin covers any overrun without scanning the whole route.
+    # margin covers any overrun without scanning the whole route. Skipped under drop_objects:
+    # every neighbor row is zeroed before _apply_neighbor_interp runs and that function skips
+    # all-zero rows, so the anchors cannot be read.
     interp = (
-        _build_neighbor_interp(tl, start, min(end + 100, len(tl)))
-        if interpolate and neighbor_history_mode != "sim"
+        _neighbor_interp_cached(tl, start, min(end + 100, len(tl)))
+        if interpolate and neighbor_history_mode != "sim" and not drop_objects
         else {}
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
@@ -1602,6 +1644,7 @@ def render_segment(
                     "rb_dist_m": round(float(s.rb_dists[k]), 4)
                     if np.isfinite(s.rb_dists[k])
                     else None,
+                    "red_light_violation": bool(s.red_light[k]),
                     "gt_deviation_m": round(gt_deviation_m, 3),
                 }
             )
@@ -1658,7 +1701,11 @@ def render_segment(
             )
             spd = float(np.hypot(tx - s.live_pose[0], ty - s.live_pose[1]) / DT)
             override = (np.array([tx, ty, th], dtype=np.float64), spd)
-        if (window is None or (window[0] <= k <= window[1])) and k % draw_every == 0:
+        if (
+            draw_every is not None
+            and (window is None or (window[0] <= k <= window[1]))
+            and k % draw_every == 0
+        ):
             _draw_step(
                 np_dict,
                 pred_cur,
