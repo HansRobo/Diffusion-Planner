@@ -325,11 +325,16 @@ class DPM_Solver:
             A pytorch tensor of the time steps, with the shape (N + 1,).
         """
         if skip_type == "logSNR":
-            lambda_T = self.noise_schedule.marginal_lambda(torch.tensor(t_T).to(device))
-            lambda_0 = self.noise_schedule.marginal_lambda(torch.tensor(t_0).to(device))
-            logSNR_steps = torch.linspace(lambda_T.cpu().item(), lambda_0.cpu().item(), N + 1).to(
-                device
-            )
+            # t_T and t_0 are Python floats, so evaluate the endpoints on the CPU.
+            # The previous version sent them to `device` only to pull the results
+            # straight back with `.cpu().item()`, forcing a GPU->CPU sync (and a
+            # torch.compile graph break) on every call. Kept in float32 rather
+            # than Python float arithmetic: `log(1 - exp(2 * log_mean_coeff))`
+            # cancels badly as t -> 0, so float64 math would shift lambda_0 by
+            # ~1e-4 and change the solver's timesteps.
+            lambda_T = self.noise_schedule.marginal_lambda(torch.tensor(t_T)).item()
+            lambda_0 = self.noise_schedule.marginal_lambda(torch.tensor(t_0)).item()
+            logSNR_steps = torch.linspace(lambda_T, lambda_0, N + 1, device=device)
             return self.noise_schedule.inverse_lambda(logSNR_steps)
         elif skip_type == "time_uniform":
             return torch.linspace(t_T, t_0, N + 1).to(device)

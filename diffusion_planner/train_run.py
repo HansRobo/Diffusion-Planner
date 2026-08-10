@@ -46,6 +46,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb_run_id", default=None, help="optional: existing wandb run id")
     p.add_argument("--wandb_project_name", default=None, help="optional: wandb project name")
     p.add_argument(
+        "--compile_model",
+        action="store_true",
+        help="compile the model with torch.compile before training",
+    )
+    p.add_argument(
+        "--use_amp",
+        action="store_true",
+        help="train with Automatic Mixed Precision (bf16 autocast)",
+    )
+    p.add_argument(
         "--closed_loop_npz_root",
         default="",
         help="optional: dir tree of route NPZ frames for closed-loop validation, OR a .json path "
@@ -109,6 +119,10 @@ def main() -> None:
         optional += ["--wandb_run_id", args.wandb_run_id]
     if args.wandb_project_name:
         optional += ["--wandb_project_name", args.wandb_project_name]
+    if args.compile_model:
+        optional += ["--compile_model"]
+    if args.use_amp:
+        optional += ["--use_amp"]
 
     dist_init_file_path().unlink(missing_ok=True)
 

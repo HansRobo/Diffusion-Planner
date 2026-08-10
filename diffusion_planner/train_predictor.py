@@ -177,6 +177,16 @@ def get_args(args_list=None):
 
     parser.add_argument("--use_ema", default=True, type=boolean)
     parser.add_argument(
+        "--compile_model",
+        action="store_true",
+        help="Compile the model with torch.compile before training",
+    )
+    parser.add_argument(
+        "--use_amp",
+        action="store_true",
+        help="Train with Automatic Mixed Precision (bf16 autocast)",
+    )
+    parser.add_argument(
         "--ema_decay",
         type=float,
         default=0.999,
