@@ -1535,6 +1535,7 @@ def test_round_runner_cli_dry_run_uses_multiple_visible_gpus_or_skips(tmp_path):
                     "min_margin": 0.3,
                     "candidate_count_per_scene": 2,
                 },
+                "replay_memory": {"capacity": 200},
                 "training": {"val_scenes": str(tmp_path / "val.json")},
                 "rounds": {"rounds": 1, "epochs_per_round": 1},
             }
