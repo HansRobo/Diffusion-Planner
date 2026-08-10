@@ -310,13 +310,21 @@ class TrainConfig:
     # the other two detect padding as an all-zero token, so without the zeroing they are
     # provably no-ops (measured: bit-identical outputs). One flag, since no other
     # combination is meaningful.
-    use_encoder_padding_mask: bool = False
+    use_encoder_padding_mask: bool = cli(
+        "zero padded encoder tokens, and skip them in cross-attention and pooling",
+        default=False,
+    )
     # Feed the pre-norm activation to the self-attention key/value as well as the query.
     # The current code norms the query only, so key/value see a differently scaled input.
-    use_prenorm_kv_self_attention: bool = False
+    use_prenorm_kv_self_attention: bool = cli(
+        "feed the pre-norm activation to the self-attention key/value, not just the query",
+        default=False,
+    )
     # Give the turn-indicator token its own class type in the positional embedding. It
     # currently reuses CLASS_TYPE_EGO_SHAPE, so the two tokens are indistinguishable there.
-    use_turn_indicator_class_type: bool = False
+    use_turn_indicator_class_type: bool = cli(
+        "give the turn-indicator token its own positional class type", default=False
+    )
 
     # ---------------------------------------------------------
     # Deterministic
