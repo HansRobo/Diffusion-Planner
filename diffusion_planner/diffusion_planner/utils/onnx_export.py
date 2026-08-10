@@ -212,7 +212,7 @@ class TurnIndicatorONNXWrapper(nn.Module):
         agent_num = 1 + self.decoder._predicted_neighbor_num
         final_x0 = final_x0.reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
 
-        encoding_pooled = torch.mean(encoding, dim=1)
+        encoding_pooled = self.decoder.pool_encoding(encoding)
         ego_trajectory = final_x0[:, 0, 1::10, :2].reshape(
             batch_size, 2 * (self.decoder._future_len // 10)
         )

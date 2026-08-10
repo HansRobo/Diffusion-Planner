@@ -289,6 +289,7 @@ class Decoder(nn.Module):
             dropout=dpr,
             use_cross_attn_mask=model_flag(config, "use_encoder_padding_mask"),
         )
+        self._use_encoder_padding_mask = model_flag(config, "use_encoder_padding_mask")
         self.turn_indicator_predictor = nn.Linear(
             2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM
         )
@@ -345,6 +346,22 @@ class Decoder(nn.Module):
         current_states = torch.cat([ego_current, neighbors_current], dim=1)  # [B, P, 4]
 
         return current_states, neighbor_current_mask, ego_current, neighbors_current
+
+    def pool_encoding(self, encoding):
+        """Pool the encoder output into a fixed-size representation. [B, N, D] -> [B, D]
+
+        Shared with the ONNX turn-indicator wrapper so the exported graph cannot drift
+        from what training and PyTorch inference compute.
+        """
+        if not self._use_encoder_padding_mask:
+            return torch.mean(encoding, dim=1)
+
+        # Average the valid tokens only. Padded ones are exactly zero (which is what
+        # use_encoder_padding_mask arranges), so a plain mean would divide the signal by
+        # the padded token count -- 564 instead of the ~251 that carry anything.
+        encoding_valid = torch.any(encoding != 0, dim=-1)  # [B, N]
+        encoding_count = encoding_valid.sum(dim=1).clamp_min(1).unsqueeze(-1)
+        return (encoding * encoding_valid.unsqueeze(-1)).sum(dim=1) / encoding_count
 
     def _compute_turn_indicator(self, ego_trajectory, encoding_pooled):
         """Compute turn indicator logit from ego trajectory and encoding.
@@ -602,8 +619,7 @@ class Decoder(nn.Module):
         B, P, _ = current_states.shape
         assert P == (1 + self._predicted_neighbor_num)
 
-        # Pool encoding to get a fixed-size representation
-        encoding_pooled = torch.mean(encoding, dim=1)  # [B, D]
+        encoding_pooled = self.pool_encoding(encoding)  # [B, D]
 
         # Dispatch to training or inference
         if self.training:

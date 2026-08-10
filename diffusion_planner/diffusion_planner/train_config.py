@@ -301,15 +301,15 @@ class TrainConfig:
     # as off, which is exactly how they were trained.
     # ---------------------------------------------------------
     # Stop padded tokens from contributing downstream: zero the encoder's output at
-    # padded positions, and mask those positions out of the DiT's cross-attention.
-    # 313 of 564 tokens are padding for a typical scene, and today they carry whatever
-    # the fusion attention produced for them.
+    # padded positions, mask those positions out of the DiT's cross-attention, and skip
+    # them when pooling the encoding for the turn indicator. 313 of 564 tokens are
+    # padding for a typical scene, and today they carry whatever the fusion attention
+    # produced for them.
     #
-    # dev ships these as two flags, but the cross-attention half derives its mask from
-    # the encoding itself (all-zero token => padding), so without the zeroing half no
-    # token is ever exactly zero and it provably does nothing (measured: bit-identical
-    # outputs). They are one flag here because only one combination of the two is
-    # meaningful.
+    # dev ships these as three commits, but only the first has any effect on its own:
+    # the other two detect padding as an all-zero token, so without the zeroing they are
+    # provably no-ops (measured: bit-identical outputs). One flag, since no other
+    # combination is meaningful.
     use_encoder_padding_mask: bool = False
     # Feed the pre-norm activation to the self-attention key/value as well as the query.
     # The current code norms the query only, so key/value see a differently scaled input.
