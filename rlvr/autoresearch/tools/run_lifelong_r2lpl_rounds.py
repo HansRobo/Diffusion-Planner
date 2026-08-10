@@ -2345,6 +2345,7 @@ def _run_mining_phase(
         )
         elapsed = _run(cmd, rdir / "perception_mine.log", env=_env_for_gpu(gpu_id))
         rows = _read_jsonl(credit_jsonl)
+        rows = _filter_expert_idle_rows(cfg, rows, credit_jsonl)
         _write_json(rdir / "credit_windows_paths.json", [row["scene_path"] for row in rows])
         return elapsed
 
@@ -2398,10 +2399,48 @@ def _run_mining_phase(
     )
     elapsed = _run_parallel(jobs)
     rows = _merge_jsonl_files(credit_parts, credit_jsonl)
+    rows = _filter_expert_idle_rows(cfg, rows, credit_jsonl)
     _merge_jsonl_files(segment_parts, segments_jsonl)
     _merge_mining_summaries(summary_parts, summary_json)
     _write_json(rdir / "credit_windows_paths.json", [row["scene_path"] for row in rows])
     return elapsed
+
+
+def _filter_expert_idle_rows(
+    cfg: dict[str, Any], rows: list[dict[str, Any]], credit_jsonl: Path
+) -> list[dict[str, Any]]:
+    """Opt-in mining-row filter: drop credit windows whose recorded expert is idle.
+
+    ``event_mining.expert_min_end_progress_m`` (absent = no-op, no silent default)
+    drops rows with ``expert_disagreement_expert_end_progress`` below the threshold —
+    windows where the expert never really moves can only supervise stay-stopped.
+    Stop-then-go windows accumulate progress and survive. Rows missing the field are
+    kept and counted loudly. The filtered set is rewritten to ``credit_jsonl`` so every
+    downstream consumer (repair shards, refresh, paths list) sees the same rows.
+    """
+    threshold = (cfg.get("event_mining") or {}).get("expert_min_end_progress_m")
+    if threshold is None:
+        return rows
+    threshold = float(threshold)
+    kept, dropped, missing = [], 0, 0
+    for row in rows:
+        progress = row.get("expert_disagreement_expert_end_progress")
+        if progress is None:
+            missing += 1
+            kept.append(row)
+        elif float(progress) < threshold:
+            dropped += 1
+        else:
+            kept.append(row)
+    with credit_jsonl.open("w") as fh:
+        for row in kept:
+            fh.write(json.dumps(row) + "\n")
+    print(
+        f"[mining-filter] expert_min_end_progress_m={threshold}: kept {len(kept)}/{len(rows)} "
+        f"(dropped {dropped} expert-idle; {missing} rows missing the field, kept)",
+        flush=True,
+    )
+    return kept
 
 
 def _replay_row_sources(cfg: dict[str, Any], out: Path, round_idx: int) -> list[str]:
