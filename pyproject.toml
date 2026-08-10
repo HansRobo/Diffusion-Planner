@@ -7,7 +7,11 @@ requires-python = ">=3.10"
 dependencies = [
     "diffusion-planner",
     "diffusion-planner-dashboard",
+    "zarr>=2.18.3,<3",
 ]
+
+[dependency-groups]
+dev = ["pre-commit>=4.6.1", "ruff>=0.16.1"]
 
 [tool.uv]
 package = false
@@ -20,47 +24,34 @@ diffusion-planner-dashboard = { workspace = true }
 members = ["packages/*"]
 
 [tool.ruff]
-line-length = 100
 target-version = "py310"
 extend-exclude = ["ros2_ws"]
 
 [tool.ruff.lint]
-select = [
-    "E",
-    "F",
-    "W",   # pyflakes/pycodestyle
-    "I",   # isort
-    "B",   # bugbear
-    "UP",  # pyupgrade
-    "C4",  # comprehensions
-    "SIM", # simplify
-    "N",   # pep8-naming
-    "D",   # pydocstyle
-]
-ignore = [
-    "D100",
-    "D104",
-    "D105",
-    "D107", # missing docstrings
-    "E501", # handled by formatter
-]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
 
-[tool.ruff.lint.pydocstyle]
-convention = "google"
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+skip-magic-trailing-comma = false
+docstring-code-format = true
 
 [tool.ruff.lint.isort]
 known-first-party = ["diffusion_planner", "diffusion_planner_dashboard"]
 
-[tool.ruff.format]
-docstring-code-format = true
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
 
 [tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+
+reportMissingTypeStubs = false
+reportUnusedImport = "warning"
+reportUnusedVariable = "warning"
+
 extraPaths = [
     "ros2_ws/install/diffusion_planner_data_tools/local/lib/python3.10/dist-packages",
-]
-
-[dependency-groups]
-dev = [
-    "pre-commit>=4.6.1",
-    "ruff>=0.16.1",
 ]

@@ -1,0 +1,33 @@
+# AGENTS.md
+
+## Project
+
+Diffusion Planner is an autonomous-driving planner using diffusion models for trajectory generation.
+
+- Python dependencies are managed with `uv`.
+- `ros2_ws` is a ROS 2 workspace root.
+
+## Key Paths
+
+- packages/diffusion_planner/
+    - Core Python package: datasets, models, diffusion logic, visualization.
+
+- packages/diffusion_planner_dashboard/
+    - Streamlit dashboard for visualization.
+
+- ros2_ws/src/deps/autoware_universe/planning/autoware_diffusion_planner/
+    - ROS 2 data processing and inference package. Git repository root of this package is `ros2_ws/src/deps/autoware_universe/`
+
+- ros2_ws/src/diffusion_planner_data_tools/
+    - C++/pybind11 tools for generating model inputs and labels from rosbags.
+
+
+The ROS 2 inference node and `diffusion_planner_data_tools` share preprocessing logic. When changing model inputs, feature definitions, normalization, tensor shapes, or preprocessing behavior, check both sides for consistency.
+
+## Rules
+
+* This is PoC code. Test code is not important. Focus on the main logic and correctness of the planner.
+* This is a PoC. Prefer simple, focused changes over production-level abstractions.
+* Write code, comments, identifiers, and documentation in English.
+* Do not edit `pyproject.toml` directly for dependency changes. Use `uv add`, `uv remove`, or other appropriate `uv` commands.
+* You do not need to build or run the full test suite. If validation requires ROS 2, GPU, datasets, or another unavailable environment, ask the user to run it.
