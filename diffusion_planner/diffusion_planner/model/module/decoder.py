@@ -97,16 +97,21 @@ def compute_training_loss(
 
     eps = 1e-3
     t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
-    t = t.view(B, 1, 1, 1)
-    t = t.expand(B, P, T + 1, 1)
     z = torch.randn_like(gt_future, device=gt_future.device)  # [B, P, T, 4]
 
-    max_delay = 5
-    delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
-    prefix_mask = generate_prefix_mask(delay, 1 + Pn, T + 1)  # (B, P, T+1, 1)
-    mask_coeff = random.uniform(0.0, 1.0)
-    curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=gt_future.device))
-    t = torch.where(prefix_mask, curr_mask_time, t)
+    # Real-time chunking trains on a randomly delayed prefix: the first `delay` steps are
+    # held at the ground truth and given their own (earlier) diffusion time, so the model
+    # learns to continue a trajectory it has already committed to. Without it there is one
+    # timestep per sample and nothing is held fixed.
+    prefix_mask = None
+    if not model_flag(args, "disable_real_time_chunking"):
+        t = t.view(B, 1, 1, 1).expand(B, P, T + 1, 1)
+        max_delay = 5
+        delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
+        prefix_mask = generate_prefix_mask(delay, 1 + Pn, T + 1)  # (B, P, T+1, 1)
+        mask_coeff = random.uniform(0.0, 1.0)
+        curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=gt_future.device))
+        t = torch.where(prefix_mask, curr_mask_time, t)
 
     if use_velocity:
         full_traj = torch.cat([current_states[:, :, None, :], gt_future], dim=2)  # [B, P, T+1, 4]
@@ -117,12 +122,14 @@ def compute_training_loss(
     all_gt[:, 1:][neighbor_mask] = 0.0
 
     if model_type == "x_start":
-        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
+        t_sde = t if prefix_mask is None else t[..., 1:, :]
+        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t_sde)
         # mean([B, P, T, D]), std([B, 1, T, 1]), z([B, P, T, D])
         xT = mean + std * z
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
-        xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, 1 + T, 4]
+        if prefix_mask is not None:
+            xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, 1 + T, 4]
 
         merged_inputs = {
             **inputs,
@@ -288,7 +295,9 @@ class Decoder(nn.Module):
             heads=config.num_heads,
             dropout=dpr,
             use_cross_attn_mask=model_flag(config, "use_encoder_padding_mask"),
+            scalar_time=model_flag(config, "disable_real_time_chunking"),
         )
+        self._scalar_time = model_flag(config, "disable_real_time_chunking")
         self._use_encoder_padding_mask = model_flag(config, "use_encoder_padding_mask")
         self.turn_indicator_predictor = nn.Linear(
             2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM
@@ -318,6 +327,17 @@ class Decoder(nn.Module):
                 nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
         self.apply(_basic_init)
+
+        if self._scalar_time:
+            # adaLN-Zero, as in the reference DiT: start every block as the identity and
+            # let the timestep conditioning grow in. Real-time chunking does not do this.
+            nn.init.normal_(self.dit.t_embedder.mlp[0].weight, std=0.02)
+            nn.init.normal_(self.dit.t_embedder.mlp[2].weight, std=0.02)
+            for block in self.dit.blocks:
+                nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+                nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.dit.final_layer.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.dit.final_layer.adaLN_modulation[-1].bias, 0)
 
         # Zero-out output layers:
         nn.init.constant_(self.dit.final_layer.proj[-1].weight, 0)
@@ -391,9 +411,12 @@ class Decoder(nn.Module):
         B = encoding.shape[0]
         P = 1 + self._predicted_neighbor_num
 
-        sampled_trajectories = inputs["sampled_trajectories"].reshape(
-            B, P, (1 + self._future_len), 4
+        trajectory_shape = (
+            (B, P, (1 + self._future_len) * 4)
+            if self._scalar_time
+            else (B, P, (1 + self._future_len), 4)
         )
+        sampled_trajectories = inputs["sampled_trajectories"].reshape(trajectory_shape)
         diffusion_time = inputs["diffusion_time"]
 
         gt_trajectories = inputs["gt_trajectories"].reshape(B, P, (1 + self._future_len), 4)
@@ -486,13 +509,17 @@ class Decoder(nn.Module):
 
         B, P, T_plus_1, D = action_prefix.shape
 
-        delay = inputs["delay"].to(device=action_prefix.device)
-        mask = generate_prefix_mask(delay, P, T_plus_1)  # (B, P, T_plus_1, 1)
+        mask = None
+        if not self._scalar_time:
+            delay = inputs["delay"].to(device=action_prefix.device)
+            mask = generate_prefix_mask(delay, P, T_plus_1)  # (B, P, T_plus_1, 1)
 
         def prefix_constraint(xt, t, step):
             xt = xt.reshape(B, P, 1 + self._future_len, 4)
             xt = replace_current_state(xt, current_states)
-            return xt
+            # The scalar-time DiT consumes the flat layout, so hand the solver back what
+            # it gave us; real-time chunking re-expands it inside the model wrapper.
+            return xt.reshape(B, P, -1) if self._scalar_time else xt
 
         model_wrapper_params = {
             "classifier_fn": self._guidance_fn,
@@ -520,10 +547,16 @@ class Decoder(nn.Module):
                 "cross_c": encoding,
                 "neighbor_current_mask": neighbor_current_mask,
             },
+            scalar_time=self._scalar_time,
             **model_wrapper_params,
         )
 
-        dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, correcting_xt_fn=prefix_constraint)
+        dpm_solver = dpm.DPM_Solver(
+            model_fn,
+            noise_schedule,
+            correcting_xt_fn=prefix_constraint,
+            scalar_time=self._scalar_time,
+        )
 
         x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
 

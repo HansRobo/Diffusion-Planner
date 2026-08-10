@@ -325,6 +325,16 @@ class TrainConfig:
     use_turn_indicator_class_type: bool = cli(
         "give the turn-indicator token its own positional class type", default=False
     )
+    # Drop real-time chunking: condition the denoiser on one scalar timestep per sample
+    # instead of a timestep per agent per horizon step, and stop training on randomly
+    # delayed prefixes. Unlike the flags above this swaps the timestep embedder, so the
+    # weights differ and a checkpoint does not carry across -- it needs its own run.
+    # The exported ONNX keeps its input signature either way (see onnx_export), so the
+    # deployed ROS node loads both.
+    disable_real_time_chunking: bool = cli(
+        "condition on a scalar diffusion timestep instead of real-time chunking",
+        default=False,
+    )
 
     # ---------------------------------------------------------
     # Deterministic

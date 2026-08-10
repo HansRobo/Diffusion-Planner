@@ -90,6 +90,7 @@ def model_wrapper(
     guidance_scale=1.0,
     classifier_fn=None,
     classifier_kwargs={},
+    scalar_time=False,
 ):
     """Create a wrapper function for the noise prediction model.
 
@@ -181,7 +182,10 @@ def model_wrapper(
 
     def noise_pred_fn(x, t_continuous, cond=None):
         if cond is None:
-            x = x.reshape(x.shape[0], x.shape[1], -1, 4)
+            if not scalar_time:
+                # The real-time-chunking DiT wants the trajectory as (B, P, T, 4); with a
+                # scalar timestep it wants the flat (B, P, T*4) the solver already holds.
+                x = x.reshape(x.shape[0], x.shape[1], -1, 4)
             output = model(x, t_continuous, **model_kwargs)
         else:
             output = model(x, t_continuous, cond, **model_kwargs)
@@ -192,6 +196,10 @@ def model_wrapper(
                 noise_schedule.marginal_alpha(t_continuous),
                 noise_schedule.marginal_std(t_continuous),
             )
+            if scalar_time:
+                # alpha_t / sigma_t come out per-sample; x keeps its trajectory axes.
+                alpha_t = expand_dims(alpha_t, x.dim())
+                sigma_t = expand_dims(sigma_t, x.dim())
             return (x - alpha_t * output) / sigma_t
         elif model_type == "v":
             alpha_t, sigma_t = (
@@ -251,6 +259,7 @@ class DPM_Solver:
         model_fn,
         noise_schedule,
         correcting_xt_fn=None,
+        scalar_time=False,
     ):
         """Construct a DPM-Solver.
 
@@ -286,16 +295,20 @@ class DPM_Solver:
             Burcu Karagol Ayan, S Sara Mahdavi, Rapha Gontijo Lopes, et al. Photorealistic text-to-image diffusion models
             with deep language understanding. arXiv preprint arXiv:2205.11487, 2022b.
         """
-        self.model = model_fn
+        # A scalar-time model wants one timestep per sample; the solver holds a 0-dim
+        # tensor. Real-time chunking builds its own per-element timestep instead.
+        self.model = (lambda x, t: model_fn(x, t.expand(x.shape[0]))) if scalar_time else model_fn
         self.noise_schedule = noise_schedule
         self.correcting_xt_fn = correcting_xt_fn
+        self._scalar_time = scalar_time
 
     def data_prediction_fn(self, x, t):
         """
         Return the data prediction model (with corrector).
         """
         noise = self.model(x, t)
-        x = x.reshape(x.shape[0], x.shape[1], -1, 4)
+        if not self._scalar_time:
+            x = x.reshape(x.shape[0], x.shape[1], -1, 4)
         alpha_t, sigma_t = (
             self.noise_schedule.marginal_alpha(t),
             self.noise_schedule.marginal_std(t),
@@ -416,7 +429,10 @@ class DPM_Solver:
         r0 = h_0 / h
         D1_0 = (1.0 / r0) * (model_prev_0 - model_prev_1)
         phi_1 = torch.expm1(-h)
-        x = x.reshape(x.shape[0], x.shape[1], -1, 4)
+        if not self._scalar_time:
+            # Real-time chunking's model output is (B, P, T, 4); a scalar-time model
+            # returns the flat layout x already has.
+            x = x.reshape(x.shape[0], x.shape[1], -1, 4)
         x_t = (
             (sigma_t / sigma_prev_0) * x
             - (alpha_t * phi_1) * model_prev_0
@@ -444,7 +460,7 @@ class DPM_Solver:
         else:
             raise ValueError("Solver order must be 1 or 2, got {}".format(order))
 
-    def sample(self, x, steps, prefix_mask, skip_type="time_uniform"):
+    def sample(self, x, steps, prefix_mask=None, skip_type="time_uniform"):
         """
         Compute the sample at time `t_end` by DPM-Solver, given the initial `x` at time `t_start`.
 
@@ -505,7 +521,8 @@ class DPM_Solver:
             )
         device = x.device
         T = 81
-        x = x.reshape(x.shape[0], x.shape[1], T, -1)
+        if not self._scalar_time:
+            x = x.reshape(x.shape[0], x.shape[1], T, -1)
         t_shape = (x.shape[0], x.shape[1], T, 1)
         with torch.no_grad():
             assert steps >= order
@@ -515,13 +532,27 @@ class DPM_Solver:
             timesteps_masked = self.get_time_steps(
                 skip_type=skip_type, t_T=t_T, t_0=t_0, N=steps, device=device
             )
+
+            def step_time(t, t_masked):
+                """The timestep this step feeds to the model.
+
+                Real-time chunking conditions on a timestep per agent per horizon step,
+                and holds the delayed prefix at its own (earlier) time. A scalar-time
+                model takes the plain step time and broadcasts it per sample itself.
+                """
+                if self._scalar_time:
+                    return t
+                t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
+                if prefix_mask is None:
+                    return t_BPT1
+                return torch.where(prefix_mask, t_masked, t_BPT1)
+
             assert timesteps.shape[0] - 1 == steps
             # Init the initial values.
             step = 0
             t = timesteps[step]
             t_masked = timesteps_masked[step]
-            t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-            t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
+            t_BPT1 = step_time(t, t_masked)
             t_prev_list = [t]
             model_prev_list = [self.model_fn(x, t_BPT1)]
             if self.correcting_xt_fn is not None:
@@ -530,8 +561,7 @@ class DPM_Solver:
             for step in range(1, order):
                 t = timesteps[step]
                 t_masked = timesteps_masked[step]
-                t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
+                t_BPT1 = step_time(t, t_masked)
                 x = self.multistep_dpm_solver_update(x, model_prev_list, t_prev_list, t, step)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step)
@@ -541,8 +571,7 @@ class DPM_Solver:
             for step in range(order, steps + 1):
                 t = timesteps[step]
                 t_masked = timesteps_masked[step]
-                t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_BPT1 = torch.where(prefix_mask, t_masked, t_BPT1)
+                t_BPT1 = step_time(t, t_masked)
                 # We only use lower order for steps < 10
                 if steps < 10:
                     step_order = min(order, steps + 1 - step)
@@ -560,8 +589,7 @@ class DPM_Solver:
                     model_prev_list[-1] = self.model_fn(x, t_BPT1)
             if denoise_to_zero:
                 t = torch.ones((1,)).to(device) * t_0
-                t_BPT1 = t.reshape((1, 1, 1, 1)).expand(t_shape)
-                t_BPT1 = torch.where(prefix_mask, t_0, t_BPT1)
+                t_BPT1 = step_time(t, t_0)
                 x = self.data_prediction_fn(x, t_BPT1)
                 if self.correcting_xt_fn is not None:
                     x = self.correcting_xt_fn(x, t, step + 1)
