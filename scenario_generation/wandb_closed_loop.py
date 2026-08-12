@@ -9,7 +9,9 @@ import wandb
 
 from scenario_generation.closed_loop_score_keys import (
     COMPARISON_OVERVIEW_SUM_KEYS,
+    COMPARISON_SCORE_KEYS,
     OBJECTS_ONLY_OVERVIEW_SUM_KEYS,
+    OBJECTS_ONLY_SCORE_KEYS,
     SCORE_KEYS,
     extract_score,
 )
@@ -179,6 +181,35 @@ def build_sites_aggregate_log(summaries: dict[str, dict]) -> dict:
     return {k: v for k, v in log.items() if _wandb_scalar(v) or isinstance(v, int)}
 
 
+def build_sites_score_bar_charts(summaries: dict[str, dict]) -> dict:
+    """Per-metric bar chart comparing every site side-by-side, under ``closed_loop_scores_bar/``.
+
+    Sites now only run once per training run, so a per-site score line chart would just be one
+    isolated point; a bar chart across sites fits a one-shot comparison better. ``summaries`` is
+    keyed by site label, sites only (not the ``closed_loop_npz_root`` "main" entry).
+    """
+    log: dict = {}
+    if not summaries:
+        return log
+
+    def _bar(key: str, labels: list[str]) -> None:
+        table = wandb.Table(columns=["site", key])
+        for label in labels:
+            val = extract_score(summaries[label], key)
+            if _wandb_scalar(val):
+                table.add_data(label, val)
+        if table.data:
+            log[f"closed_loop_scores_bar/{key}"] = wandb.plot.bar(table, "site", key, title=key)
+
+    all_labels = list(summaries.keys())
+    objects_labels = [label for label in all_labels if not _is_noobj_label(label)]
+    for key in COMPARISON_SCORE_KEYS:
+        _bar(key, all_labels)
+    for key in OBJECTS_ONLY_SCORE_KEYS:
+        _bar(key, objects_labels)
+    return log
+
+
 def _site_label(site: str | None) -> str:
     """W&B-key-safe site token; ``None`` (single-npz_root mode) -> ``"main"``."""
     return (site or "main").replace("/", "_")
@@ -194,6 +225,7 @@ def build_full_closed_loop_wandb_log(
     near_miss_thresh: float = 0.5,
     report_base_url: str | None = None,
     render_media: bool = True,
+    include_score_scalars: bool = True,
 ) -> dict:
     """Per-site full-route closed-loop wandb payload, keyed into role-based sections so the
     workspace stays navigable (one collapsible section each) instead of one flat ``closed_loop``
@@ -210,15 +242,20 @@ def build_full_closed_loop_wandb_log(
     unaffected) -- for a caller that already skipped rendering (e.g. train.py's RolloutParams
     ``draw=False`` on most epochs), so there's no colormap image to render from anyway.
 
+    ``include_score_scalars=False`` skips the ``closed_loop_scores/{metric}/{site}`` block --
+    for a site that only runs once per run, where :func:`build_sites_score_bar_charts` is the
+    better fit instead.
+
     The per-episode table is built once across ALL sites by :func:`build_combined_episode_table`
     at the caller (so it's a single filterable/groupable panel), not here.
     """
     label = _site_label(site)
     log: dict = {}
-    for key in SCORE_KEYS:
-        val = extract_score(summary, key)
-        if _wandb_scalar(val):
-            log[f"closed_loop_scores/{key}/{label}"] = val
+    if include_score_scalars:
+        for key in SCORE_KEYS:
+            val = extract_score(summary, key)
+            if _wandb_scalar(val):
+                log[f"closed_loop_scores/{key}/{label}"] = val
 
     rows = summary.get("segments") or []
     rep = pick_representative_row(rows, mode=video_pick)
