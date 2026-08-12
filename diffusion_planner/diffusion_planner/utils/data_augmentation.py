@@ -133,11 +133,11 @@ class StatePerturbation:
 
     def __init__(
         self,
-        augment_prob: float = 0.5,
-        num_refine: int = 20,
-        device: torch.device | str = "cpu",
-        ego_past_noise_std: float = 0.1,
-        use_smoothing_future_trajectory: bool = True,
+        augment_prob: float,
+        num_refine: int,
+        device: torch.device | str,
+        ego_past_noise_std: float,
+        use_smoothing_future_trajectory: bool,
     ) -> None:
         """
         Initialize the augmentor,
@@ -666,11 +666,11 @@ class StatePerturbationAtTau(StatePerturbation):
 
     def __init__(
         self,
-        augment_prob: float = 0.5,
-        num_refine: int = 20,
-        device: torch.device | str = "cpu",
-        ego_past_noise_std: float = 0.0,
-        use_smoothing_future_trajectory: bool = True,
+        augment_prob: float,
+        num_refine: int,
+        device: torch.device | str,
+        ego_past_noise_std: float,
+        use_smoothing_future_trajectory: bool,
         tau_min_s: float = -1.0,
         tau_max_s: float = 0.0,
     ) -> None:
