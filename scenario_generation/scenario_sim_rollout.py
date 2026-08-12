@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,7 +33,9 @@ from scenario_generation.perf_timer import Timers
 from scenario_generation.scenario_sim_metrics import build_segment_row
 from scenario_generation.scenario_sim_route import map_from_osc, resolve_route
 from scenario_generation.scenario_sim_scene import (
+    _HISTORY_LEN,
     DT,
+    TURN_INDICATOR_DISABLE,
     HistoryBuffers,
     SceneConfig,
     baselink_xyh,
@@ -275,7 +278,10 @@ def run_scenario_sim_rollout(
     collisions: list[bool] = []
 
     cached_plan_ego: np.ndarray | None = None  # (future_len, 4) ego frame
-    ti_cmd = 0  # last sim turn-indicator command (KEEP retains this)
+    # The planner is the only source of this signal -- the simulator relays what it is given --
+    # so the history the model reads is the one resolved here, held between replans.
+    ti_report = TURN_INDICATOR_DISABLE
+    ti_hist = deque([ti_report] * _HISTORY_LEN, maxlen=_HISTORY_LEN)
     # NaN until the first stepped tick; every comparison against the tolerance is then False,
     # so a rollout that never stepped reports the check as failed rather than as passed.
     coord_err: float = float("nan")
@@ -313,8 +319,16 @@ def run_scenario_sim_rollout(
 
             with timers("scene_build"):
                 update_history(buffers, states, ego_name)
+                ti_hist.append(ti_report)
                 scene = build_scene(
-                    states, buffers, builder, ego_route_ids, goal_pose, cfg.scene, ego_name
+                    states,
+                    buffers,
+                    builder,
+                    ego_route_ids,
+                    goal_pose,
+                    cfg.scene,
+                    ego_name,
+                    np.fromiter(ti_hist, dtype=np.int32, count=_HISTORY_LEN),
                 )
 
             # Replan every ``replan_interval`` ticks; consume the cached plan in between.
@@ -325,12 +339,12 @@ def run_scenario_sim_rollout(
                     cached_plan_ego, ti_model = _predict_ego_plan(
                         model, model_args, scene, device, ego_name
                     )
-                ti_cmd = resolve_keep_turn_indicator(ti_model, ti_cmd)
+                ti_report = resolve_keep_turn_indicator(ti_model, ti_report)
 
             with timers("sim_set_traj"):
                 pts = _ego_plan_to_map_trajectory(cached_plan_ego, ex, ey, eh)
                 runner.set_ego_trajectory(pts, ego_ref=ego_name)
-                runner.set_ego_turn_indicator(int(ti_cmd), ego_ref=ego_name)
+                runner.set_ego_turn_indicator(int(ti_report), ego_ref=ego_name)
 
             if buffers.age[ego_name] >= cfg.warmup_steps:
                 with timers("score_objects"):

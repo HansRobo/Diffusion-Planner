@@ -24,6 +24,9 @@ from scenario_generation.tensor_converter import _INPUT_T
 DT = 0.1  # sim + model timestep (10 Hz). Must match the interpreter's local_frame_rate.
 _HISTORY_LEN = _INPUT_T + 1  # the past the model sees, plus the current pose.
 _SIM_TYPE_EGO = 0  # get_entity_states()["type"]: 0=EGO 1=VEHICLE 2=PEDESTRIAN 3=MISC_OBJECT
+# Not signalling, in the TurnIndicatorsReport space: it has no 0, so the NO_COMMAND the
+# sim's setter would also accept is not a value this history may carry.
+TURN_INDICATOR_DISABLE = 1
 
 
 @dataclass
@@ -153,6 +156,7 @@ def build_scene(
     goal_pose: np.ndarray,
     cfg: SceneConfig,
     ego_name: str,
+    turn_indicators: np.ndarray,
 ) -> SceneContext:
     """Build a SceneContext snapshot in the map frame from this tick's sim truth."""
     ex, ey, _ = baselink_xyh(states[ego_name])
@@ -206,7 +210,7 @@ def build_scene(
                 route_lanes=route_lanes if is_ego else None,
                 route_speed_limit=route_sl if is_ego else None,
                 route_has_speed_limit=route_hsl if is_ego else None,
-                turn_indicators=(np.zeros(traj.shape[0], dtype=np.int32) if is_ego else None),
+                turn_indicators=(turn_indicators if is_ego else None),
                 route_lanelet_ids=list(ego_route_ids) if is_ego else None,
                 age_steps=buffers.age[name],
             )
