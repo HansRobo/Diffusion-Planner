@@ -31,6 +31,7 @@ from diffusion_planner.dimensions import INPUT_T, POSE_DIM
 
 from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
+from scenario_generation.inference_compile import mark_inference_step
 from scenario_generation.metrics import (
     score_object_step,
     score_object_step_batched,
@@ -1660,6 +1661,8 @@ def render_segment(
         override = None
         if plan_world is None or offset == 0:
             data = _to_torch_batch([np_dict], model_args, device)
+            # No-op unless the model was compiled with cudagraphs; one inference is one step.
+            mark_inference_step()
             _, outputs = model(data)
             pred = outputs["prediction"][0, 0].cpu().numpy()
             plan_world = _ego_pred_to_world(
@@ -1968,6 +1971,9 @@ def run_segments_batched(
                                 else:
                                     nxt = s.cursor.max_idx_reached + 1
                                 pool.submit(s.tl.prefetch, range(nxt, nxt + prefetch_ahead))
+                        # No-op unless the model was compiled with cudagraphs; one inference is
+                        # one step.
+                        mark_inference_step()
                         _, outputs = model(data)
                         preds = outputs["prediction"][:, 0].cpu().numpy()  # (B,80,4)
                         # Model's predicted turn indicator per segment, decoded with the SAME
