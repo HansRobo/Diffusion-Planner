@@ -57,7 +57,12 @@ def get_args(args_list=None):
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, help="augmentation probability", default=0.5)
     parser.add_argument(
-        "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
+        "--augment_type",
+        type=str,
+        choices=["quintic", "bridge", "tau"],
+        default="quintic",
+        help="quintic=StatePerturbation; bridge=BridgeStatePerturbation; "
+        "tau=StatePerturbationAtTau (pose+kinematics at random τ).",
     )
     parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
@@ -73,6 +78,18 @@ def get_args(args_list=None):
         default=True,
         type=boolean,
         help="whether to apply smoothing to future trajectory",
+    )
+    parser.add_argument(
+        "--tau_min_s",
+        type=float,
+        default=_train_config_default("tau_min_s"),
+        help="StatePerturbationAtTau: min τ in seconds (relative to t=0).",
+    )
+    parser.add_argument(
+        "--tau_max_s",
+        type=float,
+        default=_train_config_default("tau_max_s"),
+        help="StatePerturbationAtTau: max τ in seconds (relative to t=0).",
     )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=8, type=int)

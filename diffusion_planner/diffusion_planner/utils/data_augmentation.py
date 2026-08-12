@@ -650,18 +650,18 @@ def _quintic_coeff_matrix(duration_s: float, device, dtype) -> torch.Tensor:
 class StatePerturbationAtTau(StatePerturbation):
     """Perturb at a random time τ ∈ [tau_min, tau_max] and reconnect with two quintics.
 
-    Pose-first v1 (see issue discussion around fixed 2 s recovery at t=0):
+    Pose + kinematics recovery (extends pose-first v1):
 
     - Sample τ ~ Uniform[tau_min_s, tau_max_s] (default [-1, 0]).
-    - Apply lateral / heading offset at τ only, sampled from the same
-      ``_low`` / ``_high`` ranges as ``StatePerturbation`` (indices 1 and 2).
-    - Quintic bridge on each side of τ over ``num_refine * time_interval``
-      (same horizon as the parent future refine window).
+    - At τ apply:
+        * lateral / heading offset (``_low``/``_high`` indices 1, 2),
+        * speed / accel offset (indices 3, 5 — same ranges as parent vx / ax),
+        * yaw-rate kept from GT at τ (parent also leaves ω unperturbed; steering
+          is re-derived from ω and the new speed, matching parent ``augment``).
+    - Quintic bridge on each side of τ over ``num_refine * time_interval`` so
+      pose **and** speed/steer recover continuously toward GT at the bridge ends.
     - Re-derive ``ego_current_state`` at t=0 from the rewritten trajectory.
     - Collision check + centric transform (with ego-past transform enabled).
-
-    Speed / steering / yaw-rate random offsets are intentionally deferred: they
-    fight continuous history→future kinematics and need a separate design.
     """
 
     def __init__(
@@ -818,7 +818,9 @@ class StatePerturbationAtTau(StatePerturbation):
         accel[current_index] = torch.linalg.norm(ego_current[b, 6:8])
         yaw_rate[current_index] = ego_current[b, 9]
 
-        # Same lateral / heading ranges as StatePerturbation._low/_high[1], [2].
+        # Same lateral / heading / speed / accel ranges as StatePerturbation._low/_high.
+        # Indices: 1=y, 2=heading, 3=vx, 5=ax. Parent leaves yaw-rate (idx 8) at 0
+        # and re-derives steering from (ω, v); we mirror that at the τ mid-state.
         lateral = float(
             (
                 self._low[1]
@@ -831,10 +833,27 @@ class StatePerturbationAtTau(StatePerturbation):
                 + (self._high[2] - self._low[2]) * torch.rand((), device=device)
             ).item()
         )
-        if abs(lateral) < 1e-3 and abs(heading_off) < 1e-3:
+        speed_off = float(
+            (
+                self._low[3]
+                + (self._high[3] - self._low[3]) * torch.rand((), device=device)
+            ).item()
+        )
+        accel_off = float(
+            (
+                self._low[5]
+                + (self._high[5] - self._low[5]) * torch.rand((), device=device)
+            ).item()
+        )
+        if (
+            abs(lateral) < 1e-3
+            and abs(heading_off) < 1e-3
+            and abs(speed_off) < 1e-3
+            and abs(accel_off) < 1e-3
+        ):
             return False
 
-        # Offset pose at τ (normal to GT heading); keep speed magnitude, re-aim velocity.
+        # Offset pose + kinematics at τ; bridge ends keep GT so recovery is continuous.
         psi_gt = full_heading[tau_idx]
         x_gt = float(full_xy[tau_idx, 0].item())
         y_gt = float(full_xy[tau_idx, 1].item())
@@ -843,9 +862,14 @@ class StatePerturbationAtTau(StatePerturbation):
         y_tau = full_xy[tau_idx, 1] + lateral * torch.cos(psi_gt)
         psi_tau = self.normalize_angle(psi_gt + heading_off)
         psi_tau_val = float(psi_tau.item())
-        v_tau = speed[tau_idx]
-        a_tau = accel[tau_idx]
-        w_tau = yaw_rate[tau_idx]
+        v_gt = float(speed[tau_idx].item())
+        a_gt = float(accel[tau_idx].item())
+        w_gt = float(yaw_rate[tau_idx].item())
+        v_tau = max(0.0, v_gt + speed_off)
+        a_tau = a_gt + accel_off
+        # Keep GT yaw-rate; steering at any state (incl. t=0) follows from (ω, v)
+        # exactly as in StatePerturbation.augment.
+        w_tau = w_gt
 
         left_states = self._pack_boundary_state(
             full_xy[left_idx], full_heading[left_idx], speed[left_idx], accel[left_idx], yaw_rate[left_idx]
@@ -917,6 +941,13 @@ class StatePerturbationAtTau(StatePerturbation):
             "lateral_m": lateral,
             "heading_off_rad": heading_off,
             "heading_off_deg": float(np.rad2deg(heading_off)),
+            "speed_off_mps": speed_off,
+            "accel_off_mps2": accel_off,
+            "v_gt_mps": v_gt,
+            "v_tau_mps": float(v_tau),
+            "a_gt_mps2": a_gt,
+            "a_tau_mps2": float(a_tau),
+            "w_tau_rps": float(w_tau),
             "xy_gt": (x_gt, y_gt),
             "xy_tau": (float(x_tau.item()), float(y_tau.item())),
             "psi_gt_rad": psi_gt_val,
