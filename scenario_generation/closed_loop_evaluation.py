@@ -30,6 +30,7 @@ from scenario_generation.closed_loop_eval import (
     segment_row_for_json,
     tdigest_sidecar_row,
 )
+from scenario_generation.inference_compile import compiled_for_inference
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
@@ -167,7 +168,8 @@ class ClosedLoopEvaluation(ABC):
                 f"{len(jobs)} job(s) -> {[j.job_id for j in jobs]}"
             )
 
-        result = self.execute_jobs(jobs)
+        with compiled_for_inference(self.model):
+            result = self.execute_jobs(jobs)
         elapsed_sec = time.perf_counter() - t0
 
         if self.ddp_world_size > 1:
