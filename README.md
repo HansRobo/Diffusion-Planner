@@ -69,7 +69,7 @@ The index carries the ego dimensions of each row, stamped in at creation time
 from `configs/dataset/vehicles/`, so training needs no separate vehicle
 configuration.
 
-Before training, verify that every frame of a dataset really loads:
+Benchmark training-style dataset preprocessing:
 
 ```bash
 uv run --package diffusion-planner python scripts/dataset/check_dataset.py \
