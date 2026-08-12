@@ -2,60 +2,51 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import streamlit as st
 
 from diffusion_planner.visualizer import FramePlotOptions
 from diffusion_planner_dashboard.services import FrameIndex, FrameIndexRow
 
 
-def render_parquet_settings() -> str | None:
-    """Render the data-source form and return the applied Parquet path."""
+def render_data_source_settings() -> str | None:
+    """Render H5/Parquet source settings and return the applied values."""
     st.sidebar.subheader("Data source")
-    with st.sidebar.form("parquet-settings"):
+    with st.sidebar.form("frame-source-settings"):
         candidate = st.text_input(
-            "Frame index Parquet",
-            value=st.session_state.get("configured_parquet_path", ""),
-            placeholder="/path/to/frame_index.parquet",
+            "H5 or Parquet file",
+            value=st.session_state.get("configured_frame_source_path", ""),
+            placeholder="/path/to/frames.h5 or /path/to/train.parquet",
         )
         applied = st.form_submit_button("Apply", use_container_width=True)
     if applied:
         assert candidate is not None
-        st.session_state["configured_parquet_path"] = candidate.strip()
-    return st.session_state.get("configured_parquet_path") or None
+        st.session_state["configured_frame_source_path"] = candidate.strip()
+    source = st.session_state.get("configured_frame_source_path") or None
+    return source
 
 
 def render_frame_selector(index: FrameIndex) -> FrameIndexRow:
     """Render bag and frame selectors and return the selected index row."""
     st.sidebar.subheader("Frame")
-    bag_options = ("All bags", *index.bags)
-    selected_bag_label = st.sidebar.selectbox("Bag", bag_options)
-    selected_bag = None if selected_bag_label == "All bags" else selected_bag_label
-    indices = index.indices_for_bag(selected_bag)
+    source_options = ("All H5 files", *index.sources)
+    selected_source_label = st.sidebar.selectbox("H5 file", source_options)
+    selected_source = (
+        None if selected_source_label == "All H5 files" else selected_source_label
+    )
+    indices = index.indices_for_source(selected_source)
     position = st.sidebar.slider(
         "Frame position",
         min_value=0,
         max_value=len(indices) - 1,
         value=0,
         step=1,
-        key=f"frame-position::{index.path}::{selected_bag_label}",
+        key=f"frame-position::{index.path}::{selected_source_label}",
     )
     row = index.row(int(indices[int(position)]))
-    st.sidebar.caption(f"Parquet row: {row.index:,} · Time: {row.frame_time_ns} ns")
+    st.sidebar.caption(
+        f"Source row: {row.index:,} · H5 frame: {row.frame_index:,} · Time: {row.frame_time_ns} ns"
+    )
     return row
-
-
-def render_vehicle_parameters(row: FrameIndexRow) -> None:
-    """Show the ego dimensions the selected row was indexed with.
-
-    They are stamped into the index at scan time, so editing them here would no longer match
-    what training sees.
-    """
-    with st.sidebar.expander("Vehicle parameters"):
-        st.metric("Base link to front [m]", f"{row.vehicle.base_link_to_front:.3f}")
-        st.metric("Vehicle length [m]", f"{row.vehicle.vehicle_length:.3f}")
-        st.metric("Vehicle width [m]", f"{row.vehicle.vehicle_width:.3f}")
 
 
 def render_plot_options() -> FramePlotOptions:
@@ -77,13 +68,3 @@ def render_plot_options() -> FramePlotOptions:
         show_traffic_lights=traffic_lights,
         show_speed_limits=speed_limits,
     )
-
-
-def missing_frame_sources(row: FrameIndexRow) -> list[str]:
-    """Return human-readable errors for missing bag or map sources."""
-    errors = []
-    if not (Path(row.bag_path) / "metadata.yaml").is_file():
-        errors.append(f"Rosbag is unavailable: {row.bag_path}")
-    if not Path(row.map_path).is_file():
-        errors.append(f"Map is unavailable: {row.map_path}")
-    return errors

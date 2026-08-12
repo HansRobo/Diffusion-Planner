@@ -67,7 +67,9 @@ _TENSOR_SPECS: dict[str, TensorDisplaySpec] = {
     "neighbor_agents_future": TensorDisplaySpec(
         leading_axes=("agent",), row_axis="time_index", fields=_POSE_FIELDS
     ),
-    "lanes": TensorDisplaySpec(leading_axes=("lane",), row_axis="point_index", fields=_LANE_FIELDS),
+    "lanes": TensorDisplaySpec(
+        leading_axes=("lane",), row_axis="point_index", fields=_LANE_FIELDS
+    ),
     "route_lanes": TensorDisplaySpec(
         leading_axes=("route_lane",), row_axis="point_index", fields=_LANE_FIELDS
     ),
@@ -86,18 +88,24 @@ _TENSOR_SPECS: dict[str, TensorDisplaySpec] = {
         leading_axes=("lane",), row_axis="time_index", fields=_TRAFFIC_LIGHT_FIELDS
     ),
     "route_traffic_light_past": TensorDisplaySpec(
-        leading_axes=("route_lane",), row_axis="time_index", fields=_TRAFFIC_LIGHT_FIELDS
+        leading_axes=("route_lane",),
+        row_axis="time_index",
+        fields=_TRAFFIC_LIGHT_FIELDS,
     ),
     "ego_shape": TensorDisplaySpec(
         fields=("base_link_to_front", "vehicle_length", "vehicle_width")
     ),
     "goal_pose": TensorDisplaySpec(fields=_POSE_FIELDS),
-    "lanes_speed_limit": TensorDisplaySpec(row_axis="lane_index", fields=("speed_limit",)),
+    "lanes_speed_limit": TensorDisplaySpec(
+        row_axis="lane_index", fields=("speed_limit",)
+    ),
     "route_lanes_speed_limit": TensorDisplaySpec(
         row_axis="route_lane_index", fields=("speed_limit",)
     ),
     "turn_indicators": TensorDisplaySpec(row_axis="time_index", fields=("value",)),
-    "turn_indicators_future": TensorDisplaySpec(row_axis="time_index", fields=("value",)),
+    "turn_indicators_future": TensorDisplaySpec(
+        row_axis="time_index", fields=("value",)
+    ),
 }
 
 
@@ -144,11 +152,15 @@ def _table_data(
         if spec.fields is not None and len(spec.fields) == array.shape[0]:
             return {"field": list(spec.fields), "value": array}
         value_name = (
-            spec.fields[0] if spec.fields is not None and len(spec.fields) == 1 else "value"
+            spec.fields[0]
+            if spec.fields is not None and len(spec.fields) == 1
+            else "value"
         )
         return {spec.row_axis: np.arange(array.shape[0]), value_name: array}
     if array.ndim != 2:
-        raise ValueError(f"Expected a tensor slice with at most 2 dimensions, got {array.shape}")
+        raise ValueError(
+            f"Expected a tensor slice with at most 2 dimensions, got {array.shape}"
+        )
     columns: dict[str, Sequence[Any] | NDArray[np.generic]] = {
         spec.row_axis: np.arange(array.shape[0])
     }
@@ -177,7 +189,9 @@ def render_tensor_inspector(frame_data: Mapping[str, Any]) -> None:
         displayed, selected = _slice_tensor(tensor_name, array, spec)
         if selected:
             prefix = ", ".join(str(index) for index in selected)
-            st.code(f"{tensor_name}[{prefix}, :, :]  shape={displayed.shape}", language=None)
+            st.code(
+                f"{tensor_name}[{prefix}, :, :]  shape={displayed.shape}", language=None
+            )
         else:
             st.code(f"{tensor_name}[:]  shape={displayed.shape}", language=None)
 

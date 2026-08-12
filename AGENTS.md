@@ -30,4 +30,3 @@ The ROS 2 inference node and `diffusion_planner_data_tools` share preprocessing 
 * This is a PoC. Prefer simple, focused changes over production-level abstractions.
 * Write code, comments, identifiers, and documentation in English.
 * Do not edit `pyproject.toml` directly for dependency changes. Use `uv add`, `uv remove`, or other appropriate `uv` commands.
-* You do not need to build or run the full test suite. If validation requires ROS 2, GPU, datasets, or another unavailable environment, ask the user to run it.

@@ -1,17 +1,18 @@
-"""Parquet frame-index loading independent of the Streamlit UI."""
+"""H5 and Parquet frame-source loading independent of the Streamlit UI."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pyarrow.parquet as pq
 from numpy.typing import NDArray
 
-from diffusion_planner.data import VEHICLE_COLUMNS, VehicleParameters
-
-REQUIRED_COLUMNS = frozenset({"bag_path", "map_path", "frame_time_ns", *VEHICLE_COLUMNS})
+H5_FORMAT = "diffusion_planner_frame_dataset"
+H5_FORMAT_VERSION = 2
+PARQUET_REQUIRED_COLUMNS = frozenset({"h5_path", "frame_index", "frame_time_ns"})
 STAT_COLUMNS = (
     "ego_speed_mps",
     "ego_yaw_rate_rps",
@@ -22,83 +23,132 @@ STAT_COLUMNS = (
 
 @dataclass(frozen=True)
 class FrameIndexRow:
-    """One resolved row in a frame-index Parquet file."""
+    """One resolved H5 frame selected directly or through Parquet."""
 
     index: int
-    bag_path: str
-    map_path: str
+    h5_path: str
+    frame_index: int
     frame_time_ns: int
-    vehicle: VehicleParameters
     stats: dict[str, object]
 
 
 @dataclass(frozen=True)
 class FrameIndex:
-    """In-memory columns needed to browse a frame-index Parquet file."""
+    """In-memory columns needed to browse one H5 file or a Parquet index."""
 
     path: Path
-    bag_paths: NDArray[np.str_]
-    map_paths: NDArray[np.str_]
+    h5_paths: NDArray[np.str_]
+    frame_indices: NDArray[np.int64]
     frame_times_ns: NDArray[np.int64]
-    vehicles: NDArray[np.float64]
     stats: dict[str, NDArray[np.generic]]
 
     def __len__(self) -> int:
-        return len(self.frame_times_ns)
+        return len(self.frame_indices)
 
     @property
-    def bags(self) -> tuple[str, ...]:
-        """Return unique bag paths in first-occurrence order."""
-        return tuple(dict.fromkeys(self.bag_paths.tolist()))
+    def sources(self) -> tuple[str, ...]:
+        """Return unique H5 paths in first-occurrence order."""
+        return tuple(dict.fromkeys(self.h5_paths.tolist()))
 
-    def indices_for_bag(self, bag_path: str | None) -> NDArray[np.int64]:
-        """Return absolute row indices, optionally filtered by bag path."""
-        if bag_path is None:
+    def indices_for_source(self, h5_path: str | None) -> NDArray[np.int64]:
+        """Return row indices, optionally filtered by H5 shard."""
+        if h5_path is None:
             return np.arange(len(self), dtype=np.int64)
-        return np.flatnonzero(self.bag_paths == bag_path).astype(np.int64, copy=False)
+        return np.flatnonzero(self.h5_paths == h5_path).astype(np.int64, copy=False)
 
     def row(self, index: int) -> FrameIndexRow:
         """Return one row by its absolute index."""
         if not 0 <= index < len(self):
-            raise IndexError(f"Frame index {index} is out of range for {len(self)} rows")
+            raise IndexError(
+                f"Frame index {index} is out of range for {len(self)} rows"
+            )
         return FrameIndexRow(
             index=index,
-            bag_path=str(self.bag_paths[index]),
-            map_path=str(self.map_paths[index]),
+            h5_path=str(self.h5_paths[index]),
+            frame_index=int(self.frame_indices[index]),
             frame_time_ns=int(self.frame_times_ns[index]),
-            vehicle=VehicleParameters(*self.vehicles[index].tolist()),
             stats={key: values[index].item() for key, values in self.stats.items()},
         )
 
 
 def load_frame_index(path: str | Path) -> FrameIndex:
-    """Load and validate an index created by the scripts in ``scripts/dataset``."""
-    parquet_path = Path(path).expanduser().resolve()
-    if not parquet_path.is_file():
-        raise FileNotFoundError(f"Parquet file not found: {parquet_path}")
+    """Load a direct H5 source or a Parquet H5 frame index."""
+    source_path = Path(path).expanduser().resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Data source not found: {source_path}")
+    if source_path.suffix.lower() in {".h5", ".hdf5"}:
+        return _load_h5_index(source_path)
+    if source_path.suffix.lower() == ".parquet":
+        return _load_parquet_index(source_path)
+    raise ValueError(f"Data source must be an H5 or Parquet file: {source_path}")
 
-    parquet_file = pq.ParquetFile(parquet_path)
+
+def _load_h5_index(path: Path) -> FrameIndex:
+    """Construct a frame index directly from one H5 shard."""
+    with h5py.File(path, "r") as file:
+        _validate_h5(file, path)
+        num_frames = int(file.attrs["num_frames"])
+        if num_frames == 0:
+            raise ValueError(f"H5 frame source is empty: {path}")
+        metadata = file["metadata"]
+        if "frame_time_ns" not in metadata:
+            raise ValueError(f"H5 metadata/frame_time_ns is missing: {path}")
+        frame_times = np.asarray(metadata["frame_time_ns"][...], dtype=np.int64)
+        if len(frame_times) != num_frames:
+            raise ValueError(f"H5 frame time count differs from num_frames: {path}")
+        stats = {
+            name: np.asarray(metadata[name][...])
+            for name in STAT_COLUMNS
+            if name in metadata
+        }
+    return FrameIndex(
+        path=path,
+        h5_paths=np.asarray([str(path)] * num_frames, dtype=np.str_),
+        frame_indices=np.arange(num_frames, dtype=np.int64),
+        frame_times_ns=frame_times,
+        stats=stats,
+    )
+
+
+def _load_parquet_index(path: Path) -> FrameIndex:
+    """Load a generated Parquet index containing absolute H5 paths."""
+    parquet_file = pq.ParquetFile(path)
     column_names = set(parquet_file.schema_arrow.names)
-    missing = sorted(REQUIRED_COLUMNS.difference(column_names))
+    missing = sorted(PARQUET_REQUIRED_COLUMNS.difference(column_names))
     if missing:
         raise ValueError(f"Missing required Parquet columns: {', '.join(missing)}")
-
-    selected_columns = [*sorted(REQUIRED_COLUMNS), *(c for c in STAT_COLUMNS if c in column_names)]
-    table = parquet_file.read(columns=selected_columns)
+    selected = [
+        *sorted(PARQUET_REQUIRED_COLUMNS),
+        *(name for name in STAT_COLUMNS if name in column_names),
+    ]
+    table = parquet_file.read(columns=selected)
     if table.num_rows == 0:
-        raise ValueError(f"Parquet frame index is empty: {parquet_path}")
+        raise ValueError(f"Parquet frame index is empty: {path}")
 
     def column(name: str) -> NDArray[np.generic]:
         return np.asarray(table[name].combine_chunks().to_numpy(zero_copy_only=False))
 
+    raw_paths = column("h5_path").astype(np.str_)
+    relative_paths = [value for value in raw_paths if not Path(value).is_absolute()]
+    if relative_paths:
+        raise ValueError(f"Parquet h5_path must be absolute: {relative_paths[0]}")
+    frame_indices = column("frame_index").astype(np.int64, copy=False)
+    if np.any(frame_indices < 0):
+        raise ValueError(f"Parquet index contains a negative frame_index: {path}")
     return FrameIndex(
-        path=parquet_path,
-        bag_paths=column("bag_path").astype(np.str_),
-        map_paths=column("map_path").astype(np.str_),
+        path=path,
+        h5_paths=raw_paths,
+        frame_indices=frame_indices,
         frame_times_ns=column("frame_time_ns").astype(np.int64, copy=False),
-        # The ego dimensions are stamped into the index, so the sidebar no longer asks for them.
-        vehicles=np.stack(
-            [column(name).astype(np.float64, copy=False) for name in VEHICLE_COLUMNS], axis=1
-        ),
-        stats={name: column(name) for name in STAT_COLUMNS if name in table.column_names},
+        stats={
+            name: column(name) for name in STAT_COLUMNS if name in table.column_names
+        },
     )
+
+def _validate_h5(file: h5py.File, path: Path) -> None:
+    if file.attrs.get("format") != H5_FORMAT:
+        raise ValueError(f"Unexpected H5 format: {path}")
+    if int(file.attrs.get("format_version", -1)) != H5_FORMAT_VERSION:
+        raise ValueError(f"Unsupported H5 format version: {path}")
+    if "frames" not in file or "metadata" not in file or "num_frames" not in file.attrs:
+        raise ValueError(f"Incomplete H5 frame source: {path}")

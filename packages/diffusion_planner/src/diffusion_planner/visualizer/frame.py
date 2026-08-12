@@ -78,7 +78,9 @@ class FrameData:
     def valid_rows(array: NDArray[np.generic]) -> NDArray[np.bool_]:
         """Return a mask for non-padding rows along the first axis."""
         if array.ndim < 2:
-            raise ValueError(f"Expected an array with at least two dimensions, got {array.shape}")
+            raise ValueError(
+                f"Expected an array with at least two dimensions, got {array.shape}"
+            )
         axes = tuple(range(1, array.ndim))
         return np.any(array != 0, axis=axes)
 
@@ -86,5 +88,7 @@ class FrameData:
     def valid_steps(array: NDArray[np.generic]) -> NDArray[np.bool_]:
         """Return a mask for valid pose steps using cos/sin as validity fields."""
         if array.shape[-1] < 4:
-            raise ValueError(f"Expected pose data with at least four fields, got {array.shape}")
+            raise ValueError(
+                f"Expected pose data with at least four fields, got {array.shape}"
+            )
         return np.square(array[..., 2]) + np.square(array[..., 3]) > 0.5

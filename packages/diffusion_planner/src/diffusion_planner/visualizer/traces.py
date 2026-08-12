@@ -7,9 +7,16 @@ from collections.abc import Iterable
 import numpy as np
 import plotly.graph_objects as go
 from numpy.typing import NDArray
+from plotly.basedatatypes import BaseTraceType
 
 from .frame import FrameData
-from .schema import AgentLabelIndex, AgentShapeIndex, LaneIndex, NeighborIndex, TrafficLightIndex
+from .schema import (
+    AgentLabelIndex,
+    AgentShapeIndex,
+    LaneIndex,
+    NeighborIndex,
+    TrafficLightIndex,
+)
 from .style import FramePlotOptions, VisualizerStyle
 
 
@@ -50,7 +57,9 @@ def _line_trace(
         legendgroup=legendgroup,
         showlegend=showlegend,
         line={"color": color, "width": width, "dash": dash},
-        marker={"color": color, "size": marker_size} if marker_size is not None else None,
+        marker={"color": color, "size": marker_size}
+        if marker_size is not None
+        else None,
         hoverinfo="skip",
     )
 
@@ -62,9 +71,13 @@ def _lane_lines(lanes: NDArray[np.generic], kind: str) -> list[NDArray[np.generi
         if kind == "center":
             lines.append(center)
         elif kind == "left":
-            lines.append(center + lane[:, [LaneIndex.LEFT_OFFSET_X, LaneIndex.LEFT_OFFSET_Y]])
+            lines.append(
+                center + lane[:, [LaneIndex.LEFT_OFFSET_X, LaneIndex.LEFT_OFFSET_Y]]
+            )
         elif kind == "right":
-            lines.append(center + lane[:, [LaneIndex.RIGHT_OFFSET_X, LaneIndex.RIGHT_OFFSET_Y]])
+            lines.append(
+                center + lane[:, [LaneIndex.RIGHT_OFFSET_X, LaneIndex.RIGHT_OFFSET_Y]]
+            )
         else:
             raise ValueError(f"Unknown lane line kind: {kind}")
     return lines
@@ -72,9 +85,9 @@ def _lane_lines(lanes: NDArray[np.generic], kind: str) -> list[NDArray[np.generi
 
 def _route_polygon_traces(
     lanes: NDArray[np.generic], style: VisualizerStyle
-) -> list[go.BaseTraceType]:
+) -> list[BaseTraceType]:
     """Create one filled polygon from the left and right boundaries of each route lane."""
-    traces: list[go.BaseTraceType] = []
+    traces: list[BaseTraceType] = []
     for index, lane in enumerate(lanes[FrameData.valid_rows(lanes)]):
         center = lane[:, [LaneIndex.X, LaneIndex.Y]]
         left = center + lane[:, [LaneIndex.LEFT_OFFSET_X, LaneIndex.LEFT_OFFSET_Y]]
@@ -101,9 +114,9 @@ def create_lane_traces(
     frame: FrameData,
     style: VisualizerStyle,
     options: FramePlotOptions,
-) -> list[go.BaseTraceType]:
+) -> list[BaseTraceType]:
     """Create local-lane and route-lane traces."""
-    traces: list[go.BaseTraceType] = []
+    traces: list[BaseTraceType] = []
     lanes = frame["lanes"]
     center = _line_trace(
         _lane_lines(lanes, "center"),
@@ -135,9 +148,13 @@ def create_lane_traces(
     route_lanes = frame["route_lanes"]
     traces.extend(_route_polygon_traces(route_lanes, style))
     if options.show_speed_limits:
-        traces.extend(_create_speed_limit_trace(frame, "route_lanes", route_lanes, "route"))
+        traces.extend(
+            _create_speed_limit_trace(frame, "route_lanes", route_lanes, "route")
+        )
     if options.show_traffic_lights:
-        traces.extend(_create_traffic_light_traces(frame, "route_lanes", route_lanes, "route"))
+        traces.extend(
+            _create_traffic_light_traces(frame, "route_lanes", route_lanes, "route")
+        )
     return traces
 
 
@@ -146,7 +163,7 @@ def _create_speed_limit_trace(
     lane_key: str,
     lanes: NDArray[np.generic],
     legendgroup: str,
-) -> list[go.BaseTraceType]:
+) -> list[BaseTraceType]:
     speed_key = f"{lane_key}_speed_limit"
     speeds = frame.get(speed_key)
     if speeds is None:
@@ -186,8 +203,10 @@ def _create_traffic_light_traces(
     lane_key: str,
     lanes: NDArray[np.generic],
     legendgroup: str,
-) -> list[go.BaseTraceType]:
-    traffic_key = "lane_traffic_light_past" if lane_key == "lanes" else "route_traffic_light_past"
+) -> list[BaseTraceType]:
+    traffic_key = (
+        "lane_traffic_light_past" if lane_key == "lanes" else "route_traffic_light_past"
+    )
     traffic = frame.get(traffic_key)
     if traffic is None:
         return []
@@ -195,7 +214,7 @@ def _create_traffic_light_traces(
     colors = ("#22c55e", "#f59e0b", "#ef4444", "#6b7280")
     names = ("Green light", "Amber light", "Red light", "Unknown light")
     valid_lanes = FrameData.valid_rows(lanes)
-    traces: list[go.BaseTraceType] = []
+    traces: list[BaseTraceType] = []
     for state, (color, name) in enumerate(zip(colors, names, strict=True)):
         x: list[float] = []
         y: list[float] = []
@@ -237,9 +256,11 @@ def _create_traffic_light_traces(
     return traces
 
 
-def create_map_element_traces(frame: FrameData, style: VisualizerStyle) -> list[go.BaseTraceType]:
+def create_map_element_traces(
+    frame: FrameData, style: VisualizerStyle
+) -> list[BaseTraceType]:
     """Create polygon, stop-line, and road-border traces."""
-    traces: list[go.BaseTraceType] = []
+    traces: list[BaseTraceType] = []
     polygons = frame["polygons"]
     polygon_lines = []
     for polygon in polygons[FrameData.valid_rows(polygons)]:
@@ -341,9 +362,9 @@ def create_agent_traces(
     frame: FrameData,
     style: VisualizerStyle,
     options: FramePlotOptions,
-) -> list[go.BaseTraceType]:
+) -> list[BaseTraceType]:
     """Create ego and neighboring-agent history/future traces."""
-    traces: list[go.BaseTraceType] = []
+    traces: list[BaseTraceType] = []
     if options.show_agent_history:
         ego_past = _line_trace(
             _pose_lines(frame["ego_agent_past"]),
@@ -405,7 +426,7 @@ def _create_neighbor_boxes(
     agent_shapes: NDArray[np.generic],
     agent_labels: NDArray[np.generic],
     style: VisualizerStyle,
-) -> list[go.BaseTraceType]:
+) -> list[BaseTraceType]:
     """Create an oriented footprint box for each neighbor's current state."""
     valid_indices = np.flatnonzero(FrameData.valid_rows(neighbors))
     valid_neighbors = neighbors[valid_indices]
@@ -415,7 +436,7 @@ def _create_neighbor_boxes(
     shapes = agent_shapes[valid_indices]
     labels = agent_labels[valid_indices]
     label_names = np.array(["vehicle", "pedestrian", "bicycle"])
-    traces: list[go.BaseTraceType] = []
+    traces: list[BaseTraceType] = []
     for neighbor_index, state, shape, label_one_hot in zip(
         valid_indices, current, shapes, labels, strict=True
     ):
@@ -427,7 +448,11 @@ def _create_neighbor_boxes(
         length = float(shape[AgentShapeIndex.LENGTH])
         label = (
             label_names[int(np.argmax(label_one_hot))]
-            if np.any(label_one_hot[AgentLabelIndex.IS_VEHICLE : AgentLabelIndex.IS_BICYCLE + 1])
+            if np.any(
+                label_one_hot[
+                    AgentLabelIndex.IS_VEHICLE : AgentLabelIndex.IS_BICYCLE + 1
+                ]
+            )
             else "unknown"
         )
         if width <= 0.0 or length <= 0.0 or cos_yaw**2 + sin_yaw**2 <= 0.5:
@@ -475,13 +500,15 @@ def create_annotation_traces(
     frame: FrameData,
     style: VisualizerStyle,
     options: FramePlotOptions,
-) -> list[go.BaseTraceType]:
+) -> list[BaseTraceType]:
     """Create ego footprint and goal-pose traces."""
-    traces: list[go.BaseTraceType] = []
+    traces: list[BaseTraceType] = []
     ego_past = frame["ego_agent_past"]
     current = ego_past[-1]
     if options.show_ego_shape:
-        base_link_to_front, length, width = (float(value) for value in frame["ego_shape"][:3])
+        base_link_to_front, length, width = (
+            float(value) for value in frame["ego_shape"][:3]
+        )
         base_link_to_rear = length - base_link_to_front
         corners = np.array(
             [
@@ -536,7 +563,7 @@ def create_frame_traces(
     frame: FrameData,
     style: VisualizerStyle,
     options: FramePlotOptions,
-) -> list[go.BaseTraceType]:
+) -> list[BaseTraceType]:
     """Create all enabled traces for one frame."""
     return [
         *create_map_element_traces(frame, style),

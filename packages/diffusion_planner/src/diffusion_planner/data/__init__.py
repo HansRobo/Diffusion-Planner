@@ -5,7 +5,6 @@ from .planner_dataset import (
     PlannerDataset,
     VehicleParameters,
     build_dataloader,
-    collate_frames,
 )
 
 __all__ = [
@@ -13,5 +12,4 @@ __all__ = [
     "PlannerDataset",
     "VehicleParameters",
     "build_dataloader",
-    "collate_frames",
 ]

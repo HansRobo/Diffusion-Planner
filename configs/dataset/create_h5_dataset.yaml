@@ -1,0 +1,31 @@
+# @package _global_
+defaults:
+  - /dataset/vehicles@vehicles: tier4_fleet
+  - _self_
+
+# rosbags_from_label directory to scan. Any level down to one bag works.
+root: ???
+# Root under which the source bag directory hierarchy and frames.h5 files are written.
+output_root: ???
+index_output: ${output_root}/indexes/${split}.parquet
+split: train
+frame_interval: 0.5
+jobs: 300
+limit: null
+
+# Existing complete H5 shards can be reused to reconstruct a new Parquet index.
+resume: true
+# Regenerate existing H5 shards and replace an existing index.
+overwrite: false
+compression: lzf
+
+traffic_light_timeout_s: 0.2
+neighbor_observation_timeout_s: 0.3
+
+topic_drop_thresholds:
+  kinematic_state: 0.1
+  tracked_objects: 0.2
+  turn_indicators: 0.2
+  traffic_signals: 1.0
+
+min_travel_distance: 1000.0

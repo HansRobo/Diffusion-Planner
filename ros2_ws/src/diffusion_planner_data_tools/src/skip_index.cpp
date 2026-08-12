@@ -14,7 +14,7 @@
 
 #include "skip_index.hpp"
 
-#include "bag_index_scanner.hpp"
+#include "bag_dataset_builder.hpp"
 #include "topic_config.hpp"
 
 #include "autoware/diffusion_planner/constants.hpp"
@@ -118,7 +118,7 @@ size_t count_grid_frames(const double range_from, const double range_until,
 } // namespace
 
 FrameRange calculate_frame_range(const TopicConfig &topics,
-                                 const IndexerParam &param,
+                                 const DatasetBuilderParam &param,
                                  const std::vector<double> &ego_stamps,
                                  const std::vector<double> &turn_stamps,
                                  const std::vector<double> &objects_stamps,
@@ -178,7 +178,7 @@ FrameRange calculate_frame_range(const TopicConfig &topics,
       merge_ranges(std::move(invalid_ranges)),
       std::move(warnings),
       count_grid_frames(usable_from, usable_until, ego_first_sec,
-                        param.time_step_s, num_frames),
+                        param.frame_interval_s, num_frames),
   };
 }
 

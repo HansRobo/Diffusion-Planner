@@ -16,7 +16,7 @@
 // rosbags, sharing the exact preprocessing code used at inference time
 // (autoware::diffusion_planner::preprocess::create_input_data_map).
 
-#include "bag_index_scanner.hpp"
+#include "bag_dataset_builder.hpp"
 #include "frame_data_cache.hpp"
 #include "topic_config.hpp"
 
@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,28 +57,59 @@ py::dict to_numpy_dict(const preprocess::InputDataMap &input_data_map) {
   return result;
 }
 
-// Convert the frame index into a dict of numpy arrays (one entry per column).
-py::dict to_numpy_dict(const ddt::BagFrameIndex &index) {
+py::dict stack_frames(const std::vector<preprocess::InputDataMap> &frames) {
   py::dict result;
-  const auto n = static_cast<py::ssize_t>(index.frame_time_ns.size());
-  const auto add = [&](const char *key, const auto &values, auto element) {
-    using ElementT = decltype(element);
-    // With the pybind11 version shipped by ROS 2 Humble, the scalar-size
-    // constructor creates a zero-stride array. Use an explicit shape container
-    // so that every index row owns a distinct, contiguous element.
-    const std::vector<py::ssize_t> shape{n};
-    py::array_t<ElementT> array(shape);
-    for (py::ssize_t i = 0; i < n; ++i) {
-      array.mutable_data()[i] =
-          static_cast<ElementT>(values[static_cast<size_t>(i)]);
+  if (frames.empty()) {
+    return result;
+  }
+  const auto num_frames = static_cast<py::ssize_t>(frames.size());
+  for (const auto &[key, first_value] : frames.front()) {
+    std::vector<py::ssize_t> shape{num_frames};
+    size_t elements_per_frame = 1;
+    for (const size_t dimension : first_value.shape()) {
+      shape.push_back(static_cast<py::ssize_t>(dimension));
+      elements_per_frame *= dimension;
     }
-    result[key] = std::move(array);
-  };
-  add("frame_time_ns", index.frame_time_ns, int64_t{});
-  add("ego_speed_mps", index.ego_speed_mps, float{});
-  add("ego_yaw_rate_rps", index.ego_yaw_rate_rps, float{});
-  add("turn_indicator", index.turn_indicator, uint8_t{});
-  add("num_objects", index.num_objects, int32_t{});
+    py::array_t<float> array(shape);
+    float *output = array.mutable_data();
+    for (size_t frame_index = 0; frame_index < frames.size(); ++frame_index) {
+      const auto value_iterator = frames[frame_index].find(key);
+      if (value_iterator == frames[frame_index].end()) {
+        throw std::runtime_error("frame is missing tensor key: " + key);
+      }
+      const auto &value = value_iterator->second;
+      if (value.shape() != first_value.shape()) {
+        throw std::runtime_error("tensor shape changed between frames: " + key);
+      }
+      std::copy(value.cbegin(), value.cend(),
+                output + frame_index * elements_per_frame);
+    }
+    result[py::str(key)] = std::move(array);
+  }
+  return result;
+}
+
+py::dict metadata_to_numpy(const std::vector<ddt::BagFrameMetadata> &metadata) {
+  const std::vector<py::ssize_t> shape{
+      static_cast<py::ssize_t>(metadata.size())};
+  py::array_t<int64_t> frame_time_ns(shape);
+  py::array_t<float> ego_speed_mps(shape);
+  py::array_t<float> ego_yaw_rate_rps(shape);
+  py::array_t<uint8_t> turn_indicator(shape);
+  py::array_t<int32_t> num_objects(shape);
+  for (size_t index = 0; index < metadata.size(); ++index) {
+    frame_time_ns.mutable_data()[index] = metadata[index].frame_time_ns;
+    ego_speed_mps.mutable_data()[index] = metadata[index].ego_speed_mps;
+    ego_yaw_rate_rps.mutable_data()[index] = metadata[index].ego_yaw_rate_rps;
+    turn_indicator.mutable_data()[index] = metadata[index].turn_indicator;
+    num_objects.mutable_data()[index] = metadata[index].num_objects;
+  }
+  py::dict result;
+  result["frame_time_ns"] = std::move(frame_time_ns);
+  result["ego_speed_mps"] = std::move(ego_speed_mps);
+  result["ego_yaw_rate_rps"] = std::move(ego_yaw_rate_rps);
+  result["turn_indicator"] = std::move(turn_indicator);
+  result["num_objects"] = std::move(num_objects);
   return result;
 }
 
@@ -104,20 +136,29 @@ py::object create_frame_data(ddt::FrameDataCache &cache,
   return to_numpy_dict(result.value());
 }
 
-py::tuple scan_bag_index(const std::string &bag_path,
-                         const ddt::TopicConfig &topics,
-                         const ddt::IndexerParam &param) {
-  ddt::BagFrameIndex index;
+py::dict create_bag_frame_data(const std::string &bag_path,
+                               const std::string &map_path,
+                               const VehicleSpec &vehicle_spec,
+                               const ddt::DatasetBuilderParam &param,
+                               const ddt::TopicConfig &topics) {
+  ddt::BagDataResult bag_result;
   {
     py::gil_scoped_release release;
-    index = ddt::scan_bag_index(bag_path, topics, param);
+    bag_result = ddt::create_bag_frame_data(bag_path, map_path, vehicle_spec,
+                                            param, topics);
   }
   py::dict stats;
-  stats["all_frames"] = index.all_frames;
-  stats["usable_frames"] = index.usable_frames;
-  stats["kept_frames"] = index.frame_time_ns.size();
-  stats["skipped"] = index.skipped;
-  return py::make_tuple(to_numpy_dict(index), py::cast(index.warnings), stats);
+  stats["all_frames"] = bag_result.all_frames;
+  stats["usable_frames"] = bag_result.usable_frames;
+  stats["created_frames"] = bag_result.frames.size();
+  stats["failed_frames"] = bag_result.failed_frames;
+  stats["skipped"] = bag_result.skipped;
+  py::dict result;
+  result["frames"] = stack_frames(bag_result.frames);
+  result["metadata"] = metadata_to_numpy(bag_result.metadata);
+  result["warnings"] = py::cast(bag_result.warnings);
+  result["stats"] = std::move(stats);
+  return result;
 }
 
 } // namespace
@@ -154,12 +195,20 @@ PYBIND11_MODULE(_diffusion_planner_data_tools, m) {
       .def_readwrite("traffic_signals",
                      &ddt::TopicDropThresholds::traffic_signals);
 
-  py::class_<ddt::IndexerParam>(m, "IndexerParam")
+  py::class_<ddt::DatasetBuilderParam>(m, "DatasetBuilderParam")
       .def(py::init<>())
-      .def_readwrite("time_step_s", &ddt::IndexerParam::time_step_s)
+      .def_readwrite("frame_interval_s",
+                     &ddt::DatasetBuilderParam::frame_interval_s)
       .def_readwrite("min_travel_distance",
-                     &ddt::IndexerParam::min_travel_distance)
-      .def_readwrite("topic_drop_thresholds", &ddt::IndexerParam::topic_drop_thresholds);
+                     &ddt::DatasetBuilderParam::min_travel_distance)
+      .def_readwrite("topic_drop_thresholds",
+                     &ddt::DatasetBuilderParam::topic_drop_thresholds)
+      .def_readwrite("traffic_light_timeout_s",
+                     &ddt::DatasetBuilderParam::traffic_light_timeout_s)
+      .def_readwrite("neighbor_observation_timeout_s",
+                     &ddt::DatasetBuilderParam::neighbor_observation_timeout_s)
+      .def_readwrite("num_future_steps",
+                     &ddt::DatasetBuilderParam::num_future_steps);
 
   py::class_<VehicleSpec>(m, "VehicleSpec")
       .def(py::init<double, double, double>(), py::arg("base_link_to_front"),
@@ -168,9 +217,12 @@ PYBIND11_MODULE(_diffusion_planner_data_tools, m) {
       .def_readonly("vehicle_length", &VehicleSpec::vehicle_length)
       .def_readonly("vehicle_width", &VehicleSpec::vehicle_width);
 
-  m.def("scan_bag_index", &scan_bag_index, py::arg("bag_path"),
+  m.def("create_bag_frame_data", &create_bag_frame_data, py::arg("bag_path"),
+        py::arg("map_path"), py::arg("vehicle_spec"),
+        py::arg("param") = ddt::DatasetBuilderParam{},
         py::arg("topics") = ddt::load_topic_config(),
-        py::arg("param") = ddt::IndexerParam{});
+        "Build all usable model inputs and labels in one bag as stacked "
+        "NumPy arrays");
 
   py::class_<ddt::FrameDataCache>(m, "FrameDataCache")
       .def(py::init<size_t, size_t, ddt::TopicConfig, double>(),

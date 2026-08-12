@@ -6,20 +6,20 @@ inference time); this package exposes it to Python DataLoaders.
 
 from ._diffusion_planner_data_tools import (  # noqa: F401
     HISTORY_WINDOW_S,
+    DatasetBuilderParam,
     FrameDataCache,
-    IndexerParam,
     TopicConfig,
     TopicDropThresholds,
     VehicleSpec,
-    scan_bag_index,
+    create_bag_frame_data,
 )
 
 __all__ = [
     "HISTORY_WINDOW_S",
+    "DatasetBuilderParam",
     "FrameDataCache",
-    "IndexerParam",
     "TopicConfig",
     "TopicDropThresholds",
     "VehicleSpec",
-    "scan_bag_index",
+    "create_bag_frame_data",
 ]

@@ -53,7 +53,10 @@ class LineEncoder(nn.Module):
 
         self.stem = nn.Linear(2, embed_dim)  # x, y
         self.blocks = nn.ModuleList(
-            [MixerBlock(embed_dim, line_len, drop_path=drop_path_rate) for _ in range(depth)]
+            [
+                MixerBlock(embed_dim, line_len, drop_path=drop_path_rate)
+                for _ in range(depth)
+            ]
         )
         self.norm = nn.LayerNorm(embed_dim)
         self.head = nn.Linear(embed_dim, hidden_dim)
@@ -125,11 +128,16 @@ class LaneEncoder(nn.Module):
 
         self.speed_limit_emb = nn.Linear(1, embed_dim)
         self.unknown_speed_emb = nn.Embedding(1, embed_dim)
-        self.attribute_emb = nn.Linear(5 + 2 * 10, embed_dim)  # traffic_light and line type
+        self.attribute_emb = nn.Linear(
+            5 + 2 * 10, embed_dim
+        )  # traffic_light and line type
 
         self.stem = nn.Linear(8, embed_dim)
         self.blocks = nn.ModuleList(
-            [MixerBlock(embed_dim, lane_len, drop_path=drop_path_rate) for i in range(depth)]
+            [
+                MixerBlock(embed_dim, lane_len, drop_path=drop_path_rate)
+                for i in range(depth)
+            ]
         )
         self.norm = nn.LayerNorm(embed_dim)
         self.head = nn.Linear(embed_dim, hidden_dim)
@@ -173,7 +181,9 @@ class LaneEncoder(nn.Module):
         unknown_speed_emb = self.unknown_speed_emb(
             torch.zeros(b * p, dtype=torch.long, device=x.device)
         )
-        speed_limit_embedding = torch.where(has_speed_limit, speed_limit_emb, unknown_speed_emb)
+        speed_limit_embedding = torch.where(
+            has_speed_limit, speed_limit_emb, unknown_speed_emb
+        )
 
         # Process traffic lights for all positions
         traffic_light_embedding = self.attribute_emb(attribute)

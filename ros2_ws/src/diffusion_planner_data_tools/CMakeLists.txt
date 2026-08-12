@@ -21,7 +21,7 @@ ament_python_install_package(${PROJECT_NAME})
 # Python bindings (FrameDataCache)
 pybind11_add_module(_diffusion_planner_data_tools
   src/pybind_module.cpp
-  src/bag_index_scanner.cpp
+  src/bag_dataset_builder.cpp
   src/skip_index.cpp
   src/bag_frame_reader.cpp
   src/frame_data_cache.cpp

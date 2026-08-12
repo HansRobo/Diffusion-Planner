@@ -13,7 +13,9 @@ def main() -> None:
     navigation = st.navigation(
         {
             "Dashboard": [
-                st.Page(render_home, title="Home", icon=":material/home:", default=True),
+                st.Page(
+                    render_home, title="Home", icon=":material/home:", default=True
+                ),
             ],
             "Features": [
                 st.Page(

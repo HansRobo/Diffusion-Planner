@@ -32,28 +32,29 @@ uv sync
 
 ## Frame dashboard
 
-Build and source the ROS 2 workspace so that `diffusion_planner_data_tools` is
-available, then start the Streamlit dashboard:
+Start the Streamlit dashboard:
 
 ```bash
-source ros2_ws/install/setup.bash
 uv run diffusion-planner-dashboard
 ```
 
-Configure the frame-index Parquet path, vehicle dimensions, and visualization
-layers from the dashboard sidebar. The Parquet index is created together with
-the Zarr training dataset by `scripts/dataset/create_zarr_dataset.py`, which
-reads rosbags directly and is driven by Hydra:
+Configure either a `frames.h5` file or the generated frame-index Parquet from
+the dashboard sidebar. Generated Parquet indexes contain absolute paths to their
+H5 shards, so no separate H5 root configuration is needed.
+
+The H5 shards and Parquet index are generated directly from rosbags:
 
 ```bash
 source ros2_ws/install/setup.bash
-uv run --package diffusion-planner python scripts/dataset/create_zarr_dataset.py \
-  root=/data/rosbags_from_label output=/data/zarr/train.zarr \
-  index=/data/parquet/train.parquet split=train
+uv run python scripts/dataset/create_h5_dataset.py \
+  root=/data/rosbags_from_label \
+  output_root=/data/diffusion_planner_h5 \
+  split=train
 ```
 
-The script resumes an interrupted run: bags already stored in the Zarr dataset
-are skipped, and rerunning retries the ones that failed.
+The script writes one `frames.h5` per rosbag while preserving the source
+directory hierarchy. Complete H5 shards can be reused when rebuilding an
+interrupted Parquet index.
 
 ## Training
 
@@ -62,16 +63,16 @@ The entry point is driven by Hydra; its configuration lives in `configs/train/`.
 ```bash
 source ros2_ws/install/setup.bash
 uv run --package diffusion-planner python scripts/train/train.py \
-  dataloader.dataset.zarr_path=/data/zarr/train.zarr
+  dataloader.dataset.parquet_path=/data/diffusion_planner_h5/indexes/train.parquet
 ```
 
-The index carries the ego dimensions of each row, stamped in at creation time
-from `configs/dataset/vehicles/`, so training needs no separate vehicle
-configuration.
+The tensors already contain the vehicle shape generated from
+`configs/dataset/vehicles/`, so training performs no rosbag or map preprocessing.
 
-Benchmark training-style dataset preprocessing:
+Benchmark training-style dataset loading:
 
 ```bash
 uv run --package diffusion-planner python scripts/dataset/check_dataset.py \
-  /data/zarr/train.zarr --jobs 32
+  /data/diffusion_planner_h5/indexes/train.parquet \
+  --jobs 32
 ```

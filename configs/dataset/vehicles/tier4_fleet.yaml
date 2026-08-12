@@ -1,9 +1,8 @@
 # One vehicle per project id: every project is driven by a single vehicle model.
 #
-# This file is read only by scripts/dataset/create_parquet_rosbag_from_label.py, which stamps
-# the dimensions into every row of the index it writes. Training reads them back from there,
-# so changing this file affects new indexes only. Every project being scanned must appear
-# here, otherwise the scan refuses to start.
+# This file is read by scripts/dataset/create_h5_dataset.py. The dimensions are passed to
+# the shared C++ preprocessing and stored in each frame's ego_shape tensor. Changing this
+# file affects newly generated H5 shards only. Every scanned project must appear here.
 #
 # The numbers below are placeholders. Replace each entry with base_link_to_front /
 # vehicle_length / vehicle_width taken from that project's vehicle_info.param.yaml.

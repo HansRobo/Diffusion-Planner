@@ -65,7 +65,9 @@ class FrameDataTest(unittest.TestCase):
     def test_selects_optional_batch_dimension(self) -> None:
         """An optional leading batch dimension is indexed and removed."""
         data = make_frame()
-        data["ego_agent_past"] = np.stack((data["ego_agent_past"], data["ego_agent_past"] + 1))
+        data["ego_agent_past"] = np.stack(
+            (data["ego_agent_past"], data["ego_agent_past"] + 1)
+        )
 
         frame = FrameData.from_mapping(data, batch_index=1)
 
@@ -93,7 +95,9 @@ class PlotFrameTest(unittest.TestCase):
 
     def test_builds_expected_layers_and_equal_axes(self) -> None:
         """The default composition contains core layers and equal axes."""
-        figure = plot_frame(make_frame(), options=FramePlotOptions(show_speed_limits=True))
+        figure = plot_frame(
+            make_frame(), options=FramePlotOptions(show_speed_limits=True)
+        )
         trace_names = {trace.name for trace in figure.data}
 
         self.assertIn("Lanes", trace_names)
@@ -113,7 +117,9 @@ class PlotFrameTest(unittest.TestCase):
     def test_recovers_lane_boundary_offsets(self) -> None:
         """Relative lane boundary coordinates are restored to ego coordinates."""
         figure = plot_frame(make_frame())
-        boundary = next(trace for trace in figure.data if trace.name == "Lanes boundaries")
+        boundary = next(
+            trace for trace in figure.data if trace.name == "Lanes boundaries"
+        )
 
         self.assertEqual(list(boundary.y[:3]), [-2.0, -2.0, -2.0])
 

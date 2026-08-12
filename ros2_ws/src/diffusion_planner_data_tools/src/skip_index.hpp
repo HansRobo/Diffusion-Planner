@@ -23,7 +23,7 @@
 
 namespace autoware::diffusion_planner::data_tools {
 
-struct IndexerParam;
+struct DatasetBuilderParam;
 struct TopicConfig;
 
 struct InvalidFrameRange {
@@ -40,7 +40,7 @@ struct FrameRange {
 };
 
 FrameRange calculate_frame_range(const TopicConfig &topics,
-                                 const IndexerParam &param,
+                                 const DatasetBuilderParam &param,
                                  const std::vector<double> &ego_stamps,
                                  const std::vector<double> &turn_stamps,
                                  const std::vector<double> &objects_stamps,

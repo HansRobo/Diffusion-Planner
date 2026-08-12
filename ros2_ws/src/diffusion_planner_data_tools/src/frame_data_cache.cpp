@@ -16,16 +16,78 @@
 
 #include "label_builder.hpp"
 
-#include <autoware_lanelet2_extension/projection/mgrs_projector.hpp>
+#include <autoware/geography_utils/lanelet2_projector.hpp>
+#include <autoware/map_projection_loader/load_info_from_lanelet2_map.hpp>
+#include <autoware/map_projection_loader/map_projection_loader.hpp>
+
+#include <autoware_map_msgs/msg/map_projector_info.hpp>
 
 #include <lanelet2_io/Io.h>
+#include <lanelet2_io/Projection.h>
 
+#include <filesystem>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace autoware::diffusion_planner::data_tools {
+namespace {
+
+class LocalProjector : public lanelet::Projector {
+public:
+  LocalProjector() : Projector(lanelet::Origin(lanelet::GPSPoint{})) {}
+
+  lanelet::BasicPoint3d forward(const lanelet::GPSPoint &gps) const override {
+    return {0.0, 0.0, gps.ele};
+  }
+
+  lanelet::GPSPoint reverse(const lanelet::BasicPoint3d &point) const override {
+    return {0.0, 0.0, point.z()};
+  }
+};
+
+lanelet::LaneletMapPtr load_map(const std::string &map_path) {
+  const std::filesystem::path projector_info_path =
+      std::filesystem::path(map_path).parent_path() / "map_projector_info.yaml";
+  const auto projector_info =
+      std::filesystem::exists(projector_info_path)
+          ? autoware::map_projection_loader::load_info_from_yaml(
+                projector_info_path.string())
+          : autoware::map_projection_loader::load_info_from_lanelet2_map(
+                map_path);
+
+  lanelet::ErrorMessages errors;
+  lanelet::LaneletMapPtr map;
+  if (projector_info.projector_type ==
+      autoware_map_msgs::msg::MapProjectorInfo::LOCAL) {
+    LocalProjector projector;
+    map = lanelet::load(map_path, projector, &errors);
+    for (lanelet::Point3d point : map->pointLayer) {
+      if (point.hasAttribute("local_x")) {
+        point.x() = point.attribute("local_x").asDouble().value();
+      }
+      if (point.hasAttribute("local_y")) {
+        point.y() = point.attribute("local_y").asDouble().value();
+      }
+    }
+  } else {
+    const std::unique_ptr<lanelet::Projector> projector =
+        autoware::geography_utils::get_lanelet2_projector(projector_info);
+    map = lanelet::load(map_path, *projector, &errors);
+  }
+  if (!errors.empty()) {
+    std::string message = "failed to load lanelet map " + map_path;
+    for (const std::string &error : errors) {
+      message += "\n" + error;
+    }
+    throw std::runtime_error(message);
+  }
+  return map;
+}
+
+} // namespace
 
 FrameDataCache::FrameDataCache(const size_t reader_capacity,
                                const size_t map_capacity,
@@ -46,10 +108,7 @@ preprocess::InputDataResult FrameDataCache::create_frame_data(
     const double traffic_light_timeout_s, const int64_t num_future_steps,
     const double neighbor_observation_timeout_s) {
   auto &map_context = map_contexts_.get_or_create(map_path, [&]() {
-    lanelet::projection::MGRSProjector projector;
-    lanelet::ErrorMessages errors;
-    const lanelet::LaneletMapPtr map =
-        lanelet::load(map_path, projector, &errors);
+    const lanelet::LaneletMapPtr map = load_map(map_path);
     return std::shared_ptr<const preprocess::LaneSegmentContext>(
         preprocess::build_map_context(map, line_string_max_step_m_));
   });

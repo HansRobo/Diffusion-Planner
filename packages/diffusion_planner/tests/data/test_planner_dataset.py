@@ -1,4 +1,4 @@
-"""Tests for planner dataset filtering and batching, without the native bag reader."""
+"""Focused tests for the H5-backed planner dataset."""
 
 from __future__ import annotations
 
@@ -6,29 +6,39 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import h5py
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-import torch
 
-from diffusion_planner.data import PlannerDataset, VehicleParameters, collate_frames
-
-TAXI = VehicleParameters(base_link_to_front=3.79, vehicle_length=4.77, vehicle_width=1.75)
-BUS = VehicleParameters(base_link_to_front=5.71, vehicle_length=7.24, vehicle_width=2.43)
+from diffusion_planner.data import PlannerDataset
 
 
-def write_index(path: Path) -> None:
-    """Write a small single-split frame index covering two projects and two vehicles."""
+def write_shard(path: Path) -> None:
+    """Write two minimal frames using the production H5 schema."""
+    path.parent.mkdir(parents=True)
+    with h5py.File(path, "w") as file:
+        file.attrs["format"] = "diffusion_planner_frame_dataset"
+        file.attrs["format_version"] = 2
+        file.attrs["num_frames"] = 2
+        frames = file.create_group("frames")
+        frames.create_dataset(
+            "ego_agent_past", data=np.arange(24, dtype=np.float32).reshape(2, 2, 6)
+        )
+        metadata = file.create_group("metadata")
+        metadata.create_dataset(
+            "frame_time_ns", data=np.array([10, 20], dtype=np.int64)
+        )
+
+
+def write_index(path: Path, h5_path: Path) -> None:
+    """Write the two rows addressing the test shard."""
     pq.write_table(
         pa.table(
             {
-                "bag_path": ["/bags/a", "/bags/a", "/bags/b", "/bags/c"],
-                "map_path": ["/m/a.osm", "/m/a.osm", "/m/b.osm", "/m/c.osm"],
-                "frame_time_ns": [1, 2, 3, 4],
-                "project_id": ["x2_dev", "x2_dev", "prd_jt", "x2_dev"],
-                "split": ["train", "train", "train", "train"],
-                "base_link_to_front": [3.79, 3.79, 5.71, 3.79],
-                "vehicle_length": [4.77, 4.77, 7.24, 4.77],
-                "vehicle_width": [1.75, 1.75, 2.43, 1.75],
+                "h5_path": [str(h5_path)] * 2,
+                "frame_index": np.array([0, 1], dtype=np.int64),
+                "frame_time_ns": np.array([10, 20], dtype=np.int64),
             }
         ),
         path,
@@ -36,75 +46,44 @@ def write_index(path: Path) -> None:
 
 
 class PlannerDatasetTest(unittest.TestCase):
-    """The index is validated up front, so it must not need the native module."""
+    """H5 frames are addressed by the lightweight Parquet index."""
 
     def setUp(self) -> None:
-        """Write a fresh index for each test."""
-        self._dir = tempfile.TemporaryDirectory()
-        self.path = Path(self._dir.name) / "index.parquet"
-        write_index(self.path)
+        self._directory = tempfile.TemporaryDirectory()
+        self.root = Path(self._directory.name)
+        self.index_path = self.root / "index.parquet"
+        self.h5_path = self.root / "project/bag/frames.h5"
+        write_shard(self.h5_path)
+        write_index(self.index_path, self.h5_path)
 
     def tearDown(self) -> None:
-        """Remove the temporary index."""
-        self._dir.cleanup()
+        self._directory.cleanup()
 
-    def test_loads_every_row_of_the_index(self) -> None:
-        """One dataset covers the whole index it is given."""
-        self.assertEqual(len(PlannerDataset(self.path)), 4)
-
-    def test_reads_the_vehicle_of_each_row(self) -> None:
-        """Rows carry their own ego dimensions, so an index may mix vehicles."""
-        dataset = PlannerDataset(self.path)
-        self.assertEqual(dataset.vehicle(0), TAXI)
-        self.assertEqual(dataset.vehicle(2), BUS)
-
-    def test_rejects_an_index_without_vehicle_columns(self) -> None:
-        """An index written before the dimensions were stamped in is named as such."""
-        path = Path(self._dir.name) / "old.parquet"
-        pq.write_table(
-            pa.table(
-                {
-                    "bag_path": ["/bags/a"],
-                    "map_path": ["/m/a.osm"],
-                    "frame_time_ns": [1],
-                }
-            ),
-            path,
+    def test_loads_every_index_row(self) -> None:
+        dataset = PlannerDataset(self.index_path)
+        self.assertEqual(len(dataset), 2)
+        np.testing.assert_array_equal(
+            dataset[1]["ego_agent_past"].numpy(),
+            np.arange(24, dtype=np.float32).reshape(2, 2, 6)[1],
         )
-        with self.assertRaisesRegex(ValueError, "vehicle_length"):
-            PlannerDataset(path)
 
-    def test_rejects_a_missing_column(self) -> None:
-        """A file without the required columns is rejected."""
-        path = Path(self._dir.name) / "bare.parquet"
-        pq.write_table(pa.table({"bag_path": ["/bags/a"]}), path)
+    def test_reports_the_h5_source(self) -> None:
+        dataset = PlannerDataset(self.index_path)
+        path, frame_time_ns = dataset.source(1)
+        self.assertEqual(Path(path), self.h5_path)
+        self.assertEqual(frame_time_ns, 20)
+
+    def test_rejects_a_missing_index_column(self) -> None:
+        bare_path = self.root / "bare.parquet"
+        pq.write_table(pa.table({"h5_path": ["project/bag/frames.h5"]}), bare_path)
         with self.assertRaises(ValueError):
-            PlannerDataset(path)
+            PlannerDataset(bare_path)
 
-
-class CollateFramesTest(unittest.TestCase):
-    """Frames that fail to build are dropped instead of aborting the batch."""
-
-    @staticmethod
-    def frame(value: float) -> dict[str, torch.Tensor]:
-        """Return one frame filled with a constant."""
-        return {"ego_agent_past": torch.full((3, 6), value)}
-
-    def test_stacks_frames(self) -> None:
-        """Frames are stacked along a new batch dimension."""
-        batch = collate_frames([self.frame(0.0), self.frame(1.0)])
-        assert batch is not None
-        self.assertEqual(batch["ego_agent_past"].shape, (2, 3, 6))
-
-    def test_drops_failed_frames(self) -> None:
-        """Failed frames shrink the batch instead of breaking it."""
-        batch = collate_frames([self.frame(0.0), None])
-        assert batch is not None
-        self.assertEqual(batch["ego_agent_past"].shape, (1, 3, 6))
-
-    def test_returns_none_when_every_frame_failed(self) -> None:
-        """An all-failed batch collates to None."""
-        self.assertIsNone(collate_frames([None, None]))
+    def test_rejects_a_relative_h5_path(self) -> None:
+        relative_path = self.root / "relative.parquet"
+        write_index(relative_path, Path("project/bag/frames.h5"))
+        with self.assertRaisesRegex(ValueError, "must be absolute"):
+            PlannerDataset(relative_path)
 
 
 if __name__ == "__main__":

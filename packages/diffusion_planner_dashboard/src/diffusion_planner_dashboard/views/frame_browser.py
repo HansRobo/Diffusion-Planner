@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import astuple
 from pathlib import Path
 
 import streamlit as st
 
-from diffusion_planner.data import VehicleParameters
 from diffusion_planner.visualizer import plot_frame
 from diffusion_planner_dashboard.services import (
     FrameIndex,
@@ -15,13 +13,14 @@ from diffusion_planner_dashboard.services import (
     FrameLoader,
     load_frame_index,
 )
-from diffusion_planner_dashboard.ui.metadata import render_index_summary, render_row_metadata
+from diffusion_planner_dashboard.ui.metadata import (
+    render_index_summary,
+    render_row_metadata,
+)
 from diffusion_planner_dashboard.ui.settings import (
-    missing_frame_sources,
+    render_data_source_settings,
     render_frame_selector,
-    render_parquet_settings,
     render_plot_options,
-    render_vehicle_parameters,
 )
 from diffusion_planner_dashboard.ui.tensor_inspector import render_tensor_inspector
 
@@ -38,32 +37,30 @@ def _frame_loader() -> FrameLoader:
 
 
 # Cached on primitives so that the key stays stable and cheap to hash.
-@st.cache_data(max_entries=64, show_spinner="Reading frame data from rosbag...")
+@st.cache_data(max_entries=64, show_spinner="Reading frame data from H5...")
 def _cached_frame(
-    row_index: int,
-    bag_path: str,
-    map_path: str,
+    h5_path: str,
+    frame_index: int,
     frame_time_ns: int,
-    vehicle: tuple[float, float, float],
+    modification_time_ns: int,
 ):
-    row = FrameIndexRow(
-        row_index, bag_path, map_path, frame_time_ns, VehicleParameters(*vehicle), {}
-    )
+    del modification_time_ns
+    row = FrameIndexRow(0, h5_path, frame_index, frame_time_ns, {})
     return _frame_loader().load(row)
 
 
 def render_frame_browser() -> None:
-    """Render the complete Parquet-backed frame browser."""
+    """Render the complete H5/Parquet-backed frame browser."""
     st.title("Frame Browser")
-    parquet_path_text = render_parquet_settings()
-    if parquet_path_text is None:
-        st.info("Configure a frame-index Parquet file from the sidebar.")
+    source_path_text = render_data_source_settings()
+    if source_path_text is None:
+        st.info("Configure an H5 file or H5 frame-index Parquet from the sidebar.")
         return
 
-    parquet_path = Path(parquet_path_text).expanduser()
+    source_path = Path(source_path_text).expanduser()
     try:
-        modification_time_ns = parquet_path.stat().st_mtime_ns
-        index = _cached_index(str(parquet_path), modification_time_ns)
+        modification_time_ns = source_path.stat().st_mtime_ns
+        index = _cached_index(str(source_path), modification_time_ns)
     except (OSError, ValueError) as error:
         st.error(str(error))
         return
@@ -72,30 +69,20 @@ def render_frame_browser() -> None:
     row = render_frame_selector(index)
     render_row_metadata(row)
 
-    source_errors = missing_frame_sources(row)
-    if source_errors:
-        st.error("\n\n".join(source_errors))
-        return
-
-    render_vehicle_parameters(row)
     options = render_plot_options()
     try:
+        h5_modification_time_ns = Path(row.h5_path).stat().st_mtime_ns
         frame_data = _cached_frame(
-            row.index,
-            row.bag_path,
-            row.map_path,
+            row.h5_path,
+            row.frame_index,
             row.frame_time_ns,
-            astuple(row.vehicle),
+            h5_modification_time_ns,
         )
     except (RuntimeError, ValueError) as error:
         st.error(str(error))
         return
-    except Exception as error:  # Native rosbag/map errors vary by backend.
+    except Exception as error:
         st.exception(error)
-        return
-
-    if frame_data is None:
-        st.warning("The selected index row could not be converted into frame data.")
         return
 
     figure = plot_frame(frame_data, options=options)
