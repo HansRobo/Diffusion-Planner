@@ -78,6 +78,18 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     neighbor_collision_margin_vehicle: float = 0.25
     neighbor_collision_margin_pedestrian: float = 1.0
     neighbor_collision_margin_bicycle: float = 0.5
+    neighbor_collision_margin_unknown: float = 1.0
+
+    # Training-time augmentation that erases the type one-hot of some real neighbors (see
+    # utils/neighbor_type_augment.py), so the model learns to handle neighbors whose type
+    # perception could not confidently classify.
+    use_neighbor_unknown_augment: bool = False
+    neighbor_unknown_prob_vehicle: float = 0.05
+    neighbor_unknown_prob_pedestrian: float = 0.15
+    neighbor_unknown_prob_bicycle: float = 0.15
+    neighbor_unknown_distance_scale_max: float = 2.5
+    neighbor_unknown_distance_scale_range_m: float = 50.0
+    neighbor_unknown_prob_cap: float = 0.5
 
     alpha_planning_loss: float = 1.0
     alpha_neighbor_loss: float = 0.1

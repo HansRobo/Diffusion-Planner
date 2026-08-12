@@ -413,6 +413,7 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             margin_vehicle=args.neighbor_collision_margin_vehicle,
             margin_pedestrian=args.neighbor_collision_margin_pedestrian,
             margin_bicycle=args.neighbor_collision_margin_bicycle,
+            margin_unknown=args.neighbor_collision_margin_unknown,
         )
         total_result_dict["ego_neighbor_margin_loss"].append(neighbor_penalty.cpu())
 

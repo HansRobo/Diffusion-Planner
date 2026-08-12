@@ -246,6 +246,7 @@ def compute_training_loss(
             margin_vehicle=args.neighbor_collision_margin_vehicle,
             margin_pedestrian=args.neighbor_collision_margin_pedestrian,
             margin_bicycle=args.neighbor_collision_margin_bicycle,
+            margin_unknown=args.neighbor_collision_margin_unknown,
         )  # [B, T]
         loss["neighbor_collision_loss"] = nc_loss.mean()
     else:

@@ -5,6 +5,7 @@ from tqdm import tqdm
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.neighbor_type_augment import apply_neighbor_unknown_augment
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
 
 
@@ -51,6 +52,17 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         inputs = {key: value.to(args.device) for key, value in inputs.items()}
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
+
+        if args.use_neighbor_unknown_augment:
+            inputs["neighbor_agents_past"] = apply_neighbor_unknown_augment(
+                inputs["neighbor_agents_past"],
+                prob_vehicle=args.neighbor_unknown_prob_vehicle,
+                prob_pedestrian=args.neighbor_unknown_prob_pedestrian,
+                prob_bicycle=args.neighbor_unknown_prob_bicycle,
+                distance_scale_max=args.neighbor_unknown_distance_scale_max,
+                distance_scale_range_m=args.neighbor_unknown_distance_scale_range_m,
+                prob_cap=args.neighbor_unknown_prob_cap,
+            )
 
         ego_future = inputs["ego_agent_future"]
         neighbors_future = inputs["neighbor_agents_future"]

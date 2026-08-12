@@ -164,12 +164,16 @@ def create_neighbor_marker(neighbor_tensor: torch.Tensor, stamp) -> MarkerArray:
         heading = np.arctan2(sin_h, cos_h)
         width = neighbor_data[i, 6].item()
         length = neighbor_data[i, 7].item()
-        obj_type_idx = torch.argmax(neighbor_data[i, 8:11]).item()
+        # All-zero one-hot means the type is unknown; argmax would otherwise tie-break to
+        # index 0 (Vehicle) and mislabel it.
+        is_unknown_type = torch.sum(neighbor_data[i, 8:11]).item() == 0
+        obj_type_idx = 3 if is_unknown_type else torch.argmax(neighbor_data[i, 8:11]).item()
 
         colors = [
             ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.7),  # Vehicle - Blue
             ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.7),  # Pedestrian - Green
             ColorRGBA(r=1.0, g=0.0, b=1.0, a=0.7),  # Bicycle - Magenta
+            ColorRGBA(r=0.5, g=0.5, b=0.5, a=0.7),  # Unknown - Gray
         ]
 
         # Cube marker
@@ -214,7 +218,7 @@ def create_neighbor_marker(neighbor_tensor: torch.Tensor, stamp) -> MarkerArray:
         text_marker.pose.position.x = x
         text_marker.pose.position.y = y
         text_marker.pose.position.z = 2.0
-        obj_types = ["Vehicle", "Pedestrian", "Bicycle"]
+        obj_types = ["Vehicle", "Pedestrian", "Bicycle", "Unknown"]
         text_marker.text = f"{obj_types[obj_type_idx]} #{i}"
         text_marker.scale.z = 0.8
         text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.9)
