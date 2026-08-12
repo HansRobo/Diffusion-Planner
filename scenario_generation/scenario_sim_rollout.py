@@ -35,9 +35,9 @@ from scenario_generation.scenario_sim_scene import (
     DT,
     HistoryBuffers,
     SceneConfig,
+    baselink_xyh,
     build_scene,
     ego_metric_box,
-    pose_xyh,
     resolve_ego_name,
     update_history,
 )
@@ -119,7 +119,7 @@ def _ego_plan_to_map_trajectory(
 
 def _score_neighbors(scene, ego_state: dict, device: str, ego_name: str) -> tuple[float, bool]:
     """Instantaneous (min_clearance, collision) from raw ego-frame neighbour OBBs."""
-    ex, ey, eh = pose_xyh(ego_state)
+    ex, ey, eh = baselink_xyh(ego_state)
     R = _rotation_matrix(eh)
     neighbors_live = _build_neighbor_agents_past(
         scene, ego_name, R, np.array([ex, ey], dtype=np.float64), eh
@@ -132,7 +132,7 @@ def _score_neighbors(scene, ego_state: dict, device: str, ego_name: str) -> tupl
 
 def _traj_entry(step: int, ego_state: dict, goal_xy: np.ndarray) -> dict:
     """One trajectory_log row (world pose, speed, goal distance) for post-hoc metrics."""
-    x, y, h = pose_xyh(ego_state)
+    x, y, h = baselink_xyh(ego_state)
     tw = ego_state["twist"]
     return {
         "step": step,
@@ -164,7 +164,7 @@ def _start_and_resolve_route(
         raise RuntimeError(f"activate() did not reach 'active' (got '{st_act}'): {osc_path}")
     ego_name = resolve_ego_name(runner.get_entity_states())
 
-    x0, y0, _ = pose_xyh(runner.get_ego_state(ego_ref=ego_name))
+    x0, y0, _ = baselink_xyh(runner.get_ego_state(ego_ref=ego_name))
     ego0_xy = np.array([x0, y0], dtype=np.float32)
     ego_route_ids = resolve_route(builder, ego0_xy, osc_path, min_len_m=cfg.find_route_min_len_m)
     if not ego_route_ids:
@@ -309,10 +309,10 @@ def run_scenario_sim_rollout(
             if ego_name not in states:
                 raise RuntimeError(f"Sim stopped reporting the ego entity '{ego_name}'")
             ego_state = states[ego_name]
-            ex, ey, eh = pose_xyh(ego_state)
+            ex, ey, eh = baselink_xyh(ego_state)
 
             with timers("scene_build"):
-                update_history(buffers, states)
+                update_history(buffers, states, ego_name)
                 scene = build_scene(
                     states, buffers, builder, ego_route_ids, goal_pose, cfg.scene, ego_name
                 )
@@ -345,7 +345,7 @@ def run_scenario_sim_rollout(
             ego_after = runner.get_ego_state(ego_ref=ego_name)
             trajectory_log.append(_traj_entry(step, ego_after, goal_xy))
             if step == 0:  # verify the frame contract on the first stepped tick
-                ax, ay, _ = pose_xyh(ego_after)
+                ax, ay, _ = baselink_xyh(ego_after)
                 coord_err = float(math.hypot(ax - pts[0, 0], ay - pts[0, 1]))
                 if verbose:
                     verdict = "OK" if coord_err <= cfg.coord_check_tol_m else "FAIL"

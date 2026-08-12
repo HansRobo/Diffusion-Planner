@@ -1,7 +1,9 @@
 """Build a Diffusion-Planner ``SceneContext`` from OpenSCENARIO simulator truth.
 
 The simulator reports poses in the map (MGRS) frame and ``LaneletSceneBuilder`` works in the
-same frame, so poses are stored as-is; ``to_model_tensors`` re-centers them onto the ego.
+same frame, so no frame change is needed; ``to_model_tensors`` re-centers them onto the ego.
+Within that frame the ego is stored at base_link and every other agent at its bbox centroid,
+which is the pair ``SceneContext`` is defined in.
 
 Entities are identified by the simulator's type field rather than by name, and each one
 carries a rolling pose history because the model consumes a fixed-length past.
@@ -9,6 +11,7 @@ carries a rolling pose history because the model consumes a fixed-length past.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass
 
@@ -89,17 +92,36 @@ class HistoryBuffers:
         return np.array(self._buf[name], dtype=np.float32)  # (length, 3)
 
 
-def pose_xyh(state: dict) -> tuple[float, float, float]:
-    """The one place the simulator's pose dict shape is read."""
+def baselink_xyh(state: dict) -> tuple[float, float, float]:
+    """The reported pose as-is -- the entity's reference point, which for a vehicle catalogued
+    the Autoware way is base_link. The one place the pose dict shape is read."""
     p = state["pose"]
     return float(p["x"]), float(p["y"]), float(p["yaw"])
 
 
-def update_history(buffers: HistoryBuffers, states: dict) -> None:
-    """Append this tick's truth pose to each dynamic entity's rolling buffer."""
+def centroid_xyh(state: dict) -> tuple[float, float, float]:
+    """The bbox-centre pose. The offset from base_link to the centre is reported separately, and
+    is zero only for an entity whose two already coincide."""
+    x, y, yaw = baselink_xyh(state)
+    c = state["bounding_box"]["center"]
+    cx, cy = float(c["x"]), float(c["y"])
+    return (
+        x + math.cos(yaw) * cx - math.sin(yaw) * cy,
+        y + math.sin(yaw) * cx + math.cos(yaw) * cy,
+        yaw,
+    )
+
+
+def update_history(buffers: HistoryBuffers, states: dict, ego_name: str) -> None:
+    """Append this tick's truth pose to each dynamic entity's rolling buffer.
+
+    The ego is stored at base_link and every other agent at its bbox centroid:
+    ``to_model_tensors`` shifts a neighbour back by ``wheelbase / 2`` when it stands in as the
+    ego, and the metric OBB builders read a neighbour's stored xy as the box centre.
+    """
     for name, st in states.items():
         if _agent_type(int(st["type"])) is not None:
-            buffers.update(name, *pose_xyh(st))
+            buffers.update(name, *(baselink_xyh(st) if name == ego_name else centroid_xyh(st)))
 
 
 def entity_shape(state: dict, cfg: SceneConfig) -> tuple[float, float, float]:
@@ -133,7 +155,7 @@ def build_scene(
     ego_name: str,
 ) -> SceneContext:
     """Build a SceneContext snapshot in the map frame from this tick's sim truth."""
-    ex, ey, _ = pose_xyh(states[ego_name])
+    ex, ey, _ = baselink_xyh(states[ego_name])
     ego_xy = np.array([ex, ey], dtype=np.float32)
 
     # Closest-N lanelets around the ego, with the ego route pinned first so route context can
