@@ -133,11 +133,11 @@ class StatePerturbation:
 
     def __init__(
         self,
-        augment_prob: float,
-        num_refine: int,
-        device: torch.device | str,
-        ego_past_noise_std: float,
-        use_smoothing_future_trajectory: bool,
+        augment_prob: float = 0.5,
+        num_refine: int = 20,
+        device: torch.device | str = "cpu",
+        ego_past_noise_std: float = 0.1,
+        use_smoothing_future_trajectory: bool = True,
     ) -> None:
         """
         Initialize the augmentor,
@@ -151,6 +151,9 @@ class StatePerturbation:
         self._device = torch.device(device)
         self._ego_past_noise_std = ego_past_noise_std
         self._use_smoothing_future_trajectory = use_smoothing_future_trajectory
+        # Subclasses that rewrite ego past into the same pre-centric frame as the
+        # new current pose should set this True so centric_transform rotates past.
+        self._transform_ego_past = False
         lo = [0.0, -0.75, -0.2, -1, -0.5, -0.2, -0.1, 0.0, 0.0]
         hi = [0.0, +0.75, +0.2, +1, +0.5, +0.2, +0.1, 0.0, 0.0]
         # Shape (9,) so that len(self._low) is the number of perturbation dims;
@@ -273,7 +276,13 @@ class StatePerturbation:
 
         Invalid conditions:
           1. Ego polygon overlaps with a neighbour agent polygon.
-          2. Ego polygon intersects a lane left or right boundary segment.
+          2. Ego polygon intersects a road-border segment from ``line_strings``.
+
+        Lane left/right boundaries are intentionally not used: they frequently
+        intersect the GT ego footprint (adjacent/merging polylines), which made
+        the previous check reject a large fraction of otherwise valid samples.
+        Road borders (``line_strings[..., 3]`` one-hot) are the drivable-area
+        edge and match the training road-border penalty representation.
         """
         B = aug_ego_state.shape[0]
         device = aug_ego_state.device
@@ -308,38 +317,34 @@ class StatePerturbation:
                 ).reshape(B, N)
                 collision = collision | ((dists < 0) & valid).any(dim=1)
 
-        # ── 2. Lane boundary segment collision ───────────────────────────────
-        if "lanes" in inputs:
-            lanes = inputs["lanes"]  # [B, L, P, 33]
-            left_offset = lanes[..., 4:6]  # [B, L, P, 2]
-            right_offset = lanes[..., 6:8]  # [B, L, P, 2]
+        # ── 2. Road-border segment collision ─────────────────────────────────
+        # line_strings layout: [B, N_ls, P, D] with D>=4 → (x, y, stop_line, road_border)
+        if "line_strings" in inputs:
+            line_strings = inputs["line_strings"]
+            if line_strings.shape[-1] >= 4:
+                pts = line_strings[..., :2]  # [B, N_ls, P, 2]
+                # A polyline is a road border if any point carries the flag.
+                is_road_border = (line_strings[..., 3] > 0.5).any(dim=-1)  # [B, N_ls]
+                # Point valid when xy is non-trivial.
+                point_valid = torch.norm(pts, dim=-1) > 1e-6  # [B, N_ls, P]
+                # Segment valid only on road-border polylines with two valid endpoints.
+                seg_valid = (
+                    point_valid[:, :, :-1]
+                    & point_valid[:, :, 1:]
+                    & is_road_border[:, :, None]
+                )  # [B, N_ls, P-1]
 
-            # Absolute boundary positions
-            left_pts = lanes[..., :2] + left_offset  # [B, L, P, 2]
-            right_pts = lanes[..., :2] + right_offset  # [B, L, P, 2]
+                seg_start = pts[:, :, :-1, :].reshape(B, -1, 2)
+                seg_end = pts[:, :, 1:, :].reshape(B, -1, 2)
+                seg_valid_flat = seg_valid.reshape(B, -1)
 
-            # A waypoint is valid when its first 8 features are not all zero.
-            # Additionally, only include a boundary side when its offset is
-            # non-trivial; a near-zero offset means no boundary data.
-            lane_valid = torch.sum(torch.ne(lanes[..., :8], 0), dim=-1) > 0  # [B, L, P]
-            left_bound_valid = (torch.norm(left_offset, dim=-1) > 0.01) & lane_valid
-            right_bound_valid = (torch.norm(right_offset, dim=-1) > 0.01) & lane_valid
-
-            def _boundary_segs(pts, point_valid):
-                s = pts[:, :, :-1, :].reshape(B, -1, 2)
-                e = pts[:, :, 1:, :].reshape(B, -1, 2)
-                v = (point_valid[:, :, :-1] & point_valid[:, :, 1:]).reshape(B, -1)
-                return s, e, v
-
-            ls, le, lv = _boundary_segs(left_pts, left_bound_valid)
-            rs, re, rv = _boundary_segs(right_pts, right_bound_valid)
-
-            collision = collision | _segments_intersect_rect(
-                torch.cat([ls, rs], dim=1),
-                torch.cat([le, re], dim=1),
-                ego_corners,
-                torch.cat([lv, rv], dim=1),
-            )
+                if seg_valid_flat.any():
+                    collision = collision | _segments_intersect_rect(
+                        seg_start,
+                        seg_end,
+                        ego_corners,
+                        seg_valid_flat,
+                    )
 
         return collision
 
@@ -394,13 +399,18 @@ class StatePerturbation:
         ego_future[..., :2] = vector_transform(ego_future[..., :2], transform_matrix, center_xy)
         ego_future[..., 2] = heading_transform(ego_future[..., 2], transform_matrix)
 
-        # ego past
-        # inputs["ego_agent_past"][..., :2] = vector_transform(
-        #     inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
-        # )
-        # inputs["ego_agent_past"][..., 2:4] = vector_transform(
-        #     inputs["ego_agent_past"][..., 2:4], transform_matrix
-        # )
+        # ego past — only when past was rewritten into the perturbed frame
+        if self._transform_ego_past:
+            ego_past_mask = (
+                torch.sum(torch.ne(inputs["ego_agent_past"][..., :4], 0), dim=-1) == 0
+            )
+            inputs["ego_agent_past"][..., :2] = vector_transform(
+                inputs["ego_agent_past"][..., :2], transform_matrix, center_xy
+            )
+            inputs["ego_agent_past"][..., 2:4] = vector_transform(
+                inputs["ego_agent_past"][..., 2:4], transform_matrix
+            )
+            inputs["ego_agent_past"][ego_past_mask] = 0.0
 
         ego_past4d = inputs["ego_agent_past"]
         ego_future4d = torch.cat(
@@ -614,3 +624,473 @@ class StatePerturbation:
             return torch.concatenate([interpolated, ego_future[:, P:, :]], axis=1)
         else:
             return interpolated
+
+
+def _quintic_coeff_matrix(duration_s: float, device, dtype) -> torch.Tensor:
+    """6x6 matrix mapping boundary vector [p0,p'0,p''0,pT,p'T,p''T] to polynomial coeffs."""
+    T = float(duration_s)
+    if T <= 0.0:
+        raise ValueError("duration_s must be positive.")
+    return torch.linalg.inv(
+        torch.tensor(
+            [
+                [1, 0, 0, 0, 0, 0],
+                [0, 1, 0, 0, 0, 0],
+                [0, 0, 2, 0, 0, 0],
+                [1, T, T**2, T**3, T**4, T**5],
+                [0, 1, 2 * T, 3 * T**2, 4 * T**3, 5 * T**4],
+                [0, 0, 2, 6 * T, 12 * T**2, 20 * T**3],
+            ],
+            device=device,
+            dtype=dtype,
+        )
+    )
+
+
+class StatePerturbationAtTau(StatePerturbation):
+    """Perturb at a random time τ ∈ [tau_min, tau_max] and reconnect with two quintics.
+
+    Pose-first v1 (see issue discussion around fixed 2 s recovery at t=0):
+
+    - Sample τ ~ Uniform[tau_min_s, tau_max_s] (default [-1, 0]).
+    - Apply lateral / heading offset at τ only, sampled from the same
+      ``_low`` / ``_high`` ranges as ``StatePerturbation`` (indices 1 and 2).
+    - Quintic bridge on each side of τ over ``num_refine * time_interval``
+      (same horizon as the parent future refine window).
+    - Re-derive ``ego_current_state`` at t=0 from the rewritten trajectory.
+    - Collision check + centric transform (with ego-past transform enabled).
+
+    Speed / steering / yaw-rate random offsets are intentionally deferred: they
+    fight continuous history→future kinematics and need a separate design.
+    """
+
+    def __init__(
+        self,
+        augment_prob: float = 0.5,
+        num_refine: int = 20,
+        device: torch.device | str = "cpu",
+        ego_past_noise_std: float = 0.0,
+        use_smoothing_future_trajectory: bool = True,
+        tau_min_s: float = -1.0,
+        tau_max_s: float = 0.0,
+    ) -> None:
+        super().__init__(
+            augment_prob=augment_prob,
+            num_refine=num_refine,
+            device=device,
+            ego_past_noise_std=ego_past_noise_std,
+            use_smoothing_future_trajectory=use_smoothing_future_trajectory,
+        )
+        if tau_min_s > tau_max_s:
+            raise ValueError("tau_min_s must be <= tau_max_s.")
+        self._tau_min_s = float(tau_min_s)
+        self._tau_max_s = float(tau_max_s)
+        self._transform_ego_past = True
+        # Past is already rewritten by the bridges; default noise scale off.
+        self._ego_past_noise_std = float(ego_past_noise_std)
+        # Last successful sample metadata for visualization / debugging.
+        self.last_tau_info: dict | None = None
+
+    @property
+    def refine_horizon_s(self) -> float:
+        """Same duration as the parent quintic refine window (``num_refine * dt``)."""
+        return float(self.num_refine * self.time_interval)
+
+    def __call__(self, inputs, ego_future, neighbors_future):
+        aug_flag, aug_current, aug_past, aug_future = self.augment_at_tau(inputs, ego_future)
+
+        inputs["ego_current_state"][aug_flag] = aug_current[aug_flag]
+        inputs["ego_agent_past"][aug_flag] = aug_past[aug_flag]
+        ego_future[aug_flag] = aug_future[aug_flag]
+
+        # Optional residual past scale (off by default for this subclass).
+        B_aug = aug_flag.sum().item()
+        if B_aug > 0 and self._ego_past_noise_std > 0.0:
+            W = self._ego_past_noise_std
+            scale = torch.normal(mean=1.0, std=W, size=(B_aug, 1, 1)).to(
+                inputs["ego_agent_past"].device
+            )
+            scale = torch.clamp(scale, 1.0 - 2 * W, 1.0 + 2 * W)
+            ego_past_aug = inputs["ego_agent_past"][aug_flag].clone()
+            ego_past_aug[..., :2] = ego_past_aug[..., :2] * scale
+            inputs["ego_agent_past"][aug_flag] = ego_past_aug
+            scale_1d = scale.squeeze(-1)
+            inputs["ego_current_state"][aug_flag, 4:6] *= scale_1d
+            inputs["ego_current_state"][aug_flag, 6:8] *= scale_1d
+
+        return self.centric_transform(inputs, ego_future, neighbors_future)
+
+    def augment_at_tau(self, inputs, ego_future):
+        """Rewrite past/current/future around a random τ; return aug tensors + flag."""
+        ego_current = inputs["ego_current_state"].clone()
+        ego_past = inputs["ego_agent_past"].clone()
+        aug_future = ego_future.clone()
+        device = ego_current.device
+        dtype = ego_current.dtype
+        dt = self.time_interval
+        B = ego_current.shape[0]
+        past_len = ego_past.shape[1]
+        future_len = aug_future.shape[1]
+        current_index = past_len - 1
+        self.last_tau_info = None
+
+        valid_speed = torch.abs(ego_current[:, 4]) >= 2.0
+        aug_flag = (torch.rand(B, device=device) < self._augment_prob) & valid_speed
+
+        for batch_index in torch.nonzero(aug_flag, as_tuple=False).flatten():
+            b = int(batch_index.item())
+            try:
+                ok = self._augment_single_at_tau(
+                    ego_current=ego_current,
+                    ego_past=ego_past,
+                    ego_future=aug_future,
+                    wheel_base=float(inputs["ego_shape"][b, 0].item()),
+                    batch_index=b,
+                    current_index=current_index,
+                    past_len=past_len,
+                    future_len=future_len,
+                    dt=dt,
+                    device=device,
+                    dtype=dtype,
+                )
+            except (RuntimeError, ValueError):
+                ok = False
+            if not ok:
+                aug_flag[b] = False
+                continue
+
+        collision = self._check_aug_validity(ego_current, inputs)
+        aug_flag = aug_flag & ~collision
+        if self.last_tau_info is not None and not bool(aug_flag[0].item()):
+            # Keep the sampled τ for diagnostics even when collision rejects.
+            self.last_tau_info["accepted"] = False
+        elif self.last_tau_info is not None:
+            self.last_tau_info["accepted"] = True
+        return aug_flag, ego_current, ego_past, aug_future
+
+    def _augment_single_at_tau(
+        self,
+        ego_current: torch.Tensor,
+        ego_past: torch.Tensor,
+        ego_future: torch.Tensor,
+        wheel_base: float,
+        batch_index: int,
+        current_index: int,
+        past_len: int,
+        future_len: int,
+        dt: float,
+        device,
+        dtype,
+    ) -> bool:
+        """In-place rewrite one sample. Returns False if the window is infeasible."""
+        b = batch_index
+        full_xy, full_heading = self._build_full_xy_heading(
+            ego_past[b], ego_current[b], ego_future[b]
+        )
+        n_full = full_xy.shape[0]
+        times = (torch.arange(n_full, device=device, dtype=dtype) - current_index) * dt
+
+        past_horizon_s = float((-times[0]).item())
+        future_horizon_s = float(times[-1].item())
+        tau_lo = max(self._tau_min_s, -past_horizon_s + dt)
+        tau_hi = min(self._tau_max_s, 0.0)
+        if tau_lo > tau_hi:
+            return False
+
+        # Snap τ to the discrete time grid.
+        tau_s = float(torch.empty(1, device=device).uniform_(tau_lo, tau_hi).item())
+        tau_idx = int(torch.argmin(torch.abs(times - tau_s)).item())
+        tau_s = float(times[tau_idx].item())
+
+        left_time = tau_s - self.refine_horizon_s
+        right_time = tau_s + self.refine_horizon_s
+        left_idx = int(torch.argmin(torch.abs(times - left_time)).item())
+        right_idx = int(torch.argmin(torch.abs(times - right_time)).item())
+        left_idx = max(0, min(left_idx, tau_idx))
+        right_idx = max(tau_idx, min(right_idx, n_full - 1))
+        if tau_idx - left_idx < 2 or right_idx - tau_idx < 2:
+            return False
+
+        # GT kinematics along the original polyline.
+        speed, accel, yaw_rate = self._estimate_kinematics(full_xy, full_heading, dt)
+        # Prefer measured current-state kinematics at t=0 when available.
+        speed[current_index] = torch.linalg.norm(ego_current[b, 4:6])
+        accel[current_index] = torch.linalg.norm(ego_current[b, 6:8])
+        yaw_rate[current_index] = ego_current[b, 9]
+
+        # Same lateral / heading ranges as StatePerturbation._low/_high[1], [2].
+        lateral = float(
+            (
+                self._low[1]
+                + (self._high[1] - self._low[1]) * torch.rand((), device=device)
+            ).item()
+        )
+        heading_off = float(
+            (
+                self._low[2]
+                + (self._high[2] - self._low[2]) * torch.rand((), device=device)
+            ).item()
+        )
+        if abs(lateral) < 1e-3 and abs(heading_off) < 1e-3:
+            return False
+
+        # Offset pose at τ (normal to GT heading); keep speed magnitude, re-aim velocity.
+        psi_gt = full_heading[tau_idx]
+        x_gt = float(full_xy[tau_idx, 0].item())
+        y_gt = float(full_xy[tau_idx, 1].item())
+        psi_gt_val = float(psi_gt.item())
+        x_tau = full_xy[tau_idx, 0] - lateral * torch.sin(psi_gt)
+        y_tau = full_xy[tau_idx, 1] + lateral * torch.cos(psi_gt)
+        psi_tau = self.normalize_angle(psi_gt + heading_off)
+        psi_tau_val = float(psi_tau.item())
+        v_tau = speed[tau_idx]
+        a_tau = accel[tau_idx]
+        w_tau = yaw_rate[tau_idx]
+
+        left_states = self._pack_boundary_state(
+            full_xy[left_idx], full_heading[left_idx], speed[left_idx], accel[left_idx], yaw_rate[left_idx]
+        )
+        mid_states = (
+            x_tau,
+            y_tau,
+            psi_tau,
+            v_tau,
+            a_tau,
+            w_tau,
+        )
+        right_states = self._pack_boundary_state(
+            full_xy[right_idx],
+            full_heading[right_idx],
+            speed[right_idx],
+            accel[right_idx],
+            yaw_rate[right_idx],
+        )
+
+        # Past-side bridge [left, tau]
+        n_left = tau_idx - left_idx
+        T_left = n_left * dt
+        times_left = torch.arange(1, n_left + 1, device=device, dtype=dtype) * dt
+        traj_left = self._interpolate_segment(left_states, mid_states, T_left, times_left)
+        full_xy[left_idx + 1 : tau_idx + 1] = traj_left[:, :2]
+        full_heading[left_idx + 1 : tau_idx + 1] = traj_left[:, 2]
+
+        # Future-side bridge [tau, right] — exclude tau (already set), include right.
+        n_right = right_idx - tau_idx
+        T_right = n_right * dt
+        times_right = torch.arange(1, n_right + 1, device=device, dtype=dtype) * dt
+        traj_right = self._interpolate_segment(mid_states, right_states, T_right, times_right)
+        full_xy[tau_idx + 1 : right_idx + 1] = traj_right[:, :2]
+        full_heading[tau_idx + 1 : right_idx + 1] = traj_right[:, 2]
+        # Ensure exact mid pose (interpolation left endpoint is exclusive above).
+        full_xy[tau_idx, 0] = x_tau
+        full_xy[tau_idx, 1] = y_tau
+        full_heading[tau_idx] = psi_tau
+
+        # Write past (cos/sin) and future (heading).
+        ego_past[b, :, 0] = full_xy[:past_len, 0]
+        ego_past[b, :, 1] = full_xy[:past_len, 1]
+        ego_past[b, :, 2] = torch.cos(full_heading[:past_len])
+        ego_past[b, :, 3] = torch.sin(full_heading[:past_len])
+        ego_future[b, :, 0] = full_xy[past_len:, 0]
+        ego_future[b, :, 1] = full_xy[past_len:, 1]
+        ego_future[b, :, 2] = full_heading[past_len:]
+
+        # Re-derive current state at t=0 from the continuous path.
+        ego_current[b] = self._current_state_from_full(
+            full_xy,
+            full_heading,
+            current_index=current_index,
+            dt=dt,
+            wheel_base=wheel_base,
+            template=ego_current[b],
+        )
+        # Record for visualization (batch-0 focused; last successful overwrite wins).
+        self.last_tau_info = {
+            "batch_index": b,
+            "tau_s": tau_s,
+            "tau_idx": tau_idx,
+            "current_index": current_index,
+            "left_idx": left_idx,
+            "right_idx": right_idx,
+            "left_s": float(times[left_idx].item()),
+            "right_s": float(times[right_idx].item()),
+            "lateral_m": lateral,
+            "heading_off_rad": heading_off,
+            "heading_off_deg": float(np.rad2deg(heading_off)),
+            "xy_gt": (x_gt, y_gt),
+            "xy_tau": (float(x_tau.item()), float(y_tau.item())),
+            "psi_gt_rad": psi_gt_val,
+            "psi_tau_rad": psi_tau_val,
+            "refine_horizon_s": float(self.refine_horizon_s),
+        }
+        return True
+
+    @staticmethod
+    def _pack_boundary_state(xy, heading, speed, accel, yaw_rate):
+        return (
+            xy[0],
+            xy[1],
+            heading,
+            speed,
+            accel,
+            yaw_rate,
+        )
+
+    def _build_full_xy_heading(
+        self,
+        ego_past_b: torch.Tensor,
+        ego_current_b: torch.Tensor,
+        ego_future_b: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Concatenate past|future; force last past row = current pose."""
+        past_xy = ego_past_b[:, :2].clone()
+        if ego_past_b.shape[-1] >= 4:
+            past_heading = torch.atan2(ego_past_b[:, 3], ego_past_b[:, 2]).clone()
+        else:
+            past_heading = ego_past_b[:, 2].clone()
+        past_xy[-1] = ego_current_b[:2]
+        past_heading[-1] = torch.atan2(ego_current_b[3], ego_current_b[2])
+
+        future_xy = ego_future_b[:, :2].clone()
+        if ego_future_b.shape[-1] >= 4:
+            future_heading = torch.atan2(ego_future_b[:, 3], ego_future_b[:, 2]).clone()
+        else:
+            future_heading = ego_future_b[:, 2].clone()
+
+        full_xy = torch.cat([past_xy, future_xy], dim=0)
+        full_heading = torch.cat([past_heading, future_heading], dim=0)
+        return full_xy, full_heading
+
+    def _estimate_kinematics(
+        self, xy: torch.Tensor, heading: torch.Tensor, dt: float
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        n = xy.shape[0]
+        speed = torch.zeros(n, device=xy.device, dtype=xy.dtype)
+        accel = torch.zeros(n, device=xy.device, dtype=xy.dtype)
+        yaw_rate = torch.zeros(n, device=xy.device, dtype=xy.dtype)
+        if n < 2:
+            return speed, accel, yaw_rate
+
+        dxy = xy[1:] - xy[:-1]
+        seg_speed = torch.linalg.norm(dxy, dim=-1) / dt
+        speed[0] = seg_speed[0]
+        speed[-1] = seg_speed[-1]
+        if n > 2:
+            speed[1:-1] = 0.5 * (seg_speed[:-1] + seg_speed[1:])
+
+        dheading = self.normalize_angle(heading[1:] - heading[:-1]) / dt
+        yaw_rate[0] = dheading[0]
+        yaw_rate[-1] = dheading[-1]
+        if n > 2:
+            yaw_rate[1:-1] = 0.5 * (dheading[:-1] + dheading[1:])
+
+        dspeed = (speed[1:] - speed[:-1]) / dt
+        accel[0] = dspeed[0]
+        accel[-1] = dspeed[-1]
+        if n > 2:
+            accel[1:-1] = 0.5 * (dspeed[:-1] + dspeed[1:])
+        return speed, accel, yaw_rate
+
+    def _interpolate_segment(
+        self,
+        state0: tuple,
+        stateT: tuple,
+        duration_s: float,
+        sample_times: torch.Tensor,
+    ) -> torch.Tensor:
+        """Quintic Hermite in time between two kinematic states → (N, 3) x,y,heading."""
+        x0, y0, theta0, v0, a0, omega0 = state0
+        xT, yT, thetaT, vT, aT, omegaT = stateT
+        device = sample_times.device
+        dtype = sample_times.dtype
+
+        # Promote scalars to 1-batch tensors.
+        def _t(v):
+            if torch.is_tensor(v):
+                return v.to(device=device, dtype=dtype).reshape(1)
+            return torch.tensor([float(v)], device=device, dtype=dtype)
+
+        x0, y0, theta0, v0, a0, omega0 = map(_t, (x0, y0, theta0, v0, a0, omega0))
+        xT, yT, thetaT, vT, aT, omegaT = map(_t, (xT, yT, thetaT, vT, aT, omegaT))
+
+        sx = torch.stack(
+            [
+                x0,
+                v0 * torch.cos(theta0),
+                a0 * torch.cos(theta0) - v0 * torch.sin(theta0) * omega0,
+                xT,
+                vT * torch.cos(thetaT),
+                aT * torch.cos(thetaT) - vT * torch.sin(thetaT) * omegaT,
+            ],
+            dim=-1,
+        )  # (1, 6)
+        sy = torch.stack(
+            [
+                y0,
+                v0 * torch.sin(theta0),
+                a0 * torch.sin(theta0) + v0 * torch.cos(theta0) * omega0,
+                yT,
+                vT * torch.sin(thetaT),
+                aT * torch.sin(thetaT) + vT * torch.cos(thetaT) * omegaT,
+            ],
+            dim=-1,
+        )
+
+        A = _quintic_coeff_matrix(duration_s, device, dtype).unsqueeze(0)  # (1, 6, 6)
+        ax = A @ sx[:, :, None]
+        ay = A @ sy[:, :, None]
+        powers = torch.arange(6, device=device, dtype=dtype)
+        M = torch.pow(sample_times.unsqueeze(1), powers.unsqueeze(0)).unsqueeze(0)  # (1, N, 6)
+        traj_x = (M @ ax)[0, :, 0]
+        traj_y = (M @ ay)[0, :, 0]
+
+        # Heading from successive chord directions (start pose → first sample → …).
+        prev_x = torch.cat([x0, traj_x[:-1]], dim=0)
+        prev_y = torch.cat([y0, traj_y[:-1]], dim=0)
+        heading = torch.atan2(traj_y - prev_y, traj_x - prev_x)
+        return torch.stack([traj_x, traj_y, heading], dim=-1)
+
+    def _current_state_from_full(
+        self,
+        full_xy: torch.Tensor,
+        full_heading: torch.Tensor,
+        current_index: int,
+        dt: float,
+        wheel_base: float,
+        template: torch.Tensor,
+    ) -> torch.Tensor:
+        out = template.clone()
+        i = current_index
+        out[0] = full_xy[i, 0]
+        out[1] = full_xy[i, 1]
+        out[2] = torch.cos(full_heading[i])
+        out[3] = torch.sin(full_heading[i])
+
+        if i == 0:
+            velocity = (full_xy[1] - full_xy[0]) / dt
+            acceleration = torch.zeros(2, device=full_xy.device, dtype=full_xy.dtype)
+            yaw_rate = self.normalize_angle(full_heading[1] - full_heading[0]) / dt
+        elif i == full_xy.shape[0] - 1:
+            velocity = (full_xy[-1] - full_xy[-2]) / dt
+            acceleration = torch.zeros(2, device=full_xy.device, dtype=full_xy.dtype)
+            yaw_rate = self.normalize_angle(full_heading[-1] - full_heading[-2]) / dt
+        else:
+            velocity = (full_xy[i + 1] - full_xy[i - 1]) / (2.0 * dt)
+            acceleration = (full_xy[i + 1] - 2.0 * full_xy[i] + full_xy[i - 1]) / (dt**2)
+            yaw_rate = self.normalize_angle(full_heading[i + 1] - full_heading[i - 1]) / (
+                2.0 * dt
+            )
+
+        speed = torch.linalg.norm(velocity)
+        if speed >= 0.2:
+            steering = torch.atan(yaw_rate * wheel_base / torch.abs(speed))
+            steering = torch.clamp(steering, -2.0 / 3.0 * np.pi, 2.0 / 3.0 * np.pi)
+        else:
+            steering = torch.zeros((), device=full_xy.device, dtype=full_xy.dtype)
+            yaw_rate = torch.zeros((), device=full_xy.device, dtype=full_xy.dtype)
+
+        out[4:6] = velocity
+        out[6:8] = acceleration
+        out[8] = steering
+        out[9] = yaw_rate
+        return out

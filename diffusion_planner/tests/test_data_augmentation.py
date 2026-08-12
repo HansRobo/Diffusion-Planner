@@ -31,7 +31,8 @@ Covers:
 - _segments_intersect_rect: crossing, endpoint inside, outside, fully inside,
   valid mask filtering, batch
 - StatePerturbation._check_aug_validity: no keys, neighbor overlap/clear,
-  left/right boundary cross/clear, zero offset ignored, batch mixed
+  road-border cross/clear, stop-line ignored, lane boundaries ignored,
+  batch mixed
 - StatePerturbation.augment (integration): collision suppresses aug_flag,
   no-collision preserves aug_flag
 
@@ -540,22 +541,52 @@ def _lanes(
     return out
 
 
+def _road_borders(
+    B: int,
+    xs: list[float],
+    ys: list[float] | None = None,
+    *,
+    is_border: bool = True,
+    N_ls: int = 4,
+) -> torch.Tensor:
+    """Build line_strings with one polyline; channel 3 marks road_border."""
+    assert len(xs) >= 2
+    P = len(xs)
+    if ys is None:
+        ys = [0.0] * P
+    assert len(ys) == P
+    out = torch.zeros(B, N_ls, P, 4, dtype=torch.float32)
+    for i, (x, y) in enumerate(zip(xs, ys)):
+        out[:, 0, i, 0] = x
+        out[:, 0, i, 1] = y
+        if is_border:
+            out[:, 0, i, 3] = 1.0  # road_border one-hot
+        else:
+            out[:, 0, i, 2] = 1.0  # stop_line (not checked)
+    return out
+
+
 def _check_inputs(
     B: int,
     nbr_tensor: torch.Tensor,
-    lane_tensor: torch.Tensor,
+    lane_tensor: torch.Tensor | None = None,
     vx: float = 5.0,
     ego_shape: torch.Tensor | None = None,
+    line_strings: torch.Tensor | None = None,
 ) -> dict:
     """Minimal inputs dict for _check_aug_validity."""
     if ego_shape is None:
         ego_shape = _EGO_SHAPE_DEFAULT.expand(B, -1)
-    return {
+    out = {
         "ego_current_state": _ego_state(B, vx=vx),
         "ego_shape": ego_shape,
         "neighbor_agents_past": nbr_tensor,
-        "lanes": lane_tensor,
     }
+    if lane_tensor is not None:
+        out["lanes"] = lane_tensor
+    if line_strings is not None:
+        out["line_strings"] = line_strings
+    return out
 
 
 # ──────────────────────────────── _cross2d ──────────────────────────────────
@@ -808,7 +839,7 @@ def test_segments_intersect_rect_multiple_segments_any():
 
 
 def test_check_aug_validity_no_collision_sources():
-    """ego_shape present but no neighbor or lane data: always valid (returns all False)."""
+    """ego_shape present but no neighbor or line_strings: always valid."""
     aug = StatePerturbation()
     B = 3
     ego = _ego_state(B, vx=5.0)
@@ -818,7 +849,7 @@ def test_check_aug_validity_no_collision_sources():
     }
     collision = aug._check_aug_validity(ego, inputs)
     assert collision.shape == (B,)
-    assert not collision.any(), "No neighbor/lane keys → no collision"
+    assert not collision.any(), "No neighbor/line_strings keys → no collision"
     print("  [PASS] _check_aug_validity no collision sources")
 
 
@@ -827,7 +858,7 @@ def test_check_aug_validity_neighbor_at_ego_position():
     aug = StatePerturbation()
     B = 1
     ego = _ego_state(B, vx=5.0)  # ego at (0, 0)
-    inputs = _check_inputs(B, _nbr(B, x=0.0, y=0.0), _lanes(B, []))
+    inputs = _check_inputs(B, _nbr(B, x=0.0, y=0.0))
     collision = aug._check_aug_validity(ego, inputs)
     assert collision.item(), "Neighbor at ego center must trigger collision"
     print("  [PASS] _check_aug_validity neighbor at ego position")
@@ -838,7 +869,7 @@ def test_check_aug_validity_neighbor_far():
     aug = StatePerturbation()
     B = 1
     ego = _ego_state(B, vx=5.0)
-    inputs = _check_inputs(B, _nbr(B, x=50.0), _lanes(B, []))
+    inputs = _check_inputs(B, _nbr(B, x=50.0))
     collision = aug._check_aug_validity(ego, inputs)
     assert not collision.item(), "Distant neighbor should not trigger collision"
     print("  [PASS] _check_aug_validity neighbor far")
@@ -850,76 +881,74 @@ def test_check_aug_validity_all_zero_neighbors_ignored():
     B = 1
     ego = _ego_state(B, vx=5.0)
     empty_nbr = torch.zeros(B, 5, 31, 11)
-    inputs = _check_inputs(B, empty_nbr, _lanes(B, []))
+    inputs = _check_inputs(B, empty_nbr)
     collision = aug._check_aug_validity(ego, inputs)
     assert not collision.item(), "All-zero neighbors must be ignored"
     print("  [PASS] _check_aug_validity all-zero neighbors ignored")
 
 
-def test_check_aug_validity_lane_left_boundary_cross():
-    """Ego shifted left until it straddles the left lane boundary → collision."""
+def test_check_aug_validity_road_border_cross():
+    """Road-border polyline passing through the ego rectangle → collision."""
     aug = StatePerturbation()
     B = 1
-    # Ego at y=0.8, width=2 → spans y∈[-0.2, 1.8].
-    # Left boundary at absolute y=1.0 (center y=0, left_off=+1.0) → inside ego.
-    ego = _ego_state(B, y=0.8, vx=5.0)
-    inputs = _check_inputs(
-        B,
-        torch.zeros(B, 5, 31, 11),
-        _lanes(B, list(range(-10, 10)), left_y_off=1.0, right_y_off=-3.0),
-    )
-    collision = aug._check_aug_validity(ego, inputs)
-    assert collision.item(), "Left boundary inside ego must trigger collision"
-    print("  [PASS] _check_aug_validity left boundary cross")
-
-
-def test_check_aug_validity_lane_right_boundary_cross():
-    """Ego shifted left until it straddles the right lane boundary → collision."""
-    aug = StatePerturbation()
-    B = 1
-    # Ego at y=0.8 → spans y∈[-0.2, 1.8].
-    # Right boundary at absolute y=-0.1 (right_off=-0.1) → inside ego.
-    ego = _ego_state(B, y=0.8, vx=5.0)
-    inputs = _check_inputs(
-        B,
-        torch.zeros(B, 5, 31, 11),
-        _lanes(B, list(range(-10, 10)), left_y_off=3.0, right_y_off=-0.1),
-    )
-    collision = aug._check_aug_validity(ego, inputs)
-    assert collision.item(), "Right boundary inside ego must trigger collision"
-    print("  [PASS] _check_aug_validity right boundary cross")
-
-
-def test_check_aug_validity_lane_both_boundaries_clear():
-    """Ego centered in lane with boundaries at ±2 m: no collision."""
-    aug = StatePerturbation()
-    B = 1
-    # Ego at (0, 0), width=2 → spans y∈[-1, 1].
-    # Left boundary at y=+2.0, right at y=-2.0: both well outside.
+    # Ego at (0,0), width=2 → y∈[-1,1]. Horizontal border at y=0 crosses it.
     ego = _ego_state(B, vx=5.0)
     inputs = _check_inputs(
         B,
         torch.zeros(B, 5, 31, 11),
-        _lanes(B, list(range(-10, 10)), left_y_off=2.0, right_y_off=-2.0),
+        line_strings=_road_borders(B, xs=[-5.0, 5.0], ys=[0.0, 0.0], is_border=True),
     )
     collision = aug._check_aug_validity(ego, inputs)
-    assert not collision.item(), "Ego centered in lane should not collide"
-    print("  [PASS] _check_aug_validity lane both boundaries clear")
+    assert collision.item(), "Road border through ego must trigger collision"
+    print("  [PASS] _check_aug_validity road border cross")
 
 
-def test_check_aug_validity_zero_boundary_offset_ignored():
-    """Boundary offset ≤ 0.01 m is treated as 'no data' and ignored."""
+def test_check_aug_validity_road_border_clear():
+    """Road border well outside the ego rectangle → no collision."""
     aug = StatePerturbation()
     B = 1
-    # Ego at (0, 0). If zero right_off were honoured, abs right boundary = center = (cx, 0)
-    # which would be inside ego.  It must be skipped.
+    # Ego width=2 → y∈[-1,1]; border at y=3 is clear.
     ego = _ego_state(B, vx=5.0)
     inputs = _check_inputs(
-        B, torch.zeros(B, 5, 31, 11), _lanes(B, list(range(-3, 4)), left_y_off=2.0, right_y_off=0.0)
+        B,
+        torch.zeros(B, 5, 31, 11),
+        line_strings=_road_borders(B, xs=[-5.0, 5.0], ys=[3.0, 3.0], is_border=True),
     )
     collision = aug._check_aug_validity(ego, inputs)
-    assert not collision.item(), "Zero boundary offset must not trigger collision"
-    print("  [PASS] _check_aug_validity zero boundary offset ignored")
+    assert not collision.item(), "Distant road border should not collide"
+    print("  [PASS] _check_aug_validity road border clear")
+
+
+def test_check_aug_validity_stop_line_ignored():
+    """Stop-line polylines (channel 2) must not trigger the road-border check."""
+    aug = StatePerturbation()
+    B = 1
+    ego = _ego_state(B, vx=5.0)
+    inputs = _check_inputs(
+        B,
+        torch.zeros(B, 5, 31, 11),
+        line_strings=_road_borders(B, xs=[-5.0, 5.0], ys=[0.0, 0.0], is_border=False),
+    )
+    collision = aug._check_aug_validity(ego, inputs)
+    assert not collision.item(), "Stop-line must be ignored by road-border check"
+    print("  [PASS] _check_aug_validity stop line ignored")
+
+
+def test_check_aug_validity_lane_boundaries_ignored():
+    """Lane L/R boundaries must no longer trigger collision (road-border only)."""
+    aug = StatePerturbation()
+    B = 1
+    # Same geometry that previously failed with lane checks: left bound at y=1.0
+    # through an ego at y=0.8. With road-border-only checking this is clear.
+    ego = _ego_state(B, y=0.8, vx=5.0)
+    inputs = _check_inputs(
+        B,
+        torch.zeros(B, 5, 31, 11),
+        lane_tensor=_lanes(B, list(range(-10, 10)), left_y_off=1.0, right_y_off=-3.0),
+    )
+    collision = aug._check_aug_validity(ego, inputs)
+    assert not collision.item(), "Lane boundaries alone must not trigger collision"
+    print("  [PASS] _check_aug_validity lane boundaries ignored")
 
 
 def test_check_aug_validity_batch_mixed():
@@ -942,7 +971,7 @@ def test_check_aug_validity_batch_mixed():
         "ego_current_state": ego,
         "ego_shape": _EGO_SHAPE_DEFAULT.expand(B, -1),
         "neighbor_agents_past": nbr,
-        "lanes": torch.zeros(B, 5, 10, 33),
+        "line_strings": torch.zeros(B, 4, 8, 4),
     }
     collision = aug._check_aug_validity(ego, inputs)
     assert collision[0].item() and not collision[1].item(), (
@@ -959,7 +988,6 @@ def test_check_aug_validity_ego_shape_controls_size():
 
     # Neighbour at y=3.5 m: outside a 5×2 m ego (half-width=1 m) but inside a 10×8 m ego.
     nbr = _nbr(B, x=0.0, y=3.5, width=1.0, length=1.0)
-    lanes = torch.zeros(B, 5, 10, 33)
 
     # Small ego (5×2 m): neighbour at y=3.5 is OUTSIDE → no collision
     small_shape = torch.tensor([[2.75, 5.0, 2.0]])
@@ -967,7 +995,7 @@ def test_check_aug_validity_ego_shape_controls_size():
         "ego_current_state": ego,
         "ego_shape": small_shape,
         "neighbor_agents_past": nbr,
-        "lanes": lanes,
+        "line_strings": torch.zeros(B, 4, 8, 4),
     }
     assert not aug._check_aug_validity(ego, inputs_small).item(), (
         "5×2 ego: neighbour at y=3.5 must not collide"
@@ -979,7 +1007,7 @@ def test_check_aug_validity_ego_shape_controls_size():
         "ego_current_state": ego,
         "ego_shape": large_shape,
         "neighbor_agents_past": nbr,
-        "lanes": lanes,
+        "line_strings": torch.zeros(B, 4, 8, 4),
     }
     assert aug._check_aug_validity(ego, inputs_large).item(), (
         "10×8 ego: neighbour at y=3.5 must collide"
@@ -1118,10 +1146,10 @@ ALL_TESTS = [
     test_check_aug_validity_neighbor_at_ego_position,
     test_check_aug_validity_neighbor_far,
     test_check_aug_validity_all_zero_neighbors_ignored,
-    test_check_aug_validity_lane_left_boundary_cross,
-    test_check_aug_validity_lane_right_boundary_cross,
-    test_check_aug_validity_lane_both_boundaries_clear,
-    test_check_aug_validity_zero_boundary_offset_ignored,
+    test_check_aug_validity_road_border_cross,
+    test_check_aug_validity_road_border_clear,
+    test_check_aug_validity_stop_line_ignored,
+    test_check_aug_validity_lane_boundaries_ignored,
     test_check_aug_validity_batch_mixed,
     test_check_aug_validity_ego_shape_controls_size,
     # ── augment + collision filter (integration) ──
