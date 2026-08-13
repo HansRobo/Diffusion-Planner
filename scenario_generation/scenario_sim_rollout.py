@@ -341,10 +341,14 @@ def run_scenario_sim_rollout(
                     )
                 ti_report = resolve_keep_turn_indicator(ti_model, ti_report)
 
-            with timers("sim_set_traj"):
-                pts = _ego_plan_to_map_trajectory(cached_plan_ego, ex, ey, eh)
-                runner.set_ego_trajectory(pts, ego_ref=ego_name)
-                runner.set_ego_turn_indicator(int(ti_report), ego_ref=ego_name)
+                with timers("sim_set_traj"):
+                    # Anchored once, at the pose it was planned from. The tracker locates
+                    # itself on the trajectory by closest point, so it advances along a
+                    # map-frame plan on its own; re-anchoring on a cached tick would carry
+                    # the whole plan along with the ego and it would never make progress.
+                    pts = _ego_plan_to_map_trajectory(cached_plan_ego, ex, ey, eh)
+                    runner.set_ego_trajectory(pts, ego_ref=ego_name)
+                    runner.set_ego_turn_indicator(int(ti_report), ego_ref=ego_name)
 
             if buffers.age[ego_name] >= cfg.warmup_steps:
                 with timers("score_objects"):
