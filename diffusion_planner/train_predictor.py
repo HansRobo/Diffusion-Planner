@@ -247,9 +247,17 @@ def get_args(args_list=None):
         type=str,
         default="",
         help="alternative/addition to --closed_loop_npz_root: a curated .json path-list manifest, "
-        "grouped into per-site route pools by site_discovery.discover_sites_from_json and evaluated "
-        "as independent sites (own npz_root each). Both may be set at once (each fires "
-        "independently). Only runs on the final save_utd cadence call of the run.",
+        "grouped into per-site route pools by "
+        "site_discovery.discover_sites_with_vehicles_from_json and evaluated as independent "
+        "sites (own npz_root each). Both may be set at once (each fires independently). "
+        "Only runs on the final save_utd cadence call of the run.",
+    )
+    parser.add_argument(
+        "--closed_loop_project_vehicle_map",
+        type=str,
+        default=_train_config_default("closed_loop_project_vehicle_map"),
+        help="optional JSON file of {project_code_name: vehicle_type_label} for labeling "
+        "--closed_loop_sites_npz_root sites by vehicle type. Empty = no labeling.",
     )
     parser.add_argument(
         "--closed_loop_npz_object_modes",
