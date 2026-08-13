@@ -49,6 +49,7 @@ def _goal_lanelet(osc_path: str | Path) -> int | None:
 def resolve_route(
     builder: LaneletSceneBuilder,
     ego_xy: np.ndarray,
+    ego_heading: float,
     osc_path: str | Path,
     *,
     min_len_m: float = 120.0,
@@ -61,7 +62,7 @@ def resolve_route(
     would make route_lanes, progress and the road-border geometry differ between runs of the
     same scenario, which is not something an evaluation may leave to chance.
     """
-    start_ll = builder.snap_to_nearest_ll(ego_xy)
+    start_ll = builder.snap_to_nearest_ll(ego_xy, heading_rad=ego_heading)
     if start_ll is None:
         raise RuntimeError(f"Could not snap ego start pose {ego_xy} to any lanelet")
     goal_ll = _goal_lanelet(osc_path)

@@ -167,9 +167,11 @@ def _start_and_resolve_route(
         raise RuntimeError(f"activate() did not reach 'active' (got '{st_act}'): {osc_path}")
     ego_name = resolve_ego_name(runner.get_entity_states())
 
-    x0, y0, _ = baselink_xyh(runner.get_ego_state(ego_ref=ego_name))
+    x0, y0, h0 = baselink_xyh(runner.get_ego_state(ego_ref=ego_name))
     ego0_xy = np.array([x0, y0], dtype=np.float32)
-    ego_route_ids = resolve_route(builder, ego0_xy, osc_path, min_len_m=cfg.find_route_min_len_m)
+    ego_route_ids = resolve_route(
+        builder, ego0_xy, h0, osc_path, min_len_m=cfg.find_route_min_len_m
+    )
     if not ego_route_ids:
         raise RuntimeError("Empty ego route -- cannot build SceneContext")
     goal_pose = builder._route_goal(ego_route_ids)
