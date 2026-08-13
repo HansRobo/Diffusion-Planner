@@ -30,6 +30,7 @@ import torch
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.metrics.object import score_object_step
 from scenario_generation.perf_timer import Timers
+from scenario_generation.reproducer_rollout import _world_plan_to_ego
 from scenario_generation.scenario_sim_metrics import build_segment_row
 from scenario_generation.scenario_sim_route import resolve_route
 from scenario_generation.scenario_sim_scene import (
@@ -90,6 +91,8 @@ class RolloutConfig:
     # convention error stays inside the metre tolerance at ordinary speeds and vanishes
     # entirely from rest. Heading is compared separately because it is not speed-scaled.
     coord_check_tol_rad: float = 0.1
+    # A PNG every N ticks; None renders nothing. Metrics do not depend on it.
+    draw_every: int | None = None
     scene: SceneConfig = field(default_factory=SceneConfig)
 
     def __post_init__(self) -> None:
@@ -234,7 +237,6 @@ def _scored_accels(speeds: np.ndarray, start: int, n: int) -> np.ndarray:
 def _finalize_row(
     output_dir: Path,
     *,
-    builder: LaneletSceneBuilder,
     trajectory_log: list[dict],
     ego_state: dict | None,
     cfg: RolloutConfig,
@@ -245,6 +247,7 @@ def _finalize_row(
     result_kind: str,
     coord_err: float,
     yaw_err: float,
+    borders: list[np.ndarray],
 ) -> dict:
     """Dump the trajectory, compute post-hoc road-border metrics and build the row.
 
@@ -263,9 +266,6 @@ def _finalize_row(
     ego_len, ego_w, ego_wb = (
         ego_metric_box(ego_state) if ego_state is not None else _FALLBACK_EGO_BOX
     )
-    # Borders come off the map the builder already holds. Re-loading the .osm would keep a
-    # second copy of the whole map alive alongside it for the lifetime of the query.
-    borders = border_segments_from_map(builder._lanelet_map)
     rb, series = evaluate_trajectory(trajectory_log, borders, ego_len, ego_w, ego_wb)
     # None when the run ended before the history was warm: nothing was scored, so every block
     # is built from an empty series rather than from frames the object block never saw.
@@ -338,6 +338,8 @@ def run_scenario_sim_rollout(
     scored_from: int | None = None
 
     cached_plan_ego: np.ndarray | None = None  # (future_len, 4) ego frame
+    # The map-frame plan the sim is tracking, outliving the replan that set it.
+    pts: np.ndarray | None = None
     # The planner is the only source of this signal -- the simulator relays what it is given --
     # so the history the model reads is the one resolved here, held between replans.
     ti_report = TURN_INDICATOR_DISABLE
@@ -354,6 +356,11 @@ def run_scenario_sim_rollout(
     # silently does nothing when its directory is missing, so it has to exist before the run.
     osp_out = output_dir / "osp_out"
     osp_out.mkdir(parents=True, exist_ok=True)
+
+    # Gated: the renderer pulls in matplotlib and the whole replay module.
+    save_step_figure = None
+    if cfg.draw_every:
+        from scenario_generation.replay import save_step_figure
 
     # Measured across the ``with`` header: opening the sim is the constructor plus __enter__,
     # which no context manager of ours can wrap.
@@ -386,11 +393,24 @@ def run_scenario_sim_rollout(
                 raise ValueError(
                     f"builder holds {builder.lanelet_path}, but this scenario loaded {map_path}"
                 )
+        # Derived once: the drawing reads it every tick and the road-border metrics read it again.
+        borders = border_segments_from_map(builder._lanelet_map)
         with timers("route_resolve"):
             ego_name, ego_route_ids, goal_pose = _resolve_route_for_ego(
                 runner, builder, osc_path, cfg, verbose
             )
         goal_xy = goal_pose[:2]
+        # Already in the scene's map frame. A polyline because save_step_figure accepts a
+        # lanelet id list but does not read it.
+        route_polylines = (
+            [
+                builder._cache[ll_id].raw_centerline[:, :2]
+                for ll_id in ego_route_ids
+                if ll_id in builder._cache
+            ]
+            if cfg.draw_every
+            else None
+        )
 
         for step in range(cfg.max_steps):
             with timers("sim_get_states"):
@@ -445,6 +465,23 @@ def run_scenario_sim_rollout(
                 clearances.append(clr)
                 collisions.append(coll)
 
+            if save_step_figure is not None and pts is not None and step % cfg.draw_every == 0:
+                with timers("draw"):
+                    # The plan the sim is tracking, viewed from the current pose rather than
+                    # re-anchored there: cached_plan_ego would start every frame at the ego's
+                    # nose and hide a plan it fails to progress along. The scene is passed live
+                    # -- the renderer only reads it.
+                    save_step_figure(
+                        scene,
+                        {ego_name: _world_plan_to_ego(pts[:, :2], pts[:, 2], ex, ey, eh)},
+                        output_dir / f"{step:05d}.png",
+                        step,
+                        cfg.max_steps,
+                        route_polylines=route_polylines,
+                        road_border_polylines=borders,
+                        sim_time=step * DT,
+                    )
+
             # step() is the sole integrator: it advances BOTH the ego and the NPCs.
             with timers("sim_step"):
                 outcome = runner.step()
@@ -470,7 +507,6 @@ def run_scenario_sim_rollout(
     with timers("finalize"):
         row = _finalize_row(
             output_dir,
-            builder=builder,
             trajectory_log=trajectory_log,
             ego_state=ego_state,
             cfg=cfg,
@@ -481,6 +517,7 @@ def run_scenario_sim_rollout(
             result_kind=result_kind,
             coord_err=coord_err,
             yaw_err=yaw_err,
+            borders=borders,
         )
     # Teardown happens in HeadlessRunner.__exit__, so it is not a stage of its own: it lands in
     # rollout_total minus the parts.
