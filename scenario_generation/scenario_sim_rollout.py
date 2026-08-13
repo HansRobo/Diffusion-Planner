@@ -247,7 +247,7 @@ def _finalize_row(
     stop = start + len(clearances)
 
     row = build_segment_row(
-        n_steps_run=len(trajectory_log),
+        n_steps_run=len(clearances),
         terminated=terminated_reason,
         result_kind=result_kind,
         clearances=clearances,
@@ -264,6 +264,7 @@ def _finalize_row(
         **row,
         # A sim tick, not an index into the trimmed series, so it names a frame of the run.
         "worst_step": int(start + np.argmin(clearances)) if clearances else -1,
+        "n_ticks_run": len(trajectory_log),
         "rb_has_data": rb["rb_has_data"],
         "coord_check_ok": bool(coord_err <= cfg.coord_check_tol_m),
         "coord_check_err_m": coord_err,

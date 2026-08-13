@@ -60,6 +60,10 @@ def build_segment_row(
     ``rb_dists`` and ``accels`` is the same sim tick. The caller differences the speeds,
     because only it knows which sample precedes the window.
 
+    ``n_steps_run`` is the length of those series, which is what ``aggregate`` divides its
+    event counts by -- the same definition ``reproducer_rollout._finalize`` uses. Ticks the
+    run executed but never scored belong in a flat diagnostic, not here.
+
     ``rb_dists`` may be empty when the map ships no road-border polylines; the road_border
     block then reports ``inf`` clearances and zero events, which is what a clearance block
     does for an all-inf series.
