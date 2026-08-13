@@ -1,4 +1,4 @@
-"""Resolve the map and the ego route a scenario declares.
+"""Resolve the ego route a scenario declares.
 
 Interim: the route is computed in Python via ``LaneletSceneBuilder`` (shortestPath /
 find_route) rather than by the mission planner, so it is not guaranteed to match the route
@@ -13,23 +13,6 @@ from xml.etree import ElementTree as ET
 import numpy as np
 
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
-
-
-def map_from_osc(osc_path: str | Path) -> str:
-    """The lanelet2 map this scenario declares, from its ``RoadNetwork/LogicFile``.
-
-    The C++ interpreter resolves the map from exactly this element, so deriving the
-    Python-side map the same way makes it impossible for the two to disagree. A map passed in
-    by the caller cannot offer that guarantee: across a suite spanning several maps, route,
-    centreline and road-border geometry would silently be computed against a different map
-    than the one the simulator ran.
-    """
-    root = ET.parse(str(osc_path)).getroot()
-    for node in root.iter("LogicFile"):
-        path = node.attrib.get("filepath")
-        if path:
-            return path
-    raise ValueError(f"No RoadNetwork/LogicFile filepath in {osc_path}")
 
 
 def _ego_action_scopes(root: ET.Element, ego_name: str):

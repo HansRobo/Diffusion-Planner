@@ -31,7 +31,7 @@ from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.metrics.object import score_object_step
 from scenario_generation.perf_timer import Timers
 from scenario_generation.scenario_sim_metrics import build_segment_row
-from scenario_generation.scenario_sim_route import map_from_osc, resolve_route
+from scenario_generation.scenario_sim_route import resolve_route
 from scenario_generation.scenario_sim_scene import (
     _HISTORY_LEN,
     DT,
@@ -147,14 +147,15 @@ def _traj_entry(step: int, ego_state: dict, goal_xy: np.ndarray) -> dict:
     }
 
 
-def _start_and_resolve_route(
-    runner, builder: LaneletSceneBuilder, osc_path: str | Path, cfg: RolloutConfig, verbose: bool
-) -> tuple[str, list[int], np.ndarray]:
-    """Configure and activate the sim, then resolve the ego's name and route.
+def _start_sim(runner, osc_path: str | Path) -> None:
+    """Bring the scenario up to "active", which is when it has a map.
 
     A scenario the interpreter rejects at parse time leaves ``configure()`` at "unconfigured",
     and calling ``get_entity_states()`` on an unconfigured core dereferences a null pointer, so
     a bad lifecycle transition has to fail here rather than be carried into the loop.
+
+    Activation is what builds the simulator's configuration -- and with it resolves and loads
+    the map -- so nothing may ask which map is running until this returns.
     """
     st_cfg = runner.configure()
     if st_cfg != "inactive":
@@ -165,6 +166,12 @@ def _start_and_resolve_route(
     st_act = runner.activate()
     if st_act != "active":
         raise RuntimeError(f"activate() did not reach 'active' (got '{st_act}'): {osc_path}")
+
+
+def _resolve_route_for_ego(
+    runner, builder: LaneletSceneBuilder, osc_path: str | Path, cfg: RolloutConfig, verbose: bool
+) -> tuple[str, list[int], np.ndarray]:
+    """The ego's name and route, off the entities the running scenario reports."""
     ego_name = resolve_ego_name(runner.get_entity_states())
 
     x0, y0, h0 = baselink_xyh(runner.get_ego_state(ego_ref=ego_name))
@@ -267,26 +274,12 @@ def run_scenario_sim_rollout(
     """
     import openscenario_python as osp  # requires the SSV2_HEADLESS_EGO overlay
 
-    # Derived from the scenario by default so the Python-side geometry cannot be computed
-    # against a different map than the interpreter loaded. Pass it only to test a substitute.
-    if map_path is None:
-        map_path = map_from_osc(osc_path)
     cfg = config or RolloutConfig()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     timers = timers or Timers()
     _t_rollout = time.perf_counter()
-    with timers("map_build"):
-        if builder is None:
-            builder = LaneletSceneBuilder(str(map_path))
-        elif builder.lanelet_path != str(map_path):
-            # Route, centreline and road-border geometry all come off the builder's map. A
-            # builder carried over from another scenario would compute every one of them
-            # against a map the interpreter did not load.
-            raise ValueError(
-                f"builder holds {builder.lanelet_path}, but this scenario declares {map_path}"
-            )
     buffers = HistoryBuffers()
     trajectory_log: list[dict] = []
     clearances: list[float] = []
@@ -321,8 +314,26 @@ def run_scenario_sim_rollout(
         local_frame_rate=cfg.fps,
     ) as runner:
         timers.add("sim_open", time.perf_counter() - _t)
+        with timers("sim_start"):
+            _start_sim(runner, osc_path)
+        # Asked of the interpreter rather than re-derived from the scenario: it has already
+        # applied its own attribute reader to RoadNetwork/LogicFile and chosen a file for a
+        # directory path, and any second implementation of that is a way for the two ends to
+        # load different maps. Pass ``map_path`` only to test a substitute.
+        if map_path is None:
+            map_path = runner.lanelet2_map_path()
+        with timers("map_build"):
+            if builder is None:
+                builder = LaneletSceneBuilder(str(map_path))
+            elif Path(builder.lanelet_path).resolve() != Path(map_path).resolve():
+                # Route, centreline and road-border geometry all come off the builder's map. A
+                # builder carried over from another scenario would compute every one of them
+                # against a map the interpreter did not load.
+                raise ValueError(
+                    f"builder holds {builder.lanelet_path}, but this scenario loaded {map_path}"
+                )
         with timers("route_resolve"):
-            ego_name, ego_route_ids, goal_pose = _start_and_resolve_route(
+            ego_name, ego_route_ids, goal_pose = _resolve_route_for_ego(
                 runner, builder, osc_path, cfg, verbose
             )
         goal_xy = goal_pose[:2]
