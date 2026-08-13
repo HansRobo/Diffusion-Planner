@@ -1,5 +1,7 @@
 """Overwrite a Diffusion Planner's turn-indicator output with a separately trained head.
 
+Sample Turn Indicator Network: https://drive.google.com/file/d/1o3IZfNuJueHoDB-FOiUSxFaCakHmyi24/view?usp=drive_link
+
 Loads a full checkpoint (``best_model.pth``) plus a standalone turn-indicator checkpoint
 (``best_model_turn_indicator.pth``, as produced by
 ``ros_scripts/extract_turn_indicator_model.py``), swaps the planner's turn-indicator
@@ -577,18 +579,29 @@ def load_turn_indicator_state_dict(path: Path, use_ema: bool) -> dict[str, torch
 def overwrite_turn_indicator(model, network: TurnIndicatorNetwork) -> None:
     """Make the planner's ``turn_indicator_logit`` come from ``network``.
 
-    The injected head replaces the decoder's predictor module, and the decoder's forward
-    is wrapped so the value published under ``turn_indicator_logit`` is overwritten with
-    the injected head's output. The output schema is left untouched.
+    Nothing inside the decoder is replaced: its forward is wrapped, ``network`` is run
+    directly on the decoder's own prediction, and the result overwrites the value published
+    under ``turn_indicator_logit``. The output schema is left untouched, and the decoder's
+    original turn-indicator head simply becomes dead weight in the exported graph.
+
+    ``prediction`` is de-normalized by the decoder, so it is mapped back through the state
+    normalizer to the space the injected head was trained on.
     """
     decoder = model.decoder
-    decoder.independent_turn_indicator_predictor = network
+    if getattr(decoder, "_use_velocity", False):
+        raise SystemExit(
+            "velocity representation is not supported: the ego trajectory cannot be mapped "
+            "back to the injected head's input space"
+        )
+    normalizer = decoder._state_normalizer
 
     original_forward = decoder.forward
 
     def forward(encoding, inputs):
         outputs = original_forward(encoding, inputs)
-        outputs["turn_indicator_logit"] = outputs["independent_turn_indicator_logit"]
+        # prediction: [B, P, T, 4] in world coordinates -> normalized ego future [B, T, 4].
+        ego_trajectory = normalizer(outputs["prediction"])[:, 0]
+        outputs["turn_indicator_logit"] = network(ego_trajectory, inputs)
         return outputs
 
     decoder.forward = forward
@@ -639,6 +652,9 @@ def main() -> None:
     network = build_turn_indicator_network(Config(str(config_path)))
     state_dict = load_turn_indicator_state_dict(args.turn_indicator_checkpoint, args.use_ema)
     network.load_state_dict(state_dict)
+    # The head is run outside the traced module tree, so its parameters reach the tracer as
+    # constants; they must not require grad.
+    network.requires_grad_(False)
     overwrite_turn_indicator(model, network)
     print(f"Overwrote turn_indicator_logit with the injected head ({len(state_dict)} tensors)")
 
