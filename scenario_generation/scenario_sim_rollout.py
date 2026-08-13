@@ -190,11 +190,20 @@ def _finalize_row(
     cfg: RolloutConfig,
     clearances: list[float],
     collisions: list[bool],
+    scored_from: int | None,
     terminated_reason: str,
     result_kind: str,
     coord_err: float,
 ) -> dict:
-    """Dump the trajectory, compute post-hoc road-border metrics and build the row."""
+    """Dump the trajectory, compute post-hoc road-border metrics and build the row.
+
+    Clearance and collision are only observed once the ego's history is warm, because until
+    then the model plans off a history seeded by repetition and its output is not the
+    planner's steady-state behaviour. The road-border and braking series come off the whole
+    trajectory, so they are trimmed to the same window here -- otherwise the row's blocks
+    would count over denominators that differ by the warmup, and strong_brake would score the
+    pull-away from rest. ``progress_m`` is a total rather than a rate and stays whole-run.
+    """
     (output_dir / "trajectory_log.json").write_text(json.dumps(trajectory_log))
 
     ego_len, ego_w, ego_wb = (
@@ -204,6 +213,9 @@ def _finalize_row(
     # second copy of the whole map alive alongside it for the lifetime of the query.
     borders = border_segments_from_map(builder._lanelet_map)
     rb, series = evaluate_trajectory(trajectory_log, borders, ego_len, ego_w, ego_wb)
+    # None when the run ended before the history was warm: nothing was scored, so every block
+    # is built from an empty series rather than from frames the object block never saw.
+    start = len(trajectory_log) if scored_from is None else scored_from
 
     row = build_segment_row(
         n_steps_run=len(trajectory_log),
@@ -211,8 +223,8 @@ def _finalize_row(
         result_kind=result_kind,
         clearances=clearances,
         collisions=collisions,
-        rb_dists=series["rb_dists"],
-        speeds=series["speeds"],
+        rb_dists=series["rb_dists"][start:],
+        speeds=series["speeds"][start:],
         dt=DT,
         near_miss_thresh=cfg.near_miss_thresh,
         strong_brake_mps2=STRONG_BRAKE_MPS2,
@@ -222,7 +234,8 @@ def _finalize_row(
     # aggregate never sees them as a metric category.
     return {
         **row,
-        "worst_step": int(np.argmin(clearances)) if clearances else -1,
+        # A sim tick, not an index into the trimmed series, so it names a frame of the run.
+        "worst_step": int(start + np.argmin(clearances)) if clearances else -1,
         "rb_has_data": rb["rb_has_data"],
         "coord_check_ok": bool(coord_err <= cfg.coord_check_tol_m),
         "coord_check_err_m": coord_err,
@@ -276,6 +289,9 @@ def run_scenario_sim_rollout(
     trajectory_log: list[dict] = []
     clearances: list[float] = []
     collisions: list[bool] = []
+    # Tick the object series starts at. Every other series is trimmed to it so all the row's
+    # blocks are counted over the same frames.
+    scored_from: int | None = None
 
     cached_plan_ego: np.ndarray | None = None  # (future_len, 4) ego frame
     # The planner is the only source of this signal -- the simulator relays what it is given --
@@ -351,6 +367,8 @@ def run_scenario_sim_rollout(
                     runner.set_ego_turn_indicator(int(ti_report), ego_ref=ego_name)
 
             if buffers.age[ego_name] >= cfg.warmup_steps:
+                if scored_from is None:
+                    scored_from = step
                 with timers("score_objects"):
                     clr, coll = _score_neighbors(scene, ego_state, device, ego_name)
                 clearances.append(clr)
@@ -387,6 +405,7 @@ def run_scenario_sim_rollout(
             cfg=cfg,
             clearances=clearances,
             collisions=collisions,
+            scored_from=scored_from,
             terminated_reason=terminated_reason,
             result_kind=result_kind,
             coord_err=coord_err,
