@@ -21,6 +21,8 @@ import json
 import math
 import time
 from collections import deque
+from concurrent.futures import Executor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +32,7 @@ import torch
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.metrics.object import score_object_step
 from scenario_generation.perf_timer import Timers
+from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import _world_plan_to_ego
 from scenario_generation.scenario_sim_metrics import build_segment_row
 from scenario_generation.scenario_sim_route import resolve_route
@@ -384,6 +387,7 @@ def run_scenario_sim_rollout(
     verbose: bool = True,
     timers: Timers | None = None,
     builder: LaneletSceneBuilder | None = None,
+    draw_pool: Executor | None = None,
 ) -> dict:
     """Run one closed-loop OpenSCENARIO rollout and return an aggregate-ready row.
 
@@ -434,18 +438,26 @@ def run_scenario_sim_rollout(
     if cfg.draw_every:
         from scenario_generation.replay import save_step_figure
 
+    frames: list = []
+
     # Measured across the ``with`` header: opening the sim is the constructor plus __enter__,
     # which no context manager of ours can wrap.
     _t = time.perf_counter()
-    with osp.HeadlessRunner(
-        osc_path=str(osc_path),
-        output_directory=str(osp_out),
-        local_frame_rate=cfg.fps,
-        # The DT invariant is over the simulator's integration step, which is
-        # real_time_factor / frame_rate -- not frame_rate alone. Passed explicitly so the
-        # invariant does not rest on a default defined on the other side of the binding.
-        local_real_time_factor=1.0,
-    ) as runner:
+    # A pool passed in outlives the scenario, so a caller running many pays the spawn once. The
+    # fallback pool starts its process on the first submitted frame, so drawing off spawns none.
+    with (
+        osp.HeadlessRunner(
+            osc_path=str(osc_path),
+            output_directory=str(osp_out),
+            local_frame_rate=cfg.fps,
+            # The DT invariant is over the simulator's integration step, which is
+            # real_time_factor / frame_rate -- not frame_rate alone. Passed explicitly so the
+            # invariant does not rest on a default defined on the other side of the binding.
+            local_real_time_factor=1.0,
+        ) as runner,
+        nullcontext(draw_pool) if draw_pool is not None else render_pool(1) as pool,
+    ):
+        draw = pool if save_step_figure is not None else None
         timers.add("sim_open", time.perf_counter() - _t)
         with timers("sim_start"):
             _start_sim(runner, osc_path)
@@ -537,21 +549,24 @@ def run_scenario_sim_rollout(
                 clearances.append(clr)
                 collisions.append(coll)
 
-            if save_step_figure is not None and pts is not None and step % cfg.draw_every == 0:
-                with timers("draw"):
+            if draw is not None and pts is not None and step % cfg.draw_every == 0:
+                with timers("draw_submit"):
                     # The plan the sim is tracking, viewed from the current pose rather than
                     # re-anchored there: cached_plan_ego would start every frame at the ego's
-                    # nose and hide a plan it fails to progress along. The scene is passed live
-                    # -- the renderer only reads it.
-                    save_step_figure(
-                        scene,
-                        {ego_name: _world_plan_to_ego(pts[:, :2], pts[:, 2], ex, ey, eh)},
-                        output_dir / f"{step:05d}.png",
-                        step,
-                        cfg.max_steps,
-                        route_polylines=route_polylines,
-                        road_border_polylines=borders,
-                        sim_time=step * DT,
+                    # nose and hide a plan it fails to progress along. Safe to hand to another
+                    # process: both arguments are this tick's own objects.
+                    frames.append(
+                        draw.submit(
+                            save_step_figure,
+                            scene,
+                            {ego_name: _world_plan_to_ego(pts[:, :2], pts[:, 2], ex, ey, eh)},
+                            output_dir / f"{step:05d}.png",
+                            step,
+                            cfg.max_steps,
+                            route_polylines=route_polylines,
+                            road_border_polylines=borders,
+                            sim_time=step * DT,
+                        )
                     )
 
             # step() is the sole integrator: it advances BOTH the ego and the NPCs.
@@ -575,6 +590,11 @@ def run_scenario_sim_rollout(
                 break
 
         result_kind = runner.result_kind()
+
+    # The trace and the encoder both read this directory; neither may see a partial sequence.
+    with timers("draw_join"):
+        for f in frames:
+            f.result()
 
     with timers("finalize"):
         row = _finalize_row(
