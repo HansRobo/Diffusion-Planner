@@ -57,7 +57,9 @@ def resolve_route(
 
     Snaps the sim's actual start pose to a lanelet, then takes the shortest path to the
     scenario's goal when one is authored and reachable, else a forward route of at least
-    ``min_len_m``.
+    ``min_len_m``. That fallback is resolved deterministically: a branch picked at random
+    would make route_lanes, progress and the road-border geometry differ between runs of the
+    same scenario, which is not something an evaluation may leave to chance.
     """
     start_ll = builder.snap_to_nearest_ll(ego_xy)
     if start_ll is None:
@@ -71,4 +73,4 @@ def resolve_route(
             f"  [scenario_sim][WARN] goal lanelet {goal_ll} unreachable from {start_ll}; "
             "falling back to find_route"
         )
-    return builder.find_route(start_ll, min_len_m)
+    return builder.find_route(start_ll, min_len_m, deterministic=True)

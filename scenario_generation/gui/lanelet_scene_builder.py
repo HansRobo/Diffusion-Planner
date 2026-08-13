@@ -875,11 +875,16 @@ class LaneletSceneBuilder:
             return None
         return [ll.id for ll in path]
 
-    def find_route(self, start_ll_id: int, min_length_m: float = 120.0) -> list[int]:
+    def find_route(
+        self, start_ll_id: int, min_length_m: float = 120.0, *, deterministic: bool = False
+    ) -> list[int]:
         """Find a forward route from start_lanelet of at least min_length_m.
 
-        Follows one randomly selected successor at each step until the
-        accumulated arc length reaches min_length_m or a dead end.
+        Follows one successor at each step until the accumulated arc length
+        reaches min_length_m or a dead end. The successor is picked at random,
+        which is what a caller generating varied scenes wants; ``deterministic``
+        takes the lowest-id one instead, for a caller that has to get the same
+        route out of the same map on every run.
         """
         if start_ll_id not in self._ll_by_id:
             return [start_ll_id]
@@ -896,8 +901,11 @@ class LaneletSceneBuilder:
             following = self._routing_graph.following(current_ll)
             if not following:
                 break
-            # Random branch selection for variety
-            next_ll = random.choice(list(following))
+            next_ll = (
+                min(following, key=lambda ll: ll.id)
+                if deterministic
+                else random.choice(list(following))
+            )
             if next_ll.id not in self._cache:
                 break
             route_ids.append(next_ll.id)
