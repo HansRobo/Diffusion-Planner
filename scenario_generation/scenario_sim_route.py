@@ -32,17 +32,29 @@ def map_from_osc(osc_path: str | Path) -> str:
     raise ValueError(f"No RoadNetwork/LogicFile filepath in {osc_path}")
 
 
-def _goal_lanelet(osc_path: str | Path) -> int | None:
-    """Goal lanelet id from an ``AcquirePositionAction`` LanePosition, if the scenario
-    authors one. SSv2 lane ids are lanelet ids."""
+def _ego_action_scopes(root: ET.Element, ego_name: str):
+    """The elements whose private actions belong to the ego: its ``Init`` block and every
+    ``ManeuverGroup`` listing it as an actor."""
+    for private in root.iter("Private"):
+        if private.get("entityRef") == ego_name:
+            yield private
+    for group in root.iter("ManeuverGroup"):
+        if any(ref.get("entityRef") == ego_name for ref in group.iter("EntityRef")):
+            yield group
+
+
+def _goal_lanelet(osc_path: str | Path, ego_name: str) -> int | None:
+    """Goal lanelet id from the ego's own ``AcquirePositionAction`` LanePosition, if the
+    scenario authors one. SSv2 lane ids are lanelet ids."""
     root = ET.parse(str(osc_path)).getroot()
-    for routing in root.iter("AcquirePositionAction"):
-        lp = routing.find(".//LanePosition")
-        if lp is not None and "laneId" in lp.attrib:
-            try:
-                return int(lp.attrib["laneId"])
-            except ValueError:
-                return None
+    for scope in _ego_action_scopes(root, ego_name):
+        for routing in scope.iter("AcquirePositionAction"):
+            lp = routing.find(".//LanePosition")
+            if lp is not None and "laneId" in lp.attrib:
+                try:
+                    return int(lp.attrib["laneId"])
+                except ValueError:
+                    return None
     return None
 
 
@@ -51,6 +63,7 @@ def resolve_route(
     ego_xy: np.ndarray,
     ego_heading: float,
     osc_path: str | Path,
+    ego_name: str,
     *,
     min_len_m: float = 120.0,
 ) -> list[int]:
@@ -65,7 +78,7 @@ def resolve_route(
     start_ll = builder.snap_to_nearest_ll(ego_xy, heading_rad=ego_heading)
     if start_ll is None:
         raise RuntimeError(f"Could not snap ego start pose {ego_xy} to any lanelet")
-    goal_ll = _goal_lanelet(osc_path)
+    goal_ll = _goal_lanelet(osc_path, ego_name)
     if goal_ll is not None and builder.has_lanelet_id(goal_ll):
         route = builder.route_between(start_ll, goal_ll)
         if route:
