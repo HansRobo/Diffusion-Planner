@@ -340,6 +340,13 @@ def get_args():
         "Only runs on the final save_utd cadence call of the run.",
     )
     parser.add_argument(
+        "--closed_loop_project_vehicle_map",
+        type=str,
+        default="",
+        help="optional JSON file of {project_code_name: vehicle_type_label} for labeling "
+        "--closed_loop_sites_npz_root sites by vehicle type. Empty = no labeling.",
+    )
+    parser.add_argument(
         "--closed_loop_npz_object_modes",
         nargs="+",
         choices=("objects", "noobj"),
