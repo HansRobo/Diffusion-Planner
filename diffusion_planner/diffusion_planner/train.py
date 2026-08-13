@@ -147,10 +147,10 @@ def closed_loop_validate(
     per (site, object-mode) pair: ``closed_loop_npz_root`` (single arbitrary path) and
     ``closed_loop_sites_npz_root`` (a curated ``.json`` path-list manifest grouped into
     per-site route pools by
-    :func:`~scenario_generation.site_discovery.discover_sites_from_json`) fire independently.
-    Called on the checkpoint-save cadence, rank-0 only: pass the unwrapped model; it is switched
-    to eval for the rollout (so the diffusion sampler runs and produces ``prediction``) and
-    restored afterwards.
+    :func:`~scenario_generation.site_discovery.discover_sites_with_vehicles_from_json`) fire
+    independently. Called on the checkpoint-save cadence, rank-0 only: pass the unwrapped model;
+    it is switched to eval for the rollout (so the diffusion sampler runs and produces
+    ``prediction``) and restored afterwards.
 
     ``is_final_save=True`` marks the last cadence call of the run (computed by the caller, since
     train_epochs may not land on a save_utd-multiple).
