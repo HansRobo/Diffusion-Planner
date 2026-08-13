@@ -49,13 +49,16 @@ def build_segment_row(
     clearances: list[float],
     collisions: list[bool],
     rb_dists: np.ndarray,
-    speeds: np.ndarray,
-    dt: float,
+    accels: np.ndarray,
     near_miss_thresh: float,
     strong_brake_mps2: float,
     progress_m: float,
 ) -> dict:
     """Build one closed-loop segment row from a scenario_sim rollout's raw series.
+
+    Every series covers the same frames: element ``k`` of ``clearances``, ``collisions``,
+    ``rb_dists`` and ``accels`` is the same sim tick. The caller differences the speeds,
+    because only it knows which sample precedes the window.
 
     ``rb_dists`` may be empty when the map ships no road-border polylines; the road_border
     block then reports ``inf`` clearances and zero events, which is what a clearance block
@@ -67,14 +70,7 @@ def build_segment_row(
     """
     cl = np.asarray(clearances, dtype=np.float64)
     rb = np.asarray(rb_dists, dtype=np.float64)
-
-    # Speed is logged per tick, so acceleration is a first difference over the sim step, not
-    # wall time. Padded to keep the series as long as clearances/collisions -- otherwise
-    # strong_brake.steps would be counted over k-1 steps while object.collision_steps uses k.
-    sp = np.asarray(speeds, dtype=np.float64)
-    accels = np.zeros(sp.size, dtype=np.float64)
-    if sp.size >= 2:
-        accels[1:] = np.diff(sp) / dt
+    ac = np.asarray(accels, dtype=np.float64)
 
     return {
         "n_steps_run": int(n_steps_run),
@@ -88,7 +84,7 @@ def build_segment_row(
             rb, road_border_collision_mask(rb), miss_thresh=near_miss_thresh
         ),
         "red_light_violation": _red_light_block(),
-        "strong_brake": strong_brake_block(accels, strong_brake_mps2),
+        "strong_brake": strong_brake_block(ac, strong_brake_mps2),
         "reproducer": {**_NO_REPRODUCER_CURSOR, "normal_steps": int(n_steps_run)},
     }
 
@@ -111,8 +107,7 @@ def failed_segment_row(reason: str, near_miss_thresh: float) -> dict:
             clearances=[],
             collisions=[],
             rb_dists=np.zeros(0, dtype=np.float64),
-            speeds=np.zeros(0, dtype=np.float64),
-            dt=1.0,  # no samples to difference, so the value cannot reach the row
+            accels=np.zeros(0, dtype=np.float64),
             near_miss_thresh=near_miss_thresh,
             strong_brake_mps2=float("inf"),  # no threshold was applied
             progress_m=0.0,

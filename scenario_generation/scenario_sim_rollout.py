@@ -190,6 +190,22 @@ def _resolve_route_for_ego(
     return ego_name, ego_route_ids, goal_pose
 
 
+def _scored_accels(speeds: np.ndarray, start: int, n: int) -> np.ndarray:
+    """Realized acceleration over the ``n`` scored frames from ``start``.
+
+    Differenced from the sample before the window when there is one, so every returned value
+    is a real first difference. Only a window starting at tick 0 has to open with a zero.
+    """
+    sp = np.asarray(speeds, dtype=np.float64)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    if start > 0:
+        return np.diff(sp[start - 1 : start + n]) / DT
+    accels = np.zeros(n, dtype=np.float64)
+    accels[1:] = np.diff(sp[:n]) / DT
+    return accels
+
+
 def _finalize_row(
     output_dir: Path,
     *,
@@ -211,7 +227,10 @@ def _finalize_row(
     planner's steady-state behaviour. The road-border and braking series come off the whole
     trajectory, so they are trimmed to the same window here -- otherwise the row's blocks
     would count over denominators that differ by the warmup, and strong_brake would score the
-    pull-away from rest. ``progress_m`` is a total rather than a rate and stays whole-run.
+    pull-away from rest.
+
+    Acceleration is differenced from one sample before the window, so the first scored frame
+    carries a real first difference instead of a zero standing in for one.
     """
     (output_dir / "trajectory_log.json").write_text(json.dumps(trajectory_log))
 
@@ -225,6 +244,7 @@ def _finalize_row(
     # None when the run ended before the history was warm: nothing was scored, so every block
     # is built from an empty series rather than from frames the object block never saw.
     start = len(trajectory_log) if scored_from is None else scored_from
+    stop = start + len(clearances)
 
     row = build_segment_row(
         n_steps_run=len(trajectory_log),
@@ -232,9 +252,8 @@ def _finalize_row(
         result_kind=result_kind,
         clearances=clearances,
         collisions=collisions,
-        rb_dists=series["rb_dists"][start:],
-        speeds=series["speeds"][start:],
-        dt=DT,
+        rb_dists=series["rb_dists"][start:stop],
+        accels=_scored_accels(series["speeds"], start, len(clearances)),
         near_miss_thresh=cfg.near_miss_thresh,
         strong_brake_mps2=STRONG_BRAKE_MPS2,
         progress_m=rb["progress_m"],
@@ -345,6 +364,10 @@ def run_scenario_sim_rollout(
                 raise RuntimeError(f"Sim stopped reporting the ego entity '{ego_name}'")
             ego_state = states[ego_name]
             ex, ey, eh = baselink_xyh(ego_state)
+            # Logged before stepping, so row k is the state clearance and collision are
+            # measured on. Recording the post-step pose instead pairs every object sample
+            # with a road-border and speed sample one tick later.
+            trajectory_log.append(_traj_entry(step, ego_state, goal_xy))
 
             with timers("scene_build"):
                 update_history(buffers, states, ego_name)
@@ -391,10 +414,8 @@ def run_scenario_sim_rollout(
             with timers("sim_step"):
                 outcome = runner.step()
 
-            ego_after = runner.get_ego_state(ego_ref=ego_name)
-            trajectory_log.append(_traj_entry(step, ego_after, goal_xy))
             if step == 0:  # verify the frame contract on the first stepped tick
-                ax, ay, _ = baselink_xyh(ego_after)
+                ax, ay, _ = baselink_xyh(runner.get_ego_state(ego_ref=ego_name))
                 coord_err = float(math.hypot(ax - pts[0, 0], ay - pts[0, 1]))
                 if verbose:
                     verdict = "OK" if coord_err <= cfg.coord_check_tol_m else "FAIL"
