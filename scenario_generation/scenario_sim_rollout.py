@@ -234,6 +234,67 @@ def _scored_accels(speeds: np.ndarray, start: int, n: int) -> np.ndarray:
     return accels
 
 
+def _write_rollout_trace(
+    output_dir: Path,
+    *,
+    trajectory_log: list[dict],
+    clearances: list[float],
+    collisions: list[bool],
+    rb_dists: np.ndarray,
+    scored_from: int,
+    terminated_reason: str,
+) -> None:
+    """Write ``rollout.jsonl`` next to the PNGs: one line per sim step, plus a terminated line.
+
+    The schema is the reproducer's, because the readers are shared: ``trajectory_colormap``
+    takes ``ego`` (required) plus ``speed`` / ``clearance_m`` / ``collision`` / ``rb_dist_m``,
+    and skips any line carrying an ``event`` key. Road-border distance only exists after the
+    rollout -- it is computed over the whole trajectory at once -- so the trace is written here
+    rather than streamed, which is the one place this path differs from the reproducer's.
+
+    A quantity this path never observed is left out entirely rather than written as its safe
+    value: the readers default a missing key to "no event", which a colormap would paint as a
+    measurement that was taken and found nothing. ``red_light_violation`` is always absent
+    (traffic lights are not read), and ``rb_dist_m`` is absent on a map with no road borders.
+    """
+    # Scoring runs every tick from ``scored_from`` to the last one logged. A trace whose samples
+    # were off by a tick would still be a complete, plausible picture, so the alignment the
+    # padding below relies on is asserted rather than assumed.
+    if scored_from + len(clearances) != len(trajectory_log):
+        raise ValueError(
+            f"clearance series does not span ticks {scored_from}..{len(trajectory_log)}: "
+            f"got {len(clearances)} samples"
+        )
+    # The row's blocks are counted from ``scored_from`` on, but the trace colours the whole
+    # driven path, so the metric series is head-padded back to tick 0 instead. An unscored
+    # warmup tick has no clearance rather than a clearance of zero.
+    clearances = [float("nan")] * scored_from + list(clearances)
+    collisions = [False] * scored_from + list(collisions)
+    have_rb = len(rb_dists) == len(trajectory_log)
+    with (output_dir / "rollout.jsonl").open("w", encoding="utf-8") as f:
+        for k, entry in enumerate(trajectory_log):
+            clr = clearances[k]
+            line = {
+                "k": k,
+                "ego": [round(float(entry["x"]), 3), round(float(entry["y"]), 3)],
+                "yaw": round(float(entry["heading"]), 4),
+                "dist_goal": round(float(entry["goal_d"]), 3),
+                "speed": round(float(entry["speed"]), 3),
+                "clearance_m": round(float(clr), 4) if np.isfinite(clr) else None,
+                "collision": bool(collisions[k]),
+            }
+            if have_rb:
+                rb = float(rb_dists[k])
+                line["rb_dist_m"] = round(rb, 4) if np.isfinite(rb) else None
+            f.write(json.dumps(line) + "\n")
+        f.write(
+            json.dumps(
+                {"event": "terminated", "k": len(trajectory_log), "reason": terminated_reason}
+            )
+            + "\n"
+        )
+
+
 def _finalize_row(
     output_dir: Path,
     *,
@@ -271,6 +332,17 @@ def _finalize_row(
     # is built from an empty series rather than from frames the object block never saw.
     start = len(trajectory_log) if scored_from is None else scored_from
     stop = start + len(clearances)
+    # The trace is per-tick over the whole run, so it takes the untrimmed series and the tick
+    # the trimming starts at, not the trimmed arrays the row's blocks are built from.
+    _write_rollout_trace(
+        output_dir,
+        trajectory_log=trajectory_log,
+        clearances=clearances,
+        collisions=collisions,
+        rb_dists=series["rb_dists"],
+        scored_from=start,
+        terminated_reason=terminated_reason,
+    )
 
     row = build_segment_row(
         n_steps_run=len(clearances),
