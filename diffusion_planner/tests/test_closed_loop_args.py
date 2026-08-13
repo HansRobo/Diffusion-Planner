@@ -70,8 +70,21 @@ def _args_attrs_read_by(func_name: str, path: Path) -> set[str]:
     }
 
 
+def _reads_sites_npz_root(test: ast.expr) -> bool:
+    """Whether an ``if`` test gates on ``args.closed_loop_sites_npz_root``.
+
+    The guard is currently ``and``-ed with ``is_final_save``; accept either shape so the
+    test tracks the guard's meaning rather than its exact condition.
+    """
+    parts = test.values if isinstance(test, ast.BoolOp) else [test]
+    return any(
+        isinstance(part, ast.Attribute) and part.attr == "closed_loop_sites_npz_root"
+        for part in parts
+    )
+
+
 def _sites_guard_source() -> str:
-    """The verbatim ``if args.closed_loop_sites_npz_root:`` block of ``closed_loop_validate``.
+    """The verbatim ``if args.closed_loop_sites_npz_root ...:`` block of ``closed_loop_validate``.
 
     Located by content rather than line number so the test survives edits above it.
     """
@@ -85,9 +98,7 @@ def _sites_guard_source() -> str:
     guard = next(
         node
         for node in ast.walk(validate)
-        if isinstance(node, ast.If)
-        and isinstance(node.test, ast.Attribute)
-        and node.test.attr == "closed_loop_sites_npz_root"
+        if isinstance(node, ast.If) and _reads_sites_npz_root(node.test)
     )
     segment = ast.get_source_segment(source, guard)
     assert segment, "could not recover the source of the sites guard"
@@ -125,6 +136,8 @@ def test_sites_guard_runs_on_a_grpo_namespace(tmp_path: Path):
         "args": args,
         "json": json,
         "Path": Path,
+        # Local of closed_loop_validate, not an args attribute; sites only run on the final save.
+        "is_final_save": True,
         "discover_sites_with_vehicles_from_json": lambda *a, **k: {},
         "_object_mode_pairs": lambda modes: (("objects", False),),
         "run_labeled": lambda *a, **k: None,
