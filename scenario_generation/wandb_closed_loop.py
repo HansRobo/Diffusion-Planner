@@ -182,6 +182,39 @@ def build_groups_aggregate_log(
     return {k: v for k, v in log.items() if _wandb_scalar(v) or isinstance(v, int)}
 
 
+def build_groups_score_bar_charts(summaries: dict[str, dict]) -> dict:
+    """Per-metric bar chart comparing every group side-by-side, under ``closed_loop_scores_bar/``.
+
+    Groups now only run once per training run, so a per-group score line chart would just be one
+    isolated point; a bar chart across groups fits a one-shot comparison better. ``summaries`` is
+    keyed by group label. ``__noobj``-suffixed labels are excluded from collision-style metrics.
+    """
+    log: dict = {}
+    if not summaries:
+        return log
+
+    def _bar(key: str, labels: list[str]) -> None:
+        table = wandb.Table(columns=["group", key])
+        for label in labels:
+            val = extract_score(summaries[label], key)
+            if _wandb_scalar(val):
+                table.add_data(label, val)
+        if table.data:
+            log[f"closed_loop_scores_bar/{key}"] = wandb.plot.bar(table, "group", key, title=key)
+
+    all_labels = list(summaries.keys())
+    objects_labels = [label for label in all_labels if not _is_noobj_label(label)]
+    for key in COMPARISON_SCORE_KEYS:
+        _bar(key, all_labels)
+    for key in OBJECTS_ONLY_SCORE_KEYS:
+        _bar(key, objects_labels)
+    return log
+
+
+# Back-compat alias — removed in next major version
+build_sites_score_bar_charts = build_groups_score_bar_charts
+
+
 def _group_label(group: str | None) -> str:
     """W&B-key-safe group token; ``None`` (single-npz_root mode) -> ``"main"``."""
     return (group or "main").replace("/", "_")
@@ -198,6 +231,7 @@ def build_full_closed_loop_wandb_log(
     report_base_url: str | None = None,
     render_media: bool = True,
     wandb_key_prefix: str | None = None,
+    include_score_scalars: bool = True,
 ) -> dict:
     """Per-group full-route closed-loop wandb payload, keyed into role-based sections so the
     workspace stays navigable (one collapsible section each) instead of one flat ``closed_loop``
@@ -217,6 +251,10 @@ def build_full_closed_loop_wandb_log(
     ``render_media=False`` skips the video + colormap-image block entirely (scores/links are
     unaffected) -- for a caller that already skipped rendering (e.g. train.py's RolloutParams
     ``draw=False`` on most epochs), so there's no colormap image to render from anyway.
+
+    ``include_score_scalars=False`` skips the ``closed_loop_scores/{metric}/{group}`` block --
+    for a group that only runs once per run, where :func:`build_groups_score_bar_charts` is the
+    better fit instead.
 
     The per-episode table is built once across ALL groups by :func:`build_combined_episode_table`
     at the caller (so it's a single filterable/groupable panel), not here.
@@ -245,10 +283,11 @@ def build_full_closed_loop_wandb_log(
         rest = "/".join(parts[1:])
         return f"closed_loop/{wandb_key_prefix}/{rest}"
 
-    for key in SCORE_KEYS:
-        val = extract_score(summary, key)
-        if _wandb_scalar(val):
-            log[_key(f"scores/{key}/{label}")] = val
+    if include_score_scalars:
+        for key in SCORE_KEYS:
+            val = extract_score(summary, key)
+            if _wandb_scalar(val):
+                log[_key(f"scores/{key}/{label}")] = val
 
     rows = summary.get("segments") or []
     rep = pick_representative_row(rows, mode=video_pick)
