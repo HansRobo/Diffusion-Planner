@@ -77,15 +77,20 @@ def main(argv: list[str] | None = None) -> int:
     # Same split the closed-loop eval writer uses: a human-readable row, with the clearance
     # digests in a sidecar so a parent can still pool an approximate global p5. ``route`` is
     # what carries a row's identity through that pair -- ``attach_tdigest_sidecars`` keys the
-    # reattach on it, so a sidecar without one can be written but never read back.
-    route = Path(a.osc).stem
+    # reattach on it, so a sidecar without one can be written but never read back. It names the
+    # case, not the scenario file: one scenario_0.xosc per scenario id collides suite-wide.
+    route = Path(a.out_dir).name
     row_out = Path(a.row_out)
     row_out.write_text(
         json.dumps(segment_row_for_json(row, route=route, timing=timers.as_dict()), default=float)
     )
+    # Removed when there is nothing to write, so an earlier run's digests cannot outlive it.
+    side_out = row_out.with_suffix(".tdigests.json")
     side = tdigest_sidecar_row({"route": route, **row})
     if side is not None:
-        row_out.with_suffix(".tdigests.json").write_text(json.dumps(side, default=float))
+        side_out.write_text(json.dumps(side, default=float))
+    else:
+        side_out.unlink(missing_ok=True)
     return 0
 
 
