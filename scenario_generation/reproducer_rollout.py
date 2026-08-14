@@ -1755,7 +1755,6 @@ def render_segment(
     # exception only surfaces here.
     for f in pending:
         f.result()
-    dbg.close()
     return _finalize(s)
 
 
