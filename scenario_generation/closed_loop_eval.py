@@ -402,7 +402,7 @@ def aggregate(
     }
 
 
-def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
+def build_mp4(png_dir: Path, mp4_path: Path, fps: float, remove_pngs: bool = False) -> None:
     """Encode the PNG sequence in ``png_dir`` to an MP4.
 
     PNGs are named by step ``k`` and may be sparse (``draw_every`` skips frames), so glob the
@@ -433,6 +433,9 @@ def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
         ],
         check=True,
     )
+    if remove_pngs:
+        for png in png_dir.glob("*.png"):
+            png.unlink()
 
 
 def run_closed_loop_eval(

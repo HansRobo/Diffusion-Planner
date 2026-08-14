@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     if any(out_dir.glob("*.png")):
         # fps is the sim tick rate, so a sparse sequence plays draw_every x faster than real
         # time. Not a separate knob: one number cannot be both.
-        build_mp4(out_dir, out_dir / f"{route}.mp4", a.fps)
+        build_mp4(out_dir, out_dir / f"{route}.mp4", a.fps, remove_pngs=True)
     return 0
 
 
