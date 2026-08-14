@@ -24,6 +24,10 @@ from scenario_generation.tensor_converter import _INPUT_T
 DT = 0.1  # sim + model timestep (10 Hz). Must match the interpreter's local_frame_rate.
 _HISTORY_LEN = _INPUT_T + 1  # the past the model sees, plus the current pose.
 _SIM_TYPE_EGO = 0  # get_entity_states()["type"]: 0=EGO 1=VEHICLE 2=PEDESTRIAN 3=MISC_OBJECT
+# get_entity_states()["subtype"]. A two-wheeler is a VEHICLE by type; only the subtype tells
+# it apart, and the model's agent-type one-hot has a class for it.
+_SIM_SUBTYPE_MOTORCYCLE = 5
+_SIM_SUBTYPE_BICYCLE = 6
 # Not signalling, in the TurnIndicatorsReport space: it has no 0, so the NO_COMMAND the
 # sim's setter would also accept is not a value this history may carry.
 TURN_INDICATOR_DISABLE = 1
@@ -56,9 +60,13 @@ def resolve_ego_name(states: dict) -> str:
     raise RuntimeError(f"more than one ego-typed entity: {egos}")
 
 
-def _agent_type(sim_type: int) -> AgentType | None:
-    """Map the simulator's entity type to ``AgentType``; ``None`` for non-agents."""
+def _agent_type(state: dict) -> AgentType | None:
+    """Map a reported entity to ``AgentType``; ``None`` for non-agents."""
+    sim_type = int(state["type"])
     if sim_type in (0, 1):  # EGO, VEHICLE
+        subtype = int(state.get("subtype", 0))
+        if subtype in (_SIM_SUBTYPE_MOTORCYCLE, _SIM_SUBTYPE_BICYCLE):
+            return AgentType.BICYCLE
         return AgentType.VEHICLE
     if sim_type == 2:  # PEDESTRIAN
         return AgentType.PEDESTRIAN
@@ -150,7 +158,7 @@ def update_history(buffers: HistoryBuffers, states: dict, ego_name: str) -> None
     ``to_model_tensors`` shifts a neighbour back by ``wheelbase / 2`` when it stands in as the
     ego, and the metric OBB builders read a neighbour's stored xy as the box centre.
     """
-    live = {name for name, st in states.items() if _agent_type(int(st["type"])) is not None}
+    live = {name for name, st in states.items() if _agent_type(st) is not None}
     buffers.forget(live)
     for name in live:
         st = states[name]
@@ -226,7 +234,7 @@ def build_scene(
 
     agents: list[Agent] = []
     for name, st in states.items():
-        atype = _agent_type(int(st["type"]))
+        atype = _agent_type(st)
         if atype is None:
             continue
         length, width, wheelbase = entity_shape(st)
