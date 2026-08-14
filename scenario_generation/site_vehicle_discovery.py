@@ -204,7 +204,7 @@ if __name__ == "__main__":
         "--project_vehicle_map",
         default=None,
         help="Path to JSON file mapping project names to vehicle types "
-        "(e.g. {'x2_dev': 'aomi'}). When provided, also outputs vehicles.json.",
+        "(e.g. {'project_a': 'vehicle_a'}). When provided, also outputs vehicles.json.",
     )
     args = parser.parse_args()
 
