@@ -174,7 +174,7 @@ _ARCH_KEYS = (
     "route_len", "polygon_num", "polygon_len", "line_string_num", "line_string_len",
     "encoder_mixer_depth", "encoder_fusion_depth", "decoder_depth", "num_heads",
     "hidden_dim", "predicted_neighbor_num", "use_ego_history", "use_turn_indicators",
-    "diffusion_model_type", "use_velocity_representation",
+    "diffusion_model_type", "use_velocity_representation", "use_cross_attn_mask",
 )  # fmt: skip
 
 

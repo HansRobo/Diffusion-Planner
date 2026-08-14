@@ -283,6 +283,7 @@ class Decoder(nn.Module):
         self.dit = DiT(
             depth=config.decoder_depth,
             output_dim=(config.future_len + 1) * 4,  # x, y, cos, sin
+            use_cross_attn_mask=config.use_cross_attn_mask,
             hidden_dim=config.hidden_dim,
             heads=config.num_heads,
             dropout=dpr,

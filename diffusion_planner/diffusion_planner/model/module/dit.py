@@ -104,12 +104,17 @@ class DiT(nn.Module):
         self,
         depth,
         output_dim,
+        use_cross_attn_mask,
         hidden_dim=192,
         heads=6,
         dropout=0.1,
         mlp_ratio=4.0,
     ):
         super().__init__()
+
+        # Masking padded encoder tokens in the cross-attention changes the exported ONNX
+        # graph, so it stays opt-in for compatibility with already deployed models.
+        self.use_cross_attn_mask = use_cross_attn_mask
 
         T = 81
         D = 4
@@ -163,7 +168,10 @@ class DiT(nn.Module):
 
         ego_mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
         attn_mask = torch.cat([ego_mask, neighbor_current_mask], dim=1)
-        cross_attn_mask = torch.all(cross_c == 0, dim=-1)
+        if self.use_cross_attn_mask:
+            cross_attn_mask = torch.all(cross_c == 0, dim=-1)
+        else:
+            cross_attn_mask = None
 
         for block in self.blocks:
             x = block(x, cross_c, t, attn_mask, cross_attn_mask)

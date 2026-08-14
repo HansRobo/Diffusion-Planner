@@ -189,6 +189,13 @@ def get_args(args_list=None):
     parser.add_argument("--encoder_mixer_depth", type=int, default=6)
     parser.add_argument("--encoder_fusion_depth", type=int, default=6)
     parser.add_argument("--decoder_depth", type=int, help="number of decoding layers", default=3)
+    parser.add_argument(
+        "--use_cross_attn_mask",
+        type=boolean,
+        default=_train_config_default("use_cross_attn_mask"),
+        help="mask padded encoder tokens in the DiT cross-attention. Off by default: it "
+        "changes the exported ONNX graph, breaking compatibility with deployed models.",
+    )
     parser.add_argument("--num_heads", type=int, help="number of multi-head", default=8)
     parser.add_argument("--hidden_dim", type=int, help="hidden dimension", default=256)
     parser.add_argument(
