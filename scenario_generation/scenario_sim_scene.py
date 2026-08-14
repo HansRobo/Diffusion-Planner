@@ -36,11 +36,6 @@ class SceneConfig:
     max_map_lanelets: int = 140
     map_mask_range_m: float = 100.0
     route_window_segments: int = 25
-    # Feeds ``Agent.wheelbase`` only, whose contract is the real axle spacing (~0.65 * length
-    # when unavailable) -- what the model input has to match is the convention its training
-    # data was built with. Metric geometry uses :func:`ego_metric_box` instead; the two want
-    # different numbers for the same vehicle.
-    wheelbase_ratio: float = 0.65
 
 
 def resolve_ego_name(states: dict) -> str:
@@ -71,25 +66,28 @@ def _agent_type(sim_type: int) -> AgentType | None:
 
 
 class HistoryBuffers:
-    """Per-entity rolling ``(x, y, heading)`` history keyed by the stable sim name.
+    """Per-entity rolling ``(x, y, heading)`` and ``(vx, vy)`` history keyed by the sim name.
 
-    A newly seen entity has its buffer filled by repeating the current pose rather than
+    A newly seen entity has its buffers filled by repeating the current sample rather than
     zeros, so no teleport artifact enters the model input. ``age`` counts how many *previous*
-    poses of the buffer are real, which is the convention the tensor converter masks on, and
-    lets scoring wait until the history is warm.
+    samples are real, which is the convention the tensor converter masks on, and lets scoring
+    wait until the history is warm.
     """
 
     def __init__(self, length: int = _HISTORY_LEN):
         self.length = length
         self._buf: dict[str, deque] = {}
+        self._vel: dict[str, deque] = {}
         self.age: dict[str, int] = {}
 
-    def update(self, name: str, x: float, y: float, yaw: float) -> None:
+    def update(self, name: str, x: float, y: float, yaw: float, vx: float, vy: float) -> None:
         if name not in self._buf:
             self._buf[name] = deque([(x, y, yaw)] * self.length, maxlen=self.length)
+            self._vel[name] = deque([(vx, vy)] * self.length, maxlen=self.length)
             self.age[name] = 0
         else:
             self._buf[name].append((x, y, yaw))
+            self._vel[name].append((vx, vy))
             self.age[name] += 1
 
     def forget(self, live_names: set[str]) -> None:
@@ -101,10 +99,14 @@ class HistoryBuffers:
         """
         for name in self._buf.keys() - live_names:
             del self._buf[name]
+            del self._vel[name]
             del self.age[name]
 
     def trajectory(self, name: str) -> np.ndarray:
         return np.array(self._buf[name], dtype=np.float64)  # (length, 3)
+
+    def velocities(self, name: str) -> np.ndarray:
+        return np.array(self._vel[name], dtype=np.float64)  # (length, 2)
 
 
 def baselink_xyh(state: dict) -> tuple[float, float, float]:
@@ -127,6 +129,20 @@ def centroid_xyh(state: dict) -> tuple[float, float, float]:
     )
 
 
+def velocity_xy(state: dict) -> tuple[float, float]:
+    """Map-frame ``(vx, vy)`` from the reported twist.
+
+    The twist is in the entity's own frame -- the headless ego only ever sets ``linear.x``
+    from the vehicle model's longitudinal speed -- so it is rotated by the yaw rather than
+    used as-is.
+    """
+    tw = state["twist"]
+    vlong, vlat = float(tw["linear_x"]), float(tw["linear_y"])
+    yaw = float(state["pose"]["yaw"])
+    c, s_ = math.cos(yaw), math.sin(yaw)
+    return vlong * c - vlat * s_, vlong * s_ + vlat * c
+
+
 def update_history(buffers: HistoryBuffers, states: dict, ego_name: str) -> None:
     """Append this tick's truth pose to each dynamic entity's rolling buffer.
 
@@ -138,14 +154,19 @@ def update_history(buffers: HistoryBuffers, states: dict, ego_name: str) -> None
     buffers.forget(live)
     for name in live:
         st = states[name]
-        buffers.update(name, *(baselink_xyh(st) if name == ego_name else centroid_xyh(st)))
+        pose = baselink_xyh(st) if name == ego_name else centroid_xyh(st)
+        buffers.update(name, *pose, *velocity_xy(st))
 
 
-def entity_shape(state: dict, cfg: SceneConfig) -> tuple[float, float, float]:
-    """``(length, width, axle_wheelbase)`` for ``Agent`` -- model input, not metrics."""
+def entity_shape(state: dict) -> tuple[float, float, float]:
+    """``(length, width, axle_wheelbase)`` for ``Agent`` -- model input, not metrics.
+
+    The axle spacing is the simulator's, off the entity's vehicle parameters; it is 0 for a
+    non-vehicle, whose reference point already is its box centre. Metric geometry wants a
+    different number for the same vehicle and takes it from :func:`ego_metric_box`.
+    """
     dims = state["bounding_box"]["dimensions"]
-    length, width = float(dims["x"]), float(dims["y"])
-    return length, width, cfg.wheelbase_ratio * length
+    return float(dims["x"]), float(dims["y"]), float(state["wheel_base"])
 
 
 def ego_metric_box(state: dict) -> tuple[float, float, float]:
@@ -208,7 +229,7 @@ def build_scene(
         atype = _agent_type(int(st["type"]))
         if atype is None:
             continue
-        length, width, wheelbase = entity_shape(st, cfg)
+        length, width, wheelbase = entity_shape(st)
         traj = buffers.trajectory(name)
         is_ego = name == ego_name
         agents.append(
@@ -219,7 +240,7 @@ def build_scene(
                 width=width,
                 wheelbase=wheelbase,
                 past_trajectory=traj,
-                past_velocities=None,  # derived from position diffs in the converter
+                past_velocities=buffers.velocities(name),
                 goal_pose=goal_pose.astype(np.float32) if is_ego else None,
                 route_lanes=route_lanes if is_ego else None,
                 route_speed_limit=route_sl if is_ego else None,
