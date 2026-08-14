@@ -106,7 +106,10 @@ def _predict_ego_plan(model, model_args, scene, device, ego_name: str) -> tuple[
         device,
         return_turn_indicators=True,
     )
-    return preds[ego_name], int(tis.get(ego_name, 0))
+    # A model without a turn-indicator head returns no class at all. Falling back to 0 puts
+    # NO_COMMAND into a history that is in report space, where 0 is not a value, and
+    # resolve_keep_turn_indicator carries it forward from then on.
+    return preds[ego_name], int(tis.get(ego_name, TURN_INDICATOR_DISABLE))
 
 
 def _ego_plan_to_map_trajectory(

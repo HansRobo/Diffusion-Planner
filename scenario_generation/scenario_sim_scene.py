@@ -74,8 +74,9 @@ class HistoryBuffers:
     """Per-entity rolling ``(x, y, heading)`` history keyed by the stable sim name.
 
     A newly seen entity has its buffer filled by repeating the current pose rather than
-    zeros, so no teleport artifact enters the model input. ``age`` counts the real ticks each
-    entity has accumulated, so scoring can wait until the history is warm.
+    zeros, so no teleport artifact enters the model input. ``age`` counts how many *previous*
+    poses of the buffer are real, which is the convention the tensor converter masks on, and
+    lets scoring wait until the history is warm.
     """
 
     def __init__(self, length: int = _HISTORY_LEN):
@@ -86,13 +87,24 @@ class HistoryBuffers:
     def update(self, name: str, x: float, y: float, yaw: float) -> None:
         if name not in self._buf:
             self._buf[name] = deque([(x, y, yaw)] * self.length, maxlen=self.length)
-            self.age[name] = 1
+            self.age[name] = 0
         else:
             self._buf[name].append((x, y, yaw))
             self.age[name] += 1
 
+    def forget(self, live_names: set[str]) -> None:
+        """Drop entities the simulator no longer reports.
+
+        A scenario may delete an entity and spawn a new one under the same name, and the sim
+        accepts that. Keeping the old buffer would append the new spawn pose onto it, putting
+        a teleport into the model input with an age that says the history is warm.
+        """
+        for name in self._buf.keys() - live_names:
+            del self._buf[name]
+            del self.age[name]
+
     def trajectory(self, name: str) -> np.ndarray:
-        return np.array(self._buf[name], dtype=np.float32)  # (length, 3)
+        return np.array(self._buf[name], dtype=np.float64)  # (length, 3)
 
 
 def baselink_xyh(state: dict) -> tuple[float, float, float]:
@@ -122,9 +134,11 @@ def update_history(buffers: HistoryBuffers, states: dict, ego_name: str) -> None
     ``to_model_tensors`` shifts a neighbour back by ``wheelbase / 2`` when it stands in as the
     ego, and the metric OBB builders read a neighbour's stored xy as the box centre.
     """
-    for name, st in states.items():
-        if _agent_type(int(st["type"])) is not None:
-            buffers.update(name, *(baselink_xyh(st) if name == ego_name else centroid_xyh(st)))
+    live = {name for name, st in states.items() if _agent_type(int(st["type"])) is not None}
+    buffers.forget(live)
+    for name in live:
+        st = states[name]
+        buffers.update(name, *(baselink_xyh(st) if name == ego_name else centroid_xyh(st)))
 
 
 def entity_shape(state: dict, cfg: SceneConfig) -> tuple[float, float, float]:
