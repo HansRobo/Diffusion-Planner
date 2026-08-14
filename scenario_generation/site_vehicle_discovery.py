@@ -1,4 +1,4 @@
-"""Group a curated flat JSON path list into per-site npz roots.
+"""Group a curated flat JSON path list into site and vehicle groups for closed-loop evaluation.
 
 A "site" is inferred from the path component immediately before the first recognized split
 dir (``_SPLIT_DIR_NAMES``) in each JSON entry, following the existing
@@ -192,15 +192,42 @@ def discover_sites_with_vehicles_from_json(
 
 if __name__ == "__main__":
     import argparse
+    from collections import defaultdict
 
-    parser = argparse.ArgumentParser(description="Discover site groups from raw data")
-    parser.add_argument(
-        "--input", "-i", required=True, help="Folder, flat JSON, or grouped JSON path"
+    parser = argparse.ArgumentParser(
+        description="Discover site and vehicle groups from raw data. "
+        "Outputs sites.json by default; also outputs vehicles.json when --project_vehicle_map is given."
     )
-    parser.add_argument("--output", "-o", required=True, help="Output grouped JSON path")
+    parser.add_argument("--input", "-i", required=True, help="Flat JSON path list input")
+    parser.add_argument("--output-dir", "-o", required=True, help="Output directory for JSON files")
+    parser.add_argument(
+        "--project_vehicle_map",
+        default=None,
+        help="Path to JSON file mapping project names to vehicle types "
+        "(e.g. {'x2_dev': 'aomi'}). When provided, also outputs vehicles.json.",
+    )
     args = parser.parse_args()
 
-    groups = discover_sites_from_json(args.input)
-    with open(args.output, "w") as f:
-        json.dump({k: [str(p) for p in v] for k, v in groups.items()}, f, indent=2)
-    print(f"Wrote {len(groups)} groups to {args.output}")
+    # Load project->vehicle map if provided
+    project_vehicle_map = None
+    if args.project_vehicle_map:
+        project_vehicle_map = json.loads(Path(args.project_vehicle_map).read_text())
+
+    # Always output sites.json
+    sites = discover_sites_with_vehicles_from_json(args.input, project_vehicle_map)
+    sites_out = {name: [str(p) for p in info["npz_roots"]] for name, info in sites.items()}
+    sites_path = Path(args.output_dir) / "sites.json"
+    sites_path.parent.mkdir(parents=True, exist_ok=True)
+    sites_path.write_text(json.dumps(sites_out, indent=2))
+    print(f"Wrote {len(sites_out)} sites to {sites_path}")
+
+    # Output vehicles.json only when project_vehicle_map is provided
+    if project_vehicle_map:
+        by_vehicle: dict[str, list[str]] = defaultdict(list)
+        for name, info in sites.items():
+            vehicle = info["vehicle_type"] or "unknown"
+            by_vehicle[vehicle].extend([str(p) for p in info["npz_roots"]])
+        vehicles_out = dict(by_vehicle)
+        vehicles_path = Path(args.output_dir) / "vehicles.json"
+        vehicles_path.write_text(json.dumps(vehicles_out, indent=2))
+        print(f"Wrote {len(vehicles_out)} vehicles to {vehicles_path}")
