@@ -29,6 +29,7 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
 
@@ -554,6 +555,15 @@ def main() -> int:
         print(f"No inputs found under {args.groups_npz_root}", file=sys.stderr)
         return 1
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    args.out_root = args.out_root / timestamp
+    if args.out_root.exists() and any(args.out_root.iterdir()):
+        print(
+            f"Output directory {args.out_root} already exists and is not empty. "
+            f"Specify a different --out_root to avoid data loss or remove the old directory.",
+            file=sys.stderr,
+        )
+        return 1
     args.out_root.mkdir(parents=True, exist_ok=True)
 
     run_closed_loop_main(
