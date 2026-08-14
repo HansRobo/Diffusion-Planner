@@ -74,13 +74,22 @@ class RolloutConfig:
     # > 1 consume a cached plan open-loop in between: cheaper, less reactive.
     replan_interval: int = 1
     max_steps: int = 300
-    warmup_steps: int = 5  # skip scoring until the history buffer is warm
+    # Ticks of real history required before a frame is scored. The buffer is seeded by
+    # repeating the spawn pose, which is truthful -- the ego does start at rest -- so this is
+    # not about waiting for fabricated rows to scroll out, but about how much of the
+    # pull-away transient belongs in the measurement.
+    warmup_steps: int = 5
     near_miss_thresh: float = 1.0
     find_route_min_len_m: float = 120.0
     # Coordinate-contract check: after the first stepped tick the ego's realized pose must
     # land within this tolerance (m) of the injected plan's first future point. A gross frame
     # mismatch blows past it.
     coord_check_tol_m: float = 2.0
+    # The position check alone cannot see a rotated plan: after one tick both the realized
+    # pose and the plan's first point sit within v*dt of the spawn pose, so any heading
+    # convention error stays inside the metre tolerance at ordinary speeds and vanishes
+    # entirely from rest. Heading is compared separately because it is not speed-scaled.
+    coord_check_tol_rad: float = 0.1
     scene: SceneConfig = field(default_factory=SceneConfig)
 
     def __post_init__(self) -> None:
@@ -130,6 +139,10 @@ def _ego_plan_to_map_trajectory(
     first = math.hypot(world_xy[0, 0] - ex, world_xy[0, 1] - ey)
     speeds = np.concatenate([[first], seg]) / DT
     return np.column_stack([world_xy, world_h, speeds])
+
+
+def _wrap_pi(angle: float) -> float:
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def _score_neighbors(scene, ego_state: dict, device: str, ego_name: str) -> tuple[float, bool]:
@@ -231,12 +244,13 @@ def _finalize_row(
     terminated_reason: str,
     result_kind: str,
     coord_err: float,
+    yaw_err: float,
 ) -> dict:
     """Dump the trajectory, compute post-hoc road-border metrics and build the row.
 
-    Clearance and collision are only observed once the ego's history is warm, because until
-    then the model plans off a history seeded by repetition and its output is not the
-    planner's steady-state behaviour. The road-border and braking series come off the whole
+    Clearance and collision are only observed once the ego has accumulated ``warmup_steps`` of
+    real history, so the pull-away from rest does not dominate what is measured. The
+    road-border and braking series come off the whole
     trajectory, so they are trimmed to the same window here -- otherwise the row's blocks
     would count over denominators that differ by the warmup, and strong_brake would score the
     pull-away from rest.
@@ -278,8 +292,11 @@ def _finalize_row(
         "worst_step": int(start + np.argmin(clearances)) if clearances else -1,
         "n_ticks_run": len(trajectory_log),
         "rb_has_data": rb["rb_has_data"],
-        "coord_check_ok": bool(coord_err <= cfg.coord_check_tol_m),
+        "coord_check_ok": bool(
+            coord_err <= cfg.coord_check_tol_m and yaw_err <= cfg.coord_check_tol_rad
+        ),
         "coord_check_err_m": coord_err,
+        "coord_check_yaw_err_rad": yaw_err,
     }
 
 
@@ -328,6 +345,7 @@ def run_scenario_sim_rollout(
     # NaN until the first stepped tick; every comparison against the tolerance is then False,
     # so a rollout that never stepped reports the check as failed rather than as passed.
     coord_err: float = float("nan")
+    yaw_err: float = float("nan")
     ego_state: dict | None = None  # last tick's ego truth, for the finalize ego shape
     terminated_reason = "max_steps"
 
@@ -344,6 +362,10 @@ def run_scenario_sim_rollout(
         osc_path=str(osc_path),
         output_directory=str(osp_out),
         local_frame_rate=cfg.fps,
+        # The DT invariant is over the simulator's integration step, which is
+        # real_time_factor / frame_rate -- not frame_rate alone. Passed explicitly so the
+        # invariant does not rest on a default defined on the other side of the binding.
+        local_real_time_factor=1.0,
     ) as runner:
         timers.add("sim_open", time.perf_counter() - _t)
         with timers("sim_start"):
@@ -428,13 +450,15 @@ def run_scenario_sim_rollout(
                 outcome = runner.step()
 
             if step == 0:  # verify the frame contract on the first stepped tick
-                ax, ay, _ = baselink_xyh(runner.get_ego_state(ego_ref=ego_name))
+                ax, ay, ah = baselink_xyh(runner.get_ego_state(ego_ref=ego_name))
                 coord_err = float(math.hypot(ax - pts[0, 0], ay - pts[0, 1]))
+                yaw_err = abs(_wrap_pi(ah - pts[0, 2]))
                 if verbose:
-                    verdict = "OK" if coord_err <= cfg.coord_check_tol_m else "FAIL"
+                    ok = coord_err <= cfg.coord_check_tol_m and yaw_err <= cfg.coord_check_tol_rad
                     print(
                         f"  [scenario_sim] coord check: err={coord_err:.3f} m "
-                        f"(tol {cfg.coord_check_tol_m}) -> {verdict}"
+                        f"(tol {cfg.coord_check_tol_m}), yaw={yaw_err:.3f} rad "
+                        f"(tol {cfg.coord_check_tol_rad}) -> {'OK' if ok else 'FAIL'}"
                     )
 
             if outcome == "terminated":
@@ -456,6 +480,7 @@ def run_scenario_sim_rollout(
             terminated_reason=terminated_reason,
             result_kind=result_kind,
             coord_err=coord_err,
+            yaw_err=yaw_err,
         )
     # Teardown happens in HeadlessRunner.__exit__, so it is not a stage of its own: it lands in
     # rollout_total minus the parts.
