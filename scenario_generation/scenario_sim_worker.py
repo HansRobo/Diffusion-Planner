@@ -81,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     # case, not the scenario file: one scenario_0.xosc per scenario id collides suite-wide.
     route = Path(a.out_dir).name
     row_out = Path(a.row_out)
+    row_out.parent.mkdir(parents=True, exist_ok=True)
     row_out.write_text(
         json.dumps(segment_row_for_json(row, route=route, timing=timers.as_dict()), default=float)
     )
