@@ -9,8 +9,7 @@ from diffusion_planner.data.dimensions import TRAJECTORY_DIM, TRAJECTORY_LENGTH
 
 from .decoder import TrajectoryDecoder
 from .encoder import SceneEncoder
-from .flow_matching import sample as sample_flow
-from .flow_matching import sample_time
+from .flow_matching import compute_x0_flow_matching_loss, sample
 from .normalizer import PlannerNormalizer
 
 
@@ -68,18 +67,15 @@ class DiffusionPlanner(nn.Module):
         )
 
     @staticmethod
-    def create_agent_mask(input_data: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Create `(B, A)` masks from observed neighbor histories."""
-        neighbor_mask = (
-            torch.count_nonzero(input_data["neighbor_agents_past"], dim=(-2, -1)) == 0
-        )
-        ego_mask = torch.zeros(
-            neighbor_mask.shape[0],
-            1,
-            dtype=torch.bool,
-            device=neighbor_mask.device,
-        )
-        return torch.cat((ego_mask, neighbor_mask), dim=1)
+    def create_agent_pose(
+        input_data: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """Create current `[x, y, cos_yaw, sin_yaw]` poses with shape `(B, A, 4)`."""
+        ego_pose = input_data["ego_agent_past"][:, -1, :TRAJECTORY_DIM].unsqueeze(1)
+        neighbor_pose = input_data["neighbor_agents_past"][
+            :, :, -1, :TRAJECTORY_DIM
+        ]
+        return torch.cat((ego_pose, neighbor_pose), dim=1)
 
     @staticmethod
     def create_target_trajectory(
@@ -109,36 +105,28 @@ class DiffusionPlanner(nn.Module):
         """
         normalized_input = self.normalizer.normalize_input(input_data)
         scene, scene_mask = self.scene_encoder(normalized_input)
-        return self.trajectory_decoder(x, x_mask, scene, scene_mask, time)
+        agent_pose = self.create_agent_pose(normalized_input)
+        return self.trajectory_decoder(
+            x, x_mask, scene, scene_mask, agent_pose, time
+        )
 
     def compute_loss(self, input_data: dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute masked conditional flow-matching loss for one batch."""
         target = self.create_target_trajectory(input_data)
-        agent_mask = self.create_agent_mask(input_data)
-        target_mask = torch.count_nonzero(target, dim=(-2, -1)) == 0
-        loss_mask = agent_mask | target_mask
+        training_mask = (torch.count_nonzero(target, dim=-1) == 0).any(dim=-1)
         target = self.normalizer.normalize_trajectory(target)
-
-        noise = torch.randn_like(target) * self.noise_scale
-        noise = noise.masked_fill(loss_mask[:, :, None, None], 0.0)
-        target = target.masked_fill(loss_mask[:, :, None, None], 0.0)
-        time = sample_time(
-            target.shape[0],
-            target.device,
-            target.dtype,
-            self.time_mean,
-            self.time_std,
+        return compute_x0_flow_matching_loss(
+            x0_model=lambda state, time: self(
+                state, training_mask, input_data, time
+            ),
+            loss_function=lambda error: error.square(),
+            target=target,
+            mask=training_mask,
+            time_mean=self.time_mean,
+            time_std=self.time_std,
+            time_epsilon=self.time_epsilon,
+            noise_scale=self.noise_scale,
         )
-        time_view = time[:, None, None, None]
-        flow_state = (1 - time_view) * noise + time_view * target
-        denominator = (1 - time_view).clamp_min(self.time_epsilon)
-        target_velocity = (target - flow_state) / denominator
-
-        clean_prediction = self(flow_state, agent_mask, input_data, time)
-        predicted_velocity = (clean_prediction - flow_state) / denominator
-        valid = (~loss_mask)[:, :, None, None].expand_as(predicted_velocity)
-        squared_error = (predicted_velocity - target_velocity).square()
-        return squared_error.masked_select(valid).mean()
 
     @torch.no_grad()
     def sample(
@@ -153,7 +141,17 @@ class DiffusionPlanner(nn.Module):
         """
         normalized_input = self.normalizer.normalize_input(input_data)
         scene, scene_mask = self.scene_encoder(normalized_input)
-        agent_mask = self.create_agent_mask(input_data)
+        agent_pose = self.create_agent_pose(normalized_input)
+        neighbor_mask = (
+            torch.count_nonzero(input_data["neighbor_agents_past"], dim=(-2, -1)) == 0
+        )
+        ego_mask = torch.zeros(
+            neighbor_mask.shape[0],
+            1,
+            dtype=torch.bool,
+            device=neighbor_mask.device,
+        )
+        agent_mask = torch.cat((ego_mask, neighbor_mask), dim=1)
         batch, agents = agent_mask.shape
         initial_state = self.noise_scale * torch.randn(
             batch,
@@ -163,9 +161,9 @@ class DiffusionPlanner(nn.Module):
             device=scene.device,
             dtype=scene.dtype,
         )
-        normalized_trajectory = sample_flow(
+        normalized_trajectory = sample(
             x0_model=lambda state, time: self.trajectory_decoder(
-                state, agent_mask, scene, scene_mask, time
+                state, agent_mask, scene, scene_mask, agent_pose, time
             ),
             initial_state=initial_state,
             num_steps=num_steps,

@@ -4,6 +4,16 @@
 # leading slash makes it absolute against configs/ and @ binds it to a short key.
 defaults:
   - /train/dataloader@dataloader: default
+  - /train/model@model: default
+  - /train/optimizer@optimizer: default
+  - /train/scheduler@scheduler: default
   - _self_
 
 seed: 42
+
+training:
+  total_steps: 100000
+  device: auto
+  amp_dtype: bfloat16
+  max_grad_norm: 1.0
+  log_interval: 10

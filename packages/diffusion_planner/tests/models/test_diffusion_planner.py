@@ -90,6 +90,16 @@ class DiffusionPlannerTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         loss.backward()
 
+    def test_partial_future_padding_masks_complete_agent(self) -> None:
+        target = self.model.create_target_trajectory(self.input_data)
+        target[:, 0, TRAJECTORY_LENGTH // 2 :] = 0.0
+
+        missing_future = (torch.count_nonzero(target, dim=-1) == 0).any(dim=-1)
+
+        self.assertTrue(missing_future[:, 0].all())
+        self.assertFalse(missing_future[:, 1].any())
+        self.assertTrue(missing_future[:, 2].all())
+
     def test_logistic_normal_time_is_inside_unit_interval(self) -> None:
         time = sample_time(
             128,

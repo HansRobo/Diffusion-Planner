@@ -14,6 +14,8 @@ import torch
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader, Dataset
 
+from .data_augmentation import PlannerDataAugmentation
+
 REQUIRED_INDEX_COLUMNS = frozenset({"h5_path", "frame_index", "frame_time_ns"})
 H5_FORMAT = "diffusion_planner_frame_dataset"
 H5_FORMAT_VERSION = 4
@@ -29,6 +31,7 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
         parquet_path: str | Path,
         *,
         file_capacity: int = 8,
+        data_augmentation: PlannerDataAugmentation | None = None,
     ) -> None:
         """Load the lightweight index and defer H5 opens to DataLoader workers."""
         self._index_path = Path(parquet_path).expanduser().resolve()
@@ -58,6 +61,7 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
             raise ValueError("Parquet index contains a negative frame_index")
 
         self._file_capacity = file_capacity
+        self._data_augmentation = data_augmentation
         self._files: OrderedDict[Path, h5py.File] = OrderedDict()
         self._frame_keys: tuple[str, ...] | None = None
 
@@ -97,13 +101,15 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
             raise ValueError(
                 f"H5 tensor schema differs from the first opened shard: {path}"
             )
-        frame: dict[str, torch.Tensor] = {}
+        frame_arrays: dict[str, NDArray[Any]] = {}
         for key in keys:
             dataset = frames[key]
             if not isinstance(dataset, h5py.Dataset):
                 raise ValueError(f"H5 'frames/{key}' must be a dataset: {path}")
-            frame[key] = torch.from_numpy(np.asarray(dataset[frame_index]))
-        return frame
+            frame_arrays[key] = np.asarray(dataset[frame_index])
+        if self._data_augmentation is not None:
+            frame_arrays = self._data_augmentation(frame_arrays)
+        return {key: torch.from_numpy(value) for key, value in frame_arrays.items()}
 
     def _resolve_h5_path(self, index: int) -> Path:
         return Path(str(self._h5_paths[index]))

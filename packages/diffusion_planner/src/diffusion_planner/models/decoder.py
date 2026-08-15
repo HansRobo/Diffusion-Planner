@@ -97,7 +97,7 @@ class TrajectoryEncoder(nn.Module):
 
 
 class TrajectoryDecoderBlock(nn.Module):
-    """Fuse agent trajectory tokens with each other and scene memory."""
+    """Fuse independent agent trajectory tokens with scene memory."""
 
     def __init__(
         self,
@@ -107,12 +107,8 @@ class TrajectoryDecoderBlock(nn.Module):
         dropout: float,
     ) -> None:
         super().__init__()
-        self.agent_norm = AdaptiveLayerNorm(hidden_dim)
         self.cross_norm = AdaptiveLayerNorm(hidden_dim)
         self.feedforward_norm = AdaptiveLayerNorm(hidden_dim)
-        self.agent_attention = nn.MultiheadAttention(
-            hidden_dim, num_heads, dropout=dropout, batch_first=True
-        )
         self.cross_attention = nn.MultiheadAttention(
             hidden_dim, num_heads, dropout=dropout, batch_first=True
         )
@@ -135,16 +131,6 @@ class TrajectoryDecoderBlock(nn.Module):
         scene_mask: torch.Tensor,
     ) -> torch.Tensor:
         """Decode masked agent tokens using masked scene memory and flow time."""
-        agent = self.agent_norm(x, time)
-        agent = self.agent_attention(
-            agent,
-            agent,
-            agent,
-            key_padding_mask=x_mask,
-            need_weights=False,
-        )[0]
-        x = x + self.dropout(agent)
-
         query = self.cross_norm(x, time)
         memory = self.scene_norm(scene)
         cross = self.cross_attention(
@@ -180,6 +166,7 @@ class TrajectoryDecoder(nn.Module):
         )
         self.ego_embedding = nn.Parameter(torch.empty(hidden_dim))
         self.neighbor_embedding = nn.Parameter(torch.empty(hidden_dim))
+        self.agent_pose_embedding = nn.Linear(TRAJECTORY_DIM, hidden_dim)
         self.time_embedding = SinusoidalTimeEmbedding(hidden_dim)
         self.blocks = nn.ModuleList(
             TrajectoryDecoderBlock(hidden_dim, num_heads, feedforward_dim, dropout)
@@ -200,6 +187,7 @@ class TrajectoryDecoder(nn.Module):
         x_mask: torch.Tensor,
         scene: torch.Tensor,
         scene_mask: torch.Tensor,
+        agent_pos: torch.Tensor,
         time: torch.Tensor,
     ) -> torch.Tensor:
         """Predict clean trajectories from a noisy flow state.
@@ -212,6 +200,8 @@ class TrajectoryDecoder(nn.Module):
             x_mask: Invalid-agent mask with shape `(B, A)`.
             scene: Scene tokens with shape `(B, S, H)`.
             scene_mask: Invalid-scene-token mask with shape `(B, S)`.
+            agent_pos: Normalized current poses with shape `(B, A, 4)`, where
+                each pose is `[x, y, cos_yaw, sin_yaw]` and is aligned with `x`.
             time: Flow times with shape `(B,)` or `(B, 1)`.
 
         Returns:
@@ -227,7 +217,11 @@ class TrajectoryDecoder(nn.Module):
             ),
             dim=0,
         )
-        features = features + agent_embedding[None]
+        features = (
+            features
+            + agent_embedding[None]
+            + self.agent_pose_embedding(agent_pos)
+        )
         features = features.masked_fill(x_mask.unsqueeze(-1), 0.0)
 
         time_features = self.time_embedding(time.to(dtype=features.dtype))

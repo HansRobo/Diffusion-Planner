@@ -31,6 +31,10 @@ class PlannerNormalizer(nn.Module):
     ) -> dict[str, torch.Tensor]:
         """Return a shallow-copied input map with continuous features normalized."""
         normalized = input_data.copy()
+        if "ego_agent_past" in input_data:
+            normalized["ego_agent_past"] = self._normalize_pose(
+                input_data["ego_agent_past"]
+            )
         normalized["neighbor_agents_past"] = self._normalize_pose(
             input_data["neighbor_agents_past"]
         )

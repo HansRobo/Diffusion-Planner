@@ -6,7 +6,14 @@ dataset:
   _target_: diffusion_planner.data.PlannerDataset
   parquet_path: ???
   file_capacity: 8
-batch_size: 32
+  data_augmentation:
+    _target_: diffusion_planner.data.PlannerDataAugmentation
+    lateral_offset_range: [-1.0, 1.0]
+    yaw_offset_range: [-0.0872665, 0.0872665]
+    probability: 0.5
+batch_size: 512
 shuffle: true
 # Each worker owns its own small LRU cache of read-only H5 handles.
-num_workers: 8
+num_workers: 64
+pin_memory: true
+drop_last: true

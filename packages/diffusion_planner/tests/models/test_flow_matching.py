@@ -6,10 +6,49 @@ import unittest
 
 import torch
 
-from diffusion_planner.models.flow_matching import euler_step, heun_step, sample
+from diffusion_planner.models.flow_matching import (
+    compute_x0_flow_matching_loss,
+    euler_step,
+    heun_step,
+    sample,
+)
 
 
 class FlowMatchingTest(unittest.TestCase):
+    def test_x0_loss_accepts_l1_function(self) -> None:
+        target = torch.ones(1, 2, 3)
+        loss = compute_x0_flow_matching_loss(
+            x0_model=lambda _state, _time: target + 1.0,
+            loss_function=lambda error: error.abs(),
+            target=target,
+            mask=torch.zeros(1, 2, dtype=torch.bool),
+            time_mean=0.0,
+            time_std=0.0,
+            time_epsilon=1e-5,
+            noise_scale=1.0,
+        )
+
+        torch.testing.assert_close(loss, torch.tensor(2.0))
+
+    def test_x0_loss_masks_elements(self) -> None:
+        target = torch.randn(2, 3, 4)
+        mask = torch.tensor(
+            [[False, False, True], [False, True, True]], dtype=torch.bool
+        )
+
+        loss = compute_x0_flow_matching_loss(
+            x0_model=lambda _state, _time: target,
+            loss_function=lambda error: error.square(),
+            target=target,
+            mask=mask,
+            time_mean=-0.4,
+            time_std=1.0,
+            time_epsilon=1e-5,
+            noise_scale=1.0,
+        )
+
+        torch.testing.assert_close(loss, torch.zeros_like(loss), atol=1e-10, rtol=0)
+
     def test_euler_step_accepts_x0_lambda(self) -> None:
         state = torch.zeros(2, 3)
         time = torch.zeros(2)
