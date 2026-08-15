@@ -10,14 +10,14 @@ output_root: ???
 index_output: ${output_root}/indexes/${split}.parquet
 split: train
 frame_interval: 0.5
-jobs: 300
+jobs: 200
 limit: null
 
 # Existing complete H5 shards can be reused to reconstruct a new Parquet index.
 resume: true
 # Regenerate existing H5 shards and replace an existing index.
 overwrite: false
-compression: lzf
+compression: zstd
 
 traffic_light_timeout_s: 0.2
 neighbor_observation_timeout_s: 0.3

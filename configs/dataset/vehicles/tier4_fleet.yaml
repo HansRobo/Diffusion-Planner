@@ -8,37 +8,31 @@
 # vehicle_length / vehicle_width taken from that project's vehicle_info.param.yaml.
 
 x2_dev:
-  _target_: diffusion_planner.data.VehicleParameters
   base_link_to_front: 5.71111
   vehicle_length: 7.2369
   vehicle_width: 2.42741
 
 prd_jt:
-  _target_: diffusion_planner.data.VehicleParameters
   base_link_to_front: 3.55
   vehicle_length: 4.40
   vehicle_width: 1.84
 
 erga: # Isuzu Erga, a full-size bus: these placeholders are certainly wrong for it.
-  _target_: diffusion_planner.data.VehicleParameters
   base_link_to_front: 7.5568
   vehicle_length: 10.8812
   vehicle_width: 2.8736
 
 rAwaNfK1:
-  _target_: diffusion_planner.data.VehicleParameters
   base_link_to_front: 5.71111
   vehicle_length: 7.2369
   vehicle_width: 2.42741
 
 L3Lm25QG:
-  _target_: diffusion_planner.data.VehicleParameters
   base_link_to_front: 5.71111
   vehicle_length: 7.2369
   vehicle_width: 2.42741
 
 dnjXqf91: # Minibus.
-  _target_: diffusion_planner.data.VehicleParameters
   base_link_to_front: 5.71111
   vehicle_length: 7.2369
   vehicle_width: 2.42741

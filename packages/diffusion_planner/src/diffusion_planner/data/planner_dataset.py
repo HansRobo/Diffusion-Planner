@@ -3,30 +3,22 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import h5py
+import hdf5plugin
 import numpy as np
 import pyarrow.parquet as pq
 import torch
 from numpy.typing import NDArray
 from torch.utils.data import DataLoader, Dataset
 
-VEHICLE_COLUMNS = ("base_link_to_front", "vehicle_length", "vehicle_width")
 REQUIRED_INDEX_COLUMNS = frozenset({"h5_path", "frame_index", "frame_time_ns"})
 H5_FORMAT = "diffusion_planner_frame_dataset"
-H5_FORMAT_VERSION = 2
+H5_FORMAT_VERSION = 4
 
-
-@dataclass(frozen=True)
-class VehicleParameters:
-    """Vehicle dimensions used while preprocessing source bags."""
-
-    base_link_to_front: float
-    vehicle_length: float
-    vehicle_width: float
+hdf5plugin.register(filters="zstd")
 
 
 class PlannerDataset(Dataset[dict[str, torch.Tensor]]):

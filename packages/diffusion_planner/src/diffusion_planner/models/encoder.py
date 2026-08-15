@@ -1,197 +1,650 @@
+"""Composable MLP-Mixer encoders for vectorized planner inputs."""
+
+from __future__ import annotations
+
 import torch
 from timm.models.mlp_mixer import MixerBlock
 from torch import nn
 
-CLASS_TYPE_EGO = 0
-CLASS_TYPE_NEIGHBOR = 1
-CLASS_TYPE_STATIC = 2
-CLASS_TYPE_LANE = 3
-CLASS_TYPE_ROUTE = 4
-CLASS_TYPE_POLYGON = 5
-CLASS_TYPE_LINE_STRING = 6
-CLASS_TYPE_GOAL_POSE = 7
-CLASS_TYPE_EGO_SHAPE = 8
-CLASS_TYPE_TURN_INDICATOR = 9
-CLASS_TYPE_NUM = 10
+from diffusion_planner.data.dimensions import (
+    AGENT_LABEL_DIM,
+    AGENT_POSE_DIM,
+    AGENT_SHAPE_DIM,
+    EGO_HISTORY_LENGTH,
+    EGO_SHAPE_DIM,
+    GOAL_POSE_DIM,
+    INTERSECTION_AREA_LENGTH,
+    LANE_GEOMETRY_DIM,
+    LANE_LENGTH,
+    LANE_TYPE_DIM,
+    ROAD_BORDER_LENGTH,
+    STOP_LINE_LENGTH,
+    TRAFFIC_LIGHT_DIM,
+    TRAFFIC_LIGHT_FUTURE_LENGTH,
+    TRAFFIC_LIGHT_PAST_LENGTH,
+)
+
+EGO_VELOCITY_INDEX = 4
 
 
-class LineEncoder(nn.Module):
-    """Encode polyline elements (e.g. lanes, route segments) into per-element features.
+def _element_embedding(hidden_dim: int) -> nn.Parameter:
+    embedding = nn.Parameter(torch.empty(hidden_dim))
+    nn.init.normal_(embedding, std=0.02)
+    return embedding
 
-    Each polyline is a fixed-length sequence of 2D points with a type one-hot
-    appended to every point. The point coordinates are embedded by a linear stem,
-    mixed across tokens by MLP-Mixer blocks, and average-pooled into a single
-    feature per polyline. The type one-hot is injected additively via a separate
-    embedding instead of being fed through the stem/Mixer.
-    """
+
+class OneHotEncoder(nn.Module):
+    """Encode one-hot vectors."""
+
+    def __init__(self, num_classes: int, output_dim: int) -> None:
+        super().__init__()
+        self.num_classes = num_classes
+        self.projection = nn.Linear(num_classes, output_dim, bias=False)
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        """Encode one-hot vectors.
+
+        Args:
+            values: One-hot vectors with shape `(..., C)`.
+
+        Returns:
+            Encoded features with shape `(..., output_dim)`.
+        """
+        return self.projection(values)
+
+
+class FloatVectorEncoder(nn.Module):
+    """Encode continuous vectors."""
+
+    def __init__(self, vector_dim: int, output_dim: int) -> None:
+        super().__init__()
+        self.vector_dim = vector_dim
+        self.projection = nn.Linear(vector_dim, output_dim)
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        """Encode continuous vectors.
+
+        Args:
+            values: Continuous vectors with shape `(..., D)`.
+
+        Returns:
+            Encoded features with shape `(..., output_dim)`.
+        """
+        return self.projection(values)
+
+
+class OneHotSequenceEncoder(nn.Module):
+    """Encode one-hot sequences with an MLP-Mixer."""
 
     def __init__(
         self,
-        line_len: int,
-        class_type: int,
+        sequence_len: int,
+        num_classes: int,
+        hidden_dim: int,
+        depth: int,
+        drop_path_rate: float,
+        embed_dim: int = 128,
+    ) -> None:
+        super().__init__()
+        self.sequence_len = sequence_len
+        self.num_classes = num_classes
+        self.one_hot_encoder = OneHotEncoder(num_classes, embed_dim)
+        self.blocks = nn.ModuleList(
+            MixerBlock(embed_dim, sequence_len, drop_path=drop_path_rate)
+            for _ in range(depth)
+        )
+        self.norm = nn.LayerNorm(embed_dim)
+        self.output = nn.Linear(embed_dim, hidden_dim)
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        """Encode one-hot sequences.
+
+        Args:
+            values: One-hot sequences with shape `(..., T, C)`.
+
+        Returns:
+            Encoded features with shape `(..., hidden_dim)`.
+        """
+        prefix = values.shape[:-2]
+        features = values.reshape(-1, self.sequence_len, self.num_classes)
+        features = self.one_hot_encoder(features)
+        for block in self.blocks:
+            features = block(features)
+        features = self.output(self.norm(features).mean(dim=1))
+        return features.reshape(*prefix, -1)
+
+
+class FloatVectorSequenceEncoder(nn.Module):
+    """Encode continuous-vector sequences with an MLP-Mixer."""
+
+    def __init__(
+        self,
+        sequence_len: int,
+        vector_dim: int,
+        hidden_dim: int,
+        depth: int,
+        drop_path_rate: float,
+        embed_dim: int = 128,
+    ) -> None:
+        super().__init__()
+        self.sequence_len = sequence_len
+        self.vector_dim = vector_dim
+        self.vector_encoder = FloatVectorEncoder(vector_dim, embed_dim)
+        self.blocks = nn.ModuleList(
+            MixerBlock(embed_dim, sequence_len, drop_path=drop_path_rate)
+            for _ in range(depth)
+        )
+        self.norm = nn.LayerNorm(embed_dim)
+        self.output = nn.Linear(embed_dim, hidden_dim)
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        """Encode continuous-vector sequences.
+
+        Args:
+            values: Continuous-vector sequences with shape `(..., T, D)`.
+
+        Returns:
+            Encoded features with shape `(..., hidden_dim)`.
+        """
+        prefix = values.shape[:-2]
+        features = values.reshape(-1, self.sequence_len, self.vector_dim)
+        features = self.vector_encoder(features)
+        for block in self.blocks:
+            features = block(features)
+        features = self.output(self.norm(features).mean(dim=1))
+        return features.reshape(*prefix, -1)
+
+
+def _mask_invalid(
+    features: torch.Tensor, invalid_mask: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return features.masked_fill(invalid_mask.unsqueeze(-1), 0.0), invalid_mask
+
+
+class IntersectionAreaEncoder(nn.Module):
+    """Encode intersection-area boundaries."""
+
+    def __init__(
+        self,
         drop_path_rate: float,
         hidden_dim: int,
         depth: int,
-        num_types: int,
         embed_dim: int = 128,
     ) -> None:
-        """Encode polyline elements for initialization.
-
-        Args:
-            line_len: Number of points per polyline (token count for the Mixer).
-            class_type: Class type id of this element (one of the CLASS_TYPE_* constants).
-            drop_path_rate: Stochastic depth rate for the Mixer blocks.
-            hidden_dim: Output feature dimension of the head.
-            depth: Number of MixerBlock layers.
-            num_types: Size of the per-point type one-hot in the input.
-            embed_dim: Internal embedding dimension.
-        """
         super().__init__()
-        self._class_type = class_type
-
-        self.type_emb = nn.Linear(num_types, embed_dim)
-
-        self.stem = nn.Linear(2, embed_dim)  # x, y
-        self.blocks = nn.ModuleList(
-            [
-                MixerBlock(embed_dim, line_len, drop_path=drop_path_rate)
-                for _ in range(depth)
-            ]
+        self.geometry_encoder = FloatVectorSequenceEncoder(
+            INTERSECTION_AREA_LENGTH, 2, hidden_dim, depth, drop_path_rate, embed_dim
         )
-        self.norm = nn.LayerNorm(embed_dim)
-        self.head = nn.Linear(embed_dim, hidden_dim)
+        self.element_embedding = _element_embedding(hidden_dim)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode a batch of polylines.
+    def forward(
+        self, intersection_area: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode intersection-area boundaries.
 
         Args:
-            x: Tensor of shape (B, P, V, D) where B is the batch size, P is the
-                number of polylines, V is the number of points per polyline
-                (== line_len), and D = 2 + num_types with each point laid out as
-                (x, y, type_one_hot...).
+            intersection_area: Boundary points with shape `(B, N, V, 2)`.
 
         Returns:
-            A tuple of:
-                - feat: Tensor of shape (B, P, hidden_dim). Per-polyline features;
-                  rows for invalid (all-zero) polylines are zeroed out.
-                - mask_p: Bool tensor of shape (B, P). True where the polyline is
-                  invalid (all elements zero).
+            Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
         """
-        b, p, v, _ = x.shape
-
-        # Mask before splitting: an element is empty only if every coord/type is 0.
-        mask_p = torch.sum(torch.ne(x, 0), dim=(-2, -1)) == 0
-        valid_indices = ~mask_p.view(-1)
-
-        # Split coordinates and type one-hot. The type is constant within an element,
-        # so a single representative point is enough.
-        coords = x[..., :2]  # (b, p, v, 2)
-        type_one_hot = x[:, :, 0, 2:]  # (b, p, num_types)
-
-        feat = coords.view(b * p, v, -1)  # (b * p, v, 2): x, y
-
-        feat = self.stem(feat)  # (b * p, v, embed_dim)
-        for block in self.blocks:
-            feat = block(feat)
-        feat = self.norm(feat)
-
-        # global average pooling over tokens
-        feat = torch.mean(feat, dim=1)
-
-        # Inject type information via embedding instead of through the stem/Mixer.
-        feat = feat + self.type_emb(type_one_hot.view(b * p, -1))
-
-        feat = self.head(feat)
-
-        # Apply mask to zero out invalid positions
-        feat = feat * valid_indices.float().unsqueeze(-1)
-
-        return feat.view(b, p, -1), mask_p.reshape(b, -1)
+        invalid_mask = torch.count_nonzero(intersection_area, dim=(-2, -1)) == 0
+        features = self.geometry_encoder(intersection_area) + self.element_embedding
+        return _mask_invalid(features, invalid_mask)
 
 
-class LaneEncoder(nn.Module):
-    """Encode lane polylines with attributes (speed limit, traffic lights, line types)."""
+class RoadBorderEncoder(nn.Module):
+    """Encode road-border polylines."""
 
     def __init__(
         self,
-        lane_len,
-        class_type,
-        drop_path_rate,
-        hidden_dim,
-        depth,
-        embed_dim=128,
-    ):
+        drop_path_rate: float,
+        hidden_dim: int,
+        depth: int,
+        embed_dim: int = 128,
+    ) -> None:
         super().__init__()
-
-        self._lane_len = lane_len
-        self._class_type = class_type
-
-        self.speed_limit_emb = nn.Linear(1, embed_dim)
-        self.unknown_speed_emb = nn.Embedding(1, embed_dim)
-        self.attribute_emb = nn.Linear(
-            5 + 2 * 10, embed_dim
-        )  # traffic_light and line type
-
-        self.stem = nn.Linear(8, embed_dim)
-        self.blocks = nn.ModuleList(
-            [
-                MixerBlock(embed_dim, lane_len, drop_path=drop_path_rate)
-                for i in range(depth)
-            ]
+        self.geometry_encoder = FloatVectorSequenceEncoder(
+            ROAD_BORDER_LENGTH, 2, hidden_dim, depth, drop_path_rate, embed_dim
         )
-        self.norm = nn.LayerNorm(embed_dim)
-        self.head = nn.Linear(embed_dim, hidden_dim)
+        self.element_embedding = _element_embedding(hidden_dim)
 
-    def forward(self, x, speed_limit, has_speed_limit):
-        """Encode lane polylines.
+    def forward(self, road_borders: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode road-border polylines.
 
         Args:
-            x: Tensor of shape (B, P, V, D) with coords (x, y, x_left-x, y_left-y,
-                x_right-x, y_right-y) plus traffic (5) and line_type (2*10).
-            speed_limit: Tensor of shape (B, P, 1).
-            has_speed_limit: Bool tensor of shape (B, P, 1).
+            road_borders: Polyline points with shape `(B, N, V, 2)`.
+
+        Returns:
+            Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
         """
-        attribute = x[:, :, 0, 8:]
-        x = x[..., :8]
+        invalid_mask = torch.count_nonzero(road_borders, dim=(-2, -1)) == 0
+        features = self.geometry_encoder(road_borders) + self.element_embedding
+        return _mask_invalid(features, invalid_mask)
 
-        b, p, v, _ = x.shape
-        mask_p = torch.sum(torch.ne(x[..., :8], 0), dim=(-2, -1)) == 0
-        valid_indices = ~mask_p.view(-1)
 
-        x = x.view(b * p, v, -1)
+class StopLineEncoder(nn.Module):
+    """Encode stop lines."""
 
-        # Use torch.where instead of indexing to maintain fixed size
-        x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
-
-        x = self.stem(x)  # (b * p, v, embed_dim)
-        for block in self.blocks:
-            x = block(x)
-        x = self.norm(x)
-
-        # global average pooling over tokens
-        x = torch.mean(x, dim=1)
-
-        # Reshape speed_limit and traffic to match flattened dimensions
-        speed_limit = speed_limit.view(b * p, 1)
-        has_speed_limit = has_speed_limit.view(b * p, 1)
-        attribute = attribute.view(b * p, -1)
-
-        # Create embeddings for all positions
-        speed_limit_emb = self.speed_limit_emb(speed_limit)
-        unknown_speed_emb = self.unknown_speed_emb(
-            torch.zeros(b * p, dtype=torch.long, device=x.device)
+    def __init__(
+        self,
+        drop_path_rate: float,
+        hidden_dim: int,
+        depth: int,
+        embed_dim: int = 128,
+    ) -> None:
+        super().__init__()
+        self.geometry_encoder = FloatVectorSequenceEncoder(
+            STOP_LINE_LENGTH, 2, hidden_dim, depth, drop_path_rate, embed_dim
         )
-        speed_limit_embedding = torch.where(
-            has_speed_limit, speed_limit_emb, unknown_speed_emb
+        self.element_embedding = _element_embedding(hidden_dim)
+
+    def forward(self, stop_lines: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode stop lines.
+
+        Args:
+            stop_lines: Line points with shape `(B, N, V, 2)`.
+
+        Returns:
+            Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
+        """
+        invalid_mask = torch.count_nonzero(stop_lines, dim=(-2, -1)) == 0
+        features = self.geometry_encoder(stop_lines) + self.element_embedding
+        return _mask_invalid(features, invalid_mask)
+
+
+class NeighborAgentEncoder(nn.Module):
+    """Encode neighbor motion history, shape, and semantic label."""
+
+    def __init__(
+        self,
+        drop_path_rate: float,
+        hidden_dim: int,
+        depth: int,
+        embed_dim: int = 128,
+    ) -> None:
+        super().__init__()
+        self.history_encoder = FloatVectorSequenceEncoder(
+            EGO_HISTORY_LENGTH,
+            AGENT_POSE_DIM,
+            hidden_dim,
+            depth,
+            drop_path_rate,
+            embed_dim,
+        )
+        self.shape_encoder = FloatVectorEncoder(AGENT_SHAPE_DIM, hidden_dim)
+        self.label_encoder = OneHotEncoder(AGENT_LABEL_DIM, hidden_dim)
+        self.element_embedding = _element_embedding(hidden_dim)
+
+    def forward(
+        self,
+        neighbor_agents_past: torch.Tensor,
+        agent_shape: torch.Tensor,
+        agent_label: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode neighbor agents.
+
+        Args:
+            neighbor_agents_past: Pose histories with shape `(B, N, T, 4)`.
+            agent_shape: Width and length with shape `(B, N, 2)`.
+            agent_label: Class one-hot vectors with shape `(B, N, 3)`.
+
+        Returns:
+            Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
+        """
+        invalid_mask = torch.count_nonzero(neighbor_agents_past, dim=(-2, -1)) == 0
+        features = self.history_encoder(neighbor_agents_past)
+        features = features + self.shape_encoder(agent_shape)
+        features = features + self.label_encoder(agent_label)
+        features = features + self.element_embedding
+        return _mask_invalid(features, invalid_mask)
+
+
+class LaneEncoder(nn.Module):
+    """Encode lane geometry and attributes."""
+
+    def __init__(
+        self,
+        drop_path_rate: float,
+        hidden_dim: int,
+        depth: int,
+        embed_dim: int = 128,
+    ) -> None:
+        super().__init__()
+        self.geometry_encoder = FloatVectorSequenceEncoder(
+            LANE_LENGTH,
+            LANE_GEOMETRY_DIM,
+            hidden_dim,
+            depth,
+            drop_path_rate,
+            embed_dim,
+        )
+        self.lane_type_encoder = OneHotEncoder(LANE_TYPE_DIM, hidden_dim)
+        self.past_traffic_encoder = OneHotSequenceEncoder(
+            TRAFFIC_LIGHT_PAST_LENGTH,
+            TRAFFIC_LIGHT_DIM,
+            hidden_dim,
+            depth,
+            drop_path_rate,
+            embed_dim,
+        )
+        self.future_traffic_encoder = OneHotSequenceEncoder(
+            TRAFFIC_LIGHT_FUTURE_LENGTH,
+            TRAFFIC_LIGHT_DIM,
+            hidden_dim,
+            depth,
+            drop_path_rate,
+            embed_dim,
+        )
+        self.speed_limit_encoder = FloatVectorEncoder(1, hidden_dim)
+        self.unknown_speed_embedding = nn.Parameter(torch.empty(hidden_dim))
+        self.element_embedding = _element_embedding(hidden_dim)
+        nn.init.normal_(self.unknown_speed_embedding, std=0.02)
+
+    def forward(
+        self,
+        lanes: torch.Tensor,
+        lane_types: torch.Tensor,
+        speed_limits: torch.Tensor,
+        traffic_light_past: torch.Tensor,
+        traffic_light_future: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode lanes.
+
+        Args:
+            lanes: Lane geometry with shape `(B, N, V, 6)`.
+            lane_types: Boundary type vectors with shape `(B, N, 20)`.
+            speed_limits: Speed limits with shape `(B, N, 1)`.
+            traffic_light_past: Past states with shape `(B, N, T_past, 6)`.
+            traffic_light_future: Future states with shape `(B, N, T_future, 6)`.
+
+        Returns:
+            Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
+        """
+        invalid_mask = torch.count_nonzero(lanes, dim=(-2, -1)) == 0
+        features = self.geometry_encoder(lanes)
+        features = features + self.lane_type_encoder(lane_types)
+        features = features + self.past_traffic_encoder(traffic_light_past)
+        features = features + self.future_traffic_encoder(traffic_light_future)
+        features = features + self.element_embedding
+
+        known_speed = speed_limits > 0
+        speed_features = self.speed_limit_encoder(speed_limits)
+        unknown_speed = self.unknown_speed_embedding.expand_as(speed_features)
+        features = features + torch.where(known_speed, speed_features, unknown_speed)
+        return _mask_invalid(features, invalid_mask)
+
+
+class EgoStopHistoryEncoder(nn.Module):
+    """Encode ego stop history."""
+
+    def __init__(
+        self,
+        velocity_threshold: float,
+        drop_path_rate: float,
+        hidden_dim: int,
+        depth: int,
+        embed_dim: int = 128,
+    ) -> None:
+        super().__init__()
+        self.velocity_threshold = velocity_threshold
+        self.stop_history_encoder = OneHotSequenceEncoder(
+            EGO_HISTORY_LENGTH,
+            2,
+            hidden_dim,
+            depth,
+            drop_path_rate,
+            embed_dim,
+        )
+        self.element_embedding = _element_embedding(hidden_dim)
+
+    def forward(
+        self, ego_agent_past: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode ego stop history.
+
+        Args:
+            ego_agent_past: Ego history with shape `(B, T, 6)`.
+
+        Returns:
+            Tokens with shape `(B, H)` and masks with shape `(B,)`.
+        """
+        invalid_mask = torch.zeros(
+            ego_agent_past.shape[0], dtype=torch.bool, device=ego_agent_past.device
+        )
+        velocity = ego_agent_past[..., EGO_VELOCITY_INDEX]
+        stopped = velocity <= self.velocity_threshold
+        stop_history = torch.stack((~stopped, stopped), dim=-1).to(ego_agent_past.dtype)
+        features = self.stop_history_encoder(stop_history) + self.element_embedding
+        return _mask_invalid(features, invalid_mask)
+
+
+class GoalPoseEncoder(nn.Module):
+    """Encode goal position and orientation."""
+
+    def __init__(self, hidden_dim: int) -> None:
+        super().__init__()
+        self.goal_pose_encoder = FloatVectorEncoder(GOAL_POSE_DIM, hidden_dim)
+        self.element_embedding = _element_embedding(hidden_dim)
+
+    def forward(self, goal_pose: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode goal poses.
+
+        Args:
+            goal_pose: Goal pose vectors with shape `(B, 4)`.
+
+        Returns:
+            Tokens with shape `(B, H)` and masks with shape `(B,)`.
+        """
+        invalid_mask = torch.zeros(
+            goal_pose.shape[0], dtype=torch.bool, device=goal_pose.device
+        )
+        features = self.goal_pose_encoder(goal_pose) + self.element_embedding
+        return _mask_invalid(features, invalid_mask)
+
+
+class EgoShapeEncoder(nn.Module):
+    """Encode ego vehicle dimensions."""
+
+    def __init__(self, hidden_dim: int) -> None:
+        super().__init__()
+        self.ego_shape_encoder = FloatVectorEncoder(EGO_SHAPE_DIM, hidden_dim)
+        self.element_embedding = _element_embedding(hidden_dim)
+
+    def forward(self, ego_shape: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode ego vehicle dimensions.
+
+        Args:
+            ego_shape: Vehicle dimensions with shape `(B, 3)`.
+
+        Returns:
+            Tokens with shape `(B, H)` and masks with shape `(B,)`.
+        """
+        invalid_mask = torch.zeros(
+            ego_shape.shape[0], dtype=torch.bool, device=ego_shape.device
+        )
+        features = self.ego_shape_encoder(ego_shape) + self.element_embedding
+        return _mask_invalid(features, invalid_mask)
+
+
+class FusionEncoder(nn.Module):
+    """Fuse scene tokens with padding-aware self-attention."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        depth: int,
+        dropout: float = 0.0,
+        feedforward_dim: int | None = None,
+    ) -> None:
+        super().__init__()
+        layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=num_heads,
+            dim_feedforward=feedforward_dim or hidden_dim * 4,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            layer, num_layers=depth, norm=nn.LayerNorm(hidden_dim)
         )
 
-        # Process traffic lights for all positions
-        traffic_light_embedding = self.attribute_emb(attribute)
+    def forward(self, tokens: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
+        """Fuse scene tokens with self-attention.
 
-        x = x + speed_limit_embedding + traffic_light_embedding
-        x = self.head(x)
+        Args:
+            tokens: Scene tokens with shape `(B, N, H)`.
+            padding_mask: Invalid-token mask with shape `(B, N)`.
 
-        # Apply mask to zero out invalid positions
-        x = x * valid_indices.float().unsqueeze(-1)
+        Returns:
+            Fused tokens with shape `(B, N, H)`.
+        """
+        features = self.transformer(tokens, src_key_padding_mask=padding_mask)
+        return features.masked_fill(padding_mask.unsqueeze(-1), 0.0)
 
-        return x.view(b, p, -1), mask_p.reshape(b, -1)
+
+class SceneEncoder(nn.Module):
+    """Tokenize and fuse an input-data map."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        fusion_depth: int,
+        encoder_depth: int,
+        drop_path_rate: float = 0.0,
+        dropout: float = 0.0,
+        embed_dim: int = 128,
+        velocity_threshold: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.neighbor_agent_encoder = NeighborAgentEncoder(
+            drop_path_rate,
+            hidden_dim,
+            encoder_depth,
+            embed_dim,
+        )
+        self.lane_encoder = LaneEncoder(
+            drop_path_rate,
+            hidden_dim,
+            encoder_depth,
+            embed_dim,
+        )
+        self.route_lane_encoder = LaneEncoder(
+            drop_path_rate,
+            hidden_dim,
+            encoder_depth,
+            embed_dim,
+        )
+        self.intersection_area_encoder = IntersectionAreaEncoder(
+            drop_path_rate,
+            hidden_dim,
+            encoder_depth,
+            embed_dim,
+        )
+        self.stop_line_encoder = StopLineEncoder(
+            drop_path_rate,
+            hidden_dim,
+            encoder_depth,
+            embed_dim,
+        )
+        self.road_border_encoder = RoadBorderEncoder(
+            drop_path_rate,
+            hidden_dim,
+            encoder_depth,
+            embed_dim,
+        )
+        self.ego_stop_history_encoder = EgoStopHistoryEncoder(
+            velocity_threshold,
+            drop_path_rate,
+            hidden_dim,
+            encoder_depth,
+            embed_dim,
+        )
+        self.goal_pose_encoder = GoalPoseEncoder(hidden_dim)
+        self.ego_shape_encoder = EgoShapeEncoder(hidden_dim)
+        self.fusion_encoder = FusionEncoder(
+            hidden_dim, num_heads, fusion_depth, dropout
+        )
+
+    def forward(
+        self, input_data: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode a batched planner input map.
+
+        Args:
+            input_data: Original planner tensors keyed by their schema names.
+
+        Returns:
+            Fused scene tokens with shape `(B, N, H)` and padding masks with
+            shape `(B, N)`.
+        """
+        neighbor_tokens, neighbor_mask = self.neighbor_agent_encoder(
+            input_data["neighbor_agents_past"],
+            input_data["agent_shape"],
+            input_data["agent_label"],
+        )
+        lane_tokens, lane_mask = self.lane_encoder(
+            input_data["lanes"],
+            input_data["lane_types"],
+            input_data["lanes_speed_limit"],
+            input_data["lane_traffic_light_past"],
+            input_data["lane_traffic_light_future"],
+        )
+        route_tokens, route_mask = self.route_lane_encoder(
+            input_data["route_lanes"],
+            input_data["route_lane_types"],
+            input_data["route_lanes_speed_limit"],
+            input_data["route_traffic_light_past"],
+            input_data["route_traffic_light_future"],
+        )
+
+        intersection_tokens, intersection_mask = self.intersection_area_encoder(
+            input_data["intersection_area"]
+        )
+        stop_line_tokens, stop_line_mask = self.stop_line_encoder(
+            input_data["stop_lines"]
+        )
+        road_border_tokens, road_border_mask = self.road_border_encoder(
+            input_data["road_borders"]
+        )
+
+        ego_stop_token, ego_stop_mask = self.ego_stop_history_encoder(
+            input_data["ego_agent_past"]
+        )
+        goal_pose_token, goal_pose_mask = self.goal_pose_encoder(
+            input_data["goal_pose"]
+        )
+        ego_shape_token, ego_shape_mask = self.ego_shape_encoder(
+            input_data["ego_shape"]
+        )
+        singleton_tokens = torch.stack(
+            (ego_stop_token, goal_pose_token, ego_shape_token), dim=1
+        )
+        singleton_mask = torch.stack(
+            (ego_stop_mask, goal_pose_mask, ego_shape_mask), dim=1
+        )
+
+        masks = (
+            neighbor_mask,
+            lane_mask,
+            route_mask,
+            intersection_mask,
+            stop_line_mask,
+            road_border_mask,
+        )
+        tokens = torch.cat(
+            (
+                neighbor_tokens,
+                lane_tokens,
+                route_tokens,
+                intersection_tokens,
+                stop_line_tokens,
+                road_border_tokens,
+                singleton_tokens,
+            ),
+            dim=1,
+        )
+        padding_mask = torch.cat((*masks, singleton_mask), dim=1)
+        return self.fusion_encoder(tokens, padding_mask), padding_mask

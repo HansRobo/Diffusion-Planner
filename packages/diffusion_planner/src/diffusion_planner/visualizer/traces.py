@@ -259,14 +259,13 @@ def _create_traffic_light_traces(
 def create_map_element_traces(
     frame: FrameData, style: VisualizerStyle
 ) -> list[BaseTraceType]:
-    """Create polygon, stop-line, and road-border traces."""
+    """Create intersection-area, stop-line, and road-border traces."""
     traces: list[BaseTraceType] = []
-    polygons = frame["polygons"]
-    polygon_lines = []
-    for polygon in polygons[FrameData.valid_rows(polygons)]:
-        points = polygon[:, :2]
-        polygon_lines.append(np.concatenate((points, points[:1]), axis=0))
-    x, y = _joined_lines(polygon_lines)
+    intersection_areas = frame["intersection_area"]
+    area_lines = []
+    for area in intersection_areas[FrameData.valid_rows(intersection_areas)]:
+        area_lines.append(np.concatenate((area, area[:1]), axis=0))
+    x, y = _joined_lines(area_lines)
     if x:
         traces.append(
             go.Scatter(
@@ -276,7 +275,7 @@ def create_map_element_traces(
                 fill="toself",
                 fillcolor=style.polygon_color,
                 line={"color": style.polygon_color, "width": 1},
-                name="Polygons",
+                name="Intersection areas",
                 legendgroup="map-elements",
                 hoverinfo="skip",
             )

@@ -19,7 +19,7 @@ def write_shard(path: Path) -> None:
     path.parent.mkdir(parents=True)
     with h5py.File(path, "w") as file:
         file.attrs["format"] = "diffusion_planner_frame_dataset"
-        file.attrs["format_version"] = 2
+        file.attrs["format_version"] = 4
         file.attrs["num_frames"] = 2
         frames = file.create_group("frames")
         frames.create_dataset(

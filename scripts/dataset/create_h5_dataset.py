@@ -13,6 +13,7 @@ from typing import Any
 
 import diffusion_planner_data_tools as dpt
 import h5py
+import hdf5plugin
 import hydra
 import numpy as np
 import pyarrow as pa
@@ -20,11 +21,20 @@ import pyarrow.parquet as pq
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from diffusion_planner.data import VehicleParameters
-
 SPLITS = ("train", "valid", "auto")
 FORMAT_NAME = "diffusion_planner_frame_dataset"
-FORMAT_VERSION = 2
+FORMAT_VERSION = 4
+
+hdf5plugin.register(filters="zstd")
+
+
+@dataclass(frozen=True)
+class VehicleParameters:
+    """Vehicle dimensions used while preprocessing source bags."""
+
+    base_link_to_front: float
+    vehicle_length: float
+    vehicle_width: float
 
 
 @dataclass(frozen=True)
@@ -70,9 +80,14 @@ class BagResult:
 
 
 def build_vehicles(config: DictConfig) -> dict[str, VehicleParameters]:
-    """Instantiate the project-to-vehicle mapping used by source bags."""
+    """Build the project-to-vehicle mapping used by source bags."""
     return {
-        str(project): hydra.utils.instantiate(node) for project, node in config.items()
+        str(project): VehicleParameters(
+            base_link_to_front=float(node.base_link_to_front),
+            vehicle_length=float(node.vehicle_length),
+            vehicle_width=float(node.vehicle_width),
+        )
+        for project, node in config.items()
     }
 
 
@@ -197,12 +212,17 @@ def write_h5(
             metadata_group = file.create_group("metadata")
             for key, values in result["frames"].items():
                 array = np.asarray(values)
+                compression = (
+                    dict(hdf5plugin.Zstd())
+                    if config.compression == "zstd"
+                    else {"compression": config.compression}
+                )
                 frames_group.create_dataset(
                     key,
                     data=array,
                     chunks=(1, *array.shape[1:]),
-                    compression=config.compression,
                     shuffle=config.compression is not None,
+                    **compression,
                 )
             for key, values in result["metadata"].items():
                 metadata_group.create_dataset(key, data=np.asarray(values))

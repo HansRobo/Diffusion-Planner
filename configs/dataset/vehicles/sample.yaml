@@ -1,5 +1,4 @@
 sample:
-  _target_: diffusion_planner.data.VehicleParameters
   base_link_to_front: 3.79
   vehicle_length: 4.89
   vehicle_width: 1.896

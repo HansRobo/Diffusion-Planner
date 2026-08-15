@@ -73,10 +73,10 @@ _TENSOR_SPECS: dict[str, TensorDisplaySpec] = {
     "route_lanes": TensorDisplaySpec(
         leading_axes=("route_lane",), row_axis="point_index", fields=_LANE_FIELDS
     ),
-    "polygons": TensorDisplaySpec(
-        leading_axes=("polygon",),
+    "intersection_area": TensorDisplaySpec(
+        leading_axes=("intersection_area",),
         row_axis="point_index",
-        fields=("x", "y", "intersection_area"),
+        fields=("x", "y"),
     ),
     "stop_lines": TensorDisplaySpec(
         leading_axes=("stop_line",), row_axis="point_index", fields=("x", "y")

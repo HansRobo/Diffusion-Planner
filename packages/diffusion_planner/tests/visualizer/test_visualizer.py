@@ -22,16 +22,13 @@ def make_frame() -> dict[str, np.ndarray]:
     neighbors[0, :, 6:8] = [1.8, 4.5]
     neighbors[0, :, 8] = 1.0
 
-    lanes = np.zeros((2, 3, 26), dtype=np.float32)
+    lanes = np.zeros((2, 3, 6), dtype=np.float32)
     lanes[0, :, 0] = [0.0, 5.0, 10.0]
     lanes[0, :, 3] = -2.0
     lanes[0, :, 5] = 2.0
-    lanes[0, :, 6] = 1.0
-    lanes[0, :, 16] = 1.0
 
-    polygons = np.zeros((1, 4, 3), dtype=np.float32)
-    polygons[0, :, :2] = [[5.0, 5.0], [7.0, 5.0], [7.0, 7.0], [5.0, 7.0]]
-    polygons[0, :, 2] = 1.0
+    intersection_area = np.zeros((1, 4, 2), dtype=np.float32)
+    intersection_area[0] = [[5.0, 5.0], [7.0, 5.0], [7.0, 7.0], [5.0, 7.0]]
 
     stop_lines = np.zeros((1, 2, 2), dtype=np.float32)
     stop_lines[0] = [[8.0, -2.0], [8.0, 2.0]]
@@ -46,12 +43,14 @@ def make_frame() -> dict[str, np.ndarray]:
         "ego_agent_past": ego,
         "neighbor_agents_past": neighbors,
         "lanes": lanes,
+        "lane_types": np.zeros((2, 20), dtype=np.float32),
         "lanes_speed_limit": np.array([[10.0], [0.0]], dtype=np.float32),
         "route_lanes": lanes[:1].copy(),
+        "route_lane_types": np.zeros((1, 20), dtype=np.float32),
         "route_lanes_speed_limit": np.array([[10.0]], dtype=np.float32),
         "lane_traffic_light_past": traffic,
         "route_traffic_light_past": traffic[:1].copy(),
-        "polygons": polygons,
+        "intersection_area": intersection_area,
         "stop_lines": stop_lines,
         "road_borders": road_borders,
         "goal_pose": np.array([20.0, 1.0, 1.0, 0.0], dtype=np.float32),

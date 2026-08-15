@@ -7,9 +7,12 @@ from pathlib import Path
 from typing import Any
 
 import h5py
+import hdf5plugin
 import numpy as np
 
 from .frame_index import FrameIndexRow, _validate_h5
+
+hdf5plugin.register(filters="zstd")
 
 
 class FrameLoader:

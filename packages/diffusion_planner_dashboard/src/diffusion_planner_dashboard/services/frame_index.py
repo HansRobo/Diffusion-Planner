@@ -6,13 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import h5py
+import hdf5plugin
 import numpy as np
 import pyarrow.parquet as pq
 from numpy.typing import NDArray
 
 H5_FORMAT = "diffusion_planner_frame_dataset"
-H5_FORMAT_VERSION = 2
+H5_FORMAT_VERSION = 4
 PARQUET_REQUIRED_COLUMNS = frozenset({"h5_path", "frame_index", "frame_time_ns"})
+
+hdf5plugin.register(filters="zstd")
 STAT_COLUMNS = (
     "ego_speed_mps",
     "ego_yaw_rate_rps",
