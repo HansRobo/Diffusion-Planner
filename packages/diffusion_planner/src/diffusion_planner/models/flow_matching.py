@@ -70,7 +70,9 @@ def compute_x0_flow_matching_loss(
     x_pred = x0_model(flow_state, time)
     elementwise_loss = loss_function((x_pred - target) / denominator)
     valid = (~expanded_mask).expand_as(elementwise_loss)
-    return elementwise_loss.masked_select(valid).mean()
+    masked_loss = elementwise_loss.masked_fill(~valid, 0.0)
+    valid_count = valid.sum().clamp_min(1)
+    return masked_loss.sum() / valid_count
 
 
 def predict_velocity(
@@ -94,9 +96,7 @@ def euler_step(
 ) -> torch.Tensor:
     """Advance one x0-prediction ODE step with Euler integration."""
     velocity = predict_velocity(x0_model, state, time, epsilon)
-    step_size = (next_time - time).reshape(
-        time.shape[0], *([1] * (state.ndim - 1))
-    )
+    step_size = (next_time - time).reshape(time.shape[0], *([1] * (state.ndim - 1)))
     return state + step_size * velocity
 
 
@@ -109,9 +109,7 @@ def heun_step(
 ) -> torch.Tensor:
     """Advance one x0-prediction ODE step with Heun integration."""
     velocity = predict_velocity(x0_model, state, time, epsilon)
-    step_size = (next_time - time).reshape(
-        time.shape[0], *([1] * (state.ndim - 1))
-    )
+    step_size = (next_time - time).reshape(time.shape[0], *([1] * (state.ndim - 1)))
     euler_state = state + step_size * velocity
     next_velocity = predict_velocity(x0_model, euler_state, next_time, epsilon)
     return state + step_size * 0.5 * (velocity + next_velocity)
@@ -137,9 +135,7 @@ def sample(
     for step in range(num_steps - 1):
         time = timesteps[step].expand(batch)
         next_time = timesteps[step + 1].expand(batch)
-        state = project_state(
-            heun_step(x0_model, state, time, next_time, epsilon)
-        )
+        state = project_state(heun_step(x0_model, state, time, next_time, epsilon))
     state = euler_step(
         x0_model,
         state,

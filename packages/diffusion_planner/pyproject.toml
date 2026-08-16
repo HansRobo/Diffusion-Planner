@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Model and visualization library for diffusion planner"
 requires-python = ">=3.10"
 dependencies = [
+    "accelerate>=1.14.0",
     "argcomplete>=3.7.0",
     "h5py>=3.16.0",
     "hdf5plugin>=7.0.0",
