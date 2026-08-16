@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
+from typing import Any
 
 import streamlit as st
 import torch
 
+from diffusion_planner.data import PlannerDataAugmentation
 from diffusion_planner.visualizer import plot_frame
 from diffusion_planner_dashboard.services import (
     FrameIndex,
@@ -73,6 +76,9 @@ def _cached_prediction(
     time_epsilon: float,
     noise_scale: float,
     seed: int,
+    apply_augmentation: bool,
+    lateral_offset: float,
+    yaw_offset: float,
 ):
     planner = _cached_planner(checkpoint_path, checkpoint_modification_time_ns, device)
     frame_data = _cached_frame(
@@ -81,6 +87,8 @@ def _cached_prediction(
         frame_time_ns,
         h5_modification_time_ns,
     )
+    if apply_augmentation:
+        frame_data = _augment_frame(frame_data, lateral_offset, yaw_offset)
     return run_inference(
         planner.model,
         frame_data,
@@ -90,6 +98,18 @@ def _cached_prediction(
         noise_scale=noise_scale,
         seed=seed,
     )
+
+
+def _augment_frame(
+    frame_data: dict[str, Any], lateral_offset: float, yaw_offset: float
+) -> dict[str, Any]:
+    """Apply a deterministic training augmentation to one frame."""
+    augmentation = PlannerDataAugmentation(
+        lateral_offset_range=(lateral_offset, lateral_offset),
+        yaw_offset_range=(yaw_offset, yaw_offset),
+        probability=1.0,
+    )
+    return augmentation(frame_data)
 
 
 def _render_source_settings() -> tuple[str | None, str | None]:
@@ -135,11 +155,39 @@ def _render_inference_settings() -> tuple[str, int, float, float, int]:
     return device, num_steps, time_epsilon, noise_scale, seed
 
 
+def _render_augmentation_settings() -> tuple[bool, float, float]:
+    """Render deterministic augmentation controls for checkpoint inference."""
+    st.sidebar.subheader("Data augmentation")
+    enabled = st.sidebar.checkbox("Apply augmentation", value=False)
+    lateral_offset = float(
+        st.sidebar.slider(
+            "Lateral offset [m]",
+            min_value=-5.0,
+            max_value=5.0,
+            value=1.0,
+            step=0.1,
+            disabled=not enabled,
+        )
+    )
+    yaw_offset_degrees = float(
+        st.sidebar.slider(
+            "Yaw offset [deg]",
+            min_value=-30.0,
+            max_value=30.0,
+            value=5.0,
+            step=0.5,
+            disabled=not enabled,
+        )
+    )
+    return enabled, lateral_offset, math.radians(yaw_offset_degrees)
+
+
 def render_training_results() -> None:
     """Render checkpoint inference alongside ground-truth trajectories."""
     st.title("Training Results")
     source_path_text, checkpoint_path_text = _render_source_settings()
     device, num_steps, time_epsilon, noise_scale, seed = _render_inference_settings()
+    apply_augmentation, lateral_offset, yaw_offset = _render_augmentation_settings()
     if source_path_text is None or checkpoint_path_text is None:
         st.info("Configure both a frame source and a checkpoint from the sidebar.")
         return
@@ -180,6 +228,11 @@ def render_training_results() -> None:
             row.frame_time_ns,
             h5_modification_time_ns,
         )
+        visualized_frame = (
+            _augment_frame(frame_data, lateral_offset, yaw_offset)
+            if apply_augmentation
+            else frame_data
+        )
         prediction, inference_seconds = _cached_prediction(
             str(checkpoint_path),
             checkpoint_modification_time_ns,
@@ -192,6 +245,9 @@ def render_training_results() -> None:
             time_epsilon,
             noise_scale,
             seed,
+            apply_augmentation,
+            lateral_offset,
+            yaw_offset,
         )
     except Exception as error:
         st.exception(error)
@@ -201,15 +257,21 @@ def render_training_results() -> None:
         f"Inference: {inference_seconds:.3f} s · seed: {seed} · "
         f"checkpoint: `{checkpoint_path}`"
     )
+    if apply_augmentation:
+        st.caption(
+            f"Augmentation: lateral offset {lateral_offset:.2f} m · "
+            f"yaw offset {math.degrees(yaw_offset):.2f} deg"
+        )
     figure = plot_frame(
-        frame_data,
+        visualized_frame,
         options=options,
         predicted_trajectory=prediction,
     )
     chart_key = (
         f"training-result::{checkpoint_path}::{checkpoint_modification_time_ns}::"
         f"{row.h5_path}::{row.frame_index}::{num_steps}::{time_epsilon}::"
-        f"{noise_scale}::{seed}"
+        f"{noise_scale}::{seed}::{apply_augmentation}::{lateral_offset}::"
+        f"{yaw_offset}"
     )
     figure.update_layout(autosize=True, uirevision=chart_key)
     st.plotly_chart(
