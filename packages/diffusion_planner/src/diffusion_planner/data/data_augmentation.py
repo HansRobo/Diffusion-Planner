@@ -8,6 +8,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from .dimensions import EGO_VELOCITY_INDEX
+
 
 class PlannerDataAugmentation:
     """Move ego along the y-axis, rotate it, and recenter one planner frame."""
@@ -17,10 +19,12 @@ class PlannerDataAugmentation:
         lateral_offset_range: tuple[float, float] = (-1.0, 1.0),
         yaw_offset_range: tuple[float, float] = (-math.radians(5), math.radians(5)),
         probability: float = 0.5,
+        ego_speed_scale_range: tuple[float, float] = (0.8, 1.2),
     ) -> None:
         self.lateral_offset_range = lateral_offset_range
         self.yaw_offset_range = yaw_offset_range
         self.probability = probability
+        self.ego_speed_scale_range = ego_speed_scale_range
 
     def __call__(self, input_data: dict[str, NDArray[Any]]) -> dict[str, NDArray[Any]]:
         """Return a coordinate-augmented shallow copy of one H5 frame."""
@@ -32,6 +36,7 @@ class PlannerDataAugmentation:
         ego_heading = _normalize(ego_current[2:4])
         lateral_offset = np.random.uniform(*self.lateral_offset_range)
         yaw_offset = np.random.uniform(*self.yaw_offset_range)
+        ego_speed_scale = np.random.uniform(*self.ego_speed_scale_range)
 
         augmented_position = ego_position.copy()
         augmented_position[1] += lateral_offset
@@ -41,6 +46,7 @@ class PlannerDataAugmentation:
         output["ego_agent_past"] = _transform_pose_tensor(
             input_data["ego_agent_past"], ego_position, ego_heading
         )
+        output["ego_agent_past"][..., EGO_VELOCITY_INDEX] *= ego_speed_scale
         if "ego_agent_future" in input_data:
             output["ego_agent_future"] = _transform_pose_tensor(
                 input_data["ego_agent_future"],

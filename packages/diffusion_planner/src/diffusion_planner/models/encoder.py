@@ -12,6 +12,7 @@ from diffusion_planner.data.dimensions import (
     AGENT_SHAPE_DIM,
     EGO_HISTORY_LENGTH,
     EGO_SHAPE_DIM,
+    EGO_VELOCITY_INDEX,
     GOAL_POSE_DIM,
     INTERSECTION_AREA_LENGTH,
     LANE_GEOMETRY_DIM,
@@ -23,8 +24,6 @@ from diffusion_planner.data.dimensions import (
     TRAFFIC_LIGHT_FUTURE_LENGTH,
     TRAFFIC_LIGHT_PAST_LENGTH,
 )
-
-EGO_VELOCITY_INDEX = 4
 
 
 def _element_embedding(hidden_dim: int) -> nn.Parameter:

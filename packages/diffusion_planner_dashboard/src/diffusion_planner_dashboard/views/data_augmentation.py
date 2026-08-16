@@ -54,7 +54,7 @@ def _cached_frame(
     return _frame_loader().load(row)
 
 
-def _render_augmentation_settings() -> tuple[float, float]:
+def _render_augmentation_settings() -> tuple[float, float, float]:
     st.sidebar.subheader("Augmentation")
     lateral_offset = float(
         st.sidebar.slider(
@@ -74,16 +74,29 @@ def _render_augmentation_settings() -> tuple[float, float]:
             step=0.5,
         )
     )
-    return lateral_offset, math.radians(yaw_offset_degrees)
+    ego_speed_scale = float(
+        st.sidebar.slider(
+            "Ego history speed scale",
+            min_value=0.5,
+            max_value=1.5,
+            value=1.0,
+            step=0.01,
+        )
+    )
+    return lateral_offset, math.radians(yaw_offset_degrees), ego_speed_scale
 
 
 def _augment_frame(
-    frame_data: dict[str, Any], lateral_offset: float, yaw_offset: float
+    frame_data: dict[str, Any],
+    lateral_offset: float,
+    yaw_offset: float,
+    ego_speed_scale: float,
 ) -> dict[str, Any]:
     augmentation = PlannerDataAugmentation(
         lateral_offset_range=(lateral_offset, lateral_offset),
         yaw_offset_range=(yaw_offset, yaw_offset),
         probability=1.0,
+        ego_speed_scale_range=(ego_speed_scale, ego_speed_scale),
     )
     return augmentation(frame_data)
 
@@ -106,7 +119,7 @@ def render_data_augmentation() -> None:
     """Render original and deterministically augmented frame data."""
     st.title("Data Augmentation")
     source_path_text = render_data_source_settings()
-    lateral_offset, yaw_offset = _render_augmentation_settings()
+    lateral_offset, yaw_offset, ego_speed_scale = _render_augmentation_settings()
     if source_path_text is None:
         st.info("Configure an H5 file or frame-index Parquet from the sidebar.")
         return
@@ -132,7 +145,9 @@ def render_data_augmentation() -> None:
             row.frame_time_ns,
             h5_modification_time_ns,
         )
-        augmented = _augment_frame(original, lateral_offset, yaw_offset)
+        augmented = _augment_frame(
+            original, lateral_offset, yaw_offset, ego_speed_scale
+        )
     except Exception as error:
         st.exception(error)
         return
@@ -140,11 +155,13 @@ def render_data_augmentation() -> None:
     yaw_offset_degrees = math.degrees(yaw_offset)
     st.caption(
         f"Applied fixed lateral offset {lateral_offset:.2f} m and yaw offset "
-        f"{yaw_offset_degrees:.2f} deg with probability 1.0."
+        f"{yaw_offset_degrees:.2f} deg, and scaled ego history speed by "
+        f"{ego_speed_scale:.2f} with probability 1.0."
     )
     original_column, augmented_column = st.columns(2)
     chart_identity = (
-        f"{index.path}::{row.index}::{lateral_offset}::{yaw_offset_degrees}"
+        f"{index.path}::{row.index}::{lateral_offset}::{yaw_offset_degrees}::"
+        f"{ego_speed_scale}"
     )
     with original_column:
         st.subheader("Original")

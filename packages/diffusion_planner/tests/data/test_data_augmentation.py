@@ -83,6 +83,20 @@ class PlannerDataAugmentationTest(unittest.TestCase):
         self.assertEqual(np.count_nonzero(result["lanes"][1]), 0)
         self.assertIs(result["agent_shape"], frame["agent_shape"])
 
+    def test_scales_only_ego_speed_history(self) -> None:
+        frame = _frame()
+        augmentation = PlannerDataAugmentation(
+            lateral_offset_range=(0.0, 0.0),
+            yaw_offset_range=(0.0, 0.0),
+            probability=1.0,
+            ego_speed_scale_range=(1.2, 1.2),
+        )
+
+        result = augmentation(frame)
+
+        np.testing.assert_allclose(result["ego_agent_past"][:, 4], 1.2)
+        np.testing.assert_allclose(result["ego_agent_future"][:, 4], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

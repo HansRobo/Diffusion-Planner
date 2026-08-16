@@ -10,6 +10,7 @@ dataset:
     _target_: diffusion_planner.data.PlannerDataAugmentation
     lateral_offset_range: [-1.0, 1.0]
     yaw_offset_range: [-0.0872665, 0.0872665]
+    ego_speed_scale_range: [0.8, 1.2]
     probability: 0.5
   data_normalizer:
     _target_: diffusion_planner.data.PlannerDataNormalizer

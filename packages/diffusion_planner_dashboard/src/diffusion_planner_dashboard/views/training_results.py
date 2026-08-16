@@ -79,6 +79,7 @@ def _cached_prediction(
     apply_augmentation: bool,
     lateral_offset: float,
     yaw_offset: float,
+    ego_speed_scale: float,
 ):
     planner = _cached_planner(checkpoint_path, checkpoint_modification_time_ns, device)
     frame_data = _cached_frame(
@@ -88,7 +89,9 @@ def _cached_prediction(
         h5_modification_time_ns,
     )
     if apply_augmentation:
-        frame_data = _augment_frame(frame_data, lateral_offset, yaw_offset)
+        frame_data = _augment_frame(
+            frame_data, lateral_offset, yaw_offset, ego_speed_scale
+        )
     return run_inference(
         planner.model,
         frame_data,
@@ -101,13 +104,17 @@ def _cached_prediction(
 
 
 def _augment_frame(
-    frame_data: dict[str, Any], lateral_offset: float, yaw_offset: float
+    frame_data: dict[str, Any],
+    lateral_offset: float,
+    yaw_offset: float,
+    ego_speed_scale: float,
 ) -> dict[str, Any]:
     """Apply a deterministic training augmentation to one frame."""
     augmentation = PlannerDataAugmentation(
         lateral_offset_range=(lateral_offset, lateral_offset),
         yaw_offset_range=(yaw_offset, yaw_offset),
         probability=1.0,
+        ego_speed_scale_range=(ego_speed_scale, ego_speed_scale),
     )
     return augmentation(frame_data)
 
@@ -155,7 +162,7 @@ def _render_inference_settings() -> tuple[str, int, float, float, int]:
     return device, num_steps, time_epsilon, noise_scale, seed
 
 
-def _render_augmentation_settings() -> tuple[bool, float, float]:
+def _render_augmentation_settings() -> tuple[bool, float, float, float]:
     """Render deterministic augmentation controls for checkpoint inference."""
     st.sidebar.subheader("Data augmentation")
     enabled = st.sidebar.checkbox("Apply augmentation", value=False)
@@ -179,7 +186,17 @@ def _render_augmentation_settings() -> tuple[bool, float, float]:
             disabled=not enabled,
         )
     )
-    return enabled, lateral_offset, math.radians(yaw_offset_degrees)
+    ego_speed_scale = float(
+        st.sidebar.slider(
+            "Ego history speed scale",
+            min_value=0.5,
+            max_value=1.5,
+            value=1.0,
+            step=0.01,
+            disabled=not enabled,
+        )
+    )
+    return enabled, lateral_offset, math.radians(yaw_offset_degrees), ego_speed_scale
 
 
 def render_training_results() -> None:
@@ -187,7 +204,9 @@ def render_training_results() -> None:
     st.title("Training Results")
     source_path_text, checkpoint_path_text = _render_source_settings()
     device, num_steps, time_epsilon, noise_scale, seed = _render_inference_settings()
-    apply_augmentation, lateral_offset, yaw_offset = _render_augmentation_settings()
+    apply_augmentation, lateral_offset, yaw_offset, ego_speed_scale = (
+        _render_augmentation_settings()
+    )
     if source_path_text is None or checkpoint_path_text is None:
         st.info("Configure both a frame source and a checkpoint from the sidebar.")
         return
@@ -229,7 +248,7 @@ def render_training_results() -> None:
             h5_modification_time_ns,
         )
         visualized_frame = (
-            _augment_frame(frame_data, lateral_offset, yaw_offset)
+            _augment_frame(frame_data, lateral_offset, yaw_offset, ego_speed_scale)
             if apply_augmentation
             else frame_data
         )
@@ -248,6 +267,7 @@ def render_training_results() -> None:
             apply_augmentation,
             lateral_offset,
             yaw_offset,
+            ego_speed_scale,
         )
     except Exception as error:
         st.exception(error)
@@ -260,7 +280,8 @@ def render_training_results() -> None:
     if apply_augmentation:
         st.caption(
             f"Augmentation: lateral offset {lateral_offset:.2f} m · "
-            f"yaw offset {math.degrees(yaw_offset):.2f} deg"
+            f"yaw offset {math.degrees(yaw_offset):.2f} deg · "
+            f"ego history speed scale {ego_speed_scale:.2f}"
         )
     figure = plot_frame(
         visualized_frame,
@@ -271,7 +292,7 @@ def render_training_results() -> None:
         f"training-result::{checkpoint_path}::{checkpoint_modification_time_ns}::"
         f"{row.h5_path}::{row.frame_index}::{num_steps}::{time_epsilon}::"
         f"{noise_scale}::{seed}::{apply_augmentation}::{lateral_offset}::"
-        f"{yaw_offset}"
+        f"{yaw_offset}::{ego_speed_scale}"
     )
     figure.update_layout(autosize=True, uirevision=chart_key)
     st.plotly_chart(
