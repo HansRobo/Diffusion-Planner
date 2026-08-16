@@ -8,7 +8,7 @@ dataset:
   file_capacity: 8
   data_augmentation:
     _target_: diffusion_planner.data.PlannerDataAugmentation
-    lateral_offset_range: [-1.0, 1.0]
+    lateral_offset_range: [-1.5, 1.5]
     yaw_offset_range: [-0.0872665, 0.0872665]
     ego_speed_scale_range: [0.8, 1.2]
     probability: 0.5
