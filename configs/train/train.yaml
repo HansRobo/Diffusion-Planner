@@ -28,3 +28,4 @@ training:
   log_interval: 200
   checkpoint_dir: checkpoints
   resume_from: null
+  warm_start: false

@@ -56,36 +56,40 @@ def load_checkpoint(
     scheduler: Scheduler,
     *,
     steps_per_epoch: int,
+    warm_start: bool = False,
 ) -> tuple[int, int]:
-    """Restore training state and return the restart epoch and global step."""
+    """Restore a full training state or warm-start from model weights only."""
     checkpoint_path = Path(path).expanduser()
     checkpoint: dict[str, Any] = torch.load(
         checkpoint_path, map_location="cpu", weights_only=False
     )
 
-    saved_steps_per_epoch = int(checkpoint["steps_per_epoch"])
-    if saved_steps_per_epoch != steps_per_epoch:
-        raise RuntimeError(
-            "steps_per_epoch changed since the checkpoint was created: "
-            f"saved={saved_steps_per_epoch}, current={steps_per_epoch}"
-        )
-    saved_world_size = int(checkpoint["world_size"])
-    if saved_world_size != accelerator.num_processes:
-        raise RuntimeError(
-            "world size changed since the checkpoint was created: "
-            f"saved={saved_world_size}, current={accelerator.num_processes}"
-        )
-
     model.load_state_dict(checkpoint["model"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
-    scheduler.load_state_dict(checkpoint["scheduler"])
+    if not warm_start:
+        saved_steps_per_epoch = int(checkpoint["steps_per_epoch"])
+        if saved_steps_per_epoch != steps_per_epoch:
+            raise RuntimeError(
+                "steps_per_epoch changed since the checkpoint was created: "
+                f"saved={saved_steps_per_epoch}, current={steps_per_epoch}"
+            )
+        saved_world_size = int(checkpoint["world_size"])
+        if saved_world_size != accelerator.num_processes:
+            raise RuntimeError(
+                "world size changed since the checkpoint was created: "
+                f"saved={saved_world_size}, current={accelerator.num_processes}"
+            )
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
     accelerator.wait_for_everyone()
 
-    epoch = int(checkpoint["epoch"])
-    global_step = int(checkpoint["global_step"])
+    epoch = 0 if warm_start else int(checkpoint["epoch"])
+    global_step = 0 if warm_start else int(checkpoint["global_step"])
     if accelerator.is_main_process:
-        print(
-            f"loaded checkpoint: {checkpoint_path} "
-            f"(restart_epoch={epoch + 1}, global_step={global_step})"
-        )
+        if warm_start:
+            print(f"warm-started model weights: {checkpoint_path}")
+        else:
+            print(
+                f"loaded checkpoint: {checkpoint_path} "
+                f"(restart_epoch={epoch + 1}, global_step={global_step})"
+            )
     return epoch, global_step

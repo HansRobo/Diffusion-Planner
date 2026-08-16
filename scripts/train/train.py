@@ -93,6 +93,7 @@ def main(config: DictConfig) -> None:
             optimizer,
             scheduler,
             steps_per_epoch=steps_per_epoch,
+            warm_start=bool(config.training.warm_start),
         )
 
     if accelerator.is_main_process:
