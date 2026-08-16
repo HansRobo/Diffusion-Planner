@@ -15,6 +15,7 @@ from numpy.typing import NDArray
 from torch.utils.data import DataLoader, Dataset
 
 from .data_augmentation import PlannerDataAugmentation
+from .normalization import PlannerDataNormalizer
 
 REQUIRED_INDEX_COLUMNS = frozenset({"h5_path", "frame_index", "frame_time_ns"})
 H5_FORMAT = "diffusion_planner_frame_dataset"
@@ -32,6 +33,7 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
         *,
         file_capacity: int = 8,
         data_augmentation: PlannerDataAugmentation | None = None,
+        data_normalizer: PlannerDataNormalizer | None = None,
     ) -> None:
         """Load the lightweight index and defer H5 opens to DataLoader workers."""
         self._index_path = Path(parquet_path).expanduser().resolve()
@@ -62,6 +64,7 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
 
         self._file_capacity = file_capacity
         self._data_augmentation = data_augmentation
+        self._data_normalizer = data_normalizer
         self._files: OrderedDict[Path, h5py.File] = OrderedDict()
         self._frame_keys: tuple[str, ...] | None = None
 
@@ -73,7 +76,7 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
         return str(self._resolve_h5_path(index)), int(self._frame_times_ns[index])
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        """Load one already-preprocessed frame from its H5 shard."""
+        """Load, augment, normalize, and convert one H5 frame to tensors."""
         path = self._resolve_h5_path(index)
         file = self._file_for(path)
         frame_index = int(self._frame_indices[index])
@@ -109,6 +112,8 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
             frame_arrays[key] = np.asarray(dataset[frame_index])
         if self._data_augmentation is not None:
             frame_arrays = self._data_augmentation(frame_arrays)
+        if self._data_normalizer is not None:
+            frame_arrays = self._data_normalizer(frame_arrays)
         return {key: torch.from_numpy(value) for key, value in frame_arrays.items()}
 
     def _resolve_h5_path(self, index: int) -> Path:

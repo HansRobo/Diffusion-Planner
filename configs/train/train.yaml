@@ -19,6 +19,12 @@ training:
   compile: true
   compile_backend: inductor
   max_grad_norm: 1.0
+  time_mean: -0.4
+  time_std: 1.0
+  time_epsilon: 1.0e-5
+  noise_scale: 1.0
+  ego_loss_weight: 10.0
+  neighbor_loss_weight: 1.0
   log_interval: 200
   checkpoint_dir: checkpoints
   resume_from: null

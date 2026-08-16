@@ -20,6 +20,7 @@ from tqdm import trange
 from diffusion_planner.models.flow_matching import (
     compute_x0_flow_matching_loss,
     sample,
+    x0_velocity_error,
 )
 from diffusion_planner.utils.optimizer import build_optimizer
 
@@ -94,12 +95,13 @@ def train(
         target = dataset[indices]
         loss = compute_x0_flow_matching_loss(
             x0_model=model,
-            loss_function=lambda error: error.square(),
+            loss_function=lambda x_prediction, clean_target, time: x0_velocity_error(
+                x_prediction - clean_target, time, 1e-5
+            ).square(),
             target=target,
             mask=torch.zeros(batch_size, dtype=torch.bool, device=dataset.device),
             time_mean=-0.4,
             time_std=1.0,
-            time_epsilon=1e-5,
             noise_scale=1.0,
         )
 

@@ -11,6 +11,11 @@ dataset:
     lateral_offset_range: [-1.0, 1.0]
     yaw_offset_range: [-0.0872665, 0.0872665]
     probability: 0.5
+  data_normalizer:
+    _target_: diffusion_planner.data.PlannerDataNormalizer
+    position_scale: 50.0
+    speed_scale: 15.0
+    vehicle_shape_scale: 10.0
 # This batch size applies to each process/GPU.
 batch_size: 160
 shuffle: true

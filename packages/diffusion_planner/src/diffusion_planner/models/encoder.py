@@ -375,8 +375,8 @@ class LaneEncoder(nn.Module):
         return _mask_invalid(features, invalid_mask)
 
 
-class EgoStopHistoryEncoder(nn.Module):
-    """Encode ego stop history."""
+class EgoHistoryEncoder(nn.Module):
+    """Encode ego stop history and current velocity."""
 
     def __init__(
         self,
@@ -396,12 +396,13 @@ class EgoStopHistoryEncoder(nn.Module):
             drop_path_rate,
             embed_dim,
         )
+        self.current_velocity_encoder = FloatVectorEncoder(1, hidden_dim)
         self.element_embedding = _element_embedding(hidden_dim)
 
     def forward(
         self, ego_agent_past: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode ego stop history.
+        """Encode ego stop history and current velocity.
 
         Args:
             ego_agent_past: Ego history with shape `(B, T, 6)`.
@@ -412,18 +413,26 @@ class EgoStopHistoryEncoder(nn.Module):
         invalid_mask = torch.zeros(
             ego_agent_past.shape[0], dtype=torch.bool, device=ego_agent_past.device
         )
-        velocity = ego_agent_past[..., EGO_VELOCITY_INDEX]
-        stopped = velocity <= self.velocity_threshold
+        velocity_history = ego_agent_past[..., EGO_VELOCITY_INDEX]
+        stopped = velocity_history <= self.velocity_threshold
         stop_history = torch.stack((~stopped, stopped), dim=-1).to(ego_agent_past.dtype)
-        features = self.stop_history_encoder(stop_history) + self.element_embedding
+        current_velocity = velocity_history[:, -1].unsqueeze(-1)
+        features = self.stop_history_encoder(stop_history)
+        features = features + self.current_velocity_encoder(current_velocity)
+        features = features + self.element_embedding
         return _mask_invalid(features, invalid_mask)
 
 
 class GoalPoseEncoder(nn.Module):
     """Encode goal position and orientation."""
 
-    def __init__(self, hidden_dim: int) -> None:
+    def __init__(
+        self,
+        hidden_dim: int,
+        max_distance: float = 2.0,
+    ) -> None:
         super().__init__()
+        self.max_distance = max_distance
         self.goal_pose_encoder = FloatVectorEncoder(GOAL_POSE_DIM, hidden_dim)
         self.element_embedding = _element_embedding(hidden_dim)
 
@@ -431,14 +440,13 @@ class GoalPoseEncoder(nn.Module):
         """Encode goal poses.
 
         Args:
-            goal_pose: Goal pose vectors with shape `(B, 4)`.
+            goal_pose: Normalized goal pose vectors with shape `(B, 4)`.
 
         Returns:
             Tokens with shape `(B, H)` and masks with shape `(B,)`.
         """
-        invalid_mask = torch.zeros(
-            goal_pose.shape[0], dtype=torch.bool, device=goal_pose.device
-        )
+        distance = torch.linalg.vector_norm(goal_pose[..., :2], dim=-1)
+        invalid_mask = distance > self.max_distance
         features = self.goal_pose_encoder(goal_pose) + self.element_embedding
         return _mask_invalid(features, invalid_mask)
 
@@ -517,6 +525,7 @@ class SceneEncoder(nn.Module):
         dropout: float = 0.0,
         embed_dim: int = 128,
         velocity_threshold: float = 0.1,
+        goal_max_distance: float = 2.0,
     ) -> None:
         super().__init__()
         self.neighbor_agent_encoder = NeighborAgentEncoder(
@@ -555,14 +564,14 @@ class SceneEncoder(nn.Module):
             encoder_depth,
             embed_dim,
         )
-        self.ego_stop_history_encoder = EgoStopHistoryEncoder(
+        self.ego_history_encoder = EgoHistoryEncoder(
             velocity_threshold,
             drop_path_rate,
             hidden_dim,
             encoder_depth,
             embed_dim,
         )
-        self.goal_pose_encoder = GoalPoseEncoder(hidden_dim)
+        self.goal_pose_encoder = GoalPoseEncoder(hidden_dim, goal_max_distance)
         self.ego_shape_encoder = EgoShapeEncoder(hidden_dim)
         self.fusion_encoder = FusionEncoder(
             hidden_dim, num_heads, fusion_depth, dropout
@@ -574,7 +583,7 @@ class SceneEncoder(nn.Module):
         """Encode a batched planner input map.
 
         Args:
-            input_data: Original planner tensors keyed by their schema names.
+            input_data: Normalized planner tensors keyed by their schema names.
 
         Returns:
             Fused scene tokens with shape `(B, N, H)` and padding masks with
@@ -610,7 +619,7 @@ class SceneEncoder(nn.Module):
             input_data["road_borders"]
         )
 
-        ego_stop_token, ego_stop_mask = self.ego_stop_history_encoder(
+        ego_history_token, ego_history_mask = self.ego_history_encoder(
             input_data["ego_agent_past"]
         )
         goal_pose_token, goal_pose_mask = self.goal_pose_encoder(
@@ -620,10 +629,10 @@ class SceneEncoder(nn.Module):
             input_data["ego_shape"]
         )
         singleton_tokens = torch.stack(
-            (ego_stop_token, goal_pose_token, ego_shape_token), dim=1
+            (ego_history_token, goal_pose_token, ego_shape_token), dim=1
         )
         singleton_mask = torch.stack(
-            (ego_stop_mask, goal_pose_mask, ego_shape_mask), dim=1
+            (ego_history_mask, goal_pose_mask, ego_shape_mask), dim=1
         )
 
         masks = (

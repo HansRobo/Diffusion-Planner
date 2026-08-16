@@ -15,8 +15,9 @@ from diffusion_planner.data.dimensions import (
     TRAFFIC_LIGHT_PAST_LENGTH,
 )
 from diffusion_planner.models.encoder import (
+    EGO_VELOCITY_INDEX,
+    EgoHistoryEncoder,
     EgoShapeEncoder,
-    EgoStopHistoryEncoder,
     FloatVectorEncoder,
     FusionEncoder,
     GoalPoseEncoder,
@@ -59,12 +60,16 @@ class SceneEncoderTest(unittest.TestCase):
             "lane_types": torch.zeros(2, 2, 20),
             "lanes_speed_limit": torch.zeros(2, 2, 1),
             "lane_traffic_light_past": torch.zeros(2, 2, TRAFFIC_LIGHT_PAST_LENGTH, 6),
-            "lane_traffic_light_future": torch.zeros(2, 2, TRAFFIC_LIGHT_FUTURE_LENGTH, 6),
+            "lane_traffic_light_future": torch.zeros(
+                2, 2, TRAFFIC_LIGHT_FUTURE_LENGTH, 6
+            ),
             "route_lanes": torch.zeros(2, 1, LANE_LENGTH, 6),
             "route_lane_types": torch.zeros(2, 1, 20),
             "route_lanes_speed_limit": torch.zeros(2, 1, 1),
             "route_traffic_light_past": torch.zeros(2, 1, TRAFFIC_LIGHT_PAST_LENGTH, 6),
-            "route_traffic_light_future": torch.zeros(2, 1, TRAFFIC_LIGHT_FUTURE_LENGTH, 6),
+            "route_traffic_light_future": torch.zeros(
+                2, 1, TRAFFIC_LIGHT_FUTURE_LENGTH, 6
+            ),
             "intersection_area": torch.zeros(2, 2, INTERSECTION_AREA_LENGTH, 2),
             "stop_lines": torch.zeros(2, 2, 2, 2),
             "road_borders": torch.zeros(2, 2, ROAD_BORDER_LENGTH, 2),
@@ -91,7 +96,7 @@ class SceneVectorEncoderTest(unittest.TestCase):
     def test_goal_pose_encoder(self) -> None:
         encoder = GoalPoseEncoder(hidden_dim=16)
         goal_pose = torch.tensor(
-            [[10.0, -2.0, 1.0, 0.0], [4.0, 3.0, 0.0, 1.0]],
+            [[0.2, -0.04, 1.0, 0.0], [0.08, 0.06, 0.0, 1.0]],
             requires_grad=True,
         )
 
@@ -103,11 +108,18 @@ class SceneVectorEncoderTest(unittest.TestCase):
         features.sum().backward()
         self.assertIsNotNone(goal_pose.grad)
 
+    def test_goal_pose_encoder_masks_goals_beyond_100_meters(self) -> None:
+        encoder = GoalPoseEncoder(hidden_dim=16, max_distance=2.0)
+        goal_pose = torch.tensor([[2.0, 0.0, 1.0, 0.0], [2.01, 0.0, 1.0, 0.0]])
+
+        features, mask = encoder(goal_pose)
+
+        torch.testing.assert_close(mask, torch.tensor([False, True]))
+        torch.testing.assert_close(features[1], torch.zeros_like(features[1]))
+
     def test_ego_shape_encoder(self) -> None:
         encoder = EgoShapeEncoder(hidden_dim=16)
-        ego_shape = torch.tensor(
-            [[3.8, 4.9, 1.9], [5.7, 7.2, 2.4]], requires_grad=True
-        )
+        ego_shape = torch.tensor([[3.8, 4.9, 1.9], [5.7, 7.2, 2.4]], requires_grad=True)
 
         features, mask = encoder(ego_shape)
 
@@ -118,9 +130,9 @@ class SceneVectorEncoderTest(unittest.TestCase):
         self.assertIsNotNone(ego_shape.grad)
 
 
-class EgoStopHistoryEncoderTest(unittest.TestCase):
+class EgoHistoryEncoderTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.encoder = EgoStopHistoryEncoder(
+        self.encoder = EgoHistoryEncoder(
             velocity_threshold=0.1,
             drop_path_rate=0.0,
             hidden_dim=16,
@@ -150,6 +162,20 @@ class EgoStopHistoryEncoderTest(unittest.TestCase):
         torch.testing.assert_close(baseline_features, changed_features)
         torch.testing.assert_close(baseline_mask, changed_mask)
 
+    def test_encodes_only_current_velocity_as_continuous_value(self) -> None:
+        baseline = torch.ones(1, EGO_HISTORY_LENGTH, 6)
+        changed_past = baseline.clone()
+        changed_past[:, :-1, EGO_VELOCITY_INDEX] = 2.0
+        changed_current = baseline.clone()
+        changed_current[:, -1, EGO_VELOCITY_INDEX] = 2.0
+
+        baseline_features, _ = self.encoder(baseline)
+        changed_past_features, _ = self.encoder(changed_past)
+        changed_current_features, _ = self.encoder(changed_current)
+
+        torch.testing.assert_close(baseline_features, changed_past_features)
+        self.assertFalse(torch.equal(baseline_features, changed_current_features))
+
 
 class FloatVectorEncoderTest(unittest.TestCase):
     def test_preserves_prefix_dimensions(self) -> None:
@@ -171,7 +197,9 @@ class MapLineEncoderTest(unittest.TestCase):
             depth=1,
             embed_dim=8,
         )
-        intersection_area = torch.zeros(2, 3, INTERSECTION_AREA_LENGTH, 2, requires_grad=True)
+        intersection_area = torch.zeros(
+            2, 3, INTERSECTION_AREA_LENGTH, 2, requires_grad=True
+        )
         with torch.no_grad():
             intersection_area[0, 0, :4] = torch.tensor(
                 [[1.0, 1.0], [2.0, 1.0], [2.0, 2.0], [1.0, 2.0]]
@@ -330,6 +358,7 @@ class LaneEncoderTest(unittest.TestCase):
         )
 
         self.assertFalse(torch.equal(baseline_features, changed_features))
+
 
 if __name__ == "__main__":
     unittest.main()

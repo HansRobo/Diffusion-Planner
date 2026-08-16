@@ -9,8 +9,7 @@ from diffusion_planner.data.dimensions import TRAJECTORY_DIM, TRAJECTORY_LENGTH
 
 from .decoder import TrajectoryDecoder
 from .encoder import SceneEncoder
-from .flow_matching import compute_x0_flow_matching_loss, sample
-from .normalizer import PlannerNormalizer
+from .flow_matching import sample
 
 
 class DiffusionPlanner(nn.Module):
@@ -29,24 +28,9 @@ class DiffusionPlanner(nn.Module):
         drop_path_rate: float = 0.0,
         dropout: float = 0.0,
         velocity_threshold: float = 0.1,
-        time_mean: float = -0.4,
-        time_std: float = 1.0,
-        time_epsilon: float = 1e-5,
-        noise_scale: float = 1.0,
-        position_scale: float = 50.0,
-        speed_scale: float = 15.0,
-        vehicle_shape_scale: float = 10.0,
+        goal_max_distance: float = 2.0,
     ) -> None:
         super().__init__()
-        self.time_mean = time_mean
-        self.time_std = time_std
-        self.time_epsilon = time_epsilon
-        self.noise_scale = noise_scale
-        self.normalizer = PlannerNormalizer(
-            position_scale=position_scale,
-            speed_scale=speed_scale,
-            vehicle_shape_scale=vehicle_shape_scale,
-        )
         self.scene_encoder = SceneEncoder(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
@@ -56,6 +40,7 @@ class DiffusionPlanner(nn.Module):
             dropout=dropout,
             embed_dim=embed_dim,
             velocity_threshold=velocity_threshold,
+            goal_max_distance=goal_max_distance,
         )
         self.trajectory_decoder = TrajectoryDecoder(
             hidden_dim=hidden_dim,
@@ -75,14 +60,6 @@ class DiffusionPlanner(nn.Module):
         neighbor_pose = input_data["neighbor_agents_past"][:, :, -1, :TRAJECTORY_DIM]
         return torch.cat((ego_pose, neighbor_pose), dim=1)
 
-    @staticmethod
-    def create_target_trajectory(
-        input_data: dict[str, torch.Tensor],
-    ) -> torch.Tensor:
-        """Combine labels into `(B, A, T, 4)` ego and neighbor trajectories."""
-        ego_future = input_data["ego_agent_future"][..., :TRAJECTORY_DIM].unsqueeze(1)
-        return torch.cat((ego_future, input_data["neighbor_agents_future"]), dim=1)
-
     def forward(
         self,
         x: torch.Tensor,
@@ -101,43 +78,26 @@ class DiffusionPlanner(nn.Module):
         Returns:
             Predicted normalized clean trajectories with shape `(B, A, T, 4)`.
         """
-        normalized_input = self.normalizer.normalize_input(input_data)
-        scene, scene_mask = self.scene_encoder(normalized_input)
-        agent_pose = self.create_agent_pose(normalized_input)
+        scene, scene_mask = self.scene_encoder(input_data)
+        agent_pose = self.create_agent_pose(input_data)
         return self.trajectory_decoder(x, x_mask, scene, scene_mask, agent_pose, time)
-
-    def compute_loss(self, input_data: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Compute masked conditional flow-matching loss for one batch."""
-        target = self.create_target_trajectory(input_data)
-        training_mask = (torch.count_nonzero(target, dim=-1) == 0).any(dim=-1)
-        target = self.normalizer.normalize_trajectory(target)
-        return compute_x0_flow_matching_loss(
-            x0_model=lambda state, time: self(state, training_mask, input_data, time),
-            loss_function=lambda error: error.square(),
-            target=target,
-            mask=training_mask,
-            time_mean=self.time_mean,
-            time_std=self.time_std,
-            time_epsilon=self.time_epsilon,
-            noise_scale=self.noise_scale,
-        )
 
     @torch.no_grad()
     def sample(
         self,
         input_data: dict[str, torch.Tensor],
         num_steps: int = 20,
+        time_epsilon: float = 1e-5,
         noise_scale: float = 1.0,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Generate physical-unit `(B, A, T, 4)` trajectories with Heun integration.
+        """Generate normalized `(B, A, T, 4)` trajectories with Heun integration.
 
         `input_data` must already contain training ground-truth or inference-time
         heuristic traffic-light future tensors.
         """
-        normalized_input = self.normalizer.normalize_input(input_data)
-        scene, scene_mask = self.scene_encoder(normalized_input)
-        agent_pose = self.create_agent_pose(normalized_input)
+        scene, scene_mask = self.scene_encoder(input_data)
+        agent_pose = self.create_agent_pose(input_data)
         neighbor_mask = (
             torch.count_nonzero(input_data["neighbor_agents_past"], dim=(-2, -1)) == 0
         )
@@ -158,17 +118,20 @@ class DiffusionPlanner(nn.Module):
             dtype=scene.dtype,
             generator=generator,
         )
-        normalized_trajectory = sample(
+        trajectory = sample(
             x0_model=lambda state, time: self.trajectory_decoder(
                 state, agent_mask, scene, scene_mask, agent_pose, time
             ),
             initial_state=initial_state,
             num_steps=num_steps,
-            epsilon=self.time_epsilon,
+            epsilon=time_epsilon,
             project_state=lambda state: state.masked_fill(
                 agent_mask[:, :, None, None], 0.0
             ),
         )
-        trajectory = self.normalizer.denormalize_trajectory(normalized_trajectory)
-        trajectory = self.normalizer.normalize_yaw_vector(trajectory)
+        yaw = trajectory[..., 2:4]
+        yaw = yaw / torch.linalg.vector_norm(
+            yaw, dim=-1, keepdim=True
+        ).clamp_min(1e-6)
+        trajectory = torch.cat((trajectory[..., :2], yaw), dim=-1)
         return trajectory.masked_fill(agent_mask[:, :, None, None], 0.0)

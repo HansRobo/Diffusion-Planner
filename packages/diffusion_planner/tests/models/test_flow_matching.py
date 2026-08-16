@@ -11,6 +11,7 @@ from diffusion_planner.models.flow_matching import (
     euler_step,
     heun_step,
     sample,
+    x0_velocity_error,
 )
 
 
@@ -19,12 +20,13 @@ class FlowMatchingTest(unittest.TestCase):
         target = torch.ones(1, 2, 3)
         loss = compute_x0_flow_matching_loss(
             x0_model=lambda _state, _time: target + 1.0,
-            loss_function=lambda error: error.abs(),
+            loss_function=lambda x_prediction, clean_target, time: x0_velocity_error(
+                x_prediction - clean_target, time, 1e-5
+            ).abs(),
             target=target,
             mask=torch.zeros(1, 2, dtype=torch.bool),
             time_mean=0.0,
             time_std=0.0,
-            time_epsilon=1e-5,
             noise_scale=1.0,
         )
 
@@ -38,12 +40,13 @@ class FlowMatchingTest(unittest.TestCase):
 
         loss = compute_x0_flow_matching_loss(
             x0_model=lambda _state, _time: target,
-            loss_function=lambda error: error.square(),
+            loss_function=lambda x_prediction, clean_target, time: x0_velocity_error(
+                x_prediction - clean_target, time, 1e-5
+            ).square(),
             target=target,
             mask=mask,
             time_mean=-0.4,
             time_std=1.0,
-            time_epsilon=1e-5,
             noise_scale=1.0,
         )
 

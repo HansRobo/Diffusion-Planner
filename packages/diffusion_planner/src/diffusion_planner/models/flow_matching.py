@@ -8,7 +8,7 @@ import torch
 
 X0Model = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 StateProjector = Callable[[torch.Tensor], torch.Tensor]
-ElementwiseLoss = Callable[[torch.Tensor], torch.Tensor]
+ElementwiseLoss = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 def sample_time(
@@ -30,23 +30,22 @@ def compute_x0_flow_matching_loss(
     mask: torch.Tensor,
     time_mean: float,
     time_std: float,
-    time_epsilon: float,
     noise_scale: float,
 ) -> torch.Tensor:
     """Compute masked flow-matching loss from clean-state predictions.
 
     Args:
         x0_model: Function mapping a noisy state and `(B,)` time to clean state.
-        loss_function: Elementwise loss applied to the time-weighted x0 error.
+        loss_function: Elementwise loss receiving x0 prediction, clean target,
+            and `(B,)` flow time.
         target: Clean target states with batch as the first dimension.
         mask: Invalid-element mask matching the leading dimensions of `target`.
         time_mean: Mean of the normal distribution before the sigmoid transform.
         time_std: Standard deviation before the sigmoid transform.
-        time_epsilon: Minimum denominator when converting x0 to velocity.
         noise_scale: Standard deviation of the initial Gaussian noise.
 
     Returns:
-        Scalar mean squared velocity error over valid target values.
+        Scalar mean elementwise loss over valid target values.
     """
     expanded_mask = mask
     while expanded_mask.ndim < target.ndim:
@@ -65,14 +64,22 @@ def compute_x0_flow_matching_loss(
     )
     time_view = time.reshape(target.shape[0], *([1] * (target.ndim - 1)))
     flow_state = (1 - time_view) * noise + time_view * target
-    denominator = (1 - time_view).clamp_min(time_epsilon)
-
     x_pred = x0_model(flow_state, time)
-    elementwise_loss = loss_function((x_pred - target) / denominator)
+    elementwise_loss = loss_function(x_pred, target, time)
     valid = (~expanded_mask).expand_as(elementwise_loss)
     masked_loss = elementwise_loss.masked_fill(~valid, 0.0)
     valid_count = valid.sum().clamp_min(1)
     return masked_loss.sum() / valid_count
+
+
+def x0_velocity_error(
+    error: torch.Tensor,
+    time: torch.Tensor,
+    epsilon: float,
+) -> torch.Tensor:
+    """Convert raw x0 error into flow-velocity error."""
+    time_view = time.reshape(time.shape[0], *([1] * (error.ndim - 1)))
+    return error / (1 - time_view).clamp_min(epsilon)
 
 
 def predict_velocity(

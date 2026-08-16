@@ -10,28 +10,16 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from omegaconf import DictConfig, OmegaConf
-from torch import nn
 from tqdm.auto import tqdm
 
 import wandb
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
+from diffusion_planner.models.loss import compute_diffusion_planner_loss
 from diffusion_planner.utils.checkpoint import load_checkpoint, save_checkpoint
 from diffusion_planner.utils.lr_scheduler import (
     build_lr_scheduler,
     describe_lr_scheduler,
 )
-
-
-class TrainingModel(nn.Module):
-    """Expose planner loss through forward for distributed gradient synchronization."""
-
-    def __init__(self, planner: DiffusionPlanner) -> None:
-        super().__init__()
-        self.planner = planner
-
-    def forward(self, input_data: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Compute scalar flow-matching loss for one batch."""
-        return self.planner.compute_loss(input_data)
 
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="train/train")
@@ -67,17 +55,15 @@ def main(config: DictConfig) -> None:
         )
 
     planner: DiffusionPlanner = hydra.utils.instantiate(config.model)
+    checkpoint_model = planner
     model_config = OmegaConf.to_container(
         config.model, resolve=True, throw_on_missing=True
     )
-    training_model = TrainingModel(planner)
     if accelerator.is_main_process:
-        parameter_count = sum(
-            parameter.numel() for parameter in training_model.parameters()
-        )
+        parameter_count = sum(parameter.numel() for parameter in planner.parameters())
         trainable_parameter_count = sum(
             parameter.numel()
-            for parameter in training_model.parameters()
+            for parameter in planner.parameters()
             if parameter.requires_grad
         )
         print(
@@ -86,13 +72,11 @@ def main(config: DictConfig) -> None:
         )
     optimizer = hydra.utils.instantiate(
         config.optimizer,
-        model=training_model,
+        model=planner,
         output_layers=(planner.trajectory_decoder.output_projection,),
         verbose=accelerator.is_main_process,
     )
-    training_model, optimizer, loader = accelerator.prepare(
-        training_model, optimizer, loader
-    )
+    planner, optimizer, loader = accelerator.prepare(planner, optimizer, loader)
     total_epochs = int(config.training.total_epochs)
     steps_per_epoch = len(loader)
     total_steps = total_epochs * steps_per_epoch
@@ -105,7 +89,7 @@ def main(config: DictConfig) -> None:
         start_epoch, global_step = load_checkpoint(
             accelerator,
             str(config.training.resume_from),
-            training_model,
+            checkpoint_model,
             optimizer,
             scheduler,
             steps_per_epoch=steps_per_epoch,
@@ -125,7 +109,7 @@ def main(config: DictConfig) -> None:
         print(describe_lr_scheduler(config.scheduler, total_steps))
         print(f"run_name={run_name} checkpoint_dir={checkpoint_dir}")
 
-    training_model.train()
+    planner.train()
     optimizer.zero_grad(set_to_none=True)
     log_interval = int(config.training.log_interval)
     for epoch in range(start_epoch, total_epochs):
@@ -138,10 +122,19 @@ def main(config: DictConfig) -> None:
             dynamic_ncols=True,
         )
         for step_in_epoch, batch in enumerate(progress, start=1):
-            loss = training_model(batch)
+            loss = compute_diffusion_planner_loss(
+                planner,
+                batch,
+                time_mean=float(config.training.time_mean),
+                time_std=float(config.training.time_std),
+                time_epsilon=float(config.training.time_epsilon),
+                noise_scale=float(config.training.noise_scale),
+                ego_loss_weight=float(config.training.ego_loss_weight),
+                neighbor_loss_weight=float(config.training.neighbor_loss_weight),
+            )
             accelerator.backward(loss)
             gradient_norm = accelerator.clip_grad_norm_(
-                training_model.parameters(), float(config.training.max_grad_norm)
+                planner.parameters(), float(config.training.max_grad_norm)
             )
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
@@ -181,7 +174,7 @@ def main(config: DictConfig) -> None:
                 save_checkpoint(
                     accelerator,
                     checkpoint_dir / "latest.pth",
-                    training_model,
+                    checkpoint_model,
                     optimizer,
                     scheduler,
                     model_config=model_config,  # pyright: ignore[reportArgumentType]
@@ -194,7 +187,7 @@ def main(config: DictConfig) -> None:
             save_checkpoint(
                 accelerator,
                 checkpoint_dir / f"epoch_{epoch + 1:04d}.pth",
-                training_model,
+                checkpoint_model,
                 optimizer,
                 scheduler,
                 model_config=model_config,  # pyright: ignore[reportArgumentType]

@@ -70,6 +70,7 @@ def _cached_prediction(
     h5_modification_time_ns: int,
     device: str,
     num_steps: int,
+    time_epsilon: float,
     noise_scale: float,
     seed: int,
 ):
@@ -85,6 +86,7 @@ def _cached_prediction(
         frame_data,
         device=device,
         num_steps=num_steps,
+        time_epsilon=time_epsilon,
         noise_scale=noise_scale,
         seed=seed,
     )
@@ -114,25 +116,30 @@ def _render_source_settings() -> tuple[str | None, str | None]:
     )
 
 
-def _render_inference_settings() -> tuple[str, int, float, int]:
+def _render_inference_settings() -> tuple[str, int, float, float, int]:
     st.sidebar.subheader("Inference")
     devices = ["cuda", "cpu"] if torch.cuda.is_available() else ["cpu"]
     device = st.sidebar.selectbox("Device", devices)
     num_steps = int(
         st.sidebar.number_input("Sampling steps", min_value=1, value=20, step=1)
     )
+    time_epsilon = float(
+        st.sidebar.number_input(
+            "Time epsilon", min_value=1e-8, value=1e-5, format="%.1e"
+        )
+    )
     noise_scale = float(
         st.sidebar.number_input("Noise scale", min_value=0.0, value=1.0, step=0.1)
     )
     seed = int(st.sidebar.number_input("Random seed", min_value=0, value=42, step=1))
-    return device, num_steps, noise_scale, seed
+    return device, num_steps, time_epsilon, noise_scale, seed
 
 
 def render_training_results() -> None:
     """Render checkpoint inference alongside ground-truth trajectories."""
     st.title("Training Results")
     source_path_text, checkpoint_path_text = _render_source_settings()
-    device, num_steps, noise_scale, seed = _render_inference_settings()
+    device, num_steps, time_epsilon, noise_scale, seed = _render_inference_settings()
     if source_path_text is None or checkpoint_path_text is None:
         st.info("Configure both a frame source and a checkpoint from the sidebar.")
         return
@@ -158,18 +165,13 @@ def render_training_results() -> None:
     render_row_metadata(row)
     options = render_plot_options()
 
-    metadata_columns = st.columns(5)
+    metadata_columns = st.columns(6)
     metadata_columns[0].metric("Checkpoint epoch", planner.epoch)
     metadata_columns[1].metric("Global step", planner.global_step)
     metadata_columns[2].metric("Sampling steps", num_steps)
-    metadata_columns[3].metric("Noise scale", noise_scale)
-    metadata_columns[4].metric("Device", device)
-    if planner.used_default_config:
-        st.warning(
-            "This checkpoint does not contain model_config; using the current "
-            "DiffusionPlanner defaults."
-        )
-
+    metadata_columns[3].metric("Time epsilon", f"{time_epsilon:.1e}")
+    metadata_columns[4].metric("Noise scale", noise_scale)
+    metadata_columns[5].metric("Device", device)
     try:
         h5_modification_time_ns = Path(row.h5_path).stat().st_mtime_ns
         frame_data = _cached_frame(
@@ -187,6 +189,7 @@ def render_training_results() -> None:
             h5_modification_time_ns,
             device,
             num_steps,
+            time_epsilon,
             noise_scale,
             seed,
         )
@@ -205,7 +208,8 @@ def render_training_results() -> None:
     )
     chart_key = (
         f"training-result::{checkpoint_path}::{checkpoint_modification_time_ns}::"
-        f"{row.h5_path}::{row.frame_index}::{num_steps}::{noise_scale}::{seed}"
+        f"{row.h5_path}::{row.frame_index}::{num_steps}::{time_epsilon}::"
+        f"{noise_scale}::{seed}"
     )
     figure.update_layout(autosize=True, uirevision=chart_key)
     st.plotly_chart(

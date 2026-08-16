@@ -18,6 +18,12 @@ from diffusion_planner.data.dimensions import (
 )
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.flow_matching import sample_time
+from diffusion_planner.models.loss import (
+    compute_diffusion_planner_loss,
+    create_target_trajectory,
+    trajectory_error_in_target_frame,
+    trajectory_huber_loss,
+)
 
 
 def make_input_data() -> dict[str, torch.Tensor]:
@@ -25,40 +31,30 @@ def make_input_data() -> dict[str, torch.Tensor]:
     neighbors = 2
     data = {
         "ego_agent_past": torch.zeros(batch, EGO_HISTORY_LENGTH, 6),
-        "neighbor_agents_past": torch.zeros(
-            batch, neighbors, EGO_HISTORY_LENGTH, 4
-        ),
+        "neighbor_agents_past": torch.zeros(batch, neighbors, EGO_HISTORY_LENGTH, 4),
         "agent_shape": torch.zeros(batch, neighbors, 2),
         "agent_label": torch.zeros(batch, neighbors, 3),
         "lanes": torch.zeros(batch, 2, LANE_LENGTH, 6),
         "lane_types": torch.zeros(batch, 2, 20),
         "lanes_speed_limit": torch.zeros(batch, 2, 1),
-        "lane_traffic_light_past": torch.zeros(
-            batch, 2, TRAFFIC_LIGHT_PAST_LENGTH, 6
-        ),
+        "lane_traffic_light_past": torch.zeros(batch, 2, TRAFFIC_LIGHT_PAST_LENGTH, 6),
         "lane_traffic_light_future": torch.zeros(
             batch, 2, TRAFFIC_LIGHT_FUTURE_LENGTH, 6
         ),
         "route_lanes": torch.zeros(batch, 1, LANE_LENGTH, 6),
         "route_lane_types": torch.zeros(batch, 1, 20),
         "route_lanes_speed_limit": torch.zeros(batch, 1, 1),
-        "route_traffic_light_past": torch.zeros(
-            batch, 1, TRAFFIC_LIGHT_PAST_LENGTH, 6
-        ),
+        "route_traffic_light_past": torch.zeros(batch, 1, TRAFFIC_LIGHT_PAST_LENGTH, 6),
         "route_traffic_light_future": torch.zeros(
             batch, 1, TRAFFIC_LIGHT_FUTURE_LENGTH, 6
         ),
-        "intersection_area": torch.zeros(
-            batch, 1, INTERSECTION_AREA_LENGTH, 2
-        ),
+        "intersection_area": torch.zeros(batch, 1, INTERSECTION_AREA_LENGTH, 2),
         "stop_lines": torch.zeros(batch, 1, STOP_LINE_LENGTH, 2),
         "road_borders": torch.zeros(batch, 1, ROAD_BORDER_LENGTH, 2),
         "goal_pose": torch.tensor([[10.0, 0.0, 1.0, 0.0]]),
         "ego_shape": torch.tensor([[3.8, 4.9, 1.9]]),
         "ego_agent_future": torch.zeros(batch, TRAJECTORY_LENGTH, 6),
-        "neighbor_agents_future": torch.zeros(
-            batch, neighbors, TRAJECTORY_LENGTH, 4
-        ),
+        "neighbor_agents_future": torch.zeros(batch, neighbors, TRAJECTORY_LENGTH, 4),
     }
     data["ego_agent_past"][..., 2] = 1.0
     data["neighbor_agents_past"][:, 0, :, 2] = 1.0
@@ -84,14 +80,21 @@ class DiffusionPlannerTest(unittest.TestCase):
         self.input_data = make_input_data()
 
     def test_compute_loss(self) -> None:
-        loss = self.model.compute_loss(self.input_data)
+        loss = compute_diffusion_planner_loss(
+            self.model,
+            self.input_data,
+            time_mean=-0.4,
+            time_std=1.0,
+            time_epsilon=1e-5,
+            noise_scale=1.0,
+        )
 
         self.assertEqual(loss.ndim, 0)
         self.assertTrue(torch.isfinite(loss))
         loss.backward()
 
     def test_partial_future_padding_masks_complete_agent(self) -> None:
-        target = self.model.create_target_trajectory(self.input_data)
+        target = create_target_trajectory(self.input_data)
         target[:, 0, TRAJECTORY_LENGTH // 2 :] = 0.0
 
         missing_future = (torch.count_nonzero(target, dim=-1) == 0).any(dim=-1)
@@ -100,13 +103,53 @@ class DiffusionPlannerTest(unittest.TestCase):
         self.assertFalse(missing_future[:, 1].any())
         self.assertTrue(missing_future[:, 2].all())
 
+    def test_position_error_uses_target_longitudinal_lateral_frame(self) -> None:
+        error = torch.tensor([[[[1.0, 0.0, 0.25, -0.5]]]])
+        target = torch.tensor([[[[0.0, 0.0, 0.0, 1.0]]]])
+
+        transformed = trajectory_error_in_target_frame(error, target)
+
+        torch.testing.assert_close(
+            transformed, torch.tensor([[[[0.0, -1.0, 0.25, -0.5]]]])
+        )
+
+    def test_trajectory_loss_uses_elementwise_huber(self) -> None:
+        error = torch.tensor([[[[0.0, -2.0, 0.5, -0.5]]]])
+        target = torch.tensor([[[[0.0, 0.0, 1.0, 0.0]]]])
+        prediction = target + error
+
+        loss = trajectory_huber_loss(
+            prediction, target, torch.zeros(1), time_epsilon=1e-5
+        )
+
+        torch.testing.assert_close(loss, torch.tensor([[[[0.0, 1.5, 0.125, 0.125]]]]))
+
+    def test_trajectory_loss_applies_ego_and_neighbor_weights(self) -> None:
+        target = torch.tensor(
+            [[[[0.0, 0.0, 1.0, 0.0]], [[0.0, 0.0, 1.0, 0.0]]]]
+        )
+        prediction = target.clone()
+        prediction[..., 0] += 0.5
+
+        loss = trajectory_huber_loss(
+            prediction,
+            target,
+            torch.zeros(1),
+            time_epsilon=1e-5,
+            ego_loss_weight=2.0,
+            neighbor_loss_weight=0.5,
+        )
+
+        torch.testing.assert_close(loss[0, 0, 0, 0], torch.tensor(0.25))
+        torch.testing.assert_close(loss[0, 1, 0, 0], torch.tensor(0.0625))
+
     def test_logistic_normal_time_is_inside_unit_interval(self) -> None:
         time = sample_time(
             128,
             torch.device("cpu"),
             torch.float32,
-            self.model.time_mean,
-            self.model.time_std,
+            -0.4,
+            1.0,
         )
 
         self.assertTrue(torch.all(time > 0))
@@ -141,7 +184,9 @@ class DiffusionPlannerTest(unittest.TestCase):
         decoder_handle.remove()
 
         self.assertEqual(trajectories.shape, (1, 3, TRAJECTORY_LENGTH, 4))
-        torch.testing.assert_close(trajectories[:, 2], torch.zeros_like(trajectories[:, 2]))
+        torch.testing.assert_close(
+            trajectories[:, 2], torch.zeros_like(trajectories[:, 2])
+        )
         self.assertEqual(call_count, 1)
         self.assertEqual(decoder_call_count, 3)
 
