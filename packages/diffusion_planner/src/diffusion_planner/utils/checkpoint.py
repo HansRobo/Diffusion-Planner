@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,13 @@ from torch import nn
 from torch.optim import Optimizer
 
 
+def _remove_state_prefix(state: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+    """Remove a wrapper prefix when every model-state key contains it."""
+    if state and all(key.startswith(prefix) for key in state):
+        return {key.removeprefix(prefix): value for key, value in state.items()}
+    return dict(state)
+
+
 def save_checkpoint(
     accelerator: Accelerator,
     path: str | Path,
@@ -19,6 +27,7 @@ def save_checkpoint(
     optimizer: Optimizer,
     scheduler: Scheduler,
     *,
+    model_config: Mapping[str, Any],
     epoch: int,
     step_in_epoch: int,
     global_step: int,
@@ -27,8 +36,10 @@ def save_checkpoint(
     """Atomically save model and training state from the main process."""
     checkpoint_path = Path(path)
     temporary_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+    model_state = _remove_state_prefix(accelerator.get_state_dict(model), "_orig_mod.")
     state = {
-        "model": accelerator.get_state_dict(model),
+        "model": model_state,
+        "model_config": dict(model_config),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
         "epoch": epoch,
@@ -75,7 +86,8 @@ def load_checkpoint(
     unwrapped_model = accelerator.unwrap_model(
         model, keep_fp32_wrapper=False, keep_torch_compile=False
     )
-    unwrapped_model.load_state_dict(checkpoint["model"])
+    model_state = _remove_state_prefix(checkpoint["model"], "_orig_mod.")
+    unwrapped_model.load_state_dict(model_state)
     optimizer.load_state_dict(checkpoint["optimizer"])
     scheduler.load_state_dict(checkpoint["scheduler"])
     accelerator.wait_for_everyone()

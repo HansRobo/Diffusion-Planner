@@ -63,6 +63,11 @@ class PlannerDataAugmentationTest(unittest.TestCase):
             atol=1e-6,
         )
         np.testing.assert_allclose(
+            result["ego_agent_future"][0, :4],
+            _pose(-2.0, 0.0, 0.0, -1.0),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
             result["goal_pose"],
             _pose(0.0, -4.0, 0.0, -1.0),
             atol=1e-6,

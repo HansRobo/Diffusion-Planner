@@ -1,3 +1,0 @@
-output_dir: checkpoints
-resume_from: null
-latest_interval_steps: 100

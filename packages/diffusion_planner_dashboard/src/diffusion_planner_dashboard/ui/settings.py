@@ -55,6 +55,7 @@ def render_plot_options() -> FramePlotOptions:
         lane_boundaries = st.checkbox("Lane boundaries", value=True)
         agent_history = st.checkbox("Agent history", value=True)
         agent_future = st.checkbox("Agent future labels", value=True)
+        agent_prediction = st.checkbox("Agent prediction", value=True)
         ego_shape = st.checkbox("Ego footprint", value=True)
         goal = st.checkbox("Goal pose", value=True)
         traffic_lights = st.checkbox("Traffic lights", value=True)
@@ -63,6 +64,7 @@ def render_plot_options() -> FramePlotOptions:
         show_lane_boundaries=lane_boundaries,
         show_agent_history=agent_history,
         show_agent_future=agent_future,
+        show_agent_prediction=agent_prediction,
         show_ego_shape=ego_shape,
         show_goal=goal,
         show_traffic_lights=traffic_lights,

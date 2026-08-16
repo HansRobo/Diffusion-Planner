@@ -122,7 +122,10 @@ def _leading_axis_names(spec: TensorDisplaySpec, count: int) -> list[str]:
 
 
 def _slice_tensor(
-    tensor_name: str, array: NDArray[np.generic], spec: TensorDisplaySpec
+    tensor_name: str,
+    array: NDArray[np.generic],
+    spec: TensorDisplaySpec,
+    key_prefix: str,
 ) -> tuple[NDArray[np.generic], tuple[int, ...]]:
     leading_count = max(0, array.ndim - 2)
     selected: list[int] = []
@@ -134,7 +137,7 @@ def _slice_tensor(
                 max_value=array.shape[axis] - 1,
                 value=0,
                 step=1,
-                key=f"tensor-inspector::{tensor_name}::axis-{axis}",
+                key=f"{key_prefix}::{tensor_name}::axis-{axis}",
             )
         )
     if not selected:
@@ -169,7 +172,9 @@ def _table_data(
     return columns
 
 
-def render_tensor_inspector(frame_data: Mapping[str, Any]) -> None:
+def render_tensor_inspector(
+    frame_data: Mapping[str, Any], *, key_prefix: str = "tensor-inspector"
+) -> None:
     """Render a collapsed raw-data inspector for the selected frame."""
     with st.expander("Tensor Inspector", expanded=False):
         tensor_names = sorted(frame_data)
@@ -180,13 +185,13 @@ def render_tensor_inspector(frame_data: Mapping[str, Any]) -> None:
         tensor_name = st.selectbox(
             "Tensor",
             tensor_names,
-            key="tensor-inspector::tensor",
+            key=f"{key_prefix}::tensor",
         )
         array = np.asarray(frame_data[tensor_name])
         st.caption(f"Shape: {array.shape} · Dtype: {array.dtype}")
 
         spec = _TENSOR_SPECS.get(tensor_name, TensorDisplaySpec())
-        displayed, selected = _slice_tensor(tensor_name, array, spec)
+        displayed, selected = _slice_tensor(tensor_name, array, spec, key_prefix)
         if selected:
             prefix = ", ".join(str(index) for index in selected)
             st.code(

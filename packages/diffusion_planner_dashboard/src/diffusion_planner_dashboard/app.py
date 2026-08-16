@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import streamlit as st
 
-from diffusion_planner_dashboard.views import render_frame_browser, render_home
+from diffusion_planner_dashboard.views import (
+    render_data_augmentation,
+    render_frame_browser,
+    render_home,
+    render_training_results,
+)
 
 
 def main() -> None:
@@ -22,6 +27,16 @@ def main() -> None:
                     render_frame_browser,
                     title="Frame Browser",
                     icon=":material/animation:",
+                ),
+                st.Page(
+                    render_training_results,
+                    title="Training Results",
+                    icon=":material/model_training:",
+                ),
+                st.Page(
+                    render_data_augmentation,
+                    title="Data Augmentation",
+                    icon=":material/compare:",
                 ),
             ],
         }

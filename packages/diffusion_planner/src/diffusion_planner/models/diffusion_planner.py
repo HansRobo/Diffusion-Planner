@@ -72,9 +72,7 @@ class DiffusionPlanner(nn.Module):
     ) -> torch.Tensor:
         """Create current `[x, y, cos_yaw, sin_yaw]` poses with shape `(B, A, 4)`."""
         ego_pose = input_data["ego_agent_past"][:, -1, :TRAJECTORY_DIM].unsqueeze(1)
-        neighbor_pose = input_data["neighbor_agents_past"][
-            :, :, -1, :TRAJECTORY_DIM
-        ]
+        neighbor_pose = input_data["neighbor_agents_past"][:, :, -1, :TRAJECTORY_DIM]
         return torch.cat((ego_pose, neighbor_pose), dim=1)
 
     @staticmethod
@@ -106,9 +104,7 @@ class DiffusionPlanner(nn.Module):
         normalized_input = self.normalizer.normalize_input(input_data)
         scene, scene_mask = self.scene_encoder(normalized_input)
         agent_pose = self.create_agent_pose(normalized_input)
-        return self.trajectory_decoder(
-            x, x_mask, scene, scene_mask, agent_pose, time
-        )
+        return self.trajectory_decoder(x, x_mask, scene, scene_mask, agent_pose, time)
 
     def compute_loss(self, input_data: dict[str, torch.Tensor]) -> torch.Tensor:
         """Compute masked conditional flow-matching loss for one batch."""
@@ -116,9 +112,7 @@ class DiffusionPlanner(nn.Module):
         training_mask = (torch.count_nonzero(target, dim=-1) == 0).any(dim=-1)
         target = self.normalizer.normalize_trajectory(target)
         return compute_x0_flow_matching_loss(
-            x0_model=lambda state, time: self(
-                state, training_mask, input_data, time
-            ),
+            x0_model=lambda state, time: self(state, training_mask, input_data, time),
             loss_function=lambda error: error.square(),
             target=target,
             mask=training_mask,
@@ -133,6 +127,8 @@ class DiffusionPlanner(nn.Module):
         self,
         input_data: dict[str, torch.Tensor],
         num_steps: int = 20,
+        noise_scale: float = 1.0,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Generate physical-unit `(B, A, T, 4)` trajectories with Heun integration.
 
@@ -153,13 +149,14 @@ class DiffusionPlanner(nn.Module):
         )
         agent_mask = torch.cat((ego_mask, neighbor_mask), dim=1)
         batch, agents = agent_mask.shape
-        initial_state = self.noise_scale * torch.randn(
+        initial_state = noise_scale * torch.randn(
             batch,
             agents,
             TRAJECTORY_LENGTH,
             TRAJECTORY_DIM,
             device=scene.device,
             dtype=scene.dtype,
+            generator=generator,
         )
         normalized_trajectory = sample(
             x0_model=lambda state, time: self.trajectory_decoder(

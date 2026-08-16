@@ -22,9 +22,7 @@ class PlannerDataAugmentation:
         self.yaw_offset_range = yaw_offset_range
         self.probability = probability
 
-    def __call__(
-        self, input_data: dict[str, NDArray[Any]]
-    ) -> dict[str, NDArray[Any]]:
+    def __call__(self, input_data: dict[str, NDArray[Any]]) -> dict[str, NDArray[Any]]:
         """Return a coordinate-augmented shallow copy of one H5 frame."""
         if np.random.random() >= self.probability:
             return input_data.copy()
@@ -45,7 +43,9 @@ class PlannerDataAugmentation:
         )
         if "ego_agent_future" in input_data:
             output["ego_agent_future"] = _transform_pose_tensor(
-                input_data["ego_agent_future"], ego_position, ego_heading
+                input_data["ego_agent_future"],
+                augmented_position,
+                augmented_heading,
             )
         output["neighbor_agents_past"] = _transform_pose_tensor(
             input_data["neighbor_agents_past"],
@@ -89,9 +89,7 @@ def _rotate(vector: NDArray[Any], angle: float) -> NDArray[Any]:
     )
 
 
-def _vectors_to_local(
-    vectors: NDArray[Any], heading: NDArray[Any]
-) -> NDArray[Any]:
+def _vectors_to_local(vectors: NDArray[Any], heading: NDArray[Any]) -> NDArray[Any]:
     x = vectors[..., 0] * heading[0] + vectors[..., 1] * heading[1]
     y = -vectors[..., 0] * heading[1] + vectors[..., 1] * heading[0]
     return np.stack((x, y), axis=-1)

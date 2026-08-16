@@ -23,6 +23,8 @@ class VisualizerStyle:
     neighbor_future_color: str = "#65a30d"
     past_trajectory_color: str = "#2563eb"
     future_trajectory_color: str = "#16a34a"
+    ego_prediction_color: str = "#f97316"
+    neighbor_prediction_color: str = "#9333ea"
     goal_color: str = "#7c3aed"
     lane_width: float = 1.2
     route_width: float = 3.0
@@ -38,6 +40,7 @@ class FramePlotOptions:
     show_lane_boundaries: bool = True
     show_agent_history: bool = True
     show_agent_future: bool = True
+    show_agent_prediction: bool = True
     show_ego_shape: bool = True
     show_goal: bool = True
     show_traffic_lights: bool = True

@@ -49,13 +49,16 @@ def main(config: DictConfig) -> None:
     set_seed(int(config.seed), device_specific=True)
 
     run_name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{config.experiment_name}"
-    checkpoint_dir = Path(str(config.checkpoint.output_dir)) / run_name
+    checkpoint_dir = Path(str(config.training.checkpoint_dir)) / run_name
 
     if accelerator.is_main_process:
         wandb_config = OmegaConf.to_container(
             config, resolve=True, throw_on_missing=True
         )
-        wandb.init(name=run_name, config=wandb_config)  # type: ignore
+        wandb.init(
+            name=run_name,
+            config=wandb_config,  # type: ignore
+        )
 
     loader = hydra.utils.instantiate(config.dataloader)
     if len(loader) == 0:
@@ -64,6 +67,9 @@ def main(config: DictConfig) -> None:
         )
 
     planner: DiffusionPlanner = hydra.utils.instantiate(config.model)
+    model_config = OmegaConf.to_container(
+        config.model, resolve=True, throw_on_missing=True
+    )
     training_model = TrainingModel(planner)
     if accelerator.is_main_process:
         parameter_count = sum(
@@ -95,10 +101,10 @@ def main(config: DictConfig) -> None:
 
     start_epoch = 0
     global_step = 0
-    if config.checkpoint.resume_from is not None:
+    if config.training.resume_from is not None:
         start_epoch, global_step = load_checkpoint(
             accelerator,
-            str(config.checkpoint.resume_from),
+            str(config.training.resume_from),
             training_model,
             optimizer,
             scheduler,
@@ -122,7 +128,6 @@ def main(config: DictConfig) -> None:
     training_model.train()
     optimizer.zero_grad(set_to_none=True)
     log_interval = int(config.training.log_interval)
-    latest_interval = int(config.checkpoint.latest_interval_steps)
     for epoch in range(start_epoch, total_epochs):
         if hasattr(loader, "set_epoch"):
             loader.set_epoch(epoch)
@@ -172,13 +177,14 @@ def main(config: DictConfig) -> None:
                         f"grad_norm={metric_values['train/grad_norm']:.3f} "
                         f"lr={metric_values['train/learning_rate']:.2e}"
                     )
-            if accelerator.is_main_process and global_step % latest_interval == 0:
+            if accelerator.is_main_process and global_step % log_interval == 0:
                 save_checkpoint(
                     accelerator,
                     checkpoint_dir / "latest.pth",
                     training_model,
                     optimizer,
                     scheduler,
+                    model_config=model_config,  # pyright: ignore[reportArgumentType]
                     epoch=epoch,
                     step_in_epoch=step_in_epoch,
                     global_step=global_step,
@@ -191,6 +197,7 @@ def main(config: DictConfig) -> None:
                 training_model,
                 optimizer,
                 scheduler,
+                model_config=model_config,  # pyright: ignore[reportArgumentType]
                 epoch=epoch + 1,
                 step_in_epoch=0,
                 global_step=global_step,

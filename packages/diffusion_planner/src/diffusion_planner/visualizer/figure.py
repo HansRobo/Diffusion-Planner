@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
 import plotly.graph_objects as go
+from numpy.typing import ArrayLike
 
 from .frame import FrameData
 from .style import FramePlotOptions, VisualizerStyle
@@ -18,6 +20,7 @@ def plot_frame(
     batch_index: int = 0,
     options: FramePlotOptions | None = None,
     style: VisualizerStyle | None = None,
+    predicted_trajectory: ArrayLike | None = None,
 ) -> go.Figure:
     """Build an interactive 2D figure for one model-ready frame.
 
@@ -31,7 +34,12 @@ def plot_frame(
     )
     resolved_options = options or FramePlotOptions()
     resolved_style = style or VisualizerStyle()
-    figure = go.Figure(create_frame_traces(frame, resolved_style, resolved_options))
+    prediction = (
+        np.asarray(predicted_trajectory) if predicted_trajectory is not None else None
+    )
+    figure = go.Figure(
+        create_frame_traces(frame, resolved_style, resolved_options, prediction)
+    )
     figure.update_layout(
         title=resolved_options.title,
         template="plotly_white",

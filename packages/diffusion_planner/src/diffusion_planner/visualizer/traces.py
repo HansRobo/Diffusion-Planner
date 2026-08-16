@@ -325,6 +325,8 @@ def _neighbor_trajectory_trace(
     name: str,
     color: str,
     width: float,
+    legendgroup: str = "neighbors",
+    dash: str | None = None,
 ) -> go.Scattergl | None:
     """Create neighbor trajectories with their first-axis index in hover data."""
     x: list[float | None] = []
@@ -349,8 +351,8 @@ def _neighbor_trajectory_trace(
         customdata=neighbor_indices,
         mode="lines",
         name=name,
-        legendgroup="neighbors",
-        line={"color": color, "width": width},
+        legendgroup=legendgroup,
+        line={"color": color, "width": width, "dash": dash},
         hovertemplate=(
             "neighbor_index=%{customdata}<br>x=%{x:.2f} m<br>y=%{y:.2f} m<extra></extra>"
         ),
@@ -417,6 +419,39 @@ def create_agent_traces(
             )
             if trace is not None:
                 traces.append(trace)
+    return traces
+
+
+def create_prediction_traces(
+    prediction: NDArray[np.generic],
+    style: VisualizerStyle,
+    options: FramePlotOptions,
+) -> list[BaseTraceType]:
+    """Create ego and neighbor traces for a sampled `(A, T, 4)` trajectory."""
+    if not options.show_agent_prediction:
+        return []
+    traces: list[BaseTraceType] = []
+    ego_prediction = _line_trace(
+        _pose_lines(prediction[0]),
+        name="Ego prediction",
+        color=style.ego_prediction_color,
+        width=style.future_width,
+        legendgroup="prediction",
+        dash="dash",
+        marker_size=style.trajectory_marker_size,
+    )
+    if ego_prediction is not None:
+        traces.append(ego_prediction)
+    neighbor_prediction = _neighbor_trajectory_trace(
+        prediction[1:],
+        name="Neighbors prediction",
+        color=style.neighbor_prediction_color,
+        width=style.future_width,
+        legendgroup="prediction",
+        dash="dash",
+    )
+    if neighbor_prediction is not None:
+        traces.append(neighbor_prediction)
     return traces
 
 
@@ -562,11 +597,17 @@ def create_frame_traces(
     frame: FrameData,
     style: VisualizerStyle,
     options: FramePlotOptions,
+    prediction: NDArray[np.generic] | None = None,
 ) -> list[BaseTraceType]:
     """Create all enabled traces for one frame."""
     return [
         *create_map_element_traces(frame, style),
         *create_lane_traces(frame, style, options),
         *create_agent_traces(frame, style, options),
+        *(
+            create_prediction_traces(prediction, style, options)
+            if prediction is not None
+            else []
+        ),
         *create_annotation_traces(frame, style, options),
     ]
