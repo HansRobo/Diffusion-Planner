@@ -43,7 +43,7 @@ sys.path.insert(
     str(Path(__file__).resolve().parents[1] / "scripts" / "tag_management"),
 )
 from incremental_index import build_incremental_index
-from write_site_split_tags import apply_path_tags, parse_site_split
+from write_path_tags import apply_path_tags, parse_site_split
 
 
 class _CountingProxy:
@@ -512,14 +512,12 @@ def test_parse_site_split_and_apply(sample: Path) -> None:
     # or ariake) route, which has a numeric-prefixed map_id.
     assert site == "xxxx_site_a"
     assert split == "auto"
-    # apply_path_tags rewrites every frame whose site/split tags don't
-    # already match the directory layout. Frames whose site/split already
-    # match (aomi's `split:auto`, psim's even-frame `split:manual`) are
-    # no-ops; the ariake route and the psim odd frames (`split:valid`) get
-    # rewritten. The aomi fixture leaves aomi untouched → 15 actual writes
-    # out of 30 frames.
+    # apply_path_tags strips owned dims before comparing, so frames whose
+    # existing tags already match the path-derived site/split are no-ops for
+    # those dimensions. The fixture pre-seeds site/split correctly, but the
+    # script also adds a project: tag on every frame, so all 30 frames change.
     n = apply_path_tags(sample)
-    assert n == 15  # 10 ariake + 5 psim odd frames; aomi already matches
+    assert n == 30
     for path in paths:
         tags = read_tags(path)
         # site resolves via the path layout. For psim (non-numeric map_id)
@@ -560,6 +558,7 @@ def test_split_labels_refine_generate_from_labeled_manual(tmp_path: Path) -> Non
     assert result == 1
     assert read_tags(npz) == [
         "lateral:turn",
+        "project:proj_c",
         "site:xxxx_site_example",
         "split:train",
     ]

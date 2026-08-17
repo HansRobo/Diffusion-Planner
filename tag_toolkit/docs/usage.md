@@ -68,8 +68,8 @@ At `granularity="frame"`, tags must co-occur on the same NPZ.
 Once written, `site` and `split` are ordinary tags — query and mutate only
 look at sidecar `tags`. To fill them for a whole dataset from paths (with
 optional split labels), use
-`scripts/write_site_split_tags.py` (a dataset helper, not a library entry
-point).
+`scripts/write_path_tags.py` (derive site / split / project / vehicle from the
+directory layout, optionally refined by ``split_labels.json``).
 
 ---
 
