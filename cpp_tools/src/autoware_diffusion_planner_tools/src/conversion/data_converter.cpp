@@ -53,7 +53,9 @@ std::vector<OverrideSegment> build_override_segments(
     const auto & sample = control_modes[index];
     if (sample.mode != current_mode) {
       if (current_mode == 4) {
-        segments.push_back({start_timestamp, previous_timestamp});
+        // Use the first non-4 sample as the exclusive end boundary. This keeps
+        // a single-sample override visible to half-open interval readers.
+        segments.push_back({start_timestamp, sample.rosbag_time});
       }
       current_mode = sample.mode;
       start_timestamp = sample.rosbag_time;

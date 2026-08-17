@@ -20,6 +20,7 @@
 struct OverrideSegment
 {
   int64_t start_timestamp_ns;
+  // Exclusive end boundary: [start_timestamp_ns, end_timestamp_ns).
   int64_t end_timestamp_ns;
 };
 
