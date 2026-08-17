@@ -61,7 +61,9 @@ def test_closed_loop_config_fields_exist():
     """Verify closed_loop_* config fields are properly marked with cli() in TrainConfig."""
     from diffusion_planner.train_config import TrainConfig
 
-    cli_field_names = {f.name for f in TrainConfig.__dataclass_fields__.values() if f.metadata.get("cli")}
+    cli_field_names = {
+        f.name for f in TrainConfig.__dataclass_fields__.values() if f.metadata.get("cli")
+    }
 
     # These closed_loop fields should be in CLI
     expected_cli_fields = [
@@ -69,7 +71,9 @@ def test_closed_loop_config_fields_exist():
     ]
 
     for field_name in expected_cli_fields:
-        assert field_name in cli_field_names, f"{field_name} should be marked with cli() in TrainConfig"
+        assert field_name in cli_field_names, (
+            f"{field_name} should be marked with cli() in TrainConfig"
+        )
 
 
 def test_args_conversion_in_train_predictor():

@@ -219,7 +219,9 @@ def build_groups_aggregate_log(
     route_completion_num = sum(
         float(s.get("mean_route_completion", 0.0)) * int(s.get("n_segments", 0)) for s in values
     )
-    log[f"{prefix}/route_completion"] = route_completion_num / total_segments if total_segments else 0.0
+    log[f"{prefix}/route_completion"] = (
+        route_completion_num / total_segments if total_segments else 0.0
+    )
 
     for key in COMPARISON_OVERVIEW_SUM_KEYS:
         log[f"{prefix}/{key}"] = sum(int(extract_score(s, key) or 0) for s in values)

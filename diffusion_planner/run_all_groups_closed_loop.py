@@ -25,6 +25,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
 from scenario_generation.wandb_closed_loop import build_groups_aggregate_log
 
 
@@ -208,9 +209,7 @@ def _load_group_results(out_dir: Path | str) -> dict[str, dict]:
             )
             continue
         summary["segments"] = [
-            json.loads(line)
-            for line in segments_jsonl.read_text().splitlines()
-            if line.strip()
+            json.loads(line) for line in segments_jsonl.read_text().splitlines() if line.strip()
         ]
         summaries[key] = summary
     return summaries
@@ -228,9 +227,7 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
         manifest = {k.replace("closed_loop_overview/", ""): v for k, v in aggregates.items()}
     else:
         manifest = {}
-    Path(out_dir, "groups.json").write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False)
-    )
+    Path(out_dir, "groups.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
 
 
 def run_closed_loop_main(
@@ -537,6 +534,7 @@ def _refresh_workspace_view(
             file=sys.stderr,
         )
         import traceback
+
         traceback.print_exc()
         return
 

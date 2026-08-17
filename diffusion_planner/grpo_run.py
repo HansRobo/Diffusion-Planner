@@ -41,6 +41,7 @@ def main() -> None:
     exp_name = f"{args.exp_name}_grpo"
     train_set_list = str(Path(args.train_set_list).resolve())
     valid_set_list = str(Path(args.valid_set_list).resolve())
+
     def resolve_npz_root(val):
         if not val:
             return []

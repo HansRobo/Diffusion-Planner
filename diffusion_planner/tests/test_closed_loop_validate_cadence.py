@@ -45,7 +45,6 @@ def _fake_model():
 def test_empty_closed_loop_npz_root_returns_early(tmp_path):
     """No closed_loop_npz_root means closed_loop_validate returns early."""
     import diffusion_planner.train as train_module
-
     from diffusion_planner.train import closed_loop_validate
 
     # Create a mock to verify train_loop is NOT called

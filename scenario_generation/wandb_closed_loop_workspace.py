@@ -50,10 +50,7 @@ def _split_labels_by_mode(group_names: list[str], json_name: str) -> dict[str, l
     """Labels under ``json_name`` split into two mode buckets: ``<json_name>`` (objects
     labels) and ``<json_name>__noobj`` (noobj labels). Missing buckets are omitted.
     Each json renders as up to two separate sections in the dashboard."""
-    objects = [
-        g for g in group_names
-        if g.startswith(f"{json_name}/") and not is_noobj_label(g)
-    ]
+    objects = [g for g in group_names if g.startswith(f"{json_name}/") and not is_noobj_label(g)]
     noobj = [g for g in group_names if g.startswith(f"{json_name}__noobj/")]
     out: dict[str, list[str]] = {}
     if objects:
@@ -322,9 +319,7 @@ def _resolve_entity(entity: str | None) -> str:
         return entity
     resolved = wandb.Api().default_entity
     if not resolved:
-        raise SystemExit(
-            "Could not infer --entity: pass it explicitly or configure `wandb init`."
-        )
+        raise SystemExit("Could not infer --entity: pass it explicitly or configure `wandb init`.")
     return resolved
 
 

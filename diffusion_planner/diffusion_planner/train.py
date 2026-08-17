@@ -159,7 +159,9 @@ def closed_loop_validate(
             args=args,
             out_root=out_dir,
             wandb_run=wandb.run,
-            object_modes=args.closed_loop_object_modes if args.closed_loop_object_modes is not None else ["objects"],
+            object_modes=args.closed_loop_object_modes
+            if args.closed_loop_object_modes is not None
+            else ["objects"],
             render_media=is_final_save,
         )
 
