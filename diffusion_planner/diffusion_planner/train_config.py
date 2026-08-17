@@ -260,6 +260,11 @@ class TrainConfig:
             "strong_brake",
         ]
     )
+    render_media: bool = cli(
+        "render video/colormap artifacts during wandb logging (turn off for cheap intermediate "
+        "cadences — speeds up validation)",
+        default=True,
+    )
 
     # Scenario-based Open-loop validation. The list JSON maps metric names to NPZ paths.
     scenario_based_open_loop_list: str = cli(

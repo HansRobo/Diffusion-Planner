@@ -12,7 +12,7 @@ CLI can import it without pulling in the heavier deps wandb_closed_loop.py/.
 
 from __future__ import annotations
 
-# Per-group score keys: closed_loop_scores/{key}/{label} in wandb.
+# Per-group score keys: closed_loop/{key}/{label} in wandb.
 COMPARISON_SCORE_KEYS = (
     "mean_route_completion",
     "total_curb_hits",

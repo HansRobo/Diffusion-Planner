@@ -1,26 +1,20 @@
 """Run ``valid_predictor_closed_loop.py`` once per group.
 
-``--groups_npz_root`` accepts multiple input formats:
-- Folder path: treated as one route directory -> `{folder_name: {"all": [paths]}}`
-- Flat JSON (list): `["/path/to/route1", ...]` -> `{json_stem: {"all": [paths]}}`
-- Grouped JSON (dict): `{"g1": [...], "g2": [...]}` -> `{json_stem: {g1: [paths], g2: [paths]}}`
+``--groups_npz_root`` accepts:
+- Folder path: treated as one route directory -> ``{folder_name: {"all": [paths]}}``
+- Flat JSON (list): ``["/path/to/route1", ...]`` -> ``{json_stem: {"all": [paths]}}``
+- Grouped JSON (dict): ``{"g1": [...], "g2": [...]}`` -> ``{json_stem: {g1: [paths], g2: [paths]}}``
 
-Outputs land in ``<out_root>/<json_name>/<group_name>/`` (summary.json,
-segments.jsonl, videos). A ``groups_summary.json`` at each ``<out_root>/<json_name>/``
-records results for all groups in that JSON, keyed as ``<json_name>/<group_name>``.
-The root ``<out_root>/groups_summary.json`` aggregates all JSONs for reporting.
-
-Object mode suffix: ``objects`` = normal, ``noobj`` = empty-world.
-- Directory: ``<out_root>/<json_name>/<group_name>/``
-- WANDB key: ``closed_loop/<metric>/<json_name>/<group_name>/``
+Outputs land in ``<out_root>/<json_name>/<group_name>/`` (objects mode) or
+``<out_root>/<json_name>__noobj/<group_name>/`` (noobj mode); per-json ``groups.json``
+files aggregate one JSON, ``<out_root>/groups.json`` aggregates everything.
 
 Example::
 
     python diffusion_planner/run_all_groups_closed_loop.py \\
         --groups_npz_root override.json site.json \\
         --model_path /media/.../best_model.pth \\
-        --out_root /media/.../cl_results \\
-        --near_miss_thresh 0.3 --replan_interval 10 --draw_every 8
+        --out_root /media/.../cl_results
 """
 
 from __future__ import annotations
@@ -31,38 +25,15 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import TypedDict
-
 from scenario_generation.wandb_closed_loop import build_groups_aggregate_log
 
 
-class GroupEntry(TypedDict):
-    npz_root: list[str]
-    out_dir: str
-    summary: dict | None
-
-
-class GroupsSummary(TypedDict):
-    """Keyed as '<json_name>/<group_name>' (mode suffix applied at out_dir level)."""
-
-    npz_root: list[str]
-    out_dir: str
-    summary: dict | None
-
-
 def resolve_closed_loop_inputs(inputs: str | list[str]) -> dict[str, dict[str, list[str]]]:
-    """Resolve multiple input paths to ``{<json_name>: {<group_name>: [route_dirs]}}``.
+    """Resolve input paths to ``{<json_name>: {<group_name>: [route_dirs]}}``.
 
-    The top-level key is the JSON filename (without extension) or folder name.
-    For folder or flat JSON (list), the inner key is always ``"all"``.
-    For grouped JSON (dict), the inner keys are the group names from the JSON.
-
-    Args:
-        inputs: Single path or list of paths (folders, JSON files).
-
-    Returns:
-        Dict mapping ``{json_name: {group_name: [route_dir_paths]}}``.
-        Route dirs are the leaves; .npz enumeration is done by closed_loop_eval.enumerate_routes().
+    The top-level key is the JSON filename (without extension) or folder name;
+    for folder or flat JSON (list) the inner key is ``"all"``; for grouped JSON
+    (dict) the inner keys are the group's names from the JSON.
     """
     if isinstance(inputs, str):
         inputs = [inputs]
@@ -117,29 +88,26 @@ def run_one_group(
     out_dir: str | Path,
     args: argparse.Namespace,
     group_name: str | None = None,
-) -> tuple[dict, dict | None, str]:
-    """Run closed-loop evaluation for a single group (mode handled at caller level).
+    mode: str | None = None,
+) -> None:
+    """Run closed-loop evaluation for a single group; writes ``summary.json`` + ``segments.jsonl``
+    under ``out_dir``. Wandb logging is left to the caller (re-reads via :func:`_load_group_results`).
 
-    Args:
-        model: PyTorch model (None for subprocess mode).
-        npz_root_list: List of route directory paths.
-        out_dir: Output directory for this group (already includes mode suffix).
-        args: CLI args or Namespace.
-        group_name: Label for this group (used in logs).
-
-    Returns:
-        (log, summary, label) tuple.
+    ``mode`` is passed explicitly so it doesn't have to be inferred from ``out_dir`` (a json_name
+    containing ``__noobj`` would silently mis-infer).
     """
     from scenario_generation.closed_loop_evaluation import (
         ClosedLoopEvalConfig,
         FullRouteClosedLoopEvaluation,
         RolloutParams,
     )
-    from scenario_generation.wandb_closed_loop import build_full_closed_loop_wandb_log
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     label = group_name or out_dir.name
+    if mode not in (None, "objects", "noobj"):
+        raise ValueError(f"mode must be 'objects' or 'noobj', got {mode!r}")
+    drop_objects = mode == "noobj"
 
     # Write npz roots to JSON if multiple, otherwise use as-is
     if len(npz_root_list) > 1:
@@ -149,9 +117,8 @@ def run_one_group(
         npz_root_arg = npz_root_list[0]
 
     if model is not None:
-        seg_len = getattr(args, "closed_loop_seg_len", 100000)
-        fps = float(getattr(args, "closed_loop_fps", 10))
-        drop_objects = "__noobj" in str(out_dir)
+        seg_len = args.closed_loop_seg_len
+        fps = float(args.closed_loop_fps)
 
         evaluator = FullRouteClosedLoopEvaluation(
             model,
@@ -160,20 +127,19 @@ def run_one_group(
                 out_dir=out_dir,
                 params=RolloutParams(
                     device=args.device,
-                    near_miss_thresh=getattr(args, "closed_loop_near_miss_thresh", 0.5),
-                    search_radius=getattr(args, "closed_loop_search_radius", 1.5),
-                    warmup_steps=getattr(args, "closed_loop_warmup_steps", 0),
-                    unstick_after=getattr(args, "closed_loop_unstick_after", 300),
-                    unstick_advance_m=getattr(args, "closed_loop_unstick_advance_m", 5.0),
-                    unstick_radius_mult=getattr(args, "closed_loop_unstick_radius_mult", 10.0),
-                    unstick_teleport_after=getattr(args, "closed_loop_unstick_teleport_after", 300),
-                    draw_every=getattr(args, "closed_loop_draw_every", 4)
-                    if getattr(args, "render_media", False)
-                    else None,
-                    replan_interval=getattr(args, "closed_loop_replan_interval", 4),
-                    abort_deviation_m=getattr(args, "closed_loop_abort_deviation_m", 50.0),
-                    abort_after=getattr(args, "closed_loop_abort_after", 30),
-                    abort_max_snaps=getattr(args, "closed_loop_abort_max_snaps", 0),
+                    near_miss_thresh=args.closed_loop_near_miss_thresh,
+                    search_radius=args.closed_loop_search_radius,
+                    warmup_steps=args.closed_loop_warmup_steps,
+                    unstick_after=args.closed_loop_unstick_after,
+                    unstick_advance_m=args.closed_loop_unstick_advance_m,
+                    unstick_radius_mult=args.closed_loop_unstick_radius_mult,
+                    unstick_teleport_after=args.closed_loop_unstick_teleport_after,
+                    draw_every=args.closed_loop_draw_every if args.render_media else None,
+                    replan_interval=args.closed_loop_replan_interval,
+                    abort_deviation_m=args.closed_loop_abort_deviation_m,
+                    abort_after=args.closed_loop_abort_after,
+                    abort_max_snaps=args.closed_loop_abort_max_snaps,
+                    draw_workers=args.closed_loop_draw_workers,
                     drop_objects=drop_objects,
                 ),
                 fps=fps,
@@ -182,24 +148,8 @@ def run_one_group(
             npz_root_arg,
             seg_len=seg_len,
         )
-        summary = evaluator.run()
-
-        if not summary:
-            return {}, None, label
-
-        render_media = getattr(args, "render_media", True)
-        group_log = build_full_closed_loop_wandb_log(
-            summary,
-            out_dir=str(out_dir),
-            group=label,
-            video_pick=getattr(args, "closed_loop_wandb_video_pick", "worst"),
-            colormap_metrics=tuple(getattr(args, "closed_loop_colormap_metrics", [])),
-            near_miss_thresh=getattr(args, "closed_loop_near_miss_thresh", 0.5),
-            render_media=render_media,
-        )
-        return group_log, summary, label
+        evaluator.run()
     else:
-        # Subprocess call from CLI
         cli_path = Path(__file__).resolve().parent / "valid_predictor_closed_loop.py"
         cmd = [
             sys.executable,
@@ -213,59 +163,121 @@ def run_one_group(
         ]
         if hasattr(args, "extra_args") and args.extra_args:
             cmd.extend(args.extra_args)
-        if "__noobj" in str(out_dir):
+        cmd.extend(["--draw_workers", str(args.closed_loop_draw_workers)])
+        if drop_objects:
             cmd.append("--drop_objects")
 
-        error = None
         for attempt in range(1, 3):
             try:
                 subprocess.run(cmd, check=True)
-                error = None
                 break
             except subprocess.CalledProcessError as e:
-                error = e
                 print(f"  [{label}] attempt {attempt}/2 failed: {e}", file=sys.stderr)
-
-        summary_path = out_dir / "summary.json"
-        summary = json.loads(summary_path.read_text()) if summary_path.is_file() else None
-        return {}, summary, label
 
 
 def _make_summary_key(json_name: str, group_name: str) -> str:
     """Build the summary key, e.g. 'override/departure' or 'site/all'."""
+    if "/" in group_name or "/" in json_name:
+        raise ValueError(
+            f"json_name and group_name must not contain '/': got {json_name!r}, {group_name!r}"
+        )
     return f"{json_name}/{group_name}"
+
+
+def _load_group_results(out_dir: Path | str) -> dict[str, dict]:
+    """Reload per-group results from ``out_dir`` (each ``<group_dir>/summary.json``
+    augmented with rows from the matching ``segments.jsonl``). Groups missing
+    ``segments.jsonl`` (partial run, manual deletion) are skipped with a warning."""
+    out_dir = Path(out_dir)
+    summaries: dict[str, dict] = {}
+    for summary_file in out_dir.rglob("summary.json"):
+        key = "/".join(summary_file.parent.relative_to(out_dir).parts)
+        try:
+            summary = json.loads(summary_file.read_text())
+        except json.JSONDecodeError as exc:
+            print(
+                f"Warning: skipping malformed summary at {summary_file}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        segments_jsonl = summary_file.parent / "segments.jsonl"
+        if not segments_jsonl.is_file():
+            print(
+                f"Warning: {key} has no segments.jsonl, skipping",
+                file=sys.stderr,
+            )
+            continue
+        summary["segments"] = [
+            json.loads(line)
+            for line in segments_jsonl.read_text().splitlines()
+            if line.strip()
+        ]
+        summaries[key] = summary
+    return summaries
+
+
+def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> None:
+    """Write ``<out_dir>/groups.json`` aggregating ``summaries`` via ``build_groups_aggregate_log``.
+
+    The aggregate keys are prefixed with ``closed_loop_overview/`` internally;
+    that prefix is stripped for the on-disk file so the manifest matches the
+    shape consumed by ``wandb_closed_loop_workspace`` and the per-JSON helpers.
+    """
+    if summaries:
+        aggregates = build_groups_aggregate_log(summaries, prefix="closed_loop_overview")
+        manifest = {k.replace("closed_loop_overview/", ""): v for k, v in aggregates.items()}
+    else:
+        manifest = {}
+    Path(out_dir, "groups.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False)
+    )
 
 
 def run_closed_loop_main(
     model,  # PyTorch model (for train.py direct call) or None for subprocess
-    groups_npz_root: list[str],
-    args: argparse.Namespace,
-    out_root: str | Path,
+    groups_npz_root: list[str] | None = None,
+    args: argparse.Namespace = None,
+    out_root: str | Path | None = None,
     *,
+    resolved: dict[str, dict[str, list[str]]] | None = None,
     wandb_run=None,  # Optional wandb.Run instance; if None, creates own session
     only_json: list[str] | None = None,
     object_modes: list[str] | None = None,
-) -> dict[str, dict]:
+    render_media: bool = True,
+) -> bool:
     """Unified entry point for closed-loop evaluation.
 
     Works both as:
     - Direct API call from train.py (model provided, wandb_run provided)
     - CLI entry point via main() (model=None, wandb_run=None)
 
+    Either ``groups_npz_root`` OR pre-computed ``resolved`` must be provided;
+    the latter lets callers that already resolved (and filtered) the inputs
+    skip the duplicate ``resolve_closed_loop_inputs()`` + ``only_json`` filter
+    pass.
+
     Output directory structure:
         <out_root>/<json_name>/<group_name>          (objects mode)
         <out_root>/<json_name>__noobj/<group_name>   (noobj mode)
 
-    Returns:
-        merged root manifest: {summary_key: {npz_root, out_dir, summary}}
-    """
-    resolved = resolve_closed_loop_inputs(groups_npz_root)
+    Writes:
+        - ``<out_root>/groups.json`` (root aggregate)
+        - ``<out_root>/<json_name>/groups.json`` and ``<out_root>/<json_name>__noobj/groups.json``
+          (per-JSON aggregates)
+        - W&B log payload if a run is provided (or one is created here)
 
+    Returns True on success, False if no inputs were resolved (so CLI wrappers
+    can map that to their own exit code).
+    """
+    if resolved is None:
+        if groups_npz_root is None:
+            raise ValueError("run_closed_loop_main: pass either groups_npz_root or resolved")
+        resolved = resolve_closed_loop_inputs(groups_npz_root)
     if only_json:
         resolved = {k: v for k, v in resolved.items() if k in only_json}
     if not resolved:
         print(f"No inputs found under {groups_npz_root}", file=sys.stderr)
-        return {}
+        return False
 
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -279,156 +291,45 @@ def run_closed_loop_main(
 
         for group_name, npz_paths in groups.items():
             for mode in modes:
-                # Label and out_dir
                 if mode == "objects":
                     mode_out_dir = json_out_dir / group_name
                     summary_key = _make_summary_key(json_name, group_name)
-                    label = summary_key  # e.g. "override/departure"
                 else:  # noobj
                     json_mode_name = f"{json_name}__noobj"
                     mode_out_dir = out_root / json_mode_name / group_name
                     summary_key = _make_summary_key(json_mode_name, group_name)
-                    label = summary_key  # e.g. "override__noobj/departure"
 
-                print(f"=== [{label}] npz={npz_paths} -> out={mode_out_dir} ===")
+                print(f"=== [{summary_key}] npz={npz_paths} -> out={mode_out_dir} ===")
 
-                _, summary, _ = run_one_group(
+                run_one_group(
                     model,
                     npz_paths,
                     mode_out_dir,
                     args,
-                    group_name=label,
+                    group_name=summary_key,
+                    mode=mode,
                 )
 
-                # Update groups_summary.json at json_out_dir (or out_root for __noobj)
-                summary_out_dir = (
-                    json_out_dir if mode == "objects" else out_root / f"{json_name}__noobj"
-                )
-                update_groups_summary(
-                    summary_out_dir,
-                    summary_key,
-                    npz_paths,
-                    mode_out_dir,
-                    summary,
-                )
+    all_summaries = _load_group_results(out_root)
+    all_group_names = sorted(all_summaries.keys())
 
-    # ------------------------------------------------------------------ helpers ----
-    def _manifest_path(json_name: str, mode: str) -> Path:
-        return out_root / (json_name if mode == "objects" else f"{json_name}__noobj") / "groups_summary.json"
-
-    def _read_manifest(path: Path) -> dict | None:
-        """Read a groups_summary.json, supporting both new nested and legacy flat formats."""
-        if not path.is_file():
-            return None
-        try:
-            return json.loads(path.read_text())
-        except Exception:
-            return None
-
-    def _collect_groups(manifest: dict | None) -> tuple[dict, dict, list[str]]:
-        """From a groups_summary.json (new or legacy), return:
-        - sub_groups: {key: entry} or {}
-        - overview: {}
-        - group_names: [individual group keys]
-        """
-        if manifest is None:
-            return {}, {}, []
-        if "sub_groups" in manifest:
-            # New nested format
-            group_names = list(manifest["sub_groups"].keys())
-            return manifest["sub_groups"], manifest.get("overview", {}), group_names
-        else:
-            # Legacy flat: top-level keys are group keys, __overview__ for overview
-            legacy_sub = {k: v for k, v in manifest.items() if not k.startswith("__")}
-            legacy_overview = manifest.get("__overview__", {})
-            legacy_names = list(legacy_sub.keys())
-            return legacy_sub, legacy_overview, legacy_names
-
-    # ------------------------------------------------------------------ merge ----
-    root_manifest: dict = {"overview": {}, "sub_groups": {}}
-    per_json_manifest_paths: list[str] = []
-    all_group_names: list[str] = []
-    all_summaries: dict[str, dict] = {}
+    _write_groups_manifest(out_root, all_summaries)
 
     for json_name in resolved:
         for mode in modes:
-            path = _manifest_path(json_name, mode)
-            manifest = _read_manifest(path)
-            if manifest is None:
-                continue
+            json_label = json_name if mode == "objects" else f"{json_name}__noobj"
+            json_prefix = f"{json_label}/"
+            per_json_summaries = {
+                k: v for k, v in all_summaries.items() if k.startswith(json_prefix)
+            }
+            json_out_dir = out_root / json_label
+            if json_out_dir.exists() and per_json_summaries:
+                _write_groups_manifest(json_out_dir, per_json_summaries)
 
-            sub_groups, overview, group_names = _collect_groups(manifest)
-            per_json_manifest_paths.append(str(path))
-
-            json_key = json_name if mode == "objects" else f"{json_name}__noobj"
-            root_manifest["sub_groups"][json_key] = {"overview": overview}
-
-            for gname in group_names:
-                if gname not in all_group_names:
-                    all_group_names.append(gname)
-                if sub_groups and sub_groups.get(gname, {}).get("summary"):
-                    all_summaries[gname] = sub_groups[gname]["summary"]
-
-    all_group_names = sorted(set(all_group_names))
-    root_manifest["overview"] = build_groups_aggregate_log(all_summaries, prefix="closed_loop_overview")
-    args._per_json_manifest_paths = per_json_manifest_paths  # type: ignore[attr-defined]
-
-    root_manifest_path = out_root / "groups_summary.json"
-    root_manifest_path.write_text(json.dumps(root_manifest, indent=2, ensure_ascii=False))
-
-    # Log to wandb (supports both passed run and own session)
     if all_group_names:
-        _log_to_wandb(args, all_group_names, root_manifest, wandb_run)
-
-    return root_manifest
-
-
-def update_groups_summary(
-    out_dir: Path | str,
-    summary_key: str,
-    npz_root: list[str],
-    mode_out_dir: Path | str,
-    summary: dict | None,
-) -> None:
-    """Update groups_summary.json at <out_dir>/ with one mode's result.
-
-    summary_key is e.g. 'override/departure' or 'site/all'.
-
-    Writes a nested structure:
-        {
-          "overview": { segment-weighted aggregate from build_groups_aggregate_log },
-          "sub_groups": {
-            "<summary_key>": { npz_root, out_dir, summary },
-            ...
-          }
-        }
-    """
-    out_dir = Path(out_dir)
-    manifest_path = out_dir / "groups_summary.json"
-
-    merged: dict = {"overview": {}, "sub_groups": {}}
-    if manifest_path.is_file():
-        try:
-            loaded = json.loads(manifest_path.read_text())
-            if "overview" in loaded and "sub_groups" in loaded:
-                merged = loaded
-            else:
-                # Legacy flat structure — migrate
-                merged["sub_groups"] = {k: v for k, v in loaded.items() if not k.startswith("__")}
-        except Exception:
-            pass
-
-    merged["sub_groups"][summary_key] = {
-        "npz_root": npz_root,
-        "out_dir": str(mode_out_dir),
-        "summary": summary,
-    }
-
-    # Refresh overview every time a group is written
-    summaries = {k: v["summary"] for k, v in merged["sub_groups"].items() if v.get("summary")}
-    merged["overview"] = build_groups_aggregate_log(summaries, prefix="closed_loop_overview")
-
-    manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
+        _log_to_wandb(
+            args, all_group_names, all_summaries, out_root, wandb_run, render_media=render_media
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -457,10 +358,23 @@ def parse_args() -> argparse.Namespace:
         "Each group runs once per mode; noobj gets a '__noobj' suffix on the out_dir.",
     )
     parser.add_argument(
+        "--closed_loop_draw_workers",
+        type=int,
+        default=4,
+        help="parallelism for per-frame trajectory drawing (1=serial). Forwarded as --draw_workers "
+        "in the subprocess CLI path; used directly in the in-process path.",
+    )
+    parser.add_argument(
         "--extra_args",
         nargs=argparse.REMAINDER,
         default=[],
         help="passed through verbatim to valid_predictor_closed_loop.py",
+    )
+    parser.add_argument(
+        "--render_media",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="render video/colormap artifacts during wandb logging (default: on)",
     )
     parser.add_argument(
         "--wandb_project",
@@ -470,13 +384,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument(
-        "--wandb_video_pick",
+        "--closed_loop_wandb_video_pick",
         choices=("worst", "first", "longest"),
         default="worst",
         help="which episode gets its video uploaded per group",
     )
     parser.add_argument(
-        "--wandb_colormap_metrics",
+        "--closed_loop_colormap_metrics",
         nargs="*",
         default=[
             "clearance",
@@ -494,13 +408,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    resolved = resolve_closed_loop_inputs(args.groups_npz_root)
-
-    if args.only_json:
-        resolved = {k: v for k, v in resolved.items() if k in args.only_json}
-    if not resolved:
-        print(f"No inputs found under {args.groups_npz_root}", file=sys.stderr)
-        return 1
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     args.out_root = args.out_root / timestamp
@@ -513,149 +420,131 @@ def main() -> int:
         return 1
     args.out_root.mkdir(parents=True, exist_ok=True)
 
-    run_closed_loop_main(
+    ok = run_closed_loop_main(
         model=None,  # CLI mode: subprocess
         groups_npz_root=args.groups_npz_root,
         args=args,
         out_root=args.out_root,
         only_json=args.only_json,
         object_modes=args.object_modes,
+        render_media=args.render_media,
     )
-
-    return 0
+    return int(not ok)
 
 
 def _log_to_wandb(
-    args: argparse.Namespace,
+    args: object,
     group_names: list[str],
-    root_manifest: dict,
-    run: "wandb.sdk.wandb_run.Run | None" = None,  # type: ignore[name-defined]
+    group_summaries: dict[str, dict],
+    out_root: str | Path,
+    run: "wandb.sdk.wandb_run.Run | None" = None,
+    render_media: bool = True,
 ) -> None:
-    """One wandb run: closed_loop/<metric>/<json_name>/<group_name> + per-json aggregates.
+    """Push per-group closed-loop metrics to W&B and refresh the curated workspace view.
 
-    If run is provided (passed from train.py), uses it. Otherwise creates own session.
-
-    root_manifest is the root groups_summary.json with structure:
-        { overview: {...}, sub_groups: { json_name: { overview: {...} } } }
-    Individual group summaries are looked up from <json>/groups_summary.json sub_groups.
+    Reuses ``run`` if given, else starts its own. The workspace view URL is written to
+    ``run.summary["closed_loop/workspace_view_url"]`` so it's visible on the W&B run page.
     """
     import wandb
 
-    from scenario_generation.wandb_closed_loop import (
-        build_combined_episode_table,
-        build_full_closed_loop_wandb_log,
-        build_groups_aggregate_log,
-    )
+    from scenario_generation.wandb_closed_loop import build_groups_wandb_log
+
+    if not group_summaries:
+        return
 
     if run is None:
-        run = wandb.init(project=args.wandb_project, name=args.wandb_run_name)
+        # CLI entrypoint: own the wandb lifetime.
+        run = wandb.init(
+            project=getattr(args, "wandb_project", None),
+            name=getattr(args, "wandb_run_name", None),
+        )
         own_run = True
     else:
         own_run = False
 
-    # Build lookup: group_name -> {out_dir, summary} from per-json sub_groups
-    group_manifest: dict[str, dict] = {}
-    per_json_paths: list[str] = getattr(args, "_per_json_manifest_paths", [])  # type: ignore[attr-defined]
-    for json_path in per_json_paths:
-        if Path(json_path).is_file():
-            try:
-                partial = json.loads(Path(json_path).read_text())
-                if "sub_groups" in partial:
-                    group_manifest.update(partial["sub_groups"])
-                else:
-                    for k, v in partial.items():
-                        if not k.startswith("__") and isinstance(v, dict) and v.get("summary"):
-                            group_manifest[k] = v
-            except Exception:
-                pass
-    # Fallback: scan out_root for per-json groups_summary.json files
-    out_root = Path(args.out_root)  # type: ignore[attr-defined]
-    if not group_manifest:
-        for gpath in sorted(out_root.rglob("groups_summary.json")):
-            if gpath.parent == out_root:
-                continue  # skip root groups_summary.json
-            try:
-                partial = json.loads(gpath.read_text())
-                if "sub_groups" in partial:
-                    group_manifest.update(partial["sub_groups"])
-                else:
-                    for k, v in partial.items():
-                        if not k.startswith("__") and isinstance(v, dict) and v.get("summary"):
-                            group_manifest[k] = v
-            except Exception:
-                pass
-
     try:
-        log: dict = {}
-        group_summaries: dict[str, dict] = {}
-        episode_data: list = []
-
-        for group_name in group_names:
-            r = group_manifest.get(group_name) or {}
-            summary = r.get("summary")
-            if not summary:
-                continue
-            group_out_dir = r.get("out_dir") or ""
-            segments_path = Path(group_out_dir) / "segments.jsonl"
-            rows = []
-            if segments_path.is_file():
-                with segments_path.open(encoding="utf-8") as f:
-                    rows = [json.loads(line) for line in f if line.strip()]
-            summary_with_rows = {**summary, "segments": rows}
-
-            wandb_key_prefix = group_name  # e.g. "override/departure"
-            log.update(
-                build_full_closed_loop_wandb_log(
-                    summary_with_rows,
-                    out_dir=group_out_dir,
-                    group=group_name,
-                    video_pick=getattr(args, "wandb_video_pick", "worst"),
-                    colormap_metrics=tuple(
-                        getattr(
-                            args,
-                            "wandb_colormap_metrics",
-                            [
-                                "clearance",
-                                "collision",
-                                "near_miss",
-                                "speed",
-                                "road_border",
-                                "red_light",
-                                "strong_brake",
-                            ],
-                        )
-                    ),
-                    near_miss_thresh=summary.get("near_miss_thresh", 0.5),
-                    wandb_key_prefix=wandb_key_prefix,
-                )
-            )
-            group_summaries[group_name] = summary_with_rows
-            episode_data.append((group_name, rows, group_out_dir))
-
-        if episode_data:
-            log["closed_loop_episodes/all"] = build_combined_episode_table(episode_data)
-
-        # Per-json aggregates: group by json_name (before __noobj or /)
-        json_aggregates: dict[str, dict[str, dict]] = {}
-        for name, summary in group_summaries.items():
-            if "/" in name:
-                json_name = name.split("/")[0]
-            else:
-                json_name = name.replace("__noobj", "")
-            if json_name not in json_aggregates:
-                json_aggregates[json_name] = {}
-            json_aggregates[json_name][name] = summary
-
-        for json_name, sub in json_aggregates.items():
-            if len(sub) > 1:
-                prefix = f"closed_loop_overview/{json_name}"
-                log.update(build_groups_aggregate_log(sub, prefix=prefix))
-
+        log = build_groups_wandb_log(
+            {key: group_summaries[key] for key in group_names},
+            out_root=out_root,
+            video_pick=args.closed_loop_wandb_video_pick,
+            colormap_metrics=tuple(args.closed_loop_colormap_metrics or ()),
+            # ``summary`` doesn't store ``near_miss_thresh``; pass trainer's value so
+            # colormap matches the rollout's actual threshold.
+            near_miss_thresh_default=getattr(args, "closed_loop_near_miss_thresh", 0.5),
+            render_media=args.render_media,
+        )
         run.log(log)
         print(f"wandb: logged {len(group_summaries)} group(s) to run {run.id}")
+
+        _refresh_workspace_view(run, args, group_names)
     finally:
         if own_run:
             wandb.finish()
+
+
+def _refresh_workspace_view(
+    run: "wandb.sdk.wandb_run.Run",
+    args: object,
+    group_names: list[str],
+) -> None:
+    """Rebuild the curated closed-loop workspace view for this run.
+
+    Skipped when the user didn't opt-in (no ``wandb_project``), or when the workspace
+    SDK isn't importable. API-side failures are logged and skipped (run metrics already
+    landed); programming errors (empty list, etc.) still raise.
+    """
+    # Prefer explicit user opt-in; fall back to whatever the active run uses.
+    project = getattr(args, "wandb_project", None) or run.project
+    if not project:
+        print(
+            "wandb: skipping workspace refresh (no wandb_project set; "
+            "pass --wandb_project to enable dashboard view).",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        from scenario_generation.wandb_closed_loop_workspace import (
+            build_closed_loop_workspace,
+        )
+    except ImportError as e:
+        print(
+            f"wandb: skipping workspace refresh (wandb_workspaces unavailable: {e})",
+            file=sys.stderr,
+        )
+        return
+
+    # Suffix ``run.id`` so two runs that share ``--exp_name`` don't upsert onto each
+    # other's dashboard layout (wandb_workspaces upserts by name).
+    base_name = run.name or run.id
+    view_name = f"Closed-Loop / {base_name} ({run.id})"
+
+    try:
+        url = build_closed_loop_workspace(
+            run.entity,
+            project,
+            group_names=list(group_names),
+            name=view_name,
+        )
+    except ValueError as e:
+        # Programming error — surface it.
+        print(f"wandb: workspace build failed: {e}", file=sys.stderr)
+        raise
+    except Exception as e:
+        # Network / W&B API error — log with traceback but don't crash; metrics landed.
+        print(
+            f"wandb: workspace refresh failed (run metrics still logged): {e}",
+            file=sys.stderr,
+        )
+        import traceback
+        traceback.print_exc()
+        return
+
+    run.summary["closed_loop/workspace_view_url"] = url
+    # ``run.summary[k] = v`` queues; explicit ``update()`` flushes so the URL is on the
+    # run page even if outer ``_log_to_wandb`` returns without further logging.
+    run.summary.update()
+    print(f"wandb: dashboard view saved → {url}")
 
 
 if __name__ == "__main__":

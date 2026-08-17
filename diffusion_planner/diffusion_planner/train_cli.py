@@ -1,14 +1,8 @@
 """The command line shared by train_predictor.py and train_run.py.
 
-Both entrypoints take the same flags, because both build their parser from the fields
-``TrainConfig`` marks with ``cli(...)``. Names, types, defaults, choices and help text
-are read off the dataclass, so nothing here has to be updated when a setting is added,
-renamed or re-defaulted -- and the launcher cannot drift from the trainer, which is how
-they previously ended up disagreeing about ``train_epochs`` and the run directory.
-
-Adding a flag therefore means one edit: mark the field with ``cli(...)`` in
-train_config.py. Everything else is a setting, not a flag, and is changed by editing
-its default there.
+Both entrypoints take the same flags, built from ``TrainConfig`` fields marked
+``cli(...)``. Names, types, defaults, choices and help text are read off the dataclass,
+so adding a flag is one edit (mark the field with ``cli(...)`` in ``train_config.py``).
 """
 
 import argparse
@@ -56,11 +50,16 @@ def _add_argument(parser: argparse.ArgumentParser, f: Field) -> None:
         kwargs["type"] = str
         kwargs["choices"] = get_args(annotation)
     elif annotation is bool:
-        # `--use_amp` and `--use_amp False` both work: the bare form is the common case,
-        # the explicit form is needed to switch off anything that defaults to on.
+        # Bare form (``--use_amp``) is common; ``--use_amp False`` is needed to switch off
+        # a default-on flag.
         kwargs["type"] = boolean
         kwargs["nargs"] = "?"
         kwargs["const"] = True
+    elif get_origin(annotation) is list:
+        # ``list[X]`` -> ``nargs="+"``. Forwarding the typing-form as ``type=`` would make
+        # argparse call ``list[X](string)`` on every value, which always crashes.
+        kwargs.pop("type", None)
+        kwargs["nargs"] = "+"
     else:
         kwargs["type"] = annotation
 
