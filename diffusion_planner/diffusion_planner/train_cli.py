@@ -90,8 +90,11 @@ def resolve_paths(args: argparse.Namespace) -> None:
             setattr(args, f.name, str(Path(value).resolve()))
 
 
-def build_train_config(args: argparse.Namespace, **overrides: Any) -> TrainConfig:
-    """Build the config the trainer runs on, with normalizers attached."""
+def build_train_config(args: Any, **overrides: Any) -> TrainConfig:
+    """Build the config the trainer runs on, with normalizers attached.
+
+    Accepts either argparse.Namespace or Hydra DictConfig.
+    """
     values = {f.name: getattr(args, f.name) for f in cli_fields()}
     values.update(overrides)
 

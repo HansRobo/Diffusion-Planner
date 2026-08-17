@@ -1,0 +1,176 @@
+# Default training configuration for Diffusion Planner
+
+defaults:
+  - _self_
+
+# ---------------------------------------------------------
+# Required Arguments
+# ---------------------------------------------------------
+exp_name: diffusion_planner
+save_dir: ./outputs
+train_set_list: ???
+valid_set_list: ???
+
+train_subsample_step: 1
+
+# ---------------------------------------------------------
+# Data Dimensions
+# ---------------------------------------------------------
+future_len: 80
+time_len: 31
+ego_prediction_horizon: 80
+
+agent_state_dim: 11
+agent_num: 320
+
+static_objects_state_dim: 10
+static_objects_num: 5
+
+lane_num: 140
+lane_len: 20
+
+route_num: 25
+route_len: 20
+
+polygon_num: 10
+polygon_len: 40
+
+line_string_num: 60
+line_string_len: 20
+
+# ---------------------------------------------------------
+# DataLoader Parameters
+# ---------------------------------------------------------
+use_data_augment: true
+augment_prob: 0.5
+augment_type: quintic
+num_refine: 20
+ego_past_noise_std: 0.1
+use_smoothing_future_trajectory: true
+normalization_file_path: normalization.json
+num_workers: 8
+pin_mem: true
+
+# ---------------------------------------------------------
+# Training Parameters
+# ---------------------------------------------------------
+seed: 3407
+train_epochs: 100
+batch_size: 512
+save_utd: 10
+learning_rate: 0.0001
+warm_up_epoch: 5
+encoder_drop_path_rate: 0.1
+decoder_drop_path_rate: 0.1
+use_ego_history: true
+ego_history_dropout_rate: 0.4
+use_turn_indicators: true
+
+# Loss Coefficients
+coeff_position_lat_loss: 1.0
+coeff_position_lon_loss: 1.0
+coeff_heading_l2_loss: 1.0
+coeff_velocity: 1.0
+coeff_timestep:
+  - 1.0
+  - 1.0
+  - 1.0
+  - 1.0
+
+coeff_road_border_loss: 1.0
+road_border_margin: 0.25
+road_border_n_interp: 2
+
+coeff_neighbor_collision_loss: 0.0
+neighbor_collision_margin_vehicle: 0.25
+neighbor_collision_margin_pedestrian: 1.0
+neighbor_collision_margin_bicycle: 0.5
+
+enable_epdms_eval: false
+enable_pdms_eval: false
+epdms_eval_use_agent_boxes: true
+epdms_eval_use_road_border: true
+
+alpha_planning_loss: 1.0
+alpha_neighbor_loss: 0.1
+
+# Velocity Representation & Hybrid Loss
+use_velocity_representation: false
+hybrid_loss_omega: 0.1
+hybrid_loss_window: 10
+
+guidance_scale: 0.5
+device: cuda
+use_ema: true
+ema_decay: 0.999
+
+# ---------------------------------------------------------
+# Model Architecture
+# ---------------------------------------------------------
+encoder_mixer_depth: 6
+encoder_fusion_depth: 6
+decoder_depth: 3
+num_heads: 8
+hidden_dim: 256
+diffusion_model_type: x_start
+predicted_neighbor_num: 320
+resume_model_path: null
+
+# ---------------------------------------------------------
+# Logging & Distributed Setup
+# ---------------------------------------------------------
+use_wandb: false
+wandb_run_id: null
+wandb_project_name: Diffusion-Planner
+notes: ""
+ddp: true
+port: "22323"
+
+enable_temporal_stability_eval: true
+enable_replan_consistency_eval: true
+replan_consistency_expected_gap: 1
+
+# ---------------------------------------------------------
+# Closed-loop validation
+# ---------------------------------------------------------
+closed_loop_npz_root: ""
+closed_loop_object_modes:
+  - objects
+closed_loop_seg_len: 100000
+closed_loop_replan_interval: 4
+closed_loop_draw_every: 4
+closed_loop_draw_workers: 4
+closed_loop_fps: 10
+closed_loop_near_miss_thresh: 0.5
+closed_loop_search_radius: 1.5
+closed_loop_warmup_steps: 0
+closed_loop_unstick_after: 300
+closed_loop_unstick_advance_m: 5.0
+closed_loop_unstick_radius_mult: 10.0
+closed_loop_unstick_teleport_after: 300
+closed_loop_abort_deviation_m: 50.0
+closed_loop_abort_after: 30
+closed_loop_abort_max_snaps: 0
+closed_loop_wandb_video_pick: worst
+closed_loop_colormap_metrics:
+  - clearance
+  - collision
+  - near_miss
+  - speed
+  - road_border
+  - red_light
+  - strong_brake
+closed_loop_report_base_url: ""
+
+# ---------------------------------------------------------
+# Scenario-based Open-loop validation
+# ---------------------------------------------------------
+scenario_based_open_loop_list: ""
+scenario_centerline_horizon_seconds: 8.0
+scenario_departure_horizon_seconds: 3.0
+scenario_departure_minimum_displacement_m: 2.0
+
+# ---------------------------------------------------------
+# Deterministic
+# ---------------------------------------------------------
+deterministic: true

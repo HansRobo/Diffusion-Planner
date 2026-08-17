@@ -1,0 +1,7 @@
+# Hydra global configuration
+hydra:
+  run:
+    dir: outputs/${now:%Y%m%d_%H%M%S}
+  sweep:
+    dir: outputs/${now:%Y%m%d_%H%M%S}/sweeps
+    subdir: ${hydra.job.num}
