@@ -241,6 +241,7 @@ def run_closed_loop_main(
     only_json: list[str] | None = None,
     object_modes: list[str] | None = None,
     render_media: bool = True,
+    shard: tuple[int, int] | None = None,
 ) -> bool:
     """Unified entry point for closed-loop evaluation.
 
@@ -281,13 +282,25 @@ def run_closed_loop_main(
 
     modes = object_modes or ["objects", "noobj"]
 
+    # When ``shard`` is set, jobs are round-robin split across ``world_size``
+    # ranks: every rank runs its own subset in-process on its own GPU (via DDP),
+    # rank 0 aggregates the on-disk results afterwards. shard=None means run
+    # everything sequentially (CLI mode).
+    rank, world_size = (shard if shard is not None else (0, 1))
+
     # Triple loop: json_name -> group_name -> mode
+    i = 0
     for json_name, groups in resolved.items():
         json_out_dir = out_root / json_name
         json_out_dir.mkdir(parents=True, exist_ok=True)
 
         for group_name, npz_paths in groups.items():
             for mode in modes:
+                if i % world_size != rank:
+                    i += 1
+                    continue
+                i += 1
+
                 if mode == "objects":
                     mode_out_dir = json_out_dir / group_name
                     summary_key = _make_summary_key(json_name, group_name)
@@ -307,26 +320,28 @@ def run_closed_loop_main(
                     mode=mode,
                 )
 
-    all_summaries = _load_group_results(out_root)
-    all_group_names = sorted(all_summaries.keys())
+    # Aggregate on rank 0 only (shard=None -> rank 0; DDP -> rank 0 only).
+    if rank == 0:
+        all_summaries = _load_group_results(out_root)
+        all_group_names = sorted(all_summaries.keys())
 
-    _write_groups_manifest(out_root, all_summaries)
+        _write_groups_manifest(out_root, all_summaries)
 
-    for json_name in resolved:
-        for mode in modes:
-            json_label = json_name if mode == "objects" else f"{json_name}__noobj"
-            json_prefix = f"{json_label}/"
-            per_json_summaries = {
-                k: v for k, v in all_summaries.items() if k.startswith(json_prefix)
-            }
-            json_out_dir = out_root / json_label
-            if json_out_dir.exists() and per_json_summaries:
-                _write_groups_manifest(json_out_dir, per_json_summaries)
+        for json_name in resolved:
+            for mode in modes:
+                json_label = json_name if mode == "objects" else f"{json_name}__noobj"
+                json_prefix = f"{json_label}/"
+                per_json_summaries = {
+                    k: v for k, v in all_summaries.items() if k.startswith(json_prefix)
+                }
+                json_out_dir = out_root / json_label
+                if json_out_dir.exists() and per_json_summaries:
+                    _write_groups_manifest(json_out_dir, per_json_summaries)
 
-    if all_group_names:
-        _log_to_wandb(
-            args, all_group_names, all_summaries, out_root, wandb_run, render_media=render_media
-        )
+        if all_group_names:
+            _log_to_wandb(
+                args, all_group_names, all_summaries, out_root, wandb_run, render_media=render_media
+            )
 
 
 def parse_args() -> argparse.Namespace:

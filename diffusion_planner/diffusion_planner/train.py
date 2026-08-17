@@ -127,21 +127,17 @@ def wandb_epdms_metrics(epdms_means):
 
 
 def closed_loop_validate(
-    model, args, epoch: int, out_dir: str, *, is_final_save: bool = False
+    model, args, epoch: int, out_dir: str, global_rank: int, world_size: int, *, is_final_save: bool = False
 ) -> None:
     """Closed-loop rendered rollout; logs metrics + videos to wandb.
 
-    Unified entry point via :func:`~diffusion_planner.run_all_groups_closed_loop.run_closed_loop_main`.
-    Supports multiple input formats via :func:`~diffusion_planner.run_all_groups_closed_loop.resolve_closed_loop_inputs`.
-    Called on the checkpoint-save cadence, rank-0 only: pass the unwrapped model; it is switched
-    to eval for the rollout (so the diffusion sampler runs and produces ``prediction``) and
-    restored afterwards.
+    Every rank runs its shard of the (json, group, mode) jobs; rank 0 waits
+    for all then aggregates the on-disk results and logs to wandb.
 
-    ``is_final_save=True`` marks the last cadence call of the run (computed by the caller, since
-    train_epochs may not land on a save_utd-multiple).
-
-    ``closed_loop_npz_root`` runs every cadence call; only its video/colormap rendering is
-    deferred to ``is_final_save``.
+    This is the standard distributed-validation pattern: each worker processes
+    its own data slice on its own GPU (no GPU conflicts), then rank 0
+    assembles the final summary. The parent must call a barrier before this
+    to ensure every rank has finished its epoch and the checkpoint is stable.
     """
     if not args.closed_loop_npz_root:
         return
@@ -163,21 +159,21 @@ def closed_loop_validate(
             if args.closed_loop_object_modes is not None
             else ["objects"],
             render_media=is_final_save,
+            shard=(global_rank, world_size),
         )
 
-        # Per-group summaries + aggregate + episode-table are already logged to wandb
-        # inside run_closed_loop_main() (it owns the wandb session when wandb_run is given).
-        # Print a short per-group stdout summary for live-train log readability — wandb UI
-        # already has the structured view.
-        for group_key, summary in _load_group_results(out_dir).items():
-            print(
-                f"closed-loop [{group_key}] @epoch {epoch + 1}: {summary.get('n_segments', 0)} seg in "
-                f"{summary.get('elapsed_sec', 0):.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
-                f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
-                f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
-                f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
-                f"{len(summary.get('video_mp4s', []))} video(s)"
-            )
+        # Rank 0: per-group stdout summary (wandb logging already happened inside
+        # run_closed_loop_main for rank 0).
+        if global_rank == 0:
+            for group_key, summary in _load_group_results(out_dir).items():
+                print(
+                    f"closed-loop [{group_key}] @epoch {epoch + 1}: {summary.get('n_segments', 0)} seg in "
+                    f"{summary.get('elapsed_sec', 0):.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
+                    f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
+                    f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
+                    f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
+                    f"{len(summary.get('video_mp4s', []))} video(s)"
+                )
 
     finally:
         net.train(was_training)
@@ -187,7 +183,7 @@ def model_training(args: TrainConfig):
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
     # init ddp
-    global_rank, rank, _ = ddp.ddp_setup_universal(True, args)
+    global_rank, rank, world_size = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
 
     if global_rank == 0:
@@ -608,6 +604,8 @@ def model_training(args: TrainConfig):
                     args,
                     epoch,
                     os.path.join(curr_dir, "closed_loop"),
+                    global_rank,
+                    world_size,
                     is_final_save=is_final_save,
                 )
 

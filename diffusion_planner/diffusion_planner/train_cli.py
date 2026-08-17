@@ -43,7 +43,10 @@ def _add_argument(parser: argparse.ArgumentParser, f: Field) -> None:
     if required:
         kwargs["required"] = True
     else:
-        kwargs["default"] = f.default if f.default is not MISSING else f.default_factory()
+        if f.default is not MISSING:
+            kwargs["default"] = f.default
+        else:
+            kwargs["default"] = f.default_factory()
 
     annotation = _unwrap_optional(f.type)
     if get_origin(annotation) is Literal:

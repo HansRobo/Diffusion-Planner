@@ -18,18 +18,23 @@ from diffusion_planner.dimensions import (
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
-def cli(help: str, *, default: Any = MISSING, path: bool = False) -> Any:
+def cli(help: str, *, default: Any = MISSING, default_factory: Any = MISSING, path: bool = False) -> Any:
     """Mark a TrainConfig field as exposed on the command line.
 
     The argument's name, type, default, choices and help text are all read off the field
     definition by :mod:`diffusion_planner.train_cli` -- anything marked here is a flag on
     both entrypoints (:mod:`train_predictor` and :mod:`train_run`), and anything not
     marked is a setting changed by editing its default below.
+
+    Use ``default_factory`` for mutable defaults (lists/dicts) — dataclasses refuses
+    a raw mutable default, and ``cli(default=[])`` is the same trap at a thinner layer.
     """
     metadata = {"cli": True, "help": help, "path": path}
-    if default is MISSING:
-        return field(metadata=metadata)
-    return field(default=default, metadata=metadata)
+    if default is not MISSING:
+        return field(default=default, metadata=metadata)
+    if default_factory is not MISSING:
+        return field(default_factory=default_factory, metadata=metadata)
+    return field(metadata=metadata)
 
 
 @dataclass
@@ -207,10 +212,11 @@ class TrainConfig:
     # - Grouped JSON: `{"g1": [...], "g2": [...]}` -> keys become group names
     # - Path-list JSON (legacy): same format as site_discovery.discover_sites_from_json input
     # ---------------------------------------------------------
-    closed_loop_npz_root: str = cli(
+    closed_loop_npz_root: list[str] = cli(
         "dir tree, flat JSON, or grouped JSON for closed-loop validation. "
-        "Empty = disabled. Supports: folder, flat JSON (list), grouped JSON (dict).",
-        default="",
+        "Empty = disabled. Supports: folder, flat JSON (list), grouped JSON (dict). "
+        "Multiple inputs each become their own top-level namespace.",
+        default_factory=lambda: [],
         path=True,
     )
     # Object-mode ablation: "objects"=normal, "noobj"=empty-world (no dynamic/static
@@ -218,7 +224,7 @@ class TrainConfig:
     # route/map").
     closed_loop_object_modes: list[str] = cli(
         "object-mode(s): 'objects'=normal, 'noobj'=empty-world ablation",
-        default=["objects"],
+        default_factory=lambda: ["objects"],
     )
     closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
     # Re-plan every N steps: replan=1 is a model forward EVERY step (~minutes/epoch over a full
