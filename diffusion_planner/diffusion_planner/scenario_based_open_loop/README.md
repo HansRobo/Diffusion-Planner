@@ -32,7 +32,7 @@ Summary averages these per-sample scores:
 
 These two lateral quantities are not interchangeable: segment-axis `lateral_error_m` is the #327 geometry; `lateral_offset_m` is the prediction-heading match used for `match_rate_percent`.
 
-Per-sample `details.jsonl` `centerline` fields include visualization polylines (`prediction_xy`, `closest_centerline_xy`, `centerline_xy` without padded `[0, 0]` vertices) and the `lateral_offset_m` timeseries. Those arrays are not copied into the summary.
+Per-sample `details.jsonl` keeps scalar centerline fields. `centerline_xy`, `prediction_xy`, `closest_centerline_xy`, and `lateral_offset_m` are used only for the PNG and are not written to JSONL.
 
 ## Visualization
 
