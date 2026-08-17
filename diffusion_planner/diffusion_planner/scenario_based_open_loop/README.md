@@ -28,9 +28,9 @@ Centerline match uses `--scenario_centerline_match_threshold_m` (default `0.5`) 
 Summary averages these per-sample scores:
 
 - `average_lateral_error_m` / `final_lateral_error_m`: unsigned distance to the selected **centerline segment's supporting line**. Endpoint overshoot is `longitudinal_error_m`, not lateral error. Zero-length segments are ignored.
-- `match_rate_percent`: percentage of horizon steps whose heading-frame `|n|` is at most `match_threshold_m`. The Frenet s-axis is the **prediction heading** (stored `(cos, sin)` when present, otherwise xy differences); `n` is the left normal (left of the nearest centerline foot is positive).
+- `lateral_in_band_rate`: percentage of horizon steps whose heading-frame `|n|` is at most `match_threshold_m`. The Frenet s-axis is the **prediction heading** (stored `(cos, sin)` when present, otherwise xy differences); `n` is the left normal (left of the nearest centerline foot is positive).
 
-These two lateral quantities are not interchangeable: segment-axis `lateral_error_m` is the #327 geometry; `lateral_offset_m` is the prediction-heading match used for `match_rate_percent`.
+These two lateral quantities are not interchangeable: segment-axis `lateral_error_m` is the #327 geometry; `lateral_offset_m` is the prediction-heading offset used for `lateral_in_band_rate`.
 
 Per-sample `details.jsonl` keeps scalar centerline fields. `centerline_xy`, `prediction_xy`, `closest_centerline_xy`, and `lateral_offset_m` are used only for the PNG and are not written to JSONL.
 

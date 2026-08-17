@@ -60,7 +60,7 @@ def test_centerline_metric_returns_lateral_errors_at_requested_horizon():
     assert set(values) == {
         "average_lateral_error_m",
         "final_lateral_error_m",
-        "match_rate_percent",
+        "lateral_in_band_rate",
     }
 
 
@@ -103,8 +103,8 @@ def test_centerline_heading_frame_offset_uses_left_normal_sign():
     )
 
 
-def test_centerline_match_rate_uses_abs_offset_and_threshold():
-    """match_rate_percent is the fraction of steps with |n| <= threshold."""
+def test_centerline_lateral_in_band_rate_uses_abs_offset_and_threshold():
+    """lateral_in_band_rate is the fraction of steps with |n| <= threshold."""
     prediction = torch.tensor(
         [[[0.5, 0.5, 1.0, 0.0], [1.5, 1.0, 1.0, 0.0], [2.5, 1.5, 1.0, 0.0]]],
     )
@@ -114,7 +114,7 @@ def test_centerline_match_rate_uses_abs_offset_and_threshold():
         {"horizon_seconds": 0.3, "match_threshold_m": 1.0},
     )
 
-    torch.testing.assert_close(values["match_rate_percent"], torch.tensor([200.0 / 3.0]))
+    torch.testing.assert_close(values["lateral_in_band_rate"], torch.tensor([200.0 / 3.0]))
 
 
 def test_centerline_details_include_polylines_and_offsets():

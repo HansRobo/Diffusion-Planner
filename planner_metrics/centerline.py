@@ -226,7 +226,7 @@ def _centerline_scores(
     return {
         "average_lateral_error_m": lateral_error.mean(dim=1),
         "final_lateral_error_m": lateral_error[:, -1],
-        "match_rate_percent": matched.mean(dim=1) * 100.0,
+        "lateral_in_band_rate": matched.mean(dim=1) * 100.0,
     }
 
 
