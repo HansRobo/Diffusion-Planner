@@ -8,7 +8,6 @@ metric-specific details without coupling the runner to individual metrics.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 import torch
 
@@ -29,7 +28,7 @@ class MetricEvaluation:
     """
 
     scores: dict[str, torch.Tensor]
-    details: dict[str, dict[str, Any]] = field(default_factory=dict)
+    details: dict[str, dict[str, torch.Tensor]] = field(default_factory=dict)
 
 
 def _tensor_to_json(sampled: torch.Tensor) -> Any:
