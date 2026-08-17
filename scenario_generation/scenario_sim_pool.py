@@ -27,7 +27,11 @@ from scenario_generation.closed_loop_eval import (
 )
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.render_pool import render_pool
-from scenario_generation.scenario_sim_rollout import RolloutConfig, run_scenario_sim_rollout
+from scenario_generation.scenario_sim_rollout import (
+    RolloutConfig,
+    ScenarioRejected,
+    run_scenario_sim_rollout,
+)
 
 
 def _claim(claim_dir: Path, index: int) -> bool:
@@ -163,6 +167,13 @@ def main(argv: list[str] | None = None) -> int:
                 # 'active'" -- the same thing a genuinely broken scenario reports. So the count is
                 # what distinguishes them. Exiting costs parallelism only: whatever this worker
                 # has not claimed, another takes.
+                #
+                # A scenario the interpreter refused at configure time is not evidence about this
+                # process: configure runs before the core is built. Those cluster in the work list
+                # -- a broken scenario's variants sit at consecutive indices, and one worker claims
+                # the run of them -- so counting them retires healthy workers.
+                if isinstance(e, ScenarioRejected):
+                    continue
                 consecutive_failures += 1
                 if isinstance(e, BrokenExecutor) or consecutive_failures >= 3:
                     print(
