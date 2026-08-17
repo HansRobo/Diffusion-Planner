@@ -67,9 +67,11 @@ std::vector<OverrideSegment> build_override_segments(
 }
 
 void save_override_segments_json(
-  const std::string & output_dir, const std::vector<OverrideSegment> & segments)
+  const std::string & output_dir, const std::vector<OverrideSegment> & segments,
+  const std::size_t control_mode_sample_count)
 {
   nlohmann::json payload;
+  payload["control_mode_sample_count"] = control_mode_sample_count;
   payload["override_segments"] = nlohmann::json::array();
   for (const auto & segment : segments) {
     payload["override_segments"].push_back(
@@ -111,7 +113,8 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
     converter.extract_override_segments ? build_override_segments(bag_data.control_modes)
                                         : std::vector<OverrideSegment>{};
   if (converter.extract_override_segments) {
-    save_override_segments_json(paths.save_dir, override_segments);
+    save_override_segments_json(
+      paths.save_dir, override_segments, bag_data.control_modes.size());
   }
 
   const auto missing_topics_skip = check_missing_topics(bag_data);
