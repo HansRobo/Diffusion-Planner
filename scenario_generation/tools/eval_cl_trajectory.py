@@ -156,15 +156,42 @@ def _min_dist_vectorized(
         proj = s_starts[None, :, :] + t[:, :, None] * ab[None, :, :]  # (K, B, 2)
         delta = points[:, None, :] - proj
         dist = np.sqrt((delta * delta).sum(axis=2))  # (K, B)
-        # Degenerate (zero-length) segments fall back to point distance.
-        dist_deg = np.linalg.norm(points[:, None, :] - s_starts[None, :, :], axis=2)
-        dist = np.where(ab_len2[None, :] < 1e-12, dist_deg, dist)
+        # Only for a block that holds one -- a second full (K, B, 2) norm, and real maps have
+        # none. Kept at all because norm and sqrt(sum(d*d)) need not round identically.
+        degenerate = ab_len2 < 1e-12
+        if degenerate.any():
+            dist_deg = np.linalg.norm(points[:, None, :] - s_starts[None, :, :], axis=2)
+            dist = np.where(degenerate[None, :], dist_deg, dist)
 
         block_min = float(dist.min())
         if block_min < min_dist:
             min_dist = block_min
 
     return min_dist
+
+
+_TICK_BLOCK = 50
+# A segment further than this from a block's path cannot be nearest for any tick in it, provided
+# the block's reported distances stay inside the bound -- checked, not assumed.
+_BLOCK_MARGIN_M = 50.0
+
+
+def _block_segment_mask(
+    seg_starts: np.ndarray,
+    seg_ends: np.ndarray,
+    xy: np.ndarray,
+    reach: float,
+) -> np.ndarray:
+    """Which segments could be within ``_BLOCK_MARGIN_M`` of the ego anywhere in this block.
+
+    Deliberately not parameterised: the caller's exactness check reads the same constant, and a
+    wider mask with an unchanged check would be silently wrong.
+    """
+    lo = xy.min(axis=0) - (reach + _BLOCK_MARGIN_M)
+    hi = xy.max(axis=0) + (reach + _BLOCK_MARGIN_M)
+    return (np.maximum(seg_starts, seg_ends) >= lo).all(axis=1) & (
+        np.minimum(seg_starts, seg_ends) <= hi
+    ).all(axis=1)
 
 
 def evaluate_trajectory(
@@ -186,29 +213,37 @@ def evaluate_trajectory(
     seg_starts, seg_ends = _flatten_segments(border_segments)
     has_borders = seg_starts.shape[0] > 0
 
-    rb_dists = []
-    speeds = []
-    positions = []
+    speeds = [entry["speed"] for entry in traj]
+    positions = [(entry["x"], entry["y"]) for entry in traj]
 
-    for entry in traj:
-        x, y, h = entry["x"], entry["y"], entry["heading"]
-        speed = entry["speed"]
-        positions.append((x, y))
-        speeds.append(speed)
+    # Full perimeter, not just corners: a border piercing the middle of an edge leaves every
+    # corner outside rb_cross_thresh while still crossing.
+    def _perimeter(entry: dict) -> np.ndarray:
+        return _compute_ego_perimeter(
+            entry["x"], entry["y"], entry["heading"], half_l, half_w, ego_wheelbase
+        )
 
-        if has_borders:
-            # Sample the full OBB perimeter, not just corners: a border that
-            # pierces the middle of a vehicle edge can leave every corner
-            # outside rb_cross_thresh but still be a true crossing.
-            perimeter = _compute_ego_perimeter(
-                x,
-                y,
-                h,
-                half_l,
-                half_w,
-                ego_wheelbase,
+    rb_dists: list[float] = []
+    if has_borders:
+        # Furthest a perimeter point can be from the reported pose.
+        reach = float(np.hypot(0.5 * (ego_length + ego_wheelbase), 0.5 * ego_width))
+        for b0 in range(0, len(traj), _TICK_BLOCK):
+            block = traj[b0 : b0 + _TICK_BLOCK]
+            mask = _block_segment_mask(
+                seg_starts, seg_ends, np.asarray(positions[b0 : b0 + _TICK_BLOCK]), reach
             )
-            rb_dists.append(_min_dist_vectorized(perimeter, seg_starts, seg_ends))
+            b_starts, b_ends = seg_starts[mask], seg_ends[mask]
+            block_dists = [_min_dist_vectorized(_perimeter(e), b_starts, b_ends) for e in block]
+
+            # Redo against the full set when the bound the mask assumed was not honoured. A
+            # block that kept no segments reports inf for every tick, so "no finite distance"
+            # has to trigger this too -- otherwise inf reaches rb_dist_min/med/p5.
+            finite = [d for d in block_dists if math.isfinite(d)]
+            if mask.sum() < seg_starts.shape[0] and (not finite or max(finite) > _BLOCK_MARGIN_M):
+                block_dists = [
+                    _min_dist_vectorized(_perimeter(e), seg_starts, seg_ends) for e in block
+                ]
+            rb_dists.extend(block_dists)
 
     rb_dists = np.array(rb_dists)
     speeds = np.array(speeds)
