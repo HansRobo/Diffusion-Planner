@@ -64,10 +64,11 @@ def test_metric_parameters_are_derived_from_train_config_field_names():
     class Args:
         def __init__(self):
             self.scenario_centerline_horizon_seconds = 8.0
+            self.scenario_centerline_match_threshold_m = 0.5
             self.scenario_departure_horizon_seconds = 3.0
             self.scenario_departure_minimum_displacement_m = 2.0
 
     assert _metric_parameters_from_args(Args()) == {
-        "centerline": {"horizon_seconds": 8.0},
+        "centerline": {"horizon_seconds": 8.0, "match_threshold_m": 0.5},
         "departure": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
     }

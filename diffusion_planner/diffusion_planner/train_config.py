@@ -283,6 +283,10 @@ class TrainConfig:
         path=True,
     )
     scenario_centerline_horizon_seconds: float = 8.0
+    scenario_centerline_match_threshold_m: float = cli(
+        "Centerline match-rate threshold in meters for |heading-frame lateral offset|.",
+        default=0.5,
+    )
     scenario_departure_horizon_seconds: float = 3.0
     scenario_departure_minimum_displacement_m: float = 2.0
 

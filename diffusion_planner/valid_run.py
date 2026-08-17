@@ -7,6 +7,7 @@ per-clip MP4s on rank 0 when --save_predictions_dir is set.
 """
 
 import argparse
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +62,12 @@ def main() -> None:
     save_dir = output_root / "predictions"
 
     here = Path(__file__).resolve().parent
+    # torch.distributed.run workers start with cwd=here, so a relative PYTHONPATH
+    # (or none) would miss the sibling planner_metrics package and fall through
+    # to a venv editable install from another checkout.
+    repo_root = str(here.parent)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
     dist_init_file_path().unlink(missing_ok=True)
 
     cmd = [
@@ -93,7 +100,7 @@ def main() -> None:
         )
     if args.scenario_based_open_loop_only:
         cmd.append("--scenario_based_open_loop_only")
-    rc = tee_run(cmd, cwd=here, log_path=output_root / "valid_log.txt")
+    rc = tee_run(cmd, cwd=here, env=env, log_path=output_root / "valid_log.txt")
     sys.exit(rc)
 
 

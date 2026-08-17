@@ -187,6 +187,9 @@ def run_validation(valid_cfg: ValidConfig):
                 scenario_centerline_horizon_seconds=getattr(
                     config_obj, "scenario_centerline_horizon_seconds", 8.0
                 ),
+                scenario_centerline_match_threshold_m=getattr(
+                    config_obj, "scenario_centerline_match_threshold_m", 0.5
+                ),
                 scenario_departure_horizon_seconds=getattr(
                     config_obj, "scenario_departure_horizon_seconds", 3.0
                 ),
