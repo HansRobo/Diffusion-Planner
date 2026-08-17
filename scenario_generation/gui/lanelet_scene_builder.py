@@ -291,8 +291,7 @@ class LaneletSceneBuilder:
         from autoware_lanelet2_extension_python.projection import MGRSProjector
 
         projection = MGRSProjector(lanelet2.io.Origin(0.0, 0.0))
-        # Kept so a caller that reuses one builder across scenarios can check it against the
-        # map that scenario declares: every geometry this builder serves is that map's.
+        # The map every geometry this builder serves comes from.
         self.lanelet_path = str(lanelet_path)
         self._lanelet_map = lanelet2.io.load(str(lanelet_path), projection)
 
