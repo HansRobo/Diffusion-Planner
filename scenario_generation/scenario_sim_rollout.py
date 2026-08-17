@@ -387,16 +387,17 @@ def run_scenario_sim_rollout(
     device: str = "cpu",
     verbose: bool = True,
     timers: Timers | None = None,
-    builder: LaneletSceneBuilder | None = None,
+    builders: dict[str, LaneletSceneBuilder] | None = None,
     draw_pool: Executor | None = None,
 ) -> dict:
     """Run one closed-loop OpenSCENARIO rollout and return an aggregate-ready row.
 
     ``model`` / ``model_args`` follow the ``run_closed_loop_eval`` contract
     (``model(data) -> (_, outputs)`` with ``outputs["prediction"]``; ``model_args`` provides
-    ``observation_normalizer`` / ``predicted_neighbor_num`` / ``future_len``). ``builder`` lets
-    a caller that outlives one scenario reuse a parsed map, which is per-map work a
-    per-scenario process would otherwise pay per scenario.
+    ``observation_normalizer`` / ``predicted_neighbor_num`` / ``future_len``). ``builders`` is a
+    cache a caller that outlives one scenario can hand in to reuse parsed maps -- per-map work
+    that a per-scenario process otherwise pays per scenario. It is keyed on the resolved map
+    path, so a builder can never be reused against a different map.
     """
     # Participants in one DDS domain all discover each other, so processes sharing a domain cost
     # N^2 of discovery. 101 is the last domain whose RTPS base ports clear Linux's ephemeral
@@ -474,15 +475,16 @@ def run_scenario_sim_rollout(
         if map_path is None:
             map_path = runner.lanelet2_map_path()
         with timers("map_build"):
+            # Keyed on the resolved map rather than handed in ready-made: route, centreline and
+            # road-border geometry all come off this builder, so one carried over from another
+            # scenario would compute every one of them against a map the interpreter did not
+            # load.
+            if builders is None:
+                builders = {}
+            key = str(Path(map_path).resolve())
+            builder = builders.get(key)
             if builder is None:
-                builder = LaneletSceneBuilder(str(map_path))
-            elif Path(builder.lanelet_path).resolve() != Path(map_path).resolve():
-                # Route, centreline and road-border geometry all come off the builder's map. A
-                # builder carried over from another scenario would compute every one of them
-                # against a map the interpreter did not load.
-                raise ValueError(
-                    f"builder holds {builder.lanelet_path}, but this scenario loaded {map_path}"
-                )
+                builder = builders[key] = LaneletSceneBuilder(str(map_path))
         # Derived once: the drawing reads it every tick and the road-border metrics read it again.
         borders = border_segments_from_map(builder._lanelet_map)
         with timers("route_resolve"):
