@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import time
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
@@ -252,6 +253,24 @@ if __name__ == "__main__":
     with Pool(processes=num_workers) as pool:
         results = pool.map(process_single_bag, process_args)
 
+    converted_count = sum(
+        result.get("status") == "converted"
+        for result in results
+        if isinstance(result, dict)
+    )
+    skipped_count = sum(
+        result.get("status") == "skipped" for result in results if isinstance(result, dict)
+    )
+    failed_count = sum(
+        result.get("status") == "failed" for result in results if isinstance(result, dict)
+    )
+    logging.info(
+        "Conversion summary: converted=%d, skipped=%d, failed=%d",
+        converted_count,
+        skipped_count,
+        failed_count,
+    )
+
     if args.conversion_manifest_path is not None:
         manifest_path = args.conversion_manifest_path.resolve()
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -259,21 +278,9 @@ if __name__ == "__main__":
             json.dumps(
                 {
                     "records": results,
-                    "converted_count": sum(
-                        result.get("status") == "converted"
-                        for result in results
-                        if isinstance(result, dict)
-                    ),
-                    "skipped_count": sum(
-                        result.get("status") == "skipped"
-                        for result in results
-                        if isinstance(result, dict)
-                    ),
-                    "failed_count": sum(
-                        result.get("status") == "failed"
-                        for result in results
-                        if isinstance(result, dict)
-                    ),
+                    "converted_count": converted_count,
+                    "skipped_count": skipped_count,
+                    "failed_count": failed_count,
                 },
                 indent=2,
             )
@@ -290,3 +297,7 @@ if __name__ == "__main__":
 
     with open(save_root / "processing_time.txt", "w") as summary_file:
         summary_file.write(f"Total elapsed time: {time_str}\n")
+
+    if converted_count == 0 and failed_count > 0:
+        logging.error("No bags were converted successfully.")
+        sys.exit(1)
