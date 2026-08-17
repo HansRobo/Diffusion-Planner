@@ -15,7 +15,11 @@ import json
 import time
 from pathlib import Path
 
-from scenario_generation.closed_loop_eval import segment_row_for_json, tdigest_sidecar_row
+from scenario_generation.closed_loop_eval import (
+    build_mp4,
+    segment_row_for_json,
+    tdigest_sidecar_row,
+)
 from scenario_generation.perf_timer import Timers
 from scenario_generation.scenario_sim_rollout import RolloutConfig, run_scenario_sim_rollout
 
@@ -43,6 +47,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--warmup_steps", type=int, default=5)
     p.add_argument("--near_miss_thresh", type=float, default=1.0)
     p.add_argument("--fps", type=float, default=10.0)
+    p.add_argument(
+        "--draw_every",
+        type=int,
+        default=None,
+        help="render a PNG every N ticks and encode them to an MP4; omitted (default) renders "
+        "nothing, which is what a run that only wants the metrics row should do",
+    )
     return p.parse_args(argv)
 
 
@@ -61,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=a.max_steps,
         warmup_steps=a.warmup_steps,
         near_miss_thresh=a.near_miss_thresh,
+        draw_every=a.draw_every,
     )
     row = run_scenario_sim_rollout(
         model,
@@ -92,6 +104,14 @@ def main(argv: list[str] | None = None) -> int:
         side_out.write_text(json.dumps(side, default=float))
     else:
         side_out.unlink(missing_ok=True)
+
+    # After the row, so a missing or unhappy ffmpeg costs the video and not the metrics.
+    out_dir = Path(a.out_dir)
+    # ffmpeg's glob errors on a directory with no match.
+    if any(out_dir.glob("*.png")):
+        # fps is the sim tick rate, so a sparse sequence plays draw_every x faster than real
+        # time. Not a separate knob: one number cannot be both.
+        build_mp4(out_dir, out_dir / f"{route}.mp4", a.fps, remove_pngs=True)
     return 0
 
 
