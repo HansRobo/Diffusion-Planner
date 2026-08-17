@@ -150,6 +150,7 @@ def process_single_bag(args_tuple):
             "reason": "already_exists",
             "bag_path": str(bag_path),
             "output_dir": str(save_dir),
+            "error": None,
         }
 
     try:
@@ -193,11 +194,20 @@ def process_single_bag(args_tuple):
             "mode": mode,
             "bag_path": str(bag_path),
             "output_dir": str(save_dir),
+            "reason": None,
+            "error": None,
         }
     except Exception as e:
         error_msg = f"Error processing {bag_path}: {str(e)}"
         logging.error(error_msg)
-        return {"status": "failed", "mode": mode, "bag_path": str(bag_path), "error": str(e)}
+        return {
+            "status": "failed",
+            "mode": mode,
+            "bag_path": str(bag_path),
+            "output_dir": str(save_dir),
+            "reason": "conversion_failed",
+            "error": str(e),
+        }
 
 
 if __name__ == "__main__":

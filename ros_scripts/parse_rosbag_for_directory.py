@@ -90,7 +90,14 @@ def process_single_bag(args_tuple):
             f"Unexpected bag path layout for {bag_path}: expected "
             f"<proj_id>/<map_id>/<split>/<date>/<time>. Skipping."
         )
-        return {"status": "skipped", "bag_path": str(bag_path), "reason": "unexpected_layout"}
+        return {
+            "status": "skipped",
+            "mode": None,
+            "bag_path": str(bag_path),
+            "output_dir": None,
+            "reason": "unexpected_layout",
+            "error": None,
+        }
 
     # split が train/valid/auto のいずれでもない場合 (例: psim) は manual にフォールバック
     mode = SPLIT_TO_MODE.get(split, "manual")
@@ -116,6 +123,7 @@ def process_single_bag(args_tuple):
             "reason": "already_exists",
             "bag_path": str(bag_path),
             "output_dir": str(save_dir),
+            "error": None,
         }
 
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +157,14 @@ def process_single_bag(args_tuple):
     except Exception as e:
         error_msg = f"Error processing {bag_path}: {str(e)}"
         logging.error(error_msg)
-        return {"status": "failed", "mode": mode, "bag_path": str(bag_path), "error": str(e)}
+        return {
+            "status": "failed",
+            "mode": mode,
+            "bag_path": str(bag_path),
+            "output_dir": str(save_dir),
+            "reason": "conversion_failed",
+            "error": str(e),
+        }
 
     # The C++ converter writes the per-frame npz/json directly under save_dir but
     # emits the per-sequence route json into a nested "routes" subdir. Flatten it
@@ -165,7 +180,14 @@ def process_single_bag(args_tuple):
     except Exception as e:
         error_msg = f"Error flattening routes for {save_dir}: {str(e)}"
         logging.error(error_msg)
-        return {"status": "failed", "mode": mode, "bag_path": str(bag_path), "error": str(e)}
+        return {
+            "status": "failed",
+            "mode": mode,
+            "bag_path": str(bag_path),
+            "output_dir": str(save_dir),
+            "reason": "postprocess_failed",
+            "error": str(e),
+        }
 
     logging.info(f"Completed: {save_dir}")
     return {
@@ -173,6 +195,8 @@ def process_single_bag(args_tuple):
         "mode": mode,
         "bag_path": str(bag_path),
         "output_dir": str(save_dir),
+        "reason": None,
+        "error": None,
     }
 
 
