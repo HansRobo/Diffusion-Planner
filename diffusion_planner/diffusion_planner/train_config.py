@@ -260,7 +260,6 @@ class TrainConfig:
             "strong_brake",
         ]
     )
-    closed_loop_report_base_url: str = ""
 
     # Scenario-based Open-loop validation. The list JSON maps metric names to NPZ paths.
     scenario_based_open_loop_list: str = cli(

@@ -1,6 +1,5 @@
 """Single source of truth for closed-loop score/metric key names -- the small headline numbers
-surfaced in W&B (per-group score trends + cross-group overview) and the local HTML report, split
-into two groups:
+surfaced in W&B (per-group score trends + cross-group overview), split into two groups:
 
 - COMPARISON: meaningful in both objects and empty-world ("__noobj") ablation mode -- shown for
   every group/label, objects vs noobj overlaid as separate lines.
@@ -8,14 +7,12 @@ into two groups:
   -- shown for objects-labeled groups only, since a noobj line here is always a meaningless flat 0.
 
 Kept dependency-free (no torch/matplotlib/wandb) so wandb_closed_loop_workspace.py's standalone
-CLI can import it without pulling in the heavier deps wandb_closed_loop.py/
-closed_loop_html_report.py need.
+CLI can import it without pulling in the heavier deps wandb_closed_loop.py/.
 """
 
 from __future__ import annotations
 
-# Per-group score keys: closed_loop_scores/{key}/{label} in wandb; summary/episode columns in the
-# HTML report.
+# Per-group score keys: closed_loop_scores/{key}/{label} in wandb.
 COMPARISON_SCORE_KEYS = (
     "mean_route_completion",
     "total_curb_hits",

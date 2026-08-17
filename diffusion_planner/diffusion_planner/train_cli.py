@@ -86,7 +86,13 @@ def resolve_paths(args: argparse.Namespace) -> None:
         if not f.metadata.get("path"):
             continue
         value = getattr(args, f.name)
-        if value:
+        if not value:
+            continue
+        # Handle list types (nargs="+")
+        if isinstance(value, list):
+            resolved = [str(Path(v).resolve()) for v in value]
+            setattr(args, f.name, resolved)
+        else:
             setattr(args, f.name, str(Path(value).resolve()))
 
 
@@ -121,5 +127,12 @@ def to_command_line(args: argparse.Namespace, exclude: tuple[str, ...] = ()) -> 
         # A required field has no default, so it is always forwarded.
         if f.default is not MISSING and value == f.default:
             continue
-        argv += [f"--{f.name}", str(value)]
+        # Handle list types (nargs="+")
+        if isinstance(value, list):
+            if not value:  # empty list
+                continue
+            argv.append(f"--{f.name}")
+            argv.extend(str(v) for v in value)
+        else:
+            argv += [f"--{f.name}", str(value)]
     return argv

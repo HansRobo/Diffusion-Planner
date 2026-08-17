@@ -140,17 +140,16 @@ def closed_loop_validate(
     ``is_final_save=True`` marks the last cadence call of the run (computed by the caller, since
     train_epochs may not land on a save_utd-multiple).
 
-    * ``closed_loop_npz_root`` runs every cadence call; only its video/colormap rendering is
-      deferred to ``is_final_save``.
-    * ``closed_loop_sites_npz_root`` only runs at all on ``is_final_save`` -- it covers many more
-      sites/routes and is too expensive to run every cadence call.
+    ``closed_loop_npz_root`` runs every cadence call; only its video/colormap rendering is
+    deferred to ``is_final_save``.
     """
     if not args.closed_loop_npz_root:
         return
 
-    from run_all_groups_closed_loop import run_closed_loop_main
+    import json
+    from pathlib import Path
 
-    from scenario_generation.closed_loop_html_report import build_html_report
+    from run_all_groups_closed_loop import run_closed_loop_main
     from scenario_generation.wandb_closed_loop import (
         build_combined_episode_table,
         build_groups_aggregate_log,
@@ -172,29 +171,34 @@ def closed_loop_validate(
             object_modes=args.closed_loop_object_modes or ["objects"],
         )
 
-        # Build episode_data and group_summaries from the manifest for additional wandb logging
+        # Build episode_data and group_summaries by reading individual groups_summary.json files
         episode_data: list = []
         group_summaries: dict[str, dict] = {}
-        group_report_labels: list[str] = []
 
-        for summary_key, info in root_manifest.items():
-            summary = info.get("summary")
-            if not summary:
-                continue
-            group_out_dir = info.get("out_dir", "")
-            group_summaries[summary_key] = summary
-            segments = summary.get("segments") or []
-            episode_data.append((summary_key, segments, group_out_dir))
-            group_report_labels.append(summary_key)
-
-            print(
-                f"closed-loop [{summary_key}] @epoch {epoch + 1}: {summary['n_segments']} seg in "
-                f"{summary['elapsed_sec']:.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
-                f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
-                f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
-                f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
-                f"{len(summary.get('video_mp4s', []))} video(s)"
-            )
+        # root_manifest["sub_groups"] maps json_key -> {"overview": {...}}
+        for json_key in root_manifest.get("sub_groups", {}):
+            manifest_path = Path(out_dir) / json_key / "groups_summary.json"
+            if manifest_path.is_file():
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                    for group_key, info in manifest.get("sub_groups", {}).items():
+                        summary = info.get("summary")
+                        if not summary:
+                            continue
+                        group_out_dir = info.get("out_dir", "")
+                        group_summaries[group_key] = summary
+                        segments = summary.get("segments") or []
+                        episode_data.append((group_key, segments, group_out_dir))
+                        print(
+                            f"closed-loop [{group_key}] @epoch {epoch + 1}: {summary['n_segments']} seg in "
+                            f"{summary['elapsed_sec']:.1f}s  route_completion={summary.get('mean_route_completion', 0.0):.3f}  "
+                            f"collisions={summary.get('object', {}).get('collision_count', 0)}  "
+                            f"curb_hits={summary.get('road_border', {}).get('collision_count', 0)}  "
+                            f"snaps={summary.get('reproducer', {}).get('snap_count', 0)}  -> "
+                            f"{len(summary.get('video_mp4s', []))} video(s)"
+                        )
+                except Exception as e:
+                    print(f"Warning: failed to read {manifest_path}: {e}")
 
         if not episode_data:
             return
@@ -204,10 +208,6 @@ def closed_loop_validate(
             log["closed_loop_episodes/all"] = build_combined_episode_table(episode_data)
         if len(group_summaries) > 1:
             log.update(build_groups_aggregate_log(group_summaries))
-        if is_final_save and group_report_labels:
-            report_path = build_html_report(out_dir, group_report_labels)
-            if report_path:
-                print(f"closed-loop: wrote {report_path}")
 
         if log:
             wandb.log(log, step=epoch + 1)

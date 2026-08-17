@@ -5,10 +5,9 @@ Reads the per-step trace ``reproducer_rollout.render_segment`` already writes to
 one line per step) and draws a colored polyline (risk metric -> color) with a colorbar
 legend, similar in spirit to a routing app's "road risk" heatmap overlay.
 
-Used by both the local HTML gallery (one PNG per route/segment, all routes) and the
-W&B representative-case image (one PNG per group, ``wandb.Image``, worst-case route
-only) — same renderer, same look, so a human comparing the two is looking at the
-same visualization either way.
+Used by both the W&B representative-case image (one PNG per group, ``wandb.Image``,
+worst-case route) and the local video/colormap output — same renderer, same look,
+so a human comparing the two is looking at the same visualization either way.
 """
 
 from __future__ import annotations
@@ -311,8 +310,7 @@ def render_trajectory_colormaps(
     """Render one trajectory-colormap PNG per metric in ``metrics`` (default: all of
     :data:`METRIC_CHOICES`), named ``{out_dir}/{stem}_trajcolormap_{metric}.png``.
 
-    Used to feed a single episode's metric-switcher (the local HTML report's per-card
-    dropdown, and W&B's per-metric keys for the one representative episode) — one trajectory,
+    Used to feed W&B's per-metric keys for the one representative episode — one trajectory,
     several colorings, instead of forcing a single metric choice up front. Returns a dict of
     only the metrics that actually rendered (a metric can legitimately be skipped, e.g. no
     per-step trace at all -> every metric skipped; this never raises).

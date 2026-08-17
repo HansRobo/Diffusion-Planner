@@ -33,7 +33,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
 
-from scenario_generation.closed_loop_html_report import build_html_report
 from scenario_generation.wandb_closed_loop import build_groups_aggregate_log
 
 
@@ -196,7 +195,6 @@ def run_one_group(
             video_pick=getattr(args, "closed_loop_wandb_video_pick", "worst"),
             colormap_metrics=tuple(getattr(args, "closed_loop_colormap_metrics", [])),
             near_miss_thresh=getattr(args, "closed_loop_near_miss_thresh", 0.5),
-            report_base_url=getattr(args, "closed_loop_report_base_url", None),
             render_media=render_media,
         )
         return group_log, summary, label
@@ -233,7 +231,7 @@ def run_one_group(
         return {}, summary, label
 
 
-def _make_summary_key(json_name: str, group_name: str, mode: str) -> str:
+def _make_summary_key(json_name: str, group_name: str) -> str:
     """Build the summary key, e.g. 'override/departure' or 'site/all'."""
     return f"{json_name}/{group_name}"
 
@@ -284,12 +282,12 @@ def run_closed_loop_main(
                 # Label and out_dir
                 if mode == "objects":
                     mode_out_dir = json_out_dir / group_name
-                    summary_key = _make_summary_key(json_name, group_name, mode)
+                    summary_key = _make_summary_key(json_name, group_name)
                     label = summary_key  # e.g. "override/departure"
                 else:  # noobj
                     json_mode_name = f"{json_name}__noobj"
                     mode_out_dir = out_root / json_mode_name / group_name
-                    summary_key = _make_summary_key(json_mode_name, group_name, mode)
+                    summary_key = _make_summary_key(json_mode_name, group_name)
                     label = summary_key  # e.g. "override__noobj/departure"
 
                 print(f"=== [{label}] npz={npz_paths} -> out={mode_out_dir} ===")
@@ -378,35 +376,9 @@ def run_closed_loop_main(
     root_manifest_path = out_root / "groups_summary.json"
     root_manifest_path.write_text(json.dumps(root_manifest, indent=2, ensure_ascii=False))
 
-    # Build HTML report (only if not using existing wandb session)
-    report_path = None
-    if wandb_run is None and root_manifest["sub_groups"]:
-        report_path = build_html_report(
-            out_root,
-            title="Per-Group Closed-Loop Evaluation",
-            subtitle=f"groups_npz_root={groups_npz_root}",
-            colormap_metrics=tuple(
-                getattr(
-                    args,
-                    "report_colormap_metrics",
-                    [
-                        "clearance",
-                        "collision",
-                        "near_miss",
-                        "speed",
-                        "road_border",
-                        "red_light",
-                        "strong_brake",
-                    ],
-                )
-            ),
-        )
-        if report_path:
-            print(f"Wrote {report_path}")
-
     # Log to wandb (supports both passed run and own session)
     if all_group_names:
-        _log_to_wandb(args, all_group_names, root_manifest, report_path, wandb_run)
+        _log_to_wandb(args, all_group_names, root_manifest, wandb_run)
 
     return root_manifest
 
@@ -491,11 +463,6 @@ def parse_args() -> argparse.Namespace:
         help="passed through verbatim to valid_predictor_closed_loop.py",
     )
     parser.add_argument(
-        "--no_report",
-        action="store_true",
-        help="skip writing the local HTML gallery at --out_root",
-    )
-    parser.add_argument(
         "--wandb_project",
         type=str,
         default=None,
@@ -521,26 +488,6 @@ def parse_args() -> argparse.Namespace:
             "strong_brake",
         ],
         help="per-step metrics rendered as trajectory-colormap images for wandb",
-    )
-    parser.add_argument(
-        "--report_colormap_metrics",
-        nargs="*",
-        default=[
-            "clearance",
-            "collision",
-            "near_miss",
-            "speed",
-            "road_border",
-            "red_light",
-            "strong_brake",
-        ],
-        help="per-step metrics rendered in the local HTML report",
-    )
-    parser.add_argument(
-        "--report_base_url",
-        type=str,
-        default=None,
-        help="if --out_root is served over HTTP, wandb records a clickable report URL",
     )
     return parser.parse_args()
 
@@ -582,7 +529,6 @@ def _log_to_wandb(
     args: argparse.Namespace,
     group_names: list[str],
     root_manifest: dict,
-    report_path: Path | None,
     run: "wandb.sdk.wandb_run.Run | None" = None,  # type: ignore[name-defined]
 ) -> None:
     """One wandb run: closed_loop/<metric>/<json_name>/<group_name> + per-json aggregates.
@@ -599,7 +545,6 @@ def _log_to_wandb(
         build_combined_episode_table,
         build_full_closed_loop_wandb_log,
         build_groups_aggregate_log,
-        resolve_report_link,
     )
 
     if run is None:
@@ -681,7 +626,6 @@ def _log_to_wandb(
                         )
                     ),
                     near_miss_thresh=summary.get("near_miss_thresh", 0.5),
-                    report_base_url=getattr(args, "report_base_url", None),
                     wandb_key_prefix=wandb_key_prefix,
                 )
             )
@@ -707,10 +651,6 @@ def _log_to_wandb(
                 prefix = f"closed_loop_overview/{json_name}"
                 log.update(build_groups_aggregate_log(sub, prefix=prefix))
 
-        if report_path is not None:
-            log["closed_loop_links/report"] = resolve_report_link(
-                args.out_root, getattr(args, "report_base_url", None)
-            )
         run.log(log)
         print(f"wandb: logged {len(group_summaries)} group(s) to run {run.id}")
     finally:

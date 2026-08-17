@@ -129,20 +129,6 @@ def build_combined_episode_table(
     return table
 
 
-def resolve_report_link(out_dir: str | Path, report_base_url: str | None = None) -> str:
-    """Where the rich local report (all videos + HTML gallery) for this run lives.
-
-    Returns a clickable ``http(s)://...`` URL if ``report_base_url`` is set (the run's
-    ``out_dir`` is being served over HTTP from that base, e.g. on a training server), else
-    the plain local filesystem path (informational only — W&B's web UI cannot open
-    ``file://`` links, so on a local dev machine this is for the human to copy/open by hand).
-    """
-    out_dir = Path(out_dir)
-    if report_base_url:
-        return report_base_url.rstrip("/") + "/" + out_dir.name
-    return str(out_dir.resolve())
-
-
 def build_groups_aggregate_log(
     summaries: dict[str, dict],
     *,
@@ -228,7 +214,6 @@ def build_full_closed_loop_wandb_log(
     video_pick: str = "worst",
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
     near_miss_thresh: float = 0.5,
-    report_base_url: str | None = None,
     render_media: bool = True,
     wandb_key_prefix: str | None = None,
     include_score_scalars: bool = True,
@@ -240,9 +225,8 @@ def build_full_closed_loop_wandb_log(
     - ``closed_loop_scores/{metric}/{group}`` — scalar trends (metric-first so the same metric's
       groups sort adjacently; the W&B panel-search box filters by either metric or group token).
     - ``closed_loop_media/{group}`` — ONE gallery panel holding every ``colormap_metrics`` image
-      for the representative episode (captioned by metric), mirroring the HTML report's
-      per-card metric dropdown; ``closed_loop_media/{group}__video`` — that episode's video.
-    - ``closed_loop_links/{group}`` — where the full report (all videos + HTML) lives.
+      for the representative episode (captioned by metric), mirroring W&B's
+      per-metric keys for the one representative episode; ``closed_loop_media/{group}__video`` — that episode's video.
 
     If ``wandb_key_prefix`` is set (e.g. ``override/departure``), it replaces the
     ``closed_loop_scores/``, ``closed_loop_media/``, ``closed_loop_links/`` prefix, allowing
@@ -314,10 +298,6 @@ def build_full_closed_loop_wandb_log(
         if gallery:
             log[_key(f"media/{label}")] = gallery
 
-    if out_dir is not None:
-        log[_key(f"links/{label}")] = resolve_report_link(out_dir, report_base_url)
-    elif summary.get("npz_root"):
-        log[_key(f"links/{label}")] = str(summary["npz_root"])
     return log
 
 

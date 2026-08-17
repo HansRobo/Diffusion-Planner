@@ -230,8 +230,7 @@ def _merge_shards(
     """Aggregate every worker's segments_{rank}.jsonl (+ tdigests sidecars) into one summary.
 
     Also writes a merged, human-readable ``segments.jsonl`` (same tdigest-stripped shape the
-    sequential path writes) -- downstream consumers like closed_loop_html_report only look for
-    the unsharded filename, so without this a parallel-run group's videos never show up there.
+    sequential path writes) for downstream consumers.
     """
     from scenario_generation.closed_loop_eval import (
         aggregate,

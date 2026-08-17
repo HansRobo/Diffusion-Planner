@@ -143,7 +143,7 @@ def test_no_project_vehicle_map_produces_no_per_vehicle_rollup(tmp_path: Path):
     ``test_sites_aggregate_log_without_vehicle_types_has_no_per_vehicle_keys`` above omits
     ``site_vehicle_types`` entirely, which the production callers never do -- they build it
     from ``discover_sites_with_vehicles_from_json`` (see ``closed_loop_validate`` in train.py
-    and ``_log_to_wandb`` in run_all_sites_closed_loop.py). Unlike the HTML report, these key
+    and ``_log_to_wandb`` in run_all_groups_closed_loop.py). Unlike the HTML report, these key
     names cannot be corrected after a run has logged them.
     """
     path_list = tmp_path / "path_list.json"

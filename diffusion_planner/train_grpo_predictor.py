@@ -417,13 +417,6 @@ def get_args():
         "representative episode (one image each — cheap, unlike video/episode picking, so "
         "all of them render by default)",
     )
-    parser.add_argument(
-        "--closed_loop_report_base_url",
-        type=str,
-        default="",
-        help="if the out_dir tree is served over HTTP from this base, wandb records a "
-        "clickable report URL instead of just the local path",
-    )
 
     args = parser.parse_args()
 
