@@ -23,6 +23,7 @@
 #include "types/override_segment.hpp"
 
 #include <autoware/diffusion_planner/preprocessing/lane_segments.hpp>
+#include <autoware_vehicle_msgs/msg/control_mode_report.hpp>
 
 #include <lanelet2_core/LaneletMap.h>
 #include <lanelet2_io/Io.h>
@@ -52,7 +53,9 @@ std::vector<OverrideSegment> build_override_segments(
   for (size_t index = 1; index < control_modes.size(); ++index) {
     const auto & sample = control_modes[index];
     if (sample.mode != current_mode) {
-      if (current_mode == 4) {
+      // Only MANUAL is treated as an override interval. DISENGAGED and
+      // partial-autonomy modes are treated as non-override modes.
+      if (current_mode == autoware_vehicle_msgs::msg::ControlModeReport::MANUAL) {
         // Use the first non-4 sample as the exclusive end boundary. This keeps
         // a single-sample override visible to half-open interval readers.
         segments.push_back({start_timestamp, sample.rosbag_time});
@@ -62,7 +65,7 @@ std::vector<OverrideSegment> build_override_segments(
     }
     previous_timestamp = sample.rosbag_time;
   }
-  if (current_mode == 4) {
+  if (current_mode == autoware_vehicle_msgs::msg::ControlModeReport::MANUAL) {
     segments.push_back({start_timestamp, previous_timestamp});
   }
   return segments;
