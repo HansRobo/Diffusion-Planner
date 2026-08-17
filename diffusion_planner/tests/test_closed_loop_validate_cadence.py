@@ -5,11 +5,12 @@ from unittest.mock import MagicMock
 
 import diffusion_planner.train as train_module
 import pytest
+from diffusion_planner.train import closed_loop_validate
+
 import scenario_generation.closed_loop_evaluation as closed_loop_evaluation
 import scenario_generation.closed_loop_html_report as closed_loop_html_report
 import scenario_generation.site_discovery as site_discovery
 import scenario_generation.wandb_closed_loop as wandb_closed_loop
-from diffusion_planner.train import closed_loop_validate
 
 
 def _make_args(**overrides):
@@ -69,7 +70,9 @@ def _fake_discover_sites(_path):
 wandb_log_calls: list = []
 
 
-def _fake_build_full_closed_loop_wandb_log(_summary, *, site=None, include_score_scalars=True, **_kw):
+def _fake_build_full_closed_loop_wandb_log(
+    _summary, *, site=None, include_score_scalars=True, **_kw
+):
     wandb_log_calls.append((site, include_score_scalars))
     return {}
 
@@ -79,18 +82,14 @@ def _patched_dependencies(monkeypatch):
     """Replace the heavy scenario_generation calls with recording fakes."""
     _FakeEvaluator.calls = []
     wandb_log_calls.clear()
-    monkeypatch.setattr(
-        closed_loop_evaluation, "FullRouteClosedLoopEvaluation", _FakeEvaluator
-    )
+    monkeypatch.setattr(closed_loop_evaluation, "FullRouteClosedLoopEvaluation", _FakeEvaluator)
     monkeypatch.setattr(site_discovery, "discover_sites_from_json", _fake_discover_sites)
     monkeypatch.setattr(
         wandb_closed_loop,
         "build_full_closed_loop_wandb_log",
         _fake_build_full_closed_loop_wandb_log,
     )
-    monkeypatch.setattr(
-        wandb_closed_loop, "build_combined_episode_table", lambda *a, **k: None
-    )
+    monkeypatch.setattr(wandb_closed_loop, "build_combined_episode_table", lambda *a, **k: None)
     monkeypatch.setattr(wandb_closed_loop, "build_sites_aggregate_log", lambda *a, **k: {})
     monkeypatch.setattr(wandb_closed_loop, "build_sites_score_bar_charts", lambda *a, **k: {})
     monkeypatch.setattr(closed_loop_html_report, "build_html_report", lambda *a, **k: None)

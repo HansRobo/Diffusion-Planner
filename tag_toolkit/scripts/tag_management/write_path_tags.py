@@ -64,7 +64,6 @@ sys.path.insert(0, str(_repo_root() / "Diffusion-Planner" / "scenario_generation
 
 from site_discovery import NPZPathInfo, parse_npz_path  # noqa: E402
 
-
 # Dimensions this script owns. The tag-merge loop drops these from existing
 # sidecars before appending fresh values, so reruns overwrite cleanly.
 _OWNED_DIMS = ("site", "split", "project", "vehicle")

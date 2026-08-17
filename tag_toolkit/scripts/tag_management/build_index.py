@@ -48,11 +48,7 @@ def parse_args() -> argparse.Namespace:
         "-o",
         type=Path,
         required=True,
-        help=(
-            "Output .db path. Must end in one of: "
-            + ", ".join(_DB_SUFFIXES)
-            + "."
-        ),
+        help=("Output .db path. Must end in one of: " + ", ".join(_DB_SUFFIXES) + "."),
     )
     parser.add_argument(
         "--force",
@@ -88,9 +84,7 @@ def main() -> int:
     print(f"Building index from {args.source}...")
     store = TagStore.build_index(args.source, args.output)
 
-    print(
-        f"  {len(store.route_paths())} routes, {len(store.npz_paths())} frames"
-    )
+    print(f"  {len(store.route_paths())} routes, {len(store.npz_paths())} frames")
     print(f"Wrote index to {args.output}")
     return 0
 
