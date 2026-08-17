@@ -90,11 +90,13 @@ class DiffusionPlanner(nn.Module):
         time_epsilon: float = 1e-5,
         noise_scale: float = 1.0,
         generator: torch.Generator | None = None,
+        initial_noise: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Generate normalized `(B, A, T, 4)` trajectories with Heun integration.
 
         `input_data` must already contain training ground-truth or inference-time
-        heuristic traffic-light future tensors.
+        heuristic traffic-light future tensors. When `initial_noise` is supplied,
+        internal random generation and `noise_scale` are not used.
         """
         scene, scene_mask = self.scene_encoder(input_data)
         agent_pose = self.create_agent_pose(input_data)
@@ -109,15 +111,17 @@ class DiffusionPlanner(nn.Module):
         )
         agent_mask = torch.cat((ego_mask, neighbor_mask), dim=1)
         batch, agents = agent_mask.shape
-        initial_state = noise_scale * torch.randn(
-            batch,
-            agents,
-            TRAJECTORY_LENGTH,
-            TRAJECTORY_DIM,
-            device=scene.device,
-            dtype=scene.dtype,
-            generator=generator,
-        )
+        initial_state = initial_noise
+        if initial_state is None:
+            initial_state = noise_scale * torch.randn(
+                batch,
+                agents,
+                TRAJECTORY_LENGTH,
+                TRAJECTORY_DIM,
+                device=scene.device,
+                dtype=scene.dtype,
+                generator=generator,
+            )
         trajectory = sample(
             x0_model=lambda state, time: self.trajectory_decoder(
                 state, agent_mask, scene, scene_mask, agent_pose, time
@@ -130,8 +134,6 @@ class DiffusionPlanner(nn.Module):
             ),
         )
         yaw = trajectory[..., 2:4]
-        yaw = yaw / torch.linalg.vector_norm(
-            yaw, dim=-1, keepdim=True
-        ).clamp_min(1e-6)
+        yaw = yaw / torch.linalg.vector_norm(yaw, dim=-1, keepdim=True).clamp_min(1e-6)
         trajectory = torch.cat((trajectory[..., :2], yaw), dim=-1)
         return trajectory.masked_fill(agent_mask[:, :, None, None], 0.0)
