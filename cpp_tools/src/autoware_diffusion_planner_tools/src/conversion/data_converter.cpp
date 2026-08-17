@@ -111,13 +111,6 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
 
   ParsedBagData bag_data = load_rosbag(
     paths.rosbag_path, converter.limit, converter.extract_override_segments);
-  const std::vector<OverrideSegment> override_segments =
-    converter.extract_override_segments ? build_override_segments(bag_data.control_modes)
-                                        : std::vector<OverrideSegment>{};
-  if (converter.extract_override_segments) {
-    save_override_segments_json(
-      paths.save_dir, override_segments, bag_data.control_modes.size());
-  }
 
   const auto missing_topics_skip = check_missing_topics(bag_data);
   if (missing_topics_skip) {
@@ -130,6 +123,12 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
       paths.save_dir, rosbag_dir_name, "missing_topics", 0, 0.0, 0, 0, missing_topics_skip.value(),
       bag_data.timestamp_stats_map, false, bag_metadata);
     return 0;
+  }
+
+  if (converter.extract_override_segments) {
+    save_override_segments_json(
+      paths.save_dir, build_override_segments(bag_data.control_modes),
+      bag_data.control_modes.size());
   }
 
   std::vector<SequenceData> sequences = build_sequences(bag_data, converter.search_nearest_route);
