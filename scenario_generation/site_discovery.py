@@ -141,7 +141,8 @@ def discover_sites_with_vehicles_from_json(
     """
     labelling = project_vehicle_map is not None
     project_vehicle_map = project_vehicle_map or {}
-    entries = json.loads(Path(json_path).read_text())
+    json_path = Path(json_path).resolve()
+    entries = json.loads(json_path.read_text())
 
     # Pass 1: resolve (site, project, vehicle_type) per entry.
     # Projects missing from the map are collected rather than warned about here --
@@ -150,6 +151,7 @@ def discover_sites_with_vehicles_from_json(
     parsed: list[tuple[str, str, str, Path]] = []
     unmapped_projects: set[str] = set()
     for entry in entries:
+        entry = Path(json_path.parent, entry)
         info = parse_npz_path(entry)
         if info is None:
             continue
