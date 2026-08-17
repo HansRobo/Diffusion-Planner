@@ -1,6 +1,31 @@
 import argparse
+import json
 import subprocess
 from pathlib import Path
+
+
+def write_conversion_manifest(
+    path: Path,
+    results: list[dict],
+    converted_count: int,
+    skipped_count: int,
+    failed_count: int,
+):
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "records": results,
+                "converted_count": converted_count,
+                "skipped_count": skipped_count,
+                "failed_count": failed_count,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def parse_args() -> argparse.Namespace:

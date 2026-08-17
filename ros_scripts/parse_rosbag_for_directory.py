@@ -1,14 +1,15 @@
 import argparse
-import json
 import logging
 import os
 import shutil
 import sys
 import time
+from collections import Counter
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 from parse_rosbag_by_cpp import main as parse_rosbag_main_cpp
+from parse_rosbag_by_cpp import write_conversion_manifest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CPP_BINARY = (
@@ -282,17 +283,10 @@ if __name__ == "__main__":
     with Pool(processes=num_workers) as pool:
         results = pool.map(process_single_bag, process_args)
 
-    converted_count = sum(
-        result.get("status") == "converted"
-        for result in results
-        if isinstance(result, dict)
-    )
-    skipped_count = sum(
-        result.get("status") == "skipped" for result in results if isinstance(result, dict)
-    )
-    failed_count = sum(
-        result.get("status") == "failed" for result in results if isinstance(result, dict)
-    )
+    status_counts = Counter(result["status"] for result in results)
+    converted_count = status_counts["converted"]
+    skipped_count = status_counts["skipped"]
+    failed_count = status_counts["failed"]
     logging.info(
         "Conversion summary: converted=%d, skipped=%d, failed=%d",
         converted_count,
@@ -301,20 +295,12 @@ if __name__ == "__main__":
     )
 
     if args.conversion_manifest_path is not None:
-        manifest_path = args.conversion_manifest_path.resolve()
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "records": results,
-                    "converted_count": converted_count,
-                    "skipped_count": skipped_count,
-                    "failed_count": failed_count,
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
+        write_conversion_manifest(
+            args.conversion_manifest_path,
+            results,
+            converted_count,
+            skipped_count,
+            failed_count,
         )
 
     elapsed_seconds = int(time.perf_counter() - start_time)
