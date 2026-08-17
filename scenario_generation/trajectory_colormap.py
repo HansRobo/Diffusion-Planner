@@ -40,6 +40,20 @@ _DT = 0.1
 # give, so it's skipped for these.
 _BINARY_METRICS = ("collision", "near_miss", "red_light", "strong_brake")
 
+# The trace key each metric is derived from. A producer that never observed a quantity omits its
+# key entirely, and every accessor below defaults to the safe value -- which would paint a
+# uniform "no event" picture indistinguishable from a measured zero. Checking for the key lets
+# an unobserved metric be skipped instead, for any producer and for runs already on disk.
+_METRIC_TRACE_KEYS = {
+    "clearance": "clearance_m",
+    "collision": "collision",
+    "near_miss": "clearance_m",
+    "speed": "speed",
+    "road_border": "rb_dist_m",
+    "red_light": "red_light_violation",
+    "strong_brake": "speed",
+}
+
 # Short colorbar axis label. The ticks themselves (see _risk_and_ticks) carry the actual
 # units/values — qualitative low/medium/high/very high labels alone aren't legible without
 # knowing the metric's scale, so every tick is now a real number instead.
@@ -178,10 +192,14 @@ def render_trajectory_colormap(
     scheme as ``"clearance"``; ``None`` on frames with no lane geometry -> treated as safe),
     ``"red_light"`` (binary), ``"strong_brake"`` (binary, accel <= ``strong_brake_mps2``).
     Returns ``out_png`` on success, or ``None`` if there was no per-step trace to draw
-    (e.g. a 0-frame segment, or an old run predating the trace fields).
+    (e.g. a 0-frame segment, or an old run predating the trace fields), or if the run never
+    observed the quantity ``metric`` is derived from -- an unobserved metric has to be absent
+    rather than drawn as a flat "no event", which reads as a measurement that was taken.
     """
     rows = load_step_trace(png_dir)
     if len(rows) < 2:
+        return None
+    if not any(_METRIC_TRACE_KEYS[metric] in r for r in rows):
         return None
 
     import matplotlib

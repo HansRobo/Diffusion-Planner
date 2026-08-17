@@ -1,5 +1,7 @@
-from dataclasses import dataclass, field
-from typing import Literal, Optional
+from dataclasses import MISSING, dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal, Optional
 
 from diffusion_planner.dimensions import (
     INPUT_T,
@@ -16,15 +18,46 @@ from diffusion_planner.dimensions import (
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
+def cli(help: str, *, default: Any = MISSING, path: bool = False) -> Any:
+    """Mark a TrainConfig field as exposed on the command line.
+
+    The argument's name, type, default, choices and help text are all read off the field
+    definition by :mod:`diffusion_planner.train_cli` -- anything marked here is a flag on
+    both entrypoints (:mod:`train_predictor` and :mod:`train_run`), and anything not
+    marked is a setting changed by editing its default below.
+    """
+    metadata = {"cli": True, "help": help, "path": path}
+    if default is MISSING:
+        return field(metadata=metadata)
+    return field(default=default, metadata=metadata)
+
+
 @dataclass
 class TrainConfig:
     # ---------------------------------------------------------
     # Required Arguments (Fields without default values must be declared first)
     # ---------------------------------------------------------
-    exp_name: str
-    save_dir: str
-    train_set_list: str
-    valid_set_list: str
+    exp_name: str = cli("name of this run; appears in the save directory and in wandb")
+    train_set_list: str = cli("JSON list of training NPZ paths", path=True)
+    valid_set_list: str = cli("JSON list of validation NPZ paths", path=True)
+
+    # ---------------------------------------------------------
+    # Run output
+    #
+    # One rule, shared by both entrypoints: `save_dir` is derived from `output_root`
+    # unless it is given explicitly. train_run.py derives it once and passes the result
+    # down, so the launcher and the trainer always agree on the directory (previously
+    # train_run.py built the timestamped path itself while train_predictor.py demanded a
+    # ready-made `save_dir`, so the two disagreed about what a run directory even was).
+    # ---------------------------------------------------------
+    output_root: str = cli(
+        "parent directory for run directories", default="/mnt/nvme/training_result", path=True
+    )
+    save_dir: str = cli(
+        "this run's directory; derived as <output_root>/<timestamp>_<exp_name> when empty",
+        default="",
+        path=True,
+    )
 
     train_subsample_step: int = 1
 
@@ -70,7 +103,7 @@ class TrainConfig:
     # Training Parameters
     # ---------------------------------------------------------
     seed: int = 3407
-    train_epochs: int = 100
+    train_epochs: int = 80
     batch_size: int = 512
     save_utd: int = 10
     learning_rate: float = 1e-4
@@ -136,14 +169,18 @@ class TrainConfig:
     # Encoder output). Off by default: it changes the exported ONNX graph, so enabling it
     # breaks compatibility with already deployed models.
     use_cross_attn_mask: bool = False
-    resume_model_path: Optional[str] = None
+    resume_model_path: Optional[str] = cli(
+        "resume training from this .pth", default=None, path=True
+    )
 
     # ---------------------------------------------------------
     # Logging & Distributed Setup
     # ---------------------------------------------------------
-    use_wandb: bool = False
-    wandb_run_id: Optional[str] = None
-    wandb_project_name: str = "Diffusion-Planner"
+    use_wandb: bool = cli("log the run to Weights & Biases", default=True)
+    wandb_run_id: Optional[str] = cli(
+        "attach to this existing wandb run instead of creating one", default=None
+    )
+    wandb_project_name: str = cli("Weights & Biases project name", default="Diffusion-Planner")
     notes: str = ""
     ddp: bool = True
     port: str = "22323"
@@ -151,8 +188,17 @@ class TrainConfig:
     # Validation-only temporal stability metrics. Replan consistency requires full-sequence
     # Step-1 NPZ frames in valid_set_list; the default gap=1 avoids treating skip-N lists
     # as true frame-to-frame replanning data.
-    enable_temporal_stability_eval: bool = True
-    enable_replan_consistency_eval: bool = True
+    enable_temporal_stability_eval: bool = cli(
+        "validation-only ego jerk / curvature-rate metrics. Computed from the trajectory "
+        "the normal validation pass already predicts, so turning this off saves little.",
+        default=True,
+    )
+    enable_replan_consistency_eval: bool = cli(
+        "validation-only inter-frame replan consistency. Needs a Step-1 valid_set_list and "
+        "runs TWO extra forwards per adjacent frame pair every epoch, so on a full Step-1 "
+        "list this roughly doubles validation cost.",
+        default=True,
+    )
     replan_consistency_expected_gap: int = 1
 
     # ---------------------------------------------------------
@@ -166,11 +212,26 @@ class TrainConfig:
     # Both may be set at once — each fires independently and contributes its own rows to the
     # combined episode table / cross-site aggregate.
     # ---------------------------------------------------------
-    closed_loop_npz_root: str = ""
-    closed_loop_sites_npz_root: str = ""
+    closed_loop_npz_root: str = cli(
+        "dir tree of route NPZ frames for closed-loop validation, OR a .json path list of "
+        "such dirs. Empty = disabled.",
+        default="",
+        path=True,
+    )
+    closed_loop_sites_npz_root: str = cli(
+        "curated .json path-list manifest grouped into per-site route pools and evaluated "
+        "as independent sites. May be set together with closed_loop_npz_root.",
+        default="",
+        path=True,
+    )
     # optional JSON file of {project_code_name: vehicle_type_label} for labeling
     # closed_loop_sites_npz_root sites by vehicle type. Empty = no labeling.
-    closed_loop_project_vehicle_map: str = ""
+    closed_loop_project_vehicle_map: str = cli(
+        "optional JSON file of {project_code_name: vehicle_type_label} for labeling "
+        "closed_loop_sites_npz_root sites by vehicle type. Empty = no labeling.",
+        default="",
+        path=True,
+    )
     # Object-mode ablation per source: "objects"=normal, "noobj"=empty-world (no dynamic/static
     # objects, map kept — isolates "reacts badly to traffic" from "can't follow the
     # route/map"). npz_root defaults to objects-only (usually a single curated scene);
@@ -183,7 +244,10 @@ class TrainConfig:
     closed_loop_replan_interval: int = 4
     closed_loop_draw_every: int = 4  # render 1 of every N steps (matplotlib is the dominant cost)
     # draw on this many worker processes (minimum 1)
-    closed_loop_draw_workers: int = 4
+    closed_loop_draw_workers: int = cli(
+        "draw on this many worker processes (minimum 1)",
+        default=4,
+    )
     closed_loop_fps: int = 10
     closed_loop_near_miss_thresh: float = 0.5
     closed_loop_search_radius: float = 1.5
@@ -217,7 +281,11 @@ class TrainConfig:
     closed_loop_report_base_url: str = ""
 
     # Scenario-based Open-loop validation. The list JSON maps metric names to NPZ paths.
-    scenario_based_open_loop_list: str = ""
+    scenario_based_open_loop_list: str = cli(
+        "JSON mapping scenario-based open-loop metric names to NPZ path lists. Empty = disabled.",
+        default="",
+        path=True,
+    )
     scenario_centerline_horizon_seconds: float = 8.0
     scenario_departure_horizon_seconds: float = 3.0
     scenario_departure_minimum_displacement_m: float = 2.0
@@ -232,3 +300,12 @@ class TrainConfig:
     # Deterministic
     # ---------------------------------------------------------
     deterministic: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.save_dir:
+            self.save_dir = self.build_save_dir(self.output_root, self.exp_name)
+
+    @staticmethod
+    def build_save_dir(output_root: str, exp_name: str) -> str:
+        """The one place a run directory name is defined."""
+        return str(Path(output_root) / f"{datetime.now():%Y%m%d-%H%M%S}_{exp_name}")
