@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 
 from diffusion_planner.data import PlannerDataNormalizer
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
+from diffusion_planner.models.turn_indicator import TurnIndicatorModel
 
 
 def run_inference(
@@ -52,3 +53,32 @@ def run_inference(
     prediction_array = prediction[0].detach().float().cpu().numpy()
     prediction_array = normalizer.denormalize_trajectory(prediction_array)
     return prediction_array.astype(np.float32, copy=False), elapsed
+
+
+def run_turn_indicator_inference(
+    model: TurnIndicatorModel,
+    frame_data: Mapping[str, Any],
+    *,
+    device: str,
+) -> tuple[NDArray[np.float32], int, float]:
+    """Predict the next turn indicator and return probabilities and elapsed seconds."""
+    torch_device = torch.device(device)
+    normalized_frame = PlannerDataNormalizer()(
+        {key: np.asarray(value) for key, value in frame_data.items()}
+    )
+    input_data = {
+        key: torch.as_tensor(value, device=torch_device).unsqueeze(0)
+        for key, value in normalized_frame.items()
+    }
+    if torch_device.type == "cuda":
+        torch.cuda.synchronize(torch_device)
+    start = perf_counter()
+    with torch.inference_mode():
+        logits = model(input_data)
+        probabilities = torch.softmax(logits, dim=-1)
+    if torch_device.type == "cuda":
+        torch.cuda.synchronize(torch_device)
+    elapsed = perf_counter() - start
+    probability_array = probabilities[0].detach().float().cpu().numpy()
+    predicted_report = int(probability_array.argmax()) + 1
+    return probability_array.astype(np.float32, copy=False), predicted_report, elapsed

@@ -1,0 +1,9 @@
+_target_: diffusion_planner.models.turn_indicator.build_turn_indicator_model
+pretrained_planner_checkpoint: ???
+hidden_dim: 256
+num_heads: 8
+history_length: 31
+history_encoder_depth: 2
+embed_dim: 128
+drop_path_rate: 0.0
+dropout: 0.0

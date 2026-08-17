@@ -1,0 +1,21 @@
+_target_: diffusion_planner.data.build_dataloader
+dataset:
+  _target_: diffusion_planner.data.PlannerDataset
+  parquet_path: ???
+  file_capacity: 8
+  data_augmentation:
+    _target_: diffusion_planner.data.PlannerDataAugmentation
+    lateral_offset_range: [-1.5, 1.5]
+    yaw_offset_range: [-0.0872665, 0.0872665]
+    ego_speed_scale_range: [0.8, 1.2]
+    probability: 0.5
+  data_normalizer:
+    _target_: diffusion_planner.data.PlannerDataNormalizer
+    position_scale: 50.0
+    speed_scale: 15.0
+    vehicle_shape_scale: 10.0
+batch_size: 160
+shuffle: true
+num_workers: 64
+pin_memory: true
+drop_last: true

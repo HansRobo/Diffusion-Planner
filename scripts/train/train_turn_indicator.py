@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Train the turn-indicator classifier with a frozen planner SceneEncoder."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+import hydra
+import torch
+from accelerate import Accelerator
+from accelerate.utils import set_seed
+from omegaconf import DictConfig, OmegaConf
+from tqdm.auto import tqdm
+
+import wandb
+from diffusion_planner.models.turn_indicator import TurnIndicatorModel
+from diffusion_planner.models.turn_indicator_loss import compute_turn_indicator_loss
+from diffusion_planner.utils.checkpoint import load_checkpoint, save_checkpoint
+from diffusion_planner.utils.lr_scheduler import (
+    build_lr_scheduler,
+    describe_lr_scheduler,
+)
+
+
+@hydra.main(
+    version_base=None,
+    config_path="../../configs",
+    config_name="train_turn_indicator/train",
+)
+def main(config: DictConfig) -> None:
+    """Train on one or more devices managed by Accelerate."""
+    dynamo_backend = (
+        str(config.training.compile_backend) if bool(config.training.compile) else "no"
+    )
+    accelerator = Accelerator(
+        cpu=bool(config.training.cpu),
+        mixed_precision=str(config.training.mixed_precision),
+        split_batches=False,
+        dynamo_backend=dynamo_backend,
+    )
+    set_seed(int(config.seed), device_specific=True)
+
+    run_name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{config.experiment_name}"
+    checkpoint_dir = Path(str(config.training.checkpoint_dir)) / run_name
+    if accelerator.is_main_process:
+        wandb_config = OmegaConf.to_container(
+            config, resolve=True, throw_on_missing=True
+        )
+        wandb.init(name=run_name, config=wandb_config)  # type: ignore
+
+    loader = hydra.utils.instantiate(config.dataloader)
+    if len(loader) == 0:
+        raise RuntimeError(
+            "dataloader has no batches; reduce batch_size or disable drop_last"
+        )
+
+    model: TurnIndicatorModel = hydra.utils.instantiate(config.model)
+    checkpoint_model = model
+    model_config = OmegaConf.to_container(
+        config.model, resolve=True, throw_on_missing=True
+    )
+    if accelerator.is_main_process:
+        parameter_count = sum(parameter.numel() for parameter in model.parameters())
+        trainable_parameter_count = sum(
+            parameter.numel()
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        )
+        print(
+            f"parameters={parameter_count / 1e6:.2f}M "
+            f"trainable={trainable_parameter_count / 1e6:.2f}M"
+        )
+
+    optimizer = hydra.utils.instantiate(
+        config.optimizer,
+        model=model,
+        output_layers=(model.decoder.classifier,),
+        verbose=accelerator.is_main_process,
+    )
+    model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
+    total_epochs = int(config.training.total_epochs)
+    steps_per_epoch = len(loader)
+    total_steps = total_epochs * steps_per_epoch
+    scheduler = build_lr_scheduler(optimizer, config.scheduler, total_steps)
+    scheduler.step_update(0)
+
+    start_epoch = 0
+    global_step = 0
+    if config.training.resume_from is not None:
+        start_epoch, global_step = load_checkpoint(
+            accelerator,
+            str(config.training.resume_from),
+            checkpoint_model,
+            optimizer,
+            scheduler,
+            steps_per_epoch=steps_per_epoch,
+            warm_start=bool(config.training.warm_start),
+        )
+
+    if accelerator.is_main_process:
+        print(
+            f"training {len(loader.dataset)} frames on "
+            f"{accelerator.num_processes} process(es), configured batch size "
+            f"{config.dataloader.batch_size}"
+        )
+        print(
+            f"epochs={total_epochs} steps_per_epoch={steps_per_epoch} "
+            f"total_steps={total_steps}"
+        )
+        print(f"torch_compile={bool(config.training.compile)} backend={dynamo_backend}")
+        print(describe_lr_scheduler(config.scheduler, total_steps))
+        print(f"run_name={run_name} checkpoint_dir={checkpoint_dir}")
+
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    log_interval = int(config.training.log_interval)
+    for epoch in range(start_epoch, total_epochs):
+        if hasattr(loader, "set_epoch"):
+            loader.set_epoch(epoch)
+        progress = tqdm(
+            loader,
+            desc=f"epoch {epoch + 1}/{total_epochs}",
+            disable=not accelerator.is_main_process,
+            dynamic_ncols=True,
+        )
+        for step_in_epoch, batch in enumerate(progress, start=1):
+            loss, correct, valid_count = compute_turn_indicator_loss(
+                model,
+                batch,
+                transition_weight=float(config.training.transition_loss_weight),
+            )
+            accelerator.backward(loss)
+            gradient_norm = accelerator.clip_grad_norm_(
+                model.parameters(), float(config.training.max_grad_norm)
+            )
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            if accelerator.optimizer_step_was_skipped:
+                continue
+
+            global_step += 1
+            scheduler.step_update(global_step)
+            if global_step % log_interval == 0:
+                gradient_norm_value = (
+                    gradient_norm.detach().float()
+                    if gradient_norm is not None
+                    else torch.full((), torch.nan, device=loss.device)
+                )
+                mean_metrics = accelerator.reduce(
+                    torch.stack((loss.detach().float(), gradient_norm_value)),
+                    reduction="mean",
+                )
+                count_metrics = accelerator.reduce(
+                    torch.stack((correct, valid_count)).to(torch.float32),
+                    reduction="sum",
+                )
+                accuracy = count_metrics[0] / count_metrics[1].clamp_min(1)
+                metric_values = {
+                    "train/loss": mean_metrics[0].item(),
+                    "train/accuracy": accuracy.item(),
+                    "train/grad_norm": mean_metrics[1].item(),
+                    "train/learning_rate": optimizer.param_groups[0]["lr"],
+                }
+                if accelerator.is_main_process:
+                    progress.set_postfix(
+                        loss=f"{metric_values['train/loss']:.5f}",
+                        accuracy=f"{metric_values['train/accuracy']:.3f}",
+                        lr=f"{metric_values['train/learning_rate']:.2e}",
+                    )
+                    wandb.log(metric_values, step=global_step)
+                    print(
+                        f"step={global_step}/{total_steps} "
+                        f"loss={metric_values['train/loss']:.5f} "
+                        f"accuracy={metric_values['train/accuracy']:.3f} "
+                        f"grad_norm={metric_values['train/grad_norm']:.3f} "
+                        f"lr={metric_values['train/learning_rate']:.2e}"
+                    )
+            if accelerator.is_main_process and global_step % log_interval == 0:
+                save_checkpoint(
+                    accelerator,
+                    checkpoint_dir / "latest.pth",
+                    checkpoint_model,
+                    optimizer,
+                    scheduler,
+                    model_config=model_config,  # pyright: ignore[reportArgumentType]
+                    epoch=epoch,
+                    step_in_epoch=step_in_epoch,
+                    global_step=global_step,
+                    steps_per_epoch=steps_per_epoch,
+                )
+        if accelerator.is_main_process:
+            save_checkpoint(
+                accelerator,
+                checkpoint_dir / f"epoch_{epoch + 1:04d}.pth",
+                checkpoint_model,
+                optimizer,
+                scheduler,
+                model_config=model_config,  # pyright: ignore[reportArgumentType]
+                epoch=epoch + 1,
+                step_in_epoch=0,
+                global_step=global_step,
+                steps_per_epoch=steps_per_epoch,
+            )
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        wandb.finish()
+
+
+if __name__ == "__main__":
+    main()

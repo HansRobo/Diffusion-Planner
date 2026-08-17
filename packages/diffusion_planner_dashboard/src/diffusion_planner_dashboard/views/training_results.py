@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import streamlit as st
 import torch
 
@@ -16,9 +17,12 @@ from diffusion_planner_dashboard.services import (
     FrameIndexRow,
     FrameLoader,
     LoadedPlanner,
+    LoadedTurnIndicator,
     load_frame_index,
     load_planner_checkpoint,
+    load_turn_indicator_checkpoint,
     run_inference,
+    run_turn_indicator_inference,
 )
 from diffusion_planner_dashboard.ui.metadata import (
     render_index_summary,
@@ -63,6 +67,16 @@ def _cached_planner(
     return load_planner_checkpoint(checkpoint_path, device)
 
 
+@st.cache_resource(show_spinner="Loading turn indicator checkpoint...")
+def _cached_turn_indicator(
+    checkpoint_path: str,
+    modification_time_ns: int,
+    device: str,
+) -> LoadedTurnIndicator:
+    del modification_time_ns
+    return load_turn_indicator_checkpoint(checkpoint_path, device)
+
+
 @st.cache_data(max_entries=32, show_spinner="Sampling trajectories...")
 def _cached_prediction(
     checkpoint_path: str,
@@ -103,6 +117,36 @@ def _cached_prediction(
     )
 
 
+@st.cache_data(max_entries=32, show_spinner="Predicting turn indicator...")
+def _cached_turn_indicator_prediction(
+    checkpoint_path: str,
+    checkpoint_modification_time_ns: int,
+    h5_path: str,
+    frame_index: int,
+    frame_time_ns: int,
+    h5_modification_time_ns: int,
+    device: str,
+    apply_augmentation: bool,
+    lateral_offset: float,
+    yaw_offset: float,
+    ego_speed_scale: float,
+):
+    loaded = _cached_turn_indicator(
+        checkpoint_path, checkpoint_modification_time_ns, device
+    )
+    frame_data = _cached_frame(
+        h5_path,
+        frame_index,
+        frame_time_ns,
+        h5_modification_time_ns,
+    )
+    if apply_augmentation:
+        frame_data = _augment_frame(
+            frame_data, lateral_offset, yaw_offset, ego_speed_scale
+        )
+    return run_turn_indicator_inference(loaded.model, frame_data, device=device)
+
+
 def _augment_frame(
     frame_data: dict[str, Any],
     lateral_offset: float,
@@ -119,7 +163,7 @@ def _augment_frame(
     return augmentation(frame_data)
 
 
-def _render_source_settings() -> tuple[str | None, str | None]:
+def _render_source_settings() -> tuple[str | None, str | None, str | None]:
     """Apply the frame source and checkpoint together."""
     st.sidebar.subheader("Sources")
     with st.sidebar.form("training-result-source-settings"):
@@ -129,17 +173,26 @@ def _render_source_settings() -> tuple[str | None, str | None]:
             placeholder="/path/to/frames.h5 or /path/to/train.parquet",
         )
         checkpoint_candidate = st.text_input(
-            "Checkpoint file",
+            "Planner checkpoint file",
             value=st.session_state.get("configured_checkpoint_path", ""),
             placeholder="/path/to/epoch_0001.pth",
+        )
+        turn_indicator_checkpoint_candidate = st.text_input(
+            "Turn indicator checkpoint file (optional)",
+            value=st.session_state.get("configured_turn_indicator_checkpoint_path", ""),
+            placeholder="/path/to/turn_indicator/epoch_0001.pth",
         )
         applied = st.form_submit_button("Apply sources", use_container_width=True)
     if applied:
         st.session_state["configured_frame_source_path"] = source_candidate.strip()
         st.session_state["configured_checkpoint_path"] = checkpoint_candidate.strip()
+        st.session_state["configured_turn_indicator_checkpoint_path"] = (
+            turn_indicator_checkpoint_candidate.strip()
+        )
     return (
         st.session_state.get("configured_frame_source_path") or None,
         st.session_state.get("configured_checkpoint_path") or None,
+        st.session_state.get("configured_turn_indicator_checkpoint_path") or None,
     )
 
 
@@ -202,7 +255,9 @@ def _render_augmentation_settings() -> tuple[bool, float, float, float]:
 def render_training_results() -> None:
     """Render checkpoint inference alongside ground-truth trajectories."""
     st.title("Training Results")
-    source_path_text, checkpoint_path_text = _render_source_settings()
+    source_path_text, checkpoint_path_text, turn_indicator_checkpoint_path_text = (
+        _render_source_settings()
+    )
     device, num_steps, time_epsilon, noise_scale, seed = _render_inference_settings()
     apply_augmentation, lateral_offset, yaw_offset, ego_speed_scale = (
         _render_augmentation_settings()
@@ -213,6 +268,13 @@ def render_training_results() -> None:
 
     source_path = Path(source_path_text).expanduser()
     checkpoint_path = Path(checkpoint_path_text).expanduser()
+    turn_indicator_checkpoint_path = (
+        Path(turn_indicator_checkpoint_path_text).expanduser()
+        if turn_indicator_checkpoint_path_text is not None
+        else None
+    )
+    turn_indicator_checkpoint_modification_time_ns: int | None = None
+    loaded_turn_indicator: LoadedTurnIndicator | None = None
     try:
         source_modification_time_ns = source_path.stat().st_mtime_ns
         checkpoint_modification_time_ns = checkpoint_path.stat().st_mtime_ns
@@ -220,6 +282,15 @@ def render_training_results() -> None:
         planner = _cached_planner(
             str(checkpoint_path), checkpoint_modification_time_ns, device
         )
+        if turn_indicator_checkpoint_path is not None:
+            turn_indicator_checkpoint_modification_time_ns = (
+                turn_indicator_checkpoint_path.stat().st_mtime_ns
+            )
+            loaded_turn_indicator = _cached_turn_indicator(
+                str(turn_indicator_checkpoint_path),
+                turn_indicator_checkpoint_modification_time_ns,
+                device,
+            )
     except (OSError, RuntimeError, ValueError) as error:
         st.error(str(error))
         return
@@ -269,6 +340,24 @@ def render_training_results() -> None:
             yaw_offset,
             ego_speed_scale,
         )
+        turn_indicator_result = None
+        if (
+            turn_indicator_checkpoint_path is not None
+            and turn_indicator_checkpoint_modification_time_ns is not None
+        ):
+            turn_indicator_result = _cached_turn_indicator_prediction(
+                str(turn_indicator_checkpoint_path),
+                turn_indicator_checkpoint_modification_time_ns,
+                row.h5_path,
+                row.frame_index,
+                row.frame_time_ns,
+                h5_modification_time_ns,
+                device,
+                apply_augmentation,
+                lateral_offset,
+                yaw_offset,
+                ego_speed_scale,
+            )
     except Exception as error:
         st.exception(error)
         return
@@ -283,6 +372,37 @@ def render_training_results() -> None:
             f"yaw offset {math.degrees(yaw_offset):.2f} deg · "
             f"ego history speed scale {ego_speed_scale:.2f}"
         )
+    if turn_indicator_result is not None and loaded_turn_indicator is not None:
+        probabilities, predicted_report, turn_indicator_seconds = turn_indicator_result
+        indicator_names = {0: "Missing", 1: "Disabled", 2: "Left", 3: "Right"}
+        target_values = np.asarray(visualized_frame["turn_indicators_future"])
+        history_values = np.asarray(visualized_frame["turn_indicators"])
+        target_report = int(target_values.reshape(-1)[0])
+        current_report = int(history_values.reshape(-1)[-1])
+        st.subheader("Turn Indicator Prediction")
+        indicator_columns = st.columns(6)
+        indicator_columns[0].metric(
+            "Prediction", indicator_names.get(predicted_report, str(predicted_report))
+        )
+        indicator_columns[1].metric(
+            "Ground truth", indicator_names.get(target_report, str(target_report))
+        )
+        indicator_columns[2].metric(
+            "Current", indicator_names.get(current_report, str(current_report))
+        )
+        indicator_columns[3].metric(
+            "Confidence", f"{float(probabilities[predicted_report - 1]):.1%}"
+        )
+        indicator_columns[4].metric("Checkpoint epoch", loaded_turn_indicator.epoch)
+        indicator_columns[5].metric("Inference", f"{turn_indicator_seconds:.3f} s")
+        probability_columns = st.columns(3)
+        for column, name, probability in zip(
+            probability_columns,
+            ("Disabled", "Left", "Right"),
+            probabilities,
+            strict=True,
+        ):
+            column.metric(f"P({name})", f"{float(probability):.1%}")
     figure = plot_frame(
         visualized_frame,
         options=options,

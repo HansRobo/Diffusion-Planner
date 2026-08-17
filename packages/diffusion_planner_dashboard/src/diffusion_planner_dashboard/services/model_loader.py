@@ -9,6 +9,10 @@ from typing import Any
 import torch
 
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
+from diffusion_planner.models.turn_indicator import (
+    TurnIndicatorModel,
+    build_turn_indicator_model,
+)
 
 
 @dataclass(frozen=True)
@@ -16,6 +20,15 @@ class LoadedPlanner:
     """A restored planner and checkpoint metadata for dashboard inference."""
 
     model: DiffusionPlanner
+    epoch: int
+    global_step: int
+
+
+@dataclass(frozen=True)
+class LoadedTurnIndicator:
+    """A restored turn-indicator model and checkpoint metadata."""
+
+    model: TurnIndicatorModel
     epoch: int
     global_step: int
 
@@ -33,6 +46,27 @@ def load_planner_checkpoint(path: str | Path, device: str) -> LoadedPlanner:
     model.to(torch.device(device))
     model.eval()
     return LoadedPlanner(
+        model=model,
+        epoch=int(checkpoint.get("epoch", 0)),
+        global_step=int(checkpoint.get("global_step", 0)),
+    )
+
+
+def load_turn_indicator_checkpoint(
+    path: str | Path, device: str
+) -> LoadedTurnIndicator:
+    """Restore a turn-indicator model on ``device`` from its checkpoint."""
+    checkpoint_path = Path(path).expanduser()
+    checkpoint: dict[str, Any] = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=False
+    )
+    model_config = dict(checkpoint["model_config"])
+    model_config.pop("_target_", None)
+    model = build_turn_indicator_model(**model_config)
+    model.load_state_dict(checkpoint["model"])
+    model.to(torch.device(device))
+    model.eval()
+    return LoadedTurnIndicator(
         model=model,
         epoch=int(checkpoint.get("epoch", 0)),
         global_step=int(checkpoint.get("global_step", 0)),
