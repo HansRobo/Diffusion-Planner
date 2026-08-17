@@ -902,19 +902,53 @@ def _clearance_stats(values: np.ndarray) -> dict:
     return out
 
 
+def road_border_collision_mask(rb_dists: np.ndarray) -> np.ndarray:
+    """Contact mask for the road-border family: a finite distance under the contact threshold.
+
+    Objects report contact from OBB overlap; road borders have no such test, so contact is
+    read off the distance series itself.
+    """
+    return np.isfinite(rb_dists) & (rb_dists < RB_COLLISION_THRESH_M)
+
+
+def clearance_family_block(
+    values: np.ndarray, collisions: np.ndarray, *, miss_thresh: float
+) -> dict:
+    """One ``object`` / ``road_border`` segment-row block from a clearance series.
+
+    Every producer of these blocks must go through here: ``closed_loop_eval._event_family_block``
+    rolls the ``collision_*`` / ``miss_*`` keys up positionally, so a layout that differs
+    between producers still aggregates -- silently, with the wrong numbers.
+    """
+    miss = np.isfinite(values) & (values <= miss_thresh)
+    return {
+        "miss_thresh_m": float(miss_thresh),
+        "collision_steps": int(collisions.sum()),
+        "collision_count": _event_count(collisions),
+        "miss_steps": int(miss.sum()),
+        "miss_count": _event_count(miss),
+        **_clearance_stats(values),
+    }
+
+
+def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
+    """The ``strong_brake`` segment-row block from a realized-acceleration series."""
+    mask = strong_brake_mask(accels, thresh_mps2=float(thresh_mps2))
+    return {
+        "thresh_mps2": float(thresh_mps2),
+        # Strongest over-threshold accel after the 2-frame consecutive mask
+        # (single-frame tracker/replan spikes are excluded).
+        "strongest_mps2": float(accels[mask].min()) if mask.any() else float("inf"),
+        "steps": int(mask.sum()),
+        "count": _event_count(mask),
+    }
+
+
 def _finalize(s: _SegState) -> dict:
     cl = s.clearances[: s.k]
-    finite = np.isfinite(cl)
     rb = s.rb_dists[: s.k]
     accels = s.accels[: s.k] if s.accels is not None else np.zeros(0, dtype=np.float32)
-    # Per-step state booleans -> both a step count and a rising-edge event count.
-    obj_coll = s.collisions[: s.k]
-    obj_miss = finite & (cl <= s.near_miss_thresh)
-    rb_finite = np.isfinite(rb)
-    rb_coll = rb_finite & (rb < RB_COLLISION_THRESH_M)
-    rb_miss = rb_finite & (rb <= s.near_miss_thresh)
     red_mask = s.red_light[: s.k]
-    brake_mask = strong_brake_mask(accels, thresh_mps2=float(s.strong_brake_mps2))
 
     # Graded (non-saturating) headline metrics: improve smoothly as the model trains, unlike the
     # binary *_count event tallies below — the "getting better" signal those alone can't show.
@@ -935,36 +969,15 @@ def _finalize(s: _SegState) -> dict:
         if s.gt_dev_count
         else float("inf"),
         "progress_m": progress_m,
-        "object": {
-            "miss_thresh_m": float(s.near_miss_thresh),
-            "collision_steps": int(obj_coll.sum()),
-            "collision_count": _event_count(obj_coll),
-            "miss_steps": int(obj_miss.sum()),
-            "miss_count": _event_count(obj_miss),
-            **_clearance_stats(cl),
-        },
-        "road_border": {
-            "miss_thresh_m": float(s.near_miss_thresh),
-            "collision_steps": int(rb_coll.sum()),
-            "collision_count": _event_count(rb_coll),
-            "miss_steps": int(rb_miss.sum()),
-            "miss_count": _event_count(rb_miss),
-            **_clearance_stats(rb),
-        },
+        "object": clearance_family_block(cl, s.collisions[: s.k], miss_thresh=s.near_miss_thresh),
+        "road_border": clearance_family_block(
+            rb, road_border_collision_mask(rb), miss_thresh=s.near_miss_thresh
+        ),
         "red_light_violation": {
             "steps": int(red_mask.sum()),
             "count": _event_count(red_mask),
         },
-        "strong_brake": {
-            "thresh_mps2": float(s.strong_brake_mps2),
-            # Strongest over-threshold accel after the 2-frame consecutive mask
-            # (single-frame tracker/replan spikes are excluded).
-            "strongest_mps2": (
-                float(accels[brake_mask].min()) if brake_mask.any() else float("inf")
-            ),
-            "steps": int(brake_mask.sum()),
-            "count": _event_count(brake_mask),
-        },
+        "strong_brake": strong_brake_block(accels, s.strong_brake_mps2),
         "reproducer": {
             "expand_count": int(s.expand_count),
             "snap_count": int(s.snap_count),
@@ -1326,6 +1339,7 @@ def _draw_step(
     distance_label_offset_m: float = 1.2,
     view_half_m: float = 50.0,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
+    reproducer_ego: tuple[float, float, float] | None = None,
 ):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
@@ -1339,6 +1353,9 @@ def _draw_step(
     ``neighbor_ids``: per-slot track UUIDs from the sidecar. When given, neighbor
     agents are renamed to their UUID so the sim's own ``_stable_color`` keeps one
     color per track across frames (vs the flickering distance-sorted slot colors).
+
+    ``reproducer_ego``: optional ``(x, y, heading)`` of the recorded cursor ego in
+    the live-ego frame, drawn as a hollow outline matching the live ego color.
     """
     from pathlib import Path
 
@@ -1374,6 +1391,7 @@ def _draw_step(
         route_polylines=_polylines_from_tensor(data["route_lanes"]),
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
         extra_ego_trajectories=extra_ego_trajectories,
+        reproducer_ego=reproducer_ego,
     )
 
 
@@ -1722,6 +1740,7 @@ def render_segment(
                 and (window is None or (window[0] <= k <= window[1]))
                 and k % draw_every == 0
             ):
+                repro_xyh = _world_pose_to_ego(tl.poses[idx], s.live_pose)
                 pending.append(
                     draw.submit(
                         _draw_step,
@@ -1735,6 +1754,7 @@ def render_segment(
                         title_prefix=title_prefix,
                         distance_label_offset_m=distance_label_offset_m,
                         view_half_m=view_half_m,
+                        reproducer_ego=repro_xyh,
                     )
                 )
             snaps_before = s.snap_count
