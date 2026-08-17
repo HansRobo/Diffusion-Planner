@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import traceback
+from concurrent.futures import BrokenExecutor
 from pathlib import Path
 
 from scenario_generation.closed_loop_eval import (
@@ -86,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     work = json.loads(Path(a.work_list).read_text())
     claim_dir = Path(a.claim_dir)
     builders: dict[str, LaneletSceneBuilder] = {}
+    consecutive_failures = 0
 
     # One renderer for this worker's whole life; the rollout would otherwise spawn one per scenario.
     with render_pool(1) if cfg.draw_every else contextlib.nullcontext() as draw:
@@ -113,6 +115,16 @@ def main(argv: list[str] | None = None) -> int:
                 # Same outputs the per-scenario worker writes: ``route`` is what reattaches a
                 # sidecar to its row, and the frames exist only to become the video.
                 route = out.name
+                side_out = out / "row.tdigests.json"
+                side = tdigest_sidecar_row({"route": route, **row})
+                if side is not None:
+                    side_out.write_text(json.dumps(side, default=float))
+                else:
+                    # Removed when there is nothing to write, so an earlier run's digests cannot
+                    # outlive it.
+                    side_out.unlink(missing_ok=True)
+                # Written last of the two: the parent reads row.json as the case's receipt, so
+                # nothing the row vouches for may still fail after it lands.
                 # The per-scenario driver derives which slot and GPU ran a case from the process
                 # it spawned; a pooled worker runs many, so it has to say so on each row.
                 (out / "row.json").write_text(
@@ -127,9 +139,6 @@ def main(argv: list[str] | None = None) -> int:
                         default=float,
                     )
                 )
-                side = tdigest_sidecar_row({"route": route, **row})
-                if side is not None:
-                    (out / "row.tdigests.json").write_text(json.dumps(side, default=float))
                 # Encoded after the row and reported apart from it: an unhappy ffmpeg costs the
                 # video, not the metrics, and must not read as a failed scenario. ffmpeg's glob
                 # errors on a directory with no match.
@@ -138,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                         build_mp4(out, out / f"{route}.mp4", a.fps, remove_pngs=True)
                 except Exception as e:  # noqa: BLE001
                     (out / "mp4_error.txt").write_text(f"{type(e).__name__}: {e}\n")
+                consecutive_failures = 0
             except Exception as e:  # noqa: BLE001
                 # One scenario's failure must not end the worker: the scenarios it has not
                 # claimed yet are still its to take. The parent reads row.json, so its absence
@@ -145,6 +155,22 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[pool] {osc_path}: {type(e).__name__}: {e}", file=sys.stderr)
                 traceback.print_exc()
                 (out / "error.txt").write_text(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+                # A worker whose own process is broken keeps claiming scenarios and failing them
+                # fast, which destroys work a healthy worker would have finished -- so stop
+                # claiming. A renderer that died takes the pool with it permanently, and that is
+                # visible; a simulator core left instantiated by a throwing teardown is not, since
+                # the interpreter swallows it and Python sees only "activate() did not reach
+                # 'active'" -- the same thing a genuinely broken scenario reports. So the count is
+                # what distinguishes them. Exiting costs parallelism only: whatever this worker
+                # has not claimed, another takes.
+                consecutive_failures += 1
+                if isinstance(e, BrokenExecutor) or consecutive_failures >= 3:
+                    print(
+                        f"[pool] giving up after {consecutive_failures} consecutive failures"
+                        f" ({type(e).__name__})",
+                        file=sys.stderr,
+                    )
+                    break
             finally:
                 if a.watchdog_sec > 0:
                     faulthandler.cancel_dump_traceback_later()
