@@ -1,5 +1,6 @@
 import json
 import random
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -17,8 +18,18 @@ def openjson(path):
             reader = zstandard.ZstdDecompressor().stream_reader(f)
             return json.load(io.TextIOWrapper(reader, encoding="utf-8"))
     with open(path, "r", encoding="utf-8") as f:
-        dict = json.load(f)
-    return dict
+        return json.load(f)
+
+
+def resolve_related_paths(json_path, entries):
+    """Resolve each of ``entries`` against ``json_path``'s directory.
+
+    Entries that are already absolute pass through unchanged (``Path`` drops the base when
+    joined with an absolute segment), so this is safe to apply to JSON files written with
+    either absolute or path-relative entries.
+    """
+    base = Path(json_path).parent
+    return [Path(base, entry) for entry in entries]
 
 
 def set_seed(CUR_SEED):

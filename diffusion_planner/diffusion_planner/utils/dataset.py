@@ -3,14 +3,14 @@ import os
 import numpy as np
 from torch.utils.data import Dataset
 
-from diffusion_planner.utils.train_utils import openjson
+from diffusion_planner.utils.train_utils import openjson, resolve_related_paths
 from planner_metrics.temporal_stability import consecutive_frame_pairs
 
 
 class DiffusionPlannerData(Dataset):
     def __init__(self, data_list):
         if isinstance(data_list, (str, bytes, os.PathLike)):
-            self.data_list = openjson(data_list)
+            self.data_list = resolve_related_paths(data_list, openjson(data_list))
         else:
             self.data_list = list(data_list)
 
@@ -26,7 +26,7 @@ class DiffusionPlannerData(Dataset):
 
 class DiffusionPlannerPairData(Dataset):
     def __init__(self, data_list, expected_gap: int | None = None):
-        paths = openjson(data_list)
+        paths = resolve_related_paths(data_list, openjson(data_list))
         expected_gap = expected_gap or None
         self.pairs = list(consecutive_frame_pairs(paths, expected_gap=expected_gap))
 

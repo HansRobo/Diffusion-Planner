@@ -37,7 +37,7 @@ import torch
 from tqdm import tqdm
 
 from diffusion_planner.dimensions import OUTPUT_T
-from diffusion_planner.utils.train_utils import openjson
+from diffusion_planner.utils.train_utils import openjson, resolve_related_paths
 
 # Default real-neighbor pattern DB used as the collision-search augmentation source (training
 # and visualization both default to DB-based / copy-paste colliders).
@@ -201,6 +201,7 @@ def build_neighbor_db(
     """Scan every scene (in parallel) and persist real neighbor patterns."""
     data = openjson(data_list_path)
     files = data["files"] if isinstance(data, dict) else data
+    files = resolve_related_paths(data_list_path, files)
 
     chunks = [files[i : i + chunk_size] for i in range(0, len(files), chunk_size)]
     past_patterns: list[np.ndarray] = []
