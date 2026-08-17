@@ -138,6 +138,7 @@ def process_single_bag(args_tuple):
             offlane_max_score=offlane_max_score,
             offlane_time_stride=offlane_time_stride,
             write_skipped_npz=write_skipped_npz,
+            extract_override_segments=(mode == "auto"),
         )
     except Exception as e:
         error_msg = f"Error processing {bag_path}: {str(e)}"

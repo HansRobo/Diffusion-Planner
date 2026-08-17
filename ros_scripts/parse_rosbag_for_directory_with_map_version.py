@@ -172,6 +172,7 @@ def process_single_bag(args_tuple):
             offlane_max_score=offlane_max_score,
             offlane_time_stride=offlane_time_stride,
             write_skipped_npz=write_skipped_npz,
+            extract_override_segments=(mode == "auto"),
         )
         # Flatten the nested routes/ subdir emitted by the C++ converter so
         # save_dir does not end up with a redundant routes/routes level.

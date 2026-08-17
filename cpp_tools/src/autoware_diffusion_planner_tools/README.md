@@ -77,6 +77,10 @@ ros2 run autoware_diffusion_planner_tools data_converter \
   <save_dir>
 ```
 
+For an auto-driving rosbag, pass `--extract_override_segments` to also read
+control-mode messages and write `control_mode_4_intervals.json`. The converter
+does not infer the rosbag type from the output path.
+
 `vector_map_path` is usually the Lanelet2 map file, for example
 `/path/to/map/lanelet2_map.osm`.
 

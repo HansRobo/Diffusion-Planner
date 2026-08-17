@@ -38,16 +38,6 @@
 namespace
 {
 
-bool is_auto_output_dir(const std::string & save_dir)
-{
-  for (const auto & component : std::filesystem::path(save_dir)) {
-    if (component == "auto") {
-      return true;
-    }
-  }
-  return false;
-}
-
 std::vector<OverrideSegment> build_override_segments(
   const std::vector<ControlModeSample> & control_modes)
 {
@@ -115,12 +105,12 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
   const std::string rosbag_dir_name = paths.get_rosbag_dir_name();
   const BagMetadata bag_metadata = load_bag_metadata(paths.rosbag_path);
 
-  const bool is_auto_rosbag = is_auto_output_dir(paths.save_dir);
-  ParsedBagData bag_data = load_rosbag(paths.rosbag_path, converter.limit, is_auto_rosbag);
+  ParsedBagData bag_data = load_rosbag(
+    paths.rosbag_path, converter.limit, converter.extract_override_segments);
   const std::vector<OverrideSegment> override_segments =
-    is_auto_rosbag ? build_override_segments(bag_data.control_modes)
-                   : std::vector<OverrideSegment>{};
-  if (is_auto_rosbag) {
+    converter.extract_override_segments ? build_override_segments(bag_data.control_modes)
+                                        : std::vector<OverrideSegment>{};
+  if (converter.extract_override_segments) {
     save_override_segments_json(paths.save_dir, override_segments);
   }
 
