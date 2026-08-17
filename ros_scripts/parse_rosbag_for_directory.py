@@ -104,11 +104,16 @@ def process_single_bag(args_tuple):
 
     save_dir = (save_root / proj_id / map_id / mode / date / time).resolve()
 
-    if save_dir.is_dir():
+    has_npz = save_dir.is_dir() and any(save_dir.rglob("*.npz"))
+    has_override_json = mode != "auto" or (
+        save_dir / "control_mode_4_intervals.json"
+    ).is_file()
+    if has_npz and has_override_json:
         logging.info(f"Already exists: {save_dir}")
         return {
             "status": "skipped",
             "mode": mode,
+            "reason": "already_exists",
             "bag_path": str(bag_path),
             "output_dir": str(save_dir),
         }
