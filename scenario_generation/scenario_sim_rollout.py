@@ -69,6 +69,15 @@ STRONG_BRAKE_MPS2 = -2.5
 _FALLBACK_EGO_BOX = (4.0, 1.8, 2.6)
 
 
+class ScenarioRejected(RuntimeError):
+    """The interpreter refused the scenario at parse/configure time.
+
+    Separate from every other failure because it says something about the scenario and nothing
+    about the process: configure runs before the simulator core is built, so a caller that reuses
+    one process for many scenarios can keep going without wondering whether its core is intact.
+    """
+
+
 @dataclass
 class RolloutConfig:
     """Tuning for a single scenario_sim rollout."""
@@ -191,7 +200,7 @@ def _start_sim(runner, osc_path: str | Path) -> None:
     """
     st_cfg = runner.configure()
     if st_cfg != "inactive":
-        raise RuntimeError(
+        raise ScenarioRejected(
             f"configure() did not reach 'inactive' (got '{st_cfg}') -- scenario "
             f"rejected by the interpreter at parse/configure time: {osc_path}"
         )
