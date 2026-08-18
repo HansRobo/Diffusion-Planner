@@ -454,7 +454,6 @@ def run_closed_loop_eval(
     replan_interval: int,
     draw_every: int,
     neighbor_history_mode: str,
-    ego_prediction_from_control: bool,
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
     tracker_mode: str = "mpc",
@@ -495,18 +494,6 @@ def run_closed_loop_eval(
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Ego-prediction source for trajectory_and_control models: True => reconstruct the ego
-    # trajectory from the control (accel, curvature) head via the unicycle model (kinematically
-    # consistent, no lateral slip); False => use the pose head directly. No-op for pure-trajectory
-    # (flag never read) and pure-control (always control) models, and for ONNX (choice is baked in
-    # at export, which has no torch decoder). Saved here and restored in the finally so the caller's
-    # model — e.g. the live training model reused for open-loop validation — is left untouched.
-    decoder = getattr(model, "decoder", None)
-    prev_ego_prediction_from_control = None
-    if decoder is not None:
-        prev_ego_prediction_from_control = decoder._ego_prediction_from_control
-        decoder._ego_prediction_from_control = ego_prediction_from_control
 
     # npz_root is either one directory tree, a JSON path list of route dirs, or an
     # already-resolved list of roots -- enumerate_multi_root_routes merges them all,
@@ -596,8 +583,6 @@ def run_closed_loop_eval(
     finally:
         fout.close()
         fdigest.close()
-        if decoder is not None:
-            decoder._ego_prediction_from_control = prev_ego_prediction_from_control
         draw_pool.shutdown()
 
     # In-memory ``rows`` still carry digests for this process's aggregate.

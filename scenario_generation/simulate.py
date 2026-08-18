@@ -89,10 +89,10 @@ class _OnnxModel:
             if name == "delay":
                 arr = arr.reshape(-1, 1)[:1]  # graph declares a static [1, 1] delay
             if name == "sampled_trajectories":
-                # The caller sizes this zero dummy by the checkpoint's output_mode (D=6 for
-                # trajectory_and_control), but exported graphs may bake a different per-step
-                # dim (e.g. POSE_DIM=4 for the ROS interface) — match the graph's declared
-                # static last dim by slicing/zero-padding (the input is all-zero either way).
+                # The caller sizes this zero dummy by CONTROL_DIM, but an exported graph may
+                # bake a different per-step dim (e.g. POSE_DIM=4 for the ROS interface) --
+                # match the graph's declared static last dim by slicing/zero-padding (the
+                # input is all-zero either way).
                 want_d = self._input_shapes[name][-1]
                 got_d = arr.shape[-1]
                 if isinstance(want_d, int) and got_d != want_d:

@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.dimensions import INPUT_T, output_dim_for_mode
+from diffusion_planner.dimensions import CONTROL_DIM, INPUT_T
 from diffusion_planner.model.guidance.collision import (
     batch_signed_distance_rect,
     center_rect_to_points,
@@ -277,13 +277,13 @@ def _arrays_to_device(arrays: dict, device: str) -> dict:
 
 def _add_static_inputs(data: dict, model_args, n: int, device: str) -> None:
     """Add the per-batch ``delay`` + zero ``sampled_trajectories`` the model expects
-    (P = 1 ego + predicted neighbors, T = future_len + 1, D = per-step dim of the
-    decoder's output mode). In place."""
+    (P = 1 ego + predicted neighbors, T = future_len + 1, D = CONTROL_DIM). In place."""
     data["delay"] = torch.zeros((n,), dtype=torch.long, device=device)
     n_agents = 1 + model_args.predicted_neighbor_num
-    D = output_dim_for_mode(model_args.output_mode)
     data["sampled_trajectories"] = torch.zeros(
-        (n, n_agents, model_args.future_len + 1, D), dtype=torch.float32, device=device
+        (n, n_agents, model_args.future_len + 1, CONTROL_DIM),
+        dtype=torch.float32,
+        device=device,
     )
 
 

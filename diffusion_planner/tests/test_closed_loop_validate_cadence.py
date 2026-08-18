@@ -37,7 +37,6 @@ def _make_args(**overrides):
         closed_loop_wandb_video_pick="worst",
         closed_loop_colormap_metrics=[],
         closed_loop_report_base_url="",
-        closed_loop_ego_prediction_from_control=True,
         device="cpu",
         ddp=False,
     )

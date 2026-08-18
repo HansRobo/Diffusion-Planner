@@ -152,10 +152,7 @@ class TrainConfig:
     hybrid_loss_omega: float = 0.1
     hybrid_loss_window: int = 10
 
-    # Output Mode & Control Loss
-    output_mode: Literal["trajectory", "control", "trajectory_and_control"] = (
-        "trajectory_and_control"
-    )
+    # Control Loss
     coeff_control_loss: float = 1.0
     control_traj_loss_horizon: int = 80
     coeff_control_traj_loss: float = 0.4
@@ -264,10 +261,6 @@ class TrainConfig:
     closed_loop_unstick_advance_m: float = 5.0
     closed_loop_unstick_radius_mult: float = 10.0
     closed_loop_unstick_teleport_after: int = 300
-    # trajectory_and_control models: reconstruct the ego trajectory from the control (accel,
-    # curvature) head via the unicycle model (kinematically consistent, no lateral slip) instead of
-    # the pose head. No-op for pure-trajectory / pure-control models.
-    closed_loop_ego_prediction_from_control: bool = True
     # Early-abort a badly-diverged segment instead of burning the full step budget (see
     # RolloutParams / reproducer_rollout.render_segment for the exact trigger condition).
     # 0 = disabled for either knob.

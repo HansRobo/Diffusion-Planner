@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from diffusion_planner.dimensions import (
+    CONTROL_DIM,
     INPUT_T,
     LINE_STRING_TYPE_NUM,
     MAX_NUM_AGENTS,
@@ -19,7 +20,6 @@ from diffusion_planner.dimensions import (
     NUM_POLYGONS,
     NUM_SEGMENTS_IN_LANE,
     NUM_SEGMENTS_IN_ROUTE,
-    OUTPUT_MODE_TRAJECTORY_AND_CONTROL,
     OUTPUT_T,
     POINTS_PER_LANELET,
     POINTS_PER_LINE_STRING,
@@ -54,11 +54,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run onnxsim to produce a simplified ONNX model",
     )
-    parser.add_argument(
-        "--ego-from-control",
-        action="store_true",
-        help="For trajectory_and_control mode: ego prediction uses control→trajectory conversion via unicycle model",
-    )
     args = parser.parse_args()
     return args
 
@@ -67,14 +62,13 @@ class ONNXWrapper(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
-        self._output_mode = model.decoder._output_mode
 
     def _extract_ego_control(self, denoised):
-        """Extract denormalized ego control [B, T, 2] from denoised [B, P, T+1, D].
+        """Extract denormalized ego control [B, T, 2] from denoised [B, P, T+1, 2].
 
         Returns (acceleration [m/s²], curvature [1/m]) per timestep.
         """
-        ego_ctrl_normalized = denoised[:, 0:1, 1:, POSE_DIM:]  # [B, 1, T, 2]
+        ego_ctrl_normalized = denoised[:, 0:1, 1:, :]  # [B, 1, T, 2]
         ego_ctrl = self.model.decoder._control_normalizer.inverse(ego_ctrl_normalized)
         return ego_ctrl[:, 0]  # [B, T, 2]
 
@@ -98,16 +92,8 @@ class ONNXWrapper(nn.Module):
         turn_indicators,
         delay,
     ):
-        # ONNX input is always 4D (POSE_DIM). Pad to D if trajectory_and_control.
-        D = self.model.decoder._D
-        if D > POSE_DIM:
-            pad = torch.zeros(
-                *sampled_trajectories.shape[:-1],
-                D - POSE_DIM,
-                device=sampled_trajectories.device,
-                dtype=sampled_trajectories.dtype,
-            )
-            sampled_trajectories = torch.cat([sampled_trajectories, pad], dim=-1)
+        # The node sends POSE_DIM channels; the decoder denoises CONTROL_DIM of them.
+        sampled_trajectories = sampled_trajectories[..., :CONTROL_DIM]
         inputs = {
             "sampled_trajectories": sampled_trajectories,
             "ego_agent_past": ego_agent_past,
@@ -131,12 +117,8 @@ class ONNXWrapper(nn.Module):
         prediction = decoder_outputs["prediction"]
         turn_indicator_logit = decoder_outputs["turn_indicator_logit"]
 
-        if self._output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
-            denoised = decoder_outputs["denoised"]
-            ego_control = self._extract_ego_control(denoised)  # [B, T, 2]
-            return prediction, turn_indicator_logit, ego_control
-
-        return prediction, turn_indicator_logit
+        ego_control = self._extract_ego_control(decoder_outputs["denoised"])  # [B, T, 2]
+        return prediction, turn_indicator_logit, ego_control
 
 
 def compare_outputs(torch_output, onnx_output):
@@ -209,7 +191,6 @@ def convert_model(
     eval_npz_path: Path | None,
     use_ema: bool = False,
     use_simplify: bool = False,
-    ego_from_control: bool = False,
 ):
     """Convert a single PyTorch model to ONNX format."""
     print(f"\n{'=' * 80}")
@@ -287,15 +268,6 @@ def convert_model(
     new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(new_state_dict)
 
-    if ego_from_control:
-        if model.decoder._output_mode != OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
-            raise ValueError(
-                f"--ego-from-control requires output_mode='trajectory_and_control', "
-                f"but got '{model.decoder._output_mode}'"
-            )
-        model.decoder._ego_prediction_from_control = True
-        print("Ego prediction will use control→trajectory conversion")
-
     # Wrap model for onnx compatibility
     wrapper = ONNXWrapper(model).eval()
 
@@ -318,10 +290,8 @@ def convert_model(
     dynamic_axes["prediction"] = {0: "batch"}
     dynamic_axes["turn_indicator_logit"] = {0: "batch"}
 
-    has_ego_control = wrapper._output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL
-    if has_ego_control:
-        output_names.append("ego_control")
-        dynamic_axes["ego_control"] = {0: "batch"}
+    output_names.append("ego_control")
+    dynamic_axes["ego_control"] = {0: "batch"}
 
     # Suppress known-harmless TracerWarnings:
     #   - assert D == 4 / assert P == ... : fixed dimensions, always constant
@@ -477,7 +447,6 @@ if __name__ == "__main__":
             eval_npz_path=args.eval_npz,
             use_ema=args.use_ema,
             use_simplify=args.use_simplify,
-            ego_from_control=args.ego_from_control,
         )
 
     # Print summary

@@ -7,12 +7,9 @@ import torch.nn as nn
 
 import diffusion_planner.model.diffusion_utils.dpm_solver_pytorch as dpm
 from diffusion_planner.dimensions import (
-    OUTPUT_MODE_CONTROL,
-    OUTPUT_MODE_TRAJECTORY,
-    OUTPUT_MODE_TRAJECTORY_AND_CONTROL,
+    CONTROL_DIM,
     POSE_DIM,
     TURN_INDICATOR_OUTPUT_DIM,
-    output_dim_for_mode,
 )
 from diffusion_planner.loss import (
     compute_control_traj_loss,
@@ -20,12 +17,8 @@ from diffusion_planner.loss import (
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
     control_to_waypoints,
-    hybrid_loss,
-    loss_func,
     make_turn_indicator_gt,
-    velocity_to_waypoints,
     waypoints_to_control,
-    waypoints_to_velocity,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.flow_matching_utils.ode_solver import (
@@ -65,125 +58,43 @@ def generate_prefix_mask(delay: torch.Tensor, num_agents: int, max_len: int) -> 
     return torch.cat([ego_mask, neighbor_mask], dim=1)
 
 
-def _compute_trajectory_loss(
-    model_output: torch.Tensor,
-    gt_target: torch.Tensor,
-    use_velocity: bool,
-    hybrid_omega: float,
-    hybrid_window: int,
-    longitudinal_velocity: torch.Tensor,
-    args: Namespace,
-    T: int,
-) -> torch.Tensor:
-    """Compute trajectory-space loss. Returns [B, P, T]."""
-    if use_velocity:
-        return hybrid_loss(model_output, gt_target, omega=hybrid_omega, W=hybrid_window)
-
-    loss_dict = loss_func(model_output, gt_target)
-    heading_l2_loss = loss_dict["heading_l2_loss"]
-    position_lat_loss = loss_dict["position_lat_loss"]
-    position_lon_loss = loss_dict["position_lon_loss"]
-
-    velocity_weight = longitudinal_velocity * args.coeff_velocity
-    velocity_weight = torch.abs(velocity_weight)
-    velocity_weight = torch.clamp_min(velocity_weight, 1.0)
-    velocity_weight = velocity_weight.unsqueeze(-1)
-    position_lon_loss = position_lon_loss / velocity_weight
-
-    timestep_weight = args.coeff_timestep
-    assert T % len(timestep_weight) == 0, (
-        f"Timestep {T} is not divisible by the number of timestep weights {len(timestep_weight)}"
-    )
-    unit = T // len(timestep_weight)
-    for i in range(len(timestep_weight)):
-        position_lat_loss[:, :, i * unit : (i + 1) * unit] *= timestep_weight[i]
-        position_lon_loss[:, :, i * unit : (i + 1) * unit] *= timestep_weight[i]
-        heading_l2_loss[:, :, i * unit : (i + 1) * unit] *= timestep_weight[i]
-
-    return (
-        args.coeff_position_lat_loss * position_lat_loss
-        + args.coeff_position_lon_loss * position_lon_loss
-        + args.coeff_heading_l2_loss * heading_l2_loss
-    )
-
-
 def build_gt_representation(
     gt_future: torch.Tensor,
     current_states: torch.Tensor,
     inputs: dict[str, torch.Tensor],
-    output_mode: str,
-    use_velocity: bool,
     norm: StateNormalizer,
     control_norm: ControlNormalizer,
     obs_norm: ObservationNormalizer,
-    Pn: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build GT and current state in the target representation.
+    """Build the control GT and the current control state the diffusion runs on.
 
     Returns:
-        all_gt: [B, P, T+1, D] where D depends on output_mode.
-        all_gt_pose: [B, P, T+1, 4] trajectory in pose space (for turn indicator / edge points).
-            Only differs from all_gt when output_mode includes control.
+        all_gt: [B, P, T+1, CONTROL_DIM] normalized (accel, curvature).
+        all_gt_pose: [B, P, T+1, 4] the same future in pose space, for the turn indicator
+            and the edge-point penalties, which always work in trajectory space.
     """
-    has_traj = output_mode in (OUTPUT_MODE_TRAJECTORY, OUTPUT_MODE_TRAJECTORY_AND_CONTROL)
-    has_ctrl = output_mode in (OUTPUT_MODE_CONTROL, OUTPUT_MODE_TRAJECTORY_AND_CONTROL)
+    # Control is only meaningful for ego. Neighbor control in the ego-centric frame is
+    # ill-defined (the unicycle model wants the agent at the origin with zero heading),
+    # so the neighbor channels are zero -- train with alpha_neighbor_loss = 0.
+    raw_inputs = obs_norm.inverse(inputs)
+    B, P, T = gt_future.shape[:3]
 
-    # --- Trajectory part [B, P, T, 4] ---
-    if has_traj:
-        if use_velocity:
-            full_traj = torch.cat([current_states[:, :, None, :], gt_future], dim=2)
-            traj_gt = waypoints_to_velocity(full_traj)  # [B, P, T, 4]
-        else:
-            traj_gt = norm(gt_future)  # [B, P, T, 4]
-        traj_current = current_states  # [B, P, 4]
+    ego_history = raw_inputs["ego_agent_past"]  # [B, T_hist, 4] raw
+    ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
+    ego_ctrl = waypoints_to_control(
+        ego_history, gt_future[:, 0], t0_states={"v": ego_v0.squeeze(-1)}
+    )  # [B, T, 2]
 
-    # --- Control part [B, P, T, 2] ---
-    # Control is only meaningful for ego. Neighbor control in ego-centric frame
-    # is ill-defined (unicycle model requires origin position and zero heading).
-    # Neighbor control channels are filled with zeros.
-    if has_ctrl:
-        raw_inputs = obs_norm.inverse(inputs)
-        B, P, T = gt_future.shape[:3]
+    ctrl_gt = torch.zeros(B, P, T, CONTROL_DIM, device=gt_future.device)
+    ctrl_gt[:, 0] = control_norm(ego_ctrl)
 
-        # Ego control
-        ego_history = raw_inputs["ego_agent_past"]  # [B, T_hist, 4] raw
-        ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
-        ego_ctrl = waypoints_to_control(
-            ego_history, gt_future[:, 0], t0_states={"v": ego_v0.squeeze(-1)}
-        )  # [B, T, 2]
-        ego_ctrl_norm = control_norm(ego_ctrl)  # [B, T, 2]
+    # Current state: [normalized_v0, 0] for ego, zeros for neighbors
+    ego_ctrl_current = control_norm(torch.cat([ego_v0, torch.zeros_like(ego_v0)], dim=-1))  # [B, 2]
+    ctrl_current = torch.zeros(B, P, CONTROL_DIM, device=gt_future.device)
+    ctrl_current[:, 0] = ego_ctrl_current
 
-        # Assemble: ego control + zeros for neighbors
-        ctrl_gt = torch.zeros(B, P, T, 2, device=gt_future.device)
-        ctrl_gt[:, 0] = ego_ctrl_norm
-
-        # Current state: [normalized_v0, 0] for ego, zeros for neighbors
-        ego_ctrl_current = control_norm(
-            torch.cat([ego_v0, torch.zeros_like(ego_v0)], dim=-1)
-        )  # [B, 2]
-        ctrl_current = torch.zeros(B, P, 2, device=gt_future.device)
-        ctrl_current[:, 0] = ego_ctrl_current
-
-    # --- Assemble ---
-    if output_mode == OUTPUT_MODE_TRAJECTORY:
-        gt_converted = traj_gt
-        current_D = traj_current
-    elif output_mode == OUTPUT_MODE_CONTROL:
-        gt_converted = ctrl_gt
-        current_D = ctrl_current
-    else:  # trajectory_and_control
-        gt_converted = torch.cat([traj_gt, ctrl_gt], dim=-1)  # [B, P, T, 6]
-        current_D = torch.cat([traj_current, ctrl_current], dim=-1)  # [B, P, 6]
-
-    all_gt = torch.cat([current_D[:, :, None, :], gt_converted], dim=2)  # [B, P, T+1, D]
-
-    # Pose-space GT (always 4D) for turn indicator and edge point computation
-    if use_velocity:
-        full_traj = torch.cat([current_states[:, :, None, :], gt_future], dim=2)
-        vel_gt = waypoints_to_velocity(full_traj)
-        all_gt_pose = torch.cat([current_states[:, :, None, :], vel_gt], dim=2)
-    else:
-        all_gt_pose = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
+    all_gt = torch.cat([ctrl_current[:, :, None, :], ctrl_gt], dim=2)  # [B, P, T+1, 2]
+    all_gt_pose = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
 
     return all_gt, all_gt_pose
 
@@ -198,11 +109,7 @@ def compute_training_loss(
     control_norm = args.control_normalizer
     obs_norm = args.observation_normalizer
     model_type = args.diffusion_model_type
-    use_velocity = args.use_velocity_representation
-    hybrid_omega = args.hybrid_loss_omega
-    hybrid_window = args.hybrid_loss_window
-    output_mode = args.output_mode
-    D = output_dim_for_mode(output_mode)
+    D = CONTROL_DIM
 
     ego_future, neighbors_future, neighbor_future_mask = futures
     neighbors_future_valid = ~neighbor_future_mask  # [B, Pn, V]
@@ -224,17 +131,13 @@ def compute_training_loss(
     )  # [B, P, T, 4]
     current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
 
-    # Build GT in the target representation
     all_gt, all_gt_pose = build_gt_representation(
         gt_future,
         current_states,
         inputs,
-        output_mode,
-        use_velocity,
         norm,
         control_norm,
         obs_norm,
-        Pn,
     )
     all_gt[:, 1:][neighbor_mask] = 0.0
     all_gt_pose[:, 1:][neighbor_mask] = 0.0
@@ -259,62 +162,21 @@ def compute_training_loss(
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
         xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, 1 + T, D]
 
-        # Fix neighbor control channels to GT (zero) — control is only meaningful for ego
-        if output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
-            xT[:, 1:, :, POSE_DIM:] = all_gt[:, 1:, :, POSE_DIM:]
-
         merged_inputs = {
             **inputs,
             "gt_trajectories": all_gt,
             "sampled_trajectories": xT,
             "diffusion_time": t,
             "prefix_mask": prefix_mask,
+            "gt_trajectories_pose": all_gt_pose,
         }
-        # Pass pose-space GT for turn indicator when not in trajectory mode
-        if output_mode != OUTPUT_MODE_TRAJECTORY:
-            merged_inputs["gt_trajectories_pose"] = all_gt_pose
 
         _, decoder_output = model(merged_inputs)
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, D]
 
         gt_target = all_gt[:, :, 1:, :]  # [B, P, T, D]
 
-        # --- Loss computation per output_mode ---
-        if output_mode == OUTPUT_MODE_TRAJECTORY:
-            dpm_loss = _compute_trajectory_loss(
-                model_output,
-                gt_target,
-                use_velocity,
-                hybrid_omega,
-                hybrid_window,
-                longitudinal_velocity,
-                args,
-                T,
-            )
-        elif output_mode == OUTPUT_MODE_CONTROL:
-            dpm_loss = torch.sum((model_output - gt_target) ** 2, dim=-1)  # [B, P, T]
-        else:  # trajectory_and_control
-            traj_out = model_output[..., :POSE_DIM]
-            traj_gt = gt_target[..., :POSE_DIM]
-            ctrl_out = model_output[..., POSE_DIM:]
-            ctrl_gt = gt_target[..., POSE_DIM:]
-
-            traj_loss = _compute_trajectory_loss(
-                traj_out,
-                traj_gt,
-                use_velocity,
-                hybrid_omega,
-                hybrid_window,
-                longitudinal_velocity,
-                args,
-                T,
-            )
-            # Control loss for ego only — neighbor control is not well-defined
-            # in ego-centric frame (position/heading offset violates unicycle assumptions).
-            ego_ctrl_loss = torch.sum((ctrl_out[:, 0] - ctrl_gt[:, 0]) ** 2, dim=-1)  # [B, T]
-            coeff_ctrl = args.coeff_control_loss
-            dpm_loss = traj_loss
-            dpm_loss[:, 0] = dpm_loss[:, 0] + coeff_ctrl * ego_ctrl_loss
+        dpm_loss = torch.sum((model_output - gt_target) ** 2, dim=-1)  # [B, P, T]
 
     elif model_type == "flow_matching":
         # t=0 is noise, t=1 is data
@@ -324,19 +186,14 @@ def compute_training_loss(
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
 
-        # Fix neighbor control channels to GT (zero) — control is only meaningful for ego
-        if output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
-            xT[:, 1:, :, POSE_DIM:] = all_gt[:, 1:, :, POSE_DIM:]
-
         merged_inputs = {
             **inputs,
             "gt_trajectories": all_gt,
             "sampled_trajectories": xT,
             "diffusion_time": t,
             "prefix_mask": prefix_mask,
+            "gt_trajectories_pose": all_gt_pose,
         }
-        if output_mode != OUTPUT_MODE_TRAJECTORY:
-            merged_inputs["gt_trajectories_pose"] = all_gt_pose
 
         _, decoder_output = model(merged_inputs)
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, D]
@@ -362,35 +219,13 @@ def compute_training_loss(
         args.coeff_road_border_loss > 0 or args.coeff_neighbor_collision_loss > 0
     )
     if need_ego_edge:
-        # For control/mixed modes, reconstruct trajectory from the trajectory part or
-        # from the pose-space GT. Edge losses always operate in trajectory space.
-        if output_mode == OUTPUT_MODE_TRAJECTORY:
-            ego_pred = model_output[:, 0]  # [B, T, 4]
-            if use_velocity:
-                ego_current_raw = current_states[:, 0]  # [B, 4]
-                ego_pred_world = velocity_to_waypoints(ego_pred)
-                ego_pred_world[..., :2] = ego_pred_world[..., :2] + ego_current_raw[:, None, :2]
-            else:
-                ego_pred_world = ego_pred * norm.std[0].to(model_output.device) + norm.mean[0].to(
-                    model_output.device
-                )  # [B, T, 4]
-        elif output_mode == OUTPUT_MODE_CONTROL:
-            ego_ctrl_pred = model_output[:, 0]  # [B, T, 2]
-            ego_pred_world = control_to_waypoints(
-                ego_ctrl_pred,
-                inputs["ego_agent_past"],
-                t0_states={"v": longitudinal_velocity.squeeze(-1)},
-            )  # [B, T, 4]
-        else:  # trajectory_and_control
-            ego_pred = model_output[:, 0, :, :POSE_DIM]  # [B, T, 4]
-            if use_velocity:
-                ego_current_raw = current_states[:, 0]
-                ego_pred_world = velocity_to_waypoints(ego_pred)
-                ego_pred_world[..., :2] = ego_pred_world[..., :2] + ego_current_raw[:, None, :2]
-            else:
-                ego_pred_world = ego_pred * norm.std[0].to(model_output.device) + norm.mean[0].to(
-                    model_output.device
-                )
+        # Edge losses always operate in trajectory space, so the predicted control is
+        # integrated back into waypoints first.
+        ego_pred_world = control_to_waypoints(
+            model_output[:, 0],
+            inputs["ego_agent_past"],
+            t0_states={"v": longitudinal_velocity.squeeze(-1)},
+        )  # [B, T, 4]
 
         ego_edge_points = compute_ego_edge_points(
             ego_pred_world, inputs["ego_shape"], n_interp=args.road_border_n_interp
@@ -425,11 +260,8 @@ def compute_training_loss(
 
     # Control-to-trajectory loss (sliding window)
     ctrl_traj_horizon = args.control_traj_loss_horizon
-    if ctrl_traj_horizon > 0 and model_type == "x_start" and output_mode != OUTPUT_MODE_TRAJECTORY:
-        if output_mode == OUTPUT_MODE_CONTROL:
-            ego_ctrl_pred = model_output[:, 0]  # [B, T, 2]
-        else:  # trajectory_and_control
-            ego_ctrl_pred = model_output[:, 0, :, POSE_DIM:]  # [B, T, 2]
+    if ctrl_traj_horizon > 0 and model_type == "x_start":
+        ego_ctrl_pred = model_output[:, 0]  # [B, T, 2]
 
         raw_inputs = obs_norm.inverse(inputs)
         ego_current_raw = raw_inputs["ego_current_state"][:, :4]  # [B, 4]
@@ -475,8 +307,7 @@ class Decoder(nn.Module):
         self._predicted_neighbor_num = config.predicted_neighbor_num
         self._future_len = config.future_len
 
-        self._output_mode = config.output_mode
-        self._D = output_dim_for_mode(self._output_mode)
+        self._D = CONTROL_DIM
 
         self.dit = DiT(
             depth=config.decoder_depth,
@@ -502,8 +333,6 @@ class Decoder(nn.Module):
         )
         self._guidance_scale = config.guidance_scale
         self._model_type = config.diffusion_model_type
-        self._use_velocity = config.use_velocity_representation
-        self._ego_prediction_from_control = False
 
         # Initialize transformer layers:
         def _basic_init(m):
@@ -548,23 +377,18 @@ class Decoder(nn.Module):
         return current_states, neighbor_current_mask, ego_current, neighbors_current
 
     def _build_current_states_D(self, inputs, current_states):
-        """Build current states in D-dimensional space for the diffusion process.
+        """Build the current control state the diffusion prefix is pinned to.
 
         Args:
             inputs: Dict containing ego_current_state and neighbor_agents_past.
             current_states: [B, P, 4] pose-space current states.
 
         Returns:
-            current_states_D: [B, P, D] current states in the target representation.
+            current_states_D: [B, P, CONTROL_DIM] normalized [v0, 0] for ego, zeros for
+                neighbors.
         """
-        if self._output_mode == OUTPUT_MODE_TRAJECTORY:
-            return current_states  # [B, P, 4]
+        B, P = current_states.shape[:2]
 
-        B = current_states.shape[0]
-        Pn = self._predicted_neighbor_num
-        P = 1 + Pn
-
-        # Control current state: ego = normalized [v0, 0], neighbors = zeros
         # Denormalize only ego_current_state directly to avoid
         # observation_normalizer.inverse's boolean masking (ONNX-incompatible).
         device = current_states.device
@@ -576,13 +400,10 @@ class Decoder(nn.Module):
         ego_ctrl_current = self._control_normalizer(
             torch.cat([ego_v0, torch.zeros_like(ego_v0)], dim=-1)
         )  # [B, 2]
-        ctrl_current = torch.zeros(B, P, 2, device=current_states.device)
-        ctrl_current[:, 0] = ego_ctrl_current
 
-        if self._output_mode == OUTPUT_MODE_CONTROL:
-            return ctrl_current
-        else:  # trajectory_and_control
-            return torch.cat([current_states, ctrl_current], dim=-1)  # [B, P, 6]
+        ctrl_current = torch.zeros(B, P, CONTROL_DIM, device=device)
+        ctrl_current[:, 0] = ego_ctrl_current
+        return ctrl_current
 
     def _compute_turn_indicator(self, ego_trajectory, encoding_pooled):
         """Compute turn indicator logit from ego trajectory and encoding.
@@ -618,18 +439,12 @@ class Decoder(nn.Module):
         )
         diffusion_time = inputs["diffusion_time"]
 
-        gt_trajectories = inputs["gt_trajectories"].reshape(B, P, (1 + self._future_len), D)
-        # Turn indicator uses pose (x,y) from gt_trajectories_pose if available,
-        # otherwise fall back to first 2 channels of gt_trajectories.
-        if "gt_trajectories_pose" in inputs:
-            gt_traj_pose = inputs["gt_trajectories_pose"].reshape(
-                B, P, (1 + self._future_len), POSE_DIM
-            )
-            ego_trajectory = gt_traj_pose[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
-        else:
-            ego_trajectory = gt_trajectories[:, 0, 1::10, :2].reshape(
-                B, 2 * (self._future_len // 10)
-            )
+        # The denoised channels are (accel, curvature), so the turn indicator reads the
+        # pose-space GT the trainer passes alongside them.
+        gt_traj_pose = inputs["gt_trajectories_pose"].reshape(
+            B, P, (1 + self._future_len), POSE_DIM
+        )
+        ego_trajectory = gt_traj_pose[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
         turn_indicator_logit = self._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
         return {
@@ -643,100 +458,42 @@ class Decoder(nn.Module):
         }
 
     def denoised_to_trajectory(self, x, inputs, current_states):
-        """Convert denoised output [B, P, T+1, D] to trajectory [B, P, T, 4].
+        """Convert the denoised control [B, P, T+1, 2] into a trajectory [B, P, T, 4].
 
-        Handles all output modes (trajectory, control, trajectory_and_control)
-        and velocity representation.
+        Both ego and neighbors are integrated through the unicycle model. Control signals
+        (accel, curvature) are frame-invariant, so integrating from the ego-centric history
+        produces ego-centric trajectories directly.
         """
-        B, P = x.shape[:2]
         Pn = self._predicted_neighbor_num
 
-        if self._output_mode == OUTPUT_MODE_CONTROL:
-            # x is [B, P, T+1, 2] — normalized control (accel, curvature)
-            # Denormalize ego and neighbor with separate normalizers
-            ctrl_raw = x[:, :, 1:, :]  # [B, P, T, 2]
-            ctrl = torch.empty_like(ctrl_raw)
-            ctrl[:, 0:1] = self._control_normalizer.inverse(ctrl_raw[:, 0:1])
-            ctrl[:, 1:] = self._neighbor_control_normalizer.inverse(ctrl_raw[:, 1:])
+        # Denormalize ego and neighbors with their own statistics.
+        ctrl_raw = x[:, :, 1:, :]  # [B, P, T, 2]
+        ctrl = torch.empty_like(ctrl_raw)
+        ctrl[:, 0:1] = self._control_normalizer.inverse(ctrl_raw[:, 0:1])
+        ctrl[:, 1:] = self._neighbor_control_normalizer.inverse(ctrl_raw[:, 1:])
 
-            # Denormalize inputs to get raw history/velocity for control→trajectory conversion
-            raw_inputs = self._observation_normalizer.inverse(inputs)
+        raw_inputs = self._observation_normalizer.inverse(inputs)
 
-            # Ego: convert control → trajectory
-            ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
-            ego_traj = control_to_waypoints(
-                ctrl[:, 0],
-                raw_inputs["ego_agent_past"],
-                t0_states={"v": ego_v0.squeeze(-1)},
-            )  # [B, T, 4]
+        ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
+        ego_traj = control_to_waypoints(
+            ctrl[:, 0],
+            raw_inputs["ego_agent_past"],
+            t0_states={"v": ego_v0.squeeze(-1)},
+        )  # [B, T, 4]
 
-            # Neighbors: convert control → trajectory
-            # Control signals (accel, curvature) are frame-invariant, so integrating
-            # from ego-centric history directly produces ego-centric trajectories.
-            neighbor_history = raw_inputs["neighbor_agents_past"][:, :Pn, :, :4]
-            neighbor_traj = control_to_waypoints(
-                ctrl[:, 1:],
-                neighbor_history,
-            )  # [B, Pn, T, 4] in ego-centric frame
+        neighbor_history = raw_inputs["neighbor_agents_past"][:, :Pn, :, :4]
+        neighbor_traj = control_to_waypoints(ctrl[:, 1:], neighbor_history)  # [B, Pn, T, 4]
 
-            return torch.cat([ego_traj[:, None], neighbor_traj], dim=1)
-
-        elif self._output_mode == OUTPUT_MODE_TRAJECTORY_AND_CONTROL:
-            if self._ego_prediction_from_control:
-                # Ego: use control channels → trajectory via unicycle model
-                ego_ctrl_raw = x[:, 0:1, 1:, POSE_DIM:]  # [B, 1, T, 2]
-                ego_ctrl = self._control_normalizer.inverse(ego_ctrl_raw)  # [B, 1, T, 2]
-
-                # Denormalize only the needed fields directly to avoid
-                # observation_normalizer.inverse's boolean masking (ONNX-incompatible).
-                obs_norms = self._observation_normalizer._normalization_dict
-                device = x.device
-                ego_past_norm = obs_norms["ego_agent_past"]
-                ego_agent_past_raw = inputs["ego_agent_past"] * ego_past_norm["std"].to(
-                    device
-                ) + ego_past_norm["mean"].to(device)
-                ego_state_norm = obs_norms["ego_current_state"]
-                ego_current_state_raw = inputs["ego_current_state"] * ego_state_norm["std"].to(
-                    device
-                ) + ego_state_norm["mean"].to(device)
-                ego_v0 = ego_current_state_raw[:, 4:5]  # [B, 1]
-                ego_traj = control_to_waypoints(
-                    ego_ctrl[:, 0],
-                    ego_agent_past_raw,
-                    t0_states={"v": ego_v0.squeeze(-1)},
-                )  # [B, T, 4]
-
-                # Neighbors: use trajectory channels as usual
-                # state_normalizer has shape [P, 1, 4] (ego + neighbors),
-                # so we need to apply inverse on the full P dim then slice.
-                x_traj_full = x[:, :, :, :POSE_DIM]  # [B, P, T+1, 4]
-                neighbor_future = self._state_normalizer.inverse(x_traj_full)[:, 1:, 1:]
-
-                return torch.cat([ego_traj[:, None], neighbor_future], dim=1)
-
-            # x is [B, P, T+1, 6] — use trajectory part [B, P, T+1, 4]
-            x_traj = x[..., :POSE_DIM]  # [B, P, T+1, 4]
-        else:
-            x_traj = x  # [B, P, T+1, 4]
-
-        # Convert trajectory/velocity representation to world waypoints
-        if self._use_velocity:
-            future = velocity_to_waypoints(x_traj[:, :, 1:, :])
-            future[..., :2] = future[..., :2] + current_states[:, :, None, :2]
-            return future
-        else:
-            return self._state_normalizer.inverse(x_traj)[:, :, 1:]
+        return torch.cat([ego_traj[:, None], neighbor_traj], dim=1)
 
     def _compute_turn_indicator_from_denoised(self, x, encoding_pooled):
-        """Extract ego trajectory (x,y) from denoised output for turn indicator."""
+        """Turn indicator logit for a denoised control tensor.
+
+        The first two channels are (accel, curvature), not (x, y), so the trajectory slot
+        is fed zeros and the prediction rests on the pooled encoding.
+        """
         B = x.shape[0]
-        if self._output_mode == OUTPUT_MODE_CONTROL:
-            # Control mode: first 2 channels are (accel, curvature), not (x,y).
-            # Use zeros as fallback — turn indicator relies mainly on encoding_pooled.
-            ego_xy = torch.zeros(B, 2 * (self._future_len // 10), device=x.device, dtype=x.dtype)
-        else:
-            # trajectory or trajectory_and_control: first 2 channels are (x,y)
-            ego_xy = x[:, 0, 1::10, :2].reshape(B, 2 * (self._future_len // 10))
+        ego_xy = torch.zeros(B, 2 * (self._future_len // 10), device=x.device, dtype=x.dtype)
         return self._compute_turn_indicator(ego_xy, encoding_pooled)
 
     def _inference_flow_matching(
@@ -804,13 +561,6 @@ class Decoder(nn.Module):
             xt = xt.reshape(B, P, -1, D)
             # Replace first timestep with current state (functional, no in-place)
             xt = torch.cat([current_states_D.unsqueeze(2), xt[:, :, 1:, :]], dim=2)
-            # Fix neighbor control channels to zero — control is only meaningful for ego
-            if D > POSE_DIM:
-                ego = xt[:, 0:1, :, :]  # [B, 1, T+1, D] — keep ego as-is
-                neighbor_pose = xt[:, 1:, :, :POSE_DIM]  # [B, Pn, T+1, 4]
-                neighbor_ctrl = torch.zeros_like(xt[:, 1:, :, POSE_DIM:])  # [B, Pn, T+1, 2]
-                neighbors = torch.cat([neighbor_pose, neighbor_ctrl], dim=-1)
-                xt = torch.cat([ego, neighbors], dim=1)
             return xt.reshape(B, P, -1)
 
         model_wrapper_params = {

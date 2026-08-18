@@ -186,26 +186,19 @@ class DecoderONNXWrapper(nn.Module):
         batch_size = encoding.shape[0]
         agent_num = 1 + self.decoder._predicted_neighbor_num
 
-        # ONNX input is always 4D (POSE_DIM). Pad to D if trajectory_and_control.
-        D = self.decoder._D
+        # The deployed ROS node always sends a POSE_DIM-wide zero tensor here, while the
+        # decoder denoises CONTROL_DIM channels -- keep the node's signature and drop the
+        # extra columns (the input is all-zero either way).
         sampled_trajectories = sampled_trajectories.reshape(
             batch_size, agent_num, 1 + self.decoder._future_len, POSE_DIM
-        )
-        if D > POSE_DIM:
-            pad = torch.zeros(
-                *sampled_trajectories.shape[:-1],
-                D - POSE_DIM,
-                device=sampled_trajectories.device,
-                dtype=sampled_trajectories.dtype,
-            )
-            sampled_trajectories = torch.cat([sampled_trajectories, pad], dim=-1)
+        )[..., :CONTROL_DIM]
 
         model_output = self.decoder.dit(
             sampled_trajectories,
             diffusion_time,
             encoding,
             neighbor_current_mask,
-        ).reshape(batch_size, agent_num, 1 + self.decoder._future_len, D)
+        ).reshape(batch_size, agent_num, 1 + self.decoder._future_len, CONTROL_DIM)
 
         return model_output
 
@@ -220,12 +213,14 @@ class TurnIndicatorONNXWrapper(nn.Module):
     def forward(self, encoding: torch.Tensor, final_x0: torch.Tensor) -> torch.Tensor:
         batch_size = encoding.shape[0]
         agent_num = 1 + self.decoder._predicted_neighbor_num
-        D = self.decoder._D
-        final_x0 = final_x0.reshape(batch_size, agent_num, 1 + self.decoder._future_len, D)
-
         encoding_pooled = torch.mean(encoding, dim=1)
-        ego_trajectory = final_x0[:, 0, 1::10, :2].reshape(
-            batch_size, 2 * (self.decoder._future_len // 10)
+        # The denoised channels are (accel, curvature), so the trajectory slot is zero here
+        # exactly as it is in Decoder._compute_turn_indicator_from_denoised.
+        ego_trajectory = torch.zeros(
+            batch_size,
+            2 * (self.decoder._future_len // 10),
+            device=final_x0.device,
+            dtype=final_x0.dtype,
         )
         return self.decoder._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
@@ -257,16 +252,8 @@ class FullONNXWrapper(nn.Module):
         turn_indicators: torch.Tensor,
         delay: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # ONNX input is always 4D (POSE_DIM). Pad to D if trajectory_and_control.
-        D = self.model.decoder._D
-        if D > POSE_DIM:
-            pad = torch.zeros(
-                *sampled_trajectories.shape[:-1],
-                D - POSE_DIM,
-                device=sampled_trajectories.device,
-                dtype=sampled_trajectories.dtype,
-            )
-            sampled_trajectories = torch.cat([sampled_trajectories, pad], dim=-1)
+        # The node sends POSE_DIM channels; the decoder denoises CONTROL_DIM of them.
+        sampled_trajectories = sampled_trajectories[..., :CONTROL_DIM]
         inputs = {
             "sampled_trajectories": sampled_trajectories,
             "ego_agent_past": ego_agent_past,

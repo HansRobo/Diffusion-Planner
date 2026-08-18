@@ -185,14 +185,6 @@ def closed_loop_validate(
     was_training = net.training
     net.eval()
 
-    # Ego-prediction source for trajectory_and_control models: True => reconstruct the ego
-    # trajectory from the control (accel, curvature) head via the unicycle model (kinematically
-    # consistent, no lateral slip); False => use the pose head directly. No-op for pure-trajectory
-    # (flag never read) and pure-control (always control) models. Saved here and restored in the
-    # finally so the live training model is left untouched.
-    prev_ego_prediction_from_control = net.decoder._ego_prediction_from_control
-    net.decoder._ego_prediction_from_control = args.closed_loop_ego_prediction_from_control
-
     def run_one(
         npz_root,
         site_out_dir: str,
@@ -344,7 +336,6 @@ def closed_loop_validate(
             if report_path:
                 print(f"closed-loop: wrote {report_path}")
     finally:
-        net.decoder._ego_prediction_from_control = prev_ego_prediction_from_control
         net.train(was_training)
 
     if log:

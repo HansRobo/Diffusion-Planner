@@ -347,14 +347,6 @@ def get_args():
         "--closed_loop_sites_npz_root sites by vehicle type. Empty = no labeling.",
     )
     parser.add_argument(
-        "--closed_loop_ego_prediction_from_control",
-        type=boolean,
-        default=True,
-        help="trajectory_and_control models: reconstruct the closed-loop ego trajectory from the "
-        "control (accel, curvature) head via the unicycle model instead of the pose head. "
-        "No-op for pure-trajectory / pure-control models.",
-    )
-    parser.add_argument(
         "--closed_loop_npz_object_modes",
         nargs="+",
         choices=("objects", "noobj"),
