@@ -3,7 +3,7 @@
 Post-hoc only: it reads a run directory the driver already wrote and produces a second tree
 beside it, never running inside a rollout and never changing what a worker writes.
 
-The viewer's ``scenario_sim`` dataset is three levels deep::
+The viewer's ``closed_loop_scenario`` dataset is three levels deep::
 
     <out_root>/                                  # one evaluation run
       groups_summary.json
@@ -49,8 +49,8 @@ _UNMEASURED_MARKER_KEY = "unmeasured_keys"
 # the separator, so a run is matched against both rather than by inverting one.
 _KEY_SEPARATORS = ("_", "__")
 
-# The viewer maps a sim step to a video second with this constant for the scenario_sim
-# dataset. The export re-times each mp4 so the constant holds whatever the run drew at.
+# The viewer maps a sim step to a video second with this constant for the
+# closed_loop_scenario dataset. The export re-times each mp4 so the constant holds.
 VIEWER_STEPS_PER_VIDEO_SEC = 40
 
 _MAP_ID_RE = re.compile(r"/map/[^/]+/(\d+)/")
