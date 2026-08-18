@@ -80,6 +80,7 @@ npz 経路と違い、**記録走行という基準がありません**。その
 | `category` / `category_name` | 絞り込み。`A`〜`Z` と日本語名 |
 | `map` / `version` | 絞り込み。**別の地図の結果は比較できない**ので区別が要る |
 | `error` | そのシナリオで行を書けなかったケース数。null なら完全 |
+| | ただし **1 行も出なかったシナリオはエントリ自体が現れません**。員数は `run.json` で見てください |
 | `unmeasured_keys` | **測っていない**項目名。0 と区別するため |
 | `summary` | `aggregate()` の出力。npz 経路の `summary.json` と同じ形 |
 
@@ -107,7 +108,8 @@ npz 経路と違い、**記録走行という基準がありません**。その
   "scenario": "08a38cfe-...",
   "route": "ego_speed8p3333_pedestrian_speed1p3889_startpoint40",
   "case_key": "08a38cfe-..._14_scenario_0",
-  "n_steps_run": 199, "terminated": "max_steps", "progress_m": 160.6,
+  "n_steps_run": 199, "terminated": "max_steps", "result_kind": "Failure",
+  "progress_m": 160.6,
   "object": { "collision_count": 1, ... },
   "road_border": {...}, "red_light_violation": {...},
   "strong_brake": {...}, "reproducer": {...}
@@ -118,6 +120,21 @@ npz 経路と違い、**記録走行という基準がありません**。その
   メディアのファイル名でもあります
 - `case_key` は元のラン上のディレクトリ名。追跡用で、表示には使いません
 - `segment` はありません
+
+### ケースの成否
+
+| キー | 意味 |
+|---|---|
+| `result_kind` | scenario_simulator_v2 の判定。`Pass` / `Failure` / `Error` |
+| `terminated` | 走行が止まった理由。`sim_terminated`（シナリオ側の停止条件）/ `max_steps`（打ち切り） |
+
+**`result_kind` は OpenSCENARIO の停止条件による判定で、走行品質の判定ではありません。**
+打ち切りに達したケースは条件を満たしていないので必ず `Failure` になります。実測では 452 ケース中
+`Failure` が 430 件で、うち 212 件は打ち切り、261 件は物体衝突も路端逸脱もありません。
+一覧に「95% 失敗」と出すと誤読されるので、`result_kind` は絞り込みに使い、
+品質は `object.collision_count` などの実測値で見てください。
+
+ケースが走りきらなかった場合は行そのものが出ません（`run.json` の `missing_rows`）。
 
 ## media
 
