@@ -60,7 +60,13 @@ _MAP_ID_RE = re.compile(r"/map/[^/]+/(\d+)/")
 _PLACEHOLDER_SITES = frozenset({"unknown_map", "unknown_scenario"})
 
 # What ``site_of`` accepts.
-_SITE_MODES = ("scenario_id", "map", "flat")
+_SITE_MODES = ("scenario_id", "map", "category", "flat")
+
+# The suite's own scenario names, written beside it when the suite is pulled. A category is
+# the leading component of a name like ``C-01-31500_case01_dp``. The names travel with the
+# suite because the credentials that would fetch them are deliberately not on the cluster.
+_NAMES_SIDECAR = "scenario_names.json"
+_CATEGORY_RE = re.compile(r"^([A-Z])-")
 
 # The id is a uuid somewhere in the scenario's path, but not at a fixed depth: the suite
 # root is an expansion whose shape belongs to whoever expanded it. Match by form, not index.
@@ -160,21 +166,46 @@ def load_case_rels(run_dir: Path) -> dict[str, str]:
     }
 
 
-def site_of(case_key: str, row: dict, rel: str | None, mode: str) -> str:
-    """Derive the viewer's ``site`` for one case.
+def load_scenario_names(rel: str | None) -> dict[str, str]:
+    """``{scenario id: display name}`` from the sidecar beside the suite.
+
+    ``rel`` is any scenario path; the suite root is two levels above its
+    ``<scenario id>/<version>/`` pair. A missing sidecar yields an empty map.
+    """
+    if not rel:
+        return {}
+    # The suite root is above the scenario's ``<id>/<version>/`` pair, but whether the
+    # scenarios live directly under it varies, so look up a few levels rather than assume.
+    for base in list(Path(rel).parents)[2:5]:
+        try:
+            return json.loads((base / _NAMES_SIDECAR).read_text(encoding="utf-8"))["scenarios"]
+        except (OSError, ValueError, KeyError):
+            continue
+    return {}
+
+
+def site_of(
+    case_key: str, row: dict, rel: str | None, mode: str, names: dict[str, str] | None = None
+) -> str:
+    """Derive one of the viewer's two grouping levels for a case.
 
     ``scenario_id`` groups a scenario's parameter expansions together under the id the
     scenario is known by elsewhere, which is the identity a reader needs to line results up
-    across runs. ``map`` follows the viewer's own wording -- a site is the location that was
-    evaluated. ``flat`` puts everything in one site, for a suite on a single map.
+    across runs. ``category`` is the leading component of the scenario's name, which is what
+    a reader browses by. ``map`` is the location that was evaluated, and ``flat`` puts
+    everything in one bucket.
     """
     if mode == "flat":
         return "all"
     if mode == "map":
         match = _MAP_ID_RE.search(str(row.get("map_path", "")))
         return match.group(1) if match else "unknown_map"
-    match = _SCENARIO_ID_RE.search(rel or case_key)
-    return match.group(1) if match else "unknown_scenario"
+    scenario = _SCENARIO_ID_RE.search(rel or case_key)
+    if mode == "category":
+        display = (names or {}).get(scenario.group(1) if scenario else "", "")
+        match = _CATEGORY_RE.match(display)
+        return match.group(1) if match else "uncategorized"
+    return scenario.group(1) if scenario else "unknown_scenario"
 
 
 def scenario_description(rel: str | None, scenario_root: str | None = None) -> str | None:
@@ -204,6 +235,45 @@ def scenario_description(rel: str | None, scenario_root: str | None = None) -> s
     except Exception:  # noqa: BLE001 - a label is never worth failing an export over
         return None
     return None
+
+
+def scenario_parameters(rel: str | None) -> dict[str, str]:
+    """The scenario's top-level parameter assignment, or ``{}`` when it cannot be read."""
+    if not rel:
+        return {}
+    try:
+        import xml.etree.ElementTree as ET
+
+        out: dict[str, str] = {}
+        for _, elem in ET.iterparse(rel, events=("start",)):
+            if elem.tag == "ParameterDeclaration":
+                out[elem.get("name") or ""] = elem.get("value") or ""
+            elif elem.tag == "Storyboard":
+                break
+        return out
+    except Exception:  # noqa: BLE001 - a name is never worth failing an export over
+        return {}
+
+
+def route_names(cases: list[tuple[str, str | None]]) -> dict[str, str]:
+    """``{case key: route}`` naming each case by what its expansion actually varied.
+
+    A positional index says nothing to a reader and does not survive a re-expansion, whereas
+    the parameter assignment is both readable and the thing compared across runs. Falls back
+    to the case key when the parameters cannot be read or would not name cases uniquely.
+    """
+    fallback = {key: key for key, _ in cases}
+    params = {key: scenario_parameters(rel) for key, rel in cases}
+    keys = set().union(*params.values()) if params else set()
+    varying = sorted(k for k in keys if len({p.get(k) for p in params.values()}) > 1)
+    if not varying:
+        return fallback
+    named = {
+        key: "_".join(f"{k}{params[key].get(k, '')}".replace(".", "p") for k in varying)
+        for key, _ in cases
+    }
+    # A collision would silently overwrite one case's media with another's.
+    return named if len(set(named.values())) == len(named) else fallback
 
 
 def find_mp4(case_dir: Path, stem: str) -> Path | None:
@@ -270,6 +340,7 @@ def collect_cases(
     """
     rels = load_case_rels(run_dir)
     submitted = load_submitted(run_dir)
+    names = load_scenario_names(next(iter(rels.values()), None))
     by_site: dict[tuple[str, str], list[dict]] = {}
     found: set[str] = set()
     for row_path in sorted(run_dir.glob("*/row.json")):
@@ -280,14 +351,15 @@ def collect_cases(
         except (OSError, ValueError) as exc:
             print(f"viewer_export: unreadable row for {case_key}: {exc}", file=sys.stderr)
             continue
+        row["case_key"] = case_key
         row.setdefault("route", case_key)
         row["_case_dir"] = str(case_dir)
         row["_rel"] = rels.get(case_key)
         found.add(case_key)
         rel = rels.get(case_key)
         cell = (
-            site_of(case_key, row, rel, group_mode),
-            site_of(case_key, row, rel, site_mode),
+            site_of(case_key, row, rel, group_mode, names),
+            site_of(case_key, row, rel, site_mode, names),
         )
         by_site.setdefault(cell, []).append(row)
     # One entry per submitted case, so two spellings of one directory never count twice.
@@ -345,13 +417,18 @@ def write_viewer_tree(
         near_miss = float(rows[0].get("object", {}).get("miss_thresh_m") or 1.0)
         strong_brake = float(rows[0].get("strong_brake", {}).get("thresh_mps2") or -2.5)
 
+        # Named per scenario, because what varies between its expansions is only knowable
+        # by comparing them.
+        routes = route_names([(str(r["case_key"]), r.get("_rel")) for r in rows])
+
         clean_rows = []
         for row in rows:
             case_dir = Path(row.pop("_case_dir"))
             row.pop("_rel", None)
+            row["route"] = routes.get(str(row["case_key"]), str(row["route"]))
             stem = str(row["route"])
 
-            mp4 = find_mp4(case_dir, stem)
+            mp4 = find_mp4(case_dir, str(row["case_key"]))
             if mp4 is not None:
                 dst = site_dir / f"{stem}.mp4"
                 if not retime_mp4(mp4, dst, scale):
@@ -397,7 +474,9 @@ def write_viewer_tree(
             ):
                 block["measured"] = False
                 unmeasured.append(family)
-        summary[_UNMEASURED_MARKER_KEY] = unmeasured
+        # ``reproducer`` counts a mechanism this path does not have -- there is no recorded
+        # drive to snap back to -- so its zeros are structural rather than observations.
+        summary[_UNMEASURED_MARKER_KEY] = unmeasured + ["reproducer"]
         # The shortfall travels in the scenario's own summary because that is the only file
         # the viewer reads per scenario; a count kept only in the export report is invisible.
         summary.update(
@@ -485,6 +564,7 @@ def export(
 
     rels = load_case_rels(run_dir)
     submitted = load_submitted(run_dir)
+    names = load_scenario_names(next(iter(rels.values()), None))
     # A case with no row can only be blamed on a site when the site comes from the scenario's
     # path. What cannot be attributed still has to reach the manifest, as a run-level fact.
     site_errors: dict[str, str] = {}
@@ -493,7 +573,9 @@ def export(
         if site_mode != "map":
             per_site: dict[str, list[str]] = {}
             for key in missing:
-                per_site.setdefault(site_of(key, {}, rels.get(key), site_mode), []).append(key)
+                per_site.setdefault(
+                    site_of(key, {}, rels.get(key), site_mode, names), []
+                ).append(key)
             site_errors = {
                 s: f"{len(k)} of this site's case(s) produced no row: {', '.join(k[:5])}"
                 for s, k in per_site.items()
