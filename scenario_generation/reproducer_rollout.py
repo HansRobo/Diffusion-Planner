@@ -273,11 +273,11 @@ def _arrays_to_device(arrays: dict, device: str) -> dict:
 
 def _add_static_inputs(data: dict, model_args, n: int, device: str) -> None:
     """Add the per-batch ``delay`` + zero ``sampled_trajectories`` the model expects
-    (P = 1 ego + predicted neighbors, T = future_len + 1, D = CONTROL_DIM). In place."""
+    (P = 1 ego + predicted neighbors, T = future_len, D = CONTROL_DIM). In place."""
     data["delay"] = torch.zeros((n,), dtype=torch.long, device=device)
     n_agents = 1 + model_args.predicted_neighbor_num
     data["sampled_trajectories"] = torch.zeros(
-        (n, n_agents, model_args.future_len + 1, CONTROL_DIM),
+        (n, n_agents, model_args.future_len, CONTROL_DIM),
         dtype=torch.float32,
         device=device,
     )

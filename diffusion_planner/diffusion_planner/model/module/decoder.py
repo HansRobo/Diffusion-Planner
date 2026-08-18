@@ -34,6 +34,25 @@ from diffusion_planner.utils.normalizer import (
 from diffusion_planner.utils.unicycle_accel_curvature import action_to_traj4d, traj4d_to_action
 
 
+def generate_future_prefix_mask(delay: torch.Tensor, num_agents: int, horizon: int) -> torch.Tensor:
+    """Mask of the future steps a delayed ego has already committed to.
+
+    Real-time chunking holds the first ``delay`` future steps at the ground truth. The
+    trajectory version (``generate_prefix_mask``) counts a leading current-state slot, so
+    it marks ``step <= delay``; the control tensor has no such slot, so the committed
+    steps are ``step < delay`` and ``delay = 0`` pins nothing.
+
+    Returns:
+        [B, num_agents, horizon, 1] bool, True only on the ego row.
+    """
+    steps = torch.arange(horizon, device=delay.device).view(1, 1, -1, 1)
+    ego_mask = steps < delay.reshape(-1, 1, 1, 1)  # (B, 1, horizon, 1)
+    neighbor_mask = torch.zeros(
+        (delay.shape[0], num_agents - 1, horizon, 1), dtype=torch.bool, device=delay.device
+    )
+    return torch.cat([ego_mask, neighbor_mask], dim=1)
+
+
 def generate_prefix_mask(delay: torch.Tensor, num_agents: int, max_len: int) -> torch.Tensor:
     """Generates a prefix mask based on a delay tensor.
 
@@ -66,12 +85,17 @@ def build_gt_representation(
     control_norm: ControlNormalizer,
     obs_norm: ObservationNormalizer,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build the control GT and the current control state the diffusion runs on.
+    """Build the control GT the diffusion runs on.
+
+    The control tensor carries the T future steps only. A pose-space trajectory needs its
+    current pose to be anchored somewhere, but T controls integrate into T poses on their
+    own -- the initial velocity they start from is ``ego_current_state``, which the encoder
+    already sees.
 
     Returns:
-        all_gt: [B, P, T+1, CONTROL_DIM] normalized (accel, curvature).
-        all_gt_pose: [B, P, T+1, 4] the same future in pose space, for the turn indicator
-            and the edge-point penalties, which always work in trajectory space.
+        all_gt: [B, P, T, CONTROL_DIM] normalized (accel, curvature).
+        all_gt_pose: [B, P, T+1, 4] the same future in pose space (current pose first), for
+            the turn indicator, which works in trajectory space.
     """
     # Control is only meaningful for ego. Neighbor control in the ego-centric frame is
     # ill-defined (the unicycle model wants the agent at the origin with zero heading),
@@ -85,15 +109,9 @@ def build_gt_representation(
         ACTION_SPACE, ego_history, gt_future[:, 0], t0_states={"v": ego_v0.squeeze(-1)}
     )  # [B, T, 2]
 
-    ctrl_gt = torch.zeros(B, P, T, CONTROL_DIM, device=gt_future.device)
-    ctrl_gt[:, 0] = control_norm(ego_ctrl)
+    all_gt = torch.zeros(B, P, T, CONTROL_DIM, device=gt_future.device)
+    all_gt[:, 0] = control_norm(ego_ctrl)
 
-    # Current state: [normalized_v0, 0] for ego, zeros for neighbors
-    ego_ctrl_current = control_norm(torch.cat([ego_v0, torch.zeros_like(ego_v0)], dim=-1))  # [B, 2]
-    ctrl_current = torch.zeros(B, P, CONTROL_DIM, device=gt_future.device)
-    ctrl_current[:, 0] = ego_ctrl_current
-
-    all_gt = torch.cat([ctrl_current[:, :, None, :], ctrl_gt], dim=2)  # [B, P, T+1, 2]
     all_gt_pose = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)
 
     return all_gt, all_gt_pose
@@ -139,29 +157,28 @@ def compute_training_loss(
         control_norm,
         obs_norm,
     )
-    all_gt[:, 1:][neighbor_mask] = 0.0
+    # all_gt covers the future only, all_gt_pose additionally carries the current pose.
+    all_gt[:, 1:][neighbor_future_mask] = 0.0
     all_gt_pose[:, 1:][neighbor_mask] = 0.0
 
     eps = 1e-3
     t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
     t = t.view(B, 1, 1, 1)
-    t = t.expand(B, P, T + 1, 1)
+    t = t.expand(B, P, T, 1)
     z = torch.randn(B, P, T, D, device=gt_future.device)  # [B, P, T, D]
 
     max_delay = 5
     delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
-    prefix_mask = generate_prefix_mask(delay, 1 + Pn, T + 1)  # (B, P, T+1, 1)
+    prefix_mask = generate_future_prefix_mask(delay, 1 + Pn, T)  # (B, P, T, 1)
     mask_coeff = random.uniform(0.0, 1.0)
     curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=gt_future.device))
     t = torch.where(prefix_mask, curr_mask_time, t)
 
     if model_type == "x_start":
-        mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
+        mean, std = VPSDE_linear().marginal_prob(all_gt, t)
         # mean([B, P, T, D]), std([B, 1, T, 1]), z([B, P, T, D])
         xT = mean + std * z
-
-        xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
-        xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, 1 + T, D]
+        xT = torch.where(prefix_mask, all_gt, xT)  # [B, P, T, D]
 
         merged_inputs = {
             **inputs,
@@ -171,20 +188,17 @@ def compute_training_loss(
             "prefix_mask": prefix_mask,
             "gt_trajectories_pose": all_gt_pose,
         }
-        _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, D]
-        model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, D]
+        _, decoder_output = model(merged_inputs)
+        model_output = decoder_output["model_output"]  # [B, P, T, D]
 
-        gt_target = all_gt[:, :, 1:, :]  # [B, P, T, D]
-
-        dpm_loss = torch.sum((model_output - gt_target) ** 2, dim=-1)  # [B, P, T]
+        dpm_loss = torch.sum((model_output - all_gt) ** 2, dim=-1)  # [B, P, T]
 
     elif model_type == "flow_matching":
         # t=0 is noise, t=1 is data
         t = t.reshape(-1, *([1] * (len(all_gt.shape) - 1)))  # [B, 1, 1, 1]
-        xT = (1 - t) * z + t * all_gt[:, :, 1:, :]  # [B, P, T, D]
+        xT = (1 - t) * z + t * all_gt  # [B, P, T, D]
         t = t.reshape(-1)  # [B,]
 
-        xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
         merged_inputs = {
             **inputs,
             "gt_trajectories": all_gt,
@@ -193,10 +207,10 @@ def compute_training_loss(
             "prefix_mask": prefix_mask,
             "gt_trajectories_pose": all_gt_pose,
         }
-        _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, D]
-        model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, D]
+        _, decoder_output = model(merged_inputs)
+        model_output = decoder_output["model_output"]  # [B, P, T, D]
 
-        target_v = all_gt[:, :, 1:, :] - z
+        target_v = all_gt - z
         dpm_loss = torch.sum((model_output - target_v) ** 2, dim=-1)
     else:
         raise NotImplementedError(f"Unknown diffusion model type: {model_type}")
@@ -307,11 +321,11 @@ class Decoder(nn.Module):
 
         self.dit = DiT(
             depth=config.decoder_depth,
-            output_dim=(config.future_len + 1) * CONTROL_DIM,
+            output_dim=config.future_len * CONTROL_DIM,
             hidden_dim=config.hidden_dim,
             heads=config.num_heads,
             dropout=dpr,
-            T=config.future_len + 1,
+            T=config.future_len,
             D=CONTROL_DIM,
         )
         self.turn_indicator_predictor = nn.Linear(
@@ -371,35 +385,6 @@ class Decoder(nn.Module):
 
         return current_states, neighbor_current_mask, ego_current, neighbors_current
 
-    def _build_current_states_D(self, inputs, current_states):
-        """Build the current control state the diffusion prefix is pinned to.
-
-        Args:
-            inputs: Dict containing ego_current_state and neighbor_agents_past.
-            current_states: [B, P, 4] pose-space current states.
-
-        Returns:
-            current_states_D: [B, P, CONTROL_DIM] normalized [v0, 0] for ego, zeros for
-                neighbors.
-        """
-        B, P = current_states.shape[:2]
-
-        # Denormalize only ego_current_state directly to avoid
-        # observation_normalizer.inverse's boolean masking (ONNX-incompatible).
-        device = current_states.device
-        ego_state_norm = self._observation_normalizer._normalization_dict["ego_current_state"]
-        ego_current_state_raw = inputs["ego_current_state"] * ego_state_norm["std"].to(
-            device
-        ) + ego_state_norm["mean"].to(device)
-        ego_v0 = ego_current_state_raw[:, 4:5]  # [B, 1]
-        ego_ctrl_current = self._control_normalizer(
-            torch.cat([ego_v0, torch.zeros_like(ego_v0)], dim=-1)
-        )  # [B, 2]
-
-        ctrl_current = torch.zeros(B, P, CONTROL_DIM, device=device)
-        ctrl_current[:, 0] = ego_ctrl_current
-        return ctrl_current
-
     def _compute_turn_indicator(self, ego_trajectory, encoding_pooled):
         """Compute turn indicator logit from ego trajectory and encoding.
 
@@ -429,9 +414,7 @@ class Decoder(nn.Module):
         P = 1 + self._predicted_neighbor_num
         D = CONTROL_DIM
 
-        sampled_trajectories = inputs["sampled_trajectories"].reshape(
-            B, P, (1 + self._future_len), D
-        )
+        sampled_trajectories = inputs["sampled_trajectories"].reshape(B, P, self._future_len, D)
         diffusion_time = inputs["diffusion_time"]
 
         # The denoised channels are (accel, curvature), so the turn indicator reads the
@@ -452,8 +435,8 @@ class Decoder(nn.Module):
             "turn_indicator_logit": turn_indicator_logit,
         }
 
-    def denoised_to_trajectory(self, x, inputs, current_states):
-        """Convert the denoised ego control [B, P, T+1, 2] into a trajectory [B, P, T, 4].
+    def denoised_to_trajectory(self, x, inputs):
+        """Convert the denoised ego control [B, P, T, 2] into a trajectory [B, P, T, 4].
 
         Only the ego row carries a trained signal: neighbor control GT is zero (control in
         the ego-centric frame is ill-defined for them), so this branch trains with
@@ -463,7 +446,7 @@ class Decoder(nn.Module):
         """
         B, P = x.shape[:2]
 
-        ego_ctrl = self._control_normalizer.inverse(x[:, 0, 1:, :])  # [B, T, 2]
+        ego_ctrl = self._control_normalizer.inverse(x[:, 0])  # [B, T, 2]
 
         raw_inputs = self._observation_normalizer.inverse(inputs)
         ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
@@ -524,10 +507,10 @@ class Decoder(nn.Module):
         x = euler_integration(func, x, NUM_STEP)
         # x = heun_integration(func, x, NUM_STEP)
         # x = rk4_integration(func, x, NUM_STEP)
-        x = x.reshape(B, P, (1 + self._future_len), D)
+        x = x.reshape(B, P, self._future_len, D)
 
         turn_indicator_logit = self._compute_turn_indicator_from_denoised(x, encoding_pooled)
-        prediction = self.denoised_to_trajectory(x, inputs, current_states)
+        prediction = self.denoised_to_trajectory(x, inputs)
 
         return {
             "prediction": prediction,
@@ -562,24 +545,11 @@ class Decoder(nn.Module):
         D = CONTROL_DIM
 
         xT = sampled_trajectories
-        action_prefix = sampled_trajectories.reshape(B, P, -1, D)
 
-        # Build current state in D-space for prefix constraint
-        current_states_D = self._build_current_states_D(inputs, current_states)  # [B, P, D]
-        action_prefix = torch.cat(
-            [current_states_D.unsqueeze(2), action_prefix[:, :, 1:, :]], dim=2
-        )
-
-        B, P, T_plus_1, _ = action_prefix.shape
-
-        delay = inputs["delay"].to(device=action_prefix.device)
-        mask = generate_prefix_mask(delay, P, T_plus_1)  # (B, P, T_plus_1, 1)
-
-        def prefix_constraint(xt, t, step):
-            xt = xt.reshape(B, P, -1, D)
-            # Replace first timestep with current state (functional, no in-place)
-            xt = torch.cat([current_states_D.unsqueeze(2), xt[:, :, 1:, :]], dim=2)
-            return xt.reshape(B, P, -1)
+        delay = inputs["delay"].to(device=xT.device)
+        # The already-committed steps keep their own (earlier) diffusion time; nothing else
+        # is pinned, so the solver needs no xt correction.
+        mask = generate_future_prefix_mask(delay, P, self._future_len)  # (B, P, T, 1)
 
         model_wrapper_params = {
             "classifier_fn": self._guidance_fn,
@@ -611,19 +581,14 @@ class Decoder(nn.Module):
             **model_wrapper_params,
         )
 
-        dpm_solver = dpm.DPM_Solver(
-            model_fn,
-            noise_schedule,
-            correcting_xt_fn=prefix_constraint,
-            D=D,
-        )
+        dpm_solver = dpm.DPM_Solver(model_fn, noise_schedule, D=D)
 
         x0 = dpm_solver.sample(xT, steps=10, prefix_mask=mask, skip_type="logSNR")
 
-        x0 = x0.reshape(B, P, (1 + self._future_len), D)
+        x0 = x0.reshape(B, P, self._future_len, D)
 
         turn_indicator_logit = self._compute_turn_indicator_from_denoised(x0, encoding_pooled)
-        prediction = self.denoised_to_trajectory(x0, inputs, current_states)
+        prediction = self.denoised_to_trajectory(x0, inputs)
 
         return {
             "prediction": prediction,
@@ -650,9 +615,7 @@ class Decoder(nn.Module):
         P = 1 + self._predicted_neighbor_num
         D = CONTROL_DIM
 
-        sampled_trajectories = inputs["sampled_trajectories"].reshape(
-            B, P, (1 + self._future_len) * D
-        )
+        sampled_trajectories = inputs["sampled_trajectories"].reshape(B, P, self._future_len * D)
 
         if self._model_type == "flow_matching":
             return self._inference_flow_matching(

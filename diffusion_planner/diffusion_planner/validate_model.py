@@ -53,7 +53,7 @@ def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValida
     inputs["sampled_trajectories"] = torch.zeros(
         batch_size,
         MAX_NUM_AGENTS,
-        OUTPUT_T + 1,
+        OUTPUT_T,
         CONTROL_DIM,
         dtype=torch.float32,
         device=device,

@@ -186,19 +186,22 @@ class DecoderONNXWrapper(nn.Module):
         batch_size = encoding.shape[0]
         agent_num = 1 + self.decoder._predicted_neighbor_num
 
-        # The deployed ROS node always sends a POSE_DIM-wide zero tensor here, while the
-        # decoder denoises CONTROL_DIM channels -- keep the node's signature and drop the
-        # extra columns (the input is all-zero either way).
+        # The deployed ROS node always sends a (1 + T, POSE_DIM) zero tensor here, while
+        # the decoder denoises T steps of CONTROL_DIM channels -- keep the node's signature
+        # and drop the leading current-state step and the extra columns (the input is
+        # all-zero either way).
         sampled_trajectories = sampled_trajectories.reshape(
             batch_size, agent_num, 1 + self.decoder._future_len, POSE_DIM
-        )[..., :CONTROL_DIM]
+        )[:, :, 1:, :CONTROL_DIM]
+        # The node's diffusion_time carries the same leading step; drop it to match.
+        diffusion_time = diffusion_time[:, :, 1:, :]
 
         model_output = self.decoder.dit(
             sampled_trajectories,
             diffusion_time,
             encoding,
             neighbor_current_mask,
-        ).reshape(batch_size, agent_num, 1 + self.decoder._future_len, CONTROL_DIM)
+        ).reshape(batch_size, agent_num, self.decoder._future_len, CONTROL_DIM)
 
         return model_output
 
@@ -252,8 +255,9 @@ class FullONNXWrapper(nn.Module):
         turn_indicators: torch.Tensor,
         delay: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # The node sends POSE_DIM channels; the decoder denoises CONTROL_DIM of them.
-        sampled_trajectories = sampled_trajectories[..., :CONTROL_DIM]
+        # The node sends 1 + T steps of POSE_DIM channels; the decoder denoises T steps of
+        # CONTROL_DIM channels.
+        sampled_trajectories = sampled_trajectories[:, :, 1:, :CONTROL_DIM]
         inputs = {
             "sampled_trajectories": sampled_trajectories,
             "ego_agent_past": ego_agent_past,
@@ -278,7 +282,7 @@ class FullONNXWrapper(nn.Module):
         # ``prediction`` is that same control integrated into waypoints. Both are exported
         # so a consumer can track the trajectory or the (accel, curvature) command.
         ego_control = self.model.decoder._control_normalizer.inverse(
-            decoder_outputs["denoised"][:, 0, 1:, :]
+            decoder_outputs["denoised"][:, 0]
         )  # [B, T, 2]
         return (
             decoder_outputs["prediction"],
