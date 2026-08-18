@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
@@ -41,6 +41,20 @@ def cli(help_text: str, *, path: bool = False, **kwargs: Any) -> Any:
         kwargs: ``default`` / ``default_factory``. Omit both to make the flag required.
     """
     return field(metadata={"cli": True, "help": help_text, "path": path}, **kwargs)
+
+
+def cli(help: str, *, default: Any = MISSING, path: bool = False) -> Any:
+    """Mark a TrainConfig field as exposed on the command line.
+
+    The argument's name, type, default, choices and help text are all read off the field
+    definition by :mod:`diffusion_planner.train_cli` -- anything marked here is a flag on
+    both entrypoints (:mod:`train_predictor` and :mod:`train_run`), and anything not
+    marked is a setting changed by editing its default below.
+    """
+    metadata = {"cli": True, "help": help, "path": path}
+    if default is MISSING:
+        return field(metadata=metadata)
+    return field(default=default, metadata=metadata)
 
 
 @dataclass
@@ -224,10 +238,10 @@ class TrainConfig:
     #
     # ``closed_loop_sites_npz_root`` is an alternative/addition to ``closed_loop_npz_root`` for
     # multi-site validation: a curated .json path-list manifest, grouped into per-site route pools
-    # by scenario_generation.site_discovery.discover_sites_from_json and evaluated as independent
-    # npz_roots, wandb-logged under "closed_loop_scores/<metric>/<site_name>". Both may be set at
-    # once — each fires independently and contributes its own rows to the combined episode table /
-    # cross-site aggregate.
+    # by scenario_generation.site_discovery.discover_sites_with_vehicles_from_json and evaluated
+    # as independent npz_roots, wandb-logged under "closed_loop_scores/<metric>/<site_name>".
+    # Both may be set at once — each fires independently and contributes its own rows to the
+    # combined episode table / cross-site aggregate.
     # ---------------------------------------------------------
     closed_loop_npz_root: str = cli(
         "dir tree of route NPZ frames for closed-loop validation, OR a .json path list of "
@@ -241,6 +255,14 @@ class TrainConfig:
         default="",
         path=True,
     )
+    # optional JSON file of {project_code_name: vehicle_type_label} for labeling
+    # closed_loop_sites_npz_root sites by vehicle type. Empty = no labeling.
+    closed_loop_project_vehicle_map: str = cli(
+        "optional JSON file of {project_code_name: vehicle_type_label} for labeling "
+        "closed_loop_sites_npz_root sites by vehicle type. Empty = no labeling.",
+        default="",
+        path=True,
+    )
     # Object-mode ablation per source: "objects"=normal, "noobj"=empty-world (no dynamic/static
     # objects, map kept — isolates "reacts badly to traffic" from "can't follow the
     # route/map"). npz_root defaults to objects-only (usually a single curated scene);
@@ -250,8 +272,13 @@ class TrainConfig:
     closed_loop_seg_len: int = 100000  # large -> one route = one segment = one trial
     # Re-plan every N steps: replan=1 is a model forward EVERY step (~minutes/epoch over a full
     # route); 40 keeps per-epoch cost to ~tens of seconds. Lower it for higher-fidelity validation.
-    closed_loop_replan_interval: int = 4
+    closed_loop_replan_interval: int = 1
     closed_loop_draw_every: int = 4  # render 1 of every N steps (matplotlib is the dominant cost)
+    # draw on this many worker processes (minimum 1)
+    closed_loop_draw_workers: int = cli(
+        "draw on this many worker processes (minimum 1)",
+        default=4,
+    )
     closed_loop_fps: int = 10
     closed_loop_near_miss_thresh: float = 0.5
     closed_loop_search_radius: float = 1.5

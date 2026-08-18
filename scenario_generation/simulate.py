@@ -126,7 +126,12 @@ def load_onnx_model(onnx_path: str | Path, device: str = "cuda"):
 
 
 def _ego_to_world(
-    pred_xy: np.ndarray, pred_cos_sin: np.ndarray, ego_x: float, ego_y: float, ego_heading: float
+    pred_xy: np.ndarray,
+    pred_cos_sin: np.ndarray,
+    ego_x: float,
+    ego_y: float,
+    ego_heading: float,
+    dtype=np.float32,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Transform model predictions from ego-centric back to world frame.
 
@@ -134,6 +139,9 @@ def _ego_to_world(
         pred_xy: (..., 2) positions in ego frame.
         pred_cos_sin: (..., 2) [cos_h, sin_h] in ego frame.
         ego_x, ego_y, ego_heading: Ego pose in world frame.
+        dtype: Output precision. float32 spaces map-frame coordinates about
+            8 mm apart at MGRS magnitudes, which a caller that differences
+            the result for velocities cannot afford.
 
     Returns:
         (world_xy, world_headings) where world_headings are in radians.
@@ -142,11 +150,11 @@ def _ego_to_world(
     # Inverse rotation: R^T = [[cos, -sin], [sin, cos]]
     wx = ego_x + pred_xy[..., 0] * c - pred_xy[..., 1] * s
     wy = ego_y + pred_xy[..., 0] * s + pred_xy[..., 1] * c
-    world_xy = np.stack([wx, wy], axis=-1).astype(np.float32)
+    world_xy = np.stack([wx, wy], axis=-1).astype(dtype)
 
     # Transform heading back
     pred_h = np.arctan2(pred_cos_sin[..., 1], pred_cos_sin[..., 0])
-    world_h = (pred_h + ego_heading).astype(np.float32)
+    world_h = (pred_h + ego_heading).astype(dtype)
 
     return world_xy, world_h
 
