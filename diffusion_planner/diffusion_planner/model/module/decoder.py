@@ -435,6 +435,12 @@ class Decoder(nn.Module):
             "turn_indicator_logit": turn_indicator_logit,
         }
 
+    def _denormalize(self, inputs, key):
+        """Undo the observation normalization of one input tensor, ONNX-exportably."""
+        norm = self._observation_normalizer._normalization_dict[key]
+        x = inputs[key]
+        return x * norm["std"].to(x.device) + norm["mean"].to(x.device)
+
     def denoised_to_trajectory(self, x, inputs):
         """Convert the denoised ego control [B, P, T, 2] into a trajectory [B, P, T, 4].
 
@@ -448,11 +454,16 @@ class Decoder(nn.Module):
 
         ego_ctrl = self._control_normalizer.inverse(x[:, 0])  # [B, T, 2]
 
-        raw_inputs = self._observation_normalizer.inverse(inputs)
-        ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
+        # Denormalize the two ego tensors elementwise instead of going through
+        # ObservationNormalizer.inverse: that zeroes padded entries with `tensor[mask] = 0`,
+        # whose advanced indexing exports as a Where whose condition is one rank short of
+        # its operands -- PyTorch accepts it, TensorRT rejects the graph. Ego history is
+        # never padded, so there is nothing to zero here.
+        ego_agent_past_raw = self._denormalize(inputs, "ego_agent_past")
+        ego_v0 = self._denormalize(inputs, "ego_current_state")[:, 4:5]  # [B, 1] raw velocity
         ego_traj = action_to_traj4d(
             ACTION_SPACE,
-            raw_inputs["ego_agent_past"],
+            ego_agent_past_raw,
             ego_ctrl,
             t0_states={"v": ego_v0.squeeze(-1)},
         )  # [B, T, 4]

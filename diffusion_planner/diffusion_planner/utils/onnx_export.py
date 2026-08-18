@@ -70,7 +70,7 @@ DECODER_INPUT_NAMES = [
 
 TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0"]
 
-FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit", "ego_control"]
+FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit"]
 ENCODER_OUTPUT_NAMES = ["encoding"]
 DECODER_OUTPUT_NAMES = ["model_output"]
 TURN_INDICATOR_OUTPUT_NAMES = ["turn_indicator_logit"]
@@ -218,13 +218,11 @@ class TurnIndicatorONNXWrapper(nn.Module):
         agent_num = 1 + self.decoder._predicted_neighbor_num
         encoding_pooled = torch.mean(encoding, dim=1)
         # The denoised channels are (accel, curvature), so the trajectory slot is zero here
-        # exactly as it is in Decoder._compute_turn_indicator_from_denoised.
-        ego_trajectory = torch.zeros(
-            batch_size,
-            2 * (self.decoder._future_len // 10),
-            device=final_x0.device,
-            dtype=final_x0.dtype,
-        )
+        # exactly as it is in Decoder._compute_turn_indicator_from_denoised. ``final_x0`` is
+        # multiplied by zero rather than ignored: the ROS node binds it by name, and an
+        # input that reaches no output is dropped from the exported signature.
+        n_traj = 2 * (self.decoder._future_len // 10)
+        ego_trajectory = final_x0.reshape(batch_size, -1)[:, :n_traj] * 0.0
         return self.decoder._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
 
@@ -254,7 +252,7 @@ class FullONNXWrapper(nn.Module):
         ego_shape: torch.Tensor,
         turn_indicators: torch.Tensor,
         delay: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # The node sends 1 + T steps of POSE_DIM channels; the decoder denoises T steps of
         # CONTROL_DIM channels.
         sampled_trajectories = sampled_trajectories[:, :, 1:, :CONTROL_DIM]
@@ -278,17 +276,11 @@ class FullONNXWrapper(nn.Module):
             "delay": delay,
         }
         _, decoder_outputs = self.model(inputs)
-        # The denoised tensor is the ego control the planner actually committed to;
-        # ``prediction`` is that same control integrated into waypoints. Both are exported
-        # so a consumer can track the trajectory or the (accel, curvature) command.
-        ego_control = self.model.decoder._control_normalizer.inverse(
-            decoder_outputs["denoised"][:, 0]
-        )  # [B, T, 2]
-        return (
-            decoder_outputs["prediction"],
-            decoder_outputs["turn_indicator_logit"],
-            ego_control,
-        )
+        # Only the two tensors the deployed ROS node declares: it validates the engine's
+        # tensor count against its own config and refuses an engine that carries more.
+        # The raw (accel, curvature) command is recoverable from ``prediction``, which is
+        # that same control integrated through the unicycle model.
+        return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
 
 
 def build_dummy_inputs() -> TensorDict:
