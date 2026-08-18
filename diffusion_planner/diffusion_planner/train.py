@@ -708,7 +708,7 @@ def model_training(args: TrainConfig):
                 scenario_output_dir = os.path.join(
                     save_path,
                     f"epoch{epoch + 1:04d}",
-                    "scenario_open_loop",
+                    "open_loop_override",
                 )
             scenario_based_open_loop_validate(
                 diffusion_planner,
