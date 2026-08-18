@@ -90,6 +90,7 @@ def run_one_group(
     args: argparse.Namespace,
     group_name: str | None = None,
     mode: str | None = None,
+    render_media: bool = True,
 ) -> None:
     """Run closed-loop evaluation for a single group; writes ``summary.json`` + ``segments.jsonl``
     under ``out_dir``. Wandb logging is left to the caller (re-reads via :func:`_load_group_results`).
@@ -135,7 +136,7 @@ def run_one_group(
                     unstick_advance_m=args.closed_loop_unstick_advance_m,
                     unstick_radius_mult=args.closed_loop_unstick_radius_mult,
                     unstick_teleport_after=args.closed_loop_unstick_teleport_after,
-                    draw_every=args.closed_loop_draw_every if args.render_media else None,
+                    draw_every=args.closed_loop_draw_every if render_media else None,
                     replan_interval=args.closed_loop_replan_interval,
                     abort_deviation_m=args.closed_loop_abort_deviation_m,
                     abort_after=args.closed_loop_abort_after,
@@ -318,6 +319,7 @@ def run_closed_loop_main(
                     args,
                     group_name=summary_key,
                     mode=mode,
+                    render_media=render_media,
                 )
 
     # Aggregate on rank 0 only (shard=None -> rank 0; DDP -> rank 0 only).

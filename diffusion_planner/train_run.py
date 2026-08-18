@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Launch pretrain/SFT training across all visible GPUs (Python replacement for train_run.sh).
+"""Launch pretrain/SFT training across all visible GPUs.
 
-Thin launcher only: it resolves the run dir, saves git info, sets NCCL env and runs
+Thin launcher: resolves the run dir, saves git info, sets NCCL env and runs
 train_predictor.py under torch.distributed.run.
-
-It takes exactly the same flags as train_predictor.py -- both parsers are generated from
-the fields TrainConfig marks with ``cli(...)`` -- and forwards them verbatim. The only
-thing it decides on its own is the run directory: it resolves ``save_dir`` once, here,
-so the launcher and the trainer cannot end up pointing at different directories.
 """
 
 import os
@@ -16,11 +11,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from diffusion_planner.config import TrainConfig, build_parser, resolve_paths, to_command_line
 from diffusion_planner.scenario_based_open_loop.open_loop import (
     load_scenario_based_open_loop_settings,
 )
-from diffusion_planner.train_cli import build_parser, resolve_paths, to_command_line
-from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.utils.dist_init import dist_init_file_path
 from run_utils import NCCL_ENV, gpu_count, tee_run
 
@@ -37,15 +31,12 @@ def write_git_info(save_path: Path, repo_dir: Path) -> None:
 
 
 def main() -> None:
-    args = build_parser(description=__doc__).parse_args()
-    resolve_paths(args)
+    args = build_parser(TrainConfig, description=__doc__).parse_args()
+    resolve_paths(args, TrainConfig)
 
     if args.scenario_based_open_loop_list:
         load_scenario_based_open_loop_settings(args.scenario_based_open_loop_list)
 
-    # Resolved here rather than in each process: the child would otherwise derive its own
-    # timestamp, and the directory this launcher writes git info and logs into would not
-    # be the one the trainer saves checkpoints into.
     if not args.save_dir:
         args.save_dir = TrainConfig.build_save_dir(args.output_root, args.exp_name)
     save_path = Path(args.save_dir)
@@ -66,7 +57,6 @@ def main() -> None:
         str(gpu_count()),
         "--standalone",
         "train_predictor.py",
-        # output_root has already done its job: save_dir is now concrete.
         *to_command_line(args, exclude=("output_root",)),
     ]
     rc = tee_run(

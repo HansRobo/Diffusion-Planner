@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.scenario_based_open_loop.validate import scenario_based_open_loop_validate
-from diffusion_planner.train_config import TrainConfig
+from diffusion_planner.config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
@@ -158,7 +158,7 @@ def closed_loop_validate(
             object_modes=args.closed_loop_object_modes
             if args.closed_loop_object_modes is not None
             else ["objects"],
-            render_media=is_final_save,
+            render_media=is_final_save and args.render_media,
             shard=(global_rank, world_size),
         )
 

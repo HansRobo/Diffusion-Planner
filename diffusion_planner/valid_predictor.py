@@ -14,7 +14,7 @@ from diffusion_planner.utils.config import Config
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
 from diffusion_planner.utils.path_key import data_path_to_rel
 from diffusion_planner.utils.train_utils import resume_model, set_seed
-from diffusion_planner.valid_config import ValidConfig
+from diffusion_planner.config import ValidConfig
 from diffusion_planner.validate_model import (
     aggregate_replan_consistency_metrics,
     aggregate_valid_metrics,

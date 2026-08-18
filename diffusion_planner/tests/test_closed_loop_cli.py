@@ -1,20 +1,21 @@
 from pathlib import Path
 
 import pytest
-from diffusion_planner.train_cli import (
+from diffusion_planner.config import (
+    TrainConfig,
+    build_config,
     build_parser,
-    build_train_config,
     resolve_paths,
     to_command_line,
 )
-from diffusion_planner.train_config import TrainConfig
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _NORMALIZATION_JSON = _REPO_ROOT / "diffusion_planner" / "normalization.json"
 
 
 def test_build_parser_required_and_defaults(tmp_path: Path):
-    parser = build_parser("test parser")
+    parser = build_parser(TrainConfig, "test parser")
     train_list = str(tmp_path / "train.json")
     valid_list = str(tmp_path / "valid.json")
 
@@ -40,7 +41,7 @@ def test_resolve_paths(tmp_path: Path, monkeypatch):
     (tmp_path / "train.json").write_text("[]")
     (tmp_path / "valid.json").write_text("[]")
 
-    parser = build_parser("test parser")
+    parser = build_parser(TrainConfig, "test parser")
     args = parser.parse_args(
         [
             "--exp_name",
@@ -51,14 +52,14 @@ def test_resolve_paths(tmp_path: Path, monkeypatch):
             "valid.json",
         ]
     )
-    resolve_paths(args)
+    resolve_paths(args, TrainConfig)
     assert Path(args.train_set_list).is_absolute()
     assert Path(args.valid_set_list).is_absolute()
     assert args.train_set_list == str((tmp_path / "train.json").resolve())
 
 
 def test_to_command_line(tmp_path: Path):
-    parser = build_parser("test parser")
+    parser = build_parser(TrainConfig, "test parser")
     train_list = str(tmp_path / "train.json")
     valid_list = str(tmp_path / "valid.json")
 
@@ -80,12 +81,11 @@ def test_to_command_line(tmp_path: Path):
     assert "--train_set_list" in cmd
     assert "--closed_loop_draw_workers" in cmd
     assert "8" in cmd
-    # Default values like use_wandb=True should be omitted
     assert "--use_wandb" not in cmd
 
 
-def test_build_train_config(tmp_path: Path):
-    parser = build_parser("test parser")
+def test_build_config(tmp_path: Path):
+    parser = build_parser(TrainConfig, "test parser")
     train_list = str(tmp_path / "train.json")
     valid_list = str(tmp_path / "valid.json")
 
@@ -99,7 +99,8 @@ def test_build_train_config(tmp_path: Path):
             valid_list,
         ]
     )
-    config = build_train_config(
+    config = build_config(
+        TrainConfig,
         args,
         num_workers=2,
         normalization_file_path=str(_NORMALIZATION_JSON),

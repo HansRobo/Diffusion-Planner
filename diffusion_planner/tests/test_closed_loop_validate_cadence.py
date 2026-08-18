@@ -21,7 +21,7 @@ def _make_args(**overrides):
         closed_loop_unstick_radius_mult=10.0,
         closed_loop_unstick_teleport_after=300,
         closed_loop_draw_every=4,
-        closed_loop_replan_interval=4,
+        closed_loop_replan_interval=1,
         closed_loop_abort_deviation_m=50.0,
         closed_loop_abort_after=30,
         closed_loop_abort_max_snaps=0,

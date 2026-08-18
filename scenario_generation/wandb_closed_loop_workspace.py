@@ -183,6 +183,20 @@ def build_closed_loop_workspace(
             for metric in OBJECTS_ONLY_SCORE_KEYS
         ]
 
+    def _per_json_bar_chart_panels(json_label: str) -> list:
+        json_is_noobj = json_label.endswith("__noobj")
+        metrics = list(COMPARISON_SCORE_KEYS)
+        if not json_is_noobj:
+            metrics += list(OBJECTS_ONLY_SCORE_KEYS)
+        return [
+            wr.BarPlot(
+                title=metric,
+                metrics=[f"closed_loop_scores_bar/{json_label}/{metric}"],
+                orientation="v",
+            )
+            for metric in metrics
+        ]
+
     def _per_json_overview_panels(json_name: str) -> list:
         """Per-json rollup: ``closed_loop_overview/<json_name>/<key>``."""
         prefix = f"{OVERVIEW_KEY_PREFIX}/{json_name}/"
@@ -277,6 +291,10 @@ def build_closed_loop_workspace(
                         "Scores (comparison)" if json_is_noobj else "Scores",
                     ),
                     _per_json_score_panels(labels_for_this),
+                ),
+                (
+                    _section_name(mode_label, "Scores (bar chart)"),
+                    _per_json_bar_chart_panels(mode_label),
                 ),
                 # Skip Scores (objects-only) in noobj bucket: every label is a noobj
                 # label, so the helper would render N empty LinePlots.

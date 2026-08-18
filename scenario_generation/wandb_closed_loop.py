@@ -8,7 +8,9 @@ import wandb
 
 from scenario_generation.closed_loop_score_keys import (
     COMPARISON_OVERVIEW_SUM_KEYS,
+    COMPARISON_SCORE_KEYS,
     OBJECTS_ONLY_OVERVIEW_SUM_KEYS,
+    OBJECTS_ONLY_SCORE_KEYS,
     SCORE_KEYS,
     extract_score,
 )
@@ -22,8 +24,14 @@ def is_noobj_label(label: str) -> bool:
 
 
 def _json_name_from_label(label: str) -> str:
-    """Split on ``"__noobj/"`` — same boundary as :func:`is_noobj_label`."""
-    return label.split("__noobj/", 1)[0]
+    """Split off the json_name from a ``<json_name>/<group_name>`` label.
+
+    Handles both objects (``<json_name>/<group_name>``) and noobj
+    (``<json_name>__noobj/<group_name>``) forms — same boundary as :func:`is_noobj_label`.
+    """
+    if "__noobj/" in label:
+        return label.split("__noobj/", 1)[0]
+    return label.split("/", 1)[0]
 
 
 def episode_stem(out_dir: str | Path, row: dict) -> str:
@@ -180,6 +188,18 @@ def build_groups_wandb_log(
             build_groups_aggregate_log(sub_summaries, prefix=f"{OVERVIEW_KEY_PREFIX}/{json_label}")
         )
 
+    # Per-(json, mode) bar charts -- one ``closed_loop_scores_bar/<json_label>/<metric>`` per
+    # bucket so the workspace can render one BarPlot per bucket, comparing same-bucket groups only.
+    json_label_for = {
+        label: (
+            _json_name_from_label(label) + "__noobj"
+            if is_noobj_label(label)
+            else _json_name_from_label(label)
+        )
+        for label in group_summaries
+    }
+    log.update(build_groups_score_bar_charts(group_summaries, json_label_for=json_label_for))
+
     return log
 
 
@@ -231,6 +251,67 @@ def build_groups_aggregate_log(
     return {k: v for k, v in log.items() if _wandb_scalar(v) or isinstance(v, int)}
 
 
+def build_groups_score_bar_charts(
+    summaries: dict[str, dict],
+    *,
+    json_label_for: dict[str, str] | None = None,
+) -> dict:
+    """Bar chart comparing groups within the same (json, mode) bucket.
+
+    Each bar chart covers one json_label and one metric; groups from different
+    jsons are never compared since their score scales are not comparable.
+
+    Parameters
+    ----------
+    summaries
+        ``{group_label: summary_dict}`` as produced by ``build_groups_wandb_log``.
+    json_label_for
+        Optional ``{group_label: json_label}`` map where ``json_label`` is
+        ``<json_name>`` or ``<json_name>__noobj``. Inferred automatically if
+        omitted.
+
+    Bar chart types:
+    - ``COMPARISON_SCORE_KEYS``: plotted for every json_label
+    - ``OBJECTS_ONLY_SCORE_KEYS``: plotted only for the objects bucket
+    """
+    log: dict = {}
+    if not summaries:
+        return log
+
+    def _bar(json_label: str, key: str, labels: list[str]) -> None:
+        table = wandb.Table(columns=["group", key])
+        for label in labels:
+            val = extract_score(summaries[label], key)
+            if _wandb_scalar(val):
+                table.add_data(label, val)
+        if table.data:
+            log[f"closed_loop_scores_bar/{json_label}/{key}"] = wandb.plot.bar(
+                table, "group", key, title=f"{json_label} / {key}"
+            )
+
+    if json_label_for is None:
+        json_label_for = {
+            label: (
+                _json_name_from_label(label) + "__noobj"
+                if is_noobj_label(label)
+                else _json_name_from_label(label)
+            )
+            for label in summaries
+        }
+
+    bucket: dict[str, list[str]] = {}
+    for label, json_label in json_label_for.items():
+        bucket.setdefault(json_label, []).append(label)
+
+    for json_label, labels in bucket.items():
+        objects_labels = [l for l in labels if not is_noobj_label(l)]
+        for key in COMPARISON_SCORE_KEYS:
+            _bar(json_label, key, labels)
+        for key in OBJECTS_ONLY_SCORE_KEYS:
+            _bar(json_label, key, objects_labels)
+
+    return log
+
 def build_full_closed_loop_wandb_log(
     summary: dict,
     *,
@@ -247,6 +328,9 @@ def build_full_closed_loop_wandb_log(
     def _scalar_key(metric: str) -> str:
         return scalar_key(group, metric)
 
+    def _media_key(slot: str) -> str:
+        return media_key(group, slot)
+
     for key in SCORE_KEYS:
         val = extract_score(summary, key)
         if _wandb_scalar(val):
@@ -257,7 +341,7 @@ def build_full_closed_loop_wandb_log(
     if render_media and rep is not None and out_dir is not None:
         png_dir, mp4_path = _segment_paths(out_dir, rep)
         if mp4_path.is_file():
-            log[media_key("video")] = wandb.Video(str(mp4_path), format="mp4")
+            log[_media_key("video")] = wandb.Video(str(mp4_path), format="mp4")
         try:
             rendered = render_trajectory_colormaps(
                 png_dir,
@@ -275,7 +359,7 @@ def build_full_closed_loop_wandb_log(
             wandb.Image(str(rendered[m]), caption=m) for m in colormap_metrics if m in rendered
         ]
         if gallery:
-            log[media_key("gallery")] = gallery
+            log[_media_key("gallery")] = gallery
 
     return log
 
