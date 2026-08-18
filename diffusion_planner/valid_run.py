@@ -62,12 +62,6 @@ def main() -> None:
     save_dir = output_root / "predictions"
 
     here = Path(__file__).resolve().parent
-    # torch.distributed.run workers start with cwd=here, so a relative PYTHONPATH
-    # (or none) would miss the sibling planner_metrics package and fall through
-    # to a venv editable install from another checkout.
-    repo_root = str(here.parent)
-    env = os.environ.copy()
-    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
     dist_init_file_path().unlink(missing_ok=True)
 
     cmd = [
