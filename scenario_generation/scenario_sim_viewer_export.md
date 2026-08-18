@@ -42,9 +42,9 @@ npz 経路と違い、**記録走行という基準がありません**。その
   "run_dir": "/mnt/.../full_run/verify-final2-3989/run",
   "ckpt": "/mnt/.../epoch0080/best_model.pth",
   "dp_commit": "da3a0270...", "branch": "final-v1",
-  "draw_every": "4", "fps": 10.0, "max_steps": "1700",
+  "draw_every": "4", "fps": 10.0, "max_steps": "3000",
   "submitted_cases": 464,
-  "verdicts": { "pass": 21, "failure": 218, "error": 1, "undecided": 212 },
+  "verdicts": { "pass": 21, "failure": 430, "error": 1, "undecided": 0 },
   "missing_rows": [{ "case_key": "<case_key>", "reason": "SyntaxError: ..." }]
 }
 ```
@@ -69,7 +69,7 @@ npz 経路と違い、**記録走行という基準がありません**。その
     "map": "2231",
     "version": "14",
     "n_cases": 12,
-    "verdicts": { "pass": 0, "failure": 7, "error": 0, "undecided": 5 },
+    "verdicts": { "pass": 0, "failure": 12, "error": 0, "undecided": 0 },
     "error": null,
     "unmeasured_keys": ["mean_route_completion", "mean_gt_deviation_m",
                         "red_light_violation", "reproducer"],
@@ -152,17 +152,16 @@ npz 経路と違い、**記録走行という基準がありません**。その
 `Failure("Timeout", …)` を初期値として置くため、**判定に到達しなかったケースでも `Failure` と
 読めてしまいます**。生の値として残してありますが、成否は必ず `verdict` を見てください。
 
-実測 452 ケースのうち判定に到達したのは 240 件で、`Pass` 21 / `Failure` 218 / `Error` 1。
-残る 212 件は `decided: false` です。**この 212 件を失敗に数えないでください。**
+ここに置いてあるランは **452 ケース全件が判定に到達しています**（`Pass` 21 / `Failure` 430 /
+`Error` 1、未判定 0）。
 
-未判定が出るのは、**評価側の歩数上限がシナリオ自身のタイムアウト条件より手前にある**ためです。
-シナリオはいずれも `SimulationTimeCondition` を持っていて、期限に達すると `exitFailure` で
-判定に到達します（実測 76 件がこれ）。このランは `max_steps: 1700` = 169.5 s で、未判定 212 件の
-シナリオはすべて 180〜200 s の条件を持つため、その手前で切れています。
-**上限を 2010 以上にすれば、全ケースがシナリオ自身の判定に到達します。**
+`decided: false` は、**評価側の歩数上限がシナリオ自身のタイムアウト条件より手前にある**ときに
+出ます。シナリオはいずれも `SimulationTimeCondition` を持っていて、期限に達すると `exitFailure`
+で判定に到達します。スイート中の最長は 200 s、このランは `max_steps: 3000` = 300 s なので
+未判定は出ません。**上限を下げたランを読むときだけ、この値に注意してください。**
 
 `Pass` は success condition の**すべて**を満たすことを要求します。実測で満たせなかった条件は
-`goal_position` 170 件・`ego_speed` 121 件・方向指示器 64 件・`ego_stop` 32 件で、
+`goal_position` 347 件・`ego_speed` 190 件・方向指示器 88 件・`ego_stop` 44 件で、
 走行の安全性とは別の条件も含みます。**Pass 率は走行品質の指標ではありません。**
 
 `terminated` は走行が止まった理由（`sim_terminated` / `max_steps`）で、`verdict.decided` と
