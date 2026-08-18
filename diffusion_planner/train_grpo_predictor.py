@@ -246,8 +246,9 @@ def model_training(args):
         agg = aggregate_valid_metrics(valid_dict, args.device)
         if global_rank == 0:
             valid_loss_ego = agg["avg_loss_ego"]
-            valid_neighbor_margin = agg["ego_means"]["ego_neighbor_margin_loss"]
-            valid_road_border = agg["ego_means"]["ego_road_border_loss"]
+            mean_ego_loss_dict = agg["ego_means"]
+            valid_neighbor_margin = mean_ego_loss_dict.get("ego_neighbor_margin_loss", 0.0)
+            valid_road_border = mean_ego_loss_dict.get("ego_road_border_loss", 0.0)
             train_reward = train_loss["reward_mean"]
             print(
                 f"Epoch {epoch + 1}/{train_epochs}\n"

@@ -1,8 +1,12 @@
 from dataclasses import dataclass
 
+from .closed_loop_config import ClosedLoopConfig
+from .model_config import ModelConfig
+from .scenario_open_loop_config import ScenarioOpenLoopConfig
+
 
 @dataclass
-class BaseConfig:
+class BaseConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     """Shared execution config used by both TrainConfig and ValidConfig."""
 
     seed: int = 3407
@@ -17,6 +21,3 @@ class BaseConfig:
     enable_pdms_eval: bool = False
     epdms_eval_use_agent_boxes: bool = True
     epdms_eval_use_road_border: bool = True
-
-    scenario_based_open_loop_list: str = ""
-    scenario_based_open_loop_only: bool = False

@@ -169,12 +169,12 @@ def run_one_group(
         if drop_objects:
             cmd.append("--drop_objects")
 
-        for attempt in range(1, 3):
-            try:
-                subprocess.run(cmd, check=True)
-                break
-            except subprocess.CalledProcessError as e:
-                print(f"  [{label}] attempt {attempt}/2 failed: {e}", file=sys.stderr)
+        # Don't wrap in try/except: bash ``set -euo pipefail`` on the caller relies on
+        # a non-zero exit code to fail fast, and silently retrying a *real* bug
+        # (TypeError, missing import, OOM) twice just delays surfacing the stack trace.
+        # Transient infra issues belong in the launcher's retry policy (e.g. SLURM
+        # ``--requeue``), not here.
+        subprocess.run(cmd, check=True)
 
 
 def _make_summary_key(json_name: str, group_name: str) -> str:
