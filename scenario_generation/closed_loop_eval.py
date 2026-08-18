@@ -23,6 +23,7 @@ import numpy as np
 
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
 from scenario_generation.perf_timer import Timers
+from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
@@ -62,7 +63,8 @@ def resolve_npz_roots(npz_root) -> list[Path]:
     The input is a single directory tree of NPZ frames (globbed recursively), a ``.json`` file
     holding a list of such directory paths (one route dir per entry) -- the same "path list"
     form as ``--train_set_list`` / ``--valid_set_list`` -- or an already-resolved list of paths
-    (e.g. from ``site_discovery.discover_sites_from_json``, which does its own per-site
+    (e.g. one site's ``npz_roots`` from
+    ``site_discovery.discover_sites_with_vehicles_from_json``, which does its own per-site
     grouping). A directory is returned as a one-element list; a JSON list or a pre-resolved
     list is returned verbatim (each entry a ``Path``).
     """
@@ -400,7 +402,7 @@ def aggregate(
     }
 
 
-def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
+def build_mp4(png_dir: Path, mp4_path: Path, fps: float, remove_pngs: bool = False) -> None:
     """Encode the PNG sequence in ``png_dir`` to an MP4.
 
     PNGs are named by step ``k`` and may be sparse (``draw_every`` skips frames), so glob the
@@ -431,6 +433,9 @@ def build_mp4(png_dir: Path, mp4_path: Path, fps: float) -> None:
         ],
         check=True,
     )
+    if remove_pngs:
+        for png in png_dir.glob("*.png"):
+            png.unlink()
 
 
 def run_closed_loop_eval(
@@ -460,6 +465,7 @@ def run_closed_loop_eval(
     abort_after: int = 30,
     abort_max_snaps: int = 0,
     drop_objects: bool = False,
+    draw_workers: int = 1,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
 
@@ -508,6 +514,8 @@ def run_closed_loop_eval(
     digests_name = "tdigests.jsonl" if shard is None else f"tdigests_{shard[0]}.jsonl"
     fout = open(out_dir / segments_name, "w")
     fdigest = open(out_dir / digests_name, "w")
+    # One pool for every route: a spawned worker re-imports torch and matplotlib.
+    draw_pool = render_pool(draw_workers)
     try:
         for ri, key in enumerate(route_keys):
             tl = RouteTimeline(routes[key], sidecar_dir=route_sidecar_dir[key], timers=timers)
@@ -538,6 +546,7 @@ def run_closed_loop_eval(
                 abort_after=abort_after,
                 abort_max_snaps=abort_max_snaps,
                 drop_objects=drop_objects,
+                draw_pool=draw_pool,
             )
             row = {"route": key, **metrics}
             # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so
@@ -574,6 +583,7 @@ def run_closed_loop_eval(
     finally:
         fout.close()
         fdigest.close()
+        draw_pool.shutdown()
 
     # In-memory ``rows`` still carry digests for this process's aggregate.
     summary = aggregate(rows, near_miss_thresh, strong_brake_mps2=strong_brake_mps2)
