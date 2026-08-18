@@ -3,10 +3,12 @@
 
 Usage:
     python3 ros_scripts/analyze_control_stats.py <path_list.json>
+    python3 ros_scripts/analyze_control_stats.py <path_list.json> --num_samples 5000
+    python3 ros_scripts/analyze_control_stats.py <path_list.json> --stride 1000
 """
 
+import argparse
 import json
-import sys
 
 import numpy as np
 import torch
@@ -77,11 +79,42 @@ def print_stats(name, data):
     print()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path_list", type=str, help="JSON list of npz frame paths")
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=None,
+        help="how many frames to analyze; default is every frame in the path list",
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=None,
+        help="take every Nth frame; default spreads --num_samples evenly over the list",
+    )
+    return parser.parse_args()
+
+
+def select_paths(paths: list[str], num_samples: int | None, stride: int | None) -> list[str]:
+    """Pick frames by striding through the path list (deterministic, no shuffling)."""
+    if stride is None:
+        if num_samples is None:
+            return paths
+        stride = max(1, len(paths) // max(1, num_samples))
+    selected = paths[::stride]
+    if num_samples is not None:
+        selected = selected[:num_samples]
+    return selected
+
+
 def main():
-    path_list_json = sys.argv[1]
-    with open(path_list_json) as f:
-        paths = json.load(f)
-    print(f"Total files: {len(paths)}")
+    args = parse_args()
+    with open(args.path_list) as f:
+        all_paths = json.load(f)
+    paths = select_paths(all_paths, args.num_samples, args.stride)
+    print(f"Total files: {len(all_paths)}, analyzing: {len(paths)}")
 
     action_space = UnicycleAccelCurvatureActionSpace(n_waypoints=80)
 

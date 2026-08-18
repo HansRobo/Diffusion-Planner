@@ -3,12 +3,13 @@
 Runnable with:
     pytest test_scripts/test_control_roundtrip.py                    # synthetic data
     python3 test_scripts/test_control_roundtrip.py <path_list.json>  # recorded data
+    python3 test_scripts/test_control_roundtrip.py <path_list.json> --out_dir <dir>  # + plots
 """
 
 import argparse
 import json
 import math
-import random
+import os
 
 import numpy as np
 import torch
@@ -20,6 +21,17 @@ from diffusion_planner.utils.unicycle_accel_curvature import action_to_traj4d, t
 T_HIST = INPUT_T + 1  # 31
 T_FUTURE = OUTPUT_T  # 80
 DT = 0.1
+
+# Ego control statistics over 3000 frames of the training set, measured with
+# ros_scripts/analyze_control_stats.py. Plots use mean +- 4 std as a fixed axis
+# range so that control magnitudes stay comparable across frames.
+ACCEL_MEAN, ACCEL_STD = -0.012965, 0.505454
+CURVATURE_MEAN, CURVATURE_STD = -0.001479, 0.033967
+PLOT_SIGMA = 4.0
+
+# Minimum extent of the trajectory panel, so that near-stationary frames are not
+# blown up to millimeter scale.
+MIN_PLOT_SPAN_M = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +122,10 @@ class TestEgoRoundtrip:
         )
 
     def test_straight_line(self):
+        # The ridge term of the velocity/acceleration solver biases the reconstruction by
+        # ~1 cm over the 40 m the trajectory covers, so the tolerance sits above that.
         past, future, v0 = make_straight_line(v=5.0, heading=0.0)
-        self._run(past, future, v0)
+        self._run(past, future, v0, atol=0.02)
 
     def test_circular_arc(self):
         # Larger atol for arcs: unicycle discrete integration accumulates error
@@ -174,20 +188,97 @@ def _load_sample(path: str) -> dict:
     }
 
 
-def _run_standalone(path_list_json: str, num_samples: int):
-    """Run roundtrip tests on recorded data and print detailed results."""
+def _set_equal_limits(ax, xs, ys, min_span: float):
+    """Give the axes a 1:1 aspect ratio spanning at least ``min_span`` metres."""
+    x_lo, x_hi = float(min(xs)), float(max(xs))
+    y_lo, y_hi = float(min(ys)), float(max(ys))
+    margin = 1.05  # a little air around the trajectory
+    span = max((x_hi - x_lo) * margin, (y_hi - y_lo) * margin, min_span)
+    x_center = 0.5 * (x_lo + x_hi)
+    y_center = 0.5 * (y_lo + y_hi)
+    ax.set_xlim(x_center - 0.5 * span, x_center + 0.5 * span)
+    ax.set_ylim(y_center - 0.5 * span, y_center + 0.5 * span)
+    ax.set_aspect("equal", adjustable="box")
+
+
+def _plot_sample(sample, ctrl, recon, out_path: str):
+    """Save a figure of GT vs roundtrip trajectory, position error and control."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    past = sample["ego_past"][0]
+    future = sample["ego_future"][0]
+    recon = recon[0]
+    err = (future[:, :2] - recon[:, :2]).norm(dim=-1)
+
+    fig, (ax_xy, ax_err, ax_ctrl) = plt.subplots(1, 3, figsize=(21, 7))
+
+    ax_xy.plot(past[:, 0], past[:, 1], "k.-", lw=1, ms=3, label="past")
+    ax_xy.plot(future[:, 0], future[:, 1], "b-", lw=2, label="GT future")
+    ax_xy.plot(recon[:, 0], recon[:, 1], "r--", lw=2, label="roundtrip")
+    ax_xy.set_title(os.path.basename(sample["path"]))
+    ax_xy.set_xlabel("x [m]")
+    ax_xy.set_ylabel("y [m]")
+    _set_equal_limits(
+        ax_xy,
+        torch.cat([past[:, 0], future[:, 0], recon[:, 0]]),
+        torch.cat([past[:, 1], future[:, 1], recon[:, 1]]),
+        MIN_PLOT_SPAN_M,
+    )
+    ax_xy.grid(alpha=0.3)
+    ax_xy.legend(fontsize=9)
+
+    ax_err.plot(err, "b-")
+    ax_err.set_title(f"position error (mean={err.mean():.5f}m, max={err.max():.5f}m)")
+    ax_err.set_xlabel("future step")
+    ax_err.set_ylabel("error [m]")
+    ax_err.set_yscale("log")
+    ax_err.grid(alpha=0.3)
+
+    ax_ctrl.plot(ctrl[0, :, 0], "b-", label="accel")
+    ax_ctrl.set_xlabel("future step")
+    ax_ctrl.set_ylabel("accel [m/s^2]", color="b")
+    ax_ctrl.set_title(f"control (v0={sample['ego_v0']:.2f} m/s, axes = mean +- {PLOT_SIGMA:g} std)")
+    ax_ctrl.set_ylim(ACCEL_MEAN - PLOT_SIGMA * ACCEL_STD, ACCEL_MEAN + PLOT_SIGMA * ACCEL_STD)
+    ax_ctrl.grid(alpha=0.3)
+    ax_curv = ax_ctrl.twinx()
+    ax_curv.plot(ctrl[0, :, 1], "g-", label="curvature")
+    ax_curv.set_ylabel("curvature [1/m]", color="g")
+    ax_curv.set_ylim(
+        CURVATURE_MEAN - PLOT_SIGMA * CURVATURE_STD,
+        CURVATURE_MEAN + PLOT_SIGMA * CURVATURE_STD,
+    )
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=110)
+    plt.close(fig)
+
+
+def _run_standalone(path_list_json: str, num_samples: int, stride: int | None, out_dir: str | None):
+    """Run roundtrip tests on recorded data and print detailed results.
+
+    Frames are picked deterministically by striding through the path list. When
+    ``stride`` is None it is derived so that ``num_samples`` frames spread evenly
+    over the whole list.
+    """
     with open(path_list_json) as f:
         paths = json.load(f)
 
-    n_sample = min(num_samples, len(paths))
-    indices = sorted(random.sample(range(len(paths)), n_sample))
+    if stride is None:
+        stride = max(1, len(paths) // max(1, num_samples))
+    indices = list(range(0, len(paths), stride))[:num_samples]
+    n_sample = len(indices)
 
-    print(f"Testing {n_sample} samples from {path_list_json}")
+    print(f"Testing {n_sample} samples from {path_list_json} (stride={stride}, total={len(paths)})")
+    if out_dir is not None:
+        os.makedirs(out_dir, exist_ok=True)
     print(f"{'=' * 70}")
 
     ego_errors = []
 
-    for idx in indices:
+    for i, idx in enumerate(indices):
         sample = _load_sample(paths[idx])
         print(f"\nSample {idx}: {sample['path']}")
 
@@ -213,6 +304,11 @@ def _run_standalone(path_list_json: str, num_samples: int):
         if ego_ctrl.isnan().any() or ego_ctrl.isinf().any():
             print("  EGO ctrl has NaN/Inf!")
 
+        if out_dir is not None:
+            out_path = os.path.join(out_dir, f"roundtrip_{i:02d}_idx{idx}.png")
+            _plot_sample(sample, ego_ctrl, ego_recon, out_path)
+            print(f"  saved: {out_path}")
+
     print(f"\n{'=' * 70}")
     print("SUMMARY")
     print(
@@ -235,9 +331,21 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="how many frames to sample from the path list",
     )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=None,
+        help="take every Nth frame; default spreads --num_samples evenly over the list",
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default=None,
+        help="if given, save a visualization PNG per sampled frame into this directory",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    _run_standalone(args.path_list, args.num_samples)
+    _run_standalone(args.path_list, args.num_samples, args.stride, args.out_dir)
