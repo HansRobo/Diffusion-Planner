@@ -703,7 +703,19 @@ def model_training(args: TrainConfig):
                 step=epoch + 1,
             )
 
-            scenario_based_open_loop_validate(diffusion_planner, args, epoch)
+            scenario_output_dir = None
+            if (epoch + 1 - init_epoch) % save_utd == 0:
+                scenario_output_dir = os.path.join(
+                    save_path,
+                    f"epoch{epoch + 1:04d}",
+                    "scenario_open_loop",
+                )
+            scenario_based_open_loop_validate(
+                diffusion_planner,
+                args,
+                epoch,
+                output_dir=scenario_output_dir,
+            )
 
             curr_data = {
                 "epoch": epoch + 1,
