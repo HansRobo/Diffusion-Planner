@@ -145,7 +145,7 @@ class TrainConfig:
     epdms_eval_use_road_border: bool = True
 
     alpha_planning_loss: float = 1.0
-    alpha_neighbor_loss: float = 0.1
+    alpha_neighbor_loss: float = 0.0
 
     # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False
