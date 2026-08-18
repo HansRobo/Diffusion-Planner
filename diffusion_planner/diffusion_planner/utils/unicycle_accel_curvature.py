@@ -900,7 +900,7 @@ class UnicycleAccelCurvatureActionSpace(ActionSpace):
         n_waypoints: int = 80,
         theta_lambda: float = 1e-2,
         theta_ridge: float = 1e-4,
-        v_lambda: float = 1e-6,
+        v_lambda: float = 1e-4,
         v_ridge: float = 1e-4,
         a_lambda: float = 1e-4,
         a_ridge: float = 1e-4,
