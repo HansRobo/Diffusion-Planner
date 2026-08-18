@@ -570,7 +570,12 @@ class PlanTFDecoder(nn.Module):
                 ego_current * ego_norm["std"][:4].to(ego_current.device)
                 + ego_norm["mean"][:4].to(ego_current.device)
             )
-            ego_current[ego_mask] = 0
+            # Keep padded ego poses zero without boolean-index assignment.
+            # The latter is exported as a shape-sensitive Scatter/Where pattern
+            # that TensorRT cannot compile reliably.
+            ego_current = torch.where(
+                ego_mask.unsqueeze(-1), torch.zeros_like(ego_current), ego_current
+            )
             neighbor_current = self._observation_normalizer.inverse(
                 {"neighbor_agents_past": inputs["neighbor_agents_past"]}
             )["neighbor_agents_past"][:, : self._predicted_neighbor_num, -1, :4]

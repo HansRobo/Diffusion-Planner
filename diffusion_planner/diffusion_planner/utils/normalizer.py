@@ -57,8 +57,12 @@ class ObservationNormalizer:
             if k not in data:  # Check if key `k` exists in `data`
                 continue
             mask = torch.sum(torch.ne(data[k], 0), dim=-1) == 0
-            norm_data[k] = (data[k] - v["mean"].to(data[k].device)) / v["std"].to(data[k].device)
-            norm_data[k][mask] = 0
+            normalized = (data[k] - v["mean"].to(data[k].device)) / v["std"].to(data[k].device)
+            # Avoid boolean-index assignment here.  ONNX lowers ``x[mask] = 0``
+            # to a Where/Scatter pattern with an incompatible condition shape
+            # for TensorRT when ``data`` has a trailing feature dimension.
+            # Make that broadcast explicit instead.
+            norm_data[k] = torch.where(mask.unsqueeze(-1), torch.zeros_like(normalized), normalized)
         return norm_data
 
     def inverse(self, data):
@@ -67,8 +71,10 @@ class ObservationNormalizer:
             if k not in data:  # Check if key `k` exists in `data`
                 continue
             mask = torch.sum(torch.ne(data[k], 0), dim=-1) == 0
-            norm_data[k] = data[k] * v["std"].to(data[k].device) + v["mean"].to(data[k].device)
-            norm_data[k][mask] = 0
+            denormalized = data[k] * v["std"].to(data[k].device) + v["mean"].to(data[k].device)
+            # Keep the inverse path ONNX/TensorRT-safe for the same reason as
+            # the forward normalization path above.
+            norm_data[k] = torch.where(mask.unsqueeze(-1), torch.zeros_like(denormalized), denormalized)
         return norm_data
 
     def to_dict(self):
