@@ -1,9 +1,13 @@
-#!/usr/bin/env python3
-"""Training entrypoint (single process; see train_run.py for the multi-GPU launcher).
+"""Train the trajectory predictor.
 
-Only the settings that have to vary per run are flags -- run with --help to see them.
-Everything else is a field of TrainConfig in diffusion_planner/train_config.py and is
-changed by editing its default there.
+Launched under torch.distributed.run, normally via train_run.py:
+
+    python train_run.py --exp_name my_exp \
+        --train_set_list /path/to/train_list.json \
+        --valid_set_list /path/to/valid_list.json
+
+All flags are declared on :class:`diffusion_planner.train_config.TrainConfig` with
+``cli(...)`` and mirrored on train_run.py.
 """
 
 from diffusion_planner.train import model_training

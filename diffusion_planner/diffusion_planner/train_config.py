@@ -21,27 +21,6 @@ from diffusion_planner.utils.normalizer import (
     StateNormalizer,
 )
 
-# This dataclass is the single source of truth for every training setting: name, type,
-# default and documentation. To change a setting, edit its default here.
-#
-# The handful of settings that genuinely have to vary per invocation are marked with
-# ``cli(...)`` below. ``train_cli.py`` turns exactly those into argparse flags for both
-# train_predictor.py and train_run.py, so neither entrypoint restates a name, a default,
-# a type or a help string. Everything not marked is deliberately not on the command line.
-
-
-def cli(help_text: str, *, path: bool = False, **kwargs: Any) -> Any:
-    """Mark a field as settable from the command line.
-
-    Args:
-        help_text: shown in ``--help``.
-        path: resolve to an absolute path before handing it to a subprocess. Needed
-            because train_run.py runs the trainer from the entrypoint directory, so a
-            path typed relative to the user's cwd would otherwise be misread.
-        kwargs: ``default`` / ``default_factory``. Omit both to make the flag required.
-    """
-    return field(metadata={"cli": True, "help": help_text, "path": path}, **kwargs)
-
 
 def cli(help: str, *, default: Any = MISSING, path: bool = False) -> Any:
     """Mark a TrainConfig field as exposed on the command line.
@@ -184,8 +163,6 @@ class TrainConfig:
     guidance_scale: float = 0.5
     device: str = "cuda"
     use_ema: bool = True
-    compile_model: bool = cli("compile the model with torch.compile before training", default=False)
-    use_amp: bool = cli("train with Automatic Mixed Precision (bf16 autocast)", default=False)
     # ModelEma decay; 0.999 needs ~3000 steps to absorb a behavior change —
     # lower for short fine-tune rounds (e.g. 0.996 for ~800-step rounds).
     ema_decay: float = 0.999
@@ -332,54 +309,6 @@ class TrainConfig:
     observation_normalizer: Optional[ObservationNormalizer] = None
     control_normalizer: Optional[ControlNormalizer] = None
     neighbor_control_normalizer: Optional[ControlNormalizer] = None
-
-    # ---------------------------------------------------------
-    # Model fixes ported from tier4/dev.
-    #
-    # Each of these changes what the network computes, but none of them changes a weight
-    # shape, so a checkpoint trained with the flag off still loads and still exports a
-    # byte-identical ONNX graph. They default off to keep tier4-main / deployed-ONNX
-    # compatibility; switch them on for new training runs. The value is recorded in
-    # args.json, so ONNX export rebuilds the architecture the checkpoint was trained with.
-    #
-    # Checkpoints predating a flag simply lack the key; utils.config.model_flag reads it
-    # as off, which is exactly how they were trained.
-    # ---------------------------------------------------------
-    # Stop padded tokens from contributing downstream: zero the encoder's output at
-    # padded positions, mask those positions out of the DiT's cross-attention, and skip
-    # them when pooling the encoding for the turn indicator. 313 of 564 tokens are
-    # padding for a typical scene, and today they carry whatever the fusion attention
-    # produced for them.
-    #
-    # dev ships these as three commits, but only the first has any effect on its own:
-    # the other two detect padding as an all-zero token, so without the zeroing they are
-    # provably no-ops (measured: bit-identical outputs). One flag, since no other
-    # combination is meaningful.
-    use_encoder_padding_mask: bool = cli(
-        "zero padded encoder tokens, and skip them in cross-attention and pooling",
-        default=False,
-    )
-    # Feed the pre-norm activation to the self-attention key/value as well as the query.
-    # The current code norms the query only, so key/value see a differently scaled input.
-    use_prenorm_kv_self_attention: bool = cli(
-        "feed the pre-norm activation to the self-attention key/value, not just the query",
-        default=False,
-    )
-    # Give the turn-indicator token its own class type in the positional embedding. It
-    # currently reuses CLASS_TYPE_EGO_SHAPE, so the two tokens are indistinguishable there.
-    use_turn_indicator_class_type: bool = cli(
-        "give the turn-indicator token its own positional class type", default=False
-    )
-    # Drop real-time chunking: condition the denoiser on one scalar timestep per sample
-    # instead of a timestep per agent per horizon step, and stop training on randomly
-    # delayed prefixes. Unlike the flags above this swaps the timestep embedder, so the
-    # weights differ and a checkpoint does not carry across -- it needs its own run.
-    # The exported ONNX keeps its input signature either way (see onnx_export), so the
-    # deployed ROS node loads both.
-    disable_real_time_chunking: bool = cli(
-        "condition on a scalar diffusion timestep instead of real-time chunking",
-        default=False,
-    )
 
     # ---------------------------------------------------------
     # Deterministic

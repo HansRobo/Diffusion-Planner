@@ -64,9 +64,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="dir tree of route NPZ frames (recursively globbed, grouped into routes), OR a .json "
-        "path list (like --train_set_list) of such dirs, or of .npz frames (all entries .npz = "
-        "one clip, i.e. a sub-range of one route). Pose JSON sidecars are read from next to each "
-        ".npz, falling back to its own source tree.",
+        "path list of such dirs (one route dir per entry, like --train_set_list). Pose JSON "
+        "sidecars are read from next to each .npz, falling back to its own source tree.",
     )
     p.add_argument(
         "--out_dir",

@@ -49,35 +49,24 @@ def route_label(npz_path: Path, key: str) -> str:
     return key
 
 
-def enumerate_routes(npz_root: Path | list[Path]) -> dict[str, list[Path]]:
-    """Group all .npz under ``npz_root`` into routes (bag-prefix groups).
-
-    ``npz_root`` is a directory (globbed recursively) or an explicit list of .npz frames -- the
-    latter is how a path list that named its frames instead of a directory is passed through.
-    """
-    if isinstance(npz_root, list):
-        paths = sorted(npz_root)
-    else:
-        paths = sorted(Path(npz_root).rglob("*.npz"))
+def enumerate_routes(npz_root: Path) -> dict[str, list[Path]]:
+    """Group all .npz under ``npz_root`` into routes (bag-prefix groups)."""
+    paths = sorted(Path(npz_root).rglob("*.npz"))
     if not paths:
         raise FileNotFoundError(f"No .npz under {npz_root}")
     return group_routes(paths)
 
 
-def resolve_npz_roots(npz_root) -> list[Path | list[Path]]:
-    """Resolve a closed-loop npz input into the list of frame sources to enumerate.
+def resolve_npz_roots(npz_root) -> list[Path]:
+    """Resolve a closed-loop npz input into the list of root directories to enumerate.
 
     The input is a single directory tree of NPZ frames (globbed recursively), a ``.json`` file
-    holding a list of paths -- the same "path list" form as ``--train_set_list`` /
-    ``--valid_set_list`` -- or an already-resolved list of paths (e.g. one site's ``npz_roots``
-    from ``site_discovery.discover_sites_with_vehicles_from_json``, which does its own per-site
-    grouping). A directory is returned as a one-element list; a pre-resolved list is returned
-    verbatim (each entry a ``Path``).
-
-    A path list whose entries are all ``.npz`` frames (one clip = a sub-range of one route,
-    which is what the mined ``closed_loop/<site>/*.json`` lists hold) is returned as ONE
-    element -- the frame list itself -- so the frames stay grouped instead of each being
-    treated as a directory to glob. Any other path list is one route directory per entry.
+    holding a list of such directory paths (one route dir per entry) -- the same "path list"
+    form as ``--train_set_list`` / ``--valid_set_list`` -- or an already-resolved list of paths
+    (e.g. one site's ``npz_roots`` from
+    ``site_discovery.discover_sites_with_vehicles_from_json``, which does its own per-site
+    grouping). A directory is returned as a one-element list; a JSON list or a pre-resolved
+    list is returned verbatim (each entry a ``Path``).
     """
     if isinstance(npz_root, (list, tuple)):
         return [Path(p) for p in npz_root]
@@ -85,11 +74,9 @@ def resolve_npz_roots(npz_root) -> list[Path | list[Path]]:
     if npz_root.suffix == ".json":
         entries = json.loads(npz_root.read_text())
         if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
-            raise ValueError(f"{npz_root} must be a JSON list of paths")
+            raise ValueError(f"{npz_root} must be a JSON list of directory paths")
         if not entries:
             raise ValueError(f"{npz_root} is an empty path list")
-        if all(e.endswith(".npz") for e in entries):
-            return [[Path(e) for e in entries]]
         return [Path(e) for e in entries]
     return [npz_root]
 
@@ -106,9 +93,6 @@ def enumerate_multi_root_routes(npz_root) -> tuple[dict[str, list[Path]], dict[s
     routes: dict[str, list[Path]] = {}
     route_sidecar_dir: dict[str, Path] = {}
     for root in roots:
-        # An explicit frame list has no root dir of its own; scope the sidecar fallback to the
-        # directory the frames sit in, which is where the converter wrote them.
-        sidecar_dir = Path(root[0]).parent if isinstance(root, list) else root
         for key, paths in enumerate_routes(root).items():
             # Key each route by its <location>_<date>_<time>_<idx> label so the per-segment PNG
             # dirs and MP4s carry the site + date, not just the ambiguous time-of-day bag prefix.
@@ -117,7 +101,7 @@ def enumerate_multi_root_routes(npz_root) -> tuple[dict[str, list[Path]], dict[s
             while uniq in routes:
                 uniq, n = f"{label}#{n}", n + 1
             routes[uniq] = paths
-            route_sidecar_dir[uniq] = sidecar_dir
+            route_sidecar_dir[uniq] = root
     return routes, route_sidecar_dir
 
 

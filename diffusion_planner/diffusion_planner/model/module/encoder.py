@@ -6,7 +6,6 @@ from timm.models.layers import Mlp
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.module.mixer import MixerBlock
-from diffusion_planner.utils.config import model_flag
 
 CLASS_TYPE_EGO = 0
 CLASS_TYPE_NEIGHBOR = 1
@@ -48,7 +47,6 @@ class Encoder(nn.Module):
         self.use_ego_history = config.use_ego_history
         self.ego_history_dropout_rate = config.ego_history_dropout_rate
         self.use_turn_indicators = config.use_turn_indicators
-        self.use_encoder_padding_mask = model_flag(config, "use_encoder_padding_mask")
 
         ego_num = 1
         goal_pose_num = 1
@@ -127,11 +125,6 @@ class Encoder(nn.Module):
             num_float=INPUT_T,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
-            class_type=(
-                CLASS_TYPE_TURN_INDICATOR
-                if model_flag(config, "use_turn_indicator_class_type")
-                else CLASS_TYPE_EGO_SHAPE
-            ),
         )
 
         self.fusion = FusionEncoder(
@@ -139,7 +132,6 @@ class Encoder(nn.Module):
             num_heads=config.num_heads,
             drop_path_rate=config.encoder_drop_path_rate,
             depth=config.encoder_fusion_depth,
-            prenorm_kv=model_flag(config, "use_prenorm_kv_self_attention"),
         )
 
         # position embedding encode x, y, cos, sin, type
@@ -313,20 +305,14 @@ class Encoder(nn.Module):
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
         encoder_outputs = self.fusion(encoding_input, encoding_mask.view(B, self.token_num))
-        if self.use_encoder_padding_mask:
-            encoder_outputs = encoder_outputs.masked_fill(
-                encoding_mask.view(B, self.token_num, 1), 0.0
-            )
 
         return encoder_outputs
 
 
 class SelfAttentionBlock(nn.Module):
-    def __init__(self, dim, heads, dropout, prenorm_kv=False):
+    def __init__(self, dim, heads, dropout):
         super().__init__()
         mlp_ratio = 4.0
-
-        self._prenorm_kv = prenorm_kv
 
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
@@ -339,13 +325,9 @@ class SelfAttentionBlock(nn.Module):
         )
 
     def forward(self, x, mask):
-        if self._prenorm_kv:
-            y = self.norm1(x)
-            x = x + self.drop_path(self.attn(y, y, y, key_padding_mask=mask, need_weights=False)[0])
-        else:
-            x = x + self.drop_path(
-                self.attn(self.norm1(x), x, x, key_padding_mask=mask, need_weights=False)[0]
-            )
+        x = x + self.drop_path(
+            self.attn(self.norm1(x), x, x, key_padding_mask=mask, need_weights=False)[0]
+        )
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -786,12 +768,11 @@ class GoalPoseEncoder(nn.Module):
 
 
 class FloatsEncoder(nn.Module):
-    def __init__(self, num_float, drop_path_rate, hidden_dim, class_type=CLASS_TYPE_EGO_SHAPE):
+    def __init__(self, num_float, drop_path_rate, hidden_dim):
         super().__init__()
         channels_mlp_dim = 128
 
         self._hidden_dim = hidden_dim
-        self._class_type = class_type
 
         self.channel_pre_project = Mlp(
             in_features=num_float,
@@ -824,7 +805,7 @@ class FloatsEncoder(nn.Module):
             dim=-1,
         )
         pos = pos.unsqueeze(1)  # (B, 1, D=4)
-        pos = add_class_type(pos, self._class_type)
+        pos = add_class_type(pos, CLASS_TYPE_EGO_SHAPE)
 
         mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
 
@@ -837,16 +818,13 @@ class FloatsEncoder(nn.Module):
 
 
 class FusionEncoder(nn.Module):
-    def __init__(self, hidden_dim, num_heads, drop_path_rate, depth, prenorm_kv=False):
+    def __init__(self, hidden_dim, num_heads, drop_path_rate, depth):
         super().__init__()
 
         dpr = drop_path_rate
 
         self.blocks = nn.ModuleList(
-            [
-                SelfAttentionBlock(hidden_dim, num_heads, dropout=dpr, prenorm_kv=prenorm_kv)
-                for i in range(depth)
-            ]
+            [SelfAttentionBlock(hidden_dim, num_heads, dropout=dpr) for i in range(depth)]
         )
 
         self.norm = nn.LayerNorm(hidden_dim)

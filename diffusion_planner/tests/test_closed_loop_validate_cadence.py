@@ -18,7 +18,6 @@ def _make_args(**overrides):
     defaults = dict(
         closed_loop_npz_root="single/route",
         closed_loop_sites_npz_root="sites_manifest.json",
-        closed_loop_project_vehicle_map="",
         closed_loop_npz_object_modes=["objects"],
         closed_loop_sites_object_modes=["objects"],
         closed_loop_near_miss_thresh=0.5,
@@ -29,7 +28,6 @@ def _make_args(**overrides):
         closed_loop_unstick_radius_mult=10.0,
         closed_loop_unstick_teleport_after=300,
         closed_loop_draw_every=4,
-        closed_loop_draw_workers=4,
         closed_loop_replan_interval=4,
         closed_loop_abort_deviation_m=50.0,
         closed_loop_abort_after=30,
@@ -66,11 +64,8 @@ class _FakeEvaluator:
         }
 
 
-def _fake_discover_sites(_path, _project_vehicle_map):
-    return {
-        "site_a": {"npz_roots": "sites/site_a", "vehicle_type": ""},
-        "site_b": {"npz_roots": "sites/site_b", "vehicle_type": ""},
-    }
+def _fake_discover_sites(_path):
+    return {"site_a": "sites/site_a", "site_b": "sites/site_b"}
 
 
 wandb_log_calls: list = []
@@ -89,9 +84,7 @@ def _patched_dependencies(monkeypatch):
     _FakeEvaluator.calls = []
     wandb_log_calls.clear()
     monkeypatch.setattr(closed_loop_evaluation, "FullRouteClosedLoopEvaluation", _FakeEvaluator)
-    monkeypatch.setattr(
-        site_discovery, "discover_sites_with_vehicles_from_json", _fake_discover_sites
-    )
+    monkeypatch.setattr(site_discovery, "discover_sites_from_json", _fake_discover_sites)
     monkeypatch.setattr(
         wandb_closed_loop,
         "build_full_closed_loop_wandb_log",

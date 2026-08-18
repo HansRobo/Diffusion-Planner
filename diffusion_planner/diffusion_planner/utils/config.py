@@ -9,19 +9,6 @@ from diffusion_planner.utils.normalizer import (
 )
 
 
-def model_flag(config, name: str) -> bool:
-    """Read an optional model-behaviour flag, defaulting to off.
-
-    ``Config`` only sets the keys its ``args.json`` actually contains, so a checkpoint
-    trained before a flag existed has no such attribute. A plain ``config.<name>`` would
-    therefore break ONNX re-export for every checkpoint predating the flag; this returns
-    False for them, which is the pre-flag behaviour by construction.
-
-    Works for both ``Config`` (attributes set from JSON) and ``TrainConfig`` (dataclass).
-    """
-    return bool(getattr(config, name, False))
-
-
 class Config:
     def __init__(self, args_file, guidance_fn=None):
         with open(args_file, "r") as f:
@@ -29,7 +16,6 @@ class Config:
 
         for key, value in args_dict.items():
             setattr(self, key, value)
-
         self.state_normalizer = StateNormalizer(
             self.state_normalizer["mean"], self.state_normalizer["std"]
         )
@@ -47,3 +33,7 @@ class Config:
         )
 
         self.guidance_fn = guidance_fn
+
+        # Default guidance scale; overridable without reloading the model.
+        if not hasattr(self, "guidance_scale"):
+            self.guidance_scale = 0.5

@@ -218,7 +218,6 @@ def closed_loop_validate(
                     draw_every=args.closed_loop_draw_every if is_final_save else None,
                     draw_workers=args.closed_loop_draw_workers,
                     replan_interval=args.closed_loop_replan_interval,
-                    neighbor_history_mode="recorded",
                     abort_deviation_m=args.closed_loop_abort_deviation_m,
                     abort_after=args.closed_loop_abort_after,
                     abort_max_snaps=args.closed_loop_abort_max_snaps,
@@ -366,7 +365,6 @@ def model_training(args: TrainConfig):
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
         print("Deterministic mode: {}".format(args.deterministic))
-        print("Use AMP: {}".format(args.use_amp))
 
         save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
@@ -533,16 +531,6 @@ def model_training(args: TrainConfig):
 
     else:
         init_epoch = 0
-
-    if args.compile_model:
-        # In-place compile (nn.Module.compile) keeps state_dict keys unchanged, so
-        # checkpoint save/resume, the EMA copy, and ONNX re-export stay compatible.
-        # Compiling the DDP wrapper lets dynamo's DDPOptimizer split graphs at
-        # gradient-bucket boundaries.
-        if global_rank == 0:
-            print("Compiling model with torch.compile (first steps will be slow)")
-        diffusion_planner.compile()
-
     # logger
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
