@@ -1,15 +1,14 @@
-#!/usr/bin/env python3
 """Roundtrip tests for the trajectory <-> control pipeline.
 
 Runnable with:
-    pytest tests/test_control_roundtrip.py          # synthetic data only
-    python3 tests/test_control_roundtrip.py <path_list.json>  # actual data
+    pytest tests/test_control_roundtrip.py                    # synthetic data
+    python3 tests/test_control_roundtrip.py <path_list.json>  # recorded data
 """
 
+import argparse
 import json
 import math
 import random
-import sys
 
 import numpy as np
 import torch
@@ -293,7 +292,7 @@ class TestNeighborLocalFrameIdentity:
 
 
 # ---------------------------------------------------------------------------
-# Standalone mode: test on actual npz data files
+# Standalone mode: roundtrip on recorded npz frames
 # ---------------------------------------------------------------------------
 
 
@@ -330,15 +329,15 @@ def _load_sample(path: str) -> dict:
     }
 
 
-def _run_standalone(path_list_json: str):
-    """Run roundtrip tests on real data and print detailed results."""
+def _run_standalone(path_list_json: str, num_samples: int, neighbors_per_sample: int):
+    """Run roundtrip tests on recorded data and print detailed results."""
     with open(path_list_json) as f:
         paths = json.load(f)
 
-    N = min(10, len(paths))
-    indices = sorted(random.sample(range(len(paths)), N))
+    n_sample = min(num_samples, len(paths))
+    indices = sorted(random.sample(range(len(paths)), n_sample))
 
-    print(f"Testing {N} samples from {path_list_json}")
+    print(f"Testing {n_sample} samples from {path_list_json}")
     print(f"{'=' * 70}")
 
     ego_errors = []
@@ -369,21 +368,20 @@ def _run_standalone(path_list_json: str):
         print(f"  EGO roundtrip: [{status}] mean={ego_mean:.6f}m  max={ego_max:.6f}m")
 
         if ego_ctrl.isnan().any() or ego_ctrl.isinf().any():
-            print(f"  EGO ctrl has NaN/Inf!")
+            print("  EGO ctrl has NaN/Inf!")
 
         # --- Neighbor roundtrip ---
         n_past = sample["neighbor_past_4d"]
         n_future = sample["neighbors_future"]
-        Pn = n_future.shape[1]
 
         valid_mask = n_past[0, :, -1, :].abs().sum(dim=-1) > 0
         valid_indices = valid_mask.nonzero(as_tuple=True)[0]
 
         if len(valid_indices) == 0:
-            print(f"  NEIGHBORS: None valid")
+            print("  NEIGHBORS: None valid")
             continue
 
-        for ni in valid_indices[:5].tolist():
+        for ni in valid_indices[:neighbors_per_sample].tolist():
             ni_past = n_past[:, ni : ni + 1]  # [1, 1, T_HIST, 4]
             ni_future = n_future[:, ni : ni + 1]  # [1, 1, T, 4]
 
@@ -453,13 +451,28 @@ def _run_standalone(path_list_json: str):
         print("  Neigh : no valid neighbors tested")
 
 
-# ---------------------------------------------------------------------------
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "path_list",
+        type=str,
+        help="JSON list of npz frame paths (the same form as --train_set_list)",
+    )
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=10,
+        help="how many frames to sample from the path list",
+    )
+    parser.add_argument(
+        "--neighbors_per_sample",
+        type=int,
+        default=5,
+        help="how many valid neighbors to check per sampled frame",
+    )
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        _run_standalone(sys.argv[1])
-    else:
-        # Run pytest programmatically
-        import pytest
-
-        sys.exit(pytest.main([__file__, "-v"]))
+    args = parse_args()
+    _run_standalone(args.path_list, args.num_samples, args.neighbors_per_sample)
