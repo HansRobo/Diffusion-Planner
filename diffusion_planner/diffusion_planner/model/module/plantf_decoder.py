@@ -818,7 +818,12 @@ def compute_plantf_training_loss(
     else:
         loss["neighbor_prediction_loss"] = torch.tensor(0.0, device=prediction.device)
 
-    loss["mode_cls_loss"] = F.cross_entropy(probability, best_mode.detach())
+    # With one mode, cross entropy is identically zero and its logits cannot
+    # affect the trajectory.  Do not compute or log this PlantF-only no-op;
+    # train_epoch already treats mode_cls_loss as optional.  Keep the original
+    # winner-mode classification objective unchanged for multimodal runs.
+    if probability.shape[-1] > 1:
+        loss["mode_cls_loss"] = F.cross_entropy(probability, best_mode.detach())
 
     # Smoothness penalty: the planTF head regresses 80 absolute waypoints
     # independently per timestep, which produces "comb" jitter (large second

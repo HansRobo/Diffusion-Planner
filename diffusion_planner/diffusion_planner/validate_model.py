@@ -74,22 +74,36 @@ def compute_plantf_mode_metrics(
     batch_index = torch.arange(trajectory.shape[0], device=trajectory.device)
     top1_ade = ade[batch_index, selected_mode]
     top1_fde = fde[batch_index, selected_mode]
-    min_ade = ade.min(dim=-1).values
-    min_fde = fde.min(dim=-1).values
-
-    mode_prob = probability.softmax(dim=-1)
-    mode_entropy = -(mode_prob * mode_prob.clamp_min(1e-12).log()).sum(dim=-1)
 
     metrics = {
         "plantf_top1_ade": top1_ade,
         "plantf_top1_fde": top1_fde,
-        "plantf_min_ade_k": min_ade,
-        "plantf_min_fde_k": min_fde,
-        "plantf_miss_rate_2m": (min_fde > miss_threshold_m).float(),
-        "plantf_top1_oracle_ade_gap": top1_ade - min_ade,
-        "plantf_mode_accuracy": (selected_mode == oracle_mode).float(),
-        "plantf_mode_entropy": mode_entropy,
     }
+
+    # These diagnostics answer multimodal questions only.  With one mode they
+    # are exact constants/redundancies (min=top1, oracle gap=0, accuracy=1,
+    # entropy=0, usage_0=1), so do not emit them into W&B/TSV.
+    if trajectory.shape[1] == 1:
+        metrics["plantf_miss_rate_2m"] = (top1_fde > miss_threshold_m).float()
+        return metrics
+
+    min_ade = ade.min(dim=-1).values
+    min_fde = fde.min(dim=-1).values
+    mode_prob = probability.softmax(dim=-1)
+    mode_entropy = -(mode_prob * mode_prob.clamp_min(1e-12).log()).sum(dim=-1)
+    metrics.update(
+        {
+            "plantf_min_ade_k": min_ade,
+            "plantf_min_fde_k": min_fde,
+            # Preserve the original multimodal definition: a sample only
+            # misses when *none* of its candidate trajectories reaches the
+            # endpoint threshold.
+            "plantf_miss_rate_2m": (min_fde > miss_threshold_m).float(),
+            "plantf_top1_oracle_ade_gap": top1_ade - min_ade,
+            "plantf_mode_accuracy": (selected_mode == oracle_mode).float(),
+            "plantf_mode_entropy": mode_entropy,
+        }
+    )
     for mode in range(trajectory.shape[1]):
         # selected: which mode argmax(pi) picks. oracle: which mode is actually
         # best (ADE min). A concentrated oracle distribution means the data is
@@ -109,6 +123,8 @@ _PROGRESS_DT = 0.1
 def compute_trajectory_progress_metrics(
     prediction_ego: torch.Tensor,
     ego_future: torch.Tensor,
+    *,
+    include_redundant_summary_metrics: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Per-sample forward-progress / smoothness metrics for the ego prediction.
 
@@ -147,13 +163,28 @@ def compute_trajectory_progress_metrics(
 
     # Ratios are clamped on the GT side so stopped scenes (GT ~ 0m) do not blow up.
     metrics = {
-        "traj_endpoint_m": pred_end,
-        "traj_gt_endpoint_m": gt_end,
         "traj_endpoint_progress_ratio": pred_end / gt_end.clamp_min(1.0),
         "traj_length_ratio": pred_len / gt_len.clamp_min(1.0),
-        "traj_fde_m": fde,
         "traj_second_diff_m": roughness,
         "traj_speed_mae_mps": speed_mae,
+    }
+    # Keep the legacy DP summaries by default.  PlantF already reports the
+    # same global FDE as ``plantf_top1_fde``; its raw endpoint values only
+    # support the ratios above and add no independent validation signal.
+    if include_redundant_summary_metrics:
+        metrics.update(
+            {
+                "traj_endpoint_m": pred_end,
+                "traj_gt_endpoint_m": gt_end,
+                "traj_fde_m": fde,
+            }
+        )
+    binned_metrics = {
+        "endpoint_progress_ratio": metrics["traj_endpoint_progress_ratio"],
+        "length_ratio": metrics["traj_length_ratio"],
+        "fde_m": fde,
+        "second_diff_m": metrics["traj_second_diff_m"],
+        "speed_mae_mps": metrics["traj_speed_mae_mps"],
     }
     binned = (
         "endpoint_progress_ratio",
@@ -165,7 +196,7 @@ def compute_trajectory_progress_metrics(
     for bin_name, lo, hi in _PROGRESS_BINS:
         mask = ((gt_end >= lo) & (gt_end < hi)).float()
         for base in binned:
-            metrics[f"traj_{base}_{bin_name}"] = metrics[f"traj_{base}"]
+            metrics[f"traj_{base}_{bin_name}"] = binned_metrics[base]
             metrics[f"traj_{base}_{bin_name}_available"] = mask
     return metrics
 
@@ -488,7 +519,16 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             )
             for key, val in mode_metrics.items():
                 total_result_dict[key].append(val.cpu())
-        progress_metrics = compute_trajectory_progress_metrics(prediction[:, 0], ego_future)
+        progress_metrics = compute_trajectory_progress_metrics(
+            prediction[:, 0],
+            ego_future,
+            # Preserve historical DP validation fields.  For PlantF, FDE is
+            # already emitted as plantf_top1_fde and the raw endpoint values
+            # have no independent interpretation in the regular log.
+            include_redundant_summary_metrics=not (
+                "trajectory" in outputs and "probability" in outputs
+            ),
+        )
         for key, val in progress_metrics.items():
             total_result_dict[key].append(val.cpu())
         turn_indicator_logit = outputs["turn_indicator_logit"]
