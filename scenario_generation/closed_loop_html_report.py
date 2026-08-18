@@ -16,7 +16,7 @@ from typing import Any
 
 from scenario_generation.closed_loop_score_keys import extract_score
 from scenario_generation.trajectory_colormap import METRIC_CHOICES, render_trajectory_colormaps
-from scenario_generation.wandb_closed_loop import episode_stem
+from scenario_generation.wandb_closed_loop import episode_stem, segment_label
 
 # Shown first in each card's metric dropdown when available (the rest follow METRIC_CHOICES
 # order) — clearance is the most broadly useful default view.
@@ -75,7 +75,6 @@ def collect_site_data(
                 if not line:
                     continue
                 r = json.loads(line)
-                start, end = r["segment"]
                 stem = episode_stem(site_dir, r)
                 video_name = f"{stem}.mp4"
                 video_path = site_dir / video_name
@@ -113,7 +112,7 @@ def collect_site_data(
                     {
                         "site": site_name,
                         "route": r["route"],
-                        "segment": f"[{start},{end}]",
+                        "segment": segment_label(r),
                         "n_steps_run": r.get("n_steps_run", 0),
                         "terminated": r.get("terminated", ""),
                         "route_completion": round(r.get("route_completion", 0.0), 3),
@@ -126,6 +125,11 @@ def collect_site_data(
                         "progress_m": round(r.get("progress_m", 0.0), 1),
                         "video_path": f"{site_name}/{video_name}" if video_path.is_file() else None,
                         "colormap_paths": colormap_paths,
+                        # scenario_sim-only diagnostics; the card renders each only when the
+                        # row carries it, so a reproducer episode looks exactly as before.
+                        "result_kind": r.get("result_kind"),
+                        "coord_check_ok": r.get("coord_check_ok"),
+                        "rb_has_data": r.get("rb_has_data"),
                     }
                 )
     return items, summaries

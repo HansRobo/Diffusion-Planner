@@ -138,6 +138,9 @@ function card(item) {
         <span>steps: <b>${item.n_steps_run}</b></span>
         <span>progress: <b>${item.progress_m}m</b></span>
         <span class="${item.terminated==='diverged'?'flag':''}">terminated: <b>${item.terminated}</b></span>
+        ${item.result_kind ? `<span class="${item.result_kind!=='Pass'?'flag':''}">scenario: <b>${item.result_kind}</b></span>` : ''}
+        ${item.coord_check_ok === false ? `<span class="flag">frame check: <b>FAILED</b></span>` : ''}
+        ${item.rb_has_data === false ? `<span class="flag">no road border in map</span>` : ''}
       </div>
     </div>`;
 

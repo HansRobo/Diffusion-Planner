@@ -11,6 +11,7 @@ inference.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import time
 from pathlib import Path
@@ -43,6 +44,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--warmup_steps", type=int, default=5)
     p.add_argument("--near_miss_thresh", type=float, default=1.0)
     p.add_argument("--fps", type=float, default=10.0)
+    p.add_argument(
+        "--route",
+        default=None,
+        help="identity carried by the row and its tdigest sidecar; defaults to the scenario "
+        "stem. Stems are not unique across a suite (the yaml->xosc converter emits a flat "
+        "scenario_<n>.xosc inside each scenario's own directory), and the sidecar is reattached "
+        "by this value, so a caller spanning a suite must pass a unique key",
+    )
+    p.add_argument(
+        "--watchdog_sec",
+        type=float,
+        default=0.0,
+        help="dump this process's stacks and exit after N seconds (0 disables). A wedged "
+        "interpreter is past responding to signals, so the deadline has to fire from inside",
+    )
     return p.parse_args(argv)
 
 
@@ -50,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     from scenario_generation.simulate import load_model
 
     a = _parse_args(argv)
+    if a.watchdog_sec > 0:
+        faulthandler.enable()
+        faulthandler.dump_traceback_later(a.watchdog_sec, exit=True)
     timers = Timers()
     t_proc = time.perf_counter()
     with timers("model_load"):
@@ -78,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     # digests in a sidecar so a parent can still pool an approximate global p5. ``route`` is
     # what carries a row's identity through that pair -- ``attach_tdigest_sidecars`` keys the
     # reattach on it, so a sidecar without one can be written but never read back.
-    route = Path(a.osc).stem
+    route = a.route or Path(a.osc).stem
     row_out = Path(a.row_out)
     row_out.write_text(
         json.dumps(segment_row_for_json(row, route=route, timing=timers.as_dict()), default=float)

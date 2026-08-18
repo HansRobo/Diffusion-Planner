@@ -13,6 +13,7 @@ route under an npz_root.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from abc import ABC, abstractmethod
@@ -20,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from scenario_generation.closed_loop_ddp import shard_items
+from scenario_generation.closed_loop_ddp import claim, shard_items
 from scenario_generation.closed_loop_eval import (
     aggregate,
     build_mp4,
@@ -30,6 +31,7 @@ from scenario_generation.closed_loop_eval import (
     segment_row_for_json,
     tdigest_sidecar_row,
 )
+from scenario_generation.inference_compile import canonical_attention, compiled_for_inference
 from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
@@ -104,6 +106,29 @@ class ClosedLoopEvalConfig:
     verbose: bool = True
     profile: bool = False
     max_jobs: int | None = None
+    # Hand jobs out as ranks become free, through claim files under this directory, instead of
+    # partitioning the list up front. Worth it when job durations vary enough that a static
+    # split leaves one rank working alone at the end; the cost is that a rank no longer gets
+    # the same jobs twice, so a run is no longer reproducible rank-by-rank. None keeps the
+    # static round-robin, which is the default precisely because it is reproducible.
+    claim_dir: Path | None = None
+    # ``torch.compile`` backend for the model forward, applied for the duration of the run and
+    # reverted afterwards. None (the default) leaves the model exactly as it was handed over.
+    # ``"cudagraphs"`` is the only backend measured bit-exact against an eager baseline; see
+    # ``scenario_generation.inference_compile``.
+    compile_backend: str | None = None
+    # Give up ``nn.MultiheadAttention``'s fused fastpath, which is the arithmetic a compiled
+    # model is forced onto. Off by default, so an existing evaluation keeps its exact numbers.
+    canonical_attention: bool = False
+
+    def __post_init__(self) -> None:
+        if self.compile_backend and not self.canonical_attention:
+            # A compiled model physically cannot take the fused MHA fastpath (dynamo cannot
+            # trace it), so an eager baseline that still takes it is running different
+            # arithmetic and will report different closed-loop metrics for a reason that has
+            # nothing to do with compilation. Couple the two switches rather than let a speed
+            # knob move the numbers.
+            self.canonical_attention = True
 
 
 @dataclass
@@ -154,6 +179,24 @@ class ClosedLoopEvaluation(ABC):
             return load_onnx_model(model_path, device)
         return load_model(model_path, device)
 
+    @contextlib.contextmanager
+    def inference_backends(self):
+        """Attention/compile backends, held across every inference this evaluation makes.
+
+        One scope for both switches, and it must enclose ALL model calls: ``torch.compile`` is
+        lazy, so the attention setting has to still hold at the first forward for the compiled
+        graph to be traced under it (the flag is not part of dynamo's guard set, so a later
+        change would be ignored while still reading back as changed).
+        """
+        with contextlib.ExitStack() as stack:
+            if self.config.canonical_attention:
+                stack.enter_context(canonical_attention())
+            if self.config.compile_backend:
+                stack.enter_context(
+                    compiled_for_inference(self.model, backend=self.config.compile_backend)
+                )
+            yield
+
     def run(self) -> dict:
         """Discover jobs, optionally shard for DDP, execute, summarize, and persist."""
         t0 = time.perf_counter()
@@ -167,7 +210,8 @@ class ClosedLoopEvaluation(ABC):
                 f"{len(jobs)} job(s) -> {[j.job_id for j in jobs]}"
             )
 
-        result = self.execute_jobs(jobs)
+        with self.inference_backends():
+            result = self.execute_jobs(jobs)
         elapsed_sec = time.perf_counter() - t0
 
         if self.ddp_world_size > 1:
@@ -210,7 +254,18 @@ class ClosedLoopEvaluation(ABC):
         return partial
 
     def shard_jobs(self, jobs: list[ClosedLoopJob]) -> list[ClosedLoopJob]:
+        """Partition the list for this rank -- unless jobs are claimed, where every rank walks
+        the whole list and takes what it wins, so the position of a job in it is the shared key
+        both sides agree on."""
+        if self.config.claim_dir is not None:
+            return jobs
         return shard_items(jobs, self.ddp_rank, self.ddp_world_size)
+
+    def claim_job(self, index: int) -> bool:
+        """True if this rank should run the job at ``index`` of the (unsharded) job list."""
+        if self.config.claim_dir is None:
+            return True
+        return claim(self.config.claim_dir, index)
 
     def initial_job_extras(self) -> dict[str, Any]:
         return {}
@@ -237,12 +292,47 @@ class ClosedLoopEvaluation(ABC):
     ) -> None:
         """Hook for per-job progress (subclasses print route/bag summaries here)."""
 
+    def stream_row(self, row: dict, segments_file, digest_file) -> None:
+        """Persist one row as it is produced, so a crashed rank keeps what it finished.
+
+        The human-readable ``segments.jsonl`` never carries the raw ``_tdigest`` blobs; those go
+        to the sidecar, which a later DDP merge (or a re-load of this run) reattaches by
+        ``route`` to pool an approximate global clearance percentile.
+        """
+        if segments_file is None:
+            return
+        segments_file.write(json.dumps(segment_row_for_json(row), default=float) + "\n")
+        segments_file.flush()
+        side = tdigest_sidecar_row(row) if digest_file is not None else None
+        if side is not None:
+            digest_file.write(json.dumps(side, default=float) + "\n")
+            digest_file.flush()
+
+    def maybe_build_mp4(self, png_dir: Path, mp4_path: Path) -> Path | None:
+        """Encode ``png_dir`` if the rollout rendered anything; None when it drew nothing."""
+        if not any(png_dir.glob("*.png")):
+            return None
+        build_mp4(png_dir, mp4_path, self.config.fps)
+        return mp4_path
+
     def execute_jobs(self, jobs: list[ClosedLoopJob]) -> JobRunResult:
+        """Run this rank's jobs, streaming each row to disk as it lands.
+
+        One implementation for every mode: the shard file names are the contract
+        ``collect_ddp_shards`` reads back, so they are decided here rather than per subclass.
+        """
         merged = JobRunResult(extras=self.initial_job_extras())
-        for ri, job in enumerate(jobs):
-            partial = self.run_job(job)
-            self.merge_job_result(merged, partial)
-            self.on_job_complete(job, partial, ri, len(jobs))
+        suffix = f"_{self.ddp_rank}" if self.ddp_world_size > 1 else ""
+        with (
+            (self.out_dir / f"segments{suffix}.jsonl").open("w", encoding="utf-8") as fout,
+            (self.out_dir / f"tdigests{suffix}.jsonl").open("w", encoding="utf-8") as fdigest,
+        ):
+            for ri, job in enumerate(jobs):
+                if not self.claim_job(ri):
+                    continue
+                partial = self.run_job(job, segments_file=fout, digest_file=fdigest)
+                self.merge_job_result(merged, partial)
+                self.on_job_complete(job, partial, ri, len(jobs))
         return merged
 
     def finalize_ddp(self, result: JobRunResult, *, elapsed_sec: float) -> dict:
@@ -298,14 +388,21 @@ class ClosedLoopEvaluation(ABC):
         return summary
 
     def prepare_ddp_merge_artifacts(self, result: JobRunResult) -> None:
-        """Hook for mode-specific files written during rank-0 DDP merge."""
+        """Rank-0: rewrite ``segments.jsonl`` as the merged view across every rank's shard.
+
+        The report and any downstream reader look for the unsharded name, so without this a
+        parallel run leaves only per-rank files behind.
+        """
+        with open(self.out_dir / "segments.jsonl", "w", encoding="utf-8") as fout:
+            for row in result.rows:
+                fout.write(json.dumps(segment_row_for_json(row), default=float) + "\n")
 
     @abstractmethod
     def discover_jobs(self) -> list[ClosedLoopJob]:
         raise NotImplementedError
 
     @abstractmethod
-    def run_job(self, job: ClosedLoopJob) -> JobRunResult:
+    def run_job(self, job: ClosedLoopJob, *, segments_file=None, digest_file=None) -> JobRunResult:
         raise NotImplementedError
 
     @abstractmethod
@@ -401,27 +498,6 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
     def initial_job_extras(self) -> dict[str, Any]:
         return {"route_keys": []}
 
-    def execute_jobs(self, jobs: list[ClosedLoopJob]) -> JobRunResult:
-        """Stream per-segment rows to ``segments.jsonl`` (``segments_{rank}.jsonl`` + a tdigest
-        sidecar under DDP sharding -- the same convention ``run_closed_loop_eval`` uses), while
-        jobs run."""
-        merged = JobRunResult(extras={"route_keys": []})
-        suffix = f"_{self.ddp_rank}" if self.ddp_world_size > 1 else ""
-        segments_path = self.out_dir / f"segments{suffix}.jsonl"
-        digests_path = self.out_dir / f"tdigests{suffix}.jsonl"
-        with (
-            segments_path.open("w", encoding="utf-8") as fout,
-            digests_path.open("w", encoding="utf-8") as fdigest,
-        ):
-            for ri, job in enumerate(jobs):
-                assert isinstance(job, FullRouteRouteJob)
-                partial = self.run_job(job, segments_file=fout, digest_file=fdigest)
-                merged.rows.extend(partial.rows)
-                merged.video_mp4s.extend(partial.video_mp4s)
-                merged.extras["route_keys"].append(job.route_key)
-                self.on_job_complete(job, partial, ri, len(jobs))
-        return merged
-
     def run_job(
         self,
         job: ClosedLoopJob,
@@ -448,25 +524,16 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 **params.render_kwargs(),
             )
             row = {"route": job.route_key, **metrics}
-            if segments_file is not None:
-                # Human-readable segments.jsonl never carries the raw _tdigest blobs; those go to
-                # the sidecar so a later DDP merge (or a re-load of this run) can still pool an
-                # approximate global clearance percentile without the full per-step samples.
-                segments_file.write(json.dumps(segment_row_for_json(row), default=float) + "\n")
-                segments_file.flush()
-                if digest_file is not None:
-                    side = tdigest_sidecar_row(row)
-                    if side is not None:
-                        digest_file.write(json.dumps(side, default=float) + "\n")
-                        digest_file.flush()
+            self.stream_row(row, segments_file, digest_file)
             rows.append(row)
 
-            if not any(png_dir.glob("*.png")):
+            seg_mp4 = self.maybe_build_mp4(
+                png_dir, self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
+            )
+            if seg_mp4 is None:
                 if self.config.verbose:
                     print(f"  [{job.route_key}] segment [{start},{end}] -> 0 frames, no video")
                 continue
-            seg_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
-            build_mp4(png_dir, seg_mp4, self.config.fps)
             video_mp4s.append(seg_mp4)
             if self.config.verbose:
                 obj = metrics["object"]
@@ -476,7 +543,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     f"min_clr={obj['clearance_min_m']:.3f}"
                 )
 
-        extras: dict[str, Any] = {}
+        # ``merge_job_result`` extends the list seeded by ``initial_job_extras``, so the job only
+        # has to report its own key rather than reach into the accumulator.
+        extras: dict[str, Any] = {"route_keys": [job.route_key]}
         if timers is not None:
             extras["timers"] = timers
         return JobRunResult(rows=rows, video_mp4s=video_mp4s, extras=extras)
@@ -527,10 +596,3 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             print(line)
         print(f"videos: per-segment <route>_<start>_<end>.mp4 in {self.out_dir}")
 
-    def prepare_ddp_merge_artifacts(self, result: JobRunResult) -> None:
-        """Rewrite ``segments.jsonl`` as the single merged, human-readable view across every
-        rank's ``segments_{rank}.jsonl`` (digests stripped, same convention ``execute_jobs`` uses
-        for the non-sharded path)."""
-        with open(self.out_dir / "segments.jsonl", "w", encoding="utf-8") as fout:
-            for row in result.rows:
-                fout.write(json.dumps(segment_row_for_json(row), default=float) + "\n")

@@ -32,13 +32,25 @@ def episode_stem(out_dir: str | Path, row: dict) -> str:
     them just ``{route}`` -- one route = one whole-route rollout, no sub-segmenting.
     Prefer the segment-suffixed form and fall back to the bare route name when that
     file/dir doesn't exist, so callers resolve videos correctly for either pipeline.
+
+    ``segment`` is absent entirely on the scenario_sim path, where a row is one whole scenario
+    and there is nothing to sub-divide; the bare route name is then the only form there is.
     """
     out_dir = Path(out_dir)
-    start, end = row["segment"]
+    segment = row.get("segment")
+    if segment is None:
+        return row["route"]
+    start, end = segment
     segmented_stem = f"{row['route']}_{start}_{end}"
     if (out_dir / f"{segmented_stem}.mp4").is_file() or (out_dir / segmented_stem).is_dir():
         return segmented_stem
     return row["route"]
+
+
+def segment_label(row: dict) -> str:
+    """``[start,end]`` for a sub-segmented row, empty when a row is one whole episode."""
+    segment = row.get("segment")
+    return f"[{segment[0]},{segment[1]}]" if segment else ""
 
 
 def _segment_paths(out_dir: str | Path, row: dict) -> tuple[Path, Path]:
@@ -90,8 +102,7 @@ EPISODE_TABLE_COLUMNS = [
 
 
 def _episode_row(table: wandb.Table, site: str, r: dict, out_dir: str | Path | None) -> None:
-    seg = r.get("segment")
-    seg_str = f"[{seg[0]},{seg[1]}]" if seg else ""
+    seg_str = segment_label(r)
     video_path = str(_segment_paths(out_dir, r)[1]) if out_dir is not None else ""
     comp = r.get("route_completion")
     table.add_data(
