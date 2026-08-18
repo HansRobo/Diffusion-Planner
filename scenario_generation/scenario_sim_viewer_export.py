@@ -3,21 +3,19 @@
 Post-hoc only: it reads a run directory the driver already wrote and produces a second tree
 beside it, never running inside a rollout and never changing what a worker writes.
 
-The viewer's ``closed_loop_scenario`` dataset is three levels deep::
+The listing is three files at the run root and the bulk sits under ``media/``::
 
-    <out_root>/                                  # one evaluation run
-      groups_summary.json
-      <group>/                                   # the map that was evaluated
-        <scenario>/                              # the scenario id, shared across runs
-          summary.json
-          segments.jsonl
-          <stem>.mp4
-          <stem>_trajcolormap_<metric>.png
-          <stem>/rollout.jsonl
+    <out_root>/
+      run.json            provenance, counts, what was not measured
+      scenarios.json      one entry per scenario: name, category, map, version, summary
+      cases.jsonl         one line per case
+      media/<scenario>/<case>.mp4
+                        <case>.rollout.jsonl
+                        <case>.<metric>.png
 
-A run is flat instead -- one directory per case -- so this module derives the two grouping
-levels and re-links the artifacts. The output *shape* lives only in
-:func:`write_viewer_tree`; everything else derives values and must not encode the layout.
+Anything a reader groups or filters by is a field rather than a directory, so a new
+grouping costs no re-export. The output *shape* lives only in :func:`write_viewer_tree`;
+everything else derives values and must not encode the layout.
 """
 
 from __future__ import annotations
@@ -29,6 +27,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 from typing import Any
@@ -60,7 +59,7 @@ _MAP_ID_RE = re.compile(r"/map/[^/]+/(\d+)/")
 _PLACEHOLDER_SITES = frozenset({"unknown_map", "unknown_scenario"})
 
 # What ``site_of`` accepts.
-_SITE_MODES = ("scenario_id", "map", "category", "flat")
+_SITE_MODES = ("scenario_id", "map", "flat")
 
 # The suite's own scenario names, written beside it when the suite is pulled. A category is
 # the leading component of a name like ``C-01-31500_case01_dp``. The names travel with the
@@ -166,22 +165,34 @@ def load_case_rels(run_dir: Path) -> dict[str, str]:
     }
 
 
-def load_scenario_names(rel: str | None) -> dict[str, str]:
-    """``{scenario id: display name}`` from the sidecar beside the suite.
+def load_sidecar(rel: str | None) -> dict[str, dict[str, str]]:
+    """The suite's sidecar: scenario display names and the category labels they use.
 
-    ``rel`` is any scenario path; the suite root is two levels above its
-    ``<scenario id>/<version>/`` pair. A missing sidecar yields an empty map.
+    The names live with the suite because the credentials that would fetch them are
+    deliberately not on the cluster. Nothing here is known to this module -- both maps come
+    from the file, so a renamed or added category needs no code change.
+
+    ``rel`` is any scenario path; the suite root is above its ``<id>/<version>/`` pair, but
+    whether the scenarios sit directly under it varies, so a few levels are tried.
     """
     if not rel:
-        return {}
-    # The suite root is above the scenario's ``<id>/<version>/`` pair, but whether the
-    # scenarios live directly under it varies, so look up a few levels rather than assume.
+        return {"scenarios": {}, "categories": {}}
     for base in list(Path(rel).parents)[2:5]:
         try:
-            return json.loads((base / _NAMES_SIDECAR).read_text(encoding="utf-8"))["scenarios"]
-        except (OSError, ValueError, KeyError):
+            loaded = json.loads((base / _NAMES_SIDECAR).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             continue
-    return {}
+        return {
+            "scenarios": loaded.get("scenarios") or {},
+            "categories": loaded.get("categories") or {},
+        }
+    return {"scenarios": {}, "categories": {}}
+
+
+def category_of(display_name: str | None) -> str | None:
+    """The category letter a scenario name leads with, or ``None`` when it has none."""
+    match = _CATEGORY_RE.match(display_name or "")
+    return match.group(1) if match else None
 
 
 def site_of(
@@ -189,11 +200,9 @@ def site_of(
 ) -> str:
     """Derive one of the viewer's two grouping levels for a case.
 
-    ``scenario_id`` groups a scenario's parameter expansions together under the id the
-    scenario is known by elsewhere, which is the identity a reader needs to line results up
-    across runs. ``category`` is the leading component of the scenario's name, which is what
-    a reader browses by. ``map`` is the location that was evaluated, and ``flat`` puts
-    everything in one bucket.
+    ``scenario_id`` is the id the scenario is known by elsewhere, which is the identity a
+    reader needs to line results up across runs. ``map`` is the location that was evaluated,
+    and ``flat`` puts everything in one bucket.
     """
     if mode == "flat":
         return "all"
@@ -201,10 +210,6 @@ def site_of(
         match = _MAP_ID_RE.search(str(row.get("map_path", "")))
         return match.group(1) if match else "unknown_map"
     scenario = _SCENARIO_ID_RE.search(rel or case_key)
-    if mode == "category":
-        display = (names or {}).get(scenario.group(1) if scenario else "", "")
-        match = _CATEGORY_RE.match(display)
-        return match.group(1) if match else "uncategorized"
     return scenario.group(1) if scenario else "unknown_scenario"
 
 
@@ -336,18 +341,15 @@ def retime_mp4(src: Path, dst: Path, scale: float) -> bool:
 
 
 def collect_cases(
-    run_dir: Path, site_mode: str, group_mode: str
-) -> tuple[dict[tuple[str, str], list[dict]], list[str]]:
-    """Read every case that produced a row, keyed by ``(group, scenario)``.
+    run_dir: Path, site_mode: str
+) -> tuple[dict[str, list[dict]], list[str]]:
+    """Read every case that produced a row, keyed by scenario.
 
-    Returns ``({(group, scenario): [row, ...]}, [case_key of every submitted case with no
-    row])``. Each row gains ``route`` (its case key) when the producer did not stamp one,
-    because that is what names the row's artifacts.
+    Returns ``({scenario: [row, ...]}, [case_key of every submitted case with no row])``.
     """
     rels = load_case_rels(run_dir)
     submitted = load_submitted(run_dir)
-    names = load_scenario_names(next(iter(rels.values()), None))
-    by_site: dict[tuple[str, str], list[dict]] = {}
+    by_scenario: dict[str, list[dict]] = {}
     found: set[str] = set()
     for row_path in sorted(run_dir.glob("*/row.json")):
         case_dir = row_path.parent
@@ -362,52 +364,50 @@ def collect_cases(
         row["_case_dir"] = str(case_dir)
         row["_rel"] = rels.get(case_key)
         found.add(case_key)
-        rel = rels.get(case_key)
-        cell = (
-            site_of(case_key, row, rel, group_mode, names),
-            site_of(case_key, row, rel, site_mode, names),
-        )
-        by_site.setdefault(cell, []).append(row)
+        scenario = site_of(case_key, row, rels.get(case_key), site_mode)
+        by_scenario.setdefault(scenario, []).append(row)
     # One entry per submitted case, so two spellings of one directory never count twice.
     missing = [
         key
         for key, rel in submitted
         if not any(a in found for a in dict.fromkeys((key, *key_aliases(rel))))
     ]
-    return by_site, missing
+    return by_scenario, missing
 
 
 def write_viewer_tree(
     out_root: Path,
-    by_site: dict[tuple[str, str], list[dict]],
+    by_scenario: dict[str, list[dict]],
     *,
     meta: dict,
-    site_errors: dict[str, str],
+    scenario_errors: dict[str, str],
     names: dict[str, str] | None = None,
-    site_labels: dict[str, str | None] | None = None,
+    categories: dict[str, str] | None = None,
     run_error: str | None = None,
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
 ) -> dict[str, dict[str, int]]:
-    """Write the whole viewer tree. **This function owns the output layout.**
+    """Write the whole export. **This function owns the output layout.**
 
-    ``<out_root>/groups_summary.json`` plus ``<out_root>/<group>/<scenario>/`` holding that
-    scenario's summary, rows and media. Returns
-    ``{"<group>/<scenario>": {"rows": n, "mp4": n, "traces": n, "colormaps": n}}`` so the
-    caller can report counts it did not itself construct.
+    The listing is three files at the run root, so opening it costs three reads rather than
+    two per scenario. Everything a reader might group or filter by -- category, map, version
+    -- is a field on the scenario rather than a directory, so a new grouping needs no
+    re-export. Media stays per scenario, where the bulk is::
+
+        <out_root>/
+          run.json            provenance, counts, what was not measured
+          scenarios.json      one entry per scenario: name, category, map, version, summary
+          cases.jsonl         one line per case
+          media/<scenario>/<case>.mp4
+                            <case>.rollout.jsonl
+                            <case>.<metric>.png
+
+    Returns ``{scenario: {"rows": n, "mp4": n, "traces": n, "colormaps": n}}``.
     """
     out_root.mkdir(parents=True, exist_ok=True)
+    media_root = out_root / "media"
     counts: dict[str, dict[str, int]] = {}
-    sub_groups: dict[str, Any] = {}
-
-    # A partial re-export must not drop groups written by an earlier one.
-    manifest_path = out_root / "groups_summary.json"
-    if manifest_path.is_file():
-        try:
-            sub_groups = json.loads(manifest_path.read_text(encoding="utf-8")).get(
-                "sub_groups", {}
-            )
-        except (ValueError, AttributeError):
-            sub_groups = {}
+    scenarios: dict[str, Any] = {}
+    case_lines: list[str] = []
 
     # The time base is a property of the run, but the viewer holds it as a per-dataset
     # constant, so the video is moved to the constant instead.
@@ -415,17 +415,17 @@ def write_viewer_tree(
     fps = float(meta.get("fps") or 0)
     scale = (fps * draw_every / VIEWER_STEPS_PER_VIDEO_SEC) if draw_every and fps else 1.0
 
-    for (group, site), rows in sorted(by_site.items()):
-        site_dir = out_root / group / site
-        site_dir.mkdir(parents=True, exist_ok=True)
-        sub_groups.setdefault(group, {"overview": {}})
+    for scenario, rows in sorted(by_scenario.items()):
+        scenario_dir = media_root / scenario
+        scenario_dir.mkdir(parents=True, exist_ok=True)
         tally = {"rows": 0, "mp4": 0, "traces": 0, "colormaps": 0}
 
         near_miss = float(rows[0].get("object", {}).get("miss_thresh_m") or 1.0)
         strong_brake = float(rows[0].get("strong_brake", {}).get("thresh_mps2") or -2.5)
-
         first_rel = rows[0].get("_rel")
-        first_map = site_of("", rows[0], None, "map")
+        display = (names or {}).get(scenario)
+        letter = category_of(display)
+
         # Named per scenario, because what varies between its expansions is only knowable
         # by comparing them.
         routes = route_names([(str(r["case_key"]), r.get("_rel")) for r in rows])
@@ -434,79 +434,75 @@ def write_viewer_tree(
         for row in rows:
             case_dir = Path(row.pop("_case_dir"))
             row.pop("_rel", None)
-            row["route"] = routes.get(str(row["case_key"]), str(row["route"]))
-            stem = str(row["route"])
+            case = routes.get(str(row["case_key"]), str(row["route"]))
+            row["route"] = case
+            row["scenario"] = scenario
 
             mp4 = find_mp4(case_dir, str(row["case_key"]))
             if mp4 is not None:
-                dst = site_dir / f"{stem}.mp4"
+                dst = scenario_dir / f"{case}.mp4"
                 if not retime_mp4(mp4, dst, scale):
                     _link_or_copy(mp4, dst)
                 tally["mp4"] += 1
 
             trace = case_dir / "rollout.jsonl"
             if trace.is_file():
-                _link_or_copy(trace, site_dir / stem / "rollout.jsonl")
+                _link_or_copy(trace, scenario_dir / f"{case}.rollout.jsonl")
                 tally["traces"] += 1
                 # Drawn from the trace because the run deletes its PNGs after encoding.
                 # Unobserved metrics are skipped rather than drawn as a measured "no event".
-                rendered = render_trajectory_colormaps(
-                    site_dir / stem,
-                    site_dir,
-                    stem,
-                    metrics=colormap_metrics,
-                    near_miss_thresh=near_miss,
-                    strong_brake_mps2=strong_brake,
-                    title=f"{site} {stem}",
-                )
+                # The renderer reads the trace as ``<dir>/rollout.jsonl``, so it gets a
+                # directory of its own rather than the layout growing one per case.
+                with tempfile.TemporaryDirectory() as staging:
+                    _link_or_copy(trace, Path(staging) / "rollout.jsonl")
+                    rendered = render_trajectory_colormaps(
+                        Path(staging),
+                        Path(staging),
+                        case,
+                        metrics=colormap_metrics,
+                        near_miss_thresh=near_miss,
+                        strong_brake_mps2=strong_brake,
+                        title=f"{display or scenario} {case}",
+                    )
+                    for metric, drawn in rendered.items():
+                        shutil.move(str(drawn), scenario_dir / f"{case}.{metric}.png")
                 tally["colormaps"] += len(rendered)
 
             clean_rows.append(row)
+            case_lines.append(json.dumps(sanitize(row), ensure_ascii=False, allow_nan=False))
             tally["rows"] += 1
 
-        # Named, never globbed: a DDP run leaves merged and per-shard files side by side.
-        with (site_dir / "segments.jsonl").open("w", encoding="utf-8") as f:
-            for row in clean_rows:
-                f.write(json.dumps(sanitize(row), ensure_ascii=False, allow_nan=False) + "\n")
-
         summary = aggregate(clean_rows, near_miss, strong_brake_mps2=strong_brake)
-        unmeasured = []
-        for key in _UNMEASURED_SUMMARY_KEYS:
-            if summary.pop(key, None) is not None:
-                unmeasured.append(key)
+        unmeasured = [k for k in _UNMEASURED_SUMMARY_KEYS if summary.pop(k, None) is not None]
         # The rollup drops the row's ``measured`` flag, so an unobserved family aggregates to
         # a zero that reads as "checked, found nothing". Carry the flag up.
-        for family in ("red_light_violation",):
-            block = summary.get(family)
-            if isinstance(block, dict) and not any(
-                r.get(family, {}).get("measured", True) for r in clean_rows
-            ):
-                block["measured"] = False
-                unmeasured.append(family)
-        # ``reproducer`` counts a mechanism this path does not have -- there is no recorded
-        # drive to snap back to -- so its zeros are structural rather than observations.
-        summary[_UNMEASURED_MARKER_KEY] = unmeasured + ["reproducer"]
-        # The shortfall travels in the scenario's own summary because that is the only file
-        # the viewer reads per scenario; a count kept only in the export report is invisible.
-        # The map and the scenario's version are properties of the scenario, not levels of
-        # the tree, and the viewer has only three.
-        summary.update(
-            {
-                "n_scenarios": len(clean_rows),
-                "map": first_map,
-                "version": _version_of(first_rel),
-                "scenario_name": (names or {}).get(site),
-                "draw_every": meta.get("draw_every"),
-                "fps": meta.get("fps"),
-                "description": (site_labels or {}).get(site),
-                "error": " / ".join(e for e in (site_errors.get(site), run_error) if e) or None,
-            }
-        )
-        _dump_json(site_dir / "summary.json", summary)
-        counts[f"{group}/{site}"] = tally
+        block = summary.get("red_light_violation")
+        if isinstance(block, dict) and not any(
+            r.get("red_light_violation", {}).get("measured", True) for r in clean_rows
+        ):
+            block["measured"] = False
+            unmeasured.append("red_light_violation")
 
-    _dump_json(manifest_path, {"overview": {}, "sub_groups": sub_groups})
-    _dump_json(out_root / "export_meta.json", meta)
+        scenarios[scenario] = {
+            "name": display,
+            "category": letter,
+            "category_name": (categories or {}).get(letter or "", None),
+            "description": scenario_description(first_rel, meta.get("scenario_root")),
+            "map": site_of("", rows[0], None, "map"),
+            "version": _version_of(first_rel),
+            "n_cases": len(clean_rows),
+            "error": " / ".join(
+                e for e in (scenario_errors.get(scenario), run_error) if e
+            )
+            or None,
+            "unmeasured_keys": unmeasured + ["reproducer"],
+            "summary": sanitize(summary),
+        }
+        counts[scenario] = tally
+
+    (out_root / "cases.jsonl").write_text("\n".join(case_lines) + "\n", encoding="utf-8")
+    _dump_json(out_root / "scenarios.json", scenarios)
+    _dump_json(out_root / "run.json", meta)
     return counts
 
 
@@ -554,57 +550,50 @@ def export(
     out_root: Path,
     *,
     site_mode: str = "scenario_id",
-    group_mode: str = "map",
     fps: float = 10.0,
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
 ) -> dict[str, dict[str, int]]:
     """Export one scenario_sim run directory into ``out_root``."""
     ctx = parse_run_context(run_dir)
-    by_site, missing = collect_cases(run_dir, site_mode, group_mode)
-    if not by_site:
+    by_scenario, missing = collect_cases(run_dir, site_mode)
+    if not by_scenario:
         raise SystemExit(f"viewer_export: no */row.json under {run_dir}")
     # Resolving nothing is a wrong assumption about the layout, not an empty run.
-    if {site for _, site in by_site} <= _PLACEHOLDER_SITES:
-        sample = next(iter(next(iter(by_site.values()))), {}).get("route")
+    if set(by_scenario) <= _PLACEHOLDER_SITES:
+        sample = next(iter(next(iter(by_scenario.values()))), {}).get("route")
         raise SystemExit(
-            f"viewer_export: --site_from {site_mode} resolved no site for any case "
+            f"viewer_export: --site_from {site_mode} resolved nothing for any case "
             f"(sample case: {sample})"
         )
 
-    site_labels = {
-        site: scenario_description(rows[0].get("_rel"), ctx.get("scenario_root"))
-        for (_, site), rows in by_site.items()
-    }
-
     rels = load_case_rels(run_dir)
     submitted = load_submitted(run_dir)
-    names = load_scenario_names(next(iter(rels.values()), None))
-    # A case with no row can only be blamed on a site when the site comes from the scenario's
-    # path. What cannot be attributed still has to reach the manifest, as a run-level fact.
-    site_errors: dict[str, str] = {}
+    sidecar = load_sidecar(next(iter(rels.values()), None))
+
+    # A case with no row can still be blamed on its scenario, because the submitted list
+    # carries the path. What cannot be attributed becomes a run-level statement instead.
+    scenario_errors: dict[str, str] = {}
     run_error: str | None = None
     if missing:
         if site_mode != "map":
-            per_site: dict[str, list[str]] = {}
+            per_scenario: dict[str, list[str]] = {}
             for key in missing:
-                per_site.setdefault(
-                    site_of(key, {}, rels.get(key), site_mode, names), []
+                per_scenario.setdefault(
+                    site_of(key, {}, rels.get(key), site_mode), []
                 ).append(key)
-            site_errors = {
-                s: f"{len(k)} of this site's case(s) produced no row: {', '.join(k[:5])}"
-                for s, k in per_site.items()
+            scenario_errors = {
+                s: f"{len(k)} of this scenario's case(s) produced no row: {', '.join(k[:5])}"
+                for s, k in per_scenario.items()
             }
         else:
             run_error = (
-                f"run incomplete: {len(missing)} of {len(submitted)} submitted case(s) produced "
-                f"no row ({', '.join(missing[:5])}); not attributable to a site under "
-                f"site_from={site_mode}"
+                f"run incomplete: {len(missing)} of {len(submitted)} submitted case(s) "
+                f"produced no row ({', '.join(missing[:5])})"
             )
 
     meta = {
         "run_dir": str(run_dir),
         "site_mode": site_mode,
-        "group_mode": group_mode,
         "fps": fps,
         # Frame n of the video is trace step n * draw_every; a consumer that syncs a plot to
         # the video needs both numbers.
@@ -614,17 +603,18 @@ def export(
         "dp_commit": ctx.get("dp_commit"),
         "branch": ctx.get("branch"),
         "max_steps": ctx.get("max_steps"),
+        "suite_name": None,
         "submitted_cases": len(submitted),
         "missing_rows": missing,
     }
 
     counts = write_viewer_tree(
         out_root,
-        by_site,
+        by_scenario,
         meta=meta,
-        site_errors=site_errors,
-        names=names,
-        site_labels=site_labels,
+        scenario_errors=scenario_errors,
+        names=sidecar["scenarios"],
+        categories=sidecar["categories"],
         run_error=run_error,
         colormap_metrics=colormap_metrics,
     )
@@ -639,12 +629,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--site_from",
         default="scenario_id",
-        help="scenario_id | map | flat -- what becomes the viewer's scenario",
-    )
-    p.add_argument(
-        "--group_from",
-        default="map",
-        help="what becomes the viewer's group, the level above the scenario (same choices)",
+        help="scenario_id | map | flat -- what a case is grouped under",
     )
     p.add_argument(
         "--fps",
@@ -658,14 +643,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     a = _parse_args(argv)
-    for flag, value in (("--site_from", a.site_from), ("--group_from", a.group_from)):
-        if value not in _SITE_MODES:
-            raise SystemExit(f"{flag} must be one of {', '.join(_SITE_MODES)}, got {value!r}")
+    if a.site_from not in _SITE_MODES:
+        raise SystemExit(
+            f"--site_from must be one of {', '.join(_SITE_MODES)}, got {a.site_from!r}"
+        )
     export(
         a.run_dir,
         a.out_root,
         site_mode=a.site_from,
-        group_mode=a.group_from,
         fps=a.fps,
         colormap_metrics=tuple(a.colormap_metrics),
     )

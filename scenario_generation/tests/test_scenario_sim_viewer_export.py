@@ -13,6 +13,10 @@ import pytest
 from scenario_generation.scenario_sim_viewer_export import export, key_aliases, load_submitted
 
 _MAP = "/suite/assets/map/proj/2231/2231-0001/lanelet2_map.osm"
+_SIDECAR = {
+    "categories": {"C": "交差点"},
+    "scenarios": {},  # _make_run が埋める
+}
 _MAP_ID = "2231"
 _SC1 = "5b071057-5e4d-4585-a0c6-2a3e649fb28c"
 _SC2 = "8dd3a7fd-6af8-4dcc-9f10-ce46d09b0e88"
@@ -49,12 +53,31 @@ def _row() -> dict:
     }
 
 
+def _make_suite(root: Path, rels: list[str]) -> None:
+    """The sidecar the suite carries: display names and the category labels they use."""
+    import re
+
+    scenarios = {}
+    for rel in rels:
+        m = re.search(r"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})", rel)
+        if m:
+            scenarios[m.group(1)] = f"C-01-1000{len(scenarios)}_case01_dp"
+    (root / "scenario_names.json").write_text(
+        json.dumps({"categories": _SIDECAR["categories"], "scenarios": scenarios})
+    )
+
+
 def _make_run(root: Path, rels: list[str], *, submitted: list[str] | None = None) -> Path:
     """A run directory in the shape the suite driver leaves behind."""
     root.mkdir(parents=True, exist_ok=True)
     (root / "run_context.txt").write_text("jobs=4 max_steps=1700 draw_every=4\n")
+    suite = root.parent / "suite"
+    suite.mkdir(parents=True, exist_ok=True)
+    _make_suite(suite, submitted or rels)
     (root / "work.json").write_text(
-        json.dumps([[str(root / key_aliases(r)[0]), r] for r in (submitted or rels)])
+        json.dumps(
+            [[str(root / key_aliases(r)[0]), str(suite / "scenarios" / r)] for r in (submitted or rels)]
+        )
     )
     trace = [json.dumps({"k": k, "ego": [float(k), 0.0], "speed": 1.0, "clearance_m": 2.0, "collision": False}) for k in range(3)]
     for rel in rels:
@@ -66,19 +89,37 @@ def _make_run(root: Path, rels: list[str], *, submitted: list[str] | None = None
     return root
 
 
-def test_layout_matches_the_viewer_contract(tmp_path):
+def test_layout_is_three_files_plus_media(tmp_path):
+    """The listing must not cost a read per scenario."""
     export(_make_run(tmp_path / "run", [_rel(_SC1), _rel(_SC1, case=6)]), tmp_path / "out")
     out = tmp_path / "out"
 
-    assert set(json.loads((out / "groups_summary.json").read_text())["sub_groups"]) == {_MAP_ID}
-    site = out / _MAP_ID / _SC1
-    rows = [json.loads(ln) for ln in (site / "segments.jsonl").read_text().splitlines()]
-    assert len(rows) == 2
-    for row in rows:
-        stem = row["route"]
-        assert (site / f"{stem}.mp4").is_file()
-        assert (site / stem / "rollout.jsonl").is_file()
-        assert (site / f"{stem}_trajcolormap_clearance.png").is_file()
+    for name in ("run.json", "scenarios.json", "cases.jsonl"):
+        assert (out / name).is_file()
+    assert not list(out.glob("*/summary.json")), "per-scenario summary files are back"
+
+    cases = [json.loads(ln) for ln in (out / "cases.jsonl").read_text().splitlines()]
+    assert len(cases) == 2
+    media = out / "media" / _SC1
+    for case in cases:
+        assert case["scenario"] == _SC1
+        stem = case["route"]
+        assert (media / f"{stem}.mp4").is_file()
+        assert (media / f"{stem}.rollout.jsonl").is_file()
+        assert (media / f"{stem}.clearance.png").is_file()
+
+
+def test_grouping_keys_are_fields_not_directories(tmp_path):
+    """Category, map and version travel as data so a new grouping needs no re-export."""
+    export(_make_run(tmp_path / "run", [_rel(_SC1)]), tmp_path / "out")
+    entry = json.loads((tmp_path / "out" / "scenarios.json").read_text())[_SC1]
+
+    assert entry["category"] == "C"
+    # The label comes from the suite's sidecar, never from this repo.
+    assert entry["category_name"] == "交差点"
+    assert entry["map"] == _MAP_ID
+    assert entry["version"] == "5"
+    assert entry["name"].startswith("C-01-")
 
 
 def test_exported_json_carries_no_non_json_constants(tmp_path):
@@ -98,37 +139,29 @@ def test_exported_json_carries_no_non_json_constants(tmp_path):
 def test_unmeasured_families_are_not_reported_as_zero(tmp_path):
     """A family nobody observed must stay distinguishable from one measured at zero."""
     export(_make_run(tmp_path / "run", [_rel(_SC1)]), tmp_path / "out")
-    summary = json.loads((tmp_path / "out" / _MAP_ID / _SC1 / "summary.json").read_text())
+    entry = json.loads((tmp_path / "out" / "scenarios.json").read_text())[_SC1]
 
-    assert "mean_route_completion" not in summary
-    assert summary["red_light_violation"]["measured"] is False
-    assert "mean_route_completion" in summary["unmeasured_keys"]
-    # Rows keep the key absent rather than null: the viewer rounds it, and round(None) raises.
-    row = json.loads((tmp_path / "out" / _MAP_ID / _SC1 / "segments.jsonl").read_text().splitlines()[0])
-    assert "route_completion" not in row
+    assert "mean_route_completion" not in entry["summary"]
+    assert entry["summary"]["red_light_violation"]["measured"] is False
+    assert {"mean_route_completion", "reproducer"} <= set(entry["unmeasured_keys"])
+    case = json.loads((tmp_path / "out" / "cases.jsonl").read_text().splitlines()[0])
+    assert "route_completion" not in case
 
 
-def test_missing_rows_reach_the_manifest_the_viewer_reads(tmp_path):
-    """Failures are absent rows, and a count only the export report carries is invisible."""
+def test_missing_cases_are_stated_against_the_submitted_list(tmp_path):
+    """Failures are absent rows; the artifacts on disk cannot reveal them."""
     run = _make_run(tmp_path / "run", [_rel(_SC1)], submitted=[_rel(_SC1), _rel(_SC1, case=6)])
     export(run, tmp_path / "out")
 
-    summary = json.loads((tmp_path / "out" / _MAP_ID / _SC1 / "summary.json").read_text())
-    assert "produced no row" in summary["error"]
-    assert json.loads((tmp_path / "out" / "export_meta.json").read_text())["submitted_cases"] == 2
+    entry = json.loads((tmp_path / "out" / "scenarios.json").read_text())[_SC1]
+    assert "produced no row" in entry["error"]
+    assert json.loads((tmp_path / "out" / "run.json").read_text())["submitted_cases"] == 2
 
 
 def test_a_site_mode_that_fits_nothing_fails(tmp_path):
     """A suite with no scenario id in its paths is a wrong mode, not an empty run."""
-    with pytest.raises(SystemExit, match="resolved no site"):
-        export(_make_run(tmp_path / "run", ["cat/a.xosc"]), tmp_path / "out", group_mode="flat")
-
-
-def test_re_export_keeps_groups_written_by_an_earlier_pass(tmp_path):
-    export(_make_run(tmp_path / "r1", [_rel(_SC1)]), tmp_path / "out")
-    export(_make_run(tmp_path / "r2", [_rel(_SC2)]), tmp_path / "out", group_mode="flat")
-    manifest = json.loads((tmp_path / "out" / "groups_summary.json").read_text())
-    assert set(manifest["sub_groups"]) == {_MAP_ID, "all"}
+    with pytest.raises(SystemExit, match="resolved nothing"):
+        export(_make_run(tmp_path / "run", ["cat/a.xosc"]), tmp_path / "out")
 
 
 def test_work_list_entries_resolve_against_the_manifest(tmp_path):
