@@ -276,6 +276,12 @@ def route_names(cases: list[tuple[str, str | None]]) -> dict[str, str]:
     return named if len(set(named.values())) == len(named) else fallback
 
 
+def _version_of(rel: str | None) -> str | None:
+    """The scenario version directory from a path shaped ``<id>/<version>/<file>``."""
+    parents = Path(rel).parents if rel else []
+    return parents[0].name if len(parents) >= 2 else None
+
+
 def find_mp4(case_dir: Path, stem: str) -> Path | None:
     """Locate a case's video.
 
@@ -377,6 +383,7 @@ def write_viewer_tree(
     *,
     meta: dict,
     site_errors: dict[str, str],
+    names: dict[str, str] | None = None,
     site_labels: dict[str, str | None] | None = None,
     run_error: str | None = None,
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
@@ -417,6 +424,8 @@ def write_viewer_tree(
         near_miss = float(rows[0].get("object", {}).get("miss_thresh_m") or 1.0)
         strong_brake = float(rows[0].get("strong_brake", {}).get("thresh_mps2") or -2.5)
 
+        first_rel = rows[0].get("_rel")
+        first_map = site_of("", rows[0], None, "map")
         # Named per scenario, because what varies between its expansions is only knowable
         # by comparing them.
         routes = route_names([(str(r["case_key"]), r.get("_rel")) for r in rows])
@@ -479,9 +488,14 @@ def write_viewer_tree(
         summary[_UNMEASURED_MARKER_KEY] = unmeasured + ["reproducer"]
         # The shortfall travels in the scenario's own summary because that is the only file
         # the viewer reads per scenario; a count kept only in the export report is invisible.
+        # The map and the scenario's version are properties of the scenario, not levels of
+        # the tree, and the viewer has only three.
         summary.update(
             {
                 "n_scenarios": len(clean_rows),
+                "map": first_map,
+                "version": _version_of(first_rel),
+                "scenario_name": (names or {}).get(site),
                 "draw_every": meta.get("draw_every"),
                 "fps": meta.get("fps"),
                 "description": (site_labels or {}).get(site),
@@ -609,6 +623,7 @@ def export(
         by_site,
         meta=meta,
         site_errors=site_errors,
+        names=names,
         site_labels=site_labels,
         run_error=run_error,
         colormap_metrics=colormap_metrics,
