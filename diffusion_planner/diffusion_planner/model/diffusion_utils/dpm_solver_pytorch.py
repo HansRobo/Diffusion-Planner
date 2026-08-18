@@ -90,7 +90,8 @@ def model_wrapper(
     guidance_scale=1.0,
     classifier_fn=None,
     classifier_kwargs={},
-    D=4,
+    *,
+    D,
 ):
     """Create a wrapper function for the noise prediction model.
 
@@ -252,7 +253,8 @@ class DPM_Solver:
         model_fn,
         noise_schedule,
         correcting_xt_fn=None,
-        D=4,
+        *,
+        D,
     ):
         """Construct a DPM-Solver.
 

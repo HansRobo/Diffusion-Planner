@@ -144,9 +144,10 @@ def compute_training_loss(
 
     eps = 1e-3
     t = torch.rand(B, device=gt_future.device) * (1 - eps) + eps  # [B,]
+    t = t.view(B, 1, 1, 1)
+    t = t.expand(B, P, T + 1, 1)
     z = torch.randn(B, P, T, D, device=gt_future.device)  # [B, P, T, D]
 
-    t = t.view(B, 1, 1, 1).expand(B, P, T + 1, 1)
     max_delay = 5
     delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
     prefix_mask = generate_prefix_mask(delay, 1 + Pn, T + 1)  # (B, P, T+1, 1)
@@ -170,8 +171,7 @@ def compute_training_loss(
             "prefix_mask": prefix_mask,
             "gt_trajectories_pose": all_gt_pose,
         }
-
-        _, decoder_output = model(merged_inputs)
+        _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, D]
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, D]
 
         gt_target = all_gt[:, :, 1:, :]  # [B, P, T, D]
@@ -185,7 +185,6 @@ def compute_training_loss(
         t = t.reshape(-1)  # [B,]
 
         xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
-
         merged_inputs = {
             **inputs,
             "gt_trajectories": all_gt,
@@ -194,8 +193,7 @@ def compute_training_loss(
             "prefix_mask": prefix_mask,
             "gt_trajectories_pose": all_gt_pose,
         }
-
-        _, decoder_output = model(merged_inputs)
+        _, decoder_output = model(merged_inputs)  # [B, P, 1 + T, D]
         model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, D]
 
         target_v = all_gt[:, :, 1:, :] - z
@@ -226,7 +224,6 @@ def compute_training_loss(
             inputs["ego_agent_past"],
             t0_states={"v": longitudinal_velocity.squeeze(-1)},
         )  # [B, T, 4]
-
         ego_edge_points = compute_ego_edge_points(
             ego_pred_world, inputs["ego_shape"], n_interp=args.road_border_n_interp
         )
@@ -307,16 +304,14 @@ class Decoder(nn.Module):
         self._predicted_neighbor_num = config.predicted_neighbor_num
         self._future_len = config.future_len
 
-        self._D = CONTROL_DIM
-
         self.dit = DiT(
             depth=config.decoder_depth,
-            output_dim=(config.future_len + 1) * self._D,
+            output_dim=(config.future_len + 1) * CONTROL_DIM,
             hidden_dim=config.hidden_dim,
             heads=config.num_heads,
             dropout=dpr,
             T=config.future_len + 1,
-            D=self._D,
+            D=CONTROL_DIM,
         )
         self.turn_indicator_predictor = nn.Linear(
             2 * (self._future_len // 10) + config.hidden_dim, TURN_INDICATOR_OUTPUT_DIM
@@ -431,7 +426,7 @@ class Decoder(nn.Module):
         """
         B = encoding.shape[0]
         P = 1 + self._predicted_neighbor_num
-        D = self._D
+        D = CONTROL_DIM
 
         sampled_trajectories = inputs["sampled_trajectories"].reshape(
             B, P, (1 + self._future_len), D
@@ -501,10 +496,21 @@ class Decoder(nn.Module):
         encoding_pooled,
         sampled_trajectories,
     ):
-        """Inference using Flow Matching approach."""
+        """Inference using Flow Matching approach.
+
+        Args:
+            encoding: [B, N, D] encoded features
+            inputs: Dict containing input data
+            neighbor_current_mask: [B, Pn] mask for invalid neighbors
+            encoding_pooled: [B, D] pooled encoding
+            sampled_trajectories: [B, P, (1 + T) * CONTROL_DIM] sampled controls
+
+        Returns:
+            Dict containing prediction and turn_indicator_logit
+        """
         B = encoding.shape[0]
         P = 1 + self._predicted_neighbor_num
-        D = self._D
+        D = CONTROL_DIM
 
         x = sampled_trajectories
         NUM_STEP = 10
@@ -514,6 +520,8 @@ class Decoder(nn.Module):
             neighbor_current_mask=neighbor_current_mask,
         )
         x = euler_integration(func, x, NUM_STEP)
+        # x = heun_integration(func, x, NUM_STEP)
+        # x = rk4_integration(func, x, NUM_STEP)
         x = x.reshape(B, P, (1 + self._future_len), D)
 
         turn_indicator_logit = self._compute_turn_indicator_from_denoised(x, encoding_pooled)
@@ -534,10 +542,22 @@ class Decoder(nn.Module):
         encoding_pooled,
         sampled_trajectories,
     ):
-        """Inference using X-Start (DPM Solver) approach."""
+        """Inference using X-Start (DPM Solver) approach.
+
+        Args:
+            encoding: [B, N, D] encoded features
+            inputs: Dict containing input data
+            current_states: [B, P, 4] current states
+            neighbor_current_mask: [B, Pn] mask for invalid neighbors
+            encoding_pooled: [B, D] pooled encoding
+            sampled_trajectories: [B, P, (1 + T) * CONTROL_DIM] sampled controls
+
+        Returns:
+            Dict containing prediction and turn_indicator_logit
+        """
         B = encoding.shape[0]
         P = 1 + self._predicted_neighbor_num
-        D = self._D
+        D = CONTROL_DIM
 
         xT = sampled_trajectories
         action_prefix = sampled_trajectories.reshape(B, P, -1, D)
@@ -626,7 +646,7 @@ class Decoder(nn.Module):
         """
         B = encoding.shape[0]
         P = 1 + self._predicted_neighbor_num
-        D = self._D
+        D = CONTROL_DIM
 
         sampled_trajectories = inputs["sampled_trajectories"].reshape(
             B, P, (1 + self._future_len) * D

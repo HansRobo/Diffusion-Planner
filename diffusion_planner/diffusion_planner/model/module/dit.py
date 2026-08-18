@@ -99,13 +99,11 @@ class DiT(nn.Module):
         heads=6,
         dropout=0.1,
         mlp_ratio=4.0,
-        T=81,
-        D=4,
+        *,
+        T,
+        D,
     ):
         super().__init__()
-
-        self._T = T
-        self._D = D
 
         self.agent_embedding = nn.Embedding(2, hidden_dim)
         self.preproj = Mlp(
@@ -130,7 +128,6 @@ class DiT(nn.Module):
     def forward(self, x, t, cross_c, neighbor_current_mask):
         """
         Forward pass of DiT.
-
         x: (B, P, T, D)   -> Embedded out of DiT
         t: (B, P, T, 1)
         cross_c: (B, N, D)      -> Cross-Attention context

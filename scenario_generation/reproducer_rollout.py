@@ -30,10 +30,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from diffusion_planner.dimensions import CONTROL_DIM, INPUT_T
-from diffusion_planner.model.guidance.collision import (
-    batch_signed_distance_rect,
-    center_rect_to_points,
-)
 
 from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector

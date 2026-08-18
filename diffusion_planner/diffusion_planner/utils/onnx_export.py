@@ -70,7 +70,7 @@ DECODER_INPUT_NAMES = [
 
 TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0"]
 
-FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit"]
+FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit", "ego_control"]
 ENCODER_OUTPUT_NAMES = ["encoding"]
 DECODER_OUTPUT_NAMES = ["model_output"]
 TURN_INDICATOR_OUTPUT_NAMES = ["turn_indicator_logit"]
@@ -251,7 +251,7 @@ class FullONNXWrapper(nn.Module):
         ego_shape: torch.Tensor,
         turn_indicators: torch.Tensor,
         delay: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # The node sends POSE_DIM channels; the decoder denoises CONTROL_DIM of them.
         sampled_trajectories = sampled_trajectories[..., :CONTROL_DIM]
         inputs = {
@@ -274,7 +274,17 @@ class FullONNXWrapper(nn.Module):
             "delay": delay,
         }
         _, decoder_outputs = self.model(inputs)
-        return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
+        # The denoised tensor is the ego control the planner actually committed to;
+        # ``prediction`` is that same control integrated into waypoints. Both are exported
+        # so a consumer can track the trajectory or the (accel, curvature) command.
+        ego_control = self.model.decoder._control_normalizer.inverse(
+            decoder_outputs["denoised"][:, 0, 1:, :]
+        )  # [B, T, 2]
+        return (
+            decoder_outputs["prediction"],
+            decoder_outputs["turn_indicator_logit"],
+            ego_control,
+        )
 
 
 def build_dummy_inputs() -> TensorDict:

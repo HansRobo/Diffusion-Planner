@@ -153,7 +153,6 @@ class TrainConfig:
     hybrid_loss_window: int = 10
 
     # Control Loss
-    coeff_control_loss: float = 1.0
     control_traj_loss_horizon: int = 80
     coeff_control_traj_loss: float = 0.4
 
