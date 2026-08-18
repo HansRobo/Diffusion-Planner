@@ -12,13 +12,12 @@ from diffusion_planner.dimensions import (
     TURN_INDICATOR_OUTPUT_DIM,
 )
 from diffusion_planner.loss import (
+    ACTION_SPACE,
     compute_control_traj_loss,
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
     compute_road_border_penalty,
-    control_to_waypoints,
     make_turn_indicator_gt,
-    waypoints_to_control,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
 from diffusion_planner.model.flow_matching_utils.ode_solver import (
@@ -32,6 +31,7 @@ from diffusion_planner.utils.normalizer import (
     ObservationNormalizer,
     StateNormalizer,
 )
+from diffusion_planner.utils.unicycle_accel_curvature import action_to_traj4d, traj4d_to_action
 
 
 def generate_prefix_mask(delay: torch.Tensor, num_agents: int, max_len: int) -> torch.Tensor:
@@ -81,8 +81,8 @@ def build_gt_representation(
 
     ego_history = raw_inputs["ego_agent_past"]  # [B, T_hist, 4] raw
     ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
-    ego_ctrl = waypoints_to_control(
-        ego_history, gt_future[:, 0], t0_states={"v": ego_v0.squeeze(-1)}
+    ego_ctrl = traj4d_to_action(
+        ACTION_SPACE, ego_history, gt_future[:, 0], t0_states={"v": ego_v0.squeeze(-1)}
     )  # [B, T, 2]
 
     ctrl_gt = torch.zeros(B, P, T, CONTROL_DIM, device=gt_future.device)
@@ -219,9 +219,10 @@ def compute_training_loss(
     if need_ego_edge:
         # Edge losses always operate in trajectory space, so the predicted control is
         # integrated back into waypoints first.
-        ego_pred_world = control_to_waypoints(
-            model_output[:, 0],
+        ego_pred_world = action_to_traj4d(
+            ACTION_SPACE,
             inputs["ego_agent_past"],
+            model_output[:, 0],
             t0_states={"v": longitudinal_velocity.squeeze(-1)},
         )  # [B, T, 4]
         ego_edge_points = compute_ego_edge_points(
@@ -466,9 +467,10 @@ class Decoder(nn.Module):
 
         raw_inputs = self._observation_normalizer.inverse(inputs)
         ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
-        ego_traj = control_to_waypoints(
-            ego_ctrl,
+        ego_traj = action_to_traj4d(
+            ACTION_SPACE,
             raw_inputs["ego_agent_past"],
+            ego_ctrl,
             t0_states={"v": ego_v0.squeeze(-1)},
         )  # [B, T, 4]
 

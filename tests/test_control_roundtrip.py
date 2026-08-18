@@ -14,12 +14,13 @@ import sys
 import numpy as np
 import torch
 from diffusion_planner.dimensions import INPUT_T, OUTPUT_T
-from diffusion_planner.loss import control_to_waypoints, waypoints_to_control
+from diffusion_planner.loss import ACTION_SPACE
 from diffusion_planner.utils.coordinate_transform import (
     transform_to_ego_frame,
     transform_to_local_frame,
 )
 from diffusion_planner.utils.normalizer import ControlNormalizer
+from diffusion_planner.utils.unicycle_accel_curvature import action_to_traj4d, traj4d_to_action
 
 T_HIST = INPUT_T + 1  # 31
 T_FUTURE = OUTPUT_T  # 80
@@ -138,11 +139,11 @@ class TestEgoRoundtrip:
     """trajectory -> control -> trajectory for ego."""
 
     def _run(self, past, future, v0, atol=0.01):
-        ctrl = waypoints_to_control(past, future, t0_states={"v": torch.tensor([v0])})
+        ctrl = traj4d_to_action(ACTION_SPACE, past, future, t0_states={"v": torch.tensor([v0])})
         assert not ctrl.isnan().any(), "NaN in ego control"
         assert not ctrl.isinf().any(), "Inf in ego control"
 
-        recon = control_to_waypoints(ctrl, past, t0_states={"v": torch.tensor([v0])})
+        recon = action_to_traj4d(ACTION_SPACE, past, ctrl, t0_states={"v": torch.tensor([v0])})
         assert torch.allclose(future[..., :2], recon[..., :2], atol=atol), (
             f"Ego roundtrip pos error too large: max={(future[..., :2] - recon[..., :2]).abs().max().item():.6f}"
         )
@@ -168,10 +169,10 @@ class TestNeighborLocalFrameRoundtrip:
         # n_past: [1, 1, T_HIST, 4], n_future: [1, 1, T, 4]
         hist_local, fut_local = transform_to_local_frame(n_past, n_future)
 
-        ctrl = waypoints_to_control(hist_local, fut_local)
+        ctrl = traj4d_to_action(ACTION_SPACE, hist_local, fut_local)
         ctrl = torch.nan_to_num(ctrl, nan=0.0)
 
-        recon_local = control_to_waypoints(ctrl, hist_local)
+        recon_local = action_to_traj4d(ACTION_SPACE, hist_local, ctrl)
 
         ref_pos = n_past[..., -1, :2]  # [1, 1, 2]
         ref_cos = n_past[..., -1, 2:3]  # [1, 1, 1]
@@ -348,14 +349,16 @@ def _run_standalone(path_list_json: str):
         print(f"\nSample {idx}: {sample['path']}")
 
         # --- Ego roundtrip ---
-        ego_ctrl = waypoints_to_control(
+        ego_ctrl = traj4d_to_action(
+            ACTION_SPACE,
             sample["ego_past"],
             sample["ego_future"],
             t0_states={"v": torch.tensor([sample["ego_v0"]])},
         )
-        ego_recon = control_to_waypoints(
-            ego_ctrl,
+        ego_recon = action_to_traj4d(
+            ACTION_SPACE,
             sample["ego_past"],
+            ego_ctrl,
             t0_states={"v": torch.tensor([sample["ego_v0"]])},
         )
         ego_err = (sample["ego_future"][0, :, :2] - ego_recon[0, :, :2]).abs()
@@ -401,14 +404,14 @@ def _run_standalone(path_list_json: str):
             )
 
             # Control roundtrip in local frame
-            n_ctrl = waypoints_to_control(hist_local, fut_local)
+            n_ctrl = traj4d_to_action(ACTION_SPACE, hist_local, fut_local)
             n_ctrl = torch.nan_to_num(n_ctrl, nan=0.0)
 
             if n_ctrl.isnan().any() or n_ctrl.isinf().any():
                 print(f"  Neighbor {ni}: ctrl has NaN/Inf -- skip")
                 continue
 
-            recon_local = control_to_waypoints(n_ctrl, hist_local)
+            recon_local = action_to_traj4d(ACTION_SPACE, hist_local, n_ctrl)
 
             # Back to ego frame
             ref_pos = ni_past[..., -1, :2]
