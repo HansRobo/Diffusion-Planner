@@ -29,7 +29,7 @@ def _random_scene(rng: np.random.Generator, n_nb: int, T: int) -> dict[str, torc
         nf[i, :, 3] = np.sin(yaw)
     return {
         "neighbor_agents_future": torch.from_numpy(nf[None]),
-        "neighbor_agents_past": torch.zeros(1, max(n_nb, 1), 3, 11),
+        "neighbor_agents_past": torch.zeros(1, max(n_nb, 1), 3, 12),
         "ego_shape": torch.tensor([[3.0, 4.5, 2.0]], dtype=torch.float32),
     }
 

@@ -67,7 +67,7 @@ def test_synthetic_injector_matches_batch_width(width):
     )
     B, Pn = 2, 8
     batch = {
-        "neighbor_agents_past": torch.zeros(B, Pn, 31, 11),
+        "neighbor_agents_past": torch.zeros(B, Pn, 31, 12),
         "neighbor_agents_future": torch.zeros(B, Pn, 80, width),
         "ego_agent_future": torch.zeros(B, 80, 3),
     }
@@ -90,7 +90,7 @@ def test_synthetic_injector_rejects_bad_width():
         pedestrian_prob=0.0, bicycle_prob=0.0, keep_clear_radius=3.0, straight_line=False
     )
     batch = {
-        "neighbor_agents_past": torch.zeros(1, 4, 31, 11),
+        "neighbor_agents_past": torch.zeros(1, 4, 31, 12),
         "neighbor_agents_future": torch.zeros(1, 4, 80, 5),
         "ego_agent_future": torch.zeros(1, 80, 3),
     }
@@ -105,7 +105,7 @@ def _augmentation_inputs():
         "ego_current_state": torch.zeros(B, 10),
         "ego_agent_past": torch.zeros(B, 31, 4),
         "ego_agent_future": torch.zeros(B, 80, 3),
-        "neighbor_agents_past": torch.zeros(B, 4, 31, 11),
+        "neighbor_agents_past": torch.zeros(B, 4, 31, 12),
         "lanes": torch.zeros(B, 10, 20, 13),
         "route_lanes": torch.zeros(B, 5, 20, 13),
         "line_strings": torch.zeros(B, 6, 20, 4),

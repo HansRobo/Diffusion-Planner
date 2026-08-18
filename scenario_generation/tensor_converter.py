@@ -161,7 +161,7 @@ def _build_neighbor_agents_past(
     ego_heading: float,
     num_neighbors: int = _MAX_NUM_NEIGHBORS,
 ) -> np.ndarray:
-    """Build neighbor_agents_past: [1, num_neighbors, INPUT_T+1, 11].
+    """Build neighbor_agents_past: [1, num_neighbors, INPUT_T+1, 12].
 
     Neighbors sorted by distance from ego (closest first). ``num_neighbors``
     defaults to ``_MAX_NUM_NEIGHBORS`` (the model's neighbor slot count); pass
@@ -169,7 +169,7 @@ def _build_neighbor_agents_past(
     neighbor dimension.
     """
     T_needed = _INPUT_T + 1
-    out = np.zeros((1, num_neighbors, T_needed, 11), dtype=np.float32)
+    out = np.zeros((1, num_neighbors, T_needed, 12), dtype=np.float32)
 
     # Collect non-ego agents with their distance to ego
     neighbors_with_dist: list[tuple[float, Agent]] = []
@@ -220,16 +220,18 @@ def _build_neighbor_agents_past(
         vel = transform_directions(vel_world_canonical, R)
 
         # Agent type one-hot
-        type_vec = np.zeros(3, dtype=np.float32)
+        type_vec = np.zeros(4, dtype=np.float32)
         if agent.agent_type == AgentType.VEHICLE:
             type_vec[0] = 1.0
         elif agent.agent_type == AgentType.PEDESTRIAN:
             type_vec[1] = 1.0
         elif agent.agent_type == AgentType.BICYCLE:
             type_vec[2] = 1.0
+        elif agent.agent_type == AgentType.UNKNOWN:
+            type_vec[3] = 1.0
 
-        # Build per-timestep features: [x, y, cos_h, sin_h, vx, vy, width, length, type(3)]
-        feats = np.zeros((T_agent, 11), dtype=np.float32)
+        # Build per-timestep features: [x, y, cos_h, sin_h, vx, vy, width, length, type(4)]
+        feats = np.zeros((T_agent, 12), dtype=np.float32)
         feats[:, 0] = xy_ego[:, 0]
         feats[:, 1] = xy_ego[:, 1]
         feats[:, 2] = cos_h
@@ -238,7 +240,7 @@ def _build_neighbor_agents_past(
         feats[:, 5] = vel[:, 1]
         feats[:, 6] = agent.width
         feats[:, 7] = agent.length
-        feats[:, 8:11] = type_vec
+        feats[:, 8:12] = type_vec
 
         # Zero out timesteps that were missing in the original (pre-transform) trajectory
         orig_invalid = np.sum(np.abs(traj[:, :2]), axis=-1) == 0
@@ -815,7 +817,7 @@ def dump_step_npz(
     # that compute_reward_batch / compute_static_collision_penalty expect.
     # Moving-agent futures are filled post-hoc by _backfill_neighbor_futures
     # in replay.py after the full sim completes.
-    nb_past = data["neighbor_agents_past"]  # (N, 31, 11)
+    nb_past = data["neighbor_agents_past"]  # (N, 31, 12)
     for i in range(min(predicted_neighbor_num, nb_past.shape[0])):
         cur = nb_past[i, -1]
         if np.all(cur[:2] == 0):

@@ -41,6 +41,8 @@ def _agent_color(agent_type: AgentType, neighbor_idx: int) -> str:
         return "#ff6699"
     if agent_type == AgentType.BICYCLE:
         return "#66ccff"
+    if agent_type == AgentType.UNKNOWN:
+        return _UNFOCUSED_COLOR
     return _NEIGHBOR_COLORS[neighbor_idx % len(_NEIGHBOR_COLORS)]
 
 

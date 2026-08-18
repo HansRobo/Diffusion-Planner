@@ -18,6 +18,7 @@ class AgentType(Enum):
     VEHICLE = "vehicle"
     PEDESTRIAN = "pedestrian"
     BICYCLE = "bicycle"
+    UNKNOWN = "unknown"
 
 
 @dataclass

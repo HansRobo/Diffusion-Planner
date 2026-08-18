@@ -28,12 +28,14 @@ MOVER_STEP_M = 0.5  # shown +x per frame (0.1 s) -> ~5 m/s in the rebuilt histor
 
 
 def _nbr_row(x, y, recorded_vx):
-    """One neighbor_agents_past row: [x, y, cos, sin, vx, vy, width, length, veh, ped, bike].
+    """One neighbor_agents_past row: [x, y, cos, sin, vx, vy, width, length, veh, ped, bike, unk].
 
     ``recorded_vx`` is the (ignored-by-sim-mode) recorded velocity column — set it large for the
     frozen track to prove the tracker does NOT read it.
     """
-    return np.array([x, y, 1.0, 0.0, recorded_vx, 0.0, 2.0, 4.5, 1.0, 0.0, 0.0], dtype=np.float32)
+    return np.array(
+        [x, y, 1.0, 0.0, recorded_vx, 0.0, 2.0, 4.5, 1.0, 0.0, 0.0, 0.0], dtype=np.float32
+    )
 
 
 def _make_neighbor_route(tmp_path):
@@ -44,7 +46,7 @@ def _make_neighbor_route(tmp_path):
     """
     paths = []
     for i in range(N_FRAMES):
-        nb = np.zeros((320, 31, 11), dtype=np.float32)
+        nb = np.zeros((320, 31, 12), dtype=np.float32)
         frozen_row = _nbr_row(10.0, 0.0, recorded_vx=11.0)  # held still, "moving" per recorded vx
         mover_row = _nbr_row(10.0 + MOVER_STEP_M * i, 3.0, recorded_vx=0.0)  # moves, recorded vx 0
         nb[0, :, :] = (
@@ -95,7 +97,7 @@ def test_sim_neighbor_velocity_from_shown_motion(tmp_path):
     ego = np.array([0.0, 0.0, 0.0])  # static ego at origin
     for t in range(6, 20):
         trk.step(t, ego[:2])
-    out, slot_uuids, _ = trk.build(ego)  # (1, 320, PAST, 11)
+    out, slot_uuids, _ = trk.build(ego)  # (1, 320, PAST, 12)
 
     assert FROZEN in slot_uuids and MOVER in slot_uuids
     nb = out[0]
@@ -118,7 +120,7 @@ def test_sim_neighbor_keeps_single_frame_track(tmp_path):
     blip_frame = 3
     paths = []
     for i in range(6):
-        nb = np.zeros((320, 31, 11), dtype=np.float32)
+        nb = np.zeros((320, 31, 12), dtype=np.float32)
         ids = [""] * 320
         if i == blip_frame:  # the neighbor appears in exactly one frame
             nb[0, :, :] = _nbr_row(8.0, 1.0, recorded_vx=0.0)

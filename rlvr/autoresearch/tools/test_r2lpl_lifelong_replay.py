@@ -1783,7 +1783,7 @@ def test_verify_credit_rollout_saves_first_realized_event_window(monkeypatch, tm
             return None
         return (
             {"ego_shape": np.ones((1, 3), dtype=np.float32), "k": s.k},
-            np.zeros((320, 11), dtype=np.float32),
+            np.zeros((320, 12), dtype=np.float32),
             s.start + s.k,
             None,
             None,
@@ -1946,7 +1946,7 @@ def test_direct_danger_window_saves_realized_moving_collision(monkeypatch, tmp_p
             return None
         return (
             {"ego_shape": np.ones((1, 3), dtype=np.float32), "k": s.k},
-            np.zeros((320, 11), dtype=np.float32),
+            np.zeros((320, 12), dtype=np.float32),
             s.start + s.k,
             None,
             None,
@@ -2101,7 +2101,7 @@ def test_direct_danger_window_saves_raw_collision_when_scorers_miss(monkeypatch,
             return None
         return (
             {"ego_shape": np.ones((1, 3), dtype=np.float32), "k": s.k},
-            np.zeros((320, 11), dtype=np.float32),
+            np.zeros((320, 12), dtype=np.float32),
             s.start + s.k,
             None,
             None,
@@ -2190,9 +2190,9 @@ def test_dump_full_credit_segment_uses_step_key_for_verified_frame(monkeypatch, 
 
     out_dir = tmp_path / "credit_segment"
     buf = [
-        (5, 20, {}, None, np.zeros((0, 11), dtype=np.float32), np.zeros(3, dtype=np.float32)),
-        (6, 21, {}, None, np.zeros((0, 11), dtype=np.float32), np.zeros(3, dtype=np.float32)),
-        (7, 22, {}, None, np.zeros((0, 11), dtype=np.float32), np.zeros(3, dtype=np.float32)),
+        (5, 20, {}, None, np.zeros((0, 12), dtype=np.float32), np.zeros(3, dtype=np.float32)),
+        (6, 21, {}, None, np.zeros((0, 12), dtype=np.float32), np.zeros(3, dtype=np.float32)),
+        (7, 22, {}, None, np.zeros((0, 12), dtype=np.float32), np.zeros(3, dtype=np.float32)),
     ]
 
     manifest = reproducer_rollout._dump_full_credit_segment(
@@ -2529,7 +2529,7 @@ def test_seed_state_tracker_mode_selects_mpc():
             self._npz = {
                 "ego_agent_past": np.zeros((31, 3), dtype=np.float32),
                 "ego_shape": np.array([4.76, 7.24, 2.29], dtype=np.float32),
-                "neighbor_agents_past": np.zeros((320, 31, 11), dtype=np.float32),
+                "neighbor_agents_past": np.zeros((320, 31, 12), dtype=np.float32),
                 "turn_indicators": np.zeros((31,), dtype=np.int64),
             }
 
@@ -2756,7 +2756,7 @@ def test_realized_event_scorer_supports_expert_disagreement(tmp_path):
     )
     np_dict = {
         "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
-        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 12), dtype=np.float32),
         "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
     }
     # Straight route along +x used as the arc-length reference.
@@ -2804,7 +2804,7 @@ def test_realized_event_scorer_realized_lag_flags_on_sustained_streak(tmp_path):
     )
     np_dict = {
         "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
-        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 12), dtype=np.float32),
         "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
     }
     ref_polyline_world = np.stack([np.linspace(0.0, 100.0, 101), np.zeros(101)], axis=1).astype(
@@ -2886,7 +2886,7 @@ def test_realized_event_scorer_expert_disagreement_requires_inputs(tmp_path):
     )
     np_dict = {
         "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
-        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 12), dtype=np.float32),
         "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
     }
     with pytest.raises(ValueError, match="mining path must pass them"):
@@ -2961,7 +2961,7 @@ def test_realized_event_scorer_uses_same_moving_collision_threshold(tmp_path):
     )
     np_dict = {
         "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
-        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 12), dtype=np.float32),
         "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
     }
     # Collision is checked at the neighbor's CURRENT pose (last past frame),
@@ -3049,7 +3049,7 @@ def test_realized_event_scorer_supports_static_collision(tmp_path):
     )
     np_dict = {
         "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
-        "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+        "neighbor_agents_past": np.zeros((1, 31, 12), dtype=np.float32),
         "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
     }
     np_dict["neighbor_agents_past"][0, -1, 0] = 3.0
@@ -3076,7 +3076,7 @@ def test_filtered_npz_payload_keeps_only_training_fields():
     payload = _filtered_npz_payload(
         {
             "ego_agent_future": np.zeros((80, 4), dtype=np.float32),
-            "neighbor_agents_past": np.zeros((320, 31, 11), dtype=np.float32),
+            "neighbor_agents_past": np.zeros((320, 31, 12), dtype=np.float32),
             "version": np.array(1, dtype=np.uint32),
             "origin": np.asarray("map"),
             "token": np.asarray("abc"),
@@ -3109,7 +3109,7 @@ def test_build_repaired_targets_preserves_simulated_context(monkeypatch, tmp_pat
     source.parent.mkdir()
     sim_ego_past = np.arange(31 * 3, dtype=np.float32).reshape(31, 3) + 10.0
     sim_current = np.linspace(0.0, 9.0, 10, dtype=np.float32) + 20.0
-    sim_neighbors = np.full((2, 31, 11), 3.5, dtype=np.float32)
+    sim_neighbors = np.full((2, 31, 12), 3.5, dtype=np.float32)
     sim_ego_shape = np.array([4.99, 10.74, 2.56], dtype=np.float32)
     sim_goal_pose = np.array([42.0, 24.0, 0.5], dtype=np.float32)
     sim_lanes = np.full((70, 20, 13), 1.25, dtype=np.float32)
@@ -4032,7 +4032,7 @@ def _patience_npz(path, *, red_route: bool, v_profile: np.ndarray) -> None:
     np.savez(
         path,
         route_lanes=route,
-        neighbor_agents_past=np.zeros((4, 31, 11), dtype=np.float32),
+        neighbor_agents_past=np.zeros((4, 31, 12), dtype=np.float32),
         ego_agent_future=fut,
     )
 
@@ -5268,7 +5268,7 @@ def test_realized_reward_scorer_per_batch_accumulate_and_teleport_skip(monkeypat
         def _np_dict():
             return {
                 "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
-                "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+                "neighbor_agents_past": np.zeros((1, 31, 12), dtype=np.float32),
                 "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
                 "ego_agent_past": np.zeros((21, 3), dtype=np.float32),
             }
@@ -5318,7 +5318,7 @@ def test_realized_reward_scorer_buffers_cleared_after_finalize(monkeypatch):
         )
         nd = {
             "ego_shape": np.array([2.79, 4.34, 1.70], dtype=np.float32),
-            "neighbor_agents_past": np.zeros((1, 31, 11), dtype=np.float32),
+            "neighbor_agents_past": np.zeros((1, 31, 12), dtype=np.float32),
             "neighbor_agents_future": np.zeros((1, 80, 4), dtype=np.float32),
             "ego_agent_past": np.zeros((21, 3), dtype=np.float32),
         }

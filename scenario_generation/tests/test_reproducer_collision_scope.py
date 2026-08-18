@@ -15,8 +15,8 @@ EGO_SHAPE = np.array([4.76, 7.24, 2.29], dtype=np.float32)  # wheelbase, length,
 
 
 def _neighbors(rows: list[list[float]]) -> np.ndarray:
-    """Build a (N, 11) live-ego-frame neighbor array [x,y,cos,sin,vx,vy,w,l,oh3]."""
-    a = np.zeros((len(rows), 11), dtype=np.float32)
+    """Build a (N, 12) live-ego-frame neighbor array [x,y,cos,sin,vx,vy,w,l,oh4]."""
+    a = np.zeros((len(rows), 12), dtype=np.float32)
     for i, r in enumerate(rows):
         a[i, :8] = r
         a[i, 8] = 1.0  # vehicle one-hot
@@ -53,12 +53,12 @@ def test_collision_counted_even_when_ego_stopped():
 
 
 def test_no_valid_neighbors_returns_inf():
-    clr, collision, m = score_object_step(np.zeros((3, 11), np.float32), EGO_SHAPE, "cpu")
+    clr, collision, m = score_object_step(np.zeros((3, 12), np.float32), EGO_SHAPE, "cpu")
     assert m == 0 and collision is False and clr == float("inf")
 
 
 def _rand_segment(rng, k):
-    nb = np.zeros((320, 11), np.float32)
+    nb = np.zeros((320, 12), np.float32)
     if k:
         idx = rng.choice(320, k, replace=False)
         nb[idx, 0] = rng.uniform(-15, 15, k)

@@ -76,7 +76,7 @@ def _has_stopped_neighbor_past(
     """Cheap pre-filter: does the scene contain at least one neighbour that
     was essentially stationary across its past?
 
-    ``nb_past`` layout: (N_nb, T_past, 11) with
+    ``nb_past`` layout: (N_nb, T_past, D) [D=11 legacy or 12] with
     [x, y, cos_h, sin_h, vx, vy, width, length, type(3)].
     """
     valid = np.abs(nb_past[:, -1, :2]).sum(axis=-1) > 1e-6

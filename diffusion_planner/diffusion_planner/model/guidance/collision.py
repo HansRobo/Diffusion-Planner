@@ -165,7 +165,7 @@ class CollisionGuidance(BaseGuidance):
             return torch.zeros(trajectory.shape[0], device=trajectory.device)
 
         B, T, D = trajectory.shape
-        neighbors_past = inputs["neighbor_agents_past"]  # [B, Pn_max, hist, 11]
+        neighbors_past = inputs["neighbor_agents_past"]  # [B, Pn_max, hist, 12]
         Pn = neighbors_past.shape[1]
 
         # Reconstruct mask: True where neighbour slot is empty (all zeros at current step).

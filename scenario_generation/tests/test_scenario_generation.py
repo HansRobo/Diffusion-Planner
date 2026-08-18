@@ -40,7 +40,7 @@ def _make_synthetic_npz(tmp_path: Path) -> Path:
         "ego_agent_past": np.zeros((T_past, 3), dtype=np.float32),
         "ego_current_state": np.zeros(10, dtype=np.float32),
         "ego_agent_future": np.zeros((T_future, 3), dtype=np.float32),
-        "neighbor_agents_past": np.zeros((N_nb, T_past, 11), dtype=np.float32),
+        "neighbor_agents_past": np.zeros((N_nb, T_past, 12), dtype=np.float32),
         "neighbor_agents_future": np.zeros((N_nb, T_future, 3), dtype=np.float32),
         "static_objects": np.zeros((5, 10), dtype=np.float32),
         "lanes": np.zeros((140, 20, 33), dtype=np.float32),
@@ -327,7 +327,7 @@ class TestTensorConverter:
         ego_xy = ego.current_position.astype(np.float64)
 
         nb = _build_neighbor_agents_past(scene, "ego", R, ego_xy, ego.current_heading)
-        assert nb.shape == (1, _MAX_NUM_NEIGHBORS, 31, 11)
+        assert nb.shape == (1, _MAX_NUM_NEIGHBORS, 31, 12)
 
         # A smaller explicit count sizes the slot dim accordingly.
         nb16 = _build_neighbor_agents_past(
@@ -338,7 +338,7 @@ class TestTensorConverter:
             ego.current_heading,
             num_neighbors=16,
         )
-        assert nb16.shape == (1, 16, 31, 11)
+        assert nb16.shape == (1, 16, 31, 12)
 
         # Slot 0 should be closest neighbor (neighbor_0 at ~(5,3), distance ~5.83)
         # Slot 1 should be neighbor_1 (at (10,-2), distance ~10.2)

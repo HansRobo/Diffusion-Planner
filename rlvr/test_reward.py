@@ -692,7 +692,7 @@ def test_survival_reward_late_crash_beats_early():
     npc_early[:, :, :, 0] = 5.0
     npc_early[:, :, :, 2] = 1.0
     data_early["neighbor_agents_future"] = npc_early
-    data_early["neighbor_agents_past"] = torch.zeros(1, 1, 21, 11)
+    data_early["neighbor_agents_past"] = torch.zeros(1, 1, 21, 12)
     data_early["neighbor_agents_past"][:, :, -1, 6] = 2.0
     data_early["neighbor_agents_past"][:, :, -1, 7] = 4.5
     data_early["neighbor_agents_past"][:, :, :, 0] = 5.0
@@ -704,7 +704,7 @@ def test_survival_reward_late_crash_beats_early():
     npc_late[:, :, :, 0] = 20.0
     npc_late[:, :, :, 2] = 1.0
     data_late["neighbor_agents_future"] = npc_late
-    data_late["neighbor_agents_past"] = torch.zeros(1, 1, 21, 11)
+    data_late["neighbor_agents_past"] = torch.zeros(1, 1, 21, 12)
     data_late["neighbor_agents_past"][:, :, -1, 6] = 2.0
     data_late["neighbor_agents_past"][:, :, -1, 7] = 4.5
     data_late["neighbor_agents_past"][:, :, :, 0] = 20.0

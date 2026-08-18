@@ -18,7 +18,7 @@ the two GT paths happen to coincide in space-time -- which a large enough DB mak
 "Situation is ignored": the pasted agent keeps its own motion regardless of the new scene's map.
 
 On-disk DB layout (single ``.npz``):
-    past:   [M, INPUT_T + 1, 11] float32  - neighbor past/current states (raw npz format)
+    past:   [M, INPUT_T + 1, 12] float32  - neighbor past/current states (raw npz format)
     future: [M, OUTPUT_T,    4] float32  - neighbor future (x, y, cos, sin); legacy 3-col
             source scenes are widened at scan time, and injection reconciles the DB width
             with the batch width either way (``_match_future_width``).
@@ -48,11 +48,12 @@ DEFAULT_NEIGHBOR_DB_PATH = (
 # Column indices within a neighbor past row (see neighbor preprocessing / loss.py).
 _PAST_X = 0
 _PAST_Y = 1
-# One-hot agent type occupies columns 8..10 = [vehicle, pedestrian, bicycle]
+# One-hot agent type occupies columns 8..11 = [vehicle, pedestrian, bicycle, unknown]
 # (matches synthetic_neighbors._TYPE_BASE).
 _TYPE_BASE = 8
 _TYPE_PEDESTRIAN = 1
 _TYPE_BICYCLE = 2
+_TYPE_UNKNOWN = 3
 
 
 def parse_args():
@@ -125,6 +126,22 @@ def _match_future_width(future: torch.Tensor, target_cols: int) -> torch.Tensor:
     return out
 
 
+def _match_past_width(past: torch.Tensor, target_cols: int) -> torch.Tensor:
+    """Widen a legacy 11-col DB past tensor to 12 (append an all-zero Unknown column).
+
+    A zero 4th column is exactly correct for legacy data: it has no Unknown label at all, so
+    the original 3-way one-hot (cols 8..10) is left untouched and still argmaxes correctly.
+    Narrowing (12 -> 11) is not supported -- there is no lossless inverse once an agent has
+    actually been labeled Unknown.
+    """
+    cols = past.shape[-1]
+    if cols == target_cols:
+        return past
+    if cols == 11 and target_cols == 12:
+        return torch.cat([past, torch.zeros_like(past[..., :1])], dim=-1)
+    raise ValueError(f"cannot reconcile past widths {cols} -> {target_cols}")
+
+
 def _valid_slot_mask(neighbor_past: np.ndarray) -> np.ndarray:
     """[Pn] bool mask: a slot is valid if its past track is not all zeros (padding)."""
     return np.any(neighbor_past != 0.0, axis=(1, 2))
@@ -145,13 +162,13 @@ def _current_distance(neighbor_past: np.ndarray) -> np.ndarray:
 def _scan_scene(path: str, max_per_scene: int, min_future_steps: int):
     """Return the closest valid+full-future neighbor patterns of one scene.
 
-    Returns ``(past, future)`` with shapes ``[k, 31, 11]`` / ``[k, 80, 4]`` (``k`` up to
+    Returns ``(past, future)`` with shapes ``[k, 31, 12]`` / ``[k, 80, 4]`` (``k`` up to
     ``max_per_scene``), or ``None`` if the scene has no usable neighbor. Futures are
     stored 4-col ``[x, y, cos, sin]``; legacy 3-col source scenes are widened here so
     one DB never mixes widths regardless of the source corpus.
     """
     scene = np.load(path, allow_pickle=True)
-    neighbor_past = np.asarray(scene["neighbor_agents_past"], dtype=np.float32)  # [Pn, 31, 11]
+    neighbor_past = np.asarray(scene["neighbor_agents_past"], dtype=np.float32)  # [Pn, 31, 12]
     neighbor_future = np.asarray(scene["neighbor_agents_future"], dtype=np.float32)
     if neighbor_future.shape[-1] == 3:
         pad = np.abs(neighbor_future[..., :2]).sum(-1) == 0
@@ -226,7 +243,7 @@ def build_neighbor_db(
     if num_patterns == 0:
         raise RuntimeError("No usable neighbor patterns found while building the DB.")
 
-    past_arr = np.concatenate(past_patterns, axis=0)  # [M, 31, 11]
+    past_arr = np.concatenate(past_patterns, axis=0)  # [M, 31, 12]
     future_arr = np.concatenate(future_patterns, axis=0)  # [M, 80, 4]
 
     if past_arr.shape[0] > max_patterns:
@@ -251,7 +268,8 @@ class NeighborPatternDB:
         search_subsample: int,
     ):
         data = np.load(db_path, allow_pickle=True)
-        self.past = torch.from_numpy(np.asarray(data["past"], dtype=np.float32))  # [M, 31, 11]
+        self.past = torch.from_numpy(np.asarray(data["past"], dtype=np.float32))  # [M, 31, 12]
+        self.past = _match_past_width(self.past, 12)  # widen legacy 11-col DBs in place
         self.future = torch.from_numpy(
             np.asarray(data["future"], dtype=np.float32)
         )  # [M, 80, 4] (legacy DBs: [M, 80, 3]; reconciled at inject)
@@ -261,12 +279,15 @@ class NeighborPatternDB:
         self.future_xy = self.future[:, :, :2].contiguous()  # [M, 80, 2]
         self.future_valid = self.future_xy.abs().sum(dim=-1) > 1e-6  # [M, 80]
 
-        # Precompute past xy + validity + agent type. Pedestrians/bicycles are only injected when
-        # their *past* track overlaps the ego's future path (see inject); vehicles are unrestricted.
+        # Precompute past xy + validity + agent type. Pedestrians/bicycles/Unknown are only
+        # injected when their *past* track overlaps the ego's future path (see inject); vehicles
+        # are unrestricted.
         self.past_xy = self.past[:, :, :2].contiguous()  # [M, 31, 2]
         self.past_valid = self.past_xy.abs().sum(dim=-1) > 1e-6  # [M, 31]
-        type_idx = self.past[:, -1, _TYPE_BASE : _TYPE_BASE + 3].argmax(dim=-1)  # [M]
-        self.is_vru = (type_idx == _TYPE_PEDESTRIAN) | (type_idx == _TYPE_BICYCLE)  # [M]
+        type_idx = self.past[:, -1, _TYPE_BASE : _TYPE_BASE + 4].argmax(dim=-1)  # [M]
+        self.is_vru = (
+            (type_idx == _TYPE_PEDESTRIAN) | (type_idx == _TYPE_BICYCLE) | (type_idx == _TYPE_UNKNOWN)
+        )  # [M]
 
         # Closest approach of each track to the origin (= the ego's t=0 pose), over the current
         # pose and every valid future step. A track that ever comes within keep_clear_radius of
@@ -312,7 +333,7 @@ class NeighborPatternDB:
         Must be called on a *raw* batch (before heading_to_cos_sin / normalization). The mask of
         slots actually written is stored on ``self.last_injected_mask`` ([B, Pn]).
         """
-        neighbor_past = inputs["neighbor_agents_past"]  # [B, Pn, 31, 11]
+        neighbor_past = inputs["neighbor_agents_past"]  # [B, Pn, 31, 12]
         neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3 or 4]
         ego_future = inputs["ego_agent_future"]  # [B, 80, 3] (x, y, heading)
         device = neighbor_past.device

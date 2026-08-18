@@ -434,7 +434,7 @@ def test_validate_canonical_scene_rejects_scalar_fields():
 
 def test_validate_canonical_scene_rejects_wrong_fixed_axis():
     d = _valid_canonical_scene()
-    d["neighbor_agents_past"] = np.zeros((100, 31, 11), np.float32)  # slots != 320
+    d["neighbor_agents_past"] = np.zeros((100, 31, 12), np.float32)  # slots != 320
     with pytest.raises(ValueError, match="neighbor_agents_past"):
         sf.validate_canonical_scene(d, ctx="slots")
     d = _valid_canonical_scene()

@@ -45,9 +45,17 @@ class ObservationNormalizer:
         ndt = {}
         for k, v in data.items():
             if k not in ["ego", "neighbor"]:
+                mean, std = v["mean"], v["std"]
+                if k == "neighbor_agents_past" and len(mean) == 11:
+                    # Real normalization.json files predate the Unknown class and stay
+                    # 11-wide (the external C++ generator that would emit 12-wide stats
+                    # hasn't been updated); pad with a pass-through (mean=0, std=1) entry
+                    # for the new Unknown one-hot column rather than editing every file.
+                    mean = [*mean, 0.0]
+                    std = [*std, 1.0]
                 ndt[k] = {
-                    "mean": torch.tensor(v["mean"], dtype=torch.float32),
-                    "std": torch.tensor(v["std"], dtype=torch.float32),
+                    "mean": torch.tensor(mean, dtype=torch.float32),
+                    "std": torch.tensor(std, dtype=torch.float32),
                 }
         return cls(ndt)
 

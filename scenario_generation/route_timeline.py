@@ -232,7 +232,10 @@ class RouteTimeline:
         return data
 
     def neighbor_last(self, idx: int) -> np.ndarray:
-        """Load ONLY ``neighbor_agents_past[:, -1]`` (current neighbor row, (320, 11)) for a frame.
+        """Load ONLY ``neighbor_agents_past[:, -1]`` (current neighbor row, (320, D); D=11
+        legacy or 12) for a frame, straight from the on-disk NPZ -- unlike the model-input
+        builders, this does NOT widen legacy 11-col data; callers that feed the model must
+        pad it themselves (see ``_npz_to_model_base`` / ``_build_nbr_world_tracks``).
 
         The track-build scans EVERY frame of the route and needs only this slice — not the
         lanes/routes/polygons/etc. that ``npz()`` decompresses. ``np.load`` is lazy per-key, so

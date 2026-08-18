@@ -35,7 +35,7 @@ def get_args(args_list=None):
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
     parser.add_argument("--ego_prediction_horizon", type=int, default=OUTPUT_T)
 
-    parser.add_argument("--agent_state_dim", type=int, help="past state dim for agents", default=11)
+    parser.add_argument("--agent_state_dim", type=int, help="past state dim for agents", default=12)
     parser.add_argument("--agent_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--static_objects_state_dim", type=int, default=10)
@@ -73,6 +73,13 @@ def get_args(args_list=None):
         default=True,
         type=boolean,
         help="whether to apply smoothing to future trajectory",
+    )
+    parser.add_argument(
+        "--unknown_class_rename_prob",
+        type=float,
+        default=0.0,
+        help="per-agent prob of relabeling a valid neighbor's type one-hot to Unknown during "
+        "training (class-agnostic; 0.0 = disabled)",
     )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=8, type=int)
@@ -126,6 +133,12 @@ def get_args(args_list=None):
         type=float,
         default=0.5,
         help="per-side neighbor box inflation [m] for bicycles",
+    )
+    parser.add_argument(
+        "--neighbor_collision_margin_unknown",
+        type=float,
+        default=1.0,
+        help="per-side neighbor box inflation [m] for Unknown-typed agents",
     )
 
     parser.add_argument(

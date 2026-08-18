@@ -225,7 +225,7 @@ class TestBatchInferenceProfile:
             dicts.append(
                 {
                     "ego_agent_past": torch.randn(1, 31, 4),
-                    "neighbor_agents_past": torch.randn(1, 32, 31, 11),
+                    "neighbor_agents_past": torch.randn(1, 32, 31, 12),
                     "lanes": torch.randn(1, 140, 20, 33),
                     "route_lanes": torch.randn(1, 25, 20, 33),
                     "polygons": torch.randn(1, 10, 40, 3),

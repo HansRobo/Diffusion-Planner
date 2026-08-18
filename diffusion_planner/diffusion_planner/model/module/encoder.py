@@ -174,7 +174,7 @@ class Encoder(nn.Module):
         )  # Only keep the current + first 5 steps of ego history
 
         # agents
-        neighbors = inputs["neighbor_agents_past"].clone()  # (B, N=32, T=21, D=11)
+        neighbors = inputs["neighbor_agents_past"].clone()  # (B, N=32, T=21, D=12)
         neighbors = torch.cat(
             [torch.zeros_like(neighbors[:, :, :-6]), neighbors[:, :, -6:]],
             dim=2,
@@ -403,7 +403,7 @@ class NeighborEncoder(nn.Module):
 
         self._hidden_dim = hidden_dim
 
-        self.type_emb = nn.Linear(3, channels_mlp_dim)
+        self.type_emb = nn.Linear(4, channels_mlp_dim)
 
         self.channel_pre_project = Mlp(
             in_features=8 + 1,
@@ -435,7 +435,7 @@ class NeighborEncoder(nn.Module):
 
     def forward(self, x):
         """
-        x: B, P, V, D (x, y, cos, sin, vx, vy, w, l, type(3))
+        x: B, P, V, D (x, y, cos, sin, vx, vy, w, l, type(4))
         """
         neighbor_type = x[:, :, -1, 8:]
         x = x[..., :8]

@@ -102,7 +102,7 @@ def _make_scene_data(B=1, P=5, T=80, device="cpu"):
     Pn = P - 1
     data = {
         "ego_current_state": torch.randn(B, 10, device=device),
-        "neighbor_agents_past": torch.randn(B, Pn, 31, 11, device=device),
+        "neighbor_agents_past": torch.randn(B, Pn, 31, 12, device=device),
         "neighbor_agents_future": torch.randn(B, Pn, T, 3, device=device),
         "ego_agent_future": torch.randn(B, T, 4, device=device),
     }

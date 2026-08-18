@@ -20,7 +20,7 @@ def _anchors_that_would_move_everything(uuids: list[str]) -> dict:
 
 
 def _np_dict(n_slots: int = 4, *, zeroed: bool) -> dict:
-    nb = np.zeros((1, n_slots, 31, 11), dtype=np.float64)
+    nb = np.zeros((1, n_slots, 31, 12), dtype=np.float64)
     if not zeroed:
         # a non-zero among the first six columns is what makes a row "present"
         nb[0, :, -1, 0] = 3.0

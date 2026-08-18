@@ -33,7 +33,7 @@ from diffusion_planner.dimensions import INPUT_T, OUTPUT_T
 
 # Neighbor past row layout (see loss.py / visualize_input.py).
 _X, _Y, _COS, _SIN, _VX, _VY, _WIDTH, _LENGTH = 0, 1, 2, 3, 4, 5, 6, 7
-_TYPE_BASE = 8  # one-hot [vehicle, pedestrian, bicycle] occupies columns 8..10
+_TYPE_BASE = 8  # one-hot [vehicle, pedestrian, bicycle, unknown] occupies columns 8..11
 
 # Per-type kinematics. ``speed`` is (min, max) m/s, ``accel_max`` is m/s^2, ``idx`` matches the
 # neighbor one-hot ordering [vehicle, pedestrian, bicycle] (cols 8..10). Size is either a fixed
@@ -105,7 +105,7 @@ class SyntheticColliderInjector:
         return torch.rand((), device=device) * (hi - lo) + lo
 
     def _make_neighbor(self, ego_xy, device, future_cols):
-        """Build one (past[31,11], future[80,future_cols]) colliding neighbor for a scene.
+        """Build one (past[31,12], future[80,future_cols]) colliding neighbor for a scene.
 
         ego_xy: [80, 2] ego GT future positions (ego frame, metres).
         future_cols: 3 -> [x, y, heading] (legacy) or 4 -> [x, y, cos, sin] (canonical);
@@ -235,7 +235,7 @@ class SyntheticColliderInjector:
         h_past = heading(past_vel)
         h_fut = heading(fut_vel)
 
-        past = torch.zeros(INPUT_T + 1, 11, device=device)
+        past = torch.zeros(INPUT_T + 1, 12, device=device)
         past[:, _X], past[:, _Y] = past_pos[:, 0], past_pos[:, 1]
         past[:, _COS], past[:, _SIN] = torch.cos(h_past), torch.sin(h_past)
         past[:, _VX], past[:, _VY] = past_vel[:, 0], past_vel[:, 1]
@@ -263,7 +263,7 @@ class SyntheticColliderInjector:
         Call on a *raw* batch before ``heading_to_cos_sin`` / normalization. The boolean mask
         of slots actually written is stored on ``self.last_injected_mask`` ([B, Pn]).
         """
-        neighbor_past = inputs["neighbor_agents_past"]  # [B, Pn, 31, 11]
+        neighbor_past = inputs["neighbor_agents_past"]  # [B, Pn, 31, 12]
         neighbor_future = inputs["neighbor_agents_future"]  # [B, Pn, 80, 3 or 4]
         ego_future = inputs["ego_agent_future"]  # [B, 80, 3] (x, y, heading)
         device = neighbor_past.device

@@ -184,7 +184,7 @@ class RolloutManager:
         if "neighbor_agents_past" in data:
             nb_past = data["neighbor_agents_past"]
             if nb_past.dim() == 4:
-                nb_past_0 = nb_past[0]  # [N_nb, T, 11]
+                nb_past_0 = nb_past[0]  # [N_nb, T, D]; D=11 legacy or 12
             else:
                 nb_past_0 = nb_past
             # width=col6, length=col7
@@ -255,7 +255,7 @@ class RolloutManager:
             if "neighbor_agents_past" in data:
                 nb_data = data["neighbor_agents_past"]
                 if nb_data.dim() == 4:
-                    nb_data = nb_data[0]  # [N_nb, T, 11]
+                    nb_data = nb_data[0]  # [N_nb, T, D]; D=11 legacy or 12
                 nb_prev = nb_data[:, -1, :4].clone()  # [N_nb, 4]
 
                 # Get neighbor position at step t+1 from GT futures

@@ -37,7 +37,7 @@ def _make_scene_data(device: torch.device = torch.device("cpu")) -> dict[str, to
     data["ego_agent_past"] = past
 
     # One neighbor at (10, 3) heading forward, speed 5 m/s
-    nb = torch.zeros(1, 1, 31, 11, device=device)
+    nb = torch.zeros(1, 1, 31, 12, device=device)
     nb[0, 0, -1, 0] = 10.0  # x
     nb[0, 0, -1, 1] = 3.0  # y
     nb[0, 0, -1, 2] = 1.0  # cos(0)

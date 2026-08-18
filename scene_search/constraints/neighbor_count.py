@@ -42,8 +42,8 @@ class NeighborCountConstraint(BaseConstraint):
     def filter(
         self, npz_path: str, npz_data: np.lib.npyio.NpzFile, params: dict, entry: dict | None = None
     ) -> bool:
-        neighbors = npz_data["neighbor_agents_past"]  # (32, 21, 11)
-        current = neighbors[:, -1, :]  # (32, 11) — last timestep (t=0)
+        neighbors = npz_data["neighbor_agents_past"]  # (32, 21, 12)
+        current = neighbors[:, -1, :]  # (32, 12) — last timestep (t=0)
         # A neighbor is active if any of its features are nonzero
         active = np.any(current != 0, axis=-1)  # (32,)
         if not np.any(active):

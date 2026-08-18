@@ -156,7 +156,7 @@ def world_to_ego_frame(
         ec[0, 4:6] = transform_directions(ec[0, 4:6].reshape(1, 2), R).flatten()
         ec[0, 6:8] = transform_directions(ec[0, 6:8].reshape(1, 2), R).flatten()
 
-    # --- neighbor_agents_past [1, N, T, 11] ---
+    # --- neighbor_agents_past [1, N, T, 12] ---
     if "neighbor_agents_past" in out:
         nb = out["neighbor_agents_past"]
         mask = np.sum(np.abs(nb[0, :, :, :6]), axis=-1) == 0
@@ -274,7 +274,7 @@ def world_to_ego_frame_torch(
         ec[:, 4:6] = _rot(ec[:, 4:6].unsqueeze(1), R).squeeze(1)
         ec[:, 6:8] = _rot(ec[:, 6:8].unsqueeze(1), R).squeeze(1)
     if "neighbor_agents_past" in batch:
-        nb = batch["neighbor_agents_past"]  # [B, N, T, 11]
+        nb = batch["neighbor_agents_past"]  # [B, N, T, 12]
         m = nb[:, :, :, :6].abs().sum(-1) == 0  # pre-transform padding mask [B,N,T]
         nb[:, :, :, :2] = _pos(nb[:, :, :, :2], R, t)
         nb[:, :, :, 2:4] = _rot(nb[:, :, :, 2:4], R)

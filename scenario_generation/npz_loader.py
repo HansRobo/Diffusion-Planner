@@ -88,11 +88,13 @@ def _correct_heading_flip(
     return False
 
 
-def _agent_type_from_onehot(is_vehicle: float, is_ped: float, is_bike: float) -> AgentType:
+def _agent_type_from_onehot(
+    is_vehicle: float, is_ped: float, is_bike: float, is_unknown: float
+) -> AgentType:
     """Map one-hot neighbor type flags to AgentType enum."""
-    vals = [is_vehicle, is_ped, is_bike]
+    vals = [is_vehicle, is_ped, is_bike, is_unknown]
     idx = int(np.argmax(vals))
-    return [AgentType.VEHICLE, AgentType.PEDESTRIAN, AgentType.BICYCLE][idx]
+    return [AgentType.VEHICLE, AgentType.PEDESTRIAN, AgentType.BICYCLE, AgentType.UNKNOWN][idx]
 
 
 def _cos_sin_to_heading(cos_h: np.ndarray, sin_h: np.ndarray) -> np.ndarray:
@@ -205,14 +207,15 @@ def _extract_neighbors(data: dict[str, np.ndarray]) -> list[Agent]:
     if nb_past is None:
         return []
 
-    # (N_nb, T, 11) [x, y, cos_h, sin_h, vx, vy, width, length, is_veh, is_ped, is_bike]
-    N_nb, T, _ = nb_past.shape
+    # (N_nb, T, 12) [x, y, cos_h, sin_h, vx, vy, width, length, is_veh, is_ped, is_bike, is_unk]
+    # Legacy 11-col scenes (no Unknown class) are also accepted; is_unk reads as 0 for them.
+    N_nb, T, D = nb_past.shape
 
     nb_future = data.get("neighbor_agents_future")
 
     agents: list[Agent] = []
     for i in range(N_nb):
-        traj_i = nb_past[i]  # (T, 11)
+        traj_i = nb_past[i]  # (T, 12)
 
         # Skip invalid neighbors (all zeros in positional data)
         if np.sum(np.abs(traj_i[:, :6])) == 0:
@@ -240,7 +243,10 @@ def _extract_neighbors(data: dict[str, np.ndarray]) -> list[Agent]:
         if last_valid < 0:
             last_valid = T - 1
         atype = _agent_type_from_onehot(
-            traj_i[last_valid, 8], traj_i[last_valid, 9], traj_i[last_valid, 10]
+            traj_i[last_valid, 8],
+            traj_i[last_valid, 9],
+            traj_i[last_valid, 10],
+            traj_i[last_valid, 11] if D >= 12 else 0.0,
         )
 
         # Current dynamics from last timestep

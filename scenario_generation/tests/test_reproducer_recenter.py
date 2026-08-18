@@ -17,7 +17,7 @@ from scenario_generation.route_timeline import RouteTimeline
 def _one_neighbor_route(tmp_path, p_rec=(5.0, 0.0)):
     """A single recorded frame (ego at world origin, heading 0) with ONE neighbor at
     ``p_rec`` in the recorded-ego frame (heading 0)."""
-    nb = np.zeros((320, 31, 11), np.float32)
+    nb = np.zeros((320, 31, 12), np.float32)
     nb[0, -1, 0:2] = p_rec  # x, y
     nb[0, -1, 2:4] = (1.0, 0.0)  # cos, sin (heading 0)
     nb[0, -1, 4] = 0.5  # vx -> makes the first-6 cols nonzero (valid, not masked)

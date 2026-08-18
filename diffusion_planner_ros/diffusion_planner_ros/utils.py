@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from autoware_perception_msgs.msg import (
+    ObjectClassification,
     TrackedObjectKinematics,
     TrackedObjects,
     TrafficLightGroupArray,
@@ -167,14 +168,15 @@ def tracking_one_step(msg: TrackedObjects, tracked_objs: dict, lost_time_limit: 
     for key in updated_tracked_objs:
         updated_tracked_objs[key].lost_time += 1
     label_map = {
-        0: -1,  # unknown -> skip
-        1: 0,  # car -> vehicle
-        2: 0,  # truck -> vehicle
-        3: 0,  # bus -> vehicle
-        4: 0,  # trailer -> vehicle
-        5: 2,  # motorcycle -> bicycle
-        6: 2,  # bicycle -> bicycle
-        7: 1,  # pedestrian -> pedestrian
+        ObjectClassification.UNKNOWN: -1,  # unknown -> skip
+        ObjectClassification.CAR: 0,  # car -> vehicle
+        ObjectClassification.TRUCK: 0,  # truck -> vehicle
+        ObjectClassification.BUS: 0,  # bus -> vehicle
+        ObjectClassification.TRAILER: 0,  # trailer -> vehicle
+        ObjectClassification.MOTORCYCLE: 2,  # motorcycle -> bicycle
+        ObjectClassification.BICYCLE: 2,  # bicycle -> bicycle
+        ObjectClassification.PEDESTRIAN: 1,  # pedestrian -> pedestrian
+        ObjectClassification.HAZARD: 3,  # hazard -> unknown
     }
     for i in range(len(msg.objects)):
         obj = msg.objects[i]
@@ -184,7 +186,9 @@ def tracking_one_step(msg: TrackedObjects, tracked_objs: dict, lost_time_limit: 
         probability_list = [i.probability for i in classification]
         max_index = np.argmax(probability_list)
         label = label_list[max_index]
-        label_in_model = label_map[label]
+        # Unrecognized labels (e.g. ANIMAL, OVER_DRIVABLE, UNDER_DRIVABLE, or any future
+        # class) are dropped, matching UNKNOWN's behavior, instead of raising a KeyError.
+        label_in_model = label_map.get(label, -1)
         if label_in_model == -1:
             continue
         kinematics = obj.kinematics
@@ -221,7 +225,7 @@ def convert_tracked_objects_to_tensor(
     max_num_objects: int,
     max_timesteps: int,
 ) -> torch.Tensor:
-    neighbor = torch.zeros((1, max_num_objects, max_timesteps, 11))
+    neighbor = torch.zeros((1, max_num_objects, max_timesteps, 12))
 
     # Sort tracked objects by distance from ego
     # It is needed because the neighbors are sorted by distance from ego in the original code
@@ -270,6 +274,7 @@ def convert_tracked_objects_to_tensor(
             neighbor[0, i, 20 - j, 8] = label_in_model == 0  # vehicle
             neighbor[0, i, 20 - j, 9] = label_in_model == 1  # pedestrian
             neighbor[0, i, 20 - j, 10] = label_in_model == 2  # bicycle
+            neighbor[0, i, 20 - j, 11] = label_in_model == 3  # unknown (incl. Hazard)
     return neighbor
 
 

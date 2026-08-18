@@ -194,7 +194,7 @@ def _stopped_neighbor_data(center_y: float, width: float = 2.0, length: float = 
     x = torch.full((T,), 20.0)
     y = torch.full((T,), float(center_y))
     fut = torch.stack([x, y, torch.ones(T), torch.zeros(T)], dim=-1).unsqueeze(0)  # (1, T, 4)
-    nap = torch.zeros(1, 1, 21, 11)
+    nap = torch.zeros(1, 1, 21, 12)
     nap[0, 0, -1, 6] = width
     nap[0, 0, -1, 7] = length
     return {"neighbor_agents_future": fut, "neighbor_agents_past": nap}
@@ -203,7 +203,7 @@ def _stopped_neighbor_data(center_y: float, width: float = 2.0, length: float = 
 def _colliding_neighbor_data(width: float = 2.0, length: float = 4.5) -> dict:
     """One NPC sharing the ego's path (y=0) at the same speed — guaranteed overlap."""
     fut = _npc_straight(offset_y=0.0, speed=0.5).unsqueeze(0)  # (1, T, 4)
-    nap = torch.zeros(1, 1, 21, 11)
+    nap = torch.zeros(1, 1, 21, 12)
     nap[0, 0, -1, 6] = width
     nap[0, 0, -1, 7] = length
     return {"neighbor_agents_future": fut, "neighbor_agents_past": nap}

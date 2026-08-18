@@ -137,17 +137,19 @@ def create_route_marker(route_tensor: torch.Tensor, stamp) -> MarkerArray:
 
 def create_neighbor_marker(neighbor_tensor: torch.Tensor, stamp) -> MarkerArray:
     """
-    Create a marker array to visualize neighboring objects (vehicles, pedestrians, bicycles).
+    Create a marker array to visualize neighboring objects (vehicles, pedestrians, bicycles,
+    unknown -- e.g. Autoware Hazard).
 
     Args:
-        neighbor_tensor: (batch(1), num_objects(32), num_frames(21), features(11))
-                        Last Dim: [x, y, cos, sin, vx, vy, length, width, vehicle, pedestrian, bicycle]
+        neighbor_tensor: (batch(1), num_objects(32), num_frames(21), features(12))
+                        Last Dim: [x, y, cos, sin, vx, vy, length, width, vehicle, pedestrian,
+                        bicycle, unknown]
         stamp:
     """
     marker_array = MarkerArray()
 
     # Last frame data
-    neighbor_data = neighbor_tensor[0, :, -1, :]  # (32, 11)
+    neighbor_data = neighbor_tensor[0, :, -1, :]  # (32, 12)
 
     # counter
     marker_id = 0
@@ -164,12 +166,13 @@ def create_neighbor_marker(neighbor_tensor: torch.Tensor, stamp) -> MarkerArray:
         heading = np.arctan2(sin_h, cos_h)
         width = neighbor_data[i, 6].item()
         length = neighbor_data[i, 7].item()
-        obj_type_idx = torch.argmax(neighbor_data[i, 8:11]).item()
+        obj_type_idx = torch.argmax(neighbor_data[i, 8:12]).item()
 
         colors = [
             ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.7),  # Vehicle - Blue
             ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.7),  # Pedestrian - Green
             ColorRGBA(r=1.0, g=0.0, b=1.0, a=0.7),  # Bicycle - Magenta
+            ColorRGBA(r=0.5, g=0.5, b=0.5, a=0.7),  # Unknown - Gray
         ]
 
         # Cube marker
@@ -214,7 +217,7 @@ def create_neighbor_marker(neighbor_tensor: torch.Tensor, stamp) -> MarkerArray:
         text_marker.pose.position.x = x
         text_marker.pose.position.y = y
         text_marker.pose.position.z = 2.0
-        obj_types = ["Vehicle", "Pedestrian", "Bicycle"]
+        obj_types = ["Vehicle", "Pedestrian", "Bicycle", "Unknown"]
         text_marker.text = f"{obj_types[obj_type_idx]} #{i}"
         text_marker.scale.z = 0.8
         text_marker.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=0.9)

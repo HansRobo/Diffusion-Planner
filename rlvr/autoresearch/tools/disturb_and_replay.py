@@ -558,8 +558,8 @@ def _apply_inverse_rigid_to_spatial(
         _dir_inv(fut, 2, 3)  # rotate the (cos,sin) heading vector, not wrap a yaw scalar
         fut[~valid] = 0
 
-    # --- neighbor_agents_past (N, T, 11) ---
-    #   channels: [x, y, cos_h, sin_h, vx, vy, w, l, label_oh×3]
+    # --- neighbor_agents_past (N, T, D); D=11 legacy or 12 ---
+    #   channels: [x, y, cos_h, sin_h, vx, vy, w, l, label_oh×3 (or ×4 incl. Unknown)]
     if "neighbor_agents_past" in out:
         nap = out["neighbor_agents_past"]
         valid = (nap[..., 0] != 0) | (nap[..., 1] != 0) | (nap[..., 2] != 0) | (nap[..., 3] != 0)

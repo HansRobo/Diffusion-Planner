@@ -35,7 +35,7 @@ class TrainConfig:
     time_len: int = INPUT_T + 1
     ego_prediction_horizon: int = OUTPUT_T
 
-    agent_state_dim: int = 11
+    agent_state_dim: int = 12
     agent_num: int = MAX_NUM_NEIGHBORS
 
     static_objects_state_dim: int = 10
@@ -62,6 +62,10 @@ class TrainConfig:
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
     use_smoothing_future_trajectory: bool = True
+    # Per-agent probability of relabeling a valid neighbor's type one-hot to Unknown during
+    # training, regardless of its original class. Class-agnostic robustness augmentation;
+    # 0.0 (default) is a true no-op that draws no random numbers.
+    unknown_class_rename_prob: float = 0.0
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True
@@ -97,6 +101,9 @@ class TrainConfig:
     neighbor_collision_margin_vehicle: float = 0.25
     neighbor_collision_margin_pedestrian: float = 1.0
     neighbor_collision_margin_bicycle: float = 0.5
+    # Unknown could be anything, including a pedestrian; default conservatively to the
+    # pedestrian margin and treat Unknown as a VRU (see neighbor_db.py).
+    neighbor_collision_margin_unknown: float = 1.0
 
     # Validation-only Autoware-aligned EPDMS metrics. train_predictor.py reads
     # these defaults when constructing argparse, so this remains the single

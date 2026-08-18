@@ -212,9 +212,11 @@ def draw_neighbor_agents(ax, inputs):
         vel_x, vel_y = neighbor[4], neighbor[5]
         len_y, len_x = neighbor[6], neighbor[7]
 
-        # Set color based on vehicle type
-        vehicle_type = np.argmax(neighbor[8:11]) if neighbor.shape[0] > 8 else 0
-        color = ["blue", "green", "purple"][vehicle_type] if vehicle_type < 3 else "blue"
+        # Set color based on vehicle type (vehicle, pedestrian, bicycle, unknown)
+        vehicle_type = np.argmax(neighbor[8:12]) if neighbor.shape[0] > 8 else 0
+        color = (
+            ["blue", "green", "purple", "gray"][vehicle_type] if vehicle_type < 4 else "blue"
+        )
 
         # Collect past trajectory
         past_points = np.array(

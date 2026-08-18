@@ -151,13 +151,15 @@ def visualize_inputs_cv2(
         len_y, len_x = neighbor[6], neighbor[7]
 
         # Set color based on vehicle type
-        vehicle_type = np.argmax(neighbor[8:11]) if neighbor.shape[0] > 8 else 0
+        vehicle_type = np.argmax(neighbor[8:12]) if neighbor.shape[0] > 8 else 0
         if vehicle_type == 0:  # Vehicle
             color = (255, 0, 0)  # Blue
         elif vehicle_type == 1:  # Pedestrian
             color = (0, 255, 0)  # Green
-        else:  # Bicycle
+        elif vehicle_type == 2:  # Bicycle
             color = (255, 0, 255)  # Purple
+        else:  # Unknown
+            color = (170, 170, 170)  # Gray
 
         # Draw past trajectory
         past_points = []

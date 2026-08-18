@@ -53,7 +53,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 _FRAME_RE = re.compile(r"_(\d+)\.npz$")
 
 # Neighbor past last-dim layout (npz_loader.py:208): [x, y, cos, sin, vx, vy,
-# width, length, is_veh, is_ped, is_bike]. Type one-hot is columns 8,9,10.
+# width, length, is_veh, is_ped, is_bike, is_unknown]. Type one-hot is columns 8..11.
 _NB_VEH_COL = 8
 _NB_PED_COL = 9
 
@@ -389,8 +389,8 @@ def peak_lat_accel(ego_future: np.ndarray) -> float:
 
 def active_neighbor_info(neighbor_agents_past: np.ndarray):
     """``(pos (Q,2), ped_mask (Q,), veh_mask (Q,), dists_origin (Q,))`` for the ACTIVE
-    neighbors at the last timestep of ``neighbor_agents_past`` (N,T,11). "Active" =
-    any of the 11 cols non-zero at t=0 (the interaction is judged at the present).
+    neighbors at the last timestep of ``neighbor_agents_past`` (N,T,12). "Active" =
+    any of the 12 cols non-zero at t=0 (the interaction is judged at the present).
     ``ped_mask``/``veh_mask`` are the pedestrian/vehicle type one-hots (cols 9/8). The
     ordering is deterministic so a path distance computed separately (e.g. batched on
     GPU) stays aligned with ``pos``. Q=0 arrays when there are no active neighbors.
@@ -400,7 +400,7 @@ def active_neighbor_info(neighbor_agents_past: np.ndarray):
     seen only in history would count there and not here. "Interaction = present now"
     is the intended semantics for labeling."""
     nap = np.asarray(neighbor_agents_past, dtype=np.float32)
-    cur = nap[:, -1, :]  # (N, 11)
+    cur = nap[:, -1, :]  # (N, 12)
     active = np.any(cur != 0, axis=-1)
     pos = cur[active, :2]
     ped_mask = cur[active, _NB_PED_COL] == 1

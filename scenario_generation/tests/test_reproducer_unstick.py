@@ -109,7 +109,7 @@ def test_unstick_jump_ego_past_uses_recorded_npz_history(tmp_path):
         unstick_radius_mult=1.0,  # disable the gentle radius-widen stage: test the teleport path
     )
     pred = np.zeros((80, 4), dtype=np.float32)  # unused in the warmup branch
-    neighbors = np.zeros((320, 11), dtype=np.float32)  # no valid neighbor -> inf clearance
+    neighbors = np.zeros((320, 12), dtype=np.float32)  # no valid neighbor -> inf clearance
 
     ego_hist_before = None
     for i in range(20):
@@ -278,7 +278,7 @@ def test_clock_mode_unstick_via_pre_step_loop(tmp_path, monkeypatch):
     monkeypatch.setattr(
         rr,
         "build_input_np",
-        lambda *a, **k: ({"turn_indicators": np.zeros((1, 31), dtype=np.int64)}, np.zeros((1, 11))),
+        lambda *a, **k: ({"turn_indicators": np.zeros((1, 31), dtype=np.int64)}, np.zeros((1, 12))),
     )
     pred = np.zeros((80, 4), dtype=np.float32)
     assert s.cursor.last_was_repeat is False
@@ -317,7 +317,7 @@ def test_clock_pre_step_counts_normal_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(
         rr,
         "build_input_np",
-        lambda *a, **k: ({"turn_indicators": np.zeros((1, 31), dtype=np.int64)}, np.zeros((1, 11))),
+        lambda *a, **k: ({"turn_indicators": np.zeros((1, 31), dtype=np.int64)}, np.zeros((1, 12))),
     )
     n = 5
     for _ in range(n):

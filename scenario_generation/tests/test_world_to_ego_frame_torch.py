@@ -18,7 +18,7 @@ torch = pytest.importorskip("torch")
 _SHAPES = {
     "ego_agent_past": (1, 31, 4),
     "ego_current_state": (1, 10),
-    "neighbor_agents_past": (1, 320, 31, 11),
+    "neighbor_agents_past": (1, 320, 31, 12),
     "lanes": (1, 140, 20, 33),
     "route_lanes": (1, 25, 20, 33),
     "polygons": (1, 10, 40, 3),

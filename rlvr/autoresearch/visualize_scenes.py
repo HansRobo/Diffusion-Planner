@@ -143,7 +143,7 @@ def draw_scene(ax, npz_path, traj, label, color, r, show_gt=True):
     )
 
     # Neighbors at t=0
-    nb_past = npz["neighbor_agents_past"]  # (N, 31, 11)
+    nb_past = npz["neighbor_agents_past"]  # (N, 31, D); D=11 legacy or 12
     for i in range(nb_past.shape[0]):
         nb = nb_past[i]
         if np.abs(nb).sum() < 1e-6:

@@ -52,7 +52,7 @@ def _moving_collision_data_3col() -> tuple[torch.Tensor, dict[str, torch.Tensor]
     neighbor[0, 0, 30, 0] = ego[0, 30, 0]
     neighbor[0, 0, 30, 1] = 0.0
 
-    past = torch.zeros(1, 1, 21, 11)
+    past = torch.zeros(1, 1, 21, 12)
     past[0, 0, -1, 6] = 2.0
     past[0, 0, -1, 7] = 2.0
 
@@ -77,7 +77,7 @@ def _rear_end_collision_data_3col() -> tuple[torch.Tensor, dict[str, torch.Tenso
     neighbor[0, 0, :, 0] = ego[0, :, 0] - 3.0
     neighbor[0, 0, :, 2] = 0.0
 
-    past = torch.zeros(1, 1, 21, 11)
+    past = torch.zeros(1, 1, 21, 12)
     past[0, 0, -1, 0] = -3.0
     past[0, 0, -1, 2] = 1.0
     past[0, 0, -1, 6] = 2.0
@@ -471,7 +471,7 @@ def test_classify_scene_flags_moving_collision_at_clearance_threshold():
     neighbor[0, 0, :, 0] = ego[0, :, 0] + 4.52
     neighbor[0, 0, :, 2] = 0.0
 
-    past = torch.zeros(1, 1, 21, 11)
+    past = torch.zeros(1, 1, 21, 12)
     past[0, 0, -1, 0] = 4.52
     past[0, 0, -1, 2] = 1.0
     past[0, 0, -1, 6] = 2.0

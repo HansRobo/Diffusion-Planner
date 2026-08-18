@@ -52,7 +52,7 @@ def _make_batch(B: int = 2, Pn: int = 2, T: int = 10, device: str = "cpu"):
     """Create a minimal batch for _compute_sft_diffusion_loss."""
     data = {
         "ego_current_state": torch.randn(B, 10, device=device),
-        "neighbor_agents_past": torch.randn(B, Pn, 31, 11, device=device),
+        "neighbor_agents_past": torch.randn(B, Pn, 31, 12, device=device),
     }
     ego_gt = torch.randn(B, T, 4, device=device)
     neighbor_gt = torch.randn(B, Pn, T, 4, device=device)

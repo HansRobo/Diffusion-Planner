@@ -73,7 +73,7 @@ def _synthesize_stopped_futures(nb_past: np.ndarray, future_len: int) -> np.ndar
     ground truth; for moving ones it's a fiction, but the reward's
     stopped mask filters them out anyway.
 
-    ``nb_past`` layout: (N_nb, T_past, 11) with
+    ``nb_past`` layout: (N_nb, T_past, D) [D=11 legacy or 12] with
     [x, y, cos_h, sin_h, vx, vy, width, length, type_onehot(3)].
     """
     N_nb = nb_past.shape[0]

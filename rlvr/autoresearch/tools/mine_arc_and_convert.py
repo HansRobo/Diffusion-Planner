@@ -4,7 +4,7 @@ For HEAL/MEND: take psim-bag-parsed NPZs (reduced: ego/nbr future 3-col, 32 neig
 slots, line_strings 2-col, polygons 2-col), keep only frames whose ego pose projects
 onto the route within [arc_lo, arc_hi], and convert each to the full trainable format:
 - ego_agent_future / neighbor_agents_future: 3-col (x,y,heading) -> 4-col (x,y,cos,sin)
-- neighbor_agents_past (32,31,11) -> (320,31,11); neighbor_agents_future (32,80,3)->(320,80,4)
+- neighbor_agents_past (32,31,D) -> (320,31,D), D unchanged (11 legacy or 12); neighbor_agents_future (32,80,3)->(320,80,4)
 - line_strings (60,20,2) -> (60,20,4): col2=0, col3=valid (1 where xy nonzero) [campaign approx;
   loss.py treats col3>0.5 as the road-border mask]
 - polygons (10,40,2) -> (10,40,3): col2=presence (1 where xy nonzero)
@@ -33,10 +33,12 @@ def convert(d):
     out["ego_agent_past"] = d["ego_agent_past"].astype(np.float32)
     # neighbors: pad slots to 320
     npf = d["neighbor_agents_future"].astype(np.float32)  # (32,80,3)
-    npp = d["neighbor_agents_past"].astype(np.float32)  # (32,31,11)
+    npp = d["neighbor_agents_past"].astype(np.float32)  # (32,31,D); D=11 legacy or 12
     NF = np.zeros((320, npf.shape[1], 4), np.float32)
     NF[: npf.shape[0]] = _f2to4(npf)
-    NP = np.zeros((320, npp.shape[1], 11), np.float32)
+    # Width matches the source (11 while corpora predate the Unknown class, 12 once
+    # regenerated) -- do not hardcode 12 here, real on-disk corpora are still 11-wide.
+    NP = np.zeros((320, npp.shape[1], npp.shape[-1]), np.float32)
     NP[: npp.shape[0]] = npp
     out["neighbor_agents_future"] = NF
     out["neighbor_agents_past"] = NP

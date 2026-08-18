@@ -52,7 +52,7 @@ version                     int32   ()
 ego_agent_past              float32 (INPUT_T + 1, 3)
 ego_current_state           float32 (10,)
 ego_agent_future            float32 (OUTPUT_T, 3)
-neighbor_agents_past        float32 (MAX_NUM_NEIGHBORS, INPUT_T + 1, 11)
+neighbor_agents_past        float32 (MAX_NUM_NEIGHBORS, INPUT_T + 1, 12)
 neighbor_agents_future      float32 (MAX_NUM_NEIGHBORS, OUTPUT_T, 3)
 static_objects              float32 (5, 10)
 lanes                       float32 (NUM_SEGMENTS_IN_LANE, POINTS_PER_LANELET, SEGMENT_POINT_DIM)
@@ -237,11 +237,18 @@ _CLS_TRAILER = 4
 _CLS_MOTORCYCLE = 5
 _CLS_BICYCLE = 6
 _CLS_PEDESTRIAN = 7
+# ANIMAL=8, HAZARD=9: added in autoware_msgs tag 1.7.0's ObjectClassification.msg (verified
+# against https://github.com/autowarefoundation/autoware_msgs/blob/1.7.0/
+# autoware_perception_msgs/msg/ObjectClassification.msg -- this repo's pinned version, see
+# cpp_tools/cpp_tools.repos). No symbolic ROS message import is available in this pure-Python
+# script (unlike diffusion_planner_ros/utils.py), hence the literal value here.
+_CLS_HAZARD = 9
 
 # Model labels.
 _AGENT_VEHICLE = 0
 _AGENT_PEDESTRIAN = 1
 _AGENT_BICYCLE = 2
+_AGENT_UNKNOWN = 3
 
 
 def _highest_prob_label(classification) -> int:
@@ -263,6 +270,8 @@ def _get_model_label(classification) -> int:
         return _AGENT_BICYCLE
     if label == _CLS_PEDESTRIAN:
         return _AGENT_PEDESTRIAN
+    if label == _CLS_HAZARD:
+        return _AGENT_UNKNOWN
     return _AGENT_VEHICLE
 
 
@@ -285,7 +294,14 @@ def _agent_state_from_object(obj):
 
 
 def _agent_state_array(state, map2bl_matrix_4x4):
-    """C++ AgentState::as_array, computed after transform to ego frame (11 features)."""
+    """C++ AgentState::as_array, computed after transform to ego frame (12 features).
+
+    NOTE: the actual production converter is the external C++ AgentState::as_array
+    (autoware_universe, out of scope for the Unknown-class change -- see
+    cpp_tools/cpp_tools.repos) and will keep emitting 11-wide output until that repo is
+    separately updated. This local Python mirror widens to 12 for consistency/local
+    testing only -- it does not affect production training-NPZ generation.
+    """
     pose_bl = map2bl_matrix_4x4 @ state["pose_map"]
     cos_yaw = pose_bl[0, 0]
     sin_yaw = pose_bl[1, 0]
@@ -307,6 +323,7 @@ def _agent_state_array(state, map2bl_matrix_4x4):
         float(label == _AGENT_VEHICLE),
         float(label == _AGENT_PEDESTRIAN),
         float(label == _AGENT_BICYCLE),
+        float(label == _AGENT_UNKNOWN),
     )
 
 
@@ -318,7 +335,7 @@ def _latest_state_distance(history, map2bl_matrix_4x4):
 def build_neighbor_past(data_list, i, map2bl_matrix_4x4, max_num_objects, time_length):
     """Port of AgentData.update_histories + transformed_and_trimmed_histories + flatten.
 
-    Returns (tensor (max_num_objects, time_length, 11), agent_ids) where agents are sorted
+    Returns (tensor (max_num_objects, time_length, 12), agent_ids) where agents are sorted
     by latest-state ego distance and trimmed to max_num_objects, matching the C++ converter.
     agent_ids is the ordered list of object ids kept (used for the future, which must share
     the same ordering).
@@ -350,7 +367,7 @@ def build_neighbor_past(data_list, i, map2bl_matrix_4x4, max_num_objects, time_l
     items.sort(key=lambda kv: _latest_state_distance(kv[1], map2bl_matrix_4x4))
     items = items[:max_num_objects]
 
-    out = np.zeros((max_num_objects, time_length, 11), dtype=np.float32)
+    out = np.zeros((max_num_objects, time_length, 12), dtype=np.float32)
     for a, (_oid, history) in enumerate(items):
         for t, state in enumerate(history):
             out[a, t] = _agent_state_array(state, map2bl_matrix_4x4)
@@ -408,7 +425,7 @@ def create_neighbor_future(
     """
     This function is similar to utils.convert_tracked_objects_to_tensor, but there are some discrepancies.
     """
-    neighbor = torch.zeros((1, max_num_objects, max_timesteps, 11))
+    neighbor = torch.zeros((1, max_num_objects, max_timesteps, 12))
 
     # [Discrepancy1] for future tensor, sort is not needed
 
@@ -445,6 +462,7 @@ def create_neighbor_future(
             neighbor[0, i, j, 8] = label_in_model == 0  # vehicle
             neighbor[0, i, j, 9] = label_in_model == 1  # pedestrian
             neighbor[0, i, j, 10] = label_in_model == 2  # bicycle
+            neighbor[0, i, j, 11] = label_in_model == 3  # unknown (incl. Hazard)
     return neighbor
 
 

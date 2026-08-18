@@ -130,6 +130,7 @@ def compute_collision_reward(
         margin_vehicle=args.neighbor_collision_margin_vehicle,
         margin_pedestrian=args.neighbor_collision_margin_pedestrian,
         margin_bicycle=args.neighbor_collision_margin_bicycle,
+        margin_unknown=args.neighbor_collision_margin_unknown,
     )  # [B*N, T]
 
     if args.w_road_border > 0.0:

@@ -38,6 +38,33 @@ def heading_transform(heading, transform_mat):
     ).reshape(*shape)
 
 
+def rename_agents_to_unknown(
+    neighbor_agents_past: torch.Tensor, prob: float
+) -> torch.Tensor:
+    """Stochastically relabel some valid neighbors' one-hot type to Unknown (col 11), applied
+    consistently across every past timestep of that agent (not per-frame -- an agent's semantic
+    class does not change frame to frame). Class-agnostic: applies regardless of the agent's
+    original type. Training-time only; never call this at eval/inference.
+
+    neighbor_agents_past: [B, N, T, D] raw (pre-normalization) tensor, D >= 12.
+    prob: per-agent probability. If <= 0.0, this is a true no-op and draws NO random numbers,
+        so it never perturbs the RNG call sequence for callers who leave it at the default.
+    """
+    if prob <= 0.0:
+        return neighbor_agents_past
+    # "Valid" mirrors NeighborEncoder.forward's mask_p: any nonzero kinematic (cols :8) at
+    # any past timestep. Padding slots are never touched.
+    valid = torch.any(torch.ne(neighbor_agents_past[..., :8], 0), dim=-1).any(dim=-1)  # [B, N]
+    rename = (torch.rand(valid.shape, device=neighbor_agents_past.device) < prob) & valid
+    if not rename.any():
+        return neighbor_agents_past
+    selected = neighbor_agents_past[rename]  # [K, T, D]
+    selected[..., 8:12] = 0.0
+    selected[..., 11] = 1.0
+    neighbor_agents_past[rename] = selected
+    return neighbor_agents_past
+
+
 def _cross2d(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """2D cross product along the last dimension: u × v = u.x*v.y - u.y*v.x"""
     return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
@@ -294,7 +321,7 @@ class StatePerturbation:
 
         # ── 1. Neighbour agent polygon collision ──────────────────────────────
         if "neighbor_agents_past" in inputs:
-            nbr = inputs["neighbor_agents_past"][:, :, -1, :]  # [B, N, 11]
+            nbr = inputs["neighbor_agents_past"][:, :, -1, :]  # [B, N, 12]
             N = nbr.shape[1]
             valid = torch.sum(torch.ne(nbr[:, :, :4], 0), dim=-1) > 0  # [B, N]
             if valid.any():

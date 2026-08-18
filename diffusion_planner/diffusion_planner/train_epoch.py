@@ -4,7 +4,7 @@ from tqdm import tqdm
 
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.data_augmentation import StatePerturbation, rename_agents_to_unknown
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
 
 
@@ -64,6 +64,9 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
         neighbors_future = heading_to_cos_sin(neighbors_future)
         neighbors_future[mask] = 0.0
+        inputs["neighbor_agents_past"] = rename_agents_to_unknown(
+            inputs["neighbor_agents_past"], args.unknown_class_rename_prob
+        )
         inputs = args.observation_normalizer(inputs)
 
         # call the model

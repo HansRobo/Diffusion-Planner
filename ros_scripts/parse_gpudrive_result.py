@@ -396,7 +396,7 @@ def save_sequences(
             polygons_np = tensor_to_numpy(polygon_tensor)
             line_strings_np = tensor_to_numpy(line_string_tensor)
 
-            neighbor_past = np.zeros((MAX_NUM_NEIGHBORS, past_steps, 11), dtype=np.float32)
+            neighbor_past = np.zeros((MAX_NUM_NEIGHBORS, past_steps, 12), dtype=np.float32)
             neighbor_future = np.zeros((MAX_NUM_NEIGHBORS, output_t, 3), dtype=np.float32)
             other_candidates = []
             for other_idx in range(simulation.num_agents):

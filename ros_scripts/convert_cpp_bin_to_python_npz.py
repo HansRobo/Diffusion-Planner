@@ -49,6 +49,10 @@ class TrainingDataReader:
             "ego_agent_past": self.PAST_TIME_STEPS * POSE_DIM,
             "ego_current_state": 10,
             "ego_agent_future": OUTPUT_T * POSE_DIM,
+            # Byte layout must match the external C++ writer (autoware_universe agent.cpp,
+            # out of scope for the Unknown-class change) exactly, hence the literal 11 here
+            # instead of dimensions.NEIGHBOR_SHAPE[-1] -- bumping this to 12 without the C++
+            # side also changing would misalign every field parsed after this one.
             "neighbor_agents_past": MAX_NUM_NEIGHBORS * self.PAST_TIME_STEPS * 11,
             "neighbor_agents_future": MAX_NUM_NEIGHBORS * OUTPUT_T * POSE_DIM,
             "static_objects": self.STATIC_NUM * 10,

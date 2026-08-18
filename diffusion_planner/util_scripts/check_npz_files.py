@@ -42,7 +42,7 @@ if __name__ == "__main__":
     """
     ego_current_state	float32	(10, 10)
     ego_agent_future	float32	(10, 80, 3)
-    neighbor_agents_past	float32	(10, 32, 21, 11)
+    neighbor_agents_past	float32	(10, 32, 21, 12)
     neighbor_agents_future	float32	(10, 32, 80, 3)
     static_objects	float32	(10, 5, 10)
     lanes	float32	(10, 70, 20, 13)

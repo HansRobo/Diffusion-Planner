@@ -203,7 +203,7 @@ def test_ttc_reports_first_unsafe_and_collision_steps():
 
     data = {
         "neighbor_agents_future": nf,
-        "neighbor_agents_past": torch.zeros(1, 1, 21, 11),
+        "neighbor_agents_past": torch.zeros(1, 1, 21, 12),
         "ego_shape": _square_ego_shape().unsqueeze(0),
     }
     data["neighbor_agents_past"][0, 0, -1, 6] = ns[0, 0]
@@ -369,7 +369,7 @@ def test_disabled_flag_no_effect_on_reward_totals():
     nf, ns, nv = _stopped_neighbor(center=(20.0, 2.15))
     data = {
         "neighbor_agents_future": nf,
-        "neighbor_agents_past": torch.zeros(1, 1, 21, 11),
+        "neighbor_agents_past": torch.zeros(1, 1, 21, 12),
         "ego_shape": _ego_shape().unsqueeze(0),
     }
     data["neighbor_agents_past"][0, 0, -1, 6] = ns[0, 0]  # width
@@ -409,7 +409,7 @@ def test_survival_mode_sc_crossing_contributes_to_first_terminal():
     nf, ns, nv = _stopped_neighbor(center=(8.0, 0.0))
     data = {
         "neighbor_agents_future": nf,
-        "neighbor_agents_past": torch.zeros(1, 1, 21, 11),
+        "neighbor_agents_past": torch.zeros(1, 1, 21, 12),
         "ego_shape": _ego_shape().unsqueeze(0),
     }
     data["neighbor_agents_past"][0, 0, -1, 6] = ns[0, 0]  # width
@@ -438,7 +438,7 @@ def test_kinematic_gate_field_exposed():
     nf, ns, nv = _stopped_neighbor(center=(40.0, 10.0))  # far away, no interaction
     data = {
         "neighbor_agents_future": nf,
-        "neighbor_agents_past": torch.zeros(1, 1, 21, 11),
+        "neighbor_agents_past": torch.zeros(1, 1, 21, 12),
         "ego_shape": _ego_shape().unsqueeze(0),
     }
     data["neighbor_agents_past"][0, 0, -1, 6] = ns[0, 0]

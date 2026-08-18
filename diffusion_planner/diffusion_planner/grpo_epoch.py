@@ -31,6 +31,7 @@ from diffusion_planner.grpo_utils import (
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
+from diffusion_planner.utils.data_augmentation import rename_agents_to_unknown
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
 
 
@@ -59,6 +60,9 @@ def _sft_step(raw_inputs, model, optimizer, args, ema, aug):
 
     ego_future = heading_to_cos_sin(ego_future)
     neighbors_future, neighbor_future_mask = _neighbor_future_world(neighbors_future_raw)
+    inputs["neighbor_agents_past"] = rename_agents_to_unknown(
+        inputs["neighbor_agents_past"], args.unknown_class_rename_prob
+    )
     inputs = args.observation_normalizer(inputs)
 
     optimizer.zero_grad()
@@ -113,6 +117,13 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
         raw_inputs = collider_injector.inject(
             raw_inputs, args.neighbor_inject_max, args.neighbor_inject_prob
         )
+
+    # Applied here (per-scene, before expand_batch) rather than per-sample after expansion, so
+    # every one of the N expanded copies of a scene sees an identical rename decision -- a
+    # prerequisite for comparable group advantages, same as the collider injection above.
+    raw_inputs["neighbor_agents_past"] = rename_agents_to_unknown(
+        raw_inputs["neighbor_agents_past"], args.unknown_class_rename_prob
+    )
 
     exp = expand_batch(raw_inputs, n)
     B = exp["ego_current_state"].shape[0]  # == num_scenes * N

@@ -359,7 +359,7 @@ def main():
 
     # snapshot the (augmented) scene context for plotting, in raw metres / ego frame.
     raw_np = {k: v.detach().cpu().numpy() for k, v in raw.items()}
-    neigh_past = raw_np["neighbor_agents_past"]  # [S, Pn, 31, 11]
+    neigh_past = raw_np["neighbor_agents_past"]  # [S, Pn, 31, 12]
     neigh_future = raw_np["neighbor_agents_future"]  # [S, Pn, 80, 3]
     ego_future_gt = raw_np["ego_agent_future"]  # [S, T, 3]
     ego_shape = raw_np["ego_shape"]  # [S, 3] -> [_, length, width]

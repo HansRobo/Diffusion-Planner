@@ -6,12 +6,13 @@ from diffusion_planner.model.guidance.collision import center_rect_to_points
 
 _NEIGHBOR_EVAL_STEPS = [0, 20, 40, 60, 79]
 
-# One-hot agent type occupies columns 8..10 = [vehicle, pedestrian, bicycle]
+# One-hot agent type occupies columns 8..11 = [vehicle, pedestrian, bicycle, unknown]
 # (matches synthetic_neighbors._TYPE_BASE / neighbor_db).
 _TYPE_BASE = 8
 _TYPE_VEHICLE = 0
 _TYPE_PEDESTRIAN = 1
 _TYPE_BICYCLE = 2
+_TYPE_UNKNOWN = 3
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +400,7 @@ def compute_neighbor_collision_penalty(
     margin_vehicle: float,
     margin_pedestrian: float,
     margin_bicycle: float,
+    margin_unknown: float,
 ) -> torch.Tensor:
     """Compute neighbor collision penalty for ego trajectory.
 
@@ -409,8 +411,8 @@ def compute_neighbor_collision_penalty(
     on any discrete edge-point sampling (so it never misses shallow overlaps or a small agent
     sitting inside the ego footprint).
 
-    The inflation amount is set independently per agent type (one-hot type in past cols 8..10);
-    all three must be specified explicitly by the caller.
+    The inflation amount is set independently per agent type (one-hot type in past cols 8..11);
+    all four must be specified explicitly by the caller.
 
     Args:
         ego_edge_points: [B, T, K, 2] sample points on ego bbox edges (only the 4 corners,
@@ -421,6 +423,7 @@ def compute_neighbor_collision_penalty(
         margin_vehicle: per-side inflation (meters) for vehicles.
         margin_pedestrian: per-side inflation (meters) for pedestrians.
         margin_bicycle: per-side inflation (meters) for bicycles.
+        margin_unknown: per-side inflation (meters) for Unknown-typed agents.
 
     Returns:
         penalty: [B, T] non-negative penalty per timestep.
@@ -452,14 +455,14 @@ def compute_neighbor_collision_penalty(
     # Ego box corners at eval timesteps (corners are every K // 4-th edge sample point).
     ego_corners = ego_edge_points[:, steps][:, :, :: K // 4, :]  # [B, S, 4, 2]
 
-    # Per-neighbor inflation margin selected by the agent type one-hot (cols 8..10).
+    # Per-neighbor inflation margin selected by the agent type one-hot (cols 8..11).
     neighbor_sizes = neighbor_agents_past[:, :Pn, -1, :]
     margin_by_type = torch.tensor(
-        [margin_vehicle, margin_pedestrian, margin_bicycle],
+        [margin_vehicle, margin_pedestrian, margin_bicycle, margin_unknown],
         device=device,
         dtype=neighbor_sizes.dtype,
-    )  # ordered [vehicle, pedestrian, bicycle]
-    type_idx = neighbor_sizes[..., _TYPE_BASE : _TYPE_BASE + 3].argmax(dim=-1)  # [B, Pn]
+    )  # ordered [vehicle, pedestrian, bicycle, unknown]
+    type_idx = neighbor_sizes[..., _TYPE_BASE : _TYPE_BASE + 4].argmax(dim=-1)  # [B, Pn]
     neighbor_margin = margin_by_type[type_idx]  # [B, Pn]
 
     # Neighbor sizes from last past timestep, inflated by the per-type margin on each side.

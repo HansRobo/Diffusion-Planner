@@ -380,7 +380,7 @@ def transform_to_new_ego_frame(
         eap = _xform_dir(eap, 2, 3)
         out["ego_agent_past"] = eap
 
-    # neighbor_agents_past [B, N, T, 11]: 0,1 x,y; 2,3 cos,sin; 4,5 vx,vy
+    # neighbor_agents_past [B, N, T, D] (D=11 legacy or 12): 0,1 x,y; 2,3 cos,sin; 4,5 vx,vy
     if "neighbor_agents_past" in out:
         nap = out["neighbor_agents_past"]
         if nap.numel() > 0:

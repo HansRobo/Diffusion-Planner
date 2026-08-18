@@ -145,6 +145,25 @@ def _rel_pose(recorded_pose: np.ndarray, live_pose: np.ndarray) -> tuple[float, 
 # --------------------------------------------------------------------------- #
 # model input
 # --------------------------------------------------------------------------- #
+def _match_neighbor_past_width(neighbor_agents_past: np.ndarray, target_cols: int = 12) -> np.ndarray:
+    """Widen a legacy 11-col neighbor_agents_past array to 12 (append a zero Unknown column).
+
+    Real on-disk NPZ corpora predate the Unknown class and stay 11-wide until the external
+    C++ generator is updated (out of scope here); the model's NeighborEncoder now requires
+    exactly 12, so this boundary must widen before anything reaches the model.
+    """
+    cols = neighbor_agents_past.shape[-1]
+    if cols == target_cols:
+        return neighbor_agents_past
+    if cols == target_cols - 1:
+        pad = np.zeros(neighbor_agents_past.shape[:-1] + (1,), dtype=neighbor_agents_past.dtype)
+        return np.concatenate([neighbor_agents_past, pad], axis=-1)
+    raise ValueError(
+        f"neighbor_agents_past has unexpected width {cols} "
+        f"(expected {target_cols - 1} or {target_cols})"
+    )
+
+
 def _npz_to_model_base(npz: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """NPZ training arrays -> batched [1,...] model-input dict (un-normalized).
 
@@ -161,7 +180,7 @@ def _npz_to_model_base(npz: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     out = {
         "ego_agent_past": ep[None],
         "ego_current_state": b(npz["ego_current_state"].reshape(-1)[:10]),
-        "neighbor_agents_past": b(npz["neighbor_agents_past"]),
+        "neighbor_agents_past": _match_neighbor_past_width(b(npz["neighbor_agents_past"])),
         "lanes": b(npz["lanes"]),
         "lanes_speed_limit": b(npz["lanes_speed_limit"]),
         "lanes_has_speed_limit": np.asarray(npz["lanes_has_speed_limit"])[None].astype(bool),
@@ -222,7 +241,7 @@ def build_input_np(
 ) -> tuple[dict, np.ndarray]:
     """CPU-only per-segment input build (numpy, no torch/normalize).
 
-    Returns (recentered [1,...] numpy model-input dict, neighbors_live (320,11) for
+    Returns (recentered [1,...] numpy model-input dict, neighbors_live (320,12) for
     scoring). This is the threadable half: ``np.load`` and ``world_to_ego_frame``
     are numpy/IO and release the GIL, so many segments build concurrently; the
     torch conversion + normalization happen once for the whole batch afterwards
@@ -234,7 +253,7 @@ def build_input_np(
     # Swap in the live ego's own history + dynamics (closed-loop truth).
     recen["ego_agent_past"] = _live_ego_past(ego_hist_world, live_pose)
     recen["ego_current_state"] = _live_ego_current(dyn)
-    neighbors_live = recen["neighbor_agents_past"][0, :, -1, :].copy()  # (320,11) for scoring
+    neighbors_live = recen["neighbor_agents_past"][0, :, -1, :].copy()  # (320,12) for scoring
     return recen, neighbors_live
 
 
@@ -353,7 +372,7 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
         # bounded by the save-buffer deque cap, and irrelevant at B<=64.
         host = {k: batch[k].detach().cpu().numpy() for k in batch}
         np_dicts = [{k: host[k][i : i + 1] for k in host} for i in range(N)]
-        nb_all = host["neighbor_agents_past"][:, :, -1, :]  # (N,320,11)
+        nb_all = host["neighbor_agents_past"][:, :, -1, :]  # (N,320,12)
     else:
         nb_all = batch["neighbor_agents_past"][:, :, -1, :].detach().cpu().numpy()
     neighbors_live = [nb_all[i].copy() for i in range(N)]
@@ -637,7 +656,7 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         s.nbr_tracker.step(idx, s.live_pose[:2])
         sim_nb, slot_uuids, world_by_uuid = s.nbr_tracker.build(
             s.live_pose
-        )  # (1,320,31,11) live-ego
+        )  # (1,320,31,12) live-ego
     if gpu_transform:
         # 8-tuple (..., sim_nb, slot_uuids, world_by_uuid); sim_nb overrides the recorded
         # neighbor block AFTER the batched world_to_ego transform (None = recorded mode).
@@ -995,7 +1014,7 @@ def _build_neighbor_interp(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.1
             continue
         pose = tl.poses[idx]
         c, s = math.cos(pose[2]), math.sin(pose[2])
-        nb = tl.neighbor_last(idx)  # (320, 11) ego frame — single-key load (fast)
+        nb = tl.neighbor_last(idx)  # (320, D); D=11 legacy or 12 — single-key load (fast)
         for slot in range(min(len(ids), nb.shape[0])):
             row = nb[slot]
             if np.abs(row[:6]).sum() == 0:
@@ -1080,7 +1099,7 @@ def _apply_neighbor_interp(np_dict, neighbor_ids, live_pose, idx, interp):
 
     Mutates ``np_dict`` neighbor current (x, y, cos, sin) in the live-ego frame.
     """
-    nb = np_dict["neighbor_agents_past"][0]  # (320, 31, 11) live-ego frame
+    nb = np_dict["neighbor_agents_past"][0]  # (320, 31, 12) live-ego frame
     ex, ey, eyaw = float(live_pose[0]), float(live_pose[1]), float(live_pose[2])
     c, s = math.cos(eyaw), math.sin(eyaw)
     for slot in range(min(nb.shape[0], len(neighbor_ids))):
@@ -1118,7 +1137,7 @@ def _build_nbr_world_tracks(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.
             continue
         pose = tl.poses[idx]
         c, s = math.cos(pose[2]), math.sin(pose[2])
-        nb = tl.neighbor_last(idx)  # (320, 11) recorded-ego frame — single-key load (fast)
+        nb = tl.neighbor_last(idx)  # (320, D) recorded-ego frame; D=11 legacy or 12 — single-key load (fast)
         for slot in range(min(len(ids), nb.shape[0])):
             row = nb[slot]
             if np.abs(row[:6]).sum() == 0:
@@ -1131,7 +1150,12 @@ def _build_nbr_world_tracks(tl: RouteTimeline, lo: int, hi: int, eps: float = 0.
             wh = math.atan2(row[3], row[2]) + pose[2]
             raw.setdefault(u, []).append((idx, wx, wy, wh))
             if u not in attrs:
-                attrs[u] = row[6:11].astype(np.float32)  # width,length,is_veh,is_ped,is_bike
+                # width,length,is_veh,is_ped,is_bike,is_unknown -- pad a legacy 11-wide row
+                # (no Unknown label) to 6, since this feeds a fixed 12-wide model input below.
+                a = row[6:12].astype(np.float32)
+                if a.shape[0] < 6:
+                    a = np.concatenate([a, np.zeros(6 - a.shape[0], dtype=np.float32)])
+                attrs[u] = a
     interp: dict[str, tuple] = {}
     span: dict[str, tuple] = {}
     for u, lst in raw.items():
@@ -1256,7 +1280,7 @@ class SimNeighborTracker:
                 del dq[0]
 
     def build(self, live_pose: np.ndarray) -> tuple[np.ndarray, list, dict]:
-        """(1, 320, 31, 11) neighbor_agents_past in the live-ego frame, from shown history."""
+        """(1, 320, 31, 12) neighbor_agents_past in the live-ego frame, from shown history."""
         ex, ey, eyaw = float(live_pose[0]), float(live_pose[1]), float(live_pose[2])
         R = _rotation_matrix(eyaw)  # world delta -> ego frame (rotates by -eyaw)
         present = [u for u in self.hist if len(self.hist[u]) > 0 and self._present(u, self.rec_t)]
@@ -1268,7 +1292,7 @@ class SimNeighborTracker:
 
         present.sort(key=_cur_d2)  # nearest-first, mirroring the recorded slot order
         present = present[:320]
-        out = np.zeros((320, PAST, 11), dtype=np.float32)
+        out = np.zeros((320, PAST, 12), dtype=np.float32)
         slot_uuids = list(present)  # slot -> track UUID (for sim-future assembly across frames)
         world_by_uuid = {u: self.hist[u][-1] for u in present}  # UUID -> current shown world pose
         m = len(present)
@@ -1297,7 +1321,7 @@ class SimNeighborTracker:
             out[:m, :, 3] = np.sin(lh)
             out[:m, :, 4] = ve[:, :, 0]
             out[:m, :, 5] = ve[:, :, 1]
-            out[:m, :, 6:11] = np.stack([self.attrs[u] for u in present])[:, None, :]
+            out[:m, :, 6:12] = np.stack([self.attrs[u] for u in present])[:, None, :]
         return out[None], slot_uuids, world_by_uuid
 
 

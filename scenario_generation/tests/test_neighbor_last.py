@@ -13,7 +13,7 @@ N_NEIGHBORS = 4
 
 def _write_frame(tmp_path, i: int):
     p = tmp_path / f"route_{i:010d}.npz"
-    nb = np.arange(N_NEIGHBORS * 31 * 11, dtype=np.float32).reshape(N_NEIGHBORS, 31, 11) + i
+    nb = np.arange(N_NEIGHBORS * 31 * 12, dtype=np.float32).reshape(N_NEIGHBORS, 31, 12) + i
     np.savez_compressed(
         p,
         neighbor_agents_past=nb,

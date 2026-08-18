@@ -276,7 +276,7 @@ def test_underprogress_reference_baseline_path():
     data = {
         "ego_agent_future": torch.zeros(T, 4),
         "neighbor_agents_future": torch.zeros(0, T, 4),
-        "neighbor_agents_past": torch.zeros(0, 21, 11),
+        "neighbor_agents_past": torch.zeros(0, 21, 12),
         "lanes": _trivial_lane(),
         "route_lanes": _trivial_lane(),
         "line_strings": torch.zeros(0, 20, 4),
@@ -310,7 +310,7 @@ def test_underprogress_reference_baseline_falls_back_when_key_missing():
     data = {
         "ego_agent_future": torch.zeros(T, 4),
         "neighbor_agents_future": torch.zeros(0, T, 4),
-        "neighbor_agents_past": torch.zeros(0, 21, 11),
+        "neighbor_agents_past": torch.zeros(0, 21, 12),
         "lanes": _trivial_lane(),
         "route_lanes": _trivial_lane(),
         "line_strings": torch.zeros(0, 20, 4),
@@ -342,7 +342,7 @@ def test_underprogress_baseline_accepts_python_scalar():
     base = {
         "ego_agent_future": torch.zeros(T, 4),
         "neighbor_agents_future": torch.zeros(0, T, 4),
-        "neighbor_agents_past": torch.zeros(0, 21, 11),
+        "neighbor_agents_past": torch.zeros(0, 21, 12),
         "lanes": _trivial_lane(),
         "route_lanes": _trivial_lane(),
         "line_strings": torch.zeros(0, 20, 4),

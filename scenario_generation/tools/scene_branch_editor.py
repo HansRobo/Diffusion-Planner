@@ -324,7 +324,7 @@ def _inject_obstacles_into_tensors(
     """
     if not obstacles:
         return data
-    nap = data["neighbor_agents_past"]  # [1, N, 31, 11]
+    nap = data["neighbor_agents_past"]  # [1, N, 31, D]; D=11 legacy or 12
     B, N, T, F = nap.shape
 
     # Sort by distance from ego (at origin) to match the distance-sorted convention
@@ -354,10 +354,10 @@ def _inject_obstacles_into_tensors(
         n_valid = min(hist + 1, T)
         if n_valid < T:
             row[: T - n_valid] = 0.0
-        new_rows.append(row.unsqueeze(0).unsqueeze(0))  # [1, 1, 31, 11]
+        new_rows.append(row.unsqueeze(0).unsqueeze(0))  # [1, 1, 31, D]
 
     if new_rows:
-        new_block = torch.cat(new_rows, dim=1)  # [1, n_obs, 31, 11]
+        new_block = torch.cat(new_rows, dim=1)  # [1, n_obs, 31, D]
         # Prepend obstacles, truncate to N total
         nap_new = torch.cat([new_block, nap], dim=1)[:, :N, :, :]
         data = dict(data)

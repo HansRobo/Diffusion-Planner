@@ -28,7 +28,7 @@ def _write_route(npz_dir, n: int, n_slots: int = 3):
     npz_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for i in range(n):
-        nb = np.zeros((n_slots, 31, 11), dtype=np.float32)
+        nb = np.zeros((n_slots, 31, 12), dtype=np.float32)
         for s in range(n_slots):
             nb[s, -1, 0] = 10.0 * s + i  # x advances every frame -> anchors are kept, not dropped
             nb[s, -1, 1] = 2.0 * s

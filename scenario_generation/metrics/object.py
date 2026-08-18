@@ -55,7 +55,7 @@ def score_object_step(
     *stopped* neighbors and filters out rear-end hits — for mining we want to
     catch collisions with moving neighbors AND the ego being struck from behind.
 
-    neighbors_live: (320, 11) in live-ego frame [x,y,cos,sin,vx,vy,w,l,type...].
+    neighbors_live: (320, 12) in live-ego frame [x,y,cos,sin,vx,vy,w,l,type...].
     """
     ego_b, npc_corners, M = _ego_neighbor_obb(neighbors_live, ego_shape, device)
     if M == 0:
@@ -96,7 +96,7 @@ def score_object_step_batched(
     # All valid neighbors across all segments -> one transfer -> one corner build.
     nb_all = np.concatenate(
         [nb[v] for nb, v in zip(neighbors_list, valids) if v.any()], axis=0
-    )  # (K, 11)
+    )  # (K, 12)
     rects = torch.tensor(
         np.stack(
             [nb_all[:, 0], nb_all[:, 1], nb_all[:, 2], nb_all[:, 3], nb_all[:, 7], nb_all[:, 6]],

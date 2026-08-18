@@ -99,7 +99,7 @@ def _make_inputs(B: int = 1, N_nbr: int = 3, T_past: int = 5, T_fut: int = 80):
     for t in range(T_past):
         ego_agent_past[:, t, 0] = (t - T_past) * 0.1
 
-    neighbor_agents_past = torch.zeros(B, N_nbr, T_past, 11, dtype=torch.float32)
+    neighbor_agents_past = torch.zeros(B, N_nbr, T_past, 12, dtype=torch.float32)
     lanes = torch.zeros(B, 2, 5, 8, dtype=torch.float32)
     route_lanes = torch.zeros(B, 2, 5, 8, dtype=torch.float32)
     polygons = torch.zeros(B, 2, 4, 2, dtype=torch.float32)
@@ -517,7 +517,7 @@ def _nbr(
     T: int = 31,
 ) -> torch.Tensor:
     """Build a neighbor_agents_past tensor with one visible agent at (x, y)."""
-    out = torch.zeros(B, N, T, 11, dtype=torch.float32)
+    out = torch.zeros(B, N, T, 12, dtype=torch.float32)
     out[:, 0, -1, 0] = x  # position x
     out[:, 0, -1, 1] = y  # position y
     out[:, 0, -1, 2] = 1.0  # cos_h (heading = 0)
@@ -849,7 +849,7 @@ def test_check_aug_validity_all_zero_neighbors_ignored():
     aug = StatePerturbation()
     B = 1
     ego = _ego_state(B, vx=5.0)
-    empty_nbr = torch.zeros(B, 5, 31, 11)
+    empty_nbr = torch.zeros(B, 5, 31, 12)
     inputs = _check_inputs(B, empty_nbr, _lanes(B, []))
     collision = aug._check_aug_validity(ego, inputs)
     assert not collision.item(), "All-zero neighbors must be ignored"
@@ -865,7 +865,7 @@ def test_check_aug_validity_lane_left_boundary_cross():
     ego = _ego_state(B, y=0.8, vx=5.0)
     inputs = _check_inputs(
         B,
-        torch.zeros(B, 5, 31, 11),
+        torch.zeros(B, 5, 31, 12),
         _lanes(B, list(range(-10, 10)), left_y_off=1.0, right_y_off=-3.0),
     )
     collision = aug._check_aug_validity(ego, inputs)
@@ -882,7 +882,7 @@ def test_check_aug_validity_lane_right_boundary_cross():
     ego = _ego_state(B, y=0.8, vx=5.0)
     inputs = _check_inputs(
         B,
-        torch.zeros(B, 5, 31, 11),
+        torch.zeros(B, 5, 31, 12),
         _lanes(B, list(range(-10, 10)), left_y_off=3.0, right_y_off=-0.1),
     )
     collision = aug._check_aug_validity(ego, inputs)
@@ -899,7 +899,7 @@ def test_check_aug_validity_lane_both_boundaries_clear():
     ego = _ego_state(B, vx=5.0)
     inputs = _check_inputs(
         B,
-        torch.zeros(B, 5, 31, 11),
+        torch.zeros(B, 5, 31, 12),
         _lanes(B, list(range(-10, 10)), left_y_off=2.0, right_y_off=-2.0),
     )
     collision = aug._check_aug_validity(ego, inputs)
@@ -915,7 +915,7 @@ def test_check_aug_validity_zero_boundary_offset_ignored():
     # which would be inside ego.  It must be skipped.
     ego = _ego_state(B, vx=5.0)
     inputs = _check_inputs(
-        B, torch.zeros(B, 5, 31, 11), _lanes(B, list(range(-3, 4)), left_y_off=2.0, right_y_off=0.0)
+        B, torch.zeros(B, 5, 31, 12), _lanes(B, list(range(-3, 4)), left_y_off=2.0, right_y_off=0.0)
     )
     collision = aug._check_aug_validity(ego, inputs)
     assert not collision.item(), "Zero boundary offset must not trigger collision"
@@ -927,7 +927,7 @@ def test_check_aug_validity_batch_mixed():
     aug = StatePerturbation()
     B = 2
     ego = _ego_state(B, vx=5.0)  # both at (0, 0)
-    nbr = torch.zeros(B, 5, 31, 11)
+    nbr = torch.zeros(B, 5, 31, 12)
     # b=0: neighbor at (0, 0) → collision
     nbr[0, 0, -1, 0] = 0.0
     nbr[0, 0, -1, 2] = 1.0
@@ -1018,7 +1018,7 @@ def test_augment_no_collision_preserves_aug_flag():
     inputs = {
         "ego_current_state": _ego_state(B, vx=10.0),
         "ego_shape": _EGO_SHAPE_DEFAULT.expand(B, -1),
-        "neighbor_agents_past": torch.zeros(B, 5, 31, 11),  # no neighbours
+        "neighbor_agents_past": torch.zeros(B, 5, 31, 12),  # no neighbours
         "lanes": torch.zeros(B, 5, 10, 33),  # no lane boundaries
     }
     aug_flag, _ = aug.augment(inputs)
@@ -1031,7 +1031,7 @@ def test_augment_collision_batch_selectively_suppresses():
     torch.manual_seed(0)
     aug = StatePerturbation(augment_prob=1.0)
     B = 2
-    nbr = torch.zeros(B, 5, 31, 11)
+    nbr = torch.zeros(B, 5, 31, 12)
     # b=0: neighbour at (0, 0) → always collides after any perturbation
     nbr[0, 0, -1, 0] = 0.0
     nbr[0, 0, -1, 2] = 1.0

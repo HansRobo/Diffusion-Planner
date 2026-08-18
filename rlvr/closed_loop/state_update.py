@@ -120,7 +120,7 @@ def update_scene_state(
             new_data["ego_agent_past"][..., 2:4], T
         )
 
-    # --- Transform neighbor_agents_past [1, N_nb, 31, 11] ---
+    # --- Transform neighbor_agents_past [1, N_nb, 31, D] (D=11 legacy or 12) ---
     if "neighbor_agents_past" in new_data:
         nb = new_data["neighbor_agents_past"]
         mask = torch.sum(torch.ne(nb[..., :6], 0), dim=-1) == 0
@@ -211,8 +211,9 @@ def advance_neighbor_past(
     if "neighbor_agents_past" not in data:
         return data
 
-    nb = data["neighbor_agents_past"]  # [1, N_nb, 31, 11]
+    nb = data["neighbor_agents_past"]  # [1, N_nb, 31, D] (D=11 legacy or 12)
     N_nb = nb.shape[1]
+    D = nb.shape[-1]
     device = nb.device
 
     # Get old current positions (last timestep) for velocity computation
@@ -222,8 +223,9 @@ def advance_neighbor_past(
     # Compute velocities from position difference
     new_vel = (new_pos - old_pos) / dt  # [N_nb, 2]
 
-    # Build new timestep entry [N_nb, 11]
-    new_entry = torch.zeros(N_nb, 11, dtype=torch.float32, device=device)
+    # Build new timestep entry [N_nb, D] -- width matches the input, so this stays correct
+    # whether neighbor_agents_past is still 11-wide (legacy, no Unknown class) or 12-wide.
+    new_entry = torch.zeros(N_nb, D, dtype=torch.float32, device=device)
     new_entry[:, :4] = new_nb_positions[:, :4]  # x, y, cos_h, sin_h
     new_entry[:, 4:6] = new_vel  # vx, vy
     # Copy static attributes (width, length, type) from last known entry
