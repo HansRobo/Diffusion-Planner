@@ -62,6 +62,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max_steps", type=int, default=300)
     p.add_argument("--warmup_steps", type=int, default=5)
     p.add_argument("--near_miss_thresh", type=float, default=1.0)
+    p.add_argument(
+        "--turn_indicator_keep_bias",
+        type=float,
+        default=0.25,
+        help="subtracted from the KEEP logit before the turn-indicator argmax; 0.25 (default) "
+        "is the C++ planner's value",
+    )
     p.add_argument("--fps", type=float, default=10.0)
     p.add_argument("--draw_every", type=int, default=None)
     p.add_argument(
@@ -86,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         warmup_steps=a.warmup_steps,
         near_miss_thresh=a.near_miss_thresh,
         draw_every=a.draw_every,
+        turn_indicator_keep_bias=a.turn_indicator_keep_bias,
     )
     model, model_args = load_model(a.model_path, a.device)
     work = json.loads(Path(a.work_list).read_text())
