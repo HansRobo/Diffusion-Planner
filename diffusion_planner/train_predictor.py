@@ -87,6 +87,12 @@ def get_args(args_list=None):
     parser.add_argument("--save_utd", type=int, default=10)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument(
+        "--encoder_learning_rate",
+        type=float,
+        default=None,
+        help="optional encoder-only base LR; defaults to --learning_rate",
+    )
+    parser.add_argument(
         "--weight_decay",
         type=float,
         default=1e-4,
@@ -214,6 +220,14 @@ def get_args(args_list=None):
         help="zero the goal_pose input (global-frame data bug); model plans from route",
     )
     parser.add_argument(
+        "--plantf_relative_xy",
+        type=boolean,
+        default=False,
+        help="original-planTF xy representation: regress every agent future relative "
+        "to its current position, then add that observed position back at inference. "
+        "Use only for a newly trained PlantF checkpoint.",
+    )
+    parser.add_argument(
         "--coeff_smoothness_loss",
         type=float,
         default=0.0,
@@ -325,6 +339,21 @@ def get_args(args_list=None):
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
+    parser.add_argument(
+        "--pretrained_encoder_path",
+        type=str,
+        default=None,
+        help="warm-start: load ONLY the encoder.* weights from this checkpoint "
+        "(e.g. a diffusion model trained on production data); the head stays fresh. "
+        "Use the same normalization the pretrained encoder was trained with.",
+    )
+    parser.add_argument(
+        "--freeze_encoder_epochs",
+        type=int,
+        default=0,
+        help="freeze the encoder for the first N epochs (train the head only), "
+        "then unfreeze for joint fine-tuning (only with matching normalization)",
+    )
 
     parser.add_argument("--use_wandb", default=False, type=boolean)
     parser.add_argument(

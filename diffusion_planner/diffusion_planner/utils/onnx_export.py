@@ -71,9 +71,11 @@ DECODER_INPUT_NAMES = [
 
 TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0"]
 
-# planTF head: single decoder call, no external denoising loop and no separate
-# turn-indicator graph (the logit is a decoder output).
-PLANTF_DECODER_INPUT_NAMES = ["encoding"]
+# planTF head: one-shot, no external denoising loop and no separate
+# turn-indicator graph.  It nevertheless retains the DP decoder's four-input
+# interface so relative-xy PlantF can reconstruct agent-current anchors and
+# existing deployment bindings do not need a head-specific decoder contract.
+PLANTF_DECODER_INPUT_NAMES = DECODER_INPUT_NAMES
 
 FULL_OUTPUT_NAMES = ["prediction", "turn_indicator_logit"]
 ENCODER_OUTPUT_NAMES = ["encoding"]
@@ -237,8 +239,20 @@ class PlanTFDecoderONNXWrapper(nn.Module):
         super().__init__()
         self.decoder = model.decoder
 
-    def forward(self, encoding: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.decoder.forward_deploy(encoding)
+    def forward(
+        self,
+        encoding: torch.Tensor,
+        sampled_trajectories: torch.Tensor,
+        diffusion_time: torch.Tensor,
+        neighbor_agents_past: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        prediction, probability, turn_indicator_logit = self.decoder.forward_deploy(
+            encoding, sampled_trajectories, diffusion_time, neighbor_agents_past
+        )
+        # Keep diffusion_time in the exported graph despite PlanTF's one-shot
+        # decoder; deployment binds the same four DP decoder inputs.
+        keep_alive = 0.0 * diffusion_time[:, 0, 0, 0]
+        return prediction + keep_alive[:, None, None, None], probability, turn_indicator_logit
 
 
 class FullONNXWrapper(nn.Module):
@@ -609,10 +623,11 @@ def export_model_to_onnx(
             encoding = wrappers.encoder(*(export_inputs[name] for name in ENCODER_INPUT_NAMES))
 
         if wrappers.turn_indicator is None:  # planTF head: no denoising loop
+            decoder_inputs = build_decoder_inputs(export_inputs, encoding)
             export_specs = build_plantf_export_specs(
                 wrappers,
                 export_inputs,
-                {"encoding": encoding},
+                decoder_inputs,
                 full_onnx_path,
                 encoder_onnx_path,
                 decoder_onnx_path,

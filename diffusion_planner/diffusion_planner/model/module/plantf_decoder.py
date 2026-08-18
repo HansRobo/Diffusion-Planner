@@ -388,6 +388,14 @@ class PlanTFDecoder(nn.Module):
         # gives the temporal continuity a per-timestep absolute regression lacks
         # (fixes the "comb" jitter and stalled forward progress of the planTF head).
         self._use_velocity = getattr(config, "use_velocity_representation", False)
+        # Original planTF trains xy targets relative to each agent's current
+        # position.  This is particularly important for neighbors: unlike ego,
+        # their current xy is not always the origin of the ego frame.  The head
+        # predicts the relative component in StateNormalizer units and we add
+        # the current state (also in StateNormalizer units) before exposing the
+        # usual absolute ego-frame prediction.  It is opt-in because a legacy
+        # absolute-xy checkpoint cannot be reinterpreted safely.
+        self._relative_xy = getattr(config, "plantf_relative_xy", False)
         # Feed the current ego motion state (ego_current_state[:, 4:10] =
         # vx, vy, ax, ay, steering, yaw_rate) into the trajectory head so the
         # absolute-waypoint regression is anchored to the current motion, the
@@ -514,11 +522,71 @@ class PlanTFDecoder(nn.Module):
         is then mapped into the StateNormalizer space so every downstream consumer
         (WTA selection, smooth-L1 loss, mode metrics, prediction, ONNX) is unchanged.
         """
-        wp = velocity_to_waypoints(velocity)  # [..., T, 4] absolute metres, heading passthrough
+        wp = velocity_to_waypoints(velocity)  # [..., T, 4] relative xy, heading passthrough
         idx = 0 if ego else 1  # ego uses row 0; neighbors share the same neighbor stats
         mean = self._state_normalizer.mean[idx].to(wp.device)  # [1, 4]
         std = self._state_normalizer.std[idx].to(wp.device)  # [1, 4]
+        if self._relative_xy:
+            # xy is a displacement, not an absolute waypoint.  Do not subtract
+            # the StateNormalizer mean here: the current absolute state is
+            # added later in _anchor_relative_xy.
+            xy = wp[..., :2] / std[..., :2]
+            heading = (wp[..., 2:] - mean[..., 2:]) / std[..., 2:]
+            return torch.cat([xy, heading], dim=-1)
         return (wp - mean) / std
+
+    def _anchor_relative_xy(self, trajectory, neighbor_prediction, inputs):
+        """Convert planTF-style relative xy head outputs to absolute xy.
+
+        ``trajectory`` and ``neighbor_prediction`` are already in
+        StateNormalizer units.  The observation normalizer is inverted first
+        because the current neighbor state in ``inputs`` is observation-
+        normalized, whereas StateNormalizer is the coordinate system of the
+        decoder targets.  Heading channels intentionally remain unchanged;
+        original planTF only predicts neighbor xy.
+        """
+        if not self._relative_xy:
+            return trajectory, neighbor_prediction
+        if inputs is None:
+            raise ValueError(
+                "plantf_relative_xy requires raw inputs to anchor ego and neighbor current positions"
+            )
+
+        if self._observation_normalizer is None:
+            ego_current = inputs["ego_current_state"][:, :4]
+            neighbor_current = inputs["neighbor_agents_past"][:, : self._predicted_neighbor_num, -1, :4]
+        else:
+            # The full DP input carries a 10-channel ego_current_state, while
+            # the split ONNX decoder reconstructs only its 4-channel pose from
+            # sampled_trajectories.  Inverting the complete observation dict
+            # therefore fails for the split graph.  Invert only the pose
+            # channels needed for the anchor, and preserve zero-padded poses.
+            ego_current = inputs["ego_current_state"][:, :4]
+            ego_norm = self._observation_normalizer._normalization_dict[
+                "ego_current_state"
+            ]
+            ego_mask = torch.sum(torch.ne(ego_current, 0), dim=-1) == 0
+            ego_current = (
+                ego_current * ego_norm["std"][:4].to(ego_current.device)
+                + ego_norm["mean"][:4].to(ego_current.device)
+            )
+            ego_current[ego_mask] = 0
+            neighbor_current = self._observation_normalizer.inverse(
+                {"neighbor_agents_past": inputs["neighbor_agents_past"]}
+            )["neighbor_agents_past"][:, : self._predicted_neighbor_num, -1, :4]
+        B = trajectory.shape[0]
+        Pn = self._predicted_neighbor_num
+        neighbor_current = neighbor_current[:, :Pn]
+        current = torch.cat([ego_current[:, None], neighbor_current], dim=1)
+        mean = self._state_normalizer.mean[:, 0].to(current.device)
+        std = self._state_normalizer.std[:, 0].to(current.device)
+        current_norm_xy = (current[..., :2] - mean[None, :, :2]) / std[None, :, :2]
+
+        trajectory = trajectory.clone()
+        neighbor_prediction = neighbor_prediction.clone()
+        trajectory[..., :2] += current_norm_xy[:, :1, None, :]
+        neighbor_prediction[..., :2] += current_norm_xy[:, 1:, None, :]
+        return trajectory, neighbor_prediction
 
     def _ego_state_feat(self, inputs):
         """Normalized current ego motion state fed to the trajectory head, or
@@ -528,7 +596,7 @@ class PlanTFDecoder(nn.Module):
             return None
         return inputs["ego_current_state"][:, self._ego_state_slice]
 
-    def _decode(self, encoding, ego_state=None):
+    def _decode(self, encoding, ego_state=None, inputs=None):
         """Run both heads on the encoder tokens.
 
         Returns (trajectory [B, K, T, 4], probability [B, K],
@@ -552,6 +620,9 @@ class PlanTFDecoder(nn.Module):
         if self._use_velocity:
             trajectory = self._integrate_velocity(trajectory, ego=True)
             neighbor_prediction = self._integrate_velocity(neighbor_prediction, ego=False)
+        trajectory, neighbor_prediction = self._anchor_relative_xy(
+            trajectory, neighbor_prediction, inputs
+        )
         if self._predict_scale:
             return trajectory, probability, neighbor_prediction, log_scale
         return trajectory, probability, neighbor_prediction
@@ -613,7 +684,13 @@ class PlanTFDecoder(nn.Module):
         training (index 1 on the current-state-prepended axis = future step 0)."""
         return ego_trajectory[:, ::10, :2].reshape(-1, 2 * (self._future_len // 10))
 
-    def forward_deploy(self, encoding, ego_current_state=None):
+    def forward_deploy(
+        self,
+        encoding,
+        sampled_trajectories=None,
+        diffusion_time=None,
+        neighbor_agents_past=None,
+    ):
         """One-shot deployment path for the split ONNX export.
 
         Unlike the diffusion decoder there is no external denoising loop, so a
@@ -621,20 +698,37 @@ class PlanTFDecoder(nn.Module):
         independent turn-indicator head is excluded (it re-encodes raw map
         inputs itself and is a training-time auxiliary, not a deploy output).
 
-        ``ego_current_state`` (normalized) is required when the head consumes the
-        current motion state; the ONNX decoder graph then takes it as a second input.
+        The split decoder deliberately uses the same four inputs as the DP
+        decoder graph.  ``sampled_trajectories[:, 0, 0]`` supplies the ego
+        current state for relative-xy reconstruction; ``neighbor_agents_past``
+        supplies current neighbor states.  The diffusion-time input is kept in
+        the signature for the shared DP deployment contract, but is otherwise
+        irrelevant to this one-shot head.
 
         Returns:
             prediction: [B, 1 + Pn, T, 4] best-mode ego + neighbors, denormalized.
             probability: [B, K] mode logits.
             turn_indicator_logit: [B, TURN_INDICATOR_OUTPUT_DIM]
         """
-        ego_state = (
-            ego_current_state[:, self._ego_state_slice]
-            if (self._use_ego_state and ego_current_state is not None)
-            else None
-        )
-        decode_out = self._decode(encoding, ego_state)
+        if self._relative_xy:
+            if sampled_trajectories is None or neighbor_agents_past is None:
+                raise ValueError(
+                    "plantf_relative_xy split decoder requires sampled_trajectories and "
+                    "neighbor_agents_past to reconstruct current agent positions"
+                )
+            B = encoding.shape[0]
+            sampled = sampled_trajectories.reshape(
+                B, 1 + self._predicted_neighbor_num, 1 + self._future_len, 4
+            )
+            deploy_inputs = {
+                "ego_current_state": sampled[:, 0, 0],
+                "neighbor_agents_past": neighbor_agents_past,
+            }
+        else:
+            deploy_inputs = None
+        # The original planTF head does not consume ego_current_state directly
+        # on its split graph; state conditioning remains part of the encoder.
+        decode_out = self._decode(encoding, inputs=deploy_inputs)
         # Deploy path ignores the log-scale (used only in the training NLL loss).
         trajectory, probability, neighbor_prediction = decode_out[:3]
         best_trajectory = self._best_mode_trajectory(trajectory, probability)
@@ -666,7 +760,7 @@ class PlanTFDecoder(nn.Module):
         B = encoding.shape[0]
         Pn = self._predicted_neighbor_num
 
-        decode_out = self._decode(encoding, self._ego_state_feat(inputs))
+        decode_out = self._decode(encoding, self._ego_state_feat(inputs), inputs)
         if self._predict_scale:
             trajectory, probability, neighbor_prediction, log_scale = decode_out
         else:

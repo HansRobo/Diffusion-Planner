@@ -73,6 +73,9 @@ class TrainConfig:
     batch_size: int = 512
     save_utd: int = 10
     learning_rate: float = 1e-4
+    # Optional encoder-specific base LR.  When None, the encoder uses
+    # ``learning_rate`` just like the decoder/head.
+    encoder_learning_rate: Optional[float] = None
     # AdamW weight decay. Applied only to matmul weights; biases and
     # LayerNorm/BatchNorm/Embedding params are excluded (standard transformer
     # practice, matches original planTF). Previously torch AdamW's default 0.01
@@ -149,6 +152,12 @@ class TrainConfig:
     # Autoware feeds ego-frame -> train/deploy mismatch. Masking makes the model
     # plan from the route (route_lanes carries the goal). Bakes into ONNX.
     plantf_mask_goal_pose: bool = False
+    # Original planTF predicts every agent's future xy relative to that agent's
+    # current xy.  At inference the decoder adds the observed current xy back,
+    # so the returned DP-compatible trajectory remains in absolute ego-frame
+    # coordinates.  Keep this opt-in for checkpoint compatibility: existing
+    # absolute-xy checkpoints must not be interpreted as relative-xy models.
+    plantf_relative_xy: bool = False
     # --- planTF combinable ablation toggles (docs/plantf_head_development_notes.md §9) ---
     # Trajectory head architecture. "mlp" (default): reshape the single ego token
     # into K modes. "cross_attn": K mode queries cross-attend to ALL encoder
@@ -210,6 +219,18 @@ class TrainConfig:
     num_modes: int = 6
     predicted_neighbor_num: int = MAX_NUM_NEIGHBORS
     resume_model_path: Optional[str] = None
+    # Warm-start: load ONLY the encoder weights (encoder.* keys) from a checkpoint
+    # (e.g. a diffusion model trained on production data) into this model, leaving
+    # the decoder/head randomly initialized. The shared encoder is the bulk of the
+    # params, so this speeds up planTF convergence. IMPORTANT: use the SAME
+    # normalization the pretrained encoder was trained with, else the encoder sees
+    # an out-of-distribution input and its features are miscalibrated (unless you
+    # also fine-tune it, i.e. freeze_encoder_epochs=0).
+    pretrained_encoder_path: Optional[str] = None
+    # Freeze the encoder for the first N epochs (train the head only), then unfreeze
+    # for joint fine-tuning. Only sensible when the normalization matches the
+    # pretrained encoder (frozen features must match the input distribution).
+    freeze_encoder_epochs: int = 0
 
     # ---------------------------------------------------------
     # Logging & Distributed Setup

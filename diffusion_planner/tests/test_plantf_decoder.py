@@ -137,6 +137,95 @@ def test_inference_prediction_contract():
     assert torch.allclose(outputs["prediction"][:, 0], expected)
 
 
+def test_relative_xy_is_anchored_at_each_agent_current_position():
+    """Original-planTF relative xy output must reconstruct absolute DP xy."""
+    config = _config()
+    config.plantf_relative_xy = True
+    model = Diffusion_Planner(config).eval()
+    inputs = _inputs(batch_size=1)
+    Pn = MAX_NUM_NEIGHBORS
+    # Use distinct, non-origin coordinates so an ego-only anchor cannot pass.
+    inputs["ego_current_state"][0, :2] = torch.tensor([3.0, -2.0])
+    inputs["neighbor_agents_past"][0, :Pn, -1, :2] = torch.stack(
+        [torch.tensor([10.0 + i, -5.0 - i]) for i in range(Pn)]
+    )
+    trajectory = torch.zeros(1, NUM_MODES, OUTPUT_T, POSE_DIM)
+    neighbors = torch.zeros(1, Pn, OUTPUT_T, POSE_DIM)
+
+    anchored_ego, anchored_neighbors = model.decoder._anchor_relative_xy(
+        trajectory, neighbors, inputs
+    )
+    norm = config.state_normalizer
+    expected_ego = (inputs["ego_current_state"][0, :2] - norm.mean[0, 0, :2]) / norm.std[0, 0, :2]
+    expected_neighbors = (
+        inputs["neighbor_agents_past"][0, :Pn, -1, :2] - norm.mean[1:, 0, :2]
+    ) / norm.std[1:, 0, :2]
+    assert torch.allclose(anchored_ego[0, :, :, :2], expected_ego.view(1, 1, 2))
+    assert torch.allclose(anchored_neighbors[0, :, :, :2], expected_neighbors[:, None, :])
+
+
+def test_relative_xy_runs_forward_and_training_loss():
+    """Relative-xy mode must work through the normal model/loss integration."""
+    torch.manual_seed(7)
+    config = _config()
+    config.plantf_relative_xy = True
+    model = Diffusion_Planner(config)
+    inputs = _inputs(batch_size=2)
+    # Current positions must be non-zero for ego and neighbors, otherwise an
+    # accidental no-op anchor would not be detected by this integration test.
+    inputs["ego_current_state"][:, :2] = torch.tensor([[2.0, -1.0], [4.0, 3.0]])
+    inputs["neighbor_agents_past"][:, :, -1, 0] += 8.0
+
+    model.eval()
+    with torch.no_grad():
+        _, outputs = model(inputs)
+    assert torch.isfinite(outputs["prediction"]).all()
+
+    model.train()
+    B, Pn = 2, MAX_NUM_NEIGHBORS
+    ego_future = torch.randn(B, OUTPUT_T, POSE_DIM)
+    neighbors_future = torch.randn(B, Pn, OUTPUT_T, POSE_DIM)
+    mask = torch.zeros(B, Pn, OUTPUT_T, dtype=torch.bool)
+    loss = compute_plantf_training_loss(
+        model, inputs, (ego_future, neighbors_future, mask), _loss_args(config)
+    )
+    total = loss["ego_planning_loss"] + loss["neighbor_prediction_loss"] + loss["mode_cls_loss"]
+    total.backward()
+    assert torch.isfinite(total)
+
+
+def test_relative_xy_rejects_split_decoder_without_neighbor_current_state():
+    """Split graph requires the shared DP decoder anchor inputs."""
+    config = _config()
+    config.plantf_relative_xy = True
+    model = Diffusion_Planner(config).eval()
+    with pytest.raises(ValueError, match="sampled_trajectories"):
+        model.decoder.forward_deploy(torch.zeros(1, 1 + MAX_NUM_NEIGHBORS, HIDDEN_DIM))
+
+
+def test_relative_xy_split_decoder_matches_full_decoder_contract():
+    """Relative mode preserves DP's four-input split-decoder ABI and output."""
+    torch.manual_seed(11)
+    config = _config()
+    config.plantf_relative_xy = True
+    model = Diffusion_Planner(config).eval()
+    inputs = _inputs(batch_size=1)
+    inputs["ego_current_state"][0, :2] = torch.tensor([2.5, -1.5])
+    inputs["neighbor_agents_past"][0, :, -1, :2] += 3.0
+    sampled = torch.zeros(1, 1 + MAX_NUM_NEIGHBORS, OUTPUT_T + 1, POSE_DIM)
+    sampled[:, 0, 0] = inputs["ego_current_state"][:, :4]
+    encoding = model.encoder(inputs)
+    with torch.no_grad():
+        full = model.decoder(encoding, inputs)["prediction"]
+        split, _, _ = model.decoder.forward_deploy(
+            encoding,
+            sampled,
+            torch.ones(1, 1 + MAX_NUM_NEIGHBORS, OUTPUT_T + 1, 1),
+            inputs["neighbor_agents_past"],
+        )
+    assert torch.allclose(split, full)
+
+
 def test_training_loss_keys_and_backward():
     torch.manual_seed(0)
     config = _config()
