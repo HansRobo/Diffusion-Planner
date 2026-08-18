@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from collections import deque
 from concurrent.futures import Executor
@@ -397,6 +398,11 @@ def run_scenario_sim_rollout(
     a caller that outlives one scenario reuse a parsed map, which is per-map work a
     per-scenario process would otherwise pay per scenario.
     """
+    # Participants in one DDS domain all discover each other, so processes sharing a domain cost
+    # N^2 of discovery. 101 is the last domain whose RTPS base ports clear Linux's ephemeral
+    # range; setdefault, because a caller that knows its slot assigns better than pid modulo.
+    os.environ.setdefault("ROS_DOMAIN_ID", str(os.getpid() % 101))
+
     import openscenario_python as osp  # requires the SSV2_HEADLESS_EGO overlay
 
     cfg = config or RolloutConfig()
