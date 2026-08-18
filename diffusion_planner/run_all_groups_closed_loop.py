@@ -169,11 +169,6 @@ def run_one_group(
         if drop_objects:
             cmd.append("--drop_objects")
 
-        # Don't wrap in try/except: bash ``set -euo pipefail`` on the caller relies on
-        # a non-zero exit code to fail fast, and silently retrying a *real* bug
-        # (TypeError, missing import, OOM) twice just delays surfacing the stack trace.
-        # Transient infra issues belong in the launcher's retry policy (e.g. SLURM
-        # ``--requeue``), not here.
         subprocess.run(cmd, check=True)
 
 
@@ -558,9 +553,11 @@ def _refresh_workspace_view(
         return
 
     run.summary["closed_loop/workspace_view_url"] = url
-    # ``run.summary[k] = v`` queues; explicit ``update()`` flushes so the URL is on the
-    # run page even if outer ``_log_to_wandb`` returns without further logging.
-    run.summary.update()
+    # ``run.summary[k] = v`` queues; pass the URL through ``update`` to flush it to
+    # the run page immediately (wandb 0.27 ``SummaryDict.update`` requires a dict
+    # argument — the no-arg form raises ``TypeError: missing 1 required positional
+    # argument: 'd'``).
+    run.summary.update({"closed_loop/workspace_view_url": url})
     print(f"wandb: dashboard view saved → {url}")
 
 
