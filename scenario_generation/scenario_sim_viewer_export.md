@@ -44,12 +44,15 @@ npz 経路と違い、**記録走行という基準がありません**。その
   "dp_commit": "da3a0270...", "branch": "final-v1",
   "draw_every": "4", "fps": 10.0, "max_steps": "1700",
   "submitted_cases": 464,
-  "missing_rows": ["<case_key>", "..."]
+  "verdicts": { "pass": 21, "failure": 218, "error": 1, "undecided": 212 },
+  "missing_rows": [{ "case_key": "<case_key>", "reason": "SyntaxError: ..." }]
 }
 ```
 
+`verdicts` がラン全体の成否です（`scenarios.json` の合計）。
+
 `submitted_cases` が投入数、`cases.jsonl` の行数が成功数です。**差が失敗**で、
-`missing_rows` にその一覧が入ります。失敗したケースはディレクトリごと存在しないので、
+`missing_rows` にその一覧と理由が入ります。走らなかったケースもディレクトリは残るので、
 ファイルを数えても検出できません。
 
 ## scenarios.json
@@ -66,6 +69,7 @@ npz 経路と違い、**記録走行という基準がありません**。その
     "map": "2231",
     "version": "14",
     "n_cases": 12,
+    "verdicts": { "pass": 0, "failure": 7, "error": 0, "undecided": 5 },
     "error": null,
     "unmeasured_keys": ["mean_route_completion", "mean_gt_deviation_m",
                         "red_light_violation", "reproducer"],
@@ -79,9 +83,10 @@ npz 経路と違い、**記録走行という基準がありません**。その
 | `name` / `description` | 表示名。uuid のままでは読めないので |
 | `category` / `category_name` | 絞り込み。`A`〜`Z` と日本語名 |
 | `map` / `version` | 絞り込み。**別の地図の結果は比較できない**ので区別が要る |
-| `error` | そのシナリオで行を書けなかったケース数。null なら完全 |
-| | ただし **1 行も出なかったシナリオはエントリ自体が現れません**。員数は `run.json` で見てください |
+| `verdicts` | `pass` / `failure` / `error` / `undecided` の 4 件数。合計は `n_cases` |
+| `error` | そのシナリオで行を書けなかったケース数と理由。null なら完全 |
 | `unmeasured_keys` | **測っていない**項目名。0 と区別するため |
+| | 1 ケースも行が出なかったシナリオも、`n_cases: 0` と `error` を持つエントリとして現れます |
 | `summary` | `aggregate()` の出力。npz 経路の `summary.json` と同じ形 |
 
 ### 測っていない項目（重要）
@@ -121,20 +126,41 @@ npz 経路と違い、**記録走行という基準がありません**。その
 - `case_key` は元のラン上のディレクトリ名。追跡用で、表示には使いません
 - `segment` はありません
 
-### ケースの成否
+### ケースの成否 — この経路で最も重要な値
+
+`verdict` が**シナリオ自身の判定**です。
+
+```json
+"verdict": {
+  "decided": true,
+  "kind": "Failure",
+  "type": "SimulationFailure",
+  "trigger": "Is any of [ego] colliding with another given entity Npc1?",
+  "unmet": ["goal_position", "scenarioCheck_npc_cross"]
+}
+```
 
 | キー | 意味 |
 |---|---|
-| `result_kind` | scenario_simulator_v2 の判定。`Pass` / `Failure` / `Error` |
-| `terminated` | 走行が止まった理由。`sim_terminated`（シナリオ側の停止条件）/ `max_steps`（打ち切り） |
+| `decided` | シナリオが判定に到達したか。**`false` は歩数上限での打ち切り** |
+| `kind` | `Pass` / `Failure` / `Error`。`decided: false` のとき**このキーはありません** |
+| `type` | `SimulationFailure` / `SyntaxError` など |
+| `trigger` | 判定を引いた条件の文 |
+| `unmet` | 満たせなかった success condition 名。シナリオ作者が付けた名前です |
 
-**`result_kind` は OpenSCENARIO の停止条件による判定で、走行品質の判定ではありません。**
-打ち切りに達したケースは条件を満たしていないので必ず `Failure` になります。実測では 452 ケース中
-`Failure` が 430 件で、うち 212 件は打ち切り、261 件は物体衝突も路端逸脱もありません。
-一覧に「95% 失敗」と出すと誤読されるので、`result_kind` は絞り込みに使い、
-品質は `object.collision_count` などの実測値で見てください。
+**同じ行にある `result_kind` は判定ではありません。** インタプリタが configure 時に
+`Failure("Timeout", …)` を初期値として置くため、**判定に到達しなかったケースでも `Failure` と
+読めてしまいます**。生の値として残してありますが、成否は必ず `verdict` を見てください。
 
-ケースが走りきらなかった場合は行そのものが出ません（`run.json` の `missing_rows`）。
+実測 452 ケースのうち判定に到達したのは 240 件で、`Pass` 21 / `Failure` 218 / `Error` 1。
+残る 212 件は `decided: false` です。**この 212 件を失敗に数えないでください。**
+
+`Pass` は success condition の**すべて**を満たすことを要求します。実測で満たせなかった条件は
+`goal_position` 170 件・`ego_speed` 121 件・方向指示器 64 件・`ego_stop` 32 件で、
+走行の安全性とは別の条件も含みます。**Pass 率は走行品質の指標ではありません。**
+
+`terminated` は走行が止まった理由（`sim_terminated` / `max_steps`）で、`verdict.decided` と
+対応します。
 
 ## media
 
