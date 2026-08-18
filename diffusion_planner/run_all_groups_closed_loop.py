@@ -345,6 +345,8 @@ def run_closed_loop_main(
                 args, all_group_names, all_summaries, out_root, wandb_run, render_media=render_media
             )
 
+    return True
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)

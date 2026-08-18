@@ -86,6 +86,12 @@ class TrainConfig(ClosedLoopConfig):
     train_subsample_step: int = 1
 
     # ---------------------------------------------------------
+    # Scenario-based open-loop validation
+    # ---------------------------------------------------------
+    scenario_based_open_loop_list: str = ""
+    scenario_based_open_loop_only: bool = False
+
+    # ---------------------------------------------------------
     # Training Parameters
     # ---------------------------------------------------------
     seed: int = 3407
