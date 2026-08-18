@@ -257,7 +257,7 @@ def build_full_closed_loop_wandb_log(
     if render_media and rep is not None and out_dir is not None:
         png_dir, mp4_path = _segment_paths(out_dir, rep)
         if mp4_path.is_file():
-            log[_media_key("video")] = wandb.Video(str(mp4_path), format="mp4")
+            log[media_key("video")] = wandb.Video(str(mp4_path), format="mp4")
         try:
             rendered = render_trajectory_colormaps(
                 png_dir,
@@ -275,7 +275,7 @@ def build_full_closed_loop_wandb_log(
             wandb.Image(str(rendered[m]), caption=m) for m in colormap_metrics if m in rendered
         ]
         if gallery:
-            log[_media_key("gallery")] = gallery
+            log[media_key("gallery")] = gallery
 
     return log
 
