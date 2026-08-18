@@ -127,7 +127,6 @@ def test_inference_prediction_contract():
     assert outputs["trajectory"].shape == (B, NUM_MODES, OUTPUT_T, POSE_DIM)
     assert outputs["probability"].shape == (B, NUM_MODES)
     assert outputs["turn_indicator_logit"].shape == (B, TURN_INDICATOR_OUTPUT_DIM)
-    assert outputs["independent_turn_indicator_logit"].shape == (B, TURN_INDICATOR_OUTPUT_DIM)
     assert torch.isfinite(outputs["prediction"]).all()
 
     # ego row of "prediction" must be the argmax mode, denormalized
@@ -158,7 +157,6 @@ def test_training_loss_keys_and_backward():
         "neighbor_prediction_loss",
         "mode_cls_loss",
         "turn_indicator_loss",
-        "independent_turn_indicator_loss",
         "road_border_loss",
         "neighbor_collision_loss",
         "turn_indicator_accuracy",
@@ -200,7 +198,6 @@ def test_winner_takes_all_picks_closest_mode():
                 "probability": torch.zeros(B, K, requires_grad=True),
                 "neighbor_prediction": torch.zeros(B, Pn, OUTPUT_T, POSE_DIM),
                 "turn_indicator_logit": torch.zeros(B, TURN_INDICATOR_OUTPUT_DIM),
-                "independent_turn_indicator_logit": torch.zeros(B, TURN_INDICATOR_OUTPUT_DIM),
             }
 
     loss = compute_plantf_training_loss(

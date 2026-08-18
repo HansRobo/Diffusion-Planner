@@ -33,7 +33,6 @@ from diffusion_planner.loss import (
     make_turn_indicator_gt,
     velocity_to_waypoints,
 )
-from diffusion_planner.model.module.turn_indicator import TurnIndicatorNetwork
 from diffusion_planner.utils.normalizer import StateNormalizer
 
 
@@ -494,14 +493,6 @@ class PlanTFDecoder(nn.Module):
             nn.init.constant_(head[-1].weight, 0)
             nn.init.constant_(head[-1].bias, 0)
 
-        self.independent_turn_indicator_predictor = TurnIndicatorNetwork(
-            hidden_dim=config.hidden_dim // 2,
-            num_heads=config.num_heads // 2,
-            mixer_depth=config.encoder_mixer_depth // 2,
-            fusion_depth=config.encoder_fusion_depth // 2,
-            drop_path_rate=config.encoder_drop_path_rate,
-        )
-
     def _compute_turn_indicator(self, ego_trajectory, encoding_pooled):
         turn_indicator_input = torch.cat([ego_trajectory, encoding_pooled], dim=-1)
         return self.turn_indicator_predictor(turn_indicator_input)
@@ -659,7 +650,7 @@ class PlanTFDecoder(nn.Module):
                 [both] "trajectory": [B, K, T, 4] ego mode trajectories (normalized)
                 [both] "probability": [B, K] mode logits
                 [both] "neighbor_prediction": [B, Pn, T, 4] (normalized)
-                [both] "turn_indicator_logit" / "independent_turn_indicator_logit"
+                [both] "turn_indicator_logit": [B, TURN_INDICATOR_OUTPUT_DIM]
                 [inference-only] "prediction": [B, 1 + Pn, T, 4] best-mode ego +
                     neighbors, denormalized — same contract as ``Decoder``.
         """
@@ -690,18 +681,12 @@ class PlanTFDecoder(nn.Module):
             outputs["turn_indicator_logit"] = self._compute_turn_indicator(
                 ego_trajectory, encoding_pooled
             )
-            outputs["independent_turn_indicator_logit"] = self.independent_turn_indicator_predictor(
-                gt_trajectories[:, 0, 1:], inputs
-            )
             return outputs
 
         best_trajectory = self._best_mode_trajectory(trajectory, probability, inputs)
 
         outputs["turn_indicator_logit"] = self._compute_turn_indicator(
             self._subsampled_ego_xy(best_trajectory), encoding_pooled
-        )
-        outputs["independent_turn_indicator_logit"] = self.independent_turn_indicator_predictor(
-            best_trajectory, inputs
         )
 
         prediction = torch.cat([best_trajectory[:, None], neighbor_prediction], dim=1)
@@ -890,15 +875,6 @@ def compute_plantf_training_loss(
     turn_indicator_coeff = torch.where(turn_indicator_change, 1.0, 0.05)
     turn_indicator_loss = (turn_indicator_loss * turn_indicator_coeff).mean()
     loss["turn_indicator_loss"] = turn_indicator_loss
-
-    independent_turn_indicator_logit = decoder_output["independent_turn_indicator_logit"]
-    independent_turn_indicator_loss = nn.functional.cross_entropy(
-        independent_turn_indicator_logit, turn_indicator_gt, reduction="none"
-    )
-    independent_turn_indicator_loss = (
-        independent_turn_indicator_loss * turn_indicator_coeff
-    ).mean()
-    loss["independent_turn_indicator_loss"] = independent_turn_indicator_loss
 
     with torch.no_grad():
         turn_indicator_accuracy = (
