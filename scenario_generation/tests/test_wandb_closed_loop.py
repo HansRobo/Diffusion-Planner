@@ -165,3 +165,16 @@ def test_no_project_vehicle_map_produces_no_per_vehicle_rollup(tmp_path: Path):
     per_vehicle = sorted(k for k in log if k.startswith("closed_loop_overview_by_vehicle/"))
     assert not per_vehicle, f"per-vehicle rollup logged without a map: {per_vehicle[:4]}"
     assert log["closed_loop_overview/n_sites"] == 2  # the overall rollup is unaffected
+
+
+def test_episode_stem_without_segment(tmp_path):
+    """A producer whose unit of work is a whole scenario writes no ``segment``.
+
+    Indexing the key raises for such a row, so the stem resolves to the route name.
+    """
+    from scenario_generation.wandb_closed_loop import episode_stem
+
+    assert episode_stem(tmp_path, {"route": "case_a"}) == "case_a"
+    # A segmented row still prefers the suffixed stem when that file exists.
+    (tmp_path / "case_a_0_10.mp4").write_bytes(b"")
+    assert episode_stem(tmp_path, {"route": "case_a", "segment": [0, 10]}) == "case_a_0_10"
