@@ -19,6 +19,12 @@ deviation from a recorded human drive, and route progress needs the resolved rou
 from __future__ import annotations
 
 import numpy as np
+from diffusion_planner.dimensions import (
+    TURN_INDICATOR_OUTPUT_DISABLE,
+    TURN_INDICATOR_OUTPUT_ENABLE_LEFT,
+    TURN_INDICATOR_OUTPUT_ENABLE_RIGHT,
+    TURN_INDICATOR_OUTPUT_KEEP,
+)
 
 from scenario_generation.reproducer_rollout import (
     clearance_family_block,
@@ -41,6 +47,42 @@ def _red_light_block() -> dict:
     return {"steps": 0, "count": 0, "measured": False}
 
 
+def _turn_indicator_block(states: list[int], asks: list[int | None]) -> dict:
+    """Turn-indicator activity over the scored window.
+
+    ``states`` is what the simulator relayed, which is what a scenario's indicator conditions
+    judge. ``asks`` is the class the model chose before KEEP was resolved against the held
+    state, so ``asked_off_steps`` separates "the signal stayed on" from "the model never asked
+    to clear it" -- the two have nothing in common but the same relayed state. An ask is None
+    for ticks before the first prediction.
+
+    ``aggregate`` does not consume this block. The NPZ path has no indicator series, so
+    requiring it there would fail every reproducer row.
+    """
+    on = [
+        s in (TURN_INDICATOR_OUTPUT_ENABLE_LEFT, TURN_INDICATOR_OUTPUT_ENABLE_RIGHT) for s in states
+    ]
+    intervals = 0
+    longest = 0
+    run = 0
+    for signalling in on:
+        if not signalling:
+            run = 0
+            continue
+        run += 1
+        if run == 1:
+            intervals += 1
+        longest = max(longest, run)
+    asked = [a for a in asks if a is not None and a != TURN_INDICATOR_OUTPUT_KEEP]
+    return {
+        "signal_steps": sum(on),
+        "on_intervals": intervals,
+        "longest_on_steps": longest,
+        "asked_steps": len(asked),
+        "asked_off_steps": sum(1 for a in asked if a == TURN_INDICATOR_OUTPUT_DISABLE),
+    }
+
+
 def build_segment_row(
     *,
     n_steps_run: int,
@@ -53,6 +95,8 @@ def build_segment_row(
     near_miss_thresh: float,
     strong_brake_mps2: float,
     progress_m: float,
+    turn_indicators: list[int],
+    turn_indicator_asks: list[int | None],
 ) -> dict:
     """Build one closed-loop segment row from a scenario_sim rollout's raw series.
 
@@ -89,6 +133,7 @@ def build_segment_row(
         ),
         "red_light_violation": _red_light_block(),
         "strong_brake": strong_brake_block(ac, strong_brake_mps2),
+        "turn_indicator": _turn_indicator_block(turn_indicators, turn_indicator_asks),
         "reproducer": {**_NO_REPRODUCER_CURSOR, "normal_steps": int(n_steps_run)},
     }
 
@@ -115,6 +160,8 @@ def failed_segment_row(reason: str, near_miss_thresh: float) -> dict:
             near_miss_thresh=near_miss_thresh,
             strong_brake_mps2=float("inf"),  # no threshold was applied
             progress_m=0.0,
+            turn_indicators=[],
+            turn_indicator_asks=[],
         ),
         "error": reason,
     }

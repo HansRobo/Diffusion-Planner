@@ -46,6 +46,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max_steps", type=int, default=300)
     p.add_argument("--warmup_steps", type=int, default=5)
     p.add_argument("--near_miss_thresh", type=float, default=1.0)
+    p.add_argument(
+        "--turn_indicator_keep_bias",
+        type=float,
+        default=0.25,
+        help="subtracted from the KEEP logit before the turn-indicator argmax; 0.25 (default) "
+        "is the C++ planner's value",
+    )
     p.add_argument("--fps", type=float, default=10.0)
     p.add_argument(
         "--draw_every",
@@ -72,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=a.max_steps,
         warmup_steps=a.warmup_steps,
         near_miss_thresh=a.near_miss_thresh,
+        turn_indicator_keep_bias=a.turn_indicator_keep_bias,
         draw_every=a.draw_every,
     )
     row = run_scenario_sim_rollout(

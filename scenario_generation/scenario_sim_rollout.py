@@ -94,6 +94,10 @@ class RolloutConfig:
     # pull-away transient belongs in the measurement.
     warmup_steps: int = 5
     near_miss_thresh: float = 1.0
+    # Subtracted from the KEEP logit before the turn-indicator argmax. KEEP resolves to the held
+    # state, so this is the only thing that decides how decisively the model must ask for a
+    # change before one happens.
+    turn_indicator_keep_bias: float = 0.25
     find_route_min_len_m: float = 120.0
     # Coordinate-contract check: after the first stepped tick the ego's realized pose must
     # land within this tolerance (m) of the injected plan's first future point. A gross frame
@@ -117,7 +121,9 @@ class RolloutConfig:
 
 
 @torch.no_grad()
-def _predict_ego_plan(model, model_args, scene, device, ego_name: str) -> tuple[np.ndarray, int]:
+def _predict_ego_plan(
+    model, model_args, scene, device, ego_name: str, keep_bias: float
+) -> tuple[np.ndarray, int]:
     """Run the model as ego -> (ego-frame plan ``(future_len, 4)``, turn-indicator class).
 
     No ``map_cache`` is passed: the cache only pays off across steps that share one
@@ -130,6 +136,7 @@ def _predict_ego_plan(model, model_args, scene, device, ego_name: str) -> tuple[
         [ego_name],
         device,
         return_turn_indicators=True,
+        turn_indicator_keep_bias=keep_bias,
     )
     # A model without a turn-indicator head returns no class at all. Falling back to 0 puts
     # NO_COMMAND into a history that is in report space, where 0 is not a value, and
@@ -174,8 +181,21 @@ def _score_neighbors(scene, ego_state: dict, device: str, ego_name: str) -> tupl
     return min_clr, coll
 
 
-def _traj_entry(step: int, ego_state: dict, goal_xy: np.ndarray) -> dict:
-    """One trajectory_log row (world pose, speed, goal distance) for post-hoc metrics."""
+def _traj_entry(
+    step: int, ego_state: dict, goal_xy: np.ndarray, ti: int, ti_raw: int | None
+) -> dict:
+    """One trajectory_log row (world pose, speed, goal distance, turn indicator) for post-hoc
+    metrics.
+
+    ``ti`` is the indicator state the simulator is relaying while this tick is observed, which
+    is the planner's previous decision: this tick's own is resolved after the row is taken. It
+    is therefore the same value the model reads as history, in the class space
+    ``TURN_INDICATOR_DISABLE`` documents.
+
+    ``ti_raw`` is the class the model asked for at the replan that resolved ``ti``, before KEEP
+    is resolved against the previous state. The pair separates a signal the model re-asserts
+    from one that is only being held. None until the first prediction.
+    """
     x, y, h = baselink_xyh(ego_state)
     tw = ego_state["twist"]
     return {
@@ -185,6 +205,8 @@ def _traj_entry(step: int, ego_state: dict, goal_xy: np.ndarray) -> dict:
         "heading": h,
         "speed": float(math.hypot(tw["linear_x"], tw["linear_y"])),
         "goal_d": float(math.hypot(x - goal_xy[0], y - goal_xy[1])),
+        "ti": int(ti),
+        "ti_raw": None if ti_raw is None else int(ti_raw),
     }
 
 
@@ -295,6 +317,8 @@ def _write_rollout_trace(
                 "speed": round(float(entry["speed"]), 3),
                 "clearance_m": round(float(clr), 4) if np.isfinite(clr) else None,
                 "collision": bool(collisions[k]),
+                "ti": int(entry["ti"]),
+                "ti_raw": entry["ti_raw"],
             }
             if have_rb:
                 rb = float(rb_dists[k])
@@ -368,6 +392,8 @@ def _finalize_row(
         near_miss_thresh=cfg.near_miss_thresh,
         strong_brake_mps2=STRONG_BRAKE_MPS2,
         progress_m=rb["progress_m"],
+        turn_indicators=[int(e["ti"]) for e in trajectory_log[start:stop]],
+        turn_indicator_asks=[e["ti_raw"] for e in trajectory_log[start:stop]],
     )
     # scenario_sim-only diagnostics, kept flat (outside the shared category blocks) so
     # aggregate never sees them as a metric category.
@@ -438,6 +464,9 @@ def run_scenario_sim_rollout(
     # The planner is the only source of this signal -- the simulator relays what it is given --
     # so the history the model reads is the one resolved here, held between replans.
     ti_report = TURN_INDICATOR_DISABLE
+    # What the model asked for at the last replan, kept only so the trace can tell a held
+    # signal from a re-asserted one.
+    ti_model: int | None = None
     ti_hist = deque([ti_report] * _HISTORY_LEN, maxlen=_HISTORY_LEN)
     # NaN until the first stepped tick; every comparison against the tolerance is then False,
     # so a rollout that never stepped reports the check as failed rather than as passed.
@@ -526,7 +555,7 @@ def run_scenario_sim_rollout(
             # Logged before stepping, so row k is the state clearance and collision are
             # measured on. Recording the post-step pose instead pairs every object sample
             # with a road-border and speed sample one tick later.
-            trajectory_log.append(_traj_entry(step, ego_state, goal_xy))
+            trajectory_log.append(_traj_entry(step, ego_state, goal_xy, ti_report, ti_model))
 
             with timers("scene_build"):
                 update_history(buffers, states, ego_name)
@@ -548,7 +577,7 @@ def run_scenario_sim_rollout(
                 # timed as its own stage and kept out of the steady-state ms/call.
                 with timers("predict_cold" if cached_plan_ego is None else "predict"):
                     cached_plan_ego, ti_model = _predict_ego_plan(
-                        model, model_args, scene, device, ego_name
+                        model, model_args, scene, device, ego_name, cfg.turn_indicator_keep_bias
                     )
                 ti_report = resolve_keep_turn_indicator(ti_model, ti_report)
 
