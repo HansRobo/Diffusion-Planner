@@ -31,8 +31,8 @@ from diffusion_planner.grpo_utils import (
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import rename_agents_to_unknown
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
+from diffusion_planner.utils.unknown_rename_debug import apply_and_report_unknown_rename
 
 
 def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
@@ -43,7 +43,7 @@ def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
     return neighbors_future, mask
 
 
-def _sft_step(raw_inputs, model, optimizer, args, ema, aug):
+def _sft_step(raw_inputs, model, optimizer, args, ema, aug, step: int = 0, epoch: int = 0):
     """A standard supervised training step on the real GT (mirrors ``train_epoch``).
 
     ``aug`` is a ``StatePerturbation`` (or ``None``); when given it perturbs the ego
@@ -60,8 +60,13 @@ def _sft_step(raw_inputs, model, optimizer, args, ema, aug):
 
     ego_future = heading_to_cos_sin(ego_future)
     neighbors_future, neighbor_future_mask = _neighbor_future_world(neighbors_future_raw)
-    inputs["neighbor_agents_past"] = rename_agents_to_unknown(
-        inputs["neighbor_agents_past"], args.unknown_class_rename_prob
+    inputs["neighbor_agents_past"], rename_stats = apply_and_report_unknown_rename(
+        inputs["neighbor_agents_past"],
+        args.unknown_class_rename_prob,
+        debug_dir=args.unknown_rename_debug_dir,
+        debug_every_n_steps=args.unknown_rename_debug_every_n_steps,
+        step=step,
+        epoch=epoch,
     )
     inputs = args.observation_normalizer(inputs)
 
@@ -85,10 +90,13 @@ def _sft_step(raw_inputs, model, optimizer, args, ema, aug):
         "loss": loss["loss"].detach(),
         "sft_ego_planning_loss": loss["ego_planning_loss"].detach(),
         "is_grpo": torch.tensor(0.0),
+        **rename_stats,
     }
 
 
-def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
+def _grpo_step(
+    raw_inputs, model, optimizer, args, ema, collider_injector, aug, step: int = 0, epoch: int = 0
+):
     """A GRPO step: sample a group per scene, reward, advantage, policy-gradient update.
 
     ``aug`` is a ``StatePerturbation`` (or ``None``). When given it perturbs the scene's ego
@@ -121,8 +129,13 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
     # Applied here (per-scene, before expand_batch) rather than per-sample after expansion, so
     # every one of the N expanded copies of a scene sees an identical rename decision -- a
     # prerequisite for comparable group advantages, same as the collider injection above.
-    raw_inputs["neighbor_agents_past"] = rename_agents_to_unknown(
-        raw_inputs["neighbor_agents_past"], args.unknown_class_rename_prob
+    raw_inputs["neighbor_agents_past"], rename_stats = apply_and_report_unknown_rename(
+        raw_inputs["neighbor_agents_past"],
+        args.unknown_class_rename_prob,
+        debug_dir=args.unknown_rename_debug_dir,
+        debug_every_n_steps=args.unknown_rename_debug_every_n_steps,
+        step=step,
+        epoch=epoch,
     )
 
     exp = expand_batch(raw_inputs, n)
@@ -184,10 +197,11 @@ def _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug):
         "kinematic_drift": kinematic_drift.mean().detach(),
         "abs_advantage": loss_dict["abs_advantage"],
         "is_grpo": torch.tensor(1.0),
+        **rename_stats,
     }
 
 
-def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector, aug):
+def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector, aug, epoch: int = 0):
     epoch_loss = []
 
     model.train()
@@ -202,13 +216,15 @@ def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector
     # all ranks emit the same metric key set each epoch -- required for the keyed all-reduce.
     step_rng = random.Random(args.seed)
 
-    for raw_inputs in data_loader:
+    for step, raw_inputs in enumerate(data_loader):
         raw_inputs = {key: value.to(args.device) for key, value in raw_inputs.items()}
 
         if step_rng.random() < args.sft_prob:
-            step_loss = _sft_step(raw_inputs, model, optimizer, args, ema, aug)
+            step_loss = _sft_step(raw_inputs, model, optimizer, args, ema, aug, step=step, epoch=epoch)
         else:
-            step_loss = _grpo_step(raw_inputs, model, optimizer, args, ema, collider_injector, aug)
+            step_loss = _grpo_step(
+                raw_inputs, model, optimizer, args, ema, collider_injector, aug, step=step, epoch=epoch
+            )
 
         if args.ddp:
             torch.cuda.synchronize()
@@ -224,5 +240,11 @@ def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector
         if "reward_mean" in epoch_mean_loss:
             print(f"{epoch_mean_loss['reward_mean']=:.4f}")
             print(f"{epoch_mean_loss['reward_max']=:.4f}")
+        if args.unknown_class_rename_prob > 0.0:
+            print(
+                f"unknown_rename: {epoch_mean_loss['unknown_rename_count']:.1f} avg/batch "
+                f"renamed of {epoch_mean_loss['unknown_rename_valid_count']:.1f} avg valid "
+                f"({epoch_mean_loss['unknown_rename_rate']:.1%})"
+            )
 
     return epoch_mean_loss, epoch_mean_loss["loss"]

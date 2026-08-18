@@ -40,7 +40,7 @@ def heading_transform(heading, transform_mat):
 
 def rename_agents_to_unknown(
     neighbor_agents_past: torch.Tensor, prob: float
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Stochastically relabel some valid neighbors' one-hot type to Unknown (col 11), applied
     consistently across every past timestep of that agent (not per-frame -- an agent's semantic
     class does not change frame to frame). Class-agnostic: applies regardless of the agent's
@@ -49,20 +49,26 @@ def rename_agents_to_unknown(
     neighbor_agents_past: [B, N, T, D] raw (pre-normalization) tensor, D >= 12.
     prob: per-agent probability. If <= 0.0, this is a true no-op and draws NO random numbers,
         so it never perturbs the RNG call sequence for callers who leave it at the default.
+
+    Returns (neighbor_agents_past, renamed_mask, valid_mask): renamed_mask/valid_mask are
+    [B, N] bool -- which agent slots were actually relabeled this call, and which slots were
+    eligible to be (nonzero kinematics at any timestep). Exposed so callers can report/confirm
+    what the augmentation did (see utils/unknown_rename_debug.py), not just apply it blindly.
     """
-    if prob <= 0.0:
-        return neighbor_agents_past
     # "Valid" mirrors NeighborEncoder.forward's mask_p: any nonzero kinematic (cols :8) at
-    # any past timestep. Padding slots are never touched.
+    # any past timestep. Padding slots are never touched. Computed unconditionally (cheap,
+    # no RNG) so callers can report "0 renamed out of N valid" even when prob <= 0.0.
     valid = torch.any(torch.ne(neighbor_agents_past[..., :8], 0), dim=-1).any(dim=-1)  # [B, N]
+    if prob <= 0.0:
+        return neighbor_agents_past, torch.zeros_like(valid), valid
     rename = (torch.rand(valid.shape, device=neighbor_agents_past.device) < prob) & valid
     if not rename.any():
-        return neighbor_agents_past
+        return neighbor_agents_past, rename, valid
     selected = neighbor_agents_past[rename]  # [K, T, D]
     selected[..., 8:12] = 0.0
     selected[..., 11] = 1.0
     neighbor_agents_past[rename] = selected
-    return neighbor_agents_past
+    return neighbor_agents_past, rename, valid
 
 
 def _cross2d(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:

@@ -4,8 +4,9 @@ from tqdm import tqdm
 
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import StatePerturbation, rename_agents_to_unknown
+from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
+from diffusion_planner.utils.unknown_rename_debug import apply_and_report_unknown_rename
 
 
 def heading_to_cos_sin(x):
@@ -32,7 +33,7 @@ def heading_to_cos_sin(x):
     )
 
 
-def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
+def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None, epoch: int = 0):
     if len(data_loader) == 0:
         empty = {"loss": 0.0, "turn_indicator_accuracy": 0.0}
         return empty, 0.0
@@ -47,7 +48,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     if ddp.get_rank() == 0:
         data_loader = tqdm(data_loader, desc="Training", unit="batch")
 
-    for inputs in data_loader:
+    for step, inputs in enumerate(data_loader):
         inputs = {key: value.to(args.device) for key, value in inputs.items()}
         inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
         inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
@@ -64,8 +65,13 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
         neighbors_future = heading_to_cos_sin(neighbors_future)
         neighbors_future[mask] = 0.0
-        inputs["neighbor_agents_past"] = rename_agents_to_unknown(
-            inputs["neighbor_agents_past"], args.unknown_class_rename_prob
+        inputs["neighbor_agents_past"], rename_stats = apply_and_report_unknown_rename(
+            inputs["neighbor_agents_past"],
+            args.unknown_class_rename_prob,
+            debug_dir=args.unknown_rename_debug_dir,
+            debug_every_n_steps=args.unknown_rename_debug_every_n_steps,
+            step=step,
+            epoch=epoch,
         )
         inputs = args.observation_normalizer(inputs)
 
@@ -73,6 +79,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         optimizer.zero_grad()
 
         loss = compute_training_loss(model, inputs, (ego_future, neighbors_future, mask), args)
+        loss.update(rename_stats)
 
         loss["loss"] = (
             args.alpha_neighbor_loss * loss["neighbor_prediction_loss"]
@@ -102,5 +109,11 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
     if ddp.get_rank() == 0:
         print(f"{epoch_mean_loss['loss']=:.4f}")
         print(f"{epoch_mean_loss['turn_indicator_accuracy']=:.4f}")
+        if args.unknown_class_rename_prob > 0.0:
+            print(
+                f"unknown_rename: {epoch_mean_loss['unknown_rename_count']:.1f} avg/batch "
+                f"renamed of {epoch_mean_loss['unknown_rename_valid_count']:.1f} avg valid "
+                f"({epoch_mean_loss['unknown_rename_rate']:.1%})"
+            )
 
     return epoch_mean_loss, epoch_mean_loss["loss"]

@@ -81,6 +81,19 @@ def get_args(args_list=None):
         help="per-agent prob of relabeling a valid neighbor's type one-hot to Unknown during "
         "training (class-agnostic; 0.0 = disabled)",
     )
+    parser.add_argument(
+        "--unknown_rename_debug_dir",
+        type=str,
+        default="",
+        help="if set, periodically dump a before/after PNG of the unknown_class_rename_prob "
+        "augmentation here so you can visually confirm which agents get renamed (empty = off)",
+    )
+    parser.add_argument(
+        "--unknown_rename_debug_every_n_steps",
+        type=int,
+        default=200,
+        help="how often (in training steps) to dump the rename debug PNG, when the debug dir is set",
+    )
     parser.add_argument("--normalization_file_path", default="normalization.json", type=str)
     parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument("--pin-mem", action="store_true", help="Pin CPU memory in DataLoader")

@@ -25,16 +25,21 @@ def test_prob_zero_is_a_true_noop_and_draws_no_random_numbers():
     x = _make_batch()
     original = x.clone()
     with patch("torch.rand") as mock_rand:
-        out = rename_agents_to_unknown(x, 0.0)
+        out, renamed, valid = rename_agents_to_unknown(x, 0.0)
     mock_rand.assert_not_called()
     assert out is x
     assert torch.equal(out, original)
+    assert not renamed.any()
+    # valid_mask is still reported accurately even when the feature is off, so callers can
+    # show "0/2 renamed" rather than "0/0" -- the whole point is confirming it's off.
+    assert torch.equal(valid, torch.tensor([[True, True, False, False]] * B))
 
 
 def test_prob_one_renames_all_valid_agents_every_timestep():
     x = _make_batch()
-    out = rename_agents_to_unknown(x, 1.0)
+    out, renamed, valid = rename_agents_to_unknown(x, 1.0)
 
+    assert torch.equal(renamed, valid)
     # Valid agents (slots 0, 1) become Unknown at every past timestep.
     for slot in (0, 1):
         assert torch.equal(
@@ -53,7 +58,7 @@ def test_renamed_agent_is_consistent_across_all_timesteps():
     none are, never a mix."""
     torch.manual_seed(0)
     x = _make_batch()
-    out = rename_agents_to_unknown(x, 0.5)
+    out, _renamed, _valid = rename_agents_to_unknown(x, 0.5)
     is_unknown_per_t = out[..., 11] == 1.0  # [B, N, T]
     all_t_agree = (is_unknown_per_t.all(dim=-1) == is_unknown_per_t.any(dim=-1)).all()
     assert bool(all_t_agree)
@@ -62,8 +67,17 @@ def test_renamed_agent_is_consistent_across_all_timesteps():
 def test_padding_slots_never_renamed():
     torch.manual_seed(1)
     x = _make_batch()
-    out = rename_agents_to_unknown(x, 1.0)  # even at prob=1.0
+    out, renamed, _valid = rename_agents_to_unknown(x, 1.0)  # even at prob=1.0
     assert torch.all(out[:, 2:, :, 8:12] == 0.0)
+    assert not renamed[:, 2:].any()
+
+
+def test_renamed_mask_matches_which_agents_actually_changed():
+    torch.manual_seed(3)
+    x = _make_batch()
+    out, renamed, _valid = rename_agents_to_unknown(x, 0.5)
+    became_unknown = out[:, :, -1, 11] == 1.0  # [B, N]
+    assert torch.equal(renamed, became_unknown)
 
 
 def test_grpo_group_invariant_rename_before_expand():
@@ -73,7 +87,7 @@ def test_grpo_group_invariant_rename_before_expand():
     torch.manual_seed(2)
     raw = {"neighbor_agents_past": _make_batch()}
     n = 8
-    raw["neighbor_agents_past"] = rename_agents_to_unknown(
+    raw["neighbor_agents_past"], _renamed, _valid = rename_agents_to_unknown(
         raw["neighbor_agents_past"], 0.5
     )
     exp = expand_batch(raw, n)

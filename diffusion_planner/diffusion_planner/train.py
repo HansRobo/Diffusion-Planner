@@ -609,7 +609,7 @@ def model_training(args: TrainConfig):
         # training step
         train_start_time = time.perf_counter()
         train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug
+            train_loader, diffusion_planner, optimizer, args, model_ema, aug, epoch=epoch
         )
         train_sec = time.perf_counter() - train_start_time
 
