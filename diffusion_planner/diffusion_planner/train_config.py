@@ -301,7 +301,6 @@ class TrainConfig:
     state_normalizer: Optional[StateNormalizer] = None
     observation_normalizer: Optional[ObservationNormalizer] = None
     control_normalizer: Optional[ControlNormalizer] = None
-    neighbor_control_normalizer: Optional[ControlNormalizer] = None
 
     # ---------------------------------------------------------
     # Deterministic

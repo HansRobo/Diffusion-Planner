@@ -325,7 +325,6 @@ class Decoder(nn.Module):
         self._state_normalizer: StateNormalizer = config.state_normalizer
         self._observation_normalizer: ObservationNormalizer = config.observation_normalizer
         self._control_normalizer: ControlNormalizer = config.control_normalizer
-        self._neighbor_control_normalizer: ControlNormalizer = config.neighbor_control_normalizer
 
         # self._guidance_fn = config.guidance_fn
         self._guidance_fn = (
@@ -458,32 +457,29 @@ class Decoder(nn.Module):
         }
 
     def denoised_to_trajectory(self, x, inputs, current_states):
-        """Convert the denoised control [B, P, T+1, 2] into a trajectory [B, P, T, 4].
+        """Convert the denoised ego control [B, P, T+1, 2] into a trajectory [B, P, T, 4].
 
-        Both ego and neighbors are integrated through the unicycle model. Control signals
-        (accel, curvature) are frame-invariant, so integrating from the ego-centric history
-        produces ego-centric trajectories directly.
+        Only the ego row carries a trained signal: neighbor control GT is zero (control in
+        the ego-centric frame is ill-defined for them), so this branch trains with
+        alpha_neighbor_loss = 0 and the neighbor rows are returned as zeros rather than
+        integrated -- a unicycle rollout of 320 untrained rows costs real time and would
+        read as a prediction that nothing behind it supports.
         """
-        Pn = self._predicted_neighbor_num
+        B, P = x.shape[:2]
 
-        # Denormalize ego and neighbors with their own statistics.
-        ctrl_raw = x[:, :, 1:, :]  # [B, P, T, 2]
-        ctrl = torch.empty_like(ctrl_raw)
-        ctrl[:, 0:1] = self._control_normalizer.inverse(ctrl_raw[:, 0:1])
-        ctrl[:, 1:] = self._neighbor_control_normalizer.inverse(ctrl_raw[:, 1:])
+        ego_ctrl = self._control_normalizer.inverse(x[:, 0, 1:, :])  # [B, T, 2]
 
         raw_inputs = self._observation_normalizer.inverse(inputs)
-
         ego_v0 = raw_inputs["ego_current_state"][:, 4:5]  # [B, 1] raw velocity
         ego_traj = control_to_waypoints(
-            ctrl[:, 0],
+            ego_ctrl,
             raw_inputs["ego_agent_past"],
             t0_states={"v": ego_v0.squeeze(-1)},
         )  # [B, T, 4]
 
-        neighbor_history = raw_inputs["neighbor_agents_past"][:, :Pn, :, :4]
-        neighbor_traj = control_to_waypoints(ctrl[:, 1:], neighbor_history)  # [B, Pn, T, 4]
-
+        neighbor_traj = torch.zeros(
+            B, P - 1, self._future_len, POSE_DIM, device=x.device, dtype=ego_traj.dtype
+        )
         return torch.cat([ego_traj[:, None], neighbor_traj], dim=1)
 
     def _compute_turn_indicator_from_denoised(self, x, encoding_pooled):

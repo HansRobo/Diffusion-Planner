@@ -28,9 +28,6 @@ class Config:
         self.control_normalizer = ControlNormalizer(
             self.control_normalizer["mean"], self.control_normalizer["std"]
         )
-        self.neighbor_control_normalizer = ControlNormalizer(
-            self.neighbor_control_normalizer["mean"], self.neighbor_control_normalizer["std"]
-        )
 
         self.guidance_fn = guidance_fn
 

@@ -108,10 +108,6 @@ def build_train_config(args: argparse.Namespace, **overrides: Any) -> TrainConfi
         mean=[-0.030108, -0.001032],
         std=[2.177840, 0.033305],
     )
-    config.neighbor_control_normalizer = ControlNormalizer(
-        mean=[-3.346858, 0.000680],
-        std=[46.111027, 0.295797],
-    )
     return config
 
 
