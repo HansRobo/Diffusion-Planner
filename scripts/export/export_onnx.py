@@ -120,7 +120,6 @@ def _export(
     input_names: tuple[str, ...],
     output_names: tuple[str, ...],
     opset_version: int,
-    optimize: bool = True,
 ) -> None:
     torch.onnx.export(
         model,
@@ -132,7 +131,7 @@ def _export(
         dynamo=True,
         dynamic_shapes=_dynamic_shapes(inputs),
         external_data=False,
-        optimize=optimize,
+        optimize=True,
     )
     print(f"exported: {path}")
 
@@ -173,6 +172,33 @@ def _validate(
                 ),
             )
     print(f"validated: {path}")
+
+
+def _validate_all(
+    validations: list[
+        tuple[
+            Path,
+            tuple[str, ...],
+            tuple[torch.Tensor, ...],
+            tuple[torch.Tensor, ...],
+        ]
+    ],
+) -> None:
+    """Run every ONNX validation before reporting collected failures."""
+    failures: list[tuple[Path, Exception]] = []
+    for path, input_names, inputs, expected in validations:
+        try:
+            _validate(path, input_names, inputs, expected)
+        except Exception as error:
+            failures.append((path, error))
+            print(f"validation failed: {path}\n{error}")
+
+    if failures:
+        failed_paths = ", ".join(str(path) for path, _ in failures)
+        raise RuntimeError(
+            f"{len(failures)} ONNX validation(s) failed after all validations ran: "
+            f"{failed_paths}"
+        ) from failures[0][1]
 
 
 def main() -> None:
@@ -229,21 +255,24 @@ def main() -> None:
         SAMPLER_INPUT_NAMES,
         ("trajectory",),
         args.opset_version,
-        optimize=False,
     )
     if not args.skip_validation:
-        _validate(scene_path, SCENE_INPUT_NAMES, scene_inputs, scene_outputs)
-        _validate(
-            decoder_path,
-            DECODER_INPUT_NAMES,
-            decoder_inputs,
-            (decoder_output,),
-        )
-        _validate(
-            sampler_path,
-            SAMPLER_INPUT_NAMES,
-            sampler_inputs,
-            (sampler_output,),
+        _validate_all(
+            [
+                (scene_path, SCENE_INPUT_NAMES, scene_inputs, scene_outputs),
+                (
+                    decoder_path,
+                    DECODER_INPUT_NAMES,
+                    decoder_inputs,
+                    (decoder_output,),
+                ),
+                (
+                    sampler_path,
+                    SAMPLER_INPUT_NAMES,
+                    sampler_inputs,
+                    (sampler_output,),
+                ),
+            ]
         )
 
 

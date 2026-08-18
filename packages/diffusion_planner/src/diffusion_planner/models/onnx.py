@@ -120,7 +120,7 @@ class TrajectoryDecoderOnnxWrapper(nn.Module):
 
 
 class DiffusionPlannerSamplerOnnxWrapper(nn.Module):
-    """Expose fixed 20-step Heun sampling as one ONNX graph."""
+    """Expose fixed 10-step Heun sampling as one ONNX graph."""
 
     def __init__(self, planner: DiffusionPlanner) -> None:
         super().__init__()
@@ -179,7 +179,7 @@ class DiffusionPlannerSamplerOnnxWrapper(nn.Module):
         )
         return self.planner.sample(
             input_data,
-            num_steps=20,
+            num_steps=10,
             time_epsilon=1e-5,
             initial_noise=initial_noise,
         )
