@@ -108,6 +108,11 @@ class TrainConfig:
     save_utd: int = 10
     learning_rate: float = 1e-4
     warm_up_epoch: int = 5
+    # Log gradient norms every N steps (0 disables). The L2 norm is free -- it is what
+    # clip_grad_norm_ returns -- and is recorded every step regardless; this knob only
+    # gates the linf pass, which walks every parameter. The values stay on device until the
+    # epoch-end sync, so 1 does not reintroduce the per-step host sync that #10 removed.
+    grad_stats_interval: int = 1
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True

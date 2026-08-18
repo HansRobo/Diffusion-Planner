@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from datetime import timedelta
 
 import torch
@@ -91,6 +92,33 @@ def get_model(model, use_ddp):
         return model
 
 
+def print_from_every_rank(message):
+    """Print from *every* rank, not just rank 0.
+
+    ``setup_for_distributed`` replaces ``builtins.print`` with a wrapper that drops output
+    on non-master ranks unless ``force=True`` is passed -- so a plain ``print`` of a
+    per-rank diagnostic is silently lost on exactly the ranks that had something to say.
+    Passing ``force=True`` is not an option either: the wrapper is only installed when DDP
+    actually initializes, so on the single-process path it would hit the real ``print`` and
+    raise TypeError. Writing to stdout directly is correct in both modes.
+    """
+    sys.stdout.write(str(message) + "\n")
+    sys.stdout.flush()
+
+
+def gather_objects(obj):
+    """Gather a picklable object from every rank into a list, on every rank.
+
+    Collective: must be called by every rank. Returns ``[obj]`` when DDP is not
+    initialized, so callers work unchanged in single-process runs.
+    """
+    if not is_dist_avail_and_initialized():
+        return [obj]
+    gathered = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, obj)
+    return gathered
+
+
 def is_dist_avail_and_initialized():
     if not dist.is_available():
         return False
@@ -126,10 +154,46 @@ def all_reduce_min(value, device):
 
 
 def reduce_and_average_losses(loss_dict, device):
+    """Combine per-rank epoch metrics into one global dict.
+
+    Most keys are averaged, but two kinds must not be:
+
+    * ``*_max`` (epoch maximum of a gradient norm) is reduced with MAX -- averaging maxima
+      across ranks would hide the one rank that saw the spike, which defeats the purpose.
+    * ``*_steps`` is a step count, so it is summed.
+
+    Ranks can also end an epoch with *different* key sets (a rank that skipped every step
+    on which the gradient stats were due contributes no ``grad/*`` entry). all_reduce is
+    collective, so iterating each rank's own keys would deadlock on the mismatch; the union
+    is agreed on first, in a deterministic order, and averages divide by the number of
+    ranks that actually reported the key rather than by world_size.
+    """
     torch.distributed.barrier()
     world_size = dist.get_world_size()
-    for key in loss_dict.keys():
-        loss_tensor = torch.tensor([loss_dict[key].item()]).to(device)
-        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-        loss_dict[key] = loss_tensor.item() / world_size
+
+    gathered: list = [None] * world_size
+    dist.all_gather_object(gathered, sorted(loss_dict.keys()))
+    keys = sorted({key for part in gathered for key in part})
+
+    for key in keys:
+        present = key in loss_dict
+        raw = loss_dict[key] if present else 0.0
+        value = float(raw.item() if torch.is_tensor(raw) else raw)
+
+        if key.endswith("_max"):
+            t = torch.tensor(
+                [value if present else float("-inf")], dtype=torch.float64, device=device
+            )
+            dist.all_reduce(t, op=dist.ReduceOp.MAX)
+            loss_dict[key] = t.item()
+        elif key.endswith("_steps"):
+            t = torch.tensor([value], dtype=torch.float64, device=device)
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+            loss_dict[key] = t.item()
+        else:
+            # [sum, number of ranks reporting] in one collective.
+            t = torch.tensor([value, 1.0 if present else 0.0], dtype=torch.float64, device=device)
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+            loss_dict[key] = t[0].item() / max(t[1].item(), 1.0)
+
     return loss_dict

@@ -90,6 +90,31 @@ def log_dataset_artifact(
         run.use_artifact(artifact)
 
 
+def nonfinite_step_log(reports: list[dict]) -> dict:
+    """wandb payload naming the NPZ files behind this epoch's skipped steps.
+
+    Empty when nothing was skipped, so the table only ever appears on epochs that actually
+    had a problem. ``train_loss/grad/skipped_steps`` is the scalar to watch/alert on; this
+    table is what turns "it happened" into "it was these files".
+    """
+    if not reports:
+        return {}
+    columns = ["rank", "step", "grad_norm", "bad_losses", "bad_inputs", "npz_paths", "detail"]
+    data = [
+        [
+            r["rank"],
+            r["step"],
+            r["grad_norm"],
+            ", ".join(r["bad_losses"]),
+            ", ".join(r["bad_inputs"]),
+            "\n".join(r["bad_paths"]),
+            r["text"],
+        ]
+        for r in reports
+    ]
+    return {"train_diagnostics/nonfinite_steps": wandb.Table(columns=columns, data=data)}
+
+
 def mean_ego_loss(loss_dict):
     result = {}
     for key, val in loss_dict.items():
@@ -401,7 +426,8 @@ def model_training(args: TrainConfig):
         aug = None
 
     # prepare dataset
-    train_set = DiffusionPlannerData(args.train_set_list)
+    # with_index lets train_epoch name the NPZ files behind a non-finite gradient step.
+    train_set = DiffusionPlannerData(args.train_set_list, with_index=True)
     valid_set = DiffusionPlannerData(args.valid_set_list)
 
     train_set.data_list = train_set.data_list[:: args.train_subsample_step]
@@ -608,7 +634,7 @@ def model_training(args: TrainConfig):
 
         # training step
         train_start_time = time.perf_counter()
-        train_loss, train_total_loss = train_epoch(
+        train_loss, train_total_loss, nonfinite_reports = train_epoch(
             train_loader, diffusion_planner, optimizer, args, model_ema, aug
         )
         train_sec = time.perf_counter() - train_start_time
@@ -689,6 +715,7 @@ def model_training(args: TrainConfig):
             lr_dict = {"lr": optimizer.param_groups[0]["lr"]}
             wandb.log(
                 {
+                    **nonfinite_step_log(nonfinite_reports),
                     **{f"train_loss/{k}": v for k, v in train_loss.items()},
                     **{f"lr/{k}": v for k, v in lr_dict.items()},
                     **time_dict,
