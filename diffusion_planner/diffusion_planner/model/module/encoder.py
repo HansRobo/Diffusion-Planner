@@ -123,7 +123,7 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
-            num_types=POLYGON_TYPE_NUM,
+            point_dim=2 + POLYGON_TYPE_NUM,
         )
         self.line_string_encoder = LineEncoder(
             config.line_string_len,
@@ -131,7 +131,7 @@ class Encoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
             depth=config.encoder_mixer_depth,
-            num_types=LINE_STRING_TYPE_NUM,
+            point_dim=2 + LINE_STRING_TYPE_NUM,
         )
         self.goal_pose_encoder = GoalPoseEncoder(
             drop_path_rate=config.encoder_drop_path_rate,
@@ -667,7 +667,7 @@ class LaneEncoder(nn.Module):
 
 
 class LineEncoder(nn.Module):
-    def __init__(self, line_len, class_type, drop_path_rate, hidden_dim, depth, num_types):
+    def __init__(self, line_len, class_type, drop_path_rate, hidden_dim, depth, point_dim=2):
         super().__init__()
         self._class_type = class_type
         tokens_mlp_dim = 64
@@ -675,11 +675,13 @@ class LineEncoder(nn.Module):
 
         self._line_len = line_len
 
-        # type one-hot is fed via an embedding, not through the Mlp/Mixer
-        self.type_emb = nn.Linear(num_types, channels_mlp_dim)
-
+        # DP checkpoint compatibility: keep the map-type one-hot channels in
+        # the MLP input.  The production DP checkpoint was trained with
+        # ``point_dim + 2`` features (coordinates, type one-hot, dx, dy):
+        # polygon=5 and line_string=6.  Moving type to a separate embedding
+        # changes these projection shapes and prevents encoder warm-start.
         self.channel_pre_project = Mlp(
-            in_features=4,  # x, y, dx, dy
+            in_features=point_dim + 2,
             hidden_features=channels_mlp_dim,
             out_features=channels_mlp_dim,
             act_layer=nn.GELU,
@@ -712,50 +714,43 @@ class LineEncoder(nn.Module):
         """
         B, P, V, D = x.shape
 
-        # Mask before splitting: an element is empty only if every coord/type is 0.
-        mask_p = torch.sum(torch.ne(x, 0), dim=(-2, -1)) == 0
-        valid_indices = ~mask_p.view(-1)
-
-        # Split coordinates and type one-hot. The type is constant within an element,
-        # so a single representative point is enough.
-        coords = x[..., :2]  # (B, P, V, 2)
-        type_one_hot = x[:, :, 0, 2:]  # (B, P, num_types)
-
-        diff_x = coords[:, :, 1:, 0] - coords[:, :, :-1, 0]  # (B, P, V-1)
-        diff_y = coords[:, :, 1:, 1] - coords[:, :, :-1, 1]  # (B, P, V-1)
+        diff_x = x[:, :, 1:, 0] - x[:, :, :-1, 0]  # (B, P, V-1)
+        diff_y = x[:, :, 1:, 1] - x[:, :, :-1, 1]  # (B, P, V-1)
         diff_x = torch.cat([diff_x, torch.zeros_like(diff_x[:, :, :1])], dim=2)  # (B, P, V)
         diff_x = diff_x.view(B, P, V, 1)
         diff_y = torch.cat([diff_y, torch.zeros_like(diff_y[:, :, :1])], dim=2)  # (B, P, V)
         diff_y = diff_y.view(B, P, V, 1)
-        feat = torch.concat([coords, diff_x, diff_y], dim=-1)  # (B, P, V, 4): x, y, dx, dy
+        x = torch.concat([x, diff_x, diff_y], dim=-1)  # (B, P, V, D+2)
 
-        pos = feat[:, :, int(self._line_len / 2), :4].clone()  # x, y, x'-x, y'-y
+        pos = x[:, :, int(self._line_len / 2), :4].clone()  # legacy DP layout
         heading = torch.atan2(pos[..., 3], pos[..., 2])
         pos = torch.stack(
             [pos[..., 0], pos[..., 1], torch.cos(heading), torch.sin(heading)], dim=-1
         )
         pos = add_class_type(pos, self._class_type)
 
-        feat = feat.view(B * P, V, -1)
+        B, P, V, _ = x.shape
+        mask_v = torch.sum(torch.ne(x[..., :4], 0), dim=-1).to(x.device) == 0
+        mask_p = torch.sum(~mask_v, dim=-1) == 0
+        valid_indices = ~mask_p.view(-1)
 
-        feat = self.channel_pre_project(feat)
-        feat = feat.permute(0, 2, 1)
-        feat = self.token_pre_project(feat)
-        feat = feat.permute(0, 2, 1)
+        x = x.view(B * P, V, -1)
+        x = torch.where(valid_indices.view(-1, 1, 1), x, torch.zeros_like(x))
+
+        x = self.channel_pre_project(x)
+        x = x.permute(0, 2, 1)
+        x = self.token_pre_project(x)
+        x = x.permute(0, 2, 1)
         for block in self.blocks:
-            feat = block(feat)
+            x = block(x)
 
-        feat = torch.mean(feat, dim=1)
-
-        # Inject type information via embedding instead of through the Mlp/Mixer.
-        feat = feat + self.type_emb(type_one_hot.view(B * P, -1))
-
-        feat = self.emb_project(self.norm(feat))
+        x = torch.mean(x, dim=1)
+        x = self.emb_project(self.norm(x))
 
         # Apply mask to zero out invalid positions
-        feat = feat * valid_indices.float().unsqueeze(-1)
+        x = x * valid_indices.float().unsqueeze(-1)
 
-        return feat.view(B, P, -1), mask_p.reshape(B, -1), pos.view(B, P, -1)
+        return x.view(B, P, -1), mask_p.reshape(B, -1), pos.view(B, P, -1)
 
 
 class GoalPoseEncoder(nn.Module):

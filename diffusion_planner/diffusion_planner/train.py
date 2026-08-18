@@ -272,6 +272,64 @@ def render_checkpoint_legacy_visualization(
     )
 
 
+def warmstart_encoder(model, path, device):
+    """Load ONLY the encoder.* weights from a checkpoint (e.g. a diffusion model
+    trained on production data) into ``model.encoder``, leaving the decoder/head
+    untouched. Speeds up planTF training since the shared encoder is the bulk of
+    the params. ``strict=False`` so a slightly different config surfaces as
+    missing/unexpected keys instead of crashing. ``model`` must be the unwrapped
+    Diffusion_Planner (call before DDP wrap)."""
+    ckpt = torch.load(path, map_location=device)
+    sd = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+    # Check the DDP prefix first.  Stripping ``len("encoder.")`` from a
+    # ``module.encoder.*`` key produces ``ncoder.*`` and silently turns every
+    # checkpoint tensor into an unexpected key under ``strict=False``.
+    prefixes = ("module.encoder.", "encoder.")
+    enc = {}
+    for key, value in sd.items():
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                enc[key[len(prefix) :]] = value
+                break
+    if not enc:
+        raise ValueError(
+            "[warm-start] no encoder.* or module.encoder.* keys found in "
+            f"checkpoint: {path}"
+        )
+
+    # ``strict=False`` still raises for same-named tensors with different
+    # shapes.  This is expected when a DP checkpoint and the plantf data
+    # adapter expose a different number of map-feature channels.  Transfer all
+    # compatible encoder weights and retain plantf's fresh initialization for
+    # those input projections.
+    target = model.encoder.state_dict()
+    compatible = {
+        key: value
+        for key, value in enc.items()
+        if key in target and target[key].shape == value.shape
+    }
+    skipped_shape = [
+        key
+        for key, value in enc.items()
+        if key in target and target[key].shape != value.shape
+    ]
+    missing, unexpected = model.encoder.load_state_dict(compatible, strict=False)
+    print(
+        f"[warm-start] encoder: loaded {len(compatible)}/{len(enc)} keys from {path} | "
+        f"missing={len(missing)} unexpected={len(unexpected)} "
+        f"shape_skipped={len(skipped_shape)}"
+    )
+    if not compatible:
+        raise ValueError(
+            "[warm-start] no compatible encoder tensors found in checkpoint: "
+            f"{path}"
+        )
+    if skipped_shape:
+        print(f"[warm-start] kept fresh incompatible tensors: {skipped_shape}")
+    if unexpected:
+        print(f"[warm-start] NOTE unexpected keys (not in encoder): {unexpected[:5]}...")
+
+
 def model_training(args: TrainConfig):
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
@@ -423,6 +481,10 @@ def model_training(args: TrainConfig):
     diffusion_planner = Diffusion_Planner(args)
     diffusion_planner = diffusion_planner.to(rank if args.device == "cuda" else args.device)
 
+    # Warm-start the shared encoder from a pretrained checkpoint (before DDP wrap).
+    if getattr(args, "pretrained_encoder_path", None):
+        warmstart_encoder(diffusion_planner, args.pretrained_encoder_path, args.device)
+
     if args.ddp:
         diffusion_planner = DDP(diffusion_planner, device_ids=[rank], find_unused_parameters=True)
 
@@ -444,22 +506,30 @@ def model_training(args: TrainConfig):
     # LayerNorm/BatchNorm/GroupNorm/Embedding params are excluded (standard
     # transformer practice, matches original planTF). The previous single group
     # relied on torch AdamW's default wd=0.01 applied to ALL params.
+    encoder_lr = args.encoder_learning_rate or args.learning_rate
+    encoder_param_ids = {id(param) for param in ddp.get_model(diffusion_planner, args.ddp).encoder.parameters()}
     decay_params, no_decay_params = [], []
+    encoder_decay_params, encoder_no_decay_params = [], []
     _no_decay_modules = (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d, nn.GroupNorm, nn.Embedding)
     for module in ddp.get_model(diffusion_planner, args.ddp).modules():
         for param_name, param in module.named_parameters(recurse=False):
             if not param.requires_grad:
                 continue
-            if param_name.endswith("bias") or isinstance(module, _no_decay_modules):
-                no_decay_params.append(param)
+            is_no_decay = param_name.endswith("bias") or isinstance(module, _no_decay_modules)
+            if id(param) in encoder_param_ids:
+                (encoder_no_decay_params if is_no_decay else encoder_decay_params).append(param)
             else:
-                decay_params.append(param)
+                (no_decay_params if is_no_decay else decay_params).append(param)
     params = [
-        {"params": decay_params, "lr": args.learning_rate, "weight_decay": args.weight_decay},
-        {"params": no_decay_params, "lr": args.learning_rate, "weight_decay": 0.0},
+        {"params": decay_params, "lr": args.learning_rate, "weight_decay": args.weight_decay, "group_name": "head_decay"},
+        {"params": no_decay_params, "lr": args.learning_rate, "weight_decay": 0.0, "group_name": "head_no_decay"},
+        {"params": encoder_decay_params, "lr": encoder_lr, "weight_decay": args.weight_decay, "group_name": "encoder_decay"},
+        {"params": encoder_no_decay_params, "lr": encoder_lr, "weight_decay": 0.0, "group_name": "encoder_no_decay"},
     ]
 
     optimizer = optim.AdamW(params)
+    if global_rank == 0:
+        print(f"Optimizer base LR: head={args.learning_rate}, encoder={encoder_lr}")
     scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
 
     if args.resume_model_path is not None:
@@ -471,8 +541,8 @@ def model_training(args: TrainConfig):
 
         # Override learning rate with the new value
         for param_group in optimizer.param_groups:
-            param_group["lr"] = args.learning_rate
-        print(f"Learning rate reset to {args.learning_rate}")
+            param_group["lr"] = encoder_lr if param_group.get("group_name", "").startswith("encoder_") else args.learning_rate
+        print(f"Learning rate reset: head={args.learning_rate}, encoder={encoder_lr}")
 
     else:
         init_epoch = 0
@@ -551,6 +621,21 @@ def model_training(args: TrainConfig):
 
     # begin training
     for epoch in range(init_epoch, train_epochs):
+        # Encoder freeze schedule: freeze for the first freeze_encoder_epochs (train
+        # the head only), then unfreeze for joint fine-tuning. Toggling requires_grad
+        # is safe because the encoder params are already in the optimizer (built
+        # while trainable) — frozen params simply receive no gradient and are skipped
+        # by optimizer.step, then resume once unfrozen.
+        if args.freeze_encoder_epochs > 0:
+            frozen = epoch < args.freeze_encoder_epochs
+            enc = ddp.get_model(diffusion_planner, args.ddp).encoder
+            for p in enc.parameters():
+                p.requires_grad = not frozen
+            if epoch in (init_epoch, args.freeze_encoder_epochs):
+                print(
+                    f"[freeze] epoch {epoch}: encoder {'FROZEN (head-only)' if frozen else 'trainable (joint)'}"
+                )
+
         # Synchronize all processes before training
         if args.ddp:
             torch.distributed.barrier()
@@ -680,7 +765,7 @@ def model_training(args: TrainConfig):
                     )
                 if args.enable_checkpoint_viz:
                     render_checkpoint_legacy_visualization(
-                        diffusion_planner,
+                        model_ema.ema if args.use_ema else diffusion_planner,
                         args,
                         epoch,
                         curr_dir,
@@ -689,7 +774,7 @@ def model_training(args: TrainConfig):
                         viz_sample_data,
                     )
                     render_checkpoint_visualizations(
-                        diffusion_planner,
+                        model_ema.ema if args.use_ema else diffusion_planner,
                         args,
                         epoch,
                         curr_dir,
@@ -726,7 +811,7 @@ def model_training(args: TrainConfig):
                     )
                 if args.enable_checkpoint_viz:
                     render_checkpoint_legacy_visualization(
-                        diffusion_planner,
+                        model_ema.ema if args.use_ema else diffusion_planner,
                         args,
                         epoch,
                         curr_dir,
@@ -735,7 +820,7 @@ def model_training(args: TrainConfig):
                         viz_sample_data,
                     )
                     render_checkpoint_visualizations(
-                        diffusion_planner,
+                        model_ema.ema if args.use_ema else diffusion_planner,
                         args,
                         epoch,
                         curr_dir,
