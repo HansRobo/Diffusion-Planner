@@ -55,6 +55,8 @@ DP encoder checkpoint.
 | `coeff_smoothness_loss` | `1.0` | Penalizes second differences and reduces comb-like trajectories. |
 | `plantf_smoothness_tail_weight` | `1.0` | Places additional smoothness emphasis at the tail. |
 | `freeze_encoder_epochs` | `2` | Warm-start the new head before joint fine-tuning. |
+| `ego_history_dropout_rate` | `0.0` | Current baseline disables this DP input dropout. |
+| augmentation | `quintic`, probability `0.5` | Current DP data-augmentation baseline. |
 | global batch size | `96` on two GPUs | The training code splits this to 48 samples per rank. |
 | head / encoder LR | `5e-4` / `5e-5` | Current production baseline. |
 
@@ -93,6 +95,10 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
   --coeff_road_border_loss 1.0 \
   --coeff_neighbor_collision_loss 0.0 \
   --freeze_encoder_epochs 2 \
+  --ego_history_dropout_rate 0.0 \
+  --use_data_augment True \
+  --augment_type quintic \
+  --augment_prob 0.5 \
   --batch_size 96 \
   --learning_rate 5e-4 \
   --encoder_learning_rate 5e-5 \
