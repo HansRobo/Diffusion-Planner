@@ -23,10 +23,12 @@ def load_run_data(run_dir: Path) -> tuple[dict[str, Any], dict[str, dict[str, An
             if not line:
                 continue
             row = json.loads(line)
-            scen_key = row.get("scenario") or row.get("name") or row.get("route_id")
+            scen_key = row.get("route") or row.get("scenario") or row.get("name") or row.get("route_id")
             if not scen_key and "row_file" in row:
                 scen_key = Path(row["row_file"]).stem
             if scen_key:
+                # Use basename of route if it is a full path
+                scen_key = Path(scen_key).name
                 segments[scen_key] = row
     return summary, segments
 
@@ -34,9 +36,9 @@ def load_run_data(run_dir: Path) -> tuple[dict[str, Any], dict[str, dict[str, An
 def is_passed(row: dict[str, Any]) -> bool:
     rk = str(row.get("result_kind", "")).lower()
     term = str(row.get("terminated", "")).lower()
-    if rk in ("passed", "success", "exitsuccess"):
+    if rk in ("pass", "passed", "success", "exitsuccess"):
         return True
-    if term in ("passed", "success", "exitsuccess"):
+    if term in ("pass", "passed", "success", "exitsuccess"):
         return True
     return False
 
