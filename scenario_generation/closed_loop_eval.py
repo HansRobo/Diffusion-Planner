@@ -402,12 +402,16 @@ def aggregate(
     }
 
 
-def build_mp4(png_dir: Path, mp4_path: Path, fps: float, remove_pngs: bool = False) -> None:
+def build_mp4(png_dir: Path, mp4_path: Path, fps: float, remove_pngs: bool = True) -> None:
     """Encode the PNG sequence in ``png_dir`` to an MP4.
 
     PNGs are named by step ``k`` and may be sparse (``draw_every`` skips frames), so glob the
     directory (gap-tolerant, name-sorted) instead of a contiguous ``%05d`` counter. ``fps`` is the
     raw frame rate, so a sparse sequence plays faster than real time (shorter video).
+
+    ``remove_pngs`` (default ``True``): delete the PNGs once the MP4 is built, so a run over
+    many routes/segments does not accumulate per-step PNGs on disk (this is what exhausts
+    inodes on a long eval run). Pass ``False`` to keep them, e.g. for manual inspection.
     """
     subprocess.run(
         [
