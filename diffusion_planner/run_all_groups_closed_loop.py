@@ -264,7 +264,6 @@ def run_closed_loop_main(
     if render_media is None:
         render_media = cfg.render_media
 
-
     for json_name, groups in resolved.items():
         json_out_dir = out_root / json_name
         json_out_dir.mkdir(parents=True, exist_ok=True)
