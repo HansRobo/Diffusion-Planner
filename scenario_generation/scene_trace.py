@@ -22,10 +22,8 @@ def _points(points: np.ndarray) -> list[list[float]]:
 def asset_dir(run_dir: Path) -> Path:
     """Where the map assets for the cases under ``run_dir`` live.
 
-    One map serves every case that ran on it, so the assets sit beside the case directories
-    rather than inside them. Both the rollout that writes them and the export that reads them
-    call this, because a disagreement is silent: the export simply finds no map and the viewer
-    draws the trace over nothing.
+    One map serves every case that ran on it, so the assets sit beside the case directories.
+    Writer and export both call this; a disagreement is silent -- the export finds no map.
     """
     return Path(run_dir) / "scene_maps"
 
@@ -33,8 +31,7 @@ def asset_dir(run_dir: Path) -> Path:
 def write_map_asset(builder, asset_dir: Path) -> tuple[str, Path]:
     """Write one immutable map asset, shared by every case using this map.
 
-    The digest is calculated from the exported geometry rather than a machine-local path, so
-    the viewer can cache it safely after the run is copied to another host.
+    Keyed by a digest of the geometry, not a path, so it survives a copy to another host.
     """
     lanes = []
     for lane_id, lane in sorted(builder._cache.items()):

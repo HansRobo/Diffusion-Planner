@@ -115,9 +115,8 @@ class RolloutConfig:
     coord_check_tol_rad: float = 0.1
     # A PNG every N ticks; None renders nothing. Metrics do not depend on it.
     draw_every: int | None = None
-    # Vector scene geometry for browser replay, written every tick. Independent of
-    # ``draw_every``: it imports no matplotlib and invokes no encoder, so a run that draws
-    # nothing still reports what happened.
+    # Vector scene geometry for browser replay, every tick. Independent of ``draw_every``:
+    # no matplotlib, no encoder.
     write_scene_trace: bool = True
     scene: SceneConfig = field(default_factory=SceneConfig)
 
@@ -554,9 +553,8 @@ def run_scenario_sim_rollout(
         )
 
         if cfg.write_scene_trace:
-            # One map asset per map, shared by every case. The default is the run directory --
-            # ``output_dir`` is one case within it -- because that is where the export looks;
-            # writing them per case would duplicate the map and leave the export finding none.
+            # The run directory, not this case: that is where the export looks, and one asset
+            # serves every case on the map.
             assets = (
                 Path(scene_asset_dir)
                 if scene_asset_dir is not None
@@ -631,7 +629,7 @@ def run_scenario_sim_rollout(
 
             if trace_writer is not None and pts is not None:
                 # The same pre-step scene and map-frame plan the renderer is handed. Warm-up
-                # ticks carry null metrics because nothing scored them.
+                # ticks carry null metrics: nothing scored them.
                 scored = buffers.age[ego_name] >= cfg.warmup_steps
                 trace_writer.write_frame(
                     step,

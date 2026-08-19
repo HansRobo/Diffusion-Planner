@@ -103,10 +103,8 @@ def main(argv: list[str] | None = None) -> int:
             timers=timers,
         )
     except ScenarioRejected as e:
-        # A scenario the interpreter refuses at configure time says nothing about this worker or
-        # the code under test -- the run never started. Reported by its own exit code so a parent
-        # can count it apart from a case that ran and failed; a suite carrying broken scenarios
-        # would otherwise fail every run and the exit code would stop meaning anything.
+        # The run never started, so this says nothing about the code under test. Its own exit
+        # code, so a parent can count it apart from a case that ran and failed.
         out = Path(a.out_dir)
         out.mkdir(parents=True, exist_ok=True)
         (out / "rejected.txt").write_text(f"{e}\n")

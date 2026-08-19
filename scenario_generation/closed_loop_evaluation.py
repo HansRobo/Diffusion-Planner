@@ -108,11 +108,9 @@ class ClosedLoopEvalConfig:
     verbose: bool = True
     profile: bool = False
     max_jobs: int | None = None
-    # Hand jobs out as ranks become free, through claim files under this directory, instead of
-    # partitioning the list up front. Worth it when job durations vary enough that a static
-    # split leaves one rank working alone at the end; the cost is that a rank no longer gets
-    # the same jobs twice, so a run is no longer reproducible rank-by-rank. None keeps the
-    # static round-robin, which is the default precisely because it is reproducible.
+    # Claim files here instead of partitioning up front, for when durations vary enough that a
+    # static split leaves one rank working alone. Costs reproducibility rank-by-rank, so the
+    # default is None.
     claim_dir: Path | None = None
 
 

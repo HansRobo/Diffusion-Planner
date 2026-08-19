@@ -313,14 +313,9 @@ def find_mp4(case_dir: Path, stem: str) -> Path | None:
 def _link_or_copy(src: Path, dst: Path) -> None:
     """Hardlink ``src`` to ``dst``, copying only across filesystems.
 
-    Hardlinking keeps the exported tree free: the raw run and the viewer tree name the same
-    file rather than storing it twice, which matters at suite scale. ``EXDEV`` is the one
-    failure a copy is the right answer to; any other means something about the destination is
-    wrong, and copying anyway would publish a tree while hiding why it could not be linked.
-
-    A destination that already exists means two cases resolved to one name. The export builds
-    into an empty tree, so it cannot happen for a run's own cases -- and overwriting would make
-    a collision look like a successful export of half the pair.
+    The raw run and the viewer tree name the same file rather than storing it twice. ``EXDEV``
+    is the one failure a copy answers; any other says the destination is wrong. An existing
+    ``dst`` means two cases resolved to one name, which must not read as a successful export.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -450,8 +445,7 @@ def _as_number(value) -> float:
     """``value`` as a float, or 0.0 when it does not name one.
 
     Run metadata is whatever the driver exported, so a switch that is off arrives as a word.
-    Only the video time base reads these, and a missing time base means no retiming -- which is
-    what an absent value already means -- so refusing the run over it would be wrong.
+    0.0 means "no time base", which is what an absent value already means.
     """
     try:
         return float(value)
@@ -488,8 +482,8 @@ def write_viewer_tree(
 
     Returns ``{scenario: {"rows": n, "mp4": n, "traces": n, "colormaps": n}}``.
     """
-    # An export laid over an earlier one keeps the earlier run's media while replacing the
-    # three index files, which is a dataset that describes one run and contains two.
+    # Laid over an earlier export, the index files are replaced but its media stays: one run
+    # described, two contained.
     if out_root.exists() and any(out_root.iterdir()):
         raise SystemExit(f"viewer_export: {out_root} is not empty -- export into a new tree")
     out_root.mkdir(parents=True, exist_ok=True)
@@ -498,9 +492,8 @@ def write_viewer_tree(
     scenarios: dict[str, Any] = {}
     case_lines: list[str] = []
 
-    # The time base is a property of legacy videos only; a scene trace carries simulation steps
-    # and needs no retiming. The run reports these as it was configured, and a run that drew
-    # nothing reports a word rather than a number, so neither is guaranteed numeric.
+    # Legacy videos only; a scene trace carries simulation steps and needs no retiming. The run
+    # reports these as configured, so neither is guaranteed numeric.
     draw_every = _as_number(meta.get("draw_every"))
     fps = _as_number(meta.get("fps"))
     scale = (fps * draw_every / VIEWER_STEPS_PER_VIDEO_SEC) if draw_every and fps else 1.0
@@ -549,9 +542,8 @@ def write_viewer_tree(
                     if source_map.is_file():
                         map_dst = out_root / "maps" / source_map.name
                         map_dst.parent.mkdir(parents=True, exist_ok=True)
-                        # Every case on a map names the same asset, so the first one to reach
-                        # it places it. Unlike a case's own media, a name already taken here is
-                        # the sharing working -- the name is a digest of the contents.
+                        # The first case to reach it places it. A name already taken is the
+                        # sharing working: the name is a digest of the contents.
                         if not map_dst.exists():
                             _link_or_copy(source_map, map_dst)
                         row["map_asset"] = f"maps/{source_map.name}"
