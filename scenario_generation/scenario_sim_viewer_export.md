@@ -3,6 +3,10 @@
 OpenSCENARIO スイートを scenario_simulator_v2 で closed-loop 実行した評価結果です。
 共有ルートの `<dataset root>/closed_loop_scenario/` に置きます。
 
+**このファイルが仕様の唯一の出所です。** 共有ルートに置く `FORMAT.md` は公開時にここから
+複製する成果物で、直接編集しません。2 か所を手で直すと、読む人が見ている仕様と
+エクスポータの実装が黙って食い違います。
+
 ## 配置
 
 ```text
@@ -11,8 +15,11 @@ closed_loop_scenario/
     run.json                    # 実行の素性・員数
     scenarios.json              # シナリオ 82 件のメタと集計
     cases.jsonl                 # ケース 452 行（一覧の行）
+    maps/
+      <map_ref>.json.gz         # 地図 1 枚。同じ地図で走った全ケースが共有する
     media/
       <scenario_id>/            # Web.Auto のシナリオ ID（uuid）
+        <case>.scene.jsonl.gz
         <case>.mp4
         <case>.rollout.jsonl
         <case>.<metric>.png
@@ -117,14 +124,21 @@ npz 経路と違い、**記録走行という基準がありません**。その
   "progress_m": 160.6,
   "object": { "collision_count": 1, ... },
   "road_border": {...}, "red_light_violation": {...},
-  "strong_brake": {...}, "reproducer": {...}
+  "strong_brake": {...}, "reproducer": {...},
+  "turn_indicator": {...},
+  "scene_trace": "media/08a38cfe-.../ego_speed8p3333_....scene.jsonl.gz",
+  "map_asset": "maps/cae6f39155915310.json.gz"
 }
 ```
 
 - `route` は**そのケースで変えたパラメータの値**から作った名前です。同じシナリオ内で一意で、
   メディアのファイル名でもあります
 - `case_key` は元のラン上のディレクトリ名。追跡用で、表示には使いません
+- `scene_trace` と `map_asset` は `<run>` からの相対パス。**どちらも無いことがあります**
+  （描画・trace を切ったラン）。読む側は optional として扱ってください
+- `turn_indicator` は ego が出した方向指示の集計
 - `segment` はありません
+- `pool_pid` / `slot` / `gpu` は**もうありません**。永続ワーカー経路の診断値で、その経路は退役しました
 
 ### ケースの成否 — この経路で最も重要な値
 
@@ -170,14 +184,40 @@ npz 経路と違い、**記録走行という基準がありません**。その
 ## media
 
 ```text
-media/<scenario_id>/<route>.mp4
+media/<scenario_id>/<route>.scene.jsonl.gz
+                    <route>.mp4
                     <route>.rollout.jsonl
                     <route>.<metric>.png
 ```
 
+### scene.jsonl.gz — ブラウザで再生する幾何
+
+1 行 1 tick の gzip 済み JSON Lines。各行は `{"k": tick, "agents": [[id, x, y, heading], ...],
+"plan": [[x, y], ...], "clearance_m": …, "collision": …}`。座標は地図フレーム、3 桁丸め。
+`clearance_m` と `collision` は採点前のウォームアップ tick では `null`（測っていないので 0 とは書きません）。
+
+**ヘッダは最後の行**に置きます（`{"event": "header", "map_ref": …, "route": …, "goal": …,
+"agents": {…}, "terminated": …}`）。後から現れたエージェントも `agents` に載せられ、
+読む側はヘッダを待たずにフレームを読み始められます。
+
+レーンと道路境界の幾何は `maps/<map_ref>.json.gz` にあり、`map_ref` はその内容の digest です。
+**同じ地図で走ったケースは 1 枚を共有します**（452 ケース・3 地図で 4.5 MiB）。
+digest はマシン固有のパスではなく幾何から作るので、ランを別ホストへ複製しても有効です。
+
+mp4 と違い matplotlib も ffmpeg も通らないため、描画を切ったランでも出ます。
+実測でスイート合計 178 MiB（平均 403 KiB/ケース）— 同じスイートの mp4 は 733 MiB。
+
 `<metric>` は `clearance` / `collision` / `near_miss` / `speed` / `road_border` /
 `strong_brake`。**測っていないメトリクスの画像は出しません**（平坦な「異常なし」を
 描かないため）。`red_light` は常にありません。
+
+**動画は無いことがあります。** 下記の時刻合わせに失敗したケースでは、生の動画を置く代わりに
+**何も置きません**。ビューアは `step / 40` で読むので、時刻の合っていない動画を置くと
+「再生できる、しかしイベント位置がずれている」という一番たちの悪い状態になるためです。
+行（`cases.jsonl`）は通常どおり出ます。
+
+mp4 とカラーマップ画像は `--include_legacy_media` を付けたときだけ出します。付けない場合は
+`scene.jsonl.gz` と `rollout.jsonl` だけになります。
 
 ### 動画時刻
 
@@ -212,8 +252,13 @@ video_time[s] = step / 40
 ```bash
 python3 -m scenario_generation.scenario_sim_viewer_export \
   --run_dir  <スイートのラン出力> \
-  --out_root <dataset>/closed_loop_scenario/<run 名>
+  --out_root <dataset>/closed_loop_scenario/<run 名> \
+  --include_legacy_media
 ```
+
+`--out_root` は**空か存在しない**ツリーを指してください。既存の公開の上に重ねると
+索引 3 ファイルだけが差し替わり前のランの `media/` が残るので、1 つのランを名乗って
+2 つのランを含むデータセットになります。エクスポータはこれを拒否します。
 
 `<run 名>` は 1 階層にまとめます（例 `20260817-230105_final-v1-3989`）。
 
