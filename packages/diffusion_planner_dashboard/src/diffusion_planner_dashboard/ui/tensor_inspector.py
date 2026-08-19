@@ -106,6 +106,9 @@ _TENSOR_SPECS: dict[str, TensorDisplaySpec] = {
     "turn_indicators_future": TensorDisplaySpec(
         row_axis="time_index", fields=("value",)
     ),
+    "predicted_trajectory": TensorDisplaySpec(
+        leading_axes=("agent",), row_axis="time_index", fields=_POSE_FIELDS
+    ),
 }
 
 

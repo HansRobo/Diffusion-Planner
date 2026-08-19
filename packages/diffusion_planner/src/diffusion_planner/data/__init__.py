@@ -6,10 +6,12 @@ from .planner_dataset import (
     PlannerDataset,
     build_dataloader,
 )
+from .traffic_light import fill_unknown_traffic_light_futures
 
 __all__ = [
     "PlannerDataAugmentation",
     "PlannerDataNormalizer",
     "PlannerDataset",
     "build_dataloader",
+    "fill_unknown_traffic_light_futures",
 ]

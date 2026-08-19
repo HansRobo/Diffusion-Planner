@@ -7,11 +7,14 @@ from time import perf_counter
 from typing import Any
 
 import numpy as np
+import onnxruntime as ort
 import torch
 from numpy.typing import NDArray
 
 from diffusion_planner.data import PlannerDataNormalizer
+from diffusion_planner.data.dimensions import TRAJECTORY_DIM, TRAJECTORY_LENGTH
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
+from diffusion_planner.models.onnx import SCENE_INPUT_NAMES
 from diffusion_planner.models.turn_indicator import TurnIndicatorModel
 
 
@@ -52,6 +55,40 @@ def run_inference(
     elapsed = perf_counter() - start
     prediction_array = prediction[0].detach().float().cpu().numpy()
     prediction_array = normalizer.denormalize_trajectory(prediction_array)
+    return prediction_array.astype(np.float32, copy=False), elapsed
+
+
+def run_onnx_inference(
+    session: ort.InferenceSession,
+    frame_data: Mapping[str, Any],
+    *,
+    noise_scale: float,
+    seed: int,
+) -> tuple[NDArray[np.float32], float]:
+    """Run a fixed-step sampler ONNX for one dashboard frame."""
+    normalizer = PlannerDataNormalizer()
+    normalized_frame = normalizer(
+        {key: np.asarray(value) for key, value in frame_data.items()}
+    )
+    neighbor_count = normalized_frame["neighbor_agents_past"].shape[0]
+    generator = torch.Generator().manual_seed(seed)
+    initial_noise = torch.randn(
+        (1, neighbor_count + 1, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
+        generator=generator,
+        dtype=torch.float32,
+    ).numpy() * np.float32(noise_scale)
+    available_inputs = {value.name for value in session.get_inputs()}
+    inputs = {
+        name: np.asarray(normalized_frame[name], dtype=np.float32)[None]
+        for name in SCENE_INPUT_NAMES
+        if name in available_inputs
+    }
+    inputs["initial_noise"] = initial_noise
+
+    start = perf_counter()
+    prediction = session.run(None, inputs)[0]
+    elapsed = perf_counter() - start
+    prediction_array = normalizer.denormalize_trajectory(np.asarray(prediction[0]))
     return prediction_array.astype(np.float32, copy=False), elapsed
 
 

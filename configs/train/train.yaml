@@ -13,7 +13,7 @@ seed: 42
 experiment_name: ???
 
 training:
-  total_epochs: 25
+  total_epochs: 10
   cpu: false
   mixed_precision: bf16
   compile: true
@@ -27,5 +27,5 @@ training:
   neighbor_loss_weight: 1.0
   log_interval: 200
   checkpoint_dir: checkpoints
-  resume_from: /home/hisaki/diffusion_planner/checkpoints/20260816-162854-baseline/epoch_0010.pth
-  warm_start: true
+  resume_from: null
+  warm_start: false

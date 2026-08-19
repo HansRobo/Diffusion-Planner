@@ -1,4 +1,4 @@
-"""Visualize sampled trajectories from a training checkpoint."""
+"""Visualize sampled trajectories from a checkpoint or sampler ONNX."""
 
 from __future__ import annotations
 
@@ -10,18 +10,23 @@ import numpy as np
 import streamlit as st
 import torch
 
-from diffusion_planner.data import PlannerDataAugmentation
+from diffusion_planner.data import (
+    PlannerDataAugmentation,
+    fill_unknown_traffic_light_futures,
+)
 from diffusion_planner.visualizer import plot_frame
 from diffusion_planner_dashboard.services import (
     FrameIndex,
     FrameIndexRow,
     FrameLoader,
+    LoadedOnnxPlanner,
     LoadedPlanner,
     LoadedTurnIndicator,
     load_frame_index,
-    load_planner_checkpoint,
+    load_planner,
     load_turn_indicator_checkpoint,
     run_inference,
+    run_onnx_inference,
     run_turn_indicator_inference,
 )
 from diffusion_planner_dashboard.ui.metadata import (
@@ -32,6 +37,7 @@ from diffusion_planner_dashboard.ui.settings import (
     render_frame_selector,
     render_plot_options,
 )
+from diffusion_planner_dashboard.ui.tensor_inspector import render_tensor_inspector
 
 
 @st.cache_data(show_spinner=False)
@@ -57,14 +63,14 @@ def _cached_frame(
     return _frame_loader().load(row)
 
 
-@st.cache_resource(show_spinner="Loading checkpoint...")
+@st.cache_resource(show_spinner="Loading planner model...")
 def _cached_planner(
-    checkpoint_path: str,
+    model_path: str,
     modification_time_ns: int,
     device: str,
-) -> LoadedPlanner:
+) -> LoadedPlanner | LoadedOnnxPlanner:
     del modification_time_ns
-    return load_planner_checkpoint(checkpoint_path, device)
+    return load_planner(model_path, device)
 
 
 @st.cache_resource(show_spinner="Loading turn indicator checkpoint...")
@@ -79,8 +85,8 @@ def _cached_turn_indicator(
 
 @st.cache_data(max_entries=32, show_spinner="Sampling trajectories...")
 def _cached_prediction(
-    checkpoint_path: str,
-    checkpoint_modification_time_ns: int,
+    model_path: str,
+    model_modification_time_ns: int,
     h5_path: str,
     frame_index: int,
     frame_time_ns: int,
@@ -94,17 +100,39 @@ def _cached_prediction(
     lateral_offset: float,
     yaw_offset: float,
     ego_speed_scale: float,
+    remove_neighbor_agents: bool,
+    set_traffic_lights_unknown: bool,
+    infer_future_traffic_lights: bool,
+    mix_inferred_and_recorded_traffic_lights: bool,
+    fill_unknown_traffic_lights: bool,
 ):
-    planner = _cached_planner(checkpoint_path, checkpoint_modification_time_ns, device)
+    planner = _cached_planner(model_path, model_modification_time_ns, device)
     frame_data = _cached_frame(
         h5_path,
         frame_index,
         frame_time_ns,
         h5_modification_time_ns,
     )
+    if remove_neighbor_agents:
+        frame_data = _remove_neighbor_agents(frame_data)
+    if set_traffic_lights_unknown:
+        frame_data = _set_traffic_lights_unknown(frame_data)
+    if infer_future_traffic_lights:
+        frame_data = _infer_future_traffic_lights(frame_data)
+    elif mix_inferred_and_recorded_traffic_lights:
+        frame_data = _mix_inferred_and_recorded_traffic_lights(frame_data)
+    if fill_unknown_traffic_lights:
+        frame_data = _fill_unknown_traffic_lights(frame_data)
     if apply_augmentation:
         frame_data = _augment_frame(
             frame_data, lateral_offset, yaw_offset, ego_speed_scale
+        )
+    if isinstance(planner, LoadedOnnxPlanner):
+        return run_onnx_inference(
+            planner.session,
+            frame_data,
+            noise_scale=noise_scale,
+            seed=seed,
         )
     return run_inference(
         planner.model,
@@ -130,6 +158,11 @@ def _cached_turn_indicator_prediction(
     lateral_offset: float,
     yaw_offset: float,
     ego_speed_scale: float,
+    remove_neighbor_agents: bool,
+    set_traffic_lights_unknown: bool,
+    infer_future_traffic_lights: bool,
+    mix_inferred_and_recorded_traffic_lights: bool,
+    fill_unknown_traffic_lights: bool,
 ):
     loaded = _cached_turn_indicator(
         checkpoint_path, checkpoint_modification_time_ns, device
@@ -140,6 +173,16 @@ def _cached_turn_indicator_prediction(
         frame_time_ns,
         h5_modification_time_ns,
     )
+    if remove_neighbor_agents:
+        frame_data = _remove_neighbor_agents(frame_data)
+    if set_traffic_lights_unknown:
+        frame_data = _set_traffic_lights_unknown(frame_data)
+    if infer_future_traffic_lights:
+        frame_data = _infer_future_traffic_lights(frame_data)
+    elif mix_inferred_and_recorded_traffic_lights:
+        frame_data = _mix_inferred_and_recorded_traffic_lights(frame_data)
+    if fill_unknown_traffic_lights:
+        frame_data = _fill_unknown_traffic_lights(frame_data)
     if apply_augmentation:
         frame_data = _augment_frame(
             frame_data, lateral_offset, yaw_offset, ego_speed_scale
@@ -163,6 +206,96 @@ def _augment_frame(
     return augmentation(frame_data)
 
 
+def _remove_neighbor_agents(frame_data: dict[str, Any]) -> dict[str, Any]:
+    """Return a frame with every neighbor-agent tensor zeroed."""
+    result = dict(frame_data)
+    for key in (
+        "neighbor_agents_past",
+        "neighbor_agents_future",
+        "agent_shape",
+        "agent_label",
+    ):
+        if key in result:
+            result[key] = np.zeros_like(np.asarray(result[key]))
+    return result
+
+
+def _set_traffic_lights_unknown(frame_data: dict[str, Any]) -> dict[str, Any]:
+    """Return a frame with every traffic-light state set to Unknown."""
+    result = dict(frame_data)
+    for key in (
+        "lane_traffic_light_past",
+        "lane_traffic_light_future",
+        "route_traffic_light_past",
+        "route_traffic_light_future",
+    ):
+        if key not in result:
+            continue
+        values = np.zeros_like(np.asarray(result[key]))
+        values[..., 3] = 1
+        result[key] = values
+    return result
+
+
+def _infer_traffic_light_future(past: np.ndarray, future_length: int) -> np.ndarray:
+    """Apply the Autoware inference rule to one traffic-light history tensor."""
+    current = past[..., -1, :]
+    future = np.repeat(current[..., None, :], future_length, axis=-2)
+    flattened_past = past.reshape(-1, past.shape[-2], past.shape[-1])
+    flattened_future = future.reshape(-1, future_length, future.shape[-1])
+    amber_index = 1
+    red_index = 2
+    amber_duration_steps = 30
+    for index, history in enumerate(flattened_past):
+        if history[-1, amber_index] <= 0.5:
+            continue
+        elapsed_steps = 0
+        for state in history[::-1]:
+            if state[amber_index] <= 0.5:
+                break
+            elapsed_steps += 1
+        remaining_steps = max(amber_duration_steps - elapsed_steps, 0)
+        flattened_future[index, remaining_steps:, :] = 0
+        flattened_future[index, remaining_steps:, red_index] = 1
+    return future
+
+
+def _infer_future_traffic_lights(frame_data: dict[str, Any]) -> dict[str, Any]:
+    """Replace recorded traffic-light futures with inference-time estimates."""
+    result = dict(frame_data)
+    for past_key, future_key in (
+        ("lane_traffic_light_past", "lane_traffic_light_future"),
+        ("route_traffic_light_past", "route_traffic_light_future"),
+    ):
+        if past_key not in result or future_key not in result:
+            continue
+        past = np.asarray(result[past_key])
+        future_length = np.asarray(result[future_key]).shape[-2]
+        result[future_key] = _infer_traffic_light_future(past, future_length)
+    return result
+
+
+def _mix_inferred_and_recorded_traffic_lights(
+    frame_data: dict[str, Any], inferred_steps: int = 30
+) -> dict[str, Any]:
+    """Use inferred traffic lights first, then recorded future observations."""
+    result = dict(frame_data)
+    inferred = _infer_future_traffic_lights(frame_data)
+    for key in ("lane_traffic_light_future", "route_traffic_light_future"):
+        if key not in result or key not in inferred:
+            continue
+        mixed = np.array(result[key], copy=True)
+        steps = min(inferred_steps, mixed.shape[-2])
+        mixed[..., :steps, :] = np.asarray(inferred[key])[..., :steps, :]
+        result[key] = mixed
+    return result
+
+
+def _fill_unknown_traffic_lights(frame_data: dict[str, Any]) -> dict[str, Any]:
+    """Forward-fill Unknown future states for lane and route traffic lights."""
+    return fill_unknown_traffic_light_futures(frame_data)
+
+
 def _render_source_settings() -> tuple[str | None, str | None, str | None]:
     """Apply the frame source and checkpoint together."""
     st.sidebar.subheader("Sources")
@@ -173,9 +306,9 @@ def _render_source_settings() -> tuple[str | None, str | None, str | None]:
             placeholder="/path/to/frames.h5 or /path/to/train.parquet",
         )
         checkpoint_candidate = st.text_input(
-            "Planner checkpoint file",
+            "Planner checkpoint or sampler ONNX",
             value=st.session_state.get("configured_checkpoint_path", ""),
-            placeholder="/path/to/epoch_0001.pth",
+            placeholder="/path/to/epoch_0001.pth or diffusion_planner_sampler.onnx",
         )
         turn_indicator_checkpoint_candidate = st.text_input(
             "Turn indicator checkpoint file (optional)",
@@ -196,16 +329,29 @@ def _render_source_settings() -> tuple[str | None, str | None, str | None]:
     )
 
 
-def _render_inference_settings() -> tuple[str, int, float, float, int]:
+def _render_inference_settings(onnx_model: bool) -> tuple[str, int, float, float, int]:
     st.sidebar.subheader("Inference")
     devices = ["cuda", "cpu"] if torch.cuda.is_available() else ["cpu"]
     device = st.sidebar.selectbox("Device", devices)
     num_steps = int(
-        st.sidebar.number_input("Sampling steps", min_value=1, value=20, step=1)
+        st.sidebar.number_input(
+            "Sampling steps",
+            min_value=1,
+            value=10 if onnx_model else 20,
+            step=1,
+            disabled=onnx_model,
+            help="The sampler ONNX contains a fixed 10-step sampling loop."
+            if onnx_model
+            else None,
+        )
     )
     time_epsilon = float(
         st.sidebar.number_input(
-            "Time epsilon", min_value=1e-8, value=1e-5, format="%.1e"
+            "Time epsilon",
+            min_value=1e-8,
+            value=1e-5,
+            format="%.1e",
+            disabled=onnx_model,
         )
     )
     noise_scale = float(
@@ -242,8 +388,8 @@ def _render_augmentation_settings() -> tuple[bool, float, float, float]:
     ego_speed_scale = float(
         st.sidebar.slider(
             "Ego history speed scale",
-            min_value=0.5,
-            max_value=1.5,
+            min_value=0.0,
+            max_value=2.0,
             value=1.0,
             step=0.01,
             disabled=not enabled,
@@ -252,18 +398,58 @@ def _render_augmentation_settings() -> tuple[bool, float, float, float]:
     return enabled, lateral_offset, math.radians(yaw_offset_degrees), ego_speed_scale
 
 
+def _render_temporary_validation_settings() -> tuple[bool, bool, bool, bool, bool]:
+    """Render temporary controls used for model-behavior checks."""
+    st.sidebar.subheader("Temporary validation")
+    remove_neighbor_agents = st.sidebar.checkbox(
+        "Remove all neighbor agents", value=False
+    )
+    set_traffic_lights_unknown = st.sidebar.checkbox(
+        "Set all traffic lights to Unknown", value=False
+    )
+    infer_future_traffic_lights = st.sidebar.checkbox(
+        "Infer traffic light future from past", value=False
+    )
+    mix_inferred_and_recorded_traffic_lights = st.sidebar.checkbox(
+        "Infer first 3 s, then use recorded traffic lights",
+        value=False,
+        disabled=infer_future_traffic_lights,
+        help="Future indices 0-29 are inferred; indices 30-79 use H5 observations.",
+    )
+    fill_unknown_traffic_lights = st.sidebar.checkbox(
+        "Fill future Unknown traffic lights from previous state", value=False
+    )
+    return (
+        remove_neighbor_agents,
+        set_traffic_lights_unknown,
+        infer_future_traffic_lights,
+        mix_inferred_and_recorded_traffic_lights,
+        fill_unknown_traffic_lights,
+    )
+
+
 def render_training_results() -> None:
     """Render checkpoint inference alongside ground-truth trajectories."""
     st.title("Training Results")
     source_path_text, checkpoint_path_text, turn_indicator_checkpoint_path_text = (
         _render_source_settings()
     )
-    device, num_steps, time_epsilon, noise_scale, seed = _render_inference_settings()
+    device, num_steps, time_epsilon, noise_scale, seed = _render_inference_settings(
+        checkpoint_path_text is not None
+        and Path(checkpoint_path_text).suffix.lower() == ".onnx"
+    )
     apply_augmentation, lateral_offset, yaw_offset, ego_speed_scale = (
         _render_augmentation_settings()
     )
+    (
+        remove_neighbor_agents,
+        set_traffic_lights_unknown,
+        infer_future_traffic_lights,
+        mix_inferred_and_recorded_traffic_lights,
+        fill_unknown_traffic_lights,
+    ) = _render_temporary_validation_settings()
     if source_path_text is None or checkpoint_path_text is None:
-        st.info("Configure both a frame source and a checkpoint from the sidebar.")
+        st.info("Configure both a frame source and a planner model from the sidebar.")
         return
 
     source_path = Path(source_path_text).expanduser()
@@ -304,12 +490,24 @@ def render_training_results() -> None:
     options = render_plot_options()
 
     metadata_columns = st.columns(6)
-    metadata_columns[0].metric("Checkpoint epoch", planner.epoch)
-    metadata_columns[1].metric("Global step", planner.global_step)
-    metadata_columns[2].metric("Sampling steps", num_steps)
+    metadata_columns[0].metric(
+        "Checkpoint epoch",
+        "-" if isinstance(planner, LoadedOnnxPlanner) else planner.epoch,
+    )
+    metadata_columns[1].metric(
+        "Global step",
+        "-" if isinstance(planner, LoadedOnnxPlanner) else planner.global_step,
+    )
+    metadata_columns[2].metric(
+        "Sampling steps",
+        planner.sampling_steps if isinstance(planner, LoadedOnnxPlanner) else num_steps,
+    )
     metadata_columns[3].metric("Time epsilon", f"{time_epsilon:.1e}")
     metadata_columns[4].metric("Noise scale", noise_scale)
-    metadata_columns[5].metric("Device", device)
+    metadata_columns[5].metric(
+        "Device",
+        planner.provider if isinstance(planner, LoadedOnnxPlanner) else device,
+    )
     try:
         h5_modification_time_ns = Path(row.h5_path).stat().st_mtime_ns
         frame_data = _cached_frame(
@@ -319,10 +517,24 @@ def render_training_results() -> None:
             h5_modification_time_ns,
         )
         visualized_frame = (
-            _augment_frame(frame_data, lateral_offset, yaw_offset, ego_speed_scale)
-            if apply_augmentation
+            _remove_neighbor_agents(frame_data)
+            if remove_neighbor_agents
             else frame_data
         )
+        if set_traffic_lights_unknown:
+            visualized_frame = _set_traffic_lights_unknown(visualized_frame)
+        if infer_future_traffic_lights:
+            visualized_frame = _infer_future_traffic_lights(visualized_frame)
+        elif mix_inferred_and_recorded_traffic_lights:
+            visualized_frame = _mix_inferred_and_recorded_traffic_lights(
+                visualized_frame
+            )
+        if fill_unknown_traffic_lights:
+            visualized_frame = _fill_unknown_traffic_lights(visualized_frame)
+        if apply_augmentation:
+            visualized_frame = _augment_frame(
+                visualized_frame, lateral_offset, yaw_offset, ego_speed_scale
+            )
         prediction, inference_seconds = _cached_prediction(
             str(checkpoint_path),
             checkpoint_modification_time_ns,
@@ -339,6 +551,11 @@ def render_training_results() -> None:
             lateral_offset,
             yaw_offset,
             ego_speed_scale,
+            remove_neighbor_agents,
+            set_traffic_lights_unknown,
+            infer_future_traffic_lights,
+            mix_inferred_and_recorded_traffic_lights,
+            fill_unknown_traffic_lights,
         )
         turn_indicator_result = None
         if (
@@ -357,6 +574,11 @@ def render_training_results() -> None:
                 lateral_offset,
                 yaw_offset,
                 ego_speed_scale,
+                remove_neighbor_agents,
+                set_traffic_lights_unknown,
+                infer_future_traffic_lights,
+                mix_inferred_and_recorded_traffic_lights,
+                fill_unknown_traffic_lights,
             )
     except Exception as error:
         st.exception(error)
@@ -364,13 +586,28 @@ def render_training_results() -> None:
 
     st.caption(
         f"Inference: {inference_seconds:.3f} s · seed: {seed} · "
-        f"checkpoint: `{checkpoint_path}`"
+        f"model: `{checkpoint_path}`"
     )
     if apply_augmentation:
         st.caption(
             f"Augmentation: lateral offset {lateral_offset:.2f} m · "
             f"yaw offset {math.degrees(yaw_offset):.2f} deg · "
             f"ego history speed scale {ego_speed_scale:.2f}"
+        )
+    if remove_neighbor_agents:
+        st.caption("Temporary validation: all neighbor agents removed")
+    if set_traffic_lights_unknown:
+        st.caption("Temporary validation: all traffic lights set to Unknown")
+    if infer_future_traffic_lights:
+        st.caption("Temporary validation: traffic light future inferred from past")
+    elif mix_inferred_and_recorded_traffic_lights:
+        st.caption(
+            "Temporary validation: first 3 s of traffic light future inferred from past; "
+            "remaining 5 s loaded from H5"
+        )
+    if fill_unknown_traffic_lights:
+        st.caption(
+            "Temporary validation: future Unknown traffic lights filled from previous state"
         )
     if turn_indicator_result is not None and loaded_turn_indicator is not None:
         probabilities, predicted_report, turn_indicator_seconds = turn_indicator_result
@@ -412,7 +649,9 @@ def render_training_results() -> None:
         f"training-result::{checkpoint_path}::{checkpoint_modification_time_ns}::"
         f"{row.h5_path}::{row.frame_index}::{num_steps}::{time_epsilon}::"
         f"{noise_scale}::{seed}::{apply_augmentation}::{lateral_offset}::"
-        f"{yaw_offset}::{ego_speed_scale}"
+        f"{yaw_offset}::{ego_speed_scale}::{remove_neighbor_agents}::"
+        f"{set_traffic_lights_unknown}::{infer_future_traffic_lights}::"
+        f"{mix_inferred_and_recorded_traffic_lights}::{fill_unknown_traffic_lights}"
     )
     figure.update_layout(autosize=True, uirevision=chart_key)
     st.plotly_chart(
@@ -421,4 +660,10 @@ def render_training_results() -> None:
         height=900,
         key=chart_key,
         config={"responsive": True, "scrollZoom": True},
+    )
+    inspected_tensors = dict(visualized_frame)
+    inspected_tensors["predicted_trajectory"] = prediction
+    render_tensor_inspector(
+        inspected_tensors,
+        key_prefix="training-result-tensor-inspector",
     )

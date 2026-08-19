@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from .data_augmentation import PlannerDataAugmentation
 from .normalization import PlannerDataNormalizer
+from .traffic_light import fill_unknown_traffic_light_futures
 
 REQUIRED_INDEX_COLUMNS = frozenset({"h5_path", "frame_index", "frame_time_ns"})
 H5_FORMAT = "diffusion_planner_frame_dataset"
@@ -112,6 +113,7 @@ class PlannerDataset(Dataset[dict[str, torch.Tensor]]):
             frame_arrays[key] = np.asarray(dataset[frame_index])
         if self._data_augmentation is not None:
             frame_arrays = self._data_augmentation(frame_arrays)
+        frame_arrays = fill_unknown_traffic_light_futures(frame_arrays)
         if self._data_normalizer is not None:
             frame_arrays = self._data_normalizer(frame_arrays)
         return {key: torch.from_numpy(value) for key, value in frame_arrays.items()}

@@ -77,8 +77,8 @@ def _render_augmentation_settings() -> tuple[float, float, float]:
     ego_speed_scale = float(
         st.sidebar.slider(
             "Ego history speed scale",
-            min_value=0.5,
-            max_value=1.5,
+            min_value=0.0,
+            max_value=2.0,
             value=1.0,
             step=0.01,
         )
