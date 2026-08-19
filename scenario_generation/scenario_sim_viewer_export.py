@@ -21,6 +21,7 @@ everything else derives values and must not encode the layout.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import os
@@ -445,6 +446,7 @@ def write_viewer_tree(
     categories: dict[str, str] | None = None,
     run_error: str | None = None,
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
+    include_legacy_media: bool = False,
 ) -> dict[str, dict[str, int]]:
     """Write the whole export. **This function owns the output layout.**
 
@@ -457,9 +459,9 @@ def write_viewer_tree(
           run.json            provenance, counts, what was not measured
           scenarios.json      one entry per scenario: name, category, map, version, summary
           cases.jsonl         one line per case
-          media/<scenario>/<case>.mp4
+          maps/<map_ref>.json.gz
+          media/<scenario>/<case>.scene.jsonl.gz
                             <case>.rollout.jsonl
-                            <case>.<metric>.png
 
     Returns ``{scenario: {"rows": n, "mp4": n, "traces": n, "colormaps": n}}``.
     """
@@ -469,7 +471,8 @@ def write_viewer_tree(
     scenarios: dict[str, Any] = {}
     case_lines: list[str] = []
 
-    # The time base is a property of the run, but the viewer holds it as a per-dataset
+    # The time base is a property of legacy videos. New scene traces use simulation steps
+    # directly and avoid both matplotlib rendering and ffmpeg encoding.
     # constant, so the video is moved to the constant instead.
     draw_every = int(meta.get("draw_every") or 0)
     fps = float(meta.get("fps") or 0)
@@ -499,7 +502,30 @@ def write_viewer_tree(
             row["route"] = case
             row["scenario"] = scenario
 
-            mp4 = find_mp4(case_dir, str(row["case_key"]))
+            scene_trace = case_dir / "scene_trace.jsonl.gz"
+            if scene_trace.is_file():
+                trace_dst = scenario_dir / f"{case}.scene.jsonl.gz"
+                _link_or_copy(scene_trace, trace_dst)
+                map_ref = None
+                try:
+                    with gzip.open(scene_trace, "rt", encoding="utf-8") as trace_file:
+                        for line in trace_file:
+                            candidate = json.loads(line)
+                            if candidate.get("event") == "header":
+                                map_ref = candidate.get("map_ref")
+                                break
+                except (OSError, ValueError):
+                    map_ref = None
+                row["scene_trace"] = f"media/{scenario}/{case}.scene.jsonl.gz"
+                if map_ref:
+                    source_map = case_dir.parent / "scene_maps" / f"{map_ref}.json.gz"
+                    if source_map.is_file():
+                        map_dst = out_root / "maps" / source_map.name
+                        map_dst.parent.mkdir(parents=True, exist_ok=True)
+                        _link_or_copy(source_map, map_dst)
+                        row["map_asset"] = f"maps/{source_map.name}"
+
+            mp4 = find_mp4(case_dir, str(row["case_key"])) if include_legacy_media else None
             if mp4 is not None:
                 dst = scenario_dir / f"{case}.mp4"
                 if not retime_mp4(mp4, dst, scale):
@@ -510,6 +536,7 @@ def write_viewer_tree(
             if trace.is_file():
                 _link_or_copy(trace, scenario_dir / f"{case}.rollout.jsonl")
                 tally["traces"] += 1
+            if include_legacy_media and trace.is_file():
                 # Drawn from the trace because the run deletes its PNGs after encoding.
                 # Unobserved metrics are skipped rather than drawn as a measured "no event".
                 # The renderer reads the trace as ``<dir>/rollout.jsonl``, so it gets a
@@ -650,6 +677,7 @@ def export(
     site_mode: str = "scenario_id",
     fps: float = 10.0,
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
+    include_legacy_media: bool = False,
 ) -> dict[str, dict[str, int]]:
     """Export one scenario_sim run directory into ``out_root``."""
     ctx = parse_run_context(run_dir)
@@ -720,6 +748,7 @@ def export(
         categories=sidecar["categories"],
         run_error=run_error,
         colormap_metrics=colormap_metrics,
+        include_legacy_media=include_legacy_media,
     )
     print(_report(out_root, counts, len(submitted), missing), end="")
     return counts
@@ -729,6 +758,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run_dir", required=True, type=Path, help="a finished suite run directory")
     p.add_argument("--out_root", required=True, type=Path, help="viewer tree to write")
+    p.add_argument("--include_legacy_media", action="store_true", help="also copy MP4 and draw legacy PNG colormaps")
     p.add_argument(
         "--site_from",
         default="scenario_id",
@@ -756,6 +786,7 @@ def main(argv: list[str] | None = None) -> int:
         site_mode=a.site_from,
         fps=a.fps,
         colormap_metrics=tuple(a.colormap_metrics),
+        include_legacy_media=a.include_legacy_media,
     )
     return 0
 

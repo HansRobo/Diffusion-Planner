@@ -163,6 +163,7 @@ class ScenarioSimClosedLoopEvaluation(ClosedLoopEvaluation):
                 verbose=self.config.verbose,
                 timers=timers,
                 builder=builder,
+                scene_asset_dir=self.out_dir / "scene_maps",
             )
         except BaseException as e:  # noqa: BLE001 - one scenario must not end the rank's shard
             # A schema-complete failure row rather than a propagated exception: aggregate raises
@@ -237,4 +238,3 @@ class ScenarioSimClosedLoopEvaluation(ClosedLoopEvaluation):
         )
         for line in format_summary_lines(summary):
             print(line)
-

@@ -42,6 +42,7 @@ from scenario_generation.scenario_sim_scene import (
     resolve_ego_name,
     update_history,
 )
+from scenario_generation.scene_trace import SceneTraceWriter, write_map_asset
 from scenario_generation.simulate import (
     _ego_to_world,
     _predict_batch,
@@ -88,6 +89,9 @@ class RolloutConfig:
     # of a rollout that is otherwise all inference, so an evaluation that only wants metrics
     # leaves it off. Metrics do not depend on it.
     draw_every: int | None = None
+    # Browser scene replay is the default reporting artifact.  It records vector geometry and
+    # does not import matplotlib or invoke ffmpeg.
+    write_scene_trace: bool = True
     scene: SceneConfig = field(default_factory=SceneConfig)
 
     def __post_init__(self) -> None:
@@ -309,6 +313,7 @@ def run_scenario_sim_rollout(
     verbose: bool = True,
     timers: Timers | None = None,
     builder: LaneletSceneBuilder | None = None,
+    scene_asset_dir: str | Path | None = None,
 ) -> dict:
     """Run one closed-loop OpenSCENARIO rollout and return an aggregate-ready row.
 
@@ -342,6 +347,7 @@ def run_scenario_sim_rollout(
     trajectory_log: list[dict] = []
     clearances: list[float] = []
     collisions: list[bool] = []
+    trace_writer: SceneTraceWriter | None = None
 
     cached_plan_ego: np.ndarray | None = None  # (future_len, 4) ego frame
     ti_cmd = 0  # last sim turn-indicator command (KEEP retains this)
@@ -393,6 +399,23 @@ def run_scenario_sim_rollout(
                 runner, builder, osc_path, cfg, verbose
             )
         goal_xy = goal_pose[:2]
+        if cfg.write_scene_trace:
+            # Evaluation supplies one run-level directory.  The fallback keeps the standalone
+            # worker useful without duplicating map data within one case directory.
+            assets = Path(scene_asset_dir) if scene_asset_dir is not None else output_dir / "scene_maps"
+            with timers("scene_trace_map"):
+                map_ref, _ = write_map_asset(builder, assets)
+            route = [
+                [round(float(x), 3), round(float(y), 3)]
+                for lane_id in ego_route_ids
+                for x, y in builder.raw_centerline(lane_id)[:, :2]
+            ]
+            trace_writer = SceneTraceWriter(
+                output_dir / "scene_trace.jsonl.gz",
+                map_ref=map_ref,
+                route=route,
+                goal=[round(float(goal_pose[0]), 3), round(float(goal_pose[1]), 3)],
+            )
 
         for step in range(cfg.max_steps):
             with timers("sim_get_states"):
@@ -429,6 +452,17 @@ def run_scenario_sim_rollout(
                 clearances.append(clr)
                 collisions.append(coll)
 
+            if trace_writer is not None:
+                # `scene` and `pts` are the exact pre-step objects the legacy renderer used.
+                # The first unscored warm-up ticks intentionally carry null metrics.
+                trace_writer.write_frame(
+                    step,
+                    scene,
+                    pts,
+                    clearance=(clr if buffers.age[ego_name] >= cfg.warmup_steps else None),
+                    collision=(coll if buffers.age[ego_name] >= cfg.warmup_steps else None),
+                )
+
             if save_step_figure is not None and step % cfg.draw_every == 0:
                 with timers("draw"):
                     # The scene is map-frame and the plan is ego-frame, which is the pair the
@@ -464,6 +498,9 @@ def run_scenario_sim_rollout(
                 break
 
         result_kind = runner.result_kind()
+
+    if trace_writer is not None:
+        trace_writer.close(terminated_reason)
 
     with timers("finalize"):
         row = _finalize_row(

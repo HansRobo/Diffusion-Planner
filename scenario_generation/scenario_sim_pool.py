@@ -76,6 +76,7 @@ def _drain(
                 device=a.device,
                 builder=builders[map_path],
                 verbose=True,
+                scene_asset_dir=out.parent / "scene_maps",
             )
             # The parent needs a per-scenario wall to compute achieved concurrency; in the
             # per-scenario-process design it measured that itself, and it cannot here.

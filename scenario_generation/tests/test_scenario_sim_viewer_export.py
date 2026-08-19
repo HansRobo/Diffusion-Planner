@@ -104,9 +104,9 @@ def test_layout_is_three_files_plus_media(tmp_path):
     for case in cases:
         assert case["scenario"] == _SC1
         stem = case["route"]
-        assert (media / f"{stem}.mp4").is_file()
+        assert not (media / f"{stem}.mp4").exists()
         assert (media / f"{stem}.rollout.jsonl").is_file()
-        assert (media / f"{stem}.clearance.png").is_file()
+        assert not list(media.glob(f"{stem}.*.png"))
 
 
 def test_grouping_keys_are_fields_not_directories(tmp_path):
