@@ -65,13 +65,15 @@ ENCODER_INPUT_NAMES = [
 
 # Image mode replaces every rasterised element with the BEV stack; what is left are the
 # scene facts that have no pixels (see ImageEncoder) plus what the decoder itself reads.
+# ``ego_shape`` is absent: the ego box is drawn into the raster, and its only other reader is
+# the road-border guidance, which is not part of the exported graph.  ``goal_pose`` is absent
+# because the image encoder deliberately drops it (see ImageEncoder) and the decoder never
+# reads it.
 IMAGE_FULL_INPUT_NAMES = [
     "sampled_trajectories",
     "bev_image",
     "ego_current_state",
     "neighbor_agents_past",
-    "goal_pose",
-    "ego_shape",
     "turn_indicators",
     "delay",
 ]
@@ -79,8 +81,6 @@ IMAGE_FULL_INPUT_NAMES = [
 IMAGE_ENCODER_INPUT_NAMES = [
     "bev_image",
     "ego_current_state",
-    "goal_pose",
-    "ego_shape",
     "turn_indicators",
 ]
 
@@ -195,15 +195,11 @@ class ImageEncoderONNXWrapper(nn.Module):
         self,
         bev_image: torch.Tensor,
         ego_current_state: torch.Tensor,
-        goal_pose: torch.Tensor,
-        ego_shape: torch.Tensor,
         turn_indicators: torch.Tensor,
     ) -> torch.Tensor:
         inputs = {
             "bev_image": bev_image,
             "ego_current_state": ego_current_state,
-            "goal_pose": goal_pose,
-            "ego_shape": ego_shape,
             "turn_indicators": turn_indicators,
         }
         return self.encoder(inputs)
@@ -328,8 +324,6 @@ class ImageFullONNXWrapper(nn.Module):
         bev_image: torch.Tensor,
         ego_current_state: torch.Tensor,
         neighbor_agents_past: torch.Tensor,
-        goal_pose: torch.Tensor,
-        ego_shape: torch.Tensor,
         turn_indicators: torch.Tensor,
         delay: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -338,8 +332,6 @@ class ImageFullONNXWrapper(nn.Module):
             "bev_image": bev_image,
             "ego_current_state": ego_current_state,
             "neighbor_agents_past": neighbor_agents_past,
-            "goal_pose": goal_pose,
-            "ego_shape": ego_shape,
             "turn_indicators": turn_indicators,
             "delay": delay,
         }

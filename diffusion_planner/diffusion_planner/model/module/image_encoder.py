@@ -5,10 +5,19 @@ Each sample carries ``NUM_SCALES`` multi-channel BEV rasters (see
 each raster into a spatial feature map; the cells of that map become the tokens handed to
 the decoder, tagged with a learned cell position and a learned per-scale embedding.
 
-A raster cannot carry everything the planner needs: ego speed and acceleration, the ego
-footprint, the turn indicator history and the goal pose (which usually lies hundreds of
-metres away, far outside even the wide view) have no pixels.  Those are appended as
-separate scalar tokens, reusing the same small encoders as the vector pipeline.
+A raster cannot carry everything the planner needs, so a few scalar tokens are appended,
+reusing the same small encoders as the vector pipeline:
+
+* ego motion -- the history channel is a binary polyline with no time markers, so it gives
+  the path shape and the mean speed over the window, but not the instantaneous velocity or
+  the acceleration.  Only those four numbers are passed; the pose is always the origin, and
+  the ego footprint is already drawn as a box on ``CH_EGO``.
+* turn indicators -- no pixel representation at all.
+
+The goal pose is deliberately NOT among them.  It is the route destination, typically several
+hundred metres out, so as a scalar it is a distraction far more often than it is guidance; the
+raster draws it on ``CH_GOAL_POSE`` on the rare frames where it actually falls inside a view,
+and the route channel carries the intent that matters within the horizon.
 """
 
 import torch
@@ -16,12 +25,12 @@ import torch.nn as nn
 from torchvision.models import resnet18
 
 from diffusion_planner.dimensions import INPUT_T
-from diffusion_planner.model.module.encoder import (
-    FloatsEncoder,
-    FusionEncoder,
-    GoalPoseEncoder,
-)
+from diffusion_planner.model.module.encoder import FloatsEncoder, FusionEncoder
 from diffusion_planner.utils.render_bev import NUM_CHANNELS, NUM_SCALES
+
+# (vx, vy, ax, ay) inside ego_current_state; the remaining fields are either identically
+# constant in the ego frame (pose) or already visible in the raster.
+EGO_MOTION_SLICE = slice(4, 8)
 
 RESNET_FEATURE_DIM = 512
 RESNET_STRIDE = 32  # total downsampling factor of resnet18 up to layer4
@@ -84,17 +93,8 @@ class ImageEncoder(nn.Module):
         self.scale_embedding = nn.Parameter(torch.randn(NUM_SCALES, 1, config.hidden_dim) * 0.02)
 
         # Scene state that has no pixel representation.
-        self.goal_pose_encoder = GoalPoseEncoder(
-            drop_path_rate=config.encoder_drop_path_rate,
-            hidden_dim=config.hidden_dim,
-        )
-        self.ego_state_encoder = FloatsEncoder(
-            num_float=config.ego_current_state_dim,
-            drop_path_rate=config.encoder_drop_path_rate,
-            hidden_dim=config.hidden_dim,
-        )
-        self.ego_shape_encoder = FloatsEncoder(
-            num_float=3,
+        self.ego_motion_encoder = FloatsEncoder(
+            num_float=EGO_MOTION_SLICE.stop - EGO_MOTION_SLICE.start,
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
         )
@@ -103,7 +103,7 @@ class ImageEncoder(nn.Module):
             drop_path_rate=config.encoder_drop_path_rate,
             hidden_dim=config.hidden_dim,
         )
-        self.scalar_token_num = 4
+        self.scalar_token_num = 2
         self.token_num = self.image_token_num + self.scalar_token_num
 
         self.fusion = FusionEncoder(
@@ -122,9 +122,7 @@ class ImageEncoder(nn.Module):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
 
-        self.goal_pose_encoder.apply(_basic_init)
-        self.ego_state_encoder.apply(_basic_init)
-        self.ego_shape_encoder.apply(_basic_init)
+        self.ego_motion_encoder.apply(_basic_init)
         self.turn_indicator_encoder.apply(_basic_init)
         self.fusion.apply(_basic_init)
 
@@ -146,25 +144,19 @@ class ImageEncoder(nn.Module):
         images = inputs["bev_image"]  # (B, S, C, H, W)
         image_tokens = self.encode_images(images)
 
-        goal_pose = inputs["goal_pose"]  # (B, D=4)
-        ego_state = inputs["ego_current_state"]  # (B, D)
-        ego_shape = inputs["ego_shape"]  # (B, D=3)
+        ego_motion = inputs["ego_current_state"][:, EGO_MOTION_SLICE]  # (B, D=4)
 
         turn_indicator = inputs["turn_indicators"][:, :-1].float()  # (B, T)
         if not self.use_turn_indicators:
             turn_indicator = torch.zeros_like(turn_indicator)
 
-        encoding_goal_pose, _, _ = self.goal_pose_encoder(goal_pose)
-        encoding_ego_state, _, _ = self.ego_state_encoder(ego_state)
-        encoding_ego_shape, _, _ = self.ego_shape_encoder(ego_shape)
+        encoding_ego_motion, _, _ = self.ego_motion_encoder(ego_motion)
         encoding_turn_indicator, _, _ = self.turn_indicator_encoder(turn_indicator)
 
         encoding_input = torch.cat(
             [
                 image_tokens,
-                encoding_goal_pose,
-                encoding_ego_state,
-                encoding_ego_shape,
+                encoding_ego_motion,
                 encoding_turn_indicator,
             ],
             dim=1,

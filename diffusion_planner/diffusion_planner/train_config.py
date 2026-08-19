@@ -71,8 +71,6 @@ class TrainConfig:
     agent_state_dim: int = 11
     agent_num: int = MAX_NUM_NEIGHBORS
 
-    ego_current_state_dim: int = 10
-
     static_objects_state_dim: int = 10
     static_objects_num: int = 5
 
