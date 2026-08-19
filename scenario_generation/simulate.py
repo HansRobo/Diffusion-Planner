@@ -78,6 +78,34 @@ class _OnnxModel:
         self._input_shapes = {i.name: i.shape for i in self.session.get_inputs()}
         self._outputs = [o.name for o in self.session.get_outputs()]
 
+    def _match_sampled_trajectories(self, arr: np.ndarray) -> np.ndarray:
+        """Reshape the caller's latent to the layout the exported graph declares.
+
+        The caller sizes it the way the torch decoder wants -- (B, P, future_len, CONTROL_DIM) --
+        but a graph exported for the ROS interface bakes (B, P, 1 + future_len, POSE_DIM) and
+        slices the leading current-state step and the extra columns away itself. Prepend a zero
+        step / pad the per-step dim so both layouts feed the same rollout code."""
+        want = self._input_shapes["sampled_trajectories"]
+        assert len(want) == arr.ndim, f"sampled_trajectories rank {arr.ndim} != graph {len(want)}"
+
+        want_t, got_t = want[-2], arr.shape[-2]
+        if isinstance(want_t, int) and got_t != want_t:
+            assert want_t == got_t + 1, (
+                f"graph wants {want_t} steps, caller has {got_t}: only the ROS layout's single "
+                "leading current-state step is a known difference"
+            )
+            head = np.zeros((*arr.shape[:-2], 1, arr.shape[-1]), dtype=arr.dtype)
+            arr = np.concatenate([head, arr], axis=-2)
+
+        want_d, got_d = want[-1], arr.shape[-1]
+        if isinstance(want_d, int) and got_d != want_d:
+            if got_d > want_d:
+                arr = arr[..., :want_d]
+            else:
+                pad = np.zeros((*arr.shape[:-1], want_d - got_d), dtype=arr.dtype)
+                arr = np.concatenate([arr, pad], axis=-1)
+        return arr
+
     def __call__(self, data):
         feed = {}
         for name, otype in self._inputs:
@@ -89,18 +117,7 @@ class _OnnxModel:
             if name == "delay":
                 arr = arr.reshape(-1, 1)[:1]  # graph declares a static [1, 1] delay
             if name == "sampled_trajectories":
-                # The caller sizes this zero dummy by CONTROL_DIM, but an exported graph may
-                # bake a different per-step dim (e.g. POSE_DIM=4 for the ROS interface) --
-                # match the graph's declared static last dim by slicing/zero-padding (the
-                # input is all-zero either way).
-                want_d = self._input_shapes[name][-1]
-                got_d = arr.shape[-1]
-                if isinstance(want_d, int) and got_d != want_d:
-                    if got_d > want_d:
-                        arr = arr[..., :want_d]
-                    else:
-                        pad = np.zeros((*arr.shape[:-1], want_d - got_d), dtype=arr.dtype)
-                        arr = np.concatenate([arr, pad], axis=-1)
+                arr = self._match_sampled_trajectories(arr)
             feed[name] = arr
         pred, ti = self.session.run(self._outputs, feed)
         outputs = {
