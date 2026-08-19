@@ -15,6 +15,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import torch
+
 from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
 from diffusion_planner.config.config_cli import build_config, build_parser, resolve_paths
 from diffusion_planner.utils import ddp
@@ -103,14 +105,18 @@ def run_one_group(
         raise ValueError(f"mode must be 'objects' or 'noobj', got {mode!r}")
     drop_objects = mode == "noobj"
 
-    if len(npz_root_list) > 1:
-        npz_root_arg = out_dir / "_npz_roots.json"
-        npz_root_arg.write_text(json.dumps([str(p) for p in npz_root_list]))
-    else:
-        npz_root_arg = npz_root_list[0]
-
     ddp_rank = ddp.get_rank()
     ddp_world_size = ddp.get_world_size()
+
+    if len(npz_root_list) > 1:
+        npz_root_arg = out_dir / "_npz_roots.json"
+        if ddp_rank == 0:
+            npz_root_arg.write_text(json.dumps([str(p) for p in npz_root_list]))
+        if ddp_world_size > 1:
+            torch.distributed.barrier()
+        npz_root_arg = str(npz_root_arg)
+    else:
+        npz_root_arg = npz_root_list[0]
 
     evaluator = FullRouteClosedLoopEvaluation(
         model,
