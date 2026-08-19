@@ -252,7 +252,9 @@ def run_closed_loop_main(
     if not cfg.closed_loop_npz_root:
         print("No closed_loop_npz_root set, skipping closed-loop evaluation", file=sys.stderr)
         return False
-    entries = resolve_closed_loop_inputs(cfg.closed_loop_npz_root, modes=cfg.closed_loop_object_modes)
+    entries = resolve_closed_loop_inputs(
+        cfg.closed_loop_npz_root, modes=cfg.closed_loop_object_modes
+    )
     if only_json:
         entries = [e for e in entries if e["name"] in only_json]
     if not entries:

@@ -112,7 +112,9 @@ def build_config(cls: type, args: argparse.Namespace, **overrides: Any) -> Any:
     return cls(**values)
 
 
-def to_command_line(cfg_or_cls: Any, cls: type | None = None, exclude: tuple[str, ...] = ()) -> list[str]:
+def to_command_line(
+    cfg_or_cls: Any, cls: type | None = None, exclude: tuple[str, ...] = ()
+) -> list[str]:
     """Serialise a config back to argv.
 
     Two call shapes:
