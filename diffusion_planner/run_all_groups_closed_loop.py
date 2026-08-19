@@ -11,7 +11,6 @@ Accepts the same ``ClosedLoopConfig`` fields as train.py. Example::
 from __future__ import annotations
 
 import json
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -324,6 +323,7 @@ def _build_parser() -> "argparse.ArgumentParser":
 
 
 def main() -> int:
+    from diffusion_planner.utils import ddp
     import torch
 
     from scenario_generation.simulate import load_model
@@ -335,10 +335,15 @@ def main() -> int:
     cfg = build_config(ClosedLoopConfig, args)
     base_out_root = args.out_root
 
+    # Init DDP when launched under torchrun (RANK/WORLD_SIZE present) so that
+    # ddp.get_rank()/get_world_size() below reflect the real process group; without
+    # this every rank would fall back to (0, 1) and silently re-run every route.
+    global_rank, rank, world_size = ddp.ddp_setup_universal(False, cfg)
+    print(f"{global_rank=}, {rank=}, {world_size=}")
+
     if cfg.device.startswith("cuda"):
-        _local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(_local_rank)
-        cfg.device = f"cuda:{_local_rank}"
+        torch.cuda.set_device(rank)
+        cfg.device = f"cuda:{rank}"
 
     model, model_args = load_model(args.model_path, cfg.device)
 

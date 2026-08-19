@@ -52,3 +52,7 @@ class ClosedLoopConfig:
     )
     device: str = cli("device for model and evaluation", default="cuda")
     wandb_project: str = cli("Weights & Biases project name (empty=disabled)", default="")
+    # Mirror BaseConfig.ddp so ddp_setup_universal(...) can be called on this config
+    # directly; ``True`` here means "respect RANK/WORLD_SIZE if set" (single-process
+    # CLI runs with no torchrun env vars stay non-distributed).
+    ddp: bool = cli("enable DDP when RANK/WORLD_SIZE are present", default=True)

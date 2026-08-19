@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -237,10 +236,7 @@ def _write_summary(out_dir: Path, summary: dict) -> None:
 
 
 def main() -> None:
-    import os
-
     import torch
-    import torch.distributed as dist
 
     from scenario_generation.closed_loop_eval import run_closed_loop_eval
 
@@ -252,12 +248,19 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     knobs = _eval_knobs(args)
 
-    _rank = ddp.get_rank()
-    _world = ddp.get_world_size()
+    # Init DDP when launched under torchrun so ddp.get_rank()/get_world_size()
+    # reflect the real process group; without it every rank would silently fall
+    # back to (0, 1) and re-run every route, racing on the same out_dir.
+    # ``args`` is an argparse.Namespace here so we wrap it with the minimal attr
+    # ddp_setup_universal reads.
+    class _CfgShim:
+        ddp = True
+
+    _rank, _local_rank, _world = ddp.ddp_setup_universal(False, _CfgShim())
+    print(f"{_rank=}, {_local_rank=}, {_world=}")
     shard = (_rank, _world) if _world > 1 else None
 
     if args.device.startswith("cuda"):
-        _local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(_local_rank)
         device = f"cuda:{_local_rank}"
     else:
@@ -285,6 +288,8 @@ def main() -> None:
     # Barrier: wait for all ranks to finish writing their segments_{rank}.jsonl
     # Only rank 0 merges the results to avoid race conditions
     if shard is not None:
+        import torch.distributed as dist
+
         dist.barrier()
         if _rank == 0:
             summary = _merge_shards(
