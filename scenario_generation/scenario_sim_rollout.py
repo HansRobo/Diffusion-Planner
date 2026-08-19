@@ -35,6 +35,7 @@ from scenario_generation.metrics.object import score_object_step
 from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import _world_plan_to_ego
+from scenario_generation.scenario_sim_diagnostics import diagnose_case
 from scenario_generation.scenario_sim_metrics import build_segment_row
 from scenario_generation.scenario_sim_route import resolve_route
 from scenario_generation.scene_trace import (
@@ -418,7 +419,7 @@ def _finalize_row(
     )
     # scenario_sim-only diagnostics, kept flat (outside the shared category blocks) so
     # aggregate never sees them as a metric category.
-    return {
+    interim = {
         **row,
         # A sim tick, not an index into the trimmed series, so it names a frame of the run.
         "worst_step": int(start + np.argmin(clearances[:n_scored])) if n_scored else -1,
@@ -436,6 +437,16 @@ def _finalize_row(
         ),
         "coord_check_err_m": coord_err,
         "coord_check_yaw_err_rad": yaw_err,
+    }
+    diag = diagnose_case(interim, Path(output_dir))
+    return {
+        **interim,
+        "failure_category": diag["failure_category"],
+        "hazard_engaged": diag["hazard_engaged"],
+        "hazard_verdict": diag["hazard_verdict"],
+        "verdict_kind": diag.get("verdict_kind", result_kind),
+        "verdict_trigger": diag.get("verdict_trigger"),
+        "verdict_unmet": diag.get("verdict_unmet", []),
     }
 
 
