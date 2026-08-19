@@ -24,7 +24,7 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
-from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.dataset import DiffusionPlannerData, bev_render_settings
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.neighbor_db import NeighborPatternDB
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
@@ -556,8 +556,8 @@ def model_training(args):
     else:
         aug = None
 
-    train_set = DiffusionPlannerData(args.train_set_list)
-    valid_set = DiffusionPlannerData(args.valid_set_list)
+    train_set = DiffusionPlannerData(args.train_set_list, *bev_render_settings(args))
+    valid_set = DiffusionPlannerData(args.valid_set_list, *bev_render_settings(args))
 
     train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 

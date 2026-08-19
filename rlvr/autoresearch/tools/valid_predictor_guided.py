@@ -26,7 +26,7 @@ import torch
 from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.config import Config
-from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.dataset import DiffusionPlannerData, bev_render_settings
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
@@ -105,7 +105,7 @@ def main():
     policy, heads = load_policy(args.policy_dir, model_args, device)
     cfg = Config(args.args_json_path)
 
-    valid_set = DiffusionPlannerData(args.valid_set_list)
+    valid_set = DiffusionPlannerData(args.valid_set_list, *bev_render_settings(model_args))
     if args.limit:
         valid_set = Subset(valid_set, range(min(args.limit, len(valid_set))))
     loader = DataLoader(

@@ -22,7 +22,11 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
-from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
+from diffusion_planner.utils.dataset import (
+    DiffusionPlannerData,
+    DiffusionPlannerPairData,
+    bev_render_settings,
+)
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
@@ -386,6 +390,11 @@ def model_training(args: TrainConfig):
     save_utd = args.save_utd
 
     # set up data loaders
+    if args.input_type == "image" and args.use_data_augment:
+        # The rasters are drawn in the DataLoader worker, before the on-GPU perturbation
+        # rewrites the ego frame, so an augmented batch would carry stale images.
+        raise ValueError("use_data_augment must be False when input_type is 'image'")
+
     if args.use_data_augment:
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
@@ -401,8 +410,8 @@ def model_training(args: TrainConfig):
         aug = None
 
     # prepare dataset
-    train_set = DiffusionPlannerData(args.train_set_list)
-    valid_set = DiffusionPlannerData(args.valid_set_list)
+    train_set = DiffusionPlannerData(args.train_set_list, *bev_render_settings(args))
+    valid_set = DiffusionPlannerData(args.valid_set_list, *bev_render_settings(args))
 
     train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 

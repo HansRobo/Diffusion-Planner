@@ -11,7 +11,11 @@ from diffusion_planner.scenario_based_open_loop.open_loop import (
 )
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.config import Config
-from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
+from diffusion_planner.utils.dataset import (
+    DiffusionPlannerData,
+    DiffusionPlannerPairData,
+    bev_render_settings,
+)
 from diffusion_planner.utils.path_key import data_path_to_rel
 from diffusion_planner.utils.train_utils import resume_model, set_seed
 from diffusion_planner.valid_config import ValidConfig
@@ -219,7 +223,7 @@ def run_validation(valid_cfg: ValidConfig):
         raise ValueError("--valid_set_list is required for standard validation")
 
     # set up data loaders
-    valid_set = DiffusionPlannerData(valid_cfg.valid_set_list)
+    valid_set = DiffusionPlannerData(valid_cfg.valid_set_list, *bev_render_settings(config_obj))
     valid_sampler = DistributedSampler(
         valid_set, num_replicas=ddp.get_world_size(), rank=global_rank, shuffle=False
     )

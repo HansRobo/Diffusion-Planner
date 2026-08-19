@@ -41,7 +41,10 @@ from diffusion_planner.loss import (  # noqa: E402
 )
 from diffusion_planner.model.guidance.collision import center_rect_to_points  # noqa: E402
 from diffusion_planner.train_epoch import heading_to_cos_sin  # noqa: E402
-from diffusion_planner.utils.dataset import DiffusionPlannerData  # noqa: E402
+from diffusion_planner.utils.dataset import (  # noqa: E402
+    DiffusionPlannerData,
+    bev_render_settings,
+)
 from diffusion_planner.utils.neighbor_db import (  # noqa: E402
     DEFAULT_NEIGHBOR_DB_PATH,
     NeighborPatternDB,
@@ -154,7 +157,7 @@ def main():
     model = load_model(args, v.resume_model_path, v.use_ema, device)
     print(f"Model loaded from {v.resume_model_path} (ema={v.use_ema})")
 
-    dataset = DiffusionPlannerData(v.data_list)
+    dataset = DiffusionPlannerData(v.data_list, *bev_render_settings(args))
     idx = (
         v.scene_index
         if v.scene_index >= 0

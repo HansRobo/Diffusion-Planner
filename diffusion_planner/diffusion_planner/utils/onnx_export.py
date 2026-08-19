@@ -22,7 +22,9 @@ import torch.nn as nn
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.model.module.image_encoder import ImageEncoder
 from diffusion_planner.utils.config import Config
+from diffusion_planner.utils.render_bev import NUM_CHANNELS, NUM_SCALES
 
 FULL_INPUT_NAMES = [
     "sampled_trajectories",
@@ -56,6 +58,27 @@ ENCODER_INPUT_NAMES = [
     "route_lanes_has_speed_limit",
     "polygons",
     "line_strings",
+    "goal_pose",
+    "ego_shape",
+    "turn_indicators",
+]
+
+# Image mode replaces every rasterised element with the BEV stack; what is left are the
+# scene facts that have no pixels (see ImageEncoder) plus what the decoder itself reads.
+IMAGE_FULL_INPUT_NAMES = [
+    "sampled_trajectories",
+    "bev_image",
+    "ego_current_state",
+    "neighbor_agents_past",
+    "goal_pose",
+    "ego_shape",
+    "turn_indicators",
+    "delay",
+]
+
+IMAGE_ENCODER_INPUT_NAMES = [
+    "bev_image",
+    "ego_current_state",
     "goal_pose",
     "ego_shape",
     "turn_indicators",
@@ -156,6 +179,29 @@ class EncoderONNXWrapper(nn.Module):
             "route_lanes_has_speed_limit": route_lanes_has_speed_limit,
             "polygons": polygons,
             "line_strings": line_strings,
+            "goal_pose": goal_pose,
+            "ego_shape": ego_shape,
+            "turn_indicators": turn_indicators,
+        }
+        return self.encoder(inputs)
+
+
+class ImageEncoderONNXWrapper(nn.Module):
+    def __init__(self, model: Diffusion_Planner):
+        super().__init__()
+        self.encoder = model.encoder
+
+    def forward(
+        self,
+        bev_image: torch.Tensor,
+        ego_current_state: torch.Tensor,
+        goal_pose: torch.Tensor,
+        ego_shape: torch.Tensor,
+        turn_indicators: torch.Tensor,
+    ) -> torch.Tensor:
+        inputs = {
+            "bev_image": bev_image,
+            "ego_current_state": ego_current_state,
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
             "turn_indicators": turn_indicators,
@@ -269,6 +315,64 @@ class FullONNXWrapper(nn.Module):
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
 
 
+class ImageFullONNXWrapper(nn.Module):
+    """All-in-one planner export for the BEV-image encoder."""
+
+    def __init__(self, model: Diffusion_Planner):
+        super().__init__()
+        self.model = model
+
+    def forward(
+        self,
+        sampled_trajectories: torch.Tensor,
+        bev_image: torch.Tensor,
+        ego_current_state: torch.Tensor,
+        neighbor_agents_past: torch.Tensor,
+        goal_pose: torch.Tensor,
+        ego_shape: torch.Tensor,
+        turn_indicators: torch.Tensor,
+        delay: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        inputs = {
+            "sampled_trajectories": sampled_trajectories,
+            "bev_image": bev_image,
+            "ego_current_state": ego_current_state,
+            "neighbor_agents_past": neighbor_agents_past,
+            "goal_pose": goal_pose,
+            "ego_shape": ego_shape,
+            "turn_indicators": turn_indicators,
+            "delay": delay,
+        }
+        _, decoder_outputs = self.model(inputs)
+        return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
+
+
+@dataclass(frozen=True)
+class ExportSchema:
+    """Which wrappers and input names apply to a model, given its encoder."""
+
+    full: nn.Module
+    encoder: nn.Module
+    full_input_names: list[str]
+    encoder_input_names: list[str]
+
+
+def build_schema(model: Diffusion_Planner) -> ExportSchema:
+    if isinstance(model.encoder, ImageEncoder):
+        return ExportSchema(
+            full=ImageFullONNXWrapper(model).eval(),
+            encoder=ImageEncoderONNXWrapper(model).eval(),
+            full_input_names=IMAGE_FULL_INPUT_NAMES,
+            encoder_input_names=IMAGE_ENCODER_INPUT_NAMES,
+        )
+    return ExportSchema(
+        full=FullONNXWrapper(model).eval(),
+        encoder=EncoderONNXWrapper(model).eval(),
+        full_input_names=FULL_INPUT_NAMES,
+        encoder_input_names=ENCODER_INPUT_NAMES,
+    )
+
+
 def build_dummy_inputs() -> TensorDict:
     inputs = {}
     inputs["sampled_trajectories"] = torch.ones(
@@ -304,6 +408,17 @@ def build_dummy_inputs() -> TensorDict:
     inputs["ego_shape"] = torch.tensor([[2.75, 4.34, 1.70]], dtype=torch.float32)
     inputs["turn_indicators"] = torch.randint(0, 3, (1, INPUT_T + 1), dtype=torch.float32)
     inputs["delay"] = torch.zeros(1, 1, dtype=torch.float32)
+    return inputs
+
+
+def add_bev_dummy_input(inputs: TensorDict, image_size: int) -> TensorDict:
+    """Add the rasterised scene, kept as uint8 so the graph takes the renderer's own output."""
+    inputs["bev_image"] = (
+        torch.randint(
+            0, 2, (1, NUM_SCALES, NUM_CHANNELS, image_size, image_size), dtype=torch.uint8
+        )
+        * 255
+    )
     return inputs
 
 
@@ -345,9 +460,10 @@ def load_model(config_json_path: str, ckpt_path: str, use_ema: bool) -> Diffusio
 
 
 def build_wrappers(model: Diffusion_Planner) -> ModelWrappers:
+    schema = build_schema(model)
     return ModelWrappers(
-        full=FullONNXWrapper(model).eval(),
-        encoder=EncoderONNXWrapper(model).eval(),
+        full=schema.full,
+        encoder=schema.encoder,
         decoder=DecoderONNXWrapper(model).eval(),
         turn_indicator=TurnIndicatorONNXWrapper(model).eval(),
     )
@@ -355,6 +471,7 @@ def build_wrappers(model: Diffusion_Planner) -> ModelWrappers:
 
 def build_export_specs(
     wrappers: ModelWrappers,
+    schema: ExportSchema,
     inputs: TensorDict,
     decoder_inputs: TensorDict,
     turn_indicator_inputs: TensorDict,
@@ -367,14 +484,14 @@ def build_export_specs(
         ExportSpec(
             wrapper=wrappers.full,
             inputs=inputs,
-            input_names=FULL_INPUT_NAMES,
+            input_names=schema.full_input_names,
             output_names=FULL_OUTPUT_NAMES,
             output_path=full_onnx_path,
         ),
         ExportSpec(
             wrapper=wrappers.encoder,
             inputs=inputs,
-            input_names=ENCODER_INPUT_NAMES,
+            input_names=schema.encoder_input_names,
             output_names=ENCODER_OUTPUT_NAMES,
             output_path=encoder_onnx_path,
         ),
@@ -483,12 +600,22 @@ def export_model_to_onnx(
     the training loop skips it). The SDPA / MHA backends are forced only for the duration of the
     export via :func:`onnx_export_backends` and restored afterwards.
     """
-    wrappers = build_wrappers(model)
+    schema = build_schema(model)
+    wrappers = ModelWrappers(
+        full=schema.full,
+        encoder=schema.encoder,
+        decoder=DecoderONNXWrapper(model).eval(),
+        turn_indicator=TurnIndicatorONNXWrapper(model).eval(),
+    )
     export_inputs = build_dummy_inputs()
+    if isinstance(model.encoder, ImageEncoder):
+        export_inputs = add_bev_dummy_input(export_inputs, model.encoder.image_size)
 
     with onnx_export_backends():
         with torch.no_grad():
-            encoding = wrappers.encoder(*(export_inputs[name] for name in ENCODER_INPUT_NAMES))
+            encoding = wrappers.encoder(
+                *(export_inputs[name] for name in schema.encoder_input_names)
+            )
 
         decoder_inputs = build_decoder_inputs(export_inputs, encoding)
         with torch.no_grad():
@@ -502,6 +629,7 @@ def export_model_to_onnx(
 
         export_specs = build_export_specs(
             wrappers,
+            schema,
             export_inputs,
             decoder_inputs,
             turn_indicator_inputs,

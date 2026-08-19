@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.dataset import DiffusionPlannerData, bev_render_settings
 from planner_metrics.centerline import evaluate_centerline_with_details
 from planner_metrics.departure import evaluate_departure_with_details
 
@@ -130,7 +130,7 @@ def run_scenario_based_open_loop_validation(
                 root.mkdir(parents=True, exist_ok=True)
         for metric_name, paths in metric_lists.items():
             loader = DataLoader(
-                DiffusionPlannerData(paths),
+                DiffusionPlannerData(paths, *bev_render_settings(args)),
                 batch_size=args.batch_size,
                 shuffle=False,
                 num_workers=args.num_workers,

@@ -236,7 +236,7 @@ def load_model(args, ckpt_path, use_ema, device):
 
 
 def select_batch(data_list, num_scenes, seed, device):
-    dataset = DiffusionPlannerData(data_list)
+    dataset = DiffusionPlannerData(data_list, False, 0)
     rng = np.random.default_rng(seed)
     idx = rng.choice(len(dataset), size=num_scenes, replace=False)
     batch = default_collate([dataset[int(i)] for i in idx])

@@ -71,6 +71,8 @@ class TrainConfig:
     agent_state_dim: int = 11
     agent_num: int = MAX_NUM_NEIGHBORS
 
+    ego_current_state_dim: int = 10
+
     static_objects_state_dim: int = 10
     static_objects_num: int = 5
 
@@ -87,16 +89,31 @@ class TrainConfig:
     line_string_len: int = POINTS_PER_LINE_STRING
 
     # ---------------------------------------------------------
+    # Scene representation fed to the encoder
+    #
+    # "vector" is the original pipeline: polylines and agent states are encoded per element.
+    # "image" renders the same scene into BEV rasters (see diffusion_planner.utils.render_bev)
+    # and encodes them with a shared ResNet.  Rasterisation happens in the DataLoader worker,
+    # before the on-GPU augmentation, so `use_data_augment` must be off in image mode.
+    # ---------------------------------------------------------
+    input_type: Literal["vector", "image"] = cli(
+        "scene representation fed to the encoder", default="image"
+    )
+    bev_image_size: int = 224
+
+    # ---------------------------------------------------------
     # DataLoader Parameters
     # ---------------------------------------------------------
-    use_data_augment: bool = True
+    # Off by default because `input_type` defaults to "image" on this branch: the rasters are
+    # drawn in the DataLoader worker, before the on-GPU perturbation would rewrite the ego frame.
+    use_data_augment: bool = False
     augment_prob: float = 0.5
     augment_type: Literal["quintic", "bridge"] = "quintic"
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
     use_smoothing_future_trajectory: bool = True
     normalization_file_path: str = "normalization.json"
-    num_workers: int = 8
+    num_workers: int = 16
     pin_mem: bool = True
 
     # ---------------------------------------------------------
@@ -141,7 +158,7 @@ class TrainConfig:
     epdms_eval_use_road_border: bool = True
 
     alpha_planning_loss: float = 1.0
-    alpha_neighbor_loss: float = 0.1
+    alpha_neighbor_loss: float = 0.0
 
     # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False
