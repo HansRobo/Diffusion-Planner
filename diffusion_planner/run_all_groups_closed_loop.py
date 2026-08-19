@@ -338,12 +338,14 @@ def main() -> int:
     # Init DDP when launched under torchrun (RANK/WORLD_SIZE present) so that
     # ddp.get_rank()/get_world_size() below reflect the real process group; without
     # this every rank would fall back to (0, 1) and silently re-run every route.
-    global_rank, rank, world_size = ddp.ddp_setup_universal(False, cfg)
-    print(f"{global_rank=}, {rank=}, {world_size=}")
+    # verbose=True installs setup_for_distributed(rank == 0) so non-master prints
+    # are silenced under torchrun, matching train.py / valid_predictor.py.
+    global_rank, local_rank, world_size = ddp.ddp_setup_universal(True, cfg)
+    print(f"{global_rank=}, {local_rank=}, {world_size=}")
 
     if cfg.device.startswith("cuda"):
-        torch.cuda.set_device(rank)
-        cfg.device = f"cuda:{rank}"
+        torch.cuda.set_device(local_rank)
+        cfg.device = f"cuda:{local_rank}"
 
     model, model_args = load_model(args.model_path, cfg.device)
 

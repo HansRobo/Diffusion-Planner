@@ -248,15 +248,10 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     knobs = _eval_knobs(args)
 
-    # Init DDP when launched under torchrun so ddp.get_rank()/get_world_size()
-    # reflect the real process group; without it every rank would silently fall
-    # back to (0, 1) and re-run every route, racing on the same out_dir.
-    # ``args`` is an argparse.Namespace here so we wrap it with the minimal attr
-    # ddp_setup_universal reads.
     class _CfgShim:
         ddp = True
 
-    _rank, _local_rank, _world = ddp.ddp_setup_universal(False, _CfgShim())
+    _rank, _local_rank, _world = ddp.ddp_setup_universal(True, _CfgShim())
     print(f"{_rank=}, {_local_rank=}, {_world=}")
     shard = (_rank, _world) if _world > 1 else None
 
