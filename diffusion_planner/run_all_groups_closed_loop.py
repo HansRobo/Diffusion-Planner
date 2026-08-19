@@ -1,30 +1,24 @@
-"""Run ``valid_predictor_closed_loop.py`` once per group.
+"""Run closed-loop evaluation for all groups.
 
-``--groups_npz_root`` accepts:
-- Folder path: treated as one route directory -> ``{folder_name: {"all": [paths]}}``
-- Flat JSON (list): ``["/path/to/route1", ...]`` -> ``{json_stem: {"all": [paths]}}``
-- Grouped JSON (dict): ``{"g1": [...], "g2": [...]}`` -> ``{json_stem: {g1: [paths], g2: [paths]}}``
-
-Outputs land in ``<out_root>/<json_name>/<group_name>/`` (objects mode) or
-``<out_root>/<json_name>__noobj/<group_name>/`` (noobj mode); per-json ``groups.json``
-files aggregate one JSON, ``<out_root>/groups.json`` aggregates everything.
-
-Example::
+Accepts the same ``ClosedLoopConfig`` fields as train.py. Example::
 
     python diffusion_planner/run_all_groups_closed_loop.py \\
-        --groups_npz_root override.json site.json \\
+        --closed_loop_npz_root override.json site.json \\
         --model_path /media/.../best_model.pth \\
         --out_root /media/.../cl_results
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
+import torch
+from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
+from diffusion_planner.config.config_cli import build_config, build_parser, resolve_paths
+from diffusion_planner.utils import ddp
 
 from scenario_generation.wandb_closed_loop import build_groups_aggregate_log
 
@@ -84,19 +78,20 @@ def resolve_closed_loop_inputs(inputs: str | list[str]) -> dict[str, dict[str, l
 
 
 def run_one_group(
-    model,  # PyTorch model (for train.py direct call) or None for subprocess
+    model,  # always provided by the caller (train.py or main())
+    model_args,  # model args from load_model (for closed-loop rollout)
     npz_root_list: list[str],
     out_dir: str | Path,
-    args: argparse.Namespace,
+    cfg: ClosedLoopConfig,
     group_name: str | None = None,
     mode: str | None = None,
     render_media: bool = True,
 ) -> None:
     """Run closed-loop evaluation for a single group; writes ``summary.json`` + ``segments.jsonl``
-    under ``out_dir``. Wandb logging is left to the caller (re-reads via :func:`_load_group_results`).
+    under ``out_dir``. Wandb logging is left to the caller.
 
-    ``mode`` is passed explicitly so it doesn't have to be inferred from ``out_dir`` (a json_name
-    containing ``__noobj`` would silently mis-infer).
+    ``mode`` is passed explicitly so it doesn't have to be inferred from ``out_dir``
+    (a json_name containing ``__noobj`` would silently mis-infer).
     """
     from scenario_generation.closed_loop_evaluation import (
         ClosedLoopEvalConfig,
@@ -106,70 +101,55 @@ def run_one_group(
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    label = group_name or out_dir.name
     if mode not in (None, "objects", "noobj"):
         raise ValueError(f"mode must be 'objects' or 'noobj', got {mode!r}")
     drop_objects = mode == "noobj"
 
-    # Write npz roots to JSON if multiple, otherwise use as-is
+    ddp_rank = ddp.get_rank()
+    ddp_world_size = ddp.get_world_size()
+
     if len(npz_root_list) > 1:
         npz_root_arg = out_dir / "_npz_roots.json"
-        npz_root_arg.write_text(json.dumps([str(p) for p in npz_root_list]))
+        if ddp_rank == 0:
+            npz_root_arg.write_text(json.dumps([str(p) for p in npz_root_list]))
+        if ddp_world_size > 1:
+            torch.distributed.barrier()
+        npz_root_arg = str(npz_root_arg)
     else:
         npz_root_arg = npz_root_list[0]
 
-    if model is not None:
-        seg_len = args.closed_loop_seg_len
-        fps = float(args.closed_loop_fps)
-
-        evaluator = FullRouteClosedLoopEvaluation(
-            model,
-            args,
-            ClosedLoopEvalConfig(
-                out_dir=out_dir,
-                params=RolloutParams(
-                    device=args.device,
-                    near_miss_thresh=args.closed_loop_near_miss_thresh,
-                    search_radius=args.closed_loop_search_radius,
-                    warmup_steps=args.closed_loop_warmup_steps,
-                    unstick_after=args.closed_loop_unstick_after,
-                    unstick_advance_m=args.closed_loop_unstick_advance_m,
-                    unstick_radius_mult=args.closed_loop_unstick_radius_mult,
-                    unstick_teleport_after=args.closed_loop_unstick_teleport_after,
-                    draw_every=args.closed_loop_draw_every if render_media else None,
-                    replan_interval=args.closed_loop_replan_interval,
-                    abort_deviation_m=args.closed_loop_abort_deviation_m,
-                    abort_after=args.closed_loop_abort_after,
-                    abort_max_snaps=args.closed_loop_abort_max_snaps,
-                    draw_workers=args.closed_loop_draw_workers,
-                    drop_objects=drop_objects,
-                ),
-                fps=fps,
-                verbose=False,
+    evaluator = FullRouteClosedLoopEvaluation(
+        model,
+        model_args,
+        ClosedLoopEvalConfig(
+            out_dir=out_dir,
+            params=RolloutParams(
+                device=cfg.device,
+                near_miss_thresh=cfg.closed_loop_near_miss_thresh,
+                search_radius=cfg.closed_loop_search_radius,
+                warmup_steps=cfg.closed_loop_warmup_steps,
+                unstick_after=cfg.closed_loop_unstick_after,
+                unstick_advance_m=cfg.closed_loop_unstick_advance_m,
+                unstick_radius_mult=cfg.closed_loop_unstick_radius_mult,
+                unstick_teleport_after=cfg.closed_loop_unstick_teleport_after,
+                draw_every=cfg.closed_loop_draw_every if render_media else None,
+                replan_interval=cfg.closed_loop_replan_interval,
+                abort_deviation_m=cfg.closed_loop_abort_deviation_m,
+                abort_after=cfg.closed_loop_abort_after,
+                abort_max_snaps=cfg.closed_loop_abort_max_snaps,
+                draw_workers=cfg.closed_loop_draw_workers,
+                drop_objects=drop_objects,
             ),
-            npz_root_arg,
-            seg_len=seg_len,
-        )
-        evaluator.run()
-    else:
-        cli_path = Path(__file__).resolve().parent / "valid_predictor_closed_loop.py"
-        cmd = [
-            sys.executable,
-            str(cli_path),
-            "--model_path",
-            str(args.model_path),
-            "--npz_root",
-            str(npz_root_arg),
-            "--out_dir",
-            str(out_dir),
-        ]
-        if hasattr(args, "extra_args") and args.extra_args:
-            cmd.extend(args.extra_args)
-        cmd.extend(["--draw_workers", str(args.closed_loop_draw_workers)])
-        if drop_objects:
-            cmd.append("--drop_objects")
+            fps=float(cfg.closed_loop_fps),
+            verbose=False,
+        ),
+        npz_root_arg,
+        seg_len=cfg.closed_loop_seg_len,
+        ddp_rank=ddp_rank,
+        ddp_world_size=ddp_world_size,
+    )
 
-        subprocess.run(cmd, check=True)
+    evaluator.run_distributed()
 
 
 def _make_summary_key(json_name: str, group_name: str) -> str:
@@ -227,25 +207,23 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
 
 
 def run_closed_loop_main(
-    model,  # PyTorch model (for train.py direct call) or None for subprocess
-    groups_npz_root: list[str] | None = None,
-    args: argparse.Namespace = None,
+    model,  # always provided by the caller
+    model_args,  # model args from load_model (for closed-loop rollout)
+    cfg: ClosedLoopConfig,
     out_root: str | Path | None = None,
     *,
     resolved: dict[str, dict[str, list[str]]] | None = None,
     wandb_run=None,  # Optional wandb.Run instance; if None, creates own session
     only_json: list[str] | None = None,
-    object_modes: list[str] | None = None,
-    render_media: bool = True,
-    shard: tuple[int, int] | None = None,
+    render_media: bool | None = None,
 ) -> bool:
     """Unified entry point for closed-loop evaluation.
 
     Works both as:
     - Direct API call from train.py (model provided, wandb_run provided)
-    - CLI entry point via main() (model=None, wandb_run=None)
+    - CLI entry point via main() (model provided directly)
 
-    Either ``groups_npz_root`` OR pre-computed ``resolved`` must be provided;
+    Either ``cfg.closed_loop_npz_root`` OR pre-computed ``resolved`` must be non-empty;
     the latter lets callers that already resolved (and filtered) the inputs
     skip the duplicate ``resolve_closed_loop_inputs()`` + ``only_json`` filter
     pass.
@@ -253,6 +231,11 @@ def run_closed_loop_main(
     Output directory structure:
         <out_root>/<json_name>/<group_name>          (objects mode)
         <out_root>/<json_name>__noobj/<group_name>   (noobj mode)
+
+    Multi-GPU: launched via ``torch.distributed.run``. DDP rank is read from ``RANK``.
+    All ranks evaluate all groups; per-group ``run_distributed()`` does its own barrier
+    + rank-0 merge, so by the time we reach aggregation every rank's shards are flushed.
+    Rank 0 then writes the manifest and logs to wandb.
 
     Writes:
         - ``<out_root>/groups.json`` (root aggregate)
@@ -264,39 +247,29 @@ def run_closed_loop_main(
     can map that to their own exit code).
     """
     if resolved is None:
-        if groups_npz_root is None:
-            raise ValueError("run_closed_loop_main: pass either groups_npz_root or resolved")
-        resolved = resolve_closed_loop_inputs(groups_npz_root)
+        if not cfg.closed_loop_npz_root:
+            print("No closed_loop_npz_root set, skipping closed-loop evaluation", file=sys.stderr)
+            return False
+        resolved = resolve_closed_loop_inputs(cfg.closed_loop_npz_root)
     if only_json:
         resolved = {k: v for k, v in resolved.items() if k in only_json}
     if not resolved:
-        print(f"No inputs found under {groups_npz_root}", file=sys.stderr)
+        print(f"No inputs found under {cfg.closed_loop_npz_root}", file=sys.stderr)
         return False
 
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    modes = object_modes or ["objects", "noobj"]
+    modes = cfg.closed_loop_object_modes
+    if render_media is None:
+        render_media = cfg.render_media
 
-    # When ``shard`` is set, jobs are round-robin split across ``world_size``
-    # ranks: every rank runs its own subset in-process on its own GPU (via DDP),
-    # rank 0 aggregates the on-disk results afterwards. shard=None means run
-    # everything sequentially (CLI mode).
-    rank, world_size = shard if shard is not None else (0, 1)
-
-    # Triple loop: json_name -> group_name -> mode
-    i = 0
     for json_name, groups in resolved.items():
         json_out_dir = out_root / json_name
         json_out_dir.mkdir(parents=True, exist_ok=True)
 
         for group_name, npz_paths in groups.items():
             for mode in modes:
-                if i % world_size != rank:
-                    i += 1
-                    continue
-                i += 1
-
                 if mode == "objects":
                     mode_out_dir = json_out_dir / group_name
                     summary_key = _make_summary_key(json_name, group_name)
@@ -305,20 +278,19 @@ def run_closed_loop_main(
                     mode_out_dir = out_root / json_mode_name / group_name
                     summary_key = _make_summary_key(json_mode_name, group_name)
 
-                print(f"=== [{summary_key}] npz={npz_paths} -> out={mode_out_dir} ===")
-
                 run_one_group(
                     model,
+                    model_args,
                     npz_paths,
                     mode_out_dir,
-                    args,
+                    cfg,
                     group_name=summary_key,
                     mode=mode,
                     render_media=render_media,
                 )
 
-    # Aggregate on rank 0 only (shard=None -> rank 0; DDP -> rank 0 only).
-    if rank == 0:
+    # rank-0 reads the per-group summaries; run_one_group already barriered + merged internally.
+    if ddp.get_rank() == 0:
         all_summaries = _load_group_results(out_root)
         all_group_names = sorted(all_summaries.keys())
 
@@ -337,21 +309,14 @@ def run_closed_loop_main(
 
         if all_group_names:
             _log_to_wandb(
-                args, all_group_names, all_summaries, out_root, wandb_run, render_media=render_media
+                cfg, all_group_names, all_summaries, out_root, wandb_run, render_media=render_media
             )
 
     return True
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--groups_npz_root",
-        required=True,
-        nargs="+",
-        help="Input paths: folder(s), flat JSON(s) (list of paths), or grouped JSON(s) (dict). "
-        "Each JSON/folder becomes its own top-level namespace.",
-    )
+def _build_parser() -> "argparse.ArgumentParser":
+    parser = build_parser(ClosedLoopConfig, description=__doc__)
     parser.add_argument("--model_path", required=True, type=Path)
     parser.add_argument("--out_root", required=True, type=Path)
     parser.add_argument(
@@ -360,91 +325,52 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="run only these JSON/folder names (e.g. override site)",
     )
-    parser.add_argument(
-        "--object_modes",
-        nargs="+",
-        choices=("objects", "noobj"),
-        default=["objects", "noobj"],
-        help="'objects'=normal, 'noobj'=empty-world ablation (--drop_objects). "
-        "Each group runs once per mode; noobj gets a '__noobj' suffix on the out_dir.",
-    )
-    parser.add_argument(
-        "--closed_loop_draw_workers",
-        type=int,
-        default=4,
-        help="parallelism for per-frame trajectory drawing (1=serial). Forwarded as --draw_workers "
-        "in the subprocess CLI path; used directly in the in-process path.",
-    )
-    parser.add_argument(
-        "--extra_args",
-        nargs=argparse.REMAINDER,
-        default=[],
-        help="passed through verbatim to valid_predictor_closed_loop.py",
-    )
-    parser.add_argument(
-        "--render_media",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="render video/colormap artifacts during wandb logging (default: on)",
-    )
-    parser.add_argument(
-        "--wandb_project",
-        type=str,
-        default=None,
-        help="optional: log to wandb (one run, all groups + per-json aggregates)",
-    )
-    parser.add_argument("--wandb_run_name", type=str, default=None)
-    parser.add_argument(
-        "--closed_loop_wandb_video_pick",
-        choices=("worst", "first", "longest"),
-        default="worst",
-        help="which episode gets its video uploaded per group",
-    )
-    parser.add_argument(
-        "--closed_loop_colormap_metrics",
-        nargs="*",
-        default=[
-            "clearance",
-            "collision",
-            "near_miss",
-            "speed",
-            "road_border",
-            "red_light",
-            "strong_brake",
-        ],
-        help="per-step metrics rendered as trajectory-colormap images for wandb",
-    )
-    return parser.parse_args()
+    return parser
 
 
 def main() -> int:
-    args = parse_args()
+    import torch
+    from diffusion_planner.utils import ddp
+
+    from scenario_generation.simulate import load_model
+
+    parser = _build_parser()
+    args = parser.parse_args()
+    resolve_paths(args, ClosedLoopConfig)
+
+    cfg = build_config(ClosedLoopConfig, args)
+    base_out_root = args.out_root
+
+    # Init DDP when launched under torchrun (RANK/WORLD_SIZE present) so that
+    # ddp.get_rank()/get_world_size() below reflect the real process group; without
+    # this every rank would fall back to (0, 1) and silently re-run every route.
+    # verbose=True installs setup_for_distributed(rank == 0) so non-master prints
+    # are silenced under torchrun, matching train.py / valid_predictor.py.
+    global_rank, local_rank, world_size = ddp.ddp_setup_universal(True, cfg)
+    print(f"{global_rank=}, {local_rank=}, {world_size=}")
+
+    if cfg.device.startswith("cuda"):
+        torch.cuda.set_device(local_rank)
+        cfg.device = f"cuda:{local_rank}"
+
+    model, model_args = load_model(args.model_path, cfg.device)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    args.out_root = args.out_root / timestamp
-    if args.out_root.exists() and any(args.out_root.iterdir()):
-        print(
-            f"Output directory {args.out_root} already exists and is not empty. "
-            f"Specify a different --out_root to avoid data loss or remove the old directory.",
-            file=sys.stderr,
-        )
-        return 1
-    args.out_root.mkdir(parents=True, exist_ok=True)
+    out_root = base_out_root / timestamp
+    out_root.mkdir(parents=True, exist_ok=True)
 
     ok = run_closed_loop_main(
-        model=None,  # CLI mode: subprocess
-        groups_npz_root=args.groups_npz_root,
-        args=args,
-        out_root=args.out_root,
+        model=model,
+        model_args=model_args,
+        cfg=cfg,
+        out_root=out_root,
         only_json=args.only_json,
-        object_modes=args.object_modes,
-        render_media=args.render_media,
     )
     return int(not ok)
 
 
 def _log_to_wandb(
-    args: object,
+    cfg: ClosedLoopConfig,
     group_names: list[str],
     group_summaries: dict[str, dict],
     out_root: str | Path,
@@ -465,10 +391,7 @@ def _log_to_wandb(
 
     if run is None:
         # CLI entrypoint: own the wandb lifetime.
-        run = wandb.init(
-            project=getattr(args, "wandb_project", None),
-            name=getattr(args, "wandb_run_name", None),
-        )
+        run = wandb.init(project=cfg.wandb_project or None)
         own_run = True
     else:
         own_run = False
@@ -477,17 +400,15 @@ def _log_to_wandb(
         log = build_groups_wandb_log(
             {key: group_summaries[key] for key in group_names},
             out_root=out_root,
-            video_pick=args.closed_loop_wandb_video_pick,
-            colormap_metrics=tuple(args.closed_loop_colormap_metrics or ()),
-            # ``summary`` doesn't store ``near_miss_thresh``; pass trainer's value so
-            # colormap matches the rollout's actual threshold.
-            near_miss_thresh_default=getattr(args, "closed_loop_near_miss_thresh", 0.5),
-            render_media=args.render_media,
+            video_pick=cfg.closed_loop_wandb_video_pick,
+            colormap_metrics=tuple(cfg.closed_loop_colormap_metrics or ()),
+            near_miss_thresh_default=cfg.closed_loop_near_miss_thresh,
+            render_media=render_media,
         )
         run.log(log)
         print(f"wandb: logged {len(group_summaries)} group(s) to run {run.id}")
 
-        _refresh_workspace_view(run, args, group_names)
+        _refresh_workspace_view(run, cfg, group_names)
     finally:
         if own_run:
             wandb.finish()
@@ -553,10 +474,6 @@ def _refresh_workspace_view(
         return
 
     run.summary["closed_loop/workspace_view_url"] = url
-    # ``run.summary[k] = v`` queues; pass the URL through ``update`` to flush it to
-    # the run page immediately (wandb 0.27 ``SummaryDict.update`` requires a dict
-    # argument — the no-arg form raises ``TypeError: missing 1 required positional
-    # argument: 'd'``).
     run.summary.update({"closed_loop/workspace_view_url": url})
     print(f"wandb: dashboard view saved → {url}")
 

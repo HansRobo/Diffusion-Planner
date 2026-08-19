@@ -126,26 +126,10 @@ def wandb_epdms_metrics(epdms_means):
     }
 
 
-def closed_loop_validate(
-    model,
-    args,
-    epoch: int,
-    out_dir: str,
-    global_rank: int,
-    world_size: int,
-    *,
-    is_final_save: bool = False,
-) -> None:
-    """Closed-loop rendered rollout; logs metrics + videos to wandb.
+def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
+    """Closed-loop rendered rollout; logs metrics + videos to wandb."""
+    import os
 
-    Every rank runs its shard of the (json, group, mode) jobs; rank 0 waits
-    for all then aggregates the on-disk results and logs to wandb.
-
-    This is the standard distributed-validation pattern: each worker processes
-    its own data slice on its own GPU (no GPU conflicts), then rank 0
-    assembles the final summary. The parent must call a barrier before this
-    to ensure every rank has finished its epoch and the checkpoint is stable.
-    """
     if not args.closed_loop_npz_root:
         return
 
@@ -158,20 +142,14 @@ def closed_loop_validate(
     try:
         run_closed_loop_main(
             model=net,
-            groups_npz_root=[str(p) for p in args.closed_loop_npz_root],
-            args=args,
+            model_args=args,
+            cfg=args,
             out_root=out_dir,
             wandb_run=wandb.run,
-            object_modes=args.closed_loop_object_modes
-            if args.closed_loop_object_modes is not None
-            else ["objects"],
-            render_media=is_final_save and args.render_media,
-            shard=(global_rank, world_size),
+            render_media=args.render_media,
         )
 
-        # Rank 0: per-group stdout summary (wandb logging already happened inside
-        # run_closed_loop_main for rank 0).
-        if global_rank == 0:
+        if ddp.get_rank() == 0:
             for group_key, summary in _load_group_results(out_dir).items():
                 print(
                     f"closed-loop [{group_key}] @epoch {epoch + 1}: {summary.get('n_segments', 0)} seg in "
@@ -187,6 +165,7 @@ def closed_loop_validate(
 
 
 def model_training(args: TrainConfig):
+    save_path = args.save_dir
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
     # init ddp
@@ -201,9 +180,6 @@ def model_training(args: TrainConfig):
         print("Use device: {}".format(args.device))
         print("Deterministic mode: {}".format(args.deterministic))
 
-        save_path = args.save_dir
-        os.makedirs(save_path, exist_ok=True)
-
         # Save args
         args_dict = vars(args)
         args_dict = {
@@ -212,11 +188,9 @@ def model_training(args: TrainConfig):
         }
         args_dict["major_version"] = 5
 
+        os.makedirs(save_path, exist_ok=True)
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
-
-    else:
-        save_path = None
 
     # set seed
     set_seed(args.seed + global_rank)
@@ -601,20 +575,6 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
-                # Closed-loop validation runs on the same cadence as the checkpoint save; outputs
-                # (videos + metrics) land next to the saved weights they correspond to.
-                is_final_save = (epoch + 1 - init_epoch) // save_utd == (
-                    train_epochs - init_epoch
-                ) // save_utd
-                closed_loop_validate(
-                    diffusion_planner,
-                    args,
-                    epoch,
-                    os.path.join(curr_dir, "closed_loop"),
-                    global_rank,
-                    world_size,
-                    is_final_save=is_final_save,
-                )
 
             if valid_loss_ego_position_lat_loss < best_loss:
                 curr_dir = os.path.join(save_path, "best_model")
@@ -637,6 +597,17 @@ def model_training(args: TrainConfig):
                     opset_version=20,
                     external_data=False,
                 )
+
+        if (epoch + 1 - init_epoch) // save_utd == (train_epochs - init_epoch) // save_utd:
+            # closed-loop validation runs on all ranks
+            curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
+            os.makedirs(curr_dir, exist_ok=True)
+            closed_loop_validate(
+                diffusion_planner,
+                args,
+                epoch,
+                os.path.join(curr_dir, "closed_loop"),
+            )
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)
