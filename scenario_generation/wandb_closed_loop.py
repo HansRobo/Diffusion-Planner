@@ -34,9 +34,16 @@ def episode_stem(out_dir: str | Path, row: dict) -> str:
     them just ``{route}`` -- one route = one whole-route rollout, no sub-segmenting.
     Prefer the segment-suffixed form and fall back to the bare route name when that
     file/dir doesn't exist, so callers resolve videos correctly for either pipeline.
+
+    A row with no ``segment`` at all comes from a producer whose unit of work is one whole
+    scenario rather than a slice of a route; there is no suffix to prefer, so it resolves
+    straight to the route name.
     """
     out_dir = Path(out_dir)
-    start, end = row["segment"]
+    segment = row.get("segment")
+    if segment is None:
+        return row["route"]
+    start, end = segment
     segmented_stem = f"{row['route']}_{start}_{end}"
     if (out_dir / f"{segmented_stem}.mp4").is_file() or (out_dir / segmented_stem).is_dir():
         return segmented_stem
