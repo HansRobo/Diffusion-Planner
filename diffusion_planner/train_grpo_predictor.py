@@ -56,13 +56,13 @@ def model_training(args):
     global_rank, rank, world_size = ddp.ddp_setup_universal(True, args)
     print(f"{global_rank=}, {rank=}")
 
+    save_path = args.save_dir
     if global_rank == 0:
         print("------------- {} -------------".format(args.exp_name))
         print("Scenes per step (batch_size): {}".format(args.batch_size))
         print("Group size (num_generations): {}".format(args.num_generations))
         print("Learning rate: {}".format(args.learning_rate))
 
-        save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
 
         args_dict = vars(args)
@@ -74,8 +74,6 @@ def model_training(args):
 
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
-    else:
-        save_path = None
 
     set_seed(args.seed + global_rank)
 
@@ -309,18 +307,6 @@ def model_training(args):
                     opset_version=20,
                     external_data=False,
                 )
-                is_final_save = (epoch + 1 - init_epoch) // save_utd == (
-                    train_epochs - init_epoch
-                ) // save_utd
-                closed_loop_validate(
-                    diffusion_planner,
-                    args,
-                    epoch,
-                    os.path.join(curr_dir, "closed_loop"),
-                    global_rank,
-                    world_size,
-                    is_final_save=is_final_save,
-                )
 
             if train_reward > best_reward:
                 curr_dir = os.path.join(save_path, "best_model")
@@ -340,6 +326,18 @@ def model_training(args):
                     opset_version=20,
                     external_data=False,
                 )
+
+        if (epoch + 1 - init_epoch) // save_utd == (
+            train_epochs - init_epoch
+        ) // save_utd:
+            curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
+            os.makedirs(curr_dir, exist_ok=True)
+            closed_loop_validate(
+                diffusion_planner,
+                args,
+                epoch,
+                os.path.join(curr_dir, "closed_loop"),
+            )
 
         scheduler.step()
         train_sampler.set_epoch(epoch + 1)

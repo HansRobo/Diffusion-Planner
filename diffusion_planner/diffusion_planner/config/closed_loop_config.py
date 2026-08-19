@@ -1,7 +1,5 @@
 from dataclasses import dataclass, field
 
-from diffusion_planner.dimensions import MAX_NUM_NEIGHBORS
-
 from .config_cli import cli
 
 
@@ -52,3 +50,5 @@ class ClosedLoopConfig:
         "render video/colormap artifacts during wandb logging",
         default=True,
     )
+    device: str = cli("device for model and evaluation", default="cuda")
+    wandb_project: str = cli("Weights & Biases project name (empty=disabled)", default="")
