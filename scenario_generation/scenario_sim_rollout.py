@@ -37,7 +37,11 @@ from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import _world_plan_to_ego
 from scenario_generation.scenario_sim_metrics import build_segment_row
 from scenario_generation.scenario_sim_route import resolve_route
-from scenario_generation.scene_trace import SceneTraceWriter, write_map_asset
+from scenario_generation.scene_trace import (
+    SceneTraceWriter,
+    asset_dir as scene_asset_dir_for,
+    write_map_asset,
+)
 from scenario_generation.scenario_sim_scene import (
     _HISTORY_LEN,
     DT,
@@ -550,10 +554,14 @@ def run_scenario_sim_rollout(
         )
 
         if cfg.write_scene_trace:
-            # One map asset per map, shared by every case: a caller that evaluates a suite
-            # passes one run-level directory, and the fallback keeps a standalone rollout
-            # self-contained rather than duplicating the map into each case.
-            assets = Path(scene_asset_dir) if scene_asset_dir is not None else output_dir / "scene_maps"
+            # One map asset per map, shared by every case. The default is the run directory --
+            # ``output_dir`` is one case within it -- because that is where the export looks;
+            # writing them per case would duplicate the map and leave the export finding none.
+            assets = (
+                Path(scene_asset_dir)
+                if scene_asset_dir is not None
+                else scene_asset_dir_for(output_dir.parent)
+            )
             with timers("scene_trace_map"):
                 map_ref, _ = write_map_asset(builder, assets)
             trace_writer = SceneTraceWriter(

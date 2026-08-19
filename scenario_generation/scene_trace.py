@@ -19,6 +19,17 @@ def _points(points: np.ndarray) -> list[list[float]]:
     return [[round(float(x), 3), round(float(y), 3)] for x, y in points[:, :2]]
 
 
+def asset_dir(run_dir: Path) -> Path:
+    """Where the map assets for the cases under ``run_dir`` live.
+
+    One map serves every case that ran on it, so the assets sit beside the case directories
+    rather than inside them. Both the rollout that writes them and the export that reads them
+    call this, because a disagreement is silent: the export simply finds no map and the viewer
+    draws the trace over nothing.
+    """
+    return Path(run_dir) / "scene_maps"
+
+
 def write_map_asset(builder, asset_dir: Path) -> tuple[str, Path]:
     """Write one immutable map asset, shared by every case using this map.
 

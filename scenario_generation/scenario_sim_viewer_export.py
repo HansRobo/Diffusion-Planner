@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from scenario_generation.closed_loop_eval import aggregate
+from scenario_generation.scene_trace import asset_dir as scene_asset_dir_for
 from scenario_generation.trajectory_colormap import METRIC_CHOICES, render_trajectory_colormaps
 
 # ``aggregate`` derives these from row keys this path never writes, so it returns the
@@ -531,7 +532,7 @@ def write_viewer_tree(
                     map_ref = None
                 row["scene_trace"] = f"media/{scenario}/{case}.scene.jsonl.gz"
                 if map_ref:
-                    source_map = case_dir.parent / "scene_maps" / f"{map_ref}.json.gz"
+                    source_map = scene_asset_dir_for(case_dir.parent) / f"{map_ref}.json.gz"
                     if source_map.is_file():
                         map_dst = out_root / "maps" / source_map.name
                         map_dst.parent.mkdir(parents=True, exist_ok=True)

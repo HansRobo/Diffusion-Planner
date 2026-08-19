@@ -5,12 +5,14 @@ These assert the shape a consumer outside this repo depends on.
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
 import pytest
 
 from scenario_generation.scenario_sim_viewer_export import export, key_aliases, load_submitted
+from scenario_generation.scene_trace import asset_dir
 
 _MAP = "/suite/assets/map/proj/2231/2231-0001/lanelet2_map.osm"
 _SIDECAR = {
@@ -20,6 +22,7 @@ _SIDECAR = {
 _MAP_ID = "2231"
 _SC1 = "5b071057-5e4d-4585-a0c6-2a3e649fb28c"
 _SC2 = "8dd3a7fd-6af8-4dcc-9f10-ce46d09b0e88"
+_MAP_REF = "0123456789abcdef"
 
 
 def _rel(scenario_id: str, case: int = 5) -> str:
@@ -86,6 +89,13 @@ def _make_run(root: Path, rels: list[str], *, submitted: list[str] | None = None
         (case / "row.json").write_text(json.dumps(_row()))
         (case / "rollout.jsonl").write_text("\n".join(trace) + "\n")
         (case / f"{case.name}.mp4").write_bytes(b"\x00")
+        with gzip.open(case / "scene_trace.jsonl.gz", "wt", encoding="utf-8") as f:
+            f.write(json.dumps({"event": "header", "map_ref": _MAP_REF}) + "\n")
+    # One asset for the whole run, written where the rollout puts it.
+    assets = asset_dir(root)
+    assets.mkdir(parents=True, exist_ok=True)
+    with gzip.open(assets / f"{_MAP_REF}.json.gz", "wt", encoding="utf-8") as f:
+        f.write(json.dumps({"version": 1, "lanes": [], "road_borders": []}))
     return root
 
 
@@ -214,3 +224,21 @@ def test_work_list_entries_resolve_against_the_manifest(tmp_path):
     got = dict(load_submitted(run))
     assert got["case_a"] == str(run / _rel(_SC1))
     assert got["case_b"] == absolute
+
+
+def test_the_map_the_rollout_wrote_is_the_map_the_export_publishes(tmp_path):
+    """A rollout is handed one case directory and derives the asset directory from it, so the
+    two sides agree through ``asset_dir`` rather than through a caller remembering to wire it.
+    A disagreement is silent: the export finds no map and the viewer draws over nothing."""
+    export(_make_run(tmp_path / "run", [_rel(_SC1), _rel(_SC1, case=6)]), tmp_path / "out")
+    out = tmp_path / "out"
+
+    cases = [json.loads(ln) for ln in (out / "cases.jsonl").read_text().splitlines()]
+    assert cases, "no cases exported"
+    for case in cases:
+        assert case["map_asset"] == f"maps/{_MAP_REF}.json.gz"
+        assert case["scene_trace"] == f"media/{_SC1}/{case['route']}.scene.jsonl.gz"
+        assert (out / case["map_asset"]).is_file()
+        assert (out / case["scene_trace"]).is_file()
+    # One map serves every case that ran on it.
+    assert len(list((out / "maps").iterdir())) == 1
