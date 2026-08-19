@@ -231,8 +231,12 @@ def classify_hazard_engagement(row: dict[str, Any], ego_speed_param: float | Non
     category = classify_failure(row)
 
     obj_block = row.get("object") or {}
-    cl_min = obj_block.get("clearance_min_m", float("inf"))
-    vmax = row.get("max_speed_mps", 0.0)
+    cl_min = obj_block.get("clearance_min_m")
+    if cl_min is None:
+        cl_min = float("inf")
+    vmax = row.get("max_speed_mps")
+    if vmax is None:
+        vmax = 0.0
 
     # An obstacle came within 20m, collision occurred, or vehicle attained specified speed
     engaged = False
@@ -280,6 +284,9 @@ def diagnose_case(row: dict[str, Any], case_dir: Path | None = None) -> dict[str
         if junit_path.is_file():
             verdict = parse_junit_verdict(junit_path)
 
+    if verdict is None and isinstance(row.get("verdict"), dict):
+        verdict = row["verdict"]
+
     category = classify_failure(row, verdict)
     hazard = classify_hazard_engagement(row)
     passed = is_passed(row, verdict)
@@ -290,7 +297,7 @@ def diagnose_case(row: dict[str, Any], case_dir: Path | None = None) -> dict[str
         **hazard,
     }
     if verdict and verdict.get("decided"):
-        diag["verdict_kind"] = verdict["kind"]
-        diag["verdict_trigger"] = verdict["trigger"]
-        diag["verdict_unmet"] = verdict["unmet"]
+        diag["verdict_kind"] = verdict.get("kind")
+        diag["verdict_trigger"] = verdict.get("trigger")
+        diag["verdict_unmet"] = verdict.get("unmet", [])
     return diag

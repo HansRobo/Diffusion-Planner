@@ -19,47 +19,45 @@ from scenario_generation.scenario_sim_diagnostics import (
 
 
 def load_run_data(run_dir: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-    summary_path = run_dir / "summary.json"
-    segments_path = run_dir / "segments.jsonl"
+    """Load evaluation run data strictly per FORMAT.md."""
+    cases_path = run_dir / "cases.jsonl"
+    if not cases_path.is_file():
+        cases_path = run_dir / "segments.jsonl"
+    run_json_path = run_dir / "run.json"
+    if not run_json_path.is_file():
+        run_json_path = run_dir / "summary.json"
+    scenarios_json_path = run_dir / "scenarios.json"
 
-    summary = {}
-    if summary_path.exists():
+    if not cases_path.is_file():
+        raise FileNotFoundError(f"Neither cases.jsonl nor segments.jsonl found in {run_dir}")
+
+    summary: dict[str, Any] = {}
+    if run_json_path.is_file():
         try:
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary = json.loads(run_json_path.read_text(encoding="utf-8"))
         except Exception:
             pass
 
-    segments = {}
-    if segments_path.exists():
-        for line in segments_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            scen_key = row.get("route") or row.get("scenario") or row.get("name") or row.get("route_id")
-            if not scen_key and "row_file" in row:
-                scen_key = Path(row["row_file"]).stem
-            if scen_key:
-                # Use basename of route if it is a full path
-                scen_key = Path(scen_key).name
-                case_dir = run_dir / scen_key
-                row["diagnostics"] = diagnose_case(row, case_dir if case_dir.is_dir() else None)
-                segments[scen_key] = row
-    else:
-        # Fallback to scanning individual row.json files in subdirectories
-        for rp in sorted(run_dir.glob("*/row.json")):
-            try:
-                row = json.loads(rp.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            scen_key = rp.parent.name
-            row["diagnostics"] = diagnose_case(row, rp.parent)
-            segments[scen_key] = row
+    if scenarios_json_path.is_file():
+        try:
+            summary["scenarios_meta"] = json.loads(scenarios_json_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
 
-    return summary, segments
+    cases: dict[str, dict[str, Any]] = {}
+    for line in cases_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        scen_key = row.get("case_key") or f"{row.get('scenario')}_{row.get('route')}"
+        row["diagnostics"] = diagnose_case(row)
+        cases[scen_key] = row
+
+    return summary, cases
 
 
 def _format_stat(vals: list[float], unit: str = "", fmt: str = ".2f") -> str:
@@ -131,64 +129,70 @@ def compare_runs(base_dir: Path, treat_dir: Path, title_base: str = "Baseline", 
     treat_pr = (treat_pass_cnt / treat_total * 100) if treat_total else 0.0
 
     lines = []
-    lines.append("# Closed-Loop Scenario Evaluation Comparison")
-    lines.append(f"- **{title_base}**: `{base_dir}`")
-    lines.append(f"- **{title_treat}**: `{treat_dir}`")
+    lines.append("# クローズドループ シナリオ評価 比較レポート (Scenario Evaluation Comparison)")
+    lines.append(f"- **{title_base} (基準)**: `{base_dir}`")
+    lines.append(f"- **{title_treat} (比較対象)**: `{treat_dir}`")
     lines.append("")
 
     # Section 1: Summary Table
-    lines.append("## 1. Summary Comparison")
-    lines.append(f"| Metric | {title_base} | {title_treat} | Delta |")
+    lines.append("## 1. サマリー比較 (Summary Comparison)")
+    lines.append(f"| 指標 (Metric) | {title_base} | {title_treat} | 増減差分 (Delta) |")
     lines.append("|---|---|---|---|")
-    lines.append(f"| **Total Cases** | {base_total} | {treat_total} | {treat_total - base_total:+d} |")
-    lines.append(f"| **Common Evaluated Cases** | {len(common_scenarios)} | {len(common_scenarios)} | - |")
-    lines.append(f"| **Passed Cases** | {base_pass_cnt} ({base_pr:.1f}%) | {treat_pass_cnt} ({treat_pr:.1f}%) | {treat_pass_cnt - base_pass_cnt:+d} ({treat_pr - base_pr:+.1f}%) |")
-    lines.append(f"| **Wins (Improved Fail → Pass)** | - | {len(wins)} | +{len(wins)} |")
-    lines.append(f"| **Losses (Regressed Pass → Fail)** | - | {len(losses)} | -{len(losses)} |")
-    lines.append(f"| **Net Improvement** | - | - | **{len(wins) - len(losses):+d}** |")
+    lines.append(f"| **総ケース数 (Total Cases)** | {base_total} | {treat_total} | {treat_total - base_total:+d} |")
+    lines.append(f"| **共通評価ケース数 (Common Cases)** | {len(common_scenarios)} | {len(common_scenarios)} | - |")
+    lines.append(f"| **合格ケース数 (Passed Cases)** | {base_pass_cnt} ({base_pr:.1f}%) | {treat_pass_cnt} ({treat_pr:.1f}%) | {treat_pass_cnt - base_pass_cnt:+d} ({treat_pr - base_pr:+.1f}%) |")
+    lines.append(f"| **改善ケース (Wins: Fail → Pass)** | - | {len(wins)} | +{len(wins)} |")
+    lines.append(f"| **悪化ケース (Losses: Pass → Fail)** | - | {len(losses)} | -{len(losses)} |")
+    lines.append(f"| **純改善数 (Net Improvement)** | - | - | **{len(wins) - len(losses):+d}** |")
     lines.append("")
 
     # Section 2: Failure Category Breakdown (Hierarchical)
     all_cats = [
-        "PASS",
-        "COLLISION",
-        "ROAD_DEPARTURE",
-        "FROZEN_STANDSTILL",
-        "PROXIMITY_DEPARTURE",
-        "GOAL_STOP_FAILURE",
-        "SPEED_TIMEOUT",
-        "UNMET_CONDITION",
-        "SCENARIO_REFUSED",
-        "ERROR",
+        ("PASS", "合格"),
+        ("COLLISION", "障害物衝突"),
+        ("ROAD_DEPARTURE", "路端逸脱"),
+        ("FROZEN_STANDSTILL", "発進不能・静止"),
+        ("PROXIMITY_DEPARTURE", "過接近打ち切り"),
+        ("GOAL_STOP_FAILURE", "ゴール停止失敗"),
+        ("SPEED_TIMEOUT", "速度不足時間切れ"),
+        ("UNMET_CONDITION", "条件未達"),
+        ("SCENARIO_REFUSED", "シナリオ拒否"),
+        ("ERROR", "異常終了"),
     ]
-    lines.append("## 2. Failure Root-Cause Breakdown")
-    lines.append(f"| Category | {title_base} | {title_treat} | Delta | Description |")
+    lines.append("## 2. 失敗要因の排他分類 (Failure Root-Cause Breakdown)")
+    lines.append(f"| 失敗カテゴリ | {title_base} | {title_treat} | 増減差分 | 説明・影響 |")
     lines.append("|---|---|---|---|---|")
-    for cat in all_cats:
+    for cat, cat_ja in all_cats:
         b_c = base_cats.get(cat, 0)
         t_c = treat_cats.get(cat, 0)
         b_pct = (b_c / len(common_scenarios) * 100) if common_scenarios else 0.0
         t_pct = (t_c / len(common_scenarios) * 100) if common_scenarios else 0.0
         delta = t_c - b_c
         sign = f"{delta:+d}" if delta != 0 else "0"
-        lines.append(f"| **`{cat}`** | {b_c} ({b_pct:.1f}%) | {t_c} ({t_pct:.1f}%) | {sign} ({t_pct - b_pct:+.1f}%) | {_cat_description(cat)} |")
+        lines.append(f"| **{cat_ja}** (`{cat}`) | {b_c} ({b_pct:.1f}%) | {t_c} ({t_pct:.1f}%) | {sign} ({t_pct - b_pct:+.1f}%) | {_cat_description(cat)} |")
     lines.append("")
 
     # Section 3: Hazard Engagement Analysis
-    lines.append("## 3. Hazard Engagement & Validity Analysis")
-    lines.append(f"| Hazard Verdict | {title_base} | {title_treat} | Delta | Interpretation |")
+    lines.append("## 3. ハザード提示検知と妥当性分析 (Hazard Engagement Analysis)")
+    lines.append(f"| ハザード判定 | {title_base} | {title_treat} | 増減差分 | 解釈 |")
     lines.append("|---|---|---|---|---|")
-    hazard_keys = ["PASS_AVOIDED", "PASS_UNENGAGED", "FAIL_COLLISION", "FAIL_MOBILITY", "FAIL_OTHER"]
-    for hz in hazard_keys:
+    hazard_keys = [
+        ("PASS_AVOIDED", "真の合格 (回避成功)"),
+        ("PASS_UNENGAGED", "見かけの合格 (未遭遇)"),
+        ("FAIL_COLLISION", "安全失敗 (衝突)"),
+        ("FAIL_MOBILITY", "走行性失敗 (フリーズ/タイムアウト)"),
+        ("FAIL_OTHER", "その他失敗"),
+    ]
+    for hz, hz_ja in hazard_keys:
         b_h = base_hazards.get(hz, 0)
         t_h = treat_hazards.get(hz, 0)
         d_h = t_h - b_h
         sign = f"{d_h:+d}" if d_h != 0 else "0"
-        lines.append(f"| **`{hz}`** | {b_h} | {t_h} | {sign} | {_hazard_description(hz)} |")
+        lines.append(f"| **{hz_ja}** (`{hz}`) | {b_h} | {t_h} | {sign} | {_hazard_description(hz)} |")
     lines.append("")
 
     # Section 4: Driving Safety & Quality Metrics
-    lines.append("## 4. Driving Quality & Safety Metrics")
+    lines.append("## 4. 走行品質・安全性メトリクス (Driving Quality & Safety Metrics)")
     b_clearances = [r.get("object", {}).get("clearance_min_m") for r in base_segs.values()]
     t_clearances = [r.get("object", {}).get("clearance_min_m") for r in treat_segs.values()]
     b_accels = [r.get("strong_brake", {}).get("strongest_mps2") for r in base_segs.values()]
@@ -198,33 +202,39 @@ def compare_runs(base_dir: Path, treat_dir: Path, title_base: str = "Baseline", 
     b_steps = [r.get("n_steps_run", 0) for r in base_segs.values()]
     t_steps = [r.get("n_steps_run", 0) for r in treat_segs.values()]
 
-    lines.append(f"| Metric | {title_base} | {title_treat} |")
+    lines.append(f"| 指標 (Metric) | {title_base} | {title_treat} |")
     lines.append("|---|---|---|")
-    lines.append(f"| **Min Obstacle Clearance** | {_format_stat(b_clearances, ' m')} | {_format_stat(t_clearances, ' m')} |")
-    lines.append(f"| **Strongest Decel** | {_format_stat(b_accels, ' m/s²', fmt='.2f')} | {_format_stat(t_accels, ' m/s²', fmt='.2f')} |")
-    lines.append(f"| **Progress** | {_format_stat(b_progress, ' m', fmt='.1f')} | {_format_stat(t_progress, ' m', fmt='.1f')} |")
-    lines.append(f"| **Run Scored Steps** | {_format_stat(b_steps, ' steps', fmt='.0f')} | {_format_stat(t_steps, ' steps', fmt='.0f')} |")
+    lines.append(f"| **最小障害物クリアランス** | {_format_stat(b_clearances, ' m')} | {_format_stat(t_clearances, ' m')} |")
+    lines.append(f"| **最大減速度 (急ブレーキ)** | {_format_stat(b_accels, ' m/s²', fmt='.2f')} | {_format_stat(t_accels, ' m/s²', fmt='.2f')} |")
+    lines.append(f"| **シナリオ走行距離** | {_format_stat(b_progress, ' m', fmt='.1f')} | {_format_stat(t_progress, ' m', fmt='.1f')} |")
+    lines.append(f"| **採点走行ステップ数** | {_format_stat(b_steps, ' steps', fmt='.0f')} | {_format_stat(t_steps, ' steps', fmt='.0f')} |")
     lines.append("")
+
+    from scenario_generation.scenario_comparison_html_report import CATEGORY_LABELS_JA
 
     # Section 5: Regressions
     if losses:
-        lines.append(f"## 5. Regressions ({len(losses)} cases: Pass → Fail)")
-        lines.append(f"| Scenario | {title_base} Status | {title_treat} Cause | Details |")
+        lines.append(f"## 5. 悪化・リグレッション ({len(losses)} 件: Pass → Fail)")
+        lines.append(f"| シナリオ | {title_base} 状態 | {title_treat} 原因 | 詳細 |")
         lines.append("|---|---|---|---|")
         for s, b_cat, t_cat in losses:
             t_row = treat_segs[s]
             t_diag = t_row.get("diagnostics") or {}
             trig = t_diag.get("verdict_trigger") or t_row.get("terminated") or ""
-            lines.append(f"| `{s}` | `{b_cat}` | **`{t_cat}`** | {trig[:60]} |")
+            b_cat_ja = CATEGORY_LABELS_JA.get(b_cat, b_cat)
+            t_cat_ja = CATEGORY_LABELS_JA.get(t_cat, t_cat)
+            lines.append(f"| `{s}` | `{b_cat_ja}` | **`{t_cat_ja}`** | {trig[:60]} |")
         lines.append("")
 
     # Section 6: Improvements
     if wins:
-        lines.append(f"## 6. Improvements ({len(wins)} cases: Fail → Pass)")
-        lines.append(f"| Scenario | {title_base} Cause | {title_treat} Status |")
+        lines.append(f"## 6. 改善 ({len(wins)} 件: Fail → Pass)")
+        lines.append(f"| シナリオ | {title_base} 原因 | {title_treat} 状態 |")
         lines.append("|---|---|---|")
         for s, b_cat, t_cat in wins:
-            lines.append(f"| `{s}` | `{b_cat}` | **`{t_cat}`** |")
+            b_cat_ja = CATEGORY_LABELS_JA.get(b_cat, b_cat)
+            t_cat_ja = CATEGORY_LABELS_JA.get(t_cat, t_cat)
+            lines.append(f"| `{s}` | `{b_cat_ja}` | **`{t_cat_ja}`** |")
         lines.append("")
 
     return "\n".join(lines)
@@ -232,27 +242,27 @@ def compare_runs(base_dir: Path, treat_dir: Path, title_base: str = "Baseline", 
 
 def _cat_description(cat: str) -> str:
     descs = {
-        "PASS": "Storyboard completed with pass verdict",
-        "COLLISION": "Collided with dynamic/static obstacle",
-        "ROAD_DEPARTURE": "Crossed road boundary (no obstacle collision)",
-        "FROZEN_STANDSTILL": "Failed to pull away (v < 0.5 m/s) or StandStill cutoff",
-        "PROXIMITY_DEPARTURE": "Triggered proximity condition (act_lateral_check etc.)",
-        "GOAL_STOP_FAILURE": "Reached goal area but failed to stop / overshot",
-        "SPEED_TIMEOUT": "Moved but failed to finish within simulation deadline",
-        "UNMET_CONDITION": "Other OpenSCENARIO condition unmet",
-        "SCENARIO_REFUSED": "Interpreter refused to parse/configure scenario",
-        "ERROR": "Simulation crash or unhandled runtime error",
+        "PASS": "正常完了（Pass 判定）",
+        "COLLISION": "障害物衝突（歩行者・他車・二輪等）",
+        "ROAD_DEPARTURE": "路端逸脱・境界接触（障害物衝突なし）",
+        "FROZEN_STANDSTILL": "発進不能（最高速度 < 0.5 m/s）または静止検出打ち切り",
+        "PROXIMITY_DEPARTURE": "過接近・近接条件打ち切り（act_lateral_check 等）",
+        "GOAL_STOP_FAILURE": "ゴール到達後の停止失敗・行き過ぎ（goal_position 未達）",
+        "SPEED_TIMEOUT": "低速・シミュレーション制限時間切れ",
+        "UNMET_CONDITION": "その他 OpenSCENARIO 条件未達",
+        "SCENARIO_REFUSED": "シナリオ解釈器による拒否（構文・設定エラー）",
+        "ERROR": "シミュレータ/ワーカーの異常終了・クラッシュ",
     }
     return descs.get(cat, "")
 
 
 def _hazard_description(hz: str) -> str:
     descs = {
-        "PASS_AVOIDED": "True Pass: Hazard actively presented and safely avoided",
-        "PASS_UNENGAGED": "Trivial Pass: Vehicle did not engage/encounter hazard",
-        "FAIL_COLLISION": "Safety Fail: Direct collision with obstacle",
-        "FAIL_MOBILITY": "Mobility Fail: Ego froze or timed out before encountering/clearing hazard",
-        "FAIL_OTHER": "Other Fail: Road departure, proximity trigger, or unmet conditions",
+        "PASS_AVOIDED": "真の合格 (True Pass): ハザードが提示され、安全に回避して走破",
+        "PASS_UNENGAGED": "見かけの合格 (Trivial Pass): 低速等のためハザード未提示・非遭遇で通過",
+        "FAIL_COLLISION": "安全失敗: 障害物との直接衝突",
+        "FAIL_MOBILITY": "走行性失敗: 発進不能・フリーズまたは時間切れ",
+        "FAIL_OTHER": "その他失敗: 路端逸脱・近接条件トリガー・その他条件未達",
     }
     return descs.get(hz, "")
 
@@ -264,15 +274,33 @@ def main() -> None:
     parser.add_argument("--base-name", default="Baseline", help="Baseline name")
     parser.add_argument("--treat-name", default="Treatment", help="Treatment name")
     parser.add_argument("--out", type=Path, default=None, help="Output markdown path")
+    parser.add_argument("--html", type=Path, default=None, help="Output interactive HTML report path")
+    parser.add_argument("--title", default=None, help="Report title for HTML")
+    parser.add_argument("--subtitle", default="", help="Report subtitle for HTML")
 
     args = parser.parse_args()
     report = compare_runs(args.base, args.treat, args.base_name, args.treat_name)
 
     if args.out:
         args.out.write_text(report, encoding="utf-8")
-        print(f"Report written to: {args.out}")
+        print(f"Markdown report written to: {args.out}")
     else:
         print(report)
+
+    if args.html:
+        from scenario_generation.scenario_comparison_html_report import build_comparison_html_report
+
+        title = args.title or f"Closed-Loop Scenario Model Comparison ({args.base_name} vs {args.treat_name})"
+        html_path = build_comparison_html_report(
+            base_dir=args.base,
+            treat_dir=args.treat,
+            out_path=args.html,
+            title_base=args.base_name,
+            title_treat=args.treat_name,
+            title=title,
+            subtitle=args.subtitle,
+        )
+        print(f"Interactive HTML report written to: {html_path}")
 
 
 if __name__ == "__main__":

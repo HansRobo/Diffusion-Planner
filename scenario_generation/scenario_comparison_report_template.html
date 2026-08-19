@@ -1,0 +1,1791 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>__TITLE__</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card-bg: #1a1d27;
+    --card-border: #2e3346;
+    --header-bg: #141722;
+    --fg: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #3b82f6;
+    --win: #10b981;
+    --win-bg: rgba(16, 185, 129, 0.15);
+    --loss: #ef4444;
+    --loss-bg: rgba(239, 68, 68, 0.15);
+    --warn: #f59e0b;
+    --warn-bg: rgba(245, 158, 11, 0.15);
+    --neutral-badge: #64748b;
+    --neutral-bg: rgba(100, 116, 139, 0.15);
+    --base-col: #38bdf8;
+    --treat-col: #a855f7;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --card-border: #e2e8f0;
+      --header-bg: #f1f5f9;
+      --fg: #0f172a;
+      --muted: #64748b;
+      --accent: #2563eb;
+      --win: #059669;
+      --win-bg: #ecfdf5;
+      --loss: #dc2626;
+      --loss-bg: #fef2f2;
+      --warn: #d97706;
+      --warn-bg: #fffbeb;
+      --neutral-badge: #475569;
+      --neutral-bg: #f1f5f9;
+      --base-col: #0284c7;
+      --treat-col: #9333ea;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "Hiragino Sans", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+    margin: 0;
+    padding: 20px 24px 80px;
+    line-height: 1.5;
+  }
+
+  h1 { font-size: 1.5rem; margin: 0 0 4px; font-weight: 700; }
+  h2 { font-size: 1.15rem; margin: 32px 0 12px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .subtitle { color: var(--muted); font-size: 0.88rem; margin-bottom: 20px; }
+  .subtitle code { background: var(--card-bg); border: 1px solid var(--card-border); padding: 2px 6px; border-radius: 4px; }
+
+  /* Run Selector Bar */
+  .picker-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 24px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  }
+  .picker-title {
+    font-size: 0.85rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .picker-grid {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto;
+    gap: 12px;
+    align-items: end;
+  }
+  @media (max-width: 900px) {
+    .picker-grid { grid-template-columns: 1fr; }
+  }
+  .picker-col {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .picker-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .select-styled {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .select-styled:focus { outline: 2px solid var(--accent); }
+  .input-styled {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 0.85rem;
+  }
+  .input-styled:focus { outline: 2px solid var(--accent); }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 9px 16px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--card-border);
+    background: var(--card-bg);
+    color: var(--fg);
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+  .btn:hover { background: rgba(255, 255, 255, 0.08); }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-icon { padding: 9px 12px; }
+
+  .custom-path-toggle {
+    font-size: 0.72rem;
+    color: var(--muted);
+    cursor: pointer;
+    text-decoration: underline;
+    margin-top: 4px;
+    align-self: flex-start;
+  }
+
+  /* Status Banner */
+  .status-banner {
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .status-banner.error {
+    background: var(--loss-bg);
+    border: 1px solid var(--loss);
+    color: var(--loss);
+    display: block;
+  }
+  .status-banner.info {
+    background: rgba(59, 130, 246, 0.15);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    display: block;
+  }
+  .spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-radius: 50%;
+    border-top-color: #fff;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* KPI Summary Cards */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .kpi-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .kpi-label { font-size: 0.78rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+  .kpi-value { font-size: 1.6rem; font-weight: 800; }
+  .kpi-sub { font-size: 0.82rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+
+  /* Tables */
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 10px 0 20px;
+    font-size: 0.85rem;
+    background: var(--card-bg);
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid var(--card-border);
+  }
+  th, td {
+    padding: 10px 14px;
+    text-align: right;
+    border-bottom: 1px solid var(--card-border);
+  }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: var(--header-bg); font-weight: 600; color: var(--muted); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  /* Badges & Tags */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge-win { background: var(--win-bg); color: var(--win); border: 1px solid var(--win); }
+  .badge-loss { background: var(--loss-bg); color: var(--loss); border: 1px solid var(--loss); }
+  .badge-pass { background: var(--win-bg); color: var(--win); }
+  .badge-fail { background: var(--loss-bg); color: var(--loss); }
+  .badge-neutral { background: var(--neutral-bg); color: var(--neutral-badge); }
+  .badge-warn { background: var(--warn-bg); color: var(--warn); }
+
+  /* Controls & Filter Bar */
+  .controls-bar {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--bg);
+    padding: 12px 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    border-bottom: 1px solid var(--card-border);
+    margin-bottom: 20px;
+  }
+  .search-input {
+    flex: 1;
+    min-width: 220px;
+    padding: 8px 12px;
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    background: var(--card-bg);
+    color: var(--fg);
+    font-size: 0.85rem;
+  }
+  .search-input:focus { outline: 2px solid var(--accent); }
+  .select-ctrl {
+    padding: 8px 12px;
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    background: var(--card-bg);
+    color: var(--fg);
+    font-size: 0.85rem;
+  }
+  .btn-group { display: flex; border: 1px solid var(--card-border); border-radius: 6px; overflow: hidden; }
+  .btn-filter {
+    background: var(--card-bg);
+    color: var(--muted);
+    border: none;
+    padding: 8px 12px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    border-right: 1px solid var(--card-border);
+  }
+  .btn-filter:last-child { border-right: none; }
+  .btn-filter.active { background: var(--accent); color: #fff; }
+  .btn-filter:hover:not(.active) { background: rgba(255,255,255,0.05); }
+
+  /* Pagination Bar */
+  .pagination-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    margin: 10px 0 18px 0;
+    font-size: 0.85rem;
+  }
+  .pagination-info { color: var(--muted); font-weight: 500; }
+  .pagination-buttons { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  .page-btn {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--card-border);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .page-btn:hover:not(:disabled) {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .page-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .page-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+  .pagination-perpage {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
+  /* Scenario Cards List */
+  .scenario-list { display: flex; flex-direction: column; gap: 20px; }
+  .scen-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    overflow: hidden;
+    transition: transform 0.1s ease;
+  }
+  .scen-card:hover { border-color: rgba(59, 130, 246, 0.5); }
+  .scen-header {
+    padding: 12px 16px;
+    background: var(--header-bg);
+    border-bottom: 1px solid var(--card-border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .scen-title { font-size: 0.95rem; font-weight: 700; word-break: break-all; }
+  .scen-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 16px;
+  }
+  @media (max-width: 960px) {
+    .scen-body { grid-template-columns: 1fr; }
+  }
+  .arm-pane {
+    background: rgba(0,0,0,0.1);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .arm-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.85rem;
+    font-weight: 700;
+  }
+  .arm-media {
+    position: relative;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #000;
+    min-height: 220px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .media-missing { color: var(--muted); font-size: 0.8rem; }
+
+  /* Arm View Mode Switcher */
+  .arm-mode-tabs {
+    display: flex;
+    gap: 4px;
+    background: rgba(0,0,0,0.25);
+    padding: 3px;
+    border-radius: 6px;
+    border: 1px solid var(--card-border);
+    margin-bottom: 6px;
+  }
+  .arm-tab-btn {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .arm-tab-btn:hover { color: var(--fg); background: rgba(255,255,255,0.05); }
+  .arm-tab-btn.active {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  /* Interactive Trace Player */
+  .trace-player-wrapper {
+    position: relative;
+    width: 100%;
+    background: #0f172a;
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .trace-canvas {
+    width: 100%;
+    height: 240px;
+    display: block;
+    background: #020617;
+  }
+  .trace-hud {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    right: 6px;
+    display: flex;
+    justify-content: space-between;
+    pointer-events: none;
+    font-size: 0.68rem;
+    font-family: monospace;
+    color: #94a3b8;
+    background: rgba(2, 6, 23, 0.75);
+    padding: 3px 6px;
+    border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  .trace-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: rgba(15, 23, 42, 0.95);
+    border-top: 1px solid var(--card-border);
+  }
+  .trace-play-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 0.72rem;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .trace-slider {
+    flex: 1;
+    cursor: pointer;
+    height: 4px;
+    accent-color: var(--accent);
+  }
+  .trace-speed-btn {
+    background: rgba(255,255,255,0.1);
+    color: #94a3b8;
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 0.66rem;
+    cursor: pointer;
+  }
+
+  .colormap-bar {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .colormap-bar select {
+    font-size: 0.72rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--card-border);
+    background: var(--card-bg);
+    color: var(--fg);
+  }
+
+  .metric-pill-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 6px;
+    font-size: 0.78rem;
+  }
+  .metric-pill {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    display: flex;
+    flex-direction: column;
+  }
+  .metric-pill-label { font-size: 0.68rem; color: var(--muted); }
+  .metric-pill-val { font-weight: 700; }
+  .diag-box {
+    background: rgba(0,0,0,0.15);
+    border: 1px dashed var(--card-border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 0.76rem;
+    line-height: 1.4;
+  }
+  .diag-box strong { color: var(--muted); }
+  .text-danger { color: var(--loss); }
+  .text-success { color: var(--win); }
+
+  .cursor-pointer { cursor: pointer; }
+</style>
+</head>
+<body>
+
+<!-- Dataset Picker Bar -->
+<div class="picker-card" id="pickerCard">
+  <div class="picker-title">
+    <span>📊 比較データセット選択 (Select Evaluation Runs)</span>
+    <button class="btn btn-icon" id="refreshRunsBtn" title="ラン一覧再読込">🔄 一覧更新</button>
+  </div>
+  <div class="picker-grid">
+    <div class="picker-col">
+      <label class="picker-label" for="baseSelect">
+        <span style="color: var(--base-col);">●</span> Baseline (基準ラン)
+      </label>
+      <div id="baseSelectContainer">
+        <select id="baseSelect" class="select-styled">
+          <option value="">ランを選択...</option>
+        </select>
+        <input type="text" id="baseInput" class="input-styled" style="display:none;" placeholder="パスを入力 (例: full_run/small-0820-0057)">
+      </div>
+      <span class="custom-path-toggle" id="baseToggle">パス直接入力に切替</span>
+    </div>
+
+    <div style="display:flex; justify-content:center;">
+      <button class="btn btn-icon" id="swapBtn" title="基準と比較対象を入れ替え">⇄</button>
+    </div>
+
+    <div class="picker-col">
+      <label class="picker-label" for="treatSelect">
+        <span style="color: var(--treat-col);">●</span> Treatment (比較対象ラン)
+      </label>
+      <div id="treatSelectContainer">
+        <select id="treatSelect" class="select-styled">
+          <option value="">ランを選択...</option>
+        </select>
+        <input type="text" id="treatInput" class="input-styled" style="display:none;" placeholder="パスを入力 (例: full_run/suite-full-4428)">
+      </div>
+      <span class="custom-path-toggle" id="treatToggle">パス直接入力に切替</span>
+    </div>
+
+    <div style="display:flex; gap:6px;">
+      <button class="btn btn-primary" id="compareBtn">
+        <span id="compareBtnText">比較を更新</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="status-banner" id="statusBanner"></div>
+
+<h1 id="reportTitle">__TITLE__</h1>
+<div class="subtitle" id="reportSubtitle">
+  __SUBTITLE__
+  <div style="margin-top: 6px;" id="reportDirs">
+    <span style="color: var(--base-col); font-weight: 700;">● Baseline (基準):</span> <code id="baseDirCode">__BASE_DIR__</code> |
+    <span style="color: var(--treat-col); font-weight: 700; margin-left: 8px;">● Treatment (比較対象):</span> <code id="treatDirCode">__TREAT_DIR__</code>
+  </div>
+</div>
+
+<!-- Section 1: Executive KPI Cards -->
+<div class="kpi-grid" id="kpiGrid">
+  <div class="kpi-card">
+    <div class="kpi-label">Pass 率 (Treatment vs Baseline)</div>
+    <div class="kpi-value" id="kpiPassRate">--</div>
+    <div class="kpi-sub" id="kpiPassSub">--</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">純改善数 (改善 Wins - 悪化 Losses)</div>
+    <div class="kpi-value" id="kpiNetWins">--</div>
+    <div class="kpi-sub" id="kpiWinLossBreakdown">--</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">真の合格率 (ハザード遭遇・回避)</div>
+    <div class="kpi-value" id="kpiTruePass">--</div>
+    <div class="kpi-sub" id="kpiTruePassSub">--</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">共通評価シナリオ数</div>
+    <div class="kpi-value" id="kpiTotal">--</div>
+    <div class="kpi-sub" id="kpiTotalSub">--</div>
+  </div>
+</div>
+
+<!-- Section 2: Failure Root-Cause Breakdown -->
+<h2>1. 失敗要因の排他分類 (10段階の根本原因分類体系)</h2>
+<table id="failureTable">
+  <thead>
+    <tr>
+      <th>失敗カテゴリ (Category)</th>
+      <th>Baseline</th>
+      <th>Treatment</th>
+      <th>増減差分 (Delta)</th>
+      <th>カテゴリ説明・走行品質への影響</th>
+    </tr>
+  </thead>
+  <tbody id="failureTbody"></tbody>
+</table>
+
+<!-- Section 3: Hazard Engagement & Validity Breakdown -->
+<h2>2. ハザード提示検知とテスト妥当性分析</h2>
+<table id="hazardTable">
+  <thead>
+    <tr>
+      <th>ハザード判定 (Hazard Verdict)</th>
+      <th>Baseline</th>
+      <th>Treatment</th>
+      <th>増減差分</th>
+      <th>解釈と評価への示唆</th>
+    </tr>
+  </thead>
+  <tbody id="hazardTbody"></tbody>
+</table>
+
+<!-- Section 4: Driving Safety & Comfort Metrics -->
+<h2>3. 走行安全性・快適性メトリクス (集計統計分布)</h2>
+<table id="metricsTable">
+  <thead>
+    <tr>
+      <th>評価メトリクス</th>
+      <th>Baseline (平均・p5・中央値・p95)</th>
+      <th>Treatment (平均・p5・中央値・p95)</th>
+      <th>品質・安全性の解釈</th>
+    </tr>
+  </thead>
+  <tbody id="metricsTbody"></tbody>
+</table>
+
+<!-- Section 5: Interactive Scenario Comparison Cards -->
+<h2>4. シナリオ別詳細・サイドバイサイド比較</h2>
+
+<div class="controls-bar">
+  <input type="text" id="search" class="search-input" placeholder="シナリオ名、トリガー条件、Fail要因などで検索...">
+  
+  <div class="btn-group">
+    <button class="btn-filter active" data-delta="">全件 (<span id="cntAll">0</span>)</button>
+    <button class="btn-filter" data-delta="win" style="color: var(--win);">改善 Wins (<span id="cntWins">0</span>)</button>
+    <button class="btn-filter" data-delta="loss" style="color: var(--loss);">悪化 Losses (<span id="cntLosses">0</span>)</button>
+    <button class="btn-filter" data-delta="both_pass">両方合格 (<span id="cntBothPass">0</span>)</button>
+    <button class="btn-filter" data-delta="both_fail">両方失敗 (<span id="cntBothFail">0</span>)</button>
+  </div>
+
+  <select id="catFilter" class="select-ctrl">
+    <option value="">失敗カテゴリ: 全て</option>
+  </select>
+
+  <select id="hazardFilter" class="select-ctrl">
+    <option value="">ハザード判定: 全て</option>
+  </select>
+
+  <select id="sortSel" class="select-ctrl">
+    <option value="delta_sig">並び順: 変化の重要度順 (悪化 → 改善 → 失敗)</option>
+    <option value="name_asc">並び順: シナリオ名順 (A-Z)</option>
+    <option value="clearance_asc">並び順: 最小クリアランス順 (危険度高順)</option>
+    <option value="progress_desc">並び順: 走行距離順 (長い順)</option>
+  </select>
+
+  <span style="font-size: 0.82rem; color: var(--muted); margin-left: auto;" id="matchCount">表示中: 0 件</span>
+</div>
+
+<div class="pagination-bar" id="paginationTop"></div>
+
+<div class="scenario-list" id="scenList"></div>
+
+<div class="pagination-bar" id="paginationBottom"></div>
+
+<script>
+// Embedded initial data if present
+let CURRENT_DATA = null;
+try {
+  CURRENT_DATA = __DATA_JSON__;
+} catch (e) {
+  CURRENT_DATA = null;
+}
+
+let availableRuns = [];
+let activeDelta = '';
+let currentScenarios = [];
+let titleBase = "Baseline";
+let titleTreat = "Treatment";
+
+// UI elements
+const statusBanner = document.getElementById('statusBanner');
+const baseSelect = document.getElementById('baseSelect');
+const treatSelect = document.getElementById('treatSelect');
+const baseInput = document.getElementById('baseInput');
+const treatInput = document.getElementById('treatInput');
+const baseToggle = document.getElementById('baseToggle');
+const treatToggle = document.getElementById('treatToggle');
+const swapBtn = document.getElementById('swapBtn');
+const compareBtn = document.getElementById('compareBtn');
+const refreshRunsBtn = document.getElementById('refreshRunsBtn');
+const compareBtnText = document.getElementById('compareBtnText');
+
+const searchInput = document.getElementById('search');
+const catFilter = document.getElementById('catFilter');
+const hazardFilter = document.getElementById('hazardFilter');
+const sortSel = document.getElementById('sortSel');
+const scenList = document.getElementById('scenList');
+const matchCount = document.getElementById('matchCount');
+
+function showStatus(msg, type = 'info') {
+  if (!msg) {
+    statusBanner.className = 'status-banner';
+    statusBanner.style.display = 'none';
+    statusBanner.textContent = '';
+    return;
+  }
+  statusBanner.className = `status-banner ${type}`;
+  statusBanner.textContent = msg;
+  statusBanner.style.display = 'block';
+}
+
+function toggleCustomPath(which) {
+  const isBase = which === 'base';
+  const sel = isBase ? baseSelect : treatSelect;
+  const inp = isBase ? baseInput : treatInput;
+  const tog = isBase ? baseToggle : treatToggle;
+  
+  if (sel.style.display === 'none') {
+    sel.style.display = '';
+    inp.style.display = 'none';
+    tog.textContent = 'パス直接入力に切替';
+  } else {
+    sel.style.display = 'none';
+    inp.style.display = '';
+    if (!inp.value && sel.value) inp.value = sel.value;
+    tog.textContent = '一覧選択に切替';
+  }
+}
+
+baseToggle.addEventListener('click', () => toggleCustomPath('base'));
+treatToggle.addEventListener('click', () => toggleCustomPath('treat'));
+
+swapBtn.addEventListener('click', () => {
+  const bVal = getSelectedRun('base');
+  const tVal = getSelectedRun('treat');
+  setSelectedRun('base', tVal);
+  setSelectedRun('treat', bVal);
+});
+
+function getSelectedRun(which) {
+  const isBase = which === 'base';
+  const sel = isBase ? baseSelect : treatSelect;
+  const inp = isBase ? baseInput : treatInput;
+  return (sel.style.display === 'none' ? inp.value.trim() : sel.value.trim());
+}
+
+function setSelectedRun(which, val) {
+  const isBase = which === 'base';
+  const sel = isBase ? baseSelect : treatSelect;
+  const inp = isBase ? baseInput : treatInput;
+  if (!val) return;
+
+  // Check if exists in options
+  let match = false;
+  for (let opt of sel.options) {
+    if (opt.value === val) {
+      sel.value = val;
+      match = true;
+      break;
+    }
+  }
+  if (match) {
+    sel.style.display = '';
+    inp.style.display = 'none';
+    (isBase ? baseToggle : treatToggle).textContent = 'パス直接入力に切替';
+  } else {
+    sel.style.display = 'none';
+    inp.style.display = '';
+    inp.value = val;
+    (isBase ? baseToggle : treatToggle).textContent = '一覧選択に切替';
+  }
+}
+
+async function fetchRuns() {
+  try {
+    const res = await fetch('/api/runs');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    availableRuns = data.runs || [];
+    populateRunSelects(availableRuns);
+    showStatus('');
+  } catch (err) {
+    console.warn('API /api/runs not available (standalone mode or offline):', err);
+  }
+}
+
+function populateRunSelects(runs) {
+  const populate = (sel, curVal) => {
+    sel.innerHTML = '<option value="">ランを選択...</option>';
+    runs.forEach(r => {
+      const opt = document.createElement('option');
+      opt.value = r.path || r.id;
+      const stats = r.num_cases ? ` (${r.num_cases}件, ${(r.pass_rate || 0).toFixed(1)}% 合格)` : '';
+      const dateStr = r.mtime_str ? `[${r.mtime_str}] ` : '';
+      opt.textContent = `${dateStr}${r.name}${stats}`;
+      sel.appendChild(opt);
+    });
+    if (curVal) sel.value = curVal;
+  };
+
+  const curB = getSelectedRun('base');
+  const curT = getSelectedRun('treat');
+  populate(baseSelect, curB);
+  populate(treatSelect, curT);
+}
+
+async function loadComparison(basePath, treatPath) {
+  if (!basePath || !treatPath) {
+    showStatus('Baseline と Treatment の両方のランを指定してください', 'error');
+    return;
+  }
+
+  showStatus('比較データを計算中...', 'info');
+  compareBtn.disabled = true;
+  compareBtnText.innerHTML = '<span class="spinner"></span> 計算中...';
+
+  try {
+    const url = `/api/compare?base=${encodeURIComponent(basePath)}&treat=${encodeURIComponent(treatPath)}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      throw new Error(errJson.error || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    CURRENT_DATA = data;
+
+    // Update URL query
+    const newUrl = new URL(window.location);
+    newUrl.searchParams.set('base', basePath);
+    newUrl.searchParams.set('treat', treatPath);
+    window.history.pushState({}, '', newUrl);
+
+    renderReport(CURRENT_DATA);
+    showStatus('');
+  } catch (err) {
+    showStatus(`比較データの取得に失敗しました: ${err.message}`, 'error');
+  } finally {
+    compareBtn.disabled = false;
+    compareBtnText.textContent = '比較を更新';
+  }
+}
+
+compareBtn.addEventListener('click', () => {
+  const b = getSelectedRun('base');
+  const t = getSelectedRun('treat');
+  loadComparison(b, t);
+});
+
+refreshRunsBtn.addEventListener('click', async () => {
+  refreshRunsBtn.disabled = true;
+  refreshRunsBtn.textContent = '🔄 更新中...';
+  await fetchRuns();
+  refreshRunsBtn.disabled = false;
+  refreshRunsBtn.textContent = '🔄 一覧更新';
+});
+
+// Render the complete report from JSON payload
+function renderReport(DATA) {
+  if (!DATA || !DATA.summary) return;
+
+  titleBase = DATA.metadata?.title_base || "Baseline";
+  titleTreat = DATA.metadata?.title_treat || "Treatment";
+  const summary = DATA.summary;
+  currentScenarios = DATA.scenarios || [];
+
+  // Update header text
+  document.getElementById('reportTitle').textContent = `Closed-Loop Scenario Model Comparison (${titleBase} vs ${titleTreat})`;
+  document.getElementById('baseDirCode').textContent = DATA.metadata?.base_dir || '-';
+  document.getElementById('treatDirCode').textContent = DATA.metadata?.treat_dir || '-';
+
+  // Synchronize selects
+  if (DATA.metadata?.base_dir) setSelectedRun('base', DATA.metadata.base_dir);
+  if (DATA.metadata?.treat_dir) setSelectedRun('treat', DATA.metadata.treat_dir);
+
+  // Populate KPIs
+  document.getElementById('kpiPassRate').innerHTML = `
+    <span style="color: var(--treat-col);">${(summary.treat_pr || 0).toFixed(1)}%</span> 
+    <span style="font-size: 1rem; color: ${(summary.pr_delta || 0) >= 0 ? 'var(--win)' : 'var(--loss)'};">
+      (${(summary.pr_delta || 0) >= 0 ? '+' : ''}${(summary.pr_delta || 0).toFixed(1)}%)
+    </span>
+  `;
+  document.getElementById('kpiPassSub').textContent = `Base: ${summary.base_pass_cnt || 0}/${summary.base_total || 0} (${(summary.base_pr || 0).toFixed(1)}%) → Treat: ${summary.treat_pass_cnt || 0}/${summary.treat_total || 0}`;
+
+  const netWins = (summary.n_wins || 0) - (summary.n_losses || 0);
+  document.getElementById('kpiNetWins').innerHTML = `
+    <span style="color: ${netWins >= 0 ? 'var(--win)' : 'var(--loss)'};">${netWins >= 0 ? '+' : ''}${netWins}</span>
+  `;
+  document.getElementById('kpiWinLossBreakdown').innerHTML = `
+    <span style="color: var(--win); font-weight:600;">+${summary.n_wins || 0} 改善</span> / 
+    <span style="color: var(--loss); font-weight:600;">-${summary.n_losses || 0} 悪化</span>
+  `;
+
+  const treatAvoided = DATA.hazard_breakdown?.treat?.PASS_AVOIDED || 0;
+  const treatTotal = summary.treat_total || 1;
+  const baseAvoided = DATA.hazard_breakdown?.base?.PASS_AVOIDED || 0;
+  const baseTotal = summary.base_total || 1;
+  const treatAvoidPct = (treatAvoided / treatTotal) * 100;
+  const baseAvoidPct = (baseAvoided / baseTotal) * 100;
+  document.getElementById('kpiTruePass').innerHTML = `
+    <span>${treatAvoidPct.toFixed(1)}%</span>
+    <span style="font-size: 1rem; color: ${treatAvoidPct >= baseAvoidPct ? 'var(--win)' : 'var(--loss)'};">
+      (${treatAvoidPct >= baseAvoidPct ? '+' : ''}${(treatAvoidPct - baseAvoidPct).toFixed(1)}%)
+    </span>
+  `;
+  document.getElementById('kpiTruePassSub').textContent = `回避: Base ${baseAvoided} (${baseAvoidPct.toFixed(1)}%) → Treat ${treatAvoided}`;
+
+  document.getElementById('kpiTotal').textContent = `${summary.n_common || 0} 件`;
+  document.getElementById('kpiTotalSub').textContent = `Base総計: ${summary.base_total || 0} | Treat総計: ${summary.treat_total || 0}`;
+
+  // Populate Failure Root-Cause Breakdown
+  const failureTbody = document.getElementById('failureTbody');
+  failureTbody.innerHTML = '';
+  catFilter.innerHTML = '<option value="">失敗カテゴリ: 全て</option>';
+  (DATA.failure_breakdown_rows || []).forEach(row => {
+    const tr = document.createElement('tr');
+    const dSign = row.delta > 0 ? `+${row.delta}` : `${row.delta}`;
+    const dColor = row.category === 'PASS' 
+      ? (row.delta >= 0 ? 'var(--win)' : 'var(--loss)')
+      : (row.delta <= 0 ? 'var(--win)' : 'var(--loss)');
+    
+    tr.innerHTML = `
+      <td>
+        <span class="badge ${row.category === 'PASS' ? 'badge-pass' : 'badge-neutral'} cursor-pointer" onclick="filterByCategory('${row.category}')">
+          ${row.category_ja || row.category}
+        </span>
+        <span style="color:var(--muted); font-size:0.7rem; margin-left:4px;">(${row.category})</span>
+      </td>
+      <td>${row.base_count} (${(row.base_pct || 0).toFixed(1)}%)</td>
+      <td>${row.treat_count} (${(row.treat_pct || 0).toFixed(1)}%)</td>
+      <td style="color: ${dColor}; font-weight: 700;">${dSign} (${((row.treat_pct || 0) - (row.base_pct || 0)).toFixed(1)}%)</td>
+      <td style="color: var(--muted); font-size: 0.8rem;">${row.description}</td>
+    `;
+    failureTbody.appendChild(tr);
+
+    const opt = document.createElement('option');
+    opt.value = row.category;
+    opt.textContent = `${row.category_ja || row.category} (Base: ${row.base_count}, Treat: ${row.treat_count})`;
+    catFilter.appendChild(opt);
+  });
+
+  // Populate Hazard Breakdown
+  const hazardTbody = document.getElementById('hazardTbody');
+  hazardTbody.innerHTML = '';
+  hazardFilter.innerHTML = '<option value="">ハザード判定: 全て</option>';
+  (DATA.hazard_breakdown_rows || []).forEach(row => {
+    const tr = document.createElement('tr');
+    const dSign = row.delta > 0 ? `+${row.delta}` : `${row.delta}`;
+    const dColor = row.verdict.startsWith('PASS')
+      ? (row.delta >= 0 ? 'var(--win)' : 'var(--loss)')
+      : (row.delta <= 0 ? 'var(--win)' : 'var(--loss)');
+
+    tr.innerHTML = `
+      <td>
+        <span class="badge ${row.verdict === 'PASS_AVOIDED' ? 'badge-win' : (row.verdict === 'FAIL_COLLISION' ? 'badge-loss' : 'badge-neutral')} cursor-pointer" onclick="filterByHazard('${row.verdict}')">
+          ${row.verdict_ja || row.verdict}
+        </span>
+      </td>
+      <td>${row.base_count}</td>
+      <td>${row.treat_count}</td>
+      <td style="color: ${dColor}; font-weight: 700;">${dSign}</td>
+      <td style="color: var(--muted); font-size: 0.8rem;">${row.interpretation}</td>
+    `;
+    hazardTbody.appendChild(tr);
+
+    const opt = document.createElement('option');
+    opt.value = row.verdict;
+    opt.textContent = `${row.verdict_ja || row.verdict} (Base: ${row.base_count}, Treat: ${row.treat_count})`;
+    hazardFilter.appendChild(opt);
+  });
+
+  // Populate Safety & Comfort Metrics Table
+  const metricsTbody = document.getElementById('metricsTbody');
+  metricsTbody.innerHTML = '';
+  (DATA.safety_metrics_rows || []).forEach(row => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="font-weight: 600;">${row.metric}</td>
+      <td>${row.base_stat}</td>
+      <td>${row.treat_stat}</td>
+      <td style="color: var(--muted); font-size: 0.8rem;">${row.description}</td>
+    `;
+    metricsTbody.appendChild(tr);
+  });
+
+  // Category counts for quick tabs
+  let cntWins = 0, cntLosses = 0, cntBothPass = 0, cntBothFail = 0;
+  currentScenarios.forEach(s => {
+    if (s.delta_kind === 'win') cntWins++;
+    else if (s.delta_kind === 'loss') cntLosses++;
+    else if (s.delta_kind === 'both_pass') cntBothPass++;
+    else cntBothFail++;
+  });
+  document.getElementById('cntAll').textContent = currentScenarios.length;
+  document.getElementById('cntWins').textContent = cntWins;
+  document.getElementById('cntLosses').textContent = cntLosses;
+  document.getElementById('cntBothPass').textContent = cntBothPass;
+  document.getElementById('cntBothFail').textContent = cntBothFail;
+
+  renderScenarios();
+}
+
+// Scenario Filtering & Rendering
+document.querySelectorAll('.btn-filter').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.btn-filter').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeDelta = btn.getAttribute('data-delta');
+    renderScenarios();
+  });
+});
+
+searchInput.addEventListener('input', renderScenarios);
+catFilter.addEventListener('change', renderScenarios);
+hazardFilter.addEventListener('change', renderScenarios);
+sortSel.addEventListener('change', renderScenarios);
+
+function filterByCategory(cat) {
+  catFilter.value = cat;
+  renderScenarios();
+  document.querySelector('.controls-bar').scrollIntoView({ behavior: 'smooth' });
+}
+
+function filterByHazard(hz) {
+  hazardFilter.value = hz;
+  renderScenarios();
+  document.querySelector('.controls-bar').scrollIntoView({ behavior: 'smooth' });
+}
+
+let currentPage = 1;
+let pageSize = 30;
+let mediaObserver = null;
+
+function getMediaObserver() {
+  if (!mediaObserver) {
+    mediaObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        const el = entry.target;
+        if (entry.isIntersecting) {
+          if (el.tagName === 'VIDEO') {
+            if (el.dataset.src && !el.getAttribute('src')) {
+              el.src = el.dataset.src;
+              el.preload = 'metadata';
+            }
+          } else if (el.tagName === 'IMG') {
+            if (el.dataset.src && !el.getAttribute('src')) {
+              el.src = el.dataset.src;
+            }
+          }
+        } else {
+          // Out of viewport: release video decoder and RAM immediately
+          if (el.tagName === 'VIDEO') {
+            if (el.getAttribute('src')) {
+              el.pause();
+              el.removeAttribute('src');
+              el.load(); // Release hardware decoder and buffer memory
+            }
+          }
+        }
+      });
+    }, {
+      rootMargin: '300px 0px 300px 0px',
+      threshold: 0.01
+    });
+  }
+  return mediaObserver;
+}
+
+function cleanupActiveVideos(container) {
+  if (!container) return;
+  const observer = getMediaObserver();
+  container.querySelectorAll('video').forEach(v => {
+    try {
+      v.pause();
+      v.removeAttribute('src');
+      v.load();
+    } catch (e) {}
+    observer.unobserve(v);
+  });
+  container.querySelectorAll('img.colormap-img').forEach(img => {
+    observer.unobserve(img);
+  });
+}
+
+function renderPagination(totalItems) {
+  const topBar = document.getElementById('paginationTop');
+  const bottomBar = document.getElementById('paginationBottom');
+  if (!topBar || !bottomBar) return;
+
+  if (totalItems === 0) {
+    topBar.style.display = 'none';
+    bottomBar.style.display = 'none';
+    return;
+  }
+
+  topBar.style.display = 'flex';
+  bottomBar.style.display = 'flex';
+
+  const isAll = pageSize === 'all';
+  const effectivePageSize = isAll ? totalItems : parseInt(pageSize, 10);
+  const totalPages = isAll ? 1 : Math.max(1, Math.ceil(totalItems / effectivePageSize));
+
+  if (currentPage > totalPages) currentPage = totalPages;
+  if (currentPage < 1) currentPage = 1;
+
+  const startIdx = isAll ? 0 : (currentPage - 1) * effectivePageSize;
+  const endIdx = isAll ? totalItems : Math.min(startIdx + effectivePageSize, totalItems);
+
+  const infoHtml = `<span class="pagination-info">表示: <strong>${startIdx + 1} - ${endIdx}</strong> / 全 <strong>${totalItems}</strong> 件 (ページ ${currentPage}/${totalPages})</span>`;
+
+  // Build page buttons
+  let btnsHtml = `<button class="page-btn" ${currentPage === 1 ? 'disabled' : ''} onclick="goToPage(${currentPage - 1})">◀ 前へ</button>`;
+
+  if (totalPages <= 7) {
+    for (let p = 1; p <= totalPages; p++) {
+      btnsHtml += `<button class="page-btn ${p === currentPage ? 'active' : ''}" onclick="goToPage(${p})">${p}</button>`;
+    }
+  } else {
+    // 1 ... current-1 current current+1 ... totalPages
+    const pagesToShow = new Set([1, totalPages, currentPage, currentPage - 1, currentPage + 1]);
+    let prev = 0;
+    for (let p = 1; p <= totalPages; p++) {
+      if (pagesToShow.has(p)) {
+        if (prev && p - prev > 1) {
+          btnsHtml += `<span style="color:var(--muted); padding:0 2px;">...</span>`;
+        }
+        btnsHtml += `<button class="page-btn ${p === currentPage ? 'active' : ''}" onclick="goToPage(${p})">${p}</button>`;
+        prev = p;
+      }
+    }
+  }
+
+  btnsHtml += `<button class="page-btn ${currentPage === totalPages ? 'disabled' : ''}" onclick="goToPage(${currentPage + 1})">次へ ▶</button>`;
+
+  const perPageHtml = `
+    <div class="pagination-perpage">
+      <span>表示件数:</span>
+      <select class="select-ctrl" style="padding: 4px 8px; font-size: 0.8rem;" onchange="changePageSize(this.value)">
+        <option value="20" ${pageSize == 20 ? 'selected' : ''}>20 件/頁</option>
+        <option value="30" ${pageSize == 30 ? 'selected' : ''}>30 件/頁 (推奨)</option>
+        <option value="50" ${pageSize == 50 ? 'selected' : ''}>50 件/頁</option>
+        <option value="100" ${pageSize == 100 ? 'selected' : ''}>100 件/頁</option>
+        <option value="all" ${pageSize === 'all' ? 'selected' : ''}>全件表示</option>
+      </select>
+    </div>
+  `;
+
+  const barHtml = `
+    ${infoHtml}
+    <div class="pagination-buttons">${btnsHtml}</div>
+    ${perPageHtml}
+  `;
+
+  topBar.innerHTML = barHtml;
+  bottomBar.innerHTML = barHtml;
+}
+
+function goToPage(p) {
+  currentPage = p;
+  renderScenarios(false);
+  document.getElementById('scenList').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function changePageSize(size) {
+  pageSize = size;
+  currentPage = 1;
+  renderScenarios(true);
+}
+
+function renderScenarios(resetPage = true) {
+  if (resetPage) currentPage = 1;
+
+  const q = searchInput.value.trim().toLowerCase();
+  const cat = catFilter.value;
+  const hz = hazardFilter.value;
+
+  let filtered = currentScenarios.filter(s => {
+    if (activeDelta && s.delta_kind !== activeDelta) return false;
+    if (cat && (s.base.failure_category !== cat && s.treat.failure_category !== cat)) return false;
+    if (hz && (s.base.hazard_verdict !== hz && s.treat.hazard_verdict !== hz)) return false;
+    if (q) {
+      const searchStr = `${s.name} ${s.base.failure_category} ${s.base.failure_category_ja || ''} ${s.treat.failure_category} ${s.treat.failure_category_ja || ''} ${s.base.verdict_trigger || ''} ${s.treat.verdict_trigger || ''} ${s.base.verdict_unmet?.join(' ') || ''} ${s.treat.verdict_unmet?.join(' ') || ''}`.toLowerCase();
+      if (!searchStr.includes(q)) return false;
+    }
+    return true;
+  });
+
+  const sortMode = sortSel.value;
+  if (sortMode === 'delta_sig') {
+    const order = { loss: 0, win: 1, both_fail: 2, both_pass: 3 };
+    filtered.sort((a, b) => (order[a.delta_kind] ?? 9) - (order[b.delta_kind] ?? 9));
+  } else if (sortMode === 'name_asc') {
+    filtered.sort((a, b) => a.name.localeCompare(b.name));
+  } else if (sortMode === 'clearance_asc') {
+    filtered.sort((a, b) => (a.treat.min_clearance ?? 999) - (b.treat.min_clearance ?? 999));
+  } else if (sortMode === 'progress_desc') {
+    filtered.sort((a, b) => (b.treat.progress_m ?? 0) - (a.treat.progress_m ?? 0));
+  }
+
+  matchCount.textContent = `表示中: ${filtered.length} / ${currentScenarios.length} 件`;
+
+  // 1. Release active decoders from DOM before clearing
+  cleanupActiveVideos(scenList);
+  scenList.innerHTML = '';
+
+  // 2. Render Pagination Controls
+  renderPagination(filtered.length);
+
+  // 3. Slice page items
+  const isAll = pageSize === 'all';
+  const effectivePageSize = isAll ? filtered.length : parseInt(pageSize, 10);
+  const startIdx = isAll ? 0 : (currentPage - 1) * effectivePageSize;
+  const endIdx = isAll ? filtered.length : Math.min(startIdx + effectivePageSize, filtered.length);
+  const pageItems = filtered.slice(startIdx, endIdx);
+
+  const fragment = document.createDocumentFragment();
+  pageItems.forEach(s => fragment.appendChild(createScenarioCard(s)));
+  scenList.appendChild(fragment);
+
+  // 4. Attach observer for lazy loading / resource deallocation
+  const observer = getMediaObserver();
+  scenList.querySelectorAll('video, img.colormap-img').forEach(el => {
+    observer.observe(el);
+  });
+}
+
+function createScenarioCard(s) {
+  const card = document.createElement('div');
+  card.className = 'scen-card';
+
+  const bCatJa = s.base.failure_category_ja || s.base.failure_category;
+  const tCatJa = s.treat.failure_category_ja || s.treat.failure_category;
+
+  let deltaBadge = '';
+  if (s.delta_kind === 'win') {
+    deltaBadge = `<span class="badge badge-win">改善 (WIN): ${bCatJa} → ${tCatJa}</span>`;
+  } else if (s.delta_kind === 'loss') {
+    deltaBadge = `<span class="badge badge-loss">悪化 (LOSS): ${bCatJa} → ${tCatJa}</span>`;
+  } else if (s.delta_kind === 'both_pass') {
+    deltaBadge = `<span class="badge badge-pass">両方合格</span>`;
+  } else {
+    deltaBadge = `<span class="badge badge-neutral">両方失敗: ${bCatJa} → ${tCatJa}</span>`;
+  }
+
+  card.innerHTML = `
+    <div class="scen-header">
+      <div class="scen-title">🎬 ${s.name}</div>
+      <div>${deltaBadge}</div>
+    </div>
+    <div class="scen-body">
+      ${renderArmPane(s.base, titleBase, 'base', s.name)}
+      ${renderArmPane(s.treat, titleTreat, 'treat', s.name)}
+    </div>
+  `;
+
+  setupMediaSwitchers(card);
+  return card;
+}
+
+// Interactive 2D Trace / Rollout Player
+const traceDataCache = new Map();
+
+async function fetchTraceData(url) {
+  if (traceDataCache.has(url)) return traceDataCache.get(url);
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    const lines = text.split('\n').filter(Boolean);
+    const points = [];
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+
+    lines.forEach(l => {
+      try {
+        const item = JSON.parse(l);
+        if (item.ego && Array.isArray(item.ego) && item.ego.length >= 2) {
+          const x = item.ego[0];
+          const y = item.ego[1];
+          if (typeof x === 'number' && typeof y === 'number') {
+            minX = Math.min(minX, x);
+            maxX = Math.max(maxX, x);
+            minY = Math.min(minY, y);
+            maxY = Math.max(maxY, y);
+            points.push({
+              k: item.k ?? points.length,
+              x: x,
+              y: y,
+              yaw: item.yaw ?? 0,
+              speed: item.speed ?? 0,
+              clearance_m: item.clearance_m,
+              rb_dist_m: item.rb_dist_m,
+              collision: !!item.collision,
+              dist_goal: item.dist_goal,
+            });
+          }
+        }
+      } catch (e) {}
+    });
+
+    if (points.length === 0) return null;
+
+    // Add padding to bounds
+    const spanX = Math.max(maxX - minX, 10);
+    const spanY = Math.max(maxY - minY, 10);
+    const pad = Math.max(spanX, spanY) * 0.1;
+
+    const data = {
+      points,
+      bounds: {
+        minX: minX - pad,
+        maxX: maxX + pad,
+        minY: minY - pad,
+        maxY: maxY + pad,
+      }
+    };
+    traceDataCache.set(url, data);
+    return data;
+  } catch (err) {
+    console.error("Failed to load trace data:", url, err);
+    return null;
+  }
+}
+
+class TracePlayer {
+  constructor(container, rolloutUrl, color = "#3b82f6") {
+    this.container = container;
+    this.rolloutUrl = rolloutUrl;
+    this.color = color;
+    this.canvas = container.querySelector('canvas');
+    this.ctx = this.canvas.getContext('2d');
+    this.hudStep = container.querySelector('.trace-hud-step');
+    this.hudSpeed = container.querySelector('.trace-hud-speed');
+    this.hudClearance = container.querySelector('.trace-hud-clearance');
+    this.slider = container.querySelector('.trace-slider');
+    this.playBtn = container.querySelector('.trace-play-btn');
+    this.speedBtn = container.querySelector('.trace-speed-btn');
+
+    this.points = [];
+    this.bounds = null;
+    this.currentStep = 0;
+    this.isPlaying = false;
+    this.playSpeed = 1;
+    this.timer = null;
+
+    this.init();
+  }
+
+  async init() {
+    this.container.querySelector('.trace-loading').style.display = 'flex';
+    const data = await fetchTraceData(this.rolloutUrl);
+    this.container.querySelector('.trace-loading').style.display = 'none';
+
+    if (!data || data.points.length === 0) {
+      this.container.querySelector('.trace-error').style.display = 'flex';
+      return;
+    }
+
+    this.points = data.points;
+    this.bounds = data.bounds;
+
+    this.slider.max = this.points.length - 1;
+    this.slider.value = 0;
+    this.slider.disabled = false;
+    this.playBtn.disabled = false;
+
+    this.slider.addEventListener('input', (e) => {
+      this.currentStep = parseInt(e.target.value, 10);
+      this.draw();
+    });
+
+    this.playBtn.addEventListener('click', () => {
+      this.togglePlay();
+    });
+
+    this.speedBtn.addEventListener('click', () => {
+      if (this.playSpeed === 1) this.playSpeed = 2;
+      else if (this.playSpeed === 2) this.playSpeed = 4;
+      else this.playSpeed = 1;
+      this.speedBtn.textContent = `${this.playSpeed}x`;
+      if (this.isPlaying) {
+        this.stopAnimation();
+        this.startAnimation();
+      }
+    });
+
+    this.resize();
+    this.draw();
+  }
+
+  resize() {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = rect.width * dpr;
+    this.canvas.height = 240 * dpr;
+    this.draw();
+  }
+
+  toCanvas(x, y) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = this.canvas.width / dpr;
+    const h = this.canvas.height / dpr;
+
+    const { minX, maxX, minY, maxY } = this.bounds;
+    const rangeX = maxX - minX || 1;
+    const rangeY = maxY - minY || 1;
+
+    const scale = Math.min(w / rangeX, h / rangeY);
+    const offsetX = (w - rangeX * scale) / 2;
+    const offsetY = (h - rangeY * scale) / 2;
+
+    const cx = (offsetX + (x - minX) * scale) * dpr;
+    const cy = (h * dpr) - ((offsetY + (y - minY) * scale) * dpr);
+    return [cx, cy, scale * dpr];
+  }
+
+  draw() {
+    if (!this.points.length || !this.bounds) return;
+
+    const ctx = this.ctx;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    const dpr = window.devicePixelRatio || 1;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // 1. Grid
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    ctx.lineWidth = 1 * dpr;
+    const gridStep = 40 * dpr;
+    for (let x = 0; x < w; x += gridStep) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+    }
+    for (let y = 0; y < h; y += gridStep) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
+
+    // 2. Full Polyline
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)';
+    ctx.beginPath();
+    this.points.forEach((pt, i) => {
+      const [cx, cy] = this.toCanvas(pt.x, pt.y);
+      if (i === 0) ctx.moveTo(cx, cy);
+      else ctx.lineTo(cx, cy);
+    });
+    ctx.stroke();
+
+    // 3. Driven Polyline
+    if (this.currentStep > 0) {
+      ctx.lineWidth = 3 * dpr;
+      ctx.strokeStyle = this.color;
+      ctx.beginPath();
+      for (let i = 0; i <= this.currentStep; i++) {
+        const pt = this.points[i];
+        const [cx, cy] = this.toCanvas(pt.x, pt.y);
+        if (i === 0) ctx.moveTo(cx, cy);
+        else ctx.lineTo(cx, cy);
+      }
+      ctx.stroke();
+    }
+
+    // 4. Start & End Markers
+    const startPt = this.points[0];
+    const endPt = this.points[this.points.length - 1];
+    const [sx, sy] = this.toCanvas(startPt.x, startPt.y);
+    const [ex, ey] = this.toCanvas(endPt.x, endPt.y);
+
+    ctx.fillStyle = '#22c55e';
+    ctx.beginPath(); ctx.arc(sx, sy, 4 * dpr, 0, Math.PI * 2); ctx.fill();
+
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath(); ctx.arc(ex, ey, 4 * dpr, 0, Math.PI * 2); ctx.fill();
+
+    // 5. Current Ego Vehicle
+    const cur = this.points[this.currentStep];
+    if (cur) {
+      const [cx, cy, scale] = this.toCanvas(cur.x, cur.y);
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(-cur.yaw);
+
+      const vLength = Math.max(4.8 * scale, 8 * dpr);
+      const vWidth = Math.max(2.0 * scale, 4 * dpr);
+
+      ctx.fillStyle = this.color;
+      ctx.shadowColor = this.color;
+      ctx.shadowBlur = 8 * dpr;
+      ctx.fillRect(-vLength / 2, -vWidth / 2, vLength, vWidth);
+      ctx.shadowBlur = 0;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.moveTo(vLength / 2, 0);
+      ctx.lineTo(vLength / 2 - 4 * dpr, -vWidth / 2);
+      ctx.lineTo(vLength / 2 - 4 * dpr, vWidth / 2);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.restore();
+
+      this.slider.value = this.currentStep;
+      if (this.hudStep) this.hudStep.textContent = `Step: ${cur.k} / ${this.points.length - 1}`;
+      if (this.hudSpeed) this.hudSpeed.textContent = `${cur.speed.toFixed(1)} m/s (${(cur.speed * 3.6).toFixed(1)} km/h)`;
+      if (this.hudClearance) {
+        const clr = cur.clearance_m !== null ? `${cur.clearance_m.toFixed(2)}m` : 'N/A';
+        const rb = cur.rb_dist_m !== null ? `${cur.rb_dist_m.toFixed(2)}m` : 'N/A';
+        this.hudClearance.textContent = `Clr: ${clr} | RB: ${rb}`;
+      }
+    }
+  }
+
+  togglePlay() {
+    if (this.isPlaying) {
+      this.stopAnimation();
+    } else {
+      if (this.currentStep >= this.points.length - 1) {
+        this.currentStep = 0;
+      }
+      this.startAnimation();
+    }
+  }
+
+  startAnimation() {
+    this.isPlaying = true;
+    this.playBtn.textContent = '⏸ 停止';
+    const intervalMs = Math.max(20, 100 / this.playSpeed);
+    this.timer = setInterval(() => {
+      if (this.currentStep < this.points.length - 1) {
+        this.currentStep++;
+        this.draw();
+      } else {
+        this.stopAnimation();
+      }
+    }, intervalMs);
+  }
+
+  stopAnimation() {
+    this.isPlaying = false;
+    this.playBtn.textContent = '▶ 再生';
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  destroy() {
+    this.stopAnimation();
+  }
+}
+
+function renderArmPane(arm, armTitle, armKey, scenName) {
+  const isPass = arm.passed;
+  const statusBadge = isPass ? `<span class="badge badge-pass">PASS</span>` : `<span class="badge badge-fail">FAIL</span>`;
+  const catJa = arm.failure_category_ja || arm.failure_category;
+  const catBadge = `<span class="badge badge-neutral">${catJa}</span>`;
+  const hzJa = arm.hazard_verdict_ja || arm.hazard_verdict;
+  const hzBadge = `<span class="badge ${arm.hazard_verdict === 'PASS_AVOIDED' ? 'badge-win' : 'badge-neutral'}">${hzJa}</span>`;
+
+  // 1. Video
+  let mediaVideoHtml = '';
+  if (arm.video_path) {
+    mediaVideoHtml = `<video controls muted data-src="${arm.video_path}"></video>`;
+  } else {
+    mediaVideoHtml = `<div class="media-missing">動画なし</div>`;
+  }
+
+  // 2. Colormaps
+  let mediaColormapHtml = '';
+  let colormapSelectHtml = '';
+  if (arm.colormap_paths && Object.keys(arm.colormap_paths).length > 0) {
+    const firstKey = Object.keys(arm.colormap_paths)[0];
+    mediaColormapHtml = `<img class="colormap-img" data-src="${arm.colormap_paths[firstKey]}" alt="trajectory colormap" onclick="window.open(this.src || this.dataset.src, '_blank')">`;
+    const opts = Object.keys(arm.colormap_paths).map(k => `<option value="${arm.colormap_paths[k]}">${k}</option>`).join('');
+    colormapSelectHtml = `
+      <div class="colormap-bar">
+        <span style="font-size:0.68rem; color:var(--muted);">軌跡カラーマップ:</span>
+        <select class="colormap-sel" data-arm="${armKey}">${opts}</select>
+      </div>
+    `;
+  } else {
+    mediaColormapHtml = `<div class="media-missing">カラーマップなし</div>`;
+  }
+
+  // 3. Interactive Trace
+  let tracePaneHtml = '';
+  if (arm.rollout_path) {
+    tracePaneHtml = `
+      <div class="trace-player-wrapper" data-rollout="${arm.rollout_path}" data-color="${armKey === 'base' ? '#a855f7' : '#3b82f6'}">
+        <canvas class="trace-canvas"></canvas>
+        <div class="trace-hud">
+          <span class="trace-hud-step">Step: 0 / 0</span>
+          <span class="trace-hud-speed">0.0 m/s</span>
+          <span class="trace-hud-clearance">Clr: - | RB: -</span>
+        </div>
+        <div class="trace-loading" style="position:absolute; inset:0; background:rgba(0,0,0,0.7); display:none; align-items:center; justify-content:center; font-size:0.75rem; color:#94a3b8;">軌跡データ読込中...</div>
+        <div class="trace-error" style="position:absolute; inset:0; background:rgba(0,0,0,0.8); display:none; align-items:center; justify-content:center; font-size:0.75rem; color:#ef4444;">軌跡データの取得に失敗しました</div>
+        <div class="trace-controls">
+          <button class="trace-play-btn" disabled>▶ 再生</button>
+          <input type="range" class="trace-slider" min="0" max="100" value="0" disabled>
+          <button class="trace-speed-btn">1x</button>
+        </div>
+      </div>
+    `;
+  } else {
+    tracePaneHtml = `<div class="media-missing">軌跡データ (rollout.jsonl) なし</div>`;
+  }
+
+  const trigText = arm.verdict_trigger ? `<strong>トリガー条件:</strong> <span class="text-danger">${escapeHtml(arm.verdict_trigger)}</span><br>` : '';
+  const unmetText = (arm.verdict_unmet && arm.verdict_unmet.length > 0) ? `<strong>未達条件:</strong> ${escapeHtml(arm.verdict_unmet.join(', '))}<br>` : '';
+  const termText = arm.terminated ? `<strong>終了理由:</strong> ${escapeHtml(arm.terminated)}` : '';
+
+  return `
+    <div class="arm-pane">
+      <div class="arm-header">
+        <span style="color: ${armKey === 'base' ? 'var(--base-col)' : 'var(--treat-col)'};">● ${armTitle}</span>
+        <div style="display:flex; gap:4px; align-items:center;">
+          ${statusBadge}
+          ${catBadge}
+          ${hzBadge}
+        </div>
+      </div>
+
+      <div class="arm-mode-tabs">
+        <button class="arm-tab-btn active" data-target="video">🎬 動画 (MP4)</button>
+        <button class="arm-tab-btn" data-target="trace" ${!arm.rollout_path ? 'disabled style="opacity:0.4;"' : ''}>🗺️ 軌跡 2D</button>
+        <button class="arm-tab-btn" data-target="colormap" ${(!arm.colormap_paths || Object.keys(arm.colormap_paths).length === 0) ? 'disabled style="opacity:0.4;"' : ''}>📊 カラーマップ</button>
+      </div>
+      
+      <div class="arm-media">
+        <div class="media-pane video-pane" style="width:100%;">${mediaVideoHtml}</div>
+        <div class="media-pane trace-pane" style="width:100%; display:none;">${tracePaneHtml}</div>
+        <div class="media-pane colormap-pane" style="width:100%; display:none;">
+          ${mediaColormapHtml}
+          ${colormapSelectHtml}
+        </div>
+      </div>
+
+      <div class="metric-pill-grid">
+        <div class="metric-pill">
+          <span class="metric-pill-label">最小クリアランス</span>
+          <span class="metric-pill-val ${arm.min_clearance !== null && arm.min_clearance < 0.5 ? 'text-danger' : ''}">
+            ${arm.min_clearance !== null ? arm.min_clearance.toFixed(2) + ' m' : 'N/A'}
+          </span>
+        </div>
+        <div class="metric-pill">
+          <span class="metric-pill-label">最高速度</span>
+          <span class="metric-pill-val">${arm.max_speed !== null ? arm.max_speed.toFixed(1) + ' m/s' : 'N/A'}</span>
+        </div>
+        <div class="metric-pill">
+          <span class="metric-pill-label">最大減速度</span>
+          <span class="metric-pill-val">${arm.strongest_decel !== null ? arm.strongest_decel.toFixed(2) + ' m/s²' : 'N/A'}</span>
+        </div>
+        <div class="metric-pill">
+          <span class="metric-pill-label">走行距離 / ステップ</span>
+          <span class="metric-pill-val">${(arm.progress_m || 0).toFixed(1)}m / ${arm.n_steps || 0}s</span>
+        </div>
+      </div>
+
+      ${(trigText || unmetText || termText) ? `<div class="diag-box">${trigText}${unmetText}${termText}</div>` : ''}
+    </div>
+  `;
+}
+
+function setupMediaSwitchers(card) {
+  // Colormap selector
+  card.querySelectorAll('.colormap-sel').forEach(sel => {
+    sel.addEventListener('change', (e) => {
+      const pane = sel.closest('.colormap-pane');
+      const img = pane.querySelector('.colormap-img');
+      if (img) {
+        img.src = e.target.value;
+        img.dataset.src = e.target.value;
+      }
+    });
+  });
+
+  // Tab switcher
+  card.querySelectorAll('.arm-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pane = btn.closest('.arm-pane');
+      const target = btn.getAttribute('data-target');
+
+      pane.querySelectorAll('.arm-tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      const videoPane = pane.querySelector('.video-pane');
+      const tracePane = pane.querySelector('.trace-pane');
+      const colormapPane = pane.querySelector('.colormap-pane');
+
+      videoPane.style.display = target === 'video' ? 'block' : 'none';
+      tracePane.style.display = target === 'trace' ? 'block' : 'none';
+      colormapPane.style.display = target === 'colormap' ? 'block' : 'none';
+
+      if (target === 'trace') {
+        const traceWrapper = tracePane.querySelector('.trace-player-wrapper');
+        if (traceWrapper && !traceWrapper._player) {
+          const rolloutUrl = traceWrapper.getAttribute('data-rollout');
+          const color = traceWrapper.getAttribute('data-color') || '#3b82f6';
+          traceWrapper._player = new TracePlayer(traceWrapper, rolloutUrl, color);
+        } else if (traceWrapper && traceWrapper._player) {
+          traceWrapper._player.resize();
+        }
+      }
+    });
+  });
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// Initial bootstrap
+async function initApp() {
+  if (CURRENT_DATA && CURRENT_DATA.summary) {
+    renderReport(CURRENT_DATA);
+  }
+
+  if (window.location.protocol.startsWith('http')) {
+    await fetchRuns();
+
+    const params = new URLSearchParams(window.location.search);
+    const urlBase = params.get('base');
+    const urlTreat = params.get('treat');
+
+    if (urlBase && urlTreat) {
+      if (!CURRENT_DATA || CURRENT_DATA.metadata?.base_dir !== urlBase || CURRENT_DATA.metadata?.treat_dir !== urlTreat) {
+        loadComparison(urlBase, urlTreat);
+      }
+    } else if (!CURRENT_DATA && availableRuns.length >= 2) {
+      const b = availableRuns[1].path || availableRuns[1].id;
+      const t = availableRuns[0].path || availableRuns[0].id;
+      loadComparison(b, t);
+    }
+  } else {
+    refreshRunsBtn.style.display = 'none';
+  }
+}
+
+initApp();
+</script>
+</body>
+</html>
