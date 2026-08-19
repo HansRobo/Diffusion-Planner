@@ -37,6 +37,7 @@ from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import _world_plan_to_ego
 from scenario_generation.scenario_sim_metrics import build_segment_row
 from scenario_generation.scenario_sim_route import resolve_route
+from scenario_generation.scene_trace import SceneTraceWriter, write_map_asset
 from scenario_generation.scenario_sim_scene import (
     _HISTORY_LEN,
     DT,
@@ -110,6 +111,10 @@ class RolloutConfig:
     coord_check_tol_rad: float = 0.1
     # A PNG every N ticks; None renders nothing. Metrics do not depend on it.
     draw_every: int | None = None
+    # Vector scene geometry for browser replay, written every tick. Independent of
+    # ``draw_every``: it imports no matplotlib and invokes no encoder, so a run that draws
+    # nothing still reports what happened.
+    write_scene_trace: bool = True
     scene: SceneConfig = field(default_factory=SceneConfig)
 
     def __post_init__(self) -> None:
@@ -423,6 +428,7 @@ def run_scenario_sim_rollout(
     verbose: bool = True,
     timers: Timers | None = None,
     builders: dict[str, LaneletSceneBuilder] | None = None,
+    scene_asset_dir: str | Path | None = None,
     draw_pool: Executor | None = None,
 ) -> dict:
     """Run one closed-loop OpenSCENARIO rollout and return an aggregate-ready row.
@@ -470,6 +476,7 @@ def run_scenario_sim_rollout(
     coord_err: float = float("nan")
     yaw_err: float = float("nan")
     ego_state: dict | None = None  # last tick's ego truth, for the finalize ego shape
+    trace_writer: SceneTraceWriter | None = None
     terminated_reason = "max_steps"
 
     # The interpreter's JUnit result is the only place the reason a scenario was rejected
@@ -542,6 +549,25 @@ def run_scenario_sim_rollout(
             else None
         )
 
+        if cfg.write_scene_trace:
+            # One map asset per map, shared by every case: a caller that evaluates a suite
+            # passes one run-level directory, and the fallback keeps a standalone rollout
+            # self-contained rather than duplicating the map into each case.
+            assets = Path(scene_asset_dir) if scene_asset_dir is not None else output_dir / "scene_maps"
+            with timers("scene_trace_map"):
+                map_ref, _ = write_map_asset(builder, assets)
+            trace_writer = SceneTraceWriter(
+                output_dir / "scene_trace.jsonl.gz",
+                map_ref=map_ref,
+                route=[
+                    [round(float(x), 3), round(float(y), 3)]
+                    for ll_id in ego_route_ids
+                    if ll_id in builder._cache
+                    for x, y in builder._cache[ll_id].raw_centerline[:, :2]
+                ],
+                goal=[round(float(goal_xy[0]), 3), round(float(goal_xy[1]), 3)],
+            )
+
         for step in range(cfg.max_steps):
             with timers("sim_get_states"):
                 states = runner.get_entity_states()
@@ -595,6 +621,18 @@ def run_scenario_sim_rollout(
                 clearances.append(clr)
                 collisions.append(coll)
 
+            if trace_writer is not None and pts is not None:
+                # The same pre-step scene and map-frame plan the renderer is handed. Warm-up
+                # ticks carry null metrics because nothing scored them.
+                scored = buffers.age[ego_name] >= cfg.warmup_steps
+                trace_writer.write_frame(
+                    step,
+                    scene,
+                    pts,
+                    clearance=clearances[-1] if scored else None,
+                    collision=collisions[-1] if scored else None,
+                )
+
             if draw is not None and pts is not None and step % cfg.draw_every == 0:
                 with timers("draw_submit"):
                     # The plan the sim is tracking, viewed from the current pose rather than
@@ -641,6 +679,9 @@ def run_scenario_sim_rollout(
     with timers("draw_join"):
         for f in frames:
             f.result()
+
+    if trace_writer is not None:
+        trace_writer.close(terminated_reason)
 
     with timers("finalize"):
         row = _finalize_row(
