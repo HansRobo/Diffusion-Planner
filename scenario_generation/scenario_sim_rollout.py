@@ -69,6 +69,13 @@ from scenario_generation.transforms import _rotation_matrix
 # Same default the reproducer path uses, so the strong_brake metric is comparable.
 STRONG_BRAKE_MPS2 = -2.5
 
+# Distance to the goal at which the driving task is over, in metres. The row's event blocks
+# stop there: past the goal the route has no continuation, so anything the ego does is not the
+# task being measured -- and it drives on for minutes when the scenario has no reachable
+# success condition. Loose relative to the scenarios' own 1--3 m tolerances, because this only
+# decides where scoring ends, not whether the goal counts as reached.
+GOAL_SCORED_RADIUS_M = 5.0
+
 # Used only when the sim never reported an ego state, i.e. the scenario ended before the
 # first tick and the trajectory log is empty, so the value cannot affect any metric.
 _FALLBACK_EGO_BOX = (4.0, 1.8, 2.6)
@@ -388,27 +395,41 @@ def _finalize_row(
         terminated_reason=terminated_reason,
     )
 
+    # The first tick the ego is at the goal ends the scored window. A run that never gets there
+    # is scored whole: there is no completed task to cut the window at.
+    arrival = next(
+        (i for i, e in enumerate(trajectory_log) if e["goal_d"] < GOAL_SCORED_RADIUS_M), None
+    )
+    scored_stop = min(stop, arrival + 1) if arrival is not None else stop
+    n_scored = max(scored_stop - start, 0)
     row = build_segment_row(
-        n_steps_run=len(clearances),
+        n_steps_run=n_scored,
         terminated=terminated_reason,
         result_kind=result_kind,
-        clearances=clearances,
-        collisions=collisions,
-        rb_dists=series["rb_dists"][start:stop],
-        accels=_scored_accels(series["speeds"], start, len(clearances)),
+        clearances=clearances[:n_scored],
+        collisions=collisions[:n_scored],
+        rb_dists=series["rb_dists"][start:scored_stop],
+        accels=_scored_accels(series["speeds"], start, n_scored),
         near_miss_thresh=cfg.near_miss_thresh,
         strong_brake_mps2=STRONG_BRAKE_MPS2,
         progress_m=rb["progress_m"],
-        turn_indicators=[int(e["ti"]) for e in trajectory_log[start:stop]],
-        turn_indicator_asks=[e["ti_raw"] for e in trajectory_log[start:stop]],
+        turn_indicators=[int(e["ti"]) for e in trajectory_log[start:scored_stop]],
+        turn_indicator_asks=[e["ti_raw"] for e in trajectory_log[start:scored_stop]],
     )
     # scenario_sim-only diagnostics, kept flat (outside the shared category blocks) so
     # aggregate never sees them as a metric category.
     return {
         **row,
         # A sim tick, not an index into the trimmed series, so it names a frame of the run.
-        "worst_step": int(start + np.argmin(clearances)) if clearances else -1,
+        "worst_step": int(start + np.argmin(clearances[:n_scored])) if n_scored else -1,
         "n_ticks_run": len(trajectory_log),
+        # Over the whole drive, not the scored window: an ego that never pulls away is the one
+        # thing the event blocks cannot show, because it produces no events at all.
+        "max_speed_mps": rb["max_speed_mps"],
+        "mean_speed_mps": rb["mean_speed_mps"],
+        # The tick the scored window ended at, and whether the goal is what ended it.
+        "scored_until_step": int(scored_stop),
+        "scored_stopped_at_goal": arrival is not None,
         "rb_has_data": rb["rb_has_data"],
         "coord_check_ok": bool(
             coord_err <= cfg.coord_check_tol_m and yaw_err <= cfg.coord_check_tol_rad
