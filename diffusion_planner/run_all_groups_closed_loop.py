@@ -317,6 +317,21 @@ def run_closed_loop_main(
                     render_media=render_media,
                 )
 
+    # Under DDP, every rank must reach this point before rank 0 reads the on-disk
+    # results: without a barrier, rank 0 could start aggregating before a slower
+    # rank has finished writing its shard's summary.json/segments.jsonl, silently
+    # producing a summary built from a partial set of groups.
+    if world_size > 1:
+        import torch.distributed as dist
+
+        if not (dist.is_available() and dist.is_initialized()):
+            raise RuntimeError(
+                f"run_closed_loop_main: shard world_size={world_size} > 1 but "
+                "torch.distributed is not initialized -- refusing to aggregate without "
+                "a barrier to guarantee every rank finished writing its shard first."
+            )
+        dist.barrier()
+
     # Aggregate on rank 0 only (shard=None -> rank 0; DDP -> rank 0 only).
     if rank == 0:
         all_summaries = _load_group_results(out_root)
