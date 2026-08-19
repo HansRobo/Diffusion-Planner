@@ -30,10 +30,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from scenario_generation.closed_loop_eval import FFmpegVideoWriter
 from scenario_generation.gui.lanelet_scene_builder import LaneletSceneBuilder
 from scenario_generation.metrics.object import score_object_step
 from scenario_generation.perf_timer import Timers
-from scenario_generation.render_pool import render_pool
+from scenario_generation.render_pool import drain_oldest_frame, render_pool
 from scenario_generation.reproducer_rollout import _world_plan_to_ego
 from scenario_generation.scenario_sim_metrics import build_segment_row
 from scenario_generation.scenario_sim_route import resolve_route
@@ -95,7 +96,7 @@ class RolloutConfig:
     # convention error stays inside the metre tolerance at ordinary speeds and vanishes
     # entirely from rest. Heading is compared separately because it is not speed-scaled.
     coord_check_tol_rad: float = 0.1
-    # A PNG every N ticks; None renders nothing. Metrics do not depend on it.
+    # Render every N ticks into the video_writer; None renders nothing. Metrics do not depend on it.
     draw_every: int | None = None
     scene: SceneConfig = field(default_factory=SceneConfig)
 
@@ -247,7 +248,7 @@ def _write_rollout_trace(
     scored_from: int,
     terminated_reason: str,
 ) -> None:
-    """Write ``rollout.jsonl`` next to the PNGs: one line per sim step, plus a terminated line.
+    """Write ``rollout.jsonl`` into ``output_dir``: one line per sim step, plus a terminated line.
 
     The schema is the reproducer's, because the readers are shared: ``trajectory_colormap``
     takes ``ego`` (required) plus ``speed`` / ``clearance_m`` / ``collision`` / ``rb_dist_m``,
@@ -388,6 +389,7 @@ def run_scenario_sim_rollout(
     timers: Timers | None = None,
     builder: LaneletSceneBuilder | None = None,
     draw_pool: Executor | None = None,
+    video_writer: FFmpegVideoWriter | None = None,
 ) -> dict:
     """Run one closed-loop OpenSCENARIO rollout and return an aggregate-ready row.
 
@@ -396,6 +398,10 @@ def run_scenario_sim_rollout(
     ``observation_normalizer`` / ``predicted_neighbor_num`` / ``future_len``). ``builder`` lets
     a caller that outlives one scenario reuse a parsed map, which is per-map work a
     per-scenario process would otherwise pay per scenario.
+
+    ``video_writer`` is required whenever ``cfg.draw_every`` enables drawing, and owned (created,
+    closed) by the caller in this process -- never passed into ``draw_pool`` (a
+    ``subprocess.Popen`` is not picklable across the workers).
     """
     # Participants in one DDS domain all discover each other, so processes sharing a domain cost
     # N^2 of discovery. 101 is the last domain whose RTPS base ports clear Linux's ephemeral
@@ -560,19 +566,24 @@ def run_scenario_sim_rollout(
                     # re-anchored there: cached_plan_ego would start every frame at the ego's
                     # nose and hide a plan it fails to progress along. Safe to hand to another
                     # process: both arguments are this tick's own objects.
+                    #
+                    # The caller ties video_writer to cfg.draw_every 1:1 (see its docstring).
+                    assert video_writer is not None
                     frames.append(
                         draw.submit(
                             save_step_figure,
                             scene,
                             {ego_name: _world_plan_to_ego(pts[:, :2], pts[:, 2], ex, ey, eh)},
-                            output_dir / f"{step:05d}.png",
+                            None,
                             step,
                             cfg.max_steps,
                             route_polylines=route_polylines,
                             road_border_polylines=borders,
                             sim_time=step * DT,
+                            return_frame=True,
                         )
                     )
+                    drain_oldest_frame(frames, video_writer)
 
             # step() is the sole integrator: it advances BOTH the ego and the NPCs.
             with timers("sim_step"):
@@ -596,10 +607,10 @@ def run_scenario_sim_rollout(
 
         result_kind = runner.result_kind()
 
-    # The trace and the encoder both read this directory; neither may see a partial sequence.
+    # video_writer must see every remaining frame in step order before the caller closes it.
     with timers("draw_join"):
         for f in frames:
-            f.result()
+            video_writer.write_frame(*f.result())
 
     with timers("finalize"):
         row = _finalize_row(

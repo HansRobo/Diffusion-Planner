@@ -10,7 +10,30 @@ Callers must be spawn-safe: an importable callable, picklable arguments, a
 from __future__ import annotations
 
 import multiprocessing
-from concurrent.futures import Executor, ProcessPoolExecutor
+from concurrent.futures import Executor, Future, ProcessPoolExecutor
+from typing import Protocol
+
+# Undrained-future cap shared by every caller that streams render_pool frames straight into an
+# ffmpeg pipe instead of writing PNGs (see drain_oldest_frame): a ProcessPoolExecutor buffers
+# each completed result on the parent side whether or not .result() has been called, so an
+# unbounded backlog holds one RGBA frame (~4 MB at 1000x1000) in memory per unconsumed step.
+MAX_INFLIGHT_FRAMES = 8
+
+
+class _FrameWriter(Protocol):
+    def write_frame(self, frame_bytes: bytes, width: int, height: int, pix_fmt: str = ...) -> None: ...
+
+
+def drain_oldest_frame(
+    pending: list[Future], writer: _FrameWriter, cap: int = MAX_INFLIGHT_FRAMES
+) -> None:
+    """Write the oldest buffered frame into ``writer`` once more than ``cap`` are unconsumed.
+
+    Call this after every ``pending.append(pool.submit(...))`` in a streaming step loop, so the
+    backlog is drained in step order as it grows instead of only after the whole rollout ends.
+    """
+    if len(pending) > cap:
+        writer.write_frame(*pending.pop(0).result())
 
 
 def _pin_worker_threads() -> None:

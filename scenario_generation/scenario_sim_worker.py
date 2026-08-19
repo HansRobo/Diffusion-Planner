@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from scenario_generation.closed_loop_eval import (
-    build_mp4,
+    FFmpegVideoWriter,
     segment_row_for_json,
     tdigest_sidecar_row,
 )
@@ -51,8 +51,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--draw_every",
         type=int,
         default=None,
-        help="render a PNG every N ticks and encode them to an MP4; omitted (default) renders "
-        "nothing, which is what a run that only wants the metrics row should do",
+        help="render every N ticks and stream them into an MP4 (no per-step PNGs on disk); "
+        "omitted (default) renders nothing, which is what a run that only wants the metrics "
+        "row should do",
     )
     return p.parse_args(argv)
 
@@ -74,16 +75,30 @@ def main(argv: list[str] | None = None) -> int:
         near_miss_thresh=a.near_miss_thresh,
         draw_every=a.draw_every,
     )
-    row = run_scenario_sim_rollout(
-        model,
-        model_args,
-        a.osc,
-        a.out_dir,
-        map_path=a.map_path,
-        config=cfg,
-        device=a.device,
-        timers=timers,
-    )
+    route = Path(a.out_dir).name
+    out_dir = Path(a.out_dir)
+    # None unless media was asked for, matching cfg.draw_every (see run_scenario_sim_rollout).
+    video_writer = FFmpegVideoWriter(out_dir / f"{route}.mp4", fps=a.fps) if a.draw_every else None
+    try:
+        row = run_scenario_sim_rollout(
+            model,
+            model_args,
+            a.osc,
+            a.out_dir,
+            map_path=a.map_path,
+            config=cfg,
+            device=a.device,
+            timers=timers,
+            video_writer=video_writer,
+        )
+    finally:
+        # Best-effort, same as the old build_mp4 call it replaces: a missing or unhappy ffmpeg
+        # costs the video, never the metrics row written below.
+        if video_writer is not None:
+            try:
+                video_writer.close()
+            except RuntimeError as e:
+                print(f"[scenario_sim] {route}: {e}")
     timers.add("worker_process", time.perf_counter() - t_proc)
 
     # Same split the closed-loop eval writer uses: a human-readable row, with the clearance
@@ -91,7 +106,6 @@ def main(argv: list[str] | None = None) -> int:
     # what carries a row's identity through that pair -- ``attach_tdigest_sidecars`` keys the
     # reattach on it, so a sidecar without one can be written but never read back. It names the
     # case, not the scenario file: one scenario_0.xosc per scenario id collides suite-wide.
-    route = Path(a.out_dir).name
     row_out = Path(a.row_out)
     row_out.parent.mkdir(parents=True, exist_ok=True)
     row_out.write_text(
@@ -104,14 +118,6 @@ def main(argv: list[str] | None = None) -> int:
         side_out.write_text(json.dumps(side, default=float))
     else:
         side_out.unlink(missing_ok=True)
-
-    # After the row, so a missing or unhappy ffmpeg costs the video and not the metrics.
-    out_dir = Path(a.out_dir)
-    # ffmpeg's glob errors on a directory with no match.
-    if any(out_dir.glob("*.png")):
-        # fps is the sim tick rate, so a sparse sequence plays draw_every x faster than real
-        # time. Not a separate knob: one number cannot be both.
-        build_mp4(out_dir, out_dir / f"{route}.mp4", a.fps, remove_pngs=True)
     return 0
 
 
