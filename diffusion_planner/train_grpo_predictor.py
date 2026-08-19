@@ -306,6 +306,13 @@ def get_args():
         "--diffusion_model_type", type=str, choices=["x_start", "flow_matching"], default="x_start"
     )
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
+    parser.add_argument(
+        "--use_cross_attn_mask",
+        type=boolean,
+        default=False,
+        help="mask padded encoder tokens in the DiT cross-attention. Off by default: it "
+        "changes the exported ONNX graph, breaking compatibility with deployed models.",
+    )
 
     parser.add_argument(
         "--resume_model_path",

@@ -2089,6 +2089,7 @@ def _base_train_invocation(
         "hidden_dim",
         "diffusion_model_type",
         "predicted_neighbor_num",
+        "use_cross_attn_mask",
         "agent_num",
         "future_len",
         "time_len",

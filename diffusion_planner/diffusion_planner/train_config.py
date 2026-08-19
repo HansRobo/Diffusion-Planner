@@ -165,6 +165,13 @@ class TrainConfig:
     hidden_dim: int = 256
     diffusion_model_type: Literal["x_start", "flow_matching"] = "x_start"
     predicted_neighbor_num: int = MAX_NUM_NEIGHBORS
+    # Mask the padded encoder tokens in the DiT cross-attention (and zero them in the
+    # Encoder output). Off by default: it changes the exported ONNX graph, so enabling it
+    # breaks compatibility with already deployed models.
+    use_cross_attn_mask: bool = cli(
+        "mask padded encoder tokens in the DiT cross-attention (and zero them in the encoder output)",
+        default=False,
+    )
     resume_model_path: Optional[str] = cli(
         "resume training from this .pth", default=None, path=True
     )

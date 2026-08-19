@@ -10,6 +10,10 @@ class Config:
         with open(args_file, "r") as f:
             args_dict = json.load(f)
 
+        # Defaults for keys that args.json files written before the key existed do not
+        # carry. Set before the loop so a value present in args.json always wins.
+        self.use_cross_attn_mask = False
+
         for key, value in args_dict.items():
             setattr(self, key, value)
         self.state_normalizer = StateNormalizer(

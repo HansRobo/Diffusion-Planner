@@ -47,6 +47,9 @@ class Encoder(nn.Module):
         self.use_ego_history = config.use_ego_history
         self.ego_history_dropout_rate = config.ego_history_dropout_rate
         self.use_turn_indicators = config.use_turn_indicators
+        # Zeroing the padded tokens is what lets the DiT cross-attention detect them
+        # (see DiT.use_cross_attn_mask), so the two are governed by the same flag.
+        self.use_cross_attn_mask = config.use_cross_attn_mask
 
         ego_num = 1
         goal_pose_num = 1
@@ -305,6 +308,10 @@ class Encoder(nn.Module):
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
         encoder_outputs = self.fusion(encoding_input, encoding_mask.view(B, self.token_num))
+        if self.use_cross_attn_mask:
+            encoder_outputs = encoder_outputs.masked_fill(
+                encoding_mask.view(B, self.token_num, 1), 0.0
+            )
 
         return encoder_outputs
 
