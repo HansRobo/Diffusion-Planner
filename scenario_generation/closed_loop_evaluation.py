@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from scenario_generation.closed_loop_ddp import shard_items
+from scenario_generation.closed_loop_ddp import claim, shard_items
 from scenario_generation.closed_loop_eval import (
     aggregate,
     build_mp4,
@@ -108,6 +108,12 @@ class ClosedLoopEvalConfig:
     verbose: bool = True
     profile: bool = False
     max_jobs: int | None = None
+    # Hand jobs out as ranks become free, through claim files under this directory, instead of
+    # partitioning the list up front. Worth it when job durations vary enough that a static
+    # split leaves one rank working alone at the end; the cost is that a rank no longer gets
+    # the same jobs twice, so a run is no longer reproducible rank-by-rank. None keeps the
+    # static round-robin, which is the default precisely because it is reproducible.
+    claim_dir: Path | None = None
 
 
 @dataclass
@@ -215,7 +221,18 @@ class ClosedLoopEvaluation(ABC):
         return partial
 
     def shard_jobs(self, jobs: list[ClosedLoopJob]) -> list[ClosedLoopJob]:
+        """Partition the list for this rank -- unless jobs are claimed, where every rank walks
+        the whole list and takes what it wins, so the position of a job in it is the shared key
+        both sides agree on."""
+        if self.config.claim_dir is not None:
+            return jobs
         return shard_items(jobs, self.ddp_rank, self.ddp_world_size)
+
+    def claim_job(self, index: int) -> bool:
+        """True if this rank should run the job at ``index`` of the (unsharded) job list."""
+        if self.config.claim_dir is None:
+            return True
+        return claim(self.config.claim_dir, index)
 
     def initial_job_extras(self) -> dict[str, Any]:
         return {}
@@ -245,6 +262,8 @@ class ClosedLoopEvaluation(ABC):
     def execute_jobs(self, jobs: list[ClosedLoopJob]) -> JobRunResult:
         merged = JobRunResult(extras=self.initial_job_extras())
         for ri, job in enumerate(jobs):
+            if not self.claim_job(ri):
+                continue
             partial = self.run_job(job)
             self.merge_job_result(merged, partial)
             self.on_job_complete(job, partial, ri, len(jobs))

@@ -20,6 +20,7 @@ import traceback
 from concurrent.futures import BrokenExecutor
 from pathlib import Path
 
+from scenario_generation.closed_loop_ddp import claim
 from scenario_generation.closed_loop_eval import (
     build_mp4,
     segment_row_for_json,
@@ -32,24 +33,6 @@ from scenario_generation.scenario_sim_rollout import (
     ScenarioRejected,
     run_scenario_sim_rollout,
 )
-
-
-def _claim(claim_dir: Path, index: int) -> bool:
-    """True iff this process won the race for scenario ``index``."""
-    path = claim_dir / f"{index:06d}"
-    try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        return False
-    except FileNotFoundError:
-        claim_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            return False
-    os.write(fd, f"{os.getpid()}\n".encode())
-    os.close(fd)
-    return True
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -104,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     # One renderer for this worker's whole life; the rollout would otherwise spawn one per scenario.
     with render_pool(1) if cfg.draw_every else contextlib.nullcontext() as draw:
         for index, (out_dir, osc_path) in enumerate(work):
-            if not _claim(claim_dir, index):
+            if not claim(claim_dir, index):
                 continue
             out = Path(out_dir)
             out.mkdir(parents=True, exist_ok=True)
