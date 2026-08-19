@@ -12,10 +12,10 @@ from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
+from diffusion_planner.config import TrainConfig
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.scenario_based_open_loop.validate import scenario_based_open_loop_validate
-from diffusion_planner.config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
@@ -127,7 +127,14 @@ def wandb_epdms_metrics(epdms_means):
 
 
 def closed_loop_validate(
-    model, args, epoch: int, out_dir: str, global_rank: int, world_size: int, *, is_final_save: bool = False
+    model,
+    args,
+    epoch: int,
+    out_dir: str,
+    global_rank: int,
+    world_size: int,
+    *,
+    is_final_save: bool = False,
 ) -> None:
     """Closed-loop rendered rollout; logs metrics + videos to wandb.
 

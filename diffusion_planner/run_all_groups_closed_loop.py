@@ -282,7 +282,7 @@ def run_closed_loop_main(
     # ranks: every rank runs its own subset in-process on its own GPU (via DDP),
     # rank 0 aggregates the on-disk results afterwards. shard=None means run
     # everything sequentially (CLI mode).
-    rank, world_size = (shard if shard is not None else (0, 1))
+    rank, world_size = shard if shard is not None else (0, 1)
 
     # Triple loop: json_name -> group_name -> mode
     i = 0

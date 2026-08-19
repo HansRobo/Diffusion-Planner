@@ -9,7 +9,6 @@ from diffusion_planner.config import (
     to_command_line,
 )
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _NORMALIZATION_JSON = _REPO_ROOT / "diffusion_planner" / "normalization.json"
 

@@ -312,6 +312,7 @@ def build_groups_score_bar_charts(
 
     return log
 
+
 def build_full_closed_loop_wandb_log(
     summary: dict,
     *,

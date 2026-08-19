@@ -91,7 +91,9 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     device: str = "cuda"
     use_ema: bool = True
     ema_decay: float = 0.999
-    resume_model_path: Optional[str] = cli("resume training from this .pth", default=None, path=True)
+    resume_model_path: Optional[str] = cli(
+        "resume training from this .pth", default=None, path=True
+    )
 
     # ---------------------------------------------------------
     # Logging & Distributed

@@ -42,7 +42,9 @@ class GRPOConfig(TrainConfig):
         "max synthetic colliders injected per scene (count ~ U[1, max])",
         default=1,
     )
-    neighbor_inject_prob: float = cli("per-scene probability of injecting any synthetic colliders", default=0.5)
+    neighbor_inject_prob: float = cli(
+        "per-scene probability of injecting any synthetic colliders", default=0.5
+    )
     pedestrian_prob: float = cli("fraction of injected colliders that are pedestrians", default=0.3)
     bicycle_prob: float = cli("fraction of injected colliders that are bicycles", default=0.2)
     collider_keep_clear_radius: float = cli(
@@ -61,5 +63,9 @@ class GRPOConfig(TrainConfig):
         "(DB) max distance [m] from ego GT waypoint to count as colliding",
         default=10.0,
     )
-    neighbor_min_collision_time: float = cli("(DB) earliest future time [s] a collision may occur", default=0.8)
-    neighbor_search_subsample: int = cli("(DB) cap per-scene search to this many patterns (0=all)", default=0)
+    neighbor_min_collision_time: float = cli(
+        "(DB) earliest future time [s] a collision may occur", default=0.8
+    )
+    neighbor_search_subsample: int = cli(
+        "(DB) cap per-scene search to this many patterns (0=all)", default=0
+    )

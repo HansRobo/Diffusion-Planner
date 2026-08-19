@@ -7,7 +7,6 @@ from typing import Any, Literal, Union, get_args, get_origin
 
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
-
 # Sentinel to detect "no default provided" vs "default=None".
 _UNSET = object()
 
