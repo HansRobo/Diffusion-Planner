@@ -112,8 +112,20 @@ def build_config(cls: type, args: argparse.Namespace, **overrides: Any) -> Any:
     return cls(**values)
 
 
-def to_command_line(cfg: Any, exclude: tuple[str, ...] = ()) -> list[str]:
-    cls = type(cfg)
+def to_command_line(cfg_or_cls: Any, cls: type | None = None, exclude: tuple[str, ...] = ()) -> list[str]:
+    """Serialise a config back to argv.
+
+    Two call shapes:
+      - ``to_command_line(cfg, exclude=...)``  — cfg is a dataclass instance.
+      - ``to_command_line(args, cls=TrainConfig, exclude=...)``  — args is an
+        ``argparse.Namespace``; the matching dataclass must be passed via ``cls``
+        because ``argparse.Namespace`` itself has no dataclass fields to inspect.
+    """
+    if cls is None:
+        cls = type(cfg_or_cls)
+        cfg = cfg_or_cls
+    else:
+        cfg = cfg_or_cls
     argv: list[str] = []
     for f in cli_fields(cls):
         if f.name in exclude:

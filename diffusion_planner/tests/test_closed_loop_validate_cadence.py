@@ -59,7 +59,7 @@ def test_empty_closed_loop_npz_root_returns_early(tmp_path):
     args = _make_args(closed_loop_npz_root=[])
     model = _fake_model()
     # This should return early since closed_loop_npz_root is empty (after conversion to list)
-    closed_loop_validate(model, args, epoch=0, out_dir=str(tmp_path), is_final_save=True)
+    closed_loop_validate(model, args, epoch=0, out_dir=str(tmp_path))
     # If we get here without error, the early return worked
     assert True  # Test passes if no exception was raised
 

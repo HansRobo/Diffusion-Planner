@@ -57,7 +57,7 @@ def main() -> None:
         str(gpu_count()),
         "--standalone",
         "train_predictor.py",
-        *to_command_line(args, exclude=("output_root",)),
+        *to_command_line(args, cls=TrainConfig, exclude=("output_root",)),
     ]
     rc = tee_run(
         cmd, cwd=here, env={**os.environ, **NCCL_ENV}, log_path=save_path / "train_log.txt"

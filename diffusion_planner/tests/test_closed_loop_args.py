@@ -48,3 +48,55 @@ def test_train_predictor_uses_config_build_parser():
     source = train_predictor.read_text(encoding="utf-8")
     assert "from diffusion_planner.config import" in source
     assert "build_parser" in source
+
+
+def test_resolve_closed_loop_defaults_modes_to_objects(tmp_path):
+    """Omitting --closed_loop_object_modes ⇒ every input gets mode 'objects'.
+
+    Smoke test for the position-based pairing contract: callers don't have to
+    spell out ``objects`` N times when they only want one mode.
+    """
+    import importlib.util
+    import json
+    import sys
+
+    rcl_path = _REPO_ROOT / "diffusion_planner" / "run_all_groups_closed_loop.py"
+    spec = importlib.util.spec_from_file_location("run_all_groups_closed_loop", rcl_path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    j1 = tmp_path / "a.json"
+    j1.write_text(json.dumps({"x": ["/x"]}))
+    j2 = tmp_path / "b.json"
+    j2.write_text(json.dumps({"y": ["/y"]}))
+
+    entries = mod.resolve_closed_loop_inputs([str(j1), str(j2)])
+    assert [e["mode"] for e in entries] == ["objects", "objects"]
+
+
+def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path):
+    """Same JSON listed twice ⇒ two entries, each with its own mode.
+
+    This is the supported use case: run one dataset under multiple modes.
+    Without this contract, ``sites.json objects sites.json noobj`` would
+    silently dedupe to a single ``objects`` run.
+    """
+    import importlib.util
+    import json
+    import sys
+
+    rcl_path = _REPO_ROOT / "diffusion_planner" / "run_all_groups_closed_loop.py"
+    spec = importlib.util.spec_from_file_location("run_all_groups_closed_loop", rcl_path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    j = tmp_path / "sites.json"
+    j.write_text(json.dumps({"all": ["/data/s"]}))
+
+    entries = mod.resolve_closed_loop_inputs([str(j), str(j)], modes=["objects", "noobj"])
+
+    assert len(entries) == 2
+    assert [e["mode"] for e in entries] == ["objects", "noobj"]
+    assert entries[0]["name"] == entries[1]["name"] == "sites"

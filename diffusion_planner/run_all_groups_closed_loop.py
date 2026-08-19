@@ -23,58 +23,67 @@ from diffusion_planner.utils import ddp
 from scenario_generation.wandb_closed_loop import build_groups_aggregate_log
 
 
-def resolve_closed_loop_inputs(inputs: str | list[str]) -> dict[str, dict[str, list[str]]]:
-    """Resolve input paths to ``{<json_name>: {<group_name>: [route_dirs]}}``.
+def resolve_closed_loop_inputs(
+    inputs: str | list[str],
+    modes: list[str] | None = None,
+) -> list[dict]:
+    """Resolve input paths to a list of ``{"name", "groups", "mode"}`` entries.
 
-    The top-level key is the JSON filename (without extension) or folder name;
-    for folder or flat JSON (list) the inner key is ``"all"``; for grouped JSON
-    (dict) the inner keys are the group's names from the JSON.
+    Each entry in ``inputs`` produces ONE entry in the output list — duplicate
+    paths are allowed and kept as separate entries (same JSON may legitimately
+    need to run under multiple modes, e.g. ``sites.json objects sites.json noobj``).
+
+    ``modes`` is zipped positionally with the *input list* (1-to-1):
+
+    - Omit ``modes``  ⇒ every entry gets mode ``"objects"``.
+    - Provide ``modes`` ⇒ len(modes) MUST equal len(inputs); otherwise a
+      ValueError is raised so a mismatched CLI argument is never silently swallowed.
+
+    Return shape:
+
+        [{"name": "sites", "groups": {"all": [...]}, "mode": "objects"}, ...]
     """
     if isinstance(inputs, str):
         inputs = [inputs]
 
-    result: dict[str, dict[str, list[str]]] = {}
+    if not modes:
+        modes = ["objects"] * len(inputs)
+    if len(modes) != len(inputs):
+        raise ValueError(
+            f"--closed_loop_object_modes ({len(modes)}: {modes}) must have the same length as "
+            f"the number of JSON/folder inputs ({len(inputs)}: {list(inputs)})."
+        )
 
-    for input_path in inputs:
+    entries: list[dict] = []
+    for input_path, mode in zip(inputs, modes):
         p = Path(input_path)
 
         if not p.exists():
             print(f"Warning: {input_path} does not exist, skipping", file=sys.stderr)
             continue
 
+        groups: dict[str, list[str]] = {}
+
         if p.is_dir():
-            # Folder: treat as one route directory
-            name = p.name
-            if name not in result:
-                result[name] = {}
-            if "all" not in result[name]:
-                result[name]["all"] = []
-            result[name]["all"].append(str(p))
+            groups.setdefault("all", []).append(str(p))
 
         elif p.suffix == ".json":
-            name = p.stem
-            if name not in result:
-                result[name] = {}
-
             with open(p, "r") as f:
                 data = json.load(f)
 
             if isinstance(data, dict):
-                # Grouped JSON: {"g1": [...], "g2": [...]}
                 for group_name, paths in data.items():
-                    if group_name not in result[name]:
-                        result[name][group_name] = []
-                    for item in paths:
-                        result[name][group_name].append(str(Path(item)))
-
+                    groups.setdefault(group_name, []).extend(str(Path(item)) for item in paths)
             elif isinstance(data, list):
-                # Flat JSON (list): ["path1", "path2", ...]
-                if "all" not in result[name]:
-                    result[name]["all"] = []
-                for item in data:
-                    result[name]["all"].append(str(Path(item)))
+                groups.setdefault("all", []).extend(str(Path(item)) for item in data)
 
-    return result
+        else:
+            print(f"Warning: {input_path} has unsupported extension, skipping", file=sys.stderr)
+            continue
+
+        entries.append({"name": p.stem if p.suffix else p.name, "groups": groups, "mode": mode})
+
+    return entries
 
 
 def run_one_group(
@@ -212,7 +221,6 @@ def run_closed_loop_main(
     cfg: ClosedLoopConfig,
     out_root: str | Path | None = None,
     *,
-    resolved: dict[str, dict[str, list[str]]] | None = None,
     wandb_run=None,  # Optional wandb.Run instance; if None, creates own session
     only_json: list[str] | None = None,
     render_media: bool | None = None,
@@ -222,11 +230,6 @@ def run_closed_loop_main(
     Works both as:
     - Direct API call from train.py (model provided, wandb_run provided)
     - CLI entry point via main() (model provided directly)
-
-    Either ``cfg.closed_loop_npz_root`` OR pre-computed ``resolved`` must be non-empty;
-    the latter lets callers that already resolved (and filtered) the inputs
-    skip the duplicate ``resolve_closed_loop_inputs()`` + ``only_json`` filter
-    pass.
 
     Output directory structure:
         <out_root>/<json_name>/<group_name>          (objects mode)
@@ -246,48 +249,44 @@ def run_closed_loop_main(
     Returns True on success, False if no inputs were resolved (so CLI wrappers
     can map that to their own exit code).
     """
-    if resolved is None:
-        if not cfg.closed_loop_npz_root:
-            print("No closed_loop_npz_root set, skipping closed-loop evaluation", file=sys.stderr)
-            return False
-        resolved = resolve_closed_loop_inputs(cfg.closed_loop_npz_root)
+    if not cfg.closed_loop_npz_root:
+        print("No closed_loop_npz_root set, skipping closed-loop evaluation", file=sys.stderr)
+        return False
+    entries = resolve_closed_loop_inputs(cfg.closed_loop_npz_root, modes=cfg.closed_loop_object_modes)
     if only_json:
-        resolved = {k: v for k, v in resolved.items() if k in only_json}
-    if not resolved:
+        entries = [e for e in entries if e["name"] in only_json]
+    if not entries:
         print(f"No inputs found under {cfg.closed_loop_npz_root}", file=sys.stderr)
         return False
 
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    modes = cfg.closed_loop_object_modes
     if render_media is None:
         render_media = cfg.render_media
 
-    for json_name, groups in resolved.items():
-        json_out_dir = out_root / json_name
+    written_json_labels: set[str] = set()
+    for entry in entries:
+        json_name, mode, groups = entry["name"], entry["mode"], entry["groups"]
+        json_label = json_name if mode == "objects" else f"{json_name}__noobj"
+        json_out_dir = out_root / json_label
         json_out_dir.mkdir(parents=True, exist_ok=True)
 
         for group_name, npz_paths in groups.items():
-            for mode in modes:
-                if mode == "objects":
-                    mode_out_dir = json_out_dir / group_name
-                    summary_key = _make_summary_key(json_name, group_name)
-                else:  # noobj
-                    json_mode_name = f"{json_name}__noobj"
-                    mode_out_dir = out_root / json_mode_name / group_name
-                    summary_key = _make_summary_key(json_mode_name, group_name)
+            mode_out_dir = json_out_dir / group_name
+            summary_key = _make_summary_key(json_label, group_name)
+            run_one_group(
+                model,
+                model_args,
+                npz_paths,
+                mode_out_dir,
+                cfg,
+                group_name=summary_key,
+                mode=mode,
+                render_media=render_media,
+            )
 
-                run_one_group(
-                    model,
-                    model_args,
-                    npz_paths,
-                    mode_out_dir,
-                    cfg,
-                    group_name=summary_key,
-                    mode=mode,
-                    render_media=render_media,
-                )
+        written_json_labels.add(json_label)
 
     # rank-0 reads the per-group summaries; run_one_group already barriered + merged internally.
     if ddp.get_rank() == 0:
@@ -296,16 +295,14 @@ def run_closed_loop_main(
 
         _write_groups_manifest(out_root, all_summaries)
 
-        for json_name in resolved:
-            for mode in modes:
-                json_label = json_name if mode == "objects" else f"{json_name}__noobj"
-                json_prefix = f"{json_label}/"
-                per_json_summaries = {
-                    k: v for k, v in all_summaries.items() if k.startswith(json_prefix)
-                }
-                json_out_dir = out_root / json_label
-                if json_out_dir.exists() and per_json_summaries:
-                    _write_groups_manifest(json_out_dir, per_json_summaries)
+        for json_label in written_json_labels:
+            json_prefix = f"{json_label}/"
+            per_json_summaries = {
+                k: v for k, v in all_summaries.items() if k.startswith(json_prefix)
+            }
+            json_out_dir = out_root / json_label
+            if json_out_dir.exists() and per_json_summaries:
+                _write_groups_manifest(json_out_dir, per_json_summaries)
 
         if all_group_names:
             _log_to_wandb(
@@ -355,7 +352,7 @@ def main() -> int:
 
     model, model_args = load_model(args.model_path, cfg.device)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     out_root = base_out_root / timestamp
     out_root.mkdir(parents=True, exist_ok=True)
 
