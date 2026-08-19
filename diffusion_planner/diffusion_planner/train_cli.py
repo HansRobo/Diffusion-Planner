@@ -105,8 +105,8 @@ def build_train_config(args: argparse.Namespace, **overrides: Any) -> TrainConfi
     # The control statistics are dataset-wide constants, not something normalization.json
     # carries, so they are spelled out here for every entrypoint that builds a config.
     config.control_normalizer = ControlNormalizer(
-        mean=[-0.012965, -0.001479],
-        std=[0.505454, 0.033967],
+        mean=[-0.017765, -0.001449],
+        std=[0.507420, 0.032235],
     )
     return config
 

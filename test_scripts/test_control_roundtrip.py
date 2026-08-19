@@ -22,16 +22,17 @@ T_HIST = INPUT_T + 1  # 31
 T_FUTURE = OUTPUT_T  # 80
 DT = 0.1
 
-# Ego control statistics over 3000 frames of the training set, measured with
+# Ego control statistics over 30000 frames of the training set, measured with
 # ros_scripts/analyze_control_stats.py. Plots use mean +- 4 std as a fixed axis
 # range so that control magnitudes stay comparable across frames.
-ACCEL_MEAN, ACCEL_STD = -0.012965, 0.505454
-CURVATURE_MEAN, CURVATURE_STD = -0.001479, 0.033967
+ACCEL_MEAN, ACCEL_STD = -0.017765, 0.507420
+CURVATURE_MEAN, CURVATURE_STD = -0.001449, 0.032235
 PLOT_SIGMA = 4.0
 
-# Minimum extent of the trajectory panel, so that near-stationary frames are not
-# blown up to millimeter scale.
+# Extent limits of the trajectory panel: near-stationary frames must not be blown up to
+# millimeter scale, and the route context must not push the ego trajectory down to a dot.
 MIN_PLOT_SPAN_M = 1.0
+MAX_PLOT_SPAN_M = 80.0
 
 
 # ---------------------------------------------------------------------------
@@ -185,17 +186,48 @@ def _load_sample(path: str) -> dict:
         "ego_past": ego_past,
         "ego_v0": ego_v0,
         "ego_future": ego_future,
+        "lanes": d["lanes"],
+        "route_lanes": d["route_lanes"],
     }
 
 
-def _set_equal_limits(ax, xs, ys, min_span: float):
-    """Give the axes a 1:1 aspect ratio spanning at least ``min_span`` metres."""
+def _polylines(map_tensor: np.ndarray) -> list[np.ndarray]:
+    """Extract the valid centerline polylines from a lanes / route_lanes tensor."""
+    out = []
+    for lane in map_tensor:
+        pts = lane[:, :2]
+        pts = pts[np.abs(pts).sum(axis=-1) > 1e-6]
+        if pts.shape[0] >= 2:
+            out.append(pts)
+    return out
+
+
+def _frame_slug(path: str, common_root: str) -> str:
+    """Turn an npz path into a file-name fragment identifying the source frame."""
+    rel = os.path.relpath(path, common_root) if common_root else os.path.basename(path)
+    slug = os.path.splitext(rel)[0].replace(os.sep, "__")
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in slug)
+
+
+def _set_equal_limits(ax, xs, ys, context_xs, context_ys):
+    """Give the axes a 1:1 aspect centred on the trajectory.
+
+    The span grows to include the surrounding context (route centerlines) but is clamped
+    so that neither a stationary frame nor a long route distorts the scale.
+    """
     x_lo, x_hi = float(min(xs)), float(max(xs))
     y_lo, y_hi = float(min(ys)), float(max(ys))
-    margin = 1.05  # a little air around the trajectory
-    span = max((x_hi - x_lo) * margin, (y_hi - y_lo) * margin, min_span)
     x_center = 0.5 * (x_lo + x_hi)
     y_center = 0.5 * (y_lo + y_hi)
+    margin = 1.05  # a little air around the trajectory
+    span = max((x_hi - x_lo) * margin, (y_hi - y_lo) * margin)
+    if len(context_xs):
+        reach = max(
+            max(abs(float(min(context_xs)) - x_center), abs(float(max(context_xs)) - x_center)),
+            max(abs(float(min(context_ys)) - y_center), abs(float(max(context_ys)) - y_center)),
+        )
+        span = max(span, 2.0 * reach)
+    span = min(max(span, MIN_PLOT_SPAN_M), MAX_PLOT_SPAN_M)
     ax.set_xlim(x_center - 0.5 * span, x_center + 0.5 * span)
     ax.set_ylim(y_center - 0.5 * span, y_center + 0.5 * span)
     ax.set_aspect("equal", adjustable="box")
@@ -215,18 +247,43 @@ def _plot_sample(sample, ctrl, recon, out_path: str):
 
     fig, (ax_xy, ax_err, ax_ctrl) = plt.subplots(1, 3, figsize=(21, 7))
 
-    ax_xy.plot(past[:, 0], past[:, 1], "k.-", lw=1, ms=3, label="past")
-    ax_xy.plot(future[:, 0], future[:, 1], "b-", lw=2, label="GT future")
-    ax_xy.plot(recon[:, 0], recon[:, 1], "r--", lw=2, label="roundtrip")
+    for j, lane in enumerate(_polylines(sample["lanes"])):
+        ax_xy.plot(
+            lane[:, 0],
+            lane[:, 1],
+            "-",
+            color="0.8",
+            lw=1,
+            zorder=1,
+            label="lanes" if j == 0 else None,
+        )
+    for j, lane in enumerate(_polylines(sample["route_lanes"])):
+        ax_xy.plot(
+            lane[:, 0],
+            lane[:, 1],
+            "-",
+            color="tab:green",
+            lw=2,
+            alpha=0.5,
+            zorder=2,
+            label="route" if j == 0 else None,
+        )
+
+    ax_xy.plot(past[:, 0], past[:, 1], "k.-", lw=1, ms=3, label="past", zorder=3)
+    ax_xy.plot(future[:, 0], future[:, 1], "b-", lw=2, label="GT future", zorder=4)
+    ax_xy.plot(recon[:, 0], recon[:, 1], "r--", lw=2, label="roundtrip", zorder=5)
     ax_xy.set_title(os.path.basename(sample["path"]))
     ax_xy.set_xlabel("x [m]")
     ax_xy.set_ylabel("y [m]")
+    route = _polylines(sample["route_lanes"])
     _set_equal_limits(
         ax_xy,
         torch.cat([past[:, 0], future[:, 0], recon[:, 0]]),
         torch.cat([past[:, 1], future[:, 1], recon[:, 1]]),
-        MIN_PLOT_SPAN_M,
+        np.concatenate([r[:, 0] for r in route]) if route else np.array([]),
+        np.concatenate([r[:, 1] for r in route]) if route else np.array([]),
     )
+    ax_xy.set_axisbelow(True)
     ax_xy.grid(alpha=0.3)
     ax_xy.legend(fontsize=9)
 
@@ -271,6 +328,10 @@ def _run_standalone(path_list_json: str, num_samples: int, stride: int | None, o
     indices = list(range(0, len(paths), stride))[:num_samples]
     n_sample = len(indices)
 
+    # Name the plots after the frame they came from, relative to whatever directory the
+    # selected frames share, so the file name stays traceable without repeating the root.
+    common_root = os.path.commonpath([paths[i] for i in indices]) if n_sample > 1 else ""
+
     print(f"Testing {n_sample} samples from {path_list_json} (stride={stride}, total={len(paths)})")
     if out_dir is not None:
         os.makedirs(out_dir, exist_ok=True)
@@ -305,7 +366,7 @@ def _run_standalone(path_list_json: str, num_samples: int, stride: int | None, o
             print("  EGO ctrl has NaN/Inf!")
 
         if out_dir is not None:
-            out_path = os.path.join(out_dir, f"roundtrip_{i:02d}_idx{idx}.png")
+            out_path = os.path.join(out_dir, f"{i:03d}_{_frame_slug(paths[idx], common_root)}.png")
             _plot_sample(sample, ego_ctrl, ego_recon, out_path)
             print(f"  saved: {out_path}")
 
