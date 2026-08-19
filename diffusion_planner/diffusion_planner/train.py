@@ -12,10 +12,10 @@ from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
+from diffusion_planner.config import TrainConfig
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.scenario_based_open_loop.validate import scenario_based_open_loop_validate
-from diffusion_planner.config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
@@ -126,10 +126,8 @@ def wandb_epdms_metrics(epdms_means):
     }
 
 
-def closed_loop_validate(
-    model, args, epoch: int, out_dir: str) -> None:
-    """Closed-loop rendered rollout; logs metrics + videos to wandb.
-    """
+def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
+    """Closed-loop rendered rollout; logs metrics + videos to wandb."""
     import os
 
     if not args.closed_loop_npz_root:
@@ -193,7 +191,6 @@ def model_training(args: TrainConfig):
         os.makedirs(save_path, exist_ok=True)
         with open(os.path.join(save_path, "args.json"), "w", encoding="utf-8") as f:
             json.dump(args_dict, f, indent=4)
-
 
     # set seed
     set_seed(args.seed + global_rank)
@@ -601,9 +598,7 @@ def model_training(args: TrainConfig):
                     external_data=False,
                 )
 
-        if (epoch + 1 - init_epoch) // save_utd == (
-            train_epochs - init_epoch
-        ) // save_utd:
+        if (epoch + 1 - init_epoch) // save_utd == (train_epochs - init_epoch) // save_utd:
             # closed-loop validation runs on all ranks
             curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
             os.makedirs(curr_dir, exist_ok=True)

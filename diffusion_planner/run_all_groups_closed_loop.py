@@ -16,10 +16,10 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-
 from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
 from diffusion_planner.config.config_cli import build_config, build_parser, resolve_paths
 from diffusion_planner.utils import ddp
+
 from scenario_generation.wandb_closed_loop import build_groups_aggregate_log
 
 
@@ -329,8 +329,8 @@ def _build_parser() -> "argparse.ArgumentParser":
 
 
 def main() -> int:
-    from diffusion_planner.utils import ddp
     import torch
+    from diffusion_planner.utils import ddp
 
     from scenario_generation.simulate import load_model
 

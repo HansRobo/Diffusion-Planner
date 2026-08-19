@@ -327,9 +327,7 @@ def model_training(args):
                     external_data=False,
                 )
 
-        if (epoch + 1 - init_epoch) // save_utd == (
-            train_epochs - init_epoch
-        ) // save_utd:
+        if (epoch + 1 - init_epoch) // save_utd == (train_epochs - init_epoch) // save_utd:
             curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
             os.makedirs(curr_dir, exist_ok=True)
             closed_loop_validate(

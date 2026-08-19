@@ -6,13 +6,12 @@ from pathlib import Path
 
 import pytest
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_closed_loop_npz_root_is_list():
     """closed_loop_npz_root must be list (nargs='+') in CLI, not str."""
-    from diffusion_planner.config import build_parser, GRPOConfig
+    from diffusion_planner.config import GRPOConfig, build_parser
 
     gp = build_parser(GRPOConfig, "test")
     for action in gp._actions:

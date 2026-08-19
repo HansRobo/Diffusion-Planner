@@ -10,9 +10,9 @@ All flags are declared on :class:`diffusion_planner.config.TrainConfig` with
 ``cli(...)`` and mirrored on train_run.py.
 """
 
-from diffusion_planner.config import build_config, build_parser, TrainConfig
-from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
+from diffusion_planner.config import TrainConfig, build_config, build_parser
 from diffusion_planner.train import model_training
+from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 
 
 def main() -> None:
