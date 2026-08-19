@@ -21,6 +21,7 @@ everything else derives values and must not encode the layout.
 from __future__ import annotations
 
 import argparse
+import errno
 import gzip
 import json
 import math
@@ -310,17 +311,25 @@ def find_mp4(case_dir: Path, stem: str) -> Path | None:
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
-    """Hardlink ``src`` to ``dst``, falling back to a copy across filesystems.
+    """Hardlink ``src`` to ``dst``, copying only across filesystems.
 
     Hardlinking keeps the exported tree free: the raw run and the viewer tree name the same
-    mp4 rather than storing it twice, which matters at suite scale.
+    file rather than storing it twice, which matters at suite scale. ``EXDEV`` is the one
+    failure a copy is the right answer to; any other means something about the destination is
+    wrong, and copying anyway would publish a tree while hiding why it could not be linked.
+
+    A destination that already exists means two cases resolved to one name. The export builds
+    into an empty tree, so it cannot happen for a run's own cases -- and overwriting would make
+    a collision look like a successful export of half the pair.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        dst.unlink()
     try:
         os.link(src, dst)
-    except OSError:
+    except FileExistsError:
+        raise SystemExit(f"viewer_export: two cases claim {dst}") from None
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
         shutil.copy2(src, dst)
 
 
@@ -479,6 +488,10 @@ def write_viewer_tree(
 
     Returns ``{scenario: {"rows": n, "mp4": n, "traces": n, "colormaps": n}}``.
     """
+    # An export laid over an earlier one keeps the earlier run's media while replacing the
+    # three index files, which is a dataset that describes one run and contains two.
+    if out_root.exists() and any(out_root.iterdir()):
+        raise SystemExit(f"viewer_export: {out_root} is not empty -- export into a new tree")
     out_root.mkdir(parents=True, exist_ok=True)
     media_root = out_root / "media"
     counts: dict[str, dict[str, int]] = {}
@@ -536,7 +549,11 @@ def write_viewer_tree(
                     if source_map.is_file():
                         map_dst = out_root / "maps" / source_map.name
                         map_dst.parent.mkdir(parents=True, exist_ok=True)
-                        _link_or_copy(source_map, map_dst)
+                        # Every case on a map names the same asset, so the first one to reach
+                        # it places it. Unlike a case's own media, a name already taken here is
+                        # the sharing working -- the name is a digest of the contents.
+                        if not map_dst.exists():
+                            _link_or_copy(source_map, map_dst)
                         row["map_asset"] = f"maps/{source_map.name}"
 
             mp4 = find_mp4(case_dir, str(row["case_key"])) if include_legacy_media else None
