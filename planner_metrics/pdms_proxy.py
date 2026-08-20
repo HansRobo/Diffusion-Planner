@@ -364,6 +364,7 @@ def pdms_proxy(
     traffic_light_compliance_values: np.ndarray | None = None,
     precomputed_states: np.ndarray | None = None,
     ego_current_state: np.ndarray | None = None,
+    ego_history_poses: np.ndarray | None = None,
     add_aggregation: bool = True,
     self_reference_progress: bool = False,
     dt: float = DT,
@@ -378,6 +379,7 @@ def pdms_proxy(
 
     pred_n_cache = None
     states_n_cache = None
+    comfort_states_cache = None
 
     def _pred_numpy() -> np.ndarray:
         nonlocal pred_n_cache
@@ -405,6 +407,25 @@ def pdms_proxy(
                 )
         return states_n_cache
 
+    def _comfort_states_numpy() -> np.ndarray:
+        """The simulated future with the recorded past prepended.
+
+        Kept separate from :func:`_states_numpy` because the collision geometry
+        below indexes the simulated rows positionally and must not see the prefix.
+        """
+        nonlocal comfort_states_cache
+        if comfort_states_cache is None:
+            states = _states_numpy()
+            if ego_history_poses is None:
+                comfort_states_cache = states
+            else:
+                history = _as_numpy(ego_history_poses)
+                history = history.reshape(-1, history.shape[-2], history.shape[-1])
+                prefix = _ns.history_states_from_poses(history, dt)
+                prefix = np.repeat(prefix, len(states) // len(prefix), axis=0)
+                comfort_states_cache = np.concatenate((prefix, states), axis=1)
+        return comfort_states_cache
+
     if self_reference_progress:
         ep = _ones_like_lead(pred)
         ep_gated = _zeros_like_lead(pred)
@@ -414,7 +435,7 @@ def pdms_proxy(
     out["ego_progress_gt_gate"] = ep_gated
 
     hc = torch.as_tensor(
-        _ns.comfort_score_from_states(_states_numpy(), dt).reshape(_leading_shape(pred)),
+        _ns.comfort_score_from_states(_comfort_states_numpy(), dt).reshape(_leading_shape(pred)),
         dtype=torch.float32,
         device=pred.device,
     )
