@@ -26,6 +26,7 @@ class ClosedLoopConfig:
         default=True,
     )
     wandb_project: str = cli("Weights & Biases project name (empty=disabled)", default="")
+    port: str = "22323"
 
     # FullRouteClosedLoopEvaluation
     closed_loop_seg_len: int = 100000
