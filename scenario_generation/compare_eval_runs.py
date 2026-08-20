@@ -53,7 +53,7 @@ def load_run_data(run_dir: Path) -> tuple[dict[str, Any], dict[str, dict[str, An
             row = json.loads(line)
         except Exception:
             continue
-        scen_key = row.get("case_key") or f"{row.get('scenario')}_{row.get('route')}"
+        scen_key = row.get("case_key") or row.get("scene_id") or row.get("route") or row.get("id") or f"{row.get('scenario')}_{row.get('route')}"
         row["diagnostics"] = diagnose_case(row)
         cases[scen_key] = row
 
