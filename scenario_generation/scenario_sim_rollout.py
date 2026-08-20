@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
 from collections import deque
 from concurrent.futures import Executor
@@ -207,12 +208,11 @@ def _resolve_route_for_ego(
 
     x0, y0, h0 = baselink_xyh(runner.get_ego_state(ego_ref=ego_name))
     ego0_xy = np.array([x0, y0], dtype=np.float32)
-    ego_route_ids = resolve_route(
+    ego_route_ids, goal_pose = resolve_route(
         builder, ego0_xy, h0, osc_path, ego_name, min_len_m=cfg.find_route_min_len_m
     )
     if not ego_route_ids:
         raise RuntimeError("Empty ego route -- cannot build SceneContext")
-    goal_pose = builder._route_goal(ego_route_ids)
     if verbose:
         print(
             f"  [scenario_sim] route={len(ego_route_ids)} lanelets, "
@@ -397,6 +397,11 @@ def run_scenario_sim_rollout(
     a caller that outlives one scenario reuse a parsed map, which is per-map work a
     per-scenario process would otherwise pay per scenario.
     """
+    # Participants in one DDS domain all discover each other, so processes sharing a domain cost
+    # N^2 of discovery. 101 is the last domain whose RTPS base ports clear Linux's ephemeral
+    # range; setdefault, because a caller that knows its slot assigns better than pid modulo.
+    os.environ.setdefault("ROS_DOMAIN_ID", str(os.getpid() % 101))
+
     import openscenario_python as osp  # requires the SSV2_HEADLESS_EGO overlay
 
     cfg = config or RolloutConfig()
