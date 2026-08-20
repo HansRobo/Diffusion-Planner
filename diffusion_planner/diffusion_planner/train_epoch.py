@@ -66,11 +66,15 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
         neighbors_future = heading_to_cos_sin(neighbors_future)
         neighbors_future[mask] = 0.0
+        # Only rank 0 dumps the debug image: in a torch.distributed.run launch every rank
+        # would otherwise reach its own last step and race to write the same
+        # {debug_dir}/epoch{epoch:03d}.png path. The scalar rename stats stay per-rank
+        # (cheap, and reduce_and_average_losses below already averages them across ranks).
         inputs["neighbor_agents_past"], rename_stats = apply_and_report_unknown_rename(
             inputs,
             args.unknown_class_rename_prob,
             debug_dir=args.unknown_rename_debug_dir,
-            is_last_step=(step == num_steps - 1),
+            is_last_step=(step == num_steps - 1) and ddp.get_rank() == 0,
             epoch=epoch,
         )
         inputs = args.observation_normalizer(inputs)

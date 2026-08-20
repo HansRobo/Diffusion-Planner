@@ -225,7 +225,10 @@ def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector
 
     for step, raw_inputs in enumerate(data_loader):
         raw_inputs = {key: value.to(args.device) for key, value in raw_inputs.items()}
-        is_last_step = step == num_steps - 1
+        # Only rank 0 dumps the debug image: in a torch.distributed.run launch every rank
+        # would otherwise reach its own last step and race to write the same
+        # {debug_dir}/epoch{epoch:03d}.png path.
+        is_last_step = step == num_steps - 1 and ddp.get_rank() == 0
 
         if step_rng.random() < args.sft_prob:
             step_loss = _sft_step(
