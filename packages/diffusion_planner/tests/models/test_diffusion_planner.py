@@ -126,9 +126,7 @@ class DiffusionPlannerTest(unittest.TestCase):
         torch.testing.assert_close(loss, torch.tensor([[[[0.0, 1.5, 0.125, 0.125]]]]))
 
     def test_trajectory_loss_applies_ego_and_neighbor_weights(self) -> None:
-        target = torch.tensor(
-            [[[[0.0, 0.0, 1.0, 0.0]], [[0.0, 0.0, 1.0, 0.0]]]]
-        )
+        target = torch.tensor([[[[0.0, 0.0, 1.0, 0.0]], [[0.0, 0.0, 1.0, 0.0]]]])
         prediction = target.clone()
         prediction[..., 0] += 0.5
 

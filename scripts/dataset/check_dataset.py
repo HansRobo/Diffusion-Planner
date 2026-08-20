@@ -26,7 +26,9 @@ def benchmark_loading(
     total = len(dataset) if limit is None else min(len(dataset), limit)
     source = dataset if shuffle else Subset(dataset, range(total))
     sampler = (
-        RandomSampler(dataset, replacement=False, num_samples=total) if shuffle else None
+        RandomSampler(dataset, replacement=False, num_samples=total)
+        if shuffle
+        else None
     )
     loader = DataLoader(
         source,

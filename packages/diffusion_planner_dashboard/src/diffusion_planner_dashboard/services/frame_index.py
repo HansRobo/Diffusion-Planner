@@ -148,6 +148,7 @@ def _load_parquet_index(path: Path) -> FrameIndex:
         },
     )
 
+
 def _validate_h5(file: h5py.File, path: Path) -> None:
     if file.attrs.get("format") != H5_FORMAT:
         raise ValueError(f"Unexpected H5 format: {path}")

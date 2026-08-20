@@ -26,9 +26,7 @@ def _model() -> DiffusionPlanner:
 class OptimizerTest(unittest.TestCase):
     def test_linear_embedding_modules_use_muon(self) -> None:
         model = _model()
-        groups = classify_params(
-            model, (model.trajectory_decoder.output_projection,)
-        )
+        groups = classify_params(model, (model.trajectory_decoder.output_projection,))
         muon_names = {name for name, _ in groups["muon"]}
 
         self.assertIn("trajectory_decoder.agent_pose_embedding.weight", muon_names)
@@ -37,9 +35,7 @@ class OptimizerTest(unittest.TestCase):
 
     def test_bare_embeddings_use_no_decay_adamw(self) -> None:
         model = _model()
-        groups = classify_params(
-            model, (model.trajectory_decoder.output_projection,)
-        )
+        groups = classify_params(model, (model.trajectory_decoder.output_projection,))
         no_decay_names = {name for name, _ in groups["adamw_no_decay"]}
 
         self.assertIn("trajectory_decoder.ego_embedding", no_decay_names)
@@ -47,9 +43,7 @@ class OptimizerTest(unittest.TestCase):
 
     def test_explicit_output_layer_uses_decayed_adamw(self) -> None:
         model = _model()
-        groups = classify_params(
-            model, (model.trajectory_decoder.output_projection,)
-        )
+        groups = classify_params(model, (model.trajectory_decoder.output_projection,))
         decay_names = {name for name, _ in groups["adamw_decay"]}
 
         self.assertIn("trajectory_decoder.output_projection.weight", decay_names)

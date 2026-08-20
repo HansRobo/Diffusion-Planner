@@ -218,9 +218,7 @@ class TrajectoryDecoder(nn.Module):
             dim=0,
         )
         features = (
-            features
-            + agent_embedding[None]
-            + self.agent_pose_embedding(agent_pos)
+            features + agent_embedding[None] + self.agent_pose_embedding(agent_pos)
         )
         features = features.masked_fill(x_mask.unsqueeze(-1), 0.0)
 

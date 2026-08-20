@@ -22,9 +22,7 @@ class PlannerDataNormalizer:
         self.speed_scale = speed_scale
         self.vehicle_shape_scale = vehicle_shape_scale
 
-    def __call__(
-        self, frame: Mapping[str, NDArray[Any]]
-    ) -> dict[str, NDArray[Any]]:
+    def __call__(self, frame: Mapping[str, NDArray[Any]]) -> dict[str, NDArray[Any]]:
         """Return a normalized shallow copy of one unbatched frame."""
         normalized = dict(frame)
         for key in (

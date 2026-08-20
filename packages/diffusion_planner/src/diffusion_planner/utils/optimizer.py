@@ -26,6 +26,7 @@ NO_DECAY_MODULES = (
     nn.Embedding,
 )
 
+
 def classify_params(
     model: nn.Module, output_layers: Sequence[nn.Module]
 ) -> ParamGroups:
@@ -94,6 +95,7 @@ def _validate_param_groups(
     invalid_muon = [name for name, parameter in groups["muon"] if parameter.ndim != 2]
     if invalid_muon:
         raise ValueError(f"Muon parameters must be 2-D: {invalid_muon}")
+
 
 class MuonWithAuxAdamW(optim.Optimizer):
     """Expose a Muon and an auxiliary AdamW through one Optimizer interface."""
