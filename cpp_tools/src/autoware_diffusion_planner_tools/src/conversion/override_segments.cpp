@@ -4,11 +4,10 @@
 
 #include "conversion/override_segments.hpp"
 
+#include "nlohmann/json.hpp"
 #include "rosbag/parsed_bag_data.hpp"
 
 #include <autoware_vehicle_msgs/msg/control_mode_report.hpp>
-
-#include "nlohmann/json.hpp"
 
 #include <filesystem>
 #include <fstream>

@@ -22,7 +22,6 @@ import wandb
 
 from scenario_generation.closed_loop_score_keys import extract_score
 
-
 # (display column name, source key in a per-group summary dict)
 _ABS_COLUMNS = [
     ("Group", "group"),
@@ -100,14 +99,11 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
         return {}
 
     values = list(group_summaries.values())
-    objects_only_values = [
-        s for k, s in group_summaries.items() if "__noobj/" not in k
-    ]
+    objects_only_values = [s for k, s in group_summaries.items() if "__noobj/" not in k]
 
     n_segments = sum(int(s.get("n_segments", 0) or 0) for s in values)
     route_num = sum(
-        float(s.get("mean_route_completion", 0.0) or 0.0)
-        * int(s.get("n_segments", 0) or 0)
+        float(s.get("mean_route_completion", 0.0) or 0.0) * int(s.get("n_segments", 0) or 0)
         for s in values
     )
 
@@ -117,8 +113,13 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
         "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in values),
         "mean_route_completion": (route_num / n_segments) if n_segments else 0.0,
     }
-    for k in ("total_curb_hits", "total_snaps", "total_red_light_violations",
-              "total_strong_brakes", "n_segments_diverged"):
+    for k in (
+        "total_curb_hits",
+        "total_snaps",
+        "total_red_light_violations",
+        "total_strong_brakes",
+        "n_segments_diverged",
+    ):
         agg[k] = sum(int(extract_score(s, k) or 0) for s in values)
     agg["total_collision_events"] = sum(
         int(extract_score(s, "total_collision_events") or 0) for s in objects_only_values
@@ -137,16 +138,15 @@ def _build_table(
     rows: list[list] = []
     for group_key in sorted(group_summaries.keys()):
         summary = group_summaries[group_key]
-        rows.append([
-            _short_label(group_key) if src == "group" else value_fn(src, summary)
-            for _, src in cols
-        ])
+        rows.append(
+            [
+                _short_label(group_key) if src == "group" else value_fn(src, summary)
+                for _, src in cols
+            ]
+        )
 
     all_agg = _aggregate(group_summaries)
-    rows.append([
-        "All" if src == "group" else value_fn(src, all_agg)
-        for _, src in cols
-    ])
+    rows.append(["All" if src == "group" else value_fn(src, all_agg) for _, src in cols])
 
     return wandb.Table(columns=[c[0] for c in cols], data=rows)
 
@@ -235,7 +235,7 @@ def _build_stacked_bar_html(json_label: str, per_1000steps_table: wandb.Table) -
     return (
         f'<div id="{chart_id}" style="width:100%;height:{chart_height}px;min-width:0;"></div>'
         '<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>'
-        '<script>'
+        "<script>"
         f"var dom = document.getElementById({json.dumps(chart_id)});"
         f"var chart = echarts.init(dom);"
         f"chart.setOption({json.dumps(option)});"
@@ -254,6 +254,8 @@ def build_per_1000steps_stacked_panels(
     out: dict[str, wandb.Html] = {}
     for json_label, group_summaries in sorted(by_json.items()):
         out[f"{json_label}/count_per_1000steps"] = wandb.Html(
-            _build_stacked_bar_html(json_label, _build_table(json_label, "per_1000steps", group_summaries))
+            _build_stacked_bar_html(
+                json_label, _build_table(json_label, "per_1000steps", group_summaries)
+            )
         )
     return out

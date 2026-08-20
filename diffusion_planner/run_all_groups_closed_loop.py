@@ -209,8 +209,7 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
         objects_only_values = [s for k, s in summaries.items() if "__noobj/" not in k]
         n_segments = sum(int(s.get("n_segments", 0) or 0) for s in summaries.values())
         route_num = sum(
-            float(s.get("mean_route_completion", 0.0) or 0.0)
-            * int(s.get("n_segments", 0) or 0)
+            float(s.get("mean_route_completion", 0.0) or 0.0) * int(s.get("n_segments", 0) or 0)
             for s in summaries.values()
         )
         agg = {
@@ -218,18 +217,26 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
             "n_segments": n_segments,
             "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in summaries.values()),
             "mean_route_completion": (route_num / n_segments) if n_segments else 0.0,
-            "total_curb_hits": sum(int(s.get("road_border", {}).get("collision_count", 0) or 0)
-                                   for s in summaries.values()),
-            "total_snaps": sum(int(s.get("reproducer", {}).get("snap_count", 0) or 0)
-                               for s in summaries.values()),
-            "total_red_light_violations": sum(int(s.get("red_light_violation", {}).get("count", 0) or 0)
-                                              for s in summaries.values()),
-            "total_strong_brakes": sum(int(s.get("strong_brake", {}).get("count", 0) or 0)
-                                       for s in summaries.values()),
-            "n_segments_diverged": sum(int(s.get("n_segments_diverged", 0) or 0)
-                                       for s in summaries.values()),
-            "total_collision_events": sum(int(s.get("object", {}).get("collision_count", 0) or 0)
-                                          for s in objects_only_values),
+            "total_curb_hits": sum(
+                int(s.get("road_border", {}).get("collision_count", 0) or 0)
+                for s in summaries.values()
+            ),
+            "total_snaps": sum(
+                int(s.get("reproducer", {}).get("snap_count", 0) or 0) for s in summaries.values()
+            ),
+            "total_red_light_violations": sum(
+                int(s.get("red_light_violation", {}).get("count", 0) or 0)
+                for s in summaries.values()
+            ),
+            "total_strong_brakes": sum(
+                int(s.get("strong_brake", {}).get("count", 0) or 0) for s in summaries.values()
+            ),
+            "n_segments_diverged": sum(
+                int(s.get("n_segments_diverged", 0) or 0) for s in summaries.values()
+            ),
+            "total_collision_events": sum(
+                int(s.get("object", {}).get("collision_count", 0) or 0) for s in objects_only_values
+            ),
         }
     Path(out_dir, "groups.json").write_text(json.dumps(agg, indent=2, ensure_ascii=False))
 
@@ -325,9 +332,7 @@ def run_closed_loop_main(
                 _write_groups_manifest(json_out_dir, per_json_summaries)
 
         if all_group_names:
-            _log_to_wandb(
-                cfg, all_group_names, all_summaries, wandb_run=wandb_run
-            )
+            _log_to_wandb(cfg, all_group_names, all_summaries, wandb_run=wandb_run)
 
     return True
 
