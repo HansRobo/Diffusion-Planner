@@ -44,7 +44,7 @@ def load_model(model_path: str | Path, device: str = "cuda"):
     args_file = str(Path(model_path).parent / "args.json")
     args = Config(args_file)
     model = Diffusion_Planner(args)
-    ckpt = torch.load(str(model_path), map_location=device)
+    ckpt = torch.load(str(model_path), map_location=device, weights_only=False)
     state = ckpt.get("model", ckpt)
     state = {k.replace("module.", ""): v for k, v in state.items()}
     model.load_state_dict(state)
