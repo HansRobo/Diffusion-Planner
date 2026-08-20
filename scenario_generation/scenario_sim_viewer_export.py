@@ -14,6 +14,7 @@ import json
 import math
 import re
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,11 @@ _KEY_SEPARATORS = ("_", "__")
 _SCENARIO_ID_RE = re.compile(
     r"(?<![0-9a-fA-F-])([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})(?![0-9a-fA-F-])"
 )
+
+# The interpreter states the trigger and the unmet conditions in the failure message, so they
+# are read back out of it rather than stored a second time.
+_TRIGGER_RE = re.compile(r"\):\s*(.*?)(?:\nUnmet success conditions:|\Z)", re.S)
+_UNMET_RE = re.compile(r'^\s*-\s*"(.+?)"\s*$', re.M)
 
 # What a case is grouped under when its path carries no scenario id. A run made entirely of
 # these is a suite the export cannot read, not an empty run.
@@ -140,6 +146,63 @@ def scenario_id_of(rel: str | None, case_key: str) -> str:
     return found.group(1) if found else _UNKNOWN_SCENARIO
 
 
+def read_verdict(case_dir: Path) -> dict[str, Any]:
+    """The scenario's own verdict on a case, or a statement that it never reached one.
+
+    The interpreter writes ``result.junit.xml`` only when the storyboard resolves, so an absent
+    file means the rollout hit the step limit first. The row's ``result_kind`` cannot say that:
+    it is preset to a Timeout failure at configure time, so an undecided case still reads
+    ``Failure`` there. Undecided is its own state.
+    """
+    path = case_dir / "osp_out" / "result.junit.xml"
+    if not path.is_file():
+        return {"decided": False}
+    try:
+        case = ET.parse(path).getroot().find(".//testcase")
+    except (OSError, ET.ParseError) as exc:
+        print(f"viewer_export: unreadable verdict for {case_dir.name}: {exc}", file=sys.stderr)
+        return {"decided": False}
+    if case is None:
+        return {"decided": False}
+    node, kind = case.find("failure"), "Failure"
+    if node is None:
+        node, kind = case.find("error"), "Error"
+    if node is None:
+        return {"decided": True, "kind": "Pass"}
+    message = node.get("message") or ""
+    trigger = _TRIGGER_RE.search(message)
+    return {
+        "decided": True,
+        "kind": kind,
+        "type": node.get("type"),
+        # A configure-time error carries no triggering condition, only a message, so that
+        # message stands in as the trigger.
+        "trigger": trigger.group(1).strip() if trigger else (message.strip() or None),
+        "unmet": _UNMET_RE.findall(message),
+    }
+
+
+def verdict_reason(case_dir: Path) -> str | None:
+    """One line naming why a case reached no row, from the verdict it managed to write.
+
+    Nothing else survives such a case: it has no row to carry a metric, and the raw run it
+    failed in is not part of the export.
+    """
+    verdict = read_verdict(case_dir)
+    if not verdict.get("decided"):
+        return None
+    parts = [verdict.get("type") or verdict.get("kind"), verdict.get("trigger")]
+    return ": ".join(p for p in parts if p) or None
+
+
+def _tally_verdicts(verdicts: list[dict[str, Any]]) -> dict[str, int]:
+    """Three decided counts and the undecided one, so no consumer has to subtract."""
+    out = {"pass": 0, "failure": 0, "error": 0, "undecided": 0}
+    for verdict in verdicts:
+        out[verdict["kind"].lower() if verdict.get("decided") else "undecided"] += 1
+    return out
+
+
 def collect_cases(run_dir: Path) -> tuple[dict[str, list[dict]], list[str]]:
     """Read every case that produced a row, keyed by scenario.
 
@@ -202,13 +265,22 @@ def write_viewer_tree(
         strong_brake = float(rows[0].get("strong_brake", {}).get("thresh_mps2") or -2.5)
 
         clean_rows = []
+        case_verdicts = []
         for row in rows:
-            row.pop("_case_dir", None)
+            case_dir = Path(row.pop("_case_dir"))
             row.pop("_rel", None)
             row["scenario"] = scenario
 
             clean_rows.append(row)
-            case_lines.append(json.dumps(sanitize(row), ensure_ascii=False, allow_nan=False))
+            verdict = read_verdict(case_dir)
+            case_verdicts.append(verdict)
+            # Not in the aggregated rows: ``aggregate`` rolls a row up by key prefix and has
+            # no business seeing a block it cannot reduce.
+            case_lines.append(
+                json.dumps(
+                    sanitize({**row, "verdict": verdict}), ensure_ascii=False, allow_nan=False
+                )
+            )
             tally["rows"] += 1
 
         summary = aggregate(clean_rows, near_miss, strong_brake_mps2=strong_brake)
@@ -224,6 +296,7 @@ def write_viewer_tree(
 
         scenarios[scenario] = {
             "n_cases": len(clean_rows),
+            "verdicts": _tally_verdicts(case_verdicts),
             "error": scenario_errors.get(scenario),
             _UNMEASURED_MARKER_KEY: unmeasured + ["reproducer"],
             "summary": sanitize(summary),
@@ -237,10 +310,16 @@ def write_viewer_tree(
             continue
         scenarios[scenario] = {
             "n_cases": 0,
+            "verdicts": {"pass": 0, "failure": 0, "error": 0, "undecided": 0},
             "error": message,
             _UNMEASURED_MARKER_KEY: [],
             "summary": None,
         }
+
+    meta["verdicts"] = {
+        key: sum(e["verdicts"][key] for e in scenarios.values())
+        for key in ("pass", "failure", "error", "undecided")
+    }
 
     tree.cases.write_text("\n".join(case_lines) + "\n", encoding="utf-8")
     _dump_json(tree.scenarios, scenarios)
@@ -272,7 +351,10 @@ def export(run_dir: Path, out_root: Path) -> dict[str, dict[str, int]]:
             s: f"{len(k)} of this scenario's case(s) produced no row: {', '.join(k[:5])}"
             for s, k in per_scenario.items()
         }
-        missing_rows = [{"case_key": key} for key in missing]
+        # A key alone says a case vanished; the verdict it managed to write says why.
+        missing_rows = [
+            {"case_key": key, "reason": verdict_reason(run_dir / key)} for key in missing
+        ]
 
     meta = {
         "run_dir": str(run_dir),
