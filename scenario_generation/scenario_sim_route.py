@@ -7,6 +7,7 @@ the production stack would resolve for the same scenario.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -39,13 +40,16 @@ def _goal_lane_position(osc_path: str | Path, ego_name: str) -> tuple[int, float
             lp = routing.find(".//LanePosition")
             if lp is not None and "laneId" in lp.attrib:
                 try:
-                    return (
-                        int(lp.attrib["laneId"]),
-                        float(lp.attrib.get("s", 0.0)),
-                        float(lp.attrib.get("offset", 0.0)),
-                    )
+                    ll_id = int(lp.attrib["laneId"])
+                    arc = float(lp.attrib.get("s", 0.0))
+                    offset = float(lp.attrib.get("offset", 0.0))
                 except ValueError:
                     return None
+                # ``float`` accepts "nan" and "inf", which would reach the planner as a goal
+                # rather than as the malformed attribute they are.
+                if not (math.isfinite(arc) and math.isfinite(offset)):
+                    return None
+                return ll_id, arc, offset
     return None
 
 
@@ -68,7 +72,7 @@ def resolve_route(
 
     The goal pose is the authored ``LanePosition`` when there is one, so the planner aims at
     the point the scenario judges arrival against. It falls back to the route's last centreline
-    point only when the scenario authors no goal, or the map does not carry it.
+    point only when the scenario authors no goal, or the map does not carry that lanelet.
     """
     start_ll = builder.snap_to_nearest_ll(ego_xy, heading_rad=ego_heading)
     if start_ll is None:
@@ -78,8 +82,9 @@ def resolve_route(
         goal_ll, s, offset = authored
         route = builder.route_between(start_ll, goal_ll)
         if route:
-            pose = builder.lane_position_pose(goal_ll, s, offset)
-            return route, (pose if pose is not None else builder._route_goal(route))
+            # ``has_lanelet_id`` established the lanelet is cached, which is the only thing
+            # ``lane_position_pose`` needs to answer.
+            return route, builder.lane_position_pose(goal_ll, s, offset)
         print(
             f"  [scenario_sim][WARN] goal lanelet {goal_ll} unreachable from {start_ll}; "
             "falling back to find_route"

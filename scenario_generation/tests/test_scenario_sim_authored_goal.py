@@ -116,6 +116,15 @@ def test_goal_lane_position_none_when_the_scenario_authors_no_goal(tmp_path: Pat
     assert _goal_lane_position(_write(tmp_path, _XOSC_NO_GOAL), "ego") is None
 
 
+def test_goal_lane_position_rejects_a_non_finite_attribute(tmp_path: Path) -> None:
+    """``float`` parses "nan" and "inf" without complaint; a goal must not."""
+    for bad in ("nan", "inf", "-inf"):
+        osc = _write(tmp_path, _XOSC.format(lane=20, s=bad, offset="0"))
+        assert _goal_lane_position(osc, "ego") is None
+        osc = _write(tmp_path, _XOSC.format(lane=20, s="1.0", offset=bad))
+        assert _goal_lane_position(osc, "ego") is None
+
+
 def test_resolve_route_plans_towards_the_authored_lane_position(tmp_path: Path) -> None:
     osc = _write(tmp_path, _XOSC.format(lane=20, s="12.5", offset="0"))
     builder = _StubBuilder()
@@ -123,16 +132,6 @@ def test_resolve_route_plans_towards_the_authored_lane_position(tmp_path: Path) 
     assert route == [10, 20]
     np.testing.assert_allclose(goal, [5.0, 6.0, 0.25])
     assert builder.find_route_calls == 0
-
-
-def test_resolve_route_falls_back_to_the_route_end_when_the_map_lacks_the_pose(
-    tmp_path: Path,
-) -> None:
-    osc = _write(tmp_path, _XOSC.format(lane=20, s="12.5", offset="0"))
-    builder = _StubBuilder(lane_pose=None)
-    route, goal = resolve_route(builder, np.zeros(2), 0.0, osc, "ego")
-    assert route == [10, 20]
-    np.testing.assert_allclose(goal, [99.0, 99.0, 0.0])
 
 
 def test_resolve_route_falls_back_to_find_route_when_the_goal_is_off_the_map(
