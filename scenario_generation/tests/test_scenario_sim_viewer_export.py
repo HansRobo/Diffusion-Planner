@@ -11,7 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from scenario_generation.scenario_sim_viewer_export import export, key_aliases, load_submitted
+from scenario_generation.scenario_sim_viewer_export import (
+    ViewerTree,
+    export,
+    key_aliases,
+    load_submitted,
+)
 
 # Shaped like a suite's map path, because the map id is read out of it. Nothing on disk.
 _MAP = "/map/example_project/1/1-0001/lanelet2_map.osm"
@@ -80,6 +85,7 @@ def _make_run(root: Path, rels: list[str], *, submitted: list[str] | None = None
         case.mkdir(parents=True, exist_ok=True)
         (case / "row.json").write_text(json.dumps(_row()))
         (case / "rollout.jsonl").write_text("\n".join(trace) + "\n")
+        (case / f"{case.name}.mp4").write_bytes(b"\x00")
     return root
 
 
@@ -94,8 +100,12 @@ def test_the_listing_is_three_files_at_the_run_root(tmp_path):
 
     cases = [json.loads(ln) for ln in (out / "cases.jsonl").read_text().splitlines()]
     assert len(cases) == 2
+    tree = ViewerTree(out)
     for case in cases:
         assert case["scenario"] == _SC1
+        stem = case["route"]
+        assert tree.video(_SC1, stem).is_file()
+        assert tree.rollout(_SC1, stem).is_file()
 
 
 def test_exported_json_carries_no_non_json_constants(tmp_path):

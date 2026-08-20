@@ -10,9 +10,12 @@ costs no re-export. :class:`ViewerTree` names every path that gets written.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
+import os
 import re
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -60,6 +63,15 @@ class ViewerTree:
     @property
     def cases(self) -> Path:
         return self.root / "cases.jsonl"
+
+    def media(self, scenario: str) -> Path:
+        return self.root / "media" / scenario
+
+    def video(self, scenario: str, case: str) -> Path:
+        return self.media(scenario) / f"{case}.mp4"
+
+    def rollout(self, scenario: str, case: str) -> Path:
+        return self.media(scenario) / f"{case}.rollout.jsonl"
 
 
 def sanitize(obj: Any) -> Any:
@@ -144,6 +156,24 @@ def scenario_id_of(rel: str | None, case_key: str) -> str:
     """The id the scenario is known by elsewhere, which is what lines runs up against it."""
     found = _SCENARIO_ID_RE.search(rel or case_key)
     return found.group(1) if found else _UNKNOWN_SCENARIO
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Hardlink ``src`` to ``dst``, copying only across filesystems.
+
+    The raw run and the viewer tree name the same file rather than storing it twice. ``EXDEV``
+    is the one failure a copy answers; any other says the destination is wrong. An existing
+    ``dst`` means two cases resolved to one name, which must not read as a successful export.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dst)
+    except FileExistsError:
+        raise SystemExit(f"viewer_export: two cases claim {dst}") from None
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        shutil.copy2(src, dst)
 
 
 def read_verdict(case_dir: Path) -> dict[str, Any]:
@@ -245,8 +275,8 @@ def write_viewer_tree(
 ) -> dict[str, dict[str, int]]:
     """Write the export. Returns ``{scenario: {"rows": n}}``.
 
-    Three files at the run root, so opening the listing costs three reads rather than two per
-    scenario. See :class:`ViewerTree`.
+    Three files at the run root and the media per scenario, so opening the listing costs three
+    reads rather than two per scenario. See :class:`ViewerTree`.
     """
     # Laid over an earlier export the index would be replaced while its other contents stayed:
     # one run described, two contained.
@@ -259,6 +289,7 @@ def write_viewer_tree(
     case_lines: list[str] = []
 
     for scenario, rows in sorted(by_scenario.items()):
+        tree.media(scenario).mkdir(parents=True, exist_ok=True)
         tally = {"rows": 0}
 
         near_miss = float(rows[0].get("object", {}).get("miss_thresh_m") or 1.0)
@@ -270,7 +301,15 @@ def write_viewer_tree(
             case_dir = Path(row.pop("_case_dir"))
             row.pop("_rel", None)
             row["scenario"] = scenario
+            case = str(row["case_key"])
 
+            mp4 = case_dir / f"{row['case_key']}.mp4"
+            if mp4.is_file():
+                _link_or_copy(mp4, tree.video(scenario, case))
+
+            trace = case_dir / "rollout.jsonl"
+            if trace.is_file():
+                _link_or_copy(trace, tree.rollout(scenario, case))
             clean_rows.append(row)
             verdict = read_verdict(case_dir)
             case_verdicts.append(verdict)
@@ -358,6 +397,8 @@ def export(run_dir: Path, out_root: Path) -> dict[str, dict[str, int]]:
 
     meta = {
         "run_dir": str(run_dir),
+        # A frame is ``draw_every`` sim steps, and the container is encoded at the sim tick
+        # rate, so the video plays that many times faster than the run.
         "draw_every": ctx.get("draw_every"),
         "scenario_root": ctx.get("scenario_root"),
         "ckpt": ctx.get("ckpt"),
@@ -394,7 +435,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     a = _parse_args(argv)
-    export(a.run_dir, a.out_root)
+    export(
+        a.run_dir,
+        a.out_root,
+    )
     return 0
 
 
