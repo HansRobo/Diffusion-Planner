@@ -218,6 +218,33 @@ def get_args(args_list=None):
         help="diffusion = DiT/DPM-Solver decoder; drivor = proposal + PDM scorer head "
         "(ego trajectory only)",
     )
+    # ---- trajectory sampling ---------------------------------------------
+    # Three different time axes; see diffusion_planner/utils/drivor_sampling.py.
+    parser.add_argument(
+        "--drivor_num_poses",
+        type=int,
+        default=_train_config_default("drivor_num_poses"),
+        help="poses the head emits. NOT --future_len: the dataset stores 80 poses "
+        "at 0.1 s (8 s) and the expert target is sub-sampled to these stamps. "
+        "Free to raise -- a one-shot head pays nothing for extra poses. Use 8 "
+        "with --drivor_pose_dt 0.5 for DrivoR's upstream num_poses.",
+    )
+    parser.add_argument(
+        "--drivor_pose_dt",
+        type=float,
+        default=_train_config_default("drivor_pose_dt"),
+        help="seconds between emitted poses. Times --drivor_num_poses this is the "
+        "planning horizon, which must stay at navsim's 4 s or PDMS is not "
+        "comparable to it. Must be a multiple of the dataset's 0.1 s.",
+    )
+    parser.add_argument(
+        "--drivor_scoring_num_poses",
+        type=int,
+        default=_train_config_default("drivor_scoring_num_poses"),
+        help="steps the PDM oracle scores at --drivor_oracle_dt (navsim's "
+        "proposal_sampling: 40 @ 0.1 s). Must cover the same horizon: proposals "
+        "are interpolated up to this grid before scoring.",
+    )
     for _name in (
         "drivor_proposal_num",
         "drivor_ref_num",

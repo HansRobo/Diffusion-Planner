@@ -33,6 +33,10 @@ from diffusion_planner.utils.drivor_metrics import (
     trajectory_metrics,
 )
 from diffusion_planner.utils.drivor_oracle import DrivoROracle, TTC_UNDEFINED
+from diffusion_planner.utils.drivor_sampling import (
+    resample_expert_future,
+    scoring_horizon_slice,
+)
 from diffusion_planner.utils.train_utils import compute_grad_stats
 
 
@@ -55,6 +59,8 @@ def build_drivor_loss(args) -> DrivoRLoss:
 def build_drivor_oracle(args) -> DrivoROracle:
     return DrivoROracle(
         dt=args.drivor_oracle_dt,
+        pose_dt=args.drivor_pose_dt,
+        scoring_num_poses=args.drivor_scoring_num_poses,
         collision_stride=args.drivor_oracle_collision_stride,
         ttc_stride=args.drivor_oracle_ttc_stride,
         border_stride=args.drivor_oracle_border_stride,
@@ -96,13 +102,26 @@ def resolve_device(args) -> torch.device:
 # batch preparation
 # --------------------------------------------------------------------------
 def prepare_batch(inputs: dict, args, aug=None):
-    """Augment, then split the batch into model and oracle views.
+    """Augment, then split the batch into model, oracle and target views.
 
     The oracle needs metres: ``ObservationNormalizer`` returns a shallow copy, so
     the pre-normalization dict is handed to the oracle while the model consumes
     the normalized one.  Neighbour futures stay in their (x, y, heading) layout
     for the oracle -- this head predicts no neighbours, so nothing else needs the
     (cos, sin) form.
+
+    The three time axes of :mod:`drivor_sampling` are separated here, once:
+
+    * ``ego_future`` is sub-sampled to the head's own ``drivor_num_poses`` at
+      ``drivor_pose_dt`` -- by default 40 @ 0.1 s, i.e. the first 4 s of the
+      stored rows verbatim -- and is the imitation target.
+    * ``ego_reference`` and the oracle's neighbour futures are *clipped* to the
+      scorer's ``drivor_scoring_num_poses`` (40 @ 0.1 s, the same 4 s).  Clipping
+      keeps the dataset's 0.1 s, which already is the scoring step, so it is
+      exact; up-sampling a coarser grid back to it would not be.
+
+    Augmentation runs first, on the full stored horizon, so every derived view
+    stays consistent with the perturbed scene.
     """
     inputs["ego_agent_past"] = heading_to_cos_sin(inputs["ego_agent_past"])
     inputs["goal_pose"] = heading_to_cos_sin(inputs["goal_pose"])
@@ -113,10 +132,17 @@ def prepare_batch(inputs: dict, args, aug=None):
         inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
 
     ego_future = heading_to_cos_sin(ego_future)
+    scoring_steps = int(args.drivor_scoring_num_poses)
+    horizon = scoring_horizon_slice(scoring_steps, ego_future.shape[1])
+    ego_reference = ego_future[:, horizon]
+    ego_future = resample_expert_future(
+        ego_future, int(args.drivor_num_poses), float(args.drivor_pose_dt)
+    )
+
     oracle_inputs = dict(inputs)
-    oracle_inputs["neighbor_agents_future"] = neighbors_future
+    oracle_inputs["neighbor_agents_future"] = neighbors_future[:, :, horizon]
     model_inputs = args.observation_normalizer(inputs)
-    return model_inputs, oracle_inputs, ego_future
+    return model_inputs, oracle_inputs, ego_future, ego_reference
 
 
 # --------------------------------------------------------------------------
@@ -430,7 +456,7 @@ def train_epoch_drivor(
         inputs = {
             key: value.to(device, non_blocking=True) for key, value in inputs.items()
         }
-        model_inputs, oracle_inputs, ego_future = prepare_batch(inputs, args, aug)
+        model_inputs, oracle_inputs, ego_future, ego_reference = prepare_batch(inputs, args, aug)
 
         detailed = (step % log_every) == 0
 
@@ -442,7 +468,7 @@ def train_epoch_drivor(
         # The oracle is pure geometry on metric tensors -- fp32, no grad, and
         # deliberately outside autocast so label boundaries cannot move with the
         # compute dtype.
-        labels = oracle(pred["proposals"], oracle_inputs, ego_future)
+        labels = oracle(pred["proposals"], oracle_inputs, ego_reference)
         loss_dict = loss_fn(pred, ego_future, labels)
 
         optimizer.zero_grad(set_to_none=True)
@@ -578,20 +604,22 @@ def validate_drivor(
     for inputs in iterator:
         inputs = {key: value.to(device, non_blocking=True) for key, value in inputs.items()}
         # Validation is never augmented: the metric has to describe the data.
-        model_inputs, oracle_inputs, ego_future = prepare_batch(inputs, args, aug=None)
+        model_inputs, oracle_inputs, ego_future, ego_reference = prepare_batch(
+            inputs, args, aug=None
+        )
 
         with torch.autocast(
             device_type="cuda", dtype=dtype, enabled=bool(args.use_amp) and device.type == "cuda"
         ):
             _, pred = model(model_inputs)
 
-        labels = oracle(pred["proposals"], oracle_inputs, ego_future)
+        labels = oracle(pred["proposals"], oracle_inputs, ego_reference)
         loss_dict = loss_fn(pred, ego_future, labels)
         accumulator.add(loss_dict)
         traj_accumulator.add(trajectory_metrics(pred, ego_future))
         traj_accumulator.add(selection_metrics(loss_dict, "val"))
 
-        selected = oracle(pred["trajectory"][:, None], oracle_inputs, ego_future)[:, 0]
+        selected = oracle(pred["trajectory"][:, None], oracle_inputs, ego_reference)[:, 0]
         # The TTC sentinel means "no evaluable step", not "score 2"; the panel
         # reports it the way the aggregate treats it -- as no infraction.
         ttc_column = ORACLE_PANEL_KEYS.index("time_to_collision_within_bound")

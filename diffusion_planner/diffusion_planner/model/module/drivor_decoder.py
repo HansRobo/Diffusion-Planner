@@ -43,7 +43,11 @@ class DrivoRDecoder(nn.Module):
 
         self.proposal_num = int(config.drivor_proposal_num)
         self.ref_num = int(config.drivor_ref_num)
-        self.poses_num = int(config.future_len)
+        # The head's own trajectory length, NOT Diffusion-Planner's ``future_len``
+        # (80 poses / 8 s): this head's horizon is navsim's 4 s, by default 40
+        # poses at 0.1 s.  One linear layer's width, so the pose count is free --
+        # see ``TrainConfig.drivor_num_poses`` for the measurement.
+        self.poses_num = int(config.drivor_num_poses)
         self.state_size = POSE_STATE_SIZE
 
         # Learned proposal queries.  DrivoR uses one token per trajectory.

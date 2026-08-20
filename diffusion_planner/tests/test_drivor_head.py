@@ -29,6 +29,8 @@ from diffusion_planner.utils.drivor_oracle import ORACLE_METRIC_NAMES, TTC_UNDEF
 from diffusion_planner.utils.drivor_train import DivergenceGuard, heading_to_cos_sin
 
 HIDDEN = 32
+# Shrunk for speed; the head is horizon-agnostic (the shipped default is 40 poses
+# at 0.1 s -- see ``diffusion_planner/utils/drivor_sampling.py``).
 HORIZON = 8
 PROPOSALS = 6
 TOKENS = 12
@@ -39,7 +41,8 @@ class HeadConfig:
     """The subset of ``TrainConfig`` the head reads."""
 
     hidden_dim: int = HIDDEN
-    future_len: int = HORIZON
+    drivor_num_poses: int = HORIZON
+    drivor_pose_dt: float = 0.1
     drivor_proposal_num: int = PROPOSALS
     drivor_ref_num: int = 2
     drivor_scorer_ref_num: int = 2

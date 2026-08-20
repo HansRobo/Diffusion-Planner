@@ -36,12 +36,56 @@ Losses (`model/module/drivor_loss.py`):
 Deliberately dropped from DrivoR: Hungarian agent loss, BEV semantic CE,
 drivable-area raster, and `diversity_loss` (DrivoR runs `inter_weight=0`).
 
+## Output trajectory sampling
+
+Three grids meet in this head, and `utils/drivor_sampling.py` is the only place
+that converts between them:
+
+| grid | sampling | fixed by |
+|---|---|---|
+| dataset `ego_agent_future` | 80 poses @ 0.1 s (8 s) | the NPZ shards |
+| **head output** | **40 poses @ 0.1 s (4 s)** | `--drivor_num_poses` / `--drivor_pose_dt` |
+| PDM scorer | 40 steps @ 0.1 s | `pdm_scoring/default_scoring_parameters.yaml` |
+
+The **horizon** is not a free choice: the devkit scores `proposal_sampling:
+num_poses: 40, interval_length: 0.1`, so a head emitting 8 s makes PDMS
+incomparable to the devkit's — and not merely rescaled, since two sub-scores are
+*easier* over 8 s (measured on the expert trajectory: DAC 0.9629 vs 0.9766, DDC
+0.9453 vs 0.9766). Diffusion-Planner's `--future_len 80` is unrelated to this
+head and is left alone; only the expert target is re-sampled.
+
+The **density** inside those 4 s *is* free, because the head is one-shot: the
+pose count is one linear layer's width, not a rollout length. Measured on one
+H100 at batch 64:
+
+| head output | scored | model f+b | oracle | step |
+|---|---|---|---|---|
+| 8 @ 0.5 s | 40 @ 0.1 s | 370.6 ms | 30.2 ms | 400.9 ms |
+| **40 @ 0.1 s** | 40 @ 0.1 s | 364.5 ms | 26.1 ms | **390.6 ms** |
+| 80 @ 0.1 s | 80 @ 0.1 s | 364.8 ms | 33.7 ms | 398.5 ms |
+
+Hence the default: navsim's horizon at the 10 Hz the dataset and the downstream
+controller already use, so nothing is interpolated anywhere — the expert target
+is `slice(0, 40)` of the stored rows and the proposals reach the oracle
+untouched. DrivoR upstream instead emits `num_poses: 8` (`drivoR.yaml`) at
+`t4_trajectory_dt_s: 0.5` (`t4_training.yaml`); `--drivor_num_poses 8
+--drivor_pose_dt 0.5` reproduces that and everything still lines up, because
+`upsample_poses` then interpolates the proposals onto the scoring grid exactly
+the way navsim's `transform_trajectory` + `get_trajectory_as_array` do (linear in
+x/y, unwrap → linear → wrap on the heading, anchored on the ego pose at t=0,
+checked against a numpy transcription of nuPlan's `InterpolatedTrajectory` to
+1e-12). Over 512 validation scenes the two representations of the *expert*
+trajectory score identically — PDMS 0.9680 on all six sub-scores — so the
+coarse grid is a control-side choice, not an accuracy one.
+
+`tests/test_drivor_sampling.py` (21 tests) covers both configurations.
+
 ## The PDM oracle
 
 `utils/drivor_oracle.py` is a batched GPU re-implementation of the devkit's PDM
 scorer, working directly on Diffusion-Planner's ego-centric NPZ tensors — no
-devkit `Scene` objects, no CPU round-trip. ~12 ms and ~1.7 GiB at B=64, N=64,
-T=80, i.e. under 10 % of a training step.
+devkit `Scene` objects, no CPU round-trip. 26 ms and 0.40 GiB at B=64, N=64 over
+the scorer's 40 steps, i.e. under 7 % of a 391 ms training step.
 
 Every shape is static (no `.item()`, `torch.compile`-friendly). Candidate
 prefilters (`max_neighbours`, `max_border_segments`, `max_route_segments`) are
@@ -49,7 +93,7 @@ made *provably conservative* by a per-timestep guard ball that covers the whole
 proposal set plus the expert path: anything farther than
 `guard_radius + ego_radius + other_radius` cannot touch any scored trajectory.
 
-`tests/test_drivor_oracle.py` (33 tests) checks each metric against a scalar
+`tests/test_drivor_oracle.py` (37 tests) checks each metric against a scalar
 reference implementation.
 
 ### Comfort needs a simulator, not finite differences
@@ -184,8 +228,9 @@ scalars accumulate on the GPU (one all-reduce + one readback per epoch), gradien
 statistics only on the log cadence, and the divergence guard's readback is issued
 *after* `backward()` is enqueued so it overlaps with real work.
 
-The encoder is ~92 % of the step (43.8 GiB / 812 ms of a 46 GiB / 884 ms step at
-B=64 uncompiled); the head and oracle together add ~2 GiB and ~70 ms. No packed
+The encoder dominates: at B=64 uncompiled it is 94.6 % of peak memory and 83.6 %
+of the step (44.2 GiB / 344 ms of a 46.8 GiB / 412 ms step), the head adds
+2.1 GiB / 10 ms and the oracle plus loss 0.4 GiB / 58 ms. No packed
 sample cache is needed: 8 dataloader workers per rank deliver 180-2200 samples/s
 against a GPU that consumes ~100/s per rank.
 

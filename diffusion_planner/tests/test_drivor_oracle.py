@@ -24,8 +24,12 @@ from planner_metrics import pdms_navsim as ref
 from planner_metrics.pdm_simulator import STATE_ANGULAR_VELOCITY
 from planner_metrics.pdm_simulator_torch import initial_states_from_ego, simulate_proposals
 
-DT = 0.1
-HORIZON = 40
+from diffusion_planner.utils.drivor_sampling import upsample_poses
+
+DT = 0.1  # navsim's ``proposal_sampling.interval_length``
+HORIZON = 40  # navsim's ``proposal_sampling.num_poses`` -- the grid every metric uses
+NUM_POSES = 8  # DrivoR's ``num_poses``: what the head emits, before up-sampling
+POSE_DT = 0.5  # ``t4_trajectory_dt_s``
 HISTORY = 31  # the NPZ's ego_agent_past length: 3.0 s of past plus the current pose
 NUM_NEIGHBOURS = 6
 NUM_LINE_STRINGS = 4
@@ -36,10 +40,15 @@ POINTS_PER_ROUTE = 20
 EGO_SHAPE = (2.8, 4.9, 2.0)  # (wheel_base, length, width)
 
 
-def _exact_oracle() -> DrivoROracle:
-    """Strides of 1 and no candidate pruning: the reference's exact grid."""
+def _exact_oracle(pose_dt: float = DT) -> DrivoROracle:
+    """Strides of 1 and no candidate pruning: the reference's exact grid.
+
+    ``pose_dt`` defaults to the scoring step, i.e. proposals are already dense
+    and reach the metrics untouched; pass ``POSE_DT`` to declare a coarse head.
+    """
     return DrivoROracle(
         dt=DT,
+        pose_dt=pose_dt,
         collision_stride=1,
         ttc_stride=1,
         border_stride=1,
@@ -758,8 +767,14 @@ def test_output_shape_and_ranges():
         assert values.max() <= 1.0, name
 
 
-def test_production_strides_track_the_exact_grid():
-    """The shipped strides must not change the labels on ordinary scenes."""
+def test_shipped_oracle_scores_every_step():
+    """The shipped defaults must be the reference's exact grid, not a sub-sample.
+
+    With the horizon at navsim's 40 steps rather than the dataset's 80, scoring
+    every step is affordable, so the per-metric strides that used to trade
+    accuracy for time are all 1.  The numerical comparison stays as the guard
+    that fires if one is ever raised again.
+    """
     rng = np.random.default_rng(11)
     batch, num = 2, 12
     inputs = _empty_inputs(batch)
@@ -801,9 +816,87 @@ def test_production_strides_track_the_exact_grid():
         max_border_segments=NUM_LINE_STRINGS * (POINTS_PER_LINE_STRING - 1),
         max_route_segments=NUM_ROUTE * (POINTS_PER_ROUTE - 1),
     )
+    assert (
+        shipped.collision_stride,
+        shipped.ttc_stride,
+        shipped.border_stride,
+        shipped.route_stride,
+    ) == (1, 1, 1, 1)
+    # The shipped head emits on the scoring grid, so ``_to_scoring_grid`` is a
+    # pass-through and no proposal is ever interpolated in production.
+    assert shipped.pose_dt == shipped.dt
+    assert shipped.scoring_num_poses == HORIZON
     torch.testing.assert_close(
         shipped(tensor, inputs, future), _exact_oracle()(tensor, inputs, future)
     )
+
+
+def test_coarse_proposals_are_upsampled_to_the_scoring_grid():
+    """The head emits 8 poses at 0.5 s; the oracle must score the 40-step version.
+
+    ``compute_navsim_score.py`` interpolates every proposal to
+    ``proposal_sampling`` before the simulator runs, so feeding the oracle the
+    coarse poses has to be identical to interpolating them first and feeding it
+    those -- otherwise the strides, the neighbour futures and the EP reference
+    would all be indexing a different grid than the proposals.
+    """
+    rng = np.random.default_rng(23)
+    batch, num = 2, 5
+    inputs = _empty_inputs(batch, speed=8.0)
+    experts = []
+    for b in range(batch):
+        span = np.linspace(-5.0, 60.0, POINTS_PER_LINE_STRING)
+        _add_line_string(inputs, b, 0, np.stack([span, np.full_like(span, 5.0)], axis=-1), True)
+        _add_line_string(inputs, b, 1, np.stack([span, np.full_like(span, -5.0)], axis=-1), True)
+        _add_route(
+            inputs,
+            b,
+            0,
+            np.stack(
+                [np.linspace(-5.0, 60.0, POINTS_PER_ROUTE), np.zeros(POINTS_PER_ROUTE)], axis=-1
+            ),
+            half_width=2.5,
+        )
+        t = np.arange(1, HORIZON + 1) * DT
+        _add_neighbour(
+            inputs, b, 0, np.stack([26.0 + 2.0 * t, np.zeros_like(t)], axis=-1), 0.0, (1.8, 4.4)
+        )
+        experts.append(_straight_proposal(8.0))
+    future = _ego_future(experts)
+
+    stride = int(round(POSE_DT / DT))
+    coarse = torch.as_tensor(
+        np.stack(
+            [
+                np.stack(
+                    [
+                        _straight_proposal(
+                            float(rng.uniform(4.0, 11.0)),
+                            lateral=float(rng.uniform(-2.0, 2.0)),
+                            curvature=float(rng.uniform(-0.004, 0.004)),
+                        )[stride - 1 :: stride]
+                        for _ in range(num)
+                    ]
+                )
+                for _ in range(batch)
+            ]
+        ),
+        dtype=torch.float32,
+    )
+    assert coarse.shape == (batch, num, NUM_POSES, 4)
+
+    oracle = _exact_oracle(pose_dt=POSE_DT)
+    dense = upsample_poses(coarse, HORIZON, POSE_DT, DT)
+    assert dense.shape == (batch, num, HORIZON, 4)
+    torch.testing.assert_close(oracle(coarse, inputs, future), oracle(dense, inputs, future))
+
+
+def test_oracle_rejects_a_reference_off_the_scoring_grid():
+    """The EP reference, the neighbour futures and the proposals share one grid."""
+    inputs = _empty_inputs(1)
+    proposals = torch.as_tensor(_straight_proposal(6.0)[None, None], dtype=torch.float32)
+    with pytest.raises(ValueError, match="expert reference has"):
+        _exact_oracle()(proposals, inputs, _ego_future([_straight_proposal(6.0)])[:, :20])
 
 
 if __name__ == "__main__":

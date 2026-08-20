@@ -201,12 +201,45 @@ class TrainConfig:
     drivor_label_smoothing: float = 0.02
     drivor_grad_clip: float = 1.0
 
-    # PDM oracle (batched GPU labels for the model's own proposals)
+    # Trajectory sampling -- NOT Diffusion-Planner's OUTPUT_T (80 poses / 8 s).
+    #
+    # The *horizon* is the part that is not a free choice: navsim scores 4 s
+    # (``pdm_scoring/default_scoring_parameters.yaml``), so anything longer makes
+    # PDMS incomparable to it.  The *density* inside those 4 s is free -- the head
+    # is one-shot, so the pose count only changes one linear layer's width.
+    # Measured on an H100 at batch 64: model forward+backward is 365 ms whether
+    # the head emits 8 poses or 80, and the whole step is 393 ms at 40 poses vs
+    # 393 ms at 8 (1.00x).
+    #
+    # Hence 40 @ 0.1 s: navsim's horizon at the 10 Hz the dataset and the
+    # downstream controller already use, so no interpolation is needed anywhere.
+    # DrivoR upstream instead emits ``num_poses: 8`` (``drivoR.yaml``) at
+    # ``t4_trajectory_dt_s: 0.5`` (``t4_training.yaml``) and lets navsim's
+    # ``transform_trajectory`` interpolate; set ``--drivor_num_poses 8
+    # --drivor_pose_dt 0.5`` for that and everything still lines up.  Measured on
+    # 512 validation scenes, the two representations of the *expert* trajectory
+    # score identically (PDMS 0.9680 both ways, on all six sub-scores), so this
+    # is a control-side choice, not an accuracy one.  See
+    # ``diffusion_planner/utils/drivor_sampling.py``.
+    drivor_num_poses: int = 40
+    drivor_pose_dt: float = 0.1
+
+    # PDM oracle (batched GPU labels for the model's own proposals).
+    # ``default_scoring_parameters.yaml``'s ``proposal_sampling`` is
+    # ``num_poses: 40, interval_length: 0.1``.  ``drivor_oracle_dt`` is the
+    # *scoring* step, which is what the LQR rollout and every finite difference
+    # in the metrics run at; at the defaults above the head already emits on this
+    # grid, so proposals reach the oracle without interpolation.
     drivor_oracle_dt: float = 0.1
-    drivor_oracle_collision_stride: int = 2
-    drivor_oracle_ttc_stride: int = 2
-    drivor_oracle_border_stride: int = 2
-    drivor_oracle_route_stride: int = 4
+    drivor_scoring_num_poses: int = 40
+    # navsim's PDMScorer evaluates every simulated step; a stride > 1 is an
+    # approximation.  With the horizon at navsim's 40 steps instead of the
+    # dataset's 80, scoring every step is affordable (27 ms of a 393 ms step), so
+    # these default to navsim's behaviour.
+    drivor_oracle_collision_stride: int = 1
+    drivor_oracle_ttc_stride: int = 1
+    drivor_oracle_border_stride: int = 1
+    drivor_oracle_route_stride: int = 1
     drivor_oracle_max_neighbours: int = 32
     drivor_oracle_max_border_segments: int = 96
     drivor_oracle_max_route_segments: int = 128

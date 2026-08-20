@@ -75,6 +75,8 @@ from planner_metrics.pdms_navsim import (
 )
 from planner_metrics.pdm_simulator_torch import initial_states_from_ego, simulate_proposals
 
+from diffusion_planner.utils.drivor_sampling import upsample_poses
+
 # The oracle's output channels, in order.  The first six are exactly DrivoR's
 # scorer heads (``DRIVOR_HEAD_METRICS``); the seventh is their PDMS aggregate,
 # DrivoR's ``score`` pseudo-metric.
@@ -333,17 +335,26 @@ class DrivoROracle:
         self,
         *,
         dt: float = 0.1,
-        collision_stride: int = 2,
-        ttc_stride: int = 2,
-        border_stride: int = 2,
-        route_stride: int = 4,
+        pose_dt: float = 0.1,
+        scoring_num_poses: int = 40,
+        collision_stride: int = 1,
+        ttc_stride: int = 1,
+        border_stride: int = 1,
+        route_stride: int = 1,
         max_neighbours: int = 32,
         max_border_segments: int = 96,
         max_route_segments: int = 128,
         proposal_chunk: int = 0,
         score_weights: tuple[float, ...] = (1.0, 1.0, 0.0, 5.0, 5.0, 2.0),
     ) -> None:
+        # ``dt`` is the *scoring* step (``interval_length: 0.1``), ``pose_dt`` the
+        # step the head emits at.  They are equal at the shipped defaults, so
+        # proposals arrive already on the scoring grid; a coarser head (DrivoR's
+        # ``t4_trajectory_dt_s: 0.5``) is up-sampled to ``scoring_num_poses``
+        # here, exactly as ``compute_navsim_score.py`` does before simulating.
         self.dt = float(dt)
+        self.pose_dt = float(pose_dt)
+        self.scoring_num_poses = int(scoring_num_poses)
         self.collision_stride = int(collision_stride)
         self.ttc_stride = int(ttc_stride)
         self.border_stride = int(border_stride)
@@ -367,17 +378,21 @@ class DrivoROracle:
         """Score proposals.
 
         Args:
-            proposals: ``[B, N, T, 4]`` metric (x, y, cos, sin), ego frame.
+            proposals: ``[B, N, P, 4]`` metric (x, y, cos, sin), ego frame, on the
+                head's own ``pose_dt`` grid.  Up-sampled here to
+                ``scoring_num_poses`` at ``dt`` before anything is scored;
+                already-dense proposals are passed through.
             inputs: the **un-normalized** observation dict (the oracle needs
                 metres; ``ObservationNormalizer`` returns a shallow copy, so the
                 caller's original dict is the right thing to pass).
-            ego_future: ``[B, T, 4]`` expert future, the EP reference path.
+            ego_future: ``[B, scoring_num_poses, 4]`` expert future at ``dt``, the
+                EP reference path.
             scene: optional pre-built :class:`OracleScene` (see :meth:`prepare`).
 
         Returns:
             ``[B, N, 7]`` float32 labels in :data:`ORACLE_METRIC_NAMES` order.
         """
-        proposals = proposals.detach().float()
+        proposals = self._to_scoring_grid(proposals.detach().float())
         if scene is None:
             scene = self.prepare(inputs, ego_future, proposals)
 
@@ -398,6 +413,24 @@ class DrivoROracle:
         out = torch.cat((components, score[..., None]), dim=-1)
         assert out.shape == (batch, num_proposals, len(ORACLE_METRIC_NAMES))
         return out
+
+    def _to_scoring_grid(self, proposals: torch.Tensor) -> torch.Tensor:
+        """Up-sample the head's coarse poses to the scorer's sampling.
+
+        ``compute_navsim_score.py`` runs every proposal through
+        ``transform_trajectory`` + ``get_trajectory_as_array`` at
+        ``proposal_sampling`` before the simulator ever sees it, so *all* six
+        sub-scores are computed on the 0.1 s grid -- not just comfort, whose
+        rollout needs it.  :func:`upsample_poses` is that step in tensor form.
+
+        Proposals that already carry ``scoring_num_poses`` are returned as-is,
+        which keeps the oracle usable on dense trajectories (the numerical tests
+        against ``planner_metrics.pdms_navsim`` feed it those directly).
+        """
+        num_poses = proposals.shape[-2]
+        if num_poses == self.scoring_num_poses:
+            return proposals
+        return upsample_poses(proposals, self.scoring_num_poses, self.pose_dt, self.dt)
 
     def _aggregate(self, components: torch.Tensor) -> torch.Tensor:
         """PDMS over the oracle labels: NC * DAC * weighted mean of the rest."""
@@ -462,6 +495,15 @@ class DrivoROracle:
         ego_radius = ego_half.norm(dim=-1)  # [B]
         nb_radius = nb_half.norm(dim=-1)  # [B, A]
         ref_xy = ego_future[..., :2].float()  # [B, T, 2]
+        if ref_xy.shape[1] != horizon:
+            # The neighbour futures, the EP reference and the up-sampled proposals
+            # all index the same per-step grid; a mismatch here would silently
+            # compare different instants.
+            raise ValueError(
+                f"expert reference has {ref_xy.shape[1]} steps but the neighbour "
+                f"futures have {horizon}; both must be the scorer's "
+                f"{self.scoring_num_poses} steps at {self.dt} s"
+            )
         guard_centre, guard_radius = self._guard_ball(ref_xy, proposals)
         gap = (nb_xy - guard_centre[:, None]).norm(dim=-1)  # [B, A, T]
         gap = gap - guard_radius[:, None, :] - ego_radius[:, None, None] - nb_radius[:, :, None]
