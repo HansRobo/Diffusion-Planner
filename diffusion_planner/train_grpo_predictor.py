@@ -127,14 +127,9 @@ def get_args():
         "--unknown_rename_debug_dir",
         type=str,
         default="",
-        help="if set, periodically dump a before/after PNG of the unknown_class_rename_prob "
-        "augmentation here so you can visually confirm which agents get renamed (empty = off)",
-    )
-    parser.add_argument(
-        "--unknown_rename_debug_every_n_steps",
-        type=int,
-        default=200,
-        help="how often (in training steps) to dump the rename debug PNG, when the debug dir is set",
+        help="if set, dump one before/after PNG per epoch (on that epoch's last training "
+        "step) of the unknown_class_rename_prob augmentation here so you can visually "
+        "confirm which agents get renamed (empty = off)",
     )
 
     # Training

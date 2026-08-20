@@ -5,9 +5,11 @@ Two complementary ways to check what the augmentation is actually doing during a
 
 1. Cheap per-step scalars (agent counts / rename rate) -- always computed, merged into the
    same loss dict already logged to stdout/wandb every step (see ``rename_stats``).
-2. Occasional before/after PNGs -- an actual picture of which agents got relabeled, so you
-   can eyeball that the augmentation is hitting sensible agents and not, say, only ever
-   picking the same slot. Off by default; enabled via ``unknown_rename_debug_dir``.
+2. One before/after PNG per epoch, dumped on that epoch's LAST training step -- an actual
+   picture of which agents got relabeled, with the ego vehicle (current pose + past +
+   ground-truth future) and lane/route context so the scene reads on its own without
+   needing to know the augmentation's internals. Off by default; enabled via
+   ``unknown_rename_debug_dir``.
 """
 
 from pathlib import Path
@@ -18,9 +20,37 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 
 from diffusion_planner.utils.data_augmentation import rename_agents_to_unknown
-from diffusion_planner.utils.visualize_input import draw_neighbor_agents
+from diffusion_planner.utils.visualize_input import (
+    draw_ego_vehicle,
+    draw_lanes,
+    draw_neighbor_agents,
+    draw_route,
+)
+
+_VIEW_RANGE_M = 60.0
+
+# Matches draw_neighbor_agents' own vehicle_type = argmax(neighbor[8:12]) color mapping in
+# visualize_input.py -- kept in sync manually since that function draws each neighbor via an
+# unlabeled LineCollection/bounding box, so this legend can't be derived automatically.
+_NEIGHBOR_TYPE_LEGEND = [
+    Line2D([0], [0], color="blue", lw=2, label="Vehicle"),
+    Line2D([0], [0], color="green", lw=2, label="Pedestrian"),
+    Line2D([0], [0], color="purple", lw=2, label="Bicycle"),
+    Line2D([0], [0], color="gray", lw=2, label="Unknown"),
+]
+
+_CONTEXT_KEYS = (
+    "ego_current_state",
+    "ego_shape",
+    "ego_agent_past",
+    "ego_agent_future",
+    "lanes",
+    "route_lanes",
+)
 
 
 def rename_stats(renamed_mask: torch.Tensor, valid_mask: torch.Tensor) -> dict:
@@ -36,74 +66,178 @@ def rename_stats(renamed_mask: torch.Tensor, valid_mask: torch.Tensor) -> dict:
     }
 
 
-def save_unknown_rename_debug_image(
+def _context_from_inputs(inputs: dict, sample_idx: int) -> dict:
+    """Slice+detach the scene-context keys draw_ego_vehicle/draw_lanes/draw_route need,
+    matching the same to_numpy + batch-slice convention visualize_inputs uses. Identical
+    across the before/after panels (only neighbor_agents_past changes), so this is built
+    once per dump, not once per panel."""
+
+    def one(key):
+        v = inputs[key]
+        v = v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else np.asarray(v)
+        return v[sample_idx : sample_idx + 1]
+
+    return {key: one(key) for key in _CONTEXT_KEYS}
+
+
+def _draw_rename_panel(
+    ax, neighbor_agents_past: np.ndarray, renamed: np.ndarray, context: dict, title: str
+) -> None:
+    """Draw one before/after panel: lane/route background, a labeled ego (current pose, past,
+    ground-truth future), and neighbor agents colored by type with renamed agents circled."""
+    draw_lanes(ax, context)
+    draw_route(ax, context, color="olive", label="Route")
+    ego_x, ego_y, _ego_state = draw_ego_vehicle(ax, context, show_future=True)
+    draw_neighbor_agents(ax, {"neighbor_agents_past": neighbor_agents_past})
+
+    last_t = neighbor_agents_past.shape[2] - 1
+    any_circled = False
+    for i in np.nonzero(renamed)[0]:
+        x, y = neighbor_agents_past[0, i, last_t, 0], neighbor_agents_past[0, i, last_t, 1]
+        if abs(x) + abs(y) < 1e-6:  # padding slot, nothing to circle
+            continue
+        ax.add_patch(plt.Circle((x, y), 3.0, fill=False, ec="red", lw=2, zorder=10))
+        any_circled = True
+
+    ax.set_title(title)
+    ax.set_xlabel("X [m]")
+    ax.set_ylabel("Y [m]")
+    ax.set_aspect("equal")
+    ax.grid(alpha=0.3)
+    ax.set_xlim(ego_x - _VIEW_RANGE_M, ego_x + _VIEW_RANGE_M)
+    ax.set_ylim(ego_y - _VIEW_RANGE_M, ego_y + _VIEW_RANGE_M)
+
+    # draw_ego_vehicle/draw_route already set label= on their own past-trajectory/route lines;
+    # everything else (current pose, GT future, neighbor-type colors, renamed marker) has no
+    # automatic legend entry, so add proxy handles for those explicitly.
+    handles, _labels = ax.get_legend_handles_labels()
+    handles += [
+        Line2D([0], [0], color="red", lw=2, label="Ego (current pose)"),
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="none",
+            markerfacecolor="purple",
+            markersize=6,
+            label="Ego GT future (ground truth, not model output)",
+        ),
+        *_NEIGHBOR_TYPE_LEGEND,
+    ]
+    if any_circled:
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="none",
+                markeredgecolor="red",
+                markersize=10,
+                markeredgewidth=2,
+                label="Renamed to Unknown this step",
+            )
+        )
+    ax.legend(handles=handles, fontsize=7, loc="upper left")
+
+
+def _build_unknown_rename_debug_figure(
     before: torch.Tensor,
     after: torch.Tensor,
     renamed_mask: torch.Tensor,
-    save_path: str,
+    context: dict,
     sample_idx: int = 0,
-) -> None:
-    """Save a before/after PNG of one batch sample's neighbor agents so a human can confirm
-    which agents rename_agents_to_unknown relabeled -- the color flip to gray (Unknown) is
-    also circled in red since two side-by-side panels can be easy to eyeball past.
+) -> Figure:
+    """Build (but don't save) the before/after debug figure. Split out from
+    save_unknown_rename_debug_image so callers (tests) can inspect the figure -- legend
+    contents, titles -- before it gets closed.
 
     before/after: [B, N, T, D] raw (pre-normalization) neighbor_agents_past (after is the
         tensor rename_agents_to_unknown returned; before must be a clone taken beforehand,
         since that function mutates in place).
     renamed_mask: [B, N] bool, as returned by rename_agents_to_unknown.
+    context: dict with the raw (pre-normalization), un-sliced-by-sample scene tensors
+        ego_current_state/ego_shape/ego_agent_past/ego_agent_future/lanes/route_lanes --
+        identical across the before/after panels, see _context_from_inputs.
     sample_idx: which batch row to render (defaults to the first).
     """
     before_np = before[sample_idx : sample_idx + 1].detach().cpu().numpy()
     after_np = after[sample_idx : sample_idx + 1].detach().cpu().numpy()
     renamed = renamed_mask[sample_idx].detach().cpu().numpy()
-    last_t = before_np.shape[2] - 1
+    n_renamed = int(renamed.sum())
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
-    for ax, arr, title in ((axes[0], before_np, "before"), (axes[1], after_np, "after")):
-        draw_neighbor_agents(ax, {"neighbor_agents_past": arr})
-        ax.plot(0, 0, marker="s", color="black", markersize=8, zorder=11)  # ego at origin
-        for i in np.nonzero(renamed)[0]:
-            x, y = arr[0, i, last_t, 0], arr[0, i, last_t, 1]
-            if abs(x) + abs(y) < 1e-6:  # padding slot, nothing to circle
-                continue
-            ax.add_patch(plt.Circle((x, y), 3.0, fill=False, ec="red", lw=2, zorder=10))
-        ax.set_title(f"{title} ({int(renamed.sum())} renamed)")
-        ax.set_aspect("equal")
-        ax.grid(alpha=0.2)
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+    _draw_rename_panel(
+        axes[0],
+        before_np,
+        renamed,
+        context,
+        f"Before rename ({n_renamed} agent(s) will be relabeled Unknown)",
+    )
+    _draw_rename_panel(
+        axes[1],
+        after_np,
+        renamed,
+        context,
+        f"After rename ({n_renamed} agent(s) relabeled Unknown)",
+    )
+    fig.suptitle(
+        "unknown_class_rename_prob augmentation check\n"
+        "Left: neighbor_agents_past BEFORE rename_agents_to_unknown ran. Right: the SAME "
+        "tensor AFTER. Red circles mark agents relabeled to the Unknown class this step."
+    )
+    return fig
 
-    fig.suptitle(f"unknown_class_rename_prob debug -- {Path(save_path).stem}")
+
+def save_unknown_rename_debug_image(
+    before: torch.Tensor,
+    after: torch.Tensor,
+    renamed_mask: torch.Tensor,
+    context: dict,
+    save_path: str,
+    sample_idx: int = 0,
+) -> None:
+    """Save a before/after PNG of one batch sample's scene (see
+    _build_unknown_rename_debug_figure for what's drawn and why)."""
+    fig = _build_unknown_rename_debug_figure(before, after, renamed_mask, context, sample_idx)
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, bbox_inches="tight", dpi=100)
     plt.close(fig)
 
 
 def apply_and_report_unknown_rename(
-    neighbor_agents_past: torch.Tensor,
+    inputs: dict,
     prob: float,
     *,
     debug_dir: str = "",
-    debug_every_n_steps: int = 200,
-    step: int = 0,
+    is_last_step: bool = False,
     epoch: int = 0,
 ) -> tuple[torch.Tensor, dict]:
-    """Apply rename_agents_to_unknown and return (tensor, stats) -- stats always includes the
-    per-step rename count/rate; if debug_dir is set and this step lands on the dump cadence,
-    also writes a before/after PNG there. This is the call site helper train_epoch.py /
-    grpo_epoch.py use so the confirmation logic lives in one place, not three.
+    """Apply rename_agents_to_unknown to inputs["neighbor_agents_past"] and return
+    (tensor, stats) -- stats always includes the per-step rename count/rate; if debug_dir is
+    set and this is the last training step of the epoch, also writes a before/after PNG
+    there (one per epoch, not one per dump-cadence step). This is the call site helper
+    train_epoch.py / grpo_epoch.py use so the confirmation logic lives in one place, not
+    three.
+
+    inputs: the raw (pre-normalization) training-step inputs dict -- read for
+        neighbor_agents_past (mutated by rename_agents_to_unknown) and, only when actually
+        dumping an image, ego_current_state/ego_shape/ego_agent_past/ego_agent_future/
+        lanes/route_lanes (untouched, just read for context).
     """
-    dump_image = bool(debug_dir) and step % max(debug_every_n_steps, 1) == 0
-    before = neighbor_agents_past.clone() if dump_image else None
+    dump_image = bool(debug_dir) and is_last_step
+    before = inputs["neighbor_agents_past"].clone() if dump_image else None
 
     neighbor_agents_past, renamed_mask, valid_mask = rename_agents_to_unknown(
-        neighbor_agents_past, prob
+        inputs["neighbor_agents_past"], prob
     )
     # Numeric only: this dict gets merged straight into the per-step loss dict, which
     # get_epoch_mean_loss averages key-by-key -- a string value here would break that.
     stats = rename_stats(renamed_mask, valid_mask)
 
     if dump_image and bool(renamed_mask.any()):
-        save_path = str(Path(debug_dir) / f"epoch{epoch:03d}_step{step:05d}.png")
-        save_unknown_rename_debug_image(before, neighbor_agents_past, renamed_mask, save_path)
+        context = _context_from_inputs(inputs, sample_idx=0)
+        save_path = str(Path(debug_dir) / f"epoch{epoch:03d}.png")
+        save_unknown_rename_debug_image(before, neighbor_agents_past, renamed_mask, context, save_path)
         print(f"[unknown_rename_debug] saved {save_path} ({stats['unknown_rename_count']} renamed)")
 
     return neighbor_agents_past, stats

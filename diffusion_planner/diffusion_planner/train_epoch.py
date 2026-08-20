@@ -39,6 +39,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         return empty, 0.0
 
     epoch_loss = []
+    num_steps = len(data_loader)
 
     model.train()
 
@@ -66,11 +67,10 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         neighbors_future = heading_to_cos_sin(neighbors_future)
         neighbors_future[mask] = 0.0
         inputs["neighbor_agents_past"], rename_stats = apply_and_report_unknown_rename(
-            inputs["neighbor_agents_past"],
+            inputs,
             args.unknown_class_rename_prob,
             debug_dir=args.unknown_rename_debug_dir,
-            debug_every_n_steps=args.unknown_rename_debug_every_n_steps,
-            step=step,
+            is_last_step=(step == num_steps - 1),
             epoch=epoch,
         )
         inputs = args.observation_normalizer(inputs)

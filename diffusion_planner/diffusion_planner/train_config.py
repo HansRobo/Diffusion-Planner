@@ -67,10 +67,9 @@ class TrainConfig:
     # 0.0 (default) is a true no-op that draws no random numbers.
     unknown_class_rename_prob: float = 0.0
     # Confirmation tooling for the above (see utils/unknown_rename_debug.py): the per-step
-    # rename count/rate is always logged; setting this directory additionally dumps a
-    # before/after PNG every unknown_rename_debug_every_n_steps. Empty = no images (default).
+    # rename count/rate is always logged; setting this directory additionally dumps one
+    # before/after PNG per epoch, on that epoch's last training step. Empty = no images.
     unknown_rename_debug_dir: str = ""
-    unknown_rename_debug_every_n_steps: int = 200
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True

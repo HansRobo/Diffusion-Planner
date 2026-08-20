@@ -43,7 +43,7 @@ def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
     return neighbors_future, mask
 
 
-def _sft_step(raw_inputs, model, optimizer, args, ema, aug, step: int = 0, epoch: int = 0):
+def _sft_step(raw_inputs, model, optimizer, args, ema, aug, is_last_step: bool = False, epoch: int = 0):
     """A standard supervised training step on the real GT (mirrors ``train_epoch``).
 
     ``aug`` is a ``StatePerturbation`` (or ``None``); when given it perturbs the ego
@@ -61,11 +61,10 @@ def _sft_step(raw_inputs, model, optimizer, args, ema, aug, step: int = 0, epoch
     ego_future = heading_to_cos_sin(ego_future)
     neighbors_future, neighbor_future_mask = _neighbor_future_world(neighbors_future_raw)
     inputs["neighbor_agents_past"], rename_stats = apply_and_report_unknown_rename(
-        inputs["neighbor_agents_past"],
+        inputs,
         args.unknown_class_rename_prob,
         debug_dir=args.unknown_rename_debug_dir,
-        debug_every_n_steps=args.unknown_rename_debug_every_n_steps,
-        step=step,
+        is_last_step=is_last_step,
         epoch=epoch,
     )
     inputs = args.observation_normalizer(inputs)
@@ -95,7 +94,15 @@ def _sft_step(raw_inputs, model, optimizer, args, ema, aug, step: int = 0, epoch
 
 
 def _grpo_step(
-    raw_inputs, model, optimizer, args, ema, collider_injector, aug, step: int = 0, epoch: int = 0
+    raw_inputs,
+    model,
+    optimizer,
+    args,
+    ema,
+    collider_injector,
+    aug,
+    is_last_step: bool = False,
+    epoch: int = 0,
 ):
     """A GRPO step: sample a group per scene, reward, advantage, policy-gradient update.
 
@@ -130,11 +137,10 @@ def _grpo_step(
     # every one of the N expanded copies of a scene sees an identical rename decision -- a
     # prerequisite for comparable group advantages, same as the collider injection above.
     raw_inputs["neighbor_agents_past"], rename_stats = apply_and_report_unknown_rename(
-        raw_inputs["neighbor_agents_past"],
+        raw_inputs,
         args.unknown_class_rename_prob,
         debug_dir=args.unknown_rename_debug_dir,
-        debug_every_n_steps=args.unknown_rename_debug_every_n_steps,
-        step=step,
+        is_last_step=is_last_step,
         epoch=epoch,
     )
 
@@ -203,6 +209,7 @@ def _grpo_step(
 
 def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector, aug, epoch: int = 0):
     epoch_loss = []
+    num_steps = len(data_loader)
 
     model.train()
 
@@ -218,12 +225,23 @@ def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector
 
     for step, raw_inputs in enumerate(data_loader):
         raw_inputs = {key: value.to(args.device) for key, value in raw_inputs.items()}
+        is_last_step = step == num_steps - 1
 
         if step_rng.random() < args.sft_prob:
-            step_loss = _sft_step(raw_inputs, model, optimizer, args, ema, aug, step=step, epoch=epoch)
+            step_loss = _sft_step(
+                raw_inputs, model, optimizer, args, ema, aug, is_last_step=is_last_step, epoch=epoch
+            )
         else:
             step_loss = _grpo_step(
-                raw_inputs, model, optimizer, args, ema, collider_injector, aug, step=step, epoch=epoch
+                raw_inputs,
+                model,
+                optimizer,
+                args,
+                ema,
+                collider_injector,
+                aug,
+                is_last_step=is_last_step,
+                epoch=epoch,
             )
 
         if args.ddp:
