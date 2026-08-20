@@ -25,6 +25,7 @@ class ClosedLoopConfig:
         "render video/colormap artifacts during wandb logging",
         default=True,
     )
+    wandb_project: str = cli("Weights & Biases project name (empty=disabled)", default="")
 
     # FullRouteClosedLoopEvaluation
     closed_loop_seg_len: int = 100000
@@ -49,7 +50,7 @@ class ClosedLoopConfig:
     closed_loop_abort_after: int = 30
     closed_loop_abort_max_snaps: int = 0
 
-    # for train part
+    # validation in training part
     closed_loop_wandb_video_pick: str = cli(
         "which episode gets video+colormap: 'worst'/'first'/'longest'",
         default="worst",

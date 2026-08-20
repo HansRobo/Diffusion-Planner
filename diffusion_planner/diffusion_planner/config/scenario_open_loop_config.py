@@ -13,7 +13,9 @@ class ScenarioOpenLoopConfig:
     scenario_based_open_loop_list: str = cli(
         "Path to the scenario-based open-loop list", default=""
     )
-    scenario_based_open_loop_only: bool = False
+    scenario_based_open_loop_only: bool = cli(
+        "run ONLY scenario-based open-loop, skip standard validation", default=False
+    )
 
     # ---------------------------------------------------------
     # Scenario-based Open-loop

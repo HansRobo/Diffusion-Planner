@@ -178,7 +178,15 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path: Path, monk
         wandb_project="",
     )
 
-    ok = mod.run_closed_loop_main(model=None, model_args=None, cfg=cfg, out_root=tmp_path)
+    ok = mod.run_closed_loop_main(
+        model=None,
+        model_args=None,
+        cfg=cfg,
+        out_root=tmp_path,
+        wandb_run=None,
+        only_json=None,
+        render_media=False,
+    )
     assert ok is True
     by_mode = {c["mode"]: c["out_dir"] for c in captured}
     assert by_mode == {
