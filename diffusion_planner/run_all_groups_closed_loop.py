@@ -139,15 +139,21 @@ def run_one_group(
                 unstick_radius_mult=cfg.closed_loop_unstick_radius_mult,
                 unstick_teleport_after=cfg.closed_loop_unstick_teleport_after,
                 draw_every=cfg.closed_loop_draw_every if render_media else None,
+                draw_workers=cfg.closed_loop_draw_workers,
                 replan_interval=cfg.closed_loop_replan_interval,
+                tracker_mode=cfg.closed_loop_tracker_mode,
+                neighbor_history_mode=cfg.closed_loop_neighbor_history_mode,
+                yaw_gate=cfg.closed_loop_yaw_gate,
+                strong_brake_mps2=cfg.closed_loop_strong_brake_mps2,
                 abort_deviation_m=cfg.closed_loop_abort_deviation_m,
                 abort_after=cfg.closed_loop_abort_after,
                 abort_max_snaps=cfg.closed_loop_abort_max_snaps,
-                draw_workers=cfg.closed_loop_draw_workers,
                 drop_objects=drop_objects,
             ),
             fps=float(cfg.closed_loop_fps),
             verbose=False,
+            profile=False,
+            max_jobs=None,
         ),
         npz_root_arg,
         seg_len=cfg.closed_loop_seg_len,
@@ -245,11 +251,12 @@ def run_closed_loop_main(
     model,  # always provided by the caller
     model_args,  # model args from load_model (for closed-loop rollout)
     cfg: ClosedLoopConfig,
-    out_root: str | Path | None = None,
+    out_root: str | Path | None,
     *,
-    wandb_run=None,  # Optional wandb.Run instance; if None, creates own session
-    only_json: list[str] | None = None,
-    render_media: bool | None = None,
+    wandb_run: "wandb.sdk.wandb_run.Run"
+    | None,  # Optional wandb.Run instance; if None, creates own session
+    only_json: list[str] | None,
+    render_media: bool | None,
 ) -> bool:
     """Unified entry point for closed-loop evaluation.
 
@@ -386,7 +393,9 @@ def main() -> int:
         model_args=model_args,
         cfg=cfg,
         out_root=out_root,
+        wandb_run=None,
         only_json=args.only_json,
+        render_media=None,
     )
     return int(not ok)
 
