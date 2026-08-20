@@ -26,17 +26,22 @@ WHAT IS BIT-EXACT to navsim:
 
 THE DOCUMENTED DEVIATIONS (unavoidable without installing navsim/nuplan, which
 need a maps DB + an old Python and conflict with our torch/numpy — verified):
-  1. **Ego kinematic state is DERIVED from the predicted poses** (finite
-     differences + the SAME savgol smoothing), not produced by navsim's
-     bicycle-model + LQR simulator. navsim ALWAYS routes a predicted trajectory
-     through ``simulator.simulate_proposals`` before scoring
-     (``navsim/evaluate/pdm_score.py``); we cannot run that simulator, so comfort
-     reads accel/yaw re-derived from the pose path. We also skip navsim's
-     rear-axle->center shift (it needs nuplan ``VehicleParameters`` = pacifica,
-     the WRONG vehicle for J6/jpntaxi anyway); lon/lat accel are decomposed in
-     the ego body frame, which is the physically-correct decomposition the shift
-     approximates. For a FIXED-vehicle ranking proxy this is a constant transform
-     that does not change the ordering between experiments.
+  1. **NC/TTC read pose-derived kinematics; comfort does not.** navsim ALWAYS
+     routes a predicted trajectory through ``simulator.simulate_proposals``
+     before scoring (``navsim/evaluate/pdm_score.py``), and comfort is the
+     sub-metric where that matters: finite-differencing raw waypoints amplifies
+     trajectory-head noise by ``1/dt**2`` and every proposal fails the
+     longitudinal-accel bound, so comfort collapses to a constant 0.  That
+     simulator is now ported -- ``planner_metrics.pdm_simulator`` (literal) and
+     ``pdm_simulator_torch`` (batched GPU) -- and ``comfort_score`` runs it, so
+     comfort is no longer a deviation.  NC/TTC still use ``states_from_poses``
+     (finite differences on the *predicted* path), which is the conservative
+     choice: it scores the trajectory as issued rather than as a tracker would
+     smooth it.
+     Note there is no rear-axle->center shift to reproduce:
+     ``state_array_to_center_state_array`` appears nowhere in navsim's scoring
+     path, and ``pdm_comfort_metrics._extract_ego_acceleration`` reads
+     ``StateIndex.ACCELERATION_X/Y`` off the rear-axle state directly.
   2. **Agents are GT-future, not policy-simulated.** NC/TTC use the ACTUAL
      future agent boxes from the ``.gt.tar`` sidecar (ground-truth future),
      where navsim uses a (non-)reactive traffic-agents policy forecast. The
@@ -89,6 +94,8 @@ from enum import IntEnum
 import numpy as np
 import numpy.typing as npt
 from scipy.signal import savgol_filter
+
+from planner_metrics import pdm_simulator as _sim
 
 # ---------------------------------------------------------------------------
 # State layout (navsim StateIndex, pdm_enums.py:StateIndex). We only fill the
@@ -300,11 +307,21 @@ def ego_is_comfortable(
 def states_from_poses(poses: npt.NDArray[np.float64], dt: float) -> npt.NDArray[np.float64]:
     """Build a navsim-layout state array ``[B, T, STATE_SIZE]`` from poses.
 
-    DEVIATION (#1): kinematics are DERIVED from the pose path (not navsim's
-    bicycle-model sim). World velocity/acceleration via central differences,
-    then accel decomposed into the ego BODY frame (lon=x, lat=y) so the comfort
-    lon/lat bounds apply to the correct components. ``poses`` is ``[..., T, 4]``
-    = (x, y, cos, sin); returns ``[..., T, STATE_SIZE]``.
+    Kinematics are DERIVED from the pose path: world velocity/acceleration via
+    central differences, then accel decomposed into the ego BODY frame (lon=x,
+    lat=y) so the comfort lon/lat bounds would apply to the correct components.
+
+    This is **not** what navsim feeds its comfort metric -- see
+    :func:`simulated_states_from_poses`, which runs the real LQR + bicycle-model
+    rollout, and which :func:`comfort_score` uses.  What is left here serves NC,
+    TTC and the Autoware extended-comfort port, all of which want the trajectory
+    as issued rather than as a tracker would follow it.  (The Autoware C++ reads
+    the planner message's own longitudinal-acceleration field with lateral pinned
+    to 0; our trajectories carry no acceleration channel, so finite differences
+    are the closest available stand-in there.)
+
+    ``poses`` is ``[..., T, 4]`` = (x, y, cos, sin); returns
+    ``[..., T, STATE_SIZE]``.
     """
     poses = np.asarray(poses, dtype=np.float64)
     lead = poses.shape[:-2]
@@ -338,16 +355,132 @@ def states_from_poses(poses: npt.NDArray[np.float64], dt: float) -> npt.NDArray[
     return states
 
 
-def comfort_score(poses: npt.NDArray[np.float64], dt: float) -> npt.NDArray[np.float64]:
+def simulated_states_from_poses(
+    poses: npt.NDArray[np.float64],
+    dt: float,
+    ego_current_state: npt.NDArray[np.float64] | None = None,
+    wheel_base: npt.NDArray[np.float64] | float | None = None,
+) -> npt.NDArray[np.float64]:
+    """navsim's ``PDMSimulator.simulate_proposals``: the states comfort scores.
+
+    Drives a ``BatchLQRTracker`` + ``BatchKinematicBicycleModel`` along the pose
+    path exactly as ``navsim/evaluate/pdm_score.py`` does before calling
+    ``PDMScorer``, so the returned states are the ones the six comfort bounds are
+    meant to be applied to.
+
+    ``poses`` is ``[..., T, 4]`` = (x, y, cos, sin); returns
+    ``[..., T + 1, STATE_SIZE]`` -- one row longer than the input, because
+    ``simulate_proposals`` prepends the ego's own state and
+    ``_calculate_is_comfortable`` scores it (``time_point_s = arange(0,
+    num_poses + 1) * interval_length``).
+
+    ``ego_current_state`` is Diffusion-Planner's ``[..., 10]`` ego row
+    (``[x, y, cos, sin, vx, vy, ax, ay, steering_angle, yaw_rate]``); it supplies
+    every column the rollout reads.  Without it the rollout's start state is
+    inferred from the trajectory's own leading finite differences, which is a
+    documented fallback, not navsim behaviour.  ``wheel_base`` goes to the motion
+    model only -- the tracker uses pacifica's 3.089 m regardless, mirroring the
+    original.
+
+    Runs on the GPU through ``pdm_simulator_torch`` when torch is importable and
+    falls back to the literal numpy transliteration otherwise; the two are pinned
+    to each other in ``planner_metrics/test_pdm_simulator.py``.
+    """
+    poses = np.asarray(poses, dtype=np.float64)
+    lead = poses.shape[:-2]
+    horizon = poses.shape[-2]
+    flat = poses.reshape(-1, horizon, 4)
+    xyh = np.stack(
+        (flat[..., 0], flat[..., 1], np.arctan2(flat[..., 3], flat[..., 2])), axis=-1
+    )
+
+    if ego_current_state is not None:
+        ego = np.asarray(ego_current_state, dtype=np.float64).reshape(-1, 10)
+        # One ego row per scene, broadcast over whatever proposal axes precede it.
+        repeats = len(flat) // len(ego)
+        ego = np.repeat(ego, repeats, axis=0)
+    else:
+        ego = None
+    if wheel_base is None:
+        base = float(_sim.WHEEL_BASE_PACIFICA)
+    else:
+        base = np.asarray(wheel_base, dtype=np.float64).reshape(-1)
+        base = float(base[0]) if base.size == 1 else np.repeat(base, len(flat) // len(base))
+
+    try:
+        import torch
+
+        from planner_metrics import pdm_simulator_torch as _sim_torch
+
+        poses_t = torch.as_tensor(xyh, dtype=torch.float64)
+        if torch.cuda.is_available():
+            poses_t = poses_t.cuda()
+        initial = (
+            _sim_torch.initial_states_from_ego(
+                torch.as_tensor(ego, dtype=torch.float64, device=poses_t.device)
+            )
+            if ego is not None
+            else _sim_torch.initial_states_from_poses(poses_t, dt)
+        )
+        if not isinstance(base, float):
+            base = torch.as_tensor(base, dtype=torch.float64, device=poses_t.device)
+        states = _sim_torch.simulate_proposals(poses_t, initial, dt, base).cpu().numpy()
+    except ImportError:  # pragma: no cover - numpy-only environments
+        reference = _sim.reference_states_from_poses(xyh)
+        initial = (
+            _sim.initial_states_from_ego_current_state(ego, num_proposals=None)
+            if ego is not None
+            else _initial_states_from_poses_numpy(xyh, dt)
+        )
+        states = _sim.simulate_proposals(reference, initial, dt, base)
+
+    return states.reshape(lead + (horizon + 1, STATE_SIZE))
+
+
+def _initial_states_from_poses_numpy(
+    xyh: npt.NDArray[np.float64], dt: float
+) -> npt.NDArray[np.float64]:
+    """numpy twin of ``pdm_simulator_torch.initial_states_from_poses``."""
+    velocity = np.linalg.norm(xyh[:, 1, :2] - xyh[:, 0, :2], axis=-1) / dt
+    second = np.linalg.norm(xyh[:, 2, :2] - xyh[:, 1, :2], axis=-1) / dt
+    delta = xyh[:, 1, 2] - xyh[:, 0, 2]
+    yaw_rate = np.arctan2(np.sin(delta), np.cos(delta)) / dt
+
+    out = np.zeros((len(xyh), STATE_SIZE), dtype=np.float64)
+    out[:, STATE_X] = xyh[:, 0, 0]
+    out[:, STATE_Y] = xyh[:, 0, 1]
+    out[:, STATE_HEADING] = xyh[:, 0, 2]
+    out[:, STATE_VEL_X] = velocity
+    out[:, STATE_ACC_X] = (second - velocity) / dt
+    out[:, STATE_STEERING_ANGLE] = np.clip(
+        np.arctan(
+            yaw_rate * _sim.WHEEL_BASE_PACIFICA / np.maximum(velocity, np.finfo(np.float64).eps)
+        ),
+        -np.pi / 3,
+        np.pi / 3,
+    )
+    out[:, STATE_ANGULAR_VELOCITY] = yaw_rate
+    return out
+
+
+def comfort_score(
+    poses: npt.NDArray[np.float64],
+    dt: float,
+    ego_current_state: npt.NDArray[np.float64] | None = None,
+    wheel_base: npt.NDArray[np.float64] | float | None = None,
+) -> npt.NDArray[np.float64]:
     """navsim comfort sub-metric in {0,1}: 1 iff ALL 6 comfort metrics stay
     within bound at ALL timesteps (matches ``ego_is_comfortable(...).all(-1)``
     used by ``_calculate_history_comfort``). ``poses`` ``[..., T, 4]`` -> ``[...]``.
+
+    The bounds are applied to simulated states, never to the raw poses; see
+    :func:`simulated_states_from_poses`.
     """
     poses = np.asarray(poses, dtype=np.float64)
     lead = poses.shape[:-2]
     T = poses.shape[-2]
     flat = poses.reshape(-1, T, 4)
-    states = states_from_poses(flat, dt)  # [B, T, STATE_SIZE]
+    states = simulated_states_from_poses(flat, dt, ego_current_state, wheel_base)
     return comfort_score_from_states(states, dt).reshape(lead)
 
 

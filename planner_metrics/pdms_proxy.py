@@ -114,6 +114,25 @@ def _availability(metrics: dict[str, torch.Tensor], key: str, ref: torch.Tensor)
     return value.to(device=ref.device, dtype=torch.float32)
 
 
+def _as_numpy(value) -> np.ndarray:
+    if torch.is_tensor(value):
+        return value.detach().to(torch.float64).cpu().numpy()
+    return np.asarray(value, dtype=np.float64)
+
+
+def _wheel_base_from_ego_dims(ego_dims) -> np.ndarray | None:
+    """The motion model's wheel base, if ``ego_dims`` is a full ``ego_shape`` row.
+
+    ``ego_shape`` is (wheel_base, length, width); callers that pass only
+    (length, width) carry no wheel base, so the simulator falls back to
+    pacifica's -- the same default navsim's tracker never overrides.
+    """
+    if ego_dims is None:
+        return None
+    dims = np.asarray(ego_dims, dtype=np.float64)
+    return dims[..., 0] if dims.shape[-1] == 3 else None
+
+
 def comfort_score(traj: torch.Tensor, dt: float = DT) -> torch.Tensor:
     """NAVSIM/C++ comfort-threshold score in {0, 1} for a trajectory tensor."""
     arr = traj.detach().to(torch.float64).cpu().numpy()
@@ -344,6 +363,7 @@ def pdms_proxy(
     extended_comfort_values: np.ndarray | None = None,
     traffic_light_compliance_values: np.ndarray | None = None,
     precomputed_states: np.ndarray | None = None,
+    ego_current_state: np.ndarray | None = None,
     add_aggregation: bool = True,
     self_reference_progress: bool = False,
     dt: float = DT,
@@ -371,10 +391,17 @@ def pdms_proxy(
         if states_n_cache is None:
             T = pred.shape[-2]
             if precomputed_states is None:
-                states_n_cache = _ns.states_from_poses(_pred_numpy(), dt)
+                # navsim scores comfort on simulated states, so the array is
+                # T + 1 rows: the rollout prepends the ego's own state.
+                states_n_cache = _ns.simulated_states_from_poses(
+                    _pred_numpy(),
+                    dt,
+                    None if ego_current_state is None else _as_numpy(ego_current_state),
+                    _wheel_base_from_ego_dims(ego_dims),
+                )
             else:
                 states_n_cache = np.asarray(precomputed_states, dtype=np.float64).reshape(
-                    -1, T, _ns.STATE_SIZE
+                    -1, T + 1, _ns.STATE_SIZE
                 )
         return states_n_cache
 
