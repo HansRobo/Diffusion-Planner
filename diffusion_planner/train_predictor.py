@@ -88,7 +88,7 @@ def get_args(args_list=None):
 
     # Training
     parser.add_argument("--seed", type=int, default=3407)
-    parser.add_argument("--train_epochs", type=int, default=100)
+    parser.add_argument("--train_epochs", type=int, default=_train_config_default("train_epochs"))
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--save_utd", type=int, default=10)
     parser.add_argument("--learning_rate", type=float, default=1e-4)

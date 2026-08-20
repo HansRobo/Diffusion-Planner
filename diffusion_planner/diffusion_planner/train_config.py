@@ -73,7 +73,14 @@ class TrainConfig:
     # Training Parameters
     # ---------------------------------------------------------
     seed: int = 3407
-    train_epochs: int = 100
+    # 40 epochs at global batch 512 is 425,480 optimizer steps on the full train
+    # list.  The DrivoR schedule derives its cosine ``T_max`` from this, so it
+    # has to be what will actually be run -- an aspirational number means the LR
+    # never comes down.  NOTE the warmup is specified as a *ratio* of total
+    # steps, so raising the epoch count without re-deriving
+    # ``--drivor_warmup_ratio`` silently lengthens the ramp by the same factor:
+    # the ramp is meant to stay ~2,000 steps regardless of the epoch count.
+    train_epochs: int = 40
     batch_size: int = 512
     save_utd: int = 10
     learning_rate: float = 1e-4
@@ -180,8 +187,11 @@ class TrainConfig:
     drivor_scorer_drop_path: float = 0.0
     # Demonstration head weight in the selection aggregate. Roughly half the
     # proposals tie at the maximum PDMS, and argmax inside a tie set is arbitrary;
-    # this additive term orders them without crossing the PDMS ordering.
-    drivor_human_teacher_weight: float = 0.2
+    # this additive term orders them without crossing the PDMS ordering.  Raised
+    # from 0.2 to bias selection further towards the human demonstration: the
+    # term is additive and bounded by this weight, so it only re-orders
+    # proposals whose PDMS gap is smaller than it.
+    drivor_human_teacher_weight: float = 0.3
     # Hard bound on the six PDM logits: cap * tanh(raw / cap). 0 disables it.
     drivor_logit_bound: float = 10.0
 

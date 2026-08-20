@@ -19,7 +19,7 @@ encoder tokens ──► 64 learned proposal queries
                       ▼
                    6 independent BCE logit heads (+ human-teacher head)
                       │  PDMS aggregate: NC x DAC x weighted-mean(DDC, TTC, EP, Comfort)
-                      │  weights 0 / 5 / 5 / 2, plus 0.2 * sigma(human) as tie-break
+                      │  weights 0 / 5 / 5 / 2, plus 0.3 * sigma(human) as tie-break
                       ▼
                    argmax ──► the single ego trajectory
 ```
@@ -254,14 +254,14 @@ DRIVOR_WANDB_PATH=<entity>/<project> \
   --train_set_list "$TRAIN_SET_LIST" \
   --valid_set_list "$VALID_SET_LIST" \
   --train_subsample_step 1 --valid_subsample_step 8 \
-  --save_dir "$RUN" --train_epochs 6 --save_utd 1 \
+  --save_dir "$RUN" --train_epochs 40 --save_utd 1 \
   --batch_size 512 --num_workers 8 --prefetch_factor 4 \
   --drivor_lr_schedule drivor \
   --learning_rate 1e-4 --drivor_lr_base_batch_size 64 \
-  --drivor_warmup_ratio 0.031337 \
+  --drivor_warmup_ratio 0.004701 \
   --use_amp --amp_dtype bf16 --compile_model --compile_mode default \
   --use_ema True --drivor_fused_ema True --drivor_guard_sync_every 1 \
-  --drivor_human_teacher_weight 0.2 \
+  --drivor_human_teacher_weight 0.3 \
   --enable_replan_consistency_eval True \
   --use_wandb True
 ```
@@ -270,8 +270,18 @@ Global batch 512 is the largest that fits: it uses 43.8 GiB per device, so 1024
 runs out of memory at step 0 on an 80 GiB card. The `sqrt` rule then puts the
 peak LR at `1e-4 * sqrt(512/64) = 2.83e-4`. `--drivor_warmup_ratio` is a
 fraction of *total* steps, so it must be re-derived whenever the batch or epoch
-count changes if the ramp is to stay the same absolute length — 0.031337 is a
-2,000-step ramp over 6 epochs at this batch.
+count changes if the ramp is to stay the same absolute length: back-solve it as
+`warmup_steps / (steps_per_epoch * epochs)`. At this batch the full train list is
+10,637 steps per epoch, so 40 epochs is 425,480 steps and 0.004701 is a
+2,000-step ramp. Do not carry a ratio across a change in epoch count — leaving
+the 6-epoch 0.031337 in place at 40 epochs would stretch the ramp to 13,300
+steps.
+
+`--drivor_human_teacher_weight 0.3` biases proposal selection towards the human
+demonstration. The term is additive and bounded by the weight, so it only
+re-orders proposals whose PDMS gap is smaller than it — which is most of them,
+since roughly half the proposals tie at the maximum PDMS and `argmax` inside a
+tie set is otherwise arbitrary.
 
 `DP_DIST_INIT_FILE` overrides the hardcoded `/tmp/tmp_dist_init` rendezvous file
 — needed whenever another user's stale file is in the way or two jobs run on the
