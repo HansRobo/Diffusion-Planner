@@ -17,12 +17,14 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from scenario_generation.closed_loop_eval import aggregate
+from scenario_generation.trajectory_colormap import render_trajectory_colormaps
 
 # ``aggregate`` reduces these from row keys this path never writes, and a mean over no samples
 # is 0.0 -- which reads as a measured total failure. Dropped, and named instead.
@@ -80,6 +82,9 @@ class ViewerTree:
 
     def rollout(self, scenario: str, case: str) -> Path:
         return self.media(scenario) / f"{case}.rollout.jsonl"
+
+    def colormap(self, scenario: str, case: str, metric: str) -> Path:
+        return self.media(scenario) / f"{case}.{metric}.png"
 
 
 def sanitize(obj: Any) -> Any:
@@ -361,6 +366,21 @@ def write_viewer_tree(
             trace = case_dir / "rollout.jsonl"
             if trace.is_file():
                 _link_or_copy(trace, tree.rollout(scenario, case))
+            if trace.is_file():
+                # Drawn from the trace, because a run deletes its PNGs after encoding. The
+                # renderer reads it as ``<dir>/rollout.jsonl``, hence the staging directory.
+                with tempfile.TemporaryDirectory() as staging:
+                    _link_or_copy(trace, Path(staging) / "rollout.jsonl")
+                    rendered = render_trajectory_colormaps(
+                        Path(staging),
+                        Path(staging),
+                        case,
+                        near_miss_thresh=near_miss,
+                        strong_brake_mps2=strong_brake,
+                        title=f"{scenario} {case}",
+                    )
+                    for metric, drawn in rendered.items():
+                        shutil.move(str(drawn), tree.colormap(scenario, case, metric))
             clean_rows.append(row)
             verdict = read_verdict(case_dir)
             case_verdicts.append(verdict)
