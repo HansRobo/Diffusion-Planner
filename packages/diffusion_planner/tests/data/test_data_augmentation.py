@@ -49,7 +49,8 @@ class PlannerDataAugmentationTest(unittest.TestCase):
         augmentation = PlannerDataAugmentation(
             lateral_offset_range=(2.0, 2.0),
             yaw_offset_range=(math.pi / 2, math.pi / 2),
-            probability=1.0,
+            pose_probability=1.0,
+            speed_probability=0.0,
         )
 
         result = augmentation(frame)
@@ -75,7 +76,9 @@ class PlannerDataAugmentationTest(unittest.TestCase):
 
     def test_preserves_padding_and_non_coordinate_tensors(self) -> None:
         frame = _frame()
-        augmentation = PlannerDataAugmentation((1.0, 1.0), (0.1, 0.1), 1.0)
+        augmentation = PlannerDataAugmentation(
+            (1.0, 1.0), (0.1, 0.1), pose_probability=1.0, speed_probability=0.0
+        )
 
         result = augmentation(frame)
 
@@ -88,14 +91,32 @@ class PlannerDataAugmentationTest(unittest.TestCase):
         augmentation = PlannerDataAugmentation(
             lateral_offset_range=(0.0, 0.0),
             yaw_offset_range=(0.0, 0.0),
-            probability=1.0,
+            pose_probability=0.0,
             ego_speed_scale_range=(1.2, 1.2),
+            speed_probability=1.0,
         )
 
         result = augmentation(frame)
 
         np.testing.assert_allclose(result["ego_agent_past"][:, 4], 1.2)
         np.testing.assert_allclose(result["ego_agent_future"][:, 4], 1.0)
+
+    def test_pose_and_speed_events_are_independent(self) -> None:
+        frame = _frame()
+        augmentation = PlannerDataAugmentation(
+            lateral_offset_range=(2.0, 2.0),
+            yaw_offset_range=(0.0, 0.0),
+            pose_probability=0.0,
+            ego_speed_scale_range=(1.2, 1.2),
+            speed_probability=1.0,
+        )
+
+        result = augmentation(frame)
+
+        np.testing.assert_array_equal(
+            result["neighbor_agents_past"], frame["neighbor_agents_past"]
+        )
+        np.testing.assert_allclose(result["ego_agent_past"][:, 4], 1.2)
 
 
 if __name__ == "__main__":

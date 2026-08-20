@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from diffusion_planner.data.dimensions import TRAJECTORY_DIM, TRAJECTORY_LENGTH
+from diffusion_planner.data.dimensions import TRAJECTORY_DIM
 
 from .decoder import TrajectoryDecoder
 from .encoder import SceneEncoder
@@ -86,17 +86,15 @@ class DiffusionPlanner(nn.Module):
     def sample(
         self,
         input_data: dict[str, torch.Tensor],
+        initial_noise: torch.Tensor,
         num_steps: int = 20,
         time_epsilon: float = 1e-5,
-        noise_scale: float = 1.0,
-        generator: torch.Generator | None = None,
-        initial_noise: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Generate normalized `(B, A, T, 4)` trajectories with Heun integration.
 
         `input_data` must already contain training ground-truth or inference-time
-        heuristic traffic-light future tensors. When `initial_noise` is supplied,
-        internal random generation and `noise_scale` are not used.
+        heuristic traffic-light future tensors. `initial_noise` has shape
+        `(B, A, T, 4)` and completely determines the initial flow state.
         """
         scene, scene_mask = self.scene_encoder(input_data)
         agent_pose = self.create_agent_pose(input_data)
@@ -110,23 +108,11 @@ class DiffusionPlanner(nn.Module):
             device=neighbor_mask.device,
         )
         agent_mask = torch.cat((ego_mask, neighbor_mask), dim=1)
-        batch, agents = agent_mask.shape
-        initial_state = initial_noise
-        if initial_state is None:
-            initial_state = noise_scale * torch.randn(
-                batch,
-                agents,
-                TRAJECTORY_LENGTH,
-                TRAJECTORY_DIM,
-                device=scene.device,
-                dtype=scene.dtype,
-                generator=generator,
-            )
         trajectory = sample(
             x0_model=lambda state, time: self.trajectory_decoder(
                 state, agent_mask, scene, scene_mask, agent_pose, time
             ),
-            initial_state=initial_state,
+            initial_state=initial_noise,
             num_steps=num_steps,
             epsilon=time_epsilon,
             project_state=lambda state: state.masked_fill(

@@ -18,65 +18,69 @@ class PlannerDataAugmentation:
         self,
         lateral_offset_range: tuple[float, float] = (-1.0, 1.0),
         yaw_offset_range: tuple[float, float] = (-math.radians(5), math.radians(5)),
-        probability: float = 0.5,
+        pose_probability: float = 0.5,
         ego_speed_scale_range: tuple[float, float] = (0.8, 1.2),
+        speed_probability: float = 0.5,
     ) -> None:
         self.lateral_offset_range = lateral_offset_range
         self.yaw_offset_range = yaw_offset_range
-        self.probability = probability
+        self.pose_probability = pose_probability
         self.ego_speed_scale_range = ego_speed_scale_range
+        self.speed_probability = speed_probability
 
     def __call__(self, input_data: dict[str, NDArray[Any]]) -> dict[str, NDArray[Any]]:
-        """Return a coordinate-augmented shallow copy of one H5 frame."""
-        if np.random.random() >= self.probability:
-            return input_data.copy()
-
-        ego_current = input_data["ego_agent_past"][-1, :4]
-        ego_position = ego_current[:2]
-        ego_heading = _normalize(ego_current[2:4])
-        lateral_offset = np.random.uniform(*self.lateral_offset_range)
-        yaw_offset = np.random.uniform(*self.yaw_offset_range)
-        ego_speed_scale = np.random.uniform(*self.ego_speed_scale_range)
-
-        augmented_position = ego_position.copy()
-        augmented_position[1] += lateral_offset
-        augmented_heading = _rotate(ego_heading, yaw_offset)
-
+        """Apply pose and speed augmentation as independent random events."""
         output = input_data.copy()
-        output["ego_agent_past"] = _transform_pose_tensor(
-            input_data["ego_agent_past"], ego_position, ego_heading
-        )
-        output["ego_agent_past"][..., EGO_VELOCITY_INDEX] *= ego_speed_scale
-        if "ego_agent_future" in input_data:
-            output["ego_agent_future"] = _transform_pose_tensor(
-                input_data["ego_agent_future"],
+        if np.random.random() < self.pose_probability:
+            ego_current = input_data["ego_agent_past"][-1, :4]
+            ego_position = ego_current[:2]
+            ego_heading = _normalize(ego_current[2:4])
+            lateral_offset = np.random.uniform(*self.lateral_offset_range)
+            yaw_offset = np.random.uniform(*self.yaw_offset_range)
+
+            augmented_position = ego_position.copy()
+            augmented_position[1] += lateral_offset
+            augmented_heading = _rotate(ego_heading, yaw_offset)
+
+            output["ego_agent_past"] = _transform_pose_tensor(
+                input_data["ego_agent_past"], ego_position, ego_heading
+            )
+            if "ego_agent_future" in input_data:
+                output["ego_agent_future"] = _transform_pose_tensor(
+                    input_data["ego_agent_future"],
+                    augmented_position,
+                    augmented_heading,
+                )
+            output["neighbor_agents_past"] = _transform_pose_tensor(
+                input_data["neighbor_agents_past"],
                 augmented_position,
                 augmented_heading,
             )
-        output["neighbor_agents_past"] = _transform_pose_tensor(
-            input_data["neighbor_agents_past"],
-            augmented_position,
-            augmented_heading,
-        )
-        if "neighbor_agents_future" in input_data:
-            output["neighbor_agents_future"] = _transform_pose_tensor(
-                input_data["neighbor_agents_future"],
-                augmented_position,
-                augmented_heading,
+            if "neighbor_agents_future" in input_data:
+                output["neighbor_agents_future"] = _transform_pose_tensor(
+                    input_data["neighbor_agents_future"],
+                    augmented_position,
+                    augmented_heading,
+                )
+            output["goal_pose"] = _transform_pose_tensor(
+                input_data["goal_pose"], augmented_position, augmented_heading
             )
-        output["goal_pose"] = _transform_pose_tensor(
-            input_data["goal_pose"], augmented_position, augmented_heading
-        )
-        output["lanes"] = _transform_lane_tensor(
-            input_data["lanes"], augmented_position, augmented_heading
-        )
-        output["route_lanes"] = _transform_lane_tensor(
-            input_data["route_lanes"], augmented_position, augmented_heading
-        )
-        for key in ("intersection_area", "stop_lines", "road_borders"):
-            output[key] = _transform_point_tensor(
-                input_data[key], augmented_position, augmented_heading
+            output["lanes"] = _transform_lane_tensor(
+                input_data["lanes"], augmented_position, augmented_heading
             )
+            output["route_lanes"] = _transform_lane_tensor(
+                input_data["route_lanes"], augmented_position, augmented_heading
+            )
+            for key in ("intersection_area", "stop_lines", "road_borders"):
+                output[key] = _transform_point_tensor(
+                    input_data[key], augmented_position, augmented_heading
+                )
+
+        if np.random.random() < self.speed_probability:
+            output["ego_agent_past"] = output["ego_agent_past"].copy()
+            ego_speed_scale = np.random.uniform(*self.ego_speed_scale_range)
+            output["ego_agent_past"][..., EGO_VELOCITY_INDEX] *= ego_speed_scale
+
         return output
 
 

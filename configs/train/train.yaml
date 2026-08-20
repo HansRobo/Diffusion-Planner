@@ -13,7 +13,7 @@ seed: 42
 experiment_name: ???
 
 training:
-  total_epochs: 10
+  total_epochs: 60
   cpu: false
   mixed_precision: bf16
   compile: true

@@ -7,15 +7,11 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-import h5py
-import hdf5plugin
 import numpy as np
 import onnxruntime as ort
-import pyarrow.parquet as pq
 import torch
-from numpy.typing import NDArray
 
-from diffusion_planner.data import PlannerDataNormalizer
+from diffusion_planner.data import PlannerDataNormalizer, PlannerDataset
 from diffusion_planner.data.dimensions import TRAJECTORY_DIM, TRAJECTORY_LENGTH
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.onnx import (
@@ -24,8 +20,7 @@ from diffusion_planner.models.onnx import (
     SceneEncoderOnnxWrapper,
     TrajectoryDecoderOnnxWrapper,
 )
-
-hdf5plugin.register(filters="zstd")
+from diffusion_planner.utils.checkpoint import load_model
 
 SCENE_OUTPUT_NAMES = ("scene", "scene_mask", "agent_pose", "agent_mask")
 DECODER_INPUT_NAMES = (
@@ -42,12 +37,11 @@ SAMPLER_INPUT_NAMES = ("initial_noise", *SCENE_INPUT_NAMES)
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("checkpoint", type=Path)
-    parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
-        "--data-source",
+        "--parquet-path",
         type=Path,
         required=True,
-        help="H5 file or Parquet H5 index used to create representative inputs.",
+        help="Training dataset Parquet index used to create representative inputs.",
     )
     parser.add_argument("--frame-index", type=int, default=0)
     parser.add_argument("--opset-version", type=int, default=18)
@@ -55,55 +49,25 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_model(checkpoint_path: Path) -> DiffusionPlanner:
-    checkpoint: dict[str, Any] = torch.load(
-        checkpoint_path.expanduser(), map_location="cpu", weights_only=False
+def _load_frame(parquet_path: Path, frame_index: int) -> dict[str, torch.Tensor]:
+    dataset = PlannerDataset(
+        parquet_path,
+        file_capacity=1,
+        data_normalizer=PlannerDataNormalizer(),
     )
-    model_config = dict(checkpoint["model_config"])
-    model_config.pop("_target_", None)
-    model = DiffusionPlanner(**model_config)
-    model.load_state_dict(checkpoint["model"])
-    return model.eval()
-
-
-def _resolve_frame(source: Path, frame_index: int) -> tuple[Path, int]:
-    source = source.expanduser().resolve()
-    if source.suffix.lower() in {".h5", ".hdf5"}:
-        return source, frame_index
-    if source.suffix.lower() == ".parquet":
-        table = pq.read_table(source, columns=["h5_path", "frame_index"])
-        if not 0 <= frame_index < table.num_rows:
+    try:
+        if not 0 <= frame_index < len(dataset):
             raise IndexError(
-                f"frame-index {frame_index} is outside index with {table.num_rows} rows"
+                f"frame-index {frame_index} is outside dataset with {len(dataset)} rows"
             )
-        return (
-            Path(table["h5_path"][frame_index].as_py()),
-            int(table["frame_index"][frame_index].as_py()),
-        )
-    raise ValueError(f"data-source must be H5 or Parquet: {source}")
+        return dataset[frame_index]
+    finally:
+        dataset.close()
 
 
-def _load_frame(source: Path, frame_index: int) -> dict[str, NDArray[Any]]:
-    h5_path, h5_frame_index = _resolve_frame(source, frame_index)
-    with h5py.File(h5_path, "r") as file:
-        frames_object = file["frames"]
-        if not isinstance(frames_object, h5py.Group):
-            raise ValueError(f"H5 'frames' must be a group: {h5_path}")
-        frame: dict[str, NDArray[Any]] = {}
-        for name in SCENE_INPUT_NAMES:
-            dataset = frames_object[name]
-            if not isinstance(dataset, h5py.Dataset):
-                raise ValueError(f"H5 'frames/{name}' must be a dataset: {h5_path}")
-            frame[name] = np.asarray(dataset[h5_frame_index])
-        return frame
-
-
-def _scene_inputs(frame: dict[str, NDArray[Any]]) -> tuple[torch.Tensor, ...]:
-    normalized = PlannerDataNormalizer()(frame)
+def _scene_inputs(frame: dict[str, torch.Tensor]) -> tuple[torch.Tensor, ...]:
     return tuple(
-        torch.from_numpy(normalized[name])
-        .unsqueeze(0)
-        .repeat((2,) + (1,) * np.asarray(normalized[name]).ndim)
+        frame[name].unsqueeze(0).repeat((2,) + (1,) * frame[name].ndim)
         for name in SCENE_INPUT_NAMES
     )
 
@@ -203,8 +167,9 @@ def _validate_all(
 
 def main() -> None:
     args = _parse_args()
-    model = _load_model(args.checkpoint)
-    frame = _load_frame(args.data_source, args.frame_index)
+    checkpoint_path = args.checkpoint.expanduser().resolve()
+    model = load_model(checkpoint_path, DiffusionPlanner).eval()
+    frame = _load_frame(args.parquet_path, args.frame_index)
     scene_inputs = _scene_inputs(frame)
     scene_wrapper = SceneEncoderOnnxWrapper(model.scene_encoder).eval()
     with torch.inference_mode():
@@ -228,10 +193,11 @@ def main() -> None:
     with torch.inference_mode():
         sampler_output = sampler_wrapper(*sampler_inputs)
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    scene_path = args.output_dir / "scene_encoder.onnx"
-    decoder_path = args.output_dir / "trajectory_decoder.onnx"
-    sampler_path = args.output_dir / "diffusion_planner_sampler.onnx"
+    output_dir = checkpoint_path.parent / "onnx" / checkpoint_path.stem
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scene_path = output_dir / "scene_encoder.onnx"
+    decoder_path = output_dir / "trajectory_decoder.onnx"
+    sampler_path = output_dir / "diffusion_planner_sampler.onnx"
     _export(
         scene_wrapper,
         scene_inputs,

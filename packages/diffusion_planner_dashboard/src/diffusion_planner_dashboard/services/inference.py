@@ -39,16 +39,22 @@ def run_inference(
         for key, value in normalized_frame.items()
     }
     generator = torch.Generator(device=torch_device).manual_seed(seed)
+    neighbor_count = normalized_frame["neighbor_agents_past"].shape[0]
+    initial_noise = noise_scale * torch.randn(
+        (1, neighbor_count + 1, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
+        device=torch_device,
+        dtype=torch.float32,
+        generator=generator,
+    )
     if torch_device.type == "cuda":
         torch.cuda.synchronize(torch_device)
     start = perf_counter()
     with torch.inference_mode():
         prediction = model.sample(
             input_data,
+            initial_noise=initial_noise,
             num_steps=num_steps,
             time_epsilon=time_epsilon,
-            noise_scale=noise_scale,
-            generator=generator,
         )
     if torch_device.type == "cuda":
         torch.cuda.synchronize(torch_device)

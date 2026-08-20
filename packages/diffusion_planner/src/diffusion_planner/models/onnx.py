@@ -179,7 +179,7 @@ class DiffusionPlannerSamplerOnnxWrapper(nn.Module):
         )
         return self.planner.sample(
             input_data,
+            initial_noise,
             num_steps=10,
             time_epsilon=1e-5,
-            initial_noise=initial_noise,
         )

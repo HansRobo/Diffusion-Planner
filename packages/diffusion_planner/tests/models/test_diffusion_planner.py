@@ -14,6 +14,7 @@ from diffusion_planner.data.dimensions import (
     STOP_LINE_LENGTH,
     TRAFFIC_LIGHT_FUTURE_LENGTH,
     TRAFFIC_LIGHT_PAST_LENGTH,
+    TRAJECTORY_DIM,
     TRAJECTORY_LENGTH,
 )
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
@@ -179,7 +180,11 @@ class DiffusionPlannerTest(unittest.TestCase):
         decoder_handle = self.model.trajectory_decoder.register_forward_hook(
             count_decoder_calls
         )
-        trajectories = self.model.sample(self.input_data, num_steps=2)
+        trajectories = self.model.sample(
+            self.input_data,
+            torch.randn(1, 3, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
+            num_steps=2,
+        )
         handle.remove()
         decoder_handle.remove()
 

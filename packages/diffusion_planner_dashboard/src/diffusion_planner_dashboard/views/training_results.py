@@ -101,10 +101,7 @@ def _cached_prediction(
     yaw_offset: float,
     ego_speed_scale: float,
     remove_neighbor_agents: bool,
-    set_traffic_lights_unknown: bool,
     infer_future_traffic_lights: bool,
-    mix_inferred_and_recorded_traffic_lights: bool,
-    fill_unknown_traffic_lights: bool,
 ):
     planner = _cached_planner(model_path, model_modification_time_ns, device)
     frame_data = _cached_frame(
@@ -115,14 +112,9 @@ def _cached_prediction(
     )
     if remove_neighbor_agents:
         frame_data = _remove_neighbor_agents(frame_data)
-    if set_traffic_lights_unknown:
-        frame_data = _set_traffic_lights_unknown(frame_data)
     if infer_future_traffic_lights:
         frame_data = _infer_future_traffic_lights(frame_data)
-    elif mix_inferred_and_recorded_traffic_lights:
-        frame_data = _mix_inferred_and_recorded_traffic_lights(frame_data)
-    if fill_unknown_traffic_lights:
-        frame_data = _fill_unknown_traffic_lights(frame_data)
+    frame_data = _fill_unknown_traffic_lights(frame_data)
     if apply_augmentation:
         frame_data = _augment_frame(
             frame_data, lateral_offset, yaw_offset, ego_speed_scale
@@ -159,10 +151,7 @@ def _cached_turn_indicator_prediction(
     yaw_offset: float,
     ego_speed_scale: float,
     remove_neighbor_agents: bool,
-    set_traffic_lights_unknown: bool,
     infer_future_traffic_lights: bool,
-    mix_inferred_and_recorded_traffic_lights: bool,
-    fill_unknown_traffic_lights: bool,
 ):
     loaded = _cached_turn_indicator(
         checkpoint_path, checkpoint_modification_time_ns, device
@@ -175,14 +164,9 @@ def _cached_turn_indicator_prediction(
     )
     if remove_neighbor_agents:
         frame_data = _remove_neighbor_agents(frame_data)
-    if set_traffic_lights_unknown:
-        frame_data = _set_traffic_lights_unknown(frame_data)
     if infer_future_traffic_lights:
         frame_data = _infer_future_traffic_lights(frame_data)
-    elif mix_inferred_and_recorded_traffic_lights:
-        frame_data = _mix_inferred_and_recorded_traffic_lights(frame_data)
-    if fill_unknown_traffic_lights:
-        frame_data = _fill_unknown_traffic_lights(frame_data)
+    frame_data = _fill_unknown_traffic_lights(frame_data)
     if apply_augmentation:
         frame_data = _augment_frame(
             frame_data, lateral_offset, yaw_offset, ego_speed_scale
@@ -200,8 +184,9 @@ def _augment_frame(
     augmentation = PlannerDataAugmentation(
         lateral_offset_range=(lateral_offset, lateral_offset),
         yaw_offset_range=(yaw_offset, yaw_offset),
-        probability=1.0,
+        pose_probability=1.0,
         ego_speed_scale_range=(ego_speed_scale, ego_speed_scale),
+        speed_probability=1.0,
     )
     return augmentation(frame_data)
 
@@ -217,23 +202,6 @@ def _remove_neighbor_agents(frame_data: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in result:
             result[key] = np.zeros_like(np.asarray(result[key]))
-    return result
-
-
-def _set_traffic_lights_unknown(frame_data: dict[str, Any]) -> dict[str, Any]:
-    """Return a frame with every traffic-light state set to Unknown."""
-    result = dict(frame_data)
-    for key in (
-        "lane_traffic_light_past",
-        "lane_traffic_light_future",
-        "route_traffic_light_past",
-        "route_traffic_light_future",
-    ):
-        if key not in result:
-            continue
-        values = np.zeros_like(np.asarray(result[key]))
-        values[..., 3] = 1
-        result[key] = values
     return result
 
 
@@ -275,22 +243,6 @@ def _infer_future_traffic_lights(frame_data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _mix_inferred_and_recorded_traffic_lights(
-    frame_data: dict[str, Any], inferred_steps: int = 30
-) -> dict[str, Any]:
-    """Use inferred traffic lights first, then recorded future observations."""
-    result = dict(frame_data)
-    inferred = _infer_future_traffic_lights(frame_data)
-    for key in ("lane_traffic_light_future", "route_traffic_light_future"):
-        if key not in result or key not in inferred:
-            continue
-        mixed = np.array(result[key], copy=True)
-        steps = min(inferred_steps, mixed.shape[-2])
-        mixed[..., :steps, :] = np.asarray(inferred[key])[..., :steps, :]
-        result[key] = mixed
-    return result
-
-
 def _fill_unknown_traffic_lights(frame_data: dict[str, Any]) -> dict[str, Any]:
     """Forward-fill Unknown future states for lane and route traffic lights."""
     return fill_unknown_traffic_light_futures(frame_data)
@@ -315,6 +267,9 @@ def _render_source_settings() -> tuple[str | None, str | None, str | None]:
             value=st.session_state.get("configured_turn_indicator_checkpoint_path", ""),
             placeholder="/path/to/turn_indicator/epoch_0001.pth",
         )
+        assert source_candidate is not None
+        assert checkpoint_candidate is not None
+        assert turn_indicator_checkpoint_candidate is not None
         applied = st.form_submit_button("Apply sources", use_container_width=True)
     if applied:
         st.session_state["configured_frame_source_path"] = source_candidate.strip()
@@ -398,33 +353,18 @@ def _render_augmentation_settings() -> tuple[bool, float, float, float]:
     return enabled, lateral_offset, math.radians(yaw_offset_degrees), ego_speed_scale
 
 
-def _render_temporary_validation_settings() -> tuple[bool, bool, bool, bool, bool]:
-    """Render temporary controls used for model-behavior checks."""
-    st.sidebar.subheader("Temporary validation")
+def _render_input_options() -> tuple[bool, bool]:
+    """Render optional input transformations."""
+    st.sidebar.subheader("Input options")
     remove_neighbor_agents = st.sidebar.checkbox(
         "Remove all neighbor agents", value=False
-    )
-    set_traffic_lights_unknown = st.sidebar.checkbox(
-        "Set all traffic lights to Unknown", value=False
     )
     infer_future_traffic_lights = st.sidebar.checkbox(
         "Infer traffic light future from past", value=False
     )
-    mix_inferred_and_recorded_traffic_lights = st.sidebar.checkbox(
-        "Infer first 3 s, then use recorded traffic lights",
-        value=False,
-        disabled=infer_future_traffic_lights,
-        help="Future indices 0-29 are inferred; indices 30-79 use H5 observations.",
-    )
-    fill_unknown_traffic_lights = st.sidebar.checkbox(
-        "Fill future Unknown traffic lights from previous state", value=False
-    )
     return (
         remove_neighbor_agents,
-        set_traffic_lights_unknown,
         infer_future_traffic_lights,
-        mix_inferred_and_recorded_traffic_lights,
-        fill_unknown_traffic_lights,
     )
 
 
@@ -443,11 +383,8 @@ def render_training_results() -> None:
     )
     (
         remove_neighbor_agents,
-        set_traffic_lights_unknown,
         infer_future_traffic_lights,
-        mix_inferred_and_recorded_traffic_lights,
-        fill_unknown_traffic_lights,
-    ) = _render_temporary_validation_settings()
+    ) = _render_input_options()
     if source_path_text is None or checkpoint_path_text is None:
         st.info("Configure both a frame source and a planner model from the sidebar.")
         return
@@ -521,16 +458,9 @@ def render_training_results() -> None:
             if remove_neighbor_agents
             else frame_data
         )
-        if set_traffic_lights_unknown:
-            visualized_frame = _set_traffic_lights_unknown(visualized_frame)
         if infer_future_traffic_lights:
             visualized_frame = _infer_future_traffic_lights(visualized_frame)
-        elif mix_inferred_and_recorded_traffic_lights:
-            visualized_frame = _mix_inferred_and_recorded_traffic_lights(
-                visualized_frame
-            )
-        if fill_unknown_traffic_lights:
-            visualized_frame = _fill_unknown_traffic_lights(visualized_frame)
+        visualized_frame = _fill_unknown_traffic_lights(visualized_frame)
         if apply_augmentation:
             visualized_frame = _augment_frame(
                 visualized_frame, lateral_offset, yaw_offset, ego_speed_scale
@@ -552,10 +482,7 @@ def render_training_results() -> None:
             yaw_offset,
             ego_speed_scale,
             remove_neighbor_agents,
-            set_traffic_lights_unknown,
             infer_future_traffic_lights,
-            mix_inferred_and_recorded_traffic_lights,
-            fill_unknown_traffic_lights,
         )
         turn_indicator_result = None
         if (
@@ -575,10 +502,7 @@ def render_training_results() -> None:
                 yaw_offset,
                 ego_speed_scale,
                 remove_neighbor_agents,
-                set_traffic_lights_unknown,
                 infer_future_traffic_lights,
-                mix_inferred_and_recorded_traffic_lights,
-                fill_unknown_traffic_lights,
             )
     except Exception as error:
         st.exception(error)
@@ -595,20 +519,9 @@ def render_training_results() -> None:
             f"ego history speed scale {ego_speed_scale:.2f}"
         )
     if remove_neighbor_agents:
-        st.caption("Temporary validation: all neighbor agents removed")
-    if set_traffic_lights_unknown:
-        st.caption("Temporary validation: all traffic lights set to Unknown")
+        st.caption("Input option: all neighbor agents removed")
     if infer_future_traffic_lights:
-        st.caption("Temporary validation: traffic light future inferred from past")
-    elif mix_inferred_and_recorded_traffic_lights:
-        st.caption(
-            "Temporary validation: first 3 s of traffic light future inferred from past; "
-            "remaining 5 s loaded from H5"
-        )
-    if fill_unknown_traffic_lights:
-        st.caption(
-            "Temporary validation: future Unknown traffic lights filled from previous state"
-        )
+        st.caption("Input option: traffic light future inferred from past")
     if turn_indicator_result is not None and loaded_turn_indicator is not None:
         probabilities, predicted_report, turn_indicator_seconds = turn_indicator_result
         indicator_names = {0: "Missing", 1: "Disabled", 2: "Left", 3: "Right"}
@@ -650,8 +563,7 @@ def render_training_results() -> None:
         f"{row.h5_path}::{row.frame_index}::{num_steps}::{time_epsilon}::"
         f"{noise_scale}::{seed}::{apply_augmentation}::{lateral_offset}::"
         f"{yaw_offset}::{ego_speed_scale}::{remove_neighbor_agents}::"
-        f"{set_traffic_lights_unknown}::{infer_future_traffic_lights}::"
-        f"{mix_inferred_and_recorded_traffic_lights}::{fill_unknown_traffic_lights}"
+        f"{infer_future_traffic_lights}"
     )
     figure.update_layout(autosize=True, uirevision=chart_key)
     st.plotly_chart(

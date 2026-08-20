@@ -65,9 +65,7 @@ class OnnxWrapperTest(unittest.TestCase):
             actual = wrapper(
                 initial_noise, *(input_data[name] for name in SCENE_INPUT_NAMES)
             )
-            expected = model.sample(
-                input_data, generator=torch.Generator().manual_seed(42)
-            )
+            expected = model.sample(input_data, initial_noise, num_steps=10)
 
         torch.testing.assert_close(actual, expected)
 

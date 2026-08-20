@@ -2,15 +2,33 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import torch
 from accelerate import Accelerator
 from timm.scheduler.scheduler import Scheduler
 from torch import nn
 from torch.optim import Optimizer
+
+ModelT = TypeVar("ModelT", bound=nn.Module)
+
+
+def load_model(
+    path: str | Path,
+    model_factory: Callable[..., ModelT],
+) -> ModelT:
+    """Construct a model from its saved config and load its weights on CPU."""
+    checkpoint_path = Path(path).expanduser()
+    checkpoint: dict[str, Any] = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=False
+    )
+    model_config = dict(checkpoint["model_config"])
+    model_config.pop("_target_", None)
+    model = model_factory(**model_config)
+    model.load_state_dict(checkpoint["model"])
+    return model
 
 
 def save_checkpoint(
