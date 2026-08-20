@@ -74,6 +74,17 @@ class RolloutParams:
     # separates "reacts badly to traffic" from "can't follow the route/map". collision/near-miss
     # are 0 by construction when this is set.
     drop_objects: bool
+    goal_mode: str
+    title_prefix: str | None
+    distance_label_offset_m: float
+    view_half_m: float
+    max_stuck_steps: int
+    goal_reach_m: float
+    interpolate: bool
+    color_by_uuid: bool
+    window: tuple[int, int] | None
+    max_steps: int | None
+    timeline_progress_mode: str
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -96,6 +107,17 @@ class RolloutParams:
             "abort_after": self.abort_after,
             "abort_max_snaps": self.abort_max_snaps,
             "drop_objects": self.drop_objects,
+            "goal_mode": self.goal_mode,
+            "title_prefix": self.title_prefix,
+            "distance_label_offset_m": self.distance_label_offset_m,
+            "view_half_m": self.view_half_m,
+            "max_stuck_steps": self.max_stuck_steps,
+            "goal_reach_m": self.goal_reach_m,
+            "interpolate": self.interpolate,
+            "color_by_uuid": self.color_by_uuid,
+            "window": self.window,
+            "max_steps": self.max_steps,
+            "timeline_progress_mode": self.timeline_progress_mode,
         }
 
 
