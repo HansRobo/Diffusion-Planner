@@ -86,7 +86,7 @@ class RolloutParams:
             "unstick_radius_mult": self.unstick_radius_mult,
             "unstick_teleport_after": self.unstick_teleport_after,
             "draw_every": self.draw_every,
-            "draw_workers": self.draw_workers,
+            # Not need draw_workers here: the runner opens the pool and passes it down.
             "replan_interval": self.replan_interval,
             "tracker_mode": self.tracker_mode,
             "neighbor_history_mode": self.neighbor_history_mode,
