@@ -1,8 +1,7 @@
-"""Build wandb log payloads for full-route (per-site) closed-loop validation."""
-
-from __future__ import annotations
+"""Build wandb log payloads for full-route (per-group) closed-loop validation."""
 
 import math
+import os
 from pathlib import Path
 
 import wandb
@@ -18,22 +17,30 @@ from scenario_generation.closed_loop_score_keys import (
 from scenario_generation.trajectory_colormap import METRIC_CHOICES, render_trajectory_colormaps
 
 
-def _is_noobj_label(label: str) -> bool:
-    """True for the empty-world-ablation site label convention (``{site}__noobj``). Used to
-    exclude ablation labels from collision-style aggregates that are 0 by construction in that
-    mode."""
-    return label.endswith("__noobj")
+def is_noobj_label(label: str) -> bool:
+    """``__noobj/`` substring marks the empty-world-ablation mode; trailing ``/``
+    avoids misdetecting group names that happen to contain ``__noobj``."""
+    return "__noobj/" in label
+
+
+def _json_name_from_label(label: str) -> str:
+    """Split off the json_name from a ``<json_name>/<group_name>`` label.
+
+    Handles both objects (``<json_name>/<group_name>``) and noobj
+    (``<json_name>__noobj/<group_name>``) forms — same boundary as :func:`is_noobj_label`.
+    """
+    if "__noobj/" in label:
+        return label.split("__noobj/", 1)[0]
+    return label.split("/", 1)[0]
 
 
 def episode_stem(out_dir: str | Path, row: dict) -> str:
     """Base filename stem for one segments.jsonl row's video/png-dir/colormap files.
 
-    FullRouteClosedLoopEvaluation (PR2, train-time closed-loop validation) names these
-    ``{route}_{start}_{end}`` (segment-suffixed). PR1's ``run_closed_loop_eval`` (the
-    ``valid_predictor_closed_loop.py`` / ``run_all_sites_closed_loop.py`` CLI path) names
-    them just ``{route}`` -- one route = one whole-route rollout, no sub-segmenting.
-    Prefer the segment-suffixed form and fall back to the bare route name when that
-    file/dir doesn't exist, so callers resolve videos correctly for either pipeline.
+    Prefers the segment-suffixed ``{route}_{start}_{end}`` stem (one row may span a
+    sub-segment of a route); falls back to bare ``{route}`` when neither the suffixed
+    video file nor png directory exists, which covers callers that write at whole-route
+    granularity.
     """
     out_dir = Path(out_dir)
     start, end = row["segment"]
@@ -51,7 +58,7 @@ def _segment_paths(out_dir: str | Path, row: dict) -> tuple[Path, Path]:
 
 
 def pick_representative_row(rows: list[dict], mode: str = "worst") -> dict | None:
-    """Pick one segment row to represent a site's whole run (for the 1 video/image W&B keeps).
+    """Pick one segment row to represent a group's whole run (for the 1 video/image W&B keeps).
 
     ``mode``: ``"worst"`` (default) = most collision steps, tie-broken by smallest
     min_clearance — the case most worth a human's attention. ``"first"`` = first
@@ -74,9 +81,23 @@ def pick_representative_row(rows: list[dict], mode: str = "worst") -> dict | Non
     return max(rows, key=_worst_key)
 
 
+def scalar_key(group: str, metric: str) -> str:
+    """``closed_loop/{metric}/{group}`` — ``metric`` leads so one regex overlay grabs all groups."""
+    return f"{SCALAR_KEY_PREFIX}{metric}/{group}"
+
+
+def media_key(group: str, slot: str) -> str:
+    """``closed_loop/{group}/media/{slot}`` — ``group`` leads since media can't be overlaid."""
+    return f"{SCALAR_KEY_PREFIX}{group}/media/{slot}"
+
+
+SCALAR_KEY_PREFIX = "closed_loop/"
+EPISODE_TABLE_NAME = "closed_loop_episodes/all"
+OVERVIEW_KEY_PREFIX = "closed_loop_overview"
+
+
 EPISODE_TABLE_COLUMNS = [
-    "site",
-    "vehicle_type",
+    "group",
     "route",
     "segment",
     "n_steps_run",
@@ -92,20 +113,13 @@ EPISODE_TABLE_COLUMNS = [
 ]
 
 
-def _episode_row(
-    table: wandb.Table,
-    site: str,
-    r: dict,
-    out_dir: str | Path | None,
-    vehicle_type: str | None = None,
-) -> None:
+def _episode_row(table: wandb.Table, group: str, r: dict, out_dir: str | Path | None) -> None:
     seg = r.get("segment")
     seg_str = f"[{seg[0]},{seg[1]}]" if seg else ""
     video_path = str(_segment_paths(out_dir, r)[1]) if out_dir is not None else ""
     comp = r.get("route_completion")
     table.add_data(
-        site,
-        vehicle_type or "",
+        group,
         r.get("route", ""),
         seg_str,
         int(r.get("n_steps_run", 0)),
@@ -121,185 +135,214 @@ def _episode_row(
     )
 
 
+def build_groups_wandb_log(
+    group_summaries: dict[str, dict],
+    *,
+    out_root: str | Path,
+    video_pick: str = "worst",
+    colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
+    near_miss_thresh_default: float = 0.5,
+    render_media: bool = True,
+) -> dict:
+    """Per-group closed-loop log payload for one W&B step. Caller owns the wandb session.
+
+    See module constants for key schema: ``SCALAR_KEY_PREFIX`` / ``OVERVIEW_KEY_PREFIX`` /
+    ``EPISODE_TABLE_NAME``.
+    """
+    out_root = Path(out_root)
+    log: dict = {}
+    episode_data: list = []
+
+    for group_name, summary in group_summaries.items():
+        rows = summary.get("segments") or []
+        group_out_dir = out_root / group_name.replace("/", os.sep)
+        log.update(
+            build_full_closed_loop_wandb_log(
+                summary,
+                out_dir=str(group_out_dir),
+                group=group_name,
+                video_pick=video_pick,
+                colormap_metrics=colormap_metrics,
+                near_miss_thresh=summary.get("near_miss_thresh", near_miss_thresh_default),
+                render_media=render_media,
+            )
+        )
+        episode_data.append((group_name, rows, str(group_out_dir)))
+
+    log[EPISODE_TABLE_NAME] = build_combined_episode_table(episode_data)
+
+    log.update(build_groups_aggregate_log(group_summaries, prefix=OVERVIEW_KEY_PREFIX))
+
+    # Per-json aggregates under ``closed_loop_overview/<json_label>/`` so the workspace's
+    # per-json Overview panel has real data; objects and noobj modes are kept separate.
+    per_mode_summaries: dict[str, dict[str, dict]] = {}
+    for label, summary in group_summaries.items():
+        mode_tag = (
+            _json_name_from_label(label) + "__noobj"
+            if is_noobj_label(label)
+            else _json_name_from_label(label)
+        )
+        per_mode_summaries.setdefault(mode_tag, {})[label] = summary
+    for json_label, sub_summaries in per_mode_summaries.items():
+        log.update(
+            build_groups_aggregate_log(sub_summaries, prefix=f"{OVERVIEW_KEY_PREFIX}/{json_label}")
+        )
+
+    # Per-(json, mode) bar charts -- one ``closed_loop_scores_bar/<json_label>/<metric>`` per
+    # bucket so the workspace can render one BarPlot per bucket, comparing same-bucket groups only.
+    json_label_for = {
+        label: (
+            _json_name_from_label(label) + "__noobj"
+            if is_noobj_label(label)
+            else _json_name_from_label(label)
+        )
+        for label in group_summaries
+    }
+    log.update(build_groups_score_bar_charts(group_summaries, json_label_for=json_label_for))
+
+    return log
+
+
 def build_combined_episode_table(
-    site_episodes: list[tuple[str, list[dict], str | Path | None]]
-    | list[tuple[str, list[dict], str | Path | None, str | None]],
+    group_episodes: list[tuple[str, list[dict], str | Path | None]],
 ) -> wandb.Table:
-    """ONE episode table across every site, so the W&B UI's native sort/filter/group-by
-    works across the whole run in a single panel. ``site_episodes`` is
-    ``[(site_name, rows, out_dir), ...]``, optionally with a 4th ``vehicle_type`` element.
+    """One episode table across every group (``group`` column filled per row) so the W&B UI can
+    sort/filter across the whole run in a single panel.
     """
     table = wandb.Table(columns=EPISODE_TABLE_COLUMNS)
-    for entry in site_episodes:
-        site, rows, out_dir, *rest = entry
-        vehicle_type = rest[0] if rest else None
+    for group, rows, out_dir in group_episodes:
         for r in rows:
-            _episode_row(table, site, r, out_dir, vehicle_type)
+            _episode_row(table, group, r, out_dir)
     return table
 
 
-def resolve_report_link(out_dir: str | Path, report_base_url: str | None = None) -> str:
-    """Where the rich local report (all videos + HTML gallery) for this run lives.
-
-    Returns a clickable ``http(s)://...`` URL if ``report_base_url`` is set (the run's
-    ``out_dir`` is being served over HTTP from that base, e.g. on a training server), else
-    the plain local filesystem path (informational only — W&B's web UI cannot open
-    ``file://`` links, so on a local dev machine this is for the human to copy/open by hand).
+def build_groups_aggregate_log(
+    summaries: dict[str, dict],
+    *,
+    prefix: str = "closed_loop_overview",
+) -> dict:
+    """Cross-group rollup under ``<prefix>/``: segment-weighted mean route-completion,
+    plus plain sums of event counts. ``__noobj`` labels are excluded from collision-style
+    sums (``OBJECTS_ONLY_OVERVIEW_SUM_KEYS``) since they're 0 by construction.
     """
-    out_dir = Path(out_dir)
-    if report_base_url:
-        return report_base_url.rstrip("/") + "/" + out_dir.name
-    return str(out_dir.resolve())
-
-
-def _aggregate_rollup(prefix: str, values: list[dict], objects_values: list[dict]) -> dict:
-    """Rollup under ``{prefix}/...``, shared by the overall and per-vehicle logs."""
     log: dict = {}
-    n_sites = len(values)
+    if not summaries:
+        return log
+    values = list(summaries.values())
+    objects_values = [s for label, s in summaries.items() if not is_noobj_label(label)]
+    n_groups = len(values)
     total_segments = sum(int(s.get("n_segments", 0)) for s in values)
 
-    log[f"{prefix}/n_sites"] = n_sites
+    log[f"{prefix}/n_groups"] = n_groups
     log[f"{prefix}/n_segments"] = total_segments
 
-    comp_num = sum(
+    route_completion_num = sum(
         float(s.get("mean_route_completion", 0.0)) * int(s.get("n_segments", 0)) for s in values
     )
-    log[f"{prefix}/route_completion"] = comp_num / total_segments if total_segments else 0.0
+    log[f"{prefix}/route_completion"] = (
+        route_completion_num / total_segments if total_segments else 0.0
+    )
 
     for key in COMPARISON_OVERVIEW_SUM_KEYS:
         log[f"{prefix}/{key}"] = sum(int(extract_score(s, key) or 0) for s in values)
     for key in OBJECTS_ONLY_OVERVIEW_SUM_KEYS:
         log[f"{prefix}/{key}"] = sum(int(extract_score(s, key) or 0) for s in objects_values)
 
-    return log
-
-
-def build_sites_aggregate_log(
-    summaries: dict[str, dict],
-    site_vehicle_types: dict[str, str] | None = None,
-) -> dict:
-    """Cross-site rollup under ``closed_loop_overview/`` (the at-a-glance block): the segment-
-    weighted mean route-completion (so long routes aren't under-weighted), plus the plain
-    cross-site SUM of each event count. Deliberately just the small non-saturating set — no
-    segment-rates / min-clearances / means (those stay in each site's summary.json only).
-
-    ``summaries`` is keyed by site LABEL — a ``{site}__noobj`` label is excluded from
-    collision-style sums (``OBJECTS_ONLY_OVERVIEW_SUM_KEYS``), since those are 0 by
-    construction in the empty-world ablation and would just dilute the objects-mode number
-    with zeros.
-
-    If ``site_vehicle_types`` (``{site_label: vehicle_type}``) is given, the same rollup is
-    also computed per vehicle type under ``closed_loop_overview_by_vehicle/{vehicle_type}/...``.
-    """
-    log: dict = {}
-    if not summaries:
-        return log
-    values = list(summaries.values())
-    objects_values = [s for label, s in summaries.items() if not _is_noobj_label(label)]
-    log.update(_aggregate_rollup("closed_loop_overview", values, objects_values))
-
-    if site_vehicle_types:
-        by_vehicle: dict[str, list[str]] = {}
-        for label in summaries:
-            base_label = label[: -len("__noobj")] if _is_noobj_label(label) else label
-            vehicle_type = site_vehicle_types.get(base_label) or site_vehicle_types.get(label)
-            if vehicle_type is None:
-                continue
-            by_vehicle.setdefault(vehicle_type, []).append(label)
-        for vehicle_type, labels in by_vehicle.items():
-            v_values = [summaries[label] for label in labels]
-            v_objects_values = [summaries[label] for label in labels if not _is_noobj_label(label)]
-            log.update(
-                _aggregate_rollup(
-                    f"closed_loop_overview_by_vehicle/{vehicle_type}", v_values, v_objects_values
-                )
-            )
-
     return {k: v for k, v in log.items() if _wandb_scalar(v) or isinstance(v, int)}
 
 
-def build_sites_score_bar_charts(summaries: dict[str, dict]) -> dict:
-    """Per-metric bar chart comparing every site side-by-side, under ``closed_loop_scores_bar/``.
+def build_groups_score_bar_charts(
+    summaries: dict[str, dict],
+    *,
+    json_label_for: dict[str, str] | None = None,
+) -> dict:
+    """Bar chart comparing groups within the same (json, mode) bucket.
 
-    Sites now only run once per training run, so a per-site score line chart would just be one
-    isolated point; a bar chart across sites fits a one-shot comparison better. ``summaries`` is
-    keyed by site label, sites only (not the ``closed_loop_npz_root`` "main" entry).
+    Each bar chart covers one json_label and one metric; groups from different
+    jsons are never compared since their score scales are not comparable.
+
+    Parameters
+    ----------
+    summaries
+        ``{group_label: summary_dict}`` as produced by ``build_groups_wandb_log``.
+    json_label_for
+        Optional ``{group_label: json_label}`` map where ``json_label`` is
+        ``<json_name>`` or ``<json_name>__noobj``. Inferred automatically if
+        omitted.
+
+    Bar chart types:
+    - ``COMPARISON_SCORE_KEYS``: plotted for every json_label
+    - ``OBJECTS_ONLY_SCORE_KEYS``: plotted only for the objects bucket
     """
     log: dict = {}
     if not summaries:
         return log
 
-    def _bar(key: str, labels: list[str]) -> None:
-        table = wandb.Table(columns=["site", key])
+    def _bar(json_label: str, key: str, labels: list[str]) -> None:
+        table = wandb.Table(columns=["group", key])
         for label in labels:
             val = extract_score(summaries[label], key)
             if _wandb_scalar(val):
                 table.add_data(label, val)
         if table.data:
-            log[f"closed_loop_scores_bar/{key}"] = wandb.plot.bar(table, "site", key, title=key)
+            log[f"closed_loop_scores_bar/{json_label}/{key}"] = wandb.plot.bar(
+                table, "group", key, title=f"{json_label} / {key}"
+            )
 
-    all_labels = list(summaries.keys())
-    objects_labels = [label for label in all_labels if not _is_noobj_label(label)]
-    for key in COMPARISON_SCORE_KEYS:
-        _bar(key, all_labels)
-    for key in OBJECTS_ONLY_SCORE_KEYS:
-        _bar(key, objects_labels)
+    if json_label_for is None:
+        json_label_for = {
+            label: (
+                _json_name_from_label(label) + "__noobj"
+                if is_noobj_label(label)
+                else _json_name_from_label(label)
+            )
+            for label in summaries
+        }
+
+    bucket: dict[str, list[str]] = {}
+    for label, json_label in json_label_for.items():
+        bucket.setdefault(json_label, []).append(label)
+
+    for json_label, labels in bucket.items():
+        objects_labels = [l for l in labels if not is_noobj_label(l)]
+        for key in COMPARISON_SCORE_KEYS:
+            _bar(json_label, key, labels)
+        for key in OBJECTS_ONLY_SCORE_KEYS:
+            _bar(json_label, key, objects_labels)
+
     return log
-
-
-def _site_label(site: str | None) -> str:
-    """W&B-key-safe site token; ``None`` (single-npz_root mode) -> ``"main"``."""
-    return (site or "main").replace("/", "_")
 
 
 def build_full_closed_loop_wandb_log(
     summary: dict,
     *,
     out_dir: str | Path | None = None,
-    site: str | None = None,
+    group: str | None = None,
     video_pick: str = "worst",
     colormap_metrics: tuple[str, ...] = METRIC_CHOICES,
     near_miss_thresh: float = 0.5,
-    report_base_url: str | None = None,
     render_media: bool = True,
-    include_score_scalars: bool = True,
 ) -> dict:
-    """Per-site full-route closed-loop wandb payload, keyed into role-based sections so the
-    workspace stays navigable (one collapsible section each) instead of one flat ``closed_loop``
-    blob of 100+ panels:
-
-    - ``closed_loop_scores/{metric}/{site}`` — scalar trends (metric-first so the same metric's
-      sites sort adjacently; the W&B panel-search box filters by either metric or site token).
-    - ``closed_loop_media/{site}`` — ONE gallery panel holding every ``colormap_metrics`` image
-      for the representative episode (captioned by metric), mirroring the HTML report's
-      per-card metric dropdown; ``closed_loop_media/{site}__video`` — that episode's video.
-    - ``closed_loop_links/{site}`` — where the full report (all videos + HTML) lives.
-
-    ``render_media=False`` skips the video + colormap-image block entirely (scores/links are
-    unaffected) -- for a caller that already skipped rendering (e.g. train.py's RolloutParams
-    ``draw=False`` on most epochs), so there's no colormap image to render from anyway.
-
-    ``include_score_scalars=False`` skips the ``closed_loop_scores/{metric}/{site}`` block --
-    for a site that only runs once per run, where :func:`build_sites_score_bar_charts` is the
-    better fit instead.
-
-    The per-episode table is built once across ALL sites by :func:`build_combined_episode_table`
-    at the caller (so it's a single filterable/groupable panel), not here.
-    """
-    label = _site_label(site)
+    """One per-group closed-loop wandb payload. Caller owns the wandb session."""
     log: dict = {}
-    if include_score_scalars:
-        for key in SCORE_KEYS:
-            val = extract_score(summary, key)
-            if _wandb_scalar(val):
-                log[f"closed_loop_scores/{key}/{label}"] = val
+
+    def _scalar_key(metric: str) -> str:
+        return scalar_key(group, metric)
+
+    def _media_key(slot: str) -> str:
+        return media_key(group, slot)
+
+    for key in SCORE_KEYS:
+        val = extract_score(summary, key)
+        if _wandb_scalar(val):
+            log[_scalar_key(key)] = val
 
     rows = summary.get("segments") or []
     rep = pick_representative_row(rows, mode=video_pick)
     if render_media and rep is not None and out_dir is not None:
         png_dir, mp4_path = _segment_paths(out_dir, rep)
         if mp4_path.is_file():
-            log[f"closed_loop_media/{label}__video"] = wandb.Video(str(mp4_path), format="mp4")
+            log[_media_key("video")] = wandb.Video(str(mp4_path), format="mp4")
         try:
             rendered = render_trajectory_colormaps(
                 png_dir,
@@ -308,32 +351,26 @@ def build_full_closed_loop_wandb_log(
                 metrics=colormap_metrics,
                 near_miss_thresh=near_miss_thresh,
                 strong_brake_mps2=summary.get("strong_brake", {}).get("thresh_mps2", -2.5),
-                title=f"{site or ''} {mp4_path.stem}".strip(),
+                title=f"{group or ''} {mp4_path.stem}".strip(),
             )
         except Exception as e:  # pragma: no cover - rendering must never break training
             print(f"closed_loop: trajectory colormap failed for {mp4_path.stem}: {e}")
             rendered = {}
-        # One gallery panel per site: a list of images under a single key (captioned by metric)
-        # -> the metric becomes an in-panel selector, not N separate panels. Ordered by the
-        # requested colormap_metrics so the gallery is stable across epochs/sites.
         gallery = [
             wandb.Image(str(rendered[m]), caption=m) for m in colormap_metrics if m in rendered
         ]
         if gallery:
-            log[f"closed_loop_media/{label}"] = gallery
+            log[_media_key("gallery")] = gallery
 
-    if out_dir is not None:
-        log[f"closed_loop_links/{label}"] = resolve_report_link(out_dir, report_base_url)
-    elif summary.get("npz_root"):
-        log[f"closed_loop_links/{label}"] = str(summary["npz_root"])
     return log
 
 
 def _wandb_scalar(val) -> bool:
     if val is None:
         return False
-    if isinstance(val, (int, bool)):
-        return True
-    if isinstance(val, float):
-        return math.isfinite(val)
-    return False
+    if isinstance(val, bool):
+        return False
+    try:
+        return math.isfinite(float(val))
+    except (TypeError, ValueError):
+        return False

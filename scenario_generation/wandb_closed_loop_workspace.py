@@ -1,32 +1,17 @@
-"""Build (or refresh) a curated W&B workspace view for closed-loop eval.
+"""Build a curated W&B workspace view for closed-loop eval.
 
-The scalars/media/table this project logs under ``closed_loop_scores/``,
-``closed_loop_overview/``, ``closed_loop_media/``, and ``closed_loop_episodes/`` (see
-:mod:`scenario_generation.wandb_closed_loop`) are already namespaced into sections, but
-W&B's DEFAULT auto-generated workspace still renders one panel per distinct key — for
-N sites x ~8 score metrics that's still dozens of small single-line panels, one per
-(metric, site) pair, with no overlay.
+The closed-loop scalars/media/table are already namespaced
+(see :data:`wandb_closed_loop.SCALAR_KEY_PREFIX` / :data:`EPISODE_TABLE_NAME` /
+:data:`OVERVIEW_KEY_PREFIX`); W&B's default auto-generated workspace still renders
+one tiny single-line panel per (metric, group) pair with no overlay, so we build
+an explicit one instead.
 
-This module uses the ``wandb-workspaces`` SDK to define an explicit, curated workspace
-instead: one LinePlot PER METRIC with every site overlaid as its own colored line (via
-``metric_regex``, so it doesn't need to know site names), one MediaBrowser per site (its
-colormap gallery + video), and one table panel for the combined episode table. Built with
-``auto_generate_panels=True`` (default) so every other logged key (train/valid loss, lr,
-epdms, replan consistency, ...) still gets its usual auto panel alongside these curated
-sections — nothing from the default workspace is lost. Pass ``include_auto_panels=False``
-for a closed-loop-only view.
+``layer1`` slot in section names is either ``"ALL"`` (cross-json aggregate, overlays
+new jsons via ``metric_regex``) or a specific ``json_name`` (per-json, explicit
+``y=[...]`` enumeration — must re-run when the json list changes).
 
-This is a project-level view, not a per-run artifact — run it ONCE (or whenever the set of
-score metrics changes) via the CLI below, not from inside the training loop. The resulting
-``.url`` is a saved, shareable, LIVE view: it re-renders with each new ``wandb.log()`` call
-under the same project, exactly like the default workspace does.
-
-Example::
-
-    python -m scenario_generation.wandb_closed_loop_workspace \\
-        --entity advanced-technology-department \\
-        --project Diffusion-Planner-smoke-test \\
-        --site_names odaiba takanawa
+The intended caller is ``run_all_groups_closed_loop._log_to_wandb``. The standalone
+CLI below is just an escape hatch for manual rebuilds.
 """
 
 from __future__ import annotations
@@ -39,174 +24,353 @@ from scenario_generation.closed_loop_score_keys import (
     OBJECTS_ONLY_OVERVIEW_SUM_KEYS,
     OBJECTS_ONLY_SCORE_KEYS,
 )
+from scenario_generation.wandb_closed_loop import (
+    EPISODE_TABLE_NAME,
+    OVERVIEW_KEY_PREFIX,
+    SCALAR_KEY_PREFIX,
+    is_noobj_label,
+    media_key,
+    scalar_key,
+)
 
-# Panel groups for the objects-ablation dashboard, derived from the single source of truth in
-# closed_loop_score_keys (dependency-free, so importing it here doesn't pull in the heavier
-# torch/matplotlib deps scenario_generation.wandb_closed_loop needs):
-# - COMPARISON: meaningful in both objects and empty-world ("__noobj") mode — one panel per
-#   metric, objects and noobj overlaid as separate lines via metric_regex (no site enumeration
-#   needed, so a newly added site is picked up automatically).
-# - OBJECTS-ONLY: structurally 0 with no traffic to react to (collision counts) — plotted with
-#   an explicit y=[...] list of ONLY the objects labels, so the noobj line (always 0) doesn't
-#   show up as a flat, meaningless addition to the panel.
-#
-# The overview panel list additionally includes "route_completion" -- build_sites_aggregate_log
-# computes it as its own segment-weighted-average key, not part of the generic sum loop
-# COMPARISON_OVERVIEW_SUM_KEYS drives.
+_CLOSED_LOOP_PREFIX = "Closed-Loop / "
+_ALL_LEVEL = "ALL"
+
+# route_completion is its own segment-weighted-average key in build_groups_aggregate_log,
+# not part of the generic sum loop driven by COMPARISON_OVERVIEW_SUM_KEYS.
 _COMPARISON_OVERVIEW_KEYS = ("route_completion", *COMPARISON_OVERVIEW_SUM_KEYS)
 _OBJECTS_ONLY_OVERVIEW_KEYS = OBJECTS_ONLY_OVERVIEW_SUM_KEYS
+
+
+def _section_name(layer1: str, panel: str) -> str:
+    return f"{_CLOSED_LOOP_PREFIX}{layer1} / {panel}"
+
+
+def _split_labels_by_mode(group_names: list[str], json_name: str) -> dict[str, list[str]]:
+    """Labels under ``json_name`` split into two mode buckets: ``<json_name>`` (objects
+    labels) and ``<json_name>__noobj`` (noobj labels). Missing buckets are omitted.
+    Each json renders as up to two separate sections in the dashboard."""
+    objects = [g for g in group_names if g.startswith(f"{json_name}/") and not is_noobj_label(g)]
+    noobj = [g for g in group_names if g.startswith(f"{json_name}__noobj/")]
+    out: dict[str, list[str]] = {}
+    if objects:
+        out[json_name] = objects
+    if noobj:
+        out[f"{json_name}__noobj"] = noobj
+    return out
+
+
+def _infer_json_names(group_names: list[str]) -> list[str]:
+    """Infer the unique ``json_name`` list from full W&B labels.
+
+    Each label is ``"{json_name}/{group}"`` or ``"{json_name}__noobj/{group}"``.
+    Objects-mode (``/``) and noobj-mode (``__noobj/``) prefix variants collapse to
+    the same ``json_name``. First-seen order is preserved so section ordering stays
+    stable across runs.
+
+    Requires the project-wide convention enforced in :func:`_make_summary_key`
+    (``/`` not in json_name or group_name).
+    """
+    seen: list[str] = []
+    for label in group_names:
+        for sep in ("__noobj/", "/"):
+            idx = label.find(sep)
+            if idx < 0:
+                continue
+            json_name = label[:idx]
+            if json_name and json_name not in seen:
+                seen.append(json_name)
+            break
+    return seen
 
 
 def build_closed_loop_workspace(
     entity: str,
     project: str,
     *,
-    site_names: list[str],
+    group_names: list[str],
+    json_names: list[str] | None = None,
     name: str = "Closed-Loop Dashboard",
-    include_noobj: bool = True,
-    include_auto_panels: bool = True,
 ) -> str:
     """Create/save a curated closed-loop workspace view and return its URL.
 
-    ``site_names`` are BASE names (no ``__noobj`` suffix, e.g. ``["odaiba", "takanawa"]``) —
-    this builder expands each into its objects label (unchanged) and, when ``include_noobj``,
-    its empty-world-ablation label (``{site}__noobj``). Only the per-site media galleries need
-    those exact labels (W&B media panels take explicit
-    keys, no regex); the comparison score line plots use ``metric_regex`` and pick up any site
-    automatically, present or added later. Set ``include_noobj=False`` for an objects-only
-    dashboard (e.g. before any ablation run exists for this project).
+    ``group_names`` are full labels as logged (``{json_name}/{group}`` or
+    ``{json_name}__noobj/{group}``); ``json_names`` is the per-json list, inferred
+    from ``group_names`` when omitted. Sections: ``ALL`` (cross-json, regex overlay)
+    plus per-json × per-mode (``objects`` / ``__noobj``). ``auto_generate_panels``
+    is always off — the curated view IS the dashboard.
     """
+    if json_names is None:
+        json_names = _infer_json_names(group_names)
+    if not json_names:
+        raise ValueError(
+            "build_closed_loop_workspace: no json_names could be inferred from group_names; "
+            "pass json_names explicitly."
+        )
     import wandb_workspaces.reports.v2 as wr
     import wandb_workspaces.workspaces as ws
 
-    objects_labels = list(site_names)
-    noobj_labels = [f"{n}__noobj" for n in site_names] if include_noobj else []
-    all_labels = objects_labels + noobj_labels
+    any_noobj = any(is_noobj_label(l) for l in group_names)
+    objects_labels = [g for g in group_names if not is_noobj_label(g)]
 
-    overview_panels = (
-        [
-            wr.LinePlot(title=key, y=[f"closed_loop_overview/{key}"])
-            for key in _COMPARISON_OVERVIEW_KEYS
-        ]
-        + [
-            wr.LinePlot(title=key, y=[f"closed_loop_overview/{key}"])
-            for key in _OBJECTS_ONLY_OVERVIEW_KEYS
-        ]
-        + [
-            wr.LinePlot(
-                title="n_sites / n_segments",
-                y=["closed_loop_overview/n_sites", "closed_loop_overview/n_segments"],
-            ),
-        ]
-    )
+    labels_per_json: dict[str, dict[str, list[str]]] = {
+        json_name: _split_labels_by_mode(group_names, json_name) for json_name in json_names
+    }
 
-    # Comparison group: one panel PER METRIC, every site+mode overlaid as its own line
-    # (metric_regex matches "closed_loop_scores/{metric}/{any_label}" without needing to
-    # enumerate labels) — this is the key fix over the default workspace's
-    # one-tiny-panel-per-(metric,site) layout, AND it's what makes objects vs noobj directly
-    # comparable in the same chart.
-    comparison_score_panels = [
-        wr.LinePlot(title=metric, metric_regex=rf"^closed_loop_scores/{metric}/.*$")
-        for metric in COMPARISON_SCORE_KEYS
-    ]
-    # Objects-only group: explicit y=[...] over objects_labels ONLY (no regex) — a noobj line
-    # here would just be a flat, meaningless 0 (no traffic to collide with by construction).
-    objects_only_score_panels = [
+    overview_panels = [
+        wr.LinePlot(title=key, y=[f"{OVERVIEW_KEY_PREFIX}/{key}"])
+        for key in (*_COMPARISON_OVERVIEW_KEYS, *_OBJECTS_ONLY_OVERVIEW_KEYS)
+    ] + [
         wr.LinePlot(
-            title=metric,
-            y=[f"closed_loop_scores/{metric}/{label}" for label in objects_labels],
-        )
-        for metric in OBJECTS_ONLY_SCORE_KEYS
-    ]
-
-    # Two SEPARATE sections (not just two panel types in one section): the colormap gallery
-    # (an indexed LIST of 5 images) and the video (a single file) are different W&B media
-    # shapes — combining both key types in one MediaBrowser with gallery_axis="index" silently
-    # drops the video (the index axis only applies to the list-shaped key). Grouping all
-    # labels' overlays together and all labels' videos together (rather than interleaving)
-    # also keeps same-purpose panels next to each other.
-    overlay_panels = [
-        wr.MediaBrowser(
-            title=label,
-            media_keys=[f"closed_loop_media/{label}"],
-            mode="gallery",
-            gallery_axis="index",
-        )
-        for label in all_labels
-    ]
-    video_panels = [
-        wr.MediaBrowser(title=label, media_keys=[f"closed_loop_media/{label}__video"])
-        for label in all_labels
-    ]
-
-    episodes_panels = [
-        wr.WeavePanelSummaryTable(
-            table_name="closed_loop_episodes/all", layout=wr.Layout(w=24, h=16)
+            title="n_groups / n_segments",
+            y=[f"{OVERVIEW_KEY_PREFIX}/n_groups", f"{OVERVIEW_KEY_PREFIX}/n_segments"],
         ),
     ]
 
-    # Plain training-loop metrics (every epoch, not just closed-loop-firing epochs) — placed
-    # FIRST so loss/lr trends are visible above the closed-loop sections, in one unified view
-    # instead of needing the separate default auto-generated workspace for these.
-    training_panels = [
-        wr.LinePlot(title="train_loss", metric_regex=r"^train_loss/.*$"),
-        wr.LinePlot(title="valid_loss", metric_regex=r"^valid_loss/.*$"),
-        wr.LinePlot(title="learning_rate", metric_regex=r"^lr/.*$"),
+    # One panel PER METRIC; every group+mode overlaid via metric_regex so new jsons
+    # auto-show up.
+    all_comparison_score_panels = [
+        wr.LinePlot(title=metric, metric_regex=rf"^{SCALAR_KEY_PREFIX}{metric}/.*$")
+        for metric in COMPARISON_SCORE_KEYS
     ]
+    # Objects-only collision: explicit y=[...] over objects_labels — a noobj line here
+    # would be a flat 0 (no traffic to collide with).
+    all_objects_only_score_panels = [
+        wr.LinePlot(
+            title=metric,
+            y=sorted(scalar_key(label, metric) for label in objects_labels),
+        )
+        for metric in OBJECTS_ONLY_SCORE_KEYS
+    ]
+    # Gallery and video are different W&B media shapes (indexed list vs single file);
+    # combining them in one MediaBrowser with gallery_axis="index" silently drops video.
+    all_overlay_panels = [
+        wr.MediaBrowser(
+            title=label,
+            media_keys=[media_key(label, "gallery")],
+            mode="gallery",
+            gallery_axis="index",
+        )
+        for label in group_names
+    ]
+    all_video_panels = [
+        wr.MediaBrowser(title=label, media_keys=[media_key(label, "video")])
+        for label in group_names
+    ]
+    all_episodes_panels = [wr.WeavePanelSummaryTable(table_name=EPISODE_TABLE_NAME)]
+
+    # Per-json: explicit y=[...] enumeration so different jsons don't bleed together.
+    def _per_json_score_panels(labels_for_this: list[str]) -> list:
+        return [
+            wr.LinePlot(
+                title=metric,
+                y=sorted(scalar_key(label, metric) for label in labels_for_this),
+            )
+            for metric in COMPARISON_SCORE_KEYS
+        ]
+
+    def _per_json_objects_only_score_panels(labels_for_this: list[str]) -> list:
+        # Skip noobj bucket: every label is a noobj label, so this would just be empty
+        # LinePlots.
+        objects_labels = [l for l in labels_for_this if not is_noobj_label(l)]
+        if not objects_labels:
+            return []
+        return [
+            wr.LinePlot(
+                title=metric,
+                y=sorted(scalar_key(label, metric) for label in objects_labels),
+            )
+            for metric in OBJECTS_ONLY_SCORE_KEYS
+        ]
+
+    def _per_json_bar_chart_panels(json_label: str) -> list:
+        json_is_noobj = json_label.endswith("__noobj")
+        metrics = list(COMPARISON_SCORE_KEYS)
+        if not json_is_noobj:
+            metrics += list(OBJECTS_ONLY_SCORE_KEYS)
+        return [
+            wr.BarPlot(
+                title=metric,
+                metrics=[f"closed_loop_scores_bar/{json_label}/{metric}"],
+                orientation="v",
+            )
+            for metric in metrics
+        ]
+
+    def _per_json_overview_panels(json_name: str) -> list:
+        """Per-json rollup: ``closed_loop_overview/<json_name>/<key>``."""
+        prefix = f"{OVERVIEW_KEY_PREFIX}/{json_name}/"
+        return [
+            wr.LinePlot(title=key, y=[f"{prefix}{key}"])
+            for key in (*_COMPARISON_OVERVIEW_KEYS, *_OBJECTS_ONLY_OVERVIEW_KEYS)
+        ] + [
+            wr.LinePlot(
+                title="n_groups / n_segments",
+                y=[f"{prefix}n_groups", f"{prefix}n_segments"],
+            ),
+        ]
+
+    def _per_json_overlay_panels(labels_for_this: list[str]) -> list:
+        return [
+            wr.MediaBrowser(
+                title=label,
+                media_keys=[media_key(label, "gallery")],
+                mode="gallery",
+                gallery_axis="index",
+            )
+            for label in labels_for_this
+        ]
+
+    def _per_json_video_panels(labels_for_this: list[str]) -> list:
+        return [
+            wr.MediaBrowser(title=label, media_keys=[media_key(label, "video")])
+            for label in labels_for_this
+        ]
+
+    training_section = ws.Section(
+        name="Training",
+        panels=[
+            wr.LinePlot(title="train_loss", metric_regex=r"^train_loss/.*$"),
+            wr.LinePlot(title="valid_loss", metric_regex=r"^valid_loss/.*$"),
+            wr.LinePlot(title="learning_rate", metric_regex=r"^lr/.*$"),
+        ],
+        is_open=True,
+        pinned=True,
+    )
+
+    # ---- ALL sections ----
+    all_sections: list[ws.Section] = [
+        ws.Section(
+            name=_section_name(_ALL_LEVEL, "Overview"),
+            panels=overview_panels,
+            is_open=True,
+            pinned=True,
+        ),
+        ws.Section(
+            name=_section_name(_ALL_LEVEL, "Scores (comparison)" if any_noobj else "Scores"),
+            panels=all_comparison_score_panels,
+            is_open=True,
+            pinned=True,
+        ),
+        ws.Section(
+            name=_section_name(_ALL_LEVEL, "Scores (objects-only)"),
+            panels=all_objects_only_score_panels,
+            is_open=False,
+        ),
+        ws.Section(
+            name=_section_name(_ALL_LEVEL, "Trajectory Overlay"),
+            panels=all_overlay_panels,
+            is_open=False,
+        ),
+        ws.Section(
+            name=_section_name(_ALL_LEVEL, "Video"),
+            panels=all_video_panels,
+            is_open=False,
+        ),
+        ws.Section(
+            name=_section_name(_ALL_LEVEL, "Episodes"),
+            panels=all_episodes_panels,
+            is_open=False,
+        ),
+    ]
+
+    per_json_sections: list[ws.Section] = []
+    for json_name, mode_buckets in labels_per_json.items():
+        for mode_label, labels_for_this in mode_buckets.items():
+            # ``mode_label`` is ``<json_name>`` or ``<json_name>__noobj`` (no trailing
+            # slash), so the group-level ``is_noobj_label`` rule doesn't apply.
+            json_is_noobj = mode_label.endswith("__noobj")
+            section_specs: list[tuple[str, list]] = [
+                (
+                    _section_name(mode_label, "Overview"),
+                    _per_json_overview_panels(mode_label),
+                ),
+                (
+                    _section_name(
+                        mode_label,
+                        "Scores (comparison)" if json_is_noobj else "Scores",
+                    ),
+                    _per_json_score_panels(labels_for_this),
+                ),
+                (
+                    _section_name(mode_label, "Scores (bar chart)"),
+                    _per_json_bar_chart_panels(mode_label),
+                ),
+                # Skip Scores (objects-only) in noobj bucket: every label is a noobj
+                # label, so the helper would render N empty LinePlots.
+                (
+                    _section_name(mode_label, "Scores (objects-only)"),
+                    _per_json_objects_only_score_panels(labels_for_this),
+                ),
+                (
+                    _section_name(mode_label, "Trajectory Overlay"),
+                    _per_json_overlay_panels(labels_for_this),
+                ),
+                (
+                    _section_name(mode_label, "Video"),
+                    _per_json_video_panels(labels_for_this),
+                ),
+            ]
+            for section_name, panels in section_specs:
+                if not panels:
+                    continue
+                per_json_sections.append(
+                    ws.Section(name=section_name, panels=panels, is_open=False)
+                )
 
     workspace = ws.Workspace(
         entity=entity,
         project=project,
         name=name,
-        auto_generate_panels=include_auto_panels,
-        sections=[
-            ws.Section(name="Training", panels=training_panels, is_open=True, pinned=True),
-            ws.Section(name="Overview", panels=overview_panels, is_open=True, pinned=True),
-            ws.Section(
-                name="Scores: comparison (objects vs no-objects)"
-                if include_noobj
-                else "Scores: comparison",
-                panels=comparison_score_panels,
-                is_open=True,
-            ),
-            ws.Section(
-                name="Scores: objects-only (collision)",
-                panels=objects_only_score_panels,
-                is_open=True,
-            ),
-            ws.Section(name="Trajectory Overlay (per site)", panels=overlay_panels, is_open=False),
-            ws.Section(name="Video (per site)", panels=video_panels, is_open=False),
-            ws.Section(
-                name="Episodes (all sites, one table)", panels=episodes_panels, is_open=False
-            ),
-        ],
+        auto_generate_panels=False,
+        sections=[training_section, *all_sections, *per_json_sections],
     )
     workspace.save()
     return workspace.url
 
 
+def _resolve_entity(entity: str | None) -> str:
+    """Resolve the W&B entity: explicit override, else the API default."""
+    import wandb
+
+    if entity:
+        return entity
+    resolved = wandb.Api().default_entity
+    if not resolved:
+        raise SystemExit("Could not infer --entity: pass it explicitly or configure `wandb init`.")
+    return resolved
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--entity", required=True)
+    parser.add_argument(
+        "--entity",
+        default=None,
+        help="W&B entity (user or org). Defaults to `wandb.Api().default_entity`.",
+    )
     parser.add_argument("--project", required=True)
     parser.add_argument(
-        "--site_names",
+        "--group_names",
         nargs="+",
         required=True,
-        help="BASE site names, no '__noobj' suffix (e.g. odaiba takanawa) — the builder expands "
-        "each into its objects/no-objects labels itself (see --include_noobj)",
-    )
-    parser.add_argument("--name", default="Closed-Loop Dashboard")
-    parser.add_argument(
-        "--no_noobj",
-        action="store_true",
-        help="objects-only dashboard: skip the empty-world-ablation ('__noobj') labels entirely",
+        help="FULL per-group W&B labels actually logged (e.g. 'override_label/departure "
+        "override_label__noobj/lane_change site/all site__noobj/all'). "
+        "Caller-supplied list — does NOT auto-discover. Re-run the script when this list "
+        "changes.",
     )
     parser.add_argument(
-        "--no_auto_panels",
-        action="store_true",
-        help="closed-loop-only view: skip the auto-generated panel for every other logged key "
-        "(train/valid loss, lr, epdms, replan consistency, ...)",
+        "--json_names",
+        nargs="+",
+        default=None,
+        help="Optional explicit per-JSON section list. When omitted, inferred from "
+        "--group_names by stripping the '/<group>' or '__noobj/<group>' suffix. "
+        "Pass explicitly only to pin section order or render a json with no groups.",
+    )
+    parser.add_argument(
+        "--name",
+        default="Closed-Loop Dashboard",
+        help="Saved-view name. Pick something unique per run if you don't want earlier "
+        "views overwritten (e.g. 'Closed-Loop / <run_name>').",
     )
     return parser.parse_args()
 
@@ -214,12 +378,11 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     url = build_closed_loop_workspace(
-        args.entity,
+        _resolve_entity(args.entity),
         args.project,
-        site_names=args.site_names,
+        group_names=args.group_names,
+        json_names=args.json_names,
         name=args.name,
-        include_noobj=not args.no_noobj,
-        include_auto_panels=not args.no_auto_panels,
     )
     print(f"Saved workspace view: {url}")
     return 0
