@@ -151,3 +151,42 @@ def test_work_list_entries_resolve_against_the_manifest(tmp_path):
     got = dict(load_submitted(run))
     assert got["case_a"] == str(run / _rel(_SC1))
     assert got["case_b"] == absolute
+
+
+_JUNIT_FAILURE = """<?xml version="1.0"?>
+<testsuites name="s" failures="1" errors="0" tests="1">
+  <testsuite name="5" failures="1" errors="0" tests="1">
+    <testcase name="scenario_0">
+      <failure type="SimulationFailure" message="CustomCommandAction typed &quot;exitFailure&quot; \
+was triggered by the anonymous Condition (OpenSCENARIO.Storyboard.Story[0]): Is [ego] \
+colliding with Npc1?&#10;Unmet success conditions:&#10;  - &quot;goal_position&quot;" />
+    </testcase>
+  </testsuite>
+</testsuites>
+"""
+
+
+def test_a_case_that_never_decided_is_not_a_failure(tmp_path):
+    """Reaching a verdict and being cut off before one are different states.
+
+    The row's ``result_kind`` cannot tell them apart: the interpreter presets it to a timeout
+    failure, so a case that never decided still reads ``Failure``.
+    """
+    run = _make_run(tmp_path / "run", [_rel(_SC1), _rel(_SC1, case=6)])
+    osp_out = run / key_aliases(_rel(_SC1))[0] / "osp_out"
+    osp_out.mkdir(parents=True)
+    (osp_out / "result.junit.xml").write_text(_JUNIT_FAILURE)
+    export(run, tmp_path / "out")
+
+    verdicts = [
+        json.loads(line)["verdict"]
+        for line in (tmp_path / "out" / "cases.jsonl").read_text().splitlines()
+    ]
+    decided = [v for v in verdicts if v["decided"]]
+    assert [v for v in verdicts if not v["decided"]] == [{"decided": False}]
+    assert decided[0]["kind"] == "Failure"
+    assert decided[0]["unmet"] == ["goal_position"]
+
+    entry = json.loads((tmp_path / "out" / "scenarios.json").read_text())[_SC1]
+    assert entry["verdicts"] == {"pass": 0, "failure": 1, "error": 0, "undecided": 1}
+    assert sum(entry["verdicts"].values()) == entry["n_cases"]
