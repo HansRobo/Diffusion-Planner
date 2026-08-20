@@ -122,6 +122,7 @@ def test_the_listing_is_three_files_at_the_run_root(tmp_path):
         stem = case["route"]
         assert tree.video(_SC1, stem).is_file()
         assert tree.rollout(_SC1, stem).is_file()
+        assert tree.colormap(_SC1, stem, "clearance").is_file()
 
 
 def test_exported_json_carries_no_non_json_constants(tmp_path):
