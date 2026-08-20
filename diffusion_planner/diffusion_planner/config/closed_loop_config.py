@@ -50,6 +50,17 @@ class ClosedLoopConfig:
     closed_loop_abort_deviation_m: float = 50.0
     closed_loop_abort_after: int = 30
     closed_loop_abort_max_snaps: int = 0
+    closed_loop_goal_mode: str = "segment"
+    closed_loop_title_prefix: str | None = None
+    closed_loop_distance_label_offset_m: float = 1.2
+    closed_loop_view_half_m: float = 50.0
+    closed_loop_max_stuck_steps: int = 0
+    closed_loop_goal_reach_m: float = 5.0
+    closed_loop_interpolate: bool = True
+    closed_loop_color_by_uuid: bool = True
+    closed_loop_window: tuple[int, int] | None = None
+    closed_loop_max_steps: int | None = None
+    closed_loop_timeline_progress_mode: str = "pose"
 
     # validation in training part
     closed_loop_wandb_video_pick: str = cli(
