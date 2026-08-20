@@ -361,7 +361,7 @@ def main() -> int:
     import torch
     from diffusion_planner.utils import ddp
 
-    from scenario_generation.simulate import load_model
+    from scenario_generation.closed_loop_evaluation import FullRouteClosedLoopEvaluation
 
     parser = _build_parser()
     args = parser.parse_args()
@@ -382,7 +382,7 @@ def main() -> int:
         torch.cuda.set_device(local_rank)
         cfg.device = f"cuda:{local_rank}"
 
-    model, model_args = load_model(args.model_path, cfg.device)
+    model, model_args = FullRouteClosedLoopEvaluation.load_model_pair(args.model_path, cfg.device)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     out_root = base_out_root / timestamp
