@@ -23,10 +23,6 @@ COMPARISON_SCORE_KEYS = (
 OBJECTS_ONLY_SCORE_KEYS = ("total_collision_events",)
 SCORE_KEYS = COMPARISON_SCORE_KEYS + OBJECTS_ONLY_SCORE_KEYS
 
-# Cross-group overview sum keys: closed_loop_overview/{key} in wandb, summed across ALL groups
-# (COMPARISON) or objects-labeled groups only (OBJECTS_ONLY). mean_route_completion is NOT here --
-# the overview computes a segment-weighted average under its own "route_completion" key instead
-# of a plain sum.
 COMPARISON_OVERVIEW_SUM_KEYS = (
     "total_curb_hits",
     "total_snaps",
