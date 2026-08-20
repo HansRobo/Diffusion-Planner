@@ -16,6 +16,14 @@ at a JSON array of `.npz` paths. **No PDM cache.** DrivoR needs a `metric_cache`
 for the map/agent/progress side; the oracle here recomputes it from the NPZ
 tensors on the GPU, so there is nothing to build and nothing to invalidate.
 
+Both lists must be **skip-filtered** — the loader does no filtering of its own.
+Any frame the production filter would drop (sustained red-light stop, ego stuck,
+GT collision, stale data) is otherwise trained and scored as if it were normal,
+and those are the easy ones — ego stationary, nothing to hit — so an unfiltered
+*valid* list inflates PDMS silently. Filter with `ros_scripts/filter_scene_list.py`;
+audit an existing list by sampling `is_skipped` from each frame's `.json` sidecar.
+A list's name is not evidence either way.
+
 ### 1. Check the port (20 s, CPU)
 
 ```bash
@@ -82,9 +90,11 @@ exec ../.venv/bin/torchrun --nproc_per_node=8 train_predictor.py \
   --closed_loop_npz_root ""
 ```
 
-Batch 512 on 8xH100 is 43.8 GiB/device and ~1.9 steps/s; 1024 OOMs at step 0, so
-512 is a ceiling, not a preference. With a 10,637-step epoch, 40 epochs = 425,480
-steps ≈ 1.6 h/epoch, so ~2.5-3 days. `DP_DIST_INIT_FILE` replaces the hardcoded
+Batch 512 on 8xH100 is 43.8 GiB/device and ~2.1 steps/s; 1024 OOMs at step 0, so
+512 is a ceiling, not a preference. Budget in *steps*, not epochs: ~450k steps is
+~2.5 days, which is 40 epochs of a 10k-step corpus but 5 of a 90k-step one. Derive
+`--train_epochs` from `STEPS_PER_EPOCH` rather than carrying a number across
+datasets — it also sets the cosine's `T_max`. `DP_DIST_INIT_FILE` replaces the hardcoded
 `/tmp/tmp_dist_init` rendezvous file. `train_run.py` is not a shortcut for this
 path: it hardcodes `--train_epochs 80` and passes no `--predictor_head`.
 
@@ -156,6 +166,7 @@ the DiT sampler's inputs and the neighbour/turn-indicator outputs.
 | OOM at step 0 | `--batch_size` is global. 512/8 GPUs = 43.8 GiB each; 1024 does not fit in 80 GiB. |
 | LR near zero for whole epochs | `--drivor_warmup_ratio` carried over from a run with fewer total steps. |
 | PDMS not comparable to devkit numbers | `--drivor_num_poses * --drivor_pose_dt` ≠ navsim's 4 s. |
+| val PDMS implausibly high | the valid list was never skip-filtered ([above](#training)). |
 | `Comfort` identically 0 | needs the simulator rollout, not finite differences ([below](#comfort-needs-the-simulator)). 0 on ~3-5 % of scenes is expected — the recorded-past prefix gates them. |
 | rendezvous hangs at startup | stale `/tmp/tmp_dist_init`; set `DP_DIST_INIT_FILE` per run. |
 | W&B goes offline despite `--use_wandb True` | the job cannot see the credential. `HOME` must point where the `.netrc` actually is — on a cluster, `/home` is per-node. |
