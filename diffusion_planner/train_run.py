@@ -85,6 +85,20 @@ def parse_args() -> argparse.Namespace:
         "runs TWO extra forwards per adjacent frame pair every epoch, so on a full Step-1 list "
         "this roughly doubles validation cost. Set False to skip it.",
     )
+    p.add_argument(
+        "--unknown_class_rename_prob",
+        type=float,
+        default=_train_config_default("unknown_class_rename_prob"),
+        help="per-agent prob of relabeling a valid neighbor's type one-hot to Unknown during "
+        "training (class-agnostic; 0.0 = disabled)",
+    )
+    p.add_argument(
+        "--unknown_rename_debug_dir",
+        type=str,
+        default=_train_config_default("unknown_rename_debug_dir"),
+        help="optional: if set, dump one before/after PNG per epoch (on that epoch's last "
+        "training step) of the unknown_class_rename_prob augmentation here. Empty = off.",
+    )
     return p.parse_args()
 
 
@@ -160,6 +174,10 @@ def main() -> None:
         str(args.enable_temporal_stability_eval),
         "--enable_replan_consistency_eval",
         str(args.enable_replan_consistency_eval),
+        "--unknown_class_rename_prob",
+        str(args.unknown_class_rename_prob),
+        "--unknown_rename_debug_dir",
+        str(Path(args.unknown_rename_debug_dir).resolve()) if args.unknown_rename_debug_dir else "",
         *optional,
     ]
     rc = tee_run(
