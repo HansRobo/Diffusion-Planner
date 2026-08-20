@@ -173,6 +173,14 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
 
 
 def model_training(args: TrainConfig):
+    if getattr(args, "predictor_head", "diffusion") == "drivor":
+        # The DrivoR head shares the encoder and nothing else: its objective,
+        # metric taxonomy, validation and per-step accelerations all differ, so it
+        # owns its loop rather than threading conditionals through this one.
+        from diffusion_planner.drivor_train_loop import model_training_drivor
+
+        return model_training_drivor(args)
+
     assert len(args.coeff_timestep) == 4, "coeff_timestep must be a list of 4 elements"
 
     # init ddp

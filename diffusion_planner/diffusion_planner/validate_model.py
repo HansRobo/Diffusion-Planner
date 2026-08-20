@@ -200,6 +200,26 @@ def _neighbors_to_epdms_agent_boxes(
     return result
 
 
+def _history_poses_for_metrics(denorm_inputs: dict[str, torch.Tensor]) -> np.ndarray | None:
+    """The ego's recorded past as ``[B, H, 4]`` (x, y, cos, sin), oldest first.
+
+    ``history_comfort`` prepends this to the simulated future.  Validation runs
+    unaugmented, so the recorded frame and the ego-centric frame coincide here;
+    see ``DrivoROracle._history_states`` for why the recorded frame is also the
+    right input when augmentation is on.
+    """
+    past = denorm_inputs.get("ego_agent_past")
+    if past is None:
+        return None
+    array = past.detach().to(torch.float64).cpu().numpy()
+    if array.shape[-1] == 3:  # (x, y, heading) -> (x, y, cos, sin)
+        heading = array[..., 2]
+        array = np.stack(
+            (array[..., 0], array[..., 1], np.cos(heading), np.sin(heading)), axis=-1
+        )
+    return array
+
+
 def _epdms_eval_metrics(
     prediction: torch.Tensor,
     ego_future: torch.Tensor,
@@ -255,6 +275,14 @@ def _epdms_eval_metrics(
         lane_rings=lane_rings,
         intersection_rings=intersection_rings,
         route_centerlines=route_centerlines,
+        # navsim starts the comfort rollout from the real ego state; DP's
+        # ego_current_state supplies every column the LQR tracker reads.
+        ego_current_state=denorm_inputs["ego_current_state"].detach().cpu().numpy()
+        if "ego_current_state" in denorm_inputs
+        else None,
+        # history_comfort scores the recorded past together with the simulated
+        # future, so the panel needs the ego's own history as well.
+        ego_history_poses=_history_poses_for_metrics(denorm_inputs),
         dt=EPDMS_DT,
     )
     agent = pdms_proxy(ego_pred, ego_future, add_aggregation=False, **kwargs)

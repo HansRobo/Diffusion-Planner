@@ -39,7 +39,11 @@ def ddp_setup_universal(verbose=False, args=None):
     dist_backend = "nccl"
     # I don't know why but this is needed for DDP to work instead of 'env://'
     dist_url = "file://"
-    file_path = "/tmp/tmp_dist_init"
+    # The rendezvous file is shared state: a stale one owned by another user makes
+    # rank 0's write fail, and two concurrent jobs pointed at the same file see
+    # each other's ranks. DP_DIST_INIT_FILE lets a job pick its own; the default
+    # is unchanged.
+    file_path = os.environ.get("DP_DIST_INIT_FILE", "/tmp/tmp_dist_init")
     print("| distributed init (rank {}): {}, gpu {}".format(rank, dist_url, gpu), flush=True)
     init_process_group(
         init_method=f"{dist_url}{file_path}",

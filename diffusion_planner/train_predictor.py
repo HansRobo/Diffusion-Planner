@@ -30,6 +30,12 @@ def get_args(args_list=None):
     parser.add_argument("--train_set_list", type=str, required=True)
     parser.add_argument("--valid_set_list", type=str, required=True)
     parser.add_argument("--train_subsample_step", type=int, default=1)
+    parser.add_argument(
+        "--valid_subsample_step",
+        type=int,
+        default=_train_config_default("valid_subsample_step"),
+        help="stride into the validation list; 1 = all of it",
+    )
 
     parser.add_argument("--future_len", type=int, default=OUTPUT_T)
     parser.add_argument("--time_len", type=int, default=INPUT_T + 1)
@@ -203,6 +209,133 @@ def get_args(args_list=None):
 
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
 
+    # ---- Predictor head ------------------------------------------------
+    parser.add_argument(
+        "--predictor_head",
+        type=str,
+        choices=["diffusion", "drivor"],
+        default=_train_config_default("predictor_head"),
+        help="diffusion = DiT/DPM-Solver decoder; drivor = proposal + PDM scorer head "
+        "(ego trajectory only)",
+    )
+    for _name in (
+        "drivor_proposal_num",
+        "drivor_ref_num",
+        "drivor_scorer_ref_num",
+        "drivor_tf_d_ffn",
+        "drivor_refiner_num_heads",
+        "drivor_oracle_collision_stride",
+        "drivor_oracle_ttc_stride",
+        "drivor_oracle_border_stride",
+        "drivor_oracle_route_stride",
+        "drivor_oracle_max_neighbours",
+        "drivor_oracle_max_border_segments",
+        "drivor_oracle_max_route_segments",
+        "drivor_log_every_n_steps",
+        "prefetch_factor",
+    ):
+        parser.add_argument(f"--{_name}", type=int, default=_train_config_default(_name))
+    for _name in (
+        "drivor_refiner_ls_values",
+        "drivor_trajectory_proj_drop",
+        "drivor_trajectory_drop_path",
+        "drivor_scorer_proj_drop",
+        "drivor_scorer_drop_path",
+        "drivor_human_teacher_weight",
+        "drivor_logit_bound",
+        "drivor_weight_no_at_fault_collisions",
+        "drivor_weight_drivable_area_compliance",
+        "drivor_weight_driving_direction_compliance",
+        "drivor_weight_time_to_collision_within_bound",
+        "drivor_weight_ego_progress",
+        "drivor_weight_history_comfort",
+        "drivor_trajectory_weight",
+        "drivor_final_score_weight",
+        "drivor_prev_weight",
+        "drivor_label_smoothing",
+        "drivor_grad_clip",
+        "drivor_oracle_dt",
+    ):
+        parser.add_argument(f"--{_name}", type=float, default=_train_config_default(_name))
+    for _name in ("drivor_divergence_guard", "drivor_ddp_find_unused", "drivor_fused_ema"):
+        parser.add_argument(f"--{_name}", type=boolean, default=_train_config_default(_name))
+
+    # ---- throughput -------------------------------------------------------
+    parser.add_argument(
+        "--drivor_guard_sync_every",
+        type=int,
+        default=_train_config_default("drivor_guard_sync_every"),
+        help="Steps between the divergence guard's host readbacks. 1 = exact "
+        "per-step skip (costs one CUDA sync per step, so the CPU cannot run "
+        "ahead of the GPU); >1 keeps the per-step verdict on device and zeroes "
+        "a breached step's gradients instead of skipping it.",
+    )
+    parser.add_argument(
+        "--compile_mode",
+        type=str,
+        choices=[
+            "default",
+            "reduce-overhead",
+            "max-autotune",
+            "max-autotune-no-cudagraphs",
+        ],
+        default=_train_config_default("compile_mode"),
+        help="torch.compile mode. reduce-overhead and max-autotune capture CUDA "
+        "graphs; measured at 45 %% SLOWER here, because once the EMA's Python "
+        "loop is gone the step is GPU-bound rather than launch-bound. "
+        "max-autotune-no-cudagraphs gets the kernel autotuning without them.",
+    )
+
+    # ---- DrivoR's optimizer schedule (see utils/drivor_lr.py) --------------
+    parser.add_argument(
+        "--drivor_lr_schedule",
+        type=str,
+        choices=["drivor", "epoch", "probe"],
+        default=_train_config_default("drivor_lr_schedule"),
+        help="drivor = DrivoR's per-STEP linear ramp + cosine to zero "
+        "(navsim drivor_agent.py:452-483); epoch = this repo's per-epoch "
+        "CosineAnnealingWarmUpRestarts; probe = LR range test, then stop",
+    )
+    parser.add_argument(
+        "--drivor_warmup_ratio",
+        type=float,
+        default=_train_config_default("drivor_warmup_ratio"),
+        help="fraction of TOTAL steps spent on the linear ramp (DrivoR: 0.1)",
+    )
+    parser.add_argument(
+        "--drivor_lr_base_batch_size",
+        type=int,
+        default=_train_config_default("drivor_lr_base_batch_size"),
+        help="if > 0, treat --learning_rate as DrivoR's base_lr at this batch "
+        "size and scale the peak by sqrt(global_batch / base_batch_size) "
+        "(DrivoR: base_lr 1e-4 at 64); 0 disables scaling",
+    )
+    parser.add_argument(
+        "--drivor_lr_probe_max",
+        type=float,
+        default=_train_config_default("drivor_lr_probe_max"),
+        help="--drivor_lr_schedule probe: upper end of the geometric sweep",
+    )
+    parser.add_argument(
+        "--drivor_lr_probe_steps",
+        type=int,
+        default=_train_config_default("drivor_lr_probe_steps"),
+        help="--drivor_lr_schedule probe: steps over which to sweep, then stop",
+    )
+
+    parser.add_argument(
+        "--amp_dtype",
+        type=str,
+        choices=["bf16", "fp16"],
+        default=_train_config_default("amp_dtype"),
+    )
+    parser.add_argument(
+        "--persistent_workers", type=boolean, default=_train_config_default("persistent_workers")
+    )
+    parser.add_argument(
+        "--fused_optimizer", type=boolean, default=_train_config_default("fused_optimizer")
+    )
+
     parser.add_argument("--use_wandb", default=False, type=boolean)
     parser.add_argument(
         "--wandb_run_id", type=str, default=None, help="Existing wandb run ID to attach to"
@@ -212,6 +345,12 @@ def get_args(args_list=None):
         type=str,
         default="Diffusion-Planner",
         help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--wandb_entity",
+        type=str,
+        default=_train_config_default("wandb_entity"),
+        help="Weights & Biases entity/team (may also be given as 'entity/project')",
     )
     parser.add_argument("--notes", default="", type=str)
 
