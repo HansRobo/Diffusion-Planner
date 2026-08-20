@@ -111,3 +111,36 @@ def test_build_train_config(tmp_path: Path):
     assert config.save_dir != ""
     assert config.state_normalizer is not None
     assert config.observation_normalizer is not None
+    assert config.augment_type == "quintic"
+    assert config.tau_min_s == -1.0
+    assert config.tau_max_s == 0.0
+
+
+def test_augment_type_tau_cli(tmp_path: Path):
+    parser = build_parser("test parser")
+    train_list = str(tmp_path / "train.json")
+    valid_list = str(tmp_path / "valid.json")
+
+    args = parser.parse_args(
+        [
+            "--exp_name",
+            "test_run",
+            "--train_set_list",
+            train_list,
+            "--valid_set_list",
+            valid_list,
+            "--augment_type",
+            "tau",
+            "--tau_min_s",
+            "-0.5",
+            "--tau_max_s",
+            "0.0",
+        ]
+    )
+    assert args.augment_type == "tau"
+    assert args.tau_min_s == -0.5
+    assert args.tau_max_s == 0.0
+    cmd = to_command_line(args)
+    assert "--augment_type" in cmd
+    assert "tau" in cmd
+    assert "--tau_min_s" in cmd

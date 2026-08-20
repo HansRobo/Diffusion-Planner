@@ -18,7 +18,7 @@ from diffusion_planner.scenario_based_open_loop.validate import scenario_based_o
 from diffusion_planner.train_config import TrainConfig
 from diffusion_planner.train_epoch import train_epoch
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.data_augmentation import StatePerturbation, StatePerturbationAtTau
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
@@ -389,6 +389,16 @@ def model_training(args: TrainConfig):
     if args.use_data_augment:
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        elif args.augment_type == "tau":
+            aug = StatePerturbationAtTau(
+                augment_prob=args.augment_prob,
+                num_refine=args.num_refine,
+                device=args.device,
+                ego_past_noise_std=args.ego_past_noise_std,
+                use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
+                tau_min_s=args.tau_min_s,
+                tau_max_s=args.tau_max_s,
+            )
         else:
             aug = StatePerturbation(
                 augment_prob=args.augment_prob,

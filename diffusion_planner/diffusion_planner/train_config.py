@@ -91,10 +91,27 @@ class TrainConfig:
     # ---------------------------------------------------------
     use_data_augment: bool = True
     augment_prob: float = 0.5
-    augment_type: Literal["quintic", "bridge"] = "quintic"
+    augment_type: Literal["quintic", "bridge", "tau"] = cli(
+        "quintic=StatePerturbation; bridge=BridgeStatePerturbation; "
+        "tau=StatePerturbationAtTau (pose+kinematics at random τ).",
+        default="quintic",
+    )
     num_refine: int = 20
-    ego_past_noise_std: float = 0.1
+    ego_past_noise_std: float = cli(
+        "std of noise applied to ego past during augmentation; use 0.0 with augment_type=tau "
+        "because tau already rewrites history.",
+        default=0.1,
+    )
     use_smoothing_future_trajectory: bool = True
+    # StatePerturbationAtTau only (ignored for quintic / bridge).
+    tau_min_s: float = cli(
+        "StatePerturbationAtTau: min τ in seconds (relative to t=0). Ignored for quintic/bridge.",
+        default=-1.0,
+    )
+    tau_max_s: float = cli(
+        "StatePerturbationAtTau: max τ in seconds (relative to t=0). Ignored for quintic/bridge.",
+        default=0.0,
+    )
     normalization_file_path: str = "normalization.json"
     num_workers: int = 8
     pin_mem: bool = True

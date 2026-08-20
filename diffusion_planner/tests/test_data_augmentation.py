@@ -31,7 +31,8 @@ Covers:
 - _segments_intersect_rect: crossing, endpoint inside, outside, fully inside,
   valid mask filtering, batch
 - StatePerturbation._check_aug_validity: no keys, neighbor overlap/clear,
-  left/right boundary cross/clear, zero offset ignored, batch mixed
+  road-border cross/clear, stop-line ignored, lane boundaries ignored,
+  batch mixed
 - StatePerturbation.augment (integration): collision suppresses aug_flag,
   no-collision preserves aug_flag
 
@@ -57,7 +58,11 @@ from diffusion_planner.utils.data_augmentation import (
     _rect_corners,
     _sat_signed_distance,
     _segments_intersect_rect,
+    heading_from_cos_sin,
     heading_transform,
+    project_onto_heading,
+    rotate_xy_by_heading,
+    tangential_va,
     vector_transform,
 )
 
@@ -65,6 +70,22 @@ from diffusion_planner.utils.data_augmentation import (
 _EGO_SHAPE_DEFAULT = torch.tensor([[2.75, 5.0, 2.0]])
 
 ATOL = 1e-5
+
+# Explicit constructor kwargs — StatePerturbation requires these (no defaults).
+_AUG_DEFAULTS = dict(
+    augment_prob=0.5,
+    num_refine=20,
+    device="cpu",
+    ego_past_noise_std=0.1,
+    use_smoothing_future_trajectory=True,
+)
+
+
+def _make_aug(**overrides) -> StatePerturbation:
+    """Build StatePerturbation with required args; overrides replace defaults."""
+    kwargs = dict(_AUG_DEFAULTS)
+    kwargs.update(overrides)
+    return StatePerturbation(**kwargs)
 
 
 # ─────────────────────────────── helpers ────────────────────────────────────
@@ -185,8 +206,10 @@ def test_heading_transform_identity():
     I = torch.eye(2).unsqueeze(0).expand(B, -1, -1).clone()
     out = heading_transform(h, I)
     assert out.shape == h.shape
-    assert torch.allclose(out, h, atol=1e-5), (
-        f"Identity heading transform changed values (max diff {(out - h).abs().max():.2e})"
+    # atan2 wraps to (-pi, pi]; identity rotation still canonicalizes the angle.
+    wrapped = torch.atan2(torch.sin(h), torch.cos(h))
+    assert torch.allclose(out, wrapped, atol=1e-5), (
+        f"Identity heading transform changed values (max diff {(out - wrapped).abs().max():.2e})"
     )
     print("  [PASS] heading_transform identity")
 
@@ -218,9 +241,10 @@ def test_heading_transform_rotation_180():
 
 
 def test_state_perturbation_init():
-    aug = StatePerturbation(augment_prob=0.7, wheel_base=3.0, device="cpu")
+    aug = _make_aug(augment_prob=0.7, device="cpu")
     assert aug._augment_prob == 0.7
-    assert aug._wheel_base == 3.0
+    assert aug._ego_past_noise_std == 0.1
+    assert aug._use_smoothing_future_trajectory is True
     assert aug.num_refine == 20
     assert aug.time_interval == 0.1
     assert aug.coeff_matrix.shape == (6, 6), f"coeff_matrix shape: {aug.coeff_matrix.shape}"
@@ -229,7 +253,7 @@ def test_state_perturbation_init():
 
 
 def test_normalize_angle_in_range():
-    aug = StatePerturbation()
+    aug = _make_aug()
     angles = torch.tensor([0.0, math.pi / 2, -math.pi / 2, math.pi * 0.999])
     out = aug.normalize_angle(angles)
     assert torch.allclose(out, angles, atol=1e-5), (
@@ -240,7 +264,7 @@ def test_normalize_angle_in_range():
 
 def test_normalize_angle_wrapping():
     """2pi -> 0, -2pi -> 0, 3pi -> -pi."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     angles = torch.tensor([2 * math.pi, -2 * math.pi, 3 * math.pi])
     out = aug.normalize_angle(angles)
     expected = torch.tensor([0.0, 0.0, -math.pi])
@@ -251,7 +275,7 @@ def test_normalize_angle_wrapping():
 
 
 def test_normalize_angle_numpy():
-    aug = StatePerturbation()
+    aug = _make_aug()
     arr = np.array([0.0, 2 * np.pi, -2 * np.pi])
     out = aug.normalize_angle(arr)
     assert isinstance(out, np.ndarray), "Should return ndarray for ndarray input"
@@ -263,7 +287,7 @@ def test_normalize_angle_numpy():
 
 def test_get_transform_matrix_batch_identity():
     """cos=1, sin=0 (heading=0) -> identity matrix."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     cur_state = torch.zeros(2, 10)
     cur_state[:, 2] = 1.0
     cur_state[:, 3] = 0.0
@@ -277,7 +301,7 @@ def test_get_transform_matrix_batch_identity():
 
 def test_get_transform_matrix_batch_90deg():
     """cos=0, sin=1 (heading=pi/2) -> [[0, 1], [-1, 0]] (inverse rotation)."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     cur_state = torch.zeros(1, 10)
     cur_state[:, 2] = 0.0  # cos(pi/2)
     cur_state[:, 3] = 1.0  # sin(pi/2)
@@ -302,7 +326,7 @@ def _augment_inputs(B: int, vx: float = 10.0) -> dict:
 def test_augment_prob_zero():
     """augment_prob=0: no samples augmented regardless of velocity."""
     torch.manual_seed(42)
-    aug = StatePerturbation(augment_prob=0.0)
+    aug = _make_aug(augment_prob=0.0)
     aug_flag, _ = aug.augment(_augment_inputs(8))
     assert not aug_flag.any(), "augment_prob=0 should not augment any sample"
     print("  [PASS] augment prob=0 no augmentation")
@@ -311,7 +335,7 @@ def test_augment_prob_zero():
 def test_augment_prob_one_fast_vehicle():
     """augment_prob=1, |vx|>=2: all samples augmented and state changes."""
     torch.manual_seed(0)
-    aug = StatePerturbation(augment_prob=1.0)
+    aug = _make_aug(augment_prob=1.0)
     B = 4
     inputs = _augment_inputs(B)
     original = inputs["ego_current_state"].clone()
@@ -326,7 +350,7 @@ def test_augment_prob_one_fast_vehicle():
 def test_augment_slow_vehicle_not_augmented():
     """Slow vehicle (|vx| < 2) is never augmented even with prob=1."""
     torch.manual_seed(0)
-    aug = StatePerturbation(augment_prob=1.0)
+    aug = _make_aug(augment_prob=1.0)
     aug_flag, _ = aug.augment(_augment_inputs(4, vx=0.5))
     assert not aug_flag.any(), "Slow vehicle (vx=0.5) should not be augmented"
     print("  [PASS] augment slow vehicle not augmented")
@@ -335,7 +359,7 @@ def test_augment_slow_vehicle_not_augmented():
 def test_augment_velocity_nonneg():
     """Augmented vx >= 0 (velocity is clamped at 0)."""
     torch.manual_seed(123)
-    aug = StatePerturbation(augment_prob=1.0)
+    aug = _make_aug(augment_prob=1.0)
     _, new_state = aug.augment(_augment_inputs(32, vx=2.5))
     vx = new_state[:, 4]
     assert (vx >= -1e-6).all(), f"Augmented vx has negative values: min={vx.min():.4f}"
@@ -343,7 +367,7 @@ def test_augment_velocity_nonneg():
 
 
 def test_augment_output_shape():
-    aug = StatePerturbation()
+    aug = _make_aug()
     B = 3
     inputs = _augment_inputs(B, vx=5.0)
     aug_flag, new_state = aug.augment(inputs)
@@ -357,7 +381,7 @@ def test_augment_output_shape():
 def test_augment_cos_sin_unit_norm():
     """After augmentation, cos and sin values must lie on the unit circle."""
     torch.manual_seed(42)
-    aug = StatePerturbation(augment_prob=1.0)
+    aug = _make_aug(augment_prob=1.0)
     B = 8
     _, new_state = aug.augment(_augment_inputs(B, vx=5.0))
     norms = torch.hypot(new_state[:, 2], new_state[:, 3])
@@ -372,7 +396,7 @@ def test_augment_cos_sin_unit_norm():
 
 def test_interpolation_shape_keep_remaining():
     """keep_remaining=True preserves trailing waypoints: output shape == input shape."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     B, T = 2, 80
     aug_state = _ego_state(B, vx=5.0)
     ego_future = torch.zeros(B, T, 3)
@@ -385,7 +409,7 @@ def test_interpolation_shape_keep_remaining():
 
 def test_interpolation_shape_no_remaining():
     """keep_remaining=False: output length == num_refine (P=20)."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     B, T, P = 2, 80, aug.num_refine
     aug_state = _ego_state(B, vx=5.0)
     ego_future = torch.zeros(B, T, 3)
@@ -403,7 +427,7 @@ def test_interpolation_endpoint_proximity():
     so the last *sampled* point (at t = P*dt) differs by roughly one step of travel.
     With vx=5 m/s and dt=0.1 s the expected gap is ~0.5 m.
     """
-    aug = StatePerturbation()
+    aug = _make_aug()
     B, T, P = 1, 80, aug.num_refine
     aug_state = _ego_state(B, vx=5.0)
     ego_future = torch.zeros(B, T, 3)
@@ -418,12 +442,106 @@ def test_interpolation_endpoint_proximity():
     print("  [PASS] interpolation end-point proximity")
 
 
+def test_tangential_va_keeps_braking_sign():
+    heading = torch.zeros(2)
+    velocity = torch.tensor([[8.0, 0.0], [8.0, 0.0]])
+    accel = torch.tensor([[-2.0, 0.0], [1.5, 0.0]])
+    v, a = tangential_va(velocity, accel, heading)
+    assert torch.allclose(v, torch.tensor([8.0, 8.0]), atol=1e-6)
+    assert torch.allclose(a, torch.tensor([-2.0, 1.5]), atol=1e-6)
+    print("  [PASS] tangential_va braking sign")
+
+
+def test_tangential_va_constant_speed_turn_drops_centripetal():
+    """ay = v*omega is centripetal; tangential a must be 0, not ||(ax, ay)||."""
+    v = 8.0
+    kappa = 0.06
+    omega = v * kappa
+    heading = torch.zeros(1)
+    velocity = torch.tensor([[v, 0.0]])
+    accel = torch.tensor([[0.0, v * omega]])
+    tan_v, tan_a = tangential_va(velocity, accel, heading)
+    assert torch.allclose(tan_v, torch.tensor([v]), atol=1e-5)
+    assert torch.allclose(tan_a, torch.zeros(1), atol=1e-5)
+    assert torch.linalg.norm(accel[0]).item() > 3.0  # the old torch.norm value
+    print("  [PASS] tangential_va drops centripetal")
+
+
+def test_project_onto_heading_rotated_frame():
+    heading = torch.tensor([math.pi / 2])
+    xy = torch.tensor([[0.0, 5.0]])  # +y is forward at heading pi/2
+    assert torch.allclose(project_onto_heading(xy, heading), torch.tensor([5.0]), atol=1e-5)
+    assert torch.allclose(
+        heading_from_cos_sin(torch.tensor([0.0]), torch.tensor([1.0])),
+        torch.tensor([math.pi / 2]),
+        atol=1e-5,
+    )
+    print("  [PASS] project_onto_heading rotated frame")
+
+
+def test_rotate_then_inverse_preserves_body_velocity():
+    """Pre-rotate by +heading, then centric R(-heading), recovers body-frame v."""
+    aug = _make_aug()
+    heading = 0.2
+    state = _ego_state(1, heading=heading, vx=8.0)
+    body_v = state[:, 4:6].clone()
+    rotated = rotate_xy_by_heading(body_v, state[:, 2], state[:, 3])
+    mat = aug.get_transform_matrix_batch(state)
+    recovered = vector_transform(rotated.unsqueeze(1), mat).squeeze(1)
+    assert torch.allclose(recovered, body_v, atol=1e-5), recovered
+    print("  [PASS] rotate then inverse preserves body velocity")
+
+
+def test_interpolation_zero_perturbation_braking_nearly_identity():
+    """Constant-accel braking GT must not be rewritten as a speed-up (old norm bug)."""
+    aug = _make_aug()
+    dt = aug.time_interval
+    p = aug.num_refine
+    v0, a0 = 8.0, -2.0
+    t_fut = 80
+    times = torch.arange(1, t_fut + 1, dtype=torch.float32) * dt
+    ego_future = torch.zeros(1, t_fut, 3)
+    ego_future[0, :, 0] = v0 * times + 0.5 * a0 * times**2
+    state = _ego_state(1, vx=v0)
+    state[0, 6] = a0
+    out = aug.interpolation_future_trajectory(state, ego_future, keep_remaining=False)
+    gt = torch.stack([v0 * times[:p] + 0.5 * a0 * times[:p] ** 2, torch.zeros(p)], dim=-1)
+    err = (out[0, :, :2] - gt).norm(dim=-1).max().item()
+    assert err < 0.08, f"braking identity error {err:.3f} m (old bug ~0.55 m)"
+    print("  [PASS] interpolation braking identity")
+
+
+def test_interpolation_zero_perturbation_turn_nearly_identity():
+    """Constant-speed curve: centripetal must not be treated as tangential accel."""
+    aug = _make_aug()
+    dt = aug.time_interval
+    p = aug.num_refine
+    speed, kappa = 8.0, 0.06
+    omega = speed * kappa
+    radius = 1.0 / kappa
+    t_fut = 80
+    times = torch.arange(1, t_fut + 1, dtype=torch.float32) * dt
+    heading_t = omega * times
+    ego_future = torch.zeros(1, t_fut, 3)
+    ego_future[0, :, 0] = radius * torch.sin(heading_t)
+    ego_future[0, :, 1] = radius * (1.0 - torch.cos(heading_t))
+    ego_future[0, :, 2] = heading_t
+    state = _ego_state(1, vx=speed)
+    state[0, 7] = speed * omega  # ay centripetal
+    state[0, 9] = omega
+    out = aug.interpolation_future_trajectory(state, ego_future, keep_remaining=False)
+    gt = ego_future[0, :p, :2]
+    err = (out[0, :, :2] - gt).norm(dim=-1).max().item()
+    assert err < 0.12, f"turn identity error {err:.3f} m (old bug ~1.10 m)"
+    print("  [PASS] interpolation turn identity")
+
+
 # ─────────────────────────── centric_transform ──────────────────────────────
 
 
 def test_centric_transform_identity_ego():
     """Ego at origin with zero heading: neighbor and lane positions unchanged."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     B = 1
     inputs, ego_future, nbrs_future = _make_inputs(B)
 
@@ -454,7 +572,7 @@ def test_centric_transform_identity_ego():
 
 def test_centric_transform_zero_mask_preserved():
     """All-zero neighbor entries remain zero after transform (mask respected)."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     inputs, ego_future, nbrs_future = _make_inputs(1)
     # neighbor_agents_past is all zeros by default
     result_inputs, _, _ = aug.centric_transform(inputs, ego_future, nbrs_future)
@@ -466,7 +584,7 @@ def test_centric_transform_zero_mask_preserved():
 
 def test_centric_transform_translation():
     """Ego at (5, 3), neighbor at (6, 3) -> neighbor becomes (1, 0) after transform."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     inputs, ego_future, nbrs_future = _make_inputs(1)
 
     inputs["ego_current_state"][:, 0] = 5.0
@@ -489,7 +607,7 @@ def test_centric_transform_translation():
 
 def test_centric_transform_ego_xy_zeroed():
     """After centric_transform, ego xy should always be (0, 0)."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     inputs, ego_future, nbrs_future = _make_inputs(1)
 
     inputs["ego_current_state"][:, 0] = 10.0
@@ -540,22 +658,52 @@ def _lanes(
     return out
 
 
+def _road_borders(
+    B: int,
+    xs: list[float],
+    ys: list[float] | None = None,
+    *,
+    is_border: bool = True,
+    N_ls: int = 4,
+) -> torch.Tensor:
+    """Build line_strings with one polyline; channel 3 marks road_border."""
+    assert len(xs) >= 2
+    P = len(xs)
+    if ys is None:
+        ys = [0.0] * P
+    assert len(ys) == P
+    out = torch.zeros(B, N_ls, P, 4, dtype=torch.float32)
+    for i, (x, y) in enumerate(zip(xs, ys)):
+        out[:, 0, i, 0] = x
+        out[:, 0, i, 1] = y
+        if is_border:
+            out[:, 0, i, 3] = 1.0  # road_border one-hot
+        else:
+            out[:, 0, i, 2] = 1.0  # stop_line (not checked)
+    return out
+
+
 def _check_inputs(
     B: int,
     nbr_tensor: torch.Tensor,
-    lane_tensor: torch.Tensor,
+    lane_tensor: torch.Tensor | None = None,
     vx: float = 5.0,
     ego_shape: torch.Tensor | None = None,
+    line_strings: torch.Tensor | None = None,
 ) -> dict:
     """Minimal inputs dict for _check_aug_validity."""
     if ego_shape is None:
         ego_shape = _EGO_SHAPE_DEFAULT.expand(B, -1)
-    return {
+    out = {
         "ego_current_state": _ego_state(B, vx=vx),
         "ego_shape": ego_shape,
         "neighbor_agents_past": nbr_tensor,
-        "lanes": lane_tensor,
     }
+    if lane_tensor is not None:
+        out["lanes"] = lane_tensor
+    if line_strings is not None:
+        out["line_strings"] = line_strings
+    return out
 
 
 # ──────────────────────────────── _cross2d ──────────────────────────────────
@@ -808,8 +956,8 @@ def test_segments_intersect_rect_multiple_segments_any():
 
 
 def test_check_aug_validity_no_collision_sources():
-    """ego_shape present but no neighbor or lane data: always valid (returns all False)."""
-    aug = StatePerturbation()
+    """ego_shape present but no neighbor or line_strings: always valid."""
+    aug = _make_aug()
     B = 3
     ego = _ego_state(B, vx=5.0)
     inputs = {
@@ -818,16 +966,16 @@ def test_check_aug_validity_no_collision_sources():
     }
     collision = aug._check_aug_validity(ego, inputs)
     assert collision.shape == (B,)
-    assert not collision.any(), "No neighbor/lane keys → no collision"
+    assert not collision.any(), "No neighbor/line_strings keys → no collision"
     print("  [PASS] _check_aug_validity no collision sources")
 
 
 def test_check_aug_validity_neighbor_at_ego_position():
     """Neighbor at exactly the ego position: overlap → collision."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     B = 1
     ego = _ego_state(B, vx=5.0)  # ego at (0, 0)
-    inputs = _check_inputs(B, _nbr(B, x=0.0, y=0.0), _lanes(B, []))
+    inputs = _check_inputs(B, _nbr(B, x=0.0, y=0.0))
     collision = aug._check_aug_validity(ego, inputs)
     assert collision.item(), "Neighbor at ego center must trigger collision"
     print("  [PASS] _check_aug_validity neighbor at ego position")
@@ -835,10 +983,10 @@ def test_check_aug_validity_neighbor_at_ego_position():
 
 def test_check_aug_validity_neighbor_far():
     """Neighbor 50 m away: no overlap → no collision."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     B = 1
     ego = _ego_state(B, vx=5.0)
-    inputs = _check_inputs(B, _nbr(B, x=50.0), _lanes(B, []))
+    inputs = _check_inputs(B, _nbr(B, x=50.0))
     collision = aug._check_aug_validity(ego, inputs)
     assert not collision.item(), "Distant neighbor should not trigger collision"
     print("  [PASS] _check_aug_validity neighbor far")
@@ -846,85 +994,83 @@ def test_check_aug_validity_neighbor_far():
 
 def test_check_aug_validity_all_zero_neighbors_ignored():
     """All-zero neighbor tensor (padding): treated as absent → no collision."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     B = 1
     ego = _ego_state(B, vx=5.0)
     empty_nbr = torch.zeros(B, 5, 31, 11)
-    inputs = _check_inputs(B, empty_nbr, _lanes(B, []))
+    inputs = _check_inputs(B, empty_nbr)
     collision = aug._check_aug_validity(ego, inputs)
     assert not collision.item(), "All-zero neighbors must be ignored"
     print("  [PASS] _check_aug_validity all-zero neighbors ignored")
 
 
-def test_check_aug_validity_lane_left_boundary_cross():
-    """Ego shifted left until it straddles the left lane boundary → collision."""
-    aug = StatePerturbation()
+def test_check_aug_validity_road_border_cross():
+    """Road-border polyline passing through the ego rectangle → collision."""
+    aug = _make_aug()
     B = 1
-    # Ego at y=0.8, width=2 → spans y∈[-0.2, 1.8].
-    # Left boundary at absolute y=1.0 (center y=0, left_off=+1.0) → inside ego.
-    ego = _ego_state(B, y=0.8, vx=5.0)
-    inputs = _check_inputs(
-        B,
-        torch.zeros(B, 5, 31, 11),
-        _lanes(B, list(range(-10, 10)), left_y_off=1.0, right_y_off=-3.0),
-    )
-    collision = aug._check_aug_validity(ego, inputs)
-    assert collision.item(), "Left boundary inside ego must trigger collision"
-    print("  [PASS] _check_aug_validity left boundary cross")
-
-
-def test_check_aug_validity_lane_right_boundary_cross():
-    """Ego shifted left until it straddles the right lane boundary → collision."""
-    aug = StatePerturbation()
-    B = 1
-    # Ego at y=0.8 → spans y∈[-0.2, 1.8].
-    # Right boundary at absolute y=-0.1 (right_off=-0.1) → inside ego.
-    ego = _ego_state(B, y=0.8, vx=5.0)
-    inputs = _check_inputs(
-        B,
-        torch.zeros(B, 5, 31, 11),
-        _lanes(B, list(range(-10, 10)), left_y_off=3.0, right_y_off=-0.1),
-    )
-    collision = aug._check_aug_validity(ego, inputs)
-    assert collision.item(), "Right boundary inside ego must trigger collision"
-    print("  [PASS] _check_aug_validity right boundary cross")
-
-
-def test_check_aug_validity_lane_both_boundaries_clear():
-    """Ego centered in lane with boundaries at ±2 m: no collision."""
-    aug = StatePerturbation()
-    B = 1
-    # Ego at (0, 0), width=2 → spans y∈[-1, 1].
-    # Left boundary at y=+2.0, right at y=-2.0: both well outside.
+    # Ego at (0,0), width=2 → y∈[-1,1]. Horizontal border at y=0 crosses it.
     ego = _ego_state(B, vx=5.0)
     inputs = _check_inputs(
         B,
         torch.zeros(B, 5, 31, 11),
-        _lanes(B, list(range(-10, 10)), left_y_off=2.0, right_y_off=-2.0),
+        line_strings=_road_borders(B, xs=[-5.0, 5.0], ys=[0.0, 0.0], is_border=True),
     )
     collision = aug._check_aug_validity(ego, inputs)
-    assert not collision.item(), "Ego centered in lane should not collide"
-    print("  [PASS] _check_aug_validity lane both boundaries clear")
+    assert collision.item(), "Road border through ego must trigger collision"
+    print("  [PASS] _check_aug_validity road border cross")
 
 
-def test_check_aug_validity_zero_boundary_offset_ignored():
-    """Boundary offset ≤ 0.01 m is treated as 'no data' and ignored."""
-    aug = StatePerturbation()
+def test_check_aug_validity_road_border_clear():
+    """Road border well outside the ego rectangle → no collision."""
+    aug = _make_aug()
     B = 1
-    # Ego at (0, 0). If zero right_off were honoured, abs right boundary = center = (cx, 0)
-    # which would be inside ego.  It must be skipped.
+    # Ego width=2 → y∈[-1,1]; border at y=3 is clear.
     ego = _ego_state(B, vx=5.0)
     inputs = _check_inputs(
-        B, torch.zeros(B, 5, 31, 11), _lanes(B, list(range(-3, 4)), left_y_off=2.0, right_y_off=0.0)
+        B,
+        torch.zeros(B, 5, 31, 11),
+        line_strings=_road_borders(B, xs=[-5.0, 5.0], ys=[3.0, 3.0], is_border=True),
     )
     collision = aug._check_aug_validity(ego, inputs)
-    assert not collision.item(), "Zero boundary offset must not trigger collision"
-    print("  [PASS] _check_aug_validity zero boundary offset ignored")
+    assert not collision.item(), "Distant road border should not collide"
+    print("  [PASS] _check_aug_validity road border clear")
+
+
+def test_check_aug_validity_stop_line_ignored():
+    """Stop-line polylines (channel 2) must not trigger the road-border check."""
+    aug = _make_aug()
+    B = 1
+    ego = _ego_state(B, vx=5.0)
+    inputs = _check_inputs(
+        B,
+        torch.zeros(B, 5, 31, 11),
+        line_strings=_road_borders(B, xs=[-5.0, 5.0], ys=[0.0, 0.0], is_border=False),
+    )
+    collision = aug._check_aug_validity(ego, inputs)
+    assert not collision.item(), "Stop-line must be ignored by road-border check"
+    print("  [PASS] _check_aug_validity stop line ignored")
+
+
+def test_check_aug_validity_lane_boundaries_ignored():
+    """Lane L/R boundaries must no longer trigger collision (road-border only)."""
+    aug = _make_aug()
+    B = 1
+    # Same geometry that previously failed with lane checks: left bound at y=1.0
+    # through an ego at y=0.8. With road-border-only checking this is clear.
+    ego = _ego_state(B, y=0.8, vx=5.0)
+    inputs = _check_inputs(
+        B,
+        torch.zeros(B, 5, 31, 11),
+        lane_tensor=_lanes(B, list(range(-10, 10)), left_y_off=1.0, right_y_off=-3.0),
+    )
+    collision = aug._check_aug_validity(ego, inputs)
+    assert not collision.item(), "Lane boundaries alone must not trigger collision"
+    print("  [PASS] _check_aug_validity lane boundaries ignored")
 
 
 def test_check_aug_validity_batch_mixed():
     """B=2: b=0 collides with neighbor, b=1 is clear."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     B = 2
     ego = _ego_state(B, vx=5.0)  # both at (0, 0)
     nbr = torch.zeros(B, 5, 31, 11)
@@ -942,7 +1088,7 @@ def test_check_aug_validity_batch_mixed():
         "ego_current_state": ego,
         "ego_shape": _EGO_SHAPE_DEFAULT.expand(B, -1),
         "neighbor_agents_past": nbr,
-        "lanes": torch.zeros(B, 5, 10, 33),
+        "line_strings": torch.zeros(B, 4, 8, 4),
     }
     collision = aug._check_aug_validity(ego, inputs)
     assert collision[0].item() and not collision[1].item(), (
@@ -953,13 +1099,12 @@ def test_check_aug_validity_batch_mixed():
 
 def test_check_aug_validity_ego_shape_controls_size():
     """Different ego_shape values change which neighbours are detected as collisions."""
-    aug = StatePerturbation()
+    aug = _make_aug()
     B = 1
     ego = _ego_state(B, vx=5.0)  # ego at (0, 0), heading=0
 
     # Neighbour at y=3.5 m: outside a 5×2 m ego (half-width=1 m) but inside a 10×8 m ego.
     nbr = _nbr(B, x=0.0, y=3.5, width=1.0, length=1.0)
-    lanes = torch.zeros(B, 5, 10, 33)
 
     # Small ego (5×2 m): neighbour at y=3.5 is OUTSIDE → no collision
     small_shape = torch.tensor([[2.75, 5.0, 2.0]])
@@ -967,7 +1112,7 @@ def test_check_aug_validity_ego_shape_controls_size():
         "ego_current_state": ego,
         "ego_shape": small_shape,
         "neighbor_agents_past": nbr,
-        "lanes": lanes,
+        "line_strings": torch.zeros(B, 4, 8, 4),
     }
     assert not aug._check_aug_validity(ego, inputs_small).item(), (
         "5×2 ego: neighbour at y=3.5 must not collide"
@@ -979,7 +1124,7 @@ def test_check_aug_validity_ego_shape_controls_size():
         "ego_current_state": ego,
         "ego_shape": large_shape,
         "neighbor_agents_past": nbr,
-        "lanes": lanes,
+        "line_strings": torch.zeros(B, 4, 8, 4),
     }
     assert aug._check_aug_validity(ego, inputs_large).item(), (
         "10×8 ego: neighbour at y=3.5 must collide"
@@ -993,7 +1138,7 @@ def test_check_aug_validity_ego_shape_controls_size():
 def test_augment_collision_suppresses_aug_flag():
     """Neighbor at ego origin: any perturbation still overlaps → aug_flag forced False."""
     torch.manual_seed(0)
-    aug = StatePerturbation(augment_prob=1.0)
+    aug = _make_aug(augment_prob=1.0)
     B = 1
     # Ego at (0, 0), |vx|=10 (above the speed threshold).
     # Neighbor is also at (0, 0) with size 4.5×2.0 m.
@@ -1013,7 +1158,7 @@ def test_augment_collision_suppresses_aug_flag():
 def test_augment_no_collision_preserves_aug_flag():
     """Fast vehicle with no collision sources: aug_flag all True (prob=1)."""
     torch.manual_seed(0)
-    aug = StatePerturbation(augment_prob=1.0)
+    aug = _make_aug(augment_prob=1.0)
     B = 4
     inputs = {
         "ego_current_state": _ego_state(B, vx=10.0),
@@ -1029,7 +1174,7 @@ def test_augment_no_collision_preserves_aug_flag():
 def test_augment_collision_batch_selectively_suppresses():
     """B=2: b=0 collides (flag→False), b=1 is clear (flag stays True)."""
     torch.manual_seed(0)
-    aug = StatePerturbation(augment_prob=1.0)
+    aug = _make_aug(augment_prob=1.0)
     B = 2
     nbr = torch.zeros(B, 5, 31, 11)
     # b=0: neighbour at (0, 0) → always collides after any perturbation
@@ -1118,10 +1263,10 @@ ALL_TESTS = [
     test_check_aug_validity_neighbor_at_ego_position,
     test_check_aug_validity_neighbor_far,
     test_check_aug_validity_all_zero_neighbors_ignored,
-    test_check_aug_validity_lane_left_boundary_cross,
-    test_check_aug_validity_lane_right_boundary_cross,
-    test_check_aug_validity_lane_both_boundaries_clear,
-    test_check_aug_validity_zero_boundary_offset_ignored,
+    test_check_aug_validity_road_border_cross,
+    test_check_aug_validity_road_border_clear,
+    test_check_aug_validity_stop_line_ignored,
+    test_check_aug_validity_lane_boundaries_ignored,
     test_check_aug_validity_batch_mixed,
     test_check_aug_validity_ego_shape_controls_size,
     # ── augment + collision filter (integration) ──

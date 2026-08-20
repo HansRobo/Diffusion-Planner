@@ -20,7 +20,7 @@ from diffusion_planner.grpo_epoch import train_grpo_epoch
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.train import closed_loop_validate
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import StatePerturbation
+from diffusion_planner.utils.data_augmentation import StatePerturbation, StatePerturbationAtTau
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
@@ -99,7 +99,12 @@ def get_args():
     parser.add_argument("--use_data_augment", default=True, type=boolean)
     parser.add_argument("--augment_prob", type=float, default=0.5, help="augmentation probability")
     parser.add_argument(
-        "--augment_type", type=str, choices=["quintic", "bridge"], default="quintic"
+        "--augment_type",
+        type=str,
+        choices=["quintic", "bridge", "tau"],
+        default="quintic",
+        help="quintic=StatePerturbation; bridge=BridgeStatePerturbation; "
+        "tau=StatePerturbationAtTau (pose+kinematics at random τ).",
     )
     parser.add_argument(
         "--num_refine", type=int, default=20, help="number of refinement steps for augmentation"
@@ -115,6 +120,18 @@ def get_args():
         default=True,
         type=boolean,
         help="whether to apply smoothing to future trajectory during augmentation",
+    )
+    parser.add_argument(
+        "--tau_min_s",
+        type=float,
+        default=-1.0,
+        help="StatePerturbationAtTau: min τ in seconds (relative to t=0).",
+    )
+    parser.add_argument(
+        "--tau_max_s",
+        type=float,
+        default=0.0,
+        help="StatePerturbationAtTau: max τ in seconds (relative to t=0).",
     )
 
     # Training
@@ -543,6 +560,16 @@ def model_training(args):
     if args.use_data_augment:
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+        elif args.augment_type == "tau":
+            aug = StatePerturbationAtTau(
+                augment_prob=args.augment_prob,
+                num_refine=args.num_refine,
+                device=args.device,
+                ego_past_noise_std=args.ego_past_noise_std,
+                use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
+                tau_min_s=args.tau_min_s,
+                tau_max_s=args.tau_max_s,
+            )
         else:
             aug = StatePerturbation(
                 augment_prob=args.augment_prob,
