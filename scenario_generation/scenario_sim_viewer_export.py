@@ -366,12 +366,7 @@ def write_viewer_tree(
     return counts
 
 
-def export(
-    run_dir: Path,
-    out_root: Path,
-    *,
-    fps: float = 10.0,
-) -> dict[str, dict[str, int]]:
+def export(run_dir: Path, out_root: Path) -> dict[str, dict[str, int]]:
     """Export one scenario_sim run directory into ``out_root``."""
     ctx = parse_run_context(run_dir)
     by_scenario, missing = collect_cases(run_dir)
@@ -402,9 +397,8 @@ def export(
 
     meta = {
         "run_dir": str(run_dir),
-        # A video second is ``draw_every / fps`` sim steps, so a consumer that lines the video
-        # up with a step needs both numbers.
-        "fps": fps,
+        # A frame is ``draw_every`` sim steps, and the container is encoded at the sim tick
+        # rate, so the video plays that many times faster than the run.
         "draw_every": ctx.get("draw_every"),
         "scenario_root": ctx.get("scenario_root"),
         "ckpt": ctx.get("ckpt"),
@@ -436,13 +430,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--run_dir", required=True, type=Path, help="a finished suite run directory")
     p.add_argument("--out_root", required=True, type=Path, help="viewer tree to write")
-    p.add_argument(
-        "--fps",
-        type=float,
-        default=10.0,
-        help="tick rate the mp4s were encoded at; the driver does not stamp it, and a"
-        " consumer needs it to map a sim step to a video time",
-    )
     return p.parse_args(argv)
 
 
@@ -451,7 +438,6 @@ def main(argv: list[str] | None = None) -> int:
     export(
         a.run_dir,
         a.out_root,
-        fps=a.fps,
     )
     return 0
 
