@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from scenario_generation.scenario_sim_viewer_export import (
+    _NAMES_SIDECAR,
     ViewerTree,
     export,
     key_aliases,
@@ -20,6 +21,13 @@ from scenario_generation.scenario_sim_viewer_export import (
 
 # Shaped like a suite's map path, because the map id is read out of it. Nothing on disk.
 _MAP = "/map/example_project/1/1-0001/lanelet2_map.osm"
+_SIDECAR = {"categories": {"Z": "label"}, "scenarios": {}}
+_DESCRIPTION = "what this scenario is"
+_XOSC = (
+    '<OpenSCENARIO><FileHeader description="{d}"/>'
+    '<ParameterDeclarations><ParameterDeclaration name="speed" value="8.3"/>'
+    "</ParameterDeclarations><Storyboard/></OpenSCENARIO>"
+)
 _SC1 = str(uuid.uuid4())
 _SC2 = str(uuid.uuid4())
 
@@ -63,9 +71,17 @@ def _row() -> dict:
 def _make_run(root: Path, rels: list[str], *, submitted: list[str] | None = None) -> Path:
     """A run directory in the shape the suite driver leaves behind."""
     root.mkdir(parents=True, exist_ok=True)
-    (root / "run_context.txt").write_text("jobs=4 max_steps=1700 draw_every=4\n")
     suite = root.parent / "suite"
-    suite.mkdir(parents=True, exist_ok=True)
+    (suite / "scenarios").mkdir(parents=True, exist_ok=True)
+    (root / "run_context.txt").write_text(
+        f"jobs=4 max_steps=1700 draw_every=4 scenario_root={suite / 'scenarios'}\n"
+    )
+    # The suite ships its names beside itself, and each scenario carries its own description.
+    (suite / _NAMES_SIDECAR).write_text(json.dumps(_SIDECAR))
+    for rel in rels:
+        osc = suite / "scenarios" / rel
+        osc.parent.mkdir(parents=True, exist_ok=True)
+        osc.write_text(_XOSC.format(d=_DESCRIPTION))
     (root / "work.json").write_text(
         json.dumps(
             [
@@ -200,3 +216,22 @@ def test_a_case_that_never_decided_is_not_a_failure(tmp_path):
     entry = json.loads((tmp_path / "out" / "scenarios.json").read_text())[_SC1]
     assert entry["verdicts"] == {"pass": 0, "failure": 1, "error": 0, "undecided": 1}
     assert sum(entry["verdicts"].values()) == entry["n_cases"]
+
+
+def test_the_suite_names_travel_as_the_suite_wrote_them(tmp_path):
+    """The export copies the sidecar rather than reading it, so what a name means stays the
+    reader's business."""
+    export(_make_run(tmp_path / "run", [_rel(_SC1)]), tmp_path / "out")
+
+    assert json.loads(ViewerTree(tmp_path / "out").names.read_text()) == _SIDECAR
+
+
+def test_a_case_carries_what_its_expansion_set(tmp_path):
+    """Cases are told apart by their parameters; naming them from those is the reader's job."""
+    export(_make_run(tmp_path / "run", [_rel(_SC1)]), tmp_path / "out")
+
+    out = tmp_path / "out"
+    cases = [json.loads(ln) for ln in (out / "cases.jsonl").read_text().splitlines()]
+    assert cases[0]["parameters"] == {"speed": "8.3"}
+    entry = json.loads((out / "scenarios.json").read_text())[_SC1]
+    assert entry["description"] == _DESCRIPTION

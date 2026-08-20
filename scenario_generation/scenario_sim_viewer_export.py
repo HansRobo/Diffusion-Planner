@@ -29,6 +29,10 @@ from scenario_generation.closed_loop_eval import aggregate
 _UNMEASURED_SUMMARY_KEYS = ("mean_route_completion", "mean_gt_deviation_m")
 _UNMEASURED_MARKER_KEY = "unmeasured_keys"
 
+# The suite's own names for its scenarios. Copied rather than read, so what a name means stays
+# the reader's business.
+_NAMES_SIDECAR = "scenario_names.json"
+
 # Two producers disagree on the separator, so a case directory is matched against both.
 _KEY_SEPARATORS = ("_", "__")
 
@@ -63,6 +67,10 @@ class ViewerTree:
     @property
     def cases(self) -> Path:
         return self.root / "cases.jsonl"
+
+    @property
+    def names(self) -> Path:
+        return self.root / _NAMES_SIDECAR
 
     def media(self, scenario: str) -> Path:
         return self.root / "media" / scenario
@@ -266,12 +274,45 @@ def collect_cases(run_dir: Path) -> tuple[dict[str, list[dict]], list[str]]:
     return by_scenario, missing
 
 
+def read_scenario(rel: str | None, scenario_root: str | None) -> tuple[str | None, dict[str, str]]:
+    """``(description, parameter assignment)`` from the scenario file, read once.
+
+    A relative path is resolved against ``scenario_root``, since one driver records the path
+    outright and the other records it relative to the suite. Best effort: the suite need not be
+    present when a run is exported.
+    """
+    if not rel:
+        return None, {}
+    path = Path(rel)
+    if not path.is_absolute():
+        if not scenario_root:
+            return None, {}
+        path = Path(scenario_root) / path
+
+    description: str | None = None
+    parameters: dict[str, str] = {}
+    try:
+        for _, elem in ET.iterparse(path, events=("start",)):
+            if elem.tag == "FileHeader":
+                # First line only: the rest is a tracker link, and this is a label in a list.
+                text = (elem.get("description") or "").strip()
+                description = text.splitlines()[0].strip() if text else None
+            elif elem.tag == "ParameterDeclaration":
+                parameters[elem.get("name") or ""] = elem.get("value") or ""
+            elif elem.tag == "Storyboard":
+                break
+    except Exception:  # noqa: BLE001 - a label is never worth failing an export over
+        pass
+    return description, parameters
+
+
 def write_viewer_tree(
     out_root: Path,
     by_scenario: dict[str, list[dict]],
     *,
     meta: dict,
     scenario_errors: dict[str, str],
+    names_file: Path | None = None,
 ) -> dict[str, dict[str, int]]:
     """Write the export. Returns ``{scenario: {"rows": n}}``.
 
@@ -284,6 +325,8 @@ def write_viewer_tree(
         raise SystemExit(f"viewer_export: {out_root} is not empty -- export into a new tree")
     out_root.mkdir(parents=True, exist_ok=True)
     tree = ViewerTree(out_root)
+    if names_file is not None and names_file.is_file():
+        tree.names.write_text(names_file.read_text(encoding="utf-8"), encoding="utf-8")
     counts: dict[str, dict[str, int]] = {}
     scenarios: dict[str, Any] = {}
     case_lines: list[str] = []
@@ -295,6 +338,13 @@ def write_viewer_tree(
         near_miss = float(rows[0].get("object", {}).get("miss_thresh_m") or 1.0)
         strong_brake = float(rows[0].get("strong_brake", {}).get("thresh_mps2") or -2.5)
 
+        # One read per case: the scenario's description, and what its expansion set.
+        read = {
+            str(r["case_key"]): read_scenario(r.get("_rel"), meta.get("scenario_root"))
+            for r in rows
+        }
+        description = next((d for d, _ in read.values() if d), None)
+
         clean_rows = []
         case_verdicts = []
         for row in rows:
@@ -302,6 +352,7 @@ def write_viewer_tree(
             row.pop("_rel", None)
             row["scenario"] = scenario
             case = str(row["case_key"])
+            row["parameters"] = read[case][1]
 
             mp4 = case_dir / f"{row['case_key']}.mp4"
             if mp4.is_file():
@@ -334,6 +385,7 @@ def write_viewer_tree(
             unmeasured.append("red_light_violation")
 
         scenarios[scenario] = {
+            "description": description,
             "n_cases": len(clean_rows),
             "verdicts": _tally_verdicts(case_verdicts),
             "error": scenario_errors.get(scenario),
@@ -348,6 +400,7 @@ def write_viewer_tree(
         if scenario in scenarios:
             continue
         scenarios[scenario] = {
+            "description": None,
             "n_cases": 0,
             "verdicts": {"pass": 0, "failure": 0, "error": 0, "undecided": 0},
             "error": message,
@@ -409,11 +462,13 @@ def export(run_dir: Path, out_root: Path) -> dict[str, dict[str, int]]:
         "missing_rows": missing_rows,
     }
 
+    root = ctx.get("scenario_root")
     counts = write_viewer_tree(
         out_root,
         by_scenario,
         meta=meta,
         scenario_errors=scenario_errors,
+        names_file=Path(root).parent / _NAMES_SIDECAR if root else None,
     )
     # Submitted is the only honest denominator, so it is what the run's log states.
     exported = sum(t["rows"] for t in counts.values())
