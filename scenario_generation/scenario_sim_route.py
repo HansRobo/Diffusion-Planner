@@ -26,9 +26,7 @@ def _ego_action_scopes(root: ET.Element, ego_name: str):
             yield group
 
 
-def _goal_lane_position(
-    osc_path: str | Path, ego_name: str
-) -> tuple[int, float, float] | None:
+def _goal_lane_position(osc_path: str | Path, ego_name: str) -> tuple[int, float, float] | None:
     """``(lanelet id, s, offset)`` from the ego's own ``AcquirePositionAction`` LanePosition,
     if the scenario authors one. SSv2 lane ids are lanelet ids.
 
