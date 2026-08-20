@@ -164,7 +164,7 @@ class Encoder(nn.Module):
         nn.init.normal_(self.lane_encoder.speed_limit_emb.weight, std=0.02)
         nn.init.normal_(self.lane_encoder.attribute_emb.weight, std=0.02)
 
-    def forward(self, inputs):
+    def forward(self, inputs, return_mask: bool = False):
         # ego agent
         ego = inputs["ego_agent_past"].clone()  # (B, T=INPUT_T + 1, D=4)
         if not self.use_ego_history:
@@ -306,9 +306,15 @@ class Encoder(nn.Module):
 
         encoding_input = encoding_input + encoding_pos_result.view(B, self.token_num, -1)
 
-        encoder_outputs = self.fusion(encoding_input, encoding_mask.view(B, self.token_num))
-        encoder_outputs = encoder_outputs.masked_fill(encoding_mask.view(B, self.token_num, 1), 0.0)
+        encoding_mask = encoding_mask.view(B, self.token_num)
+        encoder_outputs = self.fusion(encoding_input, encoding_mask)
+        encoder_outputs = encoder_outputs.masked_fill(encoding_mask.unsqueeze(-1), 0.0)
 
+        if return_mask:
+            # The DrivoR head cross-attends to the raw token stream, so it needs
+            # the padding mask the fused encoder consumed internally.  Token 0
+            # (ego) is never masked, so no attention row can be fully masked.
+            return encoder_outputs, encoding_mask
         return encoder_outputs
 
 
