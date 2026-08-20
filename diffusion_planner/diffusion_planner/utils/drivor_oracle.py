@@ -476,8 +476,15 @@ class DrivoROracle:
         valid = step_valid & track_valid[:, :, None]
 
         nb_xy = future[..., :2]
-        nb_heading = future[..., 2]
-        nb_axis = torch.stack((torch.cos(nb_heading), torch.sin(nb_heading)), dim=-1)
+        # Two shard layouts reach here: ``(x, y, heading)`` and ``(x, y, cos, sin)``.
+        # Taking cos/sin of an already-decomposed pair would clamp every heading into
+        # +-1 rad and mis-rotate the collision boxes -- silently, since the box maths
+        # never sees an out-of-range value. Same tolerance as the ego-past reader below.
+        if future.shape[-1] == 4:
+            nb_axis = future[..., 2:4]
+        else:
+            nb_heading = future[..., 2]
+            nb_axis = torch.stack((torch.cos(nb_heading), torch.sin(nb_heading)), dim=-1)
         # (width, length) in the shard -> (half length, half width) here.
         nb_half = torch.stack((past[:, :, -1, 7] * 0.5, past[:, :, -1, 6] * 0.5), dim=-1)
 

@@ -891,6 +891,74 @@ def test_coarse_proposals_are_upsampled_to_the_scoring_grid():
     torch.testing.assert_close(oracle(coarse, inputs, future), oracle(dense, inputs, future))
 
 
+def _as_cos_sin_shard(inputs: dict) -> dict:
+    """Re-encode ``neighbor_agents_future`` the way the newer NPZ format stores it.
+
+    ``(x, y, heading)`` -> ``(x, y, cos, sin)``. Absent tracks are all-zero rows in
+    the real shards (verified against the corpus), and the validity test keys off
+    exactly that, so they are re-zeroed rather than left as ``cos(0) = 1``.
+    """
+    future = inputs["neighbor_agents_future"]
+    heading = future[..., 2]
+    converted = torch.stack(
+        (future[..., 0], future[..., 1], heading.cos(), heading.sin()), dim=-1
+    )
+    absent = future.abs().sum(-1, keepdim=True) == 0
+    out = dict(inputs)
+    out["neighbor_agents_future"] = torch.where(
+        absent, torch.zeros_like(converted), converted
+    )
+    return out
+
+
+def _heading_sensitive_scenarios():
+    """Scenes whose labels turn on the neighbour's box ORIENTATION, not just position.
+
+    ``_collision_scenarios`` is mostly decided by gross geometry -- a car dead ahead
+    is hit whichever way its box points -- so it cannot see an orientation bug. These
+    put the neighbour where a wrongly-rotated box crosses the ego's path and a
+    correctly-rotated one does not (or vice versa).
+    """
+    parked = np.repeat(np.array([[12.0, 3.0]]), HORIZON, axis=0)
+    return [
+        # Parallel in the next lane: 1.1 m of clearance with the true heading, but a
+        # heading read as cos(0) = 1 rad swings its 4.2 m length into the ego lane.
+        ("parallel_next_lane", _straight_proposal(8.0), [(parked, 0.0, (1.8, 4.2))]),
+        # The mirror case at an angle that is neither 0 nor +-pi/2: truly overlapping,
+        # but a heading read as cos(0.9) rad tucks the box back out of the way.
+        ("angled_next_lane", _straight_proposal(8.0), [(parked, 0.9, (1.8, 4.2))]),
+    ]
+
+
+@pytest.mark.parametrize(
+    "name,poses,neighbours",
+    _collision_scenarios() + _heading_sensitive_scenarios(),
+    ids=[
+        scenario[0] for scenario in _collision_scenarios() + _heading_sensitive_scenarios()
+    ],
+)
+def test_oracle_is_invariant_to_the_neighbour_heading_layout(name, poses, neighbours):
+    """A 3-column and a 4-column shard of the same scene must score identically.
+
+    Reading ``future[..., 2]`` as an angle on a 4-column shard would clamp every
+    heading into +-1 rad and mis-rotate the collision boxes without raising -- the
+    box maths never sees an out-of-range value -- so every NC/TTC/DDC/DAC label
+    would silently drift.
+    """
+    inputs = _empty_inputs(1)
+    for slot, (xy, heading, size) in enumerate(neighbours):
+        _add_neighbour(inputs, 0, slot, xy, heading, size)
+
+    proposals = torch.as_tensor(poses, dtype=torch.float32)[None, None]
+    ego_future = _ego_future([poses])
+    oracle = _exact_oracle()
+    torch.testing.assert_close(
+        oracle(proposals, _as_cos_sin_shard(inputs), ego_future),
+        oracle(proposals, inputs, ego_future),
+        msg=lambda m: f"{name}: heading layout changed the oracle labels\n{m}",
+    )
+
+
 def test_oracle_rejects_a_reference_off_the_scoring_grid():
     """The EP reference, the neighbour futures and the proposals share one grid."""
     inputs = _empty_inputs(1)

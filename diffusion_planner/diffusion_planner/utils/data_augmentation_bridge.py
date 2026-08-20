@@ -1447,7 +1447,17 @@ class StatePerturbation:
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )
-        neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
+        # Older shards store a raw angle in channel 2, newer ones (cos, sin) in 2:4.
+        # See the note in ``data_augmentation.py`` -- rotating a (cos, sin) pair as if
+        # it were an angle type-checks and silently corrupts every heading.
+        if neighbors_future.shape[-1] == 4:
+            neighbors_future[..., 2:4] = vector_transform(
+                neighbors_future[..., 2:4], transform_matrix
+            )
+        else:
+            neighbors_future[..., 2] = heading_transform(
+                neighbors_future[..., 2], transform_matrix
+            )
         neighbors_future[mask] = 0.0
 
         # lanes
