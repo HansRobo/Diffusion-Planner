@@ -1,45 +1,198 @@
 # DrivoR predictor head
 
-`--predictor_head drivor` replaces Diffusion-Planner's DiT/diffusion decoder with
-DrivoR's proposal-generate-then-score head. The encoder, dataset, augmentation,
-EMA and LR schedule are unchanged; everything downstream of the encoder is
-DrivoR's, and the head outputs **only an ego trajectory** — no neighbour
-prediction, no turn indicator.
+`--predictor_head drivor` swaps Diffusion-Planner's DiT/diffusion decoder for
+DrivoR's generate-then-score head. Encoder, dataset, augmentation, EMA and LR
+schedule are unchanged; everything downstream of the encoder is DrivoR's, and the
+output is **only an ego trajectory** — no neighbour prediction, no turn indicator.
 
-## What the head does
+- [Training](#training) — how to run it
+- [Design notes](#design-notes) — what was ported and what it cost
+
+## Training
+
+Prerequisites: the repo venv (no new dependencies), and the two dataset lists the
+diffusion path already uses — `--train_set_list` / `--valid_set_list` each point
+at a JSON array of `.npz` paths. **No PDM cache.** DrivoR needs a `metric_cache`
+for the map/agent/progress side; the oracle here recomputes it from the NPZ
+tensors on the GPU, so there is nothing to build and nothing to invalidate.
+
+### 1. Check the port (20 s, CPU)
+
+```bash
+cd diffusion_planner
+../.venv/bin/python -m pytest -q tests/test_drivor_*.py     # 103 passed
+```
+
+### 2. Smoke run (170 steps + one validation pass, 1 GPU)
+
+Subsample hard, keep every other flag identical to the real run:
+
+```bash
+../.venv/bin/torchrun --nproc_per_node=1 train_predictor.py \
+  --predictor_head drivor --exp_name drivor-smoke \
+  --train_set_list "$TRAIN_LIST" --valid_set_list "$VALID_LIST" \
+  --save_dir "$RUN" \
+  --train_subsample_step 500 --valid_subsample_step 50 \
+  --batch_size 64 --train_epochs 1 --save_utd 1 \
+  --drivor_lr_schedule drivor --learning_rate 1e-4 \
+  --drivor_lr_base_batch_size 64 --drivor_warmup_ratio 0.1 \
+  --use_amp --amp_dtype bf16 --use_wandb False --closed_loop_npz_root ""
+```
+
+A finite `oracle_selected` and a `devkit panel:` line at the end mean head,
+oracle, loss and metric adapter all agree on shapes.
+
+### 3. Full run
+
+Three numbers are *derived*; deriving them by hand is how runs get silently
+misconfigured.
+
+```bash
+#!/bin/bash
+set -euo pipefail
+BATCH=${BATCH:-512}                  # GLOBAL batch, not per rank
+EPOCHS=${EPOCHS:-40}
+WARMUP_STEPS=${WARMUP_STEPS:-2000}   # absolute steps, NOT a ratio
+STEPS_PER_EPOCH=${STEPS_PER_EPOCH:?read it off a previous run's tqdm total}
+PY=../.venv/bin/python
+TOTAL=$((STEPS_PER_EPOCH * EPOCHS))
+
+RATIO=$($PY -c "print(f'{$WARMUP_STEPS/$TOTAL:.6f}')")                     # warmup
+PEAK=$($PY -c "import math; print(f'{1e-4*math.sqrt($BATCH/64):.3e}')")    # sqrt rule
+echo "batch $BATCH  epochs $EPOCHS ($TOTAL steps)  peak LR $PEAK  ratio $RATIO"
+
+cd diffusion_planner
+export DP_DIST_INIT_FILE="$RUN/dist_init"; rm -f "$DP_DIST_INIT_FILE"
+export OMP_NUM_THREADS=8
+
+exec ../.venv/bin/torchrun --nproc_per_node=8 train_predictor.py \
+  --predictor_head drivor --exp_name drivor \
+  --train_set_list "$TRAIN_LIST" --valid_set_list "$VALID_LIST" \
+  --save_dir "$RUN" --train_epochs "$EPOCHS" --save_utd 1 \
+  --train_subsample_step 1 --valid_subsample_step 8 \
+  --batch_size "$BATCH" --num_workers 8 --prefetch_factor 4 \
+  --drivor_num_poses 40 --drivor_pose_dt 0.1 \
+  --drivor_lr_schedule drivor \
+  --learning_rate 1e-4 --drivor_lr_base_batch_size 64 \
+  --drivor_warmup_ratio "$RATIO" \
+  --drivor_human_teacher_weight 0.3 \
+  --use_amp --amp_dtype bf16 --compile_model --compile_mode default \
+  --use_ema True --drivor_fused_ema True --drivor_guard_sync_every 1 \
+  --use_wandb True --wandb_project_name "<entity>/<project>" \
+  --closed_loop_npz_root ""
+```
+
+Batch 512 on 8xH100 is 43.8 GiB/device and ~1.9 steps/s; 1024 OOMs at step 0, so
+512 is a ceiling, not a preference. With a 10,637-step epoch, 40 epochs = 425,480
+steps ≈ 1.6 h/epoch, so ~2.5-3 days. `DP_DIST_INIT_FILE` replaces the hardcoded
+`/tmp/tmp_dist_init` rendezvous file. `train_run.py` is not a shortcut for this
+path: it hardcodes `--train_epochs 80` and passes no `--predictor_head`.
+
+### Defaults that are wrong for this head
+
+Four belong to the diffusion path, one is DrivoR's at a different scale. Check
+them in `args.json` after launch.
+
+| flag | default | pass | why |
+|---|---|---|---|
+| `--predictor_head` | `diffusion` | `drivor` | otherwise none of this runs |
+| `--drivor_lr_base_batch_size` | `0` | `64` | 0 disables the sqrt rule, making `--learning_rate` the literal peak |
+| `--drivor_warmup_ratio` | `0.1` | derived | a fraction of *total* steps: 0.1 is DrivoR's ~3.9k-step ramp, but 42,548 steps here |
+| `--use_amp --amp_dtype bf16` | off | on | every number in this doc was measured under bf16 + TF32 |
+| `--compile_model` | off | on | ~1.6x on the step, lower peak memory |
+| `--train_epochs` | `40` | what you will run | the cosine's `T_max` comes from it, so an aspirational value never decays |
+
+Everything else is DrivoR-faithful: 64 proposals, `ref_num` 4, `scorer_ref_num` 4,
+sub-score weights 0/5/5/2, `label_smoothing` 0.02, `logit_bound` 10, `grad_clip` 1.
+
+### Reading the run
+
+Two lines per epoch on rank 0:
+
+```
+Epoch 7/40  val ADE=… FDE=… oracle_selected=… oracle_best=… top1=…
+devkit panel: PDMS=… NC=… DAC=… DDC=… TTC=… EP=… Comfort=…
+```
+
+`oracle_best - oracle_selected` is what better *selection* alone could still buy.
+The second line is the devkit's own panel and is the number comparable to devkit
+results. `perf/*` goes to W&B every `--drivor_log_every_n_steps`.
+
+```
+$RUN/args.json                  every flag as resolved -- check this first
+$RUN/train_log.tsv              per-epoch metrics, no W&B required
+$RUN/latest.pth                 per epoch; resume from here
+$RUN/best_model/                best val/selection/oracle_selected so far
+$RUN/epoch0007/                 every --save_utd epochs
+```
+
+Checkpoint selection tracks `val/selection/oracle_selected`, not a validation
+loss: this head is trained to *choose*, and a lower regression loss over 64
+proposals does not imply a better pick.
+
+Resume with `--resume_model_path "$RUN/latest.pth"` (model, EMA, optimizer,
+scheduler and epoch counter) plus optional `--wandb_run_id`. Pass the same
+`--train_epochs` or the cosine changes shape mid-flight; `--save_utd` counts from
+the resumed epoch.
+
+### Deployment
+
+The ROS node builds the model from the run's own `args.json`
+(`diffusion_planner_node.py:77` → `utils/config.py`), so the deployed head
+inherits the trained `--drivor_num_poses` and `--drivor_human_teacher_weight`
+automatically — there is no separate inference-time setting. Keep the `args.json`
+and the `.pth` together: `0.2` and `0.3` give identical `state_dict` shapes, so
+pairing a checkpoint with another run's config silently changes which proposal is
+selected, with no load error.
+
+Inert on this path (they parse, they do nothing): closed-loop rollout validation,
+temporal-stability / replan-consistency metrics, ONNX export. All three assume
+the DiT sampler's inputs and the neighbour/turn-indicator outputs.
+
+### Troubleshooting
+
+| symptom | cause |
+|---|---|
+| OOM at step 0 | `--batch_size` is global. 512/8 GPUs = 43.8 GiB each; 1024 does not fit in 80 GiB. |
+| LR near zero for whole epochs | `--drivor_warmup_ratio` carried over from a run with fewer total steps. |
+| PDMS not comparable to devkit numbers | `--drivor_num_poses * --drivor_pose_dt` ≠ navsim's 4 s. |
+| `Comfort` identically 0 | needs the simulator rollout, not finite differences ([below](#comfort-needs-the-simulator)). 0 on ~3-5 % of scenes is expected — the recorded-past prefix gates them. |
+| rendezvous hangs at startup | stale `/tmp/tmp_dist_init`; set `DP_DIST_INIT_FILE` per run. |
+| W&B goes offline despite `--use_wandb True` | the job cannot see the credential. `HOME` must point where the `.netrc` actually is — on a cluster, `/home` is per-node. |
+| many guard skips | LR above the usable band. Measure it with `--drivor_lr_schedule probe` (geometric range test, prints `[lr-probe]`, then stops); DrivoR's own band does not transfer to this encoder. |
+| `--compile_mode reduce-overhead` slower | expected. CUDA graphs measured 45 % slower: once the EMA's Python loop is gone the step is GPU-bound, not launch-bound. |
+
+## Design notes
+
+### Architecture
 
 ```
 encoder tokens ──► 64 learned proposal queries
                       │  TransformerDecoder, ref_num=4 refinement stages
-                      │  per-stage MLP trajectory head, detached proposals
-                      │  re-embedded through pos_embed between stages
+                      │  per-stage MLP head; proposals detached and re-embedded
                       ▼
                    64 candidate trajectories  [B, 64, T, 4]  (x, y, cos, sin)
                       │  scorer decoder (scorer_ref_num=4) + ego token
                       ▼
                    6 independent BCE logit heads (+ human-teacher head)
-                      │  PDMS aggregate: NC x DAC x weighted-mean(DDC, TTC, EP, Comfort)
-                      │  weights 0 / 5 / 5 / 2, plus 0.3 * sigma(human) as tie-break
+                      │  PDMS: NC x DAC x weighted-mean(DDC, TTC, EP, Comfort)
+                      │  weights 0/5/5/2, plus 0.3 * sigma(human) as tie-break
                       ▼
                    argmax ──► the single ego trajectory
 ```
 
-Losses (`model/module/drivor_loss.py`):
-
-- **WTA L1** over every refinement stage, accumulated with `prev_weight`.
-- **Six BCE heads** supervised by PDM oracle labels computed online for the
-  model's *own* proposals; TTC's `2.0` sentinel is masked, NC/DDC go through
-  `three_to_two_classes`, labels are smoothed by 0.02, logits are bounded by
-  `cap * tanh(raw / cap)`.
-- **Human-teacher BCE** against `1 / (1 + proposal_error)`.
-
+Losses (`model/module/drivor_loss.py`): WTA L1 over every refinement stage
+(accumulated with `prev_weight`); six BCE heads supervised by PDM oracle labels
+computed online for the model's *own* proposals (TTC's `2.0` sentinel masked,
+NC/DDC through `three_to_two_classes`, labels smoothed 0.02, logits bounded by
+`cap * tanh(raw / cap)`); human-teacher BCE against `1 / (1 + proposal_error)`.
 Deliberately dropped from DrivoR: Hungarian agent loss, BEV semantic CE,
 drivable-area raster, and `diversity_loss` (DrivoR runs `inter_weight=0`).
 
-## Output trajectory sampling
+### Trajectory sampling
 
-Three grids meet in this head, and `utils/drivor_sampling.py` is the only place
-that converts between them:
+Three grids meet here; `utils/drivor_sampling.py` is the only place that converts
+between them (21 tests).
 
 | grid | sampling | fixed by |
 |---|---|---|
@@ -47,67 +200,53 @@ that converts between them:
 | **head output** | **40 poses @ 0.1 s (4 s)** | `--drivor_num_poses` / `--drivor_pose_dt` |
 | PDM scorer | 40 steps @ 0.1 s | `pdm_scoring/default_scoring_parameters.yaml` |
 
-The **horizon** is not a free choice: the devkit scores `proposal_sampling:
-num_poses: 40, interval_length: 0.1`, so a head emitting 8 s makes PDMS
-incomparable to the devkit's — and not merely rescaled, since two sub-scores are
-*easier* over 8 s (measured on the expert trajectory: DAC 0.9629 vs 0.9766, DDC
-0.9453 vs 0.9766). Diffusion-Planner's `--future_len 80` is unrelated to this
-head and is left alone; only the expert target is re-sampled.
+The **horizon** is not free. The devkit scores `num_poses: 40, interval_length:
+0.1`, so a head emitting 8 s produces a PDMS incomparable to the devkit's — and
+not merely rescaled, since two sub-scores are *easier* over 8 s (on the expert
+trajectory: DAC 0.9629 vs 0.9766, DDC 0.9453 vs 0.9766). `--future_len 80` is the
+diffusion decoder's setting and is unrelated.
 
-The **density** inside those 4 s *is* free, because the head is one-shot: the
-pose count is one linear layer's width, not a rollout length. Measured on one
-H100 at batch 64:
+The **density** inside those 4 s *is* free: the head is one-shot, so the pose
+count is a linear layer's width, not a rollout length. At B=64 on one H100 the
+model's forward+backward is 365 ms whether it emits 8, 40 or 80 poses; the full
+step is 401 ms at 8 @ 0.5 s, **391 ms at 40 @ 0.1 s**, 399 ms at 80 @ 0.1 s.
+Hence the default — navsim's horizon at the 10 Hz the dataset and controller
+already use, so nothing is interpolated anywhere.
 
-| head output | scored | model f+b | oracle | step |
-|---|---|---|---|---|
-| 8 @ 0.5 s | 40 @ 0.1 s | 370.6 ms | 30.2 ms | 400.9 ms |
-| **40 @ 0.1 s** | 40 @ 0.1 s | 364.5 ms | 26.1 ms | **390.6 ms** |
-| 80 @ 0.1 s | 80 @ 0.1 s | 364.8 ms | 33.7 ms | 398.5 ms |
+DrivoR upstream emits `num_poses: 8` at `t4_trajectory_dt_s: 0.5`;
+`--drivor_num_poses 8 --drivor_pose_dt 0.5` reproduces it and still lines up,
+because `upsample_poses` interpolates onto the scoring grid exactly as navsim's
+`transform_trajectory` + `get_trajectory_as_array` do (linear x/y; unwrap →
+linear → wrap on heading; anchored on the ego pose at t=0), checked to 1e-12
+against a numpy transcription of nuPlan's `InterpolatedTrajectory`. Over 512
+validation scenes both representations of the *expert* trajectory score PDMS
+0.9680 on all six sub-scores, so the coarse grid is a control-side choice, not an
+accuracy one.
 
-Hence the default: navsim's horizon at the 10 Hz the dataset and the downstream
-controller already use, so nothing is interpolated anywhere — the expert target
-is `slice(0, 40)` of the stored rows and the proposals reach the oracle
-untouched. DrivoR upstream instead emits `num_poses: 8` (`drivoR.yaml`) at
-`t4_trajectory_dt_s: 0.5` (`t4_training.yaml`); `--drivor_num_poses 8
---drivor_pose_dt 0.5` reproduces that and everything still lines up, because
-`upsample_poses` then interpolates the proposals onto the scoring grid exactly
-the way navsim's `transform_trajectory` + `get_trajectory_as_array` do (linear in
-x/y, unwrap → linear → wrap on the heading, anchored on the ego pose at t=0,
-checked against a numpy transcription of nuPlan's `InterpolatedTrajectory` to
-1e-12). Over 512 validation scenes the two representations of the *expert*
-trajectory score identically — PDMS 0.9680 on all six sub-scores — so the
-coarse grid is a control-side choice, not an accuracy one.
-
-`tests/test_drivor_sampling.py` (21 tests) covers both configurations.
-
-## The PDM oracle
+### The PDM oracle
 
 `utils/drivor_oracle.py` is a batched GPU re-implementation of the devkit's PDM
-scorer, working directly on Diffusion-Planner's ego-centric NPZ tensors — no
-devkit `Scene` objects, no CPU round-trip. 26 ms and 0.40 GiB at B=64, N=64 over
-the scorer's 40 steps, i.e. under 7 % of a 391 ms training step.
-
-Every shape is static (no `.item()`, `torch.compile`-friendly). Candidate
-prefilters (`max_neighbours`, `max_border_segments`, `max_route_segments`) are
-made *provably conservative* by a per-timestep guard ball that covers the whole
-proposal set plus the expert path: anything farther than
-`guard_radius + ego_radius + other_radius` cannot touch any scored trajectory.
-
+scorer over Diffusion-Planner's ego-centric NPZ tensors — no devkit `Scene`
+objects, no CPU round-trip. 26 ms and 0.40 GiB at B=64, N=64, under 7 % of a
+391 ms step. Every shape is static (no `.item()`, `torch.compile`-friendly), and
+the candidate prefilters (`max_neighbours`, `max_border_segments`,
+`max_route_segments`) are made provably conservative by a per-timestep guard ball
+covering the whole proposal set plus the expert path: anything beyond
+`guard_radius + ego_radius + other_radius` cannot touch a scored trajectory.
 `tests/test_drivor_oracle.py` (37 tests) checks each metric against a scalar
-reference implementation.
+reference.
 
-### Comfort needs a simulator, not finite differences
+### Comfort needs the simulator
 
-Comfort is the one sub-score that cannot be read off the poses. NAVSIM's
-`PDMScorer` never applies the comfort bounds to waypoints: it scores the states
-`PDMSimulator.simulate_proposals` produces — a `BatchLQRTracker` computing
-(acceleration, steering-rate) commands that a `BatchKinematicBicycleModel`
-integrates. The model's first-order lags (`accel_time_constant = 0.2 s`,
-`steering_angle_time_constant = 0.05 s`) remove exactly the high-frequency
-component that finite-differencing amplifies by `1/dt**2 = 100`. Without the
-rollout every proposal fails `lon_accel` and the label collapses to a constant 0,
-which kills both the comfort head's gradient and the metric's share of the
-aggregate. Measured on real proposals from an epoch-3 checkpoint:
+Comfort cannot be read off the poses. NAVSIM's `PDMScorer` never applies the
+bounds to waypoints; it scores the states `PDMSimulator.simulate_proposals`
+produces — a `BatchLQRTracker` whose commands a `BatchKinematicBicycleModel`
+integrates. Its first-order lags (`accel_time_constant` 0.2 s,
+`steering_angle_time_constant` 0.05 s) remove exactly the high-frequency
+component finite-differencing amplifies by `1/dt² = 100`. Without the rollout
+every proposal fails `lon_accel` and the label collapses to a constant 0, killing
+both the comfort head's gradient and the metric's share of the aggregate. On real
+proposals from an epoch-3 checkpoint:
 
 | check | simulated | finite differences |
 |---|---|---|
@@ -118,176 +257,85 @@ aggregate. Measured on real proposals from an epoch-3 checkpoint:
 | yaw_accel | 1.000 | 0.141 |
 | yaw_rate | 1.000 | 0.998 |
 
-`|smoothed acc_lon|` p50 goes 3.340 -> 0.465 against bounds `+2.40 / -4.05`.
+(`|smoothed acc_lon|` p50 goes 3.340 → 0.465 against bounds `+2.40 / -4.05`.)
 
-Two implementations live in `planner_metrics/`:
+Two implementations live in `planner_metrics/`: `pdm_simulator.py`, a 1:1 numpy
+transliteration of NAVSIM (same loops, same `einsum` order, same `pinv`) kept as
+ground truth; and `pdm_simulator_torch.py`, the batched fp64 GPU version the
+oracle and devkit call. Three computations there are regrouped algebraically, not
+approximated — the velocity/acceleration fit collapses to one constant matmul
+(its normal matrix is pose-independent), the curvature fit's SVD-`pinv` becomes a
+Cholesky solve (the system is SPD), and the 10-step lateral LQR product becomes
+closed form (only one off-diagonal product is non-zero). fp64 because the fits are
+ill-conditioned enough that fp32 changes the commands, and on an H100 fp64 costs
+~2x fp32, i.e. nothing here. `torch.compile` takes B=2048 x T=80 from 80.2 ms to
+14.7 ms. `test_pdm_simulator.py` makes "the regrouping is exact" a checked claim:
+fast-vs-literal to <1e-8 on positions, compiled-vs-eager and CUDA-vs-CPU to
+<1e-9, on trajectories carrying deliberate pose noise (a clean path would hide
+the component the tracker filters).
 
-- `pdm_simulator.py` — a 1:1 numpy transliteration of NAVSIM: same loops, same
-  `einsum` order, same `pinv`. This is the ground truth, and the honest answer to
-  "is it really the same".
-- `pdm_simulator_torch.py` — the batched fp64 GPU version the oracle and devkit
-  actually call. Three computations are regrouped algebraically, not
-  approximated: the velocity/acceleration fit collapses to one **constant**
-  matmul (its normal matrix `A^T A = L^T L` is pose-independent), the curvature
-  fit's SVD-`pinv` becomes a batched Cholesky solve (the system is SPD), and the
-  10-step lateral LQR product becomes closed form (only one off-diagonal product
-  of the per-step matrices is non-zero). fp64 because the fits are ill-conditioned
-  enough that fp32 changes the commands — on an H100 fp64 is ~1:2 of fp32, so it
-  costs nothing. `torch.compile` takes B=2048 x T=80 from 80.2 ms to 14.7 ms,
-  ~2.7 % of a training step.
+Two NAVSIM properties are reproduced rather than fixed: `ACCELERATION_Y` is
+identically zero in every simulated state, which makes the lateral-accel bound
+structurally vacuous and collapses magnitude-jerk onto `|lon jerk|`; and
+`PDMSimulator` never sets the tracker's `_wheel_base`, so the tracker tracks every
+vehicle as a Pacifica (3.089 m). We keep that asymmetry and feed the motion model
+the dataset's real wheel base from `ego_shape[0]` — `v * tan(steer) / wheelbase`
+then reproduces the stored `yaw_rate` exactly, so this is not cosmetic.
 
-`planner_metrics/test_pdm_simulator.py` is what makes "the regrouping is exact" a checked
-claim: fast-vs-literal agrees to <1e-8 on positions and <1e-7 overall,
-compiled-vs-eager and CUDA-vs-CPU to <1e-9. The trajectories under test carry
-deliberate pose noise — a clean path would hide the very component the tracker
-filters.
+**`history_comfort` is not NAVSIM's `COMFORTABLE`.** The devkit's key is
+load-bearing: `navsim_score.py::_history_comfort` finite-differences the ego's
+*recorded past*, drops its last pose, concatenates it ahead of the simulated
+future and requires all six bounds over the whole 30 + 41 rows.
+NAVSIM's `COMFORTABLE` scores the rollout alone. The prefix is reconstructed at
+training time from the NPZ's `ego_agent_past` — no dataset change, no cache. Two
+consequences: the prefix is shared by every proposal in a scene, so a rough
+recorded past gates the whole scene (4.7 % of 128 scenes, 3.3 % over a separate
+300-scene draw; comfort mean 0.961 → 0.916, PDMS 0.877 → 0.870, oracle +2 %); and
+under `StatePerturbation` the past is taken in the recorded frame, which is
+correct rather than merely convenient — the bounds read body-frame accel channels
+and the raw heading, so re-framing changes nothing except injecting the
+perturbation as a step at the junction (accel channels agree to 4e-4 either way,
+while the junction heading step grows 0.031 → 0.196 rad and `yaw_accel` falls
+1.000 → 0.973).
 
-Two NAVSIM properties are reproduced rather than "fixed":
+### Metrics
 
-- `ACCELERATION_Y` is identically zero in every simulated state
-  (`_update_commands` writes `0.0`, `propagate_state` copies `ACCELERATION_2D`
-  through), which makes the lateral-accel bound structurally vacuous and
-  collapses magnitude-jerk onto `|lon jerk|`.
-- `PDMSimulator` sets the motion model's vehicle from the ego but never the
-  tracker's `_wheel_base`, so the tracker tracks every vehicle as a Pacifica
-  (3.089 m). We keep that asymmetry, and feed the motion model the dataset's real
-  wheel base from `ego_shape[0]` (this dataset's ego is a 10.7 m vehicle with a
-  4.99 m wheel base — `v * tan(steer) / 4.99` reproduces the stored `yaw_rate`
-  exactly, so this is not cosmetic).
+`utils/drivor_metrics.py` reproduces DrivoR's taxonomy: `perf/*` per-step
+diagnostics, `train/*` and `val/*` epoch aggregates, DrivoR's `_metric_name`
+display table, and selection diagnostics (`oracle_selected`, `oracle_best`,
+`oracle_gap`, `oracle_rank`, `top1_hit`, `top5_hit`). `utils/devkit_wandb.py` is a
+**verbatim copy** of the devkit's `navsim/evaluation/wandb.py`, so the
+`devkit/{pdms,nc,dac,ddc,tlc,ttc,ep,lk,comfort,ec}` panel is byte-for-byte the
+devkit's own; it scores the *selected* trajectory alone, so `ego_progress` is
+measured against the demonstration rather than the model's best proposal.
 
-### `history_comfort` is not NAVSIM's `COMFORTABLE`
+Two reporting details: soft-target BCE is `H(labels) + KL(labels || prediction)`
+and only KL has a gradient, so with 0.02 smoothing the raw scorer loss can never
+reach zero — `loss/learnable/*` reports the reducible KL remainder and
+`loss/learnable/label_entropy_floor` the constant beneath it. And because the PDM
+score is a product of bounded sub-scores it ties frequently, so the selection
+metrics are tie-aware: any proposal matching the best label counts as a hit, and
+`oracle_rank` ranks by label value rather than index.
 
-The devkit's panel key is `history_comfort`, and the name is load-bearing:
-`navsim_score.py::_history_comfort` finite-differences the ego's *recorded past*,
-drops its last pose (the rollout's row 0 already is the current state),
-concatenates it in front of the simulated future and requires all six bounds over
-the whole 30 + 41 rows. NAVSIM's `COMFORTABLE` scores the rollout alone. The
-prefix is reconstructed at training time from the NPZ's `ego_agent_past`
-(31 rows x (x, y, heading) at dt = 0.1 s, oldest first, last row exactly
-(0, 0, 0)) — no dataset change, no cache.
+### Performance
 
-Two consequences worth knowing before reading the label:
-
-- The prefix is **shared by every proposal in a scene**, so a rough recorded past
-  is a scene-level gate: comfort is 0 for all 64 proposals no matter how smooth
-  they are. Measured over 128 real scenes x 64 proposals, 4.7 % of scenes are
-  gated this way (3.3 % over a separate 300-scene draw), comfort mean drops
-  0.961 -> 0.916 and the PDMS aggregate 0.877 -> 0.870. Oracle cost is +2 %
-  (104.0 -> 106.6 ms).
-- Under `StatePerturbation` the past is taken in the frame the augmentation leaves
-  it in — the recorded one, whose transform block is commented out. That is also
-  the correct choice, not just the convenient one: the six bounds read the
-  body-frame accel channels (invariant under a rigid transform, since they are
-  differenced inside the segment and projected per row) and the raw heading, so
-  re-framing into the perturbed frame changes nothing except to inject the
-  perturbation as a step at the junction. Over 256 augmented samples the accel
-  channels agree to 4e-4 either way, while the junction heading step grows from
-  0.031 to 0.196 rad and `yaw_accel` falls 1.000 -> 0.973.
-
-No PDM cache is required. The rollout reads only X, Y, HEADING, VELOCITY_X,
-ACCELERATION_X, STEERING_ANGLE and ANGULAR_VELOCITY from the initial state, all
-of which `ego_current_state` already carries; DrivoR's cache exists for the
-map/agent/progress side, which this path recomputes from the NPZ tensors.
-
-## Metrics
-
-- `utils/drivor_metrics.py` reproduces DrivoR's metric taxonomy: `perf/*` live
-  per-step diagnostics, `train/*` and `val/*` epoch aggregates, DrivoR's
-  `_metric_name` display table, selection diagnostics (`oracle_selected`,
-  `oracle_best`, `oracle_gap`, `oracle_rank`, `top1_hit`, `top5_hit`).
-- `utils/devkit_wandb.py` is a **verbatim copy** of the e2e devkit's
-  `navsim/evaluation/wandb.py`, so the `devkit/{pdms,nc,dac,ddc,tlc,ttc,ep,lk,
-  comfort,ec}` panel is byte-for-byte the devkit's own. The panel scores the
-  *selected* trajectory on its own, so `ego_progress` is measured against the
-  demonstration rather than against the model's best proposal.
-
-Checkpoint selection uses `val/selection/oracle_selected` — the PDM score of the
-trajectory the scorer actually picks.
-
-Two reporting details worth knowing when reading the panels:
-
-- Soft-target BCE is `H(labels) + KL(labels || prediction)`, and only the KL term
-  has a gradient. Since the labels are smoothed by 0.02, `H(labels) > 0` and the
-  raw scorer loss can never reach zero. `loss/learnable/*` reports the KL
-  remainder — the part training can actually reduce — and
-  `loss/learnable/label_entropy_floor` reports the constant it sits on, so a
-  flat-looking `loss/scorer/*` can be checked against its own floor.
-- `top1_hit` compares against the oracle's argmax, and the PDM score is a product
-  of bounded sub-scores that ties frequently (whole groups of proposals share the
-  same label). The selection metrics are tie-aware: any proposal whose label
-  equals the best label counts as a hit, and `oracle_rank` ranks by label value
-  rather than by index, so ties do not turn into arbitrary misses.
-
-## Accelerations
-
-bf16 autocast (`--use_amp --amp_dtype bf16`), TF32 matmul/conv, `torch.compile`
-(`--compile_model`, ~1.6x on the step and lower peak memory), fused AdamW,
-`persistent_workers` + `prefetch_factor`, `find_unused_parameters=False` with
-`gradient_as_bucket_view=True`, and a step written to avoid host syncs: per-step
-scalars accumulate on the GPU (one all-reduce + one readback per epoch), gradient
-statistics only on the log cadence, and the divergence guard's readback is issued
-*after* `backward()` is enqueued so it overlaps with real work.
+bf16 autocast, TF32 matmul/conv, `torch.compile` (~1.6x on the step), fused
+AdamW, `persistent_workers` + `prefetch_factor`, `find_unused_parameters=False`
+with `gradient_as_bucket_view=True`, and a step written to avoid host syncs:
+per-step scalars accumulate on the GPU (one all-reduce and one readback per
+epoch), gradient statistics only on the log cadence, and the divergence guard's
+readback is issued *after* `backward()` is enqueued so it overlaps real work.
 
 The encoder dominates: at B=64 uncompiled it is 94.6 % of peak memory and 83.6 %
-of the step (44.2 GiB / 344 ms of a 46.8 GiB / 412 ms step), the head adds
-2.1 GiB / 10 ms and the oracle plus loss 0.4 GiB / 58 ms. No packed
-sample cache is needed: 8 dataloader workers per rank deliver 180-2200 samples/s
-against a GPU that consumes ~100/s per rank.
+of the step (44.2 GiB / 344 ms of a 46.8 GiB / 412 ms step); the head adds
+2.1 GiB / 10 ms, the oracle plus loss 0.4 GiB / 58 ms. No packed sample cache is
+needed — 8 workers per rank deliver 180-2200 samples/s against a GPU consuming
+~100/s.
 
-## Divergence guard
+### Divergence guard
 
 Non-finite loss, `|logit| > 15`, or `loss > 4x` the running EMA skips the
 optimizer step. The flag is MAX-all-reduced exactly once per step, never inside a
 conditional, so ranks skip together and NCCL cannot deadlock. More than 10 skips
 in a 200-step window halves the LR; a separate slow logit-drift EMA has its own
 cut with a 500-step cooldown.
-
-## Launching
-
-```bash
-cd diffusion_planner
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 DP_DIST_INIT_FILE=$RUN/dist_init \
-DRIVOR_WANDB_PATH=<entity>/<project> \
-../.venv/bin/torchrun --nproc_per_node=8 --master_port=29650 train_predictor.py \
-  --exp_name drivor \
-  --predictor_head drivor \
-  --train_set_list "$TRAIN_SET_LIST" \
-  --valid_set_list "$VALID_SET_LIST" \
-  --train_subsample_step 1 --valid_subsample_step 8 \
-  --save_dir "$RUN" --train_epochs 40 --save_utd 1 \
-  --batch_size 512 --num_workers 8 --prefetch_factor 4 \
-  --drivor_lr_schedule drivor \
-  --learning_rate 1e-4 --drivor_lr_base_batch_size 64 \
-  --drivor_warmup_ratio 0.004701 \
-  --use_amp --amp_dtype bf16 --compile_model --compile_mode default \
-  --use_ema True --drivor_fused_ema True --drivor_guard_sync_every 1 \
-  --drivor_human_teacher_weight 0.3 \
-  --enable_replan_consistency_eval True \
-  --use_wandb True
-```
-
-Global batch 512 is the largest that fits: it uses 43.8 GiB per device, so 1024
-runs out of memory at step 0 on an 80 GiB card. The `sqrt` rule then puts the
-peak LR at `1e-4 * sqrt(512/64) = 2.83e-4`. `--drivor_warmup_ratio` is a
-fraction of *total* steps, so it must be re-derived whenever the batch or epoch
-count changes if the ramp is to stay the same absolute length: back-solve it as
-`warmup_steps / (steps_per_epoch * epochs)`. At this batch the full train list is
-10,637 steps per epoch, so 40 epochs is 425,480 steps and 0.004701 is a
-2,000-step ramp. Do not carry a ratio across a change in epoch count — leaving
-the 6-epoch 0.031337 in place at 40 epochs would stretch the ramp to 13,300
-steps.
-
-`--drivor_human_teacher_weight 0.3` biases proposal selection towards the human
-demonstration. The term is additive and bounded by the weight, so it only
-re-orders proposals whose PDMS gap is smaller than it — which is most of them,
-since roughly half the proposals tie at the maximum PDMS and `argmax` inside a
-tie set is otherwise arbitrary.
-
-`DP_DIST_INIT_FILE` overrides the hardcoded `/tmp/tmp_dist_init` rendezvous file
-— needed whenever another user's stale file is in the way or two jobs run on the
-same node.
-
-Not available on this path: closed-loop rollout validation, temporal-stability /
-replan-consistency metrics and ONNX export are diffusion-specific (their
-wrappers assume the DiT sampler's inputs and the neighbour/turn-indicator
-outputs). The flags parse but are inert.
