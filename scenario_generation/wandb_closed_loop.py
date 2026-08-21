@@ -179,7 +179,7 @@ def build_closed_loop_tables(
     ``by_json`` maps ``json_label`` → ``group_key`` → per-group summary dict.
 
     Returns:
-        ``{json_label}/metrics``: abs table with raw counts and route completion
+        ``Closed-Loop-{json_label}/metrics``: abs table with raw counts and route completion
     """
     if run_name is None:
         run_name = wandb.run.name if wandb.run is not None else "unknown"
@@ -188,7 +188,7 @@ def build_closed_loop_tables(
 
     for json_label, group_summaries in sorted(by_json.items()):
         abs_table = _build_table(json_label, "abs", group_summaries)
-        out[f"{json_label}/metrics"] = abs_table
+        out[f"Closed-Loop-{json_label}/metrics"] = abs_table
 
     return out
 
@@ -202,91 +202,6 @@ _STACKED_METRICS = (
     ("Strong brakes / 1k steps", "#72B7B2"),
     ("Collisions / 1k steps", "#EECA3B"),
 )
-
-
-def _build_stacked_bar_html(json_label: str, per_1000steps_table: wandb.Table) -> str:
-    """Render an ECharts stacked-bar chart from a per_1000steps Table.
-
-    Reads the table column-wise so we don't depend on row order.
-    The ``All`` summary row is dropped — the chart shows the groups only.
-    """
-    cols = per_1000steps_table.columns
-    stacked_cols = [metric for metric, _ in _STACKED_METRICS]
-    table_data = per_1000steps_table.data
-    col_idx = {name: i for i, name in enumerate(cols)}
-
-    groups: list[str] = []
-    series: dict[str, list[float]] = {m: [] for m in stacked_cols}
-    for row in table_data:
-        if row[col_idx["Group"]] == "All":
-            continue
-        groups.append(str(row[col_idx["Group"]]))
-        for metric in stacked_cols:
-            series[metric].append(float(row[col_idx[metric]] or 0.0))
-
-    series_payload = [
-        {
-            "name": metric,
-            "type": "bar",
-            "stack": "events",
-            "barWidth": 20,
-            "emphasis": {"focus": "series"},
-            "itemStyle": {"color": color},
-            "data": series[metric],
-        }
-        for metric, color in _STACKED_METRICS
-    ]
-
-    max_label_len = max((len(g) for g in groups), default=0)
-    grid_left = max(160, max_label_len * 6 + 5)
-    chart_height = len(groups) * 50 + 30
-
-    chart_id = f"echarts_closed_loop_{json_label}".replace("/", "_").replace(":", "_")
-    option = {
-        "title": {"show": False},
-        "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
-        "legend": {"bottom": 0, "type": "scroll"},
-        "grid": {"left": grid_left, "right": 20, "top": 10, "bottom": 50},
-        "yAxis": {
-            "type": "category",
-            "data": groups,
-            "axisLabel": {
-                "width": grid_left - 20,
-                "overflow": "truncate",
-                "tooltip": {"show": False, "trigger": "item"},
-            },
-        },
-        "xAxis": {"type": "value", "name": "Events / 1k steps"},
-        "series": series_payload,
-    }
-
-    return (
-        f'<div id="{chart_id}" style="width:100%;height:{chart_height}px;min-width:0;"></div>'
-        '<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>'
-        "<script>"
-        f"var dom = document.getElementById({json.dumps(chart_id)});"
-        f"var chart = echarts.init(dom);"
-        f"chart.setOption({json.dumps(option)});"
-        "window.addEventListener('resize', function () { chart.resize(); });"
-        "</script>"
-    )
-
-
-def build_per_1000steps_stacked_panels(
-    by_json: dict[str, dict[str, dict]],
-) -> dict[str, wandb.Html]:
-    """For each json_label, return ``{panel_key: wandb.Html}`` ready
-    to be passed to ``run.log``. Builds the per_1000steps table internally
-    (not exported); only the stacked chart is returned.
-    """
-    out: dict[str, wandb.Html] = {}
-    for json_label, group_summaries in sorted(by_json.items()):
-        out[f"{json_label}/count_per_1000steps"] = wandb.Html(
-            _build_stacked_bar_html(
-                json_label, _build_table(json_label, "per_1000steps", group_summaries)
-            )
-        )
-    return out
 
 
 # Metrics for cross-run stacked bar chart
@@ -318,6 +233,19 @@ def _build_cross_run_vega_spec() -> dict:
         ],
         "transform": [
             {"filter": "datum['${field:group}'] !== 'All'"},
+            {
+                "joinaggregate": [
+                    {
+                        "op": "distinct",
+                        "field": "${field:run}",
+                        "as": "visible_run_count",
+                    }
+                ],
+            },
+            {
+                "calculate": "max(14, min(20, 30 / datum.visible_run_count))",
+                "as": "bar_thickness",
+            },
             {
                 "fold": [
                     "${field:curb_hits}",
@@ -351,6 +279,7 @@ def _build_cross_run_vega_spec() -> dict:
                 "title": "Events / 1k steps",
                 "scale": {"zero": True},
             },
+            "size": {"field": "bar_thickness", "type": "quantitative", "scale": None, "legend": None},
             "color": {
                 "field": "event_type",
                 "type": "nominal",
@@ -392,6 +321,250 @@ def _build_cross_run_vega_spec() -> dict:
         "height": {"step": 42},
     }
 
+
+def _build_table_vega_spec() -> dict:
+    """Build a table-like Vega-Lite spec for cross-run metrics comparison.
+
+    Each Group × Run pair occupies one row. The visible row label contains only
+    the Group name, while the row background color identifies the Run. The full
+    Run name remains available in the legend and tooltip.
+
+    W&B replaces ``${field:...}`` expressions using the mapping passed to
+    ``wandb.plot_table(fields=...)``.
+    """
+    metric_field_ids = [
+        source_key
+        for _, source_key in _ABS_COLUMNS[1:]
+    ]
+    metric_titles = [
+        display_name
+        for display_name, _ in _ABS_COLUMNS[1:]
+    ]
+
+    return {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "description": (
+            "Closed-loop metrics table with colored rows for cross-run "
+            "comparison."
+        ),
+        "data": {"name": "wandb"},
+        "transform": [
+            # Build an internal unique row key. The axis label later strips the
+            # Run suffix so long Run names are not rendered as row labels.
+            {
+                "calculate": (
+                    "datum['${field:group}'] + '|||' + "
+                    "datum['${field:run}']"
+                ),
+                "as": "row_key",
+            },
+            # Keep normal groups alphabetically ordered and put All last.
+            {
+                "calculate": (
+                    "(datum['${field:group}'] === 'All' "
+                    "? '~~~~All' : datum['${field:group}']) "
+                    "+ '|' + datum['${field:run}']"
+                ),
+                "as": "row_sort",
+            },
+            # Convert the fixed metric columns into table cells.
+            # Group and Run are dimensions, so they must not be folded.
+            {
+                "fold": [
+                    f"${{field:{field_id}}}"
+                    for field_id in metric_field_ids
+                ],
+                "as": ["column_name", "column_value"],
+            },
+            # Format integer counts without decimals and other numeric values
+            # to three decimal places.
+            {
+                "calculate": (
+                    "!isValid(datum.column_value) "
+                    "? '—' "
+                    ": isNumber(datum.column_value) "
+                    "? (datum.column_value % 1 === 0 "
+                    "   ? format(datum.column_value, ',.0f') "
+                    "   : format(datum.column_value, ',.3f')) "
+                    ": datum.column_value"
+                ),
+                "as": "display_value",
+            },
+        ],
+        # x/y/tooltip are shared by both the background and text layers.
+        "encoding": {
+            "x": {
+                "field": "column_name",
+                "type": "nominal",
+                "title": None,
+                "sort": metric_titles,
+                "axis": {
+                    "orient": "top",
+                    "labelAngle": 0,
+                    "labelLimit": 180,
+                    "labelPadding": 8,
+                    "title": None,
+                },
+            },
+            "y": {
+                "field": "row_key",
+                "type": "nominal",
+                "title": "Group",
+                "sort": {
+                    "field": "row_sort",
+                    "op": "min",
+                    "order": "ascending",
+                },
+                "axis": {
+                    # "group|||very-long-run-name" -> "group"
+                    "labelExpr": "split(datum.label, '|||')[0]",
+                    "labelLimit": 280,
+                    "labelPadding": 8,
+                    "titlePadding": 12,
+                },
+            },
+            "tooltip": [
+                {
+                    "field": "${field:group}",
+                    "type": "nominal",
+                    "title": "Group",
+                },
+                {
+                    "field": "${field:run}",
+                    "type": "nominal",
+                    "title": "Run",
+                },
+                {
+                    "field": "column_name",
+                    "type": "nominal",
+                    "title": "Metric",
+                },
+                {
+                    "field": "display_value",
+                    "type": "nominal",
+                    "title": "Value",
+                },
+            ],
+        },
+        "layer": [
+            {
+                # One lightly colored cell background per Run.
+                "mark": {
+                    "type": "rect",
+                    "opacity": 0.16,
+                },
+                "encoding": {
+                    "color": {
+                        "field": "${field:run}",
+                        "type": "nominal",
+                        "title": "Run",
+                        "scale": {
+                            "scheme": "tableau10",
+                        },
+                        "legend": {
+                            "labelLimit": 180,
+                            "symbolType": "square",
+                            "symbolOpacity": 0.7,
+                            "titleLimit": 180,
+                        },
+                    },
+                },
+            },
+            {
+                # Text is deliberately dark rather than colored, preserving
+                # readability over the lightly colored row background.
+                "mark": {
+                    "type": "text",
+                    "align": "center",
+                    "baseline": "middle",
+                    "fontSize": 12,
+                    "color": "#222222",
+                },
+                "encoding": {
+                    "text": {
+                        "field": "display_value",
+                        "type": "nominal",
+                    },
+                },
+            },
+        ],
+        "height": {
+            "step": 26,
+        },
+        "width": {
+            "step": 120,
+        },
+        "config": {
+            "view": {
+                "stroke": None,
+            },
+            "axis": {
+                "grid": False,
+                "domain": False,
+                "tickSize": 0,
+            },
+        },
+    }
+
+def log_metrics_tables(
+    run: wandb.sdk.wandb_run.Run,
+    by_json: dict[str, dict[str, dict]],
+) -> None:
+    entity = getattr(run, "entity", None)
+    if not entity:
+        raise ValueError("W&B run.entity is unavailable")
+
+    # create_custom_chart does not update an existing preset.
+    # Increment this suffix whenever the Vega spec changes.
+    preset_name = "closed_loop_metrics_table"
+    vega_spec_name = f"{entity}/{preset_name}"
+
+    try:
+        wandb.Api().create_custom_chart(
+            entity=entity,
+            name=preset_name,
+            display_name="Closed-Loop Metrics Table",
+            spec_type="vega2",
+            access="private",
+            spec=_build_table_vega_spec(),
+        )
+        print(f"wandb: created custom chart preset '{vega_spec_name}'")
+    except Exception as exc:
+        message = str(exc).lower()
+        if "already exists" in message or "duplicate" in message:
+            print(f"wandb: using existing preset '{vega_spec_name}'")
+        else:
+            raise RuntimeError(
+                f"Failed to create W&B preset '{vega_spec_name}'"
+            ) from exc
+
+    fields = {
+        "run": "Run",
+        "group": "Group",
+        **{source: display for display, source in _ABS_COLUMNS[1:]},
+    }
+
+    for json_label in sorted(by_json):
+        abs_table = _build_table(
+            json_label,
+            "abs",
+            by_json[json_label],
+        )
+        table_with_run = _add_run_column(abs_table, run.name)
+
+        chart = wandb.plot_table(
+            vega_spec_name=vega_spec_name,
+            data_table=table_with_run,
+            fields=fields,
+            split_table=True,
+        )
+        run.log({
+            f"Closed-Loop-{json_label}/metrics_table": chart,
+        })
+        print(
+            f"wandb: logged "
+            f"Closed-Loop-{json_label}/metrics_table"
+        )
 
 def log_cross_run_charts(
     run: wandb.sdk.wandb_run.Run,
@@ -447,8 +620,8 @@ def log_cross_run_charts(
             fields=chart_fields,
             split_table=True,
         )
-        run.log({f"{json_label}/cross_run_chart": chart})
-        print(f"wandb: logged {json_label}/cross_run_chart")
+        run.log({f"Closed-Loop-{json_label}/cross_run_chart": chart})
+        print(f"wandb: logged Closed-Loop-{json_label}/cross_run_chart")
 
 
 def log_closed_loop_to_wandb(
@@ -490,8 +663,7 @@ def log_closed_loop_to_wandb(
                 json_label = key.split("/", 1)[0]
             by_json.setdefault(json_label, {})[key] = summary
 
-        tables = build_closed_loop_tables(by_json, run_name=run.name)
-        run.log(tables)
+        log_metrics_tables(run, by_json)
         log_cross_run_charts(run, by_json)
     finally:
         if own_run:
