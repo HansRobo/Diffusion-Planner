@@ -132,7 +132,7 @@ def wandb_epdms_metrics(epdms_means):
     }
 
 
-def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
+def closed_loop_validate(model, args: TrainConfig, epoch: int, out_dir: str) -> None:
     """Closed-loop rendered rollout; logs metrics + videos to wandb."""
     import os
 
@@ -152,6 +152,7 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
             cfg=args,
             out_root=out_dir,
             wandb_run=wandb.run,
+            only_json=None,
             render_media=args.render_media,
         )
 
