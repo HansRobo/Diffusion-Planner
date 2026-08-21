@@ -332,7 +332,7 @@ def run_closed_loop_main(
                 _write_groups_manifest(json_out_dir, per_json_summaries)
 
         if all_group_names:
-            _log_to_wandb(cfg, all_group_names, all_summaries, wandb_run=wandb_run)
+            _log_to_wandb(cfg, all_group_names, all_summaries, run=wandb_run)
 
     return True
 
@@ -410,7 +410,7 @@ def _log_to_wandb(
         return
 
     if run is None:
-        run = wandb.init(project=cfg.wandb_project or None)
+        run = wandb.init(project=cfg.wandb_project_name or None, name=cfg.exp_name or None)
         own_run = True
     else:
         own_run = False
