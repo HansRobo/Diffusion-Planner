@@ -550,6 +550,18 @@ def run_closed_loop_eval(
                 abort_max_snaps=abort_max_snaps,
                 drop_objects=drop_objects,
                 draw_pool=draw_pool,
+                # No CLI/kwarg equivalent here; mirror render_segment's former defaults.
+                goal_mode="segment",
+                title_prefix=None,
+                distance_label_offset_m=1.2,
+                view_half_m=50.0,
+                max_stuck_steps=0,
+                goal_reach_m=5.0,
+                interpolate=True,
+                color_by_uuid=True,
+                window=None,
+                max_steps=None,
+                timeline_progress_mode="pose",
             )
             row = {"route": key, **metrics}
             # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so
