@@ -24,6 +24,7 @@ from diffusion_planner.dimensions import (
     RB_Y,
     TRAFFIC_LIGHT_GREEN,
     TRAFFIC_LIGHT_RED,
+    TRAFFIC_LIGHT_WHITE,
     TRAFFIC_LIGHT_YELLOW,
     X,
     Y,
@@ -43,18 +44,35 @@ CH_LANE_BOUNDARY = 0
 CH_LANE_CENTERLINE = 1
 CH_ROUTE = 2
 CH_TRAFFIC_LIGHT_GO = 3
-CH_TRAFFIC_LIGHT_STOP = 4
-CH_POLYGON = 5
-CH_LINE_STRING = 6
-CH_STATIC_OBJECT = 7
-CH_GOAL_POSE = 8
-CH_VEHICLE = 9
-CH_PEDESTRIAN = 10
-CH_BICYCLE = 11
-CH_EGO = 12
-CH_NEIGHBOR_HISTORY = 13
-CH_EGO_HISTORY = 14
-NUM_CHANNELS = 15
+CH_TRAFFIC_LIGHT_CAUTION = 4
+CH_TRAFFIC_LIGHT_STOP = 5
+CH_TRAFFIC_LIGHT_UNKNOWN = 6
+CH_POLYGON = 7
+CH_LINE_STRING = 8
+CH_STATIC_OBJECT = 9
+CH_GOAL_POSE = 10
+CH_VEHICLE = 11
+CH_PEDESTRIAN = 12
+CH_BICYCLE = 13
+CH_EGO = 14
+CH_NEIGHBOR_HISTORY = 15
+CH_EGO_HISTORY = 16
+NUM_CHANNELS = 17
+
+# Plane each traffic light state is drawn onto.  Every state gets its own plane instead of being
+# folded into one "stop" plane, so the encoder can tell a yellow light from a red one, and a light
+# whose state never arrived from a lane that has no light at all.  ``TRAFFIC_LIGHT_WHITE`` is the
+# slot the observation writes when the lane has a light but its colour is unknown or was never
+# received; it is by far the most common non-empty state in the recorded data.
+#
+# ``TRAFFIC_LIGHT_NO_TRAFFIC_LIGHT`` deliberately has no plane: such a lane is already drawn on the
+# centerline channel, and its silence across all four light planes is what identifies it.
+TRAFFIC_LIGHT_CHANNEL_OF_STATE = {
+    TRAFFIC_LIGHT_GREEN: CH_TRAFFIC_LIGHT_GO,
+    TRAFFIC_LIGHT_YELLOW: CH_TRAFFIC_LIGHT_CAUTION,
+    TRAFFIC_LIGHT_RED: CH_TRAFFIC_LIGHT_STOP,
+    TRAFFIC_LIGHT_WHITE: CH_TRAFFIC_LIGHT_UNKNOWN,
+}
 
 FILL = -1  # cv2 thickness value meaning "filled"
 LINE_TYPE = cv2.LINE_8  # binary masks: keep hard edges, no anti-aliased partial values
@@ -181,6 +199,14 @@ def _draw_pose_marker(canvas: np.ndarray, view: BevView, center_rel: np.ndarray,
     )
 
 
+def _traffic_light_channel(state: np.ndarray) -> int | None:
+    """Plane the lane's traffic light belongs on, or None when the lane has no light at all."""
+    for index, channel in TRAFFIC_LIGHT_CHANNEL_OF_STATE.items():
+        if state[index] == 1:
+            return channel
+    return None
+
+
 def _neighbor_channel(state: np.ndarray) -> int:
     type_one_hot = state[NEIGHBOR_IDX_TYPE_START : NEIGHBOR_IDX_TYPE_START + NEIGHBOR_TYPE_NUM]
     return (CH_VEHICLE, CH_PEDESTRIAN, CH_BICYCLE)[int(np.argmax(type_one_hot))]
@@ -205,11 +231,10 @@ def _draw_lanes(canvas: np.ndarray, view: BevView, transform, lanes: np.ndarray)
         _draw_polyline(canvas[CH_LANE_BOUNDARY], view, left, LANE_BOUNDARY_THICKNESS)
         _draw_polyline(canvas[CH_LANE_BOUNDARY], view, right, LANE_BOUNDARY_THICKNESS)
 
-        traffic_light = segment[0]
-        if traffic_light[TRAFFIC_LIGHT_GREEN] == 1:
-            _draw_polyline(canvas[CH_TRAFFIC_LIGHT_GO], view, center, TRAFFIC_LIGHT_THICKNESS)
-        elif traffic_light[TRAFFIC_LIGHT_YELLOW] == 1 or traffic_light[TRAFFIC_LIGHT_RED] == 1:
-            _draw_polyline(canvas[CH_TRAFFIC_LIGHT_STOP], view, center, TRAFFIC_LIGHT_THICKNESS)
+        # The state one-hot is replicated across the segment, so the first point carries it.
+        channel = _traffic_light_channel(segment[0])
+        if channel is not None:
+            _draw_polyline(canvas[channel], view, center, TRAFFIC_LIGHT_THICKNESS)
 
 
 def _draw_route(canvas: np.ndarray, view: BevView, transform, route_lanes: np.ndarray):
@@ -365,7 +390,9 @@ CHANNEL_COLORS_BGR = {
     CH_LANE_CENTERLINE: (90, 90, 90),
     CH_ROUTE: (255, 0, 255),
     CH_TRAFFIC_LIGHT_GO: (0, 200, 0),
+    CH_TRAFFIC_LIGHT_CAUTION: (0, 255, 255),
     CH_TRAFFIC_LIGHT_STOP: (0, 0, 255),
+    CH_TRAFFIC_LIGHT_UNKNOWN: (128, 0, 128),
     CH_POLYGON: (60, 110, 60),
     CH_LINE_STRING: (0, 140, 255),
     CH_STATIC_OBJECT: (0, 200, 200),
@@ -378,14 +405,18 @@ CHANNEL_COLORS_BGR = {
     CH_EGO: (255, 255, 255),
 }
 
-# Later entries win where channels overlap, so agents stay visible on top of the map.
+# Later entries win where channels overlap, so agents stay visible on top of the map.  Lanes cross
+# at an intersection, so the light planes are ordered by how much they demand attention: an
+# unknown light loses to a green one, which loses to yellow, which loses to red.
 PREVIEW_DRAW_ORDER = (
     CH_POLYGON,
     CH_LANE_CENTERLINE,
     CH_LANE_BOUNDARY,
     CH_LINE_STRING,
     CH_ROUTE,
+    CH_TRAFFIC_LIGHT_UNKNOWN,
     CH_TRAFFIC_LIGHT_GO,
+    CH_TRAFFIC_LIGHT_CAUTION,
     CH_TRAFFIC_LIGHT_STOP,
     CH_GOAL_POSE,
     CH_NEIGHBOR_HISTORY,
@@ -396,6 +427,12 @@ PREVIEW_DRAW_ORDER = (
     CH_BICYCLE,
     CH_EGO,
 )
+
+# A channel missing from either table would silently vanish from every preview, which is exactly
+# how a folded-together traffic light state went unnoticed before.
+assert len(PREVIEW_DRAW_ORDER) == NUM_CHANNELS
+assert set(PREVIEW_DRAW_ORDER) == set(range(NUM_CHANNELS))
+assert set(CHANNEL_COLORS_BGR) == set(PREVIEW_DRAW_ORDER)
 
 
 def colorize(image: np.ndarray) -> np.ndarray:
