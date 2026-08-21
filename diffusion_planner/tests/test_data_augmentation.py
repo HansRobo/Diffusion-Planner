@@ -527,12 +527,10 @@ def test_centric_transform_neighbor_future_heading_layouts_agree():
 
     assert torch.allclose(cos_sin[..., :2], angle[..., :2], atol=1e-5), "xy diverged"
     assert torch.allclose(cos_sin[0, 0, :, 2], angle[0, 0, :, 2].cos(), atol=1e-5), (
-        f"cos diverged: {cos_sin[0, 0, :, 2].tolist()} vs "
-        f"{angle[0, 0, :, 2].cos().tolist()}"
+        f"cos diverged: {cos_sin[0, 0, :, 2].tolist()} vs {angle[0, 0, :, 2].cos().tolist()}"
     )
     assert torch.allclose(cos_sin[0, 0, :, 3], angle[0, 0, :, 2].sin(), atol=1e-5), (
-        f"sin diverged: {cos_sin[0, 0, :, 3].tolist()} vs "
-        f"{angle[0, 0, :, 2].sin().tolist()}"
+        f"sin diverged: {cos_sin[0, 0, :, 3].tolist()} vs {angle[0, 0, :, 2].sin().tolist()}"
     )
     assert torch.all(cos_sin[0, 1] == 0.0), "absent track resurrected by the transform"
     print("  [PASS] centric_transform neighbor-future heading layouts agree")

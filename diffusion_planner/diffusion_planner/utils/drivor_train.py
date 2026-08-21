@@ -32,7 +32,7 @@ from diffusion_planner.utils.drivor_metrics import (
     step_metrics,
     trajectory_metrics,
 )
-from diffusion_planner.utils.drivor_oracle import DrivoROracle, TTC_UNDEFINED
+from diffusion_planner.utils.drivor_oracle import TTC_UNDEFINED, DrivoROracle
 from diffusion_planner.utils.drivor_sampling import (
     resample_expert_future,
     scoring_horizon_slice,
@@ -303,9 +303,15 @@ class DivergenceGuard:
             self._keep = 1.0 - flags[0]
             self._pending = flags if self._pending is None else torch.maximum(self._pending, flags)
             keep = self._keep
-            updated = 0.98 * self.loss_ema + 0.02 * loss_value if self.loss_ema is not None else loss_value
+            updated = (
+                0.98 * self.loss_ema + 0.02 * loss_value
+                if self.loss_ema is not None
+                else loss_value
+            )
             # Only a non-breached step may move the baseline the breach test uses.
-            self.loss_ema = updated if self.loss_ema is None else torch.lerp(self.loss_ema, updated, keep)
+            self.loss_ema = (
+                updated if self.loss_ema is None else torch.lerp(self.loss_ema, updated, keep)
+            )
             return False
 
         breached = bool(flags[0].item() > 0.0)
@@ -453,9 +459,7 @@ def train_epoch_drivor(
 
     iterator = tqdm(data_loader, desc="Training", unit="batch") if is_main else data_loader
     for step, inputs in enumerate(iterator):
-        inputs = {
-            key: value.to(device, non_blocking=True) for key, value in inputs.items()
-        }
+        inputs = {key: value.to(device, non_blocking=True) for key, value in inputs.items()}
         model_inputs, oracle_inputs, ego_future, ego_reference = prepare_batch(inputs, args, aug)
 
         detailed = (step % log_every) == 0
@@ -597,9 +601,7 @@ def validate_drivor(
     dtype = amp_dtype(args)
 
     iterator = (
-        tqdm(data_loader, desc="Validation", unit="batch")
-        if ddp.get_rank() == 0
-        else data_loader
+        tqdm(data_loader, desc="Validation", unit="batch") if ddp.get_rank() == 0 else data_loader
     )
     for inputs in iterator:
         inputs = {key: value.to(device, non_blocking=True) for key, value in inputs.items()}
@@ -628,9 +630,7 @@ def validate_drivor(
             torch.ones_like(selected[:, ttc_column]),
             selected[:, ttc_column],
         )
-        panel.add(
-            {name: selected[:, index].mean() for index, name in enumerate(ORACLE_PANEL_KEYS)}
-        )
+        panel.add({name: selected[:, index].mean() for index, name in enumerate(ORACLE_PANEL_KEYS)})
 
     means = accumulator.mean()
     extra = traj_accumulator.mean()

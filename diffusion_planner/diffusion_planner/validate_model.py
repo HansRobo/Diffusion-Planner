@@ -214,9 +214,7 @@ def _history_poses_for_metrics(denorm_inputs: dict[str, torch.Tensor]) -> np.nda
     array = past.detach().to(torch.float64).cpu().numpy()
     if array.shape[-1] == 3:  # (x, y, heading) -> (x, y, cos, sin)
         heading = array[..., 2]
-        array = np.stack(
-            (array[..., 0], array[..., 1], np.cos(heading), np.sin(heading)), axis=-1
-        )
+        array = np.stack((array[..., 0], array[..., 1], np.cos(heading), np.sin(heading)), axis=-1)
     return array
 
 

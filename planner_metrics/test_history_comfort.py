@@ -84,9 +84,7 @@ def test_comfort_score_without_history_scores_the_rollout_alone():
     poses, ego = _straight_proposal(speed), _ego(speed)
     np.testing.assert_array_equal(
         ns.comfort_score(poses, DT, ego, 2.8),
-        ns.comfort_score_from_states(
-            ns.simulated_states_from_poses(poses, DT, ego, 2.8), DT
-        ),
+        ns.comfort_score_from_states(ns.simulated_states_from_poses(poses, DT, ego, 2.8), DT),
     )
 
 
@@ -130,9 +128,7 @@ def test_one_history_broadcasts_over_the_proposal_axis():
     proposals = _straight_proposal(speed, batch=8)
     past = _straight_past(speed)  # one scene
     broadcast = ns.comfort_score(proposals, DT, ego, 2.8, history_poses=past)
-    repeated = ns.comfort_score(
-        proposals, DT, ego, 2.8, history_poses=np.repeat(past, 8, axis=0)
-    )
+    repeated = ns.comfort_score(proposals, DT, ego, 2.8, history_poses=np.repeat(past, 8, axis=0))
     np.testing.assert_array_equal(broadcast, repeated)
 
 
@@ -149,15 +145,13 @@ def test_proxy_history_comfort_matches_the_reference():
     rough[:, :-1:2, 1] += 0.5
 
     for history in (None, smooth, rough):
-        out = pdms_proxy(
-            pred, gt, ego_current_state=ego, ego_history_poses=history, dt=DT
-        )
+        out = pdms_proxy(pred, gt, ego_current_state=ego, ego_history_poses=history, dt=DT)
         # No wheel_base reaches the proxy, so the reference must use the same
         # pacifica default the rollout falls back to.
         want = ns.comfort_score(poses, DT, ego, None, history_poses=history)
         assert out["history_comfort"].reshape(-1).tolist() == want.reshape(-1).tolist()
 
     # The three cases must not be degenerate: the prefix has to change the answer.
-    assert pdms_proxy(
-        pred, gt, ego_current_state=ego, ego_history_poses=rough, dt=DT
-    )["history_comfort"].reshape(-1).tolist() == [0.0]
+    assert pdms_proxy(pred, gt, ego_current_state=ego, ego_history_poses=rough, dt=DT)[
+        "history_comfort"
+    ].reshape(-1).tolist() == [0.0]

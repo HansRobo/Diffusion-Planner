@@ -9,7 +9,6 @@ surviving the next scheduler step.
 """
 
 import torch
-
 from diffusion_planner.utils.drivor_lr import (
     DRIVOR_BASE_BATCH_SIZE,
     DRIVOR_BASE_LR,
@@ -81,9 +80,7 @@ def test_zero_warmup_ratio_is_pure_cosine():
 
 def _drivor(peak: float, total: int, warmup_ratio: float, advance: int):
     optimizer = _optimizer(peak)
-    scheduler = build_drivor_scheduler(
-        optimizer, total_steps=total, warmup_ratio=warmup_ratio
-    )
+    scheduler = build_drivor_scheduler(optimizer, total_steps=total, warmup_ratio=warmup_ratio)
     for _ in range(advance):
         scheduler.step()
     return optimizer, scheduler

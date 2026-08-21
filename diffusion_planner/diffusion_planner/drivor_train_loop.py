@@ -35,18 +35,18 @@ from diffusion_planner.utils.devkit_wandb import (
     define_wandb_score_metrics,
     score_report_to_wandb,
 )
+from diffusion_planner.utils.drivor_ema import FusedModelEma
+from diffusion_planner.utils.drivor_lr import (
+    build_drivor_scheduler,
+    build_lr_probe,
+    scaled_peak_lr,
+)
 from diffusion_planner.utils.drivor_train import (
     DivergenceGuard,
     build_drivor_loss,
     build_drivor_oracle,
     train_epoch_drivor,
     validate_drivor,
-)
-from diffusion_planner.utils.drivor_ema import FusedModelEma
-from diffusion_planner.utils.drivor_lr import (
-    build_drivor_scheduler,
-    build_lr_probe,
-    scaled_peak_lr,
 )
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
@@ -126,7 +126,11 @@ def model_training_drivor(args: TrainConfig):
         print("Learning rate: {}".format(args.learning_rate))
         print("Use device: {}".format(args.device))
         print("Use AMP: {} ({})".format(args.use_amp, args.amp_dtype))
-        print("Proposals: {}  refinement stages: {}".format(args.drivor_proposal_num, args.drivor_ref_num))
+        print(
+            "Proposals: {}  refinement stages: {}".format(
+                args.drivor_proposal_num, args.drivor_ref_num
+            )
+        )
 
         save_path = args.save_dir
         os.makedirs(save_path, exist_ok=True)
@@ -246,8 +250,11 @@ def model_training_drivor(args: TrainConfig):
             print(
                 "DrivoR step schedule: {} steps/epoch x {} epochs = {} steps; "
                 "linear ramp 0 -> {:.3e} over {} steps, then cosine -> 0".format(
-                    steps_per_epoch, args.train_epochs, total_steps,
-                    args.learning_rate, ramp,
+                    steps_per_epoch,
+                    args.train_epochs,
+                    total_steps,
+                    args.learning_rate,
+                    ramp,
                 )
             )
     elif args.drivor_lr_schedule == "probe":
@@ -271,9 +278,7 @@ def model_training_drivor(args: TrainConfig):
                 )
             )
     else:
-        scheduler = CosineAnnealingWarmUpRestarts(
-            optimizer, args.train_epochs, args.warm_up_epoch
-        )
+        scheduler = CosineAnnealingWarmUpRestarts(optimizer, args.train_epochs, args.warm_up_epoch)
         step_scheduler = False
 
     if args.resume_model_path is not None:
@@ -371,7 +376,9 @@ def model_training_drivor(args: TrainConfig):
             for group in optimizer.param_groups:
                 group["lr"] = args.learning_rate * factor
             if global_rank == 0:
-                print(f"Final phase: Epoch {epoch + 1}, LR adjusted to {args.learning_rate * factor}")
+                print(
+                    f"Final phase: Epoch {epoch + 1}, LR adjusted to {args.learning_rate * factor}"
+                )
 
         train_metrics, train_total_loss, global_step = train_epoch_drivor(
             train_loader,

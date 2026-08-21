@@ -7,10 +7,9 @@ implementation directly rather than against hand-derived numbers.
 
 import torch
 import torch.nn as nn
-from timm.utils import ModelEma
-
 from diffusion_planner.utils.drivor_ema import FusedModelEma
 from diffusion_planner.utils.drivor_train import DivergenceGuard
+from timm.utils import ModelEma
 
 
 class _Tiny(nn.Module):

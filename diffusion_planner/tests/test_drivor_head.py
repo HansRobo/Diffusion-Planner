@@ -11,11 +11,10 @@ from dataclasses import dataclass
 
 import pytest
 import torch
-
 from diffusion_planner.model.module.drivor_decoder import DrivoRDecoder
 from diffusion_planner.model.module.drivor_loss import (
-    DrivoRLoss,
     SCORER_HEAD_WEIGHTS,
+    DrivoRLoss,
     three_to_two_classes,
 )
 from diffusion_planner.model.module.drivor_scorer import (
@@ -150,10 +149,7 @@ def _logit(value: float) -> float:
 def _uniform_logits(**probabilities):
     base = {name: 1.0 for name in DRIVOR_HEAD_METRICS}
     base.update(probabilities)
-    return {
-        HEAD_BY_METRIC[name]: torch.full((1, 1), _logit(value))
-        for name, value in base.items()
-    }
+    return {HEAD_BY_METRIC[name]: torch.full((1, 1), _logit(value)) for name, value in base.items()}
 
 
 def _weights():
@@ -258,9 +254,7 @@ def test_scorer_entropy_is_the_floor_of_the_smoothed_bce():
     assert float(out["comfort_loss"]) == pytest.approx(floor, abs=1e-5)
     # Every head is at its floor, so nothing learnable is left.
     assert float(out["score_kl_loss"]) == pytest.approx(0.0, abs=1e-5)
-    assert float(out["label_entropy"]) == pytest.approx(
-        len(DRIVOR_HEAD_METRICS) * floor, abs=1e-4
-    )
+    assert float(out["label_entropy"]) == pytest.approx(len(DRIVOR_HEAD_METRICS) * floor, abs=1e-4)
 
 
 def test_three_to_two_classes_only_maps_the_half():
@@ -378,8 +372,7 @@ def test_heading_error_wraps_at_pi():
         "chosen_index": torch.zeros(1).long(),
     }
     named = {
-        key.split("/")[-1]: float(value)
-        for key, value in trajectory_metrics(pred, target).items()
+        key.split("/")[-1]: float(value) for key, value in trajectory_metrics(pred, target).items()
     }
     # 0.2 rad apart across the +/-pi seam, not 2*pi - 0.2.
     assert named["heading_MAE"] == pytest.approx(0.2, abs=1e-5)

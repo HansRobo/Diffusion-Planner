@@ -13,18 +13,17 @@ production strides are a documented speed/fidelity trade-off, not a semantic one
 import numpy as np
 import pytest
 import torch
-
 from diffusion_planner.utils.drivor_oracle import (
     ORACLE_METRIC_NAMES,
     TTC_UNDEFINED,
     DrivoROracle,
     _obb_overlap,
 )
+from diffusion_planner.utils.drivor_sampling import upsample_poses
+
 from planner_metrics import pdms_navsim as ref
 from planner_metrics.pdm_simulator import STATE_ANGULAR_VELOCITY
 from planner_metrics.pdm_simulator_torch import initial_states_from_ego, simulate_proposals
-
-from diffusion_planner.utils.drivor_sampling import upsample_poses
 
 DT = 0.1  # navsim's ``proposal_sampling.interval_length``
 HORIZON = 40  # navsim's ``proposal_sampling.num_poses`` -- the grid every metric uses
@@ -113,9 +112,7 @@ def _empty_inputs(batch: int, speed: float = 0.0) -> dict:
         "ego_agent_past": _straight_past(batch, speed),
         "neighbor_agents_past": torch.zeros(batch, NUM_NEIGHBOURS, 31, 11),
         "neighbor_agents_future": torch.zeros(batch, NUM_NEIGHBOURS, HORIZON, 3),
-        "line_strings": torch.zeros(
-            batch, NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, 4
-        ),
+        "line_strings": torch.zeros(batch, NUM_LINE_STRINGS, POINTS_PER_LINE_STRING, 4),
         "route_lanes": torch.zeros(batch, NUM_ROUTE, POINTS_PER_ROUTE, 33),
     }
 
@@ -325,9 +322,7 @@ def test_comfort_rescues_jittery_proposals():
     inputs = _empty_inputs(1, speed=8.0)
 
     oracle = _exact_oracle()
-    got = oracle(
-        torch.as_tensor(poses, dtype=torch.float32)[None], inputs, _ego_future([poses[0]])
-    )
+    got = oracle(torch.as_tensor(poses, dtype=torch.float32)[None], inputs, _ego_future([poses[0]]))
     index = ORACLE_METRIC_NAMES.index("history_comfort")
     assert got[0, 0, index].item() == 1.0
 
@@ -467,12 +462,8 @@ def _nc_ttc_reference(poses: np.ndarray, inputs: dict, batch_index: int):
     states = ref.states_from_poses(poses, DT)
     boxes = _reference_boxes(inputs, batch_index)
     offset = EGO_SHAPE[0] / 2.0
-    nc = ref.no_at_fault_collision(
-        states, boxes, EGO_SHAPE[1], EGO_SHAPE[2], center_offset=offset
-    )
-    ttc = ref.time_to_collision(
-        states, boxes, EGO_SHAPE[1], EGO_SHAPE[2], DT, center_offset=offset
-    )
+    nc = ref.no_at_fault_collision(states, boxes, EGO_SHAPE[1], EGO_SHAPE[2], center_offset=offset)
+    ttc = ref.time_to_collision(states, boxes, EGO_SHAPE[1], EGO_SHAPE[2], DT, center_offset=offset)
     return nc, ttc
 
 
@@ -493,15 +484,11 @@ def _collision_scenarios():
     # 4. car overtaking from behind -> rear collision, not at fault
     t = np.arange(1, HORIZON + 1) * DT
     from_behind = np.stack([-14.0 + 16.0 * t, np.zeros_like(t)], axis=-1)
-    scenarios.append(
-        ("from_behind", _straight_proposal(6.0), [(from_behind, 0.0, (1.8, 4.2))])
-    )
+    scenarios.append(("from_behind", _straight_proposal(6.0), [(from_behind, 0.0, (1.8, 4.2))]))
 
     # 5. crossing car from the left -> lateral (no map flags => not at fault)
     crossing = np.stack([np.full_like(t, 15.0), 14.0 - 16.0 * t], axis=-1)
-    scenarios.append(
-        ("crossing", _straight_proposal(8.0), [(crossing, -np.pi / 2, (1.8, 4.2))])
-    )
+    scenarios.append(("crossing", _straight_proposal(8.0), [(crossing, -np.pi / 2, (1.8, 4.2))]))
 
     # 6. slow leading car -> ego catches up, front collision
     leading = np.stack([9.0 + 1.0 * t, np.zeros_like(t)], axis=-1)
@@ -572,9 +559,7 @@ def test_dac_matches_reference(lateral, expected):
     _add_line_string(inputs, 0, 0, left, is_border=True)
     _add_line_string(inputs, 0, 1, right, is_border=True)
     # a non-border line string (lane marking) must be ignored
-    _add_line_string(
-        inputs, 0, 2, np.stack([span, np.zeros_like(span)], axis=-1), is_border=False
-    )
+    _add_line_string(inputs, 0, 2, np.stack([span, np.zeros_like(span)], axis=-1), is_border=False)
 
     poses = _straight_proposal(6.0, lateral=lateral)
     borders = [left, right]
@@ -631,9 +616,7 @@ def test_progress_matches_reference():
     raw = np.asarray(
         [_reference_raw_progress(candidate, reference_path) for candidate in candidates]
     )
-    expert_extent = float(
-        np.linalg.norm(np.diff(reference_path[:, :2], axis=0), axis=-1).sum()
-    )
+    expert_extent = float(np.linalg.norm(np.diff(reference_path[:, :2], axis=0), axis=-1).sum())
     # The invariant that makes the per-proposal and per-set denominators agree
     # here: projecting onto the expert's own path cannot exceed its length, so
     # ``max(raw_i, extent) == extent`` for every proposal.
@@ -703,9 +686,7 @@ def test_batching_and_chunking_are_equivalent():
     experts = []
     for b in range(batch):
         span = np.linspace(-5.0, 40.0, POINTS_PER_LINE_STRING)
-        _add_line_string(
-            inputs, b, 0, np.stack([span, np.full_like(span, 4.0 + b)], axis=-1), True
-        )
+        _add_line_string(inputs, b, 0, np.stack([span, np.full_like(span, 4.0 + b)], axis=-1), True)
         _add_route(
             inputs,
             b,
@@ -900,14 +881,10 @@ def _as_cos_sin_shard(inputs: dict) -> dict:
     """
     future = inputs["neighbor_agents_future"]
     heading = future[..., 2]
-    converted = torch.stack(
-        (future[..., 0], future[..., 1], heading.cos(), heading.sin()), dim=-1
-    )
+    converted = torch.stack((future[..., 0], future[..., 1], heading.cos(), heading.sin()), dim=-1)
     absent = future.abs().sum(-1, keepdim=True) == 0
     out = dict(inputs)
-    out["neighbor_agents_future"] = torch.where(
-        absent, torch.zeros_like(converted), converted
-    )
+    out["neighbor_agents_future"] = torch.where(absent, torch.zeros_like(converted), converted)
     return out
 
 
@@ -933,9 +910,7 @@ def _heading_sensitive_scenarios():
 @pytest.mark.parametrize(
     "name,poses,neighbours",
     _collision_scenarios() + _heading_sensitive_scenarios(),
-    ids=[
-        scenario[0] for scenario in _collision_scenarios() + _heading_sensitive_scenarios()
-    ],
+    ids=[scenario[0] for scenario in _collision_scenarios() + _heading_sensitive_scenarios()],
 )
 def test_oracle_is_invariant_to_the_neighbour_heading_layout(name, poses, neighbours):
     """A 3-column and a 4-column shard of the same scene must score identically.

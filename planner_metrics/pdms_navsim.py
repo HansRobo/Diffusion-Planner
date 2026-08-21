@@ -390,9 +390,7 @@ def simulated_states_from_poses(
     lead = poses.shape[:-2]
     horizon = poses.shape[-2]
     flat = poses.reshape(-1, horizon, 4)
-    xyh = np.stack(
-        (flat[..., 0], flat[..., 1], np.arctan2(flat[..., 3], flat[..., 2])), axis=-1
-    )
+    xyh = np.stack((flat[..., 0], flat[..., 1], np.arctan2(flat[..., 3], flat[..., 2])), axis=-1)
 
     if ego_current_state is not None:
         ego = np.asarray(ego_current_state, dtype=np.float64).reshape(-1, 10)

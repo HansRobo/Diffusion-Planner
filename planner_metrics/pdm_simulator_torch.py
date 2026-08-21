@@ -206,7 +206,9 @@ def fit_profiles(poses: torch.Tensor, dt: float, constants: Optional[_Constants]
     fit = projected @ constants.fit_weights.transpose(0, 1)
     velocity_profile = _generate_profile(fit[:, 0], fit[:, 1:], dt)
 
-    heading_displacements = torch.atan2(torch.sin(differences[..., 2]), torch.cos(differences[..., 2]))
+    heading_displacements = torch.atan2(
+        torch.sin(differences[..., 2]), torch.cos(differences[..., 2])
+    )
 
     design = constants.profile_matrix[None] * velocity_profile[:, :, None]
     design_t = design.transpose(1, 2)
@@ -296,9 +298,7 @@ def _step(
     denominator = b_0 * b_0 * q_0 + b_1 * b_1 * q_1 + b_2 * b_2 * q_2 + R_LATERAL
     numerator = b_0 * q_0 * error_0 + b_1 * q_1 * error_1
     if q_2:  # pragma: no cover - navsim pins q_lateral[LATERAL_STEERING_ANGLE] to 0
-        numerator = numerator + b_2 * q_2 * torch.atan2(
-            torch.sin(steering), torch.cos(steering)
-        )
+        numerator = numerator + b_2 * q_2 * torch.atan2(torch.sin(steering), torch.cos(steering))
     steering_rate_command = torch.where(
         stopping, torch.zeros_like(numerator), -numerator / denominator
     )
@@ -532,9 +532,12 @@ def initial_states_from_poses(poses: torch.Tensor, dt: float) -> torch.Tensor:
     velocity = (poses[:, 1, :2] - poses[:, 0, :2]).norm(dim=-1) / dt
     second = (poses[:, 2, :2] - poses[:, 1, :2]).norm(dim=-1) / dt
     heading = poses[:, 0, 2]
-    yaw_rate = torch.atan2(
-        torch.sin(poses[:, 1, 2] - poses[:, 0, 2]), torch.cos(poses[:, 1, 2] - poses[:, 0, 2])
-    ) / dt
+    yaw_rate = (
+        torch.atan2(
+            torch.sin(poses[:, 1, 2] - poses[:, 0, 2]), torch.cos(poses[:, 1, 2] - poses[:, 0, 2])
+        )
+        / dt
+    )
 
     out = poses.new_zeros((poses.shape[0], STATE_SIZE))
     out[:, STATE_X] = poses[:, 0, 0]

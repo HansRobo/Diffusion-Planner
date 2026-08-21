@@ -92,9 +92,7 @@ def scoring_horizon_slice(num_steps: int, stored_len: int) -> slice:
     so clipping is exact where up-sampling the coarse 8 poses would not be.
     """
     if num_steps > stored_len:
-        raise ValueError(
-            f"the scorer needs {num_steps} steps but the dataset stores {stored_len}"
-        )
+        raise ValueError(f"the scorer needs {num_steps} steps but the dataset stores {stored_len}")
     return slice(0, num_steps)
 
 
@@ -151,9 +149,7 @@ def _phase_unwrap(headings: torch.Tensor) -> torch.Tensor:
     """``numpy.unwrap`` along the last dim (``AngularInterpolator``'s pre-step)."""
     two_pi = 2.0 * math.pi
     adjustments = torch.zeros_like(headings)
-    adjustments[..., 1:] = torch.cumsum(
-        torch.round(torch.diff(headings, dim=-1) / two_pi), dim=-1
-    )
+    adjustments[..., 1:] = torch.cumsum(torch.round(torch.diff(headings, dim=-1) / two_pi), dim=-1)
     return headings - two_pi * adjustments
 
 

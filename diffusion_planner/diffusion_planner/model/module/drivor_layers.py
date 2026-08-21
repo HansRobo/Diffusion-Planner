@@ -157,8 +157,16 @@ class Block(nn.Module):
 class TransformerDecoder(nn.Module):
     """Iterative proposal refinement; returns every intermediate stage."""
 
-    def __init__(self, num_layers: int, d_model: int, num_heads: int, ls_values: float,
-                 proj_drop: float, drop_path: float, return_intermediate: bool = True):
+    def __init__(
+        self,
+        num_layers: int,
+        d_model: int,
+        num_heads: int,
+        ls_values: float,
+        proj_drop: float,
+        drop_path: float,
+        return_intermediate: bool = True,
+    ):
         super().__init__()
         self.layers = nn.ModuleList(
             [

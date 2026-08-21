@@ -141,9 +141,7 @@ def trajectory_metrics(
             f"{tuple(proposals.shape)} and {tuple(selected.shape)}"
         )
 
-    selected_xy_error = torch.linalg.vector_norm(
-        selected[..., :2] - target[..., :2], dim=-1
-    )
+    selected_xy_error = torch.linalg.vector_norm(selected[..., :2] - target[..., :2], dim=-1)
     proposal_xy_error = torch.linalg.vector_norm(
         proposals[..., :2] - target[:, None, :, :2], dim=-1
     )
@@ -322,9 +320,9 @@ def epoch_metrics(
         if scalar is None:
             continue
         # ``selection/*`` and ``oracle/*`` paths already carry their prefix.
-        out[name if name.startswith(f"{prefix}/") else metric_path(prefix, f"trajectory/{name}")] = (
-            scalar
-        )
+        out[
+            name if name.startswith(f"{prefix}/") else metric_path(prefix, f"trajectory/{name}")
+        ] = scalar
         if prefix == "val":
             # The comparison-facing aliases DrivoR also emits.
             canonical = {

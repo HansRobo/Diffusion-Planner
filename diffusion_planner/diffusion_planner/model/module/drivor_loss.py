@@ -52,9 +52,7 @@ def three_to_two_classes(x: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def _label_entropy(
-    target: torch.Tensor, weight: Optional[torch.Tensor] = None
-) -> torch.Tensor:
+def _label_entropy(target: torch.Tensor, weight: Optional[torch.Tensor] = None) -> torch.Tensor:
     """Bernoulli entropy of a soft label -- the irreducible part of a BCE.
 
     Reported by both halves of the split loss: the demonstration head in
@@ -62,9 +60,7 @@ def _label_entropy(
     :meth:`DrivoRLoss.finish`.
     """
     probability = target.float().clamp(1e-6, 1.0 - 1e-6)
-    entropy = -(
-        probability * probability.log() + (1.0 - probability) * (1.0 - probability).log()
-    )
+    entropy = -(probability * probability.log() + (1.0 - probability) * (1.0 - probability).log())
     if weight is None:
         return entropy.mean()
     return (entropy * weight).sum() / weight.sum().clamp(min=1.0)
@@ -85,15 +81,11 @@ class DrivoRLoss(torch.nn.Module):
         self.final_score_weight = float(final_score_weight)
         self.prev_weight = float(prev_weight)
         if not 0.0 <= float(label_smoothing) < 1.0:
-            raise ValueError(
-                f"label_smoothing must be in [0, 1), got {label_smoothing}"
-            )
+            raise ValueError(f"label_smoothing must be in [0, 1), got {label_smoothing}")
         self.label_smoothing = float(label_smoothing)
 
     # -- oracle-free half --------------------------------------------------
-    def local_terms(
-        self, pred: Mapping[str, Any], target_trajectory: torch.Tensor
-    ) -> dict:
+    def local_terms(self, pred: Mapping[str, Any], target_trajectory: torch.Tensor) -> dict:
         """Every term that is a function of the prediction and the GT alone.
 
         Args:
@@ -134,9 +126,7 @@ class DrivoRLoss(torch.nn.Module):
                     proposals.detach()[..., :2] - target[:, None, :, :2], dim=-1
                 ).mean(-1)
                 human_target = (1.0 / (1.0 + proposal_error)).float()
-            human_loss = F.binary_cross_entropy_with_logits(
-                human_logit.float(), human_target
-            )
+            human_loss = F.binary_cross_entropy_with_logits(human_logit.float(), human_target)
             human_entropy = _label_entropy(human_target)
 
         return {
@@ -210,27 +200,18 @@ class DrivoRLoss(torch.nn.Module):
                 # The floor of a BCE is the entropy of the target it is actually
                 # trained against, so it has to be the *smoothed* label: with
                 # smoothing 0.02 a hard label's minimum is H(0.01) = 0.056, not 0.
-                entropy_terms.append(
-                    _label_entropy(_smooth(target.clamp(0.0, 1.0)), mask)
-                )
+                entropy_terms.append(_label_entropy(_smooth(target.clamp(0.0, 1.0)), mask))
             else:
-                loss = F.binary_cross_entropy_with_logits(
-                    logit.float(), _smooth(target)
-                )
+                loss = F.binary_cross_entropy_with_logits(logit.float(), _smooth(target))
                 entropy_terms.append(_label_entropy(_smooth(target)))
             score_losses[metric_name] = loss
 
-        weighted = [
-            SCORER_HEAD_WEIGHTS[name] * value for name, value in score_losses.items()
-        ]
+        weighted = [SCORER_HEAD_WEIGHTS[name] * value for name, value in score_losses.items()]
         score_head_sum = torch.stack(weighted).sum()
         # Weighted the same way as ``score_head_sum``, or ``score_kl_loss`` below
         # stops being a difference of comparable quantities.
         scorer_entropy = torch.stack(
-            [
-                SCORER_HEAD_WEIGHTS[name] * value
-                for name, value in zip(score_losses, entropy_terms)
-            ]
+            [SCORER_HEAD_WEIGHTS[name] * value for name, value in zip(score_losses, entropy_terms)]
         ).sum()
 
         final_score_loss = score_head_sum
@@ -248,9 +229,7 @@ class DrivoRLoss(torch.nn.Module):
             "_local_loss": local["local_loss"],
             "_deferred_loss": self.final_score_weight * score_head_sum,
         }
-        result.update(
-            {LOSS_KEY_BY_METRIC[name]: value for name, value in score_losses.items()}
-        )
+        result.update({LOSS_KEY_BY_METRIC[name]: value for name, value in score_losses.items()})
 
         # Soft-target cross-entropy is H(labels) + KL(labels || prediction) and
         # only the KL term has a gradient, so the learnable remainder is

@@ -16,8 +16,6 @@ oracle tests use.
 import numpy as np
 import pytest
 import torch
-from scipy.interpolate import interp1d
-
 from diffusion_planner.utils.drivor_sampling import (
     DATASET_POSE_DT,
     expert_future_slice,
@@ -25,6 +23,7 @@ from diffusion_planner.utils.drivor_sampling import (
     scoring_horizon_slice,
     upsample_poses,
 )
+from scipy.interpolate import interp1d
 
 # The shipped configuration: navsim's 4 s horizon at the dataset's own 10 Hz.
 NUM_POSES = 40
@@ -53,9 +52,7 @@ def _reference_upsample(
     out_xy = interp1d(anchor_t, xy, axis=0)(stamps)
     # ``AngularInterpolator.interpolate`` -> ``principal_value(min_=-pi)``.
     out_h = ((interp1d(anchor_t, angular, axis=0)(stamps) + np.pi) % (2.0 * np.pi)) - np.pi
-    return np.concatenate(
-        (out_xy, np.cos(out_h)[:, None], np.sin(out_h)[:, None]), axis=-1
-    )
+    return np.concatenate((out_xy, np.cos(out_h)[:, None], np.sin(out_h)[:, None]), axis=-1)
 
 
 def _random_poses(rng: np.random.Generator, num_poses: int = COARSE_POSES) -> np.ndarray:
@@ -78,9 +75,7 @@ def test_expert_future_slice_is_the_documented_grid():
     assert expert_future_slice(COARSE_POSES, COARSE_DT, STORED) == slice(4, 40, 5)
 
 
-@pytest.mark.parametrize(
-    "num_poses, pose_dt", [(NUM_POSES, POSE_DT), (COARSE_POSES, COARSE_DT)]
-)
+@pytest.mark.parametrize("num_poses, pose_dt", [(NUM_POSES, POSE_DT), (COARSE_POSES, COARSE_DT)])
 def test_expert_future_slice_lands_on_the_wanted_stamps(num_poses, pose_dt):
     """Row ``i`` is ``t = (i + 1) * 0.1``, so the rows must be the wanted stamps."""
     rows = np.arange(STORED)[expert_future_slice(num_poses, pose_dt, STORED)]
@@ -155,9 +150,7 @@ def test_upsample_matches_the_reference_across_the_branch_cut():
     the long way round and the interpolated pose points backwards."""
     heading = np.array([3.0, 3.10, -3.10, -3.0, -2.9, 3.0, 3.13, -3.13])
     xy = np.cumsum(np.stack([np.cos(heading), np.sin(heading)], axis=-1) * 4.0, axis=0)
-    poses = np.concatenate(
-        (xy, np.cos(heading)[:, None], np.sin(heading)[:, None]), axis=-1
-    )
+    poses = np.concatenate((xy, np.cos(heading)[:, None], np.sin(heading)[:, None]), axis=-1)
     got = upsample_poses(
         torch.as_tensor(poses, dtype=torch.float64), SCORING_STEPS, COARSE_DT, SCORING_DT
     )

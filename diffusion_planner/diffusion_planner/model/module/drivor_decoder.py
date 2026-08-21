@@ -73,10 +73,7 @@ class DrivoRDecoder(nn.Module):
         )
 
         self.traj_head = nn.ModuleList(
-            [
-                MLP(d_model, d_ffn, self.poses_num * self.state_size)
-                for _ in range(self.ref_num + 1)
-            ]
+            [MLP(d_model, d_ffn, self.poses_num * self.state_size) for _ in range(self.ref_num + 1)]
         )
 
         self.pos_embed = nn.Sequential(
@@ -122,8 +119,8 @@ class DrivoRDecoder(nn.Module):
         encoding_mask: Optional[torch.Tensor] = None,
     ) -> dict:
         """Args:
-            encoding: [B, S, D] fused scene tokens from the DP encoder.
-            encoding_mask: [B, S] bool, True where the token is padding.
+        encoding: [B, S, D] fused scene tokens from the DP encoder.
+        encoding_mask: [B, S] bool, True where the token is padding.
         """
 
         batch_size = encoding.shape[0]
@@ -176,9 +173,7 @@ class DrivoRDecoder(nn.Module):
         }
 
     def _decode(self, head: nn.Module, tokens: torch.Tensor) -> torch.Tensor:
-        normalized = head(tokens).reshape(
-            tokens.shape[0], -1, self.poses_num, self.state_size
-        )
+        normalized = head(tokens).reshape(tokens.shape[0], -1, self.poses_num, self.state_size)
         return normalized.float() * self.state_std + self.state_mean
 
 

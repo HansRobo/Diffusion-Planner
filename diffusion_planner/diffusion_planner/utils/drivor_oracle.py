@@ -49,6 +49,8 @@ from typing import Optional
 import numpy as np
 import torch
 
+from diffusion_planner.utils.drivor_sampling import upsample_poses
+from planner_metrics.pdm_simulator_torch import initial_states_from_ego, simulate_proposals
 from planner_metrics.pdms_navsim import (
     COLLISION_STOPPED_SPEED_THRESHOLD,
     DRIVING_DIRECTION_COMPLIANCE_THRESHOLD,
@@ -63,7 +65,6 @@ from planner_metrics.pdms_navsim import (
     MAX_LON_ACCEL,
     MIN_LON_ACCEL,
     PROGRESS_DISTANCE_THRESHOLD,
-    STOPPED_SPEED_THRESHOLD,
     STATE_ACC_X,
     STATE_ACC_Y,
     STATE_HEADING,
@@ -72,10 +73,8 @@ from planner_metrics.pdms_navsim import (
     STATE_VEL_Y,
     STATE_X,
     STATE_Y,
+    STOPPED_SPEED_THRESHOLD,
 )
-from planner_metrics.pdm_simulator_torch import initial_states_from_ego, simulate_proposals
-
-from diffusion_planner.utils.drivor_sampling import upsample_poses
 
 # The oracle's output channels, in order.  The first six are exactly DrivoR's
 # scorer heads (``DRIVOR_HEAD_METRICS``); the seventh is their PDMS aggregate,
@@ -169,9 +168,7 @@ def _states_from_poses(poses: torch.Tensor, dt: float) -> torch.Tensor:
 def _phase_unwrap(headings: torch.Tensor) -> torch.Tensor:
     two_pi = 2.0 * float(np.pi)
     adjustments = torch.zeros_like(headings)
-    adjustments[..., 1:] = torch.cumsum(
-        torch.round(torch.diff(headings, dim=-1) / two_pi), dim=-1
-    )
+    adjustments[..., 1:] = torch.cumsum(torch.round(torch.diff(headings, dim=-1) / two_pi), dim=-1)
     return headings - two_pi * adjustments
 
 
@@ -434,9 +431,7 @@ class DrivoROracle:
 
     def _aggregate(self, components: torch.Tensor) -> torch.Tensor:
         """PDMS over the oracle labels: NC * DAC * weighted mean of the rest."""
-        weights = torch.tensor(
-            self.score_weights, device=components.device, dtype=components.dtype
-        )
+        weights = torch.tensor(self.score_weights, device=components.device, dtype=components.dtype)
         behaviour = components[..., 2:].clone()
         # TTC's undefined sentinel must not leak into the aggregate: treat it as
         # "no infraction" for the score while the loss masks it for the head.
@@ -546,11 +541,15 @@ class DrivoROracle:
         ) = self._route_segments(route)
         keep_route = min(self.max_route_segments, route_centre0.shape[1])
         route_rank = (
-            _point_segment_distance(
-                guard_centre[:, :, None, :], route_centre0[:, None], route_centre1[:, None]
+            (
+                _point_segment_distance(
+                    guard_centre[:, :, None, :], route_centre0[:, None], route_centre1[:, None]
+                )
+                - guard_radius[:, :, None]
             )
-            - guard_radius[:, :, None]
-        ).min(dim=1).values  # [B, R]
+            .min(dim=1)
+            .values
+        )  # [B, R]
         route_rank = torch.where(route_valid, route_rank, torch.full_like(route_rank, 1e6))
         route_order = route_rank.topk(keep_route, dim=1, largest=False).indices
 
@@ -695,9 +694,7 @@ class DrivoROracle:
         tangent = c1 - c0
         tangent = tangent / tangent.norm(dim=-1, keepdim=True).clamp_min(_EPS)
         normal = _perp(tangent)
-        left_signed = 0.5 * (
-            (left[:, :, :-1] * normal).sum(-1) + (left[:, :, 1:] * normal).sum(-1)
-        )
+        left_signed = 0.5 * ((left[:, :, :-1] * normal).sum(-1) + (left[:, :, 1:] * normal).sum(-1))
         right_signed = 0.5 * (
             (right[:, :, :-1] * normal).sum(-1) + (right[:, :, 1:] * normal).sum(-1)
         )
@@ -808,9 +805,7 @@ class DrivoROracle:
         cos_angle = self._cos_relative(to_agent, ego_axis)
         behind = cos_angle < _COS_BEHIND
 
-        front_hit = self._front_edge_hits(
-            ego_centre, ego_axis, ego_half, nb_xy, nb_axis, nb_half
-        )
+        front_hit = self._front_edge_hits(ego_centre, ego_axis, ego_half, nb_xy, nb_axis, nb_half)
         ego_stopped = ego_speed <= COLLISION_STOPPED_SPEED_THRESHOLD
         at_fault = overlap & ~ego_stopped & (nb_stopped | (~behind & front_hit))
         nc = 1.0 - at_fault.any(dim=-1).any(dim=-1).float()
@@ -926,7 +921,7 @@ class DrivoROracle:
         seg = seg1 - seg0
         length_sq = (seg * seg).sum(-1).clamp_min(_EPS)
         rel = point - seg0
-        t = ((rel * seg).sum(-1) / length_sq)
+        t = (rel * seg).sum(-1) / length_sq
         lateral = (rel * _perp(seg / seg.norm(dim=-1, keepdim=True).clamp_min(_EPS))).sum(-1)
         on_segment = (t >= 0.0) & (t <= 1.0)
         within = (lateral >= scene.route_right[:, None, None]) & (
@@ -999,9 +994,7 @@ class DrivoROracle:
             ),
             dim=-1,
         ).reshape(-1, horizon_in, 3)
-        initial = (
-            scene.ego_initial[:, None].expand(batch, num, STATE_SIZE).reshape(-1, STATE_SIZE)
-        )
+        initial = scene.ego_initial[:, None].expand(batch, num, STATE_SIZE).reshape(-1, STATE_SIZE)
         wheel_base = scene.wheel_base[:, None].expand(batch, num).reshape(-1)
         states = simulate_proposals(poses.to(torch.float64), initial, self.dt, wheel_base)
 
