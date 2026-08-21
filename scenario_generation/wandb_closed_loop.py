@@ -1,17 +1,29 @@
-"""Build ``wandb.Table``s for closed-loop evaluation results.
+"""Build ``wandb.Table``s and charts for closed-loop evaluation results.
 
 For each json_label (e.g. ``sites_sample``, ``sites_sample__noobj``,
 ``close_loop_devops_override_label``) this module produces:
 
 - one **abs** ``wandb.Table`` (raw counts / fraction over the entire run),
   ready to be logged to W&B directly.
+- one **per_1000steps** ``wandb.Table`` with a Run column, enabling cross-run
+  comparison via W&B Custom Chart (shared axes, dynamic run filtering).
 - one stacked-bar HTML panel per json_label (:func:`build_per_1000steps_stacked_panels`)
   showing the 5 count-metric columns normalized per 1000 steps.  The panel uses
   ECharts inlined via ``wandb.Html`` so it can be uploaded without any
   pre-registered Vega spec on the W&B backend.
+- one **cross-run Custom Chart** per json_label (:func:`log_cross_run_charts`)
+  that automatically appears in W&B Workspace with shared axes.
 
-The raw ``per_1000steps`` table is **not** exported — it exists only internally
-to drive the stacked bar chart.
+Cross-run Comparison (Fully Automatic):
+--------------------------------------
+1. Each run calls ``build_closed_loop_tables(by_json, run_name=run.name)``
+2. Call ``log_cross_run_charts(run, by_json, ...)`` to log charts
+3. Open W&B link → charts appear automatically with shared axes
+4. Toggle runs on/off in the left panel to update the comparison
+
+Prerequisites:
+- Run ``python wandb_closed_loop_workspace.py`` once to create the Vega preset
+- The preset is reusable across all runs
 """
 
 from __future__ import annotations
@@ -53,6 +65,12 @@ _PER_1000STEPS_COLUMNS = [
 def _short_label(group_key: str) -> str:
     """``sites_sample/group_a`` → ``group_a``. ``group_a`` → ``group_a``."""
     return group_key.split("/", 1)[1] if "/" in group_key else group_key
+
+
+def _add_run_column(table: wandb.Table, run_name: str) -> wandb.Table:
+    """Prepend a 'Run' column to a table for cross-run comparison."""
+    new_data = [[run_name] + list(row) for row in table.data]
+    return wandb.Table(columns=["Run", *table.columns], data=new_data)
 
 
 def _abs_value(source_key: str, summary: dict):
@@ -153,15 +171,25 @@ def _build_table(
 
 def build_closed_loop_tables(
     by_json: dict[str, dict[str, dict]],
+    *,
+    run_name: str | None = None,
 ) -> dict[str, wandb.Table]:
-    """Build one **abs** ``wandb.Table`` per json_label.
+    """Build abs table for each json_label.
 
     ``by_json`` maps ``json_label`` → ``group_key`` → per-group summary dict.
-    Returns ``{"{json_label}/metrics": table, ...}``.
+
+    Returns:
+        ``{json_label}/metrics``: abs table with raw counts and route completion
     """
+    if run_name is None:
+        run_name = wandb.run.name if wandb.run is not None else "unknown"
+
     out: dict[str, wandb.Table] = {}
+
     for json_label, group_summaries in sorted(by_json.items()):
-        out[f"{json_label}/metrics"] = _build_table(json_label, "abs", group_summaries)
+        abs_table = _build_table(json_label, "abs", group_summaries)
+        out[f"{json_label}/metrics"] = abs_table
+
     return out
 
 
@@ -259,3 +287,213 @@ def build_per_1000steps_stacked_panels(
             )
         )
     return out
+
+
+# Metrics for cross-run stacked bar chart
+_CROSS_RUN_METRICS = (
+    ("Curb hits / 1k steps", "curb_hits"),
+    ("Snaps / 1k steps", "snaps"),
+    ("Red light / 1k steps", "red_light"),
+    ("Strong brakes / 1k steps", "strong_brakes"),
+    ("Collisions / 1k steps", "collisions"),
+)
+
+
+def _build_cross_run_vega_spec() -> dict:
+    """Build the Vega-Lite spec for cross-run grouped stacked bar chart.
+
+    Uses W&B template variables (${field:...}) for dynamic data binding.
+    Supports clicking legend items to show/hide individual event types.
+    """
+    return {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "description": "Closed-loop events per 1k steps, grouped by run and stacked by event type.",
+        "data": {"name": "wandb"},
+        "params": [
+            {
+                "name": "selected_event_types",
+                "select": {"type": "point", "fields": ["event_type"]},
+                "bind": "legend",
+            }
+        ],
+        "transform": [
+            {"filter": "datum['${field:group}'] !== 'All'"},
+            {
+                "fold": [
+                    "${field:curb_hits}",
+                    "${field:snaps}",
+                    "${field:red_light}",
+                    "${field:strong_brakes}",
+                    "${field:collisions}",
+                ],
+                "as": ["event_key", "event_value"],
+            },
+            {
+                "calculate": "datum.event_key === '${field:curb_hits}' ? 'Curb hits' : datum.event_key === '${field:snaps}' ? 'Snaps' : datum.event_key === '${field:red_light}' ? 'Red light' : datum.event_key === '${field:strong_brakes}' ? 'Strong brakes' : 'Collisions'",
+                "as": "event_type",
+            },
+            {"filter": {"param": "selected_event_types"}},
+        ],
+        "mark": {"type": "bar", "tooltip": True},
+        "encoding": {
+            "y": {
+                "field": "${field:group}",
+                "type": "nominal",
+                "title": "Group",
+                "axis": {"labelLimit": 320},
+            },
+            "yOffset": {"field": "${field:run}", "type": "nominal"},
+            "x": {
+                "aggregate": "sum",
+                "field": "event_value",
+                "type": "quantitative",
+                "stack": "zero",
+                "title": "Events / 1k steps",
+                "scale": {"zero": True},
+            },
+            "color": {
+                "field": "event_type",
+                "type": "nominal",
+                "title": "Event type",
+                "scale": {
+                    "domain": [
+                        "Curb hits",
+                        "Snaps",
+                        "Red light",
+                        "Strong brakes",
+                        "Collisions",
+                    ],
+                    "range": ["#4C78A8", "#F58518", "#E45756", "#72B7B2", "#EECA3B"],
+                },
+            },
+            "order": {
+                "field": "event_type",
+                "sort": [
+                    "Curb hits",
+                    "Snaps",
+                    "Red light",
+                    "Strong brakes",
+                    "Collisions",
+                ],
+            },
+            "tooltip": [
+                {"field": "${field:group}", "type": "nominal", "title": "Group"},
+                {"field": "${field:run}", "type": "nominal", "title": "Run"},
+                {"field": "event_type", "type": "nominal", "title": "Event"},
+                {
+                    "aggregate": "sum",
+                    "field": "event_value",
+                    "type": "quantitative",
+                    "title": "Events / 1k steps",
+                    "format": ".3f",
+                },
+            ],
+        },
+        "height": {"step": 42},
+    }
+
+
+def log_cross_run_charts(
+    run: wandb.sdk.wandb_run.Run,
+    by_json: dict[str, dict[str, dict]],
+) -> None:
+    """Log cross-run Custom Charts for grouped stacked bar comparison.
+
+    This function:
+    1. Creates a Vega preset (if not exists) for cross-run stacked bar
+    2. Logs a Custom Chart for each json_label
+
+    Args:
+        run: W&B run instance (from wandb.init() or passed in)
+        by_json: Mapping of json_label -> group_key -> summary dict
+    """
+    entity = getattr(run, "entity", None) or "unknown"
+
+    # Create the Vega preset once
+    vega_spec_name = f"{entity}/closed_loop_cross_run_stacked_bar"
+    try:
+        api = wandb.Api()
+        api.create_custom_chart(
+            entity=entity,
+            name="closed_loop_cross_run_stacked_bar",
+            display_name="Closed-Loop Cross-Run Stacked Bar",
+            spec_type="vega2",
+            access="private",
+            spec=_build_cross_run_vega_spec(),
+        )
+        print(f"wandb: created custom chart preset '{vega_spec_name}'")
+    except Exception as e:
+        if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+            print(f"wandb: custom chart preset '{vega_spec_name}' already exists")
+        else:
+            print(f"wandb: warning - failed to create custom chart preset: {e}")
+
+    # Build fields mapping: Vega field name -> table column name
+    chart_fields = {
+        "run": "Run",
+        "group": "Group",
+    }
+    for display_name, field_key in _CROSS_RUN_METRICS:
+        chart_fields[field_key] = display_name
+
+    # Log a Custom Chart for each json_label
+    for json_label in sorted(by_json.keys()):
+        table = _build_table(json_label, "per_1000steps", by_json[json_label])
+        table_with_run = _add_run_column(table, run.name)
+
+        chart = wandb.plot_table(
+            vega_spec_name=vega_spec_name,
+            data_table=table_with_run,
+            fields=chart_fields,
+            split_table=True,
+        )
+        run.log({f"{json_label}/cross_run_chart": chart})
+        print(f"wandb: logged {json_label}/cross_run_chart")
+
+
+def log_closed_loop_to_wandb(
+    cfg: "dict | None",
+    group_names: list[str],
+    group_summaries: dict[str, dict],
+    run: "wandb.sdk.wandb_run.Run | None" = None,
+) -> None:
+    """Push per-group closed-loop scalar metrics + Custom Charts to W&B.
+
+    Reuses ``run`` if given, else starts its own.
+    Sets up W&B Custom Chart presets for cross-run comparison.
+
+    Args:
+        cfg: Config dict with ``wandb_project_name`` and ``exp_name`` fields.
+             If None, uses defaults.
+        group_names: List of group keys.
+        group_summaries: Dict mapping group key -> summary dict.
+        run: W&B run instance. If None, starts a new one.
+    """
+    if not group_summaries:
+        return
+
+    if run is None:
+        project = (cfg or {}).get("wandb_project_name") or None
+        name = (cfg or {}).get("exp_name") or None
+        run = wandb.init(project=project, name=name)
+        own_run = True
+    else:
+        own_run = False
+
+    try:
+        by_json: dict[str, dict[str, dict]] = {}
+        for key in group_names:
+            summary = group_summaries[key]
+            if "__noobj/" in key:
+                json_label = key.split("__noobj/", 1)[0] + "__noobj"
+            else:
+                json_label = key.split("/", 1)[0]
+            by_json.setdefault(json_label, {})[key] = summary
+
+        tables = build_closed_loop_tables(by_json, run_name=run.name)
+        run.log(tables)
+        log_cross_run_charts(run, by_json)
+    finally:
+        if own_run:
+            wandb.finish()
+

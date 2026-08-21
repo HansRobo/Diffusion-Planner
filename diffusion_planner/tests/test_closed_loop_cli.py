@@ -188,7 +188,7 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path: Path, monk
         captured.append({"mode": kwargs.get("mode"), "out_dir": str(out_dir)})
 
     monkeypatch.setattr(mod, "run_one_group", fake_run_one_group)
-    monkeypatch.setattr(mod, "_log_to_wandb", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "log_closed_loop_to_wandb", lambda *a, **k: None)
 
     cfg = SimpleNamespace(
         closed_loop_npz_root=[str(json_path), str(json_path)],
