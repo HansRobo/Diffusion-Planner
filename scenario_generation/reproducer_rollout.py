@@ -875,6 +875,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.in_episode = False
                 s.prev_max_idx = cur.max_idx_reached
                 s.ego_stuck = 0
+                s.stuck = 0
                 s.snap_count += 1
 
 
