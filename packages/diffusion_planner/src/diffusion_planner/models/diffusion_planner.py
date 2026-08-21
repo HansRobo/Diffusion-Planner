@@ -23,6 +23,7 @@ class DiffusionPlanner(nn.Module):
         element_encoder_depth: int = 2,
         decoder_depth: int = 6,
         trajectory_encoder_depth: int = 2,
+        trajectory_mixer_hidden_dim: int = 128,
         feedforward_dim: int = 1024,
         embed_dim: int = 128,
         drop_path_rate: float = 0.0,
@@ -49,6 +50,7 @@ class DiffusionPlanner(nn.Module):
             feedforward_dim=feedforward_dim,
             dropout=dropout,
             trajectory_encoder_depth=trajectory_encoder_depth,
+            trajectory_mixer_hidden_dim=trajectory_mixer_hidden_dim,
         )
 
     @staticmethod

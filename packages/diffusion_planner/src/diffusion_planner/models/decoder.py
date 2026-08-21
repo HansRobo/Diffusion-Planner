@@ -66,17 +66,19 @@ class TrajectoryEncoder(nn.Module):
     def __init__(
         self,
         hidden_dim: int,
+        mixer_hidden_dim: int,
         depth: int,
         drop_path_rate: float = 0.0,
     ) -> None:
         super().__init__()
         self.trajectory_len = TRAJECTORY_LENGTH
-        self.input_projection = nn.Linear(TRAJECTORY_DIM, hidden_dim)
+        self.input_projection = nn.Linear(TRAJECTORY_DIM, mixer_hidden_dim)
         self.blocks = nn.ModuleList(
-            MixerBlock(hidden_dim, TRAJECTORY_LENGTH, drop_path=drop_path_rate)
+            MixerBlock(mixer_hidden_dim, TRAJECTORY_LENGTH, drop_path=drop_path_rate)
             for _ in range(depth)
         )
-        self.norm = nn.LayerNorm(hidden_dim)
+        self.norm = nn.LayerNorm(mixer_hidden_dim)
+        self.output_projection = nn.Linear(mixer_hidden_dim, hidden_dim)
 
     def forward(self, trajectories: torch.Tensor) -> torch.Tensor:
         """Encode trajectories `(B, A, T, 4)` into agent tokens `(B, A, H)`.
@@ -92,7 +94,7 @@ class TrajectoryEncoder(nn.Module):
         features = features.reshape(batch * agents, self.trajectory_len, -1)
         for block in self.blocks:
             features = block(features)
-        features = self.norm(features).mean(dim=1)
+        features = self.output_projection(self.norm(features).mean(dim=1))
         return features.reshape(batch, agents, -1)
 
 
@@ -156,13 +158,14 @@ class TrajectoryDecoder(nn.Module):
         feedforward_dim: int = 1024,
         dropout: float = 0.0,
         trajectory_encoder_depth: int = 2,
+        trajectory_mixer_hidden_dim: int = 128,
     ) -> None:
         super().__init__()
         self.trajectory_len = TRAJECTORY_LENGTH
         self.trajectory_encoder = TrajectoryEncoder(
-            hidden_dim,
-            trajectory_encoder_depth,
-            dropout,
+            hidden_dim=hidden_dim,
+            depth=trajectory_encoder_depth,
+            mixer_hidden_dim=trajectory_mixer_hidden_dim,
         )
         self.ego_embedding = nn.Parameter(torch.empty(hidden_dim))
         self.neighbor_embedding = nn.Parameter(torch.empty(hidden_dim))

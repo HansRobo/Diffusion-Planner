@@ -5,6 +5,7 @@ scene_fusion_depth: 4
 element_encoder_depth: 2
 decoder_depth: 6
 trajectory_encoder_depth: 2
+trajectory_mixer_hidden_dim: 64
 feedforward_dim: 1024
 embed_dim: 128
 drop_path_rate: 0.0
