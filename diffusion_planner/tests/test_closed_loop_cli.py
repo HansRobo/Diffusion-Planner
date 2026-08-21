@@ -49,10 +49,11 @@ def test_build_parser_required_and_defaults(tmp_path: Path):
     assert args.use_wandb is True
     assert args.closed_loop_draw_workers == 4
     assert args.scenario_sim_driver == ""
-    # train_run.py reads these unconditionally before it launches anything, so a field that is
-    # not on the parser is not a missing option -- it is an AttributeError at startup.
     assert args.scenario_based_open_loop_list == ""
     assert args.scenario_based_open_loop_only is False
+    assert args.batch_size == 512
+    assert args.train_epochs == 80
+    assert args.save_utd == 10
 
 
 def test_resolve_paths(tmp_path: Path, monkeypatch):
@@ -215,7 +216,15 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path: Path, monk
         wandb_project_name="",
     )
 
-    ok = mod.run_closed_loop_main(model=None, model_args=None, cfg=cfg, out_root=tmp_path)
+    ok = mod.run_closed_loop_main(
+        model=None,
+        model_args=None,
+        cfg=cfg,
+        out_root=tmp_path,
+        wandb_run=None,
+        only_json=None,
+        render_media=False,
+    )
     assert ok is True
     by_mode = {c["mode"]: c["out_dir"] for c in captured}
     assert by_mode == {

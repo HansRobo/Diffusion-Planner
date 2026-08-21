@@ -37,7 +37,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     # ---------------------------------------------------------
     # DataLoader Parameters
     # ---------------------------------------------------------
-    batch_size: int = 512
+    batch_size: int = cli("batch size across all GPUs", default=512)
     num_workers: int = 8
     pin_mem: bool = True
 
@@ -55,8 +55,8 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     # Training Parameters
     # ---------------------------------------------------------
     seed: int = 3407
-    train_epochs: int = 80
-    save_utd: int = 10
+    train_epochs: int = cli("total training epochs", default=80)
+    save_utd: int = cli("checkpoint save cadence in epochs", default=10)
     learning_rate: float = 1e-4
     warm_up_epoch: int = 5
     encoder_drop_path_rate: float = 0.1
