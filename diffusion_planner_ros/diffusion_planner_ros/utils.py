@@ -312,7 +312,17 @@ def create_ego_agent_past(
 
 
 def convert_prediction_to_msg(pred: torch.Tensor, bl2map_matrix_4x4: np.array, stamp) -> Trajectory:
-    # Convert to Trajectory message
+    """``[T, 3]`` (x, y, heading) in base_link -> an Autoware ``Trajectory``.
+
+    Row 0 must be the ego's *current* pose: rows are stamped ``i * dt`` and the
+    velocity of row 0 is differenced against the base_link origin. A head whose
+    output starts one step out has to have that anchor re-added by the caller,
+    or every point comes out 0.1 s early.
+
+    Only pose, ``time_from_start`` and ``longitudinal_velocity_mps`` are filled --
+    velocity by finite difference, since no head predicts it. Lateral velocity,
+    acceleration, heading rate and the wheel angles are left at zero.
+    """
     trajectory_msg = Trajectory()
     trajectory_msg.header.stamp = stamp
     trajectory_msg.header.frame_id = "map"
