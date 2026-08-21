@@ -742,16 +742,27 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     return np_dict, neighbors_live, idx, slot_uuids, world_by_uuid
 
 
-def _feed_turn_indicator(s: _SegState, outputs) -> None:
+def _feed_turn_indicator(s: _SegState, outputs, idx: int) -> None:
     """Closed-loop turn-signal feedback for the single-segment ``render_segment`` rollout.
 
     Appends the model's predicted turn indicator to ``turn_hist`` (recorded seed scrolls
     out within PAST steps) and remembers it as ``last_turn_indicator`` so the in-between
     replan steps can re-append the same value (see ``_hold_turn_indicator``). Mirrors the
     per-batch feedback in ``run_segments_batched`` so a single-segment rollout evolves the
-    turn signal identically instead of holding the seed."""
-    ti = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
-    s.last_turn_indicator = int(np.asarray(ti).reshape(-1)[0])
+    turn signal identically instead of holding the seed.
+
+    Heads that emit no turn indicator (``--predictor_head drivor`` is ego-trajectory-only)
+    have nothing to feed back, so the history is scrolled with the RECORDED signal at the
+    cursor frame instead. That is open-loop in the turn channel only — but it is also the
+    honest deployment picture for such a head: the signal has to come from the route
+    planner, not the model. Holding the seed instead would freeze one value for the whole
+    rollout and feed the encoder a stale signal at every intersection."""
+    if "turn_indicator_logit" not in outputs:
+        rec = np.asarray(s.tl.npz(idx)["turn_indicators"]).reshape(-1).astype(np.int64)
+        s.last_turn_indicator = int(rec[-1])
+    else:
+        ti = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
+        s.last_turn_indicator = int(np.asarray(ti).reshape(-1)[0])
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
@@ -1450,7 +1461,7 @@ def render_segment(
                 pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
             )
             pred_cur = pred  # fresh plan: drawn + tracked in the current ego frame
-            _feed_turn_indicator(s, outputs)
+            _feed_turn_indicator(s, outputs, idx)
         else:
             # Clamp so a `replan_interval` longer than the horizon holds the final plan pose.
             off = min(offset, len(plan_world[0]) - 1)
