@@ -128,6 +128,12 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     epdms_eval_use_agent_boxes: bool = True
     epdms_eval_use_road_border: bool = True
 
+    scenario_based_open_loop_list: str = cli(
+        "JSON mapping scenario-based open-loop metric names to NPZ path lists. Empty = disabled.",
+        default="",
+        path=True,
+    )
+
     # ---------------------------------------------------------
     # Normalizers (set at runtime)
     # ---------------------------------------------------------
