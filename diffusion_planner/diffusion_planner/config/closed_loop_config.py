@@ -25,7 +25,8 @@ class ClosedLoopConfig:
         "render video/colormap artifacts during wandb logging",
         default=True,
     )
-    wandb_project: str = cli("Weights & Biases project name (empty=disabled)", default="")
+    wandb_project_name: str = cli("Weights & Biases project name (empty=disabled)", default="")
+    exp_name: str = cli("name of this run; appears in the save directory and in wandb", default="")
     port: str = "22323"
 
     # FullRouteClosedLoopEvaluation
