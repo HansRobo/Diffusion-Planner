@@ -48,10 +48,10 @@ void print_options(const ConverterPaths & paths, const ConverterOptions & conver
     converter.neighbor_margin, converter.road_border_margin, converter.collision_time_stride,
     converter.offlane_max_score, converter.offlane_time_stride, converter.write_skipped_npz,
     converter.sidecar_only, converter.pack_sequence, converter.extract_override_segments,
-    converter.red_light_run_radius_m,
-    converter.red_light_run_heading_tol_deg, converter.green_stop_heading_tol_deg,
-    converter.green_stop_stay_radius_m, converter.green_stop_speed_max_mps,
-    converter.green_stop_ahead_m, converter.green_stop_lead_fwd_m, converter.green_stop_lead_lat_m);
+    converter.red_light_run_radius_m, converter.red_light_run_heading_tol_deg,
+    converter.green_stop_heading_tol_deg, converter.green_stop_stay_radius_m,
+    converter.green_stop_speed_max_mps, converter.green_stop_ahead_m,
+    converter.green_stop_lead_fwd_m, converter.green_stop_lead_lat_m);
 }
 
 bool parse_arguments(int argc, char ** argv, ConverterPaths & paths, ConverterOptions & converter)
