@@ -46,6 +46,13 @@ class ClosedLoopConfig:
             "strong_brake",
         ]
     )
+    scenario_sim_driver: str = cli(
+        "shell driver that evaluates a saved checkpoint against the OpenSCENARIO suite. "
+        "Empty = disabled. It receives the checkpoint and an output directory in CKPT / OUT; "
+        "every other knob is its own environment's.",
+        default="",
+        path=True,
+    )
     render_media: bool = cli(
         "render video/colormap artifacts during wandb logging",
         default=True,

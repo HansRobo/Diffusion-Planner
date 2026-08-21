@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -162,6 +163,34 @@ def closed_loop_validate(model, args, epoch: int, out_dir: str) -> None:
 
     finally:
         net.train(was_training)
+
+
+def scenario_sim_validate(args, epoch: int, ckpt_path: str, out_dir: str) -> None:
+    """Evaluate a just-saved checkpoint against the OpenSCENARIO suite, out of process.
+
+    Rank 0 only, on the checkpoint-save cadence. The other ranks wait at the next epoch's
+    ``torch.distributed.barrier()``, which inherits the process group's timeout.
+
+    The driver fans out one process per scenario, which is the configuration the suite's
+    throughput was measured with: the rollout saturates the GPUs in time only near 96-way
+    concurrency, so sharding one scenario per rank inside this process would leave most of that
+    throughput unused. It also keeps the ROS overlay out of the training process -- the driver
+    sources it for its own children, so nothing here imports the interpreter.
+
+    A failed evaluation is reported and training continues: losing a data point costs less than
+    losing the run.
+    """
+    if not args.scenario_sim_driver:
+        return
+
+    started = time.perf_counter()
+    rc = subprocess.run(
+        ["bash", args.scenario_sim_driver],
+        env={**os.environ, "CKPT": ckpt_path, "OUT": out_dir},
+    ).returncode
+    elapsed = time.perf_counter() - started
+    status = "ok" if rc == 0 else f"FAILED rc={rc}"
+    print(f"scenario_sim @epoch {epoch + 1}: {status} in {elapsed:.1f}s -> {out_dir}", flush=True)
 
 
 def model_training(args: TrainConfig):
@@ -586,6 +615,12 @@ def model_training(args: TrainConfig):
                     use_simplify=False,
                     opset_version=20,
                     external_data=False,
+                )
+                scenario_sim_validate(
+                    args,
+                    epoch,
+                    f"{curr_dir}/best_model.pth",
+                    os.path.join(curr_dir, "scenario_sim"),
                 )
 
             if valid_loss_ego_position_lat_loss < best_loss:
