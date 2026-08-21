@@ -21,7 +21,6 @@ EGO_AGENT_PAST_IDX_SIN = 3
 
 class EGOSHAPE:
     WHEEL_BASE = 0;
-    LEGNTH = 1;
     LENGTH = 1;
     WIDTH = 2;
 
