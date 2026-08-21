@@ -174,9 +174,7 @@ def test_simulator_low_passes_waypoint_noise():
     states = _run_fast(poses, ego)
 
     simulated = np.abs(states[:, 1:, ref.STATE_ACC_X])
-    finite_difference = np.abs(
-        np.gradient(np.gradient(poses[..., 0], DT, axis=1), DT, axis=1)
-    )
+    finite_difference = np.abs(np.gradient(np.gradient(poses[..., 0], DT, axis=1), DT, axis=1))
     assert simulated.max() < 10.0
     assert finite_difference.max() > 10.0 * simulated.max()
 
@@ -191,6 +189,14 @@ def test_cuda_matches_cpu():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_compiled_matches_eager():
+    # ``_get_step`` memoises a single ``dynamic=False`` compile of the step body, so
+    # every distinct shape the session has already pushed through it has burned one of
+    # Dynamo's 8 recompile slots.  Once they are gone ``fullgraph=True`` escalates the
+    # next recompile to a hard error, which would make this test fail or pass purely on
+    # how much of the suite ran before it.  Reset both caches so it measures numerics.
+    torch._dynamo.reset()
+    fast._compiled_step = None
+
     poses, ego = _random_trajectories(64, seed=8)
     poses_t = torch.as_tensor(poses, dtype=torch.float64, device="cuda")
     initial = fast.initial_states_from_ego(torch.as_tensor(ego, dtype=torch.float64, device="cuda"))
