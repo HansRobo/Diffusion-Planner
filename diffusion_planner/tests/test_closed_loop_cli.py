@@ -48,6 +48,7 @@ def test_build_parser_required_and_defaults(tmp_path: Path):
     assert args.valid_set_list == valid_list
     assert args.use_wandb is True
     assert args.closed_loop_draw_workers == 4
+    assert args.scenario_sim_driver == ""
 
 
 def test_resolve_paths(tmp_path: Path, monkeypatch):
@@ -87,6 +88,8 @@ def test_to_command_line(tmp_path: Path):
             valid_list,
             "--closed_loop_draw_workers",
             "8",
+            "--scenario_sim_driver",
+            "/tmp/driver.sh",
         ]
     )
     cmd = to_command_line(args, cls=TrainConfig, exclude=("output_root",))
@@ -95,7 +98,37 @@ def test_to_command_line(tmp_path: Path):
     assert "--train_set_list" in cmd
     assert "--closed_loop_draw_workers" in cmd
     assert "8" in cmd
+    assert "--scenario_sim_driver" in cmd
+    assert "/tmp/driver.sh" in cmd
     assert "--use_wandb" not in cmd
+
+
+def test_scenario_sim_validate_hook(tmp_path: Path, monkeypatch):
+    """Test scenario_sim_validate contract: out-of-process invocation with CKPT/OUT env."""
+    from types import SimpleNamespace
+    from diffusion_planner.train import scenario_sim_validate
+
+    # Case 1: Disabled when scenario_sim_driver is empty
+    called_cmds = []
+
+    def fake_run(cmd, env=None, **kwargs):
+        called_cmds.append((cmd, env))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    args_disabled = SimpleNamespace(scenario_sim_driver="")
+    scenario_sim_validate(args_disabled, epoch=0, ckpt_path="/path/ckpt.pth", out_dir="/path/out")
+    assert len(called_cmds) == 0
+
+    # Case 2: Invokes bash driver with CKPT and OUT in env
+    args_enabled = SimpleNamespace(scenario_sim_driver="/opt/run_suite.sh")
+    scenario_sim_validate(args_enabled, epoch=4, ckpt_path="/path/ckpt.pth", out_dir="/path/out")
+    assert len(called_cmds) == 1
+    cmd, env = called_cmds[0]
+    assert cmd == ["bash", "/opt/run_suite.sh"]
+    assert env["CKPT"] == "/path/ckpt.pth"
+    assert env["OUT"] == "/path/out"
 
 
 def test_build_config(tmp_path: Path):
