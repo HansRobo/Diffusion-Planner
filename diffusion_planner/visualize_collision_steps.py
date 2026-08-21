@@ -157,7 +157,7 @@ def main():
     model = load_model(args, v.resume_model_path, v.use_ema, device)
     print(f"Model loaded from {v.resume_model_path} (ema={v.use_ema})")
 
-    dataset = DiffusionPlannerData(v.data_list, *bev_render_settings(args))
+    dataset = DiffusionPlannerData(v.data_list, *bev_render_settings(args), None)
     idx = (
         v.scene_index
         if v.scene_index >= 0

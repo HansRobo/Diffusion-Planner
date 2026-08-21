@@ -4,35 +4,16 @@ from tqdm import tqdm
 
 from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
-from diffusion_planner.utils.data_augmentation import StatePerturbation
-from diffusion_planner.utils.train_utils import get_epoch_mean_loss
+from diffusion_planner.utils.train_utils import get_epoch_mean_loss, heading_to_cos_sin
 
 
-def heading_to_cos_sin(x):
+def train_epoch(data_loader, model, optimizer, args, ema):
+    """One supervised epoch.
+
+    The ego-frame perturbation is not applied here: the DataLoader worker already applied it
+    (see ``DiffusionPlannerData``), so that the BEV rasters of the image encoder are drawn in
+    the perturbed ego frame instead of the recorded one.
     """
-    Convert heading angle to cosine and sine.
-    Args:
-        x: [B, T, 3] where last dimension is (x, y, heading)
-    Output:
-        x: [B, T, 4] where last dimension is (x, y, cos(heading), sin(heading))
-
-    Idempotent: a [..., 4] input that is already (x, y, cos, sin) is returned
-    unchanged. This guards against double-conversion (cos(cos)) now that scene-gen
-    emits 4-col futures — callers can hand it either layout safely.
-    """
-    if x.shape[-1] == 4:
-        return x
-    return torch.cat(
-        [
-            x[..., :2],
-            x[..., 2:3].cos(),
-            x[..., 2:3].sin(),
-        ],
-        dim=-1,
-    )
-
-
-def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
     if len(data_loader) == 0:
         empty = {"loss": 0.0, "turn_indicator_accuracy": 0.0}
         return empty, 0.0
@@ -54,9 +35,6 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
         ego_future = inputs["ego_agent_future"]
         neighbors_future = inputs["neighbor_agents_future"]
-        # Normalize to ego-centric
-        if aug is not None:
-            inputs, ego_future, neighbors_future = aug(inputs, ego_future, neighbors_future)
 
         # heading to cos sin
         ego_future = heading_to_cos_sin(ego_future)

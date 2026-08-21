@@ -26,6 +26,7 @@ from diffusion_planner.utils.dataset import (
     DiffusionPlannerData,
     DiffusionPlannerPairData,
     bev_render_settings,
+    worker_init,
 )
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
@@ -390,19 +391,19 @@ def model_training(args: TrainConfig):
     save_utd = args.save_utd
 
     # set up data loaders
-    if args.input_type == "image" and args.use_data_augment:
-        # The rasters are drawn in the DataLoader worker, before the on-GPU perturbation
-        # rewrites the ego frame, so an augmented batch would carry stale images.
-        raise ValueError("use_data_augment must be False when input_type is 'image'")
-
+    #
+    # The perturbation runs inside the DataLoader worker, on CPU tensors, so that the BEV
+    # rasters of the image encoder can be drawn afterwards in the perturbed ego frame.  A CUDA
+    # device is therefore not an option here: the workers are forked from a process that has
+    # already initialised CUDA.
     if args.use_data_augment:
         if args.augment_type == "bridge":
-            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device="cpu")
         else:
             aug = StatePerturbation(
                 augment_prob=args.augment_prob,
                 num_refine=args.num_refine,
-                device=args.device,
+                device="cpu",
                 ego_past_noise_std=args.ego_past_noise_std,
                 use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
             )
@@ -410,8 +411,9 @@ def model_training(args: TrainConfig):
         aug = None
 
     # prepare dataset
-    train_set = DiffusionPlannerData(args.train_set_list, *bev_render_settings(args))
-    valid_set = DiffusionPlannerData(args.valid_set_list, *bev_render_settings(args))
+    # Only the training set is augmented; validation always sees the recorded scene.
+    train_set = DiffusionPlannerData(args.train_set_list, *bev_render_settings(args), aug)
+    valid_set = DiffusionPlannerData(args.valid_set_list, *bev_render_settings(args), None)
 
     train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 
@@ -425,6 +427,7 @@ def model_training(args: TrainConfig):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
+        worker_init_fn=worker_init,
     )
 
     # Validation is sharded across all ranks (DistributedSampler); each rank computes
@@ -439,6 +442,7 @@ def model_training(args: TrainConfig):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False,
+        worker_init_fn=worker_init,
     )
 
     valid_pair_loader = None
@@ -618,7 +622,7 @@ def model_training(args: TrainConfig):
         # training step
         train_start_time = time.perf_counter()
         train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug
+            train_loader, diffusion_planner, optimizer, args, model_ema
         )
         train_sec = time.perf_counter() - train_start_time
 

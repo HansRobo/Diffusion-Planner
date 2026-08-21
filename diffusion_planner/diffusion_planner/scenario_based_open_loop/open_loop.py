@@ -130,7 +130,7 @@ def run_scenario_based_open_loop_validation(
                 root.mkdir(parents=True, exist_ok=True)
         for metric_name, paths in metric_lists.items():
             loader = DataLoader(
-                DiffusionPlannerData(paths, *bev_render_settings(args)),
+                DiffusionPlannerData(paths, *bev_render_settings(args), None),
                 batch_size=args.batch_size,
                 shuffle=False,
                 num_workers=args.num_workers,

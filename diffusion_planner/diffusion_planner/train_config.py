@@ -91,8 +91,8 @@ class TrainConfig:
     #
     # "vector" is the original pipeline: polylines and agent states are encoded per element.
     # "image" renders the same scene into BEV rasters (see diffusion_planner.utils.render_bev)
-    # and encodes them with a shared ResNet.  Rasterisation happens in the DataLoader worker,
-    # before the on-GPU augmentation, so `use_data_augment` must be off in image mode.
+    # and encodes them with a shared ResNet.  Both the augmentation and the rasterisation run in
+    # the DataLoader worker, in that order, so the rasters always show the perturbed ego frame.
     # ---------------------------------------------------------
     input_type: Literal["vector", "image"] = cli(
         "scene representation fed to the encoder", default="image"
@@ -102,9 +102,12 @@ class TrainConfig:
     # ---------------------------------------------------------
     # DataLoader Parameters
     # ---------------------------------------------------------
-    # Off by default because `input_type` defaults to "image" on this branch: the rasters are
-    # drawn in the DataLoader worker, before the on-GPU perturbation would rewrite the ego frame.
-    use_data_augment: bool = False
+    # The perturbation is applied per sample inside the DataLoader worker (see
+    # DiffusionPlannerData), which is what lets image mode use it: the BEV rasters are drawn
+    # from the already-perturbed scene.  "quintic" costs ~4 ms per sample there, well under the
+    # ~11 ms the rasterisation itself takes; "bridge" costs ~1 s per sample, so it needs far
+    # more workers than the rest of the pipeline to keep up.
+    use_data_augment: bool = True
     augment_prob: float = 0.5
     augment_type: Literal["quintic", "bridge"] = "quintic"
     num_refine: int = 20

@@ -105,7 +105,7 @@ def main():
     policy, heads = load_policy(args.policy_dir, model_args, device)
     cfg = Config(args.args_json_path)
 
-    valid_set = DiffusionPlannerData(args.valid_set_list, *bev_render_settings(model_args))
+    valid_set = DiffusionPlannerData(args.valid_set_list, *bev_render_settings(model_args), None)
     if args.limit:
         valid_set = Subset(valid_set, range(min(args.limit, len(valid_set))))
     loader = DataLoader(
