@@ -1,9 +1,9 @@
 import numpy as np
 import torch
 
-from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 import diffusion_planner.dimensions as dim
-from diffusion_planner.dimensions import EGOSTATE, NEIGHBORSTATE, LINESTRING, EGOSHAPE
+from diffusion_planner.dimensions import EGOSHAPE, EGOSTATE, LINESTRING, NEIGHBORSTATE
+from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
 TIME_INTERVAL = 0.1
 
@@ -211,8 +211,12 @@ class StatePerturbation:
             inputs["ego_agent_past"][aug_flag] = ego_past_aug
 
             scale_1d = scale.squeeze(-1)  # (B_aug, 1)
-            inputs["ego_current_state"][aug_flag, EGOSTATE.VX:EGOSTATE.VY+1] *= scale_1d  # vx, vy
-            inputs["ego_current_state"][aug_flag, EGOSTATE.AX:EGOSTATE.AY+1] *= scale_1d  # ax, ay
+            inputs["ego_current_state"][aug_flag, EGOSTATE.VX : EGOSTATE.VY + 1] *= (
+                scale_1d  # vx, vy
+            )
+            inputs["ego_current_state"][aug_flag, EGOSTATE.AX : EGOSTATE.AY + 1] *= (
+                scale_1d  # ax, ay
+            )
 
         return self.centric_transform(inputs, ego_future, neighbors_future)
 
@@ -231,17 +235,19 @@ class StatePerturbation:
 
         new_state = torch.zeros((B, 9), dtype=torch.float32).to(self._device)
         new_state[:, 3:] = ego_current_state[
-            :, EGOSTATE.VX:EGOSTATE.YAW_RATE+1
+            :, EGOSTATE.VX : EGOSTATE.YAW_RATE + 1
         ]  # x, y, h is 0 because of ego-centric, update vx, vy, ax, ay, steering angle, yaw rate
         new_state = new_state + scaled_random_tensor
         new_state[:, 3] = torch.max(new_state[:, 3], torch.tensor(0.0, device=new_state.device))
         new_state[:, -1] = torch.clip(new_state[:, -1], -0.85, 0.85)
 
-        ego_current_state[:, :EGOSTATE.Y+1] = new_state[:, :2]
+        ego_current_state[:, : EGOSTATE.Y + 1] = new_state[:, :2]
         ego_current_state[:, EGOSTATE.COS] = torch.cos(new_state[:, 2])
         ego_current_state[:, EGOSTATE.SIN] = torch.sin(new_state[:, 2])
-        ego_current_state[:, EGOSTATE.VX:EGOSTATE.AY+1] = new_state[:, 3:7]
-        ego_current_state[:, EGOSTATE.STEERING:EGOSTATE.YAW_RATE+1] = new_state[:, -2:]  # steering angle, yaw rate
+        ego_current_state[:, EGOSTATE.VX : EGOSTATE.AY + 1] = new_state[:, 3:7]
+        ego_current_state[:, EGOSTATE.STEERING : EGOSTATE.YAW_RATE + 1] = new_state[
+            :, -2:
+        ]  # steering angle, yaw rate
 
         # update steering angle and yaw rate
         cur_velocity = ego_current_state[:, EGOSTATE.VX]
@@ -283,11 +289,11 @@ class StatePerturbation:
 
         # ego_shape: [B, 3] = (wheelbase, length, width)
         ego_shape = inputs["ego_shape"].to(device=device, dtype=dtype)
-        ego_length = ego_shape[:, dim.EGOSHAPE.LENGTH:dim.EGOSHAPE.LENGTH+1]  # [B, 1]
-        ego_width = ego_shape[:, dim.EGOSHAPE.WIDTH:dim.EGOSHAPE.WIDTH+1]  # [B, 1]
+        ego_length = ego_shape[:, dim.EGOSHAPE.LENGTH : dim.EGOSHAPE.LENGTH + 1]  # [B, 1]
+        ego_width = ego_shape[:, dim.EGOSHAPE.WIDTH : dim.EGOSHAPE.WIDTH + 1]  # [B, 1]
 
         ego_rect = torch.cat(
-            [aug_ego_state[:, EGOSTATE.X:EGOSTATE.SIN+1], ego_length, ego_width],
+            [aug_ego_state[:, EGOSTATE.X : EGOSTATE.SIN + 1], ego_length, ego_width],
             dim=-1,
         )  # [B, 6]
         ego_corners = _rect_corners(ego_rect)  # [B, 4, 2]
@@ -376,20 +382,22 @@ class StatePerturbation:
         transform_matrix = self.get_transform_matrix_batch(cur_state)
 
         # ego xy
-        inputs["ego_current_state"][..., EGOSTATE.X:EGOSTATE.Y+1] = vector_transform(
-            inputs["ego_current_state"][..., EGOSTATE.X:EGOSTATE.Y+1], transform_matrix, center_xy
+        inputs["ego_current_state"][..., EGOSTATE.X : EGOSTATE.Y + 1] = vector_transform(
+            inputs["ego_current_state"][..., EGOSTATE.X : EGOSTATE.Y + 1],
+            transform_matrix,
+            center_xy,
         )
         # ego cos sin
-        inputs["ego_current_state"][..., EGOSTATE.COS:EGOSTATE.SIN+1] = vector_transform(
-            inputs["ego_current_state"][..., EGOSTATE.COS:EGOSTATE.SIN+1], transform_matrix
+        inputs["ego_current_state"][..., EGOSTATE.COS : EGOSTATE.SIN + 1] = vector_transform(
+            inputs["ego_current_state"][..., EGOSTATE.COS : EGOSTATE.SIN + 1], transform_matrix
         )
         # ego vx, vy
-        inputs["ego_current_state"][..., EGOSTATE.VX:EGOSTATE.VY+1] = vector_transform(
-            inputs["ego_current_state"][..., EGOSTATE.VX:EGOSTATE.VY+1], transform_matrix
+        inputs["ego_current_state"][..., EGOSTATE.VX : EGOSTATE.VY + 1] = vector_transform(
+            inputs["ego_current_state"][..., EGOSTATE.VX : EGOSTATE.VY + 1], transform_matrix
         )
         # ego ax, ay
-        inputs["ego_current_state"][..., EGOSTATE.AX:EGOSTATE.AY+1] = vector_transform(
-            inputs["ego_current_state"][..., EGOSTATE.AX:EGOSTATE.AY+1], transform_matrix
+        inputs["ego_current_state"][..., EGOSTATE.AX : EGOSTATE.AY + 1] = vector_transform(
+            inputs["ego_current_state"][..., EGOSTATE.AX : EGOSTATE.AY + 1], transform_matrix
         )
 
         # ego future xy
@@ -504,8 +512,10 @@ class StatePerturbation:
 
         # line_strings
         mask = torch.sum(torch.ne(inputs["line_strings"], 0), dim=-1) == 0
-        inputs["line_strings"][..., LINESTRING.X:LINESTRING.Y+1] = vector_transform(
-            inputs["line_strings"][..., LINESTRING.X:LINESTRING.Y+1], transform_matrix, center_xy
+        inputs["line_strings"][..., LINESTRING.X : LINESTRING.Y + 1] = vector_transform(
+            inputs["line_strings"][..., LINESTRING.X : LINESTRING.Y + 1],
+            transform_matrix,
+            center_xy,
         )
         inputs["line_strings"][mask] = 0.0
 
@@ -550,8 +560,8 @@ class StatePerturbation:
                 (ego_future[:, int(P / 2), 1] - aug_current_state[:, EGOSTATE.Y]),
                 (ego_future[:, int(P / 2), 0] - aug_current_state[:, EGOSTATE.X]),
             ),
-            torch.norm(aug_current_state[:, EGOSTATE.VX:EGOSTATE.VY+1], dim=-1),
-            torch.norm(aug_current_state[:, EGOSTATE.AX:EGOSTATE.AY+1], dim=-1),
+            torch.norm(aug_current_state[:, EGOSTATE.VX : EGOSTATE.VY + 1], dim=-1),
+            torch.norm(aug_current_state[:, EGOSTATE.AX : EGOSTATE.AY + 1], dim=-1),
             aug_current_state[:, EGOSTATE.YAW_RATE],
         )
 

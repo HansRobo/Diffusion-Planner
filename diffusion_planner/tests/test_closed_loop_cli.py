@@ -111,6 +111,7 @@ def test_to_command_line(tmp_path: Path):
 def test_scenario_sim_validate_hook(tmp_path: Path, monkeypatch):
     """Test scenario_sim_validate contract: out-of-process invocation with CKPT/OUT env."""
     from types import SimpleNamespace
+
     from diffusion_planner.train import scenario_sim_validate
 
     # Case 1: Disabled when scenario_sim_driver is empty

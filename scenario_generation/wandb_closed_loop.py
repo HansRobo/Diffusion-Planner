@@ -279,7 +279,12 @@ def _build_cross_run_vega_spec() -> dict:
                 "title": "Events / 1k steps",
                 "scale": {"zero": True},
             },
-            "size": {"field": "bar_thickness", "type": "quantitative", "scale": None, "legend": None},
+            "size": {
+                "field": "bar_thickness",
+                "type": "quantitative",
+                "scale": None,
+                "legend": None,
+            },
             "color": {
                 "field": "event_type",
                 "type": "nominal",
@@ -332,30 +337,18 @@ def _build_table_vega_spec() -> dict:
     W&B replaces ``${field:...}`` expressions using the mapping passed to
     ``wandb.plot_table(fields=...)``.
     """
-    metric_field_ids = [
-        source_key
-        for _, source_key in _ABS_COLUMNS[1:]
-    ]
-    metric_titles = [
-        display_name
-        for display_name, _ in _ABS_COLUMNS[1:]
-    ]
+    metric_field_ids = [source_key for _, source_key in _ABS_COLUMNS[1:]]
+    metric_titles = [display_name for display_name, _ in _ABS_COLUMNS[1:]]
 
     return {
         "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-        "description": (
-            "Closed-loop metrics table with colored rows for cross-run "
-            "comparison."
-        ),
+        "description": ("Closed-loop metrics table with colored rows for cross-run comparison."),
         "data": {"name": "wandb"},
         "transform": [
             # Build an internal unique row key. The axis label later strips the
             # Run suffix so long Run names are not rendered as row labels.
             {
-                "calculate": (
-                    "datum['${field:group}'] + '|||' + "
-                    "datum['${field:run}']"
-                ),
+                "calculate": ("datum['${field:group}'] + '|||' + datum['${field:run}']"),
                 "as": "row_key",
             },
             # Keep normal groups alphabetically ordered and put All last.
@@ -370,10 +363,7 @@ def _build_table_vega_spec() -> dict:
             # Convert the fixed metric columns into table cells.
             # Group and Run are dimensions, so they must not be folded.
             {
-                "fold": [
-                    f"${{field:{field_id}}}"
-                    for field_id in metric_field_ids
-                ],
+                "fold": [f"${{field:{field_id}}}" for field_id in metric_field_ids],
                 "as": ["column_name", "column_value"],
             },
             # Format integer counts without decimals and other numeric values
@@ -506,6 +496,7 @@ def _build_table_vega_spec() -> dict:
         },
     }
 
+
 def log_metrics_tables(
     run: wandb.sdk.wandb_run.Run,
     by_json: dict[str, dict[str, dict]],
@@ -534,9 +525,7 @@ def log_metrics_tables(
         if "already exists" in message or "duplicate" in message:
             print(f"wandb: using existing preset '{vega_spec_name}'")
         else:
-            raise RuntimeError(
-                f"Failed to create W&B preset '{vega_spec_name}'"
-            ) from exc
+            raise RuntimeError(f"Failed to create W&B preset '{vega_spec_name}'") from exc
 
     fields = {
         "run": "Run",
@@ -558,13 +547,13 @@ def log_metrics_tables(
             fields=fields,
             split_table=True,
         )
-        run.log({
-            f"Closed-Loop-{json_label}/metrics_table": chart,
-        })
-        print(
-            f"wandb: logged "
-            f"Closed-Loop-{json_label}/metrics_table"
+        run.log(
+            {
+                f"Closed-Loop-{json_label}/metrics_table": chart,
+            }
         )
+        print(f"wandb: logged Closed-Loop-{json_label}/metrics_table")
+
 
 def log_cross_run_charts(
     run: wandb.sdk.wandb_run.Run,
@@ -668,4 +657,3 @@ def log_closed_loop_to_wandb(
     finally:
         if own_run:
             wandb.finish()
-
