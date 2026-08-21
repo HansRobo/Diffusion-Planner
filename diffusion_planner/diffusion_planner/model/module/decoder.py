@@ -167,7 +167,7 @@ def compute_training_loss(
     t = t.expand(B, P, T, 1)
     z = torch.randn(B, P, T, D, device=gt_future.device)  # [B, P, T, D]
 
-    max_delay = 5
+    max_delay = 0
     delay = torch.randint(0, max_delay + 1, (B,), device=gt_future.device)  # [B,]
     prefix_mask = generate_future_prefix_mask(delay, 1 + Pn, T)  # (B, P, T, 1)
     mask_coeff = random.uniform(0.0, 1.0)
