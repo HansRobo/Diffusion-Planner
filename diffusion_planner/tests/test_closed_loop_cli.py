@@ -175,7 +175,7 @@ def test_resolve_closed_loop_duplicate_path_keeps_each_mode(tmp_path: Path, monk
         render_media=False,
         device="cpu",
         ddp=False,
-        wandb_project="",
+        wandb_project_name="",
     )
 
     ok = mod.run_closed_loop_main(model=None, model_args=None, cfg=cfg, out_root=tmp_path)

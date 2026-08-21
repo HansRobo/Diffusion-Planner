@@ -13,8 +13,8 @@
 // limitations under the License.
 
 #include "conversion/data_converter.hpp"
-#include "conversion/override_segments.hpp"
 
+#include "conversion/override_segments.hpp"
 #include "io/bag_metadata.hpp"
 #include "io/frame_writer.hpp"
 #include "io/projector_factory.hpp"
@@ -23,6 +23,7 @@
 #include "rosbag/parsed_bag_data.hpp"
 
 #include <autoware/diffusion_planner/preprocessing/lane_segments.hpp>
+
 #include <autoware_vehicle_msgs/msg/control_mode_report.hpp>
 
 #include <lanelet2_core/LaneletMap.h>
@@ -57,8 +58,8 @@ int run_data_converter(const ConverterPaths & paths, const ConverterOptions & co
   const std::string rosbag_dir_name = paths.get_rosbag_dir_name();
   const BagMetadata bag_metadata = load_bag_metadata(paths.rosbag_path);
 
-  ParsedBagData bag_data = load_rosbag(
-    paths.rosbag_path, converter.limit, converter.extract_override_segments);
+  ParsedBagData bag_data =
+    load_rosbag(paths.rosbag_path, converter.limit, converter.extract_override_segments);
 
   const auto missing_topics_skip = check_missing_topics(bag_data);
   if (missing_topics_skip) {

@@ -20,8 +20,6 @@ from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
 from diffusion_planner.config.config_cli import build_config, build_parser, resolve_paths
 from diffusion_planner.utils import ddp
 
-from scenario_generation.wandb_closed_loop import build_groups_aggregate_log
-
 
 def resolve_closed_loop_inputs(
     inputs: str | list[str],
@@ -87,12 +85,11 @@ def resolve_closed_loop_inputs(
 
 
 def run_one_group(
-    model,  # always provided by the caller (train.py or main())
-    model_args,  # model args from load_model (for closed-loop rollout)
+    model,
+    model_args,
     npz_root_list: list[str],
     out_dir: str | Path,
     cfg: ClosedLoopConfig,
-    group_name: str | None = None,
     mode: str | None = None,
     render_media: bool = True,
 ) -> None:
@@ -201,18 +198,47 @@ def _load_group_results(out_dir: Path | str) -> dict[str, dict]:
 
 
 def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> None:
-    """Write ``<out_dir>/groups.json`` aggregating ``summaries`` via ``build_groups_aggregate_log``.
+    """Write ``<out_dir>/groups.json`` aggregating ``summaries``.
 
-    The aggregate keys are prefixed with ``closed_loop_overview/`` internally;
-    that prefix is stripped for the on-disk file so the manifest matches the
-    shape consumed by ``wandb_closed_loop_workspace`` and the per-JSON helpers.
+    Aggregate keys are bare (``route_completion``, ``total_curb_hits``, ...) and
+    the file shape matches what ``scenario_generation.wandb_closed_loop``'s
+    ``_aggregate`` would produce, so the two paths can't drift apart.
     """
+    agg: dict = {}
     if summaries:
-        aggregates = build_groups_aggregate_log(summaries, prefix="closed_loop_overview")
-        manifest = {k.replace("closed_loop_overview/", ""): v for k, v in aggregates.items()}
-    else:
-        manifest = {}
-    Path(out_dir, "groups.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+        objects_only_values = [s for k, s in summaries.items() if "__noobj/" not in k]
+        n_segments = sum(int(s.get("n_segments", 0) or 0) for s in summaries.values())
+        route_num = sum(
+            float(s.get("mean_route_completion", 0.0) or 0.0) * int(s.get("n_segments", 0) or 0)
+            for s in summaries.values()
+        )
+        agg = {
+            "n_groups": len(summaries),
+            "n_segments": n_segments,
+            "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in summaries.values()),
+            "mean_route_completion": (route_num / n_segments) if n_segments else 0.0,
+            "total_curb_hits": sum(
+                int(s.get("road_border", {}).get("collision_count", 0) or 0)
+                for s in summaries.values()
+            ),
+            "total_snaps": sum(
+                int(s.get("reproducer", {}).get("snap_count", 0) or 0) for s in summaries.values()
+            ),
+            "total_red_light_violations": sum(
+                int(s.get("red_light_violation", {}).get("count", 0) or 0)
+                for s in summaries.values()
+            ),
+            "total_strong_brakes": sum(
+                int(s.get("strong_brake", {}).get("count", 0) or 0) for s in summaries.values()
+            ),
+            "n_segments_diverged": sum(
+                int(s.get("n_segments_diverged", 0) or 0) for s in summaries.values()
+            ),
+            "total_collision_events": sum(
+                int(s.get("object", {}).get("collision_count", 0) or 0) for s in objects_only_values
+            ),
+        }
+    Path(out_dir, "groups.json").write_text(json.dumps(agg, indent=2, ensure_ascii=False))
 
 
 def run_closed_loop_main(
@@ -283,7 +309,6 @@ def run_closed_loop_main(
                 npz_paths,
                 mode_out_dir,
                 cfg,
-                group_name=summary_key,
                 mode=mode,
                 render_media=render_media,
             )
@@ -307,9 +332,7 @@ def run_closed_loop_main(
                 _write_groups_manifest(json_out_dir, per_json_summaries)
 
         if all_group_names:
-            _log_to_wandb(
-                cfg, all_group_names, all_summaries, out_root, wandb_run, render_media=render_media
-            )
+            _log_to_wandb(cfg, all_group_names, all_summaries, run=wandb_run)
 
     return True
 
@@ -372,109 +395,45 @@ def _log_to_wandb(
     cfg: ClosedLoopConfig,
     group_names: list[str],
     group_summaries: dict[str, dict],
-    out_root: str | Path,
     run: "wandb.sdk.wandb_run.Run | None" = None,
-    render_media: bool = True,
 ) -> None:
-    """Push per-group closed-loop metrics to W&B and refresh the curated workspace view.
+    """Push per-group closed-loop scalar metrics + Table Images to W&B.
 
-    Reuses ``run`` if given, else starts its own. The workspace view URL is written to
-    ``run.summary["closed_loop/workspace_view_url"]`` so it's visible on the W&B run page.
+    Reuses ``run`` if given, else starts its own.
+    Uses professionally styled table images for better visualization.
     """
     import wandb
 
-    from scenario_generation.wandb_closed_loop import build_groups_wandb_log
+    from scenario_generation.wandb_closed_loop import build_closed_loop_tables, build_per_1000steps_stacked_panels
 
     if not group_summaries:
         return
 
     if run is None:
-        # CLI entrypoint: own the wandb lifetime.
-        run = wandb.init(project=cfg.wandb_project or None)
+        run = wandb.init(project=cfg.wandb_project_name or None, name=cfg.exp_name or None)
         own_run = True
     else:
         own_run = False
 
     try:
-        log = build_groups_wandb_log(
-            {key: group_summaries[key] for key in group_names},
-            out_root=out_root,
-            video_pick=cfg.closed_loop_wandb_video_pick,
-            colormap_metrics=tuple(cfg.closed_loop_colormap_metrics or ()),
-            near_miss_thresh_default=cfg.closed_loop_near_miss_thresh,
-            render_media=render_media,
-        )
-        run.log(log)
-        print(f"wandb: logged {len(group_summaries)} group(s) to run {run.id}")
+        # Build per-json_label grouping from group keys.
+        by_json: dict[str, dict[str, dict]] = {}
+        for key in group_names:
+            summary = group_summaries[key]
+            if "__noobj/" in key:
+                json_label = key.split("__noobj/", 1)[0] + "__noobj"
+            else:
+                json_label = key.split("/", 1)[0]
+            by_json.setdefault(json_label, {})[key] = summary
 
-        _refresh_workspace_view(run, cfg, group_names)
+        tables = build_closed_loop_tables(by_json)
+        panels = build_per_1000steps_stacked_panels(by_json)
+        run.log({**tables, **panels})
+        for key in sorted(tables) + sorted(panels):
+            print(f"wandb: logged {key}")
     finally:
         if own_run:
             wandb.finish()
-
-
-def _refresh_workspace_view(
-    run: "wandb.sdk.wandb_run.Run",
-    args: object,
-    group_names: list[str],
-) -> None:
-    """Rebuild the curated closed-loop workspace view for this run.
-
-    Skipped when the user didn't opt-in (no ``wandb_project``), or when the workspace
-    SDK isn't importable. API-side failures are logged and skipped (run metrics already
-    landed); programming errors (empty list, etc.) still raise.
-    """
-    # Prefer explicit user opt-in; fall back to whatever the active run uses.
-    project = getattr(args, "wandb_project", None) or run.project
-    if not project:
-        print(
-            "wandb: skipping workspace refresh (no wandb_project set; "
-            "pass --wandb_project to enable dashboard view).",
-            file=sys.stderr,
-        )
-        return
-
-    try:
-        from scenario_generation.wandb_closed_loop_workspace import (
-            build_closed_loop_workspace,
-        )
-    except ImportError as e:
-        print(
-            f"wandb: skipping workspace refresh (wandb_workspaces unavailable: {e})",
-            file=sys.stderr,
-        )
-        return
-
-    # Suffix ``run.id`` so two runs that share ``--exp_name`` don't upsert onto each
-    # other's dashboard layout (wandb_workspaces upserts by name).
-    base_name = run.name or run.id
-    view_name = f"Closed-Loop / {base_name} ({run.id})"
-
-    try:
-        url = build_closed_loop_workspace(
-            run.entity,
-            project,
-            group_names=list(group_names),
-            name=view_name,
-        )
-    except ValueError as e:
-        # Programming error — surface it.
-        print(f"wandb: workspace build failed: {e}", file=sys.stderr)
-        raise
-    except Exception as e:
-        # Network / W&B API error — log with traceback but don't crash; metrics landed.
-        print(
-            f"wandb: workspace refresh failed (run metrics still logged): {e}",
-            file=sys.stderr,
-        )
-        import traceback
-
-        traceback.print_exc()
-        return
-
-    run.summary["closed_loop/workspace_view_url"] = url
-    run.summary.update({"closed_loop/workspace_view_url": url})
-    print(f"wandb: dashboard view saved → {url}")
 
 
 if __name__ == "__main__":
