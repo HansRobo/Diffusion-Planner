@@ -404,7 +404,7 @@ def _log_to_wandb(
     """
     import wandb
 
-    from scenario_generation.wandb_closed_loop import build_closed_loop_tables
+    from scenario_generation.wandb_closed_loop import build_closed_loop_tables, build_per_1000steps_stacked_panels
 
     if not group_summaries:
         return
@@ -427,9 +427,10 @@ def _log_to_wandb(
             by_json.setdefault(json_label, {})[key] = summary
 
         tables = build_closed_loop_tables(by_json)
-        run.log(tables)
-        for key in sorted(tables):
-            print(f"wandb: logged closed-loop table {key}")
+        panels = build_per_1000steps_stacked_panels(by_json)
+        run.log({**tables, **panels})
+        for key in sorted(tables) + sorted(panels):
+            print(f"wandb: logged {key}")
     finally:
         if own_run:
             wandb.finish()
