@@ -1389,6 +1389,29 @@ class LaneletSceneBuilder:
             dt=0.1,
         )
 
+    def lane_position_pose(self, ll_id: int, s: float, offset: float = 0.0) -> np.ndarray | None:
+        """``(x, y, heading)`` at arc length ``s`` along a lanelet, ``offset`` metres to its left.
+
+        This is the pose an OpenSCENARIO ``LanePosition`` names. It is not the lanelet's end:
+        a scenario that authors ``s`` means that point, and the end can be hundreds of metres
+        past it. None when the lanelet is not cached.
+        """
+        c = self._cache.get(ll_id)
+        if c is None:
+            return None
+        cl = c.raw_centerline
+        arc = c.cum_arc_lengths
+        idx = int(np.searchsorted(arc, s))
+        idx = min(max(idx, 1), len(cl) - 1)
+        span = arc[idx] - arc[idx - 1]
+        t = 0.0 if span <= 0 else (s - arc[idx - 1]) / span
+        pos = cl[idx - 1] + t * (cl[idx] - cl[idx - 1])
+        heading = _heading_at_point(cl, idx - 1)
+        if offset:
+            # Lanelet2 offsets are positive to the left of the direction of travel.
+            pos = pos + offset * np.array([-math.sin(heading), math.cos(heading)])
+        return np.array([pos[0], pos[1], heading], dtype=np.float32)
+
     def _route_goal(self, route_ll_ids: list[int]) -> np.ndarray:
         """Get goal pose from the last point of the route's last lanelet."""
         last_id = route_ll_ids[-1]

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scenario_generation.site_discovery import (
+from scenario_generation.site_vehicle_discovery import (
     discover_sites_from_json,
     discover_sites_with_vehicles_from_json,
 )
@@ -144,7 +144,7 @@ def test_project_describes_every_npz_root_of_its_site(tmp_path: Path):
         path, {"proj_a": "vehicle_x", "proj_b": "vehicle_x"}
     )
     for site_key, info in sites.items():
-        # npz_roots stores the original JSON entry (bag_time dir): <root>/<project>/<site>/<split>/<date>/<time>; project = parts[-5]
+        # <root>/<project>/<site>/<split>/<date>/<time> -- project is 5 components up
         roots_from = {root.parts[-5] for root in info["npz_roots"]}
         assert roots_from == {info["project"]}, (
             f"{site_key}: project={info['project']!r} but roots come from {sorted(roots_from)}"
