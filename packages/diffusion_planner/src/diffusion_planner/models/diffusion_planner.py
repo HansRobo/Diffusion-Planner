@@ -101,7 +101,7 @@ class DiffusionPlanner(nn.Module):
         scene, scene_mask = self.scene_encoder(input_data)
         agent_pose = self.create_agent_pose(input_data)
         neighbor_mask = (
-            torch.count_nonzero(input_data["neighbor_agents_past"], dim=(-2, -1)) == 0
+            input_data["neighbor_agents_past"].abs().sum(dim=(-2, -1)) == 0
         )
         ego_mask = torch.zeros(
             neighbor_mask.shape[0],

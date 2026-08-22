@@ -93,7 +93,7 @@ class SceneEncoderOnnxWrapper(nn.Module):
         ego_pose = ego_agent_past[:, -1, :4].unsqueeze(1)
         neighbor_pose = neighbor_agents_past[:, :, -1, :4]
         agent_pose = torch.cat((ego_pose, neighbor_pose), dim=1)
-        neighbor_mask = torch.count_nonzero(neighbor_agents_past, dim=(-2, -1)) == 0
+        neighbor_mask = neighbor_agents_past.abs().sum(dim=(-2, -1)) == 0
         ego_mask = torch.zeros_like(neighbor_mask[:, :1])
         agent_mask = torch.cat((ego_mask, neighbor_mask), dim=1)
         return scene, scene_mask, agent_pose, agent_mask
@@ -180,6 +180,6 @@ class DiffusionPlannerSamplerOnnxWrapper(nn.Module):
         return self.planner.sample(
             input_data,
             initial_noise,
-            num_steps=10,
+            num_steps=6,
             time_epsilon=1e-5,
         )
