@@ -14,6 +14,7 @@ class TrajectoryEncoderTest(unittest.TestCase):
     def test_encodes_one_token_per_agent(self) -> None:
         encoder = TrajectoryEncoder(
             hidden_dim=16,
+            mixer_hidden_dim=8,
             depth=2,
         )
         trajectories = torch.randn(2, 3, TRAJECTORY_LENGTH, 4, requires_grad=True)
@@ -23,6 +24,18 @@ class TrajectoryEncoderTest(unittest.TestCase):
         self.assertEqual(tokens.shape, (2, 3, 16))
         tokens.sum().backward()
         self.assertIsNotNone(trajectories.grad)
+
+    def test_uses_separate_mixer_and_output_dimensions(self) -> None:
+        encoder = TrajectoryEncoder(
+            hidden_dim=16,
+            mixer_hidden_dim=8,
+            depth=1,
+        )
+
+        tokens = encoder(torch.randn(2, 3, TRAJECTORY_LENGTH, 4))
+
+        self.assertEqual(encoder.input_projection.out_features, 8)
+        self.assertEqual(tokens.shape, (2, 3, 16))
 
 
 class TrajectoryDecoderTest(unittest.TestCase):

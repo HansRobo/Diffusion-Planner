@@ -15,12 +15,14 @@ def make_frame() -> dict[str, np.ndarray]:
     ego[:, 0] = [-2.0, -1.0, 0.0]
     ego[:, 2] = 1.0
 
-    neighbors = np.zeros((2, 3, 11), dtype=np.float32)
+    neighbors = np.zeros((2, 3, 4), dtype=np.float32)
     neighbors[0, :, 0] = [3.0, 4.0, 5.0]
     neighbors[0, :, 1] = 2.0
     neighbors[0, :, 2] = 1.0
-    neighbors[0, :, 6:8] = [1.8, 4.5]
-    neighbors[0, :, 8] = 1.0
+    agent_shape = np.zeros((2, 2), dtype=np.float32)
+    agent_shape[0] = [1.8, 4.5]
+    agent_label = np.zeros((2, 3), dtype=np.float32)
+    agent_label[0, 0] = 1.0
 
     lanes = np.zeros((2, 3, 6), dtype=np.float32)
     lanes[0, :, 0] = [0.0, 5.0, 10.0]
@@ -42,6 +44,8 @@ def make_frame() -> dict[str, np.ndarray]:
     return {
         "ego_agent_past": ego,
         "neighbor_agents_past": neighbors,
+        "agent_shape": agent_shape,
+        "agent_label": agent_label,
         "lanes": lanes,
         "lane_types": np.zeros((2, 20), dtype=np.float32),
         "lanes_speed_limit": np.array([[10.0], [0.0]], dtype=np.float32),
@@ -127,6 +131,23 @@ class PlotFrameTest(unittest.TestCase):
         figure = plot_frame(make_frame())
 
         self.assertNotIn("Ego future", {trace.name for trace in figure.data})
+
+    def test_draws_ego_prediction_footprints(self) -> None:
+        prediction = np.zeros((3, 80, 4), dtype=np.float32)
+        prediction[0, :, 0] = np.arange(80, dtype=np.float32) * 0.1
+        prediction[0, :, 2] = 1.0
+
+        figure = plot_frame(
+            make_frame(),
+            predicted_trajectory=prediction,
+            options=FramePlotOptions(
+                show_prediction_footprints=True,
+                prediction_footprint_stride=20,
+            ),
+        )
+
+        trace_names = {trace.name for trace in figure.data}
+        self.assertIn("Ego prediction footprints", trace_names)
 
 
 if __name__ == "__main__":

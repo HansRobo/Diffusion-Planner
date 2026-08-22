@@ -455,6 +455,68 @@ def create_prediction_traces(
     return traces
 
 
+def create_prediction_footprint_traces(
+    frame: FrameData,
+    prediction: NDArray[np.generic],
+    style: VisualizerStyle,
+    options: FramePlotOptions,
+) -> list[BaseTraceType]:
+    """Create ego footprint outlines along a sampled trajectory."""
+    if not options.show_prediction_footprints or len(prediction) == 0:
+        return []
+
+    base_link_to_front, length, width = (
+        float(value) for value in frame["ego_shape"][:3]
+    )
+    base_link_to_rear = length - base_link_to_front
+    local_corners = np.array(
+        [
+            [-base_link_to_rear, -width / 2],
+            [base_link_to_front, -width / 2],
+            [base_link_to_front, width / 2],
+            [-base_link_to_rear, width / 2],
+            [-base_link_to_rear, -width / 2],
+        ]
+    )
+    ego_prediction = prediction[0]
+    step_indices = list(
+        range(0, len(ego_prediction), options.prediction_footprint_stride)
+    )
+    if step_indices and step_indices[-1] != len(ego_prediction) - 1:
+        step_indices.append(len(ego_prediction) - 1)
+
+    x: list[float | None] = []
+    y: list[float | None] = []
+    customdata: list[int | None] = []
+    for step in step_indices:
+        state = ego_prediction[step]
+        cos_yaw, sin_yaw = float(state[2]), float(state[3])
+        if cos_yaw**2 + sin_yaw**2 <= 0.5:
+            continue
+        rotation = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]])
+        corners = local_corners @ rotation.T + state[:2]
+        x.extend(float(value) for value in corners[:, 0])
+        y.extend(float(value) for value in corners[:, 1])
+        customdata.extend([step] * len(corners))
+        x.append(None)
+        y.append(None)
+        customdata.append(None)
+    if not x:
+        return []
+    return [
+        go.Scattergl(
+            x=x,
+            y=y,
+            customdata=customdata,
+            mode="lines",
+            name="Ego prediction footprints",
+            legendgroup="prediction",
+            line={"color": style.ego_prediction_color, "width": 1},
+            hovertemplate="step=%{customdata}<extra></extra>",
+        )
+    ]
+
+
 def _create_neighbor_boxes(
     neighbors: NDArray[np.generic],
     agent_shapes: NDArray[np.generic],
@@ -606,6 +668,11 @@ def create_frame_traces(
         *create_agent_traces(frame, style, options),
         *(
             create_prediction_traces(prediction, style, options)
+            if prediction is not None
+            else []
+        ),
+        *(
+            create_prediction_footprint_traces(frame, prediction, style, options)
             if prediction is not None
             else []
         ),

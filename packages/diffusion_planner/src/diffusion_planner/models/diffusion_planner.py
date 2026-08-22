@@ -23,6 +23,7 @@ class DiffusionPlanner(nn.Module):
         element_encoder_depth: int = 2,
         decoder_depth: int = 6,
         trajectory_encoder_depth: int = 2,
+        trajectory_mixer_hidden_dim: int = 128,
         feedforward_dim: int = 1024,
         embed_dim: int = 128,
         drop_path_rate: float = 0.0,
@@ -49,6 +50,7 @@ class DiffusionPlanner(nn.Module):
             feedforward_dim=feedforward_dim,
             dropout=dropout,
             trajectory_encoder_depth=trajectory_encoder_depth,
+            trajectory_mixer_hidden_dim=trajectory_mixer_hidden_dim,
         )
 
     @staticmethod
@@ -99,7 +101,7 @@ class DiffusionPlanner(nn.Module):
         scene, scene_mask = self.scene_encoder(input_data)
         agent_pose = self.create_agent_pose(input_data)
         neighbor_mask = (
-            torch.count_nonzero(input_data["neighbor_agents_past"], dim=(-2, -1)) == 0
+            input_data["neighbor_agents_past"].abs().sum(dim=(-2, -1)) == 0
         )
         ego_mask = torch.zeros(
             neighbor_mask.shape[0],

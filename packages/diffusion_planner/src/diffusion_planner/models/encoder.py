@@ -187,7 +187,7 @@ class IntersectionAreaEncoder(nn.Module):
         Returns:
             Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
         """
-        invalid_mask = torch.count_nonzero(intersection_area, dim=(-2, -1)) == 0
+        invalid_mask = intersection_area.abs().sum(dim=(-2, -1)) == 0
         features = self.geometry_encoder(intersection_area) + self.element_embedding
         return _mask_invalid(features, invalid_mask)
 
@@ -217,7 +217,7 @@ class RoadBorderEncoder(nn.Module):
         Returns:
             Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
         """
-        invalid_mask = torch.count_nonzero(road_borders, dim=(-2, -1)) == 0
+        invalid_mask = road_borders.abs().sum(dim=(-2, -1)) == 0
         features = self.geometry_encoder(road_borders) + self.element_embedding
         return _mask_invalid(features, invalid_mask)
 
@@ -247,7 +247,7 @@ class StopLineEncoder(nn.Module):
         Returns:
             Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
         """
-        invalid_mask = torch.count_nonzero(stop_lines, dim=(-2, -1)) == 0
+        invalid_mask = stop_lines.abs().sum(dim=(-2, -1)) == 0
         features = self.geometry_encoder(stop_lines) + self.element_embedding
         return _mask_invalid(features, invalid_mask)
 
@@ -291,7 +291,7 @@ class NeighborAgentEncoder(nn.Module):
         Returns:
             Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
         """
-        invalid_mask = torch.count_nonzero(neighbor_agents_past, dim=(-2, -1)) == 0
+        invalid_mask = neighbor_agents_past.abs().sum(dim=(-2, -1)) == 0
         features = self.history_encoder(neighbor_agents_past)
         features = features + self.shape_encoder(agent_shape)
         features = features + self.label_encoder(agent_label)
@@ -360,7 +360,7 @@ class LaneEncoder(nn.Module):
         Returns:
             Tokens with shape `(B, N, H)` and masks with shape `(B, N)`.
         """
-        invalid_mask = torch.count_nonzero(lanes, dim=(-2, -1)) == 0
+        invalid_mask = lanes.abs().sum(dim=(-2, -1)) == 0
         features = self.geometry_encoder(lanes)
         features = features + self.lane_type_encoder(lane_types)
         features = features + self.past_traffic_encoder(traffic_light_past)

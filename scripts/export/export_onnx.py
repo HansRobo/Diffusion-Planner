@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import onnxruntime as ort
@@ -44,7 +43,7 @@ def _parse_args() -> argparse.Namespace:
         help="Training dataset Parquet index used to create representative inputs.",
     )
     parser.add_argument("--frame-index", type=int, default=0)
-    parser.add_argument("--opset-version", type=int, default=18)
+    parser.add_argument("--opset-version", type=int, default=20)
     parser.add_argument("--skip-validation", action="store_true")
     return parser.parse_args()
 
@@ -72,11 +71,6 @@ def _scene_inputs(frame: dict[str, torch.Tensor]) -> tuple[torch.Tensor, ...]:
     )
 
 
-def _dynamic_shapes(inputs: tuple[torch.Tensor, ...]) -> tuple[dict[int, Any], ...]:
-    batch = torch.export.Dim("batch", min=1, max=2)
-    return tuple({0: batch} for _ in inputs)
-
-
 def _export(
     model: torch.nn.Module,
     inputs: tuple[torch.Tensor, ...],
@@ -92,8 +86,10 @@ def _export(
         input_names=input_names,
         output_names=output_names,
         opset_version=opset_version,
-        dynamo=True,
-        dynamic_shapes=_dynamic_shapes(inputs),
+        dynamo=False,
+        dynamic_axes={
+            name: {0: "batch"} for name in (*input_names, *output_names)
+        },
         external_data=False,
         optimize=True,
     )
@@ -167,12 +163,13 @@ def _validate_all(
 
 def main() -> None:
     args = _parse_args()
+    torch.backends.mha.set_fastpath_enabled(False)
     checkpoint_path = args.checkpoint.expanduser().resolve()
     model = load_model(checkpoint_path, DiffusionPlanner).eval()
     frame = _load_frame(args.parquet_path, args.frame_index)
     scene_inputs = _scene_inputs(frame)
     scene_wrapper = SceneEncoderOnnxWrapper(model.scene_encoder).eval()
-    with torch.inference_mode():
+    with torch.no_grad():
         scene_outputs = scene_wrapper(*scene_inputs)
 
     scene, scene_mask, agent_pose, agent_mask = scene_outputs
@@ -186,11 +183,11 @@ def main() -> None:
         torch.full((batch,), 0.5),
     )
     decoder_wrapper = TrajectoryDecoderOnnxWrapper(model.trajectory_decoder).eval()
-    with torch.inference_mode():
+    with torch.no_grad():
         decoder_output = decoder_wrapper(*decoder_inputs)
     sampler_inputs = (decoder_inputs[0], *scene_inputs)
     sampler_wrapper = DiffusionPlannerSamplerOnnxWrapper(model).eval()
-    with torch.inference_mode():
+    with torch.no_grad():
         sampler_output = sampler_wrapper(*sampler_inputs)
 
     output_dir = checkpoint_path.parent / "onnx" / checkpoint_path.stem
