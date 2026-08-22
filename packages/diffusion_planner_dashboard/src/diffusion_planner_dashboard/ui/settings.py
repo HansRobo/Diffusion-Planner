@@ -56,6 +56,14 @@ def render_plot_options() -> FramePlotOptions:
         agent_history = st.checkbox("Agent history", value=True)
         agent_future = st.checkbox("Agent future labels", value=True)
         agent_prediction = st.checkbox("Agent prediction", value=True)
+        prediction_footprints = st.checkbox("Ego prediction footprints", value=False)
+        prediction_footprint_stride = st.slider(
+            "Prediction footprint interval [steps]",
+            min_value=1,
+            max_value=40,
+            value=10,
+            disabled=not prediction_footprints,
+        )
         ego_shape = st.checkbox("Ego footprint", value=True)
         goal = st.checkbox("Goal pose", value=True)
         traffic_lights = st.checkbox("Traffic lights", value=True)
@@ -65,6 +73,8 @@ def render_plot_options() -> FramePlotOptions:
         show_agent_history=agent_history,
         show_agent_future=agent_future,
         show_agent_prediction=agent_prediction,
+        show_prediction_footprints=prediction_footprints,
+        prediction_footprint_stride=prediction_footprint_stride,
         show_ego_shape=ego_shape,
         show_goal=goal,
         show_traffic_lights=traffic_lights,
