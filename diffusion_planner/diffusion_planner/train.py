@@ -646,8 +646,8 @@ def model_training(args: TrainConfig):
                     external_data=False,
                 )
 
-        if (epoch + 1 - init_epoch) // save_utd == (train_epochs - init_epoch) // save_utd:
-            # closed-loop validation runs on all ranks
+        if epoch + 1 == train_epochs:
+            # closed-loop validation runs on all ranks, only at the final epoch
             curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
             os.makedirs(curr_dir, exist_ok=True)
             closed_loop_validate(
