@@ -477,6 +477,11 @@ def build_realized_reward_scorer(
     # computing SD/SE, not as a joinable key -> pair models at shard level instead, which is
     # deterministic by manifest order and therefore identical across runs.
     per_segment: dict[int, list[float]] = {}
+    # Chunk key per segment (s.output_route_key, set by run_segments_batched from
+    # route_keys). Lets finalize expose a per-chunk mean so the mining loop can persist
+    # per-chunk realized reward into segments.jsonl (paired per-chunk deltas need it;
+    # only the aggregate mean was recoverable from summary.json before).
+    seg_keys: dict[int, str | None] = {}
 
     def hook(built, preds, data, _device):
         rows = []
@@ -487,6 +492,7 @@ def build_realized_reward_scorer(
             wbu = rest[3] if len(rest) > 3 else None  # uuid -> current shown world pose
             k = int(s.k)
             sid = id(s)
+            seg_keys.setdefault(sid, getattr(s, "output_route_key", None))
             poses.setdefault(sid, {})[k] = np.asarray(s.live_pose, dtype=np.float64).copy()
             if wbu:
                 nbr_world.setdefault(sid, {})[k] = {
@@ -537,7 +543,9 @@ def build_realized_reward_scorer(
         return nf
 
     def finalize() -> tuple[float, int]:
+        per_chunk: dict[str, dict[str, float]] = {}
         for sid, kmap in poses.items():
+            seg_key = seg_keys.get(sid)
             ks = sorted(kmap)
             kpos = {k: i for i, k in enumerate(ks)}  # step index -> contiguous row
             world = np.stack([kmap[k] for k in ks])
@@ -577,6 +585,10 @@ def build_realized_reward_scorer(
                 acc["sum"] += float(rb[0].total)
                 acc["n"] += 1
                 per_segment.setdefault(int(sid), []).append(float(rb[0].total))
+                if seg_key is not None:
+                    pc = per_chunk.setdefault(seg_key, {"sum": 0.0, "n": 0})
+                    pc["sum"] += float(rb[0].total)
+                    pc["n"] += 1
                 comp["centerline"] += float(rb[0].centerline)
                 comp["feasibility"] += float(rb[0].feasibility)
                 comp["progress"] += float(rb[0].progress)
@@ -589,10 +601,16 @@ def build_realized_reward_scorer(
         slot_uuids_at.clear()
         teleport_ks.clear()
         last_snaps.clear()
+        seg_keys.clear()
         finalize.components = dict(comp)
         # One mean per segment, in scoring order, so callers can report SD / standard error
         # of the reward mean instead of quoting it as if it were exact.
         finalize.per_segment_rewards = [sum(v) / len(v) for v in per_segment.values() if v]
+        # Per-chunk means for the batch just finalized only (buffers are per batch);
+        # the caller reads this right after finalize() and attaches it to segment rows.
+        finalize.per_chunk = {
+            k: {"mean": v["sum"] / v["n"], "poses": int(v["n"])} for k, v in per_chunk.items()
+        }
         return (acc["sum"] / acc["n"] if acc["n"] else float("nan")), acc["n"]
 
     return hook, finalize

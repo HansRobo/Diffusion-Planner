@@ -801,10 +801,19 @@ def main() -> None:
         # Invariant this relies on: len(work_units) <= args.batch_size (guaranteed above),
         # and the same batch_size is passed to run_segments_batched, so its internal
         # sub-batch loop runs exactly once per call -> no id(s) reuse within one finalize().
+        per_chunk_reward: dict = {}
         if realized_reward_finalize is not None:
             realized_reward_finalize()
+            per_chunk_reward = getattr(realized_reward_finalize, "per_chunk", {})
         for chunk, result in zip(kept_chunks, results):
             row = segment_row_for_json(result, **_chunk_row(chunk))
+            if realized_reward_finalize is not None:
+                # None when the chunk contributed no scored poses (too short for the
+                # horizon, or every sampled window crossed a teleport) — explicit,
+                # not silently absent, so per-chunk joins can tell "unscored" apart.
+                pc = per_chunk_reward.get(chunk.key)
+                row["realized_cl_reward_chunk"] = None if pc is None else pc["mean"]
+                row["realized_cl_reward_chunk_poses"] = 0 if pc is None else pc["poses"]
             fout.write(json.dumps(row, sort_keys=True, default=float) + "\n")
             n_simulated += 1
         fout.flush()
