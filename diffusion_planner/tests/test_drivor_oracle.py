@@ -137,30 +137,54 @@ def _add_neighbour(inputs: dict, batch_index: int, slot: int, xy: np.ndarray, he
     past[batch_index, slot, -1, 8] = 1.0
 
 
-def _reference_boxes(inputs: dict, batch_index: int) -> list:
-    """Per-timestep ``[n, 9]`` agent boxes in the reference's (x,y,z,w,l,h,yaw,vx,vy) layout.
+def _reference_boxes(inputs: dict, batch_index: int) -> tuple[list, list]:
+    """``([n, 9]`` boxes, ``[n]`` track ids) per timestep, ``T + 1`` frames.
 
-    Velocities use the same consecutive-position estimate the oracle derives, so a
-    mismatch can only come from the metric logic, not from a different speed.
+    Frame 0 is the *current* scene from ``neighbor_agents_past[:, -1]``, so the
+    list is index-aligned with the rollout's ``T + 1`` rows — the same alignment
+    ``DrivoROracle.prepare`` builds. It is also the frame whose velocity decides
+    the stopped-track branch: navsim reads that off ``unique_objects[token]``,
+    the box at first appearance, never off the frame being scored.
+
+    The track id is the neighbour slot, which is what lets NC/TTC retire a track
+    after its first not-at-fault contact.
     """
     future = inputs["neighbor_agents_future"][batch_index].numpy()
     past = inputs["neighbor_agents_past"][batch_index].numpy()
     valid_track = np.abs(past[:, -1, :]).sum(-1) > 0
     valid_step = np.abs(future).sum(-1) > 0
-    boxes_per_t = []
+
+    now_rows, now_tokens = [], []
+    for a in range(future.shape[0]):
+        if not valid_track[a]:
+            continue
+        now_rows.append(
+            [
+                float(past[a, -1, 0]),
+                float(past[a, -1, 1]),
+                0.0,
+                float(past[a, -1, 6]),
+                float(past[a, -1, 7]),
+                1.5,
+                float(np.arctan2(past[a, -1, 3], past[a, -1, 2])),
+                float(past[a, -1, 4]),
+                float(past[a, -1, 5]),
+            ]
+        )
+        now_tokens.append(a)
+    boxes_per_t = [np.asarray(now_rows, dtype=np.float64).reshape(-1, 9)]
+    tokens_per_t = [np.asarray(now_tokens, dtype=np.int64)]
+
     for t in range(future.shape[1]):
-        rows = []
+        rows, tokens = [], []
         for a in range(future.shape[0]):
             if not (valid_track[a] and valid_step[a, t]):
                 continue
             xy = future[a, :, :2]
-            if t + 1 < future.shape[1] and valid_step[a, t + 1]:
-                speed = np.linalg.norm(xy[t + 1] - xy[t]) / DT
-            elif t > 0 and valid_step[a, t - 1]:
-                speed = np.linalg.norm(xy[t] - xy[t - 1]) / DT
-            else:
-                speed = float(np.linalg.norm(past[a, -1, 4:6]))
             yaw = float(future[a, t, 2])
+            # velocity is unused past frame 0 (the stopped-track test reads the
+            # first-appearance box); kept as a plausible filler for the layout
+            speed = float(np.linalg.norm(past[a, -1, 4:6]))
             rows.append(
                 [
                     float(xy[t, 0]),
@@ -174,8 +198,10 @@ def _reference_boxes(inputs: dict, batch_index: int) -> list:
                     speed * np.sin(yaw),
                 ]
             )
+            tokens.append(a)
         boxes_per_t.append(np.asarray(rows, dtype=np.float64).reshape(-1, 9))
-    return boxes_per_t
+        tokens_per_t.append(np.asarray(tokens, dtype=np.int64))
+    return boxes_per_t, tokens_per_t
 
 
 def _add_line_string(inputs: dict, batch_index: int, slot: int, xy: np.ndarray, is_border: bool):
@@ -384,9 +410,14 @@ def test_history_comfort_matches_reference_on_random_pasts():
     """The GPU prefix is the numpy reference's, bound for bound.
 
     The jitter grows draw by draw so the prefix sweeps *through* the bounds
-    instead of sitting on one side of them -- localization noise crosses the
-    lateral-accel bound somewhere around 1-2 cm at this dt, and an all-pass or
-    all-fail sweep would make the comparison vacuous, so that is asserted too.
+    instead of sitting on one side of them, and an all-pass or all-fail sweep
+    would make the comparison vacuous, so that is asserted too.
+
+    The crossing sits around 10-30 cm of pose noise. Under navsim v2's fixed
+    8/15-sample Savitzky-Golay windows it was an order of magnitude lower (1-2
+    cm): v1 filters each derivative over the *whole* horizon, which is a far
+    stronger low-pass, so a past that reads as harsh under v2 is comfortable
+    under v1. That is the one-directional effect of fix (a).
     """
     rng = np.random.default_rng(11)
     speed = 6.0
@@ -399,7 +430,7 @@ def test_history_comfort_matches_reference_on_random_pasts():
     for draw in range(12):
         inputs = _empty_inputs(1, speed=speed)
         past = inputs["ego_agent_past"].numpy().copy()
-        scale = 0.005 + 0.003 * draw
+        scale = 0.02 + 0.03 * draw
         past[..., :2] += rng.normal(scale=scale, size=past[..., :2].shape).astype(np.float32)
         inputs["ego_agent_past"] = torch.as_tensor(past)
         expected = float(
@@ -459,11 +490,38 @@ def test_comfort_uses_the_dataset_wheel_base_for_the_motion_model():
 # NC / TTC
 # ---------------------------------------------------------------------------
 def _nc_ttc_reference(poses: np.ndarray, inputs: dict, batch_index: int):
-    states = ref.states_from_poses(poses, DT)
-    boxes = _reference_boxes(inputs, batch_index)
+    """NC/TTC on the *simulated* rollout, which is what navsim scores.
+
+    ``PDMScorer`` never sees the proposal: it is handed ``PDMSimulator``'s output,
+    so a trajectory the LQR tracker cannot follow is judged on where the vehicle
+    actually goes. Row 0 of that rollout is the ego's current state, which is why
+    the boxes carry a frame 0 too.
+    """
+    states = ref.simulated_states_from_poses(
+        poses[None],
+        DT,
+        inputs["ego_current_state"][batch_index : batch_index + 1].numpy(),
+        EGO_SHAPE[0],
+    )[0]
+    boxes, tokens = _reference_boxes(inputs, batch_index)
     offset = EGO_SHAPE[0] / 2.0
-    nc = ref.no_at_fault_collision(states, boxes, EGO_SHAPE[1], EGO_SHAPE[2], center_offset=offset)
-    ttc = ref.time_to_collision(states, boxes, EGO_SHAPE[1], EGO_SHAPE[2], DT, center_offset=offset)
+    nc = ref.no_at_fault_collision(
+        states,
+        boxes,
+        EGO_SHAPE[1],
+        EGO_SHAPE[2],
+        center_offset=offset,
+        agent_tokens_per_t=tokens,
+    )
+    ttc = ref.time_to_collision(
+        states,
+        boxes,
+        EGO_SHAPE[1],
+        EGO_SHAPE[2],
+        DT,
+        center_offset=offset,
+        agent_tokens_per_t=tokens,
+    )
     return nc, ttc
 
 
@@ -586,14 +644,19 @@ def test_dac_is_one_without_borders():
 # ---------------------------------------------------------------------------
 # EP
 # ---------------------------------------------------------------------------
-def _reference_raw_progress(poses: np.ndarray, reference_path: np.ndarray) -> float:
+def _reference_raw_progress(points: np.ndarray, reference_path: np.ndarray) -> float:
     """``shapely``-projected arclength gain, the numerator of the reference's EP."""
     from shapely.geometry import LineString, Point
 
     line = LineString([tuple(p) for p in reference_path[:, :2]])
-    start = line.project(Point(poses[0, 0], poses[0, 1]))
-    end = line.project(Point(poses[-1, 0], poses[-1, 1]))
+    start = line.project(Point(points[0, 0], points[0, 1]))
+    end = line.project(Point(points[-1, 0], points[-1, 1]))
     return max(end - start, 0.0)
+
+
+def _centre_points(poses: np.ndarray, offset: float) -> np.ndarray:
+    """Footprint centres of ``(x, y, cos, sin)`` rows -- navsim v1's EP query."""
+    return poses[:, :2] + offset * poses[:, 2:4]
 
 
 def test_progress_matches_reference():
@@ -609,12 +672,23 @@ def test_progress_matches_reference():
     got = _exact_oracle()(proposals, inputs, _ego_future([expert]))
     index = ORACLE_METRIC_NAMES.index("ego_progress")
 
-    # DrivoR normalizes each proposal by ``max(its own raw, reference)``.
-    # Reproduce that with the reference's own shapely projection so both sides
-    # answer the same question.
-    reference_path = np.concatenate([np.zeros((1, 4)), expert])
+    # navsim v1 projects ``BBCoordsIndex.CENTER`` of the *simulated* rollout onto
+    # the centerline, from the initial state. Both the query points and the
+    # reference polyline are therefore centre-based and origin-anchored -- shift
+    # only one of them and the last ``offset`` metres of the path go unreachable,
+    # biasing EP down by ``offset / length`` on every sample.
+    offset = EGO_SHAPE[0] / 2.0
+    reference_path = np.concatenate([[[offset, 0.0]], _centre_points(expert, offset)])
+    rollouts = ref.simulated_states_from_poses(
+        np.stack(candidates), DT, inputs["ego_current_state"].numpy(), EGO_SHAPE[0]
+    )
     raw = np.asarray(
-        [_reference_raw_progress(candidate, reference_path) for candidate in candidates]
+        [
+            _reference_raw_progress(
+                _centre_points(ref.poses_from_states(rollout), offset), reference_path
+            )
+            for rollout in rollouts
+        ]
     )
     expert_extent = float(np.linalg.norm(np.diff(reference_path[:, :2], axis=0), axis=-1).sum())
     # The invariant that makes the per-proposal and per-set denominators agree
@@ -625,14 +699,27 @@ def test_progress_matches_reference():
     expected = np.clip(raw / denominator, 0.0, 1.0)
     np.testing.assert_allclose(got[0, :, index].numpy(), expected, atol=2e-3)
 
-    # Standing still scores zero and progress is monotone in speed -- but only up
-    # to the expert's own extent: a candidate faster than the expert projects
-    # past the end of the reference polyline and saturates there, exactly as the
-    # shapely reference does (candidates 0 and 3 both sit just under 1.0).
+    # Standing still scores zero and progress is monotone in speed, saturating
+    # once a candidate projects past the end of the reference polyline.
+    #
+    # The ego starts at rest here while the expert runs at 8 m/s, so the 8 m/s
+    # candidate scores ~0.73, not ~1.0: the tracker spends the first second
+    # catching up and the vehicle never covers the expert's arclength. That gap
+    # IS the point of scoring the rollout -- on raw poses this candidate is
+    # indistinguishable from one the ego could actually follow.
     values = got[0, :, index].tolist()
     assert values[2] == pytest.approx(0.0, abs=1e-3)
-    assert values[2] < values[1] < values[0]
-    assert values[3] == pytest.approx(values[0], abs=0.05)
+    assert values[2] < values[1] < values[0] < values[3]
+    assert values[3] == pytest.approx(1.0, abs=1e-3)
+
+    # Same expert, but from a matching initial speed: now the tracker keeps up
+    # and the expert-matching candidate does reach the end of the path.
+    matched = _exact_oracle()(
+        torch.as_tensor(expert[None], dtype=torch.float32)[None],
+        _empty_inputs(1, speed=8.0),
+        _ego_future([expert]),
+    )
+    assert matched[0, 0, index].item() == pytest.approx(1.0, abs=1e-2)
 
 
 def test_progress_gate_for_stationary_expert():

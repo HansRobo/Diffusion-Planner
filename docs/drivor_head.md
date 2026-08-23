@@ -244,20 +244,43 @@ the candidate prefilters (`max_neighbours`, `max_border_segments`,
 `max_route_segments`) are made provably conservative by a per-timestep guard ball
 covering the whole proposal set plus the expert path: anything beyond
 `guard_radius + ego_radius + other_radius` cannot touch a scored trajectory.
-`tests/test_drivor_oracle.py` (37 tests) checks each metric against a scalar
+`tests/test_drivor_oracle.py` (47 tests) checks each metric against a scalar
 reference.
 
-### Comfort needs the simulator
+The lineage is NAVSIM **v1** — the copy vendored in DrivoR and in the e2e devkit,
+not `references/navsim` (v2). The two differ in the Savitzky-Golay windows the
+comfort filters use (v1 passes `window_length=n_time` at four of the six sites;
+v2 keeps the 8/15 defaults) and in `state_array_to_center_state_array`, which
+exists only in v2. Both halves of this port are v1: full windows, and comfort
+read off the rear-axle state while the *footprint* metrics (EP, DDC, ego-area,
+collision polygons) use `BBCoordsIndex.CENTER`. v1's windows are the far stronger
+low-pass — the noise level at which a recorded past stops being comfortable moves
+from ~1-2 cm to ~10-30 cm.
 
-Comfort cannot be read off the poses. NAVSIM's `PDMScorer` never applies the
-bounds to waypoints; it scores the states `PDMSimulator.simulate_proposals`
-produces — a `BatchLQRTracker` whose commands a `BatchKinematicBicycleModel`
-integrates. Its first-order lags (`accel_time_constant` 0.2 s,
-`steering_angle_time_constant` 0.05 s) remove exactly the high-frequency
-component finite-differencing amplifies by `1/dt² = 100`. Without the rollout
-every proposal fails `lon_accel` and the label collapses to a constant 0, killing
-both the comfort head's gradient and the metric's share of the aggregate. On real
-proposals from an epoch-3 checkpoint:
+### The simulator: what gets scored
+
+`PDMScorer` never sees the proposal. It is handed the states
+`PDMSimulator.simulate_proposals` produces — a `BatchLQRTracker` whose commands a
+`BatchKinematicBicycleModel` integrates — so a trajectory the tracker cannot
+follow is judged on where the vehicle actually ends up. Every metric reads that
+rollout: NC, TTC, DAC, DDC, EP and comfort. Two consequences worth stating:
+
+- **EP credits achieved progress.** A proposal that asks for 8 m/s from a
+  standstill scores ~0.73, not 1.0, because the vehicle never covers the expert's
+  arclength. On raw poses it was indistinguishable from a followable one.
+- **The horizon is one row longer.** Row 0 of the rollout is the ego's own
+  current state (NAVSIM scores `range(num_poses + 1)`), so the agent-box lists
+  NC/TTC receive carry a frame 0 read off `neighbor_agents_past[:, :, -1]` — also
+  the only frame with *recorded* agent velocities, which is what the
+  stopped-track branch reads (NAVSIM takes it from `unique_objects[token]`, the
+  box at first appearance, never from the frame being scored).
+
+Comfort is where the rollout matters most. The tracker's first-order lags
+(`accel_time_constant` 0.2 s, `steering_angle_time_constant` 0.05 s) remove
+exactly the high-frequency component finite-differencing amplifies by
+`1/dt² = 100`. Without it every proposal fails `lon_accel` and the label
+collapses to a constant 0, killing both the comfort head's gradient and the
+metric's share of the aggregate. On real proposals from an epoch-3 checkpoint:
 
 | check | simulated | finite differences |
 |---|---|---|
@@ -292,6 +315,43 @@ structurally vacuous and collapses magnitude-jerk onto `|lon jerk|`; and
 vehicle as a Pacifica (3.089 m). We keep that asymmetry and feed the motion model
 the dataset's real wheel base from `ego_shape[0]` — `v * tan(steer) / wheelbase`
 then reproduces the stored `yaw_rate` exactly, so this is not cosmetic.
+
+**NC and TTC keep a per-track ledger.** NAVSIM does not judge each frame
+independently. Tracks already touching the ego at t=0 (`collided_track_ids`) are
+excluded for the whole horizon — otherwise the ego is found at fault against them
+on every subsequent frame — and a track is *retired* the first time it touches
+the ego without the ego being at fault, so a car that overtakes and is then
+brushed from the side cannot be re-judged. TTC keeps its own independent ledger.
+Both reduce to "the verdict at a track's first contact is the only one that
+matters", which on the GPU is a `cummax` over the step axis rather than a
+sequential scan; TTC folds the future-projection axis after the step axis to
+preserve NAVSIM's `(time_idx, future_idx)` ordering. The tokens come from the
+neighbour slot index, which DP keeps stable across frames.
+
+**TTC scores the whole horizon.** NAVSIM extends its observation by 1 s
+(`extend_observation_for_ttc`) precisely so the last `num_poses` rows keep a
+projection target for the `[0, 3, 6, 9]`-step lookahead. Truncating the tail
+instead — as this port used to — blinds TTC to collisions at the end of the
+horizon, which are the ones a planner is most likely to produce.
+
+**EP's denominator is the expert, not PDM-Closed.** NAVSIM normalises progress by
+`max(raw_progress, pdm_progress)` (`train_pdm_scorer.py::_aggregate_scores`),
+where `pdm_progress` is a *cached scalar*: at caching time the devkit runs the
+rule-based PDM-Closed planner, simulates its trajectory and scores it, storing
+the result in `MetricCache` alongside the scene (`train_cache_processor.py`). It
+is the one entry in that cache that is not proposal-independent geometry, and it
+is cacheable only because PDM-Closed does not depend on the model. We have no
+such baseline: PDM-Closed needs nuPlan's map API — roadblock connectivity, speed
+limits, an IDM policy — and the NPZ shards carry route-lane *geometry* only, so
+the expert future plays the reference-proposal role instead
+(`pdms_navsim.py::ego_progress_with_gate`). The structure is reproduced exactly —
+`max(ref_progress, raw)`, the 5 m `progress_distance_threshold` gate and its
+1.0/0.0 branches — only the reference's source differs. The denominator is shared
+by every proposal in a scene, so EP stays a monotone (1.0-saturating) rescaling
+and proposal *ranking* within a scene is untouched; what is not devkit-comparable
+is the absolute EP value, and through it the weighted aggregate. Restoring
+`pdm_progress` means re-running caching against the nuPlan source, not a change
+in this port.
 
 **`history_comfort` is not NAVSIM's `COMFORTABLE`.** The devkit's key is
 load-bearing: `navsim_score.py::_history_comfort` finite-differences the ego's

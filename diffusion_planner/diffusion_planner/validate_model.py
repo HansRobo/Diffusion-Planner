@@ -162,16 +162,30 @@ def _neighbors_to_epdms_agent_boxes(
     neighbors_future_valid: torch.Tensor,
     neighbor_agents_past: torch.Tensor,
     dt: float,
-) -> list[list[np.ndarray]]:
-    """Convert DP neighbor GT futures to [N, 9] per-timestep boxes."""
+) -> tuple[list[list[np.ndarray]], list[list[np.ndarray]]]:
+    """DP neighbour GT futures as ``[N, 9]`` boxes, plus their track ids.
+
+    Returns ``(boxes_per_sample, tokens_per_sample)`` with ``T + 1`` frames each:
+    frame 0 is the **current** scene, read off ``neighbor_agents_past[:, :, -1]``,
+    and frame ``t`` is ``t * dt`` into the future. That leading frame is what
+    makes the list index-aligned with the simulated rollout's ``T + 1`` rows —
+    navsim scores ``range(num_poses + 1)``, starting from the initial state, and
+    it is also the only frame carrying *recorded* agent velocities.
+
+    The token is the neighbour's slot index, which is stable across frames
+    because DP keeps one slot per track. NC/TTC need it to retire a track after
+    its first not-at-fault contact.
+    """
     nf = neighbors_future.detach().cpu().numpy()
     valid = neighbors_future_valid.detach().cpu().numpy().astype(bool)
     past = neighbor_agents_past.detach().cpu().numpy()
     B, Pn, T, _ = nf.shape
     result: list[list[np.ndarray]] = []
+    tokens: list[list[np.ndarray]] = []
     for b in range(B):
-        width = past[b, :Pn, -1, 6] if past.shape[-1] > 6 else np.full(Pn, 2.0)
-        length = past[b, :Pn, -1, 7] if past.shape[-1] > 7 else np.full(Pn, 4.5)
+        current = past[b, :Pn, -1]
+        width = current[:, 6] if past.shape[-1] > 6 else np.full(Pn, 2.0)
+        length = current[:, 7] if past.shape[-1] > 7 else np.full(Pn, 4.5)
         width = np.where(np.abs(width) > 1e-3, np.abs(width), 2.0)
         length = np.where(np.abs(length) > 1e-3, np.abs(length), 4.5)
         pos = nf[b, :, :, :2]
@@ -182,7 +196,26 @@ def _neighbors_to_epdms_agent_boxes(
             vy[:, 1:] = (pos[:, 1:, 1] - pos[:, :-1, 1]) / dt
             vx[:, 0] = vx[:, 1]
             vy[:, 0] = vy[:, 1]
-        sample_boxes: list[np.ndarray] = []
+
+        # frame 0: the current scene. A padded slot is all-zero, the same test
+        # ``DrivoROracle.prepare`` uses for ``track_valid``.
+        now = np.where(np.abs(current).sum(-1) > 0)[0]
+        boxes_now = np.zeros((now.shape[0], 9), dtype=np.float64)
+        if now.shape[0] > 0:
+            boxes_now[:, 0] = current[now, 0]
+            boxes_now[:, 1] = current[now, 1]
+            boxes_now[:, 3] = width[now]
+            boxes_now[:, 4] = length[now]
+            boxes_now[:, 5] = 1.5
+            boxes_now[:, 6] = np.arctan2(current[now, 3], current[now, 2])
+            # recorded velocity, not a finite difference -- this is the box
+            # navsim's is_track_stopped reads out of unique_objects
+            if past.shape[-1] > 5:
+                boxes_now[:, 7] = current[now, 4]
+                boxes_now[:, 8] = current[now, 5]
+        sample_boxes: list[np.ndarray] = [boxes_now]
+        sample_tokens: list[np.ndarray] = [now.astype(np.int64)]
+
         for t in range(T):
             idx = np.where(valid[b, :, t])[0]
             boxes = np.zeros((idx.shape[0], 9), dtype=np.float64)
@@ -196,8 +229,10 @@ def _neighbors_to_epdms_agent_boxes(
                 boxes[:, 7] = vx[idx, t]
                 boxes[:, 8] = vy[idx, t]
             sample_boxes.append(boxes)
+            sample_tokens.append(idx.astype(np.int64))
         result.append(sample_boxes)
-    return result
+        tokens.append(sample_tokens)
+    return result, tokens
 
 
 def _history_poses_for_metrics(denorm_inputs: dict[str, torch.Tensor]) -> np.ndarray | None:
@@ -239,9 +274,9 @@ def _epdms_eval_metrics(
     if getattr(args, "epdms_eval_use_road_border", True) and "line_strings" in denorm_inputs:
         border_lines = _line_strings_to_epdms_border_lines(denorm_inputs["line_strings"])
 
-    agent_boxes = None
+    agent_boxes = agent_tokens = None
     if getattr(args, "epdms_eval_use_agent_boxes", True):
-        agent_boxes = _neighbors_to_epdms_agent_boxes(
+        agent_boxes, agent_tokens = _neighbors_to_epdms_agent_boxes(
             neighbors_future,
             neighbors_future_valid,
             denorm_inputs["neighbor_agents_past"],
@@ -267,6 +302,7 @@ def _epdms_eval_metrics(
 
     kwargs = dict(
         agent_boxes_per_t=agent_boxes,
+        agent_tokens_per_t=agent_tokens,
         ego_dims=ego_dims,
         border_lines=border_lines,
         route_polys=route_polys,

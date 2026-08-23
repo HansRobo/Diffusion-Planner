@@ -4,10 +4,35 @@ This is a **1:1 port of NAVSIM's PDM-Score sub-metric formulas** — comfort,
 ego-progress (EP), no-at-fault-collision (NC) and time-to-collision (TTC) — using
 the same underlying libraries NAVSIM uses (``scipy.signal.savgol_filter`` +
 ``shapely``). Every threshold, filter parameter, aggregation weight and the
-multiplicative/weighted structure is copied verbatim from the navsim_v2 source
-checked into ``refer/Drive-JEPA/navsim_v2`` (file:line citations inline) and from
+multiplicative/weighted structure is copied verbatim from the navsim source
+vendored in the **DrivoR** reference implementation
+(``../DrivoR/navsim/planning/simulation/planner/pdm_planner/scoring/``) and from
 the nuplan-devkit helpers it imports (``is_agent_ahead/behind``,
 ``is_track_stopped``, ``get_collision_type``, ``CollisionType``, ``AGENT_TYPES``).
+
+LINEAGE — which navsim.  Two navsim generations are in circulation and they
+disagree on the comfort filter windows and on the rear-axle -> centre shift:
+
+* **v1** (DrivoR's vendored copy, and the e2e-devkit's
+  ``t4_e2e_devkit/planning/.../pdm_comfort_metrics.py``): every ``_compute_*``
+  helper passes ``window_length=n_time``, and ``state_array_to_center_state_array``
+  does not exist, so the comfort metric reads the rear-axle state directly.
+* **v2** (the devkit's ``references/navsim`` copy): the ``window_length``
+  argument is dropped, leaving the 8/15-sample defaults, and the states are
+  shifted to the footprint centre first.
+
+This port targets **v1**, because v1 is what the DrivoR paper's own code base
+runs and this module is the reference the DrivoR head is trained against.  It
+used to take v2's windows with v1's frame — a hybrid that matched neither.  Both
+halves are now v1: see ``ego_is_comfortable`` for the windows, and comfort reads
+the rear-axle state directly, as v1's ``_extract_ego_acceleration`` does.
+
+Note that v1 is not "rear axle everywhere": ``state_array_to_coords_array`` gives
+every metric that needs a *footprint* — EP, DDC, the ego-area flags, the collision
+polygons — ``BBCoordsIndex.CENTER``, i.e. the rear axle shifted forward by
+``wheel_base / 2``.  What v1 lacks is v2's ``state_array_to_center_state_array``,
+which additionally rewrites the state the comfort filters read.  Hence
+``center_offset`` on the geometric helpers and none on comfort.
 
 WHAT IS BIT-EXACT to navsim:
   * comfort: the 6 bounds, savgol params (poly/window/deriv), ``_within_bound``,
@@ -15,38 +40,47 @@ WHAT IS BIT-EXACT to navsim:
   * EP: centerline projection + clip>=0 + the proposal-relative normalization
     (``pdm_scorer.py::_calculate_progress`` / ``_aggregate_pdm_scores``).
   * NC: the at-fault classification (front/stopped-track => penalised;
-    rear/stopped-ego => not), 0.0-for-AGENT_TYPES / 0.5-for-static, the
-    already-collided dedup (``pdm_scorer.py::_calculate_no_at_fault_collision``
+    rear/stopped-ego => not), 0.0-for-AGENT_TYPES / 0.5-for-static, and the
+    per-track ledger — tracks touching the ego at t=0 are excluded for the whole
+    horizon, and a track is retired the first time it touches the ego without
+    the ego being at fault (``pdm_scorer.py::_calculate_no_at_fault_collision``
     + ``pdm_scorer_utils.py::get_collision_type``).
   * TTC: constant-velocity forward projection at future idcs [0,3,6,9]*0.1 s,
-    intersect vs agents at t+dt, agent-ahead => infraction, skip if ego stopped
-    (``pdm_scorer.py::_calculate_ttc``).
+    intersect vs agents at t+dt over the FULL horizon (navsim's
+    ``extend_observation_for_ttc`` is why the tail is not truncated),
+    agent-ahead => infraction, its own independent track ledger, skip if ego
+    stopped (``pdm_scorer.py::_calculate_ttc``).
   * aggregation: PDMS = prod(NC,DAC,DDC,TLC) * weighted_avg(EP=5, TTC=5, LK=2,
     HISTORY_COMFORT=2) (``pdm_scorer.py::_aggregate_pdm_scores`` + config).
 
 THE DOCUMENTED DEVIATIONS (unavoidable without installing navsim/nuplan, which
 need a maps DB + an old Python and conflict with our torch/numpy — verified):
-  1. **NC/TTC read pose-derived kinematics; comfort does not.** navsim ALWAYS
+  1. **CLOSED — every metric is scored on the simulated rollout.** navsim ALWAYS
      routes a predicted trajectory through ``simulator.simulate_proposals``
-     before scoring (``navsim/evaluate/pdm_score.py``), and comfort is the
-     sub-metric where that matters: finite-differencing raw waypoints amplifies
-     trajectory-head noise by ``1/dt**2`` and every proposal fails the
-     longitudinal-accel bound, so comfort collapses to a constant 0.  That
-     simulator is now ported -- ``planner_metrics.pdm_simulator`` (literal) and
-     ``pdm_simulator_torch`` (batched GPU) -- and ``comfort_score`` runs it, so
-     comfort is no longer a deviation.  NC/TTC still use ``states_from_poses``
-     (finite differences on the *predicted* path), which is the conservative
-     choice: it scores the trajectory as issued rather than as a tracker would
-     smooth it.
-     Note there is no rear-axle->center shift to reproduce:
-     ``state_array_to_center_state_array`` appears nowhere in navsim's scoring
-     path, and ``pdm_comfort_metrics._extract_ego_acceleration`` reads
-     ``StateIndex.ACCELERATION_X/Y`` off the rear-axle state directly.
+     before scoring (``navsim/evaluate/pdm_score.py``): ``PDMScorer`` never sees
+     the proposal, only ``PDMSimulator``'s output, so a trajectory the LQR
+     tracker cannot follow is judged on where the vehicle actually ends up.
+     That simulator is ported -- ``planner_metrics.pdm_simulator`` (literal) and
+     ``pdm_simulator_torch`` (batched GPU) -- and ``pdms_proxy`` now feeds its
+     output to NC, TTC, DAC, DDC and EP alike.  Comfort was the sub-metric where
+     it mattered most (finite-differencing raw waypoints amplifies head noise by
+     ``1/dt**2``, so every proposal fails the longitudinal-accel bound and
+     comfort collapses to a constant 0), but the collision and map metrics move
+     too: EP in particular now credits *achieved* progress, so a proposal the
+     tracker cannot follow no longer scores as if it had been followed.
+     Consequence for callers: the box lists NC/TTC receive are one frame longer
+     than the prediction, because row 0 of the rollout is the ego's own current
+     state — see :func:`no_at_fault_collision`.
+     Lane keeping is deliberately left on the raw prediction: it is an Autoware
+     EPDMS metric with its own spec, not one of navsim's rollout-scored terms.
   2. **Agents are GT-future, not policy-simulated.** NC/TTC use the ACTUAL
      future agent boxes from the ``.gt.tar`` sidecar (ground-truth future),
      where navsim uses a (non-)reactive traffic-agents policy forecast. The
      real future is arguably a better open-loop reference; it is not navsim's
-     forecast.
+     forecast.  Track *identity* across frames is no longer part of this
+     deviation: pass ``agent_tokens_per_t`` and the ledger behaves as navsim's
+     does.  Callers that omit tokens fall back to judging each frame
+     independently, which can only over-count infractions.
   3. **Map-gated branches are IMPLEMENTED** (``ego_area_flags``): NC's
      lateral at-fault case and TTC's multi-lane/non-drivable/intersection
      widening run against polygons built from the shard's own lane tensor
@@ -268,34 +302,58 @@ def ego_is_comfortable(
     """pdm_comfort_metrics.py::ego_is_comfortable (verbatim; vehicle params dropped).
 
     ``states`` is ``[n_batch, n_time, STATE_SIZE]``; returns ``[n_batch, 6]``.
+
+    Every ``_compute_*`` helper upstream passes ``window_length=n_time``, so the
+    Savitzky-Golay windows are the *whole* horizon rather than the 8/15-sample
+    defaults.  Only four of the six sites actually change behaviour:
+
+    * ``lon_accel`` / ``lat_accel`` -- the smoothing window widens 8 -> n_time.
+    * ``mag_jerk`` / ``lon_jerk`` -- the *derivative* window widens 15 -> n_time.
+      The acceleration these differentiate keeps window 8, because
+      ``_extract_ego_jerk`` never forwards ``window_length`` to its inner
+      ``_extract_ego_acceleration`` call (an upstream quirk, reproduced).
+    * ``yaw_accel`` / ``yaw_rate`` -- unchanged: ``_extract_ego_yaw_rate`` accepts
+      ``window_length`` and then ignores it, so both stay on
+      ``_approximate_derivatives``' default window of 5.
+
+    Widening a window can only make the filter smoother, never rougher, so the
+    change is one-directional: it relaxes the bounds.  Measured over synthetic
+    rollouts the comfort label flips on 0.6 % of smooth trajectories and 16.4 %
+    of rough ones.
     """
     n_batch, n_time, n_states = states.shape
     assert n_time == len(time_point_s)
     assert n_states == STATE_SIZE
     metric_functions = [
         lambda s, t: _within_bound(
-            _extract_ego_acceleration(s, "x"), min_bound=MIN_LON_ACCEL, max_bound=MAX_LON_ACCEL
+            _extract_ego_acceleration(s, "x", window_length=n_time),
+            min_bound=MIN_LON_ACCEL,
+            max_bound=MAX_LON_ACCEL,
         ),
         lambda s, t: _within_bound(
-            _extract_ego_acceleration(s, "y"),
+            _extract_ego_acceleration(s, "y", window_length=n_time),
             min_bound=-MAX_ABS_LAT_ACCEL,
             max_bound=MAX_ABS_LAT_ACCEL,
         ),
         lambda s, t: _within_bound(
-            _extract_ego_jerk(s, "magnitude", t),
+            _extract_ego_jerk(s, "magnitude", t, window_length=n_time),
             min_bound=-MAX_ABS_MAG_JERK,
             max_bound=MAX_ABS_MAG_JERK,
         ),
         lambda s, t: _within_bound(
-            _extract_ego_jerk(s, "x", t), min_bound=-MAX_ABS_LON_JERK, max_bound=MAX_ABS_LON_JERK
+            _extract_ego_jerk(s, "x", t, window_length=n_time),
+            min_bound=-MAX_ABS_LON_JERK,
+            max_bound=MAX_ABS_LON_JERK,
         ),
         lambda s, t: _within_bound(
-            _extract_ego_yaw_rate(s, t, deriv_order=2, poly_order=3),
+            _extract_ego_yaw_rate(s, t, deriv_order=2, poly_order=3, window_length=n_time),
             min_bound=-MAX_ABS_YAW_ACCEL,
             max_bound=MAX_ABS_YAW_ACCEL,
         ),
         lambda s, t: _within_bound(
-            _extract_ego_yaw_rate(s, t), min_bound=-MAX_ABS_YAW_RATE, max_bound=MAX_ABS_YAW_RATE
+            _extract_ego_yaw_rate(s, t, window_length=n_time),
+            min_bound=-MAX_ABS_YAW_RATE,
+            max_bound=MAX_ABS_YAW_RATE,
         ),
     ]
     results = np.zeros((n_batch, len(metric_functions)), dtype=np.bool_)
@@ -433,6 +491,33 @@ def simulated_states_from_poses(
         states = _sim.simulate_proposals(reference, initial, dt, base)
 
     return states.reshape(lead + (horizon + 1, STATE_SIZE))
+
+
+def poses_from_states(states: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """``[..., T + 1, 4]`` = (x, y, cos h, sin h) rows from a simulated rollout.
+
+    The map metrics (DAC, DDC, EP) take poses, not states, but navsim runs every
+    one of them on ``PDMScorer._states`` — the simulated rollout — not on the
+    proposal it was handed. This is the adapter between the two: same geometry,
+    the layout the pose-based helpers expect, and one row longer than the
+    proposal because row 0 is the ego's own current state.
+    """
+    states = np.asarray(states, dtype=np.float64)
+    heading = states[..., STATE_HEADING]
+    return np.stack(
+        (states[..., STATE_X], states[..., STATE_Y], np.cos(heading), np.sin(heading)), axis=-1
+    )
+
+
+def centre_xy(poses: npt.NDArray[np.float64], center_offset: float) -> npt.NDArray[np.float64]:
+    """Footprint-centre ``[..., 2]`` from ``(x, y, cos h, sin h)`` rows.
+
+    navsim v1 measures DDC displacement and EP progress at
+    ``BBCoordsIndex.CENTER``, which is the rear-axle reference shifted forward by
+    ``wheel_base / 2`` — see ``state_array_to_coords_array``.
+    """
+    poses = np.asarray(poses, dtype=np.float64)
+    return poses[..., :2] + center_offset * poses[..., 2:4]
 
 
 def _initial_states_from_poses_numpy(
@@ -802,12 +887,24 @@ def is_track_stopped(
 
 
 def get_collision_type(
-    ego_xyh, ego_speed: float, ego_poly, agent_box: npt.NDArray[np.float64], agent_poly
+    ego_xyh,
+    ego_speed: float,
+    ego_poly,
+    agent_box: npt.NDArray[np.float64],
+    agent_poly,
+    track_box: "npt.NDArray[np.float64] | None" = None,
 ) -> CollisionType:
     """pdm_scorer_utils.py::get_collision_type (verbatim logic).
 
     ``ego_xyh`` = (x, y, heading) at ego rear-axle/reference; ``ego_speed`` the
     ego speed magnitude; ``ego_poly``/``agent_poly`` shapely polygons.
+
+    navsim takes the agent's *geometry* from the frame being scored but its
+    *speed* from ``PDMObservation.unique_objects[token]``, the box at the
+    track's first appearance — so ``track_box`` overrides which box the
+    stopped-track test reads. It defaults to ``agent_box`` (the historical
+    behaviour, and identical whenever the track is visible at t=0 with the same
+    velocity).
     """
     from shapely.geometry import LineString
 
@@ -816,7 +913,7 @@ def get_collision_type(
 
     if is_ego_stopped:
         return CollisionType.STOPPED_EGO_COLLISION
-    if is_track_stopped(agent_box):
+    if is_track_stopped(agent_box if track_box is None else track_box):
         return CollisionType.STOPPED_TRACK_COLLISION
     if is_agent_behind(ego_xyh, agent_xyh):
         return CollisionType.ACTIVE_REAR_COLLISION
@@ -830,6 +927,66 @@ def get_collision_type(
 # ===========================================================================
 # NC -- no at-fault collision (pdm_scorer.py::_calculate_no_at_fault_collision)
 # ===========================================================================
+def _track_ledger(agent_boxes_per_t: list, agent_tokens_per_t: list | None) -> dict:
+    """``PDMObservation.unique_objects``: each track's box at first appearance.
+
+    navsim's ``is_track_stopped`` reads the tracked object out of that dict, not
+    the box at the frame being scored, so a track that is parked when first seen
+    stays "stopped" for the whole horizon (and vice versa).  Returns
+    ``{token: box}``; empty when the caller supplies no tokens, in which case
+    every call site falls back to the per-frame box.
+    """
+    unique: dict = {}
+    if agent_tokens_per_t is None:
+        return unique
+    for boxes_t, tokens_t in zip(agent_boxes_per_t, agent_tokens_per_t):
+        boxes = np.asarray(boxes_t, dtype=np.float64).reshape(-1, 9)
+        for row, token in zip(boxes, np.asarray(tokens_t).reshape(-1)):
+            key = int(token)
+            if key not in unique:
+                unique[key] = row
+    return unique
+
+
+def _tokens_at(agent_tokens_per_t: list | None, t: int, count: int) -> npt.NDArray[np.int64]:
+    """Per-box track ids for frame ``t``, or a per-frame-unique fallback.
+
+    Without tokens every box gets an id that cannot collide with another frame's,
+    which reproduces the historical "each frame independent" behaviour: no track
+    is ever recognised again, so nothing is ever retired.
+    """
+    if agent_tokens_per_t is None:
+        return np.arange(count, dtype=np.int64) - (t + 1) * (count + 1)
+    return np.asarray(agent_tokens_per_t[t], dtype=np.int64).reshape(-1)
+
+
+def _collided_at_start(
+    ego_states: npt.NDArray[np.float64],
+    agent_boxes_per_t: list,
+    agent_tokens_per_t: list | None,
+    ego_length: float,
+    ego_width: float,
+    center_offset: float,
+) -> set:
+    """``PDMObservation.collided_track_ids``: tracks touching the ego at t=0.
+
+    navsim builds this from the *real* ego footprint before any proposal is
+    scored and skips those tokens for the whole horizon, in both NC and TTC —
+    otherwise a track the ego is already overlapping at t=0 would be re-judged
+    (and usually found at fault) on every subsequent frame.
+    """
+    boxes = np.asarray(agent_boxes_per_t[0], dtype=np.float64).reshape(-1, 9)
+    if boxes.shape[0] == 0:
+        return set()
+    tokens = _tokens_at(agent_tokens_per_t, 0, boxes.shape[0])
+    x, y, h = ego_states[0, STATE_X], ego_states[0, STATE_Y], ego_states[0, STATE_HEADING]
+    cx = x + center_offset * np.cos(h)
+    cy = y + center_offset * np.sin(h)
+    corners = ego_corners(cx, cy, h, ego_length, ego_width)
+    hit = _sat_intersects_one_to_many(corners, box_corners_batch(boxes))
+    return {int(tokens[j]) for j in np.where(hit)[0]}
+
+
 def no_at_fault_collision(
     ego_states: npt.NDArray[np.float64],
     agent_boxes_per_t: list,
@@ -839,33 +996,50 @@ def no_at_fault_collision(
     static_labels: set | None = None,
     center_offset: float = 0.0,
     area_flags: "npt.NDArray[np.bool_] | None" = None,
+    agent_tokens_per_t: list | None = None,
 ) -> float:
     """1:1 port of NC. Returns 1.0 (no at-fault collision), 0.5 (static object)
     or 0.0 (dynamic agent), the min over the horizon.
 
-    ``ego_states`` ``[T, STATE_SIZE]`` (from ``states_from_poses``);
+    ``ego_states`` ``[T + 1, STATE_SIZE]`` — the *simulated* rollout, whose row 0
+    is the ego's own current state, exactly as ``PDMScorer._reset`` receives it;
     ``agent_boxes_per_t[t]`` an ``[N_t, 9]`` array of agent boxes in the ego
-    frame at timestep ``t``. ``agent_labels_per_t[t]`` (optional) the per-box
-    int class ids; a box whose label is in ``static_labels`` scores 0.5 (navsim
-    "not in AGENT_TYPES"), all others 0.0. Default ``static_labels=None`` =>
-    every agent is dynamic (0.0), the conservative default for T4 GT which is
-    dominated by vehicles/pedestrians/bicycles (all in nuplan AGENT_TYPES).
+    frame at ``t * dt``, so frame 0 is the current scene and the two axes are
+    index-aligned. ``agent_labels_per_t[t]`` (optional) the per-box int class
+    ids; a box whose label is in ``static_labels`` scores 0.5 (navsim "not in
+    AGENT_TYPES"), all others 0.0. Default ``static_labels=None`` => every agent
+    is dynamic (0.0), the conservative default for T4 GT which is dominated by
+    vehicles/pedestrians/bicycles (all in nuplan AGENT_TYPES).
+
+    ``agent_tokens_per_t[t]`` (optional) gives each box a track id stable across
+    frames, which is what ``proposal_collided_track_ids`` needs: a track is
+    retired from the ledger the first time it touches the ego *without* the ego
+    being at fault, and tracks already touching the ego at t=0 never enter it.
+    Callers that pass no tokens get the historical frame-independent behaviour,
+    which can only over-count.
 
     DEVIATIONS #2 (GT-future agents), #3 (lateral case needs maps => navsim's
     no-penalty else-branch). The front/stopped-track at-fault cases — the
     dominant ones — are map-INDEPENDENT and fully faithful.
     """
     T = ego_states.shape[0]
+    if len(agent_boxes_per_t) < T:
+        raise ValueError(
+            f"NC needs at least one agent frame per ego state row: got {T} rows "
+            f"and {len(agent_boxes_per_t)} frames. The rollout has num_poses + 1 "
+            "rows, so the caller must prepend the current (t=0) agent frame. "
+            "Extra frames are allowed (TTC's 1 s observation extension)."
+        )
     score = 1.0
-    # navsim dedups by track token across time. Our GT-future boxes are not
-    # tracked across frames, so we conservatively treat each frame independently
-    # for the at-fault test but keep navsim's "already-collided => skip" within
-    # the SAME frame's repeated-geometry guard (no token => no cross-frame dedup;
-    # documented). This never under-counts a fresh at-fault collision.
+    unique_boxes = _track_ledger(agent_boxes_per_t, agent_tokens_per_t)
+    collided = _collided_at_start(
+        ego_states, agent_boxes_per_t, agent_tokens_per_t, ego_length, ego_width, center_offset
+    )
     for t in range(T):
         boxes = np.asarray(agent_boxes_per_t[t], dtype=np.float64).reshape(-1, 9)
         if boxes.shape[0] == 0:
             continue
+        tokens = _tokens_at(agent_tokens_per_t, t, boxes.shape[0])
         x, y, h = ego_states[t, STATE_X], ego_states[t, STATE_Y], ego_states[t, STATE_HEADING]
         ego_speed = float(np.hypot(ego_states[t, STATE_VEL_X], ego_states[t, STATE_VEL_Y]))
         # Footprint CENTER = trajectory point + center_offset along heading
@@ -893,10 +1067,20 @@ def no_at_fault_collision(
         labels = agent_labels_per_t[t] if agent_labels_per_t is not None else None
         for local_j in np.where(sat)[0]:
             j = cand[local_j]
+            token = int(tokens[j])
+            if token in collided:
+                continue  # retired at t=0 or by an earlier not-at-fault contact
             agent_poly = _polygon(agent_corners[local_j])
             if not ego_poly.intersects(agent_poly):
                 continue
-            ctype = get_collision_type((x, y, h), ego_speed, ego_poly, boxes[j], agent_poly)
+            ctype = get_collision_type(
+                (x, y, h),
+                ego_speed,
+                ego_poly,
+                boxes[j],
+                agent_poly,
+                track_box=unique_boxes.get(token),
+            )
             at_fault = ctype in (
                 CollisionType.ACTIVE_FRONT_COLLISION,
                 CollisionType.STOPPED_TRACK_COLLISION,
@@ -913,6 +1097,10 @@ def no_at_fault_collision(
             ):
                 at_fault = True
             if not at_fault:
+                # navsim retires the track on a not-at-fault contact, so a rear
+                # or lateral brush can never be re-judged (and found at fault)
+                # once the ego has driven past it.
+                collided.add(token)
                 continue
             is_static = (
                 static_labels is not None and labels is not None and int(labels[j]) in static_labels
@@ -933,6 +1121,7 @@ def time_to_collision(
     dt: float,
     center_offset: float = 0.0,
     area_flags: "npt.NDArray[np.bool_] | None" = None,
+    agent_tokens_per_t: list | None = None,
 ) -> float:
     """1:1 port of TTC. Returns 1.0 (ok) or 0.0 (infraction).
 
@@ -942,28 +1131,50 @@ def time_to_collision(
     infraction is the agent being AHEAD (deviation #3: navsim's
     intersection/multi-lane branch needs maps). Skips when ego speed <
     ``STOPPED_SPEED_THRESHOLD``.
+
+    ``ego_states`` is the simulated rollout (``T = num_poses + 1`` rows, row 0 =
+    the ego's current state) and ``agent_boxes_per_t`` is index-aligned to it.
+    **Every** row is scored: navsim extends its observation by 1 s
+    (``PDMObservation.extend_observation_for_ttc``) precisely so the last
+    ``num_poses`` rows keep a projection target, so truncating the tail here
+    would blind TTC to collisions at the end of the horizon — the ones a planner
+    is most likely to produce. Supply the extension as extra frames beyond ``T``
+    when it is available; otherwise the projection saturates at the last frame.
+
+    ``agent_tokens_per_t`` carries navsim's ``temp_collided_track_ids`` ledger —
+    a track the ego passes without being ahead of it is retired for the rest of
+    the horizon. Independent of NC's ledger, as in navsim.
     """
     T = ego_states.shape[0]
+    frames = len(agent_boxes_per_t)
+    if frames < T:
+        raise ValueError(
+            f"TTC needs at least one agent frame per ego state row: got {T} rows "
+            f"and {frames} frames."
+        )
     future_time_idcs = np.arange(0, int(FUTURE_COLLISION_HORIZON_WINDOW * 10), 3)
-    max_future = int(future_time_idcs.max())
     speeds = np.hypot(ego_states[:, STATE_VEL_X], ego_states[:, STATE_VEL_Y])
     headings = ego_states[:, STATE_HEADING]
     # per-step world velocity for the constant-velocity projection
     dxy_per_s = np.stack([np.cos(headings) * speeds, np.sin(headings) * speeds], axis=-1)
 
     score = 1.0
-    n_eval = T - max_future
-    for t in range(max(0, n_eval)):
+    collided = _collided_at_start(
+        ego_states, agent_boxes_per_t, agent_tokens_per_t, ego_length, ego_width, center_offset
+    )
+    for t in range(T):
         if speeds[t] < STOPPED_SPEED_THRESHOLD:
             continue
         x0, y0, h = ego_states[t, STATE_X], ego_states[t, STATE_Y], headings[t]
         for fidx in future_time_idcs:
-            ct = t + int(fidx)
-            if ct >= T:
-                continue
+            # Saturate rather than skip: without the 1 s extension the last
+            # frame is the best available stand-in, and skipping would restore
+            # the tail blindness this function documents above.
+            ct = min(t + int(fidx), frames - 1)
             boxes = np.asarray(agent_boxes_per_t[ct], dtype=np.float64).reshape(-1, 9)
             if boxes.shape[0] == 0:
                 continue
+            tokens = _tokens_at(agent_tokens_per_t, ct, boxes.shape[0])
             delta_t = float(fidx) * dt
             dx, dy = dxy_per_s[t] * delta_t
             # Footprint centre = projected pose + center_offset along heading
@@ -992,6 +1203,9 @@ def time_to_collision(
             ego_xyh_current = (x0, y0, h)
             for local_j in np.where(sat)[0]:
                 j = cand[local_j]
+                token = int(tokens[j])
+                if token in collided:
+                    continue  # retired at t=0 or by an earlier not-ahead contact
                 agent_poly = _polygon(agent_corners[local_j])
                 if not ego_poly.intersects(agent_poly):
                     continue
@@ -1007,6 +1221,10 @@ def time_to_collision(
                     map_widened and not is_agent_behind(ego_xyh_current, agent_xyh)
                 ):
                     score = min(score, 0.0)
+                else:
+                    # navsim retires the track: the ego has drawn level with it,
+                    # so later projections must not count it again.
+                    collided.add(token)
     return score
 
 
@@ -1185,6 +1403,8 @@ def ddc_from_route_lanes(
     poses: npt.NDArray[np.float64],
     route_polygons: list,
     dt: float,
+    center_offset: float = 0.0,
+    prepend_origin: bool = True,
 ) -> float:
     """Driving-direction compliance, navsim's re-implementation 1:1
     (``pdm_scorer.py::_calculate_driving_direction_compliance`` +
@@ -1199,12 +1419,13 @@ def ddc_from_route_lanes(
     Proxy vs navsim: their on-route polygons come from nuPlan's map API; ours
     are built from the shard's ROUTE tensor (centerline ± boundary-offset
     channels), same center frame as the predictions, windowed to the 25
-    nearest route segments — report ``val/ddc_route_frac`` alongside. The
-    trajectory is prepended with the origin (the ego's center-frame position)
-    to mirror navsim's initial-state-inclusive indexing.
+    nearest route segments — report ``val/ddc_route_frac`` alongside.
 
-    ``poses``: ``[T, >=2]`` future positions; ``route_polygons``: list of
-    ``[P, 2]`` polygon rings.
+    ``poses``: ``[T, >=2]`` positions, or ``[T, >=4]`` = (x, y, cos h, sin h)
+    when ``center_offset`` is non-zero; ``route_polygons``: list of ``[P, 2]``
+    polygon rings. ``prepend_origin`` adds the ego's current center-frame
+    position to mirror navsim's initial-state-inclusive indexing — pass ``False``
+    when ``poses`` is a simulated rollout, whose row 0 already *is* that state.
     """
     import shapely
     from shapely.geometry import Polygon
@@ -1216,7 +1437,15 @@ def ddc_from_route_lanes(
             p = Polygon(ring)
             if p.is_valid and not p.is_empty:
                 polys.append(p)
-    pts_xy = np.concatenate([np.zeros((1, 2)), np.asarray(poses, dtype=np.float64)[:, :2]])
+    pts_xy = (
+        centre_xy(poses, center_offset)
+        if center_offset
+        else np.asarray(poses, dtype=np.float64)[:, :2]
+    )
+    if prepend_origin:
+        # the ego's current footprint centre, which in the ego frame sits at
+        # (center_offset, 0) -- not at the origin, once the offset is non-zero
+        pts_xy = np.concatenate([np.array([[center_offset, 0.0]]), pts_xy])
     if not polys:
         # no route coverage -> no oncoming evidence (navsim semantics would
         # flag EVERYTHING oncoming; with a windowed tensor that would punish

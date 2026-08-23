@@ -18,11 +18,15 @@ same reference the validation panel reports against.  ``test_drivor_oracle.py``
 checks this implementation against that (scipy/shapely) reference numerically, so
 "the oracle agrees with the reported metric" is a test, not a claim.
 
-Comfort is the one sub-score that cannot be read off the poses: NAVSIM scores the
-states an LQR tracker + kinematic bicycle model produce while *following* the
-proposal, never the waypoints themselves.  That rollout is ported exactly in
-:mod:`planner_metrics.pdm_simulator_torch` and :meth:`DrivoROracle._comfort` runs
-it, so the label measures ride quality rather than trajectory-head noise.
+No sub-score is read off the proposal's waypoints.  ``compute_navsim_score.py``
+runs every proposal through ``PDMSimulator.simulate_proposals`` -- an LQR tracker
+driving a kinematic bicycle model -- and hands the *simulated* array to
+``PDMScorer``, which derives all of its geometry (``_ego_coords``,
+``_ego_polygons``, speeds, headings) from that one array.  :meth:`DrivoROracle.
+_rollout` is that step, ported in :mod:`planner_metrics.pdm_simulator_torch`, run
+once per chunk and shared by all six metrics.  It also fixes the row indexing:
+the rollout has ``T + 1`` rows, row 0 being the ego's own current state, which is
+what makes the row index line up with NAVSIM's observation frames.
 
 Deviations from the CPU reference, all deliberate:
 
@@ -36,9 +40,13 @@ Deviations from the CPU reference, all deliberate:
   throughout this dataset (verified over a random sample of the valid split), so
   NC's 0.5 "static object" branch can never fire and building the boxes would be
   pure overhead.
-* ``no_at_fault_collision``'s cross-frame track de-duplication and the
-  map-dependent lateral-at-fault branch are not reproduced -- the same two
-  deviations the CPU port documents.
+* The map-dependent branches NAVSIM gates on ``_ego_areas`` -- NC's
+  ACTIVE_LATERAL at-fault case, TTC's multi-lane / non-drivable / intersection
+  widening -- are not reproduced; the CPU port documents the same deviation.
+  Track de-duplication *is* reproduced (see :meth:`DrivoROracle._first_contact`).
+* Neighbours come from the recorded future rather than NAVSIM's traffic-agent
+  policy forecast, and DAC / DDC read the shard's own border and route tensors
+  rather than a map database.
 """
 
 from __future__ import annotations
@@ -303,11 +311,22 @@ class OracleScene:
 
     ego_half: torch.Tensor  # [B, 2] half (length, width)
     centre_offset: torch.Tensor  # [B] rear-axle -> footprint-centre shift
-    neighbour_xy: torch.Tensor  # [B, K, T, 2]
-    neighbour_axis: torch.Tensor  # [B, K, T, 2]
+    # The observation axis is NAVSIM's: frame ``i`` is the scene at ``i * dt``,
+    # so frame 0 is the *current* one (read off ``neighbor_agents_past[-1]``) and
+    # frame ``i`` for ``i >= 1`` is ``neighbor_agents_future[i - 1]``.  That makes
+    # it index-aligned with the rollout, whose row 0 is the ego's current state.
+    # ``To = 1 + T`` normally, or ``1 + T + 10`` where the shard carries the extra
+    # second NAVSIM's ``PDMObservation`` keeps for TTC's forward projection.
+    neighbour_xy: torch.Tensor  # [B, K, To, 2]
+    neighbour_axis: torch.Tensor  # [B, K, To, 2] unit
     neighbour_half: torch.Tensor  # [B, K, 2]
-    neighbour_valid: torch.Tensor  # [B, K, T] bool
-    neighbour_stopped: torch.Tensor  # [B, K, T] bool
+    neighbour_valid: torch.Tensor  # [B, K, To] bool
+    # Per *track*, not per frame: ``is_track_stopped`` reads
+    # ``unique_objects[token]``, the box at the track's first appearance.
+    neighbour_stopped: torch.Tensor  # [B, K] bool
+    # ``PDMObservation.collided_track_ids``: tracks already touching the ego's
+    # real footprint at t=0 are ignored for the whole horizon, by NC and TTC.
+    neighbour_excluded: torch.Tensor  # [B, K] bool
     border_p0: torch.Tensor  # [B, M, 2]
     border_p1: torch.Tensor  # [B, M, 2]
     border_valid: torch.Tensor  # [B, M] bool
@@ -399,12 +418,11 @@ class DrivoROracle:
             self._score_chunk(proposals[:, start : start + chunk], scene)
             for start in range(0, num_proposals, chunk)
         ]
-        components = torch.cat(parts, dim=1)  # [B, N, 6], EP still a placeholder
-
-        # EP needs the multiplicative terms as its gate, so it is the one metric
-        # left for after the chunks are re-joined.
-        nc, dac = components[..., 0], components[..., 1]
-        components[..., 4] = self._progress(proposals, scene, nc * dac)
+        # Chunking is exact for every sub-score: DrivoR normalizes EP by
+        # ``np.maximum(raw_progress, self.pdm_progress)`` -- per proposal, against
+        # the cached PDM reference -- not by the best of the proposal set, so no
+        # metric couples proposals to each other.
+        components = torch.cat(parts, dim=1)  # [B, N, 6]
 
         score = self._aggregate(components)
         out = torch.cat((components, score[..., None]), dim=-1)
@@ -464,27 +482,78 @@ class DrivoROracle:
         # --- neighbours ---------------------------------------------------
         past = inputs["neighbor_agents_past"].float()
         future = inputs["neighbor_agents_future"].float()
-        horizon = future.shape[2]
+        ref_xy = ego_future[..., :2].float()  # [B, T, 2]
+        horizon = ref_xy.shape[1]
+        # The neighbour futures, the EP reference and the up-sampled proposals all
+        # index the same per-step grid; a mismatch would silently compare
+        # different instants, so both sides are checked before anything reads them.
+        if proposals is not None and proposals.shape[-2] != horizon:
+            raise ValueError(
+                f"expert reference has {horizon} steps but the proposals have "
+                f"{proposals.shape[-2]}; both are read on the same {self.dt} s grid"
+            )
+        if future.shape[2] < horizon:
+            raise ValueError(
+                f"expert reference has {horizon} steps but the neighbour futures "
+                f"have only {future.shape[2]}; the scorer needs at least the "
+                f"{self.scoring_num_poses} steps at {self.dt} s"
+            )
+        # NAVSIM keeps the observation 1 s longer than the proposal horizon so
+        # TTC's forward projection lands on *real* agent positions rather than an
+        # extrapolation (``PDMObservation.__init__``, ``extend_observation_for_ttc``).
+        # Shards store 8 s of neighbour future, so take the extra second when it
+        # is there and fall back to clamping at the last frame when it is not.
+        extension = int(round(FUTURE_COLLISION_HORIZON_WINDOW / self.dt))
+        future = future[:, :, : horizon + extension]
 
         track_valid = past[:, :, -1, :].abs().sum(-1) > 0  # [B, A]
         step_valid = future.abs().sum(-1) > 0  # [B, A, T]
-        valid = step_valid & track_valid[:, :, None]
 
-        nb_xy = future[..., :2]
         # Two shard layouts reach here: ``(x, y, heading)`` and ``(x, y, cos, sin)``.
         # Taking cos/sin of an already-decomposed pair would clamp every heading into
         # +-1 rad and mis-rotate the collision boxes -- silently, since the box maths
         # never sees an out-of-range value. Same tolerance as the ego-past reader below.
         if future.shape[-1] == 4:
-            nb_axis = future[..., 2:4]
+            future_axis = future[..., 2:4]
         else:
             nb_heading = future[..., 2]
-            nb_axis = torch.stack((torch.cos(nb_heading), torch.sin(nb_heading)), dim=-1)
+            future_axis = torch.stack((torch.cos(nb_heading), torch.sin(nb_heading)), dim=-1)
+
+        # Frame 0 of the observation is the *current* scene, which lives in the
+        # past tensor's last row; frames 1.. are the recorded future.
+        nb_xy = torch.cat((past[:, :, -1:, :2], future[..., :2]), dim=2)  # [B, A, To, 2]
+        nb_axis = torch.cat((past[:, :, -1:, 2:4], future_axis), dim=2)
+        nb_axis = nb_axis / nb_axis.norm(dim=-1, keepdim=True).clamp_min(_EPS)
+        valid = torch.cat((track_valid[:, :, None], step_valid), dim=2) & track_valid[:, :, None]
         # (width, length) in the shard -> (half length, half width) here.
         nb_half = torch.stack((past[:, :, -1, 7] * 0.5, past[:, :, -1, 6] * 0.5), dim=-1)
 
-        nb_speed = self._neighbour_speed(nb_xy, valid, past)
-        nb_stopped = nb_speed <= COLLISION_STOPPED_SPEED_THRESHOLD
+        # ``is_track_stopped(unique_objects[token])``: one flag per *track*, read
+        # off the box at the track's first appearance.  Every track that survives
+        # ``track_valid`` is present at t=0, so that box is the past tensor's last
+        # row -- which, unlike the recorded future, carries a real velocity
+        # channel instead of a finite difference.
+        nb_stopped = past[:, :, -1, 4:6].norm(dim=-1) <= COLLISION_STOPPED_SPEED_THRESHOLD
+
+        # ``PDMObservation.update``: anything already intersecting the ego's real
+        # footprint at t=0 goes on ``collided_track_ids`` and is skipped for the
+        # whole horizon.  The ego is at the origin of its own frame, so its
+        # footprint centre is ``centre_offset`` straight ahead.
+        ego_now_centre = torch.stack(
+            (centre_offset, torch.zeros_like(centre_offset)), dim=-1
+        )  # [B, 2]
+        ego_now_axis = torch.zeros_like(ego_now_centre)
+        ego_now_axis[:, 0] = 1.0
+        nb_excluded = (
+            _obb_overlap(
+                nb_xy[:, :, 0] - ego_now_centre[:, None],
+                ego_now_axis[:, None],
+                ego_half[:, None],
+                nb_axis[:, :, 0],
+                nb_half,
+            )
+            & valid[:, :, 0]
+        )  # [B, A]
 
         # Conservative prefilter.  Every scored ego reference point at step ``t``
         # lies inside the ball ``(guard_centre[t], guard_radius[t])`` that covers
@@ -496,18 +565,8 @@ class DrivoROracle:
         # free of host syncs.
         ego_radius = ego_half.norm(dim=-1)  # [B]
         nb_radius = nb_half.norm(dim=-1)  # [B, A]
-        ref_xy = ego_future[..., :2].float()  # [B, T, 2]
-        if ref_xy.shape[1] != horizon:
-            # The neighbour futures, the EP reference and the up-sampled proposals
-            # all index the same per-step grid; a mismatch here would silently
-            # compare different instants.
-            raise ValueError(
-                f"expert reference has {ref_xy.shape[1]} steps but the neighbour "
-                f"futures have {horizon}; both must be the scorer's "
-                f"{self.scoring_num_poses} steps at {self.dt} s"
-            )
-        guard_centre, guard_radius = self._guard_ball(ref_xy, proposals)
-        gap = (nb_xy - guard_centre[:, None]).norm(dim=-1)  # [B, A, T]
+        guard_centre, guard_radius = self._guard_ball(ref_xy, proposals, nb_xy.shape[2])
+        gap = (nb_xy - guard_centre[:, None]).norm(dim=-1)  # [B, A, To]
         gap = gap - guard_radius[:, None, :] - ego_radius[:, None, None] - nb_radius[:, :, None]
         gap = torch.where(valid, gap, torch.full_like(gap, 1e6))
         rank = gap.min(dim=-1).values  # [B, A]
@@ -558,8 +617,15 @@ class DrivoROracle:
             return tensor.gather(1, index.expand(batch, keep_route, *tensor.shape[2:]))
 
         # --- expert reference polyline (EP) -------------------------------
-        origin = torch.zeros(batch, 1, 2, device=device, dtype=torch.float32)
-        ref_path = torch.cat((origin, ref_xy), dim=1)  # [B, T+1, 2]
+        # ``_calculate_progress`` projects ``_ego_coords[..., CENTER]`` -- the
+        # footprint centre of the *simulated* state -- onto the centerline, so the
+        # polyline this port substitutes for that centerline has to be the
+        # expert's centre track too.  Querying centre points against a rear-axle
+        # polyline would clip the last ``centre_offset`` metres of every proposal
+        # against the polyline's end and bias EP down by ``offset / length``.
+        ref_centre = ref_xy + _heading_unit(ego_future.float()) * centre_offset[:, None, None]
+        ego_now = ego_now_centre[:, None]  # rollout row 0, shared by all proposals
+        ref_path = torch.cat((ego_now, ref_centre), dim=1)  # [B, T+1, 2]
         ref_p0 = ref_path[:, :-1]
         ref_p1 = ref_path[:, 1:]
         seg_len = (ref_p1 - ref_p0).norm(dim=-1)
@@ -574,6 +640,7 @@ class DrivoROracle:
             neighbour_half=take(nb_half),
             neighbour_valid=take(valid),
             neighbour_stopped=take(nb_stopped),
+            neighbour_excluded=take(nb_excluded),
             border_p0=border_p0,
             border_p1=border_p1,
             border_valid=border_valid,
@@ -623,31 +690,6 @@ class DrivoROracle:
         return _states_from_poses(past[:, :-1], self.dt)
 
     # -- scene helpers -----------------------------------------------------
-    def _neighbour_speed(
-        self, nb_xy: torch.Tensor, valid: torch.Tensor, past: torch.Tensor
-    ) -> torch.Tensor:
-        """Per-step neighbour speed from the GT future, falling back to the past.
-
-        The GT future carries no velocity channel, so speed comes from
-        consecutive *valid* positions; where no valid neighbour step exists the
-        last observed past velocity stands in.  ``is_track_stopped`` only cares
-        about a 0.05 m/s threshold, so this is plenty.
-        """
-        dt = self.dt
-        forward = torch.zeros_like(nb_xy[..., 0])
-        forward[..., :-1] = (nb_xy[..., 1:, :] - nb_xy[..., :-1, :]).norm(dim=-1) / dt
-        forward_ok = torch.zeros_like(valid)
-        forward_ok[..., :-1] = valid[..., 1:] & valid[..., :-1]
-
-        backward = torch.zeros_like(forward)
-        backward[..., 1:] = forward[..., :-1]
-        backward_ok = torch.zeros_like(valid)
-        backward_ok[..., 1:] = forward_ok[..., :-1]
-
-        fallback = past[:, :, -1, 4:6].norm(dim=-1)[:, :, None].expand_as(forward)
-        speed = torch.where(forward_ok, forward, torch.where(backward_ok, backward, fallback))
-        return speed
-
     def _border_segments(self, line_strings: torch.Tensor):
         """Road-border polylines -> flat segment list.
 
@@ -710,23 +752,44 @@ class DrivoROracle:
             valid.reshape(*flat),
         )
 
-    @staticmethod
     def _guard_ball(
-        ref_xy: torch.Tensor, proposals: Optional[torch.Tensor]
+        self, ref_xy: torch.Tensor, proposals: Optional[torch.Tensor], frames: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Per-step ball covering the expert path and every proposal.
+        """Per-frame ball covering the expert path and every proposal.
 
-        Returns ``(centre [B, T, 2], radius [B, T])``.  With no proposals the
-        ball degenerates to the expert path itself, which is only conservative
-        for trajectories that stay near the demonstration -- callers that score
-        real proposals should always pass them.
+        Returns ``(centre [B, To, 2], radius [B, To])`` on the *observation* axis:
+        frame 0 is the ego's own position (the origin, shared by every proposal),
+        frames 1..T are the scored steps, and any frame past T -- the second
+        NAVSIM keeps for TTC -- reuses the last scored ball.  With no proposals
+        the ball degenerates to the expert path itself, which is only
+        conservative for trajectories that stay near the demonstration -- callers
+        that score real proposals should always pass them.
+
+        The radius is then inflated by the distance TTC's constant-velocity
+        projection can carry a footprint (both forwards, from the step being
+        scored, and backwards, since a neighbour at frame ``f`` is tested against
+        ego steps ``f - 9 .. f``).  Without it a neighbour that only ever comes
+        close to a *projected* box could be dropped by the top-K.
         """
         if proposals is None:
-            return ref_xy, torch.zeros_like(ref_xy[..., 0])
-        cloud = torch.cat((proposals[..., :2].float(), ref_xy[:, None]), dim=1)  # [B, N+1, T, 2]
-        centre = cloud.mean(dim=1)
-        radius = (cloud - centre[:, None]).norm(dim=-1).amax(dim=1)
-        return centre, radius
+            centre, radius = ref_xy, torch.zeros_like(ref_xy[..., 0])
+        else:
+            cloud = torch.cat((proposals[..., :2].float(), ref_xy[:, None]), dim=1)
+            centre = cloud.mean(dim=1)  # [B, T, 2]
+            radius = (cloud - centre[:, None]).norm(dim=-1).amax(dim=1)
+
+        origin = torch.zeros_like(centre[:, :1])
+        centre = torch.cat((origin, centre), dim=1)
+        radius = torch.cat((torch.zeros_like(radius[:, :1]), radius), dim=1)
+
+        speed = (centre[:, 1:] - centre[:, :-1]).norm(dim=-1).amax(dim=-1) / self.dt  # [B]
+        radius = radius + (2.0 * FUTURE_COLLISION_HORIZON_WINDOW * speed)[:, None]
+
+        if frames > centre.shape[1]:
+            pad = frames - centre.shape[1]
+            centre = torch.cat((centre, centre[:, -1:].expand(-1, pad, -1)), dim=1)
+            radius = torch.cat((radius, radius[:, -1:].expand(-1, pad)), dim=1)
+        return centre[:, :frames], radius[:, :frames]
 
     def _reduce_segments(
         self,
@@ -748,70 +811,126 @@ class DrivoROracle:
         return p0.gather(1, gather2), p1.gather(1, gather2), valid.gather(1, order)
 
     # -- per-chunk scoring -------------------------------------------------
+    def _rollout(self, proposals: torch.Tensor, scene: OracleScene) -> torch.Tensor:
+        """The states NAVSIM actually scores: ``[B, N, T+1, STATE_SIZE]`` fp64.
+
+        ``PDMScorer`` never sees a proposal's waypoints.  ``compute_navsim_score``
+        runs ``simulator.simulate_proposals`` first and hands the *simulated*
+        array to ``score_proposals``; ``_reset`` then derives every piece of
+        geometry the six sub-metrics use -- ``_ego_coords``, ``_ego_polygons``,
+        the speeds, the headings -- from that array alone.  So the rollout is
+        computed once here and shared, rather than each metric re-deriving
+        kinematics from the raw poses.
+
+        Row 0 is the ego's own current state, identical across proposals, and
+        rows ``1..T`` are the tracked future -- which is what makes the row index
+        line up with :attr:`OracleScene.neighbour_xy`'s observation frames.
+
+        fp64 throughout (see :mod:`planner_metrics.pdm_simulator_torch`) because
+        the LQR fits are ill-conditioned enough that fp32 changes the commands;
+        on an H100 fp64 is ~1:2 of fp32 so this costs nothing.
+        """
+        batch, num, horizon, _ = proposals.shape
+        poses = torch.stack(
+            (
+                proposals[..., 0],
+                proposals[..., 1],
+                torch.atan2(proposals[..., 3], proposals[..., 2]),
+            ),
+            dim=-1,
+        ).reshape(-1, horizon, 3)
+        initial = scene.ego_initial[:, None].expand(batch, num, STATE_SIZE).reshape(-1, STATE_SIZE)
+        wheel_base = scene.wheel_base[:, None].expand(batch, num).reshape(-1)
+        states = simulate_proposals(poses.to(torch.float64), initial, self.dt, wheel_base)
+        return states.reshape(batch, num, horizon + 1, STATE_SIZE)
+
     def _score_chunk(self, proposals: torch.Tensor, scene: OracleScene) -> torch.Tensor:
-        """The five proposal-local metrics; EP is filled in by the caller."""
-        axis = _heading_unit(proposals)  # [B, N, T, 2]
-        centre = proposals[..., :2] + axis * scene.centre_offset[:, None, None, None]
-        speed = self._ego_speed(proposals)  # [B, N, T]
+        """All six sub-scores for one slice of the proposal axis."""
+        states = self._rollout(proposals, scene)
+        geometry = states.to(proposals.dtype)
 
-        nc, ttc = self._collision_scores(proposals, centre, axis, speed, scene)
+        heading = geometry[..., STATE_HEADING]
+        axis = torch.stack((heading.cos(), heading.sin()), dim=-1)  # [B, N, T+1, 2]
+        rear = torch.stack((geometry[..., STATE_X], geometry[..., STATE_Y]), dim=-1)
+        centre = rear + axis * scene.centre_offset[:, None, None, None]
+        speed = torch.hypot(geometry[..., STATE_VEL_X], geometry[..., STATE_VEL_Y])
+
+        nc = self._no_at_fault_collision(rear, centre, axis, speed, scene)
+        ttc = self._time_to_collision(rear, centre, axis, speed, scene)
         dac = self._drivable_area(centre, axis, scene)
-        ddc = self._driving_direction(proposals, scene)
-        comfort = self._comfort(proposals, scene)
-        placeholder = torch.zeros_like(nc)
-        return torch.stack((nc, dac, ddc, ttc, placeholder, comfort), dim=-1)
+        ddc = self._driving_direction(centre, scene)
+        comfort = self._comfort(states, scene)
+        progress = self._progress(centre, scene, nc * dac)
+        return torch.stack((nc, dac, ddc, ttc, progress, comfort), dim=-1)
 
-    def _ego_speed(self, proposals: torch.Tensor) -> torch.Tensor:
-        xy = proposals[..., :2]
-        velocity = torch.stack(
-            (_gradient(xy[..., 0], self.dt), _gradient(xy[..., 1], self.dt)), dim=-1
-        )
-        return velocity.norm(dim=-1)
+    @staticmethod
+    def _first_contact(contact: torch.Tensor) -> torch.Tensor:
+        """Keep only each track's *earliest* contact along the second-to-last axis.
 
-    def _collision_scores(
+        This is what NAVSIM's ``proposal_collided_track_ids`` bookkeeping reduces
+        to.  Walking time forward, a track is dropped from the ledger the first
+        time it touches the ego without the ego being at fault, and a token
+        already in the ledger is skipped forever after; an at-fault first contact
+        sets the score through ``np.minimum``, so re-deciding it later cannot
+        change anything (the object type, and hence the 0.0/0.5 it maps to, is a
+        property of the track).  Either way the verdict at a track's first
+        contact is the only one that can matter, which turns a sequential scan
+        into a gather.
+
+        ``contact`` is ``[..., steps, K]``; the returned mask has at most one True
+        per ``(..., K)``.  Done with ``cummax`` on uint8 rather than a cumsum or
+        an argmin so the working set stays one byte per element.
+        """
+        seen = contact.to(torch.uint8).cummax(dim=-2).values.bool()
+        earlier = torch.zeros_like(seen)
+        earlier[..., 1:, :] = seen[..., :-1, :]
+        return contact & ~earlier
+
+    def _no_at_fault_collision(
         self,
-        proposals: torch.Tensor,
+        rear: torch.Tensor,
         centre: torch.Tensor,
         axis: torch.Tensor,
         speed: torch.Tensor,
         scene: OracleScene,
-    ):
-        """NC and TTC in one pass over the (proposal, step, neighbour) grid."""
-        batch, num, horizon, _ = proposals.shape
-        device = proposals.device
+    ) -> torch.Tensor:
+        """NC over the (proposal, step, track) grid.
 
-        steps = torch.arange(
-            self.collision_stride - 1, horizon, self.collision_stride, device=device
-        )
+        ``pdm_scorer.py::_calculate_no_at_fault_collision``.  Frame ``i`` of the
+        observation is scored against rollout row ``i``, so the loop covers rows
+        ``0..T`` exactly as ``range(num_poses + 1)`` does.
+        """
+        rows = centre.shape[2]
+        device = centre.device
+        steps = torch.arange(0, rows, self.collision_stride, device=device)
+
         ego_half = scene.ego_half[:, None, None, None, :]
         nb_half = scene.neighbour_half[:, None, None, :, :]
-
-        # [B, N, Ts, K]
-        nb_xy = scene.neighbour_xy[:, None, :, :, :].permute(0, 1, 3, 2, 4)[:, :, steps]
-        nb_axis = scene.neighbour_axis[:, None, :, :, :].permute(0, 1, 3, 2, 4)[:, :, steps]
-        nb_valid = scene.neighbour_valid[:, None, :, :].permute(0, 1, 3, 2)[:, :, steps]
-        nb_stopped = scene.neighbour_stopped[:, None, :, :].permute(0, 1, 3, 2)[:, :, steps]
+        # [B, 1, Ts, K, *]
+        nb_xy = scene.neighbour_xy[:, :, steps].permute(0, 2, 1, 3)[:, None]
+        nb_axis = scene.neighbour_axis[:, :, steps].permute(0, 2, 1, 3)[:, None]
+        nb_valid = scene.neighbour_valid[:, :, steps].permute(0, 2, 1)[:, None]
 
         ego_centre = centre[:, :, steps, None, :]
         ego_axis = axis[:, :, steps, None, :]
-        ego_raw = proposals[:, :, steps, None, :2]
+        ego_rear = rear[:, :, steps, None, :]
         ego_speed = speed[:, :, steps, None]
 
-        delta = nb_xy - ego_centre
-        overlap = _obb_overlap(delta, ego_axis, ego_half, nb_axis, nb_half) & nb_valid
+        contact = _obb_overlap(nb_xy - ego_centre, ego_axis, ego_half, nb_axis, nb_half)
+        contact &= nb_valid & ~scene.neighbour_excluded[:, None, None, :]
 
-        # Ahead / behind is measured from the RAW (rear-axle) pose, as in nuplan.
-        to_agent = nb_xy - ego_raw
-        cos_angle = self._cos_relative(to_agent, ego_axis)
-        behind = cos_angle < _COS_BEHIND
-
+        # Ahead / behind is measured from the rear-axle pose, as in nuplan.
+        behind = self._cos_relative(nb_xy - ego_rear, ego_axis) < _COS_BEHIND
         front_hit = self._front_edge_hits(ego_centre, ego_axis, ego_half, nb_xy, nb_axis, nb_half)
         ego_stopped = ego_speed <= COLLISION_STOPPED_SPEED_THRESHOLD
-        at_fault = overlap & ~ego_stopped & (nb_stopped | (~behind & front_hit))
-        nc = 1.0 - at_fault.any(dim=-1).any(dim=-1).float()
+        # A stopped ego yields STOPPED_EGO_COLLISION and a rear hit
+        # ACTIVE_REAR_COLLISION -- neither is at fault, and both retire the track.
+        at_fault = ~ego_stopped & (
+            scene.neighbour_stopped[:, None, None, :] | (~behind & front_hit)
+        )
 
-        ttc = self._time_to_collision(proposals, centre, axis, speed, scene)
-        return nc, ttc
+        penalised = (self._first_contact(contact) & at_fault).any(dim=-2).any(dim=-1)
+        return 1.0 - penalised.float()
 
     @staticmethod
     def _cos_relative(to_agent: torch.Tensor, ego_axis: torch.Tensor) -> torch.Tensor:
@@ -838,63 +957,83 @@ class DrivoROracle:
 
     def _time_to_collision(
         self,
-        proposals: torch.Tensor,
+        rear: torch.Tensor,
         centre: torch.Tensor,
         axis: torch.Tensor,
         speed: torch.Tensor,
         scene: OracleScene,
     ) -> torch.Tensor:
-        """1 s constant-velocity forward projection against the GT futures."""
-        batch, num, horizon, _ = proposals.shape
-        device = proposals.device
+        """1 s constant-velocity forward projection against the recorded futures.
+
+        ``pdm_scorer.py::_calculate_ttc``.  Every rollout row ``0..T`` is a
+        projection origin -- the loop is ``range(num_poses + 1)``, with no
+        allowance made for the projection running past the end of the horizon,
+        because ``PDMObservation`` is built a second longer than the proposals
+        precisely so it does not have to be.  Where the shard cannot supply that
+        extra second the target frame is clamped, i.e. the neighbour is held at
+        its last recorded pose.
+        """
+        rows = centre.shape[2]
+        frames = scene.neighbour_xy.shape[2]
+        device = centre.device
 
         future_idcs = list(range(0, int(FUTURE_COLLISION_HORIZON_WINDOW * 10), 3))
-        max_future = max(future_idcs)
-        last = horizon - max_future
-        steps = torch.arange(self.ttc_stride - 1, max(last, 1), self.ttc_stride, device=device)
-        if steps.numel() == 0:
-            steps = torch.zeros(1, dtype=torch.long, device=device)
+        steps = torch.arange(0, rows, self.ttc_stride, device=device)
 
         ego_half = scene.ego_half[:, None, None, None, :]
         nb_half = scene.neighbour_half[:, None, None, :, :]
-        nb_xy_all = scene.neighbour_xy.permute(0, 2, 1, 3)[:, None]  # [B, 1, T, K, 2]
+        nb_xy_all = scene.neighbour_xy.permute(0, 2, 1, 3)[:, None]  # [B, 1, To, K, 2]
         nb_axis_all = scene.neighbour_axis.permute(0, 2, 1, 3)[:, None]
-        nb_valid_all = scene.neighbour_valid.permute(0, 2, 1)[:, None]  # [B, 1, T, K]
+        nb_valid_all = scene.neighbour_valid.permute(0, 2, 1)[:, None]  # [B, 1, To, K]
+        live = nb_valid_all & ~scene.neighbour_excluded[:, None, None, :]
 
         ego_centre = centre[:, :, steps, None, :]
         ego_axis = axis[:, :, steps, None, :]
-        ego_raw = proposals[:, :, steps, None, :2]
+        ego_rear = rear[:, :, steps, None, :]
         ego_speed = speed[:, :, steps, None]
         moving = ego_speed >= STOPPED_SPEED_THRESHOLD
 
-        infraction = torch.zeros(
-            moving.shape[:-1] + (nb_valid_all.shape[-1],), dtype=torch.bool, device=device
-        )
+        active, ahead = [], []
         for future in future_idcs:
-            target = (steps + future).clamp(max=horizon - 1)
+            target = (steps + future).clamp(max=frames - 1)
             nb_xy = nb_xy_all[:, :, target]
             nb_axis = nb_axis_all[:, :, target]
-            nb_valid = nb_valid_all[:, :, target]
 
             shifted = ego_centre + ego_axis * (ego_speed * (future * self.dt)).unsqueeze(-1)
             overlap = _obb_overlap(nb_xy - shifted, ego_axis, ego_half, nb_axis, nb_half)
-            ahead = self._cos_relative(nb_xy - ego_raw, ego_axis) > _COS_AHEAD
-            infraction |= overlap & nb_valid & ahead & moving
+            # A step where the ego is stopped is skipped outright: it neither
+            # scores an infraction nor retires the track.
+            active.append(overlap & live[:, :, target] & moving)
+            ahead.append(self._cos_relative(nb_xy - ego_rear, ego_axis) > _COS_AHEAD)
 
-        any_evaluable = moving.any(dim=-1).any(dim=-1)
-        hit = infraction.any(dim=-1).any(dim=-1)
+        # NAVSIM iterates ``for time_idx: for future_time_idx:``, so the ledger
+        # sees events in lexicographic (step, future) order.  Stacking the future
+        # axis *after* the step axis and folding the two together reproduces that
+        # ordering exactly, which is what ``_first_contact`` then scans.
+        grid = torch.stack(active, dim=3)  # [B, N, Ts, F, K]
+        shape = grid.shape
+        grid = grid.reshape(shape[0], shape[1], shape[2] * shape[3], shape[4])
+        verdict = torch.stack(ahead, dim=3).reshape_as(grid)
+
+        hit = (self._first_contact(grid) & verdict).any(dim=-2).any(dim=-1)
         ttc = 1.0 - hit.float()
         # Nothing evaluable (ego stationary for the whole horizon) -> undefined,
         # which DrivoR's loss masks out instead of supervising a made-up label.
+        any_evaluable = moving.any(dim=-1).any(dim=-1)
         return torch.where(any_evaluable, ttc, torch.full_like(ttc, TTC_UNDEFINED))
 
     def _drivable_area(
         self, centre: torch.Tensor, axis: torch.Tensor, scene: OracleScene
     ) -> torch.Tensor:
-        """DAC: 1 unless the footprint ever crosses a road-border polyline."""
-        batch, num, horizon, _ = centre.shape
+        """DAC: 1 unless the footprint ever crosses a road-border polyline.
+
+        ``_calculate_drivable_area_compliance`` reduces ``_ego_areas`` over all
+        ``num_poses + 1`` rows, and ``_ego_areas`` is built from ``_ego_coords``,
+        i.e. from the *simulated* footprint -- so the rows here are the rollout's.
+        """
+        rows = centre.shape[2]
         device = centre.device
-        steps = torch.arange(self.border_stride - 1, horizon, self.border_stride, device=device)
+        steps = torch.arange(0, rows, self.border_stride, device=device)
 
         ego_centre = centre[:, :, steps, None, :]
         ego_axis = axis[:, :, steps, None, :]
@@ -906,14 +1045,20 @@ class DrivoROracle:
         hit &= scene.border_valid[:, None, None]
         return 1.0 - hit.any(dim=-1).any(dim=-1).float()
 
-    def _driving_direction(self, proposals: torch.Tensor, scene: OracleScene) -> torch.Tensor:
-        """DDC: displacement accumulated while off-route, over a 1 s window."""
-        batch, num, horizon, _ = proposals.shape
-        device = proposals.device
-        steps = torch.arange(0, horizon, self.route_stride, device=device)
+    def _driving_direction(self, centre: torch.Tensor, scene: OracleScene) -> torch.Tensor:
+        """DDC: displacement accumulated while off-route, over a 1 s window.
 
-        origin = torch.zeros(batch, num, 1, 2, device=device, dtype=proposals.dtype)
-        path = torch.cat((origin, proposals[:, :, steps, :2]), dim=2)  # [B, N, Ts+1, 2]
+        ``_calculate_driving_direction_compliance`` differences
+        ``_ego_coords[:, :, BBCoordsIndex.CENTER]`` over all ``num_poses + 1``
+        rows and zeroes the first, so the path here is the rollout's footprint
+        centre -- not the raw waypoints, and with no synthetic origin to prepend
+        because row 0 already *is* the ego's current pose.
+        """
+        rows = centre.shape[2]
+        device = centre.device
+        steps = torch.arange(0, rows, self.route_stride, device=device)
+
+        path = centre[:, :, steps]  # [B, N, Ts, 2]
 
         point = path[:, :, :, None, :]
         seg0 = scene.route_centre0[:, None, None]
@@ -956,27 +1101,31 @@ class DrivoROracle:
         )
         return torch.where(has_route, ddc, torch.ones_like(ddc))
 
-    def _comfort(self, proposals: torch.Tensor, scene: OracleScene) -> torch.Tensor:
+    def _comfort(self, states: torch.Tensor, scene: OracleScene) -> torch.Tensor:
         """The six NAVSIM comfort bounds, all-or-nothing, over the whole horizon.
 
-        NAVSIM never applies these bounds to raw waypoints.  ``PDMScorer`` scores
-        the states ``PDMSimulator.simulate_proposals`` produces -- a
-        ``BatchLQRTracker`` computing (acceleration, steering-rate) commands that
-        a ``BatchKinematicBicycleModel`` integrates -- so the metric measures how
-        a tracked vehicle would ride, not the trajectory head's output noise.  The
-        model's first-order lags (``accel_time_constant = 0.2 s``,
-        ``steering_angle_time_constant = 0.05 s``) are what remove the
-        high-frequency component that finite differences amplify by ``1/dt**2``.
-        Without the rollout every proposal fails ``lon_accel`` and the label
-        collapses to a constant 0, killing both the comfort head's gradient and
-        the metric's 2/12 share of the selection aggregate.
+        NAVSIM never applies these bounds to raw waypoints; ``states`` is the
+        shared rollout from :meth:`_rollout`.  The model's first-order lags
+        (``accel_time_constant = 0.2 s``, ``steering_angle_time_constant =
+        0.05 s``) are what remove the high-frequency component that finite
+        differences amplify by ``1/dt**2``.  Without the rollout every proposal
+        fails ``lon_accel`` and the label collapses to a constant 0, killing both
+        the comfort head's gradient and the metric's 2/12 share of the selection
+        aggregate.
 
-        The rollout runs in fp64 (see :mod:`planner_metrics.pdm_simulator_torch`)
-        because the LQR fits are ill-conditioned enough that fp32 changes the
-        commands; on an H100 fp64 is ~1:2 of fp32 so this costs nothing.  Row 0
-        of the simulated array is the ego's own state and NAVSIM scores it, so the
-        comfort horizon is ``T + 1`` samples at ``time_point_s = arange(0, T+1) *
-        dt`` -- ``_calculate_is_comfortable`` verbatim.
+        Row 0 of the simulated array is the ego's own state and NAVSIM scores it,
+        so the comfort horizon is ``T + 1`` samples at ``time_point_s = arange(0,
+        T+1) * dt`` -- ``_calculate_is_comfortable`` verbatim.
+
+        The Savitzky-Golay windows are navsim v1's, i.e. DrivoR's: every
+        ``_compute_*`` helper passes ``window_length=n_time``, so the two
+        acceleration bounds and the two jerk *derivatives* run over the whole
+        horizon.  Two acceleration operators are therefore needed, not one: the
+        jerk path keeps window 8 for its inner smoothing because
+        ``_extract_ego_jerk`` never forwards ``window_length`` to
+        ``_extract_ego_acceleration``.  The yaw pair is unaffected -- window 5
+        either way -- because ``_extract_ego_yaw_rate`` accepts the argument and
+        then ignores it.  See ``planner_metrics.pdms_navsim.ego_is_comfortable``.
 
         The metric is the devkit's ``history_comfort``, not navsim's bare
         ``COMFORTABLE``: the ego's recorded past is prepended to the simulated
@@ -985,18 +1134,8 @@ class DrivoROracle:
         proposals of a scene, so it gates that scene to 0 when the recorded
         driving itself was uncomfortable -- 3.3 % of scenes, measured.
         """
-        batch, num, horizon_in, _ = proposals.shape
-        poses = torch.stack(
-            (
-                proposals[..., 0],
-                proposals[..., 1],
-                torch.atan2(proposals[..., 3], proposals[..., 2]),
-            ),
-            dim=-1,
-        ).reshape(-1, horizon_in, 3)
-        initial = scene.ego_initial[:, None].expand(batch, num, STATE_SIZE).reshape(-1, STATE_SIZE)
-        wheel_base = scene.wheel_base[:, None].expand(batch, num).reshape(-1)
-        states = simulate_proposals(poses.to(torch.float64), initial, self.dt, wheel_base)
+        batch, num = states.shape[:2]
+        states = states.reshape(-1, states.shape[2], STATE_SIZE)
 
         prefix = scene.history_states
         if prefix.shape[1] > 0:
@@ -1016,21 +1155,25 @@ class DrivoROracle:
         acc_lat = states[..., STATE_ACC_Y]
         heading = states[..., STATE_HEADING]
 
-        smooth = self._operator(horizon, 8, 2, 0, 1.0, states)
-        jerk_op = self._operator(horizon, 15, 2, 1, dt, states)
+        # The bounds' own smoothing (window_length=n_time) ...
+        smooth = self._operator(horizon, horizon, 2, 0, 1.0, states)
+        # ... and the narrower one the jerk path inherits from the default.
+        smooth_jerk = self._operator(horizon, 8, 2, 0, 1.0, states)
+        jerk_op = self._operator(horizon, horizon, 2, 1, dt, states)
         yaw_rate_op = self._operator(horizon, 5, 2, 1, dt, states)
         yaw_accel_op = self._operator(horizon, 5, 3, 2, dt, states)
 
-        acc_lon_s = acc_lon @ smooth
-        acc_lat_s = acc_lat @ smooth
-        acc_mag_s = torch.hypot(acc_lon, acc_lat) @ smooth
         unwrapped = _phase_unwrap(heading)
 
         checks = (
-            _within(acc_lon_s, MIN_LON_ACCEL, MAX_LON_ACCEL),
-            _within(acc_lat_s, -MAX_ABS_LAT_ACCEL, MAX_ABS_LAT_ACCEL),
-            _within(acc_mag_s @ jerk_op, -MAX_ABS_MAG_JERK, MAX_ABS_MAG_JERK),
-            _within(acc_lon_s @ jerk_op, -MAX_ABS_LON_JERK, MAX_ABS_LON_JERK),
+            _within(acc_lon @ smooth, MIN_LON_ACCEL, MAX_LON_ACCEL),
+            _within(acc_lat @ smooth, -MAX_ABS_LAT_ACCEL, MAX_ABS_LAT_ACCEL),
+            _within(
+                torch.hypot(acc_lon, acc_lat) @ smooth_jerk @ jerk_op,
+                -MAX_ABS_MAG_JERK,
+                MAX_ABS_MAG_JERK,
+            ),
+            _within(acc_lon @ smooth_jerk @ jerk_op, -MAX_ABS_LON_JERK, MAX_ABS_LON_JERK),
             _within(unwrapped @ yaw_accel_op, -MAX_ABS_YAW_ACCEL, MAX_ABS_YAW_ACCEL),
             _within(unwrapped @ yaw_rate_op, -MAX_ABS_YAW_RATE, MAX_ABS_YAW_RATE),
         )
@@ -1040,15 +1183,22 @@ class DrivoROracle:
         return comfortable.float().reshape(batch, num)
 
     def _progress(
-        self, proposals: torch.Tensor, scene: OracleScene, multiplicative: torch.Tensor
+        self, centre: torch.Tensor, scene: OracleScene, multiplicative: torch.Tensor
     ) -> torch.Tensor:
-        """EP: arclength gained along the expert path, normalized proposal-relative."""
+        """EP: arclength gained along the expert path, normalized proposal-relative.
+
+        ``_calculate_progress`` projects ``_ego_coords[proposal, 0, CENTER]`` and
+        ``[proposal, -1, CENTER]`` -- the simulated footprint centre at the first
+        and last rollout rows -- so both endpoints come from the rollout, and row
+        0 is the ego's real current pose rather than the proposal's first
+        waypoint one step out.
+        """
         seg0 = scene.reference_p0[:, None]
         seg1 = scene.reference_p1[:, None]
         arc = scene.reference_arc[:, None]
 
-        start = _project_arclength(proposals[:, :, 0, :2], seg0, seg1, arc)
-        end = _project_arclength(proposals[:, :, -1, :2], seg0, seg1, arc)
+        start = _project_arclength(centre[:, :, 0], seg0, seg1, arc)
+        end = _project_arclength(centre[:, :, -1], seg0, seg1, arc)
         raw = (end - start).clamp_min(0.0) * multiplicative
 
         # DrivoR's train_pdm_scorer.py:169-179 normalizes each proposal by
