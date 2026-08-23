@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .diffusion_planner import DiffusionPlanner
-from .encoder import OneHotSequenceEncoder, SceneEncoder
+from diffusion_planner.data.dimensions import TURN_INDICATOR_HISTORY_LENGTH
+
+from .encoder import OneHotSequenceEncoder
 
 
 class TurnIndicatorDecoder(nn.Module):
@@ -20,16 +18,14 @@ class TurnIndicatorDecoder(nn.Module):
         self,
         hidden_dim: int = 256,
         num_heads: int = 8,
-        history_length: int = 31,
         history_encoder_depth: int = 2,
         embed_dim: int = 128,
         drop_path_rate: float = 0.0,
         dropout: float = 0.0,
     ) -> None:
         super().__init__()
-        self.history_length = history_length
         self.history_encoder = OneHotSequenceEncoder(
-            sequence_len=history_length,
+            sequence_len=TURN_INDICATOR_HISTORY_LENGTH,
             num_classes=4,
             hidden_dim=hidden_dim,
             depth=history_encoder_depth,
@@ -79,65 +75,3 @@ class TurnIndicatorDecoder(nn.Module):
         token = history_token + attended
         token = token + self.mlp(self.norm(token))
         return self.classifier(self.output_norm(token[:, 0]))
-
-
-class TurnIndicatorModel(nn.Module):
-    """Run a frozen planner SceneEncoder followed by a trainable classifier."""
-
-    def __init__(
-        self, scene_encoder: SceneEncoder, decoder: TurnIndicatorDecoder
-    ) -> None:
-        super().__init__()
-        self.scene_encoder = scene_encoder
-        self.decoder = decoder
-        self.scene_encoder.requires_grad_(False)
-        self.scene_encoder.eval()
-
-    def train(self, mode: bool = True) -> TurnIndicatorModel:
-        """Keep the frozen SceneEncoder in evaluation mode."""
-        super().train(mode)
-        self.scene_encoder.eval()
-        return self
-
-    def forward(self, input_data: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Predict next-state logits with shape ``(B, 3)``."""
-        with torch.no_grad():
-            scene, scene_mask = self.scene_encoder(input_data)
-        return self.decoder(scene, scene_mask, input_data["turn_indicators"])
-
-
-def build_turn_indicator_model(
-    pretrained_planner_checkpoint: str | Path,
-    hidden_dim: int = 256,
-    num_heads: int = 8,
-    history_length: int = 31,
-    history_encoder_depth: int = 2,
-    embed_dim: int = 128,
-    drop_path_rate: float = 0.0,
-    dropout: float = 0.0,
-) -> TurnIndicatorModel:
-    """Load a trained planner SceneEncoder and attach a new indicator decoder."""
-    checkpoint: dict[str, Any] = torch.load(
-        Path(pretrained_planner_checkpoint).expanduser(),
-        map_location="cpu",
-        weights_only=False,
-    )
-    planner_config = dict(checkpoint["model_config"])
-    planner_config.pop("_target_", None)
-    planner = DiffusionPlanner(**planner_config)
-    planner.load_state_dict(checkpoint["model"])
-    planner_hidden_dim = planner.scene_encoder.ego_shape_encoder.ego_shape_encoder.projection.out_features
-    if planner_hidden_dim != hidden_dim:
-        raise ValueError(
-            f"hidden_dim differs from pretrained planner: {hidden_dim} != {planner_hidden_dim}"
-        )
-    decoder = TurnIndicatorDecoder(
-        hidden_dim=hidden_dim,
-        num_heads=num_heads,
-        history_length=history_length,
-        history_encoder_depth=history_encoder_depth,
-        embed_dim=embed_dim,
-        drop_path_rate=drop_path_rate,
-        dropout=dropout,
-    )
-    return TurnIndicatorModel(planner.scene_encoder, decoder)

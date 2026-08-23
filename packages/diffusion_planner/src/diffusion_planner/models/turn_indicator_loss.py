@@ -5,11 +5,9 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from .turn_indicator import TurnIndicatorModel
-
 
 def compute_turn_indicator_loss(
-    model: TurnIndicatorModel,
+    logits: torch.Tensor,
     batch: dict[str, torch.Tensor],
     transition_weight: float = 5.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -20,7 +18,6 @@ def compute_turn_indicator_loss(
     Samples whose target differs from the last valid history state receive the
     specified transition weight.
     """
-    logits = model(batch)
     target = batch["turn_indicators_future"][:, 0].to(torch.long)
     current = batch["turn_indicators"][:, -1].to(torch.long)
     valid = (target >= 1) & (target <= 3)

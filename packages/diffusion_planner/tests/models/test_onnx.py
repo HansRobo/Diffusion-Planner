@@ -40,7 +40,7 @@ class OnnxWrapperTest(unittest.TestCase):
             x = torch.randn(1, agent_mask.shape[1], 80, 4)
             time = torch.full((1,), 0.5)
             actual = decoder_wrapper(x, agent_mask, scene, scene_mask, agent_pose, time)
-            expected = model(x, agent_mask, input_data, time)
+            expected, _ = model(x, agent_mask, input_data, time)
 
         torch.testing.assert_close(actual, expected)
 
@@ -62,12 +62,17 @@ class OnnxWrapperTest(unittest.TestCase):
         )
 
         with torch.inference_mode():
-            actual = wrapper(
-                initial_noise, *(input_data[name] for name in SCENE_INPUT_NAMES)
+            actual_trajectory, actual_turn_indicator = wrapper(
+                initial_noise,
+                *(input_data[name] for name in SCENE_INPUT_NAMES),
+                input_data["turn_indicators"],
             )
-            expected = model.sample(input_data, initial_noise, num_steps=10)
+            expected_trajectory, expected_turn_indicator = model.sample(
+                input_data, initial_noise, num_steps=10
+            )
 
-        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(actual_trajectory, expected_trajectory)
+        torch.testing.assert_close(actual_turn_indicator, expected_turn_indicator)
 
 
 if __name__ == "__main__":

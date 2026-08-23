@@ -21,10 +21,8 @@ from diffusion_planner_dashboard.services import (
     FrameLoader,
     LoadedOnnxPlanner,
     LoadedPlanner,
-    LoadedTurnIndicator,
     load_frame_index,
     load_planner,
-    load_turn_indicator_checkpoint,
     run_inference,
     run_onnx_inference,
     run_turn_indicator_inference,
@@ -71,16 +69,6 @@ def _cached_planner(
 ) -> LoadedPlanner | LoadedOnnxPlanner:
     del modification_time_ns
     return load_planner(model_path, device)
-
-
-@st.cache_resource(show_spinner="Loading turn indicator checkpoint...")
-def _cached_turn_indicator(
-    checkpoint_path: str,
-    modification_time_ns: int,
-    device: str,
-) -> LoadedTurnIndicator:
-    del modification_time_ns
-    return load_turn_indicator_checkpoint(checkpoint_path, device)
 
 
 @st.cache_data(max_entries=32, show_spinner="Sampling trajectories...")
@@ -139,8 +127,8 @@ def _cached_prediction(
 
 @st.cache_data(max_entries=32, show_spinner="Predicting turn indicator...")
 def _cached_turn_indicator_prediction(
-    checkpoint_path: str,
-    checkpoint_modification_time_ns: int,
+    model_path: str,
+    model_modification_time_ns: int,
     h5_path: str,
     frame_index: int,
     frame_time_ns: int,
@@ -153,9 +141,9 @@ def _cached_turn_indicator_prediction(
     remove_neighbor_agents: bool,
     infer_future_traffic_lights: bool,
 ):
-    loaded = _cached_turn_indicator(
-        checkpoint_path, checkpoint_modification_time_ns, device
-    )
+    loaded = _cached_planner(model_path, model_modification_time_ns, device)
+    if isinstance(loaded, LoadedOnnxPlanner):
+        return None
     frame_data = _cached_frame(
         h5_path,
         frame_index,
@@ -248,7 +236,7 @@ def _fill_unknown_traffic_lights(frame_data: dict[str, Any]) -> dict[str, Any]:
     return fill_unknown_traffic_light_futures(frame_data)
 
 
-def _render_source_settings() -> tuple[str | None, str | None, str | None]:
+def _render_source_settings() -> tuple[str | None, str | None]:
     """Apply the frame source and checkpoint together."""
     st.sidebar.subheader("Sources")
     with st.sidebar.form("training-result-source-settings"):
@@ -262,25 +250,15 @@ def _render_source_settings() -> tuple[str | None, str | None, str | None]:
             value=st.session_state.get("configured_checkpoint_path", ""),
             placeholder="/path/to/epoch_0001.pth or diffusion_planner_sampler.onnx",
         )
-        turn_indicator_checkpoint_candidate = st.text_input(
-            "Turn indicator checkpoint file (optional)",
-            value=st.session_state.get("configured_turn_indicator_checkpoint_path", ""),
-            placeholder="/path/to/turn_indicator/epoch_0001.pth",
-        )
         assert source_candidate is not None
         assert checkpoint_candidate is not None
-        assert turn_indicator_checkpoint_candidate is not None
         applied = st.form_submit_button("Apply sources", use_container_width=True)
     if applied:
         st.session_state["configured_frame_source_path"] = source_candidate.strip()
         st.session_state["configured_checkpoint_path"] = checkpoint_candidate.strip()
-        st.session_state["configured_turn_indicator_checkpoint_path"] = (
-            turn_indicator_checkpoint_candidate.strip()
-        )
     return (
         st.session_state.get("configured_frame_source_path") or None,
         st.session_state.get("configured_checkpoint_path") or None,
-        st.session_state.get("configured_turn_indicator_checkpoint_path") or None,
     )
 
 
@@ -371,9 +349,7 @@ def _render_input_options() -> tuple[bool, bool]:
 def render_training_results() -> None:
     """Render checkpoint inference alongside ground-truth trajectories."""
     st.title("Training Results")
-    source_path_text, checkpoint_path_text, turn_indicator_checkpoint_path_text = (
-        _render_source_settings()
-    )
+    source_path_text, checkpoint_path_text = _render_source_settings()
     device, num_steps, time_epsilon, noise_scale, seed = _render_inference_settings(
         checkpoint_path_text is not None
         and Path(checkpoint_path_text).suffix.lower() == ".onnx"
@@ -391,13 +367,6 @@ def render_training_results() -> None:
 
     source_path = Path(source_path_text).expanduser()
     checkpoint_path = Path(checkpoint_path_text).expanduser()
-    turn_indicator_checkpoint_path = (
-        Path(turn_indicator_checkpoint_path_text).expanduser()
-        if turn_indicator_checkpoint_path_text is not None
-        else None
-    )
-    turn_indicator_checkpoint_modification_time_ns: int | None = None
-    loaded_turn_indicator: LoadedTurnIndicator | None = None
     try:
         source_modification_time_ns = source_path.stat().st_mtime_ns
         checkpoint_modification_time_ns = checkpoint_path.stat().st_mtime_ns
@@ -405,15 +374,6 @@ def render_training_results() -> None:
         planner = _cached_planner(
             str(checkpoint_path), checkpoint_modification_time_ns, device
         )
-        if turn_indicator_checkpoint_path is not None:
-            turn_indicator_checkpoint_modification_time_ns = (
-                turn_indicator_checkpoint_path.stat().st_mtime_ns
-            )
-            loaded_turn_indicator = _cached_turn_indicator(
-                str(turn_indicator_checkpoint_path),
-                turn_indicator_checkpoint_modification_time_ns,
-                device,
-            )
     except (OSError, RuntimeError, ValueError) as error:
         st.error(str(error))
         return
@@ -485,13 +445,10 @@ def render_training_results() -> None:
             infer_future_traffic_lights,
         )
         turn_indicator_result = None
-        if (
-            turn_indicator_checkpoint_path is not None
-            and turn_indicator_checkpoint_modification_time_ns is not None
-        ):
+        if isinstance(planner, LoadedPlanner):
             turn_indicator_result = _cached_turn_indicator_prediction(
-                str(turn_indicator_checkpoint_path),
-                turn_indicator_checkpoint_modification_time_ns,
+                str(checkpoint_path),
+                checkpoint_modification_time_ns,
                 row.h5_path,
                 row.frame_index,
                 row.frame_time_ns,
@@ -522,7 +479,7 @@ def render_training_results() -> None:
         st.caption("Input option: all neighbor agents removed")
     if infer_future_traffic_lights:
         st.caption("Input option: traffic light future inferred from past")
-    if turn_indicator_result is not None and loaded_turn_indicator is not None:
+    if turn_indicator_result is not None and isinstance(planner, LoadedPlanner):
         probabilities, predicted_report, turn_indicator_seconds = turn_indicator_result
         indicator_names = {0: "Missing", 1: "Disabled", 2: "Left", 3: "Right"}
         target_values = np.asarray(visualized_frame["turn_indicators_future"])
@@ -543,7 +500,7 @@ def render_training_results() -> None:
         indicator_columns[3].metric(
             "Confidence", f"{float(probabilities[predicted_report - 1]):.1%}"
         )
-        indicator_columns[4].metric("Checkpoint epoch", loaded_turn_indicator.epoch)
+        indicator_columns[4].metric("Checkpoint epoch", planner.epoch)
         indicator_columns[5].metric("Inference", f"{turn_indicator_seconds:.3f} s")
         probability_columns = st.columns(3)
         for column, name, probability in zip(

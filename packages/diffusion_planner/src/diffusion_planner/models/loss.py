@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import Protocol, TypedDict
 
 import torch
 import torch.nn.functional as F
@@ -10,11 +10,29 @@ import torch.nn.functional as F
 from diffusion_planner.data.dimensions import TRAJECTORY_DIM
 
 from .flow_matching import compute_x0_flow_matching_loss, x0_velocity_error
+from .turn_indicator_loss import compute_turn_indicator_loss
 
-PlannerModel = Callable[
-    [torch.Tensor, torch.Tensor, dict[str, torch.Tensor], torch.Tensor],
-    torch.Tensor,
-]
+
+class PlannerModel(Protocol):
+    """Callable interface used by the planner loss."""
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        x_mask: torch.Tensor,
+        input_data: dict[str, torch.Tensor],
+        time: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+
+class DiffusionPlannerLoss(TypedDict):
+    """Loss values and turn-indicator counts for one training batch."""
+
+    total: torch.Tensor
+    trajectory: torch.Tensor
+    turn_indicator: torch.Tensor
+    turn_indicator_correct: torch.Tensor
+    turn_indicator_valid_count: torch.Tensor
 
 
 def trajectory_error_in_target_frame(
@@ -79,12 +97,25 @@ def compute_diffusion_planner_loss(
     noise_scale: float,
     ego_loss_weight: float = 1.0,
     neighbor_loss_weight: float = 1.0,
-) -> torch.Tensor:
-    """Compute masked x0 flow-matching loss for one planner batch."""
+    turn_indicator_transition_loss_weight: float = 5.0,
+) -> DiffusionPlannerLoss:
+    """Compute the joint planner loss and turn-indicator metrics."""
     target = create_target_trajectory(input_data)
     training_mask = (torch.count_nonzero(target, dim=-1) == 0).any(dim=-1)
-    return compute_x0_flow_matching_loss(
-        x0_model=lambda state, time: model(state, training_mask, input_data, time),
+    turn_indicator_logits: list[torch.Tensor] = []
+
+    def predict(state: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
+        trajectory, logits = model(
+            state,
+            training_mask,
+            input_data,
+            time,
+        )
+        turn_indicator_logits.append(logits)
+        return trajectory
+
+    trajectory_loss = compute_x0_flow_matching_loss(
+        x0_model=predict,
         loss_function=lambda x_prediction, clean_target, time: trajectory_huber_loss(
             x_prediction,
             clean_target,
@@ -99,3 +130,15 @@ def compute_diffusion_planner_loss(
         time_std=time_std,
         noise_scale=noise_scale,
     )
+    turn_indicator_loss, correct, valid_count = compute_turn_indicator_loss(
+        turn_indicator_logits[0],
+        input_data,
+        transition_weight=turn_indicator_transition_loss_weight,
+    )
+    return {
+        "total": trajectory_loss + turn_indicator_loss,
+        "trajectory": trajectory_loss,
+        "turn_indicator": turn_indicator_loss,
+        "turn_indicator_correct": correct,
+        "turn_indicator_valid_count": valid_count,
+    }
