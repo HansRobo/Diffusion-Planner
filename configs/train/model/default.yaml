@@ -12,4 +12,3 @@ drop_path_rate: 0.0
 dropout: 0.0
 velocity_threshold: 0.1
 goal_max_distance: 2.0
-turn_indicator_encoder_depth: 2

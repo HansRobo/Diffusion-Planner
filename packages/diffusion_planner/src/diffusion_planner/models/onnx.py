@@ -148,7 +148,7 @@ class DiffusionPlannerSamplerOnnxWrapper(nn.Module):
         road_borders: torch.Tensor,
         goal_pose: torch.Tensor,
         ego_shape: torch.Tensor,
-        turn_indicators: torch.Tensor,
+        turn_indicator: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Generate trajectories and turn-indicator logits."""
         input_data: dict[str, torch.Tensor] = dict(
@@ -178,7 +178,7 @@ class DiffusionPlannerSamplerOnnxWrapper(nn.Module):
                 strict=True,
             )
         )
-        input_data["turn_indicators"] = turn_indicators
+        input_data["turn_indicators"] = turn_indicator.unsqueeze(-1)
         return self.planner.sample(
             input_data, initial_noise, num_steps=10, time_epsilon=1e-5
         )

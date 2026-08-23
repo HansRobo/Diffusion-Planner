@@ -89,10 +89,10 @@ def run_onnx_inference(
         if name in available_inputs
     }
     inputs["initial_noise"] = initial_noise
-    if "turn_indicators" in available_inputs:
-        inputs["turn_indicators"] = np.asarray(
-            normalized_frame["turn_indicators"], dtype=np.float32
-        )[None]
+    if "turn_indicator" in available_inputs:
+        inputs["turn_indicator"] = np.asarray(
+            [normalized_frame["turn_indicators"][-1]], dtype=np.float32
+        )
 
     start = perf_counter()
     prediction = session.run(None, inputs)[0]

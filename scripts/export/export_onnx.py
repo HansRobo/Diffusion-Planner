@@ -30,7 +30,7 @@ DECODER_INPUT_NAMES = (
     "agent_pose",
     "time",
 )
-SAMPLER_INPUT_NAMES = ("initial_noise", *SCENE_INPUT_NAMES, "turn_indicators")
+SAMPLER_INPUT_NAMES = ("initial_noise", *SCENE_INPUT_NAMES, "turn_indicator")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -183,8 +183,8 @@ def main() -> None:
     decoder_wrapper = TrajectoryDecoderOnnxWrapper(model.trajectory_decoder).eval()
     with torch.no_grad():
         decoder_output = decoder_wrapper(*decoder_inputs)
-    turn_indicators = frame["turn_indicators"].unsqueeze(0).repeat(batch_size, 1)
-    sampler_inputs = (decoder_inputs[0], *scene_inputs, turn_indicators)
+    turn_indicator = frame["turn_indicators"][-1].repeat(batch_size)
+    sampler_inputs = (decoder_inputs[0], *scene_inputs, turn_indicator)
     sampler_wrapper = DiffusionPlannerSamplerOnnxWrapper(model).eval()
     with torch.no_grad():
         sampler_output = sampler_wrapper(*sampler_inputs)

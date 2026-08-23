@@ -31,7 +31,6 @@ class DiffusionPlanner(nn.Module):
         dropout: float = 0.0,
         velocity_threshold: float = 0.1,
         goal_max_distance: float = 2.0,
-        turn_indicator_encoder_depth: int = 2,
     ) -> None:
         super().__init__()
         self.scene_encoder = SceneEncoder(
@@ -57,9 +56,6 @@ class DiffusionPlanner(nn.Module):
         self.turn_indicator_decoder = TurnIndicatorDecoder(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
-            history_encoder_depth=turn_indicator_encoder_depth,
-            embed_dim=embed_dim,
-            drop_path_rate=drop_path_rate,
             dropout=dropout,
         )
 
@@ -70,7 +66,7 @@ class DiffusionPlanner(nn.Module):
         with torch.no_grad():
             scene, scene_mask = self.scene_encoder(input_data)
         return self.turn_indicator_decoder(
-            scene.detach(), scene_mask, input_data["turn_indicators"]
+            scene.detach(), scene_mask, input_data["turn_indicators"][:, -1]
         )
 
     @staticmethod
@@ -107,7 +103,7 @@ class DiffusionPlanner(nn.Module):
             x, x_mask, scene, scene_mask, agent_pose, time
         )
         turn_indicator_logits = self.turn_indicator_decoder(
-            scene.detach(), scene_mask, input_data["turn_indicators"]
+            scene.detach(), scene_mask, input_data["turn_indicators"][:, -1]
         )
         return trajectory, turn_indicator_logits
 
@@ -151,6 +147,6 @@ class DiffusionPlanner(nn.Module):
         trajectory = torch.cat((trajectory[..., :2], yaw), dim=-1)
         trajectory = trajectory.masked_fill(agent_mask[:, :, None, None], 0.0)
         turn_indicator_logits = self.turn_indicator_decoder(
-            scene, scene_mask, input_data["turn_indicators"]
+            scene, scene_mask, input_data["turn_indicators"][:, -1]
         )
         return trajectory, turn_indicator_logits
