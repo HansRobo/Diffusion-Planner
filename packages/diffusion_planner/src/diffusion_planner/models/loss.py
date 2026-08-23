@@ -2,27 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Protocol, TypedDict
+from typing import TypedDict
 
 import torch
 import torch.nn.functional as F
 
 from diffusion_planner.data.dimensions import TRAJECTORY_DIM
 
+from .diffusion_planner import DiffusionPlanner
 from .flow_matching import compute_x0_flow_matching_loss, x0_velocity_error
-from .turn_indicator_loss import compute_turn_indicator_loss
-
-
-class PlannerModel(Protocol):
-    """Callable interface used by the planner loss."""
-
-    def __call__(
-        self,
-        x: torch.Tensor,
-        x_mask: torch.Tensor,
-        input_data: dict[str, torch.Tensor],
-        time: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
 class DiffusionPlannerLoss(TypedDict):
@@ -33,6 +21,31 @@ class DiffusionPlannerLoss(TypedDict):
     turn_indicator: torch.Tensor
     turn_indicator_correct: torch.Tensor
     turn_indicator_valid_count: torch.Tensor
+
+
+def compute_turn_indicator_loss(
+    logits: torch.Tensor,
+    batch: dict[str, torch.Tensor],
+    transition_weight: float = 5.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return weighted loss, correct count, and valid-label count."""
+    target = batch["turn_indicators_future"][:, 0].to(torch.long)
+    current = batch["turn_indicators"][:, -1].to(torch.long)
+    valid = (target >= 1) & (target <= 3)
+    current_valid = (current >= 1) & (current <= 3)
+    transition = valid & current_valid & (current != target)
+    class_target = (target - 1).clamp(0, 2)
+    per_sample_loss = F.cross_entropy(logits, class_target, reduction="none")
+    sample_weight = torch.where(
+        transition,
+        per_sample_loss.new_tensor(transition_weight),
+        per_sample_loss.new_tensor(1.0),
+    )
+    sample_weight = sample_weight * valid
+    valid_count = valid.sum()
+    loss = (per_sample_loss * sample_weight).sum() / sample_weight.sum().clamp_min(1.0)
+    correct = ((logits.argmax(dim=-1) == class_target) & valid).sum()
+    return loss, correct, valid_count
 
 
 def trajectory_error_in_target_frame(
@@ -88,7 +101,7 @@ def create_target_trajectory(
 
 
 def compute_diffusion_planner_loss(
-    model: PlannerModel,
+    model: DiffusionPlanner,
     input_data: dict[str, torch.Tensor],
     *,
     time_mean: float,

@@ -13,7 +13,7 @@ seed: 42
 experiment_name: ???
 
 training:
-  total_epochs: 60
+  total_epochs: 50
   cpu: false
   mixed_precision: bf16
   compile: true
@@ -25,7 +25,7 @@ training:
   noise_scale: 1.0
   ego_loss_weight: 10.0
   neighbor_loss_weight: 1.0
-  turn_indicator_transition_loss_weight: 5.0
+  turn_indicator_transition_loss_weight: 100.0
   log_interval: 200
   checkpoint_dir: checkpoints
   resume_from: null

@@ -19,7 +19,7 @@ dataset:
     speed_scale: 15.0
     vehicle_shape_scale: 10.0
 # This batch size applies to each process/GPU.
-batch_size: 160
+batch_size: 256
 shuffle: true
 # Each process creates this many workers, and each worker owns its own H5 cache.
 num_workers: 64
