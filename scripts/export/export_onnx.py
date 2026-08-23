@@ -87,9 +87,7 @@ def _export(
         output_names=output_names,
         opset_version=opset_version,
         dynamo=False,
-        dynamic_axes={
-            name: {0: "batch"} for name in (*input_names, *output_names)
-        },
+        dynamic_axes={name: {0: "batch"} for name in (*input_names, *output_names)},
         external_data=False,
         optimize=True,
     )
