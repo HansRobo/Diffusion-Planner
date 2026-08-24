@@ -561,6 +561,54 @@ def test_workflow_contract_preserves_repaired_target_validation_flag(tmp_path):
     assert cfg["validate_on_repaired_targets"] is True
 
 
+def test_workflow_contract_forwards_expert_idle_filter_threshold(tmp_path):
+    """The mining-row filter reads cfg["event_mining"]; a contract that sets
+    event_mining.expert_min_end_progress_m must reach it (this lever was silently
+    dead on the contract path once)."""
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        json.dumps(
+            {
+                "judgement": {
+                    "reward_config": "/tmp/reward.json",
+                    "threshold_config": "/tmp/thresholds.json",
+                    "credit_window_config": "/tmp/credit.json",
+                    "enabled_labels": ["moving_collision"],
+                },
+                "event_mining": {"expert_min_end_progress_m": 1.0},
+                "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
+                "replay_memory": {"capacity": 200},
+                "training": {"val_scenes": "/tmp/valid.json"},
+            }
+        )
+    )
+    training = tmp_path / "training.json"
+    training.write_text(json.dumps({"backend": "base_sft", "train_args": {}}))
+
+    cfg = round_runner._config_from_workflow_contract(
+        {
+            "model_path": "/tmp/model.pth",
+            "scene_list": str(scene_list),
+            "workflow_config": str(workflow),
+            "training_config": str(training),
+            "output_dir": str(tmp_path / "auto_research" / "out"),
+        }
+    )
+
+    assert cfg["event_mining"]["expert_min_end_progress_m"] == 1.0
+    # and the filter itself must see it
+    rows = [
+        {"expert_disagreement_expert_end_progress": 0.2, "event_key": "a"},
+        {"expert_disagreement_expert_end_progress": 5.0, "event_key": "b"},
+    ]
+    credit_jsonl = tmp_path / "credit_windows.jsonl"
+    credit_jsonl.write_text("")
+    kept = round_runner._filter_expert_idle_rows(cfg, rows, credit_jsonl)
+    assert [r["event_key"] for r in kept] == ["b"]
+
+
 def test_round_runner_splits_mine_and_repair_labels(tmp_path):
     cfg = {
         "reward_config": "/tmp/reward.json",

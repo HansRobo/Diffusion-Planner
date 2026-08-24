@@ -460,6 +460,13 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             perception_mining[key] = value
 
     cfg = {
+        # The mining-row filter reads cfg["event_mining"] directly; the flattening
+        # into perception_mining above covers only miner CLI passthrough keys, so
+        # filter keys must be forwarded here or a contract-driven campaign gets no
+        # filtering with no error (the dead-lever failure mode).
+        "event_mining": {
+            k: event_mining[k] for k in ("expert_min_end_progress_m",) if k in event_mining
+        },
         "rounds": int(_first_non_null(rounds.get("rounds"), 1)),
         "epochs_per_round": int(_first_non_null(rounds.get("epochs_per_round"), 1)),
         "model_path": str(contract["model_path"]),
