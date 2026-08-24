@@ -10,7 +10,6 @@ Accepts the same ``ClosedLoopConfig`` fields as train.py. Example::
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import sys
 from datetime import datetime
@@ -19,6 +18,7 @@ from pathlib import Path
 import torch
 from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
 from diffusion_planner.config.config_cli import build_config, build_parser, resolve_paths
+from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
 
 
@@ -309,10 +309,7 @@ def run_closed_loop_main(
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    if ddp.get_rank() == 0:
-        config_dict = {f.name: getattr(cfg, f.name) for f in dataclasses.fields(cfg) if f.repr}
-        with open(out_root / "closed_loop_config.json", "w") as f:
-            json.dump(config_dict, f, indent=2, ensure_ascii=False)
+    save_config(cfg, out_root, "closed_loop_config.json")
 
     if render_media is None:
         render_media = cfg.render_media
