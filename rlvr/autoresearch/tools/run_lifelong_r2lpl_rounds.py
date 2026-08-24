@@ -1089,13 +1089,22 @@ def _ema_inference_model_path(model_path: Path | str) -> Path:
         digest = hashlib.sha1(key.encode()).hexdigest()[:12]
         out_dir = _EMA_INFER_FALLBACK_ROOT / f"{model_path.stem}_{digest}_ema_infer"
     out = out_dir / "best_model.pth"
-    if not out.exists():
+    # Existence alone is not enough: a crash-resume that re-trains and overwrites
+    # the SAME checkpoint path (latest.pth-style) must not reuse the previous
+    # attempt's extraction. Fingerprint the source by (mtime_ns, size) and
+    # re-extract whenever it changed.
+    src_stat = model_path.stat()
+    fingerprint = f"{src_stat.st_mtime_ns}:{src_stat.st_size}"
+    fp_file = out_dir / "source_fingerprint.txt"
+    stale = not out.exists() or not fp_file.exists() or fp_file.read_text() != fingerprint
+    if stale:
         out_dir.mkdir(parents=True, exist_ok=True)
         state = {k.replace("module.", ""): v for k, v in ckpt["ema_state_dict"].items()}
         tmp = out_dir / "best_model.pth.tmp"
         torch.save({"model": state}, tmp)
         tmp.replace(out)
         shutil.copy2(_args_json_for_model(model_path), out_dir / "args.json")
+        fp_file.write_text(fingerprint)
     print(f"[ema] closed-loop inference weights: {out} (EMA of {model_path})")
     _EMA_INFER_CACHE[key] = out
     return out
@@ -2491,6 +2500,8 @@ def _run_repair_phase(
     model_path: Path,
     rdir: Path,
     gpu_ids: list[int],
+    *,
+    allow_empty: bool = False,
 ) -> float:
     credit_jsonl = rdir / "credit_windows.jsonl"
     rows = _read_jsonl(credit_jsonl)
@@ -2505,6 +2516,7 @@ def _run_repair_phase(
             credit_jsonl,
             rdir,
             repair_overrides=overrides,
+            allow_empty=allow_empty,
         )
         return _run(cmd, rdir / "repair.log", env=_env_for_gpu(gpu_id))
 
@@ -2571,7 +2583,7 @@ def _run_repair_phase(
     repaired_paths = _merge_json_lists(repaired_lists, rdir / "repaired_targets.json")
     _merge_jsonl_files(repaired_rows_jsonls, rdir / "repaired_targets.jsonl")
     _merge_unrepaired_lists(unrepaired_lists, rdir / "repaired_targets_unrepaired.json")
-    if not repaired_paths:
+    if not repaired_paths and not allow_empty:
         raise RuntimeError("No repaired targets were produced across repair shards")
     return elapsed
 
@@ -3075,6 +3087,17 @@ def main() -> None:
             print(
                 f"[round {round_idx}] perception_mine SKIPPED — reusing complete output in {rdir}"
             )
+            # The expert-idle filter and credit_windows_paths.json are applied by
+            # THIS process after the miner writes its summary; a crash in that
+            # window (or a threshold changed between attempts) would otherwise
+            # hand repair the unfiltered rows. The filter is idempotent — always
+            # re-apply it on the reused output.
+            reused_credit = rdir / "credit_windows.jsonl"
+            reused_rows = _filter_expert_idle_rows(cfg, _read_jsonl(reused_credit), reused_credit)
+            _write_json(
+                rdir / "credit_windows_paths.json",
+                [row["scene_path"] for row in reused_rows],
+            )
             phase_times["perception_mine"] = 0.0
         else:
             print(f"[round {round_idx}] perception_mine")
@@ -3131,7 +3154,10 @@ def main() -> None:
             )
             print(f"[round {round_idx}] replay_refresh: rows {json.dumps(build_stats)}")
             t_ref = time.perf_counter()
-            _run_repair_phase(cfg, infer_model, ref_dir, gpu_ids)
+            # Zero fresh gate-passing candidates is a legitimate refresh outcome
+            # (frozen targets are kept via the join's no_fresh_candidate branch)
+            # and must not abort the round.
+            _run_repair_phase(cfg, infer_model, ref_dir, gpu_ids, allow_empty=True)
             fresh_rows = sorted(ref_dir.glob("repair_shards/shard_*/repaired_targets.jsonl")) or [
                 ref_dir / "repaired_targets.jsonl"
             ]

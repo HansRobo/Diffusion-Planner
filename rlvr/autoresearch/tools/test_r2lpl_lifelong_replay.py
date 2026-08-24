@@ -2436,6 +2436,7 @@ def test_repair_candidate_selector_requires_safe_fix():
     ]
     reward_rows = [
         SimpleNamespace(
+            centerline=0.0,
             total=-20.0,
             collision_step=None,
             rb_crossing=True,
@@ -2446,6 +2447,7 @@ def test_repair_candidate_selector_requires_safe_fix():
             rb_min_dist=0.0,
         ),
         SimpleNamespace(
+            centerline=0.0,
             total=5.0,
             collision_step=None,
             rb_crossing=False,
@@ -2487,6 +2489,7 @@ def test_repair_candidate_selector_does_not_hard_gate_expert_disagreement():
     ]
     reward_rows = [
         SimpleNamespace(
+            centerline=0.0,
             total=10.0,
             collision_step=None,
             rb_crossing=False,
@@ -2497,6 +2500,7 @@ def test_repair_candidate_selector_does_not_hard_gate_expert_disagreement():
             rb_min_dist=1.0,
         ),
         SimpleNamespace(
+            centerline=0.0,
             total=1.0,
             collision_step=None,
             rb_crossing=False,
@@ -2528,6 +2532,7 @@ def test_expert_disagreement_selection_uses_r2lpl_state_class_weights():
     ]
     reward_rows = [
         SimpleNamespace(
+            centerline=0.0,
             total=0.0,
             collision_step=None,
             rb_crossing=False,
@@ -2538,6 +2543,7 @@ def test_expert_disagreement_selection_uses_r2lpl_state_class_weights():
             rb_min_dist=1.0,
         ),
         SimpleNamespace(
+            centerline=0.0,
             total=10.0,
             collision_step=None,
             rb_crossing=False,
@@ -3929,6 +3935,7 @@ def test_expert_morph_return_diag_reports_stage():
 
 def _morph_outcome_reward_row(total: float, *, rb_crossing: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
+        centerline=0.0,
         total=total,
         collision_step=None,
         rb_crossing=rb_crossing,
@@ -4648,7 +4655,7 @@ def test_main_runs_report_only_guards_per_round(tmp_path, monkeypatch):
         round_runner._write_json(rdir / "credit_windows_paths.json", ["/tmp/a.npz"])
         return 0.0
 
-    def fake_repair(cfg, model_path, rdir, gpu_ids):
+    def fake_repair(cfg, model_path, rdir, gpu_ids, **kwargs):
         round_runner._write_json(rdir / "repaired_targets.json", ["/tmp/repaired_a.npz"])
         round_runner._write_jsonl(
             rdir / "repaired_targets.jsonl",
@@ -5477,7 +5484,7 @@ def test_main_replay_refresh_keeps_max_of_frozen_and_fresh(tmp_path, monkeypatch
 
     refresh_dirs: list[str] = []
 
-    def fake_repair(cfg, model_path, rdir, gpu_ids):
+    def fake_repair(cfg, model_path, rdir, gpu_ids, **kwargs):
         if rdir.name == "replay_refresh":
             refresh_dirs.append(str(rdir))
             # the fresh pass must have been handed the SOURCE scenes to re-repair
@@ -5579,6 +5586,7 @@ def test_main_replay_refresh_keeps_max_of_frozen_and_fresh(tmp_path, monkeypatch
 
 def _mk_reward_row(total=5.0):
     return SimpleNamespace(
+        centerline=0.0,
         total=total,
         collision_step=None,
         rb_crossing=False,

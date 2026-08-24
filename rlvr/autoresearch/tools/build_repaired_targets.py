@@ -852,9 +852,7 @@ def _best_safe_candidate(
     # Route-path consistency: the reward's centerline component IS the
     # route-reference-path adherence score (baselink mode), normalized across
     # survivors like the rule score.
-    ref_scores = _normalize_values(
-        [float(getattr(reward_rows[item[3]], "centerline", 0.0)) for item in accepted]
-    )
+    ref_scores = _normalize_values([float(reward_rows[item[3]].centerline) for item in accepted])
     state_class = _r2lpl_state_class(source_row, mode=state_class_mode)
     if lagging_expert_target == "upweight" and is_lagging_row:
         # Rank lagging rows with near-log weights (expert consistency 0.80 +
@@ -1529,7 +1527,10 @@ def main() -> None:
         default="off",
         help="anti-stall selection for model_lagging_expert rows: 'force' selects the "
         "expert-morph candidate whenever it passes the safety gates; 'upweight' ranks "
-        "these rows with near-log weights (expert consistency 0.80). Default off.",
+        "these rows with near-log weights (expert consistency 0.80); 'force_or_drop' "
+        "extends 'force' to every expert-disagreement row and DROPS the row entirely "
+        "when no expert-morph candidate survives the gates (destructive: such rows "
+        "are excluded from training). Default off.",
     )
     ap.add_argument(
         "--state_class_mode",
