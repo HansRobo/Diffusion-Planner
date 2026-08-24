@@ -5808,7 +5808,7 @@ def test_trust_region_selection_passes_delayed_depart_rejects_far_generated():
 def test_morphs_synthesized_for_reason_only_rows():
     # A stall that ends in a collision is labelled moving_collision while the conflict
     # detector still records model_lagging_expert. Forcing already scopes on the reason;
-    # synthesis must too, or the row is structurally unrepairable (measured: such rows are structurally unrepairable).
+    # synthesis must too, or the row is structurally unrepairable (their det plan cannot express the repair).
     import numpy as np
 
     from rlvr.autoresearch.tools.build_repaired_targets import _best_safe_candidate

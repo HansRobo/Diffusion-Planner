@@ -62,8 +62,12 @@ def main():
 
     # event dedup by log dir + frame index proximity
     def key(p):
-        m = re.search(r"_(\d+)_(\d+)\.npz$", p)
-        return str(Path(p).parent), int(m.group(2)) if m else 0
+        m = re.search(r"_(\d+)\.npz$", p)
+        if m is None:
+            # A silent frame-0 fallback collapses all unparseable scenes of a log
+            # dir into one "event" and dedups unrelated scenes against each other.
+            raise ValueError(f"cannot parse trailing frame index from {p}")
+        return str(Path(p).parent), int(m.group(1))
 
     cands.sort(key=lambda c: (key(c[0])[0], key(c[0])[1]))
     picked = []
@@ -81,6 +85,11 @@ def main():
         if not merged:
             group.append({"path": p, "frame": frame, "onset": onset, "score": score})
 
+    if pool and not cands:
+        raise RuntimeError(
+            f"no resume candidates in a pool of {len(pool)} scenes ({bad} unreadable) — "
+            "wrong pool, unreadable NPZs, or thresholds no scene satisfies"
+        )
     events = [g for group in by_dir.values() for g in group]
     events.sort(key=lambda g: g["score"])
     picked = [g["path"] for g in events[: args.max_scenes]]

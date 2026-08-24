@@ -7,7 +7,6 @@ per-clip MP4s on rank 0 when --save_predictions_dir is set.
 """
 
 import argparse
-import os
 import sys
 from datetime import datetime
 from pathlib import Path

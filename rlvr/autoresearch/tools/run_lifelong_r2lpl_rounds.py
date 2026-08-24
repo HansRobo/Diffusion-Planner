@@ -2542,6 +2542,19 @@ def _run_repair_phase(
     rows = _read_jsonl(credit_jsonl)
     if not rows:
         raise RuntimeError(f"{credit_jsonl} is empty; no mined scenes to repair")
+    # A resume with FEWER GPUs than a crashed attempt must not leave that
+    # attempt's extra shard outputs behind: downstream globs (e.g. the replay
+    # refresh join) would merge stale rows — and on a 1-GPU resume they would
+    # SHADOW the flat single-GPU output entirely.
+    shard_root = rdir / "repair_shards"
+    if shard_root.exists():
+        import shutil
+
+        for stale in sorted(shard_root.glob("shard_*")):
+            if int(stale.name.split("_")[1]) >= max(len(gpu_ids), 1):
+                shutil.rmtree(stale)
+        if len(gpu_ids) <= 1:
+            shutil.rmtree(shard_root)
     if len(gpu_ids) <= 1:
         gpu_id = gpu_ids[0] if gpu_ids else None
         overrides = {"device": "cuda"} if gpu_id is not None else None
@@ -2555,15 +2568,6 @@ def _run_repair_phase(
         )
         return _run(cmd, rdir / "repair.log", env=_env_for_gpu(gpu_id))
 
-    shard_root = rdir / "repair_shards"
-    # A resume with FEWER GPUs than the crashed attempt would otherwise leave the
-    # extra shards' outputs on disk and the later glob would merge stale rows.
-    if shard_root.exists():
-        for stale in sorted(shard_root.glob("shard_*")):
-            if int(stale.name.split("_")[1]) >= len(gpu_ids):
-                import shutil
-
-                shutil.rmtree(stale)
     shard_inputs = [
         shard_root / f"shard_{idx:02d}" / "credit_windows.jsonl" for idx in range(len(gpu_ids))
     ]
@@ -3132,9 +3136,11 @@ def main() -> None:
             )
             # The expert-idle filter and credit_windows_paths.json are applied by
             # THIS process after the miner writes its summary; a crash in that
-            # window (or a threshold changed between attempts) would otherwise
-            # hand repair the unfiltered rows. The filter is idempotent — always
-            # re-apply it on the reused output.
+            # window (or a TIGHTENED threshold between attempts) would otherwise
+            # hand repair under-filtered rows. The filter is idempotent — always
+            # re-apply it on the reused output. NOTE: LOOSENING the threshold on
+            # a resume cannot resurrect rows already rewritten away; restore
+            # credit_windows_unfiltered.jsonl manually for that.
             reused_credit = rdir / "credit_windows.jsonl"
             reused_rows = _filter_expert_idle_rows(cfg, _read_jsonl(reused_credit), reused_credit)
             _write_json(

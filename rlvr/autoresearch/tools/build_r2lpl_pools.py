@@ -128,7 +128,8 @@ def _moving_filter(paths: list[str], thresh: float, workers: int) -> tuple[list[
     if paths and not keep:
         raise RuntimeError(
             f"moving filter kept 0 of {len(paths)} scenes ({unreadable} unreadable) — "
-            "wrong dataset root, corrupt NPZs, or a threshold above every displacement"
+            "wrong dataset root, corrupt NPZs, a threshold above every displacement, "
+            "or (for stopgo) a stop pool where genuinely no scene takes off"
         )
     return keep, unreadable
 

@@ -130,7 +130,7 @@ class RewardConfig:
     # |ratio - 1| at slope ``progress_band_penalty``, and the existing one-sided
     # under/overprogress penalties continue OUTSIDE the band (so the total is continuous).
     # Rationale: with a flat band there is no gradient toward expert pace, so candidate
-    # selection drifts to the cautious edge of the tolerance (2026-08 campaign finding).
+    # selection drifts to the cautious edge of the tolerance.
     progress_band_continuous: bool = False
     progress_band_penalty: float = 30.0
 

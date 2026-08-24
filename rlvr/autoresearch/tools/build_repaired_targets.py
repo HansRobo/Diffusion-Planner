@@ -1168,7 +1168,7 @@ def build_repaired_targets(
             # here silently drops morph outcome telemetry for reason-only rows.
             is_expert = _row_is_ed_like(row)
 
-            # Expert-reference scoring (ALL rows, 2026-08-07): the progress terms must
+            # Expert-reference scoring (ALL rows): the progress terms must
             # reference the LOGGED EXPERT for every mistake type, not the realized ego.
             # In closed-loop mined windows ego_agent_future is truncated at the contact
             # step (RB/MC rows typically retain only a few valid steps / a couple of
