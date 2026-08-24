@@ -79,7 +79,7 @@ class DiffusionPlannerTest(unittest.TestCase):
             decoder_depth=1,
             trajectory_encoder_depth=1,
             feedforward_dim=32,
-            embed_dim=8,
+            element_mixer_hidden_dim=8,
         )
         self.input_data = make_input_data()
 

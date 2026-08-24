@@ -27,7 +27,7 @@ class OnnxWrapperTest(unittest.TestCase):
             decoder_depth=1,
             trajectory_encoder_depth=1,
             feedforward_dim=32,
-            embed_dim=8,
+            element_mixer_hidden_dim=8,
         ).eval()
         input_data = make_input_data()
         scene_wrapper = SceneEncoderOnnxWrapper(model.scene_encoder).eval()
@@ -53,7 +53,7 @@ class OnnxWrapperTest(unittest.TestCase):
             decoder_depth=1,
             trajectory_encoder_depth=1,
             feedforward_dim=32,
-            embed_dim=8,
+            element_mixer_hidden_dim=8,
         ).eval()
         input_data = make_input_data()
         wrapper = DiffusionPlannerSamplerOnnxWrapper(model).eval()

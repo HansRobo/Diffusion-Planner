@@ -49,7 +49,7 @@ class SceneEncoderTest(unittest.TestCase):
             num_heads=4,
             fusion_depth=1,
             encoder_depth=1,
-            embed_dim=8,
+            mixer_hidden_dim=8,
         )
         input_data = {
             "ego_agent_past": torch.zeros(2, EGO_HISTORY_LENGTH, 6),
@@ -137,7 +137,7 @@ class EgoHistoryEncoderTest(unittest.TestCase):
             drop_path_rate=0.0,
             hidden_dim=16,
             depth=1,
-            embed_dim=8,
+            mixer_hidden_dim=8,
         )
 
     def test_encodes_velocity_threshold_history(self) -> None:
@@ -195,7 +195,7 @@ class MapLineEncoderTest(unittest.TestCase):
             drop_path_rate=0.0,
             hidden_dim=16,
             depth=1,
-            embed_dim=8,
+            mixer_hidden_dim=8,
         )
         intersection_area = torch.zeros(
             2, 3, INTERSECTION_AREA_LENGTH, 2, requires_grad=True
@@ -220,7 +220,7 @@ class MapLineEncoderTest(unittest.TestCase):
             drop_path_rate=0.0,
             hidden_dim=16,
             depth=1,
-            embed_dim=8,
+            mixer_hidden_dim=8,
         )
         road_borders = torch.zeros(2, 3, ROAD_BORDER_LENGTH, 2, requires_grad=True)
         with torch.no_grad():
@@ -241,7 +241,7 @@ class MapLineEncoderTest(unittest.TestCase):
             drop_path_rate=0.0,
             hidden_dim=8,
             depth=0,
-            embed_dim=4,
+            mixer_hidden_dim=4,
         )
         stop_lines = torch.zeros(1, 2, 2, 2)
         stop_lines[0, 0] = torch.tensor([[1.0, -1.0], [1.0, 1.0]])
@@ -260,7 +260,7 @@ class NeighborAgentEncoderTest(unittest.TestCase):
             drop_path_rate=0.0,
             hidden_dim=16,
             depth=1,
-            embed_dim=8,
+            mixer_hidden_dim=8,
         )
         history = torch.zeros(2, 3, EGO_HISTORY_LENGTH, 4, requires_grad=True)
         with torch.no_grad():
@@ -290,7 +290,7 @@ class LaneEncoderTest(unittest.TestCase):
             drop_path_rate=0.0,
             hidden_dim=16,
             depth=1,
-            embed_dim=8,
+            mixer_hidden_dim=8,
         )
 
     def test_encodes_all_lane_attributes_and_masks_padding(self) -> None:
