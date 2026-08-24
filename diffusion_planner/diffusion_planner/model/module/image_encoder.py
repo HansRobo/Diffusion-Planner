@@ -180,6 +180,13 @@ class ViTBackbone(nn.Module):
             global_pool="",
             img_size=image_size,
             in_chans=3,
+            # DINOv3 defaults to accepting any resolution, which makes it rebuild its rotary
+            # position embedding from the input's shape on every call.  That traces into ONNX as
+            # Shape-driven branches whose outputs have no static rank, and TensorRT refuses to
+            # build the graph.  The raster size is fixed at bev_image_size, so the embedding is a
+            # constant: pinning the resolution caches it once, leaves the outputs bit-identical,
+            # and lets the graph through.
+            dynamic_img_size=False,
         )
         # Registers and a class token sit in front of the patch tokens in ``forward_features``;
         # they carry no position, so the merger must never see them.
