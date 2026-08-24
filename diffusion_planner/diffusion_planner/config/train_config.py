@@ -45,6 +45,19 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     )
     bev_image_size: int = 224
 
+    # Trunk that turns a BEV raster into tokens (image input only).  "resnet18" is trained from
+    # scratch on the raw semantic planes.  The DINOv3 trunks are patch-16, so a 2x2 merger
+    # brings them back to the ResNet's token count and the decoder's cost never moves; a learned
+    # per-pixel MLP folds the planes down to the 3 channels they expect (see ChannelAdapter).
+    image_backbone: Literal["resnet18", "dinov3_small", "dinov3_base"] = cli(
+        "trunk that encodes the BEV rasters", default="resnet18"
+    )
+
+    # Only valid for a DINOv3 trunk: its pretrained weights are then left untouched and it stays
+    # in eval mode.  The channel adapter and the 2x2 merger around it train either way, so
+    # gradients still flow through the trunk; only its own weights are spared.
+    freeze_image_backbone: bool = cli("leave the DINOv3 weights untrained", default=False)
+
     # ---------------------------------------------------------
     # DataLoader Parameters
     # ---------------------------------------------------------

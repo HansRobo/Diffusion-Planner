@@ -350,10 +350,15 @@ def model_training(args: TrainConfig):
             )
         )
 
-    # optimizer
+    # optimizer.  A frozen image trunk (see freeze_image_backbone) reports requires_grad=False
+    # and is skipped here, so AdamW never allocates moment buffers for its weights.
     params = [
         {
-            "params": ddp.get_model(diffusion_planner, args.ddp).parameters(),
+            "params": [
+                p
+                for p in ddp.get_model(diffusion_planner, args.ddp).parameters()
+                if p.requires_grad
+            ],
             "lr": args.learning_rate,
         }
     ]

@@ -1,9 +1,10 @@
 """Encoder that consumes rendered BEV images instead of the raw vector scene.
 
 Each sample carries ``NUM_SCALES`` multi-channel BEV rasters (see
-:mod:`diffusion_planner.utils.render_bev`).  One ResNet, shared across every scale, turns
-each raster into a spatial feature map; the cells of that map become the tokens handed to
-the decoder, tagged with a learned cell position and a learned per-scale embedding.
+:mod:`diffusion_planner.utils.render_bev`).  One trunk, shared across every scale, turns each
+raster into a small grid of tokens; those become the tokens handed to the decoder, tagged with
+a learned cell position and a learned per-scale embedding.  ``config.image_backbone`` picks the
+trunk, and every choice yields the same token count, so the decoder never notices the swap.
 
 A raster cannot carry everything the planner needs, so a few scalar tokens are appended,
 reusing the same small encoders as the vector pipeline:
@@ -20,6 +21,7 @@ raster draws it on ``CH_GOAL_POSE`` on the rare frames where it actually falls i
 and the route channel carries the intent that matters within the horizon.
 """
 
+import timm
 import torch
 import torch.nn as nn
 from torchvision.models import resnet18
@@ -36,6 +38,26 @@ RESNET_FEATURE_DIM = 512
 RESNET_STRIDE = 32  # total downsampling factor of resnet18 up to layer4
 UINT8_SCALE = 255.0
 
+# Side of the token neighbourhood the merger folds into one token.  A ViT/16 leaves a 14x14
+# grid per 224px view against the ResNet's 7x7, so merging 2x2 restores the ResNet's token
+# count and every trunk hands the decoder exactly the same number of tokens.
+PIXEL_MERGE_SIZE = 2
+
+# Width of the per-pixel MLP that folds the semantic planes down to the 3 channels a pretrained
+# trunk expects.  Parameters are not what this costs: at 1x1 it holds barely a thousand of
+# them, but it runs at the full raster resolution, so its activations are what the backward
+# pass has to keep.  Measured at batch 32, every doubling of this width adds ~0.4 GiB of peak
+# memory and ~0.2 ms per sample, which is why it is not simply set generously wide.
+CHANNEL_ADAPTER_HIDDEN = 32
+
+# timm entry point of every pretrained ViT trunk that can stand in for the ResNet.  Both are
+# patch-16, so they land on the same 14x14 grid and the merger below restores the ResNet's
+# token count; DINOv2 is patch-14 and would not, which is why it is absent.
+TIMM_MODEL_OF_BACKBONE = {
+    "dinov3_small": "vit_small_patch16_dinov3.lvd1689m",
+    "dinov3_base": "vit_base_patch16_dinov3.lvd1689m",
+}
+
 
 class BevBackbone(nn.Module):
     """ResNet18 trunk adapted to ``NUM_CHANNELS`` semantic input planes.
@@ -45,8 +67,14 @@ class BevBackbone(nn.Module):
     have to be reshaped anyway.
     """
 
-    def __init__(self, in_channels: int, out_dim: int):
+    def __init__(self, in_channels: int, image_size: int, out_dim: int):
         super().__init__()
+        assert image_size % RESNET_STRIDE == 0, (
+            f"bev_image_size={image_size} must be a multiple of {RESNET_STRIDE}"
+        )
+        self.grid_size = image_size // RESNET_STRIDE
+        self.tokens_per_image = self.grid_size * self.grid_size
+
         trunk = resnet18(weights=None)
         trunk.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.stem = nn.Sequential(trunk.conv1, trunk.bn1, trunk.relu, trunk.maxpool)
@@ -57,13 +85,161 @@ class BevBackbone(nn.Module):
         self.proj = nn.Conv2d(RESNET_FEATURE_DIM, out_dim, kernel_size=1)
 
     def forward(self, images):
-        """images: (N, C, H, W) float -> (N, out_dim, H / 32, W / 32)."""
+        """images: (N, C, H, W) float -> (N, tokens_per_image, out_dim)."""
         x = self.stem(images)
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-        return self.proj(x)
+        x = self.proj(x)
+        return x.flatten(2).transpose(1, 2)
+
+
+class ChannelAdapter(nn.Module):
+    """Learned per-pixel MLP folding the semantic planes into the 3 channels a trunk expects.
+
+    Staying at 3 channels keeps the pretrained patch embedding usable instead of discarding it
+    for a randomly initialised ``NUM_CHANNELS`` convolution, and a learned fold beats a fixed
+    colour palette: which planes deserve to survive the squeeze is exactly the kind of question
+    the data can answer and a hand-picked palette cannot.
+
+    It is always trained, including when the trunk is frozen -- which is why the frozen trunk
+    is not run under ``no_grad``: gradients have to reach back through it to here.  The 1x1
+    convolutions make this an MLP applied independently to every pixel, so it re-weights planes
+    but never mixes neighbours; all spatial work stays in the trunk.
+
+    No fixed input normalisation follows it.  The pretrained mean/std is an affine map, which
+    this MLP's last layer can represent and absorb on its own.
+    """
+
+    def __init__(self, in_channels: int, hidden_channels: int, out_channels: int):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_channels, out_channels, kernel_size=1),
+        )
+
+    def forward(self, images):
+        """(N, NUM_CHANNELS, H, W) in [0, 1] -> (N, 3, H, W) in the trunk's input space."""
+        return self.mlp(images)
+
+
+class PixelMerger(nn.Module):
+    """Qwen-VL's patch merger: LayerNorm, 2x2 concat, Linear, GELU, Linear.
+
+    Folding a 2x2 neighbourhood with a learned projection rather than with pooling keeps the
+    detail the four tokens disagree on, and brings the ViT grid back to the token count the
+    decoder already saw from the ResNet.
+    """
+
+    def __init__(self, in_dim: int, grid_size: int, merge_size: int, out_dim: int):
+        super().__init__()
+        assert grid_size % merge_size == 0, (
+            f"token grid {grid_size} is not divisible by merge size {merge_size}"
+        )
+        self.merge_size = merge_size
+        self.merged_grid = grid_size // merge_size
+        merged_dim = in_dim * merge_size * merge_size
+
+        self.norm = nn.LayerNorm(in_dim, eps=1e-6)
+        self.mlp = nn.Sequential(
+            nn.Linear(merged_dim, merged_dim),
+            nn.GELU(),
+            nn.Linear(merged_dim, out_dim),
+        )
+
+    def forward(self, tokens):
+        """(N, grid_size ** 2, in_dim) -> (N, merged_grid ** 2, out_dim)."""
+        num_images = tokens.shape[0]
+        merge = self.merge_size
+        x = self.norm(tokens)
+        x = x.view(num_images, self.merged_grid, merge, self.merged_grid, merge, -1)
+        x = x.permute(0, 1, 3, 2, 4, 5).reshape(num_images, self.merged_grid**2, -1)
+        return self.mlp(x)
+
+
+class ViTBackbone(nn.Module):
+    """A pretrained timm ViT trunk plus the 2x2 merger, standing in for :class:`BevBackbone`.
+
+    ``freeze`` leaves the pretrained weights exactly as they came and holds the trunk in eval
+    mode, so its features stay deterministic.  Gradients still flow *through* it, because the
+    channel adapter in front of it always trains; only the trunk's own weights are spared a
+    gradient and an optimizer slot.
+    """
+
+    def __init__(self, backbone: str, image_size: int, out_dim: int, freeze: bool):
+        super().__init__()
+        assert backbone in TIMM_MODEL_OF_BACKBONE, f"unknown image_backbone {backbone}"
+
+        self.freeze = freeze
+        self.trunk = timm.create_model(
+            TIMM_MODEL_OF_BACKBONE[backbone],
+            pretrained=True,
+            num_classes=0,
+            global_pool="",
+            img_size=image_size,
+            in_chans=3,
+        )
+        # Registers and a class token sit in front of the patch tokens in ``forward_features``;
+        # they carry no position, so the merger must never see them.
+        self.num_prefix_tokens = self.trunk.num_prefix_tokens
+
+        patch_size = self.trunk.patch_embed.patch_size[0]
+        assert image_size % patch_size == 0, (
+            f"bev_image_size={image_size} must be a multiple of patch size {patch_size}"
+        )
+        grid_size = image_size // patch_size
+
+        self.to_pixels = ChannelAdapter(
+            in_channels=NUM_CHANNELS,
+            hidden_channels=CHANNEL_ADAPTER_HIDDEN,
+            out_channels=self.trunk.patch_embed.proj.in_channels,
+        )
+
+        self.merger = PixelMerger(
+            in_dim=self.trunk.embed_dim,
+            grid_size=grid_size,
+            merge_size=PIXEL_MERGE_SIZE,
+            out_dim=out_dim,
+        )
+        self.tokens_per_image = self.merger.merged_grid**2
+
+        if freeze:
+            self.trunk.requires_grad_(False)
+            self.trunk.eval()
+
+    def train(self, mode: bool = True):
+        """Keep a frozen trunk in eval mode however the enclosing model is switched."""
+        super().train(mode)
+        if self.freeze:
+            self.trunk.eval()
+        return self
+
+    def forward(self, images):
+        """images: (N, NUM_CHANNELS, H, W) float in [0, 1] -> (N, tokens_per_image, out_dim)."""
+        pixels = self.to_pixels(images)
+        features = self.trunk.forward_features(pixels)
+        return self.merger(features[:, self.num_prefix_tokens :, :])
+
+
+def build_bev_backbone(config):
+    """Pick the raster trunk matching ``config.image_backbone``."""
+    if config.image_backbone == "resnet18":
+        assert not config.freeze_image_backbone, (
+            "the ResNet is trained from scratch, so freezing it would leave it random"
+        )
+        return BevBackbone(
+            in_channels=NUM_CHANNELS,
+            image_size=config.bev_image_size,
+            out_dim=config.hidden_dim,
+        )
+    return ViTBackbone(
+        backbone=config.image_backbone,
+        image_size=config.bev_image_size,
+        out_dim=config.hidden_dim,
+        freeze=config.freeze_image_backbone,
+    )
 
 
 class ImageEncoder(nn.Module):
@@ -73,17 +249,10 @@ class ImageEncoder(nn.Module):
         self.hidden_dim = config.hidden_dim
         self.use_turn_indicators = config.use_turn_indicators
 
-        grid_size = config.bev_image_size // RESNET_STRIDE
-        if grid_size * RESNET_STRIDE != config.bev_image_size:
-            raise ValueError(
-                f"bev_image_size={config.bev_image_size} must be a multiple of {RESNET_STRIDE}"
-            )
         self.image_size = config.bev_image_size
-        self.grid_size = grid_size
-        self.tokens_per_image = grid_size * grid_size
+        self.backbone = build_bev_backbone(config)
+        self.tokens_per_image = self.backbone.tokens_per_image
         self.image_token_num = NUM_SCALES * self.tokens_per_image
-
-        self.backbone = BevBackbone(in_channels=NUM_CHANNELS, out_dim=config.hidden_dim)
 
         # One embedding per feature-map cell, shared by both scales, plus one per scale so
         # the decoder can tell the near view from the far view.
@@ -133,8 +302,7 @@ class ImageEncoder(nn.Module):
             images = images.float() / UINT8_SCALE
         flat = images.reshape(B * S, *images.shape[2:])
 
-        features = self.backbone(flat)  # (B * S, hidden_dim, G, G)
-        tokens = features.flatten(2).transpose(1, 2)  # (B * S, G * G, hidden_dim)
+        tokens = self.backbone(flat)  # (B * S, tokens_per_image, hidden_dim)
         tokens = tokens + self.cell_embedding
         tokens = tokens.view(B, S, self.tokens_per_image, self.hidden_dim)
         tokens = tokens + self.scale_embedding
