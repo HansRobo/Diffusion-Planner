@@ -84,10 +84,13 @@ def _end_displacement(path: str) -> float | None:
         return None
 
 
-def _moving_worker(args: tuple[str, float]) -> str | None:
+def _moving_worker(args: tuple[str, float]) -> tuple[str, bool] | None:
+    """Returns (path, kept); None means the scene was unreadable."""
     path, thresh = args
     disp = _end_displacement(path)
-    return path if disp is not None and disp >= thresh else None
+    if disp is None:
+        return None
+    return (path, disp >= thresh)
 
 
 def cmd_subsample(args: argparse.Namespace) -> None:
@@ -102,27 +105,38 @@ def cmd_subsample(args: argparse.Namespace) -> None:
 
 def cmd_moving(args: argparse.Namespace) -> None:
     paths = _read_list(args.scene_list)
-    keep: list[str] = []
-    with ProcessPoolExecutor(max_workers=args.workers) as ex:
-        for result in ex.map(
-            _moving_worker, ((p, args.min_end_displacement_m) for p in paths), chunksize=256
-        ):
-            if result is not None:
-                keep.append(result)
-    print(f"[moving] kept {len(keep)}/{len(paths)} (threshold {args.min_end_displacement_m} m)")
+    keep, unreadable = _moving_filter(paths, args.min_end_displacement_m, args.workers)
+    print(
+        f"[moving] kept {len(keep)}/{len(paths)} "
+        f"(threshold {args.min_end_displacement_m} m, {unreadable} unreadable)"
+    )
     _write_list(keep, args.out)
+
+
+def _moving_filter(paths: list[str], thresh: float, workers: int) -> tuple[list[str], int]:
+    keep: list[str] = []
+    unreadable = 0
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        for result in ex.map(_moving_worker, ((p, thresh) for p in paths), chunksize=256):
+            if result is None:
+                unreadable += 1
+            elif result[1]:
+                keep.append(result[0])
+    # An unreadable corpus must not silently shrink the pool to nothing: a wrong
+    # dataset root or format mismatch makes EVERY scene unreadable, and an empty
+    # pool would propagate into training as a quiet no-op.
+    if paths and not keep:
+        raise RuntimeError(
+            f"moving filter kept 0 of {len(paths)} scenes ({unreadable} unreadable) — "
+            "wrong dataset root, corrupt NPZs, or a threshold above every displacement"
+        )
+    return keep, unreadable
 
 
 def cmd_stopgo(args: argparse.Namespace) -> None:
     pool = _read_list(args.stop_pool)
-    keep: list[str] = []
-    with ProcessPoolExecutor(max_workers=args.workers) as ex:
-        for result in ex.map(
-            _moving_worker, ((p, args.min_end_displacement_m) for p in pool), chunksize=256
-        ):
-            if result is not None:
-                keep.append(result)
-    print(f"[stopgo] {len(keep)}/{len(pool)} stop-pool scenes take off")
+    keep, unreadable = _moving_filter(pool, args.min_end_displacement_m, args.workers)
+    print(f"[stopgo] {len(keep)}/{len(pool)} stop-pool scenes take off ({unreadable} unreadable)")
     if args.union_with is not None:
         prev = _read_list(args.union_with)
         keep = sorted(set(prev) | set(keep))
@@ -146,7 +160,12 @@ def cmd_dedup(args: argparse.Namespace) -> None:
             if last is None or idx - last >= args.min_frame_gap:
                 kept_set.add(p)
                 last = idx
-    kept = [p for p in paths if p in kept_set]
+    seen: set[str] = set()
+    kept = []
+    for p in paths:
+        if p in kept_set and p not in seen:
+            seen.add(p)
+            kept.append(p)
     print(f"[dedup] kept {len(kept)}/{len(paths)} (min frame gap {args.min_frame_gap})")
     _write_list(kept, args.out)
 
@@ -187,7 +206,16 @@ def cmd_arc_region(args: argparse.Namespace) -> None:
             and np.linalg.norm(b - goal) < args.endpoint_tol_m
         ):
             full += 1
-            pts = np.array([p for p in (_sidecar_pose(x) for x in paths) if p is not None])
+            poses = [_sidecar_pose(x) for x in paths]
+            n_missing = sum(1 for q in poses if q is None)
+            if n_missing:
+                # Dropping interior points compresses the cumulative arc length and
+                # silently shifts the [arc_from_m, arc_to_m] window along the route.
+                raise RuntimeError(
+                    f"arc-region: drive matched the endpoints but {n_missing}/{len(paths)} "
+                    "pose sidecars are unreadable — arc coordinates would be distorted"
+                )
+            pts = np.array(poses)
             arc = np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
             mask = (arc >= args.arc_from_m) & (arc <= args.arc_to_m)
             seg_pts.append(pts[mask])
@@ -213,11 +241,12 @@ def _region_init(region_path: str, radius: float) -> None:
     _RADIUS = radius
 
 
-def _near_region(path: str) -> bool:
+def _near_region(path: str) -> bool | None:
+    """True/False = inside/outside the region; None = pose unavailable."""
     assert _REGION is not None and _RADIUS is not None
     xy = _sidecar_pose(path)
     if xy is None:
-        return False
+        return None
     return bool((np.linalg.norm(_REGION - xy, axis=1) < _RADIUS).any())
 
 
@@ -229,6 +258,14 @@ def cmd_arc_exclude(args: argparse.Namespace) -> None:
         initargs=(str(args.region), args.radius_m),
     ) as ex:
         flags = list(ex.map(_near_region, paths, chunksize=256))
+    missing = [p for p, f in zip(paths, flags, strict=True) if f is None]
+    if missing:
+        # For an EXCLUSION filter, an unverifiable pose silently defaulting to
+        # "keep" would retain scenes inside the excluded region — fail loudly.
+        raise RuntimeError(
+            f"arc-exclude: {len(missing)}/{len(paths)} scenes have no readable pose "
+            f"sidecar (first: {missing[0]}) — cannot verify region membership"
+        )
     kept = [p for p, f in zip(paths, flags, strict=True) if not f]
     print(
         f"[arc-exclude] excluded {len(paths) - len(kept)}/{len(paths)} (radius {args.radius_m} m)"

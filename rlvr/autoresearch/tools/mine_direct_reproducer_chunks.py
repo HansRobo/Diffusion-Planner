@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import re
+import statistics
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -868,19 +869,17 @@ def main() -> None:
     realized_cl_reward_poses = 0
     realized_cl_reward_components = None
     realized_cl_reward_sd = realized_cl_reward_sem = None
+    realized_cl_reward_segments = 0
     if realized_reward_finalize is not None:
         t_rew = time.perf_counter()
         realized_cl_reward, realized_cl_reward_poses = realized_reward_finalize()
         realized_cl_reward_components = getattr(realized_reward_finalize, "components", None)
         _per_seg = getattr(realized_reward_finalize, "per_segment_rewards", None) or []
+        realized_cl_reward_segments = len(_per_seg)
         if _per_seg:
-            import statistics as _st
-
-            _sd = _st.pstdev(_per_seg) if len(_per_seg) > 1 else 0.0
+            _sd = statistics.pstdev(_per_seg) if len(_per_seg) > 1 else 0.0
             realized_cl_reward_sd = _sd
             realized_cl_reward_sem = _sd / (len(_per_seg) ** 0.5)
-        else:
-            realized_cl_reward_sd = realized_cl_reward_sem = None
         print(
             f"[realized_reward] mean={realized_cl_reward:.4f} over "
             f"{realized_cl_reward_poses} poses ({time.perf_counter() - t_rew:.1f}s)"
@@ -909,6 +908,7 @@ def main() -> None:
         "realized_cl_reward_poses": int(realized_cl_reward_poses),
         "realized_cl_reward_components": realized_cl_reward_components,
         "realized_cl_reward_sd": realized_cl_reward_sd,
+        "realized_cl_reward_segments": int(realized_cl_reward_segments),
         "realized_cl_reward_sem": realized_cl_reward_sem,
         "elapsed_sec": round(elapsed, 3),
         "chunks_per_sec": n_simulated / elapsed if elapsed > 0 and n_simulated else 0.0,

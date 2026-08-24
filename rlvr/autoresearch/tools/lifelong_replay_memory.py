@@ -126,7 +126,7 @@ def build_memory(
             # candidate's reward total: a LOWER total means every candidate
             # scored badly there, i.e. a harder scene. Negate so harder rows
             # rank higher. Without this every row ties at 1.0 and eviction
-            # degenerates to the alphabetical tiebreak (FIX_DIARY #184/#187).
+            # degenerates to the alphabetical tiebreak.
             difficulty_raw[path] = -float(row["selected_total"])
         else:
             difficulty_raw[path] = float(explicit if explicit is not None else 1.0)

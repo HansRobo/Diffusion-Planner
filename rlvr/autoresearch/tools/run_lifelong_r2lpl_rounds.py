@@ -366,7 +366,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     for _mk in ("expert_morph_w_max", "expert_morph_max_accel", "expert_morph_max_jerk"):
         if repair.get(_mk) is not None:
             repair_cfg[_mk] = float(repair[_mk])
-    # Depart morph defaults ON (FIX_DIARY #104/#106): the campaign's primary repair label is
+    # Depart morph defaults ON: the campaign's primary repair label is
     # expert_disagreement and the departure response must not depend on remembering a flag.
     # An explicit false in the workflow is the opt-out.
     repair_cfg["enable_depart_morph"] = bool(repair.get("enable_depart_morph", True))
@@ -1100,7 +1100,7 @@ def _ema_inference_model_path(model_path: Path | str) -> Path:
     if stale:
         out_dir.mkdir(parents=True, exist_ok=True)
         state = {k.replace("module.", ""): v for k, v in ckpt["ema_state_dict"].items()}
-        tmp = out_dir / "best_model.pth.tmp"
+        tmp = out_dir / f"best_model.pth.tmp.{os.getpid()}"
         torch.save({"model": state}, tmp)
         tmp.replace(out)
         shutil.copy2(_args_json_for_model(model_path), out_dir / "args.json")
@@ -2339,6 +2339,28 @@ def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
                 comp_totals[key] = comp_totals.get(key, 0) + value
         if comp_totals:
             aggregate["realized_cl_reward_components"] = comp_totals
+        # Pooled spread across shards (law of total variance over per-shard
+        # segment groups); without it multi-GPU rounds lose exactly the SD/SEM
+        # telemetry that stops small reward deltas being over-read.
+        groups = [
+            (
+                float(s["realized_cl_reward"]),
+                float(s["realized_cl_reward_sd"]),
+                int(s["realized_cl_reward_segments"]),
+            )
+            for s in summaries
+            if s.get("realized_cl_reward_sd") is not None
+            and int(s.get("realized_cl_reward_segments") or 0) > 0
+        ]
+        n_total = sum(n for _, _, n in groups)
+        if n_total > 1:
+            pooled_mean = sum(m * n for m, _, n in groups) / n_total
+            pooled_var = (
+                sum(n * (sd**2) + n * (m - pooled_mean) ** 2 for m, sd, n in groups) / n_total
+            )
+            aggregate["realized_cl_reward_sd"] = pooled_var**0.5
+            aggregate["realized_cl_reward_sem"] = (pooled_var**0.5) / (n_total**0.5)
+            aggregate["realized_cl_reward_segments"] = n_total
     _write_json(output, aggregate)
     return aggregate
 
@@ -2449,6 +2471,19 @@ def _filter_expert_idle_rows(
             dropped += 1
         else:
             kept.append(row)
+    if rows and not kept:
+        raise RuntimeError(
+            f"expert_min_end_progress_m={threshold} dropped ALL {len(rows)} mined rows — "
+            "threshold above every expert progress; refusing to hand repair an empty corpus"
+        )
+    # Keep the unfiltered rows next to the filtered file: the rewrite is otherwise
+    # destructive, and a resume with a LOOSENED threshold could never resurrect
+    # dropped rows from the filtered artifact alone.
+    unfiltered = credit_jsonl.with_name(credit_jsonl.stem + "_unfiltered.jsonl")
+    if not unfiltered.exists():
+        with unfiltered.open("w") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
     with credit_jsonl.open("w") as fh:
         for row in kept:
             fh.write(json.dumps(row) + "\n")
@@ -2481,7 +2516,7 @@ def _replay_row_sources(cfg: dict[str, Any], out: Path, round_idx: int) -> list[
         # rows live in the previous round's memory (persist keeps source_scene_path and
         # updates selected_total) and in its replay_refresh jsonls — not in
         # repaired_targets.jsonl, which keys the ORIGINAL paths. Without these the round-3
-        # lookup fails on every repointed scene (caught by the persistence smoke).
+        # lookup fails on every repointed scene.
         mem = prev_dir / f"round_{prev}_memory.json"
         if mem.is_file():
             sources.append(str(mem))
@@ -2521,6 +2556,14 @@ def _run_repair_phase(
         return _run(cmd, rdir / "repair.log", env=_env_for_gpu(gpu_id))
 
     shard_root = rdir / "repair_shards"
+    # A resume with FEWER GPUs than the crashed attempt would otherwise leave the
+    # extra shards' outputs on disk and the later glob would merge stale rows.
+    if shard_root.exists():
+        for stale in sorted(shard_root.glob("shard_*")):
+            if int(stale.name.split("_")[1]) >= len(gpu_ids):
+                import shutil
+
+                shutil.rmtree(stale)
     shard_inputs = [
         shard_root / f"shard_{idx:02d}" / "credit_windows.jsonl" for idx in range(len(gpu_ids))
     ]
@@ -3112,7 +3155,8 @@ def main() -> None:
                 raise RuntimeError(
                     f"mining simulated 0 of {_ms.get('planned_chunks')} planned chunks "
                     f"({_ms.get('skipped_chunks')} skipped) — the scenes could not be loaded. "
-                    f"Inspect {rdir}/perception_mine_shards/shard_00/segments.skipped.jsonl "
+                    "Inspect the segments.skipped.jsonl next to the miner output "
+                    f"(under {rdir}, or per-shard under perception_mine_shards/) "
                     "(a staged/incomplete dataset copy missing sidecar files does this)."
                 )
         print(f"[round {round_idx}] repair")

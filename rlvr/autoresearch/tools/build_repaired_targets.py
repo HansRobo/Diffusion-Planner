@@ -221,8 +221,8 @@ def _candidate_is_interaction_risky(label_row: dict[str, Any]) -> bool:
 
     Expert-paced targets are faster than the model's natural output, so a morph can clear the
     collision gate while carrying moving_near_miss / moving_ttc. Training on those teaches
-    "drive at expert pace close to other vehicles" — measured: a non-trivial share of expert targets
-    (11.5%) carried such labels, and that round's probe moving collisions went 11 -> 21.
+    "drive at expert pace close to other vehicles" — measured to noticeably increase probe
+    moving collisions when such targets were trained on.
     """
     labels = {str(x) for x in label_row.get("labels", [])}
     if labels.intersection(_INTERACTION_RISK_LABELS):
@@ -273,7 +273,7 @@ def _candidate_path_deviation(
     For the depart candidate the schedule differs from the expert BY DESIGN (a feasible
     catch-up starts from the stalled ego), so pointwise L2 conflates the intended delay
     with geometric divergence and the trust region vetoes exactly the rows the candidate
-    exists for (measured: well under 1% of stall rows repaired, with heavy trust-region drops).
+    exists for (measured: stall rows were nearly all vetoed under pointwise L2).
     This measures what the trust region actually wants to bound — how far the candidate's
     GEOMETRY strays from the expert's — via the canonical point-to-segment helper.
     Mirrors ``_candidate_deviation_penalty``'s null handling.
@@ -406,10 +406,12 @@ def _r2lpl_state_class(source_row: dict[str, Any], *, mode: str = "progress_dev"
         if d_xy <= _STATE_DEV_REC_XY_M and d_yaw <= _STATE_DEV_REC_YAW_DEG:
             return "recoverable"
         return "far_offpolicy"
-    if "expert_disagreement" not in set(source_row.get("repair_labels", [])):
-        # Collision/road-border rows carry no measured log-deviation; they are
+    if not _row_is_ed_like(source_row):
+        # Rows with NO disagreement measurement (pure collision/road-border) are
         # off-log by construction (the realized rollout failed where the log did
-        # not) but not beyond salvage -> the paper's middle class.
+        # not) but not beyond salvage -> the paper's middle class. Rows that DO
+        # carry a measured expert_disagreement_max_dev — including
+        # collision/border-labelled rows with the reason field — classify by it.
         return "recoverable"
     dev = float(source_row.get("expert_disagreement_max_dev", 0.0))
     if dev <= 1.0:
@@ -740,8 +742,14 @@ def _best_safe_candidate(
                     float(getattr(r, "sc_min_dist", -99.0)) for r in reward_rows
                 ),
             }
-            for prefix, _idx_s in scripted.items():
-                meta[f"{prefix}_outcome"] = "trust_region_rejected"
+            accepted_idx = {item[3] for item in accepted}
+            for prefix, idx_s in scripted.items():
+                # A scripted candidate that never passed the safety gates was not
+                # rejected by the trust region — stamping it so corrupts drop-rate
+                # audits that attribute rejections to the gate.
+                meta[f"{prefix}_outcome"] = (
+                    "trust_region_rejected" if idx_s in accepted_idx else "gate_rejected"
+                )
             return None, meta
         accepted = within
 

@@ -280,8 +280,9 @@ _ANCHOR_SLOTS_16 = [_anchor_slot(i) for i in range(16)]
 
 # Route-centerline guided slots for the repair fan: candidates pulled
 # toward the route centerline so curve repairs have an on-centerline mode to select instead
-# of a prototype shortcut. Scales <= 3 (route-CL guidance rule); noise inside the proven
-# [0.5, 2.0] envelope's low end.
+# of a prototype shortcut. Scales <= 3 (route-CL guidance rule); noise (0.3, 0.8) sits at
+# and slightly below the proven [0.5, 2.0] envelope's low edge — deliberately tighter than
+# the sampling envelope so the guided slots stay close to their centerline mode.
 _ROUTE_CL_SLOTS_3 = [
     {"cl": 2.0, "spd": 0.0, "noise": (0.0, 0.0), "label": "routeCL2_det"},
     {"cl": 3.0, "spd": 0.0, "noise": (0.3, 0.8), "label": "routeCL3_n0308"},

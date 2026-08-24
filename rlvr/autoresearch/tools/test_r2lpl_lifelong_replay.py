@@ -5605,7 +5605,7 @@ def _mk_candidate_row():
 def test_forced_target_prefers_depart_on_lagging_row():
     # A lagging row with BOTH scripted candidates gate-accepted must force-select the
     # DEPART candidate: the stop-anchored morph re-times the stalled model geometry and
-    # teaches the stall being repaired (FIX_DIARY #104).
+    # teaches the stall being repaired.
     source_row = {
         "repair_labels": ["expert_disagreement"],
         "expert_disagreement_reason": "model_lagging_expert",
@@ -5700,9 +5700,9 @@ def test_forced_target_drops_when_neither_scripted_candidate_accepted():
 
 
 def test_unified_morph_bit_identical_to_legacy_pair():
-    # THE morph (FIX_DIARY #111): unified entry must be byte-equal to the two legacy
-    # builders on both disagreement classes. Real-data equivalence: 279 lagging + 60
-    # rushing rows, all bit-identical (depart_morph_test/smoke_unified, 2026-08-07).
+    # THE morph: the unified entry must be byte-equal to the two legacy builders
+    # on both disagreement classes (also verified bit-identical on real mined rows
+    # of both classes before the legacy call sites were removed).
     import numpy as np
 
     from rlvr.autoresearch.tools.expert_morph import (
@@ -5808,7 +5808,7 @@ def test_trust_region_selection_passes_delayed_depart_rejects_far_generated():
 def test_morphs_synthesized_for_reason_only_rows():
     # A stall that ends in a collision is labelled moving_collision while the conflict
     # detector still records model_lagging_expert. Forcing already scopes on the reason;
-    # synthesis must too, or the row is structurally unrepairable (smoke_trustfix 195/195).
+    # synthesis must too, or the row is structurally unrepairable (measured: such rows are structurally unrepairable).
     import numpy as np
 
     from rlvr.autoresearch.tools.build_repaired_targets import _best_safe_candidate

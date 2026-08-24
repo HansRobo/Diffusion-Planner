@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -223,11 +224,17 @@ def persist_into_memory(memory_json: Path, refresh_map: Path) -> dict[str, int]:
         hit = mapping.get(str(row.get("scene_path")))
         if not hit:
             continue
+        # Record provenance BEFORE overwriting scene_path — the fallback must name
+        # the frozen target, not the fresh one it was just repointed to.
+        row["refreshed_from"] = hit.get("frozen_path", row.get("scene_path"))
         row["scene_path"] = hit["new_path"]
         row["selected_total"] = hit["new_total"]
-        row["refreshed_from"] = hit.get("frozen_path", row.get("scene_path"))
         updated += 1
-    mem_path.write_text(json.dumps(payload, indent=2))
+    # Atomic replace: this file is what a chain link hands to its successor; a
+    # crash mid-write must not leave a truncated memory JSON behind.
+    tmp = mem_path.with_suffix(f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.replace(mem_path)
     return {"memory_entries": len(entries), "repointed_to_refreshed": updated}
 
 
