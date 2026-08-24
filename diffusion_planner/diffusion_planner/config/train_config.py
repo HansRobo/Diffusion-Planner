@@ -91,7 +91,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
 
     # Control Loss
     control_traj_loss_horizon: int = 80
-    coeff_control_traj_loss: float = 0.0
+    coeff_control_traj_loss: float = 1.0
 
     guidance_scale: float = 0.5
     device: str = "cuda"
