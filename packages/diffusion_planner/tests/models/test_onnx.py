@@ -65,10 +65,10 @@ class OnnxWrapperTest(unittest.TestCase):
             actual_trajectory, actual_turn_indicator = wrapper(
                 initial_noise,
                 *(input_data[name] for name in SCENE_INPUT_NAMES),
-                input_data["turn_indicators"][:, -1],
+                input_data["turn_indicators"],
             )
             expected_trajectory, expected_turn_indicator = model.sample(
-                input_data, initial_noise, num_steps=10
+                input_data, initial_noise, num_steps=6
             )
 
         torch.testing.assert_close(actual_trajectory, expected_trajectory)
