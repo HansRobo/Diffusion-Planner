@@ -6,8 +6,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
-MODEL_DIR="${MODEL_DIR:-/home/yamashita/work_hdd/sample/best_onnx/20260730/best_model}"
-DATADIR="${DATADIR:-/home/yamashita/work_hdd/sample/mini_datasets/j6_2231_fullseq_mini_20260707}"
+MODEL_DIR="${MODEL_DIR:?MODEL_DIR must be set to a trained model directory}"
+DATADIR="${DATADIR:?DATADIR must be set to a dataset directory}"
 VALID_LIST="${VALID_LIST:-$DATADIR/path_list_valid.json}"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 DEVICE="${DEVICE:-cuda}"

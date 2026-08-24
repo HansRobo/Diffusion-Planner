@@ -217,7 +217,7 @@ recommended for formal evaluation.
 
 | Environment variable | Default | Description |
 |---|---:|---|
-| `MODEL_DIR` | `best_models/20260730/best_model` | Directory containing `args.json` and `best_model.pth` |
+| `MODEL_DIR` | *(required)* | Directory containing `args.json` and `best_model.pth` |
 | `DATADIR` | mini dataset | Evaluation dataset root |
 | `VALID_LIST` | `$DATADIR/path_list_valid.json` | List of NPZ files to evaluate |
 | `N_SAMPLES` | `128` | Maximum number of moving scenes to evaluate |

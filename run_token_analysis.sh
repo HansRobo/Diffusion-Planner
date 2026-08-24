@@ -27,7 +27,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
-MODEL_DIR="${MODEL_DIR:-$REPO_ROOT/best_models/20260730/best_model}"
+MODEL_DIR="${MODEL_DIR:?MODEL_DIR must be set to a trained model directory}"
 DATADIR="${DATADIR:?DATADIR must be set to a dataset directory}"
 N="${N_SAMPLES:-128}"
 BS="${BATCH_SIZE:-32}"

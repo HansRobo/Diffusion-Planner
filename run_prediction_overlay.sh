@@ -3,11 +3,11 @@
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
-MODEL_DIR="${MODEL_DIR:-$REPO_ROOT/best_models/20260730/best_model}"
+MODEL_DIR="${MODEL_DIR:?MODEL_DIR must be set to a trained model directory}"
 DATADIR="${DATADIR:?DATADIR must be set}"
 VALID_LIST="${VALID_LIST:-$DATADIR/path_list_valid.json}"
 SAMPLE_INDEX="${SAMPLE_INDEX:?SAMPLE_INDEX must be set}"
-OUT_DIR="${OUT_DIR:-/home/yamashita/work_hdd/DP_exp}"
+OUT_DIR="${OUT_DIR:?OUT_DIR must be set to an output directory}"
 OUTPUT_NAME="${OUTPUT_NAME:-prediction_overlay_${SAMPLE_INDEX}}"
 mkdir -p "$OUT_DIR"
 "${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}" scripts/visualize_prediction_overlay.py \
