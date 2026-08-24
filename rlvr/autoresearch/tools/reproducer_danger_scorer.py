@@ -477,6 +477,11 @@ def build_realized_reward_scorer(
     # computing SD/SE, not as a joinable key -> pair models at shard level instead, which is
     # deterministic by manifest order and therefore identical across runs.
     per_segment: dict[int, list[float]] = {}
+    # Finalized per-segment means. id(s) keys are only unique WITHIN one batch —
+    # CPython reuses freed addresses across batches — so per_segment must be
+    # drained into this list and cleared on every finalize() (which runs once
+    # per batch), never accumulated across batches under id keys.
+    per_segment_means: list[float] = []
     # Chunk key per segment (s.output_route_key, set by run_segments_batched from
     # route_keys). Lets finalize expose a per-chunk mean so the mining loop can persist
     # per-chunk realized reward into segments.jsonl (paired per-chunk deltas need it;
@@ -573,7 +578,7 @@ def build_realized_reward_scorer(
                 if progress_reference_expert and "ego_expert_future" in sd:
                     # Underprogress is gated on (N > 1 or a baseline reference); realized
                     # scoring passes ONE trajectory, so without this the penalty NEVER fires
-                    # and the ruler is blind to lagging (diary #60). Pin it to the expert.
+                    # and the ruler is blind to lagging. Pin it to the expert.
                     _ef = sd["ego_expert_future"]
                     _ef = _ef[0] if _ef.dim() == 3 else _ef
                     _xy = _ef[:, :2]
@@ -605,7 +610,9 @@ def build_realized_reward_scorer(
         finalize.components = dict(comp)
         # One mean per segment, in scoring order, so callers can report SD / standard error
         # of the reward mean instead of quoting it as if it were exact.
-        finalize.per_segment_rewards = [sum(v) / len(v) for v in per_segment.values() if v]
+        per_segment_means.extend(sum(v) / len(v) for v in per_segment.values() if v)
+        per_segment.clear()
+        finalize.per_segment_rewards = list(per_segment_means)
         # Per-chunk means for the batch just finalized only (buffers are per batch);
         # the caller reads this right after finalize() and attaches it to segment rows.
         finalize.per_chunk = {
