@@ -54,6 +54,7 @@ fused into a couple of Triton kernels.
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
@@ -336,18 +337,44 @@ def _step(
 
 
 _compiled_step = None
+_compile_abandoned = False
+
+
+def _guarded_step(*args):
+    """Call the compiled step, degrading to eager the first time Dynamo refuses.
+
+    ``dynamic=False, fullgraph=True`` gives one compiled variant per input shape
+    and only eight recompile slots; exhausting them *raises* instead of falling
+    back to eager.  Any process that pushes more than eight distinct shapes
+    through the simulator -- a whole test session, or a validation pass batched
+    differently from training -- would otherwise die on a limit that has nothing
+    to do with the numerics.  Eager is the same computation, so the fallback
+    costs speed and nothing else.
+    """
+    global _compile_abandoned
+    try:
+        return _compiled_step(*args)
+    except Exception as exc:  # pragma: no cover - depends on Dynamo state
+        _compile_abandoned = True
+        warnings.warn(
+            f"pdm_simulator_torch: falling back to the eager step ({exc.__class__.__name__}: {exc}). "
+            "Numerics are unchanged; the step is ~1.6x slower.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return _step(*args)
 
 
 def _get_step(enable_compile: bool):
     global _compiled_step
-    if not enable_compile or _COMPILE_DISABLED:
+    if not enable_compile or _COMPILE_DISABLED or _compile_abandoned:
         return _step
     if _compiled_step is None:
         try:
             _compiled_step = torch.compile(_step, dynamic=False, fullgraph=True)
         except Exception:  # pragma: no cover - inductor unavailable
             _compiled_step = _step
-    return _compiled_step
+    return _guarded_step
 
 
 # ---------------------------------------------------------------------------

@@ -196,6 +196,7 @@ def test_compiled_matches_eager():
     # how much of the suite ran before it.  Reset both caches so it measures numerics.
     torch._dynamo.reset()
     fast._compiled_step = None
+    fast._compile_abandoned = False
 
     poses, ego = _random_trajectories(64, seed=8)
     poses_t = torch.as_tensor(poses, dtype=torch.float64, device="cuda")
