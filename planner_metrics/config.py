@@ -124,16 +124,6 @@ class RewardConfig:
     #                while threshold follows it → penalty never fires).
     underprogress_reference: str = "baseline"
 
-    # Continuous, SYMMETRIC progress band (opt-in; default False keeps the historical
-    # flat-band behaviour byte-identical). When True the penalty is a V around ratio 1.0:
-    # inside [underprogress_threshold, overprogress_margin] it grows linearly with
-    # |ratio - 1| at slope ``progress_band_penalty``, and the existing one-sided
-    # under/overprogress penalties continue OUTSIDE the band (so the total is continuous).
-    # Rationale: with a flat band there is no gradient toward expert pace, so candidate
-    # selection drifts to the cautious edge of the tolerance.
-    progress_band_continuous: bool = False
-    progress_band_penalty: float = 30.0
-
     # Progress normalization scale: when enable_overprogress=True, progress is
     # normalized to [0, 1] as fraction of GT, then multiplied by this scale.
     # 100% GT progress → progress_norm_scale points. Default 20.
