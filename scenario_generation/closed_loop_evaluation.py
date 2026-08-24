@@ -41,13 +41,36 @@ from scenario_generation.route_timeline import RouteTimeline
 class RolloutParams:
     """Rollout knobs for full-route segment evaluation."""
 
+    # torch device string ("cuda"/"cpu") for model inference and the per-step
+    # object/road-border/red-light scorers.
     device: str
+    # clearance distance (m) below which a non-colliding step counts as a near-miss,
+    # for both the object and road-border clearance metrics.
     near_miss_thresh: float
+    # PerceptionReproducer neighborhood radius (m) around the live ego used to select
+    # which recorded frames to replay; also the nominal radius the unstick
+    # widen/restore escalation scales from.
     search_radius: float
+    # for the first N sim steps the ego is forced onto the recorded GT pose/speed
+    # (ignoring the tracker/model) before closed-loop control takes over.
     warmup_steps: int
+    # consecutive no-forward-progress steps before stage-1 unstick fires: widens the
+    # cursor search radius to unstick_radius_mult x nominal so the model can find a
+    # way past on its own.
     unstick_after: int
+    # distance (m) ahead of the current recorded frame the ego is snapped to on the
+    # hard unstick teleport.
     unstick_advance_m: float
+    # multiplier applied to search_radius (PerceptionReproducer.widen) the instant the
+    # stuck counter first reaches unstick_after; stays widened until the ego moves
+    # again (immediate restore) or unstick_teleport_after further stuck steps pass
+    # (then the hard teleport fires and resets it), whichever comes first. <= 1.0
+    # disables this stage-1 widening, so the teleport fires immediately at
+    # unstick_after instead (legacy behavior).
     unstick_radius_mult: float
+    # width (steps, counted from unstick_after) of the stage-1 grace window during
+    # which the widened search radius stays in effect; if still stuck when it
+    # elapses, the hard teleport fires and snaps the ego onto the recorded GT pose.
     unstick_teleport_after: int
     # write a PNG only every N steps; None skips the per-step render entirely (no PNGs, no
     # video, no colormap images -- see build_full_closed_loop_wandb_log's matching
@@ -57,10 +80,29 @@ class RolloutParams:
     draw_every: int | None
     # Not a render_kwarg: the runner opens the pool and passes it down.
     draw_workers: int
+    # re-run the model every N steps (1 = every step); between replans the cached plan
+    # is executed open-loop, re-expressed each step in the current ego frame, while the
+    # ego still single-steps at 10 Hz.
     replan_interval: int
+    # how the ego advances each step: "perfect" places it directly on the model's
+    # predicted world pose (no physical smoothing); "mpc"/"mpc_batched" both drive the
+    # same bicycle-model MPCTracker, but mpc_batched solves all segments in one shared
+    # L-BFGS call for speed, so multi-segment results are only statistically (not
+    # bit-) identical to serial "mpc" -- in a single-segment run (B=1) they match exactly.
     tracker_mode: str
+    # "sim" (SimNeighborTracker) tracks each neighbor by UUID and rebuilds its recent
+    # history from the actual shown/interpolated rosbag motion (finite-difference
+    # velocity) instead of the recorded frame's own stored history -- fixes phantom
+    # collisions when the position cursor stalls/repeats a bag frame (a moving car
+    # would otherwise still report its recorded ~11 m/s while visibly frozen);
+    # "recorded" (default) just copies the cursor frame's own 31-step history verbatim.
     neighbor_history_mode: str
+    # on/off switch for PerceptionReproducer's heading gate (fixed +-90 deg threshold)
+    # that excludes candidate recorded frames whose ego yaw diverges too far from the
+    # live ego, so a U-turn/self-crossing route can't grab an opposite-heading frame.
     yaw_gate: bool
+    # per-step realized tangential accel (m/s^2, negative) at or below which a step
+    # counts as a "strong brake" event in the strong_brake metric.
     strong_brake_mps2: float
     # Early-abort a badly-diverged segment instead of burning the full step budget on a
     # rollout that will never recover (e.g. an undertrained model driving off-lane). Set well
@@ -74,16 +116,43 @@ class RolloutParams:
     # separates "reacts badly to traffic" from "can't follow the route/map". collision/near-miss
     # are 0 by construction when this is set.
     drop_objects: bool
+    # "segment" terminates the rollout at the segment's last recorded pose (end - 1);
+    # "route" terminates at the NPZ route goal displayed in the render instead.
     goal_mode: str
+    # text prepended to each rendered PNG's title (e.g. to tag which run/segment the
+    # frame belongs to); None leaves the title unchanged.
     title_prefix: str | None
+    # perpendicular offset (m) used to nudge the "X.XXm" distance-line annotations
+    # (road-border, nearest NPC) off the line they label.
     distance_label_offset_m: float
+    # half-width (m) of the fixed viewport drawn around the ego in each rendered PNG.
     view_half_m: float
+    # hard cap on consecutive steps without the perception cursor reaching a new
+    # furthest recorded frame; reaching it terminates the segment as "stuck" (0 =
+    # disabled). Distinct from the unstick_* escalation, which is speed-gated and
+    # tries to recover instead of terminating.
     max_stuck_steps: int
+    # distance (m) from goal_xy under which the rollout terminates as having reached
+    # the goal.
     goal_reach_m: float
+    # linearly interpolate stale recorded neighbor positions between their real
+    # detections (using sidecar track UUIDs) to remove the freeze-then-jump perception
+    # stutter; skipped under drop_objects or neighbor_history_mode="sim".
     interpolate: bool
+    # render neighbor agents colored by their stable track UUID instead of the
+    # flickering distance-sorted slot color.
     color_by_uuid: bool
+    # (lo, hi) inclusive step range to actually render a PNG for (combined with
+    # draw_every); None renders every drawn step. Rollout stepping/scoring is
+    # unaffected either way.
     window: tuple[int, int] | None
+    # sim-step cap for the rollout; None defaults to 3*(end - start) so a
+    # slow-but-recovering ego still gets a budget beyond the raw segment length.
     max_steps: int | None
+    # "pose" (default) keys the recorded-frame cursor off the live ego position
+    # (PerceptionReproducer); "clock" instead advances it in lockstep with the sim
+    # step count (idx = start + k), ignoring the ego's actual position -- used to
+    # detect the ego lagging behind this "expert clock".
     timeline_progress_mode: str
 
     def render_kwargs(self) -> dict[str, Any]:
