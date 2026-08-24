@@ -81,7 +81,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     neighbor_collision_margin_pedestrian: float = 1.0
     neighbor_collision_margin_bicycle: float = 0.5
 
-    alpha_planning_loss: float = 1.0
+    alpha_planning_loss: float = 0.0
     alpha_neighbor_loss: float = 0.0
 
     # Velocity Representation & Hybrid Loss
