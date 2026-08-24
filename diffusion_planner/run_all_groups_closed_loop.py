@@ -18,6 +18,7 @@ from pathlib import Path
 import torch
 from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
 from diffusion_planner.config.config_cli import build_config, build_parser, resolve_paths
+from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
 
 
@@ -307,6 +308,9 @@ def run_closed_loop_main(
 
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
+
+    if ddp.get_rank() == 0:
+        save_config(cfg, out_root, "closed_loop_config.json")
 
     if render_media is None:
         render_media = cfg.render_media
