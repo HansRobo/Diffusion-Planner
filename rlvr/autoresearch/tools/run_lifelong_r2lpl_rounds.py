@@ -342,25 +342,8 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         repair_cfg["prototypes_path"] = str(repair["prototypes_path"])
     if repair.get("max_expert_dev_m") is not None:
         repair_cfg["max_expert_dev_m"] = float(repair["max_expert_dev_m"])
-    if repair.get("lagging_expert_target") is not None:
-        v = str(repair["lagging_expert_target"])
-        if v not in ("off", "upweight", "force", "force_or_drop"):
-            raise ValueError(
-                "repair_generation.lagging_expert_target must be "
-                f"off|upweight|force|force_or_drop, got {v!r}"
-            )
-        repair_cfg["lagging_expert_target"] = v
     if repair.get("progress_reference_expert"):
         repair_cfg["progress_reference_expert"] = bool(repair["progress_reference_expert"])
-    if repair.get("expert_target_require_clear"):
-        repair_cfg["expert_target_require_clear"] = bool(repair["expert_target_require_clear"])
-    if repair.get("state_class_mode") is not None:
-        v = str(repair["state_class_mode"])
-        if v not in ("progress_dev", "state_dev"):
-            raise ValueError(
-                f"repair_generation.state_class_mode must be progress_dev|state_dev, got {v!r}"
-            )
-        repair_cfg["state_class_mode"] = v
     if repair.get("save_candidates"):
         repair_cfg["save_candidates"] = bool(repair["save_candidates"])
     for _mk in ("expert_morph_w_max", "expert_morph_max_accel", "expert_morph_max_jerk"):
@@ -460,13 +443,6 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
             perception_mining[key] = value
 
     cfg = {
-        # The mining-row filter reads cfg["event_mining"] directly; the flattening
-        # into perception_mining above covers only miner CLI passthrough keys, so
-        # filter keys must be forwarded here or a contract-driven campaign gets no
-        # filtering with no error (the dead-lever failure mode).
-        "event_mining": {
-            k: event_mining[k] for k in ("expert_min_end_progress_m",) if k in event_mining
-        },
         "rounds": int(_first_non_null(rounds.get("rounds"), 1)),
         "epochs_per_round": int(_first_non_null(rounds.get("epochs_per_round"), 1)),
         "model_path": str(contract["model_path"]),
@@ -1954,14 +1930,8 @@ def _repair_cmd(
         cmd.extend(["--prototypes_path", str(repair_cfg["prototypes_path"])])
     if repair_cfg.get("max_expert_dev_m") is not None:
         cmd.extend(["--max_expert_dev_m", str(repair_cfg["max_expert_dev_m"])])
-    if repair_cfg.get("lagging_expert_target"):
-        cmd.extend(["--lagging_expert_target", str(repair_cfg["lagging_expert_target"])])
     if repair_cfg.get("progress_reference_expert"):
         cmd.append("--progress_reference_expert")
-    if repair_cfg.get("expert_target_require_clear"):
-        cmd.append("--expert_target_require_clear")
-    if repair_cfg.get("state_class_mode"):
-        cmd.extend(["--state_class_mode", str(repair_cfg["state_class_mode"])])
     if repair_cfg.get("save_candidates"):
         cmd.append("--save_candidates")
     if cfg.get("repair_labels"):
@@ -2384,7 +2354,6 @@ def _run_mining_phase(
         )
         elapsed = _run(cmd, rdir / "perception_mine.log", env=_env_for_gpu(gpu_id))
         rows = _read_jsonl(credit_jsonl)
-        rows = _filter_expert_idle_rows(cfg, rows, credit_jsonl)
         _write_json(rdir / "credit_windows_paths.json", [row["scene_path"] for row in rows])
         return elapsed
 
@@ -2438,61 +2407,10 @@ def _run_mining_phase(
     )
     elapsed = _run_parallel(jobs)
     rows = _merge_jsonl_files(credit_parts, credit_jsonl)
-    rows = _filter_expert_idle_rows(cfg, rows, credit_jsonl)
     _merge_jsonl_files(segment_parts, segments_jsonl)
     _merge_mining_summaries(summary_parts, summary_json)
     _write_json(rdir / "credit_windows_paths.json", [row["scene_path"] for row in rows])
     return elapsed
-
-
-def _filter_expert_idle_rows(
-    cfg: dict[str, Any], rows: list[dict[str, Any]], credit_jsonl: Path
-) -> list[dict[str, Any]]:
-    """Opt-in mining-row filter: drop credit windows whose recorded expert is idle.
-
-    ``event_mining.expert_min_end_progress_m`` (absent = no-op, no silent default)
-    drops rows with ``expert_disagreement_expert_end_progress`` below the threshold —
-    windows where the expert never really moves can only supervise stay-stopped.
-    Stop-then-go windows accumulate progress and survive. Rows missing the field are
-    kept and counted loudly. The filtered set is rewritten to ``credit_jsonl`` so every
-    downstream consumer (repair shards, refresh, paths list) sees the same rows.
-    """
-    threshold = (cfg.get("event_mining") or {}).get("expert_min_end_progress_m")
-    if threshold is None:
-        return rows
-    threshold = float(threshold)
-    kept, dropped, missing = [], 0, 0
-    for row in rows:
-        progress = row.get("expert_disagreement_expert_end_progress")
-        if progress is None:
-            missing += 1
-            kept.append(row)
-        elif float(progress) < threshold:
-            dropped += 1
-        else:
-            kept.append(row)
-    if rows and not kept:
-        raise RuntimeError(
-            f"expert_min_end_progress_m={threshold} dropped ALL {len(rows)} mined rows — "
-            "threshold above every expert progress; refusing to hand repair an empty corpus"
-        )
-    # Keep the unfiltered rows next to the filtered file: the rewrite is otherwise
-    # destructive, and a resume with a LOOSENED threshold could never resurrect
-    # dropped rows from the filtered artifact alone.
-    unfiltered = credit_jsonl.with_name(credit_jsonl.stem + "_unfiltered.jsonl")
-    if not unfiltered.exists():
-        with unfiltered.open("w") as fh:
-            for row in rows:
-                fh.write(json.dumps(row) + "\n")
-    with credit_jsonl.open("w") as fh:
-        for row in kept:
-            fh.write(json.dumps(row) + "\n")
-    print(
-        f"[mining-filter] expert_min_end_progress_m={threshold}: kept {len(kept)}/{len(rows)} "
-        f"(dropped {dropped} expert-idle; {missing} rows missing the field, kept)",
-        flush=True,
-    )
-    return kept
 
 
 def _replay_row_sources(cfg: dict[str, Any], out: Path, round_idx: int) -> list[str]:
@@ -3133,19 +3051,6 @@ def main() -> None:
         if bool(cfg.get("reuse_completed_mining")) and mining_complete:
             print(
                 f"[round {round_idx}] perception_mine SKIPPED — reusing complete output in {rdir}"
-            )
-            # The expert-idle filter and credit_windows_paths.json are applied by
-            # THIS process after the miner writes its summary; a crash in that
-            # window (or a TIGHTENED threshold between attempts) would otherwise
-            # hand repair under-filtered rows. The filter is idempotent — always
-            # re-apply it on the reused output. NOTE: LOOSENING the threshold on
-            # a resume cannot resurrect rows already rewritten away; restore
-            # credit_windows_unfiltered.jsonl manually for that.
-            reused_credit = rdir / "credit_windows.jsonl"
-            reused_rows = _filter_expert_idle_rows(cfg, _read_jsonl(reused_credit), reused_credit)
-            _write_json(
-                rdir / "credit_windows_paths.json",
-                [row["scene_path"] for row in reused_rows],
             )
             phase_times["perception_mine"] = 0.0
         else:

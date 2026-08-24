@@ -561,54 +561,6 @@ def test_workflow_contract_preserves_repaired_target_validation_flag(tmp_path):
     assert cfg["validate_on_repaired_targets"] is True
 
 
-def test_workflow_contract_forwards_expert_idle_filter_threshold(tmp_path):
-    """The mining-row filter reads cfg["event_mining"]; a contract that sets
-    event_mining.expert_min_end_progress_m must reach it (this lever was silently
-    dead on the contract path once)."""
-    scene_list = tmp_path / "scenes.json"
-    scene_list.write_text("[]")
-    workflow = tmp_path / "workflow.json"
-    workflow.write_text(
-        json.dumps(
-            {
-                "judgement": {
-                    "reward_config": "/tmp/reward.json",
-                    "threshold_config": "/tmp/thresholds.json",
-                    "credit_window_config": "/tmp/credit.json",
-                    "enabled_labels": ["moving_collision"],
-                },
-                "event_mining": {"expert_min_end_progress_m": 1.0},
-                "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
-                "replay_memory": {"capacity": 200},
-                "training": {"val_scenes": "/tmp/valid.json"},
-            }
-        )
-    )
-    training = tmp_path / "training.json"
-    training.write_text(json.dumps({"backend": "base_sft", "train_args": {}}))
-
-    cfg = round_runner._config_from_workflow_contract(
-        {
-            "model_path": "/tmp/model.pth",
-            "scene_list": str(scene_list),
-            "workflow_config": str(workflow),
-            "training_config": str(training),
-            "output_dir": str(tmp_path / "auto_research" / "out"),
-        }
-    )
-
-    assert cfg["event_mining"]["expert_min_end_progress_m"] == 1.0
-    # and the filter itself must see it
-    rows = [
-        {"expert_disagreement_expert_end_progress": 0.2, "event_key": "a"},
-        {"expert_disagreement_expert_end_progress": 5.0, "event_key": "b"},
-    ]
-    credit_jsonl = tmp_path / "credit_windows.jsonl"
-    credit_jsonl.write_text("")
-    kept = round_runner._filter_expert_idle_rows(cfg, rows, credit_jsonl)
-    assert [r["event_key"] for r in kept] == ["b"]
-
-
 def test_round_runner_splits_mine_and_repair_labels(tmp_path):
     cfg = {
         "reward_config": "/tmp/reward.json",
@@ -5602,103 +5554,6 @@ def _mk_candidate_row():
     return {"moving_collision_step": None, "expert_disagreement": False, "labels": ["clean"]}
 
 
-def test_forced_target_prefers_depart_on_lagging_row():
-    # A lagging row with BOTH scripted candidates gate-accepted must force-select the
-    # DEPART candidate: the stop-anchored morph re-times the stalled model geometry and
-    # teaches the stall being repaired.
-    source_row = {
-        "repair_labels": ["expert_disagreement"],
-        "expert_disagreement_reason": "model_lagging_expert",
-    }
-    candidate_rows = [_mk_candidate_row() for _ in range(3)]
-    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0), _mk_reward_row(3.0)]
-    idx, meta = _best_safe_candidate(
-        source_row,
-        candidate_rows,
-        reward_rows,
-        min_static_margin=0.3,
-        target_gt_disagreement_thresh=2.0,
-        lagging_expert_target="force_or_drop",
-        morph_index=1,
-        depart_index=2,
-    )
-    assert idx == 2
-    assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced_depart"
-    assert meta["depart_outcome"] == "selected"
-    assert meta["morph_outcome"] == "lost_selection"
-
-
-def test_forced_target_falls_back_to_morph_when_depart_gate_rejected():
-    source_row = {
-        "repair_labels": ["expert_disagreement"],
-        "expert_disagreement_reason": "model_lagging_expert",
-    }
-    candidate_rows = [_mk_candidate_row() for _ in range(3)]
-    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0), _mk_reward_row(-50.0)]
-    # depart candidate fails a hard gate -> not in accepted
-    reward_rows[2].rb_crossing = True
-    idx, meta = _best_safe_candidate(
-        source_row,
-        candidate_rows,
-        reward_rows,
-        min_static_margin=0.3,
-        target_gt_disagreement_thresh=2.0,
-        lagging_expert_target="force_or_drop",
-        morph_index=1,
-        depart_index=2,
-    )
-    assert idx == 1
-    assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced"
-    assert meta["morph_outcome"] == "selected"
-    assert meta["depart_outcome"] == "lost_selection"
-
-
-def test_forced_target_never_uses_depart_on_wait_rows():
-    # expert_wait_model_forward rows must keep the stop-anchored morph even when a depart
-    # candidate exists (there the ego must slow down, not depart).
-    source_row = {
-        "repair_labels": ["expert_disagreement"],
-        "expert_disagreement_reason": "expert_wait_model_forward",
-    }
-    candidate_rows = [_mk_candidate_row() for _ in range(3)]
-    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0), _mk_reward_row(3.0)]
-    idx, meta = _best_safe_candidate(
-        source_row,
-        candidate_rows,
-        reward_rows,
-        min_static_margin=0.3,
-        target_gt_disagreement_thresh=2.0,
-        lagging_expert_target="force_or_drop",
-        morph_index=1,
-        depart_index=2,
-    )
-    assert idx == 1
-    assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced"
-
-
-def test_forced_target_drops_when_neither_scripted_candidate_accepted():
-    source_row = {
-        "repair_labels": ["expert_disagreement"],
-        "expert_disagreement_reason": "model_lagging_expert",
-    }
-    candidate_rows = [_mk_candidate_row() for _ in range(3)]
-    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0), _mk_reward_row(3.0)]
-    reward_rows[1].rb_crossing = True
-    reward_rows[2].rb_crossing = True
-    idx, meta = _best_safe_candidate(
-        source_row,
-        candidate_rows,
-        reward_rows,
-        min_static_margin=0.3,
-        target_gt_disagreement_thresh=2.0,
-        lagging_expert_target="force_or_drop",
-        morph_index=1,
-        depart_index=2,
-    )
-    assert idx is None
-    assert meta["reason"] == "ed_no_expert_target"
-
-
 def test_unified_morph_bit_identical_to_legacy_pair():
     # THE morph: the unified entry must be byte-equal to the two legacy builders
     # on both disagreement classes (also verified bit-identical on real mined rows
@@ -5796,19 +5651,19 @@ def test_trust_region_selection_passes_delayed_depart_rejects_far_generated():
         candidate_trajs=trajs,
         reference_traj=expert,
         max_expert_dev_m=4.0,
-        lagging_expert_target="force_or_drop",
         depart_index=1,
     )
-    # depart passes the path-based trust region and is force-selected;
-    # the generated twin (candidate 0) would have been trust-region rejected.
+    # The depart candidate's path-based deviation passes the trust region while the
+    # generated twin's pointwise deviation rejects it — depart is the only survivor
+    # and unified selection picks it.
     assert idx == 1
-    assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced_depart"
+    assert meta["selected_r2lpl_state_class"] == "near_log"
 
 
-def test_morphs_synthesized_for_reason_only_rows():
+def test_selection_classifies_reason_only_rows_by_measured_deviation():
     # A stall that ends in a collision is labelled moving_collision while the conflict
-    # detector still records model_lagging_expert. Forcing already scopes on the reason;
-    # synthesis must too, or the row is structurally unrepairable (their det plan cannot express the repair).
+    # detector still records model_lagging_expert. Selection must classify such rows by
+    # their measured deviation (the ed-like predicate), not default them to recoverable.
     import numpy as np
 
     from rlvr.autoresearch.tools.build_repaired_targets import _best_safe_candidate
@@ -5835,8 +5690,7 @@ def test_morphs_synthesized_for_reason_only_rows():
         candidate_trajs=[delayed, delayed],
         reference_traj=expert,
         max_expert_dev_m=4.0,
-        lagging_expert_target="force_or_drop",
         depart_index=1,
     )
     assert idx == 1
-    assert meta["selected_r2lpl_state_class"] == "lagging_expert_forced_depart"
+    assert meta["selected_r2lpl_state_class"] == "near_log"

@@ -213,23 +213,6 @@ def _generate_grpo_temperature_scenes(
     return trajs.reshape(n_scenes, K, trajs.shape[1], trajs.shape[2])
 
 
-_INTERACTION_RISK_LABELS = ("moving_collision", "moving_ttc", "moving_near_miss")
-
-
-def _candidate_is_interaction_risky(label_row: dict[str, Any]) -> bool:
-    """True when a candidate merely PASSES the hard collision gate but still grazes a neighbour.
-
-    Expert-paced targets are faster than the model's natural output, so a morph can clear the
-    collision gate while carrying moving_near_miss / moving_ttc. Training on those teaches
-    "drive at expert pace close to other vehicles" — measured to noticeably increase probe
-    moving collisions when such targets were trained on.
-    """
-    labels = {str(x) for x in label_row.get("labels", [])}
-    if labels.intersection(_INTERACTION_RISK_LABELS):
-        return True
-    return label_row.get("moving_collision_step") is not None
-
-
 def _candidate_violation_score(label_row: dict[str, Any], reward_row) -> float:
     labels = {str(label) for label in label_row.get("labels", []) if str(label) != "clean"}
     score = sum(_VALIDITY_LABEL_WEIGHTS.get(label, 1.0) for label in labels)
@@ -342,70 +325,13 @@ def _normalize_values(values: list[float]) -> list[float]:
 # delta_xy_rec = 5.0 m, and delta_psi_rec = 45 deg"). These bound the deviation of
 # the ROLLOUT ego STATE from the LOGGED expert STATE (paper Eq. 21 Delta_t), which is
 # NOT the same quantity as the trajectory-level progress gap used by the legacy mode.
-_STATE_DEV_NEAR_XY_M = 1.0
-_STATE_DEV_NEAR_YAW_DEG = 15.0
-_STATE_DEV_NEAR_V_MPS = 2.0
-_STATE_DEV_REC_XY_M = 5.0
-_STATE_DEV_REC_YAW_DEG = 45.0
-STATE_CLASS_MODES = ("progress_dev", "state_dev")
+def _r2lpl_state_class(source_row: dict[str, Any]) -> str:
+    """R2LPL guidance class (near_log / recoverable / far_offpolicy, paper Eq. 24).
 
-
-def log_state_deviation(
-    data: dict[str, torch.Tensor], *, scene_path: str, dt: float = 0.1
-) -> dict[str, float]:
-    """Paper Eq. 21 ``Delta_t``: rollout ego state vs LOGGED expert state, same frame.
-
-    Scenes are written in the ROLLOUT ego frame, so the rollout ego sits at the origin
-    with identity heading. ``ego_expert_future`` starts at the logged CURRENT state (the
-    convention ``detect_expert_disagreement_projected`` requires, expert index 0 = current
-    pose), so row 0's offset from the origin IS the log-vs-rollout state deviation.
-
-    Returns ``d_xy`` (m), ``d_yaw`` (deg) and ``d_v`` (m/s). Fails loudly when the mined
-    scene lacks the fields — there is no meaningful default for a state class.
+    Classified by the trajectory-level expert progress gap: rows carrying a
+    measured ``expert_disagreement_max_dev`` classify by it, everything else is
+    the paper's middle class.
     """
-    for key in ("ego_expert_future", "ego_current_state"):
-        if key not in data:
-            raise ValueError(
-                f"{scene_path}: state-class mode 'state_dev' needs '{key}' in the mined "
-                "scene (re-mine with a reproducer that saves it)"
-            )
-    expert = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
-    if expert.shape[0] < 2:
-        raise ValueError(f"{scene_path}: ego_expert_future must have >= 2 rows for Delta_t")
-    d_xy = float(np.linalg.norm(expert[0, :2]))
-    d_yaw = abs(float(np.degrees(np.arctan2(float(expert[0, 3]), float(expert[0, 2])))))
-    v_expert = float(np.linalg.norm(expert[1, :2] - expert[0, :2]) / dt)
-    v_ego = ego_speed_ms(data["ego_current_state"].detach().cpu().numpy())
-    return {"d_xy": d_xy, "d_yaw": d_yaw, "d_v": abs(v_expert - v_ego)}
-
-
-def _r2lpl_state_class(source_row: dict[str, Any], *, mode: str = "progress_dev") -> str:
-    if mode not in STATE_CLASS_MODES:
-        raise ValueError(f"unknown state_class_mode {mode!r}; expected one of {STATE_CLASS_MODES}")
-    if mode == "state_dev":
-        # Paper Eq. 21/24: classify by the ego STATE's deviation from the logged expert
-        # state. Applies to EVERY mistake type (the paper mines Failure/Risk/Conflict
-        # states through the same Gamma(Delta_t)), so there is no per-label branch here.
-        missing = [
-            k for k in ("log_state_dev_xy_m", "log_state_dev_yaw_deg") if k not in source_row
-        ]
-        if missing:
-            raise ValueError(
-                f"{source_row.get('scene_path')}: state_class_mode='state_dev' requires "
-                f"{missing} on the row; the repair loop must inject log_state_deviation()"
-            )
-        d_xy = float(source_row["log_state_dev_xy_m"])
-        d_yaw = float(source_row["log_state_dev_yaw_deg"])
-        d_v = float(source_row.get("log_state_dev_speed_mps", 0.0))
-        if (
-            d_xy <= _STATE_DEV_NEAR_XY_M
-            and d_yaw <= _STATE_DEV_NEAR_YAW_DEG
-            and d_v <= _STATE_DEV_NEAR_V_MPS
-        ):
-            return "near_log"
-        if d_xy <= _STATE_DEV_REC_XY_M and d_yaw <= _STATE_DEV_REC_YAW_DEG:
-            return "recoverable"
-        return "far_offpolicy"
     if not _row_is_ed_like(source_row):
         # Rows with NO disagreement measurement (pure collision/road-border) are
         # off-log by construction (the realized rollout failed where the log did
@@ -693,9 +619,6 @@ def _best_safe_candidate(
     morph_index: int | None = None,
     depart_index: int | None = None,
     max_expert_dev_m: float | None = None,
-    lagging_expert_target: str = "off",
-    expert_target_require_clear: bool = False,
-    state_class_mode: str = "progress_dev",
 ) -> tuple[int | None, dict[str, Any]]:
     # Scripted candidates get a per-candidate outcome taxonomy in the meta
     # (selected / lost_selection / gate_rejected) keyed by their prefix.
@@ -770,87 +693,6 @@ def _best_safe_candidate(
             )
         return None, meta
 
-    # Anti-stall override: for rows the miner tagged as the model LAGGING the
-    # expert, the expert's own (morphed) future is the mechanism-matched target —
-    # it is real and it drove through. Under the default recoverable weights it
-    # wins only a small minority of selections while the safe-but-cautious generated winners
-    # teach the very lag being repaired (2026-08 campaign finding).
-    is_lagging_row = source_row.get("expert_disagreement_reason") == "model_lagging_expert"
-    # `force_or_drop` acts on EVERY row whose repair reason is expert_disagreement (both
-    # model_lagging_expert and expert_wait_model_forward): if the winner is not the expert
-    # morph, the row teaches a non-expert pace, so it is dropped rather than trained on.
-    is_ed_row = _row_is_ed_like(source_row)
-    forced_scope = is_ed_row if lagging_expert_target == "force_or_drop" else is_lagging_row
-
-    def _forced_candidate_ok(idx_s: int | None) -> bool:
-        return (
-            idx_s is not None
-            and idx_s in {item[3] for item in accepted}
-            and (
-                not expert_target_require_clear
-                or not _candidate_is_interaction_risky(candidate_rows[idx_s])
-            )
-        )
-
-    # Forced-target preference: on a LAGGING row the stop-anchored morph re-times the
-    # model's own (stalled) geometry, i.e. it teaches the very stall being repaired; the
-    # depart candidate carries the expert's departure, so when it survived the gates it is
-    # the mechanism-matched forced target. Stop-morph remains the fallback, and remains
-    # the only forced target for expert_wait_model_forward rows (there the ego must slow).
-    forced_index: int | None = None
-    if lagging_expert_target in ("force", "force_or_drop") and forced_scope:
-        if is_lagging_row and _forced_candidate_ok(depart_index):
-            forced_index = depart_index
-        elif _forced_candidate_ok(morph_index):
-            forced_index = morph_index
-    if forced_index is not None:
-        m_item = next(item for item in accepted if item[3] == forced_index)
-        violation_score, deviation_penalty, _reward_total, idx = m_item
-        reward_row = reward_rows[idx]
-        label_row = candidate_rows[idx]
-        selected_traj = candidate_traj_list[idx] if candidate_traj_list is not None else None
-        target_gt_max_l2 = _candidate_deviation_max_l2(selected_traj, reference_traj)
-        meta = {
-            "selected_total": float(reward_row.total),
-            "selected_sc_min_dist": float(getattr(reward_row, "sc_min_dist", 99.0)),
-            "selected_rb_min_dist": float(getattr(reward_row, "rb_min_dist", 99.0)),
-            "selected_labels": list(label_row["labels"]),
-            "selected_violation_score": float(violation_score),
-            "selected_deviation_penalty": float(deviation_penalty),
-            "selected_candidate_index": int(idx),
-            "target_gt_disagreement": bool(target_gt_max_l2 >= target_gt_disagreement_thresh),
-            "target_gt_disagreement_mean_l2": float(deviation_penalty),
-            "target_gt_disagreement_max_l2": target_gt_max_l2,
-            "selected_r2lpl_state_class": (
-                "lagging_expert_forced_depart"
-                if forced_index == depart_index and depart_index is not None
-                else "lagging_expert_forced"
-            ),
-            "selected_r2lpl_score": 1.0,
-        }
-        for prefix, idx_s in scripted.items():
-            meta[f"{prefix}_outcome"] = "selected" if idx_s == forced_index else "lost_selection"
-        return idx, meta
-
-    if lagging_expert_target == "force_or_drop" and is_ed_row:
-        _risky = expert_target_require_clear and any(
-            idx_s is not None
-            and idx_s in {item[3] for item in accepted}
-            and _candidate_is_interaction_risky(candidate_rows[idx_s])
-            for idx_s in (morph_index, depart_index)
-        )
-        # Purity mode: a lagging row trains ONLY on the expert-paced target. If the morph is
-        # absent or gate-rejected, drop the row instead of teaching the cautious generated
-        # winner — those targets are what made lagging worse link over link.
-        meta = {
-            "reason": ("ed_expert_target_interaction_risk" if _risky else "ed_no_expert_target"),
-            "best_total": max(float(r.total) for r in reward_rows),
-            "best_sc_min_dist": max(float(getattr(r, "sc_min_dist", -99.0)) for r in reward_rows),
-        }
-        for prefix, _idx_s in scripted.items():
-            meta[f"{prefix}_outcome"] = "dropped_no_expert_target"
-        return None, meta
-
     # Unified paper-style selection (R2LPL Eq. 26, reference implementation
     # rollout_cl_generator.py): the SAME three-term score ranks survivors of
     # EVERY mistake type. y = w_q * rule + w_ref * route-path consistency +
@@ -861,11 +703,7 @@ def _best_safe_candidate(
     # route-reference-path adherence score (baselink mode), normalized across
     # survivors like the rule score.
     ref_scores = _normalize_values([float(reward_rows[item[3]].centerline) for item in accepted])
-    state_class = _r2lpl_state_class(source_row, mode=state_class_mode)
-    if lagging_expert_target == "upweight" and is_lagging_row:
-        # Rank lagging rows with near-log weights (expert consistency 0.80 +
-        # the near-log expert gate) regardless of measured max_dev.
-        state_class = "near_log"
+    state_class = _r2lpl_state_class(source_row)
     rule_weight, ref_weight, expert_weight = _r2lpl_weights(state_class)
     expert_scores = [math.exp(-max(item[1], 0.0) / 4.0) for item in accepted]
     # Near-log expert gate (reference impl): drop survivors far below the most
@@ -1026,9 +864,6 @@ def build_repaired_targets(
     allow_empty: bool = False,
     target_gt_disagreement_thresh: float = 2.0,
     max_expert_dev_m: float | None = None,
-    lagging_expert_target: str = "off",
-    expert_target_require_clear: bool = False,
-    state_class_mode: str = "progress_dev",
     progress_reference_expert: bool = False,
     save_candidates: bool = False,
     repair_expert_gt_candidate: bool = True,
@@ -1197,15 +1032,6 @@ def build_repaired_targets(
                 )
             reference_traj = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
 
-            if state_class_mode == "state_dev":
-                # Paper Eq. 21: measure Delta_t here (the scene tensors live in this
-                # loop) and carry it on the row so selection AND the persisted jsonl
-                # both see the same numbers.
-                dev = log_state_deviation(data, scene_path=str(row["scene_path"]))
-                row["log_state_dev_xy_m"] = dev["d_xy"]
-                row["log_state_dev_yaw_deg"] = dev["d_yaw"]
-                row["log_state_dev_speed_mps"] = dev["d_v"]
-
             # The classifier above already ran the full subscore geometry
             # (OBB clearance / road border / lane / centerline) on this exact
             # (scene, candidates) pair — reuse it and apply only the reward
@@ -1263,10 +1089,8 @@ def build_repaired_targets(
             # Morph eligibility keys on the CONFLICT REASON, not only the mined label:
             # a stall that ends in a collision/RB event is labelled moving_collision/
             # road_border_crossing while expert_disagreement_reason still says
-            # model_lagging_expert — and the force_or_drop scope already treats such
-            # rows as ED, so without a morph in the pool they were structurally
-            # unrepairable (measured: dropped essentially wholesale). Synthesis scope must
-            # match forcing scope.
+            # model_lagging_expert — without a morph in the pool such rows have no
+            # expert-paced candidate to select at all.
             is_ed_like = _row_is_ed_like(row)
             if is_ed_like and (repair_expert_gt_candidate or enable_depart_morph):
                 stop_anchor_xy = None
@@ -1338,9 +1162,6 @@ def build_repaired_targets(
                     morph_index=morph_index if morph_added else None,
                     depart_index=depart_index if depart_added else None,
                     max_expert_dev_m=max_expert_dev_m,
-                    lagging_expert_target=lagging_expert_target,
-                    expert_target_require_clear=expert_target_require_clear,
-                    state_class_mode=state_class_mode,
                 )
             morph_selected = bool(morph_added and best_idx == morph_index)
             depart_selected = bool(depart_added and best_idx == depart_index)
@@ -1509,13 +1330,6 @@ def main() -> None:
         "are dropped to unrepaired. Off when omitted.",
     )
     ap.add_argument(
-        "--expert_target_require_clear",
-        action="store_true",
-        help="require a forced expert-morph target to be free of moving_collision / moving_ttc / "
-        "moving_near_miss; otherwise drop the row. Without it, expert-paced targets that merely "
-        "clear the hard collision gate teach driving fast close to neighbours.",
-    )
-    ap.add_argument(
         "--save_candidates",
         action="store_true",
         help="write <target>.candidates.npz next to each repaired target (all K trajectories, "
@@ -1528,31 +1342,6 @@ def main() -> None:
         help="pin the underprogress reference to the EXPERT path length when scoring "
         "expert_disagreement candidates (default: reward falls back to the model's own det "
         "trajectory, which collapses as the model gets more cautious).",
-    )
-    ap.add_argument(
-        "--lagging_expert_target",
-        choices=["off", "upweight", "force", "force_or_drop"],
-        default="off",
-        help="anti-stall selection for model_lagging_expert rows: 'force' selects the "
-        "expert-morph candidate whenever it passes the safety gates; 'upweight' ranks "
-        "these rows with near-log weights (expert consistency 0.80); 'force_or_drop' "
-        "extends 'force' to every expert-disagreement row and DROPS the row entirely "
-        "when no expert-morph candidate survives the gates (destructive: such rows "
-        "are excluded from training). Default off.",
-    )
-    ap.add_argument(
-        "--state_class_mode",
-        choices=list(STATE_CLASS_MODES),
-        default="progress_dev",
-        help="how the R2LPL guidance class (near_log / recoverable / far_offpolicy, paper "
-        "Eq. 24) is decided. 'state_dev' = paper Eq. 21: deviation of the ROLLOUT EGO STATE "
-        "from the logged expert state (d_xy 1.0/5.0 m, d_yaw 15/45 deg, d_v 2.0 m/s). "
-        "'progress_dev' (default) = the trajectory-level expert progress gap. NOTE: "
-        "'state_dev' is paper-faithful but assumes long rollouts that genuinely diverge "
-        "from the log; when mining restarts chunks from logged states at a short stride, "
-        "the rollout ego never leaves the log's neighborhood, the 'far' branch never "
-        "fires, and the classification degenerates to near_log. Prefer 'progress_dev' "
-        "unless the mining geometry uses long divergent rollouts.",
     )
     ap.add_argument(
         "--repair_expert_gt_candidate",
@@ -1668,9 +1457,6 @@ def main() -> None:
         allow_empty=bool(args.allow_empty),
         target_gt_disagreement_thresh=float(args.target_gt_disagreement_thresh),
         max_expert_dev_m=(None if args.max_expert_dev_m is None else float(args.max_expert_dev_m)),
-        lagging_expert_target=str(args.lagging_expert_target),
-        expert_target_require_clear=bool(args.expert_target_require_clear),
-        state_class_mode=str(args.state_class_mode),
         progress_reference_expert=bool(args.progress_reference_expert),
         save_candidates=bool(args.save_candidates),
         repair_expert_gt_candidate=bool(args.repair_expert_gt_candidate),
