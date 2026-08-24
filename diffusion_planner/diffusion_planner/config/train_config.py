@@ -43,7 +43,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     input_type: Literal["vector", "image"] = cli(
         "scene representation fed to the encoder", default="image"
     )
-    bev_image_size: int = 224
+    bev_image_size: int = cli("size of the BEV image", default=224)
 
     # Trunk that turns a BEV raster into tokens (image input only).  "resnet18" is trained from
     # scratch on the raw semantic planes.  The DINOv3 trunks are patch-16, so a 2x2 merger
