@@ -461,7 +461,17 @@ class StatePerturbation:
         neighbors_future[..., :2] = vector_transform(
             neighbors_future[..., :2], transform_matrix, center_xy
         )
-        neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
+        # Heading layout depends on the shard format: older NPZs carry a raw angle in
+        # channel 2, newer ones carry (cos, sin) in channels 2:4 (the layout
+        # ``neighbor_agents_past`` has always used). Rotating a (cos, sin) pair with
+        # ``heading_transform`` would read cos(theta) as theta and leave sin untouched,
+        # which is silent -- the shapes still line up -- so branch on the width.
+        if neighbors_future.shape[-1] == 4:
+            neighbors_future[..., 2:4] = vector_transform(
+                neighbors_future[..., 2:4], transform_matrix
+            )
+        else:
+            neighbors_future[..., 2] = heading_transform(neighbors_future[..., 2], transform_matrix)
         neighbors_future[mask] = 0.0
 
         # lanes

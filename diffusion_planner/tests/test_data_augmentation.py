@@ -487,6 +487,55 @@ def test_centric_transform_translation():
     print("  [PASS] centric_transform translation")
 
 
+def test_centric_transform_neighbor_future_heading_layouts_agree():
+    """Both shard layouts of neighbor_agents_future must rotate to the same pose.
+
+    Older NPZs store (x, y, heading); newer ones store (x, y, cos, sin). Both are
+    float32 of matching rank, so a wrong branch here is silent -- it would rotate
+    cos(theta) as if it were theta and leave sin(theta) alone.
+    """
+    aug = StatePerturbation(
+        augment_prob=1.0,
+        num_refine=10,
+        device="cpu",
+        ego_past_noise_std=0.0,
+        use_smoothing_future_trajectory=False,
+    )
+    headings = torch.tensor([0.4, -1.2, 2.9, -2.6])
+    xy = torch.tensor([[6.0, 3.0], [7.0, 3.5], [8.0, 4.0], [9.0, 4.5]])
+
+    def _run(layout: str):
+        inputs, ego_future, nbrs_future = _make_inputs(1, N_nbr=2, T_fut=headings.numel())
+        # Ego off-origin and rotated, so the transform is a real rotation + translation.
+        inputs["ego_current_state"][:, 0] = 5.0
+        inputs["ego_current_state"][:, 1] = 3.0
+        inputs["ego_current_state"][:, 2] = math.cos(math.radians(30.0))
+        inputs["ego_current_state"][:, 3] = math.sin(math.radians(30.0))
+        # _make_inputs predates goal_pose; centric_transform requires it.
+        inputs["goal_pose"] = torch.tensor([[40.0, 12.0, 1.0, 0.0]])
+        if layout == "cos_sin":
+            nbrs_future = torch.zeros(1, 2, headings.numel(), 4)
+            nbrs_future[0, 0, :, 2] = headings.cos()
+            nbrs_future[0, 0, :, 3] = headings.sin()
+        else:
+            nbrs_future[0, 0, :, 2] = headings
+        nbrs_future[0, 0, :, :2] = xy
+        # Slot 1 is left all-zero: an absent track must stay zero in either layout.
+        return aug.centric_transform(inputs, ego_future, nbrs_future)[2]
+
+    angle, cos_sin = _run("heading"), _run("cos_sin")
+
+    assert torch.allclose(cos_sin[..., :2], angle[..., :2], atol=1e-5), "xy diverged"
+    assert torch.allclose(cos_sin[0, 0, :, 2], angle[0, 0, :, 2].cos(), atol=1e-5), (
+        f"cos diverged: {cos_sin[0, 0, :, 2].tolist()} vs {angle[0, 0, :, 2].cos().tolist()}"
+    )
+    assert torch.allclose(cos_sin[0, 0, :, 3], angle[0, 0, :, 2].sin(), atol=1e-5), (
+        f"sin diverged: {cos_sin[0, 0, :, 3].tolist()} vs {angle[0, 0, :, 2].sin().tolist()}"
+    )
+    assert torch.all(cos_sin[0, 1] == 0.0), "absent track resurrected by the transform"
+    print("  [PASS] centric_transform neighbor-future heading layouts agree")
+
+
 def test_centric_transform_ego_xy_zeroed():
     """After centric_transform, ego xy should always be (0, 0)."""
     aug = StatePerturbation()
@@ -1089,6 +1138,7 @@ ALL_TESTS = [
     test_centric_transform_identity_ego,
     test_centric_transform_zero_mask_preserved,
     test_centric_transform_translation,
+    test_centric_transform_neighbor_future_heading_layouts_agree,
     test_centric_transform_ego_xy_zeroed,
     # ── _cross2d ──
     test_cross2d_ccw_positive,

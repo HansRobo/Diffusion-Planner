@@ -81,6 +81,21 @@ class DiffusionPlannerNode(Node):
         self.diffusion_planner.decoder.decoder.training = False
         print(f"{self.config_obj.state_normalizer=}")
 
+        # The two heads disagree about whether the output starts at t=0.  The
+        # diffusion head emits ``future_len + 1`` poses and pins row 0 to the ego's
+        # current state (decoder.py::replace_current_state), so row i is t = i * dt.
+        # The drivor head emits ``drivor_num_poses`` poses starting one step out --
+        # its target grid has no t=0 row (drivor_sampling.py::expert_future_slice) --
+        # so row i is t = (i + 1) * dt.  ``convert_prediction_to_msg`` stamps row i
+        # as i * dt either way, which would put every drivor point 0.1 s early and
+        # start the published trajectory ahead of the ego rather than at it.
+        # Re-adding the anchor is preferred over shifting the stamps: it leaves both
+        # heads emitting the identical message, which is what the controller, the
+        # candidate-trajectory republisher and the markers already assume.
+        self._needs_current_pose_anchor = (
+            getattr(self.config_obj, "predictor_head", "diffusion") == "drivor"
+        )
+
         # param(3) checkpoint
         self.backend = self.declare_parameter("backend", value="PYTORCH").value
 
@@ -438,6 +453,12 @@ class DiffusionPlannerNode(Node):
             curr_pred = pred[b, 0]
             curr_heading = np.arctan2(curr_pred[:, 3], curr_pred[:, 2])[..., None]
             curr_pred = np.concatenate([curr_pred[..., :2], curr_heading], axis=-1)
+            if self._needs_current_pose_anchor:
+                # In base_link the ego is at the origin facing +x by construction
+                # (utils.py::create_current_ego_state), which is exactly what the
+                # diffusion head pins its row 0 to.
+                anchor = np.zeros((1, curr_pred.shape[-1]), dtype=curr_pred.dtype)
+                curr_pred = np.concatenate([anchor, curr_pred], axis=0)
             trajectory_msg = convert_prediction_to_msg(curr_pred, bl2map_matrix_4x4, stamp)
 
             # Create new format trajectory by copying from existing trajectory_msg

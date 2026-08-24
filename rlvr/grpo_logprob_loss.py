@@ -16,7 +16,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-from diffusion_planner.model.module.decoder import generate_prefix_mask
 
 from rlvr.vpsde_logprob import (
     compute_discount_weights,
@@ -106,7 +105,11 @@ def _build_model_inputs(
     # Build t tensor [N, P, T+1, 1]
     t_4d = torch.full((N, P, future_len + 1, 1), t_value, device=device)
 
-    # Prefix mask (no random delay for logprob — use fixed delay=0)
+    # Prefix mask (no random delay for logprob — use fixed delay=0). Imported lazily for
+    # the same reason as in ``grpo_sft_trainer`` / ``grpo_loss``: it lives in the diffusion
+    # decoder, so a module-level import breaks every importer of this file.
+    from diffusion_planner.model.module.decoder import generate_prefix_mask
+
     delay = torch.zeros(N, dtype=torch.long, device=device)
     prefix_mask = generate_prefix_mask(delay, P, future_len + 1)
 

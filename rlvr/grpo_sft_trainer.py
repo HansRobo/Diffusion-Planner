@@ -23,7 +23,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-from diffusion_planner.model.module.decoder import generate_prefix_mask
 from scipy.signal import savgol_filter
 from torch import nn
 from tqdm import tqdm
@@ -279,6 +278,12 @@ def _compute_sft_diffusion_loss(
     # Check if model supports LoRA disable (needed for neighbor regularization)
     inner = model.module if hasattr(model, "module") else model
     use_neighbor_reg = neighbor_reg_weight > 0.0 and Pn > 0 and hasattr(inner, "disable_adapter")
+
+    # Imported lazily (as in ``grpo_loss.py``) because it lives in the diffusion decoder:
+    # a module-level import makes every consumer of this file -- including
+    # ``scenario_generation.replay``, which only wants ``_smooth_trajectory`` -- fail to
+    # import whenever the diffusion decoder does not export it.
+    from diffusion_planner.model.module.decoder import generate_prefix_mask
 
     for _ in range(K):
         # Sample random timestep

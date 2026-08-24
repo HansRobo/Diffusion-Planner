@@ -114,6 +114,25 @@ def _availability(metrics: dict[str, torch.Tensor], key: str, ref: torch.Tensor)
     return value.to(device=ref.device, dtype=torch.float32)
 
 
+def _as_numpy(value) -> np.ndarray:
+    if torch.is_tensor(value):
+        return value.detach().to(torch.float64).cpu().numpy()
+    return np.asarray(value, dtype=np.float64)
+
+
+def _wheel_base_from_ego_dims(ego_dims) -> np.ndarray | None:
+    """The motion model's wheel base, if ``ego_dims`` is a full ``ego_shape`` row.
+
+    ``ego_shape`` is (wheel_base, length, width); callers that pass only
+    (length, width) carry no wheel base, so the simulator falls back to
+    pacifica's -- the same default navsim's tracker never overrides.
+    """
+    if ego_dims is None:
+        return None
+    dims = np.asarray(ego_dims, dtype=np.float64)
+    return dims[..., 0] if dims.shape[-1] == 3 else None
+
+
 def comfort_score(traj: torch.Tensor, dt: float = DT) -> torch.Tensor:
     """NAVSIM/C++ comfort-threshold score in {0, 1} for a trajectory tensor."""
     arr = traj.detach().to(torch.float64).cpu().numpy()
@@ -122,13 +141,40 @@ def comfort_score(traj: torch.Tensor, dt: float = DT) -> torch.Tensor:
 
 
 def _ego_progress_and_gate(
-    pred: torch.Tensor, gt: torch.Tensor
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    rollout_poses: np.ndarray | None = None,
+    center_offset: np.ndarray | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """EP over the simulated rollout when one is available.
+
+    navsim projects ``BBCoordsIndex.CENTER`` of ``PDMScorer._states`` — the
+    *simulated* proposal — onto the centerline, starting at the initial state.
+    ``rollout_poses`` (``[-1, T + 1, 4]``) and the per-sample ``center_offset``
+    reproduce that; the expert reference is shifted and origin-anchored the same
+    way, or the last ``center_offset`` metres of it would be unreachable and EP
+    would read low by ``offset / path_length`` on every sample.
+    """
     lead = pred.shape[:-2]
     T = pred.shape[-2]
     pred_n = pred.detach().to(torch.float64).cpu().numpy().reshape(-1, T, 4)
     gt_n = gt.detach().to(torch.float64).cpu().numpy().reshape(-1, T, 4)
-    pairs = [_ns.ego_progress_with_gate(pred_n[i], gt_n[i]) for i in range(pred_n.shape[0])]
+    if rollout_poses is None:
+        query, reference = pred_n, gt_n
+    else:
+        offset = (
+            np.zeros((pred_n.shape[0], 1, 1))
+            if center_offset is None
+            else np.asarray(center_offset, dtype=np.float64).reshape(-1, 1, 1)
+        )
+        query = rollout_poses[..., :2] + offset * rollout_poses[..., 2:4]
+        expert = gt_n[..., :2] + offset * gt_n[..., 2:4]
+        origin = np.broadcast_to(
+            np.concatenate((offset[:, :, 0], np.zeros_like(offset[:, :, 0])), axis=-1)[:, None, :],
+            (pred_n.shape[0], 1, 2),
+        )
+        reference = np.concatenate((origin, expert), axis=1)
+    pairs = [_ns.ego_progress_with_gate(query[i], reference[i]) for i in range(pred_n.shape[0])]
     ep = np.asarray([p[0] for p in pairs], dtype=np.float64)
     gated = np.asarray([float(p[1]) for p in pairs], dtype=np.float64)
     dev = pred.device
@@ -333,6 +379,7 @@ def pdms_proxy(
     agent_boxes_per_t: list | None = None,
     ego_dims: tuple[float, float] | np.ndarray | None = None,
     agent_labels_per_t: list | None = None,
+    agent_tokens_per_t: list | None = None,
     static_labels: set | None = None,
     border_lines: list | None = None,
     route_polys: list | None = None,
@@ -344,6 +391,8 @@ def pdms_proxy(
     extended_comfort_values: np.ndarray | None = None,
     traffic_light_compliance_values: np.ndarray | None = None,
     precomputed_states: np.ndarray | None = None,
+    ego_current_state: np.ndarray | None = None,
+    ego_history_poses: np.ndarray | None = None,
     add_aggregation: bool = True,
     self_reference_progress: bool = False,
     dt: float = DT,
@@ -353,11 +402,23 @@ def pdms_proxy(
     The returned keys use Autoware planning_data_analyzer names plus
     ``<metric>_available`` flags. Missing DP inputs leave the corresponding metric
     unavailable. ``add_synthetic_epdms`` performs the strict C++ aggregation.
+
+    NC, TTC, DAC, DDC and EP are scored on the **simulated rollout**, as navsim
+    does — see :func:`_rollout_poses`. ``agent_boxes_per_t[i]`` must therefore be
+    index-aligned to it: frame 0 is the current scene, frame ``t`` is ``t * dt``,
+    for ``T + 1`` frames plus any of TTC's 1 s extension. ``agent_tokens_per_t``
+    carries the track ids that let NC/TTC retire a track after its first
+    not-at-fault contact; without them each frame is judged independently, which
+    can only over-count infractions.
+
+    Lane keeping stays on the raw prediction: it is an Autoware EPDMS metric with
+    its own spec, not one of navsim's rollout-scored terms.
     """
     out: dict[str, torch.Tensor] = {}
 
     pred_n_cache = None
     states_n_cache = None
+    comfort_states_cache = None
 
     def _pred_numpy() -> np.ndarray:
         nonlocal pred_n_cache
@@ -371,23 +432,80 @@ def pdms_proxy(
         if states_n_cache is None:
             T = pred.shape[-2]
             if precomputed_states is None:
-                states_n_cache = _ns.states_from_poses(_pred_numpy(), dt)
+                # navsim scores comfort on simulated states, so the array is
+                # T + 1 rows: the rollout prepends the ego's own state.
+                states_n_cache = _ns.simulated_states_from_poses(
+                    _pred_numpy(),
+                    dt,
+                    None if ego_current_state is None else _as_numpy(ego_current_state),
+                    _wheel_base_from_ego_dims(ego_dims),
+                )
             else:
                 states_n_cache = np.asarray(precomputed_states, dtype=np.float64).reshape(
-                    -1, T, _ns.STATE_SIZE
+                    -1, T + 1, _ns.STATE_SIZE
                 )
         return states_n_cache
+
+    def _comfort_states_numpy() -> np.ndarray:
+        """The simulated future with the recorded past prepended.
+
+        Kept separate from :func:`_states_numpy` because the collision geometry
+        below indexes the simulated rows positionally and must not see the prefix.
+        """
+        nonlocal comfort_states_cache
+        if comfort_states_cache is None:
+            states = _states_numpy()
+            if ego_history_poses is None:
+                comfort_states_cache = states
+            else:
+                history = _as_numpy(ego_history_poses)
+                history = history.reshape(-1, history.shape[-2], history.shape[-1])
+                prefix = _ns.history_states_from_poses(history, dt)
+                prefix = np.repeat(prefix, len(states) // len(prefix), axis=0)
+                comfort_states_cache = np.concatenate((prefix, states), axis=1)
+        return comfort_states_cache
+
+    def _dims_rows() -> np.ndarray | None:
+        """``ego_dims`` broadcast to one row per sample, or ``None``."""
+        if ego_dims is None:
+            return None
+        dims = np.asarray(ego_dims, dtype=np.float64)
+        if dims.ndim == 1:
+            dims = np.broadcast_to(dims, (_pred_numpy().shape[0], dims.shape[0]))
+        return dims
+
+    def _dims_at(dims: np.ndarray, i: int) -> tuple[float, float, float]:
+        """(center_offset, length, width) — the offset is wheel_base / 2."""
+        if dims.shape[1] == 3:
+            return float(dims[i][0]) / 2.0, float(dims[i][1]), float(dims[i][2])
+        return 0.0, float(dims[i][0]), float(dims[i][1])
+
+    def _offsets() -> np.ndarray:
+        dims = _dims_rows()
+        if dims is None:
+            return np.zeros(_pred_numpy().shape[0], dtype=np.float64)
+        return dims[:, 0] / 2.0 if dims.shape[1] == 3 else np.zeros(dims.shape[0], dtype=np.float64)
+
+    def _rollout_poses() -> np.ndarray:
+        """``[-1, T + 1, 4]`` poses of the simulated rollout.
+
+        navsim scores every map and collision metric on ``PDMScorer._states``,
+        never on the raw proposal: a trajectory the tracker cannot follow must be
+        judged on where the vehicle actually ends up. The extra leading row is
+        the ego's current state.
+        """
+        return _ns.poses_from_states(_states_numpy())
 
     if self_reference_progress:
         ep = _ones_like_lead(pred)
         ep_gated = _zeros_like_lead(pred)
     else:
-        ep, ep_gated = _ego_progress_and_gate(pred, gt)
+        ep, ep_gated = _ego_progress_and_gate(pred, gt, _rollout_poses(), _offsets())
     _set_metric(out, "ego_progress", ep, True)
     out["ego_progress_gt_gate"] = ep_gated
 
     hc = torch.as_tensor(
-        _ns.comfort_score_from_states(_states_numpy(), dt).reshape(_leading_shape(pred)),
+        _ns.comfort_score_from_states(_comfort_states_numpy(), dt).reshape(_leading_shape(pred)),
         dtype=torch.float32,
         device=pred.device,
     )
@@ -401,25 +519,16 @@ def pdms_proxy(
         and ego_dims is not None
         and (dac_arr is None or np.isnan(dac_arr).any())
     ):
-        T = pred.shape[-2]
         pred_n = _pred_numpy()
-        dims = np.asarray(ego_dims, dtype=np.float64)
-        if dims.ndim == 1:
-            dims = np.broadcast_to(dims, (pred_n.shape[0], dims.shape[0]))
+        dims = _dims_rows()
+        rollout = _rollout_poses()
 
         def _dac_one(i: int) -> float:
             if dac_arr is not None and not np.isnan(dac_arr[i]):
                 return float(dac_arr[i])
-            if dims.shape[1] == 3:
-                offset, length, width = (
-                    float(dims[i][0]) / 2.0,
-                    float(dims[i][1]),
-                    float(dims[i][2]),
-                )
-            else:
-                offset, length, width = 0.0, float(dims[i][0]), float(dims[i][1])
+            offset, length, width = _dims_at(dims, i)
             return _ns.dac_from_road_borders(
-                pred_n[i], border_lines[i], length, width, center_offset=offset
+                rollout[i], border_lines[i], length, width, center_offset=offset
             )
 
         values = _parallel_list(_dac_one, pred_n.shape[0])
@@ -428,11 +537,18 @@ def pdms_proxy(
         _set_metric(out, "drivable_area_compliance", _tensor_from_array(dac_arr, pred), True)
 
     if route_polys is not None:
-        T = pred.shape[-2]
         pred_n = _pred_numpy()
+        rollout = _rollout_poses()
+        offsets = _offsets()
         ddc = np.asarray(
             _parallel_list(
-                lambda i: _ns.ddc_from_route_lanes(pred_n[i], route_polys[i], dt),
+                lambda i: _ns.ddc_from_route_lanes(
+                    rollout[i],
+                    route_polys[i],
+                    dt,
+                    center_offset=float(offsets[i]),
+                    prepend_origin=False,  # rollout row 0 IS the initial state
+                ),
                 pred_n.shape[0],
             ),
             dtype=np.float64,
@@ -477,22 +593,12 @@ def pdms_proxy(
 
     if agent_boxes_per_t is not None and ego_dims is not None:
         lead = pred.shape[:-2]
-        T = pred.shape[-2]
         pred_n = _pred_numpy()
         states_n = _states_numpy()
-        dims = np.asarray(ego_dims, dtype=np.float64)
-        if dims.ndim == 1:
-            dims = np.broadcast_to(dims, (pred_n.shape[0], dims.shape[0]))
+        dims = _dims_rows()
 
         def _collision_one(i: int) -> tuple[float, float]:
-            if dims.shape[1] == 3:
-                offset, length, width = (
-                    float(dims[i][0]) / 2.0,
-                    float(dims[i][1]),
-                    float(dims[i][2]),
-                )
-            else:
-                offset, length, width = 0.0, float(dims[i][0]), float(dims[i][1])
+            offset, length, width = _dims_at(dims, i)
             states = states_n[i]
             area_flags = None
             if lane_rings is not None or intersection_rings is not None:
@@ -504,8 +610,11 @@ def pdms_proxy(
                     width,
                     center_offset=offset,
                 )
-            boxes_t = list(agent_boxes_per_t[i])[:T]
-            labels_t = list(agent_labels_per_t[i])[:T] if agent_labels_per_t is not None else None
+            # No [:T] slice: the frames are index-aligned to the rollout's
+            # T + 1 rows, and anything beyond that is TTC's 1 s extension.
+            boxes_t = list(agent_boxes_per_t[i])
+            labels_t = list(agent_labels_per_t[i]) if agent_labels_per_t is not None else None
+            tokens_t = list(agent_tokens_per_t[i]) if agent_tokens_per_t is not None else None
             nc = _ns.no_at_fault_collision(
                 states,
                 boxes_t,
@@ -515,9 +624,17 @@ def pdms_proxy(
                 static_labels=static_labels,
                 center_offset=offset,
                 area_flags=area_flags,
+                agent_tokens_per_t=tokens_t,
             )
             ttc = _ns.time_to_collision(
-                states, boxes_t, length, width, dt, center_offset=offset, area_flags=area_flags
+                states,
+                boxes_t,
+                length,
+                width,
+                dt,
+                center_offset=offset,
+                area_flags=area_flags,
+                agent_tokens_per_t=tokens_t,
             )
             return nc, ttc
 
@@ -562,6 +679,7 @@ def pdms_proxy_masked(
     gt: torch.Tensor,
     agent_boxes_per_t: list,
     agent_labels_per_t: list | None = None,
+    agent_tokens_per_t: list | None = None,
     ego_dims: np.ndarray | None = None,
     available: list | None = None,
     static_labels: set | None = None,
@@ -579,6 +697,7 @@ def pdms_proxy_masked(
             agent_boxes_per_t=agent_boxes_per_t,
             ego_dims=ego_dims,
             agent_labels_per_t=agent_labels_per_t,
+            agent_tokens_per_t=agent_tokens_per_t,
             static_labels=static_labels,
             **kwargs,
         )
@@ -592,6 +711,9 @@ def pdms_proxy_masked(
             agent_labels_per_t=None
             if agent_labels_per_t is None
             else [agent_labels_per_t[i] for i in ai],
+            agent_tokens_per_t=None
+            if agent_tokens_per_t is None
+            else [agent_tokens_per_t[i] for i in ai],
             static_labels=static_labels,
             **{
                 k: ([v[i] for i in ai] if isinstance(v, list) and len(v) == B else v)
