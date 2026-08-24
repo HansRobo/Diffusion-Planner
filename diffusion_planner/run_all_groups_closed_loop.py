@@ -309,7 +309,8 @@ def run_closed_loop_main(
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    save_config(cfg, out_root, "closed_loop_config.json")
+    if ddp.get_rank() == 0:
+        save_config(cfg, out_root, "closed_loop_config.json")
 
     if render_media is None:
         render_media = cfg.render_media
