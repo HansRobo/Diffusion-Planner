@@ -375,10 +375,33 @@ override `width_s` or `gap_s`; scalar frame-count entries are not accepted.
 
 For each mined scene:
 
-1. Generate `K` candidate ego trajectories.
-2. Score all candidates against the configured gates.
-3. Keep at most one winner.
-4. Drop the scene if no candidate passes.
+1. Generate `K` candidate ego trajectories (the `anchor_fan_16_cl3` variant adds
+   a deterministic slot, 16 anchor-prototype slots and 3 route-centerline guided
+   slots, K=20).
+2. For expert-disagreement-like rows (label OR `expert_disagreement_reason`),
+   synthesize scripted candidates from ONE GT-schedule re-timing entry point: the
+   stay-behind stop morph (stop anchor from the recorded expert via
+   `--expert_stop_anchor recorded`) and the depart morph for fail-to-take-off
+   rows (default ON, `--disable_depart_morph` to opt out). Scripted candidates
+   join the same pool under the same gates — they are never forced.
+3. Score all candidates against the configured gates, then apply the trust
+   region (`--max_expert_dev_m`): gate-passing candidates whose deviation from
+   the expert reference exceeds the bound are rejected; the depart candidate is
+   measured with a timing-free path distance (a delayed departure follows the
+   expert's geometry) while all others use pointwise L2.
+4. Rank survivors with the unified state-weighted rule (paper Eq. 26): rule
+   score + route-path consistency + expert consistency, weighted by the state
+   class from the trajectory-level expert progress gap (paper Eq. 24). Rows
+   carrying a measured `expert_disagreement_max_dev` classify by it regardless
+   of their primary label.
+5. Keep at most one winner; `--save_candidates` persists the full pool
+   (`<target>.candidates.npz`: all K trajectories, reward totals, selected and
+   morph indices) for later re-scoring.
+6. Drop the scene if no candidate passes.
+
+With `--progress_reference_expert` the underprogress reference is pinned to the
+logged expert's path length for every repaired row, so the progress discipline
+does not collapse to the model grading itself.
 
 Before candidate generation, repair groups rows by event window. If any source
 scene in an event window is already colliding with any neighbor at t=0, or is
@@ -475,8 +498,33 @@ Per round, the workflow reports:
 - replay memory size
 - final training scene count
 - guard metrics, when guards are configured
+- realized closed-loop reward (`--realized_reward`): aggregate mean with
+  SD/SEM/segment count (pooled across shards), the per-term component
+  decomposition, and a per-chunk mean in every mining segments row
+  (`realized_cl_reward_chunk` + `_poses`) so frozen chunk sets support paired
+  per-chunk model comparisons.
 
 Artifacts belong under the SSD `auto_research` area, not inside the git repo.
+
+## Replay Target Refresh (`replay_refresh`)
+
+The replay memory is a floor, not a leash: with `replay_refresh: true` each
+round re-repairs the stale replayed scenes with the CURRENT policy (same reward
+ruler) and keeps `max(frozen, fresh)` per scene; refreshed targets are then
+persisted back into the round memory (atomically) so the improvement carries to
+later rounds instead of being re-derived. Zero fresh gate-passing candidates
+keeps every frozen target and never aborts the round. See
+`refresh_replay_targets.py`.
+
+## Dataset Pool Construction
+
+`build_r2lpl_pools.py` builds the anchor/waits training pools from an IL scene
+list as chainable stages (seeded subsample, moving filter, stop-go waits via
+`build_patience_benchmark --out_pool`, per-log frame dedup, `is_skipped` audit,
+route-arc region exclusion). Every output-changing threshold is a required
+argument and the stages fail loudly on unreadable inputs.
+`build_resume_benchmark.py` selects quasi-stationary-at-t0 scenes whose
+recorded ego resumes mid-horizon — the take-off decision benchmark.
 
 ## Hard-Example Signal (`target_gt_disagreement`)
 
