@@ -141,7 +141,7 @@ def _row_is_ed_like(row: dict) -> bool:
     recorded a reason (a stall ending in a collision/RB event is labelled by the
     violation while the behavioural failure is still the lag). Synthesis, det
     extraction and forcing must all use THIS predicate or rows fall in the gap
-    (smoke_trustfix: 195/195 stall drops)."""
+    (measured: stall rows are dropped essentially wholesale otherwise)."""
     return _row_is_expert_disagreement(row) or bool(row.get("expert_disagreement_reason"))
 
 
@@ -175,7 +175,7 @@ def _expert_reference_scoring_data(
         # Pin the underprogress reference to the EXPERT's path length. Without this the
         # reward falls back to model_path_lens[0] (the current model's own det trajectory),
         # so cautious candidates are graded against an equally cautious yardstick and the
-        # reference collapses as the model degrades (2026-08 campaign, diary #60).
+        # reference collapses as the model degrades.
         exp = _future_to_4col(data["ego_expert_future"].detach().cpu().numpy())
         xy = exp[:, :2]
         valid = np.abs(xy).sum(axis=-1) > 0.1
@@ -221,7 +221,7 @@ def _candidate_is_interaction_risky(label_row: dict[str, Any]) -> bool:
 
     Expert-paced targets are faster than the model's natural output, so a morph can clear the
     collision gate while carrying moving_near_miss / moving_ttc. Training on those teaches
-    "drive at expert pace close to other vehicles" — measured: 1,923 of 16,707 expert targets
+    "drive at expert pace close to other vehicles" — measured: a non-trivial share of expert targets
     (11.5%) carried such labels, and that round's probe moving collisions went 11 -> 21.
     """
     labels = {str(x) for x in label_row.get("labels", [])}
@@ -273,7 +273,7 @@ def _candidate_path_deviation(
     For the depart candidate the schedule differs from the expert BY DESIGN (a feasible
     catch-up starts from the stalled ego), so pointwise L2 conflates the intended delay
     with geometric divergence and the trust region vetoes exactly the rows the candidate
-    exists for (redo link 1: 0.4% of stall rows repaired, 37-53% trust-region drops).
+    exists for (measured: well under 1% of stall rows repaired, with heavy trust-region drops).
     This measures what the trust region actually wants to bound — how far the candidate's
     GEOMETRY strays from the expert's — via the canonical point-to-segment helper.
     Mirrors ``_candidate_deviation_penalty``'s null handling.
@@ -765,15 +765,13 @@ def _best_safe_candidate(
     # Anti-stall override: for rows the miner tagged as the model LAGGING the
     # expert, the expert's own (morphed) future is the mechanism-matched target —
     # it is real and it drove through. Under the default recoverable weights it
-    # wins only ~9% of selections while the safe-but-cautious generated winners
+    # wins only a small minority of selections while the safe-but-cautious generated winners
     # teach the very lag being repaired (2026-08 campaign finding).
     is_lagging_row = source_row.get("expert_disagreement_reason") == "model_lagging_expert"
     # `force_or_drop` acts on EVERY row whose repair reason is expert_disagreement (both
     # model_lagging_expert and expert_wait_model_forward): if the winner is not the expert
     # morph, the row teaches a non-expert pace, so it is dropped rather than trained on.
-    is_ed_row = _row_is_expert_disagreement(source_row) or bool(
-        source_row.get("expert_disagreement_reason")
-    )
+    is_ed_row = _row_is_ed_like(source_row)
     forced_scope = is_ed_row if lagging_expert_target == "force_or_drop" else is_lagging_row
 
     def _forced_candidate_ok(idx_s: int | None) -> bool:
@@ -835,7 +833,7 @@ def _best_safe_candidate(
         )
         # Purity mode: a lagging row trains ONLY on the expert-paced target. If the morph is
         # absent or gate-rejected, drop the row instead of teaching the cautious generated
-        # winner — those targets are what made lagging WORSE link over link (campaign #58).
+        # winner — those targets are what made lagging worse link over link.
         meta = {
             "reason": ("ed_expert_target_interaction_risk" if _risky else "ed_no_expert_target"),
             "best_total": max(float(r.total) for r in reward_rows),
@@ -981,7 +979,7 @@ def _preflight_recorded_anchor(rows: list[dict[str, Any]]) -> None:
     """
     missing = []
     for row in rows:
-        if not _row_is_expert_disagreement(row):
+        if not _row_is_ed_like(row):
             continue
         with np.load(row["scene_path"]) as z:
             if "ego_recorded_future" not in z.files:
@@ -1159,13 +1157,16 @@ def build_repaired_targets(
         for scene_idx, (row, data, scene_trajs, candidate_rows) in enumerate(
             zip(kept_rows, datas, trajs, candidate_rows_per_scene, strict=True)
         ):
-            is_expert = _row_is_expert_disagreement(row)
+            # Morph synthesis, telemetry and the recorded-anchor preflight all key on
+            # the SAME ed-like predicate (label OR reason field); a stricter predicate
+            # here silently drops morph outcome telemetry for reason-only rows.
+            is_expert = _row_is_ed_like(row)
 
             # Expert-reference scoring (ALL rows, 2026-08-07): the progress terms must
             # reference the LOGGED EXPERT for every mistake type, not the realized ego.
             # In closed-loop mined windows ego_agent_future is truncated at the contact
-            # step (RB/MC rows: median 7 valid steps / 1.7 m of arc measured on link-1
-            # windows), so referencing it either disables the progress discipline
+            # step (RB/MC rows typically retain only a few valid steps / a couple of
+            # metres of arc), so referencing it either disables the progress discipline
             # (<10 valid steps) or slams every full-length candidate with overprogress
             # against a stub, selecting for shortness; underprogress then falls back to
             # the det plan grading the model against itself. Scoring-only — no mutation
@@ -1242,7 +1243,7 @@ def build_repaired_targets(
                 device=device,
             )
 
-            # THE morph (unified, FIX_DIARY #111): ONE GT-schedule re-timing operation.
+            # THE morph (unified): ONE GT-schedule re-timing operation.
             # ``stay_behind`` re-times the det plan's own geometry (rushing rows + fallback);
             # ``depart`` sources geometry from the expert path (lagging rows — a parked det
             # plan has no road ahead to re-time, it dies as "infeasible_deceleration").
@@ -1258,7 +1259,7 @@ def build_repaired_targets(
             # road_border_crossing while expert_disagreement_reason still says
             # model_lagging_expert — and the force_or_drop scope already treats such
             # rows as ED, so without a morph in the pool they were structurally
-            # unrepairable (smoke_trustfix: 195/195 dropped). Synthesis scope must
+            # unrepairable (measured: dropped essentially wholesale). Synthesis scope must
             # match forcing scope.
             is_ed_like = _row_is_ed_like(row)
             if is_ed_like and (repair_expert_gt_candidate or enable_depart_morph):
@@ -1537,16 +1538,12 @@ def main() -> None:
         help="how the R2LPL guidance class (near_log / recoverable / far_offpolicy, paper "
         "Eq. 24) is decided. 'state_dev' = paper Eq. 21: deviation of the ROLLOUT EGO STATE "
         "from the logged expert state (d_xy 1.0/5.0 m, d_yaw 15/45 deg, d_v 2.0 m/s). "
-        "'progress_dev' (default) = the trajectory-level expert progress gap, a different "
-        "quantity that classifies most near-log rows as 'recoverable'. NOTE: 'state_dev' is "
-        "paper-faithful but measured WORSE on this project's mining geometry -- chunks restart "
-        "from logged states every 88 frames, so the rollout ego never leaves the log "
-        "(d_xy p50 0.43 m, max 1.85 m => 89% near_log, 0% far_offpolicy) and the 'far' branch "
-        "that makes the paper's rule useful never fires. On a matched-corpus A/B, letting "
-        "Eq. 26 select (state_dev, no forcing) left the closed-loop reward at base (+0.8%) "
-        "while forcing the expert target gained +4.1% on the same rows, with fewer collisions "
-        "and less lagging. Keep 'progress_dev' + an anti-stall lever unless the mining geometry "
-        "changes to long rollouts that genuinely diverge from the log.",
+        "'progress_dev' (default) = the trajectory-level expert progress gap. NOTE: "
+        "'state_dev' is paper-faithful but assumes long rollouts that genuinely diverge "
+        "from the log; when mining restarts chunks from logged states at a short stride, "
+        "the rollout ego never leaves the log's neighborhood, the 'far' branch never "
+        "fires, and the classification degenerates to near_log. Prefer 'progress_dev' "
+        "unless the mining geometry uses long divergent rollouts.",
     )
     ap.add_argument(
         "--repair_expert_gt_candidate",
@@ -1580,7 +1577,7 @@ def main() -> None:
         help="No-op kept for compatibility: the depart-morph candidate (expert-path "
         "geometry, feasible catch-up timing, for model_lagging_expert scenes) is ON "
         "by default — the stop morph cannot build a departure from a parked det "
-        "plan (FIX_DIARY #104/#106). Use --disable_depart_morph to turn it off.",
+        "plan. Use --disable_depart_morph to turn it off.",
     )
     ap.add_argument(
         "--disable_depart_morph",

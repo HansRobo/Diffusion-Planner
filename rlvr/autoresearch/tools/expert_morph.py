@@ -570,7 +570,7 @@ def build_unified_morph_candidates(
     """THE morph: one GT-schedule re-timing operation for expert_disagreement rows.
 
     There is a single mechanism — re-time the ego onto the expert's schedule — with the
-    geometry source decided by the disagreement direction (FIX_DIARY #104/#106/#111):
+    geometry source decided by the disagreement direction:
 
     - ``stay_behind`` (every ED row): the det plan's own geometry re-timed to the expert's
       speed profile. The correct response when the model RUSHES a waiting expert

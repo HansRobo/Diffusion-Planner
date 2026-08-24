@@ -278,7 +278,7 @@ _ANCHOR_SLOTS_6 = [_anchor_slot(i) for i in range(6)]
 # The full prototype library (rows 0-15) as a pure anchor fan.
 _ANCHOR_SLOTS_16 = [_anchor_slot(i) for i in range(16)]
 
-# Route-centerline guided slots for the repair fan (2026-08-07, Daniel): candidates pulled
+# Route-centerline guided slots for the repair fan: candidates pulled
 # toward the route centerline so curve repairs have an on-centerline mode to select instead
 # of a prototype shortcut. Scales <= 3 (route-CL guidance rule); noise inside the proven
 # [0.5, 2.0] envelope's low end.
