@@ -460,13 +460,15 @@ def _main():
     else:
         npz_paths = [args.target]
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    scale_dirs = [args.out_dir / f"extent{int(extent)}m" for extent in VIEW_EXTENTS_M]
+    for scale_dir in scale_dirs:
+        scale_dir.mkdir(parents=True, exist_ok=True)
+
     for npz_path in npz_paths:
         data = dict(np.load(npz_path, allow_pickle=True))
         images = render_sample(data, args.image_size, VIEW_EXTENTS_M)
-        for scale, extent in enumerate(VIEW_EXTENTS_M):
-            name = f"{npz_path.stem}_extent{int(extent)}m.png"
-            cv2.imwrite(str(args.out_dir / name), colorize(images[scale]))
+        for scale, scale_dir in enumerate(scale_dirs):
+            cv2.imwrite(str(scale_dir / f"{npz_path.stem}.png"), colorize(images[scale]))
     print(f"rendered {len(npz_paths)} samples x {NUM_SCALES} scales into {args.out_dir}")
 
 
