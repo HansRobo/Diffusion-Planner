@@ -49,6 +49,10 @@ analysis tools that operate on a saved checkpoint and an evaluation dataset.
 | `scripts/visualize_prediction_overlay_video.py` | Creates a sequentially saved trajectory-overlay MP4 |
 | `run_prediction_overlay.sh` | Renders one selectable trajectory overlay scene |
 | `run_prediction_overlay_video.sh` | Renders a selectable trajectory-overlay video |
+| `scripts/visualize_closed_loop_attention.py` | Captures and renders Fusion/rollout Attention over a self-driven closed-loop rollout instead of open-loop log replay |
+| `run_closed_loop_attention_video.sh` | Generates a closed-loop Attention MP4/JSON over one route segment |
+| `scripts/token_importance_closed_loop.py` | Scores the same `drop:<group>` ablations by closed-loop collision/near-miss/clearance outcomes instead of one-step FDE/ADE |
+| `run_closed_loop_token_importance.sh` | Runs the closed-loop ablation sweep over windowed chunks and writes a TSV |
 | `notebook/token_analysis.ipynb` | Japanese explanation of the experiment, metrics, complete numerical results, graphs, and interpretation |
 | `notebook/token_analysis_en.ipynb` | English version of the same analysis |
 | `notebook/generate_english_notebook.py` | Generates the English Notebook while keeping its code cells synchronized with the Japanese source |
@@ -578,6 +582,83 @@ DEVICE=cuda \
 This produces separate all-token and neighbor-only MP4 files. Interpret a
 large rollout value as strong Decoder-to-input attention connectivity, not as
 proof that removing the token would change ADE/FDE.
+
+## Closed-Loop Variants
+
+Every tool above is open-loop: one forward pass per recorded NPZ frame, replaying
+the log exactly as it happened. Two additional tools instead drive the ego through
+this repository's existing closed-loop Perception-Reproducer rollout
+(`scenario_generation/reproducer_rollout.py`, the same engine used by closed-loop
+training/validation and by `rlvr.autoresearch.tools.mine_collisions_reproducer`) —
+the model's own predicted trajectory advances the ego one step at a time
+(`PerfectTracker`), recorded neighbors are replayed keyed on the live ego pose, and
+attention/ablation are measured on that self-driven rollout instead of log replay.
+
+### Closed-loop attention/rollout video
+
+`scripts/visualize_closed_loop_attention.py` (wrapper: `run_closed_loop_attention_video.sh`)
+captures Fusion attention (`--attention_mode all_token`, the default), neighbor-only
+attention (`neighbor`), or Decoder-to-input rollout (`rollout`) at every step of a
+closed-loop segment, and renders the same kind of PNG/MP4/JSON the open-loop video
+tools produce — reusing their drawing code (`draw_report`) and attention-capture
+hooks (`patch_fusion`/`patch_decoder`/`attention_rollout`) unmodified.
+
+```bash
+MODEL_PATH=/path/to/best_model.pth \
+NPZ_ROOT=/path/to/route_npz_root \
+ATTENTION_MODE=rollout \
+CHUNK_LEN=200 \
+DEVICE=cuda \
+OUT_DIR=/tmp/closed_loop_attention \
+./run_closed_loop_attention_video.sh
+```
+
+`NPZ_ROOT` must be a tree of route NPZ frames with pose JSON sidecars (sibling
+`.json` next to each `.npz`, or set `SIDECAR_ROOT`) — the same layout
+`RouteTimeline`/`mine_collisions_reproducer.py` expect, which is not necessarily the
+same tree used for the open-loop tools' `path_list_valid.json`. Because the ego is
+self-driven, there is no ground-truth future to draw (the open-loop drawing code
+already treats it as optional); recorded neighbor futures are unaffected. Since a
+closed-loop rollout's attention distribution isn't known ahead of time without a
+second pass, this tool rescales its color/marker range per frame rather than using
+one global scale like the open-loop `*_video` tools do.
+
+### Closed-loop feature-importance ablation
+
+`scripts/token_importance_closed_loop.py` (wrapper: `run_closed_loop_token_importance.sh`)
+re-runs the same `drop:<group>` ablation configs `token_importance.py` defines
+(imported and applied unmodified via its `apply_ablation`), but scores each one by
+closed-loop outcomes over an ~8-second window — `n_collision_steps`,
+`n_near_miss_steps`, `min_clearance`, `mean_clearance`, `progress_m`, `n_snaps` — with
+`d_<metric>` delta-from-baseline columns, instead of one-step FDE/ADE. Windows are
+fixed-length chunks at a stride across every route (`--chunk_len`/`--start_stride`,
+mirroring `mine_direct_reproducer_chunks`'s pattern), with `--num_shards`/
+`--shard_index`/`--sample_fraction` for large corpora.
+
+```bash
+MODEL_PATH=/path/to/best_model.pth \
+NPZ_ROOT=/path/to/route_npz_root \
+CHUNK_LEN=80 \
+DEVICE=cuda \
+OUT_TSV=/tmp/closed_loop_ablation.tsv \
+./run_closed_loop_token_importance.sh
+```
+
+v1 runs one full rollout per `(window, config)` pair sequentially — simple and
+correct, but not throughput-optimized; a batched version (via
+`run_segments_batched`, which accepts the same ablation hook) is a natural follow-up
+for large-corpus runs, not yet implemented.
+
+### Interpretation addendum
+
+Closed-loop ablation directly answers the open-loop caveat above ("one-step
+FDE/ADE can't see compounding error") — outcomes are now measured over a real
+multi-second self-driven rollout. It does **not** resolve the other caveat: attention
+(plain or rollout) is still not causal evidence, regardless of whether the loop is
+open or closed. Treat closed-loop ablation deltas as the stronger signal for "does
+removing this input change driving outcomes," and attention (open- or closed-loop)
+as "where did the model look," and keep interpreting the two together as this guide
+does throughout.
 
 ## Traffic-Light-Aware Lane/Route Visualization
 
