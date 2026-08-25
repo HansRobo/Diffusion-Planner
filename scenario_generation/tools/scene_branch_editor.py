@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import io
 import math
+import sys
 from pathlib import Path
 
 import gradio as gr
@@ -37,6 +38,7 @@ from scenario_generation.scene_render import (
     _PLACED_MOVING_COLOR,
     _PLACED_SELECTED_COLOR,
     _VIEW_HALF_DEFAULT,
+    SceneAttentionOverlay,
     _ensure_neighbor_future_4col,
     _extract_border_polylines,
     _obb_corners_from_placement,
@@ -80,6 +82,19 @@ _LATERAL_LAMBDA = 3.0
 # Collision-swerve guidance: slider sign picks the side in SCREEN direction
 # (+ = right / - = left), magnitude is the strength. Proximity range in metres.
 _COLLISION_SWERVE_RANGE = 8.0
+
+
+def _ensure_scripts_on_path() -> None:
+    """Put repo-root `scripts/` on sys.path so its bare sibling imports resolve.
+
+    `scripts/` modules do `from visualize_neighbor_attention import ...` (no
+    package prefix), which only works when `scripts/` itself is on
+    sys.path[0] -- true for `python scripts/foo.py`, false for this GUI's
+    `python -m scenario_generation.tools.scene_branch_editor` entry point.
+    """
+    scripts_dir = str(Path(__file__).resolve().parent.parent.parent / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
 
 
 def _build_guidance_params(
@@ -190,6 +205,82 @@ class _ModelCache:
             nb_preds = pred[0, 1:].cpu().numpy()  # (P-1, T, 4)
             return ego_traj, nb_preds
         return ego_traj
+
+    @torch.no_grad()
+    def predict_det_with_attention(
+        self,
+        npz_path: str,
+        obstacles: list | None = None,
+        zero_neighbors: bool = False,
+        ego_shape_override: tuple[float, ...] | None = None,
+        layer: str = "mean",
+    ) -> tuple[np.ndarray, list[dict], dict[str, int]] | None:
+        """One deterministic forward pass + ego-query Fusion attention over every
+        valid encoder token (all_token mode).
+
+        Returns (ego_traj (80,4) [x,y,cos_h,sin_h], records, class_row_counts).
+        `records` entries have 'class' + 'class_index' (local index within that
+        class) + 'attention_pct_all_tokens' -- positions in records are in
+        NORMALIZED model-input space and must NOT be used for drawing; callers
+        map class+class_index onto the renderer's own scene entities instead
+        (see _build_attention_overlay).
+        """
+        self._ensure_loaded()
+        data = self._load_npz(
+            npz_path,
+            obstacles=obstacles,
+            zero_neighbors=zero_neighbors,
+            ego_shape_override=ego_shape_override,
+        )
+
+        P = 1 + self._model_args.predicted_neighbor_num
+        future_len = self._model_args.future_len
+        from rlvr.closed_loop.batched_rollout import make_initial_latent
+
+        data["sampled_trajectories"] = make_initial_latent(
+            1,
+            P,
+            future_len,
+            data["ego_current_state"].device,
+        )
+
+        _ensure_scripts_on_path()
+        from token_analysis_common import find_fusion, patch_fusion
+        from visualize_all_token_attention import all_token_attention, token_records
+
+        fusion = find_fusion(self._model.encoder)
+        originals = [block.forward for block in fusion.blocks]
+        store: list[dict] = []
+        patch_fusion(fusion, store)
+        try:
+            _, decoder_output = self._model(data)
+        finally:
+            # Always restore -- predict_det/predict_guided must be completely
+            # unaffected whether or not this method is ever called.
+            for block, fwd in zip(fusion.blocks, originals):
+                block.forward = fwd
+
+        scores = all_token_attention(store, layer)[0].detach().cpu().numpy()
+        valid = (~store[0]["mask"][0]).cpu().numpy()
+        sample = {
+            k: v.detach().cpu().numpy()[0]
+            for k, v in data.items()
+            if isinstance(v, torch.Tensor)
+        }
+        records = token_records(sample, scores, valid)
+        class_row_counts = {
+            cls: int(np.asarray(sample[key]).shape[0])
+            for cls, key in [
+                ("static", "static_objects"),
+                ("lanes", "lanes"),
+                ("route", "route_lanes"),
+                ("line_strings", "line_strings"),
+            ]
+            if key in sample
+        }
+
+        ego_traj = decoder_output["prediction"][0, 0].cpu().numpy()
+        return ego_traj, records, class_row_counts
 
     @torch.no_grad()
     def predict_guided(
@@ -311,6 +402,18 @@ class _ModelCache:
         return data
 
 
+def _sort_obstacles_by_distance(obstacles: list) -> list:
+    """Single source of truth for obstacle-slot order in the injected tensor --
+    used by both `_inject_obstacles_into_tensors` and the attention-overlay
+    index mapping (`_build_attention_overlay`), so the two can never drift
+    apart.
+    """
+    return sorted(obstacles, key=lambda o: math.hypot(o.x, o.y))
+
+
+_AGENT_TYPE_ONE_HOT_COL = {"vehicle": 8, "pedestrian": 9, "bicycle": 10}
+
+
 def _inject_obstacles_into_tensors(
     data: dict[str, torch.Tensor],
     obstacles: list,
@@ -319,8 +422,8 @@ def _inject_obstacles_into_tensors(
     """Inject placed obstacles into the neighbor_agents_past tensor.
 
     Each obstacle becomes a stationary neighbor at its (x, y, yaw) with zero
-    velocity and vehicle type. Inserted at the front (closest neighbors) and
-    existing neighbors are shifted back.
+    velocity and its selected agent type. Inserted at the front (closest
+    neighbors) and existing neighbors are shifted back.
     """
     if not obstacles:
         return data
@@ -328,7 +431,7 @@ def _inject_obstacles_into_tensors(
     B, N, T, F = nap.shape
 
     # Sort by distance from ego (at origin) to match the distance-sorted convention
-    obstacles = sorted(obstacles, key=lambda o: math.hypot(o.x, o.y))
+    obstacles = _sort_obstacles_by_distance(obstacles)
 
     DT = 0.1
     new_rows = []
@@ -339,6 +442,7 @@ def _inject_obstacles_into_tensors(
         vx = spd * cos_h
         vy = spd * sin_h
         row = torch.zeros(T, F, dtype=torch.float32, device=device)
+        type_col = _AGENT_TYPE_ONE_HOT_COL.get(getattr(obs, "agent_type", "vehicle"), 8)
         for t in range(T):
             backward = (T - 1 - t) * spd * DT
             row[t, 0] = obs.x - backward * cos_h
@@ -349,7 +453,7 @@ def _inject_obstacles_into_tensors(
             row[t, 5] = vy
             row[t, 6] = obs.width
             row[t, 7] = obs.length
-            row[t, 8] = 1.0  # vehicle
+            row[t, type_col] = 1.0
         hist = getattr(obs, "history_steps", 30)
         n_valid = min(hist + 1, T)
         if n_valid < T:
@@ -370,6 +474,61 @@ def _inject_obstacles_into_tensors(
             data["neighbor_agents_future"] = naf_new
 
     return data
+
+
+def _build_attention_overlay(
+    records: list[dict],
+    obstacles: list | None,
+    class_row_counts: dict[str, int],
+) -> SceneAttentionOverlay:
+    """Map `token_records` (class + local class_index) onto the renderer's own
+    scene entities.
+
+    Neighbors: `_extract_neighbors` (npz_loader.py) builds `scene.agents`'
+    neighbor ids as `neighbor_{i}` where `i` is the raw row index in
+    `neighbor_agents_past` (never reordered, only invalid rows skipped) --
+    since `scene` is built from the raw NPZ independent of obstacle
+    injection, slots [0, n_obs) are the sorted placed obstacles (same sort
+    order `_inject_obstacles_into_tensors` used) and slots [n_obs, N) map
+    back to `neighbor_{local_index - n_obs}`. Lanes/route/static/line_strings
+    have no injection step, so their class_index already equals the
+    renderer's own row-iteration index directly.
+    """
+    obstacles = obstacles or []
+    sorted_obstacles = _sort_obstacles_by_distance(obstacles)
+    n_obs = len(sorted_obstacles)
+
+    by_class: dict[str, dict[int, float]] = {}
+    for rec in records:
+        by_class.setdefault(rec["class"], {})[rec["class_index"]] = rec["attention_pct_all_tokens"]
+
+    entity_attention: dict[str, float] = {}
+    for local_index, pct in by_class.get("neighbors", {}).items():
+        if local_index < n_obs:
+            entity_attention[sorted_obstacles[local_index].label] = pct
+        else:
+            entity_attention[f"neighbor_{local_index - n_obs}"] = pct
+
+    def _row_array(class_name: str) -> np.ndarray | None:
+        scores = by_class.get(class_name)
+        n_rows = class_row_counts.get(class_name, 0)
+        if not scores or n_rows == 0:
+            return None
+        arr = np.zeros(n_rows, dtype=np.float32)
+        for idx, pct in scores.items():
+            if 0 <= idx < n_rows:
+                arr[idx] = pct
+        return arr
+
+    all_pct = [rec["attention_pct_all_tokens"] for rec in records]
+    return SceneAttentionOverlay(
+        entity_attention=entity_attention,
+        static_attention=_row_array("static"),
+        lane_attention=_row_array("lanes"),
+        route_attention=_row_array("route"),
+        line_string_attention=_row_array("line_strings"),
+        vmax=max(all_pct) if all_pct else 0.0,
+    )
 
 
 def _traj_cos_sin_to_xyh(traj: np.ndarray) -> np.ndarray:
@@ -626,7 +785,7 @@ def _build_moving_agent(
 
     agent = Agent(
         id=aid,
-        agent_type=AgentType.VEHICLE,
+        agent_type=AgentType(getattr(obs, "agent_type", "vehicle")),
         length=obs.length,
         width=obs.width,
         wheelbase=obs.length * 0.65,
@@ -775,6 +934,7 @@ def build_interface(
         selected_obstacle_state = gr.State(value=None)
         det_traj_state = gr.State(value=None)  # cached (80, 3) or None
         guided_trajs_state = gr.State(value=None)  # cached list[(80, 3)] or None
+        attention_state = gr.State(value=None)  # cached SceneAttentionOverlay or None
 
         gr.Markdown("# Scene Branch Editor")
 
@@ -871,6 +1031,11 @@ def build_interface(
                         value=30,
                         step=1,
                         label="History steps (0=just appeared, 30=full)",
+                    )
+                    obs_type = gr.Dropdown(
+                        choices=["vehicle", "pedestrian", "bicycle"],
+                        value="vehicle",
+                        label="Type",
                     )
                     with gr.Row():
                         obs_is_moving = gr.Checkbox(label="Moving", value=False)
@@ -1064,6 +1229,25 @@ def build_interface(
                         show_nb_preds = gr.Checkbox(
                             label="NB Preds", value=True, interactive=_has_model, scale=1
                         )
+                    with gr.Row():
+                        show_attention = gr.Checkbox(
+                            label="Show Attention", value=False, interactive=_has_model, scale=1
+                        )
+                        attention_threshold = gr.Slider(
+                            minimum=0.0,
+                            maximum=20.0,
+                            value=0.0,
+                            step=0.1,
+                            label="Attn Threshold (%)",
+                            interactive=_has_model,
+                            scale=2,
+                        )
+                    attention_classes_cbg = gr.CheckboxGroup(
+                        choices=["neighbors", "static", "lanes", "route", "line_strings"],
+                        value=["neighbors", "static", "lanes", "route", "line_strings"],
+                        label="Attention Classes (neighbors incl. placed obstacles)",
+                        interactive=_has_model,
+                    )
                     if not _has_model:
                         gr.Markdown("*No model — pass `--model_path`*")
 
@@ -1227,6 +1411,9 @@ def build_interface(
             traj_rb: bool = False,
             traj_nb: bool = False,
             nb_pred_trajs: np.ndarray | None = None,
+            attention: SceneAttentionOverlay | None = None,
+            attention_threshold: float = 0.0,
+            attention_classes: set[str] | None = None,
         ):
             """Core render function: load NPZ at step, draw scene + obstacles."""
             branch = tree.branches[tree.active_branch]
@@ -1304,6 +1491,7 @@ def build_interface(
                                 speed=o.speed,
                                 route_lanelet_ids=o.route_lanelet_ids,
                                 goal_pose=o.goal_pose,
+                                agent_type=o.agent_type,
                             )
                         )
                     else:
@@ -1362,6 +1550,9 @@ def build_interface(
                 show_traj_rb=traj_rb,
                 show_traj_nb=traj_nb,
                 nb_pred_trajs=nb_pred_trajs,
+                attention=attention,
+                attention_threshold=attention_threshold,
+                attention_classes=attention_classes,
             )
             img = _fig_to_pil(fig)
             info = f"Step **{step}** / **{len(seq) - 1}** | Branch: `{tree.active_branch}`"
@@ -1403,6 +1594,22 @@ def build_interface(
                 return _traj_cos_sin_to_xyh(ego_raw), nb_raw
             return _traj_cos_sin_to_xyh(result)
 
+        def _predict_attention_with_obs(tree, step, zero_neighbors=False):
+            npz_path = _get_npz_path(tree, step)
+            if not npz_path:
+                return None
+            obs = _get_obstacles_at_step(tree, _safe_step(step))
+            result = model_cache.predict_det_with_attention(
+                npz_path,
+                obstacles=obs or None,
+                zero_neighbors=zero_neighbors,
+                ego_shape_override=tree.ego_shape,
+            )
+            if result is None:
+                return None
+            _, records, class_row_counts = result
+            return _build_attention_overlay(records, obs, class_row_counts)
+
         def on_render(
             tree,
             step,
@@ -1419,6 +1626,10 @@ def build_interface(
             det_cache,
             guided_cache,
             nb_preds_on,
+            attention_on,
+            attention_threshold_val,
+            attention_classes_val,
+            attention_cache,
         ):
             det_traj = None
             _nb_preds = None
@@ -1437,6 +1648,15 @@ def build_interface(
 
             guided_list = guided_cache if guided_on else None
 
+            attention_overlay = None
+            if attention_on and model_cache and model_cache.available:
+                attention_overlay = _predict_attention_with_obs(tree, step, zero_neighbors=hide_nb)
+                attention_cache = attention_overlay
+            elif attention_on and attention_cache is not None:
+                attention_overlay = attention_cache
+            else:
+                attention_cache = None
+
             img, info = _render(
                 tree,
                 _safe_step(step),
@@ -1451,8 +1671,52 @@ def build_interface(
                 traj_rb=traj_rb_on,
                 traj_nb=traj_nb_on,
                 nb_pred_trajs=_nb_preds,
+                attention=attention_overlay,
+                attention_threshold=attention_threshold_val,
+                attention_classes=set(attention_classes_val or []),
             )
-            return img, info, det_cache, guided_cache
+            return img, info, det_cache, guided_cache, attention_cache
+
+        def on_attention_display_change(
+            tree,
+            step,
+            view_r,
+            selected_obs,
+            gt_on,
+            det_cache,
+            guided_cache,
+            rb_on,
+            nb_on,
+            hide_nb,
+            traj_rb_on,
+            traj_nb_on,
+            attention_cache,
+            threshold_val,
+            classes_val,
+        ):
+            """Redraw-only handler for the attention threshold slider and class
+            checkbox group -- filtering happens entirely inside render_scene_at_step
+            from the already-computed attention_cache, so neither control needs a
+            new model forward pass.
+            """
+            img, info = _render(
+                tree,
+                _safe_step(step),
+                view_r,
+                selected_obs,
+                show_gt_val=gt_on,
+                det_traj=det_cache,
+                guided_trajs=guided_cache,
+                rb_dist=rb_on,
+                nb_dist=nb_on,
+                hide_nb=hide_nb,
+                traj_rb=traj_rb_on,
+                traj_nb=traj_nb_on,
+                attention=attention_cache,
+                attention_threshold=threshold_val,
+                attention_classes=set(classes_val or []),
+            )
+            return img, info
 
         def on_step_change(
             tree,
@@ -1559,6 +1823,7 @@ def build_interface(
             yaw,
             length,
             width,
+            obs_type_val,
             gt_on,
             det_cache,
             guided_cache,
@@ -1592,6 +1857,7 @@ def build_interface(
                 yaw_deg=round(float(yaw) / 5) * 5,
                 length=float(length),
                 width=float(width),
+                agent_type=str(obs_type_val or "vehicle"),
             )
             img, info = _render(
                 tree,
@@ -1659,6 +1925,7 @@ def build_interface(
                             speed=o.speed,
                             route_lanelet_ids=o.route_lanelet_ids,
                             goal_pose=o.goal_pose,
+                            agent_type=o.agent_type,
                         )
                     )
                 else:
@@ -1736,6 +2003,7 @@ def build_interface(
             history,
             is_moving,
             speed_val,
+            obs_type_val,
             gt_on,
             det_on,
             guided_on,
@@ -1824,6 +2092,7 @@ def build_interface(
                 speed=_speed,
                 route_lanelet_ids=route_ids,
                 goal_pose=goal,
+                agent_type=str(obs_type_val or "vehicle"),
             )
             tree.add_obstacle(tree.active_branch, placement)
             det_traj, guided = _recompute_trajs(
@@ -1904,6 +2173,7 @@ def build_interface(
                     30,
                     False,
                     gr.update(value=5.0, visible=False),
+                    "vehicle",
                 )
             obs = _find_obs(tree, label)
             img, info = _render(
@@ -1935,11 +2205,13 @@ def build_interface(
                     getattr(obs, "history_steps", 30),
                     _mov,
                     gr.update(value=_spd, visible=_mov),
+                    getattr(obs, "agent_type", "vehicle"),
                 )
             return (
                 img,
                 info,
                 label,
+                gr.update(),
                 gr.update(),
                 gr.update(),
                 gr.update(),
@@ -2019,6 +2291,7 @@ def build_interface(
             history,
             ed_is_moving,
             ed_speed,
+            ed_type,
             *g_args,
         ):
             if not tree.is_pending(tree.active_branch):
@@ -2088,6 +2361,7 @@ def build_interface(
                             speed=_speed,
                             route_lanelet_ids=_route,
                             goal_pose=_goal,
+                            agent_type=str(ed_type or "vehicle"),
                         )
                         _found = True
                         break
@@ -2126,6 +2400,7 @@ def build_interface(
             history,
             is_moving,
             speed_val,
+            obs_type_val,
             gt_on,
             det_on,
             guided_on,
@@ -2169,6 +2444,7 @@ def build_interface(
                     history,
                     is_moving,
                     speed_val,
+                    obs_type_val,
                     *g_args,
                 )
                 return (
@@ -2196,6 +2472,7 @@ def build_interface(
                 history,
                 is_moving,
                 speed_val,
+                obs_type_val,
                 gt_on,
                 det_on,
                 guided_on,
@@ -2617,8 +2894,18 @@ def build_interface(
             det_traj_state,
             guided_trajs_state,
             show_nb_preds,
+            show_attention,
+            attention_threshold,
+            attention_classes_cbg,
+            attention_state,
         ]
-        _render_trigger_outputs = [scene_image, step_info, det_traj_state, guided_trajs_state]
+        _render_trigger_outputs = [
+            scene_image,
+            step_info,
+            det_traj_state,
+            guided_trajs_state,
+            attention_state,
+        ]
 
         for _trigger in [
             view_half,
@@ -2631,8 +2918,33 @@ def build_interface(
             show_traj_rb,
             show_traj_nb,
             show_nb_preds,
+            show_attention,
         ]:
             _trigger.change(on_render, _render_trigger_inputs, _render_trigger_outputs)
+
+        _attn_display_inputs = [
+            tree_state,
+            step_slider,
+            view_half,
+            selected_obstacle_state,
+            show_gt,
+            det_traj_state,
+            guided_trajs_state,
+            show_rb_dist,
+            show_nb_dist,
+            hide_neighbors,
+            show_traj_rb,
+            show_traj_nb,
+            attention_state,
+            attention_threshold,
+            attention_classes_cbg,
+        ]
+        attention_threshold.change(
+            on_attention_display_change, _attn_display_inputs, [scene_image, step_info]
+        )
+        attention_classes_cbg.change(
+            on_attention_display_change, _attn_display_inputs, [scene_image, step_info]
+        )
 
         for direction, btn in [
             ("first", btn_first),
@@ -2658,6 +2970,7 @@ def build_interface(
                 obs_yaw,
                 obs_length,
                 obs_width,
+                obs_type,
                 show_gt,
                 det_traj_state,
                 guided_trajs_state,
@@ -2695,6 +3008,7 @@ def build_interface(
                 obs_history,
                 obs_is_moving,
                 obs_speed,
+                obs_type,
                 show_gt,
                 show_det,
             ]
@@ -2745,6 +3059,7 @@ def build_interface(
                 obs_history,
                 obs_is_moving,
                 obs_speed,
+                obs_type,
             ],
         )
 
@@ -3344,6 +3659,7 @@ def build_interface(
                             speed=o.speed,
                             route_lanelet_ids=o.route_lanelet_ids,
                             goal_pose=o.goal_pose,
+                            agent_type=o.agent_type,
                         )
                     )
                 else:
@@ -3430,6 +3746,7 @@ def build_interface(
                                 speed=obs.speed,
                                 route_lanelet_ids=fresh_route,
                                 goal_pose=fresh_goal,
+                                agent_type=getattr(obs, "agent_type", "vehicle"),
                             )
                     agent = _build_moving_agent(
                         _obs_for_build,
@@ -3443,7 +3760,7 @@ def build_interface(
                     h = getattr(obs, "history_steps", 30)
                     agent = Agent(
                         id=aid,
-                        agent_type=AgentType.VEHICLE,
+                        agent_type=AgentType(getattr(obs, "agent_type", "vehicle")),
                         length=obs.length,
                         width=obs.width,
                         wheelbase=obs.length * 0.65,
@@ -3901,6 +4218,7 @@ def build_interface(
                                 speed=o.speed,
                                 route_lanelet_ids=o.route_lanelet_ids,
                                 goal_pose=o.goal_pose,
+                                agent_type=o.agent_type,
                             )
                         )
                     else:
