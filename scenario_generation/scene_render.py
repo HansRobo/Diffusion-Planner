@@ -1175,5 +1175,11 @@ def render_scene_at_step(
         rank_ax.set_title(f"Top {len(_chart)} attended tokens", fontsize=10)
         rank_ax.grid(axis="x", alpha=0.25)
 
-    fig.tight_layout()
+    if rank_ax is not None:
+        # Only the 2-panel (attention) layout needs tight_layout to avoid the
+        # scene/rank subplots' labels overlapping -- it's an expensive call
+        # (walks every artist's bbox), so skip it for the far more common
+        # single-panel case; _fig_to_pil's savefig(bbox_inches="tight") still
+        # crops the single-panel output cleanly without it.
+        fig.tight_layout()
     return fig

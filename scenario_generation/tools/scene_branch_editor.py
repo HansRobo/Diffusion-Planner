@@ -561,11 +561,18 @@ def _traj_cos_sin_to_xyh(traj: np.ndarray) -> np.ndarray:
 
 
 def _fig_to_pil(fig: matplotlib.figure.Figure):
-    """Convert matplotlib Figure to PIL Image."""
+    """Convert matplotlib Figure to PIL Image.
+
+    dpi=100 (down from 120) trims raster time for negligible sharpness loss on
+    this line-art BEV plot -- Gradio scales the PNG to fit the display box
+    regardless of source resolution, so this only affects render speed, not
+    on-screen size (bbox_inches="tight" is what controls that, by cropping
+    away margin so the plot content fills more of the scaled-up display box).
+    """
     from PIL import Image
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+    fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     return Image.open(buf)
@@ -1007,7 +1014,7 @@ def build_interface(
 
         with gr.Row():
             # ═══════ LEFT PANEL — obstacle + modifications ═══════
-            with gr.Column(scale=1, min_width=260):
+            with gr.Column(scale=1, min_width=230):
                 # ── Fused Obstacle box (Add new / Edit existing) ──
                 with gr.Group():
                     gr.Markdown("### Obstacle")
@@ -1076,12 +1083,12 @@ def build_interface(
                         remove_obs_btn = gr.Button("Remove", variant="stop")
 
             # ═══════ CENTER PANEL (render + simulate + export/load/save) ═══════
-            with gr.Column(scale=4, min_width=560):
+            with gr.Column(scale=6, min_width=600):
                 scene_image = gr.Image(
                     label="Scene View",
                     type="pil",
                     interactive=False,
-                    height=850,
+                    height=1050,
                 )
 
                 # Playback control bar — YouTube-style, directly under the render:
@@ -1228,7 +1235,7 @@ def build_interface(
                     )
 
             # ═══════ RIGHT PANEL — overlay toggles + guidance ═══════
-            with gr.Column(scale=1, min_width=340):
+            with gr.Column(scale=1, min_width=300):
                 with gr.Group():
                     # Overlay toggles at the TOP, in a tidy grid.
                     gr.Markdown("### Overlays")
@@ -1562,7 +1569,7 @@ def build_interface(
                 view_half=view_r,
                 step_idx=step,
                 total_steps=len(seq),
-                figsize=(13, 11),
+                figsize=(16, 13),
                 gt_traj=gt_traj_render,
                 det_traj=det_traj,
                 guided_trajs=guided_trajs,
@@ -4302,7 +4309,7 @@ def build_interface(
                     view_half=view_r,
                     step_idx=s,
                     total_steps=len(seq),
-                    figsize=(13, 11),
+                    figsize=(16, 13),
                     gt_traj=gt_traj_r,
                     show_rb_dist=rb_on,
                     show_nb_dist=nb_on,
