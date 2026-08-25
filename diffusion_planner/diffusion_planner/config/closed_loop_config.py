@@ -196,14 +196,14 @@ class ClosedLoopConfig:
     )
 
     # Per-group pass conditions
-    # YAML path as the CLI field (JSON-serializable string, resolved by config_cli.resolve_paths)
-    closed_loop_pass_conditions: str | None = cli(
-        "YAML file with per-group pass conditions. See closed_loop_pass_conditions.yaml "
-        "for field definitions and default values. Pass Conditions: "
-        "collision=no collision, road_border=no curb hit, red_light_violation=no red-light running, "
-        "strong_brake=no hard brake, goal_reach=reached goal, snap=no emergency fallback. "
-        "Set to False to ignore that metric. If not provided, all True (strict).",
-        default=None,
+    closed_loop_pass_conditions: str = cli(
+        "Optional YAML file with per-group pass conditions. See "
+        "closed_loop_pass_conditions.yaml for field definitions and defaults. "
+        "Pass Conditions: collision=no collision, road_border=no curb hit, "
+        "red_light_violation=no red-light running, strong_brake=no hard brake, "
+        "goal_reach=reached goal, snap=no emergency fallback. Set to False to "
+        "ignore that metric. Omit (default '') for all True (strict).",
+        default="",
         path=True,
     )
     _closed_loop_pass_conditions_loaded: ClosedLoopPassConditionGroups | None = field(default=None, repr=False)
