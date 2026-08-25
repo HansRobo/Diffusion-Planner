@@ -346,7 +346,7 @@ def render_scene_at_step(
             ax.annotate(
                 f"attn {_pct:.1f}%",
                 (x, y),
-                fontsize=6,
+                fontsize=9,
                 color="black",
                 ha="center",
                 va="top",
@@ -456,7 +456,7 @@ def render_scene_at_step(
         ax.annotate(
             f"{agent.id} ({speed:.1f} m/s)",
             (pos[0], pos[1]),
-            fontsize=7,
+            fontsize=10,
             color=color,
             ha="center",
             va="bottom",
@@ -468,7 +468,7 @@ def render_scene_at_step(
             ax.annotate(
                 f"attn {_attn_pct:.1f}%",
                 (pos[0], pos[1]),
-                fontsize=7,
+                fontsize=10,
                 fontweight="bold",
                 color="black",
                 ha="center",
@@ -556,7 +556,7 @@ def render_scene_at_step(
             ax.annotate(
                 _lbl,
                 (obs.x, obs.y),
-                fontsize=8,
+                fontsize=11,
                 fontweight="bold",
                 color=color,
                 ha="center",
@@ -570,7 +570,7 @@ def render_scene_at_step(
                 ax.annotate(
                     f"attn {_obs_pct:.1f}%",
                     (obs.x, obs.y),
-                    fontsize=7,
+                    fontsize=10,
                     fontweight="bold",
                     color="black",
                     ha="center",
@@ -705,7 +705,7 @@ def render_scene_at_step(
                     ax.annotate(
                         f"RB {dist:.2f}m",
                         (mid_x, mid_y),
-                        fontsize=8,
+                        fontsize=11,
                         fontweight="bold",
                         color=color,
                         ha="center",
@@ -767,7 +767,7 @@ def render_scene_at_step(
                     ax.annotate(
                         f"{d:.2f}m",
                         (mid_x, mid_y),
-                        fontsize=7,
+                        fontsize=10,
                         color=color,
                         ha="center",
                         va="bottom",
@@ -1004,7 +1004,7 @@ def render_scene_at_step(
                         ax.annotate(
                             f"{traj_label} RB {worst_rb_dist:.2f}m @t{worst_rb_idx}",
                             (wx, wy),
-                            fontsize=7,
+                            fontsize=10,
                             fontweight="bold",
                             color=dc,
                             ha="center",
@@ -1089,7 +1089,7 @@ def render_scene_at_step(
                     ax.annotate(
                         f"{traj_label} NB {worst_nb_dist:.2f}m @t{worst_nb_idx}",
                         (wx, wy),
-                        fontsize=7,
+                        fontsize=10,
                         fontweight="bold",
                         color=dc,
                         ha="center",
@@ -1108,9 +1108,9 @@ def render_scene_at_step(
 
     ax.set_aspect("equal")
     ax.grid(True, alpha=0.12 if dark else 0.15, color=_grid_color)
-    ax.set_xlabel("X (m)", color=_text)
-    ax.set_ylabel("Y (m)", color=_text)
-    ax.tick_params(colors=_text)
+    ax.set_xlabel("X (m)", color=_text, fontsize=12)
+    ax.set_ylabel("Y (m)", color=_text, fontsize=12)
+    ax.tick_params(colors=_text, labelsize=11)
 
     # Legend for trajectory overlays
     handles, labels = ax.get_legend_handles_labels()
@@ -1118,9 +1118,9 @@ def render_scene_at_step(
         _legend_kwargs = (
             dict(facecolor=_ax_bg, edgecolor=_text, labelcolor=_text) if dark else {}
         )
-        ax.legend(fontsize=7, loc="upper right", framealpha=0.8, **_legend_kwargs)
+        ax.legend(fontsize=10, loc="upper right", framealpha=0.8, **_legend_kwargs)
 
-    ax.set_title(f"Step {step_idx} / {total_steps - 1}", fontsize=10, color=_text)
+    ax.set_title(f"Step {step_idx} / {total_steps - 1}", fontsize=14, color=_text)
 
     # Current ego speed readout — drawn in the lower-left corner (out of the way
     # of the title (top) and the trajectory legend (upper-right)). Reads the ego's
@@ -1136,7 +1136,7 @@ def render_scene_at_step(
             transform=ax.transAxes,
             ha="left",
             va="bottom",
-            fontsize=10,
+            fontsize=14,
             fontweight="bold",
             color="black",
             zorder=30,
@@ -1173,10 +1173,10 @@ def render_scene_at_step(
             _colors = [attn_cmap(attn_norm(v)) for v in _values]
             rank_ax.barh(range(len(_chart)), _values, color=_colors, edgecolor=_text)
             rank_ax.set_yticks(range(len(_chart)), _labels)
-            rank_ax.set_xlabel("Attention (% of all tokens)", color=_text)
-            rank_ax.tick_params(axis="both", labelsize=8, colors=_text)
+            rank_ax.set_xlabel("Attention (% of all tokens)", color=_text, fontsize=11)
+            rank_ax.tick_params(axis="both", labelsize=11, colors=_text)
             for row, value in enumerate(_values):
-                rank_ax.text(value, row, f" {value:.2f}%", va="center", fontsize=8, color=_text)
+                rank_ax.text(value, row, f" {value:.2f}%", va="center", fontsize=11, color=_text)
         else:
             rank_ax.text(
                 0.5,
@@ -1185,12 +1185,12 @@ def render_scene_at_step(
                 ha="center",
                 va="center",
                 transform=rank_ax.transAxes,
-                fontsize=10,
+                fontsize=14,
                 color="gray",
             )
             rank_ax.set_xticks([])
             rank_ax.set_yticks([])
-        rank_ax.set_title(f"Top {len(_chart)} attended tokens", fontsize=10, color=_text)
+        rank_ax.set_title(f"Top {len(_chart)} attended tokens", fontsize=14, color=_text)
         rank_ax.grid(axis="x", alpha=0.25, color=_grid_color)
 
     if rank_ax is not None:
