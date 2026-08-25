@@ -60,6 +60,10 @@ class SceneAttentionOverlay:
     route_attention: np.ndarray | None  # aligned to ego.route_lanes rows
     line_string_attention: np.ndarray | None  # aligned to scene.map_data.line_strings rows
     vmax: float = 0.0  # this frame's colormap normalization max
+    # Every valid Fusion token (all classes, incl. ego/goal_pose/etc.), already
+    # sorted descending by attention -- drives the right-side ranking subplot.
+    # Each entry: {"label": str, "class": str, "pct": float, "distance_m": float | None}
+    ranked: list[dict] | None = None
 
 
 def _ensure_neighbor_future_4col(naf):
@@ -135,8 +139,21 @@ def render_scene_at_step(
     attention_threshold: float = 0.0,
     attention_classes: set[str] | None = None,
 ) -> matplotlib.figure.Figure:
-    """Render a scene with placed obstacles overlaid, matching replay sim style."""
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    """Render a scene with placed obstacles overlaid, matching replay sim style.
+
+    When `attention` is provided (with a non-empty `ranked` list), the figure
+    gains a second, right-side subplot -- a horizontal bar-chart ranking of
+    the top attended tokens across every Fusion encoder class, mirroring the
+    `rank_ax` panel from `scripts/visualize_all_token_attention.py::draw_report`
+    (the same subplot `run_closed_loop_attention_video.sh` renders).
+    """
+    rank_ax = None
+    if attention is not None and attention.ranked:
+        fig, (ax, rank_ax) = plt.subplots(
+            1, 2, figsize=(figsize[0] * 1.45, figsize[1]), gridspec_kw={"width_ratios": [3.3, 1.2]}
+        )
+    else:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
     fig.patch.set_facecolor("#f8f8f8")
 
     def _attn_active(class_name: str) -> bool:
@@ -1108,6 +1125,55 @@ def render_scene_at_step(
             zorder=30,
             bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.75),
         )
+
+    # Right-side attention ranking subplot (heatmap-style bar chart) -- mirrors
+    # visualize_all_token_attention.py::draw_report's rank_ax. Respects the
+    # threshold for every class, and the class checkboxes for the 5 classes
+    # that have one (other token classes -- ego, goal_pose, etc. -- always show,
+    # since there's no control for them).
+    if rank_ax is not None:
+        _filterable_classes = {"neighbors", "static", "lanes", "route", "line_strings"}
+        _entries = []
+        for r in attention.ranked:
+            if r["class"] in _filterable_classes:
+                if attention_classes is not None and r["class"] not in attention_classes:
+                    continue
+                if r["pct"] < attention_threshold:
+                    continue
+            _entries.append(r)
+        _top_k = min(15, len(_entries))
+        _displayed = _entries[:_top_k]
+        _chart = list(reversed(_displayed))
+        if _chart:
+            _labels = []
+            for r in _chart:
+                lbl = f"{r['label']} ({r['class']})"
+                if r.get("distance_m") is not None:
+                    lbl += f" {r['distance_m']:.1f}m"
+                _labels.append(lbl)
+            _values = [r["pct"] for r in _chart]
+            _colors = [attn_cmap(attn_norm(v)) for v in _values]
+            rank_ax.barh(range(len(_chart)), _values, color=_colors, edgecolor="black")
+            rank_ax.set_yticks(range(len(_chart)), _labels)
+            rank_ax.set_xlabel("Attention (% of all tokens)")
+            rank_ax.tick_params(axis="both", labelsize=8)
+            for row, value in enumerate(_values):
+                rank_ax.text(value, row, f" {value:.2f}%", va="center", fontsize=8)
+        else:
+            rank_ax.text(
+                0.5,
+                0.5,
+                "No attended tokens\nabove threshold",
+                ha="center",
+                va="center",
+                transform=rank_ax.transAxes,
+                fontsize=10,
+                color="gray",
+            )
+            rank_ax.set_xticks([])
+            rank_ax.set_yticks([])
+        rank_ax.set_title(f"Top {len(_chart)} attended tokens", fontsize=10)
+        rank_ax.grid(axis="x", alpha=0.25)
 
     fig.tight_layout()
     return fig

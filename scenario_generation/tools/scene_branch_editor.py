@@ -520,6 +520,28 @@ def _build_attention_overlay(
                 arr[idx] = pct
         return arr
 
+    # Every valid token, resolved to the same labels used elsewhere (obstacle
+    # label / neighbor_i for the "neighbors" class), for the ranking subplot.
+    # `records` is already sorted descending by attention (token_records).
+    ranked: list[dict] = []
+    for rec in records:
+        cls = rec["class"]
+        idx = rec["class_index"]
+        if cls == "neighbors":
+            label = sorted_obstacles[idx].label if idx < n_obs else f"neighbor_{idx - n_obs}"
+        elif cls == "ego":
+            label = "ego"
+        else:
+            label = f"{cls}[{idx}]"
+        ranked.append(
+            {
+                "label": label,
+                "class": cls,
+                "pct": rec["attention_pct_all_tokens"],
+                "distance_m": rec.get("distance_m"),
+            }
+        )
+
     all_pct = [rec["attention_pct_all_tokens"] for rec in records]
     return SceneAttentionOverlay(
         entity_attention=entity_attention,
@@ -528,6 +550,7 @@ def _build_attention_overlay(
         route_attention=_row_array("route"),
         line_string_attention=_row_array("line_strings"),
         vmax=max(all_pct) if all_pct else 0.0,
+        ranked=ranked,
     )
 
 
@@ -984,7 +1007,7 @@ def build_interface(
 
         with gr.Row():
             # ═══════ LEFT PANEL — obstacle + modifications ═══════
-            with gr.Column(scale=1, min_width=300):
+            with gr.Column(scale=1, min_width=260):
                 # ── Fused Obstacle box (Add new / Edit existing) ──
                 with gr.Group():
                     gr.Markdown("### Obstacle")
@@ -1053,12 +1076,12 @@ def build_interface(
                         remove_obs_btn = gr.Button("Remove", variant="stop")
 
             # ═══════ CENTER PANEL (render + simulate + export/load/save) ═══════
-            with gr.Column(scale=2, min_width=520):
+            with gr.Column(scale=4, min_width=560):
                 scene_image = gr.Image(
                     label="Scene View",
                     type="pil",
                     interactive=False,
-                    height=600,
+                    height=850,
                 )
 
                 # Playback control bar — YouTube-style, directly under the render:
@@ -1071,19 +1094,19 @@ def build_interface(
                     # (its built-in head/number is hidden via CSS) + a separate
                     # Step number box that mirrors it and accepts typed jumps.
                     with gr.Row(elem_classes=["playbar"]):
-                        btn_play = gr.Button("▶", size="sm", min_width=36, scale=0)
-                        btn_stop = gr.Button("■", size="sm", min_width=36, variant="stop", scale=0)
-                        btn_first = gr.Button("|<", size="sm", min_width=34, scale=0)
-                        btn_prev = gr.Button("<", size="sm", min_width=34, scale=0)
-                        btn_next = gr.Button(">", size="sm", min_width=34, scale=0)
-                        btn_last = gr.Button(">|", size="sm", min_width=34, scale=0)
+                        btn_play = gr.Button("▶", size="sm", min_width=28, scale=0)
+                        btn_stop = gr.Button("■", size="sm", min_width=28, variant="stop", scale=0)
+                        btn_first = gr.Button("|<", size="sm", min_width=26, scale=0)
+                        btn_prev = gr.Button("<", size="sm", min_width=26, scale=0)
+                        btn_next = gr.Button(">", size="sm", min_width=26, scale=0)
+                        btn_last = gr.Button(">|", size="sm", min_width=26, scale=0)
                         step_slider = gr.Slider(
                             minimum=0,
                             maximum=max(0, len(tree.get_npz_sequence("root")) - 1),
                             value=0,
                             step=1,
                             show_label=False,
-                            scale=6,
+                            scale=8,
                             elem_classes=["scrub"],
                         )
                         step_jump_box = gr.Number(
@@ -1205,7 +1228,7 @@ def build_interface(
                     )
 
             # ═══════ RIGHT PANEL — overlay toggles + guidance ═══════
-            with gr.Column(scale=1, min_width=400):
+            with gr.Column(scale=1, min_width=340):
                 with gr.Group():
                     # Overlay toggles at the TOP, in a tidy grid.
                     gr.Markdown("### Overlays")
@@ -1539,6 +1562,7 @@ def build_interface(
                 view_half=view_r,
                 step_idx=step,
                 total_steps=len(seq),
+                figsize=(13, 11),
                 gt_traj=gt_traj_render,
                 det_traj=det_traj,
                 guided_trajs=guided_trajs,
@@ -4172,7 +4196,19 @@ def build_interface(
         )
 
         # Play button — pre-renders frames as PIL images for smooth playback
-        def on_play(tree, step, view_r, gt_on, hide_nb, rb_on, nb_on, fps):
+        def on_play(
+            tree,
+            step,
+            view_r,
+            gt_on,
+            hide_nb,
+            rb_on,
+            nb_on,
+            fps,
+            attention_on,
+            attention_threshold_val,
+            attention_classes_val,
+        ):
             import time
 
             seq = tree.get_npz_sequence(tree.active_branch)
@@ -4184,6 +4220,8 @@ def build_interface(
             branch = tree.branches[tree.active_branch]
             is_resimulated = branch.npz_dir is not None
             raw_obstacles = _own_obstacles(tree) if not is_resimulated else []
+            _attn_classes = set(attention_classes_val or [])
+            _attn_available = attention_on and model_cache and model_cache.available
             while s <= max_s:
                 t0 = time.monotonic()
                 scene = from_npz(seq[s])
@@ -4250,6 +4288,13 @@ def build_interface(
                         np.array(ego_wp[:2], dtype=np.float64),
                         np.array(ego_wp, dtype=np.float64),
                     )
+                # Attention is recomputed every frame (a fresh forward pass per
+                # step, same cost class as DET) -- unlike the single-step preview,
+                # there's no cross-step cache to reuse since each frame is a
+                # different model input.
+                attention_overlay = None
+                if _attn_available:
+                    attention_overlay = _predict_attention_with_obs(tree, s, zero_neighbors=hide_nb)
                 fig = render_scene_at_step(
                     scene,
                     obs_at_step,
@@ -4257,12 +4302,16 @@ def build_interface(
                     view_half=view_r,
                     step_idx=s,
                     total_steps=len(seq),
+                    figsize=(13, 11),
                     gt_traj=gt_traj_r,
                     show_rb_dist=rb_on,
                     show_nb_dist=nb_on,
                     dim_neighbors=hide_nb,
                     map_border_polylines=map_borders,
                     ego_world_pose=ego_wp,
+                    attention=attention_overlay,
+                    attention_threshold=attention_threshold_val,
+                    attention_classes=_attn_classes,
                 )
                 img = _fig_to_pil(fig)
                 info = f"Step **{s}** / **{max_s}** | Branch: `{tree.active_branch}` | ▶ Playing"
@@ -4283,6 +4332,9 @@ def build_interface(
                 show_rb_dist,
                 show_nb_dist,
                 play_fps,
+                show_attention,
+                attention_threshold,
+                attention_classes_cbg,
             ],
             [scene_image, step_info, step_slider],
         )
