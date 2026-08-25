@@ -155,7 +155,6 @@ def join(
         "improved_by_fresh": 0,
         "kept_frozen": 0,
         "no_fresh_candidate": 0,
-        "missing_frozen_score": 0,
         "gain_sum": 0.0,
     }
     for scene in replay:
@@ -173,10 +172,19 @@ def join(
             continue
         fresh_total = fresh.get("selected_total")
         fresh_path = fresh.get("scene_path")
+        # Every repaired row writes selected_total and scene_path unconditionally, so a
+        # missing score here is corrupted bookkeeping, not a scene state — keeping the
+        # scene silently would let an un-comparable row ride the replay list forever.
         if frozen_total is None or fresh_total is None or not fresh_path:
-            stats["missing_frozen_score"] += 1
-            final.append(scene)
-            continue
+            missing = (
+                "frozen selected_total"
+                if frozen_total is None
+                else ("fresh selected_total" if fresh_total is None else "fresh scene_path")
+            )
+            raise ValueError(
+                f"{scene}: {missing} is missing — repaired rows always carry both; "
+                "the row source is corrupted or hand-edited"
+            )
         if float(fresh_total) > float(frozen_total) + float(min_gain):
             stats["improved_by_fresh"] += 1
             stats["gain_sum"] += float(fresh_total) - float(frozen_total)

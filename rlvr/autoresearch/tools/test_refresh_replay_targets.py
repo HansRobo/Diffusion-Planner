@@ -239,3 +239,37 @@ def test_persist_is_idempotent_and_monotone_across_two_rounds(tmp_path):
     e = json.loads(mem.read_text())["entries"][0]
     assert (e["scene_path"], e["selected_total"]) == (n2, -1.0)
     assert e["selected_total"] > -3.0, "stored target score is monotone non-decreasing"
+
+
+def test_join_raises_on_missing_frozen_score(tmp_path):
+    """A replay row without selected_total is corrupted bookkeeping (repaired rows
+    always carry it) — join must fail loudly, not silently retain the scene."""
+    import json
+
+    frozen = tmp_path / "frozen.npz"
+    frozen.write_bytes(b"x")
+    replay = tmp_path / "replay.json"
+    replay.write_text(json.dumps([str(frozen)]))
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text(
+        json.dumps({"scene_path": str(frozen), "source_scene_path": "/tmp/src.npz"}) + "\n"
+    )
+    fresh = tmp_path / "fresh.jsonl"
+    fresh.write_text(
+        json.dumps(
+            {
+                "scene_path": str(tmp_path / "fresh.npz"),
+                "source_scene_path": "/tmp/src.npz",
+                "selected_total": 1.0,
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="selected_total"):
+        join(
+            replay_scenes=replay,
+            prev_rows=[rows],
+            fresh_rows=[fresh],
+            out_list=tmp_path / "out.json",
+            out_stats=tmp_path / "stats.json",
+        )
