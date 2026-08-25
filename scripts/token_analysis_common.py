@@ -127,3 +127,50 @@ def patch_fusion(fusion, store):
             return forward
 
         block.forward = make_forward(block, layer_index)
+
+
+def draw_closed_loop_scene(
+    ax,
+    sample: dict,
+    ego_pred,
+    *,
+    view_half_m: float,
+    distance_label_offset_m: float = 1.2,
+) -> str | None:
+    """Draw the reproducer/replay render style onto ``ax`` for one closed-loop rollout step.
+
+    ``sample`` is one already-unbatched, live-ego-frame model-input dict, as produced by
+    the closed-loop reproducer rollout (``{k: np.asarray(v)[0] for k, v in np_dict.items()}``,
+    the same shape ``scenario_generation.reproducer_rollout._draw_step`` builds its
+    ``SceneContext`` from). ``ego_pred`` is the model's ego-frame predicted trajectory
+    for this step, e.g. ``outputs["prediction"][0, 0].cpu().numpy()``.
+
+    Reuses the same base layer (lanes, road borders, traffic-light overlay, oriented
+    agent boxes, ego plan, distance badges) as ``render_reproducer_segment.py``'s video
+    output, so the two tools' scene rendering stays visually consistent. Imports are
+    local: this keeps the heavier ``scenario_generation.replay`` dependency chain out of
+    this module's import graph for callers that never use closed-loop rendering.
+
+    Returns the ego-state title fragment (or ``None`` if the sample has no ego agent).
+    """
+    from scenario_generation import npz_loader as nl
+    from scenario_generation.replay import draw_step_scene
+    from scenario_generation.reproducer_rollout import _polylines_from_tensor
+    from scenario_generation.scene_context import SceneContext
+
+    es = np.asarray(sample["ego_shape"]).reshape(-1)
+    ego = nl._extract_ego_agent(sample, float(es[0]), float(es[1]), float(es[2]))
+    neighbors = nl._extract_neighbors(sample)
+    scene = SceneContext(
+        agents=[ego] + neighbors, map_data=nl._extract_map_data(sample), ego_agent_id="ego"
+    )
+    ax.set_facecolor("#f8f8f8")
+    return draw_step_scene(
+        ax,
+        scene,
+        {"ego": ego_pred},
+        route_polylines=_polylines_from_tensor(sample["route_lanes"]),
+        road_border_polylines=_polylines_from_tensor(sample["line_strings"], border_only=True),
+        view_half_m=view_half_m,
+        distance_label_offset_m=distance_label_offset_m,
+    )

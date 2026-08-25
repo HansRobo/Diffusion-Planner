@@ -226,17 +226,33 @@ def draw_report(
     attention_layer_label: str | None = None,
     prediction=None,
     show_prediction: bool = False,
+    sample: dict | None = None,
+    ego_pred=None,
 ):
+    """``sample``/``ego_pred``: when given, ``scene_ax`` is drawn with the closed-loop
+    reproducer/replay render style (``token_analysis_common.draw_closed_loop_scene``)
+    instead of the open-loop ``visualize_inputs`` base layer. ``sample`` is one
+    already-unbatched, live-ego-frame model-input dict (as produced by the closed-loop
+    rollout); ``ego_pred`` is the model's ego-frame predicted trajectory for this step.
+    Used by the closed-loop attention video (``visualize_closed_loop_attention.py``);
+    the open-loop, single-scene caller leaves both ``None`` and is unaffected.
+    """
     fig, (scene_ax, rank_ax) = plt.subplots(
         1, 2, figsize=(19, 10), gridspec_kw={"width_ratios": [4.2, 1.15]}
     )
-    visual_inputs = {key: value.clone() for key, value in batch.items()}
-    visual_inputs["ego_agent_past"] = heading_to_cos_sin(visual_inputs["ego_agent_past"])
-    visual_inputs["goal_pose"] = heading_to_cos_sin(visual_inputs["goal_pose"])
-    visualize_inputs(visual_inputs, ax=scene_ax, view_ranges=[view_range])
-    # Reserve the map corner for token labels rather than the generic ego-state block.
-    for text_artist in list(scene_ax.texts):
-        text_artist.remove()
+    base_fragment = None
+    if sample is not None:
+        from token_analysis_common import draw_closed_loop_scene
+
+        base_fragment = draw_closed_loop_scene(scene_ax, sample, ego_pred, view_half_m=view_range)
+    else:
+        visual_inputs = {key: value.clone() for key, value in batch.items()}
+        visual_inputs["ego_agent_past"] = heading_to_cos_sin(visual_inputs["ego_agent_past"])
+        visual_inputs["goal_pose"] = heading_to_cos_sin(visual_inputs["goal_pose"])
+        visualize_inputs(visual_inputs, ax=scene_ax, view_ranges=[view_range])
+        # Reserve the map corner for token labels rather than the generic ego-state block.
+        for text_artist in list(scene_ax.texts):
+            text_artist.remove()
     if show_prediction and prediction is not None:
         from visualize_prediction_overlay import draw_prediction_paths
 
@@ -266,7 +282,7 @@ def draw_report(
             alpha=0.78,
             edgecolors="black",
             linewidths=0.6,
-            zorder=20,
+            zorder=40,
         )
 
     displayed = records[: min(top_k, len(records))]
@@ -290,7 +306,7 @@ def draw_report(
             weight="bold",
             color="black",
             bbox={"boxstyle": "round,pad=0.18", "fc": "white", "ec": "black", "alpha": 0.8},
-            zorder=30,
+            zorder=41,
         )
 
     colorbar = fig.colorbar(
@@ -310,11 +326,13 @@ def draw_report(
         )
         for name in CLASS_NAMES
     ]
-    scene_ax.legend(handles=legend, loc="lower left", title="Neighbor class")
+    scene_legend = scene_ax.legend(handles=legend, loc="lower left", title="Neighbor class")
+    scene_legend.set_zorder(42)
     scene_ax.set_title(
         f"{title_prefix} — dataset index {sample_index}\n"
         f"ego-query, {attention_layer_label or f'Fusion layer={layer}'}, "
         f"turn proxy={turn_angle_deg:.1f}°"
+        + (f"\n{base_fragment}" if base_fragment else "")
     )
 
     chart_records = list(reversed(displayed))

@@ -1511,41 +1511,33 @@ def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] 
     return ego_pts[0, 0].numpy(), border_pts[0, 0].numpy(), rb_dist
 
 
-def save_step_figure(
+def draw_step_scene(
+    ax,
     scene: SceneContext,
     agent_predictions: dict,
-    output_path: Path,
-    step: int,
-    n_steps: int,
     route_polylines: list[np.ndarray] | None = None,
-    title_prefix: str | None = None,
     distance_label_offset_m: float = 1.2,
     view_half_m: float = _VIEW_HALF_M,
-    route_lanelet_ids: list[int] | None = None,
-    sim_time: float = 0.0,
     road_border_polylines: list[np.ndarray] | None = None,
-    metrics: dict | None = None,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
     reproducer_ego: tuple[float, float, float] | None = None,
-) -> None:
-    """Render + save the overview PNG for a single replay step.
+) -> str | None:
+    """Draw one replay step's scene onto an existing Axes; the reusable core of
+    :func:`save_step_figure`.
 
     Viewport is fixed to ``±view_half_m`` metres around the ego, so lane
     borders stay visible and NPC detail remains readable at every step.
 
     ``reproducer_ego``: optional ``(x, y, heading)`` in the live-ego frame for the
     recorded cursor ego, drawn as a hollow outline in ``_EGO_COLOR``.
-    """
-    from matplotlib.figure import Figure
 
+    Returns the ego-state title fragment (speed/steer/yaw-rate/turn/goal-distance),
+    or ``None`` when the scene has no ego agent (nothing is drawn in that case).
+    """
     ego = scene.ego_agent
     if ego is None:
-        return
+        return None
     ex, ey = ego.current_position
-
-    fig = Figure(figsize=(10, 10))
-    ax = fig.add_subplot(1, 1, 1)
-    fig.patch.set_facecolor("#f8f8f8")
 
     # 1) Lane network (centerlines + left / right lane markings, gray).
     _draw_lane_network(ax, scene.map_data)
@@ -1794,23 +1786,11 @@ def save_step_figure(
     # the old :+.0f° rounded to "+0°" and was mistakable for radians.
     steer_deg = math.degrees(ego.steering_angle)
     yaw_rate_deg = math.degrees(ego.yaw_rate)
-    title = (
-        f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  agents={len(scene.agents)}"
-        f"\nego  v={ego_speed:.1f} m/s ({ego_speed_kph:.0f} km/h)  "
+    ego_fragment = (
+        f"ego  v={ego_speed:.1f} m/s ({ego_speed_kph:.0f} km/h)  "
         f"steer={steer_deg:+.1f}°  yawrate={yaw_rate_deg:+.1f}°/s  "
         f"turn={ti_label}  goal_d={goal_d:.1f} m"
     )
-    if title_prefix:
-        title = f"{title_prefix}\n{title}"
-
-    if metrics is not None:
-        gate_s = "IN" if metrics.get("lane_gate", 1.0) >= 0.5 else "CROSS"
-        title += (
-            f"\nrb_min={metrics.get('rb_min_dist', float('nan')):.2f} m  "
-            f"cl={metrics.get('cl_score', float('nan')):+.3f}  "
-            f"lane={gate_s}  "
-            f"lane_near={metrics.get('lane_near_frac', 0.0):.2f}"
-        )
 
     rb_info = _ego_border_distance(ego, scene.map_data)
     if rb_info is not None:
@@ -1934,6 +1914,67 @@ def save_step_figure(
             va="center",
             bbox=dict(boxstyle="round,pad=0.1", facecolor="white", edgecolor="#0055cc", alpha=0.85),
             zorder=31,
+        )
+
+    return ego_fragment
+
+
+def save_step_figure(
+    scene: SceneContext,
+    agent_predictions: dict,
+    output_path: Path,
+    step: int,
+    n_steps: int,
+    route_polylines: list[np.ndarray] | None = None,
+    title_prefix: str | None = None,
+    distance_label_offset_m: float = 1.2,
+    view_half_m: float = _VIEW_HALF_M,
+    route_lanelet_ids: list[int] | None = None,
+    sim_time: float = 0.0,
+    road_border_polylines: list[np.ndarray] | None = None,
+    metrics: dict | None = None,
+    extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
+    reproducer_ego: tuple[float, float, float] | None = None,
+) -> None:
+    """Render + save the overview PNG for a single replay step.
+
+    Thin wrapper around :func:`draw_step_scene`: creates the Figure, draws the
+    scene, assembles the full title (step/time header + ego-state fragment +
+    ``title_prefix`` + ``metrics``), and saves.
+    """
+    from matplotlib.figure import Figure
+
+    fig = Figure(figsize=(10, 10))
+    ax = fig.add_subplot(1, 1, 1)
+    fig.patch.set_facecolor("#f8f8f8")
+
+    ego_fragment = draw_step_scene(
+        ax,
+        scene,
+        agent_predictions,
+        route_polylines=route_polylines,
+        distance_label_offset_m=distance_label_offset_m,
+        view_half_m=view_half_m,
+        road_border_polylines=road_border_polylines,
+        extra_ego_trajectories=extra_ego_trajectories,
+        reproducer_ego=reproducer_ego,
+    )
+    if ego_fragment is None:
+        return
+
+    title = (
+        f"Step {step:04d}/{n_steps}  t={step * 0.1:.1f}s  agents={len(scene.agents)}"
+        f"\n{ego_fragment}"
+    )
+    if title_prefix:
+        title = f"{title_prefix}\n{title}"
+    if metrics is not None:
+        gate_s = "IN" if metrics.get("lane_gate", 1.0) >= 0.5 else "CROSS"
+        title += (
+            f"\nrb_min={metrics.get('rb_min_dist', float('nan')):.2f} m  "
+            f"cl={metrics.get('cl_score', float('nan')):+.3f}  "
+            f"lane={gate_s}  "
+            f"lane_near={metrics.get('lane_near_frac', 0.0):.2f}"
         )
 
     ax.set_title(title, fontsize=10)

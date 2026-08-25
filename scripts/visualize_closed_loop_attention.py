@@ -171,6 +171,7 @@ def main() -> None:
     def on_step(k: int, np_dict: dict, outputs: dict) -> None:
         sample = _unbatch(np_dict)
         batch = _closed_loop_batch(np_dict)
+        ego_pred = outputs["prediction"][0, 0].cpu().numpy()
         frame_path = frames_dir / f"frame_{k:06d}.png"
         row: dict = {"step": k}
 
@@ -200,6 +201,8 @@ def main() -> None:
                 args.marker_size_max,
                 frame_path,
                 title_prefix="Closed-Loop Neighbor Attention",
+                sample=sample,
+                ego_pred=ego_pred,
             )
             row["valid_neighbor_count"] = len(records)
             row["top_tokens"] = records[: args.top_k]
@@ -232,6 +235,8 @@ def main() -> None:
                 frame_path,
                 attention_label=attention_label,
                 title_prefix=title_prefix,
+                sample=sample,
+                ego_pred=ego_pred,
             )
             row["valid_token_count"] = len(records)
             row["class_summary"] = class_summary(records)
