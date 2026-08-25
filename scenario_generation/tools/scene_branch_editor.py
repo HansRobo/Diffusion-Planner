@@ -412,6 +412,9 @@ def _sort_obstacles_by_distance(obstacles: list) -> list:
 
 
 _AGENT_TYPE_ONE_HOT_COL = {"vehicle": 8, "pedestrian": 9, "bicycle": 10}
+# "unknown" (or any other unrecognized type) intentionally has no column here -- it gets an
+# all-zero one-hot below, matching the training-time "unknown type" convention instead of
+# silently tie-breaking to vehicle.
 
 
 def _inject_obstacles_into_tensors(
@@ -442,7 +445,7 @@ def _inject_obstacles_into_tensors(
         vx = spd * cos_h
         vy = spd * sin_h
         row = torch.zeros(T, F, dtype=torch.float32, device=device)
-        type_col = _AGENT_TYPE_ONE_HOT_COL.get(getattr(obs, "agent_type", "vehicle"), 8)
+        type_col = _AGENT_TYPE_ONE_HOT_COL.get(getattr(obs, "agent_type", "vehicle"))
         for t in range(T):
             backward = (T - 1 - t) * spd * DT
             row[t, 0] = obs.x - backward * cos_h
@@ -453,7 +456,8 @@ def _inject_obstacles_into_tensors(
             row[t, 5] = vy
             row[t, 6] = obs.width
             row[t, 7] = obs.length
-            row[t, type_col] = 1.0
+            if type_col is not None:
+                row[t, type_col] = 1.0
         hist = getattr(obs, "history_steps", 30)
         n_valid = min(hist + 1, T)
         if n_valid < T:
@@ -1076,7 +1080,7 @@ def build_interface(
                         label="History steps (0=just appeared, 30=full)",
                     )
                     obs_type = gr.Dropdown(
-                        choices=["vehicle", "pedestrian", "bicycle"],
+                        choices=["vehicle", "pedestrian", "bicycle", "unknown"],
                         value="vehicle",
                         label="Type",
                     )
@@ -2133,10 +2137,39 @@ def build_interface(
             nb_on,
             traj_rb_on,
             traj_nb_on,
+            attn_on,
+            attn_threshold,
+            attn_classes,
+            attn_cache,
             *g_args,
         ):
+            def _current_attention():
+                # Mirrors on_render's cache/recompute logic so a freshly placed
+                # obstacle's attention weight is included immediately instead of
+                # needing a separate re-render to pick it up.
+                nonlocal attn_cache
+                if attn_on and model_cache and model_cache.available:
+                    attn_cache = _predict_attention_with_obs(
+                        tree, _safe_step(step), zero_neighbors=hide_nb
+                    )
+                    return attn_cache
+                if attn_on and attn_cache is not None:
+                    return attn_cache
+                attn_cache = None
+                return None
+
             if not tree.is_pending(tree.active_branch):
-                img, info = _render(tree, _safe_step(step), view_r, None, show_gt_val=gt_on)
+                attention_overlay = _current_attention()
+                img, info = _render(
+                    tree,
+                    _safe_step(step),
+                    view_r,
+                    None,
+                    show_gt_val=gt_on,
+                    attention=attention_overlay,
+                    attention_threshold=attn_threshold,
+                    attention_classes=set(attn_classes or []),
+                )
                 mods = _modifications_md(tree, tree.active_branch)
                 return (
                     tree,
@@ -2150,9 +2183,20 @@ def build_interface(
                     "Fork first -- only pending branches can be modified",
                     gr.update(),
                     gr.update(),
+                    attn_cache,
                 )
             if x is None or y is None:
-                img, info = _render(tree, _safe_step(step), view_r, None, show_gt_val=gt_on)
+                attention_overlay = _current_attention()
+                img, info = _render(
+                    tree,
+                    _safe_step(step),
+                    view_r,
+                    None,
+                    show_gt_val=gt_on,
+                    attention=attention_overlay,
+                    attention_threshold=attn_threshold,
+                    attention_classes=set(attn_classes or []),
+                )
                 mods = _modifications_md(tree, tree.active_branch)
                 return (
                     tree,
@@ -2166,6 +2210,7 @@ def build_interface(
                     "X/Y must not be empty",
                     gr.update(),
                     gr.update(),
+                    attn_cache,
                 )
             label = tree.next_obstacle_label(tree.active_branch)
             s = _safe_step(step)
@@ -2219,6 +2264,9 @@ def build_interface(
             det_traj, guided = _recompute_trajs(
                 tree, s, det_on, guided_on, g_args or None, zero_neighbors=hide_nb
             )
+            # Recomputed AFTER add_obstacle so the newly placed obstacle's own
+            # attention weight is included, not just the pre-existing neighbors.
+            attention_overlay = _current_attention()
             img, info = _render(
                 tree,
                 s,
@@ -2232,6 +2280,9 @@ def build_interface(
                 hide_nb=hide_nb,
                 traj_rb=traj_rb_on,
                 traj_nb=traj_nb_on,
+                attention=attention_overlay,
+                attention_threshold=attn_threshold,
+                attention_classes=set(attn_classes or []),
             )
             mods = _modifications_md(tree, tree.active_branch)
             choices = _obs_choices(tree)
@@ -2247,6 +2298,7 @@ def build_interface(
                 route_info_text,
                 gr.update(value=s),
                 s,
+                attn_cache,
             )
 
         def on_select_obstacle(
@@ -2413,6 +2465,10 @@ def build_interface(
             ed_is_moving,
             ed_speed,
             ed_type,
+            attn_on,
+            attn_threshold,
+            attn_classes,
+            attn_cache,
             *g_args,
         ):
             if not tree.is_pending(tree.active_branch):
@@ -2424,6 +2480,7 @@ def build_interface(
                     gr.update(),
                     gr.update(),
                     gr.update(),
+                    attn_cache,
                 )
             if not label:
                 return (
@@ -2434,6 +2491,7 @@ def build_interface(
                     gr.update(),
                     gr.update(),
                     gr.update(),
+                    attn_cache,
                 )
             # Search current branch first, then walk ancestors to find the obstacle
             _found = False
@@ -2491,6 +2549,16 @@ def build_interface(
             det_traj, guided = _recompute_trajs(
                 tree, s, det_on, guided_on, g_args or None, zero_neighbors=hide_nb
             )
+            # Recomputed AFTER the edit above so a type/position change (e.g.
+            # switching an obstacle to "unknown") is reflected immediately.
+            attention_overlay = None
+            if attn_on and model_cache and model_cache.available:
+                attention_overlay = _predict_attention_with_obs(tree, s, zero_neighbors=hide_nb)
+                attn_cache = attention_overlay
+            elif attn_on and attn_cache is not None:
+                attention_overlay = attn_cache
+            else:
+                attn_cache = None
             img, info = _render(
                 tree,
                 s,
@@ -2504,9 +2572,12 @@ def build_interface(
                 hide_nb=hide_nb,
                 traj_rb=traj_rb_on,
                 traj_nb=traj_nb_on,
+                attention=attention_overlay,
+                attention_threshold=attn_threshold,
+                attention_classes=set(attn_classes or []),
             )
             mods = _modifications_md(tree, tree.active_branch)
-            return tree, img, info, mods, label, det_traj, guided
+            return tree, img, info, mods, label, det_traj, guided, attn_cache
 
         def on_obstacle_action(
             tree,
@@ -2530,6 +2601,10 @@ def build_interface(
             nb_on,
             traj_rb_on,
             traj_nb_on,
+            attn_on,
+            attn_threshold,
+            attn_classes,
+            attn_cache,
             *g_args,
         ):
             """Dispatch the single fused Obstacle "Apply" button.
@@ -2538,13 +2613,13 @@ def build_interface(
               "Add new" (or empty) -> on_place (places a brand-new obstacle).
               any existing label    -> on_apply_edit (edits that obstacle).
 
-            on_place returns 11 outputs; on_apply_edit returns 7. The shared
+            on_place returns 12 outputs; on_apply_edit returns 8. The shared
             .click(outputs=...) list is on_place's superset, so the edit path
             pads the trailing 4 (obs_select, obs_route_info, step_slider,
             step_mirror) with gr.update() no-ops.
             """
             if label and label != "Add new":
-                (t, img, info, mods, sel, det_traj, guided) = on_apply_edit(
+                (t, img, info, mods, sel, det_traj, guided, attn_out) = on_apply_edit(
                     tree,
                     label,
                     step,
@@ -2566,6 +2641,10 @@ def build_interface(
                     is_moving,
                     speed_val,
                     obs_type_val,
+                    attn_on,
+                    attn_threshold,
+                    attn_classes,
+                    attn_cache,
                     *g_args,
                 )
                 return (
@@ -2580,6 +2659,7 @@ def build_interface(
                     gr.update(),
                     gr.update(),
                     gr.update(),
+                    attn_out,
                 )
             return on_place(
                 tree,
@@ -2602,6 +2682,10 @@ def build_interface(
                 nb_on,
                 traj_rb_on,
                 traj_nb_on,
+                attn_on,
+                attn_threshold,
+                attn_classes,
+                attn_cache,
                 *g_args,
             )
 
@@ -3181,6 +3265,7 @@ def build_interface(
                 show_det,
             ]
             + _overlay_inputs
+            + [show_attention, attention_threshold, attention_classes_cbg, attention_state]
             + _g_inputs,
             [
                 tree_state,
@@ -3194,6 +3279,7 @@ def build_interface(
                 obs_route_info,
                 step_slider,
                 step_mirror,
+                attention_state,
             ],
         )
 

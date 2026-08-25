@@ -227,6 +227,8 @@ def _build_neighbor_agents_past(
             type_vec[1] = 1.0
         elif agent.agent_type == AgentType.BICYCLE:
             type_vec[2] = 1.0
+        elif agent.agent_type == AgentType.UNKNOWN:
+            pass  # all-zero one-hot -- matches the training-time "unknown type" convention
 
         # Build per-timestep features: [x, y, cos_h, sin_h, vx, vy, width, length, type(3)]
         feats = np.zeros((T_agent, 11), dtype=np.float32)

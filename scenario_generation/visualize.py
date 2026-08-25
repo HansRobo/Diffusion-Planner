@@ -43,6 +43,7 @@ _NEIGHBOR_COLORS = [
 ]
 _PED_COLOR = "#ff6699"
 _BIKE_COLOR = "#66ccff"
+_UNKNOWN_COLOR = "#808080"
 _LANE_COLOR = "#888888"
 _ROUTE_COLOR = "#4488ff"
 _GT_COLOR = "#22bb22"
@@ -53,6 +54,8 @@ def _agent_color(agent_type: AgentType, idx: int) -> str:
         return _PED_COLOR
     if agent_type == AgentType.BICYCLE:
         return _BIKE_COLOR
+    if agent_type == AgentType.UNKNOWN:
+        return _UNKNOWN_COLOR
     return _NEIGHBOR_COLORS[idx % len(_NEIGHBOR_COLORS)]
 
 

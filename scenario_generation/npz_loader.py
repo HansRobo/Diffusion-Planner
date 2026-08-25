@@ -91,6 +91,8 @@ def _correct_heading_flip(
 def _agent_type_from_onehot(is_vehicle: float, is_ped: float, is_bike: float) -> AgentType:
     """Map one-hot neighbor type flags to AgentType enum."""
     vals = [is_vehicle, is_ped, is_bike]
+    if not any(vals):
+        return AgentType.UNKNOWN
     idx = int(np.argmax(vals))
     return [AgentType.VEHICLE, AgentType.PEDESTRIAN, AgentType.BICYCLE][idx]
 
