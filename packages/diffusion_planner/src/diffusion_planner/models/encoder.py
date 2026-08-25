@@ -80,20 +80,20 @@ class OneHotSequenceEncoder(nn.Module):
         sequence_len: int,
         num_classes: int,
         hidden_dim: int,
+        mixer_hidden_dim: int,
         depth: int,
         drop_path_rate: float,
-        embed_dim: int = 128,
     ) -> None:
         super().__init__()
         self.sequence_len = sequence_len
         self.num_classes = num_classes
-        self.one_hot_encoder = OneHotEncoder(num_classes, embed_dim)
+        self.one_hot_encoder = OneHotEncoder(num_classes, mixer_hidden_dim)
         self.blocks = nn.ModuleList(
-            MixerBlock(embed_dim, sequence_len, drop_path=drop_path_rate)
+            MixerBlock(mixer_hidden_dim, sequence_len, drop_path=drop_path_rate)
             for _ in range(depth)
         )
-        self.norm = nn.LayerNorm(embed_dim)
-        self.output = nn.Linear(embed_dim, hidden_dim)
+        self.norm = nn.LayerNorm(mixer_hidden_dim)
+        self.output = nn.Linear(mixer_hidden_dim, hidden_dim)
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
         """Encode one-hot sequences.
@@ -121,20 +121,20 @@ class FloatVectorSequenceEncoder(nn.Module):
         sequence_len: int,
         vector_dim: int,
         hidden_dim: int,
+        mixer_hidden_dim: int,
         depth: int,
         drop_path_rate: float,
-        embed_dim: int = 128,
     ) -> None:
         super().__init__()
         self.sequence_len = sequence_len
         self.vector_dim = vector_dim
-        self.vector_encoder = FloatVectorEncoder(vector_dim, embed_dim)
+        self.vector_encoder = FloatVectorEncoder(vector_dim, mixer_hidden_dim)
         self.blocks = nn.ModuleList(
-            MixerBlock(embed_dim, sequence_len, drop_path=drop_path_rate)
+            MixerBlock(mixer_hidden_dim, sequence_len, drop_path=drop_path_rate)
             for _ in range(depth)
         )
-        self.norm = nn.LayerNorm(embed_dim)
-        self.output = nn.Linear(embed_dim, hidden_dim)
+        self.norm = nn.LayerNorm(mixer_hidden_dim)
+        self.output = nn.Linear(mixer_hidden_dim, hidden_dim)
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
         """Encode continuous-vector sequences.
@@ -168,11 +168,16 @@ class IntersectionAreaEncoder(nn.Module):
         drop_path_rate: float,
         hidden_dim: int,
         depth: int,
-        embed_dim: int = 128,
+        mixer_hidden_dim: int,
     ) -> None:
         super().__init__()
         self.geometry_encoder = FloatVectorSequenceEncoder(
-            INTERSECTION_AREA_LENGTH, 2, hidden_dim, depth, drop_path_rate, embed_dim
+            INTERSECTION_AREA_LENGTH,
+            2,
+            hidden_dim,
+            mixer_hidden_dim,
+            depth,
+            drop_path_rate,
         )
         self.element_embedding = _element_embedding(hidden_dim)
 
@@ -200,11 +205,16 @@ class RoadBorderEncoder(nn.Module):
         drop_path_rate: float,
         hidden_dim: int,
         depth: int,
-        embed_dim: int = 128,
+        mixer_hidden_dim: int,
     ) -> None:
         super().__init__()
         self.geometry_encoder = FloatVectorSequenceEncoder(
-            ROAD_BORDER_LENGTH, 2, hidden_dim, depth, drop_path_rate, embed_dim
+            ROAD_BORDER_LENGTH,
+            2,
+            hidden_dim,
+            mixer_hidden_dim,
+            depth,
+            drop_path_rate,
         )
         self.element_embedding = _element_embedding(hidden_dim)
 
@@ -230,11 +240,16 @@ class StopLineEncoder(nn.Module):
         drop_path_rate: float,
         hidden_dim: int,
         depth: int,
-        embed_dim: int = 128,
+        mixer_hidden_dim: int,
     ) -> None:
         super().__init__()
         self.geometry_encoder = FloatVectorSequenceEncoder(
-            STOP_LINE_LENGTH, 2, hidden_dim, depth, drop_path_rate, embed_dim
+            STOP_LINE_LENGTH,
+            2,
+            hidden_dim,
+            mixer_hidden_dim,
+            depth,
+            drop_path_rate,
         )
         self.element_embedding = _element_embedding(hidden_dim)
 
@@ -260,16 +275,16 @@ class NeighborAgentEncoder(nn.Module):
         drop_path_rate: float,
         hidden_dim: int,
         depth: int,
-        embed_dim: int = 128,
+        mixer_hidden_dim: int,
     ) -> None:
         super().__init__()
         self.history_encoder = FloatVectorSequenceEncoder(
             EGO_HISTORY_LENGTH,
             AGENT_POSE_DIM,
             hidden_dim,
+            mixer_hidden_dim,
             depth,
             drop_path_rate,
-            embed_dim,
         )
         self.shape_encoder = FloatVectorEncoder(AGENT_SHAPE_DIM, hidden_dim)
         self.label_encoder = OneHotEncoder(AGENT_LABEL_DIM, hidden_dim)
@@ -307,33 +322,33 @@ class LaneEncoder(nn.Module):
         drop_path_rate: float,
         hidden_dim: int,
         depth: int,
-        embed_dim: int = 128,
+        mixer_hidden_dim: int,
     ) -> None:
         super().__init__()
         self.geometry_encoder = FloatVectorSequenceEncoder(
             LANE_LENGTH,
             LANE_GEOMETRY_DIM,
             hidden_dim,
+            mixer_hidden_dim,
             depth,
             drop_path_rate,
-            embed_dim,
         )
         self.lane_type_encoder = OneHotEncoder(LANE_TYPE_DIM, hidden_dim)
         self.past_traffic_encoder = OneHotSequenceEncoder(
             TRAFFIC_LIGHT_PAST_LENGTH,
             TRAFFIC_LIGHT_DIM,
             hidden_dim,
+            mixer_hidden_dim,
             depth,
             drop_path_rate,
-            embed_dim,
         )
         self.future_traffic_encoder = OneHotSequenceEncoder(
             TRAFFIC_LIGHT_FUTURE_LENGTH,
             TRAFFIC_LIGHT_DIM,
             hidden_dim,
+            mixer_hidden_dim,
             depth,
             drop_path_rate,
-            embed_dim,
         )
         self.speed_limit_encoder = FloatVectorEncoder(1, hidden_dim)
         self.unknown_speed_embedding = nn.Parameter(torch.empty(hidden_dim))
@@ -383,7 +398,7 @@ class EgoHistoryEncoder(nn.Module):
         drop_path_rate: float,
         hidden_dim: int,
         depth: int,
-        embed_dim: int = 128,
+        mixer_hidden_dim: int,
     ) -> None:
         super().__init__()
         self.velocity_threshold = velocity_threshold
@@ -391,9 +406,9 @@ class EgoHistoryEncoder(nn.Module):
             EGO_HISTORY_LENGTH,
             2,
             hidden_dim,
+            mixer_hidden_dim,
             depth,
             drop_path_rate,
-            embed_dim,
         )
         self.current_velocity_encoder = FloatVectorEncoder(1, hidden_dim)
         self.element_embedding = _element_embedding(hidden_dim)
@@ -522,7 +537,7 @@ class SceneEncoder(nn.Module):
         encoder_depth: int,
         drop_path_rate: float = 0.0,
         dropout: float = 0.0,
-        embed_dim: int = 128,
+        mixer_hidden_dim: int = 128,
         velocity_threshold: float = 0.1,
         goal_max_distance: float = 2.0,
     ) -> None:
@@ -531,44 +546,44 @@ class SceneEncoder(nn.Module):
             drop_path_rate,
             hidden_dim,
             encoder_depth,
-            embed_dim,
+            mixer_hidden_dim,
         )
         self.lane_encoder = LaneEncoder(
             drop_path_rate,
             hidden_dim,
             encoder_depth,
-            embed_dim,
+            mixer_hidden_dim,
         )
         self.route_lane_encoder = LaneEncoder(
             drop_path_rate,
             hidden_dim,
             encoder_depth,
-            embed_dim,
+            mixer_hidden_dim,
         )
         self.intersection_area_encoder = IntersectionAreaEncoder(
             drop_path_rate,
             hidden_dim,
             encoder_depth,
-            embed_dim,
+            mixer_hidden_dim,
         )
         self.stop_line_encoder = StopLineEncoder(
             drop_path_rate,
             hidden_dim,
             encoder_depth,
-            embed_dim,
+            mixer_hidden_dim,
         )
         self.road_border_encoder = RoadBorderEncoder(
             drop_path_rate,
             hidden_dim,
             encoder_depth,
-            embed_dim,
+            mixer_hidden_dim,
         )
         self.ego_history_encoder = EgoHistoryEncoder(
             velocity_threshold,
             drop_path_rate,
             hidden_dim,
             encoder_depth,
-            embed_dim,
+            mixer_hidden_dim,
         )
         self.goal_pose_encoder = GoalPoseEncoder(hidden_dim, goal_max_distance)
         self.ego_shape_encoder = EgoShapeEncoder(hidden_dim)

@@ -26,7 +26,7 @@ class DiffusionPlanner(nn.Module):
         trajectory_encoder_depth: int = 2,
         trajectory_mixer_hidden_dim: int = 128,
         feedforward_dim: int = 1024,
-        embed_dim: int = 128,
+        element_mixer_hidden_dim: int = 128,
         drop_path_rate: float = 0.0,
         dropout: float = 0.0,
         velocity_threshold: float = 0.1,
@@ -40,7 +40,7 @@ class DiffusionPlanner(nn.Module):
             encoder_depth=element_encoder_depth,
             drop_path_rate=drop_path_rate,
             dropout=dropout,
-            embed_dim=embed_dim,
+            mixer_hidden_dim=element_mixer_hidden_dim,
             velocity_threshold=velocity_threshold,
             goal_max_distance=goal_max_distance,
         )

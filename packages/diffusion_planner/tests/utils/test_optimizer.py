@@ -19,7 +19,7 @@ def _model() -> DiffusionPlanner:
         decoder_depth=1,
         trajectory_encoder_depth=1,
         feedforward_dim=32,
-        embed_dim=8,
+        element_mixer_hidden_dim=8,
     )
 
 
