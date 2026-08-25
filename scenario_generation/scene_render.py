@@ -138,6 +138,7 @@ def render_scene_at_step(
     attention: SceneAttentionOverlay | None = None,
     attention_threshold: float = 0.0,
     attention_classes: set[str] | None = None,
+    dark: bool = False,
 ) -> matplotlib.figure.Figure:
     """Render a scene with placed obstacles overlaid, matching replay sim style.
 
@@ -146,6 +147,12 @@ def render_scene_at_step(
     the top attended tokens across every Fusion encoder class, mirroring the
     `rank_ax` panel from `scripts/visualize_all_token_attention.py::draw_report`
     (the same subplot `run_closed_loop_attention_video.sh` renders).
+
+    `dark`: only flips the NEUTRAL colors (figure/axes background, grid, axis
+    tick/label/title/legend text) -- content colors (lanes, route, agents,
+    trajectories, the attention colormap, and every white label chip) are
+    left unchanged, since they already read fine on both a near-white and a
+    near-black background.
     """
     rank_ax = None
     if attention is not None and attention.ranked:
@@ -154,7 +161,13 @@ def render_scene_at_step(
         )
     else:
         fig, ax = plt.subplots(1, 1, figsize=figsize)
-    fig.patch.set_facecolor("#f8f8f8")
+
+    _bg = "#0b0f19" if dark else "#f8f8f8"  # matches Gradio's own dark body background
+    _ax_bg = "#161a22" if dark else "white"  # lighter than _bg, mirrors the light-mode fig/ax relationship
+    _text = "#e8e8e8" if dark else "black"
+    _grid_color = "#ffffff" if dark else "#000000"
+    fig.patch.set_facecolor(_bg)
+    ax.set_facecolor(_ax_bg)
 
     def _attn_active(class_name: str) -> bool:
         return attention is not None and (attention_classes is None or class_name in attention_classes)
@@ -1094,16 +1107,20 @@ def render_scene_at_step(
         ax.set_ylim(ey - view_half, ey + view_half)
 
     ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
+    ax.grid(True, alpha=0.12 if dark else 0.15, color=_grid_color)
+    ax.set_xlabel("X (m)", color=_text)
+    ax.set_ylabel("Y (m)", color=_text)
+    ax.tick_params(colors=_text)
 
     # Legend for trajectory overlays
     handles, labels = ax.get_legend_handles_labels()
     if labels:
-        ax.legend(fontsize=7, loc="upper right", framealpha=0.8)
+        _legend_kwargs = (
+            dict(facecolor=_ax_bg, edgecolor=_text, labelcolor=_text) if dark else {}
+        )
+        ax.legend(fontsize=7, loc="upper right", framealpha=0.8, **_legend_kwargs)
 
-    ax.set_title(f"Step {step_idx} / {total_steps - 1}", fontsize=10)
+    ax.set_title(f"Step {step_idx} / {total_steps - 1}", fontsize=10, color=_text)
 
     # Current ego speed readout — drawn in the lower-left corner (out of the way
     # of the title (top) and the trajectory legend (upper-right)). Reads the ego's
@@ -1132,6 +1149,7 @@ def render_scene_at_step(
     # that have one (other token classes -- ego, goal_pose, etc. -- always show,
     # since there's no control for them).
     if rank_ax is not None:
+        rank_ax.set_facecolor(_ax_bg)
         _filterable_classes = {"neighbors", "static", "lanes", "route", "line_strings"}
         _entries = []
         for r in attention.ranked:
@@ -1153,12 +1171,12 @@ def render_scene_at_step(
                 _labels.append(lbl)
             _values = [r["pct"] for r in _chart]
             _colors = [attn_cmap(attn_norm(v)) for v in _values]
-            rank_ax.barh(range(len(_chart)), _values, color=_colors, edgecolor="black")
+            rank_ax.barh(range(len(_chart)), _values, color=_colors, edgecolor=_text)
             rank_ax.set_yticks(range(len(_chart)), _labels)
-            rank_ax.set_xlabel("Attention (% of all tokens)")
-            rank_ax.tick_params(axis="both", labelsize=8)
+            rank_ax.set_xlabel("Attention (% of all tokens)", color=_text)
+            rank_ax.tick_params(axis="both", labelsize=8, colors=_text)
             for row, value in enumerate(_values):
-                rank_ax.text(value, row, f" {value:.2f}%", va="center", fontsize=8)
+                rank_ax.text(value, row, f" {value:.2f}%", va="center", fontsize=8, color=_text)
         else:
             rank_ax.text(
                 0.5,
@@ -1172,8 +1190,8 @@ def render_scene_at_step(
             )
             rank_ax.set_xticks([])
             rank_ax.set_yticks([])
-        rank_ax.set_title(f"Top {len(_chart)} attended tokens", fontsize=10)
-        rank_ax.grid(axis="x", alpha=0.25)
+        rank_ax.set_title(f"Top {len(_chart)} attended tokens", fontsize=10, color=_text)
+        rank_ax.grid(axis="x", alpha=0.25, color=_grid_color)
 
     if rank_ax is not None:
         # Only the 2-panel (attention) layout needs tight_layout to avoid the

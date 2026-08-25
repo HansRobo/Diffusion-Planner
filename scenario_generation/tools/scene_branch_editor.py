@@ -933,7 +933,17 @@ _GUI_CSS = (
     # Vertically center every control in the playback bar.
     ".playbar {align-items: center !important;} "
     ".playbar > * {align-self: center !important; margin-top: 0 !important; "
-    "margin-bottom: 0 !important;}"
+    "margin-bottom: 0 !important;} "
+    # Dark-mode override for the scrub bar (the only custom-colored element in
+    # this stylesheet -- everything else is themed for free by Gradio's own
+    # light/dark CSS variables, toggled via the "dark" class on <body>).
+    ".dark .scrub input[type='range']::-webkit-slider-runnable-track "
+    "{background: linear-gradient(to right, #ff5544 var(--range_progress), "
+    "#454b58 var(--range_progress)) !important;} "
+    ".dark .scrub input[type='range']::-moz-range-progress "
+    "{background-color: #ff5544 !important;} "
+    ".dark .scrub input[type='range']::-moz-range-track "
+    "{background: #454b58 !important;}"
 )
 
 
@@ -965,8 +975,11 @@ def build_interface(
         det_traj_state = gr.State(value=None)  # cached (80, 3) or None
         guided_trajs_state = gr.State(value=None)  # cached list[(80, 3)] or None
         attention_state = gr.State(value=None)  # cached SceneAttentionOverlay or None
+        dark_mode_state = gr.State(value=False)  # False = light (default)
 
-        gr.Markdown("# Scene Branch Editor")
+        with gr.Row():
+            gr.Markdown("# Scene Branch Editor")
+            theme_toggle_btn = gr.Button("🌙 Dark Mode", size="sm", scale=0, min_width=150)
 
         _has_model = model_cache is not None and model_cache.available
 
@@ -1444,6 +1457,7 @@ def build_interface(
             attention: SceneAttentionOverlay | None = None,
             attention_threshold: float = 0.0,
             attention_classes: set[str] | None = None,
+            dark_on: bool = False,
         ):
             """Core render function: load NPZ at step, draw scene + obstacles."""
             branch = tree.branches[tree.active_branch]
@@ -1584,6 +1598,7 @@ def build_interface(
                 attention=attention,
                 attention_threshold=attention_threshold,
                 attention_classes=attention_classes,
+                dark=dark_on,
             )
             img = _fig_to_pil(fig)
             info = f"Step **{step}** / **{len(seq) - 1}** | Branch: `{tree.active_branch}`"
@@ -1661,6 +1676,7 @@ def build_interface(
             attention_threshold_val,
             attention_classes_val,
             attention_cache,
+            dark_on,
         ):
             det_traj = None
             _nb_preds = None
@@ -1705,6 +1721,7 @@ def build_interface(
                 attention=attention_overlay,
                 attention_threshold=attention_threshold_val,
                 attention_classes=set(attention_classes_val or []),
+                dark_on=dark_on,
             )
             return img, info, det_cache, guided_cache, attention_cache
 
@@ -1724,6 +1741,7 @@ def build_interface(
             attention_cache,
             threshold_val,
             classes_val,
+            dark_on,
         ):
             """Redraw-only handler for the attention threshold slider and class
             checkbox group -- filtering happens entirely inside render_scene_at_step
@@ -1746,8 +1764,52 @@ def build_interface(
                 attention=attention_cache,
                 attention_threshold=threshold_val,
                 attention_classes=set(classes_val or []),
+                dark_on=dark_on,
             )
             return img, info
+
+        def on_theme_toggle(
+            dark_on,
+            tree,
+            step,
+            view_r,
+            selected_obs,
+            gt_on,
+            det_cache,
+            guided_cache,
+            rb_on,
+            nb_on,
+            hide_nb,
+            traj_rb_on,
+            traj_nb_on,
+            attention_cache,
+            attention_threshold_val,
+            attention_classes_val,
+        ):
+            """Pure redraw, no model call -- theme is a purely visual parameter,
+            so this mirrors on_attention_display_change's cached-state redraw.
+            """
+            new_dark = not dark_on
+            img, info = _render(
+                tree,
+                _safe_step(step),
+                view_r,
+                selected_obs,
+                show_gt_val=gt_on,
+                det_traj=det_cache,
+                guided_trajs=guided_cache,
+                rb_dist=rb_on,
+                nb_dist=nb_on,
+                hide_nb=hide_nb,
+                traj_rb=traj_rb_on,
+                traj_nb=traj_nb_on,
+                attention=attention_cache,
+                attention_threshold=attention_threshold_val,
+                attention_classes=set(attention_classes_val or []),
+                dark_on=new_dark,
+            )
+            new_label = "☀️ Light Mode" if new_dark else "🌙 Dark Mode"
+            return img, info, new_dark, gr.update(value=new_label)
 
         def on_step_change(
             tree,
@@ -1766,6 +1828,7 @@ def build_interface(
             attention_on,
             attention_threshold_val,
             attention_classes_val,
+            dark_on,
             *g_args,
         ):
             s = _safe_step(step)
@@ -1801,6 +1864,7 @@ def build_interface(
                 attention=attention_overlay,
                 attention_threshold=attention_threshold_val,
                 attention_classes=set(attention_classes_val or []),
+                dark_on=dark_on,
             )
             return img, info, s, s, det_traj, guided, attention_overlay
 
@@ -1822,6 +1886,7 @@ def build_interface(
             attention_on,
             attention_threshold_val,
             attention_classes_val,
+            dark_on,
             *g_args,
         ):
             seq = tree.get_npz_sequence(tree.active_branch)
@@ -1862,6 +1927,7 @@ def build_interface(
                 attention=attention_overlay,
                 attention_threshold=attention_threshold_val,
                 attention_classes=set(attention_classes_val or []),
+                dark_on=dark_on,
             )
             return img, info, s, s, det_traj, guided, attention_overlay
 
@@ -1884,6 +1950,7 @@ def build_interface(
             hide_nb,
             traj_rb_on,
             traj_nb_on,
+            dark_on,
         ):
             if x is None or y is None:
                 img, info = _render(
@@ -1899,6 +1966,7 @@ def build_interface(
                     hide_nb=hide_nb,
                     traj_rb=traj_rb_on,
                     traj_nb=traj_nb_on,
+                    dark_on=dark_on,
                 )
                 return img, info
             preview = ObstaclePlacement(
@@ -1925,6 +1993,7 @@ def build_interface(
                 hide_nb=hide_nb,
                 traj_rb=traj_rb_on,
                 traj_nb=traj_nb_on,
+                dark_on=dark_on,
             )
             return img, info
 
@@ -2883,6 +2952,7 @@ def build_interface(
             show_attention,
             attention_threshold,
             attention_classes_cbg,
+            dark_mode_state,
         ] + _g_inputs
         nav_outputs = [
             scene_image,
@@ -2930,6 +3000,7 @@ def build_interface(
             show_attention,
             attention_threshold,
             attention_classes_cbg,
+            dark_mode_state,
         ] + _g_inputs
         step_jump_box.submit(
             on_step_change,
@@ -2957,6 +3028,7 @@ def build_interface(
             attention_threshold,
             attention_classes_cbg,
             attention_state,
+            dark_mode_state,
         ]
         _render_trigger_outputs = [
             scene_image,
@@ -2997,12 +3069,48 @@ def build_interface(
             attention_state,
             attention_threshold,
             attention_classes_cbg,
+            dark_mode_state,
         ]
         attention_threshold.change(
             on_attention_display_change, _attn_display_inputs, [scene_image, step_info]
         )
         attention_classes_cbg.change(
             on_attention_display_change, _attn_display_inputs, [scene_image, step_info]
+        )
+
+        # Theme toggle -- two independent bindings on the same click, deliberately
+        # not combined into one js=+fn= event (Gradio's docs are ambiguous about
+        # return-value handling when both are given alongside outputs=).
+        # 1. Pure client-side: re-themes all built-in Gradio chrome instantly.
+        theme_toggle_btn.click(
+            fn=None,
+            inputs=None,
+            outputs=None,
+            js="() => { document.body.classList.toggle('dark'); }",
+        )
+        # 2. Python: flip state, relabel the button, redraw the Scene View itself
+        # with the new palette (no model call -- theme is a pure visual parameter).
+        theme_toggle_btn.click(
+            on_theme_toggle,
+            [
+                dark_mode_state,
+                tree_state,
+                step_slider,
+                view_half,
+                selected_obstacle_state,
+                show_gt,
+                det_traj_state,
+                guided_trajs_state,
+                show_rb_dist,
+                show_nb_dist,
+                hide_neighbors,
+                show_traj_rb,
+                show_traj_nb,
+                attention_state,
+                attention_threshold,
+                attention_classes_cbg,
+            ],
+            [scene_image, step_info, dark_mode_state, theme_toggle_btn],
         )
 
         for direction, btn in [
@@ -3038,6 +3146,7 @@ def build_interface(
                 hide_neighbors,
                 show_traj_rb,
                 show_traj_nb,
+                dark_mode_state,
             ],
             [scene_image, step_info],
         )
@@ -4243,6 +4352,7 @@ def build_interface(
             attention_on,
             attention_threshold_val,
             attention_classes_val,
+            dark_on,
         ):
             import time
 
@@ -4347,6 +4457,7 @@ def build_interface(
                     attention=attention_overlay,
                     attention_threshold=attention_threshold_val,
                     attention_classes=_attn_classes,
+                    dark=dark_on,
                 )
                 img = _fig_to_pil(fig)
                 info = f"Step **{s}** / **{max_s}** | Branch: `{tree.active_branch}` | ▶ Playing"
@@ -4370,6 +4481,7 @@ def build_interface(
                 show_attention,
                 attention_threshold,
                 attention_classes_cbg,
+                dark_mode_state,
             ],
             [scene_image, step_info, step_slider],
         )
@@ -4377,6 +4489,11 @@ def build_interface(
 
         # Initial render
         demo.load(on_render, _render_trigger_inputs, _render_trigger_outputs)
+        # Force light mode on load regardless of the visitor's OS
+        # prefers-color-scheme -- Gradio otherwise auto-applies its own "dark"
+        # class when the OS is set to dark, which would contradict light mode
+        # being the default here.
+        demo.load(fn=None, inputs=None, outputs=None, js="() => { document.body.classList.remove('dark'); }")
 
     return demo
 
