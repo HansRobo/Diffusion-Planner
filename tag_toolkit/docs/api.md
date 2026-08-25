@@ -57,13 +57,13 @@ TagStore(source=None) -> TagStore
 Construct from one of:
 
 - `None` (default) — empty in-memory store. Open it with `rebuild_index(source)` later.
-- A `.db` / `.sqlite` / `.tags.db` file — opens or creates that SQLite DB. All operations are persisted.
+- A `.tags.db` file — opens or creates that SQLite DB. All operations are persisted.
 - Anything else (a directory, a path-list JSON, a list of paths, or a single `.npz`) — in-memory index seeded from that source. Mutations stay in memory; call `export_index(path)` to persist.
 
 Concurrent writers are serialized by an internal `RLock`; readers are lock-free.
 
 ```python
-store = TagStore("/data/dataset.db")                  # persisted
+store = TagStore("/data/dataset.tags.db")                  # persisted
 store = TagStore("/data/routes/")                      # in-memory, seeded
 store = TagStore("/data/close_loop_path_list.json")    # in-memory, seeded
 store = TagStore()                                     # empty; call rebuild_index() later
@@ -137,23 +137,23 @@ a `TagStore` backed by that file. Equivalent to
 `store = TagStore(); store.rebuild_index(source); store.export_index(output)`.
 
 ```python
-store = TagStore.build_index("/data/routes/", "/data/index.db")
+store = TagStore.build_index("/data/routes/", "/data/index.tags.db")
 ```
 
 The CLI wrapper at `scripts/tag_management/build_index.py` exposes the same
 flow without writing Python. It is the fast-path entry point for large
 datasets whose downstream tools (`scripts/tag_usage/export_dataset.py`,
-etc.) accept a pre-built `.db`:
+etc.) accept a pre-built `.tags.db`:
 
 ```bash
-python scripts/tag_management/build_index.py /data/routes/ -o /data/index.db
-python scripts/tag_management/build_index.py /data/routes/ -o /data/index.db --force
+python scripts/tag_management/build_index.py /data/routes/ -o /data/index.tags.db
+python scripts/tag_management/build_index.py /data/routes/ -o /data/index.tags.db --force
 ```
 
 | Flag | Meaning |
 |---|---|
 | `source` (positional) | Same shape as `TagStore`: directory, path-list `.json` / `.json.zst`, single `.npz`, or a sequence of those. |
-| `--output` / `-o` (required) | Destination `.db` / `.sqlite` / `.tags.db` path. Parent dirs are auto-created. |
+| `--output` / `-o` (required) | Destination `.tags.db` path. Parent dirs are auto-created. |
 | `--force` | Overwrite `--output` if it already exists. Default is fail-fast. |
 
 Exit codes: `0` on success; `1` if the source is missing, the output suffix is

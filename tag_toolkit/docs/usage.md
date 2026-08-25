@@ -3,7 +3,7 @@
 Tags for Diffusion Planner data live on each NPZ's sidecar JSON (`<stem>.json`
 next to `<stem>.npz`). `tag_toolkit` reads and writes the `tags` field, and
 queries at **route** or **frame** granularity. For large datasets, build the
-index once with `TagStore.build_index` and load the resulting `.db` file
+index once with `TagStore.build_index` and load the resulting `.tags.db` file
 thereafter.
 
 Scope resolution rules live in [design.md](design.md).
@@ -90,7 +90,7 @@ skipped silently.
 | `source`               | Behavior                                           |
 | ---------------------- | -------------------------------------------------- |
 | `None`                 | Empty in-memory store                              |
-| `"/path/to/index.db"`  | Open pre-built SQLite index                        |
+| `"/path/to/index.tags.db"`  | Open pre-built SQLite index                        |
 | `"/path/to/dataset"`   | Scan directory recursively for NPZ + sidecar pairs |
 | `"/path/to/list.json"` | Scan paths listed in the JSON file                 |
 | `[path1, path2, ...]`  | Scan multiple sources                              |
@@ -99,20 +99,20 @@ skipped silently.
 ```python
 store = TagStore()                       # empty
 store = TagStore("/path/to/dataset")     # scan on init
-store = TagStore("/path/to/index.db")    # open pre-built index
+store = TagStore("/path/to/index.tags.db")    # open pre-built index
 ```
 
-`TagStore` recognises `.db`, `.sqlite`, and `.tags.db` as SQLite index
+`TagStore` recognises `.tags.db` as SQLite index
 extensions on init.
 
 ### `TagStore.build_index(source, output)`
 
 Scan `source`, build the in-memory index, and persist it to `output`
-(typically a `.db` file) via `VACUUM INTO`. Returns a `TagStore` backed
+(typically a `.tags.db` file) via `VACUUM INTO`. Returns a `TagStore` backed
 by the file at `output`.
 
 ```python
-store = TagStore.build_index("/path/to/dataset", "/path/to/tags.db")
+store = TagStore.build_index("/path/to/dataset", "/path/to/tags.tags.db")
 ```
 
 ### Scope

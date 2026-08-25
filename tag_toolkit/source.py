@@ -132,8 +132,31 @@ def _expand_spec(path_s: str) -> list[Path]:
 def _expand_path_list_file(path: Path) -> list[Path]:
     """Expand a path-list JSON file."""
     data = load_json(path)
+    if not data:
+        return []
+
+    # Handle dict format: {"group_name": ["/route/path1", "/route/path2"], ...}
+    # Each value is typically a route directory (or list of route dirs);
+    # _expand_spec handles both directories (recursive *.npz) and direct npz paths.
+    if isinstance(data, dict):
+        out: list[Path] = []
+        seen: set[str] = set()
+        for group_paths in data.values():
+            if not isinstance(group_paths, list):
+                continue
+            for item in group_paths:
+                if not isinstance(item, str):
+                    continue
+                for npz in _expand_spec(os.path.expanduser(item)):
+                    key = str(npz)
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(npz)
+        return out
+
+    # Handle list format: ["path1.npz", "path2.npz", ...]
     if not isinstance(data, list):
-        raise ValueError(f"path list must be a JSON array: {path}")
+        raise ValueError(f"path list must be a JSON array or dict: {path}")
     if not data:
         return []
     for entry in data:
@@ -145,8 +168,8 @@ def _expand_path_list_file(path: Path) -> list[Path]:
         return _dedupe_npz_strings([os.path.abspath(os.path.expanduser(entry)) for entry in data])
 
     # Mixed / closed-loop lists may contain route directories — expand those only.
-    out: list[Path] = []
-    seen: set[str] = set()
+    out = []
+    seen = set()
     for item in data:
         for npz in _expand_spec(os.path.expanduser(item)):
             key = str(npz)

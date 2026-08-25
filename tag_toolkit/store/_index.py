@@ -22,6 +22,40 @@ _BATCH_SIZE = 100_000
 class _IndexMixin:
     """Mixin providing index management methods for TagStore."""
 
+    @staticmethod
+    def from_source(source: str | Path, *, save: bool = False, force_rebuild: bool = False) -> "TagStore":
+        """Load a TagStore for *source*, auto-building the index from sidecars.
+
+        By default this is read-only and in-memory: it tries to open a same-named
+        ``.tags.db`` next to *source*, and only scans sidecars when one is missing.
+
+        Args:
+            source: Path to the source (JSON path list, route directory, etc.).
+            save: When True, persist a freshly built index to ``<source>.tags.db``.
+                No-op if the index was loaded from disk (i.e. ``save`` only triggers
+                a write when the index actually had to be rebuilt).
+            force_rebuild: If True, rebuild from source even when a
+                ``.tags.db`` already exists. In that case ``save`` controls
+                whether the rebuilt index is written back to disk.
+        """
+        from . import TagStore
+
+        source = Path(source).resolve()
+        db_path = source.parent / f"{source.stem}.tags.db"
+
+        if db_path.exists() and not force_rebuild:
+            return TagStore(db_path)
+
+        store = TagStore()
+        store.rebuild_index(source)
+
+        if not save:
+            return store
+
+        store.export_index(db_path)
+        print(f"[TagStore] Index saved to {db_path}")
+        return TagStore(db_path)
+
     def rebuild_index(
         self,
         source: str | Path | Sequence[str | Path],

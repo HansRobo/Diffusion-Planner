@@ -41,20 +41,20 @@ routes = store.query("split:auto")  # instant
 ### 2. Index mode (fast for large datasets)
 
 For large datasets, build a SQLite index once and load it for repeated
-queries. The output path should end in `.db` (or `.sqlite` / `.tags.db`)
-— `TagStore` recognises those suffixes and reopens the file as a
+queries. The output path should end in `.tags.db`
+— `TagStore` recognises that suffix and reopens the file as a
 database.
 
 ```python
 from tag_toolkit import TagStore
 
-TagStore.build_index("/path/to/dataset", "/path/to/tags.db")
-store = TagStore("/path/to/tags.db")
+TagStore.build_index("/path/to/dataset", "/path/to/tags.tags.db")
+store = TagStore("/path/to/tags.tags.db")
 routes = store.query("split:auto")
 ```
 
 Note: `add_tags` and friends update the in-memory index immediately, but
-they do **not** rewrite the saved `.db` file. To refresh the on-disk
+they do **not** rewrite the saved `.tags.db` file. To refresh the on-disk
 index after on-the-fly mutations, run `build_index` again (with the same
 source).
 
@@ -108,10 +108,10 @@ print(f"Found {len(routes)} routes")
 from tag_toolkit import TagStore
 
 # Build once (slow)
-TagStore.build_index("/path/to/large_dataset", "/path/to/tags.db")
+TagStore.build_index("/path/to/large_dataset", "/path/to/tags.tags.db")
 
 # Load from index (fast, repeated use)
-store = TagStore("/path/to/tags.db")
+store = TagStore("/path/to/tags.tags.db")
 routes = store.query("split:auto")
 ```
 
@@ -120,7 +120,7 @@ routes = store.query("split:auto")
 ```python
 from tag_toolkit import TagStore
 
-store = TagStore("/path/to/tags.db")
+store = TagStore("/path/to/tags.tags.db")
 
 # Tag every frame in the index — the typical "label the whole dataset" case.
 result = store.add_tags(["override_metric:centerline"])
@@ -157,7 +157,7 @@ each call. The SQLite WAL keeps the index consistent; the on-disk
 sidecars are still flushed before each call returns.
 
 ```python
-store = TagStore("/path/to/tags.db")
+store = TagStore("/path/to/tags.tags.db")
 
 for route in store.route_paths():
     store.add_tags(["site:foo"], scope=route, sync=False)
@@ -168,7 +168,7 @@ for route in store.route_paths():
 ```python
 from tag_toolkit import TagStore, format_buckets
 
-store = TagStore("/path/to/tags.db")
+store = TagStore("/path/to/tags.tags.db")
 buckets = store.group_by(["site", "split"])
 print(format_buckets(buckets, ["site", "split"]))
 print(buckets[0].members[:2])  # route list in this bucket
@@ -188,7 +188,7 @@ TOTAL                                          3
 ### 6. Replace and remove
 
 ```python
-store = TagStore("/path/to/tags.db")
+store = TagStore("/path/to/tags.tags.db")
 
 # Add
 store.add_tags(["lateral:turn"])

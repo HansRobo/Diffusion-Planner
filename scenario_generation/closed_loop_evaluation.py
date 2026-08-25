@@ -31,6 +31,7 @@ from scenario_generation.closed_loop_eval import (
     segment_row_for_json,
     tdigest_sidecar_row,
 )
+from tag_toolkit import TagStore
 from scenario_generation.inference_compile import compiled_for_inference
 from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool
@@ -390,6 +391,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         seg_len: int,
         ddp_rank: int,
         ddp_world_size: int,
+        tag_store=None,
     ) -> None:
         super().__init__(
             model,
@@ -400,6 +402,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         )
         self.npz_root = npz_root
         self.seg_len = seg_len
+        self.tag_store = tag_store
 
     @classmethod
     def from_checkpoint(
@@ -411,6 +414,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         seg_len: int,
         ddp_rank: int,
         ddp_world_size: int,
+        tag_store=None,
     ) -> FullRouteClosedLoopEvaluation:
         model, model_args = cls.load_model_pair(model_path, config.params.device)
         return cls(
@@ -421,6 +425,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             seg_len=seg_len,
             ddp_rank=ddp_rank,
             ddp_world_size=ddp_world_size,
+            tag_store=tag_store,
         )
 
     def discover_jobs(self) -> list[FullRouteRouteJob]:
@@ -494,6 +499,8 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             row = {"route": job.route_key, **metrics}
             if self.config.pass_condition is not None:
                 row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
+            if self.tag_store:
+                row["tags"] = self.tag_store.tags_of(scope=job.route_paths, granularity="route")
             if segments_file is not None:
                 # Human-readable segments.jsonl never carries the raw _tdigest blobs; those go to
                 # the sidecar so a later DDP merge (or a re-load of this run) can still pool an

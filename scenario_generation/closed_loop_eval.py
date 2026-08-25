@@ -28,6 +28,9 @@ from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
+from tag_toolkit import TagStore
+
+
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Clearance t-digests live in a sidecar ``tdigests.jsonl`` / ``tdigests_{rank}.jsonl``
@@ -552,6 +555,8 @@ def run_closed_loop_eval(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    tag_store = TagStore.from_source(Path(npz_root), save=True)
+
     # npz_root is either one directory tree, a JSON path list of route dirs, or an
     # already-resolved list of roots -- enumerate_multi_root_routes merges them all,
     # disambiguating any bag-prefix key that collides across roots and remembering the source
@@ -618,9 +623,8 @@ def run_closed_loop_eval(
                 timeline_progress_mode="pose",
             )
             row = {"route": key, **metrics}
-            # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so
-            # multi-GPU parents can still merge approximate global clearance p5.
-            fout.write(json.dumps(segment_row_for_json(metrics, route=key), default=float) + "\n")
+
+            fout.write(json.dumps(segment_row_for_json(metrics, route=key, tags=tag_store.tags_of(scope=routes[key], granularity="route")), default=float) + "\n")
             fout.flush()
             side = tdigest_sidecar_row(row)
             if side is not None:
