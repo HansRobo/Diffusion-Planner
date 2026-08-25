@@ -146,6 +146,10 @@ def join(
                     fresh_by_source[str(src)] = row
 
     final: list[str] = []
+    if float(min_gain) < 0.0:
+        raise ValueError(
+            f"min_gain must be >= 0 (got {min_gain}); negative values break monotonicity"
+        )
     stats = {
         "replay_in": len(replay),
         "improved_by_fresh": 0,

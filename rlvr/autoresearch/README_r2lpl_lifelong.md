@@ -525,6 +525,14 @@ route-arc region exclusion). Every output-changing threshold is a required
 argument and the stages fail loudly on unreadable inputs.
 `build_resume_benchmark.py` selects quasi-stationary-at-t0 scenes whose
 recorded ego resumes mid-horizon — the take-off decision benchmark.
+`prep_ddp_ema.py` rewrites checkpoint keys with the ``module.`` prefix so EMA
+extractions evaluate through the standard DDP validation entrypoint.
+
+Replay-memory notes: entry difficulty falls back to the winning candidate's
+reward total when the width fields are absent (repaired rows), and
+``label_quotas`` keys accept the ``label/reason`` form (e.g.
+``expert_disagreement/model_lagging_expert``) so per-reason teacher classes can
+be reserved separately from the umbrella label.
 
 ## Hard-Example Signal (`target_gt_disagreement`)
 

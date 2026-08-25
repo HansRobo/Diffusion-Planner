@@ -5637,9 +5637,12 @@ def test_trust_region_selection_passes_delayed_depart_rejects_far_generated():
     source_row = {
         "repair_labels": ["expert_disagreement"],
         "expert_disagreement_reason": "model_lagging_expert",
+        "expert_disagreement_max_dev": 0.5,  # measured: near_log
     }
     candidate_rows = [_mk_candidate_row() for _ in range(2)]
-    reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0)]
+    # The generated twin carries the HIGHER reward: if the trust region ever stops
+    # rejecting it, unified selection would pick it and this test fails.
+    reward_rows = [_mk_reward_row(5.0), _mk_reward_row(2.0)]
     # candidate 0 = generated with the SAME delayed trajectory; candidate 1 = depart
     trajs = [delayed, delayed]
     idx, meta = _best_safe_candidate(
@@ -5678,6 +5681,7 @@ def test_selection_classifies_reason_only_rows_by_measured_deviation():
     source_row = {
         "repair_labels": ["moving_collision"],  # NOT expert_disagreement
         "expert_disagreement_reason": "model_lagging_expert",
+        "expert_disagreement_max_dev": 3.0,  # measured -> recoverable, not a default
     }
     candidate_rows = [_mk_candidate_row() for _ in range(2)]
     reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0)]
@@ -5693,4 +5697,108 @@ def test_selection_classifies_reason_only_rows_by_measured_deviation():
         depart_index=1,
     )
     assert idx == 1
-    assert meta["selected_r2lpl_state_class"] == "near_log"
+    assert meta["selected_r2lpl_state_class"] == "recoverable"
+
+
+def test_state_class_handles_missing_and_measured_deviation():
+    from rlvr.autoresearch.tools.build_repaired_targets import _r2lpl_state_class
+
+    base = {
+        "repair_labels": ["moving_collision"],
+        "expert_disagreement_reason": "model_lagging_expert",
+    }
+    # no measurement -> the middle class, never a phantom near_log
+    assert _r2lpl_state_class(dict(base)) == "recoverable"
+    assert _r2lpl_state_class({**base, "expert_disagreement_max_dev": 0.4}) == "near_log"
+    assert _r2lpl_state_class({**base, "expert_disagreement_max_dev": 3.0}) == "recoverable"
+    assert _r2lpl_state_class({**base, "expert_disagreement_max_dev": 9.0}) == "far_offpolicy"
+    # pure safety row without any disagreement measurement
+    assert _r2lpl_state_class({"repair_labels": ["moving_collision"]}) == "recoverable"
+
+
+def test_preflight_recorded_anchor_checks_reason_only_rows(tmp_path):
+    """Reason-only ed-like rows reach morph synthesis, so the preflight must check
+    them too — a strict-label preflight once let a run die hours into generation."""
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_repaired_targets import _preflight_recorded_anchor
+
+    scene = tmp_path / "row.npz"
+    np.savez(scene, ego_agent_future=np.zeros((80, 3), dtype=np.float32))
+    rows = [
+        {
+            "scene_path": str(scene),
+            "repair_labels": ["moving_collision"],
+            "expert_disagreement_reason": "model_lagging_expert",
+        }
+    ]
+    with pytest.raises(ValueError, match="ego_recorded_future"):
+        _preflight_recorded_anchor(rows)
+
+
+def test_selection_breaks_score_ties_by_lower_deviation():
+    import numpy as np
+
+    from rlvr.autoresearch.tools.build_repaired_targets import _best_safe_candidate
+
+    T = 80
+    expert = np.zeros((T, 4), dtype=np.float32)
+    expert[:, 0] = np.linspace(0, 60, T)
+    expert[:, 2] = 1.0
+    near = expert.copy()
+    near[:, 1] += 0.5
+    far = expert.copy()
+    far[:, 1] += 2.0
+    source_row = {"repair_labels": ["moving_collision"]}
+    candidate_rows = [_mk_candidate_row() for _ in range(2)]
+    # identical rewards -> identical Eq.26 scores -> the deviation tiebreak decides
+    reward_rows = [_mk_reward_row(2.0), _mk_reward_row(2.0)]
+    idx, _meta = _best_safe_candidate(
+        source_row,
+        candidate_rows,
+        reward_rows,
+        min_static_margin=0.3,
+        target_gt_disagreement_thresh=2.0,
+        candidate_trajs=[far, near],
+        reference_traj=expert,
+    )
+    assert idx == 1
+
+
+def test_workflow_contract_rejects_removed_knobs(tmp_path):
+    import json as _json
+
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(
+        _json.dumps(
+            {
+                "judgement": {
+                    "reward_config": "/tmp/reward.json",
+                    "threshold_config": "/tmp/thresholds.json",
+                    "credit_window_config": "/tmp/credit.json",
+                    "enabled_labels": ["moving_collision"],
+                },
+                "repair_generation": {
+                    "ego_shape": "from_npz",
+                    "min_margin": 0.3,
+                    "lagging_expert_target": "force",
+                },
+                "replay_memory": {"capacity": 200},
+                "training": {"val_scenes": "/tmp/valid.json"},
+            }
+        )
+    )
+    training = tmp_path / "training.json"
+    training.write_text(_json.dumps({"backend": "base_sft", "train_args": {}}))
+    scene_list = tmp_path / "scenes.json"
+    scene_list.write_text("[]")
+    with pytest.raises(ValueError, match="lagging_expert_target"):
+        round_runner._config_from_workflow_contract(
+            {
+                "model_path": "/tmp/model.pth",
+                "scene_list": str(scene_list),
+                "workflow_config": str(workflow),
+                "training_config": str(training),
+                "output_dir": str(tmp_path / "auto_research" / "out"),
+            }
+        )

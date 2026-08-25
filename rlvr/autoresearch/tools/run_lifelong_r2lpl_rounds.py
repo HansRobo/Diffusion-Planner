@@ -229,6 +229,17 @@ def _apply_repair_refresh_config(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
+def _non_negative_min_gain(value) -> float:
+    v = float(value)
+    if v < 0.0:
+        raise ValueError(
+            f"replay_refresh_min_gain must be >= 0 (got {v}): a negative gain would let a "
+            "WORSE fresh target replace the frozen one and be persisted, breaking the "
+            "refresh's monotonicity guarantee"
+        )
+    return v
+
+
 def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     workflow_source = contract.get("workflow_config")
     if workflow_source is None:
@@ -248,6 +259,25 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     event_mining = dict(workflow.get("event_mining") or {})
     reproducer = dict(workflow.get("perception_reproducer") or {})
     repair = dict(workflow.get("repair_generation") or {})
+    # Tombstones: these knobs were measured, rejected and REMOVED. A config that
+    # still sets one must fail here — the cherry-picking parser below would
+    # otherwise silently ignore it and the run would not do what the config says.
+    _removed = {
+        "repair_generation": (
+            "lagging_expert_target",
+            "expert_target_require_clear",
+            "state_class_mode",
+        ),
+        "event_mining": ("expert_min_end_progress_m",),
+    }
+    for section_name, keys in _removed.items():
+        section = repair if section_name == "repair_generation" else event_mining
+        present = [k for k in keys if k in section]
+        if present:
+            raise ValueError(
+                f"{section_name}.{present[0]} was removed (tested and rejected); "
+                "delete it from the workflow config"
+            )
     replay = dict(workflow.get("replay_memory") or {})
     rounds = dict(workflow.get("rounds") or {})
     refresh = dict(rounds.get("repair_refresh") or workflow.get("repair_refresh") or {})
@@ -459,7 +489,9 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
         # Replay memory as a floor: re-repair replayed scenes with the CURRENT policy and
         # keep max(frozen, fresh) by reward (see refresh_replay_targets).
         "replay_refresh": bool(workflow.get("replay_refresh", False)),
-        "replay_refresh_min_gain": float(workflow.get("replay_refresh_min_gain", 0.0)),
+        "replay_refresh_min_gain": _non_negative_min_gain(
+            workflow.get("replay_refresh_min_gain", 0.0)
+        ),
         # repoint the outgoing replay memory at refreshed targets (default on)
         "replay_refresh_persist": bool(workflow.get("replay_refresh_persist", True)),
         "reuse_completed_mining": bool(workflow.get("reuse_completed_mining", False)),
@@ -2314,12 +2346,13 @@ def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
         # telemetry that stops small reward deltas being over-read.
         groups = [
             (
-                float(s["realized_cl_reward"]),
+                float(s["realized_cl_reward_segment_mean"]),
                 float(s["realized_cl_reward_sd"]),
                 int(s["realized_cl_reward_segments"]),
             )
             for s in summaries
             if s.get("realized_cl_reward_sd") is not None
+            and s.get("realized_cl_reward_segment_mean") is not None
             and int(s.get("realized_cl_reward_segments") or 0) > 0
         ]
         n_total = sum(n for _, _, n in groups)
@@ -2331,6 +2364,7 @@ def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
             aggregate["realized_cl_reward_sd"] = pooled_var**0.5
             aggregate["realized_cl_reward_sem"] = (pooled_var**0.5) / (n_total**0.5)
             aggregate["realized_cl_reward_segments"] = n_total
+            aggregate["realized_cl_reward_segment_mean"] = pooled_mean
     _write_json(output, aggregate)
     return aggregate
 
@@ -2909,6 +2943,17 @@ def _summarize_round(
     if mining_summary.get("realized_cl_reward") is not None:
         summary["realized_cl_reward"] = mining_summary["realized_cl_reward"]
         summary["realized_cl_reward_poses"] = int(mining_summary.get("realized_cl_reward_poses", 0))
+        # Spread + decomposition travel with the mean: a mean alone invites
+        # over-reading small deltas.
+        for key in (
+            "realized_cl_reward_sd",
+            "realized_cl_reward_sem",
+            "realized_cl_reward_segments",
+            "realized_cl_reward_segment_mean",
+            "realized_cl_reward_components",
+        ):
+            if mining_summary.get(key) is not None:
+                summary[key] = mining_summary[key]
     if guard_metrics is not None:
         summary["guards"] = guard_metrics
     _write_json(rdir / "round_summary.json", summary)
@@ -3138,6 +3183,11 @@ def main() -> None:
             # Refreshed stale targets + this round's own targets, which never needed refreshing.
             refreshed = [str(p) for p in _read_json_list(ref_dir / "replay_refreshed.json")]
             replay_paths = refreshed + [p for p in replay_paths if p in current_target_set]
+            # The trainer receives --replay_scenes to TAG replay rows; handing it the
+            # pre-refresh list would train this round on the stale targets the refresh
+            # just replaced. Point it at the spliced list instead.
+            replay_json = rdir / f"round_{round_idx}_replay_scenes_refreshed.json"
+            _write_json(replay_json, replay_paths)
         anchor_paths = _anchor_slice_paths(
             cfg.get("anchor"), len(set(repaired_paths) | set(replay_paths)), round_idx
         )

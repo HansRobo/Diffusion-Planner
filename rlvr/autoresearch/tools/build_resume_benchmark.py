@@ -70,7 +70,6 @@ def main():
         return str(Path(p).parent), int(m.group(1))
 
     cands.sort(key=lambda c: (key(c[0])[0], key(c[0])[1]))
-    picked = []
     by_dir = {}
     for p, onset, score in cands:
         dirn, frame = key(p)

@@ -22,7 +22,6 @@ import torch
 
 from planner_metrics.scene_format import future_to_4col
 from planner_metrics.subscores import compute_road_border_penalty
-from rlvr.autoresearch.scene_features import ego_speed_ms
 from rlvr.autoresearch.tools.classify_scene_failures import (
     _ego_shape_from_data,
     _load_scene_thresholds,
@@ -36,8 +35,6 @@ from rlvr.autoresearch.tools.eval_det_avoidance import (
     load_npz_data,
 )
 from rlvr.autoresearch.tools.expert_morph import (
-    build_depart_morph_candidate,
-    build_expert_morph_candidate,
     build_unified_morph_candidates,
 )
 from rlvr.autoresearch.tools.reward_config_from_json import load_reward_config
@@ -320,11 +317,6 @@ def _normalize_values(values: list[float]) -> list[float]:
     return [(value - lo) / (hi - lo) for value in values]
 
 
-# Paper state-class thresholds (R2LPL Sec. V-B: "State classes are defined by
-# delta_xy_near = 1.0 m, delta_psi_near = 15 deg, delta_v_near = 2.0 m/s,
-# delta_xy_rec = 5.0 m, and delta_psi_rec = 45 deg"). These bound the deviation of
-# the ROLLOUT ego STATE from the LOGGED expert STATE (paper Eq. 21 Delta_t), which is
-# NOT the same quantity as the trajectory-level progress gap used by the legacy mode.
 def _r2lpl_state_class(source_row: dict[str, Any]) -> str:
     """R2LPL guidance class (near_log / recoverable / far_offpolicy, paper Eq. 24).
 
@@ -339,7 +331,13 @@ def _r2lpl_state_class(source_row: dict[str, Any]) -> str:
         # carry a measured expert_disagreement_max_dev — including
         # collision/border-labelled rows with the reason field — classify by it.
         return "recoverable"
-    dev = float(source_row.get("expert_disagreement_max_dev", 0.0))
+    dev_raw = source_row.get("expert_disagreement_max_dev")
+    if dev_raw is None:
+        # Ed-like row WITHOUT a measurement: the middle class, same as pure-safety
+        # rows — a phantom 0.0 here would pin selection to near_log expert
+        # imitation on rows where nothing was measured.
+        return "recoverable"
+    dev = float(dev_raw)
     if dev <= 1.0:
         return "near_log"
     if dev <= 5.0:
@@ -652,6 +650,7 @@ def _best_safe_candidate(
     # Trust-region gate: a gate-passing candidate that strays too far from the
     # expert reference is a worse training target than no target at all — far
     # off-policy targets measurably degrade closed-loop behavior when imitated.
+    gate_passing_indices = {item[3] for item in accepted}
     if max_expert_dev_m is not None and accepted:
         within = [item for item in accepted if item[1] <= max_expert_dev_m]
         if not within:
@@ -765,6 +764,10 @@ def _best_safe_candidate(
             meta[f"{prefix}_outcome"] = "lost_selection"
             if prefix in scripted_r2lpl_scores:
                 meta[f"{prefix}_r2lpl_score"] = scripted_r2lpl_scores[prefix]
+        elif idx_s in gate_passing_indices:
+            # Passed every safety gate but fell to the trust region — stamping it
+            # gate_rejected would corrupt drop-rate audits.
+            meta[f"{prefix}_outcome"] = "trust_region_rejected"
         else:
             meta[f"{prefix}_outcome"] = "gate_rejected"
             meta[f"{prefix}_labels"] = list(candidate_rows[idx_s].get("labels", []))
@@ -1219,6 +1222,11 @@ def build_repaired_targets(
                         selected_index=np.asarray(int(best_idx), dtype=np.int32),
                         morph_index=np.asarray(
                             -1 if morph_index is None else int(morph_index), dtype=np.int32
+                        ),
+                        # Without the depart identity a re-scorer cannot apply the
+                        # depart-specific trust-region metric to the saved pool.
+                        depart_index=np.asarray(
+                            -1 if depart_index is None else int(depart_index), dtype=np.int32
                         ),
                     )
 
