@@ -1763,6 +1763,9 @@ def build_interface(
             traj_nb_on,
             guided_on,
             prev_guided_cache,
+            attention_on,
+            attention_threshold_val,
+            attention_classes_val,
             *g_args,
         ):
             s = _safe_step(step)
@@ -1776,6 +1779,12 @@ def build_interface(
                 prev_guided=prev_guided_cache,
                 zero_neighbors=hide_nb,
             )
+            # Attention always recomputes fresh on navigation -- unlike the
+            # Overlays-panel toggle (on_render), the cached overlay belongs to
+            # the step we just left, so there's nothing valid to reuse here.
+            attention_overlay = None
+            if attention_on and model_cache and model_cache.available:
+                attention_overlay = _predict_attention_with_obs(tree, s, zero_neighbors=hide_nb)
             img, info = _render(
                 tree,
                 s,
@@ -1789,8 +1798,11 @@ def build_interface(
                 hide_nb=hide_nb,
                 traj_rb=traj_rb_on,
                 traj_nb=traj_nb_on,
+                attention=attention_overlay,
+                attention_threshold=attention_threshold_val,
+                attention_classes=set(attention_classes_val or []),
             )
-            return img, info, s, s, det_traj, guided
+            return img, info, s, s, det_traj, guided, attention_overlay
 
         def _on_nav_impl(
             direction,
@@ -1807,6 +1819,9 @@ def build_interface(
             traj_nb_on,
             guided_on,
             prev_guided_cache,
+            attention_on,
+            attention_threshold_val,
+            attention_classes_val,
             *g_args,
         ):
             seq = tree.get_npz_sequence(tree.active_branch)
@@ -1828,6 +1843,9 @@ def build_interface(
                 prev_guided=prev_guided_cache,
                 zero_neighbors=hide_nb,
             )
+            attention_overlay = None
+            if attention_on and model_cache and model_cache.available:
+                attention_overlay = _predict_attention_with_obs(tree, s, zero_neighbors=hide_nb)
             img, info = _render(
                 tree,
                 s,
@@ -1841,8 +1859,11 @@ def build_interface(
                 hide_nb=hide_nb,
                 traj_rb=traj_rb_on,
                 traj_nb=traj_nb_on,
+                attention=attention_overlay,
+                attention_threshold=attention_threshold_val,
+                attention_classes=set(attention_classes_val or []),
             )
-            return img, info, s, s, det_traj, guided
+            return img, info, s, s, det_traj, guided, attention_overlay
 
         def on_preview(
             tree,
@@ -2859,6 +2880,9 @@ def build_interface(
             show_traj_nb,
             show_guided,
             guided_trajs_state,
+            show_attention,
+            attention_threshold,
+            attention_classes_cbg,
         ] + _g_inputs
         nav_outputs = [
             scene_image,
@@ -2867,6 +2891,7 @@ def build_interface(
             step_mirror,
             det_traj_state,
             guided_trajs_state,
+            attention_state,
         ]
 
         step_slider.release(
@@ -2902,6 +2927,9 @@ def build_interface(
             show_traj_nb,
             show_guided,
             guided_trajs_state,
+            show_attention,
+            attention_threshold,
+            attention_classes_cbg,
         ] + _g_inputs
         step_jump_box.submit(
             on_step_change,
