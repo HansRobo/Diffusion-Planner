@@ -1,6 +1,112 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Any
+
+import yaml
 
 from .config_cli import cli
+
+
+@dataclass
+class ClosedLoopPassCondition:
+    """Pass conditions for closed-loop evaluation. Each boolean field controls whether
+    that metric's count must be zero for a segment to pass.
+
+    A condition being True means "enabled" - the segment must have 0 events of that type.
+    A condition being False means "disabled" - that metric is ignored when deciding pass/fail.
+    """
+
+    collision: bool = True  # object.collision_count == 0
+    road_border: bool = True  # road_border.collision_count == 0
+    red_light_violation: bool = True  # red_light_violation.count == 0
+    strong_brake: bool = True  # strong_brake.count == 0
+    goal_reach: bool = True 
+    snap: bool = True 
+
+
+    def to_dict(self) -> dict[str, bool]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ClosedLoopPassCondition":
+        valid_fields = {"collision", "road_border", "red_light_violation", "strong_brake", "goal_reach", "snap"}
+        filtered = {k: v for k, v in d.items() if k in valid_fields}
+        return cls(**filtered)
+
+
+@dataclass
+class ClosedLoopPassConditionGroups:
+    """Container for per-group pass conditions. Supports loading from YAML.
+
+    Usage:
+        # Direct construction
+        groups = ClosedLoopPassConditionGroups()
+
+        # From YAML file
+        groups = ClosedLoopPassConditionGroups.from_yaml("/path/to/config.yaml")
+
+        # Get condition for a specific group (falls back to default)
+        condition = groups.get_condition("pedestrian_stop")
+    """
+
+    default: ClosedLoopPassCondition = field(default_factory=ClosedLoopPassCondition)
+    groups: dict[str, ClosedLoopPassCondition] = field(default_factory=dict)
+
+    @classmethod
+    def from_yaml(cls, yaml_path: str | Path) -> "ClosedLoopPassConditionGroups":
+        """Load pass conditions from a YAML file.
+
+        YAML format:
+            default:
+              collision: true
+              road_border: true
+              red_light_violation: true
+              strong_brake: true
+              goal_reach: true
+              snap: true
+
+            groups:
+              pedestrian_stop:
+                collision: true
+                strong_brake: false  # ignore strong_brake for this group
+              parking_lot:
+                road_border: false
+                snap: false
+        """
+        yaml_path = Path(yaml_path)
+        if not yaml_path.exists():
+            raise FileNotFoundError(f"Pass condition config not found: {yaml_path}")
+
+        with open(yaml_path, "r") as f:
+            data = yaml.safe_load(f)
+
+        if data is None:
+            return cls()
+
+        default = ClosedLoopPassCondition()
+        if "default" in data:
+            default = ClosedLoopPassCondition.from_dict(data["default"])
+
+        groups: dict[str, ClosedLoopPassCondition] = {}
+        if "groups" in data:
+            for group_name, conditions in data["groups"].items():
+                # Merge with default: specified fields override, rest come from default
+                merged = default.to_dict()
+                merged.update(conditions)
+                groups[group_name] = ClosedLoopPassCondition.from_dict(merged)
+
+        return cls(default=default, groups=groups)
+
+    def get_condition(self, group_name: str) -> ClosedLoopPassCondition:
+        """Get the pass condition for a group. Falls back to default if not found."""
+        return self.groups.get(group_name, self.default)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict for JSON output."""
+        return {
+            "default": self.default.to_dict(),
+            "groups": {k: v.to_dict() for k, v in self.groups.items()},
+        }
 
 
 @dataclass
@@ -88,3 +194,48 @@ class ClosedLoopConfig:
         default="",
         path=True,
     )
+
+    # Per-group pass conditions
+    # YAML path as the CLI field (JSON-serializable string, resolved by config_cli.resolve_paths)
+    closed_loop_pass_conditions: str | None = cli(
+        "YAML file with per-group pass conditions. See closed_loop_pass_conditions.yaml "
+        "for field definitions and default values. Pass Conditions: "
+        "collision=no collision, road_border=no curb hit, red_light_violation=no red-light running, "
+        "strong_brake=no hard brake, goal_reach=reached goal, snap=no emergency fallback. "
+        "Set to False to ignore that metric. If not provided, all True (strict).",
+        default=None,
+        path=True,
+    )
+    _closed_loop_pass_conditions_loaded: ClosedLoopPassConditionGroups | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        """Auto-load ``closed_loop_pass_conditions`` (a YAML path) into the object form.
+
+        Always sets ``_closed_loop_pass_conditions_loaded`` to a non-None
+        ``ClosedLoopPassConditionGroups``:
+
+        - YAML path provided + file exists  → load from YAML
+        - YAML path provided + file missing  → fall back to all-True default
+          (typo'd path shouldn't disable pass evaluation; strict is the safer
+          default — it surfaces every violation rather than silently passing
+          everything)
+        - no path / empty path               → all-True default
+
+        Callers can therefore always do ``cfg.pass_conditions.get_condition(...)``
+        without a None-check.
+        """
+        if self._closed_loop_pass_conditions_loaded is not None:
+            return
+        if self.closed_loop_pass_conditions:
+            try:
+                self._closed_loop_pass_conditions_loaded = ClosedLoopPassConditionGroups.from_yaml(
+                    self.closed_loop_pass_conditions
+                )
+                return
+            except FileNotFoundError:
+                pass
+        self._closed_loop_pass_conditions_loaded = ClosedLoopPassConditionGroups()
+
+    @property
+    def pass_conditions(self) -> ClosedLoopPassConditionGroups:
+        return self._closed_loop_pass_conditions_loaded
