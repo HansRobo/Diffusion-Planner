@@ -9,6 +9,7 @@ module instead of reimplementing scene rendering in individual tools.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import matplotlib
@@ -41,6 +42,28 @@ _DET_COLOR = "#0088ff"
 _GUIDED_COLORS = ["#ff00aa", "#aa00ff", "#00ccaa", "#ffaa00"]
 _GT_COLOR = "#22bb22"
 _VIEW_HALF_DEFAULT = 50.0
+
+
+@dataclasses.dataclass
+class SceneAttentionOverlay:
+    """Per-token attention weights for one step, mapped onto the renderer's own
+    scene entities (see scene_branch_editor.py::_build_attention_overlay).
+
+    Positions are NOT stored here -- entities are matched by id/label (neighbors,
+    placed obstacles) or row index (static/lanes/route/line_strings), aligned to
+    the same row order the renderer already iterates.
+    """
+
+    entity_attention: dict[str, float]  # agent.id / obs.label -> attention_pct_all_tokens
+    static_attention: np.ndarray | None  # aligned to scene.map_data.static_objects rows
+    lane_attention: np.ndarray | None  # aligned to scene.map_data.lanes rows
+    route_attention: np.ndarray | None  # aligned to ego.route_lanes rows
+    line_string_attention: np.ndarray | None  # aligned to scene.map_data.line_strings rows
+    vmax: float = 0.0  # this frame's colormap normalization max
+    # Every valid Fusion token (all classes, incl. ego/goal_pose/etc.), already
+    # sorted descending by attention -- drives the right-side ranking subplot.
+    # Each entry: {"label": str, "class": str, "pct": float, "distance_m": float | None}
+    ranked: list[dict] | None = None
 
 
 def _ensure_neighbor_future_4col(naf):
@@ -112,16 +135,88 @@ def render_scene_at_step(
     show_traj_rb: bool = False,
     show_traj_nb: bool = False,
     nb_pred_trajs: np.ndarray | None = None,
+    attention: SceneAttentionOverlay | None = None,
+    attention_threshold: float = 0.0,
+    attention_classes: set[str] | None = None,
+    dark: bool = False,
 ) -> matplotlib.figure.Figure:
-    """Render a scene with placed obstacles overlaid, matching replay sim style."""
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    fig.patch.set_facecolor("#f8f8f8")
+    """Render a scene with placed obstacles overlaid, matching replay sim style.
+
+    When `attention` is provided (with a non-empty `ranked` list), the figure
+    gains a second, right-side subplot -- a horizontal bar-chart ranking of
+    the top attended tokens across every Fusion encoder class, mirroring the
+    `rank_ax` panel from `scripts/visualize_all_token_attention.py::draw_report`
+    (the same subplot `run_closed_loop_attention_video.sh` renders).
+
+    `dark`: only flips the NEUTRAL colors (figure/axes background, grid, axis
+    tick/label/title/legend text) -- content colors (lanes, route, agents,
+    trajectories, the attention colormap, and every white label chip) are
+    left unchanged, since they already read fine on both a near-white and a
+    near-black background.
+    """
+    rank_ax = None
+    if attention is not None and attention.ranked:
+        fig, (ax, rank_ax) = plt.subplots(
+            1, 2, figsize=(figsize[0] * 1.45, figsize[1]), gridspec_kw={"width_ratios": [3.3, 1.2]}
+        )
+    else:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+    _bg = "#0b0f19" if dark else "#f8f8f8"  # matches Gradio's own dark body background
+    _ax_bg = "#161a22" if dark else "white"  # lighter than _bg, mirrors the light-mode fig/ax relationship
+    _text = "#e8e8e8" if dark else "black"
+    _grid_color = "#ffffff" if dark else "#000000"
+    fig.patch.set_facecolor(_bg)
+    ax.set_facecolor(_ax_bg)
+
+    def _attn_active(class_name: str) -> bool:
+        return attention is not None and (attention_classes is None or class_name in attention_classes)
+
+    attn_cmap = None
+    attn_norm = None
+    if attention is not None:
+        attn_cmap = matplotlib.colormaps["plasma"]
+        attn_norm = matplotlib.colors.Normalize(vmin=0.0, vmax=max(attention.vmax, 1e-9))
+
+    # Lanes / road borders / route — locally masked copies so below-threshold
+    # rows are skipped by the shared drawing primitives (which already treat an
+    # all-zero row as "not present"), WITHOUT mutating `scene`/`ego` themselves
+    # (those also feed the RB/NB safety-distance overlays below, which must
+    # never be affected by this purely-visual filter).
+    map_data_for_lanes = scene.map_data
+    _ego_for_route = scene.ego_agent
+    route_for_draw = _ego_for_route.route_lanes if _ego_for_route is not None else None
+    if attention is not None:
+        if (
+            _attn_active("lanes")
+            and attention.lane_attention is not None
+            and map_data_for_lanes.lanes is not None
+        ):
+            lanes_masked = map_data_for_lanes.lanes.copy()
+            lanes_masked[attention.lane_attention < attention_threshold, :, :2] = 0.0
+            map_data_for_lanes = dataclasses.replace(map_data_for_lanes, lanes=lanes_masked)
+        if (
+            _attn_active("line_strings")
+            and attention.line_string_attention is not None
+            and map_data_for_lanes.line_strings is not None
+        ):
+            ls_masked = map_data_for_lanes.line_strings.copy()
+            ls_masked[attention.line_string_attention < attention_threshold, :, :2] = 0.0
+            map_data_for_lanes = dataclasses.replace(map_data_for_lanes, line_strings=ls_masked)
+        if (
+            route_for_draw is not None
+            and _attn_active("route")
+            and attention.route_attention is not None
+        ):
+            route_masked = route_for_draw.copy()
+            route_masked[attention.route_attention < attention_threshold, :, :2] = 0.0
+            route_for_draw = route_masked
 
     # Lane network
-    draw_lanes(ax, scene.map_data, alpha=0.7)
+    draw_lanes(ax, map_data_for_lanes, alpha=0.7)
 
     # Road borders (red) — from NPZ if available
-    draw_road_borders(ax, scene.map_data)
+    draw_road_borders(ax, map_data_for_lanes)
 
     # Road borders from lanelet2 map (world frame → ego frame via canonical transform)
     _ego_frame_borders = None
@@ -155,16 +250,15 @@ def render_scene_at_step(
 
     # Ego route
     ego = scene.ego_agent
-    if ego is not None and ego.route_lanes is not None:
-        draw_route(ax, ego.route_lanes, color=_ROUTE_COLOR, alpha=0.5, lw=2.5)
+    if route_for_draw is not None:
+        draw_route(ax, route_for_draw, color=_ROUTE_COLOR, alpha=0.5, lw=2.5)
 
     # Traffic light colored overlay on lanes + route_lanes
     from matplotlib.collections import LineCollection
 
     tl_hex = {0: "#22bb22", 1: "#ddaa00", 2: "#dd2222"}  # green, yellow, red
     tl_segments: dict[str, list[np.ndarray]] = {}
-    _ego_rl = ego.route_lanes if ego is not None else None
-    for lane_tensor in [scene.map_data.lanes, _ego_rl]:
+    for lane_tensor in [map_data_for_lanes.lanes, route_for_draw]:
         if lane_tensor is None:
             continue
         for i in range(lane_tensor.shape[0]):
@@ -196,10 +290,48 @@ def render_scene_at_step(
             )
         )
 
+    # Attention "glow" overlay for lanes/route/road-border segments — mirrors
+    # the traffic-light LineCollection technique above. Reuses the already
+    # threshold-masked tensors (below-threshold rows are already zeroed, so
+    # they're skipped by the same all-zero check every other row uses).
+    if attention is not None:
+        for class_name, tensor, weights in (
+            ("lanes", map_data_for_lanes.lanes, attention.lane_attention),
+            ("route", route_for_draw, attention.route_attention),
+            ("line_strings", map_data_for_lanes.line_strings, attention.line_string_attention),
+        ):
+            if not _attn_active(class_name) or tensor is None or weights is None:
+                continue
+            glow_segs, glow_colors, glow_widths = [], [], []
+            for i in range(min(tensor.shape[0], weights.shape[0])):
+                pts = tensor[i, :, :2]
+                if np.abs(pts).sum() < 1e-6:
+                    continue
+                valid = np.abs(pts).sum(axis=1) > 0.1
+                if valid.sum() < 2:
+                    continue
+                w_norm = attn_norm(float(weights[i]))
+                glow_segs.append(pts[valid])
+                glow_colors.append(attn_cmap(w_norm))
+                glow_widths.append(1.0 + 3.0 * w_norm)
+            if glow_segs:
+                ax.add_collection(
+                    LineCollection(
+                        glow_segs, colors=glow_colors, linewidths=glow_widths, alpha=0.85, zorder=9
+                    )
+                )
+
     # Static objects from map
     so = scene.map_data.static_objects
     for i in range(so.shape[0]):
         if np.abs(so[i, :2]).sum() < 1e-6:
+            continue
+        if (
+            _attn_active("static")
+            and attention.static_attention is not None
+            and i < attention.static_attention.shape[0]
+            and attention.static_attention[i] < attention_threshold
+        ):
             continue
         x, y = so[i, 0], so[i, 1]
         cos_h, sin_h = so[i, 2], so[i, 3]
@@ -207,7 +339,23 @@ def render_scene_at_step(
         if w < 0.1 or l < 0.1:
             continue
         heading = math.atan2(sin_h, cos_h)
-        draw_agent_box(ax, x, y, heading, l, w, "#999999", alpha=0.4, lw=0.5, zorder=5)
+        _static_lw = 0.5
+        if _attn_active("static") and attention.static_attention is not None and i < attention.static_attention.shape[0]:
+            _pct = float(attention.static_attention[i])
+            _static_lw = 0.5 + 2.5 * attn_norm(_pct)
+            ax.annotate(
+                f"attn {_pct:.1f}%",
+                (x, y),
+                fontsize=9,
+                color="black",
+                ha="center",
+                va="top",
+                xytext=(0, -6),
+                textcoords="offset points",
+                zorder=6,
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=attn_cmap(attn_norm(_pct)), alpha=0.85, lw=1),
+            )
+        draw_agent_box(ax, x, y, heading, l, w, "#999999", alpha=0.4, lw=_static_lw, zorder=5)
 
     # Agents (ego + neighbors)
     nb_idx = 0
@@ -216,6 +364,9 @@ def render_scene_at_step(
         is_placed = agent.id.startswith("placed_")
         is_neighbor = not is_ego and not is_placed
         if is_neighbor and hide_neighbors:
+            continue
+        _attn_pct = attention.entity_attention.get(agent.id) if attention is not None else None
+        if is_neighbor and _attn_active("neighbors") and (_attn_pct is None or _attn_pct < attention_threshold):
             continue
         pos = agent.current_position
         heading = agent.current_heading
@@ -268,6 +419,10 @@ def render_scene_at_step(
             )
             ax.add_patch(rect)
         else:
+            _base_lw = 2 if is_ego else (0.5 if _dimmed else 1)
+            _box_lw = _base_lw
+            if is_neighbor and _attn_active("neighbors") and _attn_pct is not None:
+                _box_lw = _base_lw + 2.5 * attn_norm(_attn_pct)
             draw_agent_box(
                 ax,
                 pos[0],
@@ -277,7 +432,7 @@ def render_scene_at_step(
                 agent.width,
                 color,
                 alpha=_alpha_box,
-                lw=2 if is_ego else (0.5 if _dimmed else 1),
+                lw=_box_lw,
                 zorder=20 if is_ego else 15,
                 # Ego pose is the rear axle (base_link); offset the box forward.
                 # Neighbors are centroid-referenced — leave wheelbase=None.
@@ -301,7 +456,7 @@ def render_scene_at_step(
         ax.annotate(
             f"{agent.id} ({speed:.1f} m/s)",
             (pos[0], pos[1]),
-            fontsize=7,
+            fontsize=10,
             color=color,
             ha="center",
             va="bottom",
@@ -309,6 +464,26 @@ def render_scene_at_step(
             textcoords="offset points",
             zorder=22,
         )
+        if is_neighbor and _attn_active("neighbors") and _attn_pct is not None:
+            ax.annotate(
+                f"attn {_attn_pct:.1f}%",
+                (pos[0], pos[1]),
+                fontsize=10,
+                fontweight="bold",
+                color="black",
+                ha="center",
+                va="bottom",
+                xytext=(0, 16),
+                textcoords="offset points",
+                zorder=23,
+                bbox=dict(
+                    boxstyle="round,pad=0.18",
+                    fc="white",
+                    ec=attn_cmap(attn_norm(_attn_pct)),
+                    alpha=0.85,
+                    lw=1,
+                ),
+            )
 
         # Goal
         if agent.goal_pose is not None and is_ego:
@@ -327,6 +502,9 @@ def render_scene_at_step(
     # Placed obstacles (orange=static, blue=moving, red=selected)
     if obstacles:
         for obs in obstacles:
+            _obs_pct = attention.entity_attention.get(obs.label) if attention is not None else None
+            if _attn_active("neighbors") and (_obs_pct is None or _obs_pct < attention_threshold):
+                continue
             is_selected = selected_obstacle == obs.label
             _is_mov = getattr(obs, "is_moving", False)
             if is_selected:
@@ -336,6 +514,8 @@ def render_scene_at_step(
             else:
                 color = _PLACED_COLOR
             lw = 3.0 if is_selected else 2.0
+            if _attn_active("neighbors") and _obs_pct is not None:
+                lw += 2.5 * attn_norm(_obs_pct)
             yaw = obs.yaw_rad
 
             # Draw OBB with dashed outline (placed obstacle = neighbor, centroid-referenced)
@@ -366,14 +546,17 @@ def render_scene_at_step(
                 zorder=31,
             )
 
-            # Label (include speed for moving obstacles)
+            # Label (include speed for moving obstacles, type when non-default)
             _lbl = f"[{obs.label}]"
             if _is_mov and _spd > 0:
                 _lbl += f" {_spd:.1f} m/s"
+            _obs_type = getattr(obs, "agent_type", "vehicle")
+            if _obs_type != "vehicle":
+                _lbl += f" ({_obs_type})"
             ax.annotate(
                 _lbl,
                 (obs.x, obs.y),
-                fontsize=8,
+                fontsize=11,
                 fontweight="bold",
                 color=color,
                 ha="center",
@@ -383,6 +566,26 @@ def render_scene_at_step(
                 zorder=32,
                 bbox=dict(boxstyle="round,pad=0.2", fc="white", ec=color, alpha=0.85, lw=1),
             )
+            if _attn_active("neighbors") and _obs_pct is not None:
+                ax.annotate(
+                    f"attn {_obs_pct:.1f}%",
+                    (obs.x, obs.y),
+                    fontsize=10,
+                    fontweight="bold",
+                    color="black",
+                    ha="center",
+                    va="bottom",
+                    xytext=(0, 20),
+                    textcoords="offset points",
+                    zorder=33,
+                    bbox=dict(
+                        boxstyle="round,pad=0.18",
+                        fc="white",
+                        ec=attn_cmap(attn_norm(_obs_pct)),
+                        alpha=0.85,
+                        lw=1,
+                    ),
+                )
 
     # Reward overlays: road border distance + neighbor distance
     if (show_rb_dist or show_nb_dist) and ego is not None:
@@ -502,7 +705,7 @@ def render_scene_at_step(
                     ax.annotate(
                         f"RB {dist:.2f}m",
                         (mid_x, mid_y),
-                        fontsize=8,
+                        fontsize=11,
                         fontweight="bold",
                         color=color,
                         ha="center",
@@ -564,7 +767,7 @@ def render_scene_at_step(
                     ax.annotate(
                         f"{d:.2f}m",
                         (mid_x, mid_y),
-                        fontsize=7,
+                        fontsize=10,
                         color=color,
                         ha="center",
                         va="bottom",
@@ -801,7 +1004,7 @@ def render_scene_at_step(
                         ax.annotate(
                             f"{traj_label} RB {worst_rb_dist:.2f}m @t{worst_rb_idx}",
                             (wx, wy),
-                            fontsize=7,
+                            fontsize=10,
                             fontweight="bold",
                             color=dc,
                             ha="center",
@@ -886,7 +1089,7 @@ def render_scene_at_step(
                     ax.annotate(
                         f"{traj_label} NB {worst_nb_dist:.2f}m @t{worst_nb_idx}",
                         (wx, wy),
-                        fontsize=7,
+                        fontsize=10,
                         fontweight="bold",
                         color=dc,
                         ha="center",
@@ -904,16 +1107,20 @@ def render_scene_at_step(
         ax.set_ylim(ey - view_half, ey + view_half)
 
     ax.set_aspect("equal")
-    ax.grid(True, alpha=0.15)
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
+    ax.grid(True, alpha=0.12 if dark else 0.15, color=_grid_color)
+    ax.set_xlabel("X (m)", color=_text, fontsize=12)
+    ax.set_ylabel("Y (m)", color=_text, fontsize=12)
+    ax.tick_params(colors=_text, labelsize=11)
 
     # Legend for trajectory overlays
     handles, labels = ax.get_legend_handles_labels()
     if labels:
-        ax.legend(fontsize=7, loc="upper right", framealpha=0.8)
+        _legend_kwargs = (
+            dict(facecolor=_ax_bg, edgecolor=_text, labelcolor=_text) if dark else {}
+        )
+        ax.legend(fontsize=10, loc="upper right", framealpha=0.8, **_legend_kwargs)
 
-    ax.set_title(f"Step {step_idx} / {total_steps - 1}", fontsize=10)
+    ax.set_title(f"Step {step_idx} / {total_steps - 1}", fontsize=14, color=_text)
 
     # Current ego speed readout — drawn in the lower-left corner (out of the way
     # of the title (top) and the trajectory legend (upper-right)). Reads the ego's
@@ -929,12 +1136,68 @@ def render_scene_at_step(
             transform=ax.transAxes,
             ha="left",
             va="bottom",
-            fontsize=10,
+            fontsize=14,
             fontweight="bold",
             color="black",
             zorder=30,
             bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.75),
         )
 
-    fig.tight_layout()
+    # Right-side attention ranking subplot (heatmap-style bar chart) -- mirrors
+    # visualize_all_token_attention.py::draw_report's rank_ax. Respects the
+    # threshold for every class, and the class checkboxes for the 5 classes
+    # that have one (other token classes -- ego, goal_pose, etc. -- always show,
+    # since there's no control for them).
+    if rank_ax is not None:
+        rank_ax.set_facecolor(_ax_bg)
+        _filterable_classes = {"neighbors", "static", "lanes", "route", "line_strings"}
+        _entries = []
+        for r in attention.ranked:
+            if r["class"] in _filterable_classes:
+                if attention_classes is not None and r["class"] not in attention_classes:
+                    continue
+                if r["pct"] < attention_threshold:
+                    continue
+            _entries.append(r)
+        _top_k = min(15, len(_entries))
+        _displayed = _entries[:_top_k]
+        _chart = list(reversed(_displayed))
+        if _chart:
+            _labels = []
+            for r in _chart:
+                lbl = f"{r['label']} ({r['class']})"
+                if r.get("distance_m") is not None:
+                    lbl += f" {r['distance_m']:.1f}m"
+                _labels.append(lbl)
+            _values = [r["pct"] for r in _chart]
+            _colors = [attn_cmap(attn_norm(v)) for v in _values]
+            rank_ax.barh(range(len(_chart)), _values, color=_colors, edgecolor=_text)
+            rank_ax.set_yticks(range(len(_chart)), _labels)
+            rank_ax.set_xlabel("Attention (% of all tokens)", color=_text, fontsize=11)
+            rank_ax.tick_params(axis="both", labelsize=11, colors=_text)
+            for row, value in enumerate(_values):
+                rank_ax.text(value, row, f" {value:.2f}%", va="center", fontsize=11, color=_text)
+        else:
+            rank_ax.text(
+                0.5,
+                0.5,
+                "No attended tokens\nabove threshold",
+                ha="center",
+                va="center",
+                transform=rank_ax.transAxes,
+                fontsize=14,
+                color="gray",
+            )
+            rank_ax.set_xticks([])
+            rank_ax.set_yticks([])
+        rank_ax.set_title(f"Top {len(_chart)} attended tokens", fontsize=14, color=_text)
+        rank_ax.grid(axis="x", alpha=0.25, color=_grid_color)
+
+    if rank_ax is not None:
+        # Only the 2-panel (attention) layout needs tight_layout to avoid the
+        # scene/rank subplots' labels overlapping -- it's an expensive call
+        # (walks every artist's bbox), so skip it for the far more common
+        # single-panel case; _fig_to_pil's savefig(bbox_inches="tight") still
+        # crops the single-panel output cleanly without it.
+        fig.tight_layout()
     return fig
