@@ -469,8 +469,8 @@ The re-timing morph covers the fail-to-stop direction only: it re-times the
 model's OWN plan, and a parked plan contains no road ahead to accelerate
 along, so `model_lagging_expert` (fail-to-take-off) scenes die as
 `not_synthesized:infeasible_deceleration`. With
-`repair_generation.enable_depart_morph: true` (CLI `--enable_depart_morph`,
-off by default) a second scripted candidate is synthesized for those scenes
+`repair_generation.enable_depart_morph` (CLI default ON;
+`--disable_depart_morph` to opt out) a second scripted candidate is synthesized for those scenes
 from the EXPERT path's geometry: a cubic Hermite bridge connects the ego pose
 to the expert path, and the same accel/jerk-limited tracker chases the
 expert's progress schedule starting at the ego (no jump at t=0; full catch-up

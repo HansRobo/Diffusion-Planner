@@ -229,6 +229,30 @@ def _apply_repair_refresh_config(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
+def _reject_removed_knobs(*, repair_generation: dict, event_mining: dict) -> None:
+    """Fail loudly when a config still sets a knob that was measured, rejected and
+    REMOVED — the cherry-picking parsers would otherwise silently ignore it and the
+    run would not do what the config says."""
+    removed = {
+        "repair_generation": (
+            "lagging_expert_target",
+            "expert_target_require_clear",
+            "state_class_mode",
+        ),
+        "event_mining": ("expert_min_end_progress_m",),
+    }
+    for section_name, section in (
+        ("repair_generation", repair_generation),
+        ("event_mining", event_mining),
+    ):
+        present = [k for k in removed[section_name] if k in (section or {})]
+        if present:
+            raise ValueError(
+                f"{section_name}.{present[0]} was removed (tested and rejected); "
+                "delete it from the config"
+            )
+
+
 def _non_negative_min_gain(value) -> float:
     v = float(value)
     if v < 0.0:
@@ -259,25 +283,7 @@ def _config_from_workflow_contract(contract: dict[str, Any]) -> dict[str, Any]:
     event_mining = dict(workflow.get("event_mining") or {})
     reproducer = dict(workflow.get("perception_reproducer") or {})
     repair = dict(workflow.get("repair_generation") or {})
-    # Tombstones: these knobs were measured, rejected and REMOVED. A config that
-    # still sets one must fail here — the cherry-picking parser below would
-    # otherwise silently ignore it and the run would not do what the config says.
-    _removed = {
-        "repair_generation": (
-            "lagging_expert_target",
-            "expert_target_require_clear",
-            "state_class_mode",
-        ),
-        "event_mining": ("expert_min_end_progress_m",),
-    }
-    for section_name, keys in _removed.items():
-        section = repair if section_name == "repair_generation" else event_mining
-        present = [k for k in keys if k in section]
-        if present:
-            raise ValueError(
-                f"{section_name}.{present[0]} was removed (tested and rejected); "
-                "delete it from the workflow config"
-            )
+    _reject_removed_knobs(repair_generation=repair, event_mining=event_mining)
     replay = dict(workflow.get("replay_memory") or {})
     rounds = dict(workflow.get("rounds") or {})
     refresh = dict(rounds.get("repair_refresh") or workflow.get("repair_refresh") or {})
@@ -597,6 +603,10 @@ def _load_config(path: Path) -> dict[str, Any]:
         missing.append("repair_config")
     if missing:
         raise ValueError(f"{path} is missing required fields: {missing}")
+    _reject_removed_knobs(
+        repair_generation=dict(cfg.get("repair_config") or {}),
+        event_mining=dict(cfg.get("event_mining") or {}),
+    )
     _validate_output_dir(cfg["output_dir"])
     _required_replay_capacity(dict(cfg.get("replay_memory") or {}))
     mining = dict(cfg.get("perception_mining") or {})
@@ -2356,8 +2366,10 @@ def _merge_mining_summaries(inputs: list[Path], output: Path) -> dict[str, Any]:
             and int(s.get("realized_cl_reward_segments") or 0) > 0
         ]
         n_total = sum(n for _, _, n in groups)
-        if n_total > 1:
+        if n_total >= 1:
             pooled_mean = sum(m * n for m, _, n in groups) / n_total
+            # n_total == 1 -> zero spread, matching the single-GPU miner's contract
+            # (pstdev of one sample is 0.0), so sharding never drops the telemetry.
             pooled_var = (
                 sum(n * (sd**2) + n * (m - pooled_mean) ** 2 for m, sd, n in groups) / n_total
             )
@@ -3309,6 +3321,18 @@ def main() -> None:
             "realized_cl_reward": fsum.get("realized_cl_reward"),
             "realized_cl_reward_poses": int(fsum.get("realized_cl_reward_poses", 0)),
         }
+        # The final checkpoint has no successor mine, so this entry is its ONLY
+        # workflow-level result — it must carry the same spread/decomposition
+        # telemetry as the per-round summaries.
+        for key in (
+            "realized_cl_reward_sd",
+            "realized_cl_reward_sem",
+            "realized_cl_reward_segments",
+            "realized_cl_reward_segment_mean",
+            "realized_cl_reward_components",
+        ):
+            if fsum.get(key) is not None:
+                final_round[key] = fsum[key]
         print(
             f"[final] residual credit_rows={final_round['residual_credit_rows']} "
             f"realized_cl_reward={final_round['realized_cl_reward']}"

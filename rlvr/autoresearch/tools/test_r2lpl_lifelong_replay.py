@@ -5823,3 +5823,33 @@ def test_refresh_join_rejects_negative_min_gain(tmp_path):
             out_stats=tmp_path / "stats.json",
             min_gain=-0.1,
         )
+
+
+def test_direct_config_rejects_removed_knobs(tmp_path):
+    """The tombstones must also fire on the direct --config path, not only the
+    workflow-contract parser."""
+    import json as _json
+
+    cfg = {
+        "rounds": 1,
+        "epochs_per_round": 1,
+        "model_path": "/tmp/model.pth",
+        "scene_list": "/tmp/scenes.json",
+        "val_scenes": "/tmp/valid.json",
+        "reward_config": "/tmp/reward.json",
+        "threshold_config": "/tmp/thresholds.json",
+        "credit_window_config": "/tmp/credit.json",
+        "output_dir": str(tmp_path / "auto_research" / "out"),
+        "training_config": "/tmp/training.json",
+        "perception_mining": {"batch_size": 1},
+        "repair_config": {
+            "ego_shape": "from_npz",
+            "min_margin": 0.3,
+            "state_class_mode": "state_dev",
+        },
+        "replay_memory": {"capacity": 10},
+    }
+    path = tmp_path / "cfg.json"
+    path.write_text(_json.dumps(cfg))
+    with pytest.raises(ValueError, match="state_class_mode"):
+        round_runner._load_config(path)
