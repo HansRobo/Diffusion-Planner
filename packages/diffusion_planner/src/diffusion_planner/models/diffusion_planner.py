@@ -10,6 +10,7 @@ from diffusion_planner.data.dimensions import TRAJECTORY_DIM
 from .decoder import TrajectoryDecoder
 from .encoder import SceneEncoder
 from .flow_matching import sample
+from .turn_indicator import TurnIndicatorDecoder
 
 
 class DiffusionPlanner(nn.Module):
@@ -52,6 +53,21 @@ class DiffusionPlanner(nn.Module):
             trajectory_encoder_depth=trajectory_encoder_depth,
             trajectory_mixer_hidden_dim=trajectory_mixer_hidden_dim,
         )
+        self.turn_indicator_decoder = TurnIndicatorDecoder(
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+        )
+
+    def predict_turn_indicator(
+        self, input_data: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        """Predict next-indicator logits without training the scene encoder."""
+        with torch.no_grad():
+            scene, scene_mask = self.scene_encoder(input_data)
+        return self.turn_indicator_decoder(
+            scene.detach(), scene_mask, input_data["turn_indicators"][:, -1]
+        )
 
     @staticmethod
     def create_agent_pose(
@@ -68,8 +84,8 @@ class DiffusionPlanner(nn.Module):
         x_mask: torch.Tensor,
         input_data: dict[str, torch.Tensor],
         time: torch.Tensor,
-    ) -> torch.Tensor:
-        """Predict the clean trajectory at a flow state.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Predict a clean trajectory and the next turn indicator.
 
         Args:
             x: Normalized flow-state trajectories with shape `(B, A, T, 4)`.
@@ -78,11 +94,18 @@ class DiffusionPlanner(nn.Module):
             time: Flow times with shape `(B,)` or `(B, 1)`.
 
         Returns:
-            Predicted normalized clean trajectories with shape `(B, A, T, 4)`.
+            Normalized clean trajectories `(B, A, T, 4)` and turn-indicator
+            logits `(B, 3)`.
         """
         scene, scene_mask = self.scene_encoder(input_data)
         agent_pose = self.create_agent_pose(input_data)
-        return self.trajectory_decoder(x, x_mask, scene, scene_mask, agent_pose, time)
+        trajectory = self.trajectory_decoder(
+            x, x_mask, scene, scene_mask, agent_pose, time
+        )
+        turn_indicator_logits = self.turn_indicator_decoder(
+            scene.detach(), scene_mask, input_data["turn_indicators"][:, -1]
+        )
+        return trajectory, turn_indicator_logits
 
     @torch.no_grad()
     def sample(
@@ -91,8 +114,8 @@ class DiffusionPlanner(nn.Module):
         initial_noise: torch.Tensor,
         num_steps: int = 20,
         time_epsilon: float = 1e-5,
-    ) -> torch.Tensor:
-        """Generate normalized `(B, A, T, 4)` trajectories with Heun integration.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generate trajectories and predict the next turn indicator.
 
         `input_data` must already contain training ground-truth or inference-time
         heuristic traffic-light future tensors. `initial_noise` has shape
@@ -122,4 +145,8 @@ class DiffusionPlanner(nn.Module):
         yaw = trajectory[..., 2:4]
         yaw = yaw / torch.linalg.vector_norm(yaw, dim=-1, keepdim=True).clamp_min(1e-6)
         trajectory = torch.cat((trajectory[..., :2], yaw), dim=-1)
-        return trajectory.masked_fill(agent_mask[:, :, None, None], 0.0)
+        trajectory = trajectory.masked_fill(agent_mask[:, :, None, None], 0.0)
+        turn_indicator_logits = self.turn_indicator_decoder(
+            scene, scene_mask, input_data["turn_indicators"][:, -1]
+        )
+        return trajectory, turn_indicator_logits

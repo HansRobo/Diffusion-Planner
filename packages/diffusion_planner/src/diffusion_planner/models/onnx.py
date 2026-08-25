@@ -148,8 +148,9 @@ class DiffusionPlannerSamplerOnnxWrapper(nn.Module):
         road_borders: torch.Tensor,
         goal_pose: torch.Tensor,
         ego_shape: torch.Tensor,
-    ) -> torch.Tensor:
-        """Generate normalized trajectories from caller-provided initial noise."""
+        turn_indicators: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Generate trajectories and turn-indicator logits."""
         input_data: dict[str, torch.Tensor] = dict(
             zip(
                 SCENE_INPUT_NAMES,
@@ -177,9 +178,7 @@ class DiffusionPlannerSamplerOnnxWrapper(nn.Module):
                 strict=True,
             )
         )
+        input_data["turn_indicators"] = turn_indicators
         return self.planner.sample(
-            input_data,
-            initial_noise,
-            num_steps=6,
-            time_epsilon=1e-5,
+            input_data, initial_noise, num_steps=6, time_epsilon=1e-5
         )

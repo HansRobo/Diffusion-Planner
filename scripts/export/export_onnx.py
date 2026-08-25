@@ -30,7 +30,7 @@ DECODER_INPUT_NAMES = (
     "agent_pose",
     "time",
 )
-SAMPLER_INPUT_NAMES = ("initial_noise", *SCENE_INPUT_NAMES)
+SAMPLER_INPUT_NAMES = ("initial_noise", *SCENE_INPUT_NAMES, "turn_indicators")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -171,19 +171,20 @@ def main() -> None:
         scene_outputs = scene_wrapper(*scene_inputs)
 
     scene, scene_mask, agent_pose, agent_mask = scene_outputs
-    batch, agents = agent_mask.shape
+    batch_size, agents = agent_mask.shape
     decoder_inputs = (
-        torch.randn(batch, agents, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
+        torch.randn(batch_size, agents, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
         agent_mask,
         scene,
         scene_mask,
         agent_pose,
-        torch.full((batch,), 0.5),
+        torch.full((batch_size,), 0.5),
     )
     decoder_wrapper = TrajectoryDecoderOnnxWrapper(model.trajectory_decoder).eval()
     with torch.no_grad():
         decoder_output = decoder_wrapper(*decoder_inputs)
-    sampler_inputs = (decoder_inputs[0], *scene_inputs)
+    turn_indicators = frame["turn_indicators"].unsqueeze(0).repeat(batch_size, 1)
+    sampler_inputs = (decoder_inputs[0], *scene_inputs, turn_indicators)
     sampler_wrapper = DiffusionPlannerSamplerOnnxWrapper(model).eval()
     with torch.no_grad():
         sampler_output = sampler_wrapper(*sampler_inputs)
@@ -214,7 +215,7 @@ def main() -> None:
         sampler_inputs,
         sampler_path,
         SAMPLER_INPUT_NAMES,
-        ("trajectory",),
+        ("trajectory", "turn_indicator_logits"),
         args.opset_version,
     )
     if not args.skip_validation:

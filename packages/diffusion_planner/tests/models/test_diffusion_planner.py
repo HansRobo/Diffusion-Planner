@@ -16,6 +16,7 @@ from diffusion_planner.data.dimensions import (
     TRAFFIC_LIGHT_PAST_LENGTH,
     TRAJECTORY_DIM,
     TRAJECTORY_LENGTH,
+    TURN_INDICATOR_HISTORY_LENGTH,
 )
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.flow_matching import sample_time
@@ -56,6 +57,8 @@ def make_input_data() -> dict[str, torch.Tensor]:
         "ego_shape": torch.tensor([[3.8, 4.9, 1.9]]),
         "ego_agent_future": torch.zeros(batch, TRAJECTORY_LENGTH, 6),
         "neighbor_agents_future": torch.zeros(batch, neighbors, TRAJECTORY_LENGTH, 4),
+        "turn_indicators": torch.ones(batch, TURN_INDICATOR_HISTORY_LENGTH),
+        "turn_indicators_future": torch.ones(batch, TRAJECTORY_LENGTH),
     }
     data["ego_agent_past"][..., 2] = 1.0
     data["neighbor_agents_past"][:, 0, :, 2] = 1.0
@@ -81,7 +84,7 @@ class DiffusionPlannerTest(unittest.TestCase):
         self.input_data = make_input_data()
 
     def test_compute_loss(self) -> None:
-        loss = compute_diffusion_planner_loss(
+        losses = compute_diffusion_planner_loss(
             self.model,
             self.input_data,
             time_mean=-0.4,
@@ -90,9 +93,9 @@ class DiffusionPlannerTest(unittest.TestCase):
             noise_scale=1.0,
         )
 
-        self.assertEqual(loss.ndim, 0)
-        self.assertTrue(torch.isfinite(loss))
-        loss.backward()
+        self.assertEqual(losses["total"].ndim, 0)
+        self.assertTrue(torch.isfinite(losses["total"]))
+        losses["total"].backward()
 
     def test_partial_future_padding_masks_complete_agent(self) -> None:
         target = create_target_trajectory(self.input_data)
@@ -178,7 +181,7 @@ class DiffusionPlannerTest(unittest.TestCase):
         decoder_handle = self.model.trajectory_decoder.register_forward_hook(
             count_decoder_calls
         )
-        trajectories = self.model.sample(
+        trajectories, turn_indicator_logits = self.model.sample(
             self.input_data,
             torch.randn(1, 3, TRAJECTORY_LENGTH, TRAJECTORY_DIM),
             num_steps=2,
@@ -187,6 +190,7 @@ class DiffusionPlannerTest(unittest.TestCase):
         decoder_handle.remove()
 
         self.assertEqual(trajectories.shape, (1, 3, TRAJECTORY_LENGTH, 4))
+        self.assertEqual(turn_indicator_logits.shape, (1, 3))
         torch.testing.assert_close(
             trajectories[:, 2], torch.zeros_like(trajectories[:, 2])
         )

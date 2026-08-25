@@ -15,7 +15,6 @@ from diffusion_planner.data import PlannerDataNormalizer
 from diffusion_planner.data.dimensions import TRAJECTORY_DIM, TRAJECTORY_LENGTH
 from diffusion_planner.models.diffusion_planner import DiffusionPlanner
 from diffusion_planner.models.onnx import SCENE_INPUT_NAMES
-from diffusion_planner.models.turn_indicator import TurnIndicatorModel
 
 
 def run_inference(
@@ -50,7 +49,7 @@ def run_inference(
         torch.cuda.synchronize(torch_device)
     start = perf_counter()
     with torch.inference_mode():
-        prediction = model.sample(
+        prediction, _ = model.sample(
             input_data,
             initial_noise=initial_noise,
             num_steps=num_steps,
@@ -90,6 +89,10 @@ def run_onnx_inference(
         if name in available_inputs
     }
     inputs["initial_noise"] = initial_noise
+    if "turn_indicators" in available_inputs:
+        inputs["turn_indicators"] = np.asarray(
+            normalized_frame["turn_indicators"], dtype=np.float32
+        )[None]
 
     start = perf_counter()
     prediction = session.run(None, inputs)[0]
@@ -99,7 +102,7 @@ def run_onnx_inference(
 
 
 def run_turn_indicator_inference(
-    model: TurnIndicatorModel,
+    model: DiffusionPlanner,
     frame_data: Mapping[str, Any],
     *,
     device: str,
@@ -117,7 +120,7 @@ def run_turn_indicator_inference(
         torch.cuda.synchronize(torch_device)
     start = perf_counter()
     with torch.inference_mode():
-        logits = model(input_data)
+        logits = model.predict_turn_indicator(input_data)
         probabilities = torch.softmax(logits, dim=-1)
     if torch_device.type == "cuda":
         torch.cuda.synchronize(torch_device)

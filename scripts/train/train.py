@@ -73,7 +73,10 @@ def main(config: DictConfig) -> None:
     optimizer = hydra.utils.instantiate(
         config.optimizer,
         model=planner,
-        output_layers=(planner.trajectory_decoder.output_projection,),
+        output_layers=(
+            planner.trajectory_decoder.output_projection,
+            planner.turn_indicator_decoder.classifier,
+        ),
         verbose=accelerator.is_main_process,
     )
     planner, optimizer, loader = accelerator.prepare(planner, optimizer, loader)
@@ -123,7 +126,7 @@ def main(config: DictConfig) -> None:
             dynamic_ncols=True,
         )
         for step_in_epoch, batch in enumerate(progress, start=1):
-            loss = compute_diffusion_planner_loss(
+            losses = compute_diffusion_planner_loss(
                 planner,
                 batch,
                 time_mean=float(config.training.time_mean),
@@ -132,7 +135,11 @@ def main(config: DictConfig) -> None:
                 noise_scale=float(config.training.noise_scale),
                 ego_loss_weight=float(config.training.ego_loss_weight),
                 neighbor_loss_weight=float(config.training.neighbor_loss_weight),
+                turn_indicator_transition_loss_weight=float(
+                    config.training.turn_indicator_transition_loss_weight
+                ),
             )
+            loss = losses["total"]
             accelerator.backward(loss)
             gradient_norm = accelerator.clip_grad_norm_(
                 planner.parameters(), float(config.training.max_grad_norm)
@@ -151,12 +158,31 @@ def main(config: DictConfig) -> None:
                     else torch.full((), torch.nan, device=loss.device)
                 )
                 metrics = accelerator.reduce(
-                    torch.stack((loss.detach().float(), gradient_norm_value)),
+                    torch.stack(
+                        (
+                            losses["trajectory"].detach().float(),
+                            losses["turn_indicator"].detach().float(),
+                            gradient_norm_value,
+                        )
+                    ),
                     reduction="mean",
+                )
+                turn_counts = accelerator.reduce(
+                    torch.stack(
+                        (
+                            losses["turn_indicator_correct"],
+                            losses["turn_indicator_valid_count"],
+                        )
+                    ).to(torch.float32),
+                    reduction="sum",
                 )
                 metric_values = {
                     "train/loss": metrics[0].item(),
-                    "train/grad_norm": metrics[1].item(),
+                    "train/turn_indicator_loss": metrics[1].item(),
+                    "train/turn_indicator_accuracy": (
+                        turn_counts[0] / turn_counts[1].clamp_min(1)
+                    ).item(),
+                    "train/grad_norm": metrics[2].item(),
                     "train/learning_rate": optimizer.param_groups[0]["lr"],
                 }
                 if accelerator.is_main_process:
