@@ -129,6 +129,10 @@ def join(
     With ``out_map`` also records {frozen_path: {new_path, new_total}} for the scenes the
     fresh policy won, which ``persist_into_memory`` uses to carry the gain into later rounds.
     """
+    if float(min_gain) < 0.0:
+        raise ValueError(
+            f"min_gain must be >= 0 (got {min_gain}); negative values break monotonicity"
+        )
     improved_map: dict[str, dict[str, Any]] = {}
     replay = _read_json_list(replay_scenes)
     frozen_rows = _read_rows(prev_rows)
@@ -146,10 +150,6 @@ def join(
                     fresh_by_source[str(src)] = row
 
     final: list[str] = []
-    if float(min_gain) < 0.0:
-        raise ValueError(
-            f"min_gain must be >= 0 (got {min_gain}); negative values break monotonicity"
-        )
     stats = {
         "replay_in": len(replay),
         "improved_by_fresh": 0,

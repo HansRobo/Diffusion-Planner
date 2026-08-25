@@ -583,10 +583,9 @@ def build_unified_morph_candidates(
     Returns the candidate list in POOL ORDER, ``[(kind, traj_or_None, diag), ...]``:
     ``stay_behind`` first, then ``depart`` when the reason calls for it. Output is
     bit-identical to calling :func:`build_expert_morph_candidate` and
-    :func:`build_depart_morph_candidate` directly (they are this operation's internals);
-    selection preference between the two lives in the repair selector
-    geometry source decided by the disagreement direction; selection between the
-    two happens in the repair selector's unified ranking, not here.
+    :func:`build_depart_morph_candidate` directly (they are this operation's internals).
+    Selection between the two happens in the repair selector's unified ranking,
+    not here.
     """
     out: list[tuple[str, np.ndarray | None, dict]] = []
     stay, stay_diag = build_expert_morph_candidate(

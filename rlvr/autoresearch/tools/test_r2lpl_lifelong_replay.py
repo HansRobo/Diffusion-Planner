@@ -5658,9 +5658,11 @@ def test_trust_region_selection_passes_delayed_depart_rejects_far_generated():
     )
     # The depart candidate's path-based deviation passes the trust region while the
     # generated twin's pointwise deviation rejects it — depart is the only survivor
-    # and unified selection picks it.
+    # and unified selection picks it. The depart_outcome assertion makes trust-region
+    # removal detectable even where Eq.26 weights would pick depart anyway.
     assert idx == 1
     assert meta["selected_r2lpl_state_class"] == "near_log"
+    assert meta["depart_outcome"] == "selected"
 
 
 def test_selection_classifies_reason_only_rows_by_measured_deviation():
@@ -5681,7 +5683,9 @@ def test_selection_classifies_reason_only_rows_by_measured_deviation():
     source_row = {
         "repair_labels": ["moving_collision"],  # NOT expert_disagreement
         "expert_disagreement_reason": "model_lagging_expert",
-        "expert_disagreement_max_dev": 3.0,  # measured -> recoverable, not a default
+        # 0.4 -> near_log: discriminates from BOTH failure modes (pre-unification
+        # the row was not ed-like -> recoverable; a dropped measurement -> recoverable).
+        "expert_disagreement_max_dev": 0.4,
     }
     candidate_rows = [_mk_candidate_row() for _ in range(2)]
     reward_rows = [_mk_reward_row(1.0), _mk_reward_row(2.0)]
@@ -5697,7 +5701,7 @@ def test_selection_classifies_reason_only_rows_by_measured_deviation():
         depart_index=1,
     )
     assert idx == 1
-    assert meta["selected_r2lpl_state_class"] == "recoverable"
+    assert meta["selected_r2lpl_state_class"] == "near_log"
 
 
 def test_state_class_handles_missing_and_measured_deviation():
@@ -5765,34 +5769,37 @@ def test_selection_breaks_score_ties_by_lower_deviation():
     assert idx == 1
 
 
-def test_workflow_contract_rejects_removed_knobs(tmp_path):
+@pytest.mark.parametrize(
+    ("section", "knob", "value"),
+    [
+        ("repair_generation", "lagging_expert_target", "force"),
+        ("repair_generation", "expert_target_require_clear", True),
+        ("repair_generation", "state_class_mode", "state_dev"),
+        ("event_mining", "expert_min_end_progress_m", 1.0),
+    ],
+)
+def test_workflow_contract_rejects_removed_knobs(tmp_path, section, knob, value):
     import json as _json
 
+    workflow_dict = {
+        "judgement": {
+            "reward_config": "/tmp/reward.json",
+            "threshold_config": "/tmp/thresholds.json",
+            "credit_window_config": "/tmp/credit.json",
+            "enabled_labels": ["moving_collision"],
+        },
+        "repair_generation": {"ego_shape": "from_npz", "min_margin": 0.3},
+        "replay_memory": {"capacity": 200},
+        "training": {"val_scenes": "/tmp/valid.json"},
+    }
+    workflow_dict.setdefault(section, {})[knob] = value
     workflow = tmp_path / "workflow.json"
-    workflow.write_text(
-        _json.dumps(
-            {
-                "judgement": {
-                    "reward_config": "/tmp/reward.json",
-                    "threshold_config": "/tmp/thresholds.json",
-                    "credit_window_config": "/tmp/credit.json",
-                    "enabled_labels": ["moving_collision"],
-                },
-                "repair_generation": {
-                    "ego_shape": "from_npz",
-                    "min_margin": 0.3,
-                    "lagging_expert_target": "force",
-                },
-                "replay_memory": {"capacity": 200},
-                "training": {"val_scenes": "/tmp/valid.json"},
-            }
-        )
-    )
+    workflow.write_text(_json.dumps(workflow_dict))
     training = tmp_path / "training.json"
     training.write_text(_json.dumps({"backend": "base_sft", "train_args": {}}))
     scene_list = tmp_path / "scenes.json"
     scene_list.write_text("[]")
-    with pytest.raises(ValueError, match="lagging_expert_target"):
+    with pytest.raises(ValueError, match=knob):
         round_runner._config_from_workflow_contract(
             {
                 "model_path": "/tmp/model.pth",
@@ -5801,4 +5808,18 @@ def test_workflow_contract_rejects_removed_knobs(tmp_path):
                 "training_config": str(training),
                 "output_dir": str(tmp_path / "auto_research" / "out"),
             }
+        )
+
+
+def test_refresh_join_rejects_negative_min_gain(tmp_path):
+    from rlvr.autoresearch.tools.refresh_replay_targets import join
+
+    with pytest.raises(ValueError, match="min_gain"):
+        join(
+            replay_scenes=tmp_path / "replay.json",
+            prev_rows=[tmp_path / "rows.jsonl"],
+            fresh_rows=[tmp_path / "fresh.jsonl"],
+            out_list=tmp_path / "out.json",
+            out_stats=tmp_path / "stats.json",
+            min_gain=-0.1,
         )
