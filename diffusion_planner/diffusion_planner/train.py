@@ -662,3 +662,9 @@ def model_training(args: TrainConfig):
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
+
+    # Tear down the DDP process group explicitly: without this, NCCL's heartbeat +
+    # IB event threads can intermittently deadlock interpreter shutdown and the
+    # training process never exits (observed hanging a full R2LPL round).
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
