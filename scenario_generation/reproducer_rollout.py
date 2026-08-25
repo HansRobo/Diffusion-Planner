@@ -470,6 +470,12 @@ class _SegState:
     # only in render_segment's loop (where gt_deviation is computed); 0 count -> reported inf.
     gt_dev_sum: float = 0.0
     gt_dev_count: int = 0
+    # Same per-step deviation, decomposed into the recorded ego's own heading frame (via
+    # _rel_pose) so a lateral (steering) error can be told apart from a longitudinal (speed/
+    # timing) one. Sums of |dx|/|dy| (not signed) over gt_dev_count steps, for
+    # mean_gt_deviation_x_m / mean_gt_deviation_y_m.
+    gt_dev_x_sum: float = 0.0
+    gt_dev_y_sum: float = 0.0
 
 
 def _ego_state_from_frame(tl: RouteTimeline, idx: int) -> tuple[np.ndarray, np.ndarray, "_EgoDyn"]:
@@ -967,6 +973,12 @@ def _finalize(s: _SegState) -> dict:
         "terminated": s.terminated,
         "route_completion": route_completion,
         "mean_gt_deviation_m": float(s.gt_dev_sum / s.gt_dev_count)
+        if s.gt_dev_count
+        else float("inf"),
+        "mean_gt_deviation_x_m": float(s.gt_dev_x_sum / s.gt_dev_count)
+        if s.gt_dev_count
+        else float("inf"),
+        "mean_gt_deviation_y_m": float(s.gt_dev_y_sum / s.gt_dev_count)
         if s.gt_dev_count
         else float("inf"),
         "progress_m": progress_m,
@@ -1612,8 +1624,11 @@ def render_segment(
             # cutting the render short. GT deviation is measured against the recorded pose at the
             # cursor's current frame (same `idx` the goal/progress checks use).
             gt_deviation_m = float(np.linalg.norm(s.live_pose[:2] - tl.poses[idx, :2]))
+            gt_dev_x_m, gt_dev_y_m, _ = _rel_pose(tl.poses[idx], s.live_pose)
             s.gt_dev_sum += gt_deviation_m
             s.gt_dev_count += 1
+            s.gt_dev_x_sum += abs(gt_dev_x_m)
+            s.gt_dev_y_sum += abs(gt_dev_y_m)
             if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
                 deviation_streak += 1
             else:
@@ -1678,6 +1693,8 @@ def render_segment(
                         else None,
                         "red_light_violation": bool(s.red_light[k]),
                         "gt_deviation_m": round(gt_deviation_m, 3),
+                        "gt_deviation_x_m": round(gt_dev_x_m, 3),
+                        "gt_deviation_y_m": round(gt_dev_y_m, 3),
                     }
                 )
                 + "\n"
@@ -1887,7 +1904,7 @@ def run_segments_batched(
                     replay_mode=timeline_progress_mode,
                     strong_brake_mps2=strong_brake_mps2,
                     yaw_gate=yaw_gate,
-                    goal_mode=goal_mode
+                    goal_mode=goal_mode,
                 )
                 for (tl, start, end) in chunk
             ]

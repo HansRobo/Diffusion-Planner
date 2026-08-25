@@ -319,16 +319,20 @@ def aggregate(
     # Graded (non-saturating) headline metrics: these improve smoothly as the model trains,
     # unlike the binary *_segment_rate / worst-moment *_min_clearance keys nested below.
     completions = [r["route_completion"] for r in rows if "route_completion" in r]
-    # gt-deviation pooled across all steps (weight each segment's mean by its step count, which
-    # equals that segment's gt-deviation sample count), so long routes aren't under-weighted.
-    dev_num = sum(
-        r["mean_gt_deviation_m"] * r["n_steps_run"]
-        for r in rows
-        if np.isfinite(r.get("mean_gt_deviation_m", float("inf")))
-    )
-    dev_den = sum(
-        r["n_steps_run"] for r in rows if np.isfinite(r.get("mean_gt_deviation_m", float("inf")))
-    )
+
+    def _pool_mean(key: str) -> float:
+        # Weight each segment's mean by its step count (== that segment's sample count for
+        # `key`), so long routes aren't under-weighted.
+        num = sum(r[key] * r["n_steps_run"] for r in rows if np.isfinite(r.get(key, float("inf"))))
+        den = sum(r["n_steps_run"] for r in rows if np.isfinite(r.get(key, float("inf"))))
+        return float(num / den) if den else float("inf")
+
+    mean_gt_deviation_m = _pool_mean("mean_gt_deviation_m")
+    # x/y decompose the same per-step deviation into the recorded ego's longitudinal (x) /
+    # lateral (y) axes (see _rel_pose), so a steering (lateral) error can be told apart from a
+    # speed/timing (longitudinal) one.
+    mean_gt_deviation_x_m = _pool_mean("mean_gt_deviation_x_m")
+    mean_gt_deviation_y_m = _pool_mean("mean_gt_deviation_y_m")
 
     term_counts: dict[str, int] = {}
     for r in rows:
@@ -383,7 +387,9 @@ def aggregate(
         "n_segments": n_seg,
         "total_steps": total_steps,
         "mean_route_completion": float(np.mean(completions)) if completions else 0.0,
-        "mean_gt_deviation_m": float(dev_num / dev_den) if dev_den else float("inf"),
+        "mean_gt_deviation_m": mean_gt_deviation_m,
+        "mean_gt_deviation_x_m": mean_gt_deviation_x_m,
+        "mean_gt_deviation_y_m": mean_gt_deviation_y_m,
         "n_segments_diverged": n_seg_diverged,
         "diverged_segment_rate": n_seg_diverged / n_seg if n_seg else 0.0,
         "object": obj,
