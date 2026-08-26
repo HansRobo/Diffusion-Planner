@@ -684,6 +684,11 @@ _GT_DEV_WINDOW_FRAMES = 150  # 15 s * 10 Hz
 _GT_DEV_INF = float("inf")
 
 
+def _wrap_pi(a):
+    """Wrap an angle (or array of them) to (-pi, pi]."""
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
 def _gt_deviation_m(tl: RouteTimeline, live_xy: np.ndarray, live_yaw: float, cursor_idx: int) -> float:
     """Min yaw-gated point-to-polyline distance from ``live_xy`` to a ±15 s window of
     recorded poses centered on ``cursor_idx``.
@@ -702,13 +707,16 @@ def _gt_deviation_m(tl: RouteTimeline, live_xy: np.ndarray, live_yaw: float, cur
     """
     live_xy = np.asarray(live_xy, dtype=np.float64).reshape(2)
     n = int(len(tl.poses))
-    if n < 2:
-        return _GT_DEV_INF
     lo = max(0, int(cursor_idx) - _GT_DEV_WINDOW_FRAMES)
     hi = min(n, int(cursor_idx) + _GT_DEV_WINDOW_FRAMES + 1)
-    if hi - lo < 2:
-        return _GT_DEV_INF
     window = tl.poses[lo:hi]  # (M, 3) -- xy + yaw
+    if len(window) == 0:
+        return _GT_DEV_INF
+    if len(window) == 1:
+        pose = window[0]
+        if abs(_wrap_pi(float(pose[2]) - float(live_yaw))) > (np.pi / 2.0):
+            return _GT_DEV_INF
+        return float(np.linalg.norm(live_xy - pose[:2]))
     a = window[:-1, :2]
     b = window[1:, :2]
     ab = b - a  # (M-1, 2)
@@ -720,11 +728,9 @@ def _gt_deviation_m(tl: RouteTimeline, live_xy: np.ndarray, live_yaw: float, cur
     proj = a + t_clamped[:, None] * ab
     d = np.linalg.norm(live_xy[None, :] - proj, axis=1)
     # Yaw gate: skip segments whose recorded heading disagrees with live ego by >90°.
-    # Seg yaw = atan2(ab_y, ab_x); wrap delta to (-pi, pi].
+    # Seg yaw = atan2(ab_y, ab_x).
     seg_yaw = np.arctan2(ab[:, 1], ab[:, 0])
-    dyaw = seg_yaw - float(live_yaw)
-    dyaw = (dyaw + np.pi) % (2.0 * np.pi) - np.pi
-    wrong_heading = np.abs(dyaw) > (np.pi / 2.0)
+    wrong_heading = np.abs(_wrap_pi(seg_yaw - float(live_yaw))) > (np.pi / 2.0)
     d = np.where(wrong_heading, _GT_DEV_INF, d)
     return float(d.min())
 
