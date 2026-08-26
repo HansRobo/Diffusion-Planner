@@ -31,6 +31,83 @@ def _ego_inside_lane(np_dict: dict, device: str) -> bool | None:
     return point_inside_any_lane_polygon(origin, lanes_t)
 
 
+def _ego_intersects_border_segments(
+    seg_p1: torch.Tensor,
+    seg_p2: torch.Tensor,
+    ego_shape: torch.Tensor,
+) -> bool:
+    """Whether any border segment intersects the current ego OBB.
+
+    ``score_road_border_step`` evaluates the current pose, whose reference
+    point is the origin and whose heading is +x.  In that frame the ego OBB is
+    an axis-aligned rectangle.  This exact segment/rectangle test avoids
+    missing an intersection between the 80 sampled perimeter points.
+    """
+    if seg_p1.shape[0] == 0:
+        return False
+
+    length = ego_shape[1]
+    width = ego_shape[2]
+    wheelbase = ego_shape[0]
+    rear_overhang = (length - wheelbase) / 2.0
+    xmin = -rear_overhang
+    xmax = length - rear_overhang
+    ymin = -width / 2.0
+    ymax = width / 2.0
+
+    def cross(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
+
+    def point_in_rect(p: torch.Tensor) -> torch.Tensor:
+        eps = 1e-6
+        return (
+            (p[:, 0] >= xmin - eps)
+            & (p[:, 0] <= xmax + eps)
+            & (p[:, 1] >= ymin - eps)
+            & (p[:, 1] <= ymax + eps)
+        )
+
+    # An endpoint inside is an intersection.
+    if point_in_rect(seg_p1).any() or point_in_rect(seg_p2).any():
+        return True
+
+    rect = torch.stack(
+        [
+            torch.stack([xmin, ymin]),
+            torch.stack([xmax, ymin]),
+            torch.stack([xmax, ymax]),
+            torch.stack([xmin, ymax]),
+        ]
+    )
+    rect_next = torch.roll(rect, shifts=-1, dims=0)
+
+    # Inclusive segment intersection, vectorized over border segments and
+    # rectangle edges.  The epsilon also treats touching as intersection.
+    a = seg_p1[:, None, :]
+    b = seg_p2[:, None, :]
+    c = rect[None, :, :]
+    d = rect_next[None, :, :]
+    ab = b - a
+    cd = d - c
+    ac = c - a
+    ad = d - a
+    ca = a - c
+    cb = b - c
+    o1 = cross(ab, ac)
+    o2 = cross(ab, ad)
+    o3 = cross(cd, ca)
+    o4 = cross(cd, cb)
+    eps = 1e-6
+    bbox_overlap = (
+        (torch.minimum(a[..., 0], b[..., 0]) <= torch.maximum(c[..., 0], d[..., 0]) + eps)
+        & (torch.maximum(a[..., 0], b[..., 0]) + eps >= torch.minimum(c[..., 0], d[..., 0]))
+        & (torch.minimum(a[..., 1], b[..., 1]) <= torch.maximum(c[..., 1], d[..., 1]) + eps)
+        & (torch.maximum(a[..., 1], b[..., 1]) + eps >= torch.minimum(c[..., 1], d[..., 1]))
+    )
+    proper = (o1 * o2 <= eps) & (o3 * o4 <= eps) & bbox_overlap
+    return bool(proper.any().item())
+
+
 def score_road_border_step(np_dict: dict, *, device: str) -> dict:
     """Ego-to-road-border distance at the current step.
 
@@ -61,7 +138,21 @@ def score_road_border_step(np_dict: dict, *, device: str) -> dict:
         rb_dist_m = float(per_ts_min[0, 0].item())
         if np.isfinite(rb_dist_m):
             inside = _ego_inside_lane(np_dict, device)
-            if inside is False:
+            # A border crossing/contact takes precedence over the signed
+            # clearance: the requested value at intersection is exactly 0.
+            if "line_strings" in np_dict:
+                ls_for_intersection = _as_float_tensor(np_dict["line_strings"], device)
+                if ls_for_intersection.dim() == 4:
+                    ls_for_intersection = ls_for_intersection[0]
+                border_xy = ls_for_intersection[..., :2]
+                valid = (ls_for_intersection[..., 3] > 0.5) & (border_xy.norm(dim=-1) > 1e-3)
+                valid_pair = valid[:, :-1] & valid[:, 1:]
+                idx = torch.where(valid_pair.reshape(-1))[0]
+                seg_p1 = border_xy[:, :-1].reshape(-1, 2)[idx]
+                seg_p2 = border_xy[:, 1:].reshape(-1, 2)[idx]
+                if _ego_intersects_border_segments(seg_p1, seg_p2, ego_shape_t):
+                    rb_dist_m = 0.0
+            if rb_dist_m != 0.0 and inside is False:
                 rb_dist_m = -rb_dist_m
 
     return {"rb_dist_m": rb_dist_m}

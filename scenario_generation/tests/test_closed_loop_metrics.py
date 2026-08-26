@@ -164,6 +164,12 @@ def _border_ls() -> np.ndarray:
     return ls
 
 
+def _nonintersecting_border_ls() -> np.ndarray:
+    ls = _border_ls()
+    ls[0, :2, 1] = 2.0
+    return ls
+
+
 def test_road_border_step_signed_positive_when_inside_lane():
     lanes = np.zeros((1, 2, 33), dtype=np.float32)
     lanes[0, :, :2] = [(-5.0, 0.0), (5.0, 0.0)]  # centerline through the ego
@@ -171,7 +177,7 @@ def test_road_border_step_signed_positive_when_inside_lane():
     lanes[0, :, 6:8] = (0.0, -1.0)  # right boundary 1m to the right -> ego origin inside
     out = score_road_border_step(
         {
-            "line_strings": _border_ls(),
+            "line_strings": _nonintersecting_border_ls(),
             "ego_shape": np.array([2.7, 4.0, 2.0], dtype=np.float32),
             "lanes": lanes,
         },
@@ -188,7 +194,7 @@ def test_road_border_step_signed_negative_when_outside_lane():
     lanes[0, :, 6:8] = (0.0, -1.0)
     out = score_road_border_step(
         {
-            "line_strings": _border_ls(),
+            "line_strings": _nonintersecting_border_ls(),
             "ego_shape": np.array([2.7, 4.0, 2.0], dtype=np.float32),
             "lanes": lanes,
         },
@@ -196,6 +202,22 @@ def test_road_border_step_signed_negative_when_outside_lane():
     )
     assert np.isfinite(out["rb_dist_m"])
     assert out["rb_dist_m"] < 0
+
+
+def test_road_border_step_is_zero_when_border_intersects_ego():
+    lanes = np.zeros((1, 3, 33), dtype=np.float32)
+    lanes[0, :, :2] = [(-5.0, 0.0), (0.0, 0.0), (5.0, 0.0)]
+    lanes[0, :, 4:6] = (0.0, 2.0)
+    lanes[0, :, 6:8] = (0.0, -2.0)
+    out = score_road_border_step(
+        {
+            "line_strings": _border_ls(),
+            "ego_shape": np.array([2.7, 4.0, 2.0], dtype=np.float32),
+            "lanes": lanes,
+        },
+        device="cpu",
+    )
+    assert out["rb_dist_m"] == 0.0
 
 
 def test_strong_brake_mask():
