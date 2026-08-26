@@ -952,7 +952,12 @@ _GUI_CSS = (
     ".dark .scrub input[type='range']::-moz-range-progress "
     "{background-color: #ff5544 !important;} "
     ".dark .scrub input[type='range']::-moz-range-track "
-    "{background: #454b58 !important;}"
+    "{background: #454b58 !important;} "
+    # Reserve visible height for the "Process Video" progress bar -- Gradio overlays its
+    # progress UI (bar + percentage text, vertically centered) on top of the event's output
+    # components with `overflow: hidden` on the overlay's wrapper, so an empty Markdown's
+    # near-0 rendered height would clip it rather than just show it small.
+    ".download-progress {min-height: 48px !important;}"
 )
 
 
@@ -1241,10 +1246,14 @@ def build_interface(
                     rsft_status = gr.Markdown("")
                     with gr.Row():
                         download_dark_mode = gr.Checkbox(label="Dark mode video", value=False, scale=1)
+                        process_video_btn = gr.Button("Process Video", variant="secondary", scale=1)
                         download_frames_btn = gr.DownloadButton(
-                            "⬇ Download Video (webm)", variant="secondary", scale=2
+                            "⬇ Download Video (webm)",
+                            variant="secondary",
+                            scale=1,
+                            interactive=False,
                         )
-                    download_frames_status = gr.Markdown("")
+                    download_frames_status = gr.Markdown("", elem_classes=["download-progress"])
 
                     gr.Markdown("#### Load / Save")
                     with gr.Row():
@@ -4606,15 +4615,19 @@ def build_interface(
             progress=gr.Progress(),
         ):
             """Render the resimulated rollout from the current step to the end as scene-view
-            frames (same overlays/checkboxes as ▶ Play) and encode them into a WebM handed to
-            the browser as a normal download -- no server-side persistence.
+            frames (same overlays/checkboxes as ▶ Play) and encode them into a WebM. Only
+            enables the separate Download button on success -- it starts (and stays, on any
+            failure below) disabled so there's never a stale/mismatched file to click through to.
             """
             branch = tree.branches[tree.active_branch]
             if branch.resim_steps is None:
-                return gr.update(), "Run Simulate first -- no resimulated frames to export."
+                return (
+                    gr.update(interactive=False),
+                    "Run Simulate first -- no resimulated frames to export.",
+                )
             seq = tree.get_npz_sequence(tree.active_branch)
             if not seq:
-                return gr.update(), "No frames found for this branch."
+                return gr.update(interactive=False), "No frames found for this branch."
 
             s_start = _safe_step(step)
             max_s = len(seq) - 1
@@ -4700,8 +4713,8 @@ def build_interface(
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
             return (
-                gr.update(value=str(webm_path)),
-                f"Ready: {n_total} frames (step {s_start}-{max_s})",
+                gr.update(value=str(webm_path), interactive=True),
+                f"Ready: {n_total} frames (step {s_start}-{max_s}) -- click Download",
             )
 
         _play_event = btn_play.click(
@@ -4724,7 +4737,7 @@ def build_interface(
         )
         btn_stop.click(None, None, None, cancels=[_play_event])
 
-        download_frames_btn.click(
+        process_video_btn.click(
             on_download_frames,
             [
                 tree_state,
