@@ -189,6 +189,88 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+VERDICT_KINDS = ("Pass", "Failure", "Error")
+PASSING_KIND = "Pass"
+UNDECIDED_KIND = "Undecided"
+
+# A pass reads differently on each field that can carry one, depending on the producer.
+_PASS_WORDS = ("pass", "passed", "success", "exitsuccess")
+_PASS_FIELDS = ("verdict_kind", "result_kind", "terminated")
+
+
+def verdict_kind(verdict: dict[str, Any] | None) -> str:
+    """The name a verdict settled on, or ``UNDECIDED_KIND`` when it never reached one."""
+    return verdict["kind"] if verdict and verdict.get("decided") else UNDECIDED_KIND
+
+
+def is_passed(row: dict[str, Any], verdict: dict[str, Any] | None = None) -> bool:
+    """Whether a scenario rollout passed."""
+    if verdict_kind(verdict) == PASSING_KIND:
+        return True
+    return any(str(row.get(f, "")).lower() in _PASS_WORDS for f in _PASS_FIELDS)
+
+
+# Declared, not discovered: a reader tabulating categories needs the ones a run did not produce.
+FAILURE_CATEGORIES = (
+    "PASS",
+    "SCENARIO_REFUSED",
+    "ERROR",
+    "COLLISION",
+    "ROAD_DEPARTURE",
+    "FROZEN_STANDSTILL",
+    "PROXIMITY_DEPARTURE",
+    "GOAL_STOP_FAILURE",
+    "SPEED_TIMEOUT",
+    "UNMET_CONDITION",
+    "UNKNOWN_FAILURE",
+)
+
+
+def _contacted(row: dict[str, Any], family: str) -> bool:
+    """Whether a contact family registered anything: a counted event or a step in contact."""
+    block = row.get(family) or {}
+    return block.get("collision_count", 0) > 0 or block.get("collision_steps", 0) > 0
+
+
+def classify_failure(row: dict[str, Any], verdict: dict[str, Any] | None = None) -> str:
+    """The one category a result belongs to, tried in the order ``FAILURE_CATEGORIES`` lists."""
+    if is_passed(row, verdict):
+        return "PASS"
+
+    term = str(row.get("terminated", "")).lower()
+    if term in ("worker_failed", "scenario_rejected") or row.get("error"):
+        if "rejected" in str(row.get("error", "")).lower():
+            return "SCENARIO_REFUSED"
+        return "ERROR"
+
+    if _contacted(row, "object"):
+        return "COLLISION"
+    if _contacted(row, "road_border"):
+        return "ROAD_DEPARTURE"
+
+    vmax = row.get("max_speed_mps")
+    trigger = (verdict.get("trigger") or "") if verdict else ""
+    trigger_lower = trigger.lower()
+
+    if (vmax is not None and vmax < 0.5) or "standstill" in trigger_lower or "stand_still" in trigger_lower:
+        return "FROZEN_STANDSTILL"
+
+    if any(k in trigger_lower for k in ("lateral_check", "longitudinal_check", "relativedistance", "obstacle_distance")):
+        return "PROXIMITY_DEPARTURE"
+
+    unmet = verdict.get("unmet", []) if verdict else []
+    if "goal_position" in unmet:
+        return "GOAL_STOP_FAILURE"
+
+    if term in ("max_steps", "sim_terminated") or "simulationtime" in trigger_lower or "timeout" in trigger_lower:
+        return "SPEED_TIMEOUT"
+
+    if unmet or trigger:
+        return "UNMET_CONDITION"
+
+    return "UNKNOWN_FAILURE"
+
+
 def read_verdict(case_dir: Path) -> dict[str, Any]:
     """The scenario's own verdict on a case, or a statement that it never reached one.
 
@@ -211,7 +293,7 @@ def read_verdict(case_dir: Path) -> dict[str, Any]:
     if node is None:
         node, kind = case.find("error"), "Error"
     if node is None:
-        return {"decided": True, "kind": "Pass"}
+        return {"decided": True, "kind": PASSING_KIND}
     message = node.get("message") or ""
     trigger = _TRIGGER_RE.search(message)
     return {
@@ -238,11 +320,14 @@ def verdict_reason(case_dir: Path) -> str | None:
     return ": ".join(p for p in parts if p) or None
 
 
+_TALLY_KEYS = tuple(k.lower() for k in (*VERDICT_KINDS, UNDECIDED_KIND))
+
+
 def _tally_verdicts(verdicts: list[dict[str, Any]]) -> dict[str, int]:
     """Three decided counts and the undecided one, so no consumer has to subtract."""
-    out = {"pass": 0, "failure": 0, "error": 0, "undecided": 0}
+    out = dict.fromkeys(_TALLY_KEYS, 0)
     for verdict in verdicts:
-        out[verdict["kind"].lower() if verdict.get("decided") else "undecided"] += 1
+        out[verdict_kind(verdict).lower()] += 1
     return out
 
 
@@ -422,7 +507,7 @@ def write_viewer_tree(
         scenarios[scenario] = {
             "description": None,
             "n_cases": 0,
-            "verdicts": {"pass": 0, "failure": 0, "error": 0, "undecided": 0},
+            "verdicts": dict.fromkeys(_TALLY_KEYS, 0),
             "error": message,
             _UNMEASURED_MARKER_KEY: [],
             "summary": None,
@@ -430,7 +515,7 @@ def write_viewer_tree(
 
     meta["verdicts"] = {
         key: sum(e["verdicts"][key] for e in scenarios.values())
-        for key in ("pass", "failure", "error", "undecided")
+        for key in _TALLY_KEYS
     }
 
     tree.cases.write_text("\n".join(case_lines) + "\n", encoding="utf-8")

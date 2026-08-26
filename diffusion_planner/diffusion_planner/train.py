@@ -193,6 +193,26 @@ def scenario_sim_validate(args, epoch: int, ckpt_path: str, out_dir: str) -> Non
     status = "ok" if rc == 0 else f"FAILED rc={rc}"
     print(f"scenario_sim @epoch {epoch + 1}: {status} in {elapsed:.1f}s -> {out_dir}", flush=True)
 
+    if rc != 0 or not args.use_wandb or wandb.run is None:
+        return
+
+    try:
+        from scenario_generation.wandb_scenario_sim import (
+            build_scenario_sim_wandb_payload,
+            load_case_rows,
+        )
+
+        out_p = Path(out_dir)
+        payload = build_scenario_sim_wandb_payload(load_case_rows(out_p), media_root=out_p)
+        wandb.run.log(payload, step=epoch + 1)
+        print(
+            f"wandb: logged scenario_sim @epoch {epoch + 1} "
+            f"(pass rate {payload.get('scenario_sim/pass_rate')}%)",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"Warning: Failed to log scenario_sim to wandb: {exc}", flush=True)
+
 
 def model_training(args: TrainConfig):
     save_path = args.save_dir
