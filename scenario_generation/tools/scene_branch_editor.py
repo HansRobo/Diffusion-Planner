@@ -14,7 +14,10 @@ from __future__ import annotations
 import argparse
 import io
 import math
+import shutil
 import sys
+import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
@@ -28,6 +31,7 @@ import torch
 from matplotlib.patches import Rectangle
 
 import guidance_gui.custom_guidance  # noqa: F401 -- registers the collision_swerve guidance
+from scenario_generation.closed_loop_eval import build_webm
 from scenario_generation.npz_loader import from_npz
 from scenario_generation.scene_context import AgentType, SceneContext
 from scenario_generation.scene_render import (
@@ -1227,6 +1231,11 @@ def build_interface(
                             scale=1,
                         )
                     rsft_status = gr.Markdown("")
+                    with gr.Row():
+                        download_frames_btn = gr.DownloadButton(
+                            "⬇ Download Video (webm)", variant="secondary", scale=1
+                        )
+                    download_frames_status = gr.Markdown("")
 
                     gr.Markdown("#### Load / Save")
                     with gr.Row():
@@ -4553,6 +4562,115 @@ def build_interface(
                     time.sleep(interval - elapsed)
                 s += 1
 
+        _DOWNLOAD_DIR_DEFAULT = Path.home() / "Downloads"
+
+        def on_download_frames(
+            tree,
+            step,
+            view_r,
+            gt_on,
+            hide_nb,
+            rb_on,
+            nb_on,
+            fps,
+            attention_on,
+            attention_threshold_val,
+            attention_classes_val,
+            dark_on,
+        ):
+            """Render the resimulated rollout from the current step to the end as scene-view
+            frames (same overlays/checkboxes as ▶ Play) and encode them into a WebM, saved
+            straight to ~/Downloads.
+            """
+            branch = tree.branches[tree.active_branch]
+            if branch.resim_steps is None:
+                return gr.update(), "Run Simulate first -- no resimulated frames to export."
+            seq = tree.get_npz_sequence(tree.active_branch)
+            if not seq:
+                return gr.update(), "No frames found for this branch."
+
+            s_start = _safe_step(step)
+            max_s = len(seq) - 1
+            _attn_classes = set(attention_classes_val or [])
+            _attn_available = attention_on and model_cache and model_cache.available
+
+            tmp_dir = Path(tempfile.mkdtemp(prefix="branch_editor_frames_"))
+            try:
+                for i, s in enumerate(range(s_start, max_s + 1)):
+                    scene = from_npz(seq[s])
+                    if tree.ego_shape:
+                        ego = scene.ego_agent
+                        if ego:
+                            ego.wheelbase, ego.length, ego.width = tree.ego_shape
+                    gt_traj_r = None
+                    if gt_on:
+                        ego = scene.ego_agent
+                        if (
+                            ego
+                            and ego.future_trajectory is not None
+                            and np.abs(ego.future_trajectory).sum() > 1e-6
+                        ):
+                            gt_traj_r = ego.future_trajectory
+                        if gt_traj_r is None and len(seq) > s + 1:
+                            gt_traj_r = _reconstruct_gt_from_sequence(seq, s, max_future=80)
+                    ego_wp = (
+                        _recover_ego_world_pose(seq, s) if (map_borders or map_builder) else None
+                    )
+                    if (
+                        scene.map_data is not None
+                        and scene.map_data.line_strings is not None
+                        and scene.map_data.line_strings.shape[-1] < 4
+                        and map_builder is not None
+                        and ego_wp is not None
+                    ):
+                        from scenario_generation.simulate import _refresh_line_strings as _rls3
+
+                        _rls3(
+                            scene,
+                            map_builder,
+                            np.array(ego_wp[:2], dtype=np.float64),
+                            np.array(ego_wp, dtype=np.float64),
+                        )
+                    attention_overlay = None
+                    if _attn_available:
+                        attention_overlay = _predict_attention_with_obs(
+                            tree, s, zero_neighbors=hide_nb
+                        )
+                    fig = render_scene_at_step(
+                        scene,
+                        [],
+                        None,
+                        view_half=view_r,
+                        step_idx=s,
+                        total_steps=len(seq),
+                        figsize=(16, 13),
+                        gt_traj=gt_traj_r,
+                        show_rb_dist=rb_on,
+                        show_nb_dist=nb_on,
+                        dim_neighbors=hide_nb,
+                        map_border_polylines=map_borders,
+                        ego_world_pose=ego_wp,
+                        attention=attention_overlay,
+                        attention_threshold=attention_threshold_val,
+                        attention_classes=_attn_classes,
+                        dark=dark_on,
+                    )
+                    img = _fig_to_pil(fig)
+                    img.save(tmp_dir / f"frame_{i:05d}.png")
+
+                _DOWNLOAD_DIR_DEFAULT.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                webm_path = (
+                    _DOWNLOAD_DIR_DEFAULT
+                    / f"{tree.active_branch}_step{s_start}-{max_s}_{ts}.webm"
+                )
+                build_webm(tmp_dir, webm_path, fps=fps)
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            n = max_s - s_start + 1
+            return gr.update(value=str(webm_path)), f"Saved {n} frames to {webm_path}"
+
         _play_event = btn_play.click(
             on_play,
             [
@@ -4572,6 +4690,25 @@ def build_interface(
             [scene_image, step_info, step_slider],
         )
         btn_stop.click(None, None, None, cancels=[_play_event])
+
+        download_frames_btn.click(
+            on_download_frames,
+            [
+                tree_state,
+                step_mirror,
+                view_half,
+                show_gt,
+                hide_neighbors,
+                show_rb_dist,
+                show_nb_dist,
+                play_fps,
+                show_attention,
+                attention_threshold,
+                attention_classes_cbg,
+                dark_mode_state,
+            ],
+            [download_frames_btn, download_frames_status],
+        )
 
         # Initial render
         demo.load(on_render, _render_trigger_inputs, _render_trigger_outputs)
@@ -4941,7 +5078,15 @@ def main():
         export_dir=args.export_dir,
         rsft_dir=args.rsft_dir,
     )
-    demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True, css=_GUI_CSS)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=args.port,
+        inbrowser=True,
+        css=_GUI_CSS,
+        # "Download Video" saves straight to ~/Downloads (see on_download_frames) -- Gradio
+        # only serves files from the CWD/system temp dir unless explicitly allowed here.
+        allowed_paths=[str(Path.home() / "Downloads")],
+    )
 
 
 if __name__ == "__main__":

@@ -441,6 +441,40 @@ def build_mp4(png_dir: Path, mp4_path: Path, fps: float, remove_pngs: bool = Tru
             png.unlink()
 
 
+def build_webm(png_dir: Path, webm_path: Path, fps: float, remove_pngs: bool = True) -> None:
+    """Encode the PNG sequence in ``png_dir`` to a WebM (VP9) video. See build_mp4 for the
+    glob-based, gap-tolerant frame selection and ``remove_pngs`` semantics."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-framerate",
+            str(fps),
+            "-pattern_type",
+            "glob",
+            "-i",
+            str(png_dir / "*.png"),
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            "-c:v",
+            "libvpx-vp9",
+            "-crf",
+            "30",
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            str(webm_path),
+        ],
+        check=True,
+    )
+    if remove_pngs:
+        for png in png_dir.glob("*.png"):
+            png.unlink()
+
+
 def run_closed_loop_eval(
     model,
     model_args,
