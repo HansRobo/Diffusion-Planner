@@ -74,7 +74,7 @@ def main(config: DictConfig) -> None:
         config.optimizer,
         model=planner,
         output_layers=(
-            planner.trajectory_decoder.output_projection,
+            planner.trajectory_decoder.output_projection.fc2,
             planner.turn_indicator_decoder.classifier,
         ),
         verbose=accelerator.is_main_process,

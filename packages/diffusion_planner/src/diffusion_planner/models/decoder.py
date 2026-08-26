@@ -176,13 +176,18 @@ class TrajectoryDecoder(nn.Module):
             for _ in range(depth)
         )
         self.output_norm = nn.LayerNorm(hidden_dim)
-        self.output_projection = nn.Linear(
-            hidden_dim, TRAJECTORY_LENGTH * TRAJECTORY_DIM
+        self.output_projection = Mlp(
+            in_features=hidden_dim,
+            hidden_features=feedforward_dim,
+            out_features=TRAJECTORY_LENGTH * TRAJECTORY_DIM,
+            act_layer=nn.GELU,
+            drop=dropout,
         )
         nn.init.normal_(self.ego_embedding, std=0.02)
         nn.init.normal_(self.neighbor_embedding, std=0.02)
-        nn.init.zeros_(self.output_projection.weight)
-        nn.init.zeros_(self.output_projection.bias)
+        nn.init.zeros_(self.output_projection.fc2.weight)
+        if self.output_projection.fc2.bias is not None:
+            nn.init.zeros_(self.output_projection.fc2.bias)
 
     def forward(
         self,
