@@ -170,6 +170,16 @@ def _nonintersecting_border_ls() -> np.ndarray:
     return ls
 
 
+def _two_sided_border_ls() -> np.ndarray:
+    ls = np.zeros((2, 2, 4), dtype=np.float32)
+    ls[:, 0, :2] = (-2.0, 2.0)
+    ls[:, 1, :2] = (2.0, 2.0)
+    ls[0, :, 1] = 2.0
+    ls[1, :, 1] = -2.0
+    ls[..., 3] = 1.0
+    return ls
+
+
 def test_road_border_step_signed_positive_when_inside_lane():
     lanes = np.zeros((1, 2, 33), dtype=np.float32)
     lanes[0, :, :2] = [(-5.0, 0.0), (5.0, 0.0)]  # centerline through the ego
@@ -201,6 +211,43 @@ def test_road_border_step_signed_negative_when_outside_lane():
         device="cpu",
     )
     assert np.isfinite(out["rb_dist_m"])
+    assert out["rb_dist_m"] < 0
+
+
+def test_road_border_step_uses_border_corridor_when_lane_is_missing():
+    lanes = np.zeros((1, 2, 33), dtype=np.float32)
+    lanes[0, :, :2] = [(-5.0, 5.0), (5.0, 5.0)]
+    lanes[0, :, 4:6] = (0.0, 1.0)
+    lanes[0, :, 6:8] = (0.0, -1.0)
+    out = score_road_border_step(
+        {
+            "line_strings": _two_sided_border_ls(),
+            "ego_shape": np.array([2.7, 4.0, 2.0], dtype=np.float32),
+            "lanes": lanes,
+        },
+        device="cpu",
+    )
+    assert np.isfinite(out["rb_dist_m"])
+    assert out["rb_dist_m"] > 0
+
+
+def test_road_border_step_does_not_pair_unrelated_border_branches():
+    ls = np.zeros((2, 2, 4), dtype=np.float32)
+    ls[0, :, :2] = [(30.0, 2.0), (40.0, 2.0)]
+    ls[1, :, :2] = [(-30.0, -2.0), (-40.0, -2.0)]
+    ls[..., 3] = 1.0
+    lanes = np.zeros((1, 2, 33), dtype=np.float32)
+    lanes[0, :, :2] = [(-5.0, 5.0), (5.0, 5.0)]
+    lanes[0, :, 4:6] = (0.0, 1.0)
+    lanes[0, :, 6:8] = (0.0, -1.0)
+    out = score_road_border_step(
+        {
+            "line_strings": ls,
+            "ego_shape": np.array([2.7, 4.0, 2.0], dtype=np.float32),
+            "lanes": lanes,
+        },
+        device="cpu",
+    )
     assert out["rb_dist_m"] < 0
 
 

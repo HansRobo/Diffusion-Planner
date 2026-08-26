@@ -6,7 +6,10 @@ import numpy as np
 import torch
 
 from planner_metrics.config import RewardConfig
-from planner_metrics.geometry import point_inside_any_lane_polygon
+from planner_metrics.geometry import (
+    _point_in_polygon,
+    point_inside_any_lane_polygon,
+)
 from planner_metrics.subscores import compute_road_border_penalty
 
 
@@ -116,6 +119,54 @@ def _ego_intersects_border_segments(
     return bool(proper.any().item())
 
 
+def _ego_inside_road_border_corridor(
+    line_strings: torch.Tensor,
+    *,
+    max_longitudinal_m: float = 50.0,
+    max_side_pair_gap_m: float = 10.0,
+) -> bool:
+    """Return whether ego is inside a polygon formed by two border segments."""
+    if line_strings.dim() == 4:
+        line_strings = line_strings[0]
+    xy = line_strings[..., :2]
+    valid = (line_strings[..., 3] > 0.5) & (xy.norm(dim=-1) > 1e-3)
+    pair_valid = valid[:, :-1] & valid[:, 1:]
+    if not bool(pair_valid.any().item()):
+        return False, float("inf"), float("inf")
+    p1, p2 = xy[:, :-1][pair_valid], xy[:, 1:][pair_valid]
+    seg = p2 - p1
+    length2 = (seg * seg).sum(dim=-1).clamp_min(1e-10)
+    t = ((-p1 * seg).sum(dim=-1) / length2).clamp(0.0, 1.0)
+    closest = p1 + t[:, None] * seg
+    usable = closest[:, 0].abs() <= max_longitudinal_m
+    upper_mask = usable & (closest[:, 1] > 1e-4)
+    lower_mask = usable & (closest[:, 1] < -1e-4)
+    upper_points = closest[upper_mask]
+    lower_points = closest[lower_mask]
+    if not upper_points.numel() or not lower_points.numel():
+        return False
+
+    # Treat every plausible upper/lower segment pair exactly like a lanelet:
+    # upper segment forward, lower segment backward, then ray-cast the ego
+    # origin against the resulting closed quadrilateral.
+    upper_indices = torch.where(upper_mask)[0]
+    lower_indices = torch.where(lower_mask)[0]
+    for upper_idx in upper_indices:
+        up = torch.stack((p1[upper_idx], p2[upper_idx]))
+        up = up[torch.argsort(up[:, 0])]
+        for lower_idx in lower_indices:
+            if abs(float(closest[upper_idx, 0] - closest[lower_idx, 0])) > max_side_pair_gap_m:
+                continue
+            low = torch.stack((p1[lower_idx], p2[lower_idx]))
+            low = low[torch.argsort(low[:, 0])]
+            polygon = torch.cat((up, low.flip(0)), dim=0)
+            if bool(
+                _point_in_polygon(torch.zeros((1, 2), device=polygon.device), polygon)[0].item()
+            ):
+                return True
+    return False
+
+
 def score_road_border_step(np_dict: dict, *, device: str) -> dict:
     """Ego-to-road-border distance at the current step.
 
@@ -160,7 +211,13 @@ def score_road_border_step(np_dict: dict, *, device: str) -> dict:
                 seg_p2 = border_xy[:, 1:].reshape(-1, 2)[idx]
                 if _ego_intersects_border_segments(seg_p1, seg_p2, ego_shape_t):
                     rb_dist_m = 0.0
+            border_inside = False
             if rb_dist_m != 0.0 and inside is False:
-                rb_dist_m = -rb_dist_m
-
+                # Lane polygons are the primary containment test.  At turns
+                # the lane representation can be incomplete, so only use the
+                # road-border corridor as a fallback when no lane contains
+                # the ego origin.
+                border_inside = _ego_inside_road_border_corridor(ls_for_intersection)
+                if not border_inside:
+                    rb_dist_m = -rb_dist_m
     return {"rb_dist_m": rb_dist_m}
