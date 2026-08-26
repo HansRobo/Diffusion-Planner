@@ -11,6 +11,7 @@ Accepts the same ``ClosedLoopConfig`` fields as train.py. Example::
 from __future__ import annotations
 
 import json
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -252,11 +253,22 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
             float(s.get("mean_route_completion", 0.0) or 0.0) * int(s.get("n_segments", 0) or 0)
             for s in summaries.values()
         )
+
+        dev_num = 0.0
+        dev_steps = 0
+        for v in summaries.values():
+            dev = v.get("mean_gt_deviation_m", None)
+            steps = int(v.get("total_steps", 0) or 0)
+            if dev is not None and math.isfinite(dev) and steps > 0:
+                dev_num += float(dev) * steps
+                dev_steps += steps
+
         agg = {
             "n_groups": len(summaries),
             "n_segments": n_segments,
             "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in summaries.values()),
             "mean_route_completion": (route_num / n_segments) if n_segments else 0.0,
+            "mean_gt_deviation_m": (dev_num / dev_steps) if dev_steps else float("inf"),
             "total_curb_hits": sum(
                 int(s.get("road_border", {}).get("collision_count", 0) or 0)
                 for s in summaries.values()
