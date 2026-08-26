@@ -464,10 +464,11 @@ class _SegState:
     # sustain threshold. route_arc_s caches tl.poses cumulative arc length (lazy).
     realized_lag_streak: int = 0
     route_arc_s: object = None
-    # Running sum/count of per-step GT-pose deviation (m), for the mean_gt_deviation_m metric
-    # (average distance from the recorded expert path — a graded tracking-quality signal that,
-    # unlike the saturating segment-rates, improves smoothly as the model trains). Accumulated
-    # only in render_segment's loop (where gt_deviation is computed); 0 count -> reported inf.
+    # Running sum/count of per-step GT deviation (m), for the mean_gt_deviation_m metric:
+    # mean yaw-gated min point-to-polyline distance from the live ego to a ±15 s window of
+    # recorded poses around the cursor's current frame (see ``_gt_deviation_m``). A graded
+    # tracking-quality signal that, unlike the saturating segment-rates, improves smoothly as
+    # the model trains. Accumulated only in render_segment's loop; 0 count -> reported inf.
     gt_dev_sum: float = 0.0
     gt_dev_count: int = 0
 
@@ -674,6 +675,58 @@ def _hold_turn_indicator(s: _SegState) -> None:
     history scrolling by re-appending the LAST decoded turn indicator, so the next replan
     sees the held signal as if the model had re-confirmed it every step."""
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
+
+
+# GT-deviation lookup window: ±15 s of recorded trajectory around the cursor. Wide enough to
+# cover any realistic live-ego-vs-recorded drift (the cursor only advances ~0.5-1.0 s/step on
+# a normal route) but bounded so the loop stays ~200 µs/step.
+_GT_DEV_WINDOW_FRAMES = 150  # 15 s * 10 Hz
+_GT_DEV_INF = float("inf")
+
+
+def _gt_deviation_m(tl: RouteTimeline, live_xy: np.ndarray, live_yaw: float, cursor_idx: int) -> float:
+    """Min yaw-gated point-to-polyline distance from ``live_xy`` to a ±15 s window of
+    recorded poses centered on ``cursor_idx``.
+
+    Why this and not ``||live - poses[cursor_idx]||``: the recorded frame the cursor
+    currently picks can lag the live ego (cool-down, speed-gap repeat, search_radius
+    jump) by up to several seconds, so the xy-only distance to that single frame
+    inflates. The min projection over a small temporal window is the proper
+    "how far off the recorded path am I" signal.
+
+    Yaw gate: each candidate segment's recorded heading must be within ±90° of the
+    live ego's heading. Otherwise a future wrong-direction recorded segment (U-turn,
+    opposite lane on a divided road) gets picked and the lateral distance is reported
+    near zero even though the live ego is in its correct lane on the other side.
+    Segments that fail the gate are skipped (treated as ``inf``).
+    """
+    live_xy = np.asarray(live_xy, dtype=np.float64).reshape(2)
+    n = int(len(tl.poses))
+    if n < 2:
+        return _GT_DEV_INF
+    lo = max(0, int(cursor_idx) - _GT_DEV_WINDOW_FRAMES)
+    hi = min(n, int(cursor_idx) + _GT_DEV_WINDOW_FRAMES + 1)
+    if hi - lo < 2:
+        return _GT_DEV_INF
+    window = tl.poses[lo:hi]  # (M, 3) -- xy + yaw
+    a = window[:-1, :2]
+    b = window[1:, :2]
+    ab = b - a  # (M-1, 2)
+    ap = live_xy[None, :] - a
+    seg_len2 = (ab * ab).sum(axis=1)
+    seg_len2_safe = np.maximum(seg_len2, 1e-9)
+    t = (ap * ab).sum(axis=1) / seg_len2_safe
+    t_clamped = np.clip(t, 0.0, 1.0)
+    proj = a + t_clamped[:, None] * ab
+    d = np.linalg.norm(live_xy[None, :] - proj, axis=1)
+    # Yaw gate: skip segments whose recorded heading disagrees with live ego by >90°.
+    # Seg yaw = atan2(ab_y, ab_x); wrap delta to (-pi, pi].
+    seg_yaw = np.arctan2(ab[:, 1], ab[:, 0])
+    dyaw = seg_yaw - float(live_yaw)
+    dyaw = (dyaw + np.pi) % (2.0 * np.pi) - np.pi
+    wrong_heading = np.abs(dyaw) > (np.pi / 2.0)
+    d = np.where(wrong_heading, _GT_DEV_INF, d)
+    return float(d.min())
 
 
 def _score_into(
@@ -1609,9 +1662,11 @@ def render_segment(
 
             # Early-abort: check BEFORE the (expensive) model replan call, using the deviation from
             # last step's advance — an already-diverged segment skips inference too instead of just
-            # cutting the render short. GT deviation is measured against the recorded pose at the
-            # cursor's current frame (same `idx` the goal/progress checks use).
-            gt_deviation_m = float(np.linalg.norm(s.live_pose[:2] - tl.poses[idx, :2]))
+            # cutting the render short. GT deviation is the yaw-gated min point-to-polyline distance
+            # from the live ego to a ±15 s window of recorded poses around the cursor's current frame
+            # (see ``_gt_deviation_m``). Pure xy distance to the cursor frame would over-report drift
+            # whenever the cursor is mid-repeat / mid-cooldown.
+            gt_deviation_m = _gt_deviation_m(tl, s.live_pose[:2], s.live_pose[2], idx)
             s.gt_dev_sum += gt_deviation_m
             s.gt_dev_count += 1
             if abort_deviation_m > 0 and gt_deviation_m > abort_deviation_m:
