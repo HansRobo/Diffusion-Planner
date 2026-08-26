@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import io
 import math
+import re
 import shutil
 import sys
 import tempfile
@@ -1004,7 +1005,7 @@ def build_interface(
                     )
                 with gr.Column(scale=2, min_width=300):
                     branch_dropdown = gr.Dropdown(
-                        choices=list(tree.branches.keys()),
+                        choices=_branch_choices(tree),
                         value=tree.active_branch,
                         label="Active Branch",
                         interactive=True,
@@ -1013,8 +1014,15 @@ def build_interface(
                     with gr.Row():
                         fork_btn = gr.Button("Fork Here", size="sm", variant="primary")
                         delete_branch_btn = gr.Button("Delete Branch", size="sm", variant="stop")
+                    with gr.Row():
+                        rename_name_tb = gr.Textbox(
+                            label="Display Name",
+                            placeholder="e.g. speed-guidance-test",
+                            scale=3,
+                        )
+                        rename_btn = gr.Button("Rename", size="sm", variant="secondary", scale=1)
                     with gr.Accordion("Fuse Timelines", open=False):
-                        _choices = list(tree.branches.keys())
+                        _choices = _branch_choices(tree)
                         with gr.Row():
                             fuse_branch_a = gr.Dropdown(
                                 choices=_choices,
@@ -1228,8 +1236,9 @@ def build_interface(
                         )
                     rsft_status = gr.Markdown("")
                     with gr.Row():
+                        download_dark_mode = gr.Checkbox(label="Dark mode video", value=False, scale=1)
                         download_frames_btn = gr.DownloadButton(
-                            "⬇ Download Video (webm)", variant="secondary", scale=1
+                            "⬇ Download Video (webm)", variant="secondary", scale=2
                         )
                     download_frames_status = gr.Markdown("")
 
@@ -2750,6 +2759,19 @@ def build_interface(
                 svg,
             )
 
+        def on_rename_branch(tree, new_name):
+            bid = tree.active_branch
+            tree.rename_branch(bid, new_name)
+            choices = _branch_choices(tree)
+            return (
+                tree,
+                gr.update(choices=choices, value=bid),
+                _branch_info_html(tree, bid),
+                _render_branch_svg(tree, 0),
+                gr.update(choices=choices),
+                gr.update(choices=choices),
+            )
+
         def on_fork(tree, step, view_r, gt_on):
             _simlog(f"on_fork: step_input={step} active={tree.active_branch}")
             seq = tree.get_npz_sequence(tree.active_branch)
@@ -2757,7 +2779,7 @@ def build_interface(
             _simlog(f"on_fork: s={s} seq_len={len(seq)}")
             new_id = tree.fork_branch(tree.active_branch, s)
             tree.active_branch = new_id
-            choices = list(tree.branches.keys())
+            choices = _branch_choices(tree)
             seq = tree.get_npz_sequence(new_id)
             max_step = max(0, len(seq) - 1)
             _simlog(
@@ -2804,7 +2826,7 @@ def build_interface(
                 )
             tree.delete_branch(tree.active_branch)
             tree.active_branch = "root"
-            choices = list(tree.branches.keys())
+            choices = _branch_choices(tree)
             seq = tree.get_npz_sequence("root")
             max_step = max(0, len(seq) - 1)
             img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
@@ -2833,7 +2855,7 @@ def build_interface(
             seq = new_tree.get_npz_sequence("root")
             max_step = max(0, len(seq) - 1)
             img, info = _render(new_tree, 0, view_r, None, show_gt_val=gt_on)
-            choices = list(new_tree.branches.keys())
+            choices = _branch_choices(new_tree)
             b_info = _branch_info_html(new_tree, "root")
             mods = _modifications_md(new_tree, "root")
             svg = _render_branch_svg(new_tree, 0)
@@ -2902,7 +2924,7 @@ def build_interface(
                 n_out = len(_full_switch_outputs) + 1
                 return (tree,) + (gr.update(),) * (n_out - 2) + (str(e),)
             tree.active_branch = new_id
-            choices = list(tree.branches.keys())
+            choices = _branch_choices(tree)
             seq = tree.get_npz_sequence(new_id)
             max_step = max(0, len(seq) - 1)
             img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
@@ -3365,6 +3387,12 @@ def build_interface(
             on_delete_branch,
             [tree_state, view_half, show_gt],
             _full_switch_outputs,
+        )
+
+        rename_btn.click(
+            on_rename_branch,
+            [tree_state, rename_name_tb],
+            [tree_state, branch_dropdown, branch_info, branch_timeline, fuse_branch_a, fuse_branch_b],
         )
 
         fuse_btn.click(
@@ -4281,7 +4309,7 @@ def build_interface(
             img, info = _render(tree, 0, view_r, None, show_gt_val=gt_on)
             b_info = _branch_info_html(tree, tree.active_branch)
             mods = _modifications_md(tree, tree.active_branch)
-            choices = list(tree.branches.keys())
+            choices = _branch_choices(tree)
             _modes = f"ego={ego_mode}, nb={neighbor_mode}"
             status = (
                 f"Simulated **{n}** steps ({advance_mode}, {_modes}) "
@@ -4476,8 +4504,6 @@ def build_interface(
                     time.sleep(interval - elapsed)
                 s += 1
 
-        _DOWNLOAD_DIR_DEFAULT = Path.home() / "Downloads"
-
         def on_download_frames(
             tree,
             step,
@@ -4491,10 +4517,11 @@ def build_interface(
             attention_threshold_val,
             attention_classes_val,
             dark_on,
+            progress=gr.Progress(),
         ):
             """Render the resimulated rollout from the current step to the end as scene-view
-            frames (same overlays/checkboxes as ▶ Play) and encode them into a WebM, saved
-            straight to ~/Downloads.
+            frames (same overlays/checkboxes as ▶ Play) and encode them into a WebM handed to
+            the browser as a normal download -- no server-side persistence.
             """
             branch = tree.branches[tree.active_branch]
             if branch.resim_steps is None:
@@ -4505,12 +4532,14 @@ def build_interface(
 
             s_start = _safe_step(step)
             max_s = len(seq) - 1
+            n_total = max_s - s_start + 1
             _attn_classes = set(attention_classes_val or [])
             _attn_available = attention_on and model_cache and model_cache.available
 
             tmp_dir = Path(tempfile.mkdtemp(prefix="branch_editor_frames_"))
             try:
                 for i, s in enumerate(range(s_start, max_s + 1)):
+                    progress((i + 1) / n_total, f"Rendering frame {i + 1}/{n_total}")
                     scene = from_npz(seq[s])
                     if tree.ego_shape:
                         ego = scene.ego_agent
@@ -4572,18 +4601,22 @@ def build_interface(
                     img = _fig_to_pil(fig)
                     img.save(tmp_dir / f"frame_{i:05d}.png")
 
-                _DOWNLOAD_DIR_DEFAULT.mkdir(parents=True, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                webm_path = (
-                    _DOWNLOAD_DIR_DEFAULT
-                    / f"{tree.active_branch}_step{s_start}-{max_s}_{ts}.webm"
-                )
+                label = tree.branch_label(tree.active_branch)
+                safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_") or tree.active_branch
+                # Separate temp dir (not tmp_dir itself) -- it must survive the `finally`
+                # cleanup below, since Gradio only reads/copies the returned file into its own
+                # cache *after* this handler returns.
+                out_dir = Path(tempfile.mkdtemp(prefix="branch_editor_video_"))
+                webm_path = out_dir / f"{safe_label}_step{s_start}-{max_s}_{ts}.webm"
                 build_webm(tmp_dir, webm_path, fps=fps)
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
-            n = max_s - s_start + 1
-            return gr.update(value=str(webm_path)), f"Saved {n} frames to {webm_path}"
+            return (
+                gr.update(value=str(webm_path)),
+                f"Ready: {n_total} frames (step {s_start}-{max_s})",
+            )
 
         _play_event = btn_play.click(
             on_play,
@@ -4619,7 +4652,7 @@ def build_interface(
                 show_attention,
                 attention_threshold,
                 attention_classes_cbg,
-                dark_mode_state,
+                download_dark_mode,
             ],
             [download_frames_btn, download_frames_status],
         )
@@ -4633,6 +4666,14 @@ def build_interface(
         demo.load(fn=None, inputs=None, outputs=None, js="() => { document.body.classList.remove('dark'); }")
 
     return demo
+
+
+def _branch_choices(tree: SceneTree) -> list[list[str]]:
+    """[[display_label, branch_id], ...] pairs for every branch dropdown in the UI. The
+    *value* Gradio reports back on selection is always the raw branch id (so
+    tree.active_branch, on_branch_change, on_fuse, etc. never need to change) -- only the
+    displayed label reflects a Rename (see SceneTree.branch_label)."""
+    return [[tree.branch_label(bid), bid] for bid in tree.branches]
 
 
 # ── SVG timeline renderer ──
@@ -4761,8 +4802,10 @@ def _render_branch_svg(tree: SceneTree, current_step: int = 0) -> str:
                 f'<circle cx="{cx + _DOT_R + 4}" cy="{cy - _DOT_R}" r="3" fill="{_COL_OBS}" />'
             )
 
-        # Label + step count
-        short = bid if len(bid) <= 18 else "..." + bid[-15:]
+        # Label + step count -- displayed text reflects a Rename (branch_label), but the
+        # onclick target below always stays the raw id, which is what on_branch_change expects.
+        label = tree.branch_label(bid)
+        short = label if len(label) <= 18 else "..." + label[-15:]
         label_x = cx + _DOT_R + 10
         fw = "bold" if is_active else "normal"
 
@@ -4819,7 +4862,7 @@ def _branch_info_html(tree: SceneTree, branch_id: str) -> str:
     if branch is None:
         return "<span style='color:#888'>Branch not found</span>"
     seq = tree.get_npz_sequence(branch_id)
-    bid = escape(branch_id)
+    bid = escape(tree.branch_label(branch_id))
 
     parts = [
         '<div style="font-family:monospace;font-size:13px;line-height:1.6;padding:4px 0">',
@@ -4835,8 +4878,8 @@ def _branch_info_html(tree: SceneTree, branch_id: str) -> str:
         prefix, suffix, cut = branch.fused_from
         parts.append(
             f'<div style="color:#aaa;font-size:12px">'
-            f"Fused: <code>{escape(prefix)}</code>[:{cut}]"
-            f" + <code>{escape(suffix)}</code></div>"
+            f"Fused: <code>{escape(tree.branch_label(prefix))}</code>[:{cut}]"
+            f" + <code>{escape(tree.branch_label(suffix))}</code></div>"
         )
     if branch.crop_range is not None:
         s, e = branch.crop_range
@@ -4992,15 +5035,7 @@ def main():
         export_dir=args.export_dir,
         rsft_dir=args.rsft_dir,
     )
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=args.port,
-        inbrowser=True,
-        css=_GUI_CSS,
-        # "Download Video" saves straight to ~/Downloads (see on_download_frames) -- Gradio
-        # only serves files from the CWD/system temp dir unless explicitly allowed here.
-        allowed_paths=[str(Path.home() / "Downloads")],
-    )
+    demo.launch(server_name="0.0.0.0", server_port=args.port, inbrowser=True, css=_GUI_CSS)
 
 
 if __name__ == "__main__":
