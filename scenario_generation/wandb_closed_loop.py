@@ -28,6 +28,8 @@ _ABS_COLUMNS = [
     ("Segments", "n_segments"),
     ("Steps", "total_steps"),
     ("Route completion (%)", "mean_route_completion"),
+    ("Pass rate (%)", "pass_rate"),
+    ("Fails", "fail_count"),
     ("Curb hits", "total_curb_hits"),
     ("Snaps", "total_snaps"),
     ("Red light", "total_red_light_violations"),
@@ -41,6 +43,7 @@ _PER_1000STEPS_COLUMNS = [
     ("Segments", "n_segments"),
     ("Steps", "total_steps"),
     ("Route completion (%)", "mean_route_completion"),
+    ("Pass rate (%)", "pass_rate"),
     ("Curb hits / 1k steps", "total_curb_hits"),
     ("Snaps / 1k steps", "total_snaps"),
     ("Red light / 1k steps", "total_red_light_violations"),
@@ -49,10 +52,29 @@ _PER_1000STEPS_COLUMNS = [
     ("Collisions / 1k steps", "total_collision_events"),
 ]
 
+# Metrics stacked into the per-1000-steps bar chart. Order is preserved so
+# colors stay stable across runs in the rendered ECharts panel.
+_STACKED_METRICS = (
+    ("Curb hits / 1k steps", "#4C78A8"),
+    ("Snaps / 1k steps", "#F58518"),
+    ("Red light / 1k steps", "#E45756"),
+    ("Strong brakes / 1k steps", "#72B7B2"),
+    ("Collisions / 1k steps", "#EECA3B"),
+)
+
 
 def _short_label(group_key: str) -> str:
     """``sites_sample/group_a`` → ``group_a``. ``group_a`` → ``group_a``."""
     return group_key.split("/", 1)[1] if "/" in group_key else group_key
+
+
+def _segment_weighted_mean(values: list[dict], key: str) -> float:
+    """Segment-weighted mean of ``key`` across groups, e.g. mean_route_completion or pass_rate."""
+    n_segments = sum(int(s.get("n_segments", 0) or 0) for s in values)
+    if n_segments == 0:
+        return 0.0
+    total = sum(float(s.get(key, 0.0) or 0.0) * int(s.get("n_segments", 0) or 0) for s in values)
+    return total / n_segments
 
 
 def _abs_value(source_key: str, summary: dict):
@@ -63,10 +85,14 @@ def _abs_value(source_key: str, summary: dict):
     Falls back to ``extract_score`` for raw per-group summaries whose
     headline numbers live in nested categories like ``road_border``.
     """
-    if source_key == "mean_route_completion":
-        if "mean_route_completion" in summary:
-            return float(summary["mean_route_completion"] or 0.0)
+    # Float fields: direct lookup or extract_score fallback.
+    if source_key in ("mean_route_completion", "pass_rate"):
+        if source_key in summary:
+            val = summary[source_key]
+            return float(val if isinstance(val, (int, float)) else 0.0)
         return float(extract_score(summary, source_key) or 0.0)
+
+    # Int fields.
     if source_key in ("n_segments", "total_steps"):
         return int(summary.get(source_key, 0) or 0)
     if source_key in summary:
@@ -76,7 +102,8 @@ def _abs_value(source_key: str, summary: dict):
 
 def _per_1000steps_value(source_key: str, summary: dict) -> float:
     """Counts normalized per 1000 steps (or per 1000 segments for ``n_segments_diverged``)."""
-    if source_key in ("n_segments", "total_steps", "mean_route_completion"):
+    # Pass-through fields that are already a fraction or count, not a rate.
+    if source_key in ("n_segments", "total_steps", "mean_route_completion", "pass_rate"):
         return _abs_value(source_key, summary)
     denom_key = "n_segments" if source_key == "n_segments_diverged" else "total_steps"
     denom = int(summary.get(denom_key, 0) or 0)
@@ -92,8 +119,8 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
     """Cross-group aggregate, same shape as a per-group summary dict.
 
     ``__noobj`` groups are excluded from collision sums (they're 0 by
-    construction in the no-object ablation). ``route_completion`` is a
-    segment-weighted mean, not a plain average.
+    construction in the no-object ablation). ``route_completion`` and
+    ``pass_rate`` are segment-weighted means, not plain averages.
     """
     if not group_summaries:
         return {}
@@ -102,36 +129,29 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
     objects_only_values = [s for k, s in group_summaries.items() if "__noobj/" not in k]
 
     n_segments = sum(int(s.get("n_segments", 0) or 0) for s in values)
-    route_num = sum(
-        float(s.get("mean_route_completion", 0.0) or 0.0) * int(s.get("n_segments", 0) or 0)
-        for s in values
-    )
 
-    agg = {
+    agg: dict = {
         "n_groups": len(values),
         "n_segments": n_segments,
         "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in values),
-        "mean_route_completion": (route_num / n_segments) if n_segments else 0.0,
+        "mean_route_completion": _segment_weighted_mean(values, "mean_route_completion"),
+        "pass_rate": _segment_weighted_mean(values, "pass_rate"),
+        "fail_count": sum(int(s.get("fail_count", 0) or 0) for s in values),
     }
-    for k in (
-        "total_curb_hits",
-        "total_snaps",
-        "total_red_light_violations",
-        "total_strong_brakes",
-        "n_segments_diverged",
-    ):
-        agg[k] = sum(int(extract_score(s, k) or 0) for s in values)
+
+    for key in ("total_curb_hits", "total_snaps", "total_red_light_violations",
+                "total_strong_brakes", "n_segments_diverged"):
+        agg[key] = sum(int(extract_score(s, key) or 0) for s in values)
+
+    # Collisions exclude __noobj groups.
     agg["total_collision_events"] = sum(
         int(extract_score(s, "total_collision_events") or 0) for s in objects_only_values
     )
     return agg
 
 
-def _build_table(
-    json_label: str,
-    kind: str,  # "abs" or "per_1000steps"
-    group_summaries: dict[str, dict],
-) -> wandb.Table:
+def _build_table(json_label: str, kind: str, group_summaries: dict[str, dict]) -> wandb.Table:
+    """Build one table (abs or per_1000steps) for ``json_label``."""
     cols = _ABS_COLUMNS if kind == "abs" else _PER_1000STEPS_COLUMNS
     value_fn = _abs_value if kind == "abs" else _per_1000steps_value
 
@@ -139,21 +159,15 @@ def _build_table(
     for group_key in sorted(group_summaries.keys()):
         summary = group_summaries[group_key]
         rows.append(
-            [
-                _short_label(group_key) if src == "group" else value_fn(src, summary)
-                for _, src in cols
-            ]
+            [_short_label(group_key) if src == "group" else value_fn(src, summary) for _, src in cols]
         )
 
     all_agg = _aggregate(group_summaries)
     rows.append(["All" if src == "group" else value_fn(src, all_agg) for _, src in cols])
-
     return wandb.Table(columns=[c[0] for c in cols], data=rows)
 
 
-def build_closed_loop_tables(
-    by_json: dict[str, dict[str, dict]],
-) -> dict[str, wandb.Table]:
+def build_closed_loop_tables(by_json: dict[str, dict[str, dict]]) -> dict[str, wandb.Table]:
     """Build one **abs** ``wandb.Table`` per json_label.
 
     ``by_json`` maps ``json_label`` → ``group_key`` → per-group summary dict.
@@ -165,17 +179,6 @@ def build_closed_loop_tables(
     return out
 
 
-# Metrics stacked into the per-1000-steps bar chart. Order is preserved so
-# colors stay stable across runs in the rendered ECharts panel.
-_STACKED_METRICS = (
-    ("Curb hits / 1k steps", "#4C78A8"),
-    ("Snaps / 1k steps", "#F58518"),
-    ("Red light / 1k steps", "#E45756"),
-    ("Strong brakes / 1k steps", "#72B7B2"),
-    ("Collisions / 1k steps", "#EECA3B"),
-)
-
-
 def _build_stacked_bar_html(json_label: str, per_1000steps_table: wandb.Table) -> str:
     """Render an ECharts stacked-bar chart from a per_1000steps Table.
 
@@ -183,18 +186,21 @@ def _build_stacked_bar_html(json_label: str, per_1000steps_table: wandb.Table) -
     The ``All`` summary row is dropped — the chart shows the groups only.
     """
     cols = per_1000steps_table.columns
-    stacked_cols = [metric for metric, _ in _STACKED_METRICS]
-    table_data = per_1000steps_table.data
     col_idx = {name: i for i, name in enumerate(cols)}
 
     groups: list[str] = []
-    series: dict[str, list[float]] = {m: [] for m in stacked_cols}
-    for row in table_data:
+    series: dict[str, list[float]] = {m: [] for m, _ in _STACKED_METRICS}
+    for row in per_1000steps_table.data:
         if row[col_idx["Group"]] == "All":
             continue
         groups.append(str(row[col_idx["Group"]]))
-        for metric in stacked_cols:
+        for metric, _ in _STACKED_METRICS:
             series[metric].append(float(row[col_idx[metric]] or 0.0))
+
+    max_label_len = max((len(g) for g in groups), default=0)
+    grid_left = max(160, max_label_len * 6 + 5)
+    chart_height = len(groups) * 50 + 30
+    chart_id = f"echarts_closed_loop_{json_label}".replace("/", "_").replace(":", "_")
 
     series_payload = [
         {
@@ -209,11 +215,6 @@ def _build_stacked_bar_html(json_label: str, per_1000steps_table: wandb.Table) -
         for metric, color in _STACKED_METRICS
     ]
 
-    max_label_len = max((len(g) for g in groups), default=0)
-    grid_left = max(160, max_label_len * 6 + 5)
-    chart_height = len(groups) * 50 + 30
-
-    chart_id = f"echarts_closed_loop_{json_label}".replace("/", "_").replace(":", "_")
     option = {
         "title": {"show": False},
         "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
