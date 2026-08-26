@@ -448,6 +448,7 @@ def aggregate(
         pass_count = sum(passed_flags)
         fail_count = n_seg - pass_count
         summary["pass_count"] = pass_count
+        summary["fail_count"] = fail_count
         summary["pass_rate"] = (pass_count / n_seg) if n_seg else 0.0
         summary["pass_condition"] = pass_condition.to_dict()
 
