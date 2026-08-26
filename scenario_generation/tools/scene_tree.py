@@ -71,6 +71,10 @@ class BranchNode:
     npz_dir: str | None = None
     fused_from: tuple[str, str, int] | None = None
     fused_npz_list: list[str] | None = None
+    # Purely cosmetic label shown in place of `id` in the UI (dropdown/SVG tree/info panel).
+    # Never used as an identity -- `id` stays the dict key and every cross-reference
+    # (parent_id, fused_from, active_branch) everywhere else.
+    display_name: str | None = None
 
     def obstacles_at_or_before(self, timestep: int) -> list[ObstaclePlacement]:
         """Return obstacles that exist at the given timestep (placed at or before it)."""
@@ -188,6 +192,10 @@ class SceneTree:
             fork_timestep=timestep,
             modifications=inherited,
             inherited_labels=inherited_labels,
+            # Cosmetic only (see BranchNode.display_name) -- inherited like the parent's
+            # obstacle placements above, so a named scenario keeps its name across forks
+            # until explicitly renamed again.
+            display_name=parent.display_name,
         )
         return new_id
 
@@ -216,6 +224,23 @@ class SceneTree:
         if branch_id not in self.branches:
             raise KeyError(f"Branch '{branch_id}' not found")
         self.branches[branch_id].crop_range = None
+
+    def branch_label(self, branch_id: str) -> str:
+        """Human-facing label for a branch: its display_name if set, else the raw id.
+
+        Purely cosmetic -- callers that need the branch's actual identity (dict key,
+        parent_id, active_branch, ...) must keep using branch_id itself.
+        """
+        b = self.branches.get(branch_id)
+        return b.display_name if b and b.display_name else branch_id
+
+    def rename_branch(self, branch_id: str, display_name: str | None) -> None:
+        """Set (or clear) a branch's cosmetic display name. Does not touch its id or any
+        cross-reference (parent_id/fused_from/active_branch all keep using the raw id)."""
+        if branch_id not in self.branches:
+            raise KeyError(f"Branch '{branch_id}' not found")
+        name = display_name.strip() if display_name else None
+        self.branches[branch_id].display_name = name or None
 
     def delete_branch(self, branch_id: str) -> list[str]:
         """Delete a branch and all its descendants. Returns list of deleted IDs."""
