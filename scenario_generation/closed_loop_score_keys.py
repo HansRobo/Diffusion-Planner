@@ -1,36 +1,4 @@
-"""Single source of truth for closed-loop score/metric key names -- the small headline numbers
-surfaced in W&B (per-group score trends + cross-group overview), split into two groups:
-
-- COMPARISON: meaningful in both objects and empty-world ("__noobj") ablation mode -- shown for
-  every group/label, objects vs noobj overlaid as separate lines.
-- OBJECTS_ONLY: structurally 0 with no traffic to react to (collision-with-other-agents counts)
-  -- shown for objects-labeled groups only, since a noobj line here is always a meaningless flat 0.
-
-Kept dependency-free (no torch/matplotlib/wandb) so wandb_closed_loop_workspace.py's standalone
-CLI can import it without pulling in the heavier deps wandb_closed_loop.py/.
-"""
-
 from __future__ import annotations
-
-# Per-group score keys: closed_loop/{key}/{label} in wandb.
-COMPARISON_SCORE_KEYS = (
-    "mean_route_completion",
-    "total_curb_hits",
-    "total_snaps",
-    "total_red_light_violations",
-    "total_strong_brakes",
-)
-OBJECTS_ONLY_SCORE_KEYS = ("total_collision_events",)
-SCORE_KEYS = COMPARISON_SCORE_KEYS + OBJECTS_ONLY_SCORE_KEYS
-
-COMPARISON_OVERVIEW_SUM_KEYS = (
-    "total_curb_hits",
-    "total_snaps",
-    "total_red_light_violations",
-    "total_strong_brakes",
-    "n_segments_diverged",
-)
-OBJECTS_ONLY_OVERVIEW_SUM_KEYS = ("total_collision_events",)
 
 # Resolve each key from a (segment or summary) dict -- closed_loop_eval's nested-metrics
 # categories (object/road_border/red_light_violation/strong_brake/reproducer) replaced the old
