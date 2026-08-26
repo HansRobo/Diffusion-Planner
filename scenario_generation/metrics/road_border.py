@@ -132,7 +132,7 @@ def _ego_inside_road_border_corridor(
     valid = (line_strings[..., 3] > 0.5) & (xy.norm(dim=-1) > 1e-3)
     pair_valid = valid[:, :-1] & valid[:, 1:]
     if not bool(pair_valid.any().item()):
-        return False, float("inf"), float("inf")
+        return False
     p1, p2 = xy[:, :-1][pair_valid], xy[:, 1:][pair_valid]
     seg = p2 - p1
     length2 = (seg * seg).sum(dim=-1).clamp_min(1e-10)
