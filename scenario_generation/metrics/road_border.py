@@ -35,16 +35,24 @@ def _ego_intersects_border_segments(
     seg_p1: torch.Tensor,
     seg_p2: torch.Tensor,
     ego_shape: torch.Tensor,
+    ego_pose: torch.Tensor | None = None,
 ) -> bool:
     """Whether any border segment intersects the current ego OBB.
 
-    ``score_road_border_step`` evaluates the current pose, whose reference
-    point is the origin and whose heading is +x.  In that frame the ego OBB is
-    an axis-aligned rectangle.  This exact segment/rectangle test avoids
+    In the ego frame the OBB is an axis-aligned rectangle.  ``ego_pose`` is
+    ``[x, y, cos_yaw, sin_yaw]`` in the segment frame; it is omitted when the
+    segments are already in the current ego frame.  This exact test avoids
     missing an intersection between the 80 sampled perimeter points.
     """
     if seg_p1.shape[0] == 0:
         return False
+
+    if ego_pose is not None:
+        offset = torch.stack([ego_pose[0], ego_pose[1]])
+        cos_yaw, sin_yaw = ego_pose[2], ego_pose[3]
+        rot_inv = torch.stack([torch.stack([cos_yaw, sin_yaw]), torch.stack([-sin_yaw, cos_yaw])])
+        seg_p1 = (seg_p1 - offset) @ rot_inv.T
+        seg_p2 = (seg_p2 - offset) @ rot_inv.T
 
     length = ego_shape[1]
     width = ego_shape[2]

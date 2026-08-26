@@ -93,6 +93,7 @@ from scenario_generation.gui.lanelet_scene_builder import (
     _obb_collides,
     _obb_corners,
 )
+from scenario_generation.metrics.road_border import _ego_intersects_border_segments
 from scenario_generation.render_pool import render_pool
 from scenario_generation.route import Route
 from scenario_generation.scene_context import Agent, AgentType, SceneContext
@@ -1515,12 +1516,21 @@ def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] 
     rb_dist = float(per_ts_min[0, 0].item())
     if not math.isfinite(rb_dist):
         return None
+    border_p1 = torch.from_numpy(border_xy[:, :-1].reshape(-1, 2)[valid_pair.reshape(-1)])
+    border_p2 = torch.from_numpy(border_xy[:, 1:].reshape(-1, 2)[valid_pair.reshape(-1)])
+    if _ego_intersects_border_segments(
+        border_p1,
+        border_p2,
+        ego_shape,
+        ego_pose=ego_traj[0, 0],
+    ):
+        rb_dist = 0.0
     lanes = np.asarray(map_data.lanes, dtype=np.float32) if map_data.lanes is not None else None
     if lanes is not None and lanes.size > 0:
         pt = torch.tensor(
             [float(ego.current_position[0]), float(ego.current_position[1])], dtype=torch.float32
         )
-        if not point_inside_any_lane_polygon(pt, torch.from_numpy(lanes)):
+        if rb_dist != 0.0 and not point_inside_any_lane_polygon(pt, torch.from_numpy(lanes)):
             rb_dist = -rb_dist
     return ego_pts[0, 0].numpy(), border_pts[0, 0].numpy(), rb_dist
 
