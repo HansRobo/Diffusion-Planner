@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from planner_metrics.config import RewardConfig
-from planner_metrics.geometry import _build_lane_polygons, _point_in_polygons
+from planner_metrics.geometry import point_inside_any_lane_polygon
 from planner_metrics.subscores import compute_road_border_penalty
 
 
@@ -27,9 +27,8 @@ def _ego_inside_lane(np_dict: dict, device: str) -> bool | None:
     lanes_t = _as_float_tensor(np_dict["lanes"], device)
     if lanes_t.dim() == 4:
         lanes_t = lanes_t[0]
-    edge_v1, edge_v2, edge_poly_id, n_polys = _build_lane_polygons(lanes_t)
-    origin = torch.zeros(1, 2, dtype=torch.float32, device=device)
-    return bool(_point_in_polygons(origin, edge_v1, edge_v2, edge_poly_id, n_polys)[0].item())
+    origin = torch.zeros(2, dtype=torch.float32, device=device)
+    return point_inside_any_lane_polygon(origin, lanes_t)
 
 
 def score_road_border_step(np_dict: dict, *, device: str) -> dict:

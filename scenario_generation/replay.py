@@ -65,6 +65,7 @@ matplotlib.use("Agg")
 import numpy as np
 import torch
 
+from planner_metrics.geometry import point_inside_any_lane_polygon
 from planner_metrics.vehicle_collision import obb_corners
 
 # Live per-step lane / border / centerline scoring. Imports are module-
@@ -1461,7 +1462,13 @@ def _ego_nearest_moving_npc(
 
 
 def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] | None:
-    """Road-border distance from the shared reward metric."""
+    """Road-border distance from the shared reward metric.
+
+    Signed by lane containment when ``map_data.lanes`` is non-empty: positive while
+    ``ego`` is inside some lane polygon, negative once it has crossed outside --
+    matches ``scenario_generation.metrics.road_border.score_road_border_step``'s
+    convention, so this render label agrees with the value logged to rollout.jsonl.
+    """
     if ego is None:
         return None
     if map_data is None or map_data.line_strings is None:
@@ -1508,6 +1515,13 @@ def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] 
     rb_dist = float(per_ts_min[0, 0].item())
     if not math.isfinite(rb_dist):
         return None
+    lanes = np.asarray(map_data.lanes, dtype=np.float32) if map_data.lanes is not None else None
+    if lanes is not None and lanes.size > 0:
+        pt = torch.tensor(
+            [float(ego.current_position[0]), float(ego.current_position[1])], dtype=torch.float32
+        )
+        if not point_inside_any_lane_polygon(pt, torch.from_numpy(lanes)):
+            rb_dist = -rb_dist
     return ego_pts[0, 0].numpy(), border_pts[0, 0].numpy(), rb_dist
 
 
