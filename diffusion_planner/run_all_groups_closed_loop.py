@@ -24,6 +24,10 @@ from diffusion_planner.config.config_cli import build_config, build_parser, reso
 from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
 
+from scenario_generation.wandb_closed_loop import (
+    log_closed_loop_to_wandb,
+)
+
 
 def resolve_closed_loop_inputs(
     inputs: str | list[str],
@@ -386,7 +390,7 @@ def run_closed_loop_main(
                 _write_groups_manifest(json_out_dir, per_json_summaries)
 
         if all_group_names:
-            _log_to_wandb(cfg, all_group_names, all_summaries, run=wandb_run)
+            log_closed_loop_to_wandb(cfg, all_group_names, all_summaries, run=wandb_run)
 
     return True
 
@@ -445,51 +449,6 @@ def main() -> int:
         render_media=None,
     )
     return int(not ok)
-
-
-def _log_to_wandb(
-    cfg: ClosedLoopConfig,
-    group_names: list[str],
-    group_summaries: dict[str, dict],
-    run: "wandb.sdk.wandb_run.Run | None" = None,
-) -> None:
-    """Push per-group closed-loop scalar metrics + Table Images to W&B.
-
-    Reuses ``run`` if given, else starts its own.
-    Uses professionally styled table images for better visualization.
-    """
-    import wandb
-
-    from scenario_generation.wandb_closed_loop import build_closed_loop_tables, build_per_1000steps_stacked_panels
-
-    if not group_summaries:
-        return
-
-    if run is None:
-        run = wandb.init(project=cfg.wandb_project_name or None, name=cfg.exp_name or None)
-        own_run = True
-    else:
-        own_run = False
-
-    try:
-        # Build per-json_label grouping from group keys.
-        by_json: dict[str, dict[str, dict]] = {}
-        for key in group_names:
-            summary = group_summaries[key]
-            if "__noobj/" in key:
-                json_label = key.split("__noobj/", 1)[0] + "__noobj"
-            else:
-                json_label = key.split("/", 1)[0]
-            by_json.setdefault(json_label, {})[key] = summary
-
-        tables = build_closed_loop_tables(by_json)
-        panels = build_per_1000steps_stacked_panels(by_json)
-        run.log({**tables, **panels})
-        for key in sorted(tables) + sorted(panels):
-            print(f"wandb: logged {key}")
-    finally:
-        if own_run:
-            wandb.finish()
 
 
 if __name__ == "__main__":
