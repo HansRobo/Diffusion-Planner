@@ -7,7 +7,6 @@ import torch
 
 from planner_metrics.config import RewardConfig
 from planner_metrics.geometry import (
-    _point_in_polygon,
     point_inside_any_lane_polygon,
 )
 from planner_metrics.subscores import compute_road_border_penalty
@@ -119,6 +118,7 @@ def _ego_intersects_border_segments(
     return bool(proper.any().item())
 
 
+@torch.no_grad()
 def _ego_inside_road_border_corridor(
     line_strings: torch.Tensor,
     *,
@@ -146,25 +146,42 @@ def _ego_inside_road_border_corridor(
     if not upper_points.numel() or not lower_points.numel():
         return False
 
-    # Treat every plausible upper/lower segment pair exactly like a lanelet:
-    # upper segment forward, lower segment backward, then ray-cast the ego
-    # origin against the resulting closed quadrilateral.
+    # Build every plausible upper/lower quadrilateral at once.  The previous
+    # implementation called point-in-polygon from a Python double loop, which
+    # was expensive because this function runs once per simulation step.
     upper_indices = torch.where(upper_mask)[0]
     lower_indices = torch.where(lower_mask)[0]
-    for upper_idx in upper_indices:
-        up = torch.stack((p1[upper_idx], p2[upper_idx]))
-        up = up[torch.argsort(up[:, 0])]
-        for lower_idx in lower_indices:
-            if abs(float(closest[upper_idx, 0] - closest[lower_idx, 0])) > max_side_pair_gap_m:
-                continue
-            low = torch.stack((p1[lower_idx], p2[lower_idx]))
-            low = low[torch.argsort(low[:, 0])]
-            polygon = torch.cat((up, low.flip(0)), dim=0)
-            if bool(
-                _point_in_polygon(torch.zeros((1, 2), device=polygon.device), polygon)[0].item()
-            ):
-                return True
-    return False
+    upper = torch.stack((p1[upper_indices], p2[upper_indices]), dim=1)
+    lower = torch.stack((p1[lower_indices], p2[lower_indices]), dim=1)
+    upper_order = torch.argsort(upper[..., 0], dim=1)
+    lower_order = torch.argsort(lower[..., 0], dim=1)
+    upper = upper.gather(1, upper_order[..., None].expand(-1, -1, 2))
+    lower = lower.gather(1, lower_order[..., None].expand(-1, -1, 2))
+
+    pair_valid = (
+        closest[upper_indices, 0][:, None] - closest[lower_indices, 0][None, :]
+    ).abs() <= max_side_pair_gap_m
+    polygons = torch.stack(
+        (
+            upper[:, None, 0, :].expand(-1, lower.shape[0], -1),
+            upper[:, None, 1, :].expand(-1, lower.shape[0], -1),
+            lower[None, :, 1, :].expand(upper.shape[0], -1, -1),
+            lower[None, :, 0, :].expand(upper.shape[0], -1, -1),
+        ),
+        dim=2,
+    )
+
+    # Vectorized ray casting for the origin against all quadrilaterals.
+    v1 = polygons
+    v2 = torch.roll(polygons, shifts=-1, dims=2)
+    y1, y2 = v1[..., 1], v2[..., 1]
+    x1, x2 = v1[..., 0], v2[..., 0]
+    cond_y = (y1 > 0) != (y2 > 0)
+    dy = y2 - y1
+    safe_dy = torch.where(dy.abs() < 1e-10, torch.ones_like(dy), dy)
+    crossing_x = x1 - y1 * (x2 - x1) / safe_dy
+    inside = (cond_y & (0 < crossing_x)).sum(dim=2) % 2 == 1
+    return bool((inside & pair_valid).any().item())
 
 
 def score_road_border_step(np_dict: dict, *, device: str) -> dict:
@@ -200,9 +217,7 @@ def score_road_border_step(np_dict: dict, *, device: str) -> dict:
             # A border crossing/contact takes precedence over the signed
             # clearance: the requested value at intersection is exactly 0.
             if "line_strings" in np_dict:
-                ls_for_intersection = _as_float_tensor(np_dict["line_strings"], device)
-                if ls_for_intersection.dim() == 4:
-                    ls_for_intersection = ls_for_intersection[0]
+                ls_for_intersection = ls
                 border_xy = ls_for_intersection[..., :2]
                 valid = (ls_for_intersection[..., 3] > 0.5) & (border_xy.norm(dim=-1) > 1e-3)
                 valid_pair = valid[:, :-1] & valid[:, 1:]
