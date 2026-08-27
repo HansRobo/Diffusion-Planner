@@ -26,6 +26,7 @@ _HISTORY_LEN = _INPUT_T + 1  # the past the model sees, plus the current pose.
 _SIM_TYPE_EGO = 0  # get_entity_states()["type"]: 0=EGO 1=VEHICLE 2=PEDESTRIAN 3=MISC_OBJECT
 # get_entity_states()["subtype"]. A two-wheeler is a VEHICLE by type; only the subtype tells
 # it apart, and the model's agent-type one-hot has a class for it.
+_SIM_TYPE_MISC_OBJECT = 3
 _SIM_SUBTYPE_MOTORCYCLE = 5
 _SIM_SUBTYPE_BICYCLE = 6
 # Not signalling, in the TurnIndicatorsReport space: it has no 0, so the NO_COMMAND the
@@ -61,7 +62,7 @@ def resolve_ego_name(states: dict) -> str:
 
 
 def _agent_type(state: dict) -> AgentType | None:
-    """Map a reported entity to ``AgentType``; ``None`` for non-agents."""
+    """Map a reported entity to ``AgentType``; ``None`` for anything with no type at all."""
     sim_type = int(state["type"])
     if sim_type in (0, 1):  # EGO, VEHICLE
         subtype = int(state.get("subtype", 0))
@@ -70,7 +71,12 @@ def _agent_type(state: dict) -> AgentType | None:
         return AgentType.VEHICLE
     if sim_type == 2:  # PEDESTRIAN
         return AgentType.PEDESTRIAN
-    return None  # MISC_OBJECT is not a dynamic agent
+    if sim_type == _SIM_TYPE_MISC_OBJECT:
+        # A MISC_OBJECT is not a vehicle, pedestrian or bicycle, which is exactly what the
+        # Unknown class is for. Dropping it instead would hide an obstacle the planner has
+        # to avoid -- the sim would show it, the model would never see it.
+        return AgentType.UNKNOWN
+    return None
 
 
 class HistoryBuffers:
