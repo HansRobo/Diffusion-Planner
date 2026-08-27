@@ -28,12 +28,74 @@ default:
 
 # Per-group overrides
 groups:
-  departure:            {collision: false, road_border: false, red_light_violation: false, strong_brake: false, goal_reach: true, snap: true}
-  lane_change:          {collision: true, road_border: true, red_light_violation: false, strong_brake: false, goal_reach: true, snap: true}
-  lane_keeping:         {collision: false, road_border: true, red_light_violation: false, strong_brake: false, goal_reach: true, snap: false}
-  obstacle_avoidance:   {collision: true, road_border: true, red_light_violation: false, strong_brake: true, goal_reach: true, snap: true}
-  obstacle_stop:        {collision: true, road_border: true, red_light_violation: false, strong_brake: false, goal_reach: true, snap: false}
-  pedestrian_stop:      {collision: true, road_border: true, red_light_violation: false, strong_brake: false, goal_reach: true, snap: false}
-  stop_line:            {collision: true, road_border: true, red_light_violation: true, strong_brake: false, goal_reach: true, snap: false}
-  traffic_light:        {collision: true, road_border: true, red_light_violation: true, strong_brake: false, goal_reach: true, snap: false}
-  unnecessary_stop:     {collision: true, road_border: true, red_light_violation: false, strong_brake: true, goal_reach: true, snap: true}
+  departure:
+    collision: false
+    road_border: false
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: true
+
+  lane_change:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: true
+
+  lane_keeping:
+    collision: false
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  obstacle_avoidance:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: true
+    goal_reach: true
+    snap: true
+
+  obstacle_stop:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  pedestrian_stop:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  stop_line:
+    collision: true
+    road_border: true
+    red_light_violation: true
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  traffic_light:
+    collision: true
+    road_border: true
+    red_light_violation: true
+    strong_brake: false
+    goal_reach: true
+    snap: false
+
+  unnecessary_stop:
+    collision: true
+    road_border: true
+    red_light_violation: false
+    strong_brake: true
+    goal_reach: true
+    snap: true
