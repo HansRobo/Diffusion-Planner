@@ -59,6 +59,37 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         default="",
         path=True,
     )
+    # Shaping knobs for the rename above, modelling how a real perception stack loses type
+    # confidence. Every default is a no-op, so leaving them alone reproduces the plain
+    # class-agnostic rename exactly, down to the RNG draw.
+    unknown_class_rename_prob_vehicle: Optional[float] = cli(
+        "per-class override of unknown_class_rename_prob for vehicles; unset = use it",
+        default=None,
+    )
+    unknown_class_rename_prob_pedestrian: Optional[float] = cli(
+        "per-class override of unknown_class_rename_prob for pedestrians; unset = use it. "
+        "Classifiers fail more often on small, easily-occluded VRUs than on cars, so this "
+        "usually wants to be higher than the vehicle rate",
+        default=None,
+    )
+    unknown_class_rename_prob_bicycle: Optional[float] = cli(
+        "per-class override of unknown_class_rename_prob for bicycles; unset = use it",
+        default=None,
+    )
+    unknown_class_rename_distance_scale_max: float = cli(
+        "scale an agent's rename probability from 1x at the ego up to this at "
+        "unknown_class_rename_distance_scale_range_m and beyond; 1.0 disables scaling",
+        default=1.0,
+    )
+    unknown_class_rename_distance_scale_range_m: float = cli(
+        "range (m) at which the distance scaling above reaches its maximum",
+        default=50.0,
+    )
+    unknown_class_rename_prob_cap: float = cli(
+        "upper bound applied after distance scaling, so a high base rate plus a large scale "
+        "cannot relabel nearly every distant agent; 1.0 disables the cap",
+        default=1.0,
+    )
     normalization_file_path: str = "normalization.json"
 
     train_subsample_step: int = 1

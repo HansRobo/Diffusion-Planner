@@ -204,6 +204,24 @@ def save_unknown_rename_debug_image(
     plt.close(fig)
 
 
+def unknown_rename_kwargs(args) -> dict:
+    """The shaping knobs of rename_agents_to_unknown, read off a TrainConfig.
+
+    Exists so the three call sites (train_epoch, and grpo_epoch twice) name them once
+    instead of six times each. Keys are checked against
+    ``apply_and_report_unknown_rename``'s signature on every call, so a typo here is a
+    TypeError rather than a knob that silently does nothing.
+    """
+    return {
+        "prob_vehicle": args.unknown_class_rename_prob_vehicle,
+        "prob_pedestrian": args.unknown_class_rename_prob_pedestrian,
+        "prob_bicycle": args.unknown_class_rename_prob_bicycle,
+        "distance_scale_max": args.unknown_class_rename_distance_scale_max,
+        "distance_scale_range_m": args.unknown_class_rename_distance_scale_range_m,
+        "prob_cap": args.unknown_class_rename_prob_cap,
+    }
+
+
 def apply_and_report_unknown_rename(
     inputs: dict,
     prob: float,
@@ -211,6 +229,12 @@ def apply_and_report_unknown_rename(
     debug_dir: str = "",
     is_last_step: bool = False,
     epoch: int = 0,
+    prob_vehicle: float | None = None,
+    prob_pedestrian: float | None = None,
+    prob_bicycle: float | None = None,
+    distance_scale_max: float = 1.0,
+    distance_scale_range_m: float = 50.0,
+    prob_cap: float = 1.0,
 ) -> tuple[torch.Tensor, dict]:
     """Apply rename_agents_to_unknown to inputs["neighbor_agents_past"] and return
     (tensor, stats) -- stats always includes the per-step rename count/rate; if debug_dir is
@@ -218,6 +242,10 @@ def apply_and_report_unknown_rename(
     there (one per epoch, not one per dump-cadence step). This is the call site helper
     train_epoch.py / grpo_epoch.py use so the confirmation logic lives in one place, not
     three.
+
+    The per-class / distance / cap keywords are forwarded verbatim to
+    rename_agents_to_unknown; see it for what they mean. ``unknown_rename_kwargs(args)``
+    builds them from a config.
 
     inputs: the raw (pre-normalization) training-step inputs dict -- read for
         neighbor_agents_past (mutated by rename_agents_to_unknown) and, only when actually
@@ -228,7 +256,14 @@ def apply_and_report_unknown_rename(
     before = inputs["neighbor_agents_past"].clone() if dump_image else None
 
     neighbor_agents_past, renamed_mask, valid_mask = rename_agents_to_unknown(
-        inputs["neighbor_agents_past"], prob
+        inputs["neighbor_agents_past"],
+        prob,
+        prob_vehicle=prob_vehicle,
+        prob_pedestrian=prob_pedestrian,
+        prob_bicycle=prob_bicycle,
+        distance_scale_max=distance_scale_max,
+        distance_scale_range_m=distance_scale_range_m,
+        prob_cap=prob_cap,
     )
     # Numeric only: this dict gets merged straight into the per-step loss dict, which
     # get_epoch_mean_loss averages key-by-key -- a string value here would break that.

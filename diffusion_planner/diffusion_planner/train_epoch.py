@@ -6,7 +6,10 @@ from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
-from diffusion_planner.utils.unknown_rename_debug import apply_and_report_unknown_rename
+from diffusion_planner.utils.unknown_rename_debug import (
+    apply_and_report_unknown_rename,
+    unknown_rename_kwargs,
+)
 
 
 def heading_to_cos_sin(x):
@@ -76,6 +79,7 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
             debug_dir=args.unknown_rename_debug_dir,
             is_last_step=(step == num_steps - 1) and ddp.get_rank() == 0,
             epoch=epoch,
+            **unknown_rename_kwargs(args),
         )
         inputs = args.observation_normalizer(inputs)
 

@@ -32,7 +32,10 @@ from diffusion_planner.model.module.decoder import compute_training_loss
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils import ddp
 from diffusion_planner.utils.train_utils import get_epoch_mean_loss
-from diffusion_planner.utils.unknown_rename_debug import apply_and_report_unknown_rename
+from diffusion_planner.utils.unknown_rename_debug import (
+    apply_and_report_unknown_rename,
+    unknown_rename_kwargs,
+)
 
 
 def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
@@ -68,6 +71,7 @@ def _sft_step(
         debug_dir=args.unknown_rename_debug_dir,
         is_last_step=is_last_step,
         epoch=epoch,
+        **unknown_rename_kwargs(args),
     )
     inputs = args.observation_normalizer(inputs)
 
@@ -144,6 +148,7 @@ def _grpo_step(
         debug_dir=args.unknown_rename_debug_dir,
         is_last_step=is_last_step,
         epoch=epoch,
+        **unknown_rename_kwargs(args),
     )
 
     exp = expand_batch(raw_inputs, n)

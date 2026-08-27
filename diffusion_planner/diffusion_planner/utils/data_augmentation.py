@@ -41,16 +41,41 @@ def heading_transform(heading, transform_mat):
 
 
 def rename_agents_to_unknown(
-    neighbor_agents_past: torch.Tensor, prob: float
+    neighbor_agents_past: torch.Tensor,
+    prob: float,
+    *,
+    prob_vehicle: float | None = None,
+    prob_pedestrian: float | None = None,
+    prob_bicycle: float | None = None,
+    distance_scale_max: float = 1.0,
+    distance_scale_range_m: float = 50.0,
+    prob_cap: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Stochastically relabel some valid neighbors' one-hot type to Unknown (col 11), applied
     consistently across every past timestep of that agent (not per-frame -- an agent's semantic
-    class does not change frame to frame). Class-agnostic: applies regardless of the agent's
-    original type. Training-time only; never call this at eval/inference.
+    class does not change frame to frame). Training-time only; never call this at eval/inference.
 
     neighbor_agents_past: [B, N, T, D] raw (pre-normalization) tensor, D >= 12.
-    prob: per-agent probability. If <= 0.0, this is a true no-op and draws NO random numbers,
-        so it never perturbs the RNG call sequence for callers who leave it at the default.
+    prob: per-agent probability, used for any class without its own override below. If the
+        effective probability is <= 0.0 for every class, this is a true no-op and draws NO
+        random numbers, so it never perturbs the RNG call sequence for callers who leave it
+        at the default.
+
+    The remaining arguments shape *which* agents get relabeled, modelling how a real
+    perception stack loses type confidence. All default to a no-op, so a call that passes only
+    ``prob`` behaves exactly as it did before they existed, down to the RNG draw:
+
+    prob_vehicle / prob_pedestrian / prob_bicycle: per-class overrides for ``prob``. Classifiers
+        fail more often on small, easily-occluded VRUs than on cars, so these usually want to be
+        higher than the vehicle rate. ``None`` means "use ``prob``".
+    distance_scale_max, distance_scale_range_m: linearly scale a agent's probability from 1x at
+        the ego up to ``distance_scale_max`` at ``distance_scale_range_m`` and beyond, measured
+        from its most recent position. 1.0 disables scaling.
+    prob_cap: upper bound applied after scaling, so a high base rate plus a large scale cannot
+        relabel nearly everything far away. 1.0 disables the cap.
+
+    Agents already typed Unknown are never selected -- relabeling them would be a no-op that
+    still inflated the reported rename count.
 
     Returns (neighbor_agents_past, renamed_mask, valid_mask): renamed_mask/valid_mask are
     [B, N] bool -- which agent slots were actually relabeled this call, and which slots were
@@ -61,9 +86,33 @@ def rename_agents_to_unknown(
     # any past timestep. Padding slots are never touched. Computed unconditionally (cheap,
     # no RNG) so callers can report "0 renamed out of N valid" even when prob <= 0.0.
     valid = torch.any(torch.ne(neighbor_agents_past[..., :8], 0), dim=-1).any(dim=-1)  # [B, N]
-    if prob <= 0.0:
+
+    # Index 3 is Unknown itself and is pinned to 0.0: an already-Unknown agent is never
+    # re-picked, so the reported rename rate stays honest.
+    class_probs = [
+        prob if prob_vehicle is None else prob_vehicle,
+        prob if prob_pedestrian is None else prob_pedestrian,
+        prob if prob_bicycle is None else prob_bicycle,
+        0.0,
+    ]
+    if max(class_probs) <= 0.0:
         return neighbor_agents_past, torch.zeros_like(valid), valid
-    rename = (torch.rand(valid.shape, device=neighbor_agents_past.device) < prob) & valid
+
+    # Base probability per agent, looked up by its current class. Padding slots argmax to 0,
+    # which is harmless because `valid` masks them out below.
+    device = neighbor_agents_past.device
+    cls = neighbor_agents_past[:, :, -1, 8:12].argmax(dim=-1)  # [B, N]
+    p = torch.tensor(class_probs, dtype=torch.float32, device=device)[cls]  # [B, N]
+
+    if distance_scale_max != 1.0:
+        dist = neighbor_agents_past[:, :, -1, 0:2].norm(dim=-1)  # [B, N]
+        p = p * (1.0 + (distance_scale_max - 1.0) * (dist / distance_scale_range_m).clamp(0.0, 1.0))
+    if prob_cap < 1.0:
+        p = p.clamp(max=prob_cap)
+
+    # One draw of exactly this shape, unconditionally -- same call as the scalar-prob version
+    # made, so a fixed seed gives identical results when no override is passed.
+    rename = (torch.rand(valid.shape, device=device) < p) & valid
     if not rename.any():
         return neighbor_agents_past, rename, valid
     selected = neighbor_agents_past[rename]  # [K, T, D]
