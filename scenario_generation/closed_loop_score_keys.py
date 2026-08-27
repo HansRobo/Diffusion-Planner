@@ -6,6 +6,8 @@ from __future__ import annotations
 SCORE_EXTRACTORS = {
     "mean_route_completion": lambda d: d.get("mean_route_completion"),
     "n_segments_diverged": lambda d: d.get("n_segments_diverged"),
+    "pass_rate": lambda d: d.get("pass_rate"),
+    "fail_count": lambda d: d.get("fail_count"),
     "total_collision_events": lambda d: d.get("object", {}).get("collision_count"),
     "total_curb_hits": lambda d: d.get("road_border", {}).get("collision_count"),
     "total_snaps": lambda d: d.get("reproducer", {}).get("snap_count"),

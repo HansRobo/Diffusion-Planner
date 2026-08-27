@@ -91,7 +91,10 @@ def _abs_value(source_key: str, summary: dict):
     Looks up the raw key first so the cross-group aggregate row (which is a
     flat dict like ``{"total_curb_hits": 39, ...}``) is read correctly.
     Falls back to ``extract_score`` for raw per-group summaries whose
-    headline numbers live in nested categories like ``road_border``.
+    headline numbers live in nested categories like ``road_border``. A key the
+    summary simply doesn't carry -- ``pass_rate`` / ``fail_count`` on a run with no
+    pass condition -- resolves to None there and reads as 0, so an old
+    ``summary.json`` still logs instead of blowing up the upload.
     """
     # Float fields: direct lookup or extract_score fallback.
     if source_key in ("mean_route_completion", "pass_rate"):
