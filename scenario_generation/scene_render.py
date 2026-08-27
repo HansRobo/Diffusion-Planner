@@ -366,7 +366,13 @@ def render_scene_at_step(
         if is_neighbor and hide_neighbors:
             continue
         _attn_pct = attention.entity_attention.get(agent.id) if attention is not None else None
-        if is_neighbor and _attn_active("neighbors") and (_attn_pct is None or _attn_pct < attention_threshold):
+        # A placed obstacle occupies a neighbor token like any other agent -- only its
+        # drawing differs -- so it takes part in the attention overlay too. Without this it
+        # silently loses its "attn %" label the moment Simulate bakes it into the scene as
+        # a placed_* agent, even though the same obstacle shows one before Simulate (it is
+        # drawn from `obstacles` further down, which has always honoured attention).
+        _attn_shown = is_neighbor or is_placed
+        if _attn_shown and _attn_active("neighbors") and (_attn_pct is None or _attn_pct < attention_threshold):
             continue
         pos = agent.current_position
         heading = agent.current_heading
@@ -405,11 +411,14 @@ def render_scene_at_step(
         if is_placed:
             rear_ovh = agent.length / 2  # placed obstacle is a neighbor (centroid-referenced)
             t_rot = mtransforms.Affine2D().rotate(heading).translate(pos[0], pos[1]) + ax.transData
+            _placed_lw = 2.5
+            if _attn_active("neighbors") and _attn_pct is not None:
+                _placed_lw += 2.5 * attn_norm(_attn_pct)
             rect = Rectangle(
                 (-rear_ovh, -agent.width / 2),
                 agent.length,
                 agent.width,
-                lw=2.5,
+                lw=_placed_lw,
                 ec=color,
                 fc=color,
                 alpha=0.3,
@@ -464,7 +473,7 @@ def render_scene_at_step(
             textcoords="offset points",
             zorder=22,
         )
-        if is_neighbor and _attn_active("neighbors") and _attn_pct is not None:
+        if _attn_shown and _attn_active("neighbors") and _attn_pct is not None:
             ax.annotate(
                 f"attn {_attn_pct:.1f}%",
                 (pos[0], pos[1]),

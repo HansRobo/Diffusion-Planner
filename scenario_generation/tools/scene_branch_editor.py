@@ -526,7 +526,15 @@ def _build_attention_overlay(
     entity_attention: dict[str, float] = {}
     for local_index, pct in by_class.get("neighbors", {}).items():
         if local_index < n_obs:
-            entity_attention[sorted_obstacles[local_index].label] = pct
+            # Two keys for the same obstacle, because the renderer reaches it by two
+            # different names: before Simulate it is drawn from the `obstacles` list and
+            # looked up by bare `obs.label`; after Simulate it has been baked into the
+            # scene as an agent whose id is `placed_{label}` (see on_simulate) and is
+            # looked up by `agent.id`. Registering only the bare label meant the
+            # attention weight vanished as soon as you simulated.
+            label = sorted_obstacles[local_index].label
+            entity_attention[label] = pct
+            entity_attention[f"placed_{label}"] = pct
         else:
             entity_attention[f"neighbor_{local_index - n_obs}"] = pct
 
