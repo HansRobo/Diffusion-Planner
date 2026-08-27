@@ -39,8 +39,8 @@ matplotlib.use("Agg", force=True)
 
 
 NEIGHBOR_OFFSET = 1  # ego occupies token 0
-CLASS_NAMES = ("vehicle", "pedestrian", "bicycle")
-CLASS_MARKERS = {"vehicle": "o", "pedestrian": "P", "bicycle": "^"}
+CLASS_NAMES = ("vehicle", "pedestrian", "bicycle", "unknown")
+CLASS_MARKERS = {"vehicle": "o", "pedestrian": "P", "bicycle": "^", "unknown": "X"}
 
 
 def load_encoder(run_dir: Path, device: str):
@@ -54,8 +54,13 @@ def neighbor_valid(neighbors: torch.Tensor) -> torch.Tensor:
 
 
 def neighbor_classes(neighbors: torch.Tensor) -> torch.Tensor:
-    """Return 0/1/2 for vehicle/pedestrian/bicycle at the current step."""
-    return neighbors[:, :, -1, 8:11].argmax(dim=-1)
+    """Return 0/1/2/3 for vehicle/pedestrian/bicycle/unknown at the current step.
+
+    The slice must be 8:12, not 8:11. An Unknown agent is one-hot [0, 0, 0, 1], so a
+    3-wide slice sees [0, 0, 0] and argmax tie-breaks to 0 -- silently reporting every
+    Unknown agent as a vehicle.
+    """
+    return neighbors[:, :, -1, 8:12].argmax(dim=-1)
 
 
 def layer_indices(layer: str, layer_count: int) -> list[int]:
@@ -185,7 +190,7 @@ def token_records(sample, scores: np.ndarray, layer_scores: np.ndarray) -> list[
     records = []
     for slot in np.flatnonzero(valid):
         current = neighbors[slot, -1]
-        class_index = int(np.argmax(current[8:11]))
+        class_index = int(np.argmax(current[8:12]))
         score = float(scores[slot])
         records.append(
             {

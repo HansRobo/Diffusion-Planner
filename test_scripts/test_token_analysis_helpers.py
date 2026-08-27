@@ -24,7 +24,7 @@ def _load_script(name):
 
 def test_neighbor_distance_ignores_history_discarded_by_encoder():
     token_importance = _load_script("token_importance")
-    nbr = torch.zeros(1, 2, 10, 11)
+    nbr = torch.zeros(1, 2, 10, 12)
     nbr[0, 0, 0, 0] = 3.0  # outside NeighborEncoder's retained window
     nbr[0, 1, -1, :2] = torch.tensor([3.0, 4.0])
 
@@ -110,7 +110,7 @@ def test_attention_payload_merge_preserves_rank_local_alignment():
 def test_all_token_visualization_layout_and_non_spatial_records():
     visualization = _load_script("visualize_all_token_attention")
     sample = {
-        "neighbor_agents_past": np.zeros((320, 31, 11), dtype=np.float32),
+        "neighbor_agents_past": np.zeros((320, 31, 12), dtype=np.float32),
         "static_objects": np.zeros((5, 10), dtype=np.float32),
         "lanes": np.zeros((140, 20, 33), dtype=np.float32),
         "route_lanes": np.zeros((25, 20, 33), dtype=np.float32),

@@ -42,6 +42,11 @@ class EGOSTATE:
     STEERING = 8;
     YAW_RATE = 9;
 
+# NOTE: AX/AY below are mislabeled -- the layout actually written by
+# tensor_converter._build_neighbor_agents_past is
+# [x, y, cos, sin, vx, vy, width, length, type(4)], so cols 6/7 are width/length,
+# not acceleration. Left as-is here because the class is currently unused; fix it
+# together with the first real consumer.
 class NEIGHBORSTATE:
     X = 0;
     Y = 1;
@@ -54,6 +59,7 @@ class NEIGHBORSTATE:
     VEHICLE_FLAG = 8;
     PEDESTRIAN_FLAG = 9;
     CYCLIST_FLAG = 10;
+    UNKNOWN_FLAG = 11;
 
 
 LINE_TYPE_NUM = 10

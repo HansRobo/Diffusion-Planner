@@ -41,7 +41,7 @@ for i, f in enumerate(files):
     with np.load(f) as d:
         for k, (name, slots) in keys.items():
             x = d[k]
-            if k == "neighbor_agents_past":  # (320, T, 11)
+            if k == "neighbor_agents_past":  # (320, T, 11 legacy or 12)
                 # NeighborEncoder zeros all earlier history before masking.
                 valid = (x[:, -6:, :8] != 0).any(axis=(1, 2))
             elif k in ("lanes", "route_lanes"):  # (P, 20, D)

@@ -140,8 +140,10 @@ def representative_position(sample: dict, class_name: str, local_index: int):
 
 def neighbor_subclass(sample: dict, local_index: int) -> str:
     point = np.asarray(sample["neighbor_agents_past"])[local_index, -1]
-    names = ("vehicle", "pedestrian", "bicycle")
-    return names[int(np.argmax(point[8:11]))]
+    # 8:12, not 8:11 -- Unknown is one-hot [0, 0, 0, 1], and a 3-wide slice would
+    # argmax-tie-break it to "vehicle".
+    names = ("vehicle", "pedestrian", "bicycle", "unknown")
+    return names[int(np.argmax(point[8:12]))]
 
 
 def token_records(sample: dict, scores: np.ndarray, valid: np.ndarray) -> list[dict]:
