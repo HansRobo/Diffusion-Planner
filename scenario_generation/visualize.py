@@ -60,8 +60,18 @@ def _agent_color(agent_type: AgentType, idx: int) -> str:
 
 
 def draw_lanes(ax, map_data, alpha=0.5):
-    """Draw lane centerlines and boundaries."""
+    """Draw lane centerlines and boundaries.
+
+    Batches all rows into 3 LineCollections (centerline / left boundary /
+    right boundary) instead of up to 3 * n_lanes individual ax.plot() calls --
+    each Line2D artist has real overhead (in add_line bookkeeping and later in
+    tight_layout's bbox walk), which matters a lot at ~100+ lanes per scene.
+    """
+    from matplotlib.collections import LineCollection
+
     lanes = map_data.lanes
+    has_boundaries = lanes.shape[-1] > 7
+    centerline_segs, left_segs, right_segs = [], [], []
     for i in range(lanes.shape[0]):
         lane = lanes[i]
         if np.abs(lane[:, :2]).sum() < 1e-6:
@@ -70,63 +80,66 @@ def draw_lanes(ax, map_data, alpha=0.5):
         valid = np.abs(pts).sum(axis=1) > 0.1
         if valid.sum() < 2:
             continue
-        # Centerline
-        ax.plot(pts[valid, 0], pts[valid, 1], "-", color=_LANE_COLOR, alpha=alpha * 0.8, lw=0.8)
-        # Boundaries (offsets from centerline)
-        if lane.shape[1] > 7:
-            lb = lane[:, 4:6]
-            rb = lane[:, 6:8]
-            ax.plot(
-                (pts + lb)[valid, 0],
-                (pts + lb)[valid, 1],
-                "-",
-                color=_LANE_COLOR,
-                alpha=alpha,
-                lw=1.0,
-            )
-            ax.plot(
-                (pts + rb)[valid, 0],
-                (pts + rb)[valid, 1],
-                "-",
-                color=_LANE_COLOR,
-                alpha=alpha,
-                lw=1.0,
-            )
+        centerline_segs.append(pts[valid])
+        if has_boundaries:
+            left_segs.append((pts + lane[:, 4:6])[valid])
+            right_segs.append((pts + lane[:, 6:8])[valid])
+    if centerline_segs:
+        ax.add_collection(
+            LineCollection(centerline_segs, colors=_LANE_COLOR, alpha=alpha * 0.8, linewidths=0.8, zorder=2)
+        )
+    if left_segs:
+        ax.add_collection(LineCollection(left_segs, colors=_LANE_COLOR, alpha=alpha, linewidths=1.0, zorder=2))
+    if right_segs:
+        ax.add_collection(LineCollection(right_segs, colors=_LANE_COLOR, alpha=alpha, linewidths=1.0, zorder=2))
 
 
 def draw_road_borders(ax, map_data):
     """Draw road borders in red (line_strings with border flag in channel 3)."""
+    from matplotlib.collections import LineCollection
+
     ls = map_data.line_strings
     if ls.shape[-1] < 4:
         return
+    segs = []
     for i in range(ls.shape[0]):
         line = ls[i]
         if np.abs(line[:, :2]).sum() < 1e-6:
             continue
         valid = (line[:, 3] > 0.5) & (np.abs(line[:, :2]).sum(axis=1) > 0.01)
         if valid.sum() > 1:
-            ax.plot(line[valid, 0], line[valid, 1], color="red", lw=2.5, alpha=0.7, zorder=4)
+            segs.append(line[valid, :2])
+    if segs:
+        ax.add_collection(LineCollection(segs, colors="red", linewidths=2.5, alpha=0.7, zorder=4))
 
 
 def draw_stop_lines(ax, map_data):
     """Draw stop lines in yellow (line_strings with stop flag in channel 2)."""
+    from matplotlib.collections import LineCollection
+
     ls = map_data.line_strings
     if ls.shape[-1] < 3:
         return
+    segs = []
     for i in range(ls.shape[0]):
         line = ls[i]
         if np.abs(line[:, :2]).sum() < 1e-6:
             continue
         valid = (line[:, 2] > 0.5) & (np.abs(line[:, :2]).sum(axis=1) > 0.01)
         if valid.sum() > 1:
-            ax.plot(line[valid, 0], line[valid, 1], color="#ddaa00", lw=2.0, alpha=0.8, zorder=4)
+            segs.append(line[valid, :2])
+    if segs:
+        ax.add_collection(LineCollection(segs, colors="#ddaa00", linewidths=2.0, alpha=0.8, zorder=4))
 
 
 def draw_route(ax, route_lanes, color=None, alpha=0.4, lw=1.5):
     """Draw route lane centerlines."""
+    from matplotlib.collections import LineCollection
+
     if route_lanes is None:
         return
     c = color or _ROUTE_COLOR
+    segs = []
     for i in range(route_lanes.shape[0]):
         lane = route_lanes[i]
         if np.abs(lane[:, :2]).sum() < 1e-6:
@@ -135,7 +148,9 @@ def draw_route(ax, route_lanes, color=None, alpha=0.4, lw=1.5):
         valid = np.abs(pts).sum(axis=1) > 0.1
         if valid.sum() < 2:
             continue
-        ax.plot(pts[valid, 0], pts[valid, 1], "-", color=c, alpha=alpha, lw=lw)
+        segs.append(pts[valid])
+    if segs:
+        ax.add_collection(LineCollection(segs, colors=c, alpha=alpha, linewidths=lw, zorder=2))
 
 
 def draw_agent_box(

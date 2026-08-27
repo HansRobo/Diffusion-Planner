@@ -480,6 +480,31 @@ def main() -> None:
                 replan_interval=1,
                 draw_every=1,
                 draw_pool=draw_pool,
+                # Match the run_segments_batched mining pass above so the render reflects
+                # the same rollout that produced the hit.
+                warmup_steps=args.warmup_steps,
+                unstick_after=args.unstick_after,
+                unstick_advance_m=args.unstick_advance_m,
+                neighbor_history_mode="sim",
+                # No CLI flag for these; mirror render_segment's/run_segments_batched's
+                # former defaults.
+                unstick_radius_mult=3.0,
+                unstick_teleport_after=300,
+                tracker_mode="mpc_batched",
+                yaw_gate=True,
+                strong_brake_mps2=-2.5,
+                abort_deviation_m=0.0,
+                abort_after=30,
+                abort_max_snaps=0,
+                drop_objects=False,
+                goal_mode="segment",
+                max_stuck_steps=0,
+                goal_reach_m=5.0,
+                interpolate=True,
+                color_by_uuid=True,
+                window=None,
+                max_steps=None,
+                timeline_progress_mode="pose",
             )
             if args.render_webm:
                 webm = od / "hit_segment.webm"

@@ -43,7 +43,9 @@ def _neighbor_future_world(neighbor_future_raw: torch.Tensor):
     return neighbors_future, mask
 
 
-def _sft_step(raw_inputs, model, optimizer, args, ema, aug, is_last_step: bool = False, epoch: int = 0):
+def _sft_step(
+    raw_inputs, model, optimizer, args, ema, aug, is_last_step: bool = False, epoch: int = 0
+):
     """A standard supervised training step on the real GT (mirrors ``train_epoch``).
 
     ``aug`` is a ``StatePerturbation`` (or ``None``); when given it perturbs the ego
@@ -207,7 +209,13 @@ def _grpo_step(
     }
 
 
-def train_grpo_epoch(data_loader, model, optimizer, args, ema, collider_injector, aug, epoch: int = 0):
+def train_grpo_epoch(
+    data_loader, model, optimizer, args, ema, collider_injector, aug, epoch: int = 0
+):
+    if len(data_loader) == 0:
+        empty = {"loss": 0.0, "reward_mean": 0.0, "reward_max": 0.0}
+        return empty, 0.0
+
     epoch_loss = []
     num_steps = len(data_loader)
 

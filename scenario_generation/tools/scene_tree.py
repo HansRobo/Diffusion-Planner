@@ -30,6 +30,7 @@ class ObstaclePlacement:
     speed: float = 0.0
     route_lanelet_ids: list[int] | None = None
     goal_pose: tuple[float, float, float] | None = None
+    agent_type: str = "vehicle"  # "vehicle" | "pedestrian" | "bicycle"
 
     @property
     def yaw_rad(self) -> float:
@@ -50,6 +51,7 @@ class ObstaclePlacement:
             speed=self.speed,
             route_lanelet_ids=self.route_lanelet_ids,
             goal_pose=self.goal_pose,
+            agent_type=self.agent_type,
         )
 
 

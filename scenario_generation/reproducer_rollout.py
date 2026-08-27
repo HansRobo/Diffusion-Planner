@@ -534,17 +534,17 @@ def _seed_state(
     goal_reach_m,
     max_stuck_steps,
     timers,
-    max_steps=None,
-    unstick_after=0,
-    unstick_advance_m=5.0,
-    unstick_radius_mult=3.0,
-    unstick_teleport_after=300,
-    neighbor_history_mode="recorded",
-    goal_mode="segment",
-    replay_mode="pose",
-    tracker_mode="mpc_batched",
-    strong_brake_mps2=-2.5,
-    yaw_gate: bool = True,
+    max_steps,
+    unstick_after,
+    unstick_advance_m,
+    unstick_radius_mult,
+    unstick_teleport_after,
+    neighbor_history_mode,
+    goal_mode,
+    replay_mode,
+    tracker_mode,
+    strong_brake_mps2,
+    yaw_gate: bool,
 ) -> _SegState:
     from scenario_generation.mpc_tracker import MPCTracker, PerfectTracker
 
@@ -856,6 +856,7 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.in_episode = False
                 s.prev_max_idx = cur.max_idx_reached
                 s.ego_stuck = 0
+                s.stuck = 0
                 s.snap_count += 1
 
 
@@ -921,19 +922,53 @@ def _clearance_stats(values: np.ndarray) -> dict:
     return out
 
 
+def road_border_collision_mask(rb_dists: np.ndarray) -> np.ndarray:
+    """Contact mask for the road-border family: a finite distance under the contact threshold.
+
+    Objects report contact from OBB overlap; road borders have no such test, so contact is
+    read off the distance series itself.
+    """
+    return np.isfinite(rb_dists) & (rb_dists < RB_COLLISION_THRESH_M)
+
+
+def clearance_family_block(
+    values: np.ndarray, collisions: np.ndarray, *, miss_thresh: float
+) -> dict:
+    """One ``object`` / ``road_border`` segment-row block from a clearance series.
+
+    Every producer of these blocks must go through here: ``closed_loop_eval._event_family_block``
+    rolls the ``collision_*`` / ``miss_*`` keys up positionally, so a layout that differs
+    between producers still aggregates -- silently, with the wrong numbers.
+    """
+    miss = np.isfinite(values) & (values <= miss_thresh)
+    return {
+        "miss_thresh_m": float(miss_thresh),
+        "collision_steps": int(collisions.sum()),
+        "collision_count": _event_count(collisions),
+        "miss_steps": int(miss.sum()),
+        "miss_count": _event_count(miss),
+        **_clearance_stats(values),
+    }
+
+
+def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
+    """The ``strong_brake`` segment-row block from a realized-acceleration series."""
+    mask = strong_brake_mask(accels, thresh_mps2=float(thresh_mps2))
+    return {
+        "thresh_mps2": float(thresh_mps2),
+        # Strongest over-threshold accel after the 2-frame consecutive mask
+        # (single-frame tracker/replan spikes are excluded).
+        "strongest_mps2": float(accels[mask].min()) if mask.any() else float("inf"),
+        "steps": int(mask.sum()),
+        "count": _event_count(mask),
+    }
+
+
 def _finalize(s: _SegState) -> dict:
     cl = s.clearances[: s.k]
-    finite = np.isfinite(cl)
     rb = s.rb_dists[: s.k]
     accels = s.accels[: s.k] if s.accels is not None else np.zeros(0, dtype=np.float32)
-    # Per-step state booleans -> both a step count and a rising-edge event count.
-    obj_coll = s.collisions[: s.k]
-    obj_miss = finite & (cl <= s.near_miss_thresh)
-    rb_finite = np.isfinite(rb)
-    rb_coll = rb_finite & (rb < RB_COLLISION_THRESH_M)
-    rb_miss = rb_finite & (rb <= s.near_miss_thresh)
     red_mask = s.red_light[: s.k]
-    brake_mask = strong_brake_mask(accels, thresh_mps2=float(s.strong_brake_mps2))
 
     # Graded (non-saturating) headline metrics: improve smoothly as the model trains, unlike the
     # binary *_count event tallies below — the "getting better" signal those alone can't show.
@@ -954,36 +989,15 @@ def _finalize(s: _SegState) -> dict:
         if s.gt_dev_count
         else float("inf"),
         "progress_m": progress_m,
-        "object": {
-            "miss_thresh_m": float(s.near_miss_thresh),
-            "collision_steps": int(obj_coll.sum()),
-            "collision_count": _event_count(obj_coll),
-            "miss_steps": int(obj_miss.sum()),
-            "miss_count": _event_count(obj_miss),
-            **_clearance_stats(cl),
-        },
-        "road_border": {
-            "miss_thresh_m": float(s.near_miss_thresh),
-            "collision_steps": int(rb_coll.sum()),
-            "collision_count": _event_count(rb_coll),
-            "miss_steps": int(rb_miss.sum()),
-            "miss_count": _event_count(rb_miss),
-            **_clearance_stats(rb),
-        },
+        "object": clearance_family_block(cl, s.collisions[: s.k], miss_thresh=s.near_miss_thresh),
+        "road_border": clearance_family_block(
+            rb, road_border_collision_mask(rb), miss_thresh=s.near_miss_thresh
+        ),
         "red_light_violation": {
             "steps": int(red_mask.sum()),
             "count": _event_count(red_mask),
         },
-        "strong_brake": {
-            "thresh_mps2": float(s.strong_brake_mps2),
-            # Strongest over-threshold accel after the 2-frame consecutive mask
-            # (single-frame tracker/replan spikes are excluded).
-            "strongest_mps2": (
-                float(accels[brake_mask].min()) if brake_mask.any() else float("inf")
-            ),
-            "steps": int(brake_mask.sum()),
-            "count": _event_count(brake_mask),
-        },
+        "strong_brake": strong_brake_block(accels, s.strong_brake_mps2),
         "reproducer": {
             "expand_count": int(s.expand_count),
             "snap_count": int(s.snap_count),
@@ -1414,37 +1428,36 @@ def render_segment(
     start: int,
     end: int,
     out_dir,
-    device: str = "cuda",
-    near_miss_thresh: float = 0.5,
-    search_radius: float = 1.5,
-    warmup_steps: int = 0,
-    window: tuple[int, int] | None = None,
-    max_steps: int | None = None,
-    goal_reach_m: float = 5.0,
-    max_stuck_steps: int = 0,
-    color_by_uuid: bool = True,
-    unstick_after: int = 300,
-    unstick_advance_m: float = 5.0,
-    unstick_radius_mult: float = 3.0,
-    unstick_teleport_after: int = 300,
-    interpolate: bool = True,
-    neighbor_history_mode: str = "sim",
-    timeline_progress_mode: str = "pose",
-    tracker_mode: str = "mpc_batched",
-    goal_mode: str = "segment",
-    title_prefix: str | None = None,
-    distance_label_offset_m: float = 1.2,
-    view_half_m: float = 50.0,
-    strong_brake_mps2: float = -2.5,
-    yaw_gate: bool = True,
-    *,
-    replan_interval: int = 1,
-    draw_every: int | None = 1,
-    abort_deviation_m: float = 0.0,
-    abort_after: int = 30,
-    abort_max_snaps: int = 0,
-    drop_objects: bool = False,
-    draw_pool: Executor | None = None,
+    device: str,
+    near_miss_thresh: float,
+    search_radius: float,
+    warmup_steps: int,
+    unstick_after: int,
+    unstick_advance_m: float,
+    unstick_radius_mult: float,
+    unstick_teleport_after: int,
+    draw_every: int | None,
+    replan_interval: int,
+    tracker_mode: str,
+    neighbor_history_mode: str,
+    yaw_gate: bool,
+    strong_brake_mps2: float,
+    abort_deviation_m: float,
+    abort_after: int,
+    abort_max_snaps: int,
+    drop_objects: bool,
+    goal_mode: str,
+    title_prefix: str | None,
+    distance_label_offset_m: float,
+    view_half_m: float,
+    max_stuck_steps: int,
+    goal_reach_m: float,
+    interpolate: bool,
+    color_by_uuid: bool,
+    window: tuple[int, int] | None,
+    max_steps: int | None,
+    timeline_progress_mode: str,
+    draw_pool: Executor | None,
 ) -> dict:
     """Re-run one segment with per-step PNG rendering (live-ego frame).
 
@@ -1525,15 +1538,15 @@ def render_segment(
     cap = max_steps if max_steps is not None else 3 * (end - start)
     timers = Timers()
     s = _seed_state(
-        tl,
-        start,
-        end,
-        search_radius,
-        warmup_steps,
-        near_miss_thresh,
-        goal_reach_m,
-        max_stuck_steps,
-        timers,
+        tl=tl,
+        start=start,
+        end=end,
+        search_radius=search_radius,
+        warmup_steps=warmup_steps,
+        near_miss_thresh=near_miss_thresh,
+        goal_reach_m=goal_reach_m,
+        max_stuck_steps=max_stuck_steps,
+        timers=timers,
         max_steps=cap,
         unstick_after=unstick_after,
         unstick_advance_m=unstick_advance_m,
@@ -1826,6 +1839,7 @@ def run_segments_batched(
     danger_credit_windows: dict[str, dict[str, int | float]] | None = None,
     danger_decluster_steps: int = 10,
     danger_manifest_callback=None,
+    goal_mode: str = "segment",
 ) -> list[dict]:
     """Run many segments in lock-step: ONE batched model forward per tick.
 
@@ -1897,6 +1911,7 @@ def run_segments_batched(
                     replay_mode=timeline_progress_mode,
                     strong_brake_mps2=strong_brake_mps2,
                     yaw_gate=yaw_gate,
+                    goal_mode=goal_mode
                 )
                 for (tl, start, end) in chunk
             ]

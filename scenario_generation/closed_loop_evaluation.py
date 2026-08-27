@@ -41,39 +41,50 @@ from scenario_generation.route_timeline import RouteTimeline
 class RolloutParams:
     """Rollout knobs for full-route segment evaluation."""
 
-    device: str = "cuda"
-    near_miss_thresh: float = 0.5
-    search_radius: float = 1.5
-    warmup_steps: int = 0
-    unstick_after: int = 300
-    unstick_advance_m: float = 2.5
-    unstick_radius_mult: float = 10.0
-    unstick_teleport_after: int = 300
+    device: str
+    near_miss_thresh: float
+    search_radius: float
+    warmup_steps: int
+    unstick_after: int
+    unstick_advance_m: float
+    unstick_radius_mult: float
+    unstick_teleport_after: int
     # write a PNG only every N steps; None skips the per-step render entirely (no PNGs, no
     # video, no colormap images -- see build_full_closed_loop_wandb_log's matching
     # render_media) while metrics/wandb scalars are unaffected -- lets a caller (e.g.
     # train.py, most epochs) skip the dominant per-epoch cost and only pay it on the one call
     # that actually needs media (e.g. the final epoch).
-    draw_every: int | None = 8
+    draw_every: int | None
     # Not a render_kwarg: the runner opens the pool and passes it down.
-    draw_workers: int = 1
-    replan_interval: int = 10
-    tracker_mode: str = "mpc"
-    neighbor_history_mode: str = "recorded"
-    yaw_gate: bool = True
-    strong_brake_mps2: float = -2.5
+    draw_workers: int
+    replan_interval: int
+    tracker_mode: str
+    neighbor_history_mode: str
+    yaw_gate: bool
+    strong_brake_mps2: float
     # Early-abort a badly-diverged segment instead of burning the full step budget on a
     # rollout that will never recover (e.g. an undertrained model driving off-lane). Set well
     # above the unstick_* knobs above: unstick snaps the ego back onto GT to let a merely-stuck
     # rollout continue; abort gives up on a rollout unstick can't save. 0 = disabled for either
     # knob. See ``reproducer_rollout.render_segment`` for the exact trigger condition.
-    abort_deviation_m: float = 50.0
-    abort_after: int = 30
-    abort_max_snaps: int = 0
+    abort_deviation_m: float
+    abort_after: int
+    abort_max_snaps: int
     # Empty-world ablation: zero neighbor_agents_past + static_objects each step (map kept) —
     # separates "reacts badly to traffic" from "can't follow the route/map". collision/near-miss
     # are 0 by construction when this is set.
-    drop_objects: bool = False
+    drop_objects: bool
+    goal_mode: str
+    title_prefix: str | None
+    distance_label_offset_m: float
+    view_half_m: float
+    max_stuck_steps: int
+    goal_reach_m: float
+    interpolate: bool
+    color_by_uuid: bool
+    window: tuple[int, int] | None
+    max_steps: int | None
+    timeline_progress_mode: str
 
     def render_kwargs(self) -> dict[str, Any]:
         return {
@@ -86,6 +97,7 @@ class RolloutParams:
             "unstick_radius_mult": self.unstick_radius_mult,
             "unstick_teleport_after": self.unstick_teleport_after,
             "draw_every": self.draw_every,
+            # Not need draw_workers here: the runner opens the pool and passes it down.
             "replan_interval": self.replan_interval,
             "tracker_mode": self.tracker_mode,
             "neighbor_history_mode": self.neighbor_history_mode,
@@ -95,6 +107,17 @@ class RolloutParams:
             "abort_after": self.abort_after,
             "abort_max_snaps": self.abort_max_snaps,
             "drop_objects": self.drop_objects,
+            "goal_mode": self.goal_mode,
+            "title_prefix": self.title_prefix,
+            "distance_label_offset_m": self.distance_label_offset_m,
+            "view_half_m": self.view_half_m,
+            "max_stuck_steps": self.max_stuck_steps,
+            "goal_reach_m": self.goal_reach_m,
+            "interpolate": self.interpolate,
+            "color_by_uuid": self.color_by_uuid,
+            "window": self.window,
+            "max_steps": self.max_steps,
+            "timeline_progress_mode": self.timeline_progress_mode,
         }
 
 
@@ -104,10 +127,10 @@ class ClosedLoopEvalConfig:
 
     out_dir: Path
     params: RolloutParams
-    fps: float = 10.0
-    verbose: bool = True
-    profile: bool = False
-    max_jobs: int | None = None
+    fps: float
+    verbose: bool
+    profile: bool
+    max_jobs: int | None
 
 
 @dataclass
@@ -341,7 +364,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
 
     ``npz_root`` accepts anything ``closed_loop_eval.resolve_npz_roots`` does: a single
     directory tree, a ``.json`` path-list file, or an already-resolved list of root paths
-    (e.g. one site's several curated date/time entries from a JSON-manifest-based site
+    (e.g. one group's several curated date/time entries from a JSON-manifest-based group
     discovery) -- ``discover_jobs`` merges routes across all of them.
     """
 
@@ -354,9 +377,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         config: ClosedLoopEvalConfig,
         npz_root: Path | str | list[Path | str],
         *,
-        seg_len: int = 100_000,
-        ddp_rank: int = 0,
-        ddp_world_size: int = 1,
+        seg_len: int,
+        ddp_rank: int,
+        ddp_world_size: int,
     ) -> None:
         super().__init__(
             model,
@@ -375,9 +398,9 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         npz_root: Path | str | list[Path | str],
         config: ClosedLoopEvalConfig,
         *,
-        seg_len: int = 100_000,
-        ddp_rank: int = 0,
-        ddp_world_size: int = 1,
+        seg_len: int,
+        ddp_rank: int,
+        ddp_world_size: int,
     ) -> FullRouteClosedLoopEvaluation:
         model, model_args = cls.load_model_pair(model_path, config.params.device)
         return cls(
