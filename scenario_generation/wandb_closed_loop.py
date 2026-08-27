@@ -40,6 +40,8 @@ _ABS_COLUMNS = [
     ("Segments", "n_segments"),
     ("Steps", "total_steps"),
     ("Route completion (%)", "mean_route_completion"),
+    ("Pass rate (%)", "pass_rate"),
+    ("Fails", "fail_count"),
     ("Curb hits", "total_curb_hits"),
     ("Snaps", "total_snaps"),
     ("Red light", "total_red_light_violations"),
@@ -53,6 +55,7 @@ _PER_1000STEPS_COLUMNS = [
     ("Segments", "n_segments"),
     ("Steps", "total_steps"),
     ("Route completion (%)", "mean_route_completion"),
+    ("Pass rate (%)", "pass_rate"),
     ("Curb hits / 1k steps", "total_curb_hits"),
     ("Snaps / 1k steps", "total_snaps"),
     ("Red light / 1k steps", "total_red_light_violations"),
@@ -73,18 +76,34 @@ def _add_run_column(table: wandb.Table, run_name: str) -> wandb.Table:
     return wandb.Table(columns=["Run", *table.columns], data=new_data)
 
 
+def _segment_weighted_mean(values: list[dict], key: str) -> float:
+    """Segment-weighted mean of ``key`` across groups, e.g. mean_route_completion or pass_rate."""
+    n_segments = sum(int(s.get("n_segments", 0) or 0) for s in values)
+    if n_segments == 0:
+        return 0.0
+    total = sum(float(s.get(key, 0.0) or 0.0) * int(s.get("n_segments", 0) or 0) for s in values)
+    return total / n_segments
+
+
 def _abs_value(source_key: str, summary: dict):
     """Numeric value for an abs column.
 
     Looks up the raw key first so the cross-group aggregate row (which is a
     flat dict like ``{"total_curb_hits": 39, ...}``) is read correctly.
     Falls back to ``extract_score`` for raw per-group summaries whose
-    headline numbers live in nested categories like ``road_border``.
+    headline numbers live in nested categories like ``road_border``. A key the
+    summary simply doesn't carry -- ``pass_rate`` / ``fail_count`` on a run with no
+    pass condition -- resolves to None there and reads as 0, so an old
+    ``summary.json`` still logs instead of blowing up the upload.
     """
-    if source_key == "mean_route_completion":
-        if "mean_route_completion" in summary:
-            return float(summary["mean_route_completion"] or 0.0)
+    # Float fields: direct lookup or extract_score fallback.
+    if source_key in ("mean_route_completion", "pass_rate"):
+        if source_key in summary:
+            val = summary[source_key]
+            return float(val if isinstance(val, (int, float)) else 0.0)
         return float(extract_score(summary, source_key) or 0.0)
+
+    # Int fields.
     if source_key in ("n_segments", "total_steps"):
         return int(summary.get(source_key, 0) or 0)
     if source_key in summary:
@@ -94,7 +113,8 @@ def _abs_value(source_key: str, summary: dict):
 
 def _per_1000steps_value(source_key: str, summary: dict) -> float:
     """Counts normalized per 1000 steps (or per 1000 segments for ``n_segments_diverged``)."""
-    if source_key in ("n_segments", "total_steps", "mean_route_completion"):
+    # Pass-through fields that are already a fraction or count, not a rate.
+    if source_key in ("n_segments", "total_steps", "mean_route_completion", "pass_rate"):
         return _abs_value(source_key, summary)
     denom_key = "n_segments" if source_key == "n_segments_diverged" else "total_steps"
     denom = int(summary.get(denom_key, 0) or 0)
@@ -110,8 +130,8 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
     """Cross-group aggregate, same shape as a per-group summary dict.
 
     ``__noobj`` groups are excluded from collision sums (they're 0 by
-    construction in the no-object ablation). ``route_completion`` is a
-    segment-weighted mean, not a plain average.
+    construction in the no-object ablation). ``route_completion`` and
+    ``pass_rate`` are segment-weighted means, not plain averages.
     """
     if not group_summaries:
         return {}
@@ -120,16 +140,14 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
     objects_only_values = [s for k, s in group_summaries.items() if "__noobj/" not in k]
 
     n_segments = sum(int(s.get("n_segments", 0) or 0) for s in values)
-    route_num = sum(
-        float(s.get("mean_route_completion", 0.0) or 0.0) * int(s.get("n_segments", 0) or 0)
-        for s in values
-    )
 
-    agg = {
+    agg: dict = {
         "n_groups": len(values),
         "n_segments": n_segments,
         "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in values),
-        "mean_route_completion": (route_num / n_segments) if n_segments else 0.0,
+        "mean_route_completion": _segment_weighted_mean(values, "mean_route_completion"),
+        "pass_rate": _segment_weighted_mean(values, "pass_rate"),
+        "fail_count": sum(int(s.get("fail_count", 0) or 0) for s in values),
     }
     for k in (
         "total_curb_hits",

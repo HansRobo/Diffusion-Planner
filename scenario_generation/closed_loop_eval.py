@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
+from diffusion_planner.config.closed_loop_config import ClosedLoopPassCondition
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, is_tdigest_key, merged_percentile
 from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool
@@ -31,6 +32,33 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Clearance t-digests live in a sidecar ``tdigests.jsonl`` / ``tdigests_{rank}.jsonl``
 # (not in the human-readable ``segments*.jsonl``) so multi-GPU merge can still pool p5.
+
+
+def evaluate_segment_pass(row: dict, condition: "ClosedLoopPassCondition") -> bool:
+    """Return True iff ``row`` satisfies every *enabled* field of ``condition``.
+
+    A segment passes when each enabled check is zero (counts) or true (boolean). Disabled
+    fields are ignored, so a ``condition`` with everything off accepts every row.
+    """
+    obj = row.get("object", {})
+    rb = row.get("road_border", {})
+    rl = row.get("red_light_violation", {})
+    br = row.get("strong_brake", {})
+    repro = row.get("reproducer", {})
+
+    if condition.collision and int(obj.get("collision_count", 0)) > 0:
+        return False
+    if condition.road_border and int(rb.get("collision_count", 0)) > 0:
+        return False
+    if condition.red_light_violation and int(rl.get("count", 0)) > 0:
+        return False
+    if condition.strong_brake and int(br.get("count", 0)) > 0:
+        return False
+    if condition.snap and int(repro.get("snap_count", 0)) > 0:
+        return False
+    if condition.goal_reach and row.get("terminated") != "goal":
+        return False
+    return True
 
 
 def route_label(npz_path: Path, key: str) -> str:
@@ -310,9 +338,19 @@ def format_summary_lines(summary: dict) -> list[str]:
 
 
 def aggregate(
-    rows: list[dict], near_miss_thresh: float, *, strong_brake_mps2: float = -2.5
+    rows: list[dict],
+    near_miss_thresh: float,
+    *,
+    strong_brake_mps2: float = -2.5,
+    pass_condition: "ClosedLoopPassCondition | None" = None,
 ) -> dict:
-    """Aggregate per-segment nested metric rows into a closed-loop summary."""
+    """Aggregate per-segment nested metric rows into a closed-loop summary.
+
+    When ``pass_condition`` is provided, also computes per-segment ``passed`` flags (attached
+    to ``rows`` in place if missing) and reports ``pass_count``, ``fail_count``, ``pass_rate``,
+    and the serialized ``pass_condition`` block in the returned summary.
+    """
+
     n_seg = len(rows)
     total_steps = sum(int(r["n_steps_run"]) for r in rows)
 
@@ -379,7 +417,7 @@ def aggregate(
     repeat = sum(int(_require_block(r, "reproducer")["repeat_steps"]) for r in rows)
 
     n_seg_diverged = term_counts.get("diverged", 0)
-    return {
+    summary = {
         "n_segments": n_seg,
         "total_steps": total_steps,
         "mean_route_completion": float(np.mean(completions)) if completions else 0.0,
@@ -399,6 +437,22 @@ def aggregate(
             "repeat_step_rate": repeat / total_steps if total_steps else 0.0,
         },
     }
+
+    # Per-segment pass/fail. Attach ``passed`` to each row (in place) so the value survives
+    # segment_row_for_json / segments.jsonl and downstream consumers can read it without
+    # re-running the evaluator. Stats go in the summary alongside other roll-ups.
+    if pass_condition is not None:
+        passed_flags = [evaluate_segment_pass(r, pass_condition) for r in rows]
+        for row, ok in zip(rows, passed_flags):
+            row.setdefault("passed", ok)
+        pass_count = sum(passed_flags)
+        fail_count = n_seg - pass_count
+        summary["pass_count"] = pass_count
+        summary["fail_count"] = fail_count
+        summary["pass_rate"] = (pass_count / n_seg) if n_seg else 0.0
+        summary["pass_condition"] = pass_condition.to_dict()
+
+    return summary
 
 
 def build_mp4(png_dir: Path, mp4_path: Path, fps: float, remove_pngs: bool = True) -> None:

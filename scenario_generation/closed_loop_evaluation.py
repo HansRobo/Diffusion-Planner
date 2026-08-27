@@ -22,6 +22,7 @@ from typing import Any
 
 from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.closed_loop_eval import (
+    evaluate_segment_pass,
     aggregate,
     build_mp4,
     enumerate_multi_root_routes,
@@ -131,6 +132,15 @@ class ClosedLoopEvalConfig:
     verbose: bool
     profile: bool
     max_jobs: int | None
+    # Pass-condition for per-segment pass/fail + aggregated pass stats in the summary.
+    # ``None`` disables pass evaluation entirely — the segment row never gains a ``passed``
+    # field and the summary never carries ``pass_count`` / ``pass_rate`` / ``pass_condition``.
+    # Callers that don't care (e.g. scenario_sim viewer export, training validation without
+    # a pass YAML) leave it at the default and see no change in summary shape. The CLI
+    # pipeline (``run_all_groups_closed_loop``) always sets it from ``cfg.pass_conditions``
+    # (which itself falls back to an all-True default), so its summaries always include
+    # pass stats.
+    pass_condition: "ClosedLoopPassCondition | None" = None
 
 
 @dataclass
@@ -482,6 +492,8 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 draw_pool=draw_pool,
             )
             row = {"route": job.route_key, **metrics}
+            if self.config.pass_condition is not None:
+                row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
             if segments_file is not None:
                 # Human-readable segments.jsonl never carries the raw _tdigest blobs; those go to
                 # the sidecar so a later DDP merge (or a re-load of this run) can still pool an
@@ -533,6 +545,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             result.rows,
             self.config.params.near_miss_thresh,
             strong_brake_mps2=self.config.params.strong_brake_mps2,
+            pass_condition=self.config.pass_condition,
         )
         summary["npz_root"] = str(self.npz_root)
         # Derived straight from the merged rows (each carries its own "route") rather than

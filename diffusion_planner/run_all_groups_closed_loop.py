@@ -16,7 +16,10 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
+from diffusion_planner.config.closed_loop_config import (
+    ClosedLoopConfig,
+    ClosedLoopPassCondition,
+)
 from diffusion_planner.config.config_cli import build_config, build_parser, resolve_paths
 from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
@@ -97,12 +100,18 @@ def run_one_group(
     cfg: ClosedLoopConfig,
     mode: str | None = None,
     render_media: bool = True,
+    pass_condition: ClosedLoopPassCondition | None = None,
 ) -> None:
     """Run closed-loop evaluation for a single group; writes ``summary.json`` + ``segments.jsonl``
     under ``out_dir``. Wandb logging is left to the caller.
 
     ``mode`` is passed explicitly so it doesn't have to be inferred from ``out_dir``
-    (a json_name containing ``__noobj`` would silently mis-infer).
+    (a json_name containing ``__noobj`` would silently misfer).
+
+    ``pass_condition`` (when set) is plumbed through to ``ClosedLoopEvalConfig`` so that
+    per-segment ``passed`` flags and the summary's ``pass_count`` / ``pass_rate`` /
+    ``pass_condition`` block are produced at the metric-aggregation source — no
+    post-processing pass over the file system needed here.
     """
     from scenario_generation.closed_loop_evaluation import (
         ClosedLoopEvalConfig,
@@ -170,6 +179,7 @@ def run_one_group(
             verbose=False,
             profile=False,
             max_jobs=None,
+            pass_condition=pass_condition,
         ),
         npz_root_arg,
         seg_len=cfg.closed_loop_seg_len,
@@ -189,10 +199,18 @@ def _make_summary_key(json_name: str, group_name: str) -> str:
     return f"{json_name}/{group_name}"
 
 
-def _load_group_results(out_dir: Path | str) -> dict[str, dict]:
+def _load_group_results(
+    out_dir: Path | str,
+) -> dict[str, dict]:
     """Reload per-group results from ``out_dir`` (each ``<group_dir>/summary.json``
     augmented with rows from the matching ``segments.jsonl``). Groups missing
-    ``segments.jsonl`` (partial run, manual deletion) are skipped with a warning."""
+    ``segments.jsonl`` (partial run, manual deletion) are skipped with a warning.
+
+    Pass/fail flags (``passed``) and the summary's ``pass_count`` / ``pass_rate`` /
+    ``pass_condition`` block are produced at the metric-aggregation source
+    (see ``aggregate()`` and ``run_job()`` in ``scenario_generation/closed_loop_eval{ation}.py``),
+    so this loader just reads them — no second pass is needed.
+    """
     out_dir = Path(out_dir)
     summaries: dict[str, dict] = {}
     for summary_file in out_dir.rglob("summary.json"):
@@ -260,6 +278,13 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
                 int(s.get("object", {}).get("collision_count", 0) or 0) for s in objects_only_values
             ),
         }
+
+        total_pass = sum(int(s.get("pass_count", 0) or 0) for s in summaries.values())
+        total_fail = sum(int(s.get("fail_count", 0) or 0) for s in summaries.values())
+        agg["n_pass_segments"] = total_pass
+        agg["n_fail_segments"] = total_fail
+        agg["pass_rate"] = (total_pass / n_segments) if n_segments else 0.0
+
     Path(out_dir, "groups.json").write_text(json.dumps(agg, indent=2, ensure_ascii=False))
 
 
@@ -301,6 +326,10 @@ def run_closed_loop_main(
     if not cfg.closed_loop_npz_root:
         print("No closed_loop_npz_root set, skipping closed-loop evaluation", file=sys.stderr)
         return False
+
+    # ``cfg.pass_conditions`` is auto-loaded at construction time (see ``__post_init__``).
+    pass_conditions = cfg.pass_conditions
+
     entries = resolve_closed_loop_inputs(
         cfg.closed_loop_npz_root, modes=cfg.closed_loop_object_modes
     )
@@ -329,6 +358,8 @@ def run_closed_loop_main(
         for group_name, npz_paths in groups.items():
             mode_out_dir = json_out_dir / group_name
             summary_key = _make_summary_key(json_label, group_name)
+            # Per-group condition (falls back to the loaded default if not overridden in YAML).
+            group_condition = pass_conditions.get_condition(group_name)
             run_one_group(
                 model,
                 model_args,
@@ -337,6 +368,7 @@ def run_closed_loop_main(
                 cfg,
                 mode=mode,
                 render_media=render_media,
+                pass_condition=group_condition,
             )
 
         written_json_labels.add(json_label)
