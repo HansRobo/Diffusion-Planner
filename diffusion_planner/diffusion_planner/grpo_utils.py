@@ -26,7 +26,7 @@ import random
 
 import torch
 
-from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
+from diffusion_planner.dimensions import OUTPUT_T, POSE_DIM
 from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
@@ -34,7 +34,7 @@ from diffusion_planner.loss import (
     loss_func,
 )
 from diffusion_planner.model.diffusion_utils.sde import VPSDE_linear
-from diffusion_planner.model.module.decoder import generate_prefix_mask
+from diffusion_planner.model.module.decoder import generate_ego_prefix_mask
 from diffusion_planner.utils.unicycle_accel_curvature import smoothing_future_trajectory
 
 
@@ -76,9 +76,9 @@ def sample_group(
     inference_inputs = dict(norm_inputs)
     # Per-row noise std ~ U[0, noise_scale]: each generated trajectory uses its own initial-noise
     # magnitude, drawn fresh each call.
-    per_row_scale = torch.rand(B, 1, 1, 1, device=device) * noise_scale
+    per_row_scale = torch.rand(B, 1, 1, device=device) * noise_scale
     inference_inputs["sampled_trajectories"] = (
-        torch.randn(B, MAX_NUM_AGENTS, OUTPUT_T + 1, POSE_DIM, device=device) * per_row_scale
+        torch.randn(B, OUTPUT_T + 1, POSE_DIM, device=device) * per_row_scale
     )
     inference_inputs["delay"] = torch.zeros(B, dtype=torch.float32, device=device)
 
@@ -243,14 +243,14 @@ def compute_grpo_loss(
     This mirrors the ``x_start`` branch of :func:`decoder.compute_training_loss`, but:
       * the ego target is the *generated* trajectory (``ego_pseudo_gt``) rather than GT,
       * the per-sample ego loss is weighted by its group-relative advantage,
-      * neighbor / turn-indicator / penalty terms are dropped (GRPO only shapes the ego policy).
+      * turn-indicator / penalty terms are dropped (GRPO only shapes the ego policy).
 
     Args:
         model: the Diffusion_Planner (training mode forward).
         norm_inputs: observation-normalized inputs (batch already expanded to B*N).
         ego_pseudo_gt: [B*N, T, 4] generated ego trajectory (world frame), detached.
-        neighbors_future: [B*N, Pn, T, 4] neighbor futures (world frame).
-        neighbor_future_mask: [B*N, Pn, T] True where a neighbor timestep is invalid.
+        neighbors_future: unused, kept so callers keep their signature.
+        neighbor_future_mask: unused, kept so callers keep their signature.
         advantages: [B*N] group-relative advantages.
         args: namespace with normalizers, loss coefficients, horizon.
 
@@ -268,41 +268,29 @@ def compute_grpo_loss(
     norm = args.state_normalizer
     ego_target = ego_pseudo_gt.detach()
 
-    B, Pn, T, _ = neighbors_future.shape
-    P = 1 + Pn
+    B, T, _ = ego_target.shape
     device = ego_pseudo_gt.device
 
     ego_current = norm_inputs["ego_current_state"][:, :4]
-    neighbors_current = norm_inputs["neighbor_agents_past"][:, :Pn, -1, :4]
     longitudinal_velocity = norm_inputs["ego_current_state"][:, 4:5]
-
-    neighbor_current_mask = torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
-    neighbor_mask = torch.concat(
-        (neighbor_current_mask.unsqueeze(-1), neighbor_future_mask), dim=-1
-    )  # [B, Pn, T+1]
-
-    # ego row uses the generated (pseudo-GT) trajectory; neighbor rows keep their GT futures.
-    gt_future = torch.cat([ego_target[:, None, :, :], neighbors_future], dim=1)  # [B, P, T, 4]
-    current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)  # [B, P, 4]
 
     eps = 1e-3
     t = torch.rand(B, device=device) * (1 - eps) + eps
-    t = t.view(B, 1, 1, 1).expand(B, P, T + 1, 1)
-    z = torch.randn_like(gt_future)
+    t = t.view(B, 1, 1).expand(B, T + 1, 1)
+    z = torch.randn_like(ego_target)
 
     max_delay = 5
     delay = torch.randint(0, max_delay + 1, (B,), device=device)
-    prefix_mask = generate_prefix_mask(delay, P, T + 1)  # [B, P, T+1, 1]
+    prefix_mask = generate_ego_prefix_mask(delay, T + 1)  # [B, T+1, 1]
     mask_coeff = random.uniform(0.0, 1.0)
     curr_mask_time = torch.maximum(t * mask_coeff, torch.tensor(eps, device=device))
     t = torch.where(prefix_mask, curr_mask_time, t)
 
-    all_gt = torch.cat([current_states[:, :, None, :], norm(gt_future)], dim=2)  # [B, P, T+1, 4]
-    all_gt[:, 1:][neighbor_mask] = 0.0
+    all_gt = torch.cat([ego_current[:, None, :], norm(ego_target)], dim=1)  # [B, T+1, 4]
 
-    mean, std = VPSDE_linear().marginal_prob(all_gt[..., 1:, :], t[..., 1:, :])
+    mean, std = VPSDE_linear().marginal_prob(all_gt[:, 1:, :], t[:, 1:, :])
     xT = mean + std * z
-    xT = torch.cat([all_gt[:, :, :1, :], xT], dim=2)
+    xT = torch.cat([all_gt[:, :1, :], xT], dim=1)
     xT = torch.where(prefix_mask, all_gt, xT)
 
     merged_inputs = {
@@ -313,8 +301,8 @@ def compute_grpo_loss(
         "prefix_mask": prefix_mask,
     }
     _, decoder_output = model(merged_inputs)
-    model_output = decoder_output["model_output"][:, :, 1:, :]  # [B, P, T, 4]
-    gt_target = all_gt[:, :, 1:, :]
+    model_output = decoder_output["model_output"][:, 1:, :]  # [B, T, 4]
+    gt_target = all_gt[:, 1:, :]
 
     loss_dict = loss_func(model_output, gt_target)
     heading_l2_loss = loss_dict["heading_l2_loss"]
@@ -322,24 +310,24 @@ def compute_grpo_loss(
     position_lon_loss = loss_dict["position_lon_loss"]
 
     velocity_weight = torch.abs(longitudinal_velocity * args.coeff_velocity)
-    velocity_weight = torch.clamp_min(velocity_weight, 1.0).unsqueeze(-1)  # [B, 1, 1]
+    velocity_weight = torch.clamp_min(velocity_weight, 1.0)  # [B, 1]
     position_lon_loss = position_lon_loss / velocity_weight
 
     timestep_weight = args.coeff_timestep
     unit = T // len(timestep_weight)
     for i in range(len(timestep_weight)):
-        position_lat_loss[:, :, i * unit : (i + 1) * unit] *= timestep_weight[i]
-        position_lon_loss[:, :, i * unit : (i + 1) * unit] *= timestep_weight[i]
-        heading_l2_loss[:, :, i * unit : (i + 1) * unit] *= timestep_weight[i]
+        position_lat_loss[:, i * unit : (i + 1) * unit] *= timestep_weight[i]
+        position_lon_loss[:, i * unit : (i + 1) * unit] *= timestep_weight[i]
+        heading_l2_loss[:, i * unit : (i + 1) * unit] *= timestep_weight[i]
 
     dpm_loss = (
         args.coeff_position_lat_loss * position_lat_loss
         + args.coeff_position_lon_loss * position_lon_loss
         + args.coeff_heading_l2_loss * heading_l2_loss
-    )  # [B, P, T]
+    )  # [B, T]
 
     # Per-sample ego diffusion loss (proxy for negative log-likelihood of the trajectory).
-    ego_loss_per_sample = dpm_loss[:, 0, : args.ego_prediction_horizon].mean(dim=-1)  # [B]
+    ego_loss_per_sample = dpm_loss[:, : args.ego_prediction_horizon].mean(dim=-1)  # [B]
 
     # GRPO policy-gradient surrogate: minimise advantage-weighted reconstruction loss.
     grpo_loss = (advantages * ego_loss_per_sample).mean()

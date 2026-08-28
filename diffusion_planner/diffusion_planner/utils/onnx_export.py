@@ -62,11 +62,11 @@ ENCODER_INPUT_NAMES = [
     "turn_indicators",
 ]
 
-# The ego-only denoiser takes no neighbor tensor: neighbors reach it through the encoding.
 DECODER_INPUT_NAMES = [
     "encoding",
     "sampled_trajectories",
     "diffusion_time",
+    "neighbor_agents_past",
 ]
 
 TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0"]
@@ -180,6 +180,7 @@ class DecoderONNXWrapper(nn.Module):
         encoding: torch.Tensor,
         sampled_trajectories: torch.Tensor,
         diffusion_time: torch.Tensor,
+        neighbor_agents_past: torch.Tensor,
     ) -> torch.Tensor:
         seq_len = 1 + self.decoder._future_len
         ego_trajectory = extract_ego_trajectory(sampled_trajectories, seq_len, 4)
@@ -188,7 +189,14 @@ class DecoderONNXWrapper(nn.Module):
         model_output = self.decoder.dit(ego_trajectory, ego_time, encoding)
 
         # Keep the padded agent axis so the shape matches what the runtime already expects.
-        return self.decoder._pad_dummy_neighbors(model_output)
+        model_output = self.decoder._pad_dummy_neighbors(model_output)
+
+        # The ego-only denoiser does not read the neighbors - they reach it through the
+        # encoding - but the exporter drops an input that nothing consumes, and the runtime
+        # feeds this tensor. Adding an exactly-zero term keeps the input in the graph without
+        # touching the result.
+        keep_input = neighbor_agents_past.reshape(neighbor_agents_past.shape[0], -1)[:, :1] * 0.0
+        return model_output + keep_input[:, :, None, None]
 
 
 class TurnIndicatorONNXWrapper(nn.Module):
@@ -302,6 +310,7 @@ def build_decoder_inputs(inputs: TensorDict, encoding: torch.Tensor) -> TensorDi
         "encoding": encoding,
         "sampled_trajectories": inputs["sampled_trajectories"],
         "diffusion_time": torch.ones(1, MAX_NUM_AGENTS, OUTPUT_T + 1, 1, dtype=torch.float32),
+        "neighbor_agents_past": inputs["neighbor_agents_past"],
     }
 
 
