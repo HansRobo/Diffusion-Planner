@@ -657,7 +657,7 @@ def log_cross_run_charts(
 
 
 def log_closed_loop_to_wandb(
-    cfg: "dict | None",
+    cfg: "ClosedLoopConfig | None",
     group_names: list[str],
     group_summaries: dict[str, dict],
     run: "wandb.sdk.wandb_run.Run | None" = None,
@@ -668,8 +668,8 @@ def log_closed_loop_to_wandb(
     Sets up W&B Custom Chart presets for cross-run comparison.
 
     Args:
-        cfg: Config dict with ``wandb_project_name`` and ``exp_name`` fields.
-             If None, uses defaults.
+        cfg: Closed-loop config exposing ``wandb_project_name`` and ``exp_name``.
+             If None, wandb.init falls back to its own defaults.
         group_names: List of group keys.
         group_summaries: Dict mapping group key -> summary dict.
         run: W&B run instance. If None, starts a new one.
@@ -678,8 +678,8 @@ def log_closed_loop_to_wandb(
         return
 
     if run is None:
-        project = (cfg or {}).get("wandb_project_name") or None
-        name = (cfg or {}).get("exp_name") or None
+        project = getattr(cfg, "wandb_project_name", None) or None
+        name = getattr(cfg, "exp_name", None) or None
         run = wandb.init(project=project, name=name)
         own_run = True
     else:
