@@ -1,5 +1,3 @@
-import math
-
 import torch
 import torch.nn as nn
 from timm.models.layers import Mlp
@@ -12,17 +10,11 @@ def modulate(x, shift, scale):
 
 class DiTBlock(nn.Module):
     """
-    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning for ego and Cross-Attention.
+    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning and Cross-Attention.
 
-    The block deliberately has no attention between agents. Every agent token only attends to
-    the scene memory, which already carries the observed histories of the neighbors, so one
-    generated future never conditions another one. Agent-level self-attention would feed the
-    noised future of a neighbor into the ego prediction, and those futures are only partially
-    supervised: a neighbor label can stop early (e.g. nothing beyond 4 s), and the values filling
-    the missing part - plus the noise added to them - stay in the model input even though the loss
-    masks them out. Interaction through such unsupervised representations would destabilize the
-    agents that do have valid labels. Making it work would require attention that knows the
-    validity of every single future timestep, which the per-agent mask cannot express.
+    The block holds no attention between agents because the network denoises the ego
+    trajectory only: neighbors reach the ego prediction through the scene memory, which
+    carries their observed histories, and never through a generated future.
     """
 
     def __init__(self, dim=192, heads=6, dropout=0.1, mlp_ratio=4.0):
@@ -43,6 +35,12 @@ class DiTBlock(nn.Module):
         )
 
     def forward(self, x, cross_c, y):
+        """
+        Args:
+            x: (B, 1, dim) ego trajectory token.
+            cross_c: (B, N, dim) scene memory.
+            y: (B, 1, dim) diffusion-time embedding.
+        """
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(y).chunk(3, dim=2)
 
         modulated_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
@@ -75,8 +73,6 @@ class FinalLayer(nn.Module):
         )
 
     def forward(self, x, y):
-        B, P, _ = x.shape
-
         shift, scale = self.adaLN_modulation(y).chunk(2, dim=2)
         x = modulate(self.norm_final(x), shift, scale)
         x = self.proj(x)
@@ -84,6 +80,13 @@ class FinalLayer(nn.Module):
 
 
 class DiT(nn.Module):
+    """Denoising network for the ego trajectory.
+
+    The network has no agent dimension: it embeds one trajectory - the ego one - into a
+    single token and conditions it on the scene memory through cross-attention. Neighbor
+    futures are neither an input nor an output.
+    """
+
     def __init__(
         self,
         depth,
@@ -97,7 +100,6 @@ class DiT(nn.Module):
 
         T = 81
         D = 4
-        self.agent_embedding = nn.Embedding(2, hidden_dim)
         self.preproj = Mlp(
             in_features=T * D,
             hidden_features=512,
@@ -117,43 +119,32 @@ class DiT(nn.Module):
         )
         self.final_layer = FinalLayer(hidden_dim, output_dim)
 
-    def forward(self, x, t, cross_c, neighbor_current_mask):
+    def forward(self, x, t, cross_c):
         """
         Forward pass of DiT.
-        x: (B, P, T, D)   -> Embedded out of DiT
-        t: (B, P, T, 1)
-        cross_c: (B, N, D)      -> Cross-Attention context
+
+        Args:
+            x: (B, T, D) noised ego trajectory.
+            t: (B, T, 1) diffusion time per trajectory step.
+            cross_c: (B, N, D) Cross-Attention context.
+
+        Returns:
+            (B, T, D) denoised ego trajectory.
         """
-        assert x.dim() == 4, f"{x.dim()=}"
-        assert t.dim() == 4, f"{t.dim()=}"
-        assert x.shape[2] == t.shape[2], f"{x.shape[2]=} {t.shape[2]=}"
-        B, P, T, D = x.shape
+        assert x.dim() == 3, f"{x.dim()=}"
+        assert t.dim() == 3, f"{t.dim()=}"
+        assert x.shape[1] == t.shape[1], f"{x.shape[1]=} {t.shape[1]=}"
+        B, T, D = x.shape
 
-        x = x.reshape(B, P, T * D)  # (B, P, T*D)
-        t = t.reshape(B, P, T)  # (B, P, T)
+        x = x.reshape(B, 1, T * D)  # (B, 1, T*D)
+        t = t.reshape(B, 1, T)  # (B, 1, T)
 
-        x = self.preproj(x)  # (B, P, hidden_dim)
-        t = self.t_embedder(t)  # (B, P, hidden_dim)
-
-        x_embedding = torch.cat(
-            [
-                self.agent_embedding.weight[0][None, :],
-                self.agent_embedding.weight[1][None, :].expand(P - 1, -1),
-            ],
-            dim=0,
-        )  # (P, hidden_dim)
-        x_embedding = x_embedding[None, :, :].expand(B, -1, -1)  # (B, P, hidden_dim)
-        x = x + x_embedding
-
-        # Invalid agents carry no information, so their tokens are zeroed instead of being
-        # attended over. See DiTBlock for why agent tokens never attend to each other.
-        ego_mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
-        agent_mask = torch.cat([ego_mask, neighbor_current_mask], dim=1)  # (B, P)
-        x = x.masked_fill(agent_mask[:, :, None], 0.0)
+        x = self.preproj(x)  # (B, 1, hidden_dim)
+        t = self.t_embedder(t)  # (B, 1, hidden_dim)
 
         for block in self.blocks:
             x = block(x, cross_c, t)
 
-        x = self.final_layer(x, t)  # (B, P, output_dim)
-        x = x.reshape(B, P, T, D)
+        x = self.final_layer(x, t)  # (B, 1, output_dim)
+        x = x.reshape(B, T, D)
         return x

@@ -17,7 +17,7 @@ except Exception as exc:  # optional metric dependency; raised only when enabled
 else:
     _EPDMS_IMPORT_ERROR = None
 
-from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
+from diffusion_planner.dimensions import OUTPUT_T, POSE_DIM
 from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
@@ -52,7 +52,6 @@ def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValida
     turn_indicator_seq = inputs["turn_indicators"]
     inputs["sampled_trajectories"] = torch.zeros(
         batch_size,
-        MAX_NUM_AGENTS,
         OUTPUT_T + 1,
         POSE_DIM,
         dtype=torch.float32,
@@ -66,9 +65,9 @@ def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValida
     neighbor_future_mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
     neighbors_future = heading_to_cos_sin(neighbors_future)
     neighbors_future[neighbor_future_mask] = 0.0
-    _, predicted_neighbor_num, _, _ = neighbors_future.shape
+    neighbor_num = neighbors_future.shape[1]
     ego_current = inputs["ego_current_state"][:, :4]
-    neighbors_current = inputs["neighbor_agents_past"][:, :predicted_neighbor_num, -1, :4]
+    neighbors_current = inputs["neighbor_agents_past"][:, :neighbor_num, -1, :4]
     inputs = args.observation_normalizer(inputs)
     return _PreparedValidationBatch(
         inputs=inputs,
@@ -329,31 +328,15 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
         ego_future = prepared.ego_future
         neighbors_future = prepared.neighbors_future
         neighbor_future_mask = prepared.neighbor_future_mask
-        ego_current = prepared.ego_current
-        neighbors_current = prepared.neighbors_current
         turn_indicator_seq = prepared.turn_indicator_seq
-        B, Pn, T, _ = neighbors_future.shape
+        B = ego_future.shape[0]
 
         _, outputs = model(inputs)
 
-        neighbor_current_mask = (
-            torch.sum(torch.ne(neighbors_current[..., :4], 0), dim=-1) == 0
-        )  # (B, Pn)
-        neighbor_mask = torch.concat(
-            (neighbor_current_mask.unsqueeze(-1), neighbor_future_mask), dim=-1
-        )  # (B, Pn, T + 1)
-
-        gt_future = torch.cat(
-            [ego_future[:, None, :, :], neighbors_future[..., :]], dim=1
-        )  # (B, Pn + 1, T, 4)
-        current_states = torch.cat([ego_current[:, None], neighbors_current], dim=1)
-        # (B, Pn + 1, 4)
-
-        all_gt = torch.cat(
-            [current_states[:, :, None, :], gt_future], dim=2
-        )  # (B, Pn + 1, T + 1, 4)
-        all_gt[:, 1:][neighbor_mask] = 0.0
-
+        # The model predicts the ego trajectory only, so validation scores the ego row of the
+        # prediction against the ego ground truth. The remaining rows are zero placeholders.
+        ego_gt = ego_future  # (B, T, 4)
+        ego_prediction = outputs["prediction"][:, 0]  # (B, T, 4)
         prediction = outputs["prediction"]
         turn_indicator_logit = outputs["turn_indicator_logit"]
         turn_indicator = turn_indicator_logit.argmax(dim=-1)
@@ -371,37 +354,31 @@ def validate_model(model, val_loader, args, return_pred=False) -> tuple[float, f
             turn_indicators.append(turn_indicator.cpu())
 
         neighbors_future_valid = ~neighbor_future_mask
-        all_gt = all_gt[:, :, 1:, :]  # (B, Pn + 1, T, 4)
-        loss_tensor = (prediction - all_gt) ** 2
-        loss_ego = loss_tensor[:, 0, :]
+        loss_ego = (ego_prediction - ego_gt) ** 2  # (B, T, 4)
         loss_ego_list.append(loss_ego.cpu())
-        loss_nei = loss_tensor[:, 1:, :]
-        loss_nei = loss_nei[neighbors_future_valid]
         total_loss_ego += loss_ego.mean().item() * B
         total_samples_ego += B
-        if loss_nei.shape[0] > 0:
-            nei_B = loss_nei.shape[0]
-            total_loss_neighbor += loss_nei.mean().item() * nei_B
-            total_samples_neighbor += nei_B
+        # avg_loss_neighbor stays at zero: there is no neighbor prediction to score. The key is
+        # kept so that log parsers and the DDP aggregation keep working.
 
-        loss_dict = loss_func(prediction, all_gt)
+        loss_dict = loss_func(ego_prediction, ego_gt)
         for key, val in loss_dict.items():
-            # val : (B, Pn + 1, T)
-            total_result_dict[f"ego_{key}"].append(val[:, 0, :].cpu())  # (B, T)
+            # val : (B, T)
+            total_result_dict[f"ego_{key}"].append(val.cpu())
 
         if getattr(args, "enable_temporal_stability_eval", False) or getattr(
             args, "enable_replan_consistency_eval", False
         ):
             total_result_dict["ego_mean_abs_jerk"].append(
-                compute_mean_abs_jerk_batch(prediction[:, 0]).cpu()
+                compute_mean_abs_jerk_batch(ego_prediction).cpu()
             )
             total_result_dict["ego_curvature_rate"].append(
-                compute_curvature_rate_batch(prediction[:, 0]).cpu()
+                compute_curvature_rate_batch(ego_prediction).cpu()
             )
 
         # Compute ego edge points for penalty metrics
         ego_edge_points = compute_ego_edge_points(
-            prediction[:, 0], inputs["ego_shape"], n_interp=args.road_border_n_interp
+            ego_prediction, inputs["ego_shape"], n_interp=args.road_border_n_interp
         )
 
         denorm_inputs = args.observation_normalizer.inverse(inputs)

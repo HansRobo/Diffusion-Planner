@@ -42,14 +42,31 @@ class CollisionGuidance(BaseGuidance):
     name = "collision"
     _energy_scale = 0.3
 
+    @staticmethod
+    def _hold_neighbors_static(x: torch.Tensor, inputs: dict) -> torch.Tensor:
+        """Append neighbor rows held at their last observed pose.
+
+        The decoder predicts the ego trajectory only, so x carries the ego row alone. The
+        neighbors enter the energy through their observation instead of through a prediction:
+        each one holds its current pose for every future step.
+        """
+        neighbor_current = inputs["neighbor_agents_past"][:, :, -1:, :4].expand(
+            -1, -1, x.shape[2], -1
+        )  # [B, Pn, T+1, 4]
+        return torch.cat([x, neighbor_current], dim=1)
+
     def _compute(self, x: torch.Tensor, inputs: dict) -> torch.Tensor:
         """
         x: [B, P, T+1, 4] physical ego-centric metres, already time-gated
-           by BaseGuidance.energy() when called from energy().
+           by BaseGuidance.energy() when called from energy(). P == 1 (ego only) means the
+           neighbors are taken from their last observation instead.
         inputs: observation dict in physical units.
 
         Returns [B] unscaled reward (higher = fewer collisions).
         """
+        if x.shape[1] == 1:
+            x = self._hold_neighbors_static(x, inputs)
+
         B, P, T, _ = x.shape
         neighbor_current_mask = inputs["neighbor_current_mask"]  # [B, Pn]
 
@@ -166,24 +183,17 @@ class CollisionGuidance(BaseGuidance):
 
         B, T, D = trajectory.shape
         neighbors_past = inputs["neighbor_agents_past"]  # [B, Pn_max, hist, 11]
-        Pn = neighbors_past.shape[1]
 
         # Reconstruct mask: True where neighbour slot is empty (all zeros at current step).
         neighbors_current = neighbors_past[:, :, -1, :4]  # [B, Pn, 4]
         neighbor_current_mask = torch.sum(torch.ne(neighbors_current, 0), dim=-1) == 0  # [B, Pn]
 
-        # Build [B, P, T+1, 4] with ego future + neighbour future (static, repeated from t=0).
+        # Build [B, 1, T+1, 4] from the ego future; _compute holds the neighbours static.
         current_slot = torch.zeros(B, 1, 1, D, device=trajectory.device)
         ego_padded = torch.cat([current_slot, trajectory.unsqueeze(1)], dim=2)  # [B, 1, T+1, 4]
 
-        # Neighbours are treated as stationary (hold their t=0 position for all future steps).
-        neighbor_current = neighbors_past[:, :Pn, -1:, :4].expand(
-            -1, -1, T + 1, -1
-        )  # [B, Pn, T+1, 4]
-        x_padded = torch.cat([ego_padded, neighbor_current], dim=1)  # [B, 1+Pn, T+1, 4]
-
         inputs_with_mask = {**inputs, "neighbor_current_mask": neighbor_current_mask}
-        raw = self._compute(x_padded, inputs_with_mask)
+        raw = self._compute(ego_padded, inputs_with_mask)
         return self._energy_scale * self.config.scale * raw
 
 

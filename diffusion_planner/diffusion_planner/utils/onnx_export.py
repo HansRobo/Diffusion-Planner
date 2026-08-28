@@ -22,6 +22,7 @@ import torch.nn as nn
 
 from diffusion_planner.dimensions import *
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
+from diffusion_planner.model.module.decoder import extract_ego_trajectory
 from diffusion_planner.utils.config import Config
 
 FULL_INPUT_NAMES = [
@@ -61,11 +62,11 @@ ENCODER_INPUT_NAMES = [
     "turn_indicators",
 ]
 
+# The ego-only denoiser takes no neighbor tensor: neighbors reach it through the encoding.
 DECODER_INPUT_NAMES = [
     "encoding",
     "sampled_trajectories",
     "diffusion_time",
-    "neighbor_agents_past",
 ]
 
 TURN_INDICATOR_INPUT_NAMES = ["encoding", "final_x0"]
@@ -179,25 +180,15 @@ class DecoderONNXWrapper(nn.Module):
         encoding: torch.Tensor,
         sampled_trajectories: torch.Tensor,
         diffusion_time: torch.Tensor,
-        neighbor_agents_past: torch.Tensor,
     ) -> torch.Tensor:
-        neighbors_current = neighbor_agents_past[:, : self.decoder._predicted_neighbor_num, -1, :4]
-        neighbor_current_mask = torch.sum(torch.ne(neighbors_current, 0), dim=-1) == 0
-        batch_size = encoding.shape[0]
-        agent_num = 1 + self.decoder._predicted_neighbor_num
+        seq_len = 1 + self.decoder._future_len
+        ego_trajectory = extract_ego_trajectory(sampled_trajectories, seq_len, 4)
+        ego_time = extract_ego_trajectory(diffusion_time, seq_len, 1)
 
-        sampled_trajectories = sampled_trajectories.reshape(
-            batch_size, agent_num, 1 + self.decoder._future_len, 4
-        )
+        model_output = self.decoder.dit(ego_trajectory, ego_time, encoding)
 
-        model_output = self.decoder.dit(
-            sampled_trajectories,
-            diffusion_time,
-            encoding,
-            neighbor_current_mask,
-        ).reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
-
-        return model_output
+        # Keep the padded agent axis so the shape matches what the runtime already expects.
+        return self.decoder._pad_dummy_neighbors(model_output)
 
 
 class TurnIndicatorONNXWrapper(nn.Module):
@@ -209,11 +200,10 @@ class TurnIndicatorONNXWrapper(nn.Module):
 
     def forward(self, encoding: torch.Tensor, final_x0: torch.Tensor) -> torch.Tensor:
         batch_size = encoding.shape[0]
-        agent_num = 1 + self.decoder._predicted_neighbor_num
-        final_x0 = final_x0.reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
+        ego_x0 = extract_ego_trajectory(final_x0, 1 + self.decoder._future_len, 4)
 
         encoding_pooled = torch.mean(encoding, dim=1)
-        ego_trajectory = final_x0[:, 0, 1::10, :2].reshape(
+        ego_trajectory = ego_x0[:, 1::10, :2].reshape(
             batch_size, 2 * (self.decoder._future_len // 10)
         )
         return self.decoder._compute_turn_indicator(ego_trajectory, encoding_pooled)
@@ -312,7 +302,6 @@ def build_decoder_inputs(inputs: TensorDict, encoding: torch.Tensor) -> TensorDi
         "encoding": encoding,
         "sampled_trajectories": inputs["sampled_trajectories"],
         "diffusion_time": torch.ones(1, MAX_NUM_AGENTS, OUTPUT_T + 1, 1, dtype=torch.float32),
-        "neighbor_agents_past": inputs["neighbor_agents_past"],
     }
 
 

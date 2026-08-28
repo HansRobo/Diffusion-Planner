@@ -13,8 +13,10 @@ class StateNormalizer:
     @classmethod
     def from_json(cls, args):
         data = openjson(args.normalization_file_path)
-        mean = [[data["ego"]["mean"]]] + [[data["neighbor"]["mean"]]] * args.predicted_neighbor_num
-        std = [[data["ego"]["std"]]] + [[data["neighbor"]["std"]]] * args.predicted_neighbor_num
+        # The model predicts the ego trajectory only, so the statistics hold a single row and
+        # broadcast over [B, T, 4].
+        mean = [data["ego"]["mean"]]
+        std = [data["ego"]["std"]]
         return cls(mean, std)
 
     def __call__(self, data):
