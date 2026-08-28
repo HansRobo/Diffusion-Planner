@@ -29,6 +29,7 @@ Prerequisites:
 from __future__ import annotations
 
 import json
+import math
 
 import wandb
 
@@ -41,6 +42,7 @@ _ABS_COLUMNS = [
     ("Steps", "total_steps"),
     ("Route completion (%)", "mean_route_completion"),
     ("Pass rate (%)", "pass_rate"),
+    ("GT deviation (m)", "mean_gt_deviation_m"),
     ("Fails", "fail_count"),
     ("Curb hits", "total_curb_hits"),
     ("Snaps", "total_snaps"),
@@ -56,6 +58,7 @@ _PER_1000STEPS_COLUMNS = [
     ("Steps", "total_steps"),
     ("Route completion (%)", "mean_route_completion"),
     ("Pass rate (%)", "pass_rate"),
+    ("GT deviation (m)", "mean_gt_deviation_m"),
     ("Curb hits / 1k steps", "total_curb_hits"),
     ("Snaps / 1k steps", "total_snaps"),
     ("Red light / 1k steps", "total_red_light_violations"),
@@ -102,6 +105,10 @@ def _abs_value(source_key: str, summary: dict):
             val = summary[source_key]
             return float(val if isinstance(val, (int, float)) else 0.0)
         return float(extract_score(summary, source_key) or 0.0)
+    if source_key == "mean_gt_deviation_m":
+        # ``inf`` (nothing measured) becomes a blank cell, not a number to be misread.
+        dev = summary.get("mean_gt_deviation_m")
+        return float(dev) if dev is not None and math.isfinite(float(dev)) else None
 
     # Int fields.
     if source_key in ("n_segments", "total_steps"):
@@ -111,10 +118,16 @@ def _abs_value(source_key: str, summary: dict):
     return int(extract_score(summary, source_key) or 0)
 
 
-def _per_1000steps_value(source_key: str, summary: dict) -> float:
+def _per_1000steps_value(source_key: str, summary: dict) -> float | None:
     """Counts normalized per 1000 steps (or per 1000 segments for ``n_segments_diverged``)."""
     # Pass-through fields that are already a fraction or count, not a rate.
-    if source_key in ("n_segments", "total_steps", "mean_route_completion", "pass_rate"):
+    if source_key in (
+        "n_segments",
+        "total_steps",
+        "mean_route_completion",
+        "pass_rate",
+        "mean_gt_deviation_m",  # already a per-step mean
+    ):
         return _abs_value(source_key, summary)
     denom_key = "n_segments" if source_key == "n_segments_diverged" else "total_steps"
     denom = int(summary.get(denom_key, 0) or 0)
@@ -130,8 +143,9 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
     """Cross-group aggregate, same shape as a per-group summary dict.
 
     ``__noobj`` groups are excluded from collision sums (they're 0 by
-    construction in the no-object ablation). ``route_completion`` and
-    ``pass_rate`` are segment-weighted means, not plain averages.
+    construction in the no-object ablation). ``route_completion`` is a
+    segment-weighted mean and ``mean_gt_deviation_m`` a step-weighted one, not
+    plain averages.
     """
     if not group_summaries:
         return {}
@@ -141,11 +155,22 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
 
     n_segments = sum(int(s.get("n_segments", 0) or 0) for s in values)
 
+    # Step-weighted mean for mean_gt_deviation_m
+    dev_num = 0.0
+    dev_steps = 0
+    for v in values:
+        dev = v.get("mean_gt_deviation_m", None)
+        steps = int(v.get("total_steps", 0) or 0)
+        if dev is not None and math.isfinite(dev) and steps > 0:
+            dev_num += float(dev) * steps
+            dev_steps += steps
+
     agg: dict = {
         "n_groups": len(values),
         "n_segments": n_segments,
         "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in values),
         "mean_route_completion": _segment_weighted_mean(values, "mean_route_completion"),
+        "mean_gt_deviation_m": (dev_num / dev_steps) if dev_steps else float("inf"),
         "pass_rate": _segment_weighted_mean(values, "pass_rate"),
         "fail_count": sum(int(s.get("fail_count", 0) or 0) for s in values),
     }
@@ -632,7 +657,7 @@ def log_cross_run_charts(
 
 
 def log_closed_loop_to_wandb(
-    cfg: "dict | None",
+    cfg: "ClosedLoopConfig | None",
     group_names: list[str],
     group_summaries: dict[str, dict],
     run: "wandb.sdk.wandb_run.Run | None" = None,
@@ -643,8 +668,8 @@ def log_closed_loop_to_wandb(
     Sets up W&B Custom Chart presets for cross-run comparison.
 
     Args:
-        cfg: Config dict with ``wandb_project_name`` and ``exp_name`` fields.
-             If None, uses defaults.
+        cfg: Closed-loop config exposing ``wandb_project_name`` and ``exp_name``.
+             If None, wandb.init falls back to its own defaults.
         group_names: List of group keys.
         group_summaries: Dict mapping group key -> summary dict.
         run: W&B run instance. If None, starts a new one.
@@ -653,8 +678,8 @@ def log_closed_loop_to_wandb(
         return
 
     if run is None:
-        project = (cfg or {}).get("wandb_project_name") or None
-        name = (cfg or {}).get("exp_name") or None
+        project = getattr(cfg, "wandb_project_name", None) or None
+        name = getattr(cfg, "exp_name", None) or None
         run = wandb.init(project=project, name=name)
         own_run = True
     else:
