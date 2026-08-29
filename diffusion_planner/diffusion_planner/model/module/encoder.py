@@ -47,6 +47,7 @@ class Encoder(nn.Module):
         self.use_ego_history = config.use_ego_history
         self.ego_history_dropout_rate = config.ego_history_dropout_rate
         self.use_turn_indicators = config.use_turn_indicators
+        self.use_ego_stop_history = config.use_ego_stop_history
 
         ego_num = 1
         goal_pose_num = 1
@@ -72,6 +73,10 @@ class Encoder(nn.Module):
             depth=config.encoder_mixer_depth,
             mixer_hidden_dim=config.encoder_mixer_hidden_dim,
             mixer_token_dim=config.encoder_mixer_token_dim,
+            use_stop_history=config.use_ego_stop_history,
+            stop_velocity_threshold=config.ego_stop_velocity_threshold_mps,
+            history_dt=config.ego_history_dt_s,
+            xy_std=config.observation_normalizer.std("ego_agent_past")[:2],
         )
         self.neighbor_encoder = NeighborEncoder(
             config.time_len,
@@ -179,11 +184,11 @@ class Encoder(nn.Module):
         ego = inputs["ego_agent_past"].clone()  # (B, T=INPUT_T + 1, D=4)
         if not self.use_ego_history:
             ego = torch.zeros_like(ego)
-        ego = torch.cat(
-            # [torch.zeros_like(ego[:, :-6]), ego[:, -6:]],
-            [ego[:, :6], torch.zeros_like(ego[:, 6:])],
-            dim=1,
-        )  # Only keep the current + first 5 steps of ego history
+        if not self.use_ego_stop_history:
+            # Only keep the 6 oldest steps of ego history. The stop-history encoder needs the
+            # whole window instead, because it derives per-step speeds from it and hands the
+            # network no pose at all.
+            ego = torch.cat([ego[:, :6], torch.zeros_like(ego[:, 6:])], dim=1)
 
         # agents
         neighbors = inputs["neighbor_agents_past"].clone()  # (B, N=32, T=21, D=11)
@@ -345,17 +350,47 @@ class SelfAttentionBlock(nn.Module):
 
 
 class EgoEncoder(nn.Module):
+    """Encode the ego history.
+
+    With ``use_stop_history`` the raw pose history never reaches the network. It is reduced to a
+    per-step stopped / moving one-hot plus the current speed, so the model cannot extrapolate its
+    own past waypoints. That shortcut is the classic cause of causal confusion: it fits the
+    open-loop target well and collapses once the model drives on its own predictions.
+    """
+
     def __init__(
-        self, time_len, drop_path_rate, hidden_dim, depth, mixer_hidden_dim, mixer_token_dim
+        self,
+        time_len,
+        drop_path_rate,
+        hidden_dim,
+        depth,
+        mixer_hidden_dim,
+        mixer_token_dim,
+        use_stop_history,
+        stop_velocity_threshold,
+        history_dt,
+        xy_std,
     ):
         super().__init__()
         tokens_mlp_dim = mixer_token_dim
         channels_mlp_dim = mixer_hidden_dim
 
         self._hidden_dim = hidden_dim
+        self.use_stop_history = use_stop_history
+        self.stop_velocity_threshold = stop_velocity_threshold
+        self.history_dt = history_dt
+        # The encoder sees normalized poses, so speeds have to be taken back to m/s before they
+        # are compared against a threshold expressed in m/s.
+        self.register_buffer("xy_std", xy_std.clone().detach().reshape(2), persistent=False)
+
+        # Stopped / moving one-hot per step, instead of (x, y, cos, sin).
+        point_dim = 2 if use_stop_history else 4
+        self.current_velocity_project = (
+            nn.Linear(1, hidden_dim) if use_stop_history else nn.Identity()
+        )
 
         self.channel_pre_project = Mlp(
-            in_features=4,
+            in_features=point_dim,
             hidden_features=channels_mlp_dim,
             out_features=channels_mlp_dim,
             act_layer=nn.GELU,
@@ -382,9 +417,27 @@ class EgoEncoder(nn.Module):
             drop=drop_path_rate,
         )
 
+    def _stop_history(self, x):
+        """Turn a normalized pose history into a stopped/moving one-hot and the current speed.
+
+        Args:
+            x: (B, T, 4) normalized (x, y, cos, sin), index 0 oldest, index T-1 current.
+
+        Returns:
+            (B, T, 2) one-hot [moving, stopped] and (B, 1) current speed in m/s.
+        """
+        displacement = (x[:, 1:, :2] - x[:, :-1, :2]) * self.xy_std  # (B, T-1, 2) metres
+        speed = torch.linalg.vector_norm(displacement, dim=-1) / self.history_dt  # (B, T-1)
+        # The oldest step has no predecessor, so it repeats the speed of the next one.
+        speed = torch.cat([speed[:, :1], speed], dim=1)  # (B, T)
+
+        stopped = speed <= self.stop_velocity_threshold
+        one_hot = torch.stack([~stopped, stopped], dim=-1).to(x.dtype)  # (B, T, 2)
+        return one_hot, speed[:, -1:]
+
     def forward(self, x):
         """
-        x: B, T=21, D=4 (x, y, cos, sin)
+        x: B, T=31, D=4 (x, y, cos, sin)
         """
         B, T, D = x.shape
         pos = x[:, -1].clone()  # (B, D=4[x, y, cos, sin])
@@ -392,6 +445,10 @@ class EgoEncoder(nn.Module):
         pos = add_class_type(pos, CLASS_TYPE_EGO)
 
         mask = torch.zeros((B, 1), dtype=torch.bool, device=x.device)
+
+        current_velocity = None
+        if self.use_stop_history:
+            x, current_velocity = self._stop_history(x)
 
         x = self.channel_pre_project(x)
         x = x.permute(0, 2, 1)
@@ -404,7 +461,10 @@ class EgoEncoder(nn.Module):
         # pooling
         x = torch.mean(x, dim=1, keepdim=True)  # (B, 1, C=channels_mlp_dim)
 
-        x = self.emb_project(self.norm(x))  # (B, hidden_dim)
+        x = self.emb_project(self.norm(x))  # (B, 1, hidden_dim)
+
+        if current_velocity is not None:
+            x = x + self.current_velocity_project(current_velocity).unsqueeze(1)
 
         return x, mask, pos
 

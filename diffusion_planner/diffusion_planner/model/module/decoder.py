@@ -86,6 +86,32 @@ def add_current_xy(future: torch.Tensor, current_state: torch.Tensor) -> torch.T
     return torch.cat([xy, future[..., 2:]], dim=-1)
 
 
+def sample_diffusion_time(
+    batch_size: int,
+    device: torch.device,
+    sampling: str,
+    mean: float,
+    std: float,
+    eps: float,
+) -> torch.Tensor:
+    """Sample the per-sample diffusion / flow time in (eps, 1 - eps).
+
+    "uniform" spreads the times evenly. "logit_normal" draws sigmoid(N(mean, std)), which puts
+    most of the budget in the middle of the schedule where the denoiser still has to decide the
+    shape of the trajectory, rather than on the two nearly trivial ends.
+
+    Returns:
+        A tensor of shape (batch_size,).
+    """
+    if sampling == "uniform":
+        t = torch.rand(batch_size, device=device)
+    elif sampling == "logit_normal":
+        t = torch.sigmoid(torch.randn(batch_size, device=device) * std + mean)
+    else:
+        raise NotImplementedError(f"Unknown time sampling: {sampling}")
+    return t.clamp(eps, 1.0 - eps)
+
+
 def compute_training_loss(
     model: nn.Module,
     inputs: dict[str, torch.Tensor],
@@ -108,7 +134,14 @@ def compute_training_loss(
     longitudinal_velocity = inputs["ego_current_state"][:, 4:5]
 
     eps = 1e-3
-    t = torch.rand(B, device=ego_future.device) * (1 - eps) + eps  # [B,]
+    t = sample_diffusion_time(
+        B,
+        ego_future.device,
+        args.time_sampling,
+        args.time_sampling_mean,
+        args.time_sampling_std,
+        eps,
+    )  # [B,]
     t = t.view(B, 1, 1).expand(B, T + 1, 1)
     z = torch.randn_like(ego_future, device=ego_future.device)  # [B, T, 4]
 
@@ -329,6 +362,16 @@ class Decoder(nn.Module):
         # Zero-out output layers:
         nn.init.constant_(self.dit.final_layer.proj[-1].weight, 0)
         nn.init.constant_(self.dit.final_layer.proj[-1].bias, 0)
+
+        # adaLN-Zero: every adaptive-LayerNorm modulation starts at zero, so each block begins as
+        # the identity in scale/shift and its gated branch contributes nothing. Xavier-initialised
+        # modulation instead perturbs the trajectory from step one, which is the part of DiT the
+        # original paper found had to be zeroed to train stably.
+        for block in self.dit.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.dit.final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.dit.final_layer.adaLN_modulation[-1].bias, 0)
 
     def _prepare_current_state(self, inputs):
         """Extract the ego current state and publish the neighbor validity mask.

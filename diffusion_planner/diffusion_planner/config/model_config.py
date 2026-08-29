@@ -50,12 +50,26 @@ class ModelConfig:
     # Per-element MLP-Mixer size. These blocks run on every element (~560 per sample)
     # at every point (20-31), so their activations dominate encoder time and memory:
     # cost scales as depth * mixer dims, not as hidden_dim. 128/64/6 is what ran before.
-    encoder_mixer_hidden_dim: int = 32
-    encoder_mixer_token_dim: int = 32
-    encoder_mixer_depth: int = 1
+    encoder_mixer_hidden_dim: int = 128
+    encoder_mixer_token_dim: int = 64
+    encoder_mixer_depth: int = 2
     encoder_fusion_depth: int = 6
     decoder_depth: int = 3
     num_heads: int = 8
     hidden_dim: int = 256
     diffusion_model_type: Literal["x_start", "flow_matching"] = "x_start"
+
+    # Ego history representation. With use_ego_stop_history the raw pose history is replaced by a
+    # per-step stopped/moving flag plus the current speed, which removes the shortcut of
+    # extrapolating the ego's own past waypoints.
+    use_ego_stop_history: bool = True
+    ego_stop_velocity_threshold_mps: float = 0.1
+    ego_history_dt_s: float = 0.1
+
+    # Diffusion / flow time sampling. "logit_normal" concentrates the sampled times around the
+    # middle of the schedule, where the denoiser actually decides the trajectory shape; uniform
+    # spends most of its budget on the trivially easy ends.
+    time_sampling: Literal["uniform", "logit_normal"] = "logit_normal"
+    time_sampling_mean: float = 0.0
+    time_sampling_std: float = 1.0
     predicted_neighbor_num: int = MAX_NUM_NEIGHBORS

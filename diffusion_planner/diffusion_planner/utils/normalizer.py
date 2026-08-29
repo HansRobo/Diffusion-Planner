@@ -73,6 +73,10 @@ class ObservationNormalizer:
             norm_data[k][mask] = 0
         return norm_data
 
+    def std(self, key):
+        """Return the per-channel std used to normalize ``key``."""
+        return self._normalization_dict[key]["std"]
+
     def to_dict(self):
         return {
             k: {kk: vv.detach().cpu().numpy().tolist() for kk, vv in v.items()}
