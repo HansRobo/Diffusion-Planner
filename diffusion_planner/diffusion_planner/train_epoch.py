@@ -32,10 +32,24 @@ def heading_to_cos_sin(x):
     )
 
 
-def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation = None):
+def train_epoch(
+    data_loader,
+    model,
+    optimizer,
+    args,
+    ema,
+    aug: StatePerturbation,
+    scheduler,
+    global_step: int,
+):
+    """Run one pass over ``data_loader``.
+
+    The learning rate is advanced once per optimizer step rather than once per epoch, so
+    ``global_step`` is threaded through and returned for the next epoch to continue from.
+    """
     if len(data_loader) == 0:
         empty = {"loss": 0.0, "turn_indicator_accuracy": 0.0}
-        return empty, 0.0
+        return empty, 0.0, global_step
 
     epoch_loss = []
 
@@ -88,6 +102,9 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         nn.utils.clip_grad_norm_(model.parameters(), 5)
         optimizer.step()
 
+        global_step += 1
+        scheduler.step_update(num_updates=global_step)
+
         ema.update(model)
 
         if args.ddp:
@@ -103,4 +120,4 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
         print(f"{epoch_mean_loss['loss']=:.4f}")
         print(f"{epoch_mean_loss['turn_indicator_accuracy']=:.4f}")
 
-    return epoch_mean_loss, epoch_mean_loss["loss"]
+    return epoch_mean_loss, epoch_mean_loss["loss"], global_step

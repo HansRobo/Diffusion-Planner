@@ -56,7 +56,27 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     train_epochs: int = cli("total training epochs", default=80)
     save_utd: int = cli("checkpoint save cadence in epochs", default=10)
     learning_rate: float = 1e-4
-    warm_up_epoch: int = 5
+    warm_up_epoch: int = 5  # GRPO fine-tuning only; the main loop is step-denominated below.
+
+    # ---------------------------------------------------------
+    # Learning Rate Schedule
+    # ---------------------------------------------------------
+    # Every duration here is counted in optimizer steps, not epochs, so the shape of the decay
+    # no longer changes when the dataset size, the batch size or the GPU count changes.
+    lr_scheduler: Literal["cosine", "tanh", "step", "multistep", "poly", "constant"] = cli(
+        "learning rate schedule shape", default="cosine"
+    )
+    warmup_steps: int = cli("linear warm-up length in optimizer steps", default=1000)
+    warmup_lr: float = 1.0e-7
+    warmup_prefix: bool = True
+    min_lr: float = 1.0e-6
+    decay_steps: int = 10000
+    decay_milestones: list[int] = field(default_factory=lambda: [20000, 40000])
+    decay_rate: float = 0.1
+    cycle_mul: float = 1.0
+    cycle_decay: float = 0.5
+    cycle_limit: int = 1
+    k_decay: float = 1.0
     encoder_drop_path_rate: float = 0.1
     decoder_drop_path_rate: float = 0.1
     use_ego_history: bool = True

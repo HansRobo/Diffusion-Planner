@@ -24,7 +24,11 @@ from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
 from diffusion_planner.utils.dataset import DiffusionPlannerData, DiffusionPlannerPairData
-from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.lr_scheduler import (
+    build_lr_scheduler,
+    describe_lr_scheduler,
+    set_base_lr,
+)
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
@@ -366,7 +370,15 @@ def model_training(args: TrainConfig):
     ]
 
     optimizer = optim.AdamW(params)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
+
+    # The schedule is denominated in optimizer steps, so its shape stays fixed when the dataset
+    # size, the batch size or the GPU count changes - none of which an epoch count controls.
+    steps_per_epoch = len(train_loader)
+    total_steps = steps_per_epoch * train_epochs
+    scheduler = build_lr_scheduler(optimizer, args, total_steps)
+    if global_rank == 0:
+        print(describe_lr_scheduler(args, total_steps))
+        print(f"{steps_per_epoch} optimizer steps per epoch")
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
@@ -381,13 +393,20 @@ def model_training(args: TrainConfig):
             use_ddp=args.ddp,
         )
 
-        # Override learning rate with the new value
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = args.learning_rate
+        # Re-anchor the schedule on the requested peak LR, so resuming with a different
+        # --learning_rate moves the whole curve instead of only the current step.
+        set_base_lr(scheduler, args.learning_rate)
         print(f"Learning rate reset to {args.learning_rate}")
+
+        # A step counter is not part of timm's scheduler state, so it is derived from the epoch
+        # the checkpoint stopped at when an older checkpoint does not carry one.
+        ckpt = torch.load(args.resume_model_path, map_location="cpu")
+        global_step = int(ckpt.get("global_step", init_epoch * steps_per_epoch))
+        del ckpt
 
     else:
         init_epoch = 0
+        global_step = 0
     # logger
     if global_rank == 0:
         os.environ["WANDB_MODE"] = "online" if args.use_wandb else "offline"
@@ -465,23 +484,17 @@ def model_training(args: TrainConfig):
         if args.ddp:
             torch.distributed.barrier()
 
-        # Adjust learning rate for final 10 epochs
-        final_epoch_count = 10
-        if epoch >= train_epochs - final_epoch_count:
-            base_lr = args.learning_rate
-            if epoch >= train_epochs - final_epoch_count // 2:  # Last 5 epochs: LR * 1/100
-                adjusted_lr = base_lr * 0.01
-            else:  # First 5 of final 10 epochs: LR * 1/10
-                adjusted_lr = base_lr * 0.1
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = adjusted_lr
-            if global_rank == 0:
-                print(f"Final phase: Epoch {epoch + 1}, LR adjusted to {adjusted_lr}")
-
         # training step
         train_start_time = time.perf_counter()
-        train_loss, train_total_loss = train_epoch(
-            train_loader, diffusion_planner, optimizer, args, model_ema, aug
+        train_loss, train_total_loss, global_step = train_epoch(
+            train_loader,
+            diffusion_planner,
+            optimizer,
+            args,
+            model_ema,
+            aug,
+            scheduler,
+            global_step,
         )
         train_sec = time.perf_counter() - train_start_time
 
@@ -612,6 +625,7 @@ def model_training(args: TrainConfig):
                 "ema_state_dict": model_ema.ema.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "schedule": scheduler.state_dict(),
+                "global_step": global_step,
                 "loss": valid_loss_ego,
                 # We always use new wandb run for each training session, so we don't need to save the wandb_id in the model_dict.
                 "wandb_id": None,
@@ -677,7 +691,6 @@ def model_training(args: TrainConfig):
                 os.path.join(curr_dir, "closed_loop"),
             )
 
-        scheduler.step()
         train_sampler.set_epoch(epoch + 1)
 
     if global_rank == 0 and wandb.run is not None:
