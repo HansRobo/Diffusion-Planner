@@ -279,7 +279,7 @@ def compute_grpo_loss(
     t = t.view(B, 1, 1).expand(B, T + 1, 1)
     z = torch.randn_like(ego_target)
 
-    max_delay = 5
+    max_delay = 0
     delay = torch.randint(0, max_delay + 1, (B,), device=device)
     prefix_mask = generate_ego_prefix_mask(delay, T + 1)  # [B, T+1, 1]
     mask_coeff = random.uniform(0.0, 1.0)

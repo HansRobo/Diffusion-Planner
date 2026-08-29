@@ -63,7 +63,7 @@ def compute_trajectory_loss(model, data, trajectory, model_args, noise, t, devic
         t_4d = t.view(B, 1, 1, 1).expand(B, P, future_len + 1, 1).clone()
 
     # Prefix mask with random delay — matches SFT (decoder.py line 95-100)
-    max_delay = 5
+    max_delay = 0
     delay = torch.randint(0, max_delay + 1, (B,), device=device)
     prefix_mask = generate_prefix_mask(delay, P, future_len + 1)  # (B, P, T+1, 1)
     mask_coeff = _random.uniform(0.0, 1.0)
@@ -318,7 +318,7 @@ def compute_batched_trajectory_losses(
     # Prefix mask with random delay — matches SFT (decoder.py line 95-100)
     # Forces first `delay` steps to use clean GT, training the model to
     # predict the trajectory conditioned on a clean prefix.
-    max_delay = 5
+    max_delay = 0
     delay = torch.randint(0, max_delay + 1, (N,), device=device)
     prefix_mask = generate_prefix_mask(delay, P, future_len + 1)  # (N, P, T+1, 1)
     mask_coeff = _random.uniform(0.0, 1.0)
@@ -658,7 +658,7 @@ def _compute_neighbor_reg_loss(
         t = torch.rand(1, device=device) * (1 - eps) + eps
         t_4d = t.view(1, 1, 1, 1).expand(1, P, future_len + 1, 1).clone()
 
-        max_delay = 5
+        max_delay = 0
         delay = torch.randint(0, max_delay + 1, (1,), device=device)
         prefix_mask = generate_prefix_mask(delay, P, future_len + 1)
         mask_coeff = _random.uniform(0.0, 1.0)

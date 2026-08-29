@@ -286,7 +286,7 @@ def _compute_sft_diffusion_loss(
         t_4d = t.view(B, 1, 1, 1).expand(B, P, future_len + 1, 1).clone()
 
         # Prefix mask with random delay
-        max_delay = 5
+        max_delay = 0
         delay = torch.randint(0, max_delay + 1, (B,), device=device)
         prefix_mask = generate_prefix_mask(delay, P, future_len + 1)
         mask_coeff = _random.uniform(0.0, 1.0)
