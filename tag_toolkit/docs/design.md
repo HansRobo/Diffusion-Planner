@@ -20,7 +20,7 @@ pre-filters). For wholesale changes, use `rebuild_index`.
 the set, they never extend it. A path that isn't in the index never
 becomes "visible" through `scope`.
 
-For large or repeated use, prefer a pre-built `.db` index file. The
+For large or repeated use, prefer a pre-built `.tags.db` index file. The
 on-init directory scan reads every sidecar on disk; the loaded index
 skips that.
 
@@ -153,7 +153,7 @@ subsequent query.
 | When set | Once, at `TagStore(source)` | Every query / mutate call |
 | Effect | Defines the **authoritative frame set** | Narrows the **operation** to a subset |
 | Can extend the frame set? | Yes — scanning discovers frames on disk | **No** — unknown paths are silently dropped |
-| Disk cost | One-time scan or `.db` load | None for indexed paths; one `expand_source` fallback per non-indexed path |
+| Disk cost | One-time scan or `.tags.db` load | None for indexed paths; one `expand_source` fallback per non-indexed path |
 | Mutability | Frozen for the lifetime of the store | Re-evaluated per call |
 
 `source` answers "what does this store see?". `scope` answers "of what

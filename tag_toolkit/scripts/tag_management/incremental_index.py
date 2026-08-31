@@ -7,8 +7,8 @@ never read, never re-tagged, never re-validated.
 
 Usage::
 
-    python incremental_index.py existing.db /path/to/dataset
-    python incremental_index.py existing.db /path/to/dataset --output new.db
+    python incremental_index.py existing.tags.db /path/to/dataset
+    python incremental_index.py existing.tags.db /path/to/dataset --output new.tags.db
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def _merge(
     triggers WAL mode, which checkpoints back to the main file on close).
     """
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_path = Path(tmpdir) / "merged.db"
+        tmp_path = Path(tmpdir) / "merged.tags.db"
         shutil.copy2(old_index_path, tmp_path)
         store = TagStore(str(tmp_path))
         try:
@@ -138,7 +138,7 @@ def main() -> int:
     parser.add_argument(
         "old_index",
         type=Path,
-        help="path to the existing SQLite index file (.db, .sqlite, or .tags.db)",
+        help="path to the existing SQLite index file (.tags.db)",
     )
     parser.add_argument(
         "new_source",

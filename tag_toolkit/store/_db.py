@@ -6,7 +6,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-_DB_SUFFIXES = (".db", ".sqlite", ".tags.db")
+_DB_SUFFIXES = (".tags.db",)
 
 # ---------------------------------------------------------------------------
 # SQLite schema

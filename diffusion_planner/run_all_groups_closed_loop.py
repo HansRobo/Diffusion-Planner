@@ -24,6 +24,7 @@ from diffusion_planner.config.closed_loop_config import (
 from diffusion_planner.config.config_cli import build_config, build_parser, resolve_paths
 from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
+from tag_toolkit.store import TagStore
 
 from scenario_generation.wandb_closed_loop import (
     log_closed_loop_to_wandb,
@@ -34,11 +35,11 @@ def resolve_closed_loop_inputs(
     inputs: str | list[str],
     modes: list[str] | None = None,
 ) -> list[dict]:
-    """Resolve input paths to a list of ``{"name", "groups", "mode"}`` entries.
+    """Resolve input paths to a list of ``{"name", "groups", "mode", "tag_store"}`` entries.
 
-    Each entry in ``inputs`` produces ONE entry in the output list — duplicate
-    paths are allowed and kept as separate entries (same JSON may legitimately
-    need to run under multiple modes, e.g. ``sites.json objects sites.json noobj``).
+    ``tag_store`` is built via ``TagStore.from_source``: if a same-named ``.tags.db``
+    exists next to the input it is loaded; otherwise an in-memory index is built.
+    The caller holds this store for the lifetime of the evaluation.
 
     ``modes`` is zipped positionally with the *input list* (1-to-1):
 
@@ -48,7 +49,7 @@ def resolve_closed_loop_inputs(
 
     Return shape:
 
-        [{"name": "sites", "groups": {"all": [...]}, "mode": "objects"}, ...]
+        [{"name": "sites", "groups": {"all": [...]}, "mode": "objects", "tag_store": TagStore}, ...]
     """
     if isinstance(inputs, str):
         inputs = [inputs]
@@ -73,6 +74,7 @@ def resolve_closed_loop_inputs(
 
         if p.is_dir():
             groups.setdefault("all", []).append(str(p))
+            tag_store = TagStore.from_source(str(p))
 
         elif p.suffix == ".json":
             with open(p, "r") as f:
@@ -83,12 +85,13 @@ def resolve_closed_loop_inputs(
                     groups.setdefault(group_name, []).extend(str(Path(item)) for item in paths)
             elif isinstance(data, list):
                 groups.setdefault("all", []).extend(str(Path(item)) for item in data)
+            tag_store = TagStore.from_source(str(p))
 
         else:
             print(f"Warning: {input_path} has unsupported extension, skipping", file=sys.stderr)
             continue
 
-        entries.append({"name": p.stem if p.suffix else p.name, "groups": groups, "mode": mode})
+        entries.append({"name": p.stem if p.suffix else p.name, "groups": groups, "mode": mode, "tag_store": tag_store})
 
     return entries
 
@@ -102,6 +105,7 @@ def run_one_group(
     mode: str | None = None,
     render_media: bool = True,
     pass_condition: ClosedLoopPassCondition | None = None,
+    tag_store=None,
 ) -> None:
     """Run closed-loop evaluation for a single group; writes ``summary.json`` + ``segments.jsonl``
     under ``out_dir``. Wandb logging is left to the caller.
@@ -186,6 +190,7 @@ def run_one_group(
         seg_len=cfg.closed_loop_seg_len,
         ddp_rank=ddp_rank,
         ddp_world_size=ddp_world_size,
+        tag_store=tag_store,
     )
 
     evaluator.run_distributed()
@@ -367,6 +372,8 @@ def run_closed_loop_main(
         json_out_dir = out_root / json_label
         json_out_dir.mkdir(parents=True, exist_ok=True)
 
+        tag_store = entry.get("tag_store")
+
         for group_name, npz_paths in groups.items():
             mode_out_dir = json_out_dir / group_name
             summary_key = _make_summary_key(json_label, group_name)
@@ -381,6 +388,7 @@ def run_closed_loop_main(
                 mode=mode,
                 render_media=render_media,
                 pass_condition=group_condition,
+                tag_store=tag_store,
             )
 
         written_json_labels.add(json_label)

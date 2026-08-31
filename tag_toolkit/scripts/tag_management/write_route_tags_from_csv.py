@@ -14,7 +14,7 @@ Usage::
         /path/to/mapping.csv \\
         --match-col t4_dataset_id \\
         --tag-dimensions devops_site devops_override_label \\
-        [--output-index /path/to/output.db]
+        [--output-index /path/to/output.tags.db]
 
 All file writes are batched (per-file fsync deferred) and synced once at
 the end for maximum performance.
@@ -337,8 +337,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "TagToolkit source (see tag_toolkit.source): a directory, a "
             "path-list .json / .json.zst, a single .npz, a sequence of "
-            "those, or a pre-built TagStore SQLite index (*.db / *.sqlite "
-            "/ *.tags.db). The form is auto-detected; a database index is "
+            "those, or a pre-built TagStore SQLite index (*.tags.db). "
+            "The form is auto-detected; a database index is "
             "the fast path for large datasets."
         ),
     )
@@ -370,7 +370,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         dest="output_index",
-        help="Output path for the .db index file (optional)",
+        help="Output path for the .tags.db index file (optional)",
     )
     return parser.parse_args()
 
