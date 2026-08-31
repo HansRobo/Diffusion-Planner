@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.dimensions import INPUT_T, POSE_DIM
+from diffusion_planner.dimensions import CONTROL_DIM, INPUT_T
 
 from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
@@ -273,11 +273,13 @@ def _arrays_to_device(arrays: dict, device: str) -> dict:
 
 def _add_static_inputs(data: dict, model_args, n: int, device: str) -> None:
     """Add the per-batch ``delay`` + zero ``sampled_trajectories`` the model expects
-    (P = 1 ego + predicted neighbors, T = future_len + 1). In place."""
+    (P = 1 ego + predicted neighbors, T = future_len, D = CONTROL_DIM). In place."""
     data["delay"] = torch.zeros((n,), dtype=torch.long, device=device)
     n_agents = 1 + model_args.predicted_neighbor_num
     data["sampled_trajectories"] = torch.zeros(
-        (n, n_agents, model_args.future_len + 1, POSE_DIM), dtype=torch.float32, device=device
+        (n, n_agents, model_args.future_len, CONTROL_DIM),
+        dtype=torch.float32,
+        device=device,
     )
 
 

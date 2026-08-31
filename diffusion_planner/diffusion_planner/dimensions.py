@@ -83,6 +83,7 @@ SEGMENT_POINT_DIM = LINE_TYPE_RIGHT_START + LINE_TYPE_NUM
 INPUT_T = 30
 OUTPUT_T = 80  # Output timestamp number
 POSE_DIM = 4  # x, y, cos(yaw), sin(yaw)
+CONTROL_DIM = 2  # accel, curvature
 
 OUTPUT_SHAPE = (1, MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM)
 

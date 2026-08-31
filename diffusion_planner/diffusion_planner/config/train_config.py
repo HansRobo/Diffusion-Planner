@@ -3,6 +3,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional
 
+from diffusion_planner.utils.normalizer import ControlNormalizer
+
 from .closed_loop_config import ClosedLoopConfig
 from .config_cli import cli
 from .model_config import ModelConfig
@@ -44,7 +46,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     augment_type: Literal["quintic", "bridge"] = "quintic"
     num_refine: int = 20
     ego_past_noise_std: float = 0.1
-    use_smoothing_future_trajectory: bool = True
+    use_smoothing_future_trajectory: bool = False
     normalization_file_path: str = "normalization.json"
 
     train_subsample_step: int = 1
@@ -80,12 +82,16 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     neighbor_collision_margin_bicycle: float = 0.5
 
     alpha_planning_loss: float = 1.0
-    alpha_neighbor_loss: float = 0.1
+    alpha_neighbor_loss: float = 0.0
 
     # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False
     hybrid_loss_omega: float = 0.1
     hybrid_loss_window: int = 10
+
+    # Control Loss
+    control_traj_loss_horizon: int = 80
+    coeff_control_traj_loss: float = 0.0
 
     guidance_scale: float = 0.5
     device: str = "cuda"
@@ -127,6 +133,17 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     # ---------------------------------------------------------
     state_normalizer: Optional[Any] = field(default=None, repr=False)
     observation_normalizer: Optional[Any] = field(default=None, repr=False)
+    # Unlike the two above, the control statistics are dataset-wide constants that
+    # normalization.json does not carry, so they are spelled out here.  Keeping them on the
+    # config itself means every entrypoint that builds one gets them without repeating the
+    # numbers -- the old shared build_train_config() no longer exists to hold them.
+    control_normalizer: Any = field(
+        default_factory=lambda: ControlNormalizer(
+            mean=[-0.017765, -0.001449],
+            std=[0.507420, 0.032235],
+        ),
+        repr=False,
+    )
 
     # ---------------------------------------------------------
     # Deterministic

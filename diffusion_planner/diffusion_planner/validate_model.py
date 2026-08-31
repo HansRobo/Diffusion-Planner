@@ -17,7 +17,7 @@ except Exception as exc:  # optional metric dependency; raised only when enabled
 else:
     _EPDMS_IMPORT_ERROR = None
 
-from diffusion_planner.dimensions import MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
+from diffusion_planner.dimensions import CONTROL_DIM, MAX_NUM_AGENTS, OUTPUT_T, POSE_DIM
 from diffusion_planner.loss import (
     compute_ego_edge_points,
     compute_neighbor_collision_penalty,
@@ -53,8 +53,8 @@ def _prepare_validation_inputs(inputs, args, device, delay=0) -> _PreparedValida
     inputs["sampled_trajectories"] = torch.zeros(
         batch_size,
         MAX_NUM_AGENTS,
-        OUTPUT_T + 1,
-        POSE_DIM,
+        OUTPUT_T,
+        CONTROL_DIM,
         dtype=torch.float32,
         device=device,
     )

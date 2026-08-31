@@ -186,16 +186,22 @@ class DecoderONNXWrapper(nn.Module):
         batch_size = encoding.shape[0]
         agent_num = 1 + self.decoder._predicted_neighbor_num
 
+        # The deployed ROS node always sends a (1 + T, POSE_DIM) zero tensor here, while
+        # the decoder denoises T steps of CONTROL_DIM channels -- keep the node's signature
+        # and drop the leading current-state step and the extra columns (the input is
+        # all-zero either way).
         sampled_trajectories = sampled_trajectories.reshape(
-            batch_size, agent_num, 1 + self.decoder._future_len, 4
-        )
+            batch_size, agent_num, 1 + self.decoder._future_len, POSE_DIM
+        )[:, :, 1:, :CONTROL_DIM]
+        # The node's diffusion_time carries the same leading step; drop it to match.
+        diffusion_time = diffusion_time[:, :, 1:, :]
 
         model_output = self.decoder.dit(
             sampled_trajectories,
             diffusion_time,
             encoding,
             neighbor_current_mask,
-        ).reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
+        ).reshape(batch_size, agent_num, self.decoder._future_len, CONTROL_DIM)
 
         return model_output
 
@@ -210,12 +216,13 @@ class TurnIndicatorONNXWrapper(nn.Module):
     def forward(self, encoding: torch.Tensor, final_x0: torch.Tensor) -> torch.Tensor:
         batch_size = encoding.shape[0]
         agent_num = 1 + self.decoder._predicted_neighbor_num
-        final_x0 = final_x0.reshape(batch_size, agent_num, 1 + self.decoder._future_len, 4)
-
         encoding_pooled = torch.mean(encoding, dim=1)
-        ego_trajectory = final_x0[:, 0, 1::10, :2].reshape(
-            batch_size, 2 * (self.decoder._future_len // 10)
-        )
+        # The denoised channels are (accel, curvature), so the trajectory slot is zero here
+        # exactly as it is in Decoder._compute_turn_indicator_from_denoised. ``final_x0`` is
+        # multiplied by zero rather than ignored: the ROS node binds it by name, and an
+        # input that reaches no output is dropped from the exported signature.
+        n_traj = 2 * (self.decoder._future_len // 10)
+        ego_trajectory = final_x0.reshape(batch_size, -1)[:, :n_traj] * 0.0
         return self.decoder._compute_turn_indicator(ego_trajectory, encoding_pooled)
 
 
@@ -246,6 +253,9 @@ class FullONNXWrapper(nn.Module):
         turn_indicators: torch.Tensor,
         delay: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # The node sends 1 + T steps of POSE_DIM channels; the decoder denoises T steps of
+        # CONTROL_DIM channels.
+        sampled_trajectories = sampled_trajectories[:, :, 1:, :CONTROL_DIM]
         inputs = {
             "sampled_trajectories": sampled_trajectories,
             "ego_agent_past": ego_agent_past,
@@ -266,6 +276,10 @@ class FullONNXWrapper(nn.Module):
             "delay": delay,
         }
         _, decoder_outputs = self.model(inputs)
+        # Only the two tensors the deployed ROS node declares: it validates the engine's
+        # tensor count against its own config and refuses an engine that carries more.
+        # The raw (accel, curvature) command is recoverable from ``prediction``, which is
+        # that same control integrated through the unicycle model.
         return decoder_outputs["prediction"], decoder_outputs["turn_indicator_logit"]
 
 

@@ -99,11 +99,12 @@ class DiT(nn.Module):
         heads=6,
         dropout=0.1,
         mlp_ratio=4.0,
+        *,
+        T,
+        D,
     ):
         super().__init__()
 
-        T = 81
-        D = 4
         self.agent_embedding = nn.Embedding(2, hidden_dim)
         self.preproj = Mlp(
             in_features=T * D,
