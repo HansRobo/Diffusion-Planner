@@ -10,13 +10,14 @@ import torch
 from diffusion_planner.dimensions import *
 from diffusion_planner.train_epoch import heading_to_cos_sin
 from diffusion_planner.utils.onnx_export import (
-    ENCODER_INPUT_NAMES,
-    FULL_INPUT_NAMES,
+    ImageEncoder,
     ModelWrappers,
     NumpyDict,
     TensorDict,
+    add_bev_dummy_input,
     build_decoder_inputs,
     build_dummy_inputs,
+    build_schema,
     build_wrappers,
     export_model_to_onnx,
     load_model,
@@ -111,10 +112,14 @@ def build_inputs_from_npz(npz_path: Path) -> TensorDict:
     return inputs
 
 
-def load_validation_inputs(eval_npz_path: Path | None) -> TensorDict:
+def load_validation_inputs(eval_npz_path: Path | None, model) -> TensorDict:
     if eval_npz_path:
-        return build_inputs_from_npz(eval_npz_path)
-    return build_dummy_inputs()
+        inputs = build_inputs_from_npz(eval_npz_path)
+    else:
+        inputs = build_dummy_inputs()
+    if isinstance(model.encoder, ImageEncoder):
+        inputs = add_bev_dummy_input(inputs, model.encoder.image_size)
+    return inputs
 
 
 def run_ort_in_subprocess(model_path: Path, np_inputs: NumpyDict) -> list[np.ndarray]:
@@ -160,15 +165,16 @@ def compare(name: str, torch_output: np.ndarray, onnx_output: np.ndarray) -> Non
 
 def validate_full_model(
     wrappers: ModelWrappers,
+    full_input_names: list[str],
     inputs: TensorDict,
     full_onnx_path: Path,
 ) -> None:
     with torch.no_grad():
         torch_prediction, torch_turn_indicator = wrappers.full(
-            *(inputs[name] for name in FULL_INPUT_NAMES)
+            *(inputs[name] for name in full_input_names)
         )
 
-    full_onnx_inputs = {name: inputs[name].cpu().numpy() for name in FULL_INPUT_NAMES}
+    full_onnx_inputs = {name: inputs[name].cpu().numpy() for name in full_input_names}
     onnx_prediction, onnx_turn_indicator = run_ort_in_subprocess(full_onnx_path, full_onnx_inputs)
     compare("prediction", torch_prediction.cpu().numpy(), onnx_prediction)
     compare(
@@ -180,6 +186,7 @@ def validate_full_model(
 
 def validate_split_models(
     wrappers: ModelWrappers,
+    encoder_input_names: list[str],
     inputs: TensorDict,
     decoder_inputs: TensorDict,
     encoder_onnx_path: Path,
@@ -187,7 +194,7 @@ def validate_split_models(
     turn_indicator_onnx_path: Path,
 ) -> None:
     with torch.no_grad():
-        torch_encoding = wrappers.encoder(*(inputs[name] for name in ENCODER_INPUT_NAMES))
+        torch_encoding = wrappers.encoder(*(inputs[name] for name in encoder_input_names))
         torch_model_output = wrappers.decoder(
             torch_encoding,
             decoder_inputs["sampled_trajectories"],
@@ -196,7 +203,7 @@ def validate_split_models(
         )
         torch_turn_indicator = wrappers.turn_indicator(torch_encoding, torch_model_output)
 
-    encoder_onnx_inputs = {name: inputs[name].cpu().numpy() for name in ENCODER_INPUT_NAMES}
+    encoder_onnx_inputs = {name: inputs[name].cpu().numpy() for name in encoder_input_names}
     onnx_encoding = run_ort_in_subprocess(encoder_onnx_path, encoder_onnx_inputs)[0]
     compare("encoding", torch_encoding.cpu().numpy(), onnx_encoding)
 
@@ -264,16 +271,18 @@ def convert_model(
 
     print("\nORT validation")
     wrappers = build_wrappers(model)
-    validation_inputs = load_validation_inputs(eval_npz_path)
+    schema = build_schema(model)
+    validation_inputs = load_validation_inputs(eval_npz_path, model)
     with torch.no_grad():
         validation_encoding = wrappers.encoder(
-            *(validation_inputs[name] for name in ENCODER_INPUT_NAMES)
+            *(validation_inputs[name] for name in schema.encoder_input_names)
         )
     validation_decoder_inputs = build_decoder_inputs(validation_inputs, validation_encoding)
 
-    validate_full_model(wrappers, validation_inputs, full_onnx_path)
+    validate_full_model(wrappers, schema.full_input_names, validation_inputs, full_onnx_path)
     validate_split_models(
         wrappers,
+        schema.encoder_input_names,
         validation_inputs,
         validation_decoder_inputs,
         encoder_onnx_path,

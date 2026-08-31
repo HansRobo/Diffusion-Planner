@@ -22,7 +22,11 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
-from diffusion_planner.utils.dataset import DiffusionPlannerData
+from diffusion_planner.utils.dataset import (
+    DiffusionPlannerData,
+    bev_render_settings,
+    worker_init,
+)
 from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
 from diffusion_planner.utils.neighbor_db import NeighborPatternDB
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
@@ -115,14 +119,17 @@ def model_training(args):
     if global_rank == 0 and args.w_kinematic > 0.0:
         print(f"Kinematic-feasibility reward enabled: w_kinematic={args.w_kinematic}")
 
+    # StatePerturbation data augmentation (same as the supervised trainer): applied in the
+    # DataLoader worker, so it runs on CPU tensors and precedes the BEV rasterisation of the
+    # image encoder. It feeds both the SFT and the GRPO step. None disables it.
     if args.use_data_augment:
         if args.augment_type == "bridge":
-            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device=args.device)
+            aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device="cpu")
         else:
             aug = StatePerturbation(
                 augment_prob=args.augment_prob,
                 num_refine=args.num_refine,
-                device=args.device,
+                device="cpu",
                 ego_past_noise_std=args.ego_past_noise_std,
                 use_smoothing_future_trajectory=args.use_smoothing_future_trajectory,
             )
@@ -131,8 +138,9 @@ def model_training(args):
     else:
         aug = None
 
-    train_set = DiffusionPlannerData(args.train_set_list)
-    valid_set = DiffusionPlannerData(args.valid_set_list)
+    # Only the training set is augmented; validation always sees the recorded scene.
+    train_set = DiffusionPlannerData(args.train_set_list, *bev_render_settings(args), aug)
+    valid_set = DiffusionPlannerData(args.valid_set_list, *bev_render_settings(args), None)
 
     train_set.data_list = train_set.data_list[:: args.train_subsample_step]
 
@@ -146,6 +154,7 @@ def model_training(args):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=True,
+        worker_init_fn=worker_init,
     )
 
     valid_sampler = DistributedSampler(
@@ -158,6 +167,7 @@ def model_training(args):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=False,
+        worker_init_fn=worker_init,
     )
     if global_rank == 0:
         print("Dataset Prepared: {} train data\n".format(len(train_set)))
@@ -237,7 +247,6 @@ def model_training(args):
             args,
             model_ema,
             collider_injector,
-            aug,
         )
 
         valid_dict = validate_model(diffusion_planner, valid_loader, args)

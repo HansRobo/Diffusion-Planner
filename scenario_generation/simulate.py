@@ -61,9 +61,20 @@ class _OnnxModel:
     The ONNX is the ``FullONNXWrapper`` graph — encoder + diffusion decoder with NO normalization
     (normalization is external, done by ``observation_normalizer`` before the call), so the SAME
     normalized ``data`` dict the torch model receives feeds the ONNX unchanged. We just pull the
-    graph's declared inputs out of ``data``, cast to each input's onnx dtype (bool flags stay bool,
-    everything else float32; ``delay`` is reshaped to the graph's ``[1, 1]``), run the session, and
-    wrap the two outputs back into torch tensors on ``device``."""
+    graph's declared inputs out of ``data``, cast each to the dtype its graph input declares (the
+    image-input graph takes ``bev_image`` as uint8 straight from the rasteriser, bool flags stay
+    bool, the rest is float32; ``delay`` is reshaped to the graph's ``[1, 1]``), run the session,
+    and wrap the two outputs back into torch tensors on ``device``."""
+
+    # Every input dtype the exported graphs declare. Missing entries are a hard error rather than
+    # a silent float32 cast, which is what let a uint8 ``bev_image`` reach the session as float.
+    _NUMPY_DTYPE_OF = {
+        "tensor(bool)": np.bool_,
+        "tensor(uint8)": np.uint8,
+        "tensor(int32)": np.int32,
+        "tensor(int64)": np.int64,
+        "tensor(float)": np.float32,
+    }
 
     def __init__(self, onnx_path: str | Path, device: str = "cuda"):
         import onnxruntime as ort
@@ -80,11 +91,15 @@ class _OnnxModel:
     def __call__(self, data):
         feed = {}
         for name, otype in self._inputs:
+            assert otype in self._NUMPY_DTYPE_OF, f"unhandled onnx dtype {otype} for input {name}"
             arr = np.asarray(data[name].detach().cpu().numpy())
-            if otype == "tensor(bool)":
-                arr = arr.astype(bool)
-            else:
-                arr = arr.astype(np.float32)
+            dtype = self._NUMPY_DTYPE_OF[otype]
+            # An integer graph input carries raster/index values, not a normalized quantity: a
+            # float source here means the caller built the wrong thing, and casting would hide it.
+            assert dtype in (np.bool_, np.float32) or arr.dtype == dtype, (
+                f"input {name} is {arr.dtype}, graph declares {otype}"
+            )
+            arr = arr.astype(dtype)
             if name == "delay":
                 arr = arr.reshape(-1, 1)[:1]  # graph declares a static [1, 1] delay
             feed[name] = arr

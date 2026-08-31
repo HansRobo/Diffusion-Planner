@@ -33,12 +33,43 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     )
 
     # ---------------------------------------------------------
+    # Scene representation fed to the encoder
+    #
+    # "vector" is the original pipeline: polylines and agent states are encoded per element.
+    # "image" renders the same scene into BEV rasters (see diffusion_planner.utils.render_bev)
+    # and encodes them with a shared ResNet.  Both the augmentation and the rasterisation run in
+    # the DataLoader worker, in that order, so the rasters always show the perturbed ego frame.
+    # ---------------------------------------------------------
+    input_type: Literal["vector", "image"] = cli(
+        "scene representation fed to the encoder", default="image"
+    )
+    bev_image_size: int = cli("size of the BEV image", default=224)
+
+    # Trunk that turns a BEV raster into tokens (image input only).  "resnet18" is trained from
+    # scratch on the raw semantic planes.  The DINOv3 trunks are patch-16, so a 2x2 merger
+    # brings them back to the ResNet's token count and the decoder's cost never moves; a learned
+    # per-pixel MLP folds the planes down to the 3 channels they expect (see ChannelAdapter).
+    image_backbone: Literal["resnet18", "dinov3_small", "dinov3_base"] = cli(
+        "trunk that encodes the BEV rasters", default="resnet18"
+    )
+
+    # Only valid for a DINOv3 trunk: its pretrained weights are then left untouched and it stays
+    # in eval mode.  The channel adapter and the 2x2 merger around it train either way, so
+    # gradients still flow through the trunk; only its own weights are spared.
+    freeze_image_backbone: bool = cli("leave the DINOv3 weights untrained", default=False)
+
+    # ---------------------------------------------------------
     # DataLoader Parameters
     # ---------------------------------------------------------
     batch_size: int = cli("batch size across all GPUs", default=512)
-    num_workers: int = 8
+    num_workers: int = 16
     pin_mem: bool = True
 
+    # The perturbation is applied per sample inside the DataLoader worker (see
+    # DiffusionPlannerData), which is what lets image mode use it: the BEV rasters are drawn
+    # from the already-perturbed scene.  "quintic" costs ~4 ms per sample there, well under the
+    # ~11 ms the rasterisation itself takes; "bridge" costs ~1 s per sample, so it needs far
+    # more workers than the rest of the pipeline to keep up.
     use_data_augment: bool = True
     augment_prob: float = 0.5
     augment_type: Literal["quintic", "bridge"] = "quintic"
@@ -80,7 +111,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     neighbor_collision_margin_bicycle: float = 0.5
 
     alpha_planning_loss: float = 1.0
-    alpha_neighbor_loss: float = 0.1
+    alpha_neighbor_loss: float = 0.0
 
     # Velocity Representation & Hybrid Loss
     use_velocity_representation: bool = False

@@ -30,6 +30,8 @@ from pathlib import Path
 import numpy as np
 import torch
 from diffusion_planner.dimensions import INPUT_T, POSE_DIM
+from diffusion_planner.utils.dataset import bev_render_settings
+from diffusion_planner.utils.render_bev import VIEW_EXTENTS_M, render_sample
 
 from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
@@ -281,6 +283,40 @@ def _add_static_inputs(data: dict, model_args, n: int, device: str) -> None:
     )
 
 
+RENDER_BEV_KEYS = (
+    "lanes",
+    "route_lanes",
+    "polygons",
+    "line_strings",
+    "static_objects",
+    "neighbor_agents_past",
+    "ego_agent_past",
+    "ego_current_state",
+    "goal_pose",
+    "ego_shape",
+)
+
+
+def _add_bev_images(batch: dict, model_args, device: str) -> None:
+    """Rasterise the BEV inputs for an image-input model, in place.
+
+    Training renders in the DataLoader worker; the rollout builds its frames itself, so the
+    same rasteriser has to run here. It must see metres, so this is called on the batch
+    BEFORE the normalizer, and it pulls only the keys the renderer reads back to the host.
+    """
+    render, image_size = bev_render_settings(model_args)
+    if not render:
+        return
+    host = {k: batch[k].detach().cpu().numpy() for k in RENDER_BEV_KEYS}
+    images = np.stack(
+        [
+            render_sample({k: v[i] for k, v in host.items()}, image_size, VIEW_EXTENTS_M)
+            for i in range(batch["ego_current_state"].shape[0])
+        ]
+    )
+    batch["bev_image"] = torch.from_numpy(images).to(device)
+
+
 def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
     """Concat N single-sample numpy dicts -> one batched, normalized torch dict.
 
@@ -291,6 +327,7 @@ def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
     N = len(np_dicts)
     arrays = {k: np.concatenate([d[k] for d in np_dicts], axis=0) for k in np_dicts[0]}
     data = _arrays_to_device(arrays, device)
+    _add_bev_images(data, model_args, device)
     _add_static_inputs(data, model_args, N, device)
     return model_args.observation_normalizer(data)
 
@@ -365,6 +402,7 @@ def _to_torch_batch_gpu(raw_payloads: list[tuple], model_args, device: str, want
     # The normalizer below shallow-copies and REPLACES keys, so these tensors
     # stay un-normalized.
     raw_gpu = dict(batch)
+    _add_bev_images(batch, model_args, device)
     _add_static_inputs(batch, model_args, N, device)
     return model_args.observation_normalizer(batch), neighbors_live, np_dicts, raw_gpu
 
@@ -1948,7 +1986,7 @@ def run_segments_batched(
                     replay_mode=timeline_progress_mode,
                     strong_brake_mps2=strong_brake_mps2,
                     yaw_gate=yaw_gate,
-                    goal_mode=goal_mode
+                    goal_mode=goal_mode,
                 )
                 for (tl, start, end) in chunk
             ]
