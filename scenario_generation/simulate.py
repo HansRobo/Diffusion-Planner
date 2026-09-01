@@ -65,6 +65,11 @@ class _OnnxModel:
     everything else float32; ``delay`` is reshaped to the graph's ``[1, 1]``), run the session, and
     wrap the two outputs back into torch tensors on ``device``."""
 
+    # nn.Module parity: the open-loop validator toggles train/eval mode around inference
+    # (``was_training = model.training`` / ``model.train(was_training)``); the graph is
+    # inference-only, so this is always False and train() is a no-op.
+    training = False
+
     def __init__(self, onnx_path: str | Path, device: str = "cuda"):
         import onnxruntime as ort
 
@@ -98,6 +103,15 @@ class _OnnxModel:
     def eval(self):  # parity with nn.Module (no-op)
         return self
 
+    def train(self, mode: bool = True):  # parity with nn.Module (no-op)
+        return self
+
+
+def load_onnx_session(onnx_path: str | Path, device: str = "cuda") -> _OnnxModel:
+    """Load just the ONNX inference session (no ``args.json``), for callers that already have
+    model args from elsewhere (e.g. ``--args_json_path`` in ``diffusion_planner/valid_predictor.py``)."""
+    return _OnnxModel(onnx_path, device)
+
 
 def load_onnx_model(onnx_path: str | Path, device: str = "cuda"):
     """Load an exported ONNX planner + its ``args.json`` (Config), returning ``(model, args)`` with
@@ -108,7 +122,7 @@ def load_onnx_model(onnx_path: str | Path, device: str = "cuda"):
     from diffusion_planner.utils.config import Config
 
     args = Config(str(Path(onnx_path).parent / "args.json"))
-    return _OnnxModel(onnx_path, device), args
+    return load_onnx_session(onnx_path, device), args
 
 
 def _ego_to_world(

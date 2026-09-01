@@ -21,7 +21,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--checkpoint",
         default="",
-        help="checkpoint .pth to validate; defaults to <model_dir>/best_model.pth",
+        help="checkpoint to validate: a .pth, or an exported .onnx (args.json is still read "
+        "from --model_dir, not from next to the .onnx); defaults to <model_dir>/best_model.pth",
     )
     p.add_argument(
         "--output_dir",
