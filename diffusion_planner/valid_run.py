@@ -19,10 +19,11 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model_dir", required=True, help="dir holding best_model.pth + args.json")
     p.add_argument(
-        "--checkpoint",
+        "--model_path",
         default="",
         help="checkpoint to validate: a .pth, or an exported .onnx (args.json is still read "
-        "from --model_dir, not from next to the .onnx); defaults to <model_dir>/best_model.pth",
+        "from --model_dir, not from next to the .onnx); defaults to <model_dir>/best_model.pth "
+        "(named to match --model_path on the closed-loop side)",
     )
     p.add_argument(
         "--output_dir",
@@ -47,7 +48,7 @@ def main() -> None:
     if args.batch_size < 1:
         raise ValueError("--batch_size must be at least 1")
     model_dir = Path(args.model_dir)
-    model_path = Path(args.checkpoint) if args.checkpoint else model_dir / "best_model.pth"
+    model_path = Path(args.model_path) if args.model_path else model_dir / "best_model.pth"
     args_json_path = model_dir / "args.json"
     if not model_path.is_file():
         raise FileNotFoundError(f"Validation checkpoint not found: {model_path}")
