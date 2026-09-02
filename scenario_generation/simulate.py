@@ -107,12 +107,6 @@ class _OnnxModel:
         return self
 
 
-def load_onnx_session(onnx_path: str | Path, device: str = "cuda") -> _OnnxModel:
-    """Load just the ONNX inference session (no ``args.json``), for callers that already have
-    model args from elsewhere (e.g. ``--args_json_path`` in ``diffusion_planner/valid_predictor.py``)."""
-    return _OnnxModel(onnx_path, device)
-
-
 def load_onnx_model(onnx_path: str | Path, device: str = "cuda"):
     """Load an exported ONNX planner + its ``args.json`` (Config), returning ``(model, args)`` with
     the same contract as :func:`load_model` so the closed-loop rollout is agnostic to which it got.
@@ -122,7 +116,7 @@ def load_onnx_model(onnx_path: str | Path, device: str = "cuda"):
     from diffusion_planner.utils.config import Config
 
     args = Config(str(Path(onnx_path).parent / "args.json"))
-    return load_onnx_session(onnx_path, device), args
+    return _OnnxModel(onnx_path, device), args
 
 
 def _ego_to_world(

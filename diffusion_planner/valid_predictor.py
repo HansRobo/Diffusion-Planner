@@ -149,10 +149,12 @@ def run_validation(valid_cfg: ValidConfig):
 
     # set up model (restore structure using training config_obj)
     if is_onnx:
-        from scenario_generation.simulate import load_onnx_session
+        from scenario_generation.simulate import load_onnx_model
 
         onnx_device = f"cuda:{rank}" if valid_cfg.device == "cuda" else valid_cfg.device
-        diffusion_planner = load_onnx_session(valid_cfg.resume_model_path, onnx_device)
+        # args.json is read again here (from next to the .onnx) but discarded: config_obj
+        # above (from --args_json_path) is the one actually used downstream.
+        diffusion_planner, _ = load_onnx_model(valid_cfg.resume_model_path, onnx_device)
         model_is_ddp = False
         print(f"ONNX model loaded from {valid_cfg.resume_model_path}")
     else:
