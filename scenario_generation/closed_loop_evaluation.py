@@ -22,9 +22,9 @@ from typing import Any
 
 from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.closed_loop_eval import (
+    FFmpegVideoWriter,
     evaluate_segment_pass,
     aggregate,
-    build_mp4,
     enumerate_multi_root_routes,
     format_summary_lines,
     load_segment_rows_with_tdigests,
@@ -51,11 +51,11 @@ class RolloutParams:
     unstick_advance_m: float
     unstick_radius_mult: float
     unstick_teleport_after: int
-    # write a PNG only every N steps; None skips the per-step render entirely (no PNGs, no
-    # video, no colormap images -- see build_full_closed_loop_wandb_log's matching
-    # render_media) while metrics/wandb scalars are unaffected -- lets a caller (e.g.
-    # train.py, most epochs) skip the dominant per-epoch cost and only pay it on the one call
-    # that actually needs media (e.g. the final epoch).
+    # stream a frame only every N steps; None skips the per-step render entirely (no video, no
+    # colormap images -- see build_full_closed_loop_wandb_log's matching render_media) while
+    # metrics/wandb scalars are unaffected -- lets a caller (e.g. train.py, most epochs) skip
+    # the dominant per-epoch cost and only pay it on the one call that actually needs media
+    # (e.g. the final epoch).
     draw_every: int | None
     # Not a render_kwarg: the runner opens the pool and passes it down.
     draw_workers: int
@@ -485,17 +485,14 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         video_mp4s: list[Path] = []
 
         for start, end in tl.iter_segments(job.seg_len):
-            png_dir = self.out_dir / f"{job.route_key}_{start}_{end}"
-            metrics = render_segment(
-                self.model,
-                self.model_args,
-                tl,
-                start,
-                end,
-                png_dir,
-                **params.render_kwargs(),
-                draw_pool=draw_pool,
-            )
+            # seg_dir holds render_segment's rollout.jsonl.
+            seg_dir = self.out_dir / f"{job.route_key}_{start}_{end}"
+            seg_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
+            with FFmpegVideoWriter(seg_mp4, fps=self.config.fps) as writer:
+                metrics = render_segment(
+                    self.model, self.model_args, tl, start, end, seg_dir,
+                    **params.render_kwargs(), draw_pool=draw_pool, video_writer=writer,
+                )
             row = {"route": job.route_key, **metrics}
             if self.config.pass_condition is not None:
                 row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
@@ -514,12 +511,10 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                         digest_file.flush()
             rows.append(row)
 
-            if not any(png_dir.glob("*.png")):
+            if writer.frame_count == 0:
                 if self.config.verbose:
                     print(f"  [{job.route_key}] segment [{start},{end}] -> 0 frames, no video")
                 continue
-            seg_mp4 = self.out_dir / f"{job.route_key}_{start}_{end}.mp4"
-            build_mp4(png_dir, seg_mp4, self.config.fps)
             video_mp4s.append(seg_mp4)
             if self.config.verbose:
                 obj = metrics["object"]

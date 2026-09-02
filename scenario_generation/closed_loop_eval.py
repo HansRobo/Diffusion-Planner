@@ -3,8 +3,8 @@
 Shared by the standalone CLI (``diffusion_planner/valid_predictor_closed_loop.py``) and the
 per-epoch training validation (``diffusion_planner/diffusion_planner/train.py``): both drive the
 ego in CLOSED LOOP through ``reproducer_rollout.render_segment`` over the route NPZ frames under
-``npz_root``, write a per-step PNG, build one MP4 per segment, and aggregate the per-segment
-metrics into a single summary.
+``npz_root``, stream one MP4 per segment straight from the rendered frames, and aggregate the
+per-segment metrics into a single summary.
 
 ``run_closed_loop_eval`` takes an already-loaded ``(model, model_args)`` (so training can pass its
 live model + ``TrainConfig`` straight in, no checkpoint reload) and returns the summary dict plus
@@ -62,7 +62,7 @@ def evaluate_segment_pass(row: dict, condition: "ClosedLoopPassCondition") -> bo
 
 
 def route_label(npz_path: Path, key: str) -> str:
-    """Human-readable route label ``<location>_<date>_<key>`` for video/PNG names.
+    """Human-readable route label ``<location>_<date>_<key>`` for video/directory names.
 
     Dataset routes are laid out ``.../<location>/<split>/<date>/<time>/routes/<time>_<idx>_<frame>``
     -- the bag-prefix ``key`` (``<time>_<idx>``) alone drops the depot/group and date, which makes the
@@ -121,8 +121,8 @@ def enumerate_multi_root_routes(npz_root) -> tuple[dict[str, list[Path]], dict[s
     route_sidecar_dir: dict[str, Path] = {}
     for root in roots:
         for key, paths in enumerate_routes(root).items():
-            # Key each route by its <location>_<date>_<time>_<idx> label so the per-segment PNG
-            # dirs and MP4s carry the location + date, not just the ambiguous time-of-day bag prefix.
+            # Key each route by its <location>_<date>_<time>_<idx> label so the per-segment MP4s
+            # carry the site + date, not just the ambiguous time-of-day bag prefix.
             label = route_label(paths[0], key)
             uniq, n = label, 1
             while uniq in routes:
@@ -455,44 +455,102 @@ def aggregate(
     return summary
 
 
-def build_mp4(png_dir: Path, mp4_path: Path, fps: float, remove_pngs: bool = True) -> None:
-    """Encode the PNG sequence in ``png_dir`` to an MP4.
+class FFmpegVideoWriter:
+    """Stream raw RGBA frames straight into an MP4 via ffmpeg's stdin, no PNGs on disk.
 
-    PNGs are named by step ``k`` and may be sparse (``draw_every`` skips frames), so glob the
-    directory (gap-tolerant, name-sorted) instead of a contiguous ``%05d`` counter. ``fps`` is the
-    raw frame rate, so a sparse sequence plays faster than real time (shorter video).
-
-    ``remove_pngs`` (default ``True``): delete the PNGs once the MP4 is built, so a run over
-    many routes/segments does not accumulate per-step PNGs on disk (this is what exhausts
-    inodes on a long eval run). Pass ``False`` to keep them, e.g. for manual inspection.
+    Holds an open ``subprocess.Popen`` and must live in one process for its whole life --
+    never pass an instance into a ``ProcessPoolExecutor`` submission (a ``Popen`` isn't
+    picklable). ``mp4_path`` is only created on the first ``write_frame`` call, so a segment
+    that draws zero frames never produces a file.
     """
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-framerate",
-            str(fps),
-            "-pattern_type",
-            "glob",
-            "-i",
-            str(png_dir / "*.png"),
-            "-vf",
-            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-crf",
-            "23",
-            str(mp4_path),
-        ],
-        check=True,
-    )
-    if remove_pngs:
-        for png in png_dir.glob("*.png"):
-            png.unlink()
+
+    def __init__(self, mp4_path: Path | str, fps: float):
+        self.mp4_path = Path(mp4_path)
+        self.fps = fps
+        self.proc: subprocess.Popen | None = None
+        self.frame_count = 0
+        self._w: int | None = None
+        self._h: int | None = None
+
+    def _start_proc(self, width: int, height: int, pix_fmt: str) -> None:
+        self._w, self._h = width, height
+        self.mp4_path.parent.mkdir(parents=True, exist_ok=True)
+        self.proc = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-vcodec",
+                "rawvideo",
+                "-s",
+                f"{width}x{height}",
+                "-pix_fmt",
+                pix_fmt,
+                "-r",
+                str(self.fps),
+                "-i",
+                "-",
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-crf",
+                "23",
+                str(self.mp4_path),
+            ],
+            stdin=subprocess.PIPE,
+        )
+
+    def write_frame(self, frame_bytes: bytes, width: int, height: int, pix_fmt: str = "rgba") -> None:
+        if self.proc is None:
+            self._start_proc(width, height, pix_fmt)
+        else:
+            # rawvideo has no per-frame header -- ffmpeg assumes every frame is width*height*
+            # channels bytes as fixed by "-s" on process start. A size change would silently
+            # shear/corrupt the rest of the video instead of erroring.
+            assert (width, height) == (self._w, self._h), (
+                f"frame size changed mid-stream: {(self._w, self._h)} -> {(width, height)}"
+            )
+        assert self.proc is not None and self.proc.stdin is not None
+        try:
+            self.proc.stdin.write(frame_bytes)
+        except BrokenPipeError:
+            # ffmpeg already exited (e.g. it rejected an argument) -- close() surfaces the real
+            # exit code via RuntimeError instead of this generic pipe error.
+            self.close()
+            raise
+        self.frame_count += 1
+
+    def close(self) -> None:
+        if self.proc is None:
+            return
+        if self.proc.stdin:
+            self.proc.stdin.close()
+        rc = self.proc.wait()
+        self.proc = None
+        if rc != 0:
+            raise RuntimeError(f"ffmpeg failed (exit {rc}) writing {self.mp4_path}")
+
+    def __enter__(self) -> "FFmpegVideoWriter":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is not None:
+            # The caller (e.g. render_segment) already failed -- a truncated stream making
+            # ffmpeg exit non-zero is an expected side effect, not new information. Close the
+            # pipe without raising over the real exception.
+            if self.proc is not None:
+                if self.proc.stdin:
+                    self.proc.stdin.close()
+                self.proc.wait()
+                self.proc = None
+            return
+        self.close()
 
 
 def run_closed_loop_eval(
@@ -530,15 +588,19 @@ def run_closed_loop_eval(
     list (``route_keys[rank::world_size]``) and writes its rows to ``segments_{rank}.jsonl`` instead
     of the merged ``segments.jsonl``/``summary.json`` -- the route-level multi-GPU parallel driver in
     ``valid_predictor_closed_loop.py`` spawns one such call per worker (route keys are globally
-    unique, so all shards share ``out_dir`` for the per-route PNG dirs and MP4s without collision).
+    unique, so all shards share ``out_dir`` for their MP4s without collision).
     The returned summary is then per-shard; the parent merges the ``segments_*.jsonl`` rows.
 
     ``model`` must be an eval-mode Diffusion-Planner (callable ``model(data) -> (_, outputs)`` with
     ``outputs["prediction"]``); ``model_args`` provides ``observation_normalizer`` /
     ``predicted_neighbor_num`` / ``future_len`` (a ``Config`` or ``TrainConfig``). Each route is
-    rolled out whole (no sub-segmenting) into one PNG dir + one MP4 (``<route>.mp4``).
+    rolled out whole (no sub-segmenting) into one MP4 (``<route>.mp4``).
     ``segments.jsonl`` (one row per route, human-readable), ``tdigests.jsonl`` (clearance
     sketches for shard merge), and ``summary.json`` are written into ``out_dir``.
+
+    Frames are streamed straight into ffmpeg via ``FFmpegVideoWriter`` -- no per-step PNGs ever
+    touch disk, which is what used to exhaust inodes on a run that draws hundreds of thousands of
+    them.
 
     Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back into
     the input history each step, held across cached-plan steps when ``replan_interval`` > 1
@@ -573,50 +635,51 @@ def run_closed_loop_eval(
     fdigest = open(out_dir / digests_name, "w")
     # One pool for every route: a spawned worker re-imports torch and matplotlib.
     draw_pool = render_pool(draw_workers)
+    render_kwargs = dict(
+        device=device,
+        near_miss_thresh=near_miss_thresh,
+        search_radius=search_radius,
+        warmup_steps=warmup_steps,
+        unstick_after=unstick_after,
+        unstick_advance_m=unstick_advance_m,
+        unstick_radius_mult=unstick_radius_mult,
+        unstick_teleport_after=unstick_teleport_after,
+        replan_interval=replan_interval,
+        draw_every=draw_every,
+        neighbor_history_mode=neighbor_history_mode,
+        tracker_mode=tracker_mode,
+        strong_brake_mps2=strong_brake_mps2,
+        yaw_gate=yaw_gate,
+        abort_deviation_m=abort_deviation_m,
+        abort_after=abort_after,
+        abort_max_snaps=abort_max_snaps,
+        drop_objects=drop_objects,
+        draw_pool=draw_pool,
+        # No CLI/kwarg equivalent here; mirror render_segment's former defaults.
+        goal_mode="segment",
+        title_prefix=None,
+        distance_label_offset_m=1.2,
+        view_half_m=50.0,
+        max_stuck_steps=0,
+        goal_reach_m=5.0,
+        interpolate=True,
+        color_by_uuid=True,
+        window=None,
+        max_steps=None,
+        timeline_progress_mode="pose",
+    )
     try:
         for ri, key in enumerate(route_keys):
             tl = RouteTimeline(routes[key], sidecar_dir=route_sidecar_dir[key], timers=timers)
-            # One route = one whole-route rollout = one <key>.mp4 (no sub-segmenting).
-            png_dir = out_dir / key
-            metrics = render_segment(
-                model,
-                model_args,
-                tl,
-                0,
-                len(tl),
-                png_dir,
-                device=device,
-                near_miss_thresh=near_miss_thresh,
-                search_radius=search_radius,
-                warmup_steps=warmup_steps,
-                unstick_after=unstick_after,
-                unstick_advance_m=unstick_advance_m,
-                unstick_radius_mult=unstick_radius_mult,
-                unstick_teleport_after=unstick_teleport_after,
-                replan_interval=replan_interval,
-                draw_every=draw_every,
-                neighbor_history_mode=neighbor_history_mode,
-                tracker_mode=tracker_mode,
-                strong_brake_mps2=strong_brake_mps2,
-                yaw_gate=yaw_gate,
-                abort_deviation_m=abort_deviation_m,
-                abort_after=abort_after,
-                abort_max_snaps=abort_max_snaps,
-                drop_objects=drop_objects,
-                draw_pool=draw_pool,
-                # No CLI/kwarg equivalent here; mirror render_segment's former defaults.
-                goal_mode="segment",
-                title_prefix=None,
-                distance_label_offset_m=1.2,
-                view_half_m=50.0,
-                max_stuck_steps=0,
-                goal_reach_m=5.0,
-                interpolate=True,
-                color_by_uuid=True,
-                window=None,
-                max_steps=None,
-                timeline_progress_mode="pose",
-            )
+            # One route = one whole-route rollout = one <key>.mp4 (no sub-segmenting). route_dir
+            # holds render_segment's rollout.jsonl.
+            route_dir = out_dir / key
+            seg_mp4 = out_dir / f"{key}.mp4"
+            with FFmpegVideoWriter(seg_mp4, fps=fps) as writer:
+                metrics = render_segment(
+                    model, model_args, tl, 0, len(tl), route_dir,
+                    **render_kwargs, video_writer=writer,
+                )
             row = {"route": key, **metrics}
             # Human-readable segments.jsonl (no _tdigest blobs). Digests go to a sidecar so
             # multi-GPU parents can still merge approximate global clearance p5.
@@ -628,16 +691,12 @@ def run_closed_loop_eval(
                 fdigest.flush()
             rows.append(row)
 
-            # A route that terminates at step 0 (e.g. ego starts within goal_reach_m) draws no PNG;
-            # skip the empty ffmpeg call (its glob would error on an empty dir).
-            if not any(png_dir.glob("*.png")):
+            # writer never started an ffmpeg process (and never created seg_mp4) if it saw 0
+            # frames -- nothing to clean up.
+            if writer.frame_count == 0:
                 if verbose:
                     print(f"[{ri + 1}/{len(route_keys)}] {key} -> 0 frames, no video")
                 continue
-            seg_mp4 = out_dir / f"{key}.mp4"
-            # Raw fps: with only every draw_every-th frame drawn, the video plays
-            # draw_every x faster than real time. For real time use fps = 10 / draw_every.
-            build_mp4(png_dir, seg_mp4, fps)
             video_mp4s.append(seg_mp4)
             if verbose:
                 obj = metrics["object"]

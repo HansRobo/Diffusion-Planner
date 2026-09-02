@@ -26,10 +26,16 @@ from concurrent.futures import Executor
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from diffusion_planner.dimensions import INPUT_T, POSE_DIM
+
+if TYPE_CHECKING:
+    # closed_loop_eval imports render_segment from this module, so importing it back at
+    # module load time would be circular -- only needed for the type hint.
+    from scenario_generation.closed_loop_eval import FFmpegVideoWriter
 
 from planner_metrics.scene_format import future_to_4col
 from scenario_generation.danger_event_selection import OnlineEventSelector
@@ -44,7 +50,7 @@ from scenario_generation.metrics import (
 from scenario_generation.metrics.tdigest import TDIGEST_KEY, tdigest_dict_from_values
 from scenario_generation.perception_reproducer import PerceptionReproducer
 from scenario_generation.perf_timer import Timers
-from scenario_generation.render_pool import render_pool
+from scenario_generation.render_pool import drain_oldest_frame, render_pool
 from scenario_generation.route_timeline import RouteTimeline
 from scenario_generation.simulate import decode_turn_indicator, resolve_keep_turn_indicator
 from scenario_generation.tensor_converter import _heading_to_cos_sin
@@ -1400,6 +1406,8 @@ def _draw_step(
     view_half_m: float = 50.0,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
     reproducer_ego: tuple[float, float, float] | None = None,
+    *,
+    return_frame: bool = False,
 ):
     """Save a PNG of one reproducer step with the EXACT perfect-tracker sim renderer.
 
@@ -1416,6 +1424,9 @@ def _draw_step(
 
     ``reproducer_ego``: optional ``(x, y, heading)`` of the recorded cursor ego in
     the live-ego frame, drawn as a hollow outline matching the live ego color.
+
+    ``path`` may be ``None`` when ``return_frame=True`` -- no PNG is written and the
+    rendered ``(rgba_bytes, width, height)`` is returned instead (see ``save_step_figure``).
     """
     from pathlib import Path
 
@@ -1439,10 +1450,10 @@ def _draw_step(
     scene = SceneContext(
         agents=[ego] + neighbors, map_data=nl._extract_map_data(data), ego_agent_id="ego"
     )
-    save_step_figure(
+    return save_step_figure(
         scene,
         {"ego": pred},  # ego-frame (80,4) prediction -> drawn as the ego plan
-        Path(path),
+        Path(path) if path is not None else None,
         step,
         total,
         title_prefix=title_prefix,
@@ -1452,6 +1463,7 @@ def _draw_step(
         road_border_polylines=_polylines_from_tensor(data["line_strings"], border_only=True),
         extra_ego_trajectories=extra_ego_trajectories,
         reproducer_ego=reproducer_ego,
+        return_frame=return_frame,
     )
 
 
@@ -1493,8 +1505,9 @@ def render_segment(
     max_steps: int | None,
     timeline_progress_mode: str,
     draw_pool: Executor | None,
+    video_writer: FFmpegVideoWriter | None = None,
 ) -> dict:
-    """Re-run one segment with per-step PNG rendering (live-ego frame).
+    """Re-run one segment with per-step PNG or streamed-video rendering (live-ego frame).
 
     Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back
     into the input ``turn_indicators`` history each step (recorded seed phases out within
@@ -1517,6 +1530,12 @@ def render_segment(
     ``draw_pool`` (see ``render_pool``): the workers the PNGs are rendered on. The step loop
     hands the arrays off and waits once, at the end of the segment. Pass one to share workers
     across segments; ``None`` opens a one-worker pool for this segment.
+
+    ``video_writer``: when given, no PNGs are written -- each worker renders and returns its
+    RGBA frame, and this process feeds them into ``video_writer.write_frame()`` in step order
+    once the step loop ends. ``video_writer`` holds an open ``ffmpeg`` stdin pipe and must be
+    created and closed by the caller in THIS process; it is never passed into ``draw_pool``
+    (a ``subprocess.Popen`` is not picklable across the worker processes).
 
     Runs until the ego reaches the segment end (within ``goal_reach_m``) or the
     step cap (``max_steps``, default 3*(end-start) — the only timeout). Unstick is
@@ -1606,6 +1625,7 @@ def render_segment(
     )
     plan_world = None  # cached (world_xy(T,2), world_h(T,)) from the most recent inference
     deviation_streak = 0  # consecutive steps the live ego has been > abort_deviation_m from GT
+    streaming = video_writer is not None
     pending: list = []
     # Per-step termination diagnostics: lets you see WHY a segment keeps running (e.g. the ego
     # looks near the goal in the PNG but `dist_goal` never drops below `goal_reach_m` because the
@@ -1808,7 +1828,7 @@ def render_segment(
                         np_dict,
                         pred_cur,
                         s.ego_shape,
-                        out_dir / f"{k:05d}.png",
+                        None if streaming else out_dir / f"{k:05d}.png",
                         neighbor_ids=nids if color_by_uuid else None,
                         step=k,
                         total=cap,
@@ -1816,8 +1836,11 @@ def render_segment(
                         distance_label_offset_m=distance_label_offset_m,
                         view_half_m=view_half_m,
                         reproducer_ego=repro_xyh,
+                        return_frame=streaming,
                     )
                 )
+                if streaming:
+                    drain_oldest_frame(pending, video_writer)
             snaps_before = s.snap_count
             _advance_step(s, pred_cur, idx, device, timers, override=override)
             if s.snap_count > snaps_before:
@@ -1825,10 +1848,14 @@ def render_segment(
                 # world location, so executing it next step would drag the ego right back. Invalidate
                 # it to force a fresh inference at the snapped pose (else the snap never sticks).
                 plan_world = None
-    # Every PNG must be on disk before the caller globs the directory for ffmpeg, and a worker
-    # exception only surfaces here.
-    for f in pending:
-        f.result()
+    # Every PNG must be on disk before the caller globs the directory for ffmpeg (or every frame
+    # written to video_writer, in step order), and a worker exception only surfaces here.
+    if streaming:
+        for f in pending:
+            video_writer.write_frame(*f.result())
+    else:
+        for f in pending:
+            f.result()
     return _finalize(s)
 
 

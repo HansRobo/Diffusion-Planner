@@ -1514,7 +1514,7 @@ def _ego_border_distance(ego, map_data) -> tuple[np.ndarray, np.ndarray, float] 
 def save_step_figure(
     scene: SceneContext,
     agent_predictions: dict,
-    output_path: Path,
+    output_path: Path | None,
     step: int,
     n_steps: int,
     route_polylines: list[np.ndarray] | None = None,
@@ -1527,23 +1527,33 @@ def save_step_figure(
     metrics: dict | None = None,
     extra_ego_trajectories: list[tuple[np.ndarray, str, str]] | None = None,
     reproducer_ego: tuple[float, float, float] | None = None,
-) -> None:
-    """Render + save the overview PNG for a single replay step.
+    *,
+    return_frame: bool = False,
+) -> tuple[bytes, int, int] | None:
+    """Render the overview figure for a single replay step, to a PNG or an in-memory frame.
 
     Viewport is fixed to ``±view_half_m`` metres around the ego, so lane
     borders stay visible and NPC detail remains readable at every step.
 
     ``reproducer_ego``: optional ``(x, y, heading)`` in the live-ego frame for the
     recorded cursor ego, drawn as a hollow outline in ``_EGO_COLOR``.
+
+    ``return_frame=True`` skips the PNG save and instead returns the rendered
+    ``(rgba_bytes, width, height)`` -- used to stream frames straight into an MP4 encoder
+    without ever touching disk. Mutually exclusive with ``output_path`` (pass one or the
+    other, not both).
     """
     from matplotlib.figure import Figure
 
     ego = scene.ego_agent
     if ego is None:
-        return
+        return None
     ex, ey = ego.current_position
 
     fig = Figure(figsize=(10, 10))
+    # Pinned so the in-memory frame (rasterized at fig.dpi) matches the PNG path exactly --
+    # _save_and_close() below always saves at dpi=100 regardless of fig.dpi.
+    fig.set_dpi(100)
     ax = fig.add_subplot(1, 1, 1)
     fig.patch.set_facecolor("#f8f8f8")
 
@@ -1938,7 +1948,19 @@ def save_step_figure(
 
     ax.set_title(title, fontsize=10)
     fig.subplots_adjust(left=0.10, right=0.95, bottom=0.08, top=0.92)
+
+    if return_frame:
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+        canvas = FigureCanvasAgg(fig)
+        canvas.draw()
+        w, h = canvas.get_width_height()
+        rgba = np.asarray(canvas.buffer_rgba()).tobytes()
+        fig.clf()
+        return rgba, w, h
+
     _save_and_close(fig, output_path)
+    return None
 
 
 @torch.no_grad()
