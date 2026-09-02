@@ -85,23 +85,42 @@ def enumerate_routes(npz_root: Path) -> dict[str, list[Path]]:
     return group_routes(paths)
 
 
+def _flatten_path_list_dict(entries: dict) -> list[Path]:
+    """Flatten ``{label: [dir, ...]}`` (create_closed_loop_path_list.py's dict form) into
+    one ``list[Path]``, preserving key order then within-key order."""
+    if not all(
+        isinstance(v, list) and all(isinstance(e, str) for e in v) for v in entries.values()
+    ):
+        raise ValueError("path list dict values must be JSON lists of directory paths")
+    paths = [Path(e) for v in entries.values() for e in v]
+    if not paths:
+        raise ValueError("path list dict is empty")
+    return paths
+
+
 def resolve_npz_roots(npz_root) -> list[Path]:
     """Resolve a closed-loop npz input into the list of root directories to enumerate.
 
     The input is a single directory tree of NPZ frames (globbed recursively), a ``.json`` file
     holding a list of such directory paths (one route dir per entry) -- the same "path list"
-    form as ``--train_set_list`` / ``--valid_set_list`` -- or an already-resolved list of paths
-    (e.g. from ``site_discovery.discover_sites_from_json``, which does its own per-group
-    grouping). A directory is returned as a one-element list; a JSON list or a pre-resolved
-    list is returned verbatim (each entry a ``Path``).
+    form as ``--train_set_list`` / ``--valid_set_list`` -- a ``.json`` file holding
+    ``{label: [dir, ...]}`` (``create_closed_loop_path_list.py``'s grouped form, one entry per
+    curated map), or an already-resolved list of paths (e.g. from
+    ``site_discovery.discover_sites_from_json``, which does its own per-group grouping). A
+    directory is returned as a one-element list; a JSON list/dict or a pre-resolved list is
+    flattened into one list (each entry a ``Path``).
     """
     if isinstance(npz_root, (list, tuple)):
         return [Path(p) for p in npz_root]
+    if isinstance(npz_root, dict):
+        return _flatten_path_list_dict(npz_root)
     npz_root = Path(npz_root)
     if npz_root.suffix == ".json":
         entries = json.loads(npz_root.read_text())
+        if isinstance(entries, dict):
+            return _flatten_path_list_dict(entries)
         if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
-            raise ValueError(f"{npz_root} must be a JSON list of directory paths")
+            raise ValueError(f"{npz_root} must be a JSON list or dict of directory paths")
         if not entries:
             raise ValueError(f"{npz_root} is an empty path list")
         return [Path(e) for e in entries]
