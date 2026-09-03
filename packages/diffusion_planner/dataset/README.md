@@ -1,34 +1,5 @@
 # ROSBAG to HDF5 conversion
 
-## Temporary old-evaluator compatibility
-
-The legacy evaluator can run a new-architecture sampler ONNX without importing
-the new PyTorch model. The adapter detects the ONNX by its `initial_noise`
-input, splits the legacy packed tensors, applies the new fixed normalization,
-and converts the output trajectory back to metres.
-
-Run scenario-based Open Loop directly from legacy NPZ files:
-
-```bash
-cd Diffusion-Planner/diffusion_planner
-python run_new_dp_onnx_open_loop.py \
-  --matrix /path/to/open_loop_matrix.json \
-  --model_path /path/to/diffusion_planner_sampler.onnx \
-  --output_dir /path/to/open_loop_result \
-  --device cuda
-```
-
-The normal `run_all_groups_closed_loop.py` command accepts the same `.onnx`
-path through `--model_path`; no other Closed Loop argument changes are needed.
-For a one-frame smoke test, `python -m scenario_generation.simulate` also
-accepts the sampler ONNX.
-
-Legacy NPZ files do not contain the complete traffic-light history and future
-required by the new schema. The compatibility adapter broadcasts the current
-legacy light state over those time axes. This is useful for interface smoke
-tests, but native HDF5 frames created from ROSBAG by the converter below should
-be used for meaningful Open Loop model-quality evaluation.
-
 ## Input JSON
 
 The converter accepts a JSON array containing absolute NPZ paths.
