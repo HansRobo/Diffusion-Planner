@@ -22,7 +22,7 @@ import pyarrow.parquet as pq
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, REPO_ROOT.as_posix())
 
-import diffusion_planner_data_tools as dpt  # noqa: E402
+import ml_planner_data as dpt  # noqa: E402
 
 hdf5plugin.register(filters="zstd")
 _WORKER_CACHE: dpt.FrameDataCache | None = None
