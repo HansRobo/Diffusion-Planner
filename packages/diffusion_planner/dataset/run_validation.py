@@ -16,7 +16,7 @@ import torch
 from visualize_input import visualize_inputs
 
 from diffusion_planner.data import PlannerDataNormalizer, PlannerDataset
-from diffusion_planner.models.onnx import SCENE_INPUT_NAMES
+from diffusion_planner.models.onnx import PLANNER_INPUT_NAMES
 
 
 def heading_to_cos_sin(array: np.ndarray) -> np.ndarray:
@@ -35,7 +35,7 @@ def run_prediction(
     normalized = PlannerDataNormalizer()(frame)
     inputs = {
         key: np.asarray(normalized[key], dtype=np.float32)[None]
-        for key in SCENE_INPUT_NAMES
+        for key in PLANNER_INPUT_NAMES
     }
     inputs["turn_indicators"] = np.asarray(
         normalized["turn_indicators"], dtype=np.float32
