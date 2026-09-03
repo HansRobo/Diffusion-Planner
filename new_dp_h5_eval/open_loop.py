@@ -43,6 +43,10 @@ def metric_view(frame: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
     current[9] = ego_past[-1, 5]
 
     neighbor_pose = frame["neighbor_agents_past"]
+    if frame["agent_shape"].shape != (neighbor_pose.shape[0], 2):
+        raise ValueError("agent_shape does not match native neighbor slots")
+    if frame["agent_label"].shape != (neighbor_pose.shape[0], 3):
+        raise ValueError("agent_label does not match native neighbor slots")
     packed = np.zeros((*neighbor_pose.shape[:-1], 11), dtype=np.float32)
     packed[..., :4] = neighbor_pose
     packed[..., 6:8] = frame["agent_shape"][:, None, :]

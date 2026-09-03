@@ -10,7 +10,7 @@ import hdf5plugin  # noqa: F401 - registers the zstd HDF5 filter
 import numpy as np
 import pyarrow.parquet as pq
 
-from .schema import H5_FORMAT, H5_FORMAT_VERSION
+from .schema import H5_FORMAT, H5_FORMAT_VERSION, MODEL_INPUT_NAMES
 
 
 class H5FrameIndex:
@@ -58,7 +58,18 @@ class H5FrameIndex:
         if not 0 <= frame_index < int(file.attrs["num_frames"]):
             raise IndexError(f"frame_index {frame_index} outside {path}")
         frames = file["frames"]
-        return {key: np.asarray(value[frame_index]) for key, value in frames.items()}
+        missing = sorted(set(MODEL_INPUT_NAMES).difference(frames.keys()))
+        if missing:
+            raise ValueError(f"H5 frame is missing native model fields: {missing} ({path})")
+        result = {key: np.asarray(value[frame_index]) for key, value in frames.items()}
+        neighbors = result["neighbor_agents_past"]
+        if result["agent_shape"].shape != (neighbors.shape[0], 2):
+            raise ValueError("agent_shape must match neighbor_agents_past slots")
+        if result["agent_label"].shape != (neighbors.shape[0], 3):
+            raise ValueError("agent_label must match neighbor_agents_past slots")
+        if result["ego_agent_past"].shape[-1] != 6 or neighbors.shape[-1] != 4:
+            raise ValueError("unexpected native ego/neighbor feature width")
+        return result
 
     def _open(self, path: Path) -> h5py.File:
         cached = self._files.pop(path, None)
@@ -87,4 +98,3 @@ class H5FrameIndex:
 
     def __exit__(self, *_args) -> None:
         self.close()
-

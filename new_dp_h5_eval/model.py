@@ -45,6 +45,10 @@ class NewDpOnnxRunner:
                      for seed in seeds]
         feed["initial_noise"] = np.stack(rng_noise)
         trajectory, turn_logits = self.session.run(None, feed)
+        if np.asarray(trajectory).shape != (len(frames), 321, 80, 4):
+            raise ValueError(f"unexpected ONNX trajectory shape: {np.asarray(trajectory).shape}")
+        if np.asarray(turn_logits).shape != (len(frames), 3):
+            raise ValueError(f"unexpected new-DP turn-logit shape: {np.asarray(turn_logits).shape}")
         trajectory = np.asarray(trajectory); trajectory[..., :2] *= 50.0
         yaw = trajectory[..., 2:4]
         trajectory[..., 2:4] = yaw / np.maximum(np.linalg.norm(yaw, axis=-1, keepdims=True), 1e-6)

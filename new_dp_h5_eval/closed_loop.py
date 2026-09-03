@@ -34,6 +34,8 @@ class NativeH5RouteTimeline(RouteTimeline):
 
     def neighbor_last(self, idx: int) -> np.ndarray:
         frame = self.npz(idx)
+        if frame["agent_shape"].shape[0] != frame["neighbor_agents_past"].shape[0]:
+            raise ValueError("native H5 agent_shape/neighbor_agents_past slot mismatch")
         out = np.zeros((frame["neighbor_agents_past"].shape[0], 11), dtype=np.float32)
         out[:, :4] = frame["neighbor_agents_past"][:, -1]
         out[:, 6:8] = frame["agent_shape"]
@@ -89,6 +91,8 @@ class ReproducerOnnxModel:
         self.calls += batch
         feed["initial_noise"] = noise
         trajectory, logits3 = self.runner.session.run(None, feed)
+        if np.asarray(trajectory).shape != (batch, 321, 80, 4) or np.asarray(logits3).shape != (batch, 3):
+            raise ValueError("new-DP ONNX output contract changed")
         trajectory[..., :2] *= 50.0
         yaw = trajectory[..., 2:4]
         trajectory[..., 2:4] = yaw / np.maximum(np.linalg.norm(yaw, axis=-1, keepdims=True), 1e-6)
