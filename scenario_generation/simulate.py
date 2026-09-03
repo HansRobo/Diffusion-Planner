@@ -93,6 +93,8 @@ class _OnnxModel:
     everything else float32; ``delay`` is reshaped to the graph's ``[1, 1]``), run the session, and
     wrap the two outputs back into torch tensors on ``device``."""
 
+    training = False
+
     def __init__(
         self,
         onnx_path: str | Path,
@@ -126,11 +128,20 @@ class _OnnxModel:
         _require_accelerator(self.session, providers, onnx_path)
         self._inputs = [(i.name, i.type) for i in self.session.get_inputs()]
         self._outputs = [o.name for o in self.session.get_outputs()]
+        self._is_new_dp = any(name == "initial_noise" for name, _ in self._inputs)
 
     def __call__(self, data):
+        if self._is_new_dp:
+            from scenario_generation.new_dp_onnx import legacy_to_new_dp, normalize_new_dp
+
+            converted = normalize_new_dp(legacy_to_new_dp(data))
+            batch = converted["ego_agent_past"].shape[0]
+            converted["initial_noise"] = np.zeros((batch, 321, 80, 4), dtype=np.float32)
+            data = converted
         feed = {}
         for name, otype in self._inputs:
-            arr = np.asarray(data[name].detach().cpu().numpy())
+            value = data[name]
+            arr = np.asarray(value.detach().cpu().numpy() if torch.is_tensor(value) else value)
             if otype == "tensor(bool)":
                 arr = arr.astype(bool)
             else:
@@ -139,6 +150,10 @@ class _OnnxModel:
                 arr = arr.reshape(-1, 1)[:1]  # graph declares a static [1, 1] delay
             feed[name] = arr
         pred, ti = self.session.run(self._outputs, feed)
+        if self._is_new_dp:
+            from scenario_generation.new_dp_onnx import denormalize_trajectory
+
+            pred = denormalize_trajectory(pred)
         outputs = {
             "prediction": torch.from_numpy(np.asarray(pred)).to(self.device),
             "turn_indicator_logit": torch.from_numpy(np.asarray(ti)).to(self.device),
@@ -146,6 +161,9 @@ class _OnnxModel:
         return None, outputs
 
     def eval(self):  # parity with nn.Module (no-op)
+        return self
+
+    def train(self, mode: bool = True):  # parity with nn.Module (no-op)
         return self
 
 
@@ -160,10 +178,15 @@ def load_onnx_model(
 
     ``args`` (from ``args.json`` next to the onnx) supplies ``observation_normalizer`` /
     ``predicted_neighbor_num`` / ``future_len`` exactly as for the .pth path."""
+    model = _OnnxModel(onnx_path, device, providers, engine_cache_dir)
+    if model._is_new_dp:
+        from scenario_generation.new_dp_onnx import compatibility_model_args
+
+        return model, compatibility_model_args()
     from diffusion_planner.utils.config import Config
 
     args = Config(str(Path(onnx_path).parent / "args.json"))
-    return _OnnxModel(onnx_path, device, providers, engine_cache_dir), args
+    return model, args
 
 
 def _ego_to_world(
@@ -1169,7 +1192,9 @@ def run_simulation(
 
 def main():
     parser = argparse.ArgumentParser(description="Closed-loop simulation with Diffusion-Planner")
-    parser.add_argument("--model_path", type=Path, required=True, help="Path to best_model.pth")
+    parser.add_argument(
+        "--model_path", type=Path, required=True, help="Path to best_model.pth or sampler.onnx"
+    )
     parser.add_argument("--npz", type=Path, required=True, help="NPZ scene file")
     parser.add_argument(
         "--output_dir", type=Path, required=True, help="Output directory for images"
@@ -1199,7 +1224,10 @@ def main():
     device = args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
 
     print(f"Loading model from {args.model_path}")
-    model, model_args = load_model(args.model_path, device)
+    if args.model_path.suffix.lower() == ".onnx":
+        model, model_args = load_onnx_model(args.model_path, device)
+    else:
+        model, model_args = load_model(args.model_path, device)
 
     print(f"Loading scene from {args.npz}")
     scene = from_npz(args.npz)
