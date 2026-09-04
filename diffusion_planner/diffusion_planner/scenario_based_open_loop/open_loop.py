@@ -13,11 +13,32 @@ from torch.utils.data import DataLoader
 from diffusion_planner.utils.dataset import DiffusionPlannerData
 from planner_metrics.centerline import evaluate_centerline_with_details
 from planner_metrics.departure import evaluate_departure_with_details
+from planner_metrics.evaluation import detail_value_to_json
 
 METRICS = {
     "centerline": evaluate_centerline_with_details,
     "departure": evaluate_departure_with_details,
 }
+
+# Per-step arrays stay available for PNG drawing but are omitted from
+# details.jsonl (uploaded to W&B).
+_JSONL_OMIT_DETAIL_KEYS = frozenset(
+    {
+        "centerline_xy",
+        "closest_centerline_xy",
+        "prediction_xy",
+        "lateral_offset_m",
+    }
+)
+
+
+def _jsonl_detail_fields(sample_fields: dict) -> dict:
+    """Drop heavy per-step arrays from the JSONL record."""
+    return {
+        key: value
+        for key, value in sample_fields.items()
+        if key not in _JSONL_OMIT_DETAIL_KEYS
+    }
 
 
 def _metric_parameters_from_args(args) -> dict[str, dict[str, object]]:
@@ -180,10 +201,14 @@ def run_scenario_based_open_loop_validation(
                             for key, value in per_sample_scores.items()
                         },
                     }
+                    sample_details: dict[str, dict] = {}
                     for section, fields in evaluation.details.items():
-                        detail[section] = {
-                            key: value[batch_index].item() for key, value in fields.items()
+                        sample_fields = {
+                            key: detail_value_to_json(value, batch_index)
+                            for key, value in fields.items()
                         }
+                        detail[section] = _jsonl_detail_fields(sample_fields)
+                        sample_details[section] = sample_fields
                     if visualization_root is not None:
                         sample_inputs = {
                             key: value[batch_index : batch_index + 1]
@@ -191,6 +216,12 @@ def run_scenario_based_open_loop_validation(
                             else value
                             for key, value in raw_inputs.items()
                         }
+                        viz_details = sample_details.get(metric_name)
+                        if viz_details is not None and "match_threshold_m" in parameters:
+                            viz_details = {
+                                **viz_details,
+                                "match_threshold_m": float(parameters["match_threshold_m"]),
+                            }
                         visualize_scenario_prediction(
                             sample_inputs,
                             ego_prediction[batch_index],
@@ -200,6 +231,7 @@ def run_scenario_based_open_loop_validation(
                             f"{metric_name} sample {sample_index}",
                             show_neighbors=True,
                             view_range=60.0,
+                            details=viz_details,
                         )
                         detail["visualization_png"] = str(
                             visualization_root / metric_name / f"sample_{sample_index:08d}.png"

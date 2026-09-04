@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from diffusion_planner.scenario_based_open_loop.open_loop import (
     METRICS,
+    _jsonl_detail_fields,
     _metric_parameters_from_args,
     load_scenario_based_open_loop_settings,
 )
@@ -64,10 +65,28 @@ def test_metric_parameters_are_derived_from_train_config_field_names():
     class Args:
         def __init__(self):
             self.scenario_centerline_horizon_seconds = 8.0
+            self.scenario_centerline_match_threshold_m = 0.5
             self.scenario_departure_horizon_seconds = 3.0
             self.scenario_departure_minimum_displacement_m = 2.0
 
     assert _metric_parameters_from_args(Args()) == {
-        "centerline": {"horizon_seconds": 8.0},
+        "centerline": {"horizon_seconds": 8.0, "match_threshold_m": 0.5},
         "departure": {"horizon_seconds": 3.0, "minimum_displacement_m": 2.0},
+    }
+
+
+def test_jsonl_omits_heavy_centerline_arrays():
+    """Drop route and per-step arrays from JSONL; keep scalar fields."""
+    assert _jsonl_detail_fields(
+        {
+            "match_threshold_m": 0.5,
+            "horizon_seconds": 8.0,
+            "centerline_xy": [[0.0, 0.0], [1.0, 0.0]],
+            "prediction_xy": [[0.5, 0.1]],
+            "closest_centerline_xy": [[0.5, 0.0]],
+            "lateral_offset_m": [0.1],
+        }
+    ) == {
+        "match_threshold_m": 0.5,
+        "horizon_seconds": 8.0,
     }

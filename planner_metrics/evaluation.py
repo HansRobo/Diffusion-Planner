@@ -20,14 +20,40 @@ class MetricEvaluation:
         scores: Mapping from score names to one-dimensional tensors with one
             value per evaluated sample. These values are aggregated into the
             validation summary.
-        details: Mapping from detail sections to fields, where each field is a
-            one-dimensional tensor aligned with ``scores``. These values are
-            written to per-sample detail records and are not included in the
-            aggregate summary.
+        details: Mapping from detail sections to fields. Scalar fields are
+            one-dimensional tensors aligned with ``scores``. Trajectory and
+            polyline fields may be higher-rank tensors or a Python list of
+            variable-length values. These values are written to per-sample
+            detail records and are not included in the aggregate summary.
     """
 
     scores: dict[str, torch.Tensor]
     details: dict[str, dict[str, torch.Tensor]] = field(default_factory=dict)
 
 
-__all__ = ["MetricEvaluation"]
+def _tensor_to_json(sampled: torch.Tensor) -> Any:
+    sampled = sampled.detach().cpu()
+    if sampled.ndim == 0:
+        item = sampled.item()
+        return bool(item) if sampled.dtype == torch.bool else item
+    return sampled.tolist()
+
+
+def detail_value_to_json(value: Any, batch_index: int) -> Any:
+    """Serialize one sample of a detail field for JSONL output.
+
+    Zero-dimensional tensors become Python numbers or bools. Higher-rank
+    tensors become nested lists. Variable-length Python lists are indexed
+    per sample; any tensor at that index is converted the same way.
+    """
+    if torch.is_tensor(value):
+        return _tensor_to_json(value[batch_index])
+    if isinstance(value, (list, tuple)):
+        sampled = value[batch_index]
+        if torch.is_tensor(sampled):
+            return _tensor_to_json(sampled)
+        return sampled
+    raise TypeError(f"unsupported detail value type: {type(value)!r}")
+
+
+__all__ = ["MetricEvaluation", "detail_value_to_json"]
