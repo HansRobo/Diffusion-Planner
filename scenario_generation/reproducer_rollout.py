@@ -390,6 +390,7 @@ class _SegState:
     goal_xy: np.ndarray
     clearances: np.ndarray
     collisions: np.ndarray
+    rear_collisions: np.ndarray
     rb_dists: np.ndarray
     red_light: np.ndarray
     # Closed-loop turn-indicator history (INPUT_T+1,). Seeded from the recorded frame, then
@@ -586,6 +587,7 @@ def _seed_state(
         goal_xy=goal_xy,
         clearances=np.full(cap, np.inf, dtype=np.float32),
         collisions=np.zeros(cap, dtype=bool),
+        rear_collisions=np.zeros(cap, dtype=bool),
         rb_dists=np.full(cap, np.inf, dtype=np.float32),
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
@@ -746,20 +748,23 @@ def _score_into(
     *,
     object_cl: float | None = None,
     object_col: bool | None = None,
+    object_rear_col: bool | None = None,
 ):
     """Score this step's object / road-border / red-light metrics into the segment state.
 
-    When ``object_cl`` / ``object_col`` are provided (batched path already scored
-    neighbors), reuse them instead of calling ``score_object_step`` again.
+    When ``object_cl`` / ``object_col`` / ``object_rear_col`` are provided (batched path
+    already scored neighbors), reuse them instead of calling ``score_object_step`` again.
     """
     with timers("score"):
         if object_cl is not None and object_col is not None:
             s.clearances[s.k] = object_cl
             s.collisions[s.k] = object_col
+            s.rear_collisions[s.k] = bool(object_rear_col)
         else:
-            cl, col, _ = score_object_step(neighbors_live, s.ego_shape, device)
+            cl, col, rear_col, _ = score_object_step(neighbors_live, s.ego_shape, device)
             s.clearances[s.k] = cl
             s.collisions[s.k] = col
+            s.rear_collisions[s.k] = rear_col
         if np_dict is not None:
             rb = score_road_border_step(np_dict, device=device)
             s.rb_dists[s.k] = float(rb["rb_dist_m"])
@@ -935,6 +940,40 @@ def _event_count(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES)
     return count
 
 
+def _event_onset_count(
+    mask: np.ndarray, onset_flag: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES
+) -> int:
+    """Count ``mask`` events (same rising-edge + ``clear_frames``-debounce grouping as
+    ``_event_count``) whose ONSET step also has ``onset_flag`` True.
+
+    Used for ``object_rear.collision_count``: a collision counts as "rear" iff the ego was
+    hit from behind at the moment that particular collision started, not merely because the
+    contact happened to touch the rear edge at some point during an already-ongoing
+    collision (e.g. the vehicle spun/slid mid-contact so the touch point drifted onto the
+    rear edge later). Riding the SAME event boundaries as ``object.collision_count``
+    (``mask=s.collisions``) means jitter in ``onset_flag`` (``s.rear_collisions``) *within*
+    one continuous collision never splits or fabricates a separate rear event.
+    """
+    if mask.size == 0:
+        return 0
+    count = 0
+    in_event = False
+    false_run = 0
+    for i, v in enumerate(mask.astype(bool)):
+        if v:
+            if not in_event:
+                if bool(onset_flag[i]):
+                    count += 1
+                in_event = True
+            false_run = 0
+        elif in_event:
+            false_run += 1
+            if false_run >= clear_frames:
+                in_event = False
+                false_run = 0
+    return count
+
+
 def _clearance_stats(values: np.ndarray) -> dict:
     """min / mean / p5 over finite clearance samples; inf when empty.
 
@@ -1032,6 +1071,21 @@ def _finalize(s: _SegState) -> dict:
         else float("inf"),
         "progress_m": progress_m,
         "object": clearance_family_block(cl, s.collisions[: s.k], miss_thresh=s.near_miss_thresh),
+        # Separate metric from "object": collisions where the ego got rear-ended by a
+        # following NPC (e.g. after diverging from the recorded GT trajectory and
+        # stopping/slowing) rather than an ego-at-fault front/side hit. A subset of
+        # "object"'s collision steps, but tracked as its own category -- same
+        # "collision_*" field names as "object" so object.collision_count -
+        # object_rear.collision_count isolates ego-caused collisions.
+        # collision_count rides "object"'s own collision event boundaries (_event_onset_count
+        # on s.collisions, gated by s.rear_collisions at each event's ONSET step) rather than
+        # counting rear_collisions events independently -- a collision counts as "rear" iff it
+        # STARTED as a rear hit, so a mid-collision wobble in/out of the rear sliver (e.g. the
+        # vehicle spins after contact) doesn't split or fabricate rear events.
+        "object_rear": {
+            "collision_steps": int(s.rear_collisions[: s.k].sum()),
+            "collision_count": _event_onset_count(s.collisions[: s.k], s.rear_collisions[: s.k]),
+        },
         "road_border": clearance_family_block(
             rb, road_border_collision_mask(rb), miss_thresh=s.near_miss_thresh
         ),
@@ -1555,8 +1609,10 @@ def render_segment(
     fired this many times in one segment — repeated snapping is itself a sign of a bad rollout.
 
     Per-step ``rollout.jsonl`` lines (next to the PNGs) always include ``clearance_m``,
-    ``collision``, ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame
-    carries no lane geometry), and ``red_light_violation`` alongside the ego pose — see
+    ``collision``, ``collision_rear`` (subset of ``collision``: the contact touches the
+    ego box's rear edge -- the ego got rear-ended rather than causing the collision
+    itself), ``rb_dist_m`` (ego-to-road-border distance; ``None`` when the frame carries no
+    lane geometry), and ``red_light_violation`` alongside the ego pose — see
     :mod:`scenario_generation.trajectory_colormap` for the trajectory-colormap consumer
     (which also derives a "strong_brake" colormap from consecutive ``speed`` samples).
 
@@ -1738,6 +1794,7 @@ def render_segment(
                         if np.isfinite(s.clearances[k])
                         else None,
                         "collision": bool(s.collisions[k]),
+                        "collision_rear": bool(s.rear_collisions[k]),
                         "rb_dist_m": round(float(s.rb_dists[k]), 4)
                         if np.isfinite(s.rb_dists[k])
                         else None,
@@ -2105,7 +2162,7 @@ def run_segments_batched(
                     realized_rows = []
                     for _row_i, (
                         (_s, np_dict, _nb, _idx, _suuid, _wbu),
-                        (_cl, col, _M, _collider_slot),
+                        (_cl, col, _rear_col, _M, _collider_slot),
                     ) in enumerate(zip(built, score_list)):
                         if realized_event_scorer is None:
                             realized_rows.append(None)
@@ -2177,7 +2234,7 @@ def run_segments_batched(
                     timers.add("realized_events", time.perf_counter() - realized_t0)
                     for row_idx, (
                         (s, _np, nb, idx, suuid, wbu),
-                        (cl, col, _M, collider_slot),
+                        (cl, col, rear_col, _M, collider_slot),
                     ) in enumerate(zip(built, score_list)):
                         danger_row = danger_rows[row_idx] if danger_rows else None
                         realized_row = realized_rows[row_idx] if realized_rows else None
@@ -2191,6 +2248,7 @@ def run_segments_batched(
                             np_dict=gpu_scenes[row_idx] if gpu_scenes is not None else _np,
                             object_cl=float(cl),
                             object_col=bool(col),
+                            object_rear_col=bool(rear_col),
                         )
                         # One-pass save: buffer this step, then dump the window on the
                         # FIRST collision — from THIS run, so the scenes match the hit.
