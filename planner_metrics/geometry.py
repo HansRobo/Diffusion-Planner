@@ -973,6 +973,20 @@ def _classify_outer_boundaries(
     return candidate_outer, outward
 
 
+def point_inside_any_lane_polygon(point: torch.Tensor, lanes: torch.Tensor) -> bool:
+    """Is ``point`` (2,) inside any lane polygon built from ``lanes`` (S, P, D>=8)?
+
+    Shared by every "is the ego inside a lanelet" check -- the closed-loop metric
+    (:func:`scenario_generation.metrics.road_border.score_road_border_step`) and the
+    per-step render label (:func:`scenario_generation.replay._ego_border_distance`) -- so
+    the sign convention used to draw the road-border distance matches the one logged to
+    ``rollout.jsonl``.
+    """
+    edge_v1, edge_v2, edge_poly_id, n_polys = _build_lane_polygons(lanes)
+    inside = _point_in_polygons(point.reshape(1, 2), edge_v1, edge_v2, edge_poly_id, n_polys)
+    return bool(inside[0].item())
+
+
 __all__ = [
     "_build_ego_bbox_corners",
     "_LN_X",
@@ -997,4 +1011,5 @@ __all__ = [
     "_points_inside_intersection_areas",
     "_point_to_segments_signed_min_dist",
     "_classify_outer_boundaries",
+    "point_inside_any_lane_polygon",
 ]
