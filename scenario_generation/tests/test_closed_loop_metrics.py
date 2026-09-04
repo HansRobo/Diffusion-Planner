@@ -199,6 +199,11 @@ def _segment_row(**overrides) -> dict:
             TDIGEST_KEY: tdigest_dict_from_values(rb_vals),
         },
         "red_light_violation": {"steps": 1, "count": 1},
+        "deviation_collision": {
+            "thresh_m": 2.0,
+            "steps": 0,
+            "count": 0,
+        },
         "strong_brake": {
             "thresh_mps2": -2.5,
             "strongest_mps2": float("inf"),
