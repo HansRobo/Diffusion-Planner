@@ -931,6 +931,33 @@ def _post_step(s: _SegState, pred: np.ndarray, neighbors_live, idx, device, time
     _advance_step(s, pred, idx, device, timers)
 
 
+def _event_onsets(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES) -> list:
+    """Onset step index of each rising-edge event in ``mask``, with falling-edge debounce.
+
+    Entering True from outside an event starts a new event (its onset is recorded). While
+    in an event, a False gap shorter than ``clear_frames`` keeps the latch (no new onset on
+    the next True); only ``clear_frames`` consecutive Falses release it so a later True is a
+    new event. ``len(_event_onsets(mask)) == _event_count(mask)`` always.
+    """
+    onsets = []
+    if mask.size == 0:
+        return onsets
+    in_event = False
+    false_run = 0
+    for i, v in enumerate(mask.astype(bool)):
+        if v:
+            if not in_event:
+                onsets.append(i)
+                in_event = True
+            false_run = 0
+        elif in_event:
+            false_run += 1
+            if false_run >= clear_frames:
+                in_event = False
+                false_run = 0
+    return onsets
+
+
 def _event_count(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES) -> int:
     """Rising-edge event count with falling-edge debounce.
 
@@ -939,23 +966,7 @@ def _event_count(mask: np.ndarray, clear_frames: int = EVENT_COUNT_CLEAR_FRAMES)
     ``clear_frames`` consecutive Falses release it so a later True is a new event. Used for
     collision / near-miss / strong-brake ``*_count`` (``*_steps`` stay raw).
     """
-    if mask.size == 0:
-        return 0
-    count = 0
-    in_event = False
-    false_run = 0
-    for v in mask.astype(bool):
-        if v:
-            if not in_event:
-                count += 1
-                in_event = True
-            false_run = 0
-        elif in_event:
-            false_run += 1
-            if false_run >= clear_frames:
-                in_event = False
-                false_run = 0
-    return count
+    return len(_event_onsets(mask, clear_frames))
 
 
 def _clearance_stats(values: np.ndarray) -> dict:
@@ -1037,12 +1048,22 @@ def deviation_collision_block(collisions: np.ndarray, gt_devs: np.ndarray, thres
     collision is also counted there. ``gt_devs`` steps with no valid GT window (``inf``,
     see ``_gt_deviation_m``) are treated as deviated (conservative: can't confirm the ego
     was on-path).
+
+    ``count`` classifies each raw collision event (as delimited by ``_event_onsets`` on
+    ``collisions``, same debounce as ``object.collision_count``) exactly once, at its onset
+    step -- not by re-running the debounced event counter over the AND-filtered per-step
+    mask. A single uninterrupted collision that dips in and out of deviation mid-event would
+    otherwise be double-counted here while staying one event in ``object.collision_count``,
+    breaking the breakdown invariant. ``steps`` stays a raw per-step tally.
     """
-    mask = collisions & (gt_devs > float(thresh_m))
+    thresh_m = float(thresh_m)
+    mask = collisions & (gt_devs > thresh_m)
+    onsets = _event_onsets(collisions)
+    count = sum(1 for i in onsets if gt_devs[i] > thresh_m)
     return {
-        "thresh_m": float(thresh_m),
+        "thresh_m": thresh_m,
         "steps": int(mask.sum()),
-        "count": _event_count(mask),
+        "count": count,
     }
 
 
