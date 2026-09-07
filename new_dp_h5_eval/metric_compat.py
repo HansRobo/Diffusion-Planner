@@ -31,4 +31,3 @@ def legacy_route_lanes(frame: dict[str, np.ndarray]) -> np.ndarray:
     out[..., 11] = tl[:, None, 4]
     out[..., 12] = tl[:, None, 3]
     return out
-

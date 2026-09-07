@@ -6,8 +6,13 @@ import numpy as np
 
 
 def _vectors_to_local(vectors: np.ndarray, heading: np.ndarray) -> np.ndarray:
-    return np.stack((vectors[..., 0] * heading[0] + vectors[..., 1] * heading[1],
-                     -vectors[..., 0] * heading[1] + vectors[..., 1] * heading[0]), axis=-1)
+    return np.stack(
+        (
+            vectors[..., 0] * heading[0] + vectors[..., 1] * heading[1],
+            -vectors[..., 0] * heading[1] + vectors[..., 1] * heading[0],
+        ),
+        axis=-1,
+    )
 
 
 def _pose(values: np.ndarray, position: np.ndarray, heading: np.ndarray) -> np.ndarray:
@@ -36,13 +41,19 @@ def _lanes(values: np.ndarray, position: np.ndarray, heading: np.ndarray) -> np.
     return out
 
 
-def recenter_frame_to_pose(frame: dict[str, np.ndarray], position: np.ndarray,
-                           heading: np.ndarray) -> dict[str, np.ndarray]:
+def recenter_frame_to_pose(
+    frame: dict[str, np.ndarray], position: np.ndarray, heading: np.ndarray
+) -> dict[str, np.ndarray]:
     """Express every spatial new-schema tensor relative to ``position/heading``."""
     heading = np.asarray(heading) / max(float(np.linalg.norm(heading)), 1e-6)
     out = dict(frame)
-    for key in ("ego_agent_past", "ego_agent_future", "neighbor_agents_past",
-                "neighbor_agents_future", "goal_pose"):
+    for key in (
+        "ego_agent_past",
+        "ego_agent_future",
+        "neighbor_agents_past",
+        "neighbor_agents_future",
+        "goal_pose",
+    ):
         if key in frame:
             out[key] = _pose(frame[key], position, heading)
     for key in ("lanes", "route_lanes"):
@@ -52,4 +63,3 @@ def recenter_frame_to_pose(frame: dict[str, np.ndarray], position: np.ndarray,
         if key in frame:
             out[key] = _points(frame[key], position, heading)
     return out
-
