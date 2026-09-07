@@ -18,6 +18,7 @@ import hdf5plugin
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, REPO_ROOT.as_posix())
@@ -26,17 +27,14 @@ import ml_planner_data as dpt  # noqa: E402
 
 hdf5plugin.register(filters="zstd")
 _WORKER_CACHE: dpt.FrameDataCache | None = None
+_BAG_PATHS_BY_NAME: dict[tuple[Path, str], Path] = {}
 
 
 def samples(matrix: Path) -> list[tuple[str, Path]]:
     data = json.loads(matrix.read_text(encoding="utf-8"))
     if isinstance(data, list):
         return [("frames", Path(path).resolve()) for path in data]
-    return [
-        (metric, Path(path).resolve())
-        for metric, paths in data.items()
-        for path in paths
-    ]
+    return [(metric, Path(path).resolve()) for metric, paths in data.items() for path in paths]
 
 
 def sidecar(npz: Path) -> dict[str, object]:
@@ -47,9 +45,31 @@ def resolve_bag(npz: Path, dataset_root_name: str, rosbag_root: Path) -> Path:
     parts = npz.parts
     marker = parts.index(dataset_root_name)
     bag = rosbag_root / Path(*parts[marker + 1 :]).parent.parent
-    if not (bag / "log_file_info.json").is_file():
-        raise FileNotFoundError(f"ROSBAG metadata not found: {bag}")
-    return bag
+    if (bag / "log_file_info.json").is_file():
+        return bag
+
+    # Some portable packages retain a project-id level that is absent from the
+    # evaluator NPZ hierarchy. Bag directory names are UUID-derived and unique.
+    key = (rosbag_root, bag.name)
+    if key not in _BAG_PATHS_BY_NAME:
+        matches = [
+            path.parent
+            for path in rosbag_root.rglob("log_file_info.json")
+            if path.parent.name == bag.name
+        ]
+        if len(matches) != 1:
+            raise FileNotFoundError(f"ROSBAG metadata not uniquely resolved for {npz}: {matches}")
+        _BAG_PATHS_BY_NAME[key] = matches[0]
+    return _BAG_PATHS_BY_NAME[key]
+
+
+def resolve_map(bag: Path, map_version_id: str) -> Path:
+    """Find the packaged map without assuming one fixed bag hierarchy depth."""
+    for parent in bag.parents:
+        candidate = parent / "map" / map_version_id / "lanelet2_map.osm"
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"map {map_version_id} not found in any ancestor of ROSBAG: {bag}")
 
 
 def chunk_paths(bag: Path) -> dict[int, Path]:
@@ -79,13 +99,16 @@ def route_chunk_indices(chunks: dict[int, Path]) -> set[int]:
 
 def start_timestamp_ns(bag: Path) -> int:
     info = json.loads((bag / "log_file_info.json").read_text(encoding="utf-8"))
-    value = str(info["start_timestamp"])
-    return int(
-        datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
-        .replace(tzinfo=timezone.utc)
-        .timestamp()
-        * 1e9
-    )
+    if "start_timestamp" in info:
+        value = str(info["start_timestamp"])
+        return int(
+            datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+            * 1e9
+        )
+    metadata = yaml.safe_load((bag / "metadata.yaml").read_text(encoding="utf-8"))
+    return int(metadata["rosbag2_bagfile_information"]["starting_time"]["nanoseconds_since_epoch"])
 
 
 def stage_frame_bag(bag: Path, timestamp: int, root: Path) -> Path:
@@ -106,16 +129,19 @@ def stage_frame_bag(bag: Path, timestamp: int, root: Path) -> Path:
     _, files_section = after.split("  files:", 1)
     metadata = before + "  relative_file_paths:\n"
     metadata += "".join(f"  - {path.name}\n" for path in selected)
-    (staged / "metadata.yaml").write_text(
-        metadata + "  files:" + files_section, encoding="utf-8"
-    )
+    (staged / "metadata.yaml").write_text(metadata + "  files:" + files_section, encoding="utf-8")
     for path in selected:
         (staged / path.name).symlink_to(path)
     return staged
 
 
 def write_frame(
-    output: Path, frame: dict[str, np.ndarray], npz: Path, bag: Path, timestamp: int
+    output: Path,
+    frame: dict[str, np.ndarray],
+    npz: Path,
+    bag: Path,
+    timestamp: int,
+    available_future_steps: int,
 ) -> dict[str, object]:
     output.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(output, "w") as h5:
@@ -126,6 +152,7 @@ def write_frame(
             source_npz_path=npz.as_posix(),
             num_frames=1,
             frame_interval_s=0.1,
+            available_future_steps=available_future_steps,
         )
         frames = h5.create_group("frames")
         for key, value in frame.items():
@@ -157,8 +184,31 @@ def write_frame(
         "ego_yaw_rate_rps": yaw_rate,
         "turn_indicator": turn,
         "num_objects": num_objects,
+        "available_future_steps": available_future_steps,
         "source_npz_path": npz.as_posix(),
     }
+
+
+def extend_future(frame: dict[str, np.ndarray], steps: int) -> dict[str, np.ndarray]:
+    """Extend a short, valid future horizon to the fixed 80-step H5 schema."""
+    if steps == 80:
+        return frame
+    future_axes = {
+        "ego_agent_future": 0,
+        "neighbor_agents_future": 1,
+        "turn_indicators_future": 0,
+        "lane_traffic_light_future": 1,
+        "route_traffic_light_future": 1,
+    }
+    result = dict(frame)
+    for key, axis in future_axes.items():
+        values = result[key]
+        if values.shape[axis] != steps:
+            raise ValueError(f"{key} has {values.shape[axis]} future steps, expected {steps}")
+        padding = [(0, 0)] * values.ndim
+        padding[axis] = (0, 80 - steps)
+        result[key] = np.pad(values, padding, mode="edge")
+    return result
 
 
 def init_worker() -> None:
@@ -183,15 +233,21 @@ def convert_one(
     ) = task
     if _WORKER_CACHE is None:
         raise RuntimeError("worker cache is not initialized")
-    frame = _WORKER_CACHE.create_frame_data(
-        staged_text,
-        map_text,
-        timestamp,
-        dpt.VehicleSpec(5.71111, 7.2369, 2.42741),
-        traffic_timeout,
-        80,
-        neighbor_timeout,
-    )
+    frame = None
+    available_future_steps = 80
+    for steps in (80, 50, 30):
+        frame = _WORKER_CACHE.create_frame_data(
+            staged_text,
+            map_text,
+            timestamp,
+            dpt.VehicleSpec(5.71111, 7.2369, 2.42741),
+            traffic_timeout,
+            steps,
+            neighbor_timeout,
+        )
+        if frame is not None:
+            available_future_steps = steps
+            break
     if frame is None:
         raise RuntimeError(f"ROSBAG frame could not be created: {npz_text}")
     npz = Path(npz_text)
@@ -199,10 +255,14 @@ def convert_one(
     output = Path(output_text) / metric / f"{npz.stem}.h5"
     row = write_frame(
         output,
-        {str(key): np.asarray(value) for key, value in frame.items()},
+        extend_future(
+            {str(key): np.asarray(value) for key, value in frame.items()},
+            available_future_steps,
+        ),
         npz,
         bag,
         timestamp,
+        available_future_steps,
     )
     row["matrix_group"] = metric
     return index, row
@@ -231,12 +291,7 @@ def main() -> None:
             timestamp = int(info["timestamp"])
             bag = resolve_bag(npz, args.dataset_root_name, rosbag_root)
             staged = stage_frame_bag(bag, timestamp, Path(temporary) / str(index))
-            map_path = (
-                bag.parents[2]
-                / "map"
-                / str(info["map_version_id"])
-                / "lanelet2_map.osm"
-            )
+            map_path = resolve_map(bag, str(info["map_version_id"]))
             tasks.append(
                 (
                     index,
@@ -252,9 +307,7 @@ def main() -> None:
                 )
             )
             print(f"[{index + 1}/{len(selected)}] prepared {npz.name}", flush=True)
-        with ProcessPoolExecutor(
-            max_workers=args.workers, initializer=init_worker
-        ) as executor:
+        with ProcessPoolExecutor(max_workers=args.workers, initializer=init_worker) as executor:
             results = list(executor.map(convert_one, tasks))
     rows = []
     for index, row in sorted(results):

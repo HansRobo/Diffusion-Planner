@@ -9,13 +9,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
 from diffusion_planner.scenario_based_open_loop.open_loop import METRICS
+
 from planner_metrics.scene_data import extract_metric_scene_data
 
 from .dataset import H5FrameIndex
 from .model import NewDpOnnxRunner
-
 
 DEFAULT_PARAMETERS = {
     "centerline": {"horizon_seconds": 8.0},
@@ -68,25 +67,50 @@ def _stack_metric_views(frames: list[dict[str, np.ndarray]]) -> dict[str, torch.
     return {key: torch.stack([view[key] for view in views]) for key in views[0]}
 
 
-def run(matrix_path: Path, index_path: Path, onnx_path: Path, output: Path,
-        batch_size: int = 8, seed: int = 0, providers: list[str] | None = None) -> dict:
-    matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
-    unknown = set(matrix).difference(METRICS)
-    if unknown:
-        raise ValueError(f"Unsupported metrics: {sorted(unknown)}")
+def _resolve_matrix(matrix_path: Path, dataset: H5FrameIndex) -> dict[str, list[tuple[dict, int]]]:
+    payload = json.loads(matrix_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("open-loop matrix must be an object")
+    result = {}
+    for metric_name, references in payload.items():
+        if not isinstance(references, list):
+            raise ValueError(f"{metric_name} must be a list")
+        resolved = []
+        for reference in references:
+            if not isinstance(reference, dict) or set(reference) != {"h5_path", "frame_index"}:
+                raise ValueError(f"{metric_name} entries must contain only h5_path and frame_index")
+            index = dataset.index_for_frame(
+                reference["h5_path"], int(reference["frame_index"]), relative_to=matrix_path.parent
+            )
+            resolved.append((reference, index))
+        result[metric_name] = resolved
+    return result
+
+
+def run(
+    matrix_path: Path,
+    index_path: Path,
+    onnx_path: Path,
+    output: Path,
+    batch_size: int = 8,
+    seed: int = 0,
+    providers: list[str] | None = None,
+) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     runner = NewDpOnnxRunner(str(onnx_path), providers)
     summaries: dict[str, dict[str, float]] = {}
     seed_cursor = 0
     with H5FrameIndex(index_path) as dataset:
         # Resolve everything before inference: partial/misaligned matrices fail atomically.
-        resolved = {name: [(path, dataset.index_for_source(path)) for path in paths]
-                    for name, paths in matrix.items()}
+        resolved = _resolve_matrix(matrix_path, dataset)
+        unknown = set(resolved).difference(METRICS)
+        if unknown:
+            raise ValueError(f"Unsupported metrics: {sorted(unknown)}")
         for metric_name, samples in resolved.items():
             totals: dict[str, float] = defaultdict(float)
             details: list[dict] = []
             for offset in range(0, len(samples), batch_size):
-                chunk = samples[offset:offset + batch_size]
+                chunk = samples[offset : offset + batch_size]
                 frames = [dataset.frame(index) for _, index in chunk]
                 trajectories, _ = runner.predict(
                     frames, [seed + seed_cursor + offset + i for i in range(len(chunk))]
@@ -99,25 +123,32 @@ def run(matrix_path: Path, index_path: Path, onnx_path: Path, output: Path,
                 )
                 for key, values in evaluation.scores.items():
                     totals[key] += float(values.float().sum().item())
-                for i, (source, _) in enumerate(chunk):
+                for i, (reference, row_index) in enumerate(chunk):
+                    indexed = dataset.rows[row_index]
                     row = {
                         "sample_index": offset + i,
-                        "source_npz": str(source),
-                        "metrics": {key: float(value[i].float().item())
-                                    for key, value in evaluation.scores.items()},
+                        "h5_path": str(reference.get("h5_path", indexed["h5_path"])),
+                        "frame_index": int(indexed["frame_index"]),
+                        "frame_time_ns": int(indexed["frame_time_ns"]),
+                        "metrics": {
+                            key: float(value[i].float().item())
+                            for key, value in evaluation.scores.items()
+                        },
                     }
                     for section, fields in evaluation.details.items():
                         row[section] = {key: value[i].item() for key, value in fields.items()}
                     details.append(row)
             detail_path = output / "details" / metric_name / "details.jsonl"
             detail_path.parent.mkdir(parents=True, exist_ok=True)
-            detail_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n"
-                                           for row in details), encoding="utf-8")
-            summaries[metric_name] = ({key: total / len(samples) for key, total in totals.items()}
-                                      if samples else {})
+            detail_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in details),
+                encoding="utf-8",
+            )
+            summaries[metric_name] = (
+                {key: total / len(samples) for key, total in totals.items()} if samples else {}
+            )
             seed_cursor += len(samples)
-    (output / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n",
-                                          encoding="utf-8")
+    (output / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n", encoding="utf-8")
     return summaries
 
 
@@ -131,8 +162,20 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--provider", action="append", dest="providers")
     args = parser.parse_args()
-    print(json.dumps(run(args.matrix, args.index, args.onnx, args.output,
-                         args.batch_size, args.seed, args.providers), indent=2))
+    print(
+        json.dumps(
+            run(
+                args.matrix,
+                args.index,
+                args.onnx,
+                args.output,
+                args.batch_size,
+                args.seed,
+                args.providers,
+            ),
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

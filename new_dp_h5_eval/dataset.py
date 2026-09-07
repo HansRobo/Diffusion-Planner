@@ -14,7 +14,7 @@ from .schema import H5_FORMAT, H5_FORMAT_VERSION, MODEL_INPUT_NAMES
 
 
 class H5FrameIndex:
-    """Read frames and resolve old matrix paths without converting their content."""
+    """Read frames addressed by their native H5 path and frame index."""
 
     def __init__(self, index_path: str | Path, file_capacity: int = 8) -> None:
         self.index_path = Path(index_path).expanduser().resolve()
@@ -26,33 +26,51 @@ class H5FrameIndex:
         self.rows = table.to_pylist()
         self._files: OrderedDict[Path, h5py.File] = OrderedDict()
         self._capacity = file_capacity
-        self._by_source: dict[str, int] = {}
-        if "source_npz_path" in table.column_names:
-            for i, row in enumerate(self.rows):
-                key = str(Path(row["source_npz_path"]).resolve())
-                if key in self._by_source:
-                    raise ValueError(f"Duplicate source_npz_path in H5 index: {key}")
-                self._by_source[key] = i
+        self._by_frame: dict[tuple[str, int], int] = {}
+        for i, row in enumerate(self.rows):
+            path = self._resolve_h5_path(row["h5_path"])
+            key = (str(path), int(row["frame_index"]))
+            if key in self._by_frame:
+                raise ValueError(f"Duplicate H5 frame in index: {key}")
+            self._by_frame[key] = i
 
     def __len__(self) -> int:
         return len(self.rows)
 
-    def index_for_source(self, source_path: str | Path) -> int:
-        key = str(Path(source_path).expanduser().resolve())
+    def index_for_frame(
+        self,
+        h5_path: str | Path,
+        frame_index: int,
+        frame_time_ns: int | None = None,
+        *,
+        relative_to: str | Path | None = None,
+    ) -> int:
+        path = Path(h5_path).expanduser()
+        if not path.is_absolute():
+            path = Path(relative_to) / path if relative_to else self.index_path.parent / path
+        key = (str(path.resolve()), int(frame_index))
         try:
-            return self._by_source[key]
+            index = self._by_frame[key]
         except KeyError as exc:
-            raise KeyError(f"No native H5 frame indexed for source: {key}") from exc
+            raise KeyError(f"No indexed native H5 frame for {key}") from exc
+        if frame_time_ns is not None and int(self.rows[index]["frame_time_ns"]) != int(
+            frame_time_ns
+        ):
+            raise ValueError(
+                f"frame_time_ns mismatch for {key}: JSON={frame_time_ns}, "
+                f"index={self.rows[index]['frame_time_ns']}"
+            )
+        return index
 
-    def frame_for_source(self, source_path: str | Path) -> dict[str, np.ndarray]:
-        return self.frame(self.index_for_source(source_path))
+    def _resolve_h5_path(self, value: str | Path) -> Path:
+        path = Path(value)
+        if not path.is_absolute():
+            path = self.index_path.parent / path
+        return path.resolve()
 
     def frame(self, index: int) -> dict[str, np.ndarray]:
         row = self.rows[index]
-        path = Path(row["h5_path"])
-        if not path.is_absolute():
-            path = self.index_path.parent / path
-        path = path.resolve()
+        path = self._resolve_h5_path(row["h5_path"])
         file = self._open(path)
         frame_index = int(row["frame_index"])
         if not 0 <= frame_index < int(file.attrs["num_frames"]):
