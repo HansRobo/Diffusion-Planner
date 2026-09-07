@@ -25,6 +25,7 @@ from scenario_generation.closed_loop_eval import (
     aggregate,
     build_mp4,
     enumerate_multi_root_routes,
+    evaluate_segment_pass,
     format_summary_lines,
     load_segment_rows_with_tdigests,
     segment_row_for_json,
@@ -35,6 +36,7 @@ from scenario_generation.perf_timer import Timers
 from scenario_generation.render_pool import render_pool
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
+from tag_toolkit import TagStore
 
 
 @dataclass
@@ -131,6 +133,15 @@ class ClosedLoopEvalConfig:
     verbose: bool
     profile: bool
     max_jobs: int | None
+    # Pass-condition for per-segment pass/fail + aggregated pass stats in the summary.
+    # ``None`` disables pass evaluation entirely — the segment row never gains a ``passed``
+    # field and the summary never carries ``pass_count`` / ``pass_rate`` / ``pass_condition``.
+    # Callers that don't care (e.g. scenario_sim viewer export, training validation without
+    # a pass YAML) leave it at the default and see no change in summary shape. The CLI
+    # pipeline (``run_all_groups_closed_loop``) always sets it from ``cfg.pass_conditions``
+    # (which itself falls back to an all-True default), so its summaries always include
+    # pass stats.
+    pass_condition: "ClosedLoopPassCondition | None" = None
 
 
 @dataclass
@@ -380,6 +391,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         seg_len: int,
         ddp_rank: int,
         ddp_world_size: int,
+        tag_store=None,
     ) -> None:
         super().__init__(
             model,
@@ -390,6 +402,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         )
         self.npz_root = npz_root
         self.seg_len = seg_len
+        self.tag_store = tag_store
 
     @classmethod
     def from_checkpoint(
@@ -401,6 +414,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         seg_len: int,
         ddp_rank: int,
         ddp_world_size: int,
+        tag_store=None,
     ) -> FullRouteClosedLoopEvaluation:
         model, model_args = cls.load_model_pair(model_path, config.params.device)
         return cls(
@@ -411,6 +425,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             seg_len=seg_len,
             ddp_rank=ddp_rank,
             ddp_world_size=ddp_world_size,
+            tag_store=tag_store,
         )
 
     def discover_jobs(self) -> list[FullRouteRouteJob]:
@@ -482,6 +497,10 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 draw_pool=draw_pool,
             )
             row = {"route": job.route_key, **metrics}
+            if self.config.pass_condition is not None:
+                row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
+            if self.tag_store:
+                row["tags"] = self.tag_store.tags_of(scope=job.route_paths, granularity="route")
             if segments_file is not None:
                 # Human-readable segments.jsonl never carries the raw _tdigest blobs; those go to
                 # the sidecar so a later DDP merge (or a re-load of this run) can still pool an
@@ -533,6 +552,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
             result.rows,
             self.config.params.near_miss_thresh,
             strong_brake_mps2=self.config.params.strong_brake_mps2,
+            pass_condition=self.config.pass_condition,
         )
         summary["npz_root"] = str(self.npz_root)
         # Derived straight from the merged rows (each carries its own "route") rather than

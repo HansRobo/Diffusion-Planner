@@ -197,8 +197,8 @@ def test_scan_mode_direct_directory(sample: Path) -> None:
 
 
 def test_index_mode_from_file(tmp_path: Path, sample: Path) -> None:
-    """TagStore can load from a .db index file (SQLite format)."""
-    index_file = tmp_path / "index.db"
+    """TagStore can load from a .tags.db index file (SQLite format)."""
+    index_file = tmp_path / "index.tags.db"
     TagStore.build_index(sample, index_file)
 
     # Load from index file
@@ -811,7 +811,7 @@ def test_source_property(sample: Path) -> None:
 
 def test_build_index_returns_index_store(sample: Path, tmp_path: Path) -> None:
     """build_index returns a TagStore with in-memory index."""
-    index_file = tmp_path / "index.db"
+    index_file = tmp_path / "index.tags.db"
     store = TagStore.build_index(sample, index_file)
 
     assert isinstance(store, TagStore)
@@ -831,8 +831,8 @@ def test_scan_path_list_json(tmp_path: Path, sample: Path) -> None:
 
 
 def test_index_file_loaded_from_pickle(tmp_path: Path, sample: Path) -> None:
-    """Passing a .db file loads the SQLite index directly without scanning."""
-    index_file = tmp_path / "index.db"
+    """Passing a .tags.db file loads the SQLite index directly without scanning."""
+    index_file = tmp_path / "index.tags.db"
     TagStore.build_index(sample, index_file)
 
     store = TagStore(index_file)
@@ -848,7 +848,7 @@ def test_build_index_from_multiple_sources(tmp_path: Path) -> None:
     _frame(a, "a1", ["split:train"])
     _frame(b, "b1", ["split:eval"])
 
-    index_file = tmp_path / "index.db"
+    index_file = tmp_path / "index.tags.db"
     store = TagStore.build_index([a, b], index_file)
     assert len(store.npz_paths()) == 2
     assert len(store.query("split:train")) == 1
@@ -857,7 +857,7 @@ def test_build_index_from_multiple_sources(tmp_path: Path) -> None:
 
 def test_index_roundtrip_paths_are_absolute(sample: Path, tmp_path: Path) -> None:
     """Index saves and loads with absolute paths."""
-    index_file = tmp_path / "index.db"
+    index_file = tmp_path / "index.tags.db"
     TagStore.build_index(sample, index_file)
 
     store = TagStore(index_file)
@@ -867,8 +867,8 @@ def test_index_roundtrip_paths_are_absolute(sample: Path, tmp_path: Path) -> Non
 
 
 def test_index_load_rejects_non_index_payload(tmp_path: Path) -> None:
-    """Loading a .db file that is not a valid SQLite database raises."""
-    index_file = tmp_path / "bad_index.db"
+    """Loading a .tags.db file that is not a valid SQLite database raises."""
+    index_file = tmp_path / "bad_index.tags.db"
     index_file.write_text("this is not a sqlite database")
 
     with pytest.raises(sqlite3.DatabaseError, match="file is not a database"):
@@ -1597,7 +1597,7 @@ def test_concurrent_add_tags_does_not_corrupt(tmp_path: Path) -> None:
     bag.mkdir(parents=True)
     frame_paths = [_frame(bag, f"frame{i:08d}") for i in range(8)]
 
-    db_path = tmp_path / "index.db"
+    db_path = tmp_path / "index.tags.db"
 
     # Populate the DB file directly so concurrent workers can use it
     tmp_conn = sqlite3.connect(str(db_path))
@@ -1932,7 +1932,7 @@ def test_append_frames_accumulates_tag_counts(sample: Path, tmp_path: Path) -> N
     from tag_toolkit import TagStore
 
     aomi_route = sample / "proj_a" / "xxxx_site_a" / "auto" / "2026-06-23" / "10-55-13" / "routes"
-    db_path = tmp_path / "index.db"
+    db_path = tmp_path / "index.tags.db"
     store = TagStore.build_index(aomi_route, db_path)
 
     route_path = str(store.route_paths()[0])
@@ -1964,7 +1964,7 @@ def test_append_frames_then_remove_tags_still_works(sample: Path, tmp_path: Path
     from tag_toolkit import TagStore
 
     aomi_route = sample / "proj_a" / "xxxx_site_a" / "auto" / "2026-06-23" / "10-55-13" / "routes"
-    db_path = tmp_path / "index.db"
+    db_path = tmp_path / "index.tags.db"
     store = TagStore.build_index(aomi_route, db_path)
     route_path = str(store.route_paths()[0])
 

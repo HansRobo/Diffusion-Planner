@@ -11,25 +11,35 @@ Accepts the same ``ClosedLoopConfig`` fields as train.py. Example::
 from __future__ import annotations
 
 import json
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import torch
-from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
+from diffusion_planner.config.closed_loop_config import (
+    ClosedLoopConfig,
+    ClosedLoopPassCondition,
+)
 from diffusion_planner.config.config_cli import build_config, build_parser, resolve_paths
+from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
+
+from scenario_generation.wandb_closed_loop import (
+    log_closed_loop_to_wandb,
+)
+from tag_toolkit.store import TagStore
 
 
 def resolve_closed_loop_inputs(
     inputs: str | list[str],
     modes: list[str] | None = None,
 ) -> list[dict]:
-    """Resolve input paths to a list of ``{"name", "groups", "mode"}`` entries.
+    """Resolve input paths to a list of ``{"name", "groups", "mode", "tag_store"}`` entries.
 
-    Each entry in ``inputs`` produces ONE entry in the output list — duplicate
-    paths are allowed and kept as separate entries (same JSON may legitimately
-    need to run under multiple modes, e.g. ``sites.json objects sites.json noobj``).
+    ``tag_store`` is built via ``TagStore.from_source``: if a same-named ``.tags.db``
+    exists next to the input it is loaded; otherwise an in-memory index is built.
+    The caller holds this store for the lifetime of the evaluation.
 
     ``modes`` is zipped positionally with the *input list* (1-to-1):
 
@@ -39,7 +49,7 @@ def resolve_closed_loop_inputs(
 
     Return shape:
 
-        [{"name": "sites", "groups": {"all": [...]}, "mode": "objects"}, ...]
+        [{"name": "sites", "groups": {"all": [...]}, "mode": "objects", "tag_store": TagStore}, ...]
     """
     if isinstance(inputs, str):
         inputs = [inputs]
@@ -64,6 +74,7 @@ def resolve_closed_loop_inputs(
 
         if p.is_dir():
             groups.setdefault("all", []).append(str(p))
+            tag_store = TagStore.from_source(str(p))
 
         elif p.suffix == ".json":
             with open(p, "r") as f:
@@ -74,12 +85,20 @@ def resolve_closed_loop_inputs(
                     groups.setdefault(group_name, []).extend(str(Path(item)) for item in paths)
             elif isinstance(data, list):
                 groups.setdefault("all", []).extend(str(Path(item)) for item in data)
+            tag_store = TagStore.from_source(str(p))
 
         else:
             print(f"Warning: {input_path} has unsupported extension, skipping", file=sys.stderr)
             continue
 
-        entries.append({"name": p.stem if p.suffix else p.name, "groups": groups, "mode": mode})
+        entries.append(
+            {
+                "name": p.stem if p.suffix else p.name,
+                "groups": groups,
+                "mode": mode,
+                "tag_store": tag_store,
+            }
+        )
 
     return entries
 
@@ -92,12 +111,19 @@ def run_one_group(
     cfg: ClosedLoopConfig,
     mode: str | None = None,
     render_media: bool = True,
+    pass_condition: ClosedLoopPassCondition | None = None,
+    tag_store=None,
 ) -> None:
     """Run closed-loop evaluation for a single group; writes ``summary.json`` + ``segments.jsonl``
     under ``out_dir``. Wandb logging is left to the caller.
 
     ``mode`` is passed explicitly so it doesn't have to be inferred from ``out_dir``
-    (a json_name containing ``__noobj`` would silently mis-infer).
+    (a json_name containing ``__noobj`` would silently misfer).
+
+    ``pass_condition`` (when set) is plumbed through to ``ClosedLoopEvalConfig`` so that
+    per-segment ``passed`` flags and the summary's ``pass_count`` / ``pass_rate`` /
+    ``pass_condition`` block are produced at the metric-aggregation source — no
+    post-processing pass over the file system needed here.
     """
     from scenario_generation.closed_loop_evaluation import (
         ClosedLoopEvalConfig,
@@ -165,11 +191,13 @@ def run_one_group(
             verbose=False,
             profile=False,
             max_jobs=None,
+            pass_condition=pass_condition,
         ),
         npz_root_arg,
         seg_len=cfg.closed_loop_seg_len,
         ddp_rank=ddp_rank,
         ddp_world_size=ddp_world_size,
+        tag_store=tag_store,
     )
 
     evaluator.run_distributed()
@@ -184,10 +212,18 @@ def _make_summary_key(json_name: str, group_name: str) -> str:
     return f"{json_name}/{group_name}"
 
 
-def _load_group_results(out_dir: Path | str) -> dict[str, dict]:
+def _load_group_results(
+    out_dir: Path | str,
+) -> dict[str, dict]:
     """Reload per-group results from ``out_dir`` (each ``<group_dir>/summary.json``
     augmented with rows from the matching ``segments.jsonl``). Groups missing
-    ``segments.jsonl`` (partial run, manual deletion) are skipped with a warning."""
+    ``segments.jsonl`` (partial run, manual deletion) are skipped with a warning.
+
+    Pass/fail flags (``passed``) and the summary's ``pass_count`` / ``pass_rate`` /
+    ``pass_condition`` block are produced at the metric-aggregation source
+    (see ``aggregate()`` and ``run_job()`` in ``scenario_generation/closed_loop_eval{ation}.py``),
+    so this loader just reads them — no second pass is needed.
+    """
     out_dir = Path(out_dir)
     summaries: dict[str, dict] = {}
     for summary_file in out_dir.rglob("summary.json"):
@@ -229,11 +265,22 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
             float(s.get("mean_route_completion", 0.0) or 0.0) * int(s.get("n_segments", 0) or 0)
             for s in summaries.values()
         )
+
+        dev_num = 0.0
+        dev_steps = 0
+        for v in summaries.values():
+            dev = v.get("mean_gt_deviation_m", None)
+            steps = int(v.get("total_steps", 0) or 0)
+            if dev is not None and math.isfinite(dev) and steps > 0:
+                dev_num += float(dev) * steps
+                dev_steps += steps
+
         agg = {
             "n_groups": len(summaries),
             "n_segments": n_segments,
             "total_steps": sum(int(s.get("total_steps", 0) or 0) for s in summaries.values()),
             "mean_route_completion": (route_num / n_segments) if n_segments else 0.0,
+            "mean_gt_deviation_m": (dev_num / dev_steps) if dev_steps else float("inf"),
             "total_curb_hits": sum(
                 int(s.get("road_border", {}).get("collision_count", 0) or 0)
                 for s in summaries.values()
@@ -255,6 +302,13 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
                 int(s.get("object", {}).get("collision_count", 0) or 0) for s in objects_only_values
             ),
         }
+
+        total_pass = sum(int(s.get("pass_count", 0) or 0) for s in summaries.values())
+        total_fail = sum(int(s.get("fail_count", 0) or 0) for s in summaries.values())
+        agg["n_pass_segments"] = total_pass
+        agg["n_fail_segments"] = total_fail
+        agg["pass_rate"] = (total_pass / n_segments) if n_segments else 0.0
+
     Path(out_dir, "groups.json").write_text(json.dumps(agg, indent=2, ensure_ascii=False))
 
 
@@ -296,6 +350,10 @@ def run_closed_loop_main(
     if not cfg.closed_loop_npz_root:
         print("No closed_loop_npz_root set, skipping closed-loop evaluation", file=sys.stderr)
         return False
+
+    # ``cfg.pass_conditions`` is auto-loaded at construction time (see ``__post_init__``).
+    pass_conditions = cfg.pass_conditions
+
     entries = resolve_closed_loop_inputs(
         cfg.closed_loop_npz_root, modes=cfg.closed_loop_object_modes
     )
@@ -308,6 +366,9 @@ def run_closed_loop_main(
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
+    if ddp.get_rank() == 0:
+        save_config(cfg, out_root, "closed_loop_config.json")
+
     if render_media is None:
         render_media = cfg.render_media
 
@@ -318,9 +379,13 @@ def run_closed_loop_main(
         json_out_dir = out_root / json_label
         json_out_dir.mkdir(parents=True, exist_ok=True)
 
+        tag_store = entry.get("tag_store")
+
         for group_name, npz_paths in groups.items():
             mode_out_dir = json_out_dir / group_name
             summary_key = _make_summary_key(json_label, group_name)
+            # Per-group condition (falls back to the loaded default if not overridden in YAML).
+            group_condition = pass_conditions.get_condition(group_name)
             run_one_group(
                 model,
                 model_args,
@@ -329,6 +394,8 @@ def run_closed_loop_main(
                 cfg,
                 mode=mode,
                 render_media=render_media,
+                pass_condition=group_condition,
+                tag_store=tag_store,
             )
 
         written_json_labels.add(json_label)
@@ -350,7 +417,7 @@ def run_closed_loop_main(
                 _write_groups_manifest(json_out_dir, per_json_summaries)
 
         if all_group_names:
-            _log_to_wandb(cfg, all_group_names, all_summaries, run=wandb_run)
+            log_closed_loop_to_wandb(cfg, all_group_names, all_summaries, run=wandb_run)
 
     return True
 
@@ -409,51 +476,6 @@ def main() -> int:
         render_media=None,
     )
     return int(not ok)
-
-
-def _log_to_wandb(
-    cfg: ClosedLoopConfig,
-    group_names: list[str],
-    group_summaries: dict[str, dict],
-    run: "wandb.sdk.wandb_run.Run | None" = None,
-) -> None:
-    """Push per-group closed-loop scalar metrics + Table Images to W&B.
-
-    Reuses ``run`` if given, else starts its own.
-    Uses professionally styled table images for better visualization.
-    """
-    import wandb
-
-    from scenario_generation.wandb_closed_loop import build_closed_loop_tables, build_per_1000steps_stacked_panels
-
-    if not group_summaries:
-        return
-
-    if run is None:
-        run = wandb.init(project=cfg.wandb_project_name or None, name=cfg.exp_name or None)
-        own_run = True
-    else:
-        own_run = False
-
-    try:
-        # Build per-json_label grouping from group keys.
-        by_json: dict[str, dict[str, dict]] = {}
-        for key in group_names:
-            summary = group_summaries[key]
-            if "__noobj/" in key:
-                json_label = key.split("__noobj/", 1)[0] + "__noobj"
-            else:
-                json_label = key.split("/", 1)[0]
-            by_json.setdefault(json_label, {})[key] = summary
-
-        tables = build_closed_loop_tables(by_json)
-        panels = build_per_1000steps_stacked_panels(by_json)
-        run.log({**tables, **panels})
-        for key in sorted(tables) + sorted(panels):
-            print(f"wandb: logged {key}")
-    finally:
-        if own_run:
-            wandb.finish()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a TagStore SQLite index (.db) from a dataset source on the CLI.
+"""Build a TagStore SQLite index (.tags.db) from a dataset source on the CLI.
 
 This is a thin wrapper around ``TagStore.build_index(source, output)``;
 it exists so the index can be materialised without writing Python code.
@@ -8,8 +8,8 @@ A pre-built index is the fast path for downstream tools such as
 
 Usage::
 
-    python build_index.py /path/to/dataset -o /data/tags.db
-    python build_index.py /path/to/dataset -o /data/tags.db --force
+    python build_index.py /path/to/dataset -o /data/tags.tags.db
+    python build_index.py /path/to/dataset -o /data/tags.tags.db --force
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ if _TAG_TOOLKIT_PARENT.exists():
 
 from tag_toolkit import TagStore
 
-_DB_SUFFIXES = (".db", ".sqlite", ".tags.db")
+_DB_SUFFIXES = (".tags.db",)
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         "-o",
         type=Path,
         required=True,
-        help=("Output .db path. Must end in one of: " + ", ".join(_DB_SUFFIXES) + "."),
+        help=("Output .tags.db path. Must end in one of: " + ", ".join(_DB_SUFFIXES) + "."),
     )
     parser.add_argument(
         "--force",

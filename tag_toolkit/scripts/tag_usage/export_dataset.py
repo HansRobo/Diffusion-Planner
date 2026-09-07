@@ -19,7 +19,7 @@ Usage::
         --query "devops_override_label:b" --mode close_loop --dimension devops_override_label
 
     # Use a pre-built SQLite index for faster startup on large datasets
-    python export_dataset.py /data/tags.db --output /data/out \\
+    python export_dataset.py /data/tags.tags.db --output /data/out \\
         --mode close_loop --dimension devops_override_label
 
 Modes
@@ -293,8 +293,8 @@ def main():
         help=(
             "TagToolkit source (see tag_toolkit.source): a directory, a "
             "path-list .json / .json.zst, a single .npz, a sequence of "
-            "those, or a pre-built TagStore SQLite index (*.db / *.sqlite "
-            "/ *.tags.db). The form is auto-detected; a database index is "
+            "those, or a pre-built TagStore SQLite index (*.tags.db). "
+            "The form is auto-detected; a database index is "
             "the fast path for large datasets."
         ),
     )

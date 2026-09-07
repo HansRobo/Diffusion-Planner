@@ -23,13 +23,16 @@ from diffusion_planner.utils.data_augmentation import StatePerturbation
 from diffusion_planner.utils.data_augmentation_bridge import (
     StatePerturbation as BridgeStatePerturbation,
 )
+from diffusion_planner.utils.data_augmentation_frenet import (
+    frenet_augmenter_from_args,
+)
 from diffusion_planner.utils.dataset import (
     DiffusionPlannerData,
     DiffusionPlannerPairData,
     bev_render_settings,
     worker_init,
 )
-from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts, final_phase_lr
 from diffusion_planner.utils.normalizer import ObservationNormalizer, StateNormalizer
 from diffusion_planner.utils.onnx_export import export_checkpoint_onnx_guarded
 from diffusion_planner.utils.train_utils import resume_model, set_seed
@@ -198,6 +201,26 @@ def scenario_sim_validate(args, epoch: int, ckpt_path: str, out_dir: str) -> Non
     status = "ok" if rc == 0 else f"FAILED rc={rc}"
     print(f"scenario_sim @epoch {epoch + 1}: {status} in {elapsed:.1f}s -> {out_dir}", flush=True)
 
+    if rc != 0 or not args.use_wandb or wandb.run is None:
+        return
+
+    try:
+        from scenario_generation.wandb_scenario_sim import (
+            build_scenario_sim_wandb_payload,
+            load_case_rows,
+        )
+
+        out_p = Path(out_dir)
+        payload = build_scenario_sim_wandb_payload(load_case_rows(out_p), media_root=out_p)
+        wandb.run.log(payload, step=epoch + 1)
+        print(
+            f"wandb: logged scenario_sim @epoch {epoch + 1} "
+            f"(pass rate {payload.get('scenario_sim/pass_rate')}%)",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"Warning: Failed to log scenario_sim to wandb: {exc}", flush=True)
+
 
 def model_training(args: TrainConfig):
     save_path = args.save_dir
@@ -251,6 +274,8 @@ def model_training(args: TrainConfig):
     if args.use_data_augment:
         if args.augment_type == "bridge":
             aug = BridgeStatePerturbation(augment_prob=args.augment_prob, device="cpu")
+        elif args.augment_type == "frenet":
+            aug = frenet_augmenter_from_args(args)
         else:
             aug = StatePerturbation(
                 augment_prob=args.augment_prob,
@@ -364,7 +389,12 @@ def model_training(args: TrainConfig):
     ]
 
     optimizer = optim.AdamW(params)
-    scheduler = CosineAnnealingWarmUpRestarts(optimizer, train_epochs, args.warm_up_epoch)
+    scheduler = CosineAnnealingWarmUpRestarts(
+        optimizer,
+        train_epochs,
+        args.warm_up_epoch,
+        lr_schedule=args.lr_schedule,
+    )
 
     if args.resume_model_path is not None:
         print(f"Model loaded from {args.resume_model_path}")
@@ -463,14 +493,10 @@ def model_training(args: TrainConfig):
         if args.ddp:
             torch.distributed.barrier()
 
-        # Adjust learning rate for final 10 epochs
-        final_epoch_count = 10
-        if epoch >= train_epochs - final_epoch_count:
-            base_lr = args.learning_rate
-            if epoch >= train_epochs - final_epoch_count // 2:  # Last 5 epochs: LR * 1/100
-                adjusted_lr = base_lr * 0.01
-            else:  # First 5 of final 10 epochs: LR * 1/10
-                adjusted_lr = base_lr * 0.1
+        # Adjust learning rate for the final 10 epochs (constant schedule only —
+        # the cosine schedule already anneals to 0 and must not be overridden)
+        adjusted_lr = final_phase_lr(args.learning_rate, epoch, train_epochs, args.lr_schedule)
+        if adjusted_lr is not None:
             for param_group in optimizer.param_groups:
                 param_group["lr"] = adjusted_lr
             if global_rank == 0:
@@ -664,8 +690,8 @@ def model_training(args: TrainConfig):
                     external_data=False,
                 )
 
-        if (epoch + 1 - init_epoch) // save_utd == (train_epochs - init_epoch) // save_utd:
-            # closed-loop validation runs on all ranks
+        if epoch + 1 == train_epochs:
+            # closed-loop validation runs on all ranks, only at the final epoch
             curr_dir = os.path.join(save_path, f"epoch{epoch + 1:04d}")
             os.makedirs(curr_dir, exist_ok=True)
             closed_loop_validate(
@@ -680,3 +706,9 @@ def model_training(args: TrainConfig):
 
     if global_rank == 0 and wandb.run is not None:
         wandb.finish()
+
+    # Tear down the DDP process group explicitly: without this, NCCL's heartbeat +
+    # IB event threads can intermittently deadlock interpreter shutdown and the
+    # training process never exits (observed hanging a full R2LPL round).
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()

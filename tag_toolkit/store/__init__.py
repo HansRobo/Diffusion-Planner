@@ -3,7 +3,7 @@
 Tags travel with each NPZ's sidecar JSON. The store scans a source,
 builds a SQLite index, and exposes query / mutation on top of that index.
 
-If ``source`` is a ``.db`` / ``.sqlite`` / ``.tags.db`` file the SQLite
+If ``source`` is a ``.tags.db`` file the SQLite
 index is opened there and all operations are persisted. Otherwise the
 index lives in memory; mutations stay in memory and can be exported to a
 file with ``store.export_index(path)``.
@@ -70,7 +70,7 @@ class TagStore(_QueryMixin, _MutateMixin, _IndexMixin):
     """SQLite-backed store for tags on NPZ sidecar files.
 
     Construct from one of:
-      - a ``.db`` / ``.sqlite`` / ``.tags.db`` file: opens/creates that
+      - a ``.tags.db`` file: opens/creates that
         SQLite database; all operations are persisted
       - a directory, path-list JSON, list of paths, or single ``.npz``:
         creates an in-memory SQLite index; mutations stay in memory;

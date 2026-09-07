@@ -4,7 +4,7 @@ Quick start::
 
     # Open or create a SQLite index
     from tag_toolkit import TagStore
-    store = TagStore("/path/to/dataset.db")   # persisted
+    store = TagStore("/path/to/dataset.tags.db")   # persisted
     # or:
     store = TagStore("/path/to/dataset/")     # in-memory, mutations stay in memory
 
