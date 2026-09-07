@@ -136,12 +136,7 @@ def stage_frame_bag(bag: Path, timestamp: int, root: Path) -> Path:
 
 
 def write_frame(
-    output: Path,
-    frame: dict[str, np.ndarray],
-    npz: Path,
-    bag: Path,
-    timestamp: int,
-    available_future_steps: int,
+    output: Path, frame: dict[str, np.ndarray], npz: Path, bag: Path, timestamp: int
 ) -> dict[str, object]:
     output.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(output, "w") as h5:
@@ -152,7 +147,6 @@ def write_frame(
             source_npz_path=npz.as_posix(),
             num_frames=1,
             frame_interval_s=0.1,
-            available_future_steps=available_future_steps,
         )
         frames = h5.create_group("frames")
         for key, value in frame.items():
@@ -184,31 +178,8 @@ def write_frame(
         "ego_yaw_rate_rps": yaw_rate,
         "turn_indicator": turn,
         "num_objects": num_objects,
-        "available_future_steps": available_future_steps,
         "source_npz_path": npz.as_posix(),
     }
-
-
-def extend_future(frame: dict[str, np.ndarray], steps: int) -> dict[str, np.ndarray]:
-    """Extend a short, valid future horizon to the fixed 80-step H5 schema."""
-    if steps == 80:
-        return frame
-    future_axes = {
-        "ego_agent_future": 0,
-        "neighbor_agents_future": 1,
-        "turn_indicators_future": 0,
-        "lane_traffic_light_future": 1,
-        "route_traffic_light_future": 1,
-    }
-    result = dict(frame)
-    for key, axis in future_axes.items():
-        values = result[key]
-        if values.shape[axis] != steps:
-            raise ValueError(f"{key} has {values.shape[axis]} future steps, expected {steps}")
-        padding = [(0, 0)] * values.ndim
-        padding[axis] = (0, 80 - steps)
-        result[key] = np.pad(values, padding, mode="edge")
-    return result
 
 
 def init_worker() -> None:
@@ -233,36 +204,28 @@ def convert_one(
     ) = task
     if _WORKER_CACHE is None:
         raise RuntimeError("worker cache is not initialized")
-    frame = None
-    available_future_steps = 80
-    for steps in (80, 50, 30):
-        frame = _WORKER_CACHE.create_frame_data(
-            staged_text,
-            map_text,
-            timestamp,
-            dpt.VehicleSpec(5.71111, 7.2369, 2.42741),
-            traffic_timeout,
-            steps,
-            neighbor_timeout,
-        )
-        if frame is not None:
-            available_future_steps = steps
-            break
+    frame = _WORKER_CACHE.create_frame_data(
+        staged_text,
+        map_text,
+        timestamp,
+        dpt.VehicleSpec(5.71111, 7.2369, 2.42741),
+        traffic_timeout,
+        80,
+        neighbor_timeout,
+    )
     if frame is None:
-        raise RuntimeError(f"ROSBAG frame could not be created: {npz_text}")
+        raise RuntimeError(
+            f"ROSBAG frame does not provide the required 80 future steps: {npz_text}"
+        )
     npz = Path(npz_text)
     bag = Path(bag_text)
     output = Path(output_text) / metric / f"{npz.stem}.h5"
     row = write_frame(
         output,
-        extend_future(
-            {str(key): np.asarray(value) for key, value in frame.items()},
-            available_future_steps,
-        ),
+        {str(key): np.asarray(value) for key, value in frame.items()},
         npz,
         bag,
         timestamp,
-        available_future_steps,
     )
     row["matrix_group"] = metric
     return index, row

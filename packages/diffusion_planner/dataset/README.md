@@ -66,6 +66,8 @@ metadata/  frame_time_ns, speed, yaw rate, turn indicator, etc.
 ```
 
 The converter reads only the Route-message chunk and the chunks required around each target timestamp.
+Every exported sample requires the model's complete 80-step future horizon. Samples
+without it are rejected instead of padding ground-truth labels.
 
 ## Arguments
 
