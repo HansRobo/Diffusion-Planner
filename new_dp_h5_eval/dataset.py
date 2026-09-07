@@ -66,6 +66,20 @@ class H5FrameIndex:
         path = Path(value)
         if not path.is_absolute():
             path = self.index_path.parent / path
+        if path.is_file():
+            return path.resolve()
+
+        # Index files created before the final dataset layout retained their
+        # original collection name (for example ``h5/basic/<group>/<file>``).
+        # The portable JSON and the shipped files use
+        # ``h5/open_loop_basic/<group>/<file>`` instead.  An index belongs to
+        # exactly one collection, so its final two components are an unambiguous
+        # stable address for a shard inside that collection.
+        parts = path.parts
+        if len(parts) >= 2:
+            relocated = self.index_path.parent / parts[-2] / parts[-1]
+            if relocated.is_file():
+                return relocated.resolve()
         return path.resolve()
 
     def frame(self, index: int) -> dict[str, np.ndarray]:
