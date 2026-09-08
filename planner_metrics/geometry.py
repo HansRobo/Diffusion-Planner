@@ -727,8 +727,8 @@ def _point_to_segments_error_components(
     points: torch.Tensor,
     seg_p1: torch.Tensor,
     seg_p2: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return lateral and beyond-segment longitudinal errors per point.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return lateral error, longitudinal overshoot, and nearest feet per point.
 
     The nearest segment is selected using the usual clamped point-to-segment
     distance.  Once selected, lateral error is measured against the infinite
@@ -736,10 +736,12 @@ def _point_to_segments_error_components(
     point beyond a centerline endpoint from turning longitudinal overshoot into
     lateral error.  Longitudinal error is the distance beyond the selected
     segment's endpoint; it is zero while the perpendicular projection lies
-    inside the segment.
+    inside the segment.  The returned foot is the clamped nearest point on that
+    segment, suitable as a visualization / heading-frame offset origin.
 
     Returns:
-        ``(lateral_error, longitudinal_error)`` with shape ``(Q,)``.
+        ``(lateral_error, longitudinal_error, closest_xy)`` with shapes
+        ``(Q,)``, ``(Q,)``, and ``(Q, 2)``.
     """
     Q = points.shape[0]
     E = seg_p1.shape[0]
@@ -750,6 +752,7 @@ def _point_to_segments_error_components(
     chunk_size = max(1, _MAX_QE // E)
     lateral_results = []
     longitudinal_results = []
+    closest_results = []
 
     for start in range(0, Q, chunk_size):
         end = min(start + chunk_size, Q)
@@ -772,8 +775,13 @@ def _point_to_segments_error_components(
         cross = nearest_seg[:, 0] * nearest_diff[:, 1] - nearest_seg[:, 1] * nearest_diff[:, 0]
         lateral_results.append(cross.abs() / nearest_len)
         longitudinal_results.append((nearest_t_raw - nearest_t_raw.clamp(0, 1)).abs() * nearest_len)
+        closest_results.append(closest[rows, nearest])
 
-    return torch.cat(lateral_results), torch.cat(longitudinal_results)
+    return (
+        torch.cat(lateral_results),
+        torch.cat(longitudinal_results),
+        torch.cat(closest_results, dim=0),
+    )
 
 
 def _points_inside_intersection_areas(
