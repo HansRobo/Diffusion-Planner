@@ -182,6 +182,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     deterministic: bool = True
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not self.save_dir:
             self.save_dir = self.build_save_dir(self.output_root, self.exp_name)
 
