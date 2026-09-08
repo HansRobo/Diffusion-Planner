@@ -89,7 +89,14 @@ def train_epoch(data_loader, model, optimizer, args, ema, aug: StatePerturbation
 
         if args.ddp:
             torch.cuda.synchronize()
-        epoch_loss.append(loss)
+        # Keep only host scalars: retaining loss tensors would keep their
+        # autograd graphs and GPU allocations alive for the whole epoch.
+        epoch_loss.append(
+            {
+                key: value if isinstance(value, (int, float)) else value.detach().item()
+                for key, value in loss.items()
+            }
+        )
 
     epoch_mean_loss = get_epoch_mean_loss(epoch_loss)
 
