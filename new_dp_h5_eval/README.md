@@ -1,8 +1,9 @@
 # New DP native-H5 evaluation
 
 Evaluate a current new-DP sampler ONNX with this repository's existing open-loop
-metrics and closed-loop renderer. The only input format is native H5 version 4 plus
-its Parquet frame index; this package does not convert NPZ files or ROS bags.
+metrics and closed-loop renderer. The only data format is native H5 version 4:
+open-loop also needs its Parquet frame index, while closed-loop uses a route-H5
+manifest. This package does not convert NPZ files or ROS bags.
 
 The standard data root is:
 
