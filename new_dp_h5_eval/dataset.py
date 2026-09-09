@@ -1,4 +1,4 @@
-"""Strict indexed reader for new-DP native H5 shards."""
+"""Strict indexed reader for current new-DP native H5 shards."""
 
 from __future__ import annotations
 
@@ -45,10 +45,8 @@ class H5FrameIndex:
         *,
         relative_to: str | Path | None = None,
     ) -> int:
-        path = Path(h5_path).expanduser()
-        if not path.is_absolute():
-            path = Path(relative_to) / path if relative_to else self.index_path.parent / path
-        key = (str(path.resolve()), int(frame_index))
+        path = self._resolve_h5_path(h5_path, relative_to=relative_to)
+        key = (str(path), int(frame_index))
         try:
             index = self._by_frame[key]
         except KeyError as exc:
@@ -62,25 +60,27 @@ class H5FrameIndex:
             )
         return index
 
-    def _resolve_h5_path(self, value: str | Path) -> Path:
+    def _resolve_h5_path(self, value: str | Path, *, relative_to: str | Path | None = None) -> Path:
         path = Path(value)
+        candidates = [path] if path.is_absolute() else []
         if not path.is_absolute():
-            path = self.index_path.parent / path
-        if path.is_file():
-            return path.resolve()
+            if relative_to is not None:
+                candidates.append(Path(relative_to) / path)
+            candidates.append(self.index_path.parent / path)
 
-        # Index files created before the final dataset layout retained their
-        # original collection name (for example ``h5/basic/<group>/<file>``).
-        # The portable JSON and the shipped files use
-        # ``h5/open_loop_basic/<group>/<file>`` instead.  An index belongs to
-        # exactly one collection, so its final two components are an unambiguous
-        # stable address for a shard inside that collection.
-        parts = path.parts
-        if len(parts) >= 2:
-            relocated = self.index_path.parent / parts[-2] / parts[-1]
-            if relocated.is_file():
-                return relocated.resolve()
-        return path.resolve()
+        # A packaged index may have been generated before its H5 collection
+        # received its final name.  Collection-local ``group/file`` remains a
+        # stable address, so resolve it against the index's collection root.
+        # This supports the shipped ``open_loop_basic`` data without knowing
+        # anything about legacy NPZ or rosbag layouts.
+        if len(path.parts) >= 2:
+            candidates.append(self.index_path.parent / path.parts[-2] / path.parts[-1])
+
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+        listed = ", ".join(str(candidate) for candidate in candidates)
+        raise FileNotFoundError(f"Native H5 shard not found for {value}; tried: {listed}")
 
     def frame(self, index: int) -> dict[str, np.ndarray]:
         row = self.rows[index]
@@ -115,6 +115,9 @@ class H5FrameIndex:
         if int(file.attrs.get("format_version", -1)) != H5_FORMAT_VERSION:
             file.close()
             raise ValueError(f"Unsupported H5 format version: {path}")
+        if "frames" not in file or "num_frames" not in file.attrs:
+            file.close()
+            raise ValueError(f"Incomplete native H5 shard: {path}")
         self._files[path] = file
         while len(self._files) > self._capacity:
             self._files.popitem(last=False)[1].close()

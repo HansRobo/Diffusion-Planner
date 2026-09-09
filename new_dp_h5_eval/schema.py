@@ -1,4 +1,6 @@
-"""The versioned native-H5/ONNX contract used by new DP."""
+"""The versioned native-H5/ONNX contract used by the current new DP."""
+
+from __future__ import annotations
 
 MODEL_INPUT_NAMES = (
     "ego_agent_past",
@@ -25,3 +27,9 @@ MODEL_INPUT_NAMES = (
 
 H5_FORMAT = "diffusion_planner_frame_dataset"
 H5_FORMAT_VERSION = 4
+
+NUM_AGENTS = 321
+FUTURE_STEPS = 80
+TRAJECTORY_DIM = 4
+TURN_LOGIT_DIM = 3
+INITIAL_NOISE_SHAPE = (NUM_AGENTS, FUTURE_STEPS, TRAJECTORY_DIM)

@@ -8,7 +8,12 @@ import numpy as np
 import onnxruntime as ort
 import torch
 
-from .schema import MODEL_INPUT_NAMES
+from .schema import (
+    INITIAL_NOISE_SHAPE,
+    MODEL_INPUT_NAMES,
+    NUM_AGENTS,
+    TURN_LOGIT_DIM,
+)
 
 
 def _providers_for_local_rank(
@@ -50,6 +55,49 @@ def normalize_frame(frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return out
 
 
+def seeded_initial_noise(seeds: list[int]) -> np.ndarray:
+    """Create the new-DP sampler noise deterministically, one seed per batch item."""
+    return np.stack(
+        [
+            torch.randn(INITIAL_NOISE_SHAPE, generator=torch.Generator().manual_seed(seed)).numpy()
+            for seed in seeds
+        ]
+    )
+
+
+def decode_onnx_outputs(
+    trajectory: np.ndarray, turn_logits: np.ndarray, *, batch_size: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate and denormalize the current sampler's two ONNX outputs."""
+    trajectory = np.asarray(trajectory)
+    turn_logits = np.asarray(turn_logits)
+    expected_trajectory = (batch_size, NUM_AGENTS, *INITIAL_NOISE_SHAPE[1:])
+    if trajectory.shape != expected_trajectory:
+        raise ValueError(f"unexpected ONNX trajectory shape: {trajectory.shape}")
+    if turn_logits.shape != (batch_size, TURN_LOGIT_DIM):
+        raise ValueError(f"unexpected new-DP turn-logit shape: {turn_logits.shape}")
+    trajectory = trajectory.copy()
+    trajectory[..., :2] *= 50.0
+    yaw = trajectory[..., 2:4]
+    trajectory[..., 2:4] = yaw / np.maximum(np.linalg.norm(yaw, axis=-1, keepdims=True), 1e-6)
+    return trajectory, turn_logits
+
+
+def legacy_feedback_turn_logits(turn_logits: np.ndarray) -> np.ndarray:
+    """Adapt new-DP state logits for the legacy closed-loop feedback decoder.
+
+    New DP predicts `[DISABLE, LEFT, RIGHT]`.  The legacy decoder additionally
+    has `NONE` (0) and `KEEP` (4), which are not next-state predictions and
+    must never be selected for a new-DP model.
+    """
+    turn_logits = np.asarray(turn_logits)
+    if turn_logits.ndim != 2 or turn_logits.shape[1] != TURN_LOGIT_DIM:
+        raise ValueError(f"unexpected new-DP turn-logit shape: {turn_logits.shape}")
+    legacy = np.full((turn_logits.shape[0], 5), -1e9, dtype=np.float32)
+    legacy[:, 1:4] = turn_logits
+    return legacy
+
+
 class NewDpOnnxRunner:
     def __init__(self, model_path: str, providers: list[str] | None = None) -> None:
         self.session = ort.InferenceSession(
@@ -72,18 +120,6 @@ class NewDpOnnxRunner:
             key: np.stack([np.asarray(f[key], dtype=np.float32) for f in normalized])
             for key in MODEL_INPUT_NAMES
         }
-        rng_noise = [
-            torch.randn((321, 80, 4), generator=torch.Generator().manual_seed(seed)).numpy()
-            for seed in seeds
-        ]
-        feed["initial_noise"] = np.stack(rng_noise)
+        feed["initial_noise"] = seeded_initial_noise(seeds)
         trajectory, turn_logits = self.session.run(None, feed)
-        if np.asarray(trajectory).shape != (len(frames), 321, 80, 4):
-            raise ValueError(f"unexpected ONNX trajectory shape: {np.asarray(trajectory).shape}")
-        if np.asarray(turn_logits).shape != (len(frames), 3):
-            raise ValueError(f"unexpected new-DP turn-logit shape: {np.asarray(turn_logits).shape}")
-        trajectory = np.asarray(trajectory)
-        trajectory[..., :2] *= 50.0
-        yaw = trajectory[..., 2:4]
-        trajectory[..., 2:4] = yaw / np.maximum(np.linalg.norm(yaw, axis=-1, keepdims=True), 1e-6)
-        return trajectory, np.asarray(turn_logits)
+        return decode_onnx_outputs(trajectory, turn_logits, batch_size=len(frames))

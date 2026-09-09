@@ -31,8 +31,13 @@ from scenario_generation.perf_timer import Timers
 from scenario_generation.reproducer_rollout import render_segment
 from scenario_generation.route_timeline import RouteTimeline
 
-from .model import NewDpOnnxRunner
-from .schema import MODEL_INPUT_NAMES
+from .model import (
+    NewDpOnnxRunner,
+    decode_onnx_outputs,
+    legacy_feedback_turn_logits,
+    seeded_initial_noise,
+)
+from .schema import H5_FORMAT, H5_FORMAT_VERSION, MODEL_INPUT_NAMES
 
 
 class NativeH5RouteTimeline(RouteTimeline):
@@ -50,14 +55,21 @@ class NativeH5RouteTimeline(RouteTimeline):
         self.h5_path = Path(h5_path).expanduser().resolve()
         self._h5 = h5py.File(self.h5_path, "r")
         try:
-            if self._h5.attrs.get("format") != "diffusion_planner_frame_dataset":
+            if self._h5.attrs.get("format") != H5_FORMAT:
                 raise ValueError(f"unexpected H5 format: {self.h5_path}")
+            if int(self._h5.attrs.get("format_version", -1)) != H5_FORMAT_VERSION:
+                raise ValueError(f"unsupported H5 format version: {self.h5_path}")
             metadata = self._h5["metadata"]
             required = {"frame_time_ns", "ego_x", "ego_y", "ego_yaw"}
             missing = required.difference(metadata.keys())
             if missing:
                 raise ValueError(
                     f"closed-loop H5 missing pose metadata {sorted(missing)}: {self.h5_path}"
+                )
+            missing = set(MODEL_INPUT_NAMES).difference(self._h5["frames"].keys())
+            if missing:
+                raise ValueError(
+                    f"closed-loop H5 missing model fields {sorted(missing)}: {self.h5_path}"
                 )
             total = int(self._h5.attrs["num_frames"])
             stop = total if frame_stop is None else int(frame_stop)
@@ -187,32 +199,16 @@ class ReproducerOnnxModel:
         device = data["ego_agent_past"].device
         feed = {key: data[key].detach().cpu().numpy() for key in MODEL_INPUT_NAMES}
         batch = feed["ego_agent_past"].shape[0]
-        noise = np.stack(
-            [
-                torch.randn(
-                    (321, 80, 4),
-                    generator=torch.Generator().manual_seed(self.seed + self.calls + i),
-                ).numpy()
-                for i in range(batch)
-            ]
-        )
+        noise = seeded_initial_noise([self.seed + self.calls + i for i in range(batch)])
         self.calls += batch
         feed["initial_noise"] = noise
         trajectory, logits3 = self.runner.session.run(None, feed)
-        if np.asarray(trajectory).shape != (batch, 321, 80, 4) or np.asarray(logits3).shape != (
-            batch,
-            3,
-        ):
-            raise ValueError("new-DP ONNX output contract changed")
-        trajectory[..., :2] *= 50.0
-        yaw = trajectory[..., 2:4]
-        trajectory[..., 2:4] = yaw / np.maximum(np.linalg.norm(yaw, axis=-1, keepdims=True), 1e-6)
-        # New classes [DISABLE, LEFT, RIGHT] correspond to old feedback ids [1,2,3].
-        logits5 = np.full((batch, 5), -1e9, dtype=np.float32)
-        logits5[:, 1:4] = logits3
+        trajectory, logits3 = decode_onnx_outputs(trajectory, logits3, batch_size=batch)
         outputs = {
             "prediction": torch.from_numpy(trajectory).to(device),
-            "turn_indicator_logit": torch.from_numpy(logits5).to(device),
+            "turn_indicator_logit": torch.from_numpy(legacy_feedback_turn_logits(logits3)).to(
+                device
+            ),
         }
         return None, outputs
 
