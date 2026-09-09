@@ -186,10 +186,12 @@ def run_one_group(
                 window=cfg.closed_loop_window,
                 max_steps=cfg.closed_loop_max_steps,
                 timeline_progress_mode=cfg.closed_loop_timeline_progress_mode,  # replay mode
+                deviation_collision_thresh_m=cfg.closed_loop_deviation_collision_thresh_m,
+                colormap_metrics=tuple(cfg.closed_loop_colormap_metrics) if render_media else (),
             ),
             fps=float(cfg.closed_loop_fps),
             verbose=False,
-            profile=False,
+            profile=cfg.closed_loop_profile,
             max_jobs=None,
             pass_condition=pass_condition,
         ),
@@ -300,6 +302,10 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
             ),
             "total_collision_events": sum(
                 int(s.get("object", {}).get("collision_count", 0) or 0) for s in objects_only_values
+            ),
+            "total_deviation_collision_events": sum(
+                int(s.get("deviation_collision", {}).get("count", 0) or 0)
+                for s in objects_only_values
             ),
         }
 

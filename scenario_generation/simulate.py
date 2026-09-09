@@ -93,6 +93,11 @@ class _OnnxModel:
     everything else float32; ``delay`` is reshaped to the graph's ``[1, 1]``), run the session, and
     wrap the two outputs back into torch tensors on ``device``."""
 
+    # nn.Module parity: the open-loop validator toggles train/eval mode around inference
+    # (``was_training = model.training`` / ``model.train(was_training)``); the graph is
+    # inference-only, so this is always False and train() is a no-op.
+    training = False
+
     def __init__(
         self,
         onnx_path: str | Path,
@@ -120,6 +125,13 @@ class _OnnxModel:
             else {}
             for p in providers
         ]
+        target = torch.device(device)
+        if target.type == "cuda" and any(p in _ACCELERATED for p in providers):
+            # ORT defaults to GPU 0 independently of torch.cuda.set_device() in each rank.
+            device_id = target.index if target.index is not None else torch.cuda.current_device()
+            for provider, option in zip(providers, options):
+                if provider in _ACCELERATED:
+                    option["device_id"] = device_id
         self.session = ort.InferenceSession(
             str(onnx_path), providers=providers, provider_options=options
         )
@@ -146,6 +158,9 @@ class _OnnxModel:
         return None, outputs
 
     def eval(self):  # parity with nn.Module (no-op)
+        return self
+
+    def train(self, mode: bool = True):  # parity with nn.Module (no-op)
         return self
 
 

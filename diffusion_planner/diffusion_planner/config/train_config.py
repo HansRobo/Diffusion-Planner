@@ -82,6 +82,13 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
         default=0,
     )
     normalization_file_path: str = "normalization.json"
+    # Override channel for launch wrappers: JSON object of non-CLI TrainConfig
+    # fields; unknown keys fail loudly (see train_predictor.apply_overrides_json).
+    train_overrides_json: str = cli(
+        "JSON object of TrainConfig field overrides applied after CLI parsing",
+        path=True,
+        default="",
+    )
 
     train_subsample_step: int = 1
 
@@ -175,6 +182,7 @@ class TrainConfig(ClosedLoopConfig, ScenarioOpenLoopConfig, ModelConfig):
     deterministic: bool = True
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not self.save_dir:
             self.save_dir = self.build_save_dir(self.output_root, self.exp_name)
 
