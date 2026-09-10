@@ -321,6 +321,10 @@ def _write_groups_manifest(out_dir: Path | str, summaries: dict[str, dict]) -> N
                 int(s.get("deviation_collision", {}).get("count", 0) or 0)
                 for s in objects_only_values
             ),
+            "total_rear_collision_events": sum(
+                int(s.get("object_rear", {}).get("collision_count", 0) or 0)
+                for s in objects_only_values
+            ),
         }
 
         total_pass = sum(int(s.get("pass_count", 0) or 0) for s in summaries.values())
