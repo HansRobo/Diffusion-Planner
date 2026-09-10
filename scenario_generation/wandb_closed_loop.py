@@ -51,6 +51,7 @@ _ABS_COLUMNS = [
     ("Segs diverged", "n_segments_diverged"),
     ("Collisions", "total_collision_events"),
     ("Rear collisions", "total_rear_collision_events"),
+    ("Turn indicator transition accuracy (%)", "turn_indicator_transition_accuracy"),
 ]
 
 _PER_1000STEPS_COLUMNS = [
@@ -67,6 +68,7 @@ _PER_1000STEPS_COLUMNS = [
     ("Segs diverged / 1k steps", "n_segments_diverged"),
     ("Collisions / 1k steps", "total_collision_events"),
     ("Rear collisions / 1k steps", "total_rear_collision_events"),
+    ("Turn indicator transition accuracy (%)", "turn_indicator_transition_accuracy"),
 ]
 
 
@@ -111,6 +113,11 @@ def _abs_value(source_key: str, summary: dict):
         # ``inf`` (nothing measured) becomes a blank cell, not a number to be misread.
         dev = summary.get("mean_gt_deviation_m")
         return float(dev) if dev is not None and math.isfinite(float(dev)) else None
+    if source_key == "turn_indicator_transition_accuracy":
+        # None (no transition was ever scored) becomes a blank cell, not a 0.0 to misread as
+        # "always wrong at transitions".
+        val = summary[source_key] if source_key in summary else extract_score(summary, source_key)
+        return float(val) if isinstance(val, (int, float)) else None
 
     # Int fields.
     if source_key in ("n_segments", "total_steps"):
@@ -129,6 +136,7 @@ def _per_1000steps_value(source_key: str, summary: dict) -> float | None:
         "mean_route_completion",
         "pass_rate",
         "mean_gt_deviation_m",  # already a per-step mean
+        "turn_indicator_transition_accuracy",  # already a ratio
     ):
         return _abs_value(source_key, summary)
     denom_key = "n_segments" if source_key == "n_segments_diverged" else "total_steps"
@@ -189,6 +197,20 @@ def _aggregate(group_summaries: dict[str, dict]) -> dict:
     )
     agg["total_rear_collision_events"] = sum(
         int(extract_score(s, "total_rear_collision_events") or 0) for s in objects_only_values
+    )
+
+    # Weighted by scored transitions (turn_indicator.transition_total), not by segment count --
+    # segments vary widely in how many transitions they contained
+    # (see reproducer_rollout._score_turn_indicator).
+    ti_transition_correct = sum(
+        int(s.get("turn_indicator", {}).get("transition_correct", 0) or 0) for s in values
+    )
+    ti_transition_total = sum(
+        int(s.get("turn_indicator", {}).get("transition_total", 0) or 0) for s in values
+    )
+    # None (not 0.0) when no transition was ever scored across any group.
+    agg["turn_indicator_transition_accuracy"] = (
+        (ti_transition_correct / ti_transition_total) if ti_transition_total else None
     )
     return agg
 
