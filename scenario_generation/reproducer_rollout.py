@@ -250,8 +250,8 @@ def build_input_np(
             delta = np.diff(ego_hist_world[-PAST:, :], axis=0)
             speeds = np.linalg.norm(delta[:, :2], axis=1) / DT
             yaw_rates = np.arctan2(np.sin(delta[:, 2]), np.cos(delta[:, 2])) / DT
-            live6[1:, 4] = speeds[-(PAST - 1):]
-            live6[1:, 5] = yaw_rates[-(PAST - 1):]
+            live6[1:, 4] = speeds[-(PAST - 1) :]
+            live6[1:, 5] = yaw_rates[-(PAST - 1) :]
             live6[0, 4:6] = live6[1, 4:6]
         live6[-1, 4], live6[-1, 5] = dyn.speed, dyn.yaw_rate
         recen["ego_agent_past"] = live6[None]
@@ -264,8 +264,9 @@ def build_input_np(
         lines[..., :2] = recen0["road_borders"]
         lines[..., 3] = (np.linalg.norm(lines[..., :2], axis=-1) > 0).astype(np.float32)
         recen["line_strings"] = lines[None]
-        from new_dp_h5_eval.metric_compat import legacy_route_lanes
+        from new_dp_h5_eval.metric_compat import legacy_lanes, legacy_route_lanes
 
+        recen["metric_lanes"] = legacy_lanes(recen0)[None]
         route33 = legacy_route_lanes(recen0)
         recen["metric_route_lanes"] = route33[None]
         return recen, neighbors_live
@@ -732,7 +733,9 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
         )  # (1,320,31,11) live-ego
     if gpu_transform:
         if getattr(s.tl, "native_h5", False):
-            raise ValueError("native H5 requires its schema-aware CPU transform; disable gpu_transform")
+            raise ValueError(
+                "native H5 requires its schema-aware CPU transform; disable gpu_transform"
+            )
         # 8-tuple (..., sim_nb, slot_uuids, world_by_uuid); sim_nb overrides the recorded
         # neighbor block AFTER the batched world_to_ego transform (None = recorded mode).
         base, dxyz, live_past, live_cur, ridx = build_input_raw(
@@ -1714,6 +1717,11 @@ def _draw_step(
     from scenario_generation.scene_context import SceneContext
 
     data = {k: np.asarray(v)[0] for k, v in np_dict.items()}
+    # Native-H5 runners retain six-column lanes for ONNX but attach an
+    # eight-column legacy view for metrics.  SceneContext is a legacy renderer,
+    # so it must consume that compatibility view as well.
+    if "metric_lanes" in data:
+        data["lanes"] = data["metric_lanes"]
     es = np.asarray(ego_shape).reshape(-1)
     ego = nl._extract_ego_agent(data, float(es[0]), float(es[1]), float(es[2]))
     neighbors = nl._extract_neighbors(data)

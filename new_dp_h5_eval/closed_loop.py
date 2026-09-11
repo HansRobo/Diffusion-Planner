@@ -237,17 +237,30 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
             for route in self.routes
         ]
 
-    def run_job(self, job, *, segments_file=None, digest_file=None, draw_pool=None) -> JobRunResult:
+    def run_job(
+        self,
+        job,
+        *,
+        segments_file=None,
+        digest_file=None,
+        draw_pool=None,
+        frames_root: Path | None = None,
+    ) -> JobRunResult:
         route = self._routes_by_id[job.job_id]
         h5_path = Path(route["h5_path"])
+        frames_root = frames_root if frames_root is not None else self.out_dir
+        timers = Timers()
         timeline = NativeH5RouteTimeline(
-            h5_path, int(route.get("frame_start", 0)), route.get("frame_stop")
+            h5_path,
+            int(route.get("frame_start", 0)),
+            route.get("frame_stop"),
+            timers=timers,
         )
         rows: list[dict] = []
         video_mp4s: list[Path] = []
         try:
             for start, end in timeline.iter_segments(job.seg_len):
-                png_dir = self.out_dir / f"{job.route_key}_{start}_{end}"
+                png_dir = frames_root / f"{job.route_key}_{start}_{end}"
                 metrics = render_segment(
                     self.model,
                     self.model_args,
@@ -257,7 +270,20 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
                     png_dir,
                     **self.config.params.render_kwargs(),
                     draw_pool=draw_pool,
+                    timers=timers,
                 )
+                if self.config.params.colormap_metrics:
+                    from scenario_generation.trajectory_colormap import render_trajectory_colormaps
+
+                    render_trajectory_colormaps(
+                        png_dir,
+                        self.out_dir,
+                        f"{job.route_key}_{start}_{end}",
+                        metrics=self.config.params.colormap_metrics,
+                        near_miss_thresh=self.config.params.near_miss_thresh,
+                        strong_brake_mps2=self.config.params.strong_brake_mps2,
+                        title=f"{job.route_key} [{start},{end}]",
+                    )
                 row = {"route": job.route_key, **metrics}
                 if self.config.pass_condition is not None:
                     row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
@@ -276,7 +302,7 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
                     video_mp4s.append(segment_mp4)
         finally:
             timeline.close()
-        return JobRunResult(rows=rows, video_mp4s=video_mp4s)
+        return JobRunResult(rows=rows, video_mp4s=video_mp4s, extras={"timers": timers})
 
 
 def rollout_params_from_closed_loop_config(
@@ -314,4 +340,8 @@ def rollout_params_from_closed_loop_config(
         window=cfg.closed_loop_window,
         max_steps=cfg.closed_loop_max_steps,
         timeline_progress_mode=cfg.closed_loop_timeline_progress_mode,
+        deviation_collision_thresh_m=cfg.closed_loop_deviation_collision_thresh_m,
+        # Native-H5 evaluation has no separate media toggle.  Keep its rendering
+        # output consistent with the regular closed-loop evaluator.
+        colormap_metrics=tuple(cfg.closed_loop_colormap_metrics),
     )

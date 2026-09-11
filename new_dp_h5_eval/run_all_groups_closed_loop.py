@@ -9,13 +9,16 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import time
 from datetime import datetime
 from pathlib import Path
 
+import torch
 from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
 from diffusion_planner.config.config_utils import save_config
 from diffusion_planner.utils import ddp
 
+from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.closed_loop_evaluation import ClosedLoopEvalConfig
 
 from .closed_loop import (
@@ -137,12 +140,13 @@ def main() -> int:
         save_config(cfg, out_root, "closed_loop_config.json")
 
     model = ReproducerOnnxModel(args.model_path, args.providers)
-    summaries: dict[str, dict] = {}
+    evaluators: dict[str, NativeH5FullRouteClosedLoopEvaluation] = {}
     for manifest, mode in zip(args.closed_loop_h5_root, modes):
         label = manifest.stem if mode == "objects" else f"{manifest.stem}__noobj"
         for group_name, routes in _load_groups(manifest).items():
             group_out = out_root / label / group_name
-            evaluator = NativeH5FullRouteClosedLoopEvaluation(
+            key = f"{label}/{group_name}"
+            evaluators[key] = NativeH5FullRouteClosedLoopEvaluation(
                 model,
                 model_args(),
                 config=ClosedLoopEvalConfig(
@@ -155,7 +159,6 @@ def main() -> int:
                     fps=float(cfg.closed_loop_fps),
                     verbose=False,
                     profile=False,
-                    max_jobs=None,
                     pass_condition=cfg.pass_conditions.get_condition(group_name),
                 ),
                 routes=routes,
@@ -163,11 +166,28 @@ def main() -> int:
                 ddp_rank=rank,
                 ddp_world_size=world_size,
             )
-            summary = evaluator.run_distributed()
-            if rank == 0:
-                summaries[f"{label}/{group_name}"] = summary
+    # Keep native-H5 evaluation on the same contract as the regular runner:
+    # distribute all groups together, let every evaluator persist rank shards,
+    # then have rank 0 merge them after a single barrier.
+    assignments = {key: [] for key in evaluators}
+    all_jobs = [
+        (key, job) for key, evaluator in evaluators.items() for job in evaluator.discover_jobs()
+    ]
+    for key, job in shard_items(all_jobs, rank, world_size):
+        assignments[key].append(job)
+
+    started = time.perf_counter()
+    partials = {key: evaluator.run(assignments[key]) for key, evaluator in evaluators.items()}
+    if world_size > 1:
+        torch.distributed.barrier()
+        if rank == 0:
+            elapsed_sec = time.perf_counter() - started
+            for key, evaluator in evaluators.items():
+                if partials[key].get("ddp_shard"):
+                    partials[key] = evaluator.merge_ddp_shards(world_size, elapsed_sec=elapsed_sec)
 
     if rank == 0:
+        summaries = partials
         _write_groups_manifest(out_root, summaries)
         for label in {key.split("/", 1)[0] for key in summaries}:
             scoped = {key: value for key, value in summaries.items() if key.startswith(f"{label}/")}

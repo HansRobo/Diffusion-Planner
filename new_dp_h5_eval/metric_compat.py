@@ -5,6 +5,21 @@ from __future__ import annotations
 import numpy as np
 
 
+def legacy_lanes(frame: dict[str, np.ndarray]) -> np.ndarray:
+    """Build the legacy 8-column lane-polygon view used by road-border scoring.
+
+    Native H5 lanes are ``xy + left-offset + right-offset``.  The legacy
+    geometry helper reads the offsets from columns 4:6 and 6:8, leaving its
+    unused tangent columns 2:4 as zero.
+    """
+    native = frame["lanes"]
+    out = np.zeros((*native.shape[:-1], 8), dtype=np.float32)
+    out[..., :2] = native[..., :2]
+    out[..., 4:6] = native[..., 2:4]
+    out[..., 6:8] = native[..., 4:6]
+    return out
+
+
 def legacy_route_lanes(frame: dict[str, np.ndarray]) -> np.ndarray:
     """Build old 33-column route lanes from native geometry and current TL state.
 
