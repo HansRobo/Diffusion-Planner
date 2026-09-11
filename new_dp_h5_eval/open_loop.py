@@ -67,6 +67,86 @@ def _stack_metric_views(frames: list[dict[str, np.ndarray]]) -> dict[str, torch.
     return {key: torch.stack([view[key] for view in views]) for key in views[0]}
 
 
+def _valid_points(values: np.ndarray) -> np.ndarray:
+    """Return a geometry row without H5's all-zero padding points."""
+    return values[np.any(values != 0, axis=-1)]
+
+
+def _draw_geometry(ax: object, geometries: np.ndarray, **kwargs: object) -> None:
+    """Draw every non-empty native H5 geometry independently."""
+    for geometry in geometries:
+        points = _valid_points(geometry)
+        if len(points):
+            ax.plot(points[:, 0], points[:, 1], **kwargs)
+            kwargs["label"] = "_nolegend_"
+
+
+def visualize_h5_prediction(
+    frame: dict[str, np.ndarray], prediction: np.ndarray, save_path: Path, title: str
+) -> None:
+    """Save one native-H5 scene without connecting zero-padded geometry to the origin."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    for lanes, color, label in (
+        (frame["lanes"], "#9ca3af", "Lanes"),
+        (frame["route_lanes"], "#00a6d6", "Route"),
+    ):
+        for lane in lanes:
+            points = _valid_points(lane)
+            if not len(points):
+                continue
+            center = points[:, :2]
+            ax.plot(center[:, 0], center[:, 1], color=color, alpha=0.75, linewidth=1.2,
+                    label=label)
+            ax.plot(
+                center[:, 0] + points[:, 2], center[:, 1] + points[:, 3],
+                color=color, alpha=0.35, linewidth=0.8,
+            )
+            ax.plot(
+                center[:, 0] + points[:, 4], center[:, 1] + points[:, 5],
+                color=color, alpha=0.35, linewidth=0.8,
+            )
+            label = "_nolegend_"
+
+    for geometries, color, label in (
+        (frame["road_borders"], "#dc2626", "Road border"),
+        (frame["stop_lines"], "#f59e0b", "Stop line"),
+    ):
+        _draw_geometry(ax, geometries, color=color, linewidth=1.0, label=label)
+
+    for area in frame["intersection_area"]:
+        points = _valid_points(area)
+        if len(points) >= 3:
+            ax.fill(points[:, 0], points[:, 1], color="#6b7280", alpha=0.15)
+
+    ego_past = _valid_points(frame["ego_agent_past"])
+    ax.plot(ego_past[:, 0], ego_past[:, 1], "--", color="#fb923c", label="Ego history")
+    ego_future = _valid_points(frame["ego_agent_future"])
+    ax.plot(ego_future[:, 0], ego_future[:, 1], "--", color="#111827", label="Ground truth")
+    for neighbor in frame["neighbor_agents_past"]:
+        valid = np.square(neighbor[:, 2]) + np.square(neighbor[:, 3]) > 0.5
+        if np.any(valid):
+            ax.plot(neighbor[valid, 0], neighbor[valid, 1], color="#64748b", alpha=0.35, linewidth=0.8)
+
+    ax.plot(prediction[:, 0], prediction[:, 1], color="#f97316", linewidth=2, label="New DP output")
+    ax.scatter(0.0, 0.0, color="#dc2626", marker="^", label="Ego")
+    ax.scatter(prediction[-1, 0], prediction[-1, 1], color="black", marker="x", label="Prediction end")
+    goal = frame["goal_pose"]
+    if np.linalg.norm(goal[:2]) <= 100.0:
+        ax.scatter(goal[0], goal[1], color="#2563eb", marker="*", s=80, label="Goal")
+    ax.set_title(title)
+    ax.set_aspect("equal")
+    ax.set_xlim(-60.0, 60.0)
+    ax.set_ylim(-60.0, 60.0)
+    ax.grid(alpha=0.3)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _resolve_matrix(matrix_path: Path, dataset: H5FrameIndex) -> dict[str, list[tuple[dict, int]]]:
     payload = json.loads(matrix_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -95,6 +175,7 @@ def run(
     batch_size: int = 8,
     seed: int = 0,
     providers: list[str] | None = None,
+    visualize: bool = True,
 ) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     runner = NewDpOnnxRunner(str(onnx_path), providers)
@@ -137,6 +218,17 @@ def run(
                     }
                     for section, fields in evaluation.details.items():
                         row[section] = {key: value[i].item() for key, value in fields.items()}
+                    if visualize:
+                        png_path = (
+                            output
+                            / "visualization"
+                            / metric_name
+                            / f"{offset + i:06d}_{Path(indexed['h5_path']).stem}.png"
+                        )
+                        visualize_h5_prediction(
+                            frames[i], trajectories[i, 0], png_path, Path(indexed["h5_path"]).stem
+                        )
+                        row["visualization_png"] = str(png_path)
                     details.append(row)
             detail_path = output / "details" / metric_name / "details.jsonl"
             detail_path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +253,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--provider", action="append", dest="providers")
+    parser.add_argument("--no-visualization", action="store_false", dest="visualize")
     args = parser.parse_args()
     print(
         json.dumps(
@@ -172,6 +265,7 @@ def main() -> None:
                 args.batch_size,
                 args.seed,
                 args.providers,
+                args.visualize,
             ),
             indent=2,
         )
