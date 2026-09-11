@@ -16,6 +16,7 @@ from scenario_generation.reproducer_rollout import (
     _clearance_stats,
     _event_count,
     deviation_collision_block,
+    turn_indicator_block,
 )
 
 
@@ -332,6 +333,10 @@ def _segment_row(**overrides) -> dict:
             "normal_steps": 3,
             "repeat_steps": 1,
         },
+        "turn_indicator": {
+            "transition_correct": 1,
+            "transition_total": 2,
+        },
     }
     row.update(overrides)
     return row
@@ -354,6 +359,9 @@ def test_aggregate_nested_keeps_tdigest_in_json():
     assert summary["reproducer"]["expand_count"] == 1
     assert abs(summary["reproducer"]["repeat_step_rate"] - 0.25) < 1e-9
     assert summary["strong_brake"]["strongest_mps2"] == float("inf")
+    assert summary["turn_indicator"]["transition_correct"] == 1
+    assert summary["turn_indicator"]["transition_total"] == 2
+    assert abs(summary["turn_indicator"]["transition_accuracy"] - 0.5) < 1e-9
     # Human-readable segments.jsonl strips digests; in-memory rows keep them.
     cleaned = metrics_for_json(rows[0])
     assert TDIGEST_KEY not in cleaned["object"]
@@ -395,6 +403,24 @@ def test_aggregate_missing_category_fails():
     bad = _segment_row()
     del bad["object"]
     with pytest.raises(KeyError, match="object"):
+        aggregate([bad], near_miss_thresh=0.5, strong_brake_mps2=-2.5)
+
+
+def test_turn_indicator_block():
+    block = turn_indicator_block(1, 2)
+    assert block == {"transition_correct": 1, "transition_total": 2}
+
+
+def test_aggregate_turn_indicator_zero_total_accuracy_is_na():
+    row = _segment_row(turn_indicator={"transition_correct": 0, "transition_total": 0})
+    summary = aggregate([row], near_miss_thresh=0.5, strong_brake_mps2=-2.5)
+    assert summary["turn_indicator"]["transition_accuracy"] is None
+
+
+def test_aggregate_missing_turn_indicator_category_fails():
+    bad = _segment_row()
+    del bad["turn_indicator"]
+    with pytest.raises(KeyError, match="turn_indicator"):
         aggregate([bad], near_miss_thresh=0.5, strong_brake_mps2=-2.5)
 
 

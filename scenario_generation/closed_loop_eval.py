@@ -146,37 +146,52 @@ def _event_family_block(
     rows: list[dict],
     category: str,
     *,
-    dual: bool,
+    prefixes: tuple[str, ...] = (),
     total_steps: int,
     n_seg: int,
     thresh_key: str | None = None,
     thresh_value: float | None = None,
+    required: bool = True,
 ) -> dict:
-    """Roll up one nested metric category across segment rows."""
+    """Roll up one nested metric category across segment rows.
+
+    ``prefixes`` names the ``{prefix}_steps``/``{prefix}_count`` pairs to roll up, e.g.
+    ``("collision", "miss")`` for ``object``/``road_border``, or ``("collision",)`` for
+    ``object_rear`` -- so a category tracking the same *kind* of event (here, collisions)
+    keeps the same field names as ``object``, and downstream code can read either block
+    the same way. An empty tuple (the default) rolls up the bare ``steps``/``count`` pair
+    used by single-event categories like ``red_light_violation``/``strong_brake``.
+
+    ``required=False`` (e.g. for ``object_rear``, added after ``object``/``road_border``)
+    treats a row missing the category entirely -- an older ``segments.jsonl`` written
+    before that metric existed -- as all-zero instead of raising, so old runs still reload.
+    Rows that DO carry the category still fail fast on a missing field within it, same as
+    ``required=True``.
+    """
+    block_fn = (
+        (lambda r: _require_block(r, category))
+        if required
+        else (lambda r: r[category] if isinstance(r.get(category), dict) else None)
+    )
     out: dict = {}
     if thresh_key is not None and thresh_value is not None:
         out[thresh_key] = thresh_value
 
-    if dual:
-        prefixes = ("collision", "miss")
-        for p in prefixes:
-            steps = sum(int(_require_block(r, category)[f"{p}_steps"]) for r in rows)
-            count = sum(int(_require_block(r, category)[f"{p}_count"]) for r in rows)
-            segs = sum(1 for r in rows if int(_require_block(r, category)[f"{p}_steps"]) > 0)
-            out[f"{p}_steps"] = steps
-            out[f"{p}_count"] = count
-            out[f"{p}_segments"] = segs
-            out[f"{p}_step_rate"] = steps / total_steps if total_steps else 0.0
-            out[f"{p}_segment_rate"] = segs / n_seg if n_seg else 0.0
-    else:
-        steps = sum(int(_require_block(r, category)["steps"]) for r in rows)
-        count = sum(int(_require_block(r, category)["count"]) for r in rows)
-        segs = sum(1 for r in rows if int(_require_block(r, category)["steps"]) > 0)
-        out["steps"] = steps
-        out["count"] = count
-        out["segments"] = segs
-        out["step_rate"] = steps / total_steps if total_steps else 0.0
-        out["segment_rate"] = segs / n_seg if n_seg else 0.0
+    for p in prefixes or (None,):
+        steps_key = f"{p}_steps" if p else "steps"
+        count_key = f"{p}_count" if p else "count"
+        segments_key = f"{p}_segments" if p else "segments"
+        step_rate_key = f"{p}_step_rate" if p else "step_rate"
+        segment_rate_key = f"{p}_segment_rate" if p else "segment_rate"
+
+        steps = sum(int(b[steps_key]) for r in rows if (b := block_fn(r)) is not None)
+        count = sum(int(b[count_key]) for r in rows if (b := block_fn(r)) is not None)
+        segs = sum(1 for r in rows if (b := block_fn(r)) is not None and int(b[steps_key]) > 0)
+        out[steps_key] = steps
+        out[count_key] = count
+        out[segments_key] = segs
+        out[step_rate_key] = steps / total_steps if total_steps else 0.0
+        out[segment_rate_key] = segs / n_seg if n_seg else 0.0
 
     return out
 
@@ -302,15 +317,34 @@ def format_summary_lines(summary: dict) -> list[str]:
     """Human-readable closed-loop summary lines (shared by CLI / train print)."""
     n_seg = int(summary["n_segments"])
     obj = summary["object"]
+    obj_rear = summary.get(
+        "object_rear",
+        {
+            "collision_count": 0,
+            "collision_steps": 0,
+            "collision_segments": 0,
+            "collision_step_rate": 0.0,
+            "collision_segment_rate": 0.0,
+        },
+    )
     rb = summary["road_border"]
     red = summary["red_light_violation"]
     brake = summary["strong_brake"]
+    ti = summary["turn_indicator"]
+    ti_acc_str = (
+        f"{ti['transition_accuracy']:.4f}" if ti["transition_accuracy"] is not None else "N/A"
+    )
     repro = summary["reproducer"]
     lines = [
         f"object collision: {obj['collision_segments']}/{n_seg} segments "
         f"(rate {obj['collision_segment_rate']:.4f}), "
         f"{obj['collision_steps']} steps (rate {obj['collision_step_rate']:.6f}), "
         f"{obj['collision_count']} events",
+        f"object_rear (ego rear-ended by a following NPC): "
+        f"{obj_rear['collision_segments']}/{n_seg} segments "
+        f"(rate {obj_rear['collision_segment_rate']:.4f}), "
+        f"{obj_rear['collision_steps']} steps (rate {obj_rear['collision_step_rate']:.6f}), "
+        f"{obj_rear['collision_count']} events",
         f"object miss (<= {obj['miss_thresh_m']} m): "
         f"{obj['miss_segments']}/{n_seg} segments "
         f"(rate {obj['miss_segment_rate']:.4f}), {obj['miss_steps']} steps, "
@@ -333,6 +367,10 @@ def format_summary_lines(summary: dict) -> list[str]:
         f"reproducer snap_count={repro['snap_count']} expand_count={repro['expand_count']} "
         f"repeat_step_rate={repro['repeat_step_rate']:.4f}  "
         f"terminated={summary['terminated_counts']}",
+        f"turn_indicator transition accuracy: "
+        f"{ti['transition_correct']}/{ti['transition_total']} ({ti_acc_str})",
+        f"mean gt_deviation={summary['mean_gt_deviation_m']:.3f} m  "
+        f"mean centerline_deviation={summary['mean_centerline_dist_m']:.3f} m",
     ]
     return lines
 
@@ -368,6 +406,17 @@ def aggregate(
     dev_den = sum(
         r["n_steps_run"] for r in rows if np.isfinite(r.get("mean_gt_deviation_m", float("inf")))
     )
+    # centerline-deviation pooled the same way as gt-deviation: step-weighted mean.
+    cl_num = sum(
+        r["mean_centerline_dist_m"] * r["n_steps_run"]
+        for r in rows
+        if np.isfinite(r.get("mean_centerline_dist_m", float("inf")))
+    )
+    cl_den = sum(
+        r["n_steps_run"]
+        for r in rows
+        if np.isfinite(r.get("mean_centerline_dist_m", float("inf")))
+    )
 
     term_counts: dict[str, int] = {}
     for r in rows:
@@ -377,7 +426,7 @@ def aggregate(
     obj = _event_family_block(
         rows,
         "object",
-        dual=True,
+        prefixes=("collision", "miss"),
         total_steps=total_steps,
         n_seg=n_seg,
         thresh_key="miss_thresh_m",
@@ -385,10 +434,25 @@ def aggregate(
     )
     obj.update(_pool_clearance(rows, "object"))
 
+    # Separate metric from "object": a subset of its collision steps where the ego got
+    # rear-ended by a following NPC rather than causing the collision itself. Same
+    # "collision_*" field names as "object" (prefixes=("collision",), no "miss" -- a
+    # near-miss doesn't distinguish rear from front/side) so the two blocks read alike.
+    # required=False: older segments.jsonl written before this metric existed lack the
+    # category entirely, and should reload as zero rather than fail.
+    obj_rear = _event_family_block(
+        rows,
+        "object_rear",
+        prefixes=("collision",),
+        total_steps=total_steps,
+        n_seg=n_seg,
+        required=False,
+    )
+
     rb = _event_family_block(
         rows,
         "road_border",
-        dual=True,
+        prefixes=("collision", "miss"),
         total_steps=total_steps,
         n_seg=n_seg,
         thresh_key="miss_thresh_m",
@@ -396,13 +460,10 @@ def aggregate(
     )
     rb.update(_pool_clearance(rows, "road_border"))
 
-    red = _event_family_block(
-        rows, "red_light_violation", dual=False, total_steps=total_steps, n_seg=n_seg
-    )
+    red = _event_family_block(rows, "red_light_violation", total_steps=total_steps, n_seg=n_seg)
     dev_col = _event_family_block(
         rows,
         "deviation_collision",
-        dual=False,
         total_steps=total_steps,
         n_seg=n_seg,
         thresh_key="thresh_m",
@@ -411,7 +472,6 @@ def aggregate(
     brake = _event_family_block(
         rows,
         "strong_brake",
-        dual=False,
         total_steps=total_steps,
         n_seg=n_seg,
         thresh_key="thresh_mps2",
@@ -420,6 +480,13 @@ def aggregate(
     # Strongest consecutive-pair accel across segments (mask-filtered; +inf if none).
     strongest = [float(_require_block(r, "strong_brake")["strongest_mps2"]) for r in rows]
     brake["strongest_mps2"] = min(strongest) if strongest else float("inf")
+
+    turn_transition_correct = sum(
+        int(_require_block(r, "turn_indicator")["transition_correct"]) for r in rows
+    )
+    turn_transition_total = sum(
+        int(_require_block(r, "turn_indicator")["transition_total"]) for r in rows
+    )
 
     expand = sum(int(_require_block(r, "reproducer")["expand_count"]) for r in rows)
     snap = sum(int(_require_block(r, "reproducer")["snap_count"]) for r in rows)
@@ -432,13 +499,26 @@ def aggregate(
         "total_steps": total_steps,
         "mean_route_completion": float(np.mean(completions)) if completions else 0.0,
         "mean_gt_deviation_m": float(dev_num / dev_den) if dev_den else float("inf"),
+        "mean_centerline_dist_m": float(cl_num / cl_den) if cl_den else float("inf"),
         "n_segments_diverged": n_seg_diverged,
         "diverged_segment_rate": n_seg_diverged / n_seg if n_seg else 0.0,
         "object": obj,
         "deviation_collision": dev_col,
+        "object_rear": obj_rear,
         "road_border": rb,
         "red_light_violation": red,
         "strong_brake": brake,
+        "turn_indicator": {
+            "transition_correct": turn_transition_correct,
+            "transition_total": turn_transition_total,
+            # None (not 0.0) when no transition was ever scored: a silent 0.0 would misread as
+            # "always wrong at transitions" rather than "no transitions to measure".
+            "transition_accuracy": (
+                (turn_transition_correct / turn_transition_total)
+                if turn_transition_total > 0
+                else None
+            ),
+        },
         "terminated_counts": term_counts,
         "reproducer": {
             "expand_count": expand,

@@ -9,10 +9,14 @@ SCORE_EXTRACTORS = {
     "pass_rate": lambda d: d.get("pass_rate"),
     "fail_count": lambda d: d.get("fail_count"),
     "total_collision_events": lambda d: d.get("object", {}).get("collision_count"),
+    "total_rear_collision_events": lambda d: d.get("object_rear", {}).get("collision_count"),
     "total_curb_hits": lambda d: d.get("road_border", {}).get("collision_count"),
     "total_snaps": lambda d: d.get("reproducer", {}).get("snap_count"),
     "total_red_light_violations": lambda d: d.get("red_light_violation", {}).get("count"),
     "total_strong_brakes": lambda d: d.get("strong_brake", {}).get("count"),
+    "turn_indicator_transition_accuracy": lambda d: d.get("turn_indicator", {}).get(
+        "transition_accuracy"
+    ),
 }
 
 

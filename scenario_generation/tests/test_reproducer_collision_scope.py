@@ -26,35 +26,58 @@ def _neighbors(rows: list[list[float]]) -> np.ndarray:
 def test_rear_end_moving_neighbor_is_a_collision():
     """Ego moving forward, a moving neighbor overlaps it from BEHIND (x < 0)."""
     rear = _neighbors([[-3.0, 0.0, 1.0, 0.0, 5.0, 0.0, 2.0, 5.0]])  # vx=5 => moving
-    clr, collision, m = score_object_step(rear, EGO_SHAPE, device="cpu")
+    clr, collision, rear_collision, m = score_object_step(rear, EGO_SHAPE, device="cpu")
     assert m == 1
     assert collision is True, f"rear-end moving overlap not flagged (clr={clr:.3f})"
+    assert rear_collision is True, "contact behind the ego's rear face must flag rear_collision"
     assert clr < 0.5
 
 
 def test_moving_neighbor_ahead_overlap_is_a_collision():
     ahead = _neighbors([[4.0, 0.0, 1.0, 0.0, 6.0, 0.0, 2.0, 4.0]])  # moving, overlaps
-    clr, collision, _ = score_object_step(ahead, EGO_SHAPE, device="cpu")
+    clr, collision, rear_collision, _ = score_object_step(ahead, EGO_SHAPE, device="cpu")
     assert collision is True, f"moving overlap not flagged (clr={clr:.3f})"
+    assert rear_collision is False, "a front overlap must not be flagged as a rear collision"
 
 
 def test_far_apart_is_not_a_collision():
     far = _neighbors([[30.0, 12.0, 1.0, 0.0, 8.0, 0.0, 2.0, 4.0]])
-    clr, collision, _ = score_object_step(far, EGO_SHAPE, device="cpu")
+    clr, collision, rear_collision, _ = score_object_step(far, EGO_SHAPE, device="cpu")
     assert collision is False
+    assert rear_collision is False
     assert clr > 1.0
 
 
 def test_collision_counted_even_when_ego_stopped():
     """No ego-speed gate: an overlap counts regardless of ego speed."""
     overlap = _neighbors([[4.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0, 4.0]])
-    _, collision, _ = score_object_step(overlap, EGO_SHAPE, device="cpu")
+    _, collision, _rear_collision, _ = score_object_step(overlap, EGO_SHAPE, device="cpu")
     assert collision is True
 
 
+def test_diagonal_side_clip_with_center_behind_is_not_a_rear_collision():
+    """A rotated NPC whose CENTER sits behind the ego's rear face, but whose actual
+    contact point is well forward of the rear edge (a diagonal side/front clip), must
+    NOT be flagged rear_collision -- only whether the contact region touches the ego's
+    rear edge matters, not where the NPC's centroid happens to be.
+
+    A center-position-only heuristic ("NPC center behind the ego's rear face" AND
+    collided) would wrongly flag this one: the center (-3.8, 3.4) is well behind the
+    ego's rear face (rear_edge_x ~= -1.24), and the box does collide -- but the actual
+    overlap is on the ego's flank, not its back.
+    """
+    diagonal = _neighbors([[-3.8, 3.4, np.cos(-0.375), np.sin(-0.375), 0.0, 0.0, 1.75, 9.6]])
+    clr, collision, rear_collision, m = score_object_step(diagonal, EGO_SHAPE, device="cpu")
+    assert m == 1
+    assert collision is True, f"diagonal overlap not flagged (clr={clr:.3f})"
+    assert rear_collision is False, "contact away from the rear edge must not flag rear_collision"
+
+
 def test_no_valid_neighbors_returns_inf():
-    clr, collision, m = score_object_step(np.zeros((3, 11), np.float32), EGO_SHAPE, "cpu")
-    assert m == 0 and collision is False and clr == float("inf")
+    clr, collision, rear_collision, m = score_object_step(
+        np.zeros((3, 11), np.float32), EGO_SHAPE, "cpu"
+    )
+    assert m == 0 and collision is False and rear_collision is False and clr == float("inf")
 
 
 def _rand_segment(rng, k):
@@ -86,10 +109,11 @@ def test_batched_scorer_matches_per_segment():
         single = [score_object_step(nb, sh, "cpu") for nb, sh in zip(segs, shapes)]
         batched = score_object_step_batched(segs, shapes, "cpu")
         for a, b in zip(single, batched):
-            # score_object_step returns a 3-tuple (min_clearance, collision, n_valid);
-            # score_object_step_batched intentionally returns a 4-tuple that appends
-            # collider_slot — its first three elements are bit-identical to score_object_step
-            # (same ops, same order), the 4th is extra.
-            assert len(a) == 3 and len(b) == 4
+            # score_object_step returns a 4-tuple (min_clearance, collision,
+            # rear_collision, n_valid); score_object_step_batched intentionally
+            # returns a 5-tuple that appends collider_slot — its first four elements
+            # are bit-identical to score_object_step (same ops, same order), the
+            # 5th is extra.
+            assert len(a) == 4 and len(b) == 5
             assert a[0] == b[0] or (a[0] != a[0] and b[0] != b[0])  # equal, or both NaN/inf
-            assert a[1] == b[1] and a[2] == b[2]
+            assert a[1] == b[1] and a[2] == b[2] and a[3] == b[3]
