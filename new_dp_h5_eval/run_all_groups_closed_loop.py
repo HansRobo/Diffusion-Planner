@@ -99,8 +99,12 @@ def _load_groups(manifest: Path) -> dict[str, list[dict]]:
                 raise ValueError(f"{manifest}: {group_name!r} route object is missing h5_path")
             h5_path = Path(route["h5_path"])
             route["h5_path"] = str(h5_path if h5_path.is_absolute() else manifest.parent / h5_path)
-            route["route_id"] = f"{group_name}__{Path(route['h5_path']).parent.name}"
+            relative = h5_path if h5_path.is_absolute() else h5_path
+            route["route_id"] = f"{group_name}__{relative.parent.as_posix().replace('/', '__')}"
             routes.append(route)
+        ids = [route["route_id"] for route in routes]
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"{manifest}: {group_name!r} has duplicate H5 route identities")
         groups[str(group_name)] = routes
     return groups
 
