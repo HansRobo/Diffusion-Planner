@@ -1908,6 +1908,7 @@ dependencies = [
     { name = "rlvr" },
     { name = "scene-search" },
     { name = "scipy" },
+    { name = "tag-toolkit" },
     { name = "tdigest" },
     { name = "torch" },
 ]
@@ -1921,6 +1922,7 @@ requires-dist = [
     { name = "rlvr", editable = "rlvr" },
     { name = "scene-search", editable = "scene_search" },
     { name = "scipy" },
+    { name = "tag-toolkit", editable = "tag_toolkit" },
     { name = "tdigest", specifier = "==0.5.2.2" },
     { name = "torch", index = "https://download.pytorch.org/whl/cu128" },
 ]
