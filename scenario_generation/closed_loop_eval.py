@@ -21,7 +21,12 @@ from pathlib import Path
 import numpy as np
 
 from scenario_generation.perf_timer import Timers
-from scenario_generation.reproducer_rollout import DT, _assert_plan_contract, render_segment
+from scenario_generation.reproducer_rollout import (
+    DT,
+    _assert_plan_contract,
+    head_emits_turn_indicator,
+    render_segment,
+)
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
 
@@ -145,9 +150,10 @@ def run_closed_loop_eval(
 
     Turn indicators are closed-loop ONLY for a head that emits ``turn_indicator_logit``: the
     model's own predicted indicator is fed back into the input history each step, held across
-    cached-plan steps when ``replan_interval`` > 1. A head without that key (``predictor_head=
-    "drivor"``) instead gets the RECORDED driver's signal scrolled in (see ``render_segment`` /
-    ``_feed_turn_indicator``); ``summary["turn_indicator_source"]`` says which happened.
+    cached-plan steps when ``replan_interval`` > 1. A head without that key (a DrivoR model
+    trained without ``drivor_turn_indicator``) instead gets the RECORDED driver's signal scrolled
+    in (see ``render_segment`` / ``_feed_turn_indicator``); ``summary["turn_indicator_source"]``
+    says which happened.
 
     Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-segment MP4),
     ``segments`` (list[row]), and ``elapsed_sec``.
@@ -236,11 +242,13 @@ def run_closed_loop_eval(
     summary["plan_horizon_s"] = round(plan_len * DT, 6)
     summary["replan_interval"] = replan_interval
     summary["executed_depth_s"] = round(replan_interval * DT, 6)
-    # The DrivoR head emits no turn_indicator_logit, so _feed_turn_indicator scrolls turn_hist
-    # with the RECORDED signal (open loop in the turn channel only). This is a config proxy for
-    # the runtime `"turn_indicator_logit" not in outputs` test — exact while drivor is the only
-    # logit-less head; a future third one needs this line updated alongside.
-    summary["turn_indicator_source"] = "recorded" if predictor_head == "drivor" else "closed_loop"
+    # A DrivoR model trained without the turn-indicator head emits no turn_indicator_logit, so
+    # _feed_turn_indicator scrolls turn_hist with the RECORDED signal (open loop in the turn
+    # channel only). head_emits_turn_indicator is the config proxy for the runtime
+    # `"turn_indicator_logit" not in outputs` test.
+    summary["turn_indicator_source"] = (
+        "closed_loop" if head_emits_turn_indicator(model_args) else "recorded"
+    )
     summary["elapsed_sec"] = time.perf_counter() - t0
     summary["video_mp4s"] = video_mp4s
     summary["segments"] = rows

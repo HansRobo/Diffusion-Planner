@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from diffusion_planner.dimensions import INPUT_T, POSE_DIM
+from diffusion_planner.dimensions import INPUT_T, POSE_DIM, TURN_INDICATOR_OUTPUT_KEEP
 from diffusion_planner.model.guidance.collision import (
     batch_signed_distance_rect,
     center_rect_to_points,
@@ -790,6 +790,28 @@ def _pre_step(s: _SegState, gpu_transform: bool = False):
     return np_dict, neighbors_live, idx, slot_uuids, world_by_uuid
 
 
+def head_emits_turn_indicator(model_args) -> bool:
+    """Whether this model's output dict carries ``turn_indicator_logit``.
+
+    Config proxy for the runtime ``"turn_indicator_logit" in outputs`` test: the diffusion head
+    always emits it; the DrivoR head only when trained with ``drivor_turn_indicator`` (absent
+    from older args.json files -> False, i.e. the recorded signal is scrolled in)."""
+    if getattr(model_args, "predictor_head", "diffusion") != "drivor":
+        return True
+    return bool(getattr(model_args, "drivor_turn_indicator", False))
+
+
+def resolve_turn_indicator(decoded, previous: int) -> int:
+    """Map a decoded head class to the raw state that goes back into ``turn_hist``.
+
+    The head's 5th class KEEP means "hold the current command" (C++ ``TurnIndicatorManager``
+    semantics). The history the encoders consume holds only the four raw states
+    NONE/DISABLE/LEFT/RIGHT -- the turn network one-hots it with 4 classes, so appending KEEP
+    itself is an out-of-range index (CUDA device-side assert on the next forward)."""
+    decoded = int(np.asarray(decoded).reshape(-1)[0])
+    return int(previous) if decoded == TURN_INDICATOR_OUTPUT_KEEP else decoded
+
+
 def _feed_turn_indicator(s: _SegState, outputs, idx: int) -> None:
     """Closed-loop turn-signal feedback for the single-segment ``render_segment`` rollout.
 
@@ -799,7 +821,7 @@ def _feed_turn_indicator(s: _SegState, outputs, idx: int) -> None:
     per-batch feedback in ``run_segments_batched`` so a single-segment rollout evolves the
     turn signal identically instead of holding the seed.
 
-    Heads that emit no turn indicator (``--predictor_head drivor`` is ego-trajectory-only)
+    Heads that emit no turn indicator (a DrivoR model trained without ``drivor_turn_indicator``)
     have nothing to feed back, so the history is scrolled with the RECORDED signal at the
     cursor frame instead. That is open-loop in the turn channel only — but it is also the
     honest deployment picture for such a head: the signal has to come from the route
@@ -810,7 +832,7 @@ def _feed_turn_indicator(s: _SegState, outputs, idx: int) -> None:
         s.last_turn_indicator = int(rec[-1])
     else:
         ti = decode_turn_indicator(outputs["turn_indicator_logit"], 0.25)
-        s.last_turn_indicator = int(np.asarray(ti).reshape(-1)[0])
+        s.last_turn_indicator = resolve_turn_indicator(ti, s.last_turn_indicator)
     s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
 
 
@@ -1661,14 +1683,14 @@ def run_segments_batched(
     from concurrent.futures import ThreadPoolExecutor
 
     timers = timers or Timers()
-    if getattr(model_args, "predictor_head", "diffusion") == "drivor":
+    if not head_emits_turn_indicator(model_args):
         # This path feeds the model's OWN decoded turn indicator back into turn_hist every tick;
-        # the DrivoR head emits no turn_indicator_logit, so the decode below would KeyError
-        # mid-rollout, after the state seeding and thread pool are up. render_segment scrolls the
-        # recorded signal instead (_feed_turn_indicator).
+        # a DrivoR model trained without the turn-indicator head emits no turn_indicator_logit,
+        # so the decode below would KeyError mid-rollout, after the state seeding and thread pool
+        # are up. render_segment scrolls the recorded signal instead (_feed_turn_indicator).
         raise ValueError(
-            "run_segments_batched requires a head that emits turn_indicator_logit; "
-            "predictor_head='drivor' does not. Use render_segment for that head."
+            "run_segments_batched requires a head that emits turn_indicator_logit; this drivor "
+            "model was trained without --drivor_turn_indicator. Use render_segment for it."
         )
     if save_dir is not None and save_max_scenes < save_pre_steps + 1:
         # The buffer is save_max_scenes+1 deep and the window is >= save_pre_steps frames
@@ -2142,7 +2164,9 @@ def run_segments_batched(
                         # Feed the model's predicted turn indicator back into the rolling
                         # history (recorded seed scrolls out within PAST steps) — the saved
                         # context then carries the sim's own signals, never the recorded ones.
-                        s.last_turn_indicator = int(ti_pred[i])
+                        s.last_turn_indicator = resolve_turn_indicator(
+                            ti_pred[i], s.last_turn_indicator
+                        )
                         s.turn_hist = np.append(s.turn_hist[1:], np.int64(s.last_turn_indicator))
                         # Clear the buffer on an unstick teleport: pre-jump frames belong
                         # to a different ego path and must never enter a saved window.
