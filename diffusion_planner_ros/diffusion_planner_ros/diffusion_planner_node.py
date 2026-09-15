@@ -17,7 +17,15 @@ from autoware_internal_planning_msgs.msg import (
 from autoware_perception_msgs.msg import TrackedObjects, TrafficLightGroupArray
 from autoware_planning_msgs.msg import LaneletRoute
 from autoware_planning_msgs.msg import Trajectory as PlanningTrajectory
-from autoware_vehicle_msgs.msg import TurnIndicatorsCommand
+from autoware_vehicle_msgs.msg import TurnIndicatorsCommand, TurnIndicatorsReport
+from diffusion_planner.dimensions import (
+    LINE_STRING_TYPE_NUM,
+    NUM_LINE_STRINGS,
+    NUM_POLYGONS,
+    POINTS_PER_LINE_STRING,
+    POINTS_PER_POLYGON,
+    POLYGON_TYPE_NUM,
+)
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.utils.config import Config
 from geometry_msgs.msg import AccelWithCovarianceStamped
@@ -33,8 +41,11 @@ from rclpy.qos import (
 from visualization_msgs.msg import MarkerArray
 
 from .lanelet2_utils.lanelet_converter import (
+    LINE_STRING_TYPE_MAP,
+    POLYGON_TYPE_MAP,
     convert_lanelet,
     create_lane_tensor,
+    create_line_tensor,
 )
 from .utils import (
     convert_prediction_to_msg,
@@ -78,7 +89,13 @@ class DiffusionPlannerNode(Node):
         self.diffusion_planner = Diffusion_Planner(self.config_obj)
         self.diffusion_planner.eval()
         self.diffusion_planner.cuda()
-        self.diffusion_planner.decoder.decoder.training = False
+        # Only the diffusion head nests a DiT under ``decoder.decoder``; eval()
+        # above already cleared its ``training`` flag, but the DiT reads the
+        # attribute directly, so it is forced here as well. The drivor head is a
+        # plain nn.Module (DrivoRDecoder) with no inner ``decoder`` -- touching it
+        # unconditionally raises AttributeError before the node ever spins.
+        if hasattr(self.diffusion_planner.decoder, "decoder"):
+            self.diffusion_planner.decoder.decoder.training = False
         print(f"{self.config_obj.state_normalizer=}")
 
         # The two heads disagree about whether the output starts at t=0.  The
@@ -92,6 +109,16 @@ class DiffusionPlannerNode(Node):
         # Re-adding the anchor is preferred over shifting the stamps: it leaves both
         # heads emitting the identical message, which is what the controller, the
         # candidate-trajectory republisher and the markers already assume.
+        # Length of the agent history the encoders were trained on.
+        self.time_len = int(getattr(self.config_obj, "time_len", 21))
+        # Element counts were hardcoded (32 neighbours, 70 lanes). The encoder sums
+        # them into a fixed ``token_num`` and reshapes with it, so any mismatch dies
+        # with "shape '[564, -1]' is invalid for input of size ...". Take them from
+        # the run's args.json so the node follows whatever the model was trained on.
+        self.agent_num = int(getattr(self.config_obj, "agent_num", 32))
+        self.lane_num = int(getattr(self.config_obj, "lane_num", 70))
+        self.route_num = int(getattr(self.config_obj, "route_num", 25))
+
         self._needs_current_pose_anchor = (
             getattr(self.config_obj, "predictor_head", "diffusion") == "drivor"
         )
@@ -171,7 +198,20 @@ class DiffusionPlannerNode(Node):
             10,
         )
 
-        # sub(5) route
+        # sub(5) turn_indicators
+        # The encoder consumes ``turn_indicators[:, :-1]``, i.e. ``time_len`` raw
+        # TurnIndicatorsReport.report values, exactly as parse_rosbag.py stores
+        # them for training -- so the history is kept in message units (DISABLE=1,
+        # ENABLE_LEFT=2, ENABLE_RIGHT=3), not one-hot and not zero-based.
+        self.turn_indicator_history = [TurnIndicatorsReport.DISABLE] * self.time_len
+        self.turn_indicator_sub = self.create_subscription(
+            TurnIndicatorsReport,
+            "/vehicle/status/turn_indicators_status",
+            self.cb_turn_indicators,
+            10,
+        )
+
+        # sub(6) route
         # https://github.com/autowarefoundation/autoware_msgs/blob/main/autoware_planning_msgs/msg/LaneletRoute.msg
         transient_qos = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -252,15 +292,25 @@ class DiffusionPlannerNode(Node):
         self.kinematic_state_list.append(msg)
         # Keep ego history for ego_agent_past
         self.ego_history.append(msg)
-        # Keep only last 21 timesteps (2.1 seconds at 10Hz)
-        if len(self.ego_history) > 21:
-            self.ego_history = self.ego_history[-21:]
+        # Keep only the last ``time_len`` timesteps (at 10 Hz). This was hardcoded
+        # to 21, which silently mismatches any run trained with a different
+        # history: the ego and neighbour encoders project the time axis with a
+        # Linear(time_len, 64), so a 21-step history against a 31-step model dies
+        # with "mat1 and mat2 shapes cannot be multiplied (128x21 and 31x64)".
+        # Read it from the run's own args.json instead.
+        if len(self.ego_history) > self.time_len:
+            self.ego_history = self.ego_history[-self.time_len :]
 
     def cb_acceleration(self, msg):
         self.acceleration_list.append(msg)
 
     def cb_traffic_light(self, msg):
         self.traffic_light_list.append(msg)
+
+    def cb_turn_indicators(self, msg: TurnIndicatorsReport) -> None:
+        self.turn_indicator_history.append(int(msg.report))
+        if len(self.turn_indicator_history) > self.time_len:
+            self.turn_indicator_history = self.turn_indicator_history[-self.time_len :]
 
     def cb_route(self, msg):
         self.route = msg
@@ -299,7 +349,11 @@ class DiffusionPlannerNode(Node):
         ).to(dev)
 
         # Create ego_agent_past
-        ego_agent_past = create_ego_agent_past(self.ego_history, map2bl_matrix_4x4).to(dev)
+        # create_ego_agent_past defaults to max_timesteps=21; pass the run's own
+        # time_len or a 31-step model silently gets a 21-step tensor.
+        ego_agent_past = create_ego_agent_past(
+            self.ego_history, map2bl_matrix_4x4, max_timesteps=self.time_len
+        ).to(dev)
 
         end = time.time()
         elapsed_msec = (end - start) * 1000
@@ -311,8 +365,8 @@ class DiffusionPlannerNode(Node):
         neighbor = convert_tracked_objects_to_tensor(
             self.tracked_objs,
             map2bl_matrix_4x4,
-            max_num_objects=32,
-            max_timesteps=21,
+            max_num_objects=self.agent_num,
+            max_timesteps=self.time_len,
         ).to(dev)
         marker_array = create_neighbor_marker(neighbor, stamp)
         self.pub_neighbor_marker.publish(marker_array)
@@ -328,7 +382,7 @@ class DiffusionPlannerNode(Node):
             center_x=curr_kinematic_state.pose.pose.position.x,
             center_y=curr_kinematic_state.pose.pose.position.y,
             traffic_light_recognition=traffic_light_recognition,
-            num_segments=70,
+            num_segments=self.lane_num,
             dev=dev,
             do_sort=True,
         )
@@ -350,7 +404,7 @@ class DiffusionPlannerNode(Node):
             center_x=curr_kinematic_state.pose.pose.position.x,
             center_y=curr_kinematic_state.pose.pose.position.y,
             traffic_light_recognition=traffic_light_recognition,
-            num_segments=25,
+            num_segments=self.route_num,
             dev=dev,
             do_sort=False,
         )
@@ -382,6 +436,40 @@ class DiffusionPlannerNode(Node):
         )
 
         # Inference
+        # Static map geometry. The encoder reads ``polygons`` and ``line_strings``
+        # unconditionally (encoder.py::forward), and both were absent here, so any
+        # inference raised KeyError as soon as a route arrived. Arguments mirror
+        # ros_scripts/parse_rosbag.py, which produced the training tensors -- the
+        # element counts, point counts and type maps must match or the learned
+        # embedding is fed a differently-shaped map.
+        start = time.time()
+        polygon_tensor = create_line_tensor(
+            self.static_map.polygons.values(),
+            map2bl_matrix_4x4,
+            center_x=curr_kinematic_state.pose.pose.position.x,
+            center_y=curr_kinematic_state.pose.pose.position.y,
+            num_elements=NUM_POLYGONS,
+            num_points=POINTS_PER_POLYGON,
+            dev=dev,
+            type_map=POLYGON_TYPE_MAP,
+            num_types=POLYGON_TYPE_NUM,
+        )
+        line_string_tensor = create_line_tensor(
+            self.static_map.line_strings.values(),
+            map2bl_matrix_4x4,
+            center_x=curr_kinematic_state.pose.pose.position.x,
+            center_y=curr_kinematic_state.pose.pose.position.y,
+            num_elements=NUM_LINE_STRINGS,
+            num_points=POINTS_PER_LINE_STRING,
+            dev=dev,
+            type_map=LINE_STRING_TYPE_MAP,
+            num_types=LINE_STRING_TYPE_NUM,
+        )
+        end = time.time()
+        self.get_logger().info(f"Time Polygon  : {(end - start) * 1000:.4f} msec")
+
+        turn_indicators = torch.tensor([self.turn_indicator_history], dtype=torch.int32, device=dev)
+
         input_dict = {
             "ego_agent_past": ego_agent_past,
             "ego_current_state": ego_current_state,
@@ -393,6 +481,9 @@ class DiffusionPlannerNode(Node):
             "route_lanes_speed_limit": route_speed_limit,
             "route_lanes_has_speed_limit": route_has_speed_limit,
             "static_objects": torch.zeros((1, 5, 10), device=dev),
+            "polygons": polygon_tensor,
+            "line_strings": line_string_tensor,
+            "turn_indicators": turn_indicators,
             "goal_pose": goal_pose,
             "ego_shape": ego_shape,
         }
@@ -428,12 +519,25 @@ class DiffusionPlannerNode(Node):
             with torch.no_grad():
                 out = self.diffusion_planner(input_dict)[1]
                 pred = out["prediction"].detach().cpu().numpy()
-                turn_indicator_logit = out["turn_indicator_logit"].detach().cpu().numpy()
+                # The turn-indicator head belongs to the DiT decoder. DrivoR only
+                # emits "prediction", so this key is absent and reading it blindly
+                # raised KeyError on every cycle.
+                turn_indicator_logit = (
+                    out["turn_indicator_logit"].detach().cpu().numpy()
+                    if "turn_indicator_logit" in out
+                    else None
+                )
         elif self.backend == "ONNXRUNTIME":
             out = self.ort_session.run(None, input_dict)
             pred, turn_indicator_logit = out
         # print(f"{turn_indicator_logit=}")  # 4 class logits(numpy)
-        turn_indicator = int(np.argmax(turn_indicator_logit, axis=-1))
+        if turn_indicator_logit is None:
+            # No prediction available: command DISABLE (lights off) rather than
+            # class 0, which would publish NO_COMMAND and leave the previous
+            # indicator latched on in the vehicle interface.
+            turn_indicator = int(TurnIndicatorsCommand.DISABLE)
+        else:
+            turn_indicator = int(np.argmax(turn_indicator_logit, axis=-1))
         end = time.time()
         elapsed_msec = (end - start) * 1000
         self.get_logger().info(f"Time Inference: {elapsed_msec:.4f} msec")
@@ -445,7 +549,16 @@ class DiffusionPlannerNode(Node):
         generator_info = GeneratorInfo()
         uuid_obj = uuid.uuid4()
         generator_info.generator_id.uuid = list(uuid_obj.bytes)
-        generator_info.generator_name.data = "diffusion_planner"
+        # The selector maps a generator to a TrajectorySource by NAME PREFIX
+        # (trajectory_selector_node.cpp::to_ranker_input_trajectories against
+        # selector.param.yaml's generator_name_prefixes: DiffusionPlanner_,
+        # MLPlanner_, MinimumRuleBasedPlanner_*). The match is case-sensitive and
+        # anchored at position 0, so the old "diffusion_planner" matched nothing and
+        # every candidate was dropped before ranking -- the ranker then reported
+        # "No best trajectory found", the adapter "Scored candidate trajectories are
+        # empty", /planning/trajectory was never published and ego could not engage.
+        # Mirror the C++ node exactly (diffusion_planner_core.cpp:673).
+        generator_info.generator_name.data = "DiffusionPlanner_batch_0"
         trajectories_msg.generator_info = [generator_info]
 
         # Publish individual trajectories for visualization and backward compatibility
