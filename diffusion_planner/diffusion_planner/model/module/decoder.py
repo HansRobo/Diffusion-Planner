@@ -11,7 +11,7 @@ from diffusion_planner.loss import (
     compute_road_border_penalty,
     hybrid_loss,
     loss_func,
-    make_turn_indicator_gt,
+    turn_indicator_loss_terms,
     velocity_to_waypoints,
     waypoints_to_velocity,
 )
@@ -218,21 +218,12 @@ def compute_training_loss(
 
     assert not torch.isnan(dpm_loss).sum(), f"loss cannot be nan, z={z}"
 
-    turn_indicator_logit = decoder_output["turn_indicator_logit"]  # [B, TURN_INDICATOR_OUTPUT_KEEP]
-    turn_indicator_gt = make_turn_indicator_gt(inputs["turn_indicators"])  # [B,]
-    turn_indicator_loss = nn.functional.cross_entropy(
-        turn_indicator_logit, turn_indicator_gt, reduction="none"
+    # Shared with the DrivoR head (loss.py::turn_indicator_loss_terms).
+    turn_terms = turn_indicator_loss_terms(
+        decoder_output["turn_indicator_logit"], inputs["turn_indicators"]
     )
-    turn_indicator_change = inputs["turn_indicators"][:, -2] != inputs["turn_indicators"][:, -1]
-    turn_indicator_coeff = torch.where(turn_indicator_change, 1.0, 0.05)
-    turn_indicator_loss = (turn_indicator_loss * turn_indicator_coeff).mean()
-    loss["turn_indicator_loss"] = turn_indicator_loss
-
-    with torch.no_grad():
-        turn_indicator_accuracy = (
-            (turn_indicator_logit.argmax(dim=-1) == turn_indicator_gt).float().mean()
-        )
-        loss["turn_indicator_accuracy"] = turn_indicator_accuracy
+    loss["turn_indicator_loss"] = turn_terms["turn_indicator_loss"]
+    loss["turn_indicator_accuracy"] = turn_terms["turn_indicator_accuracy"]
 
     return loss
 

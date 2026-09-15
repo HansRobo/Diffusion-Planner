@@ -83,8 +83,54 @@ def _enable_tf32() -> None:
     torch.set_float32_matmul_precision("high")
 
 
+def _init_from_checkpoint(model: torch.nn.Module, path: str, global_rank: int) -> None:
+    """Load matching weights from ``path`` (strict=False) before DDP / EMA exist.
+
+    For adding the turn-indicator head to a DrivoR checkpoint trained without
+    one: only ``decoder.turn_indicator_predictor.*`` may be missing and nothing
+    may be unexpected, so a wrong checkpoint fails loudly instead of training a
+    half-initialised model.  Prefers the EMA weights (the deployed ones).
+    """
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    source = "ema_state_dict" if ckpt.get("ema_state_dict") else "model"
+    state = ckpt[source] if source in ckpt else ckpt
+    state = {key.removeprefix("module."): value for key, value in state.items()}
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    bad = [key for key in missing if not key.startswith("decoder.turn_indicator_predictor.")]
+    if bad or unexpected:
+        raise RuntimeError(
+            f"drivor_init_model_path={path}: {len(bad)} missing keys outside the turn-indicator "
+            f"head (e.g. {bad[:3]}) and {len(unexpected)} unexpected keys "
+            f"(e.g. {list(unexpected)[:3]})"
+        )
+    if global_rank == 0:
+        print(
+            f"Initialised from {path} [{source}]: {len(state)} tensors loaded, "
+            f"{len(missing)} left at init (turn-indicator head)"
+        )
+
+
+def _freeze_all_but_turn_indicator(model: torch.nn.Module, global_rank: int) -> None:
+    """``drivor_turn_indicator_only``: only ``turn_indicator_predictor`` trains."""
+    if getattr(model.decoder, "turn_indicator_predictor", None) is None:
+        raise ValueError("--drivor_turn_indicator_only needs --drivor_turn_indicator true")
+    trainable = frozen = 0
+    for name, parameter in model.named_parameters():
+        keep = "turn_indicator_predictor" in name
+        parameter.requires_grad_(keep)
+        if keep:
+            trainable += parameter.numel()
+        else:
+            frozen += parameter.numel()
+    if global_rank == 0:
+        print(f"Turn-indicator-only training: {trainable} trainable / {frozen} frozen parameters")
+
+
 def _build_optimizer(model, args) -> optim.AdamW:
-    params = [{"params": ddp.get_model(model, args.ddp).parameters(), "lr": args.learning_rate}]
+    # Frozen parameters (``drivor_turn_indicator_only``) must not enter AdamW:
+    # with weight decay they would still be updated.
+    trainable = [p for p in ddp.get_model(model, args.ddp).parameters() if p.requires_grad]
+    params = [{"params": trainable, "lr": args.learning_rate}]
     if args.fused_optimizer and args.device == "cuda":
         try:
             return optim.AdamW(params, fused=True)
@@ -188,6 +234,10 @@ def model_training_drivor(args: TrainConfig):
         torch.distributed.barrier()
 
     model = Diffusion_Planner(args)
+    if args.drivor_init_model_path:
+        _init_from_checkpoint(model, args.drivor_init_model_path, global_rank)
+    if args.drivor_turn_indicator_only:
+        _freeze_all_but_turn_indicator(model, global_rank)
     model = model.to(rank if args.device == "cuda" else args.device)
     if args.ddp:
         model = DDP(
@@ -412,7 +462,7 @@ def model_training_drivor(args: TrainConfig):
             selected = valid_metrics.get(CHECKPOINT_METRIC, float("nan"))
             print(
                 "Epoch {}/{}  val ADE={:.3f} FDE={:.3f} oracle_selected={:.4f} "
-                "oracle_best={:.4f} top1={:.3f}".format(
+                "oracle_best={:.4f} top1={:.3f} turn_acc={:.3f} turn_change_acc={:.3f}".format(
                     epoch + 1,
                     args.train_epochs,
                     valid_metrics.get("val/trajectory/selected_ADE", float("nan")),
@@ -420,6 +470,8 @@ def model_training_drivor(args: TrainConfig):
                     selected,
                     valid_metrics.get("val/selection/oracle_best", float("nan")),
                     valid_metrics.get("val/selection/top1_hit", float("nan")),
+                    valid_metrics.get("val/turn_indicator/accuracy", float("nan")),
+                    valid_metrics.get("val/turn_indicator/change_accuracy", float("nan")),
                 )
             )
             print(

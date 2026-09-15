@@ -29,7 +29,15 @@ class Diffusion_Planner(nn.Module):
     def forward(self, inputs):
         if self.predictor_head == "drivor":
             encoder_outputs, encoding_mask = self.encoder(inputs, return_mask=True)
-            decoder_outputs = self.decoder(encoder_outputs, encoding_mask)
+            decoder_outputs = self.decoder(
+                encoder_outputs,
+                encoding_mask,
+                inputs=inputs,
+                # Teacher-forcing target for the turn-indicator head.  Set by
+                # ``utils/drivor_train.py::train_epoch_drivor`` only; absent at
+                # validation / inference, where the head sees the selected proposal.
+                target_trajectory=inputs.get("ego_future_target"),
+            )
             return encoder_outputs, decoder_outputs
 
         encoder_outputs = self.encoder(inputs)

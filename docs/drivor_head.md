@@ -3,7 +3,9 @@
 `--predictor_head drivor` swaps Diffusion-Planner's DiT/diffusion decoder for
 DrivoR's generate-then-score head. Encoder, dataset, augmentation, EMA and LR
 schedule are unchanged; everything downstream of the encoder is DrivoR's, and the
-output is **only an ego trajectory** — no neighbour prediction, no turn indicator.
+output is an ego trajectory — no neighbour prediction — plus, with
+`--drivor_turn_indicator true` (the default), the 5-class `turn_indicator_logit`
+(see "Turn indicator" under Design notes).
 
 - [Training](#training) — how to run it
 - [Design notes](#design-notes) — what was ported and what it cost
@@ -157,7 +159,7 @@ selected, with no load error.
 
 Inert on this path (they parse, they do nothing): closed-loop rollout validation,
 temporal-stability / replan-consistency metrics, ONNX export. All three assume
-the DiT sampler's inputs and the neighbour/turn-indicator outputs.
+the DiT sampler's inputs and the neighbour outputs.
 
 ### Troubleshooting
 
@@ -174,6 +176,29 @@ the DiT sampler's inputs and the neighbour/turn-indicator outputs.
 | `--compile_mode reduce-overhead` slower | expected. CUDA graphs measured 45 % slower: once the EMA's Python loop is gone the step is GPU-bound, not launch-bound. |
 
 ## Design notes
+
+### Turn indicator
+
+`--drivor_turn_indicator true` (default) attaches the diffusion Decoder's
+`TurnIndicatorNetwork` (`model/module/turn_indicator.py`) to this head, at the
+same half-size hyperparameters, on this head's `--drivor_num_poses` horizon. It
+is parameter- and feature-independent from the proposal/scorer stack: it reads
+the ego trajectory plus the raw turn-history / lane / route inputs. Training
+teacher-forces it with the demonstration future; inference feeds the selected
+proposal (normalized with the ego slice of the state normalizer). The loss is
+the diffusion head's (`loss.py::turn_indicator_loss_terms`: cross-entropy vs
+`make_turn_indicator_gt`, weight 1.0 on change frames, 0.05 on kept frames),
+scaled by `--drivor_turn_indicator_weight`. Metrics: `loss/turn_indicator`,
+`turn_indicator/accuracy`, `turn_indicator/change_accuracy` under `train/` and
+`val/`. Closed-loop eval then feeds the model's own indicator back
+(`summary["turn_indicator_source"] == "closed_loop"`).
+
+Adding the head to a checkpoint trained without it:
+`--drivor_init_model_path <ckpt> --drivor_turn_indicator true
+--drivor_turn_indicator_only true` loads every matching weight (only the head may
+be missing) and trains the head alone. Checkpoint selection still tracks
+`val/selection/oracle_selected`, which such a run does not move — pick the epoch
+by `val/turn_indicator/change_accuracy` from `train_log.tsv`.
 
 ### Architecture
 

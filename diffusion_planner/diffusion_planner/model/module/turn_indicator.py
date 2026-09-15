@@ -219,11 +219,17 @@ class TurnIndicatorNetwork(nn.Module):
         mixer_depth: int,
         fusion_depth: int,
         drop_path_rate: float = 0.0,
+        trajectory_len: int = OUTPUT_T,
     ):
         super(TurnIndicatorNetwork, self).__init__()
 
+        # Number of poses in the conditioning trajectory.  The diffusion Decoder
+        # feeds its full ``OUTPUT_T`` future; the DrivoR head its own
+        # ``drivor_num_poses`` horizon.  The token-mixing MLP is sized by it, so
+        # it is fixed at construction.
+        self.trajectory_len = int(trajectory_len)
         self.trajectory_encoder = TrajectoryEncoder(
-            time_len=OUTPUT_T,
+            time_len=self.trajectory_len,
             pose_dim=POSE_DIM,
             hidden_dim=hidden_dim,
             drop_path_rate=drop_path_rate,
@@ -365,6 +371,11 @@ class TurnIndicatorNetwork(nn.Module):
         Returns:
             turn_indicator_logit: (B, TURN_INDICATOR_OUTPUT_DIM)
         """
+        if ego_trajectory.shape[1] != self.trajectory_len:
+            raise ValueError(
+                f"TurnIndicatorNetwork expects {self.trajectory_len} poses, got "
+                f"{tuple(ego_trajectory.shape)}"
+            )
         query = self._encode_query(ego_trajectory)  # (B, 1, hidden)
 
         kv, kv_mask, pos = self._encode_key_value(inputs)

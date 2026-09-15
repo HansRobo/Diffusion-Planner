@@ -121,6 +121,34 @@ def make_turn_indicator_gt(
     return turn_indicators_gt
 
 
+def turn_indicator_loss_terms(
+    turn_indicator_logit: torch.Tensor,  # [B, TURN_INDICATOR_OUTPUT_DIM]
+    turn_indicators: torch.Tensor,  # [B, INPUT_T + 1]
+    change_weight: float = 1.0,
+    keep_weight: float = 0.05,
+) -> dict[str, torch.Tensor]:
+    """Cross-entropy of a turn-indicator head plus its accuracy terms.
+
+    Shared by the diffusion ``Decoder`` and the DrivoR head so both train the
+    same target (``make_turn_indicator_gt``) with the same sample weighting:
+    frames where the indicator changes weigh ``change_weight``, kept frames
+    ``keep_weight``.  Every value is a device scalar (no host sync);
+    ``turn_indicator_change_correct / turn_indicator_change_count`` sum over
+    the batch so an epoch's change accuracy is their ratio of sums.
+    """
+    turn_indicator_gt = make_turn_indicator_gt(turn_indicators)  # [B,]
+    per_sample = F.cross_entropy(turn_indicator_logit.float(), turn_indicator_gt, reduction="none")
+    change = turn_indicators[:, -2] != turn_indicators[:, -1]
+    coeff = torch.where(change, change_weight, keep_weight)
+    result = {"turn_indicator_loss": (per_sample * coeff).mean()}
+    with torch.no_grad():
+        correct = (turn_indicator_logit.argmax(dim=-1) == turn_indicator_gt).float()
+        result["turn_indicator_accuracy"] = correct.mean()
+        result["turn_indicator_change_correct"] = (correct * change).sum()
+        result["turn_indicator_change_count"] = change.float().sum()
+    return result
+
+
 def loss_func(
     trajectory_pred: torch.Tensor, trajectory_gt: torch.Tensor
 ) -> dict[str, torch.Tensor]:

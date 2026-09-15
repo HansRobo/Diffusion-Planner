@@ -208,6 +208,13 @@ def get_args(args_list=None):
     parser.add_argument("--predicted_neighbor_num", type=int, default=MAX_NUM_NEIGHBORS)
 
     parser.add_argument("--resume_model_path", type=str, help="path to resume model", default=None)
+    parser.add_argument(
+        "--drivor_init_model_path",
+        type=str,
+        default=_train_config_default("drivor_init_model_path"),
+        help="load matching weights (strict=False) before training, e.g. to add the "
+        "turn-indicator head to a DrivoR checkpoint; optimizer / schedule / epoch start fresh",
+    )
 
     # ---- Predictor head ------------------------------------------------
     parser.add_argument(
@@ -282,9 +289,16 @@ def get_args(args_list=None):
         "drivor_label_smoothing",
         "drivor_grad_clip",
         "drivor_oracle_dt",
+        "drivor_turn_indicator_weight",
     ):
         parser.add_argument(f"--{_name}", type=float, default=_train_config_default(_name))
-    for _name in ("drivor_divergence_guard", "drivor_ddp_find_unused", "drivor_fused_ema"):
+    for _name in (
+        "drivor_divergence_guard",
+        "drivor_ddp_find_unused",
+        "drivor_fused_ema",
+        "drivor_turn_indicator",
+        "drivor_turn_indicator_only",
+    ):
         parser.add_argument(f"--{_name}", type=boolean, default=_train_config_default(_name))
 
     # ---- throughput -------------------------------------------------------

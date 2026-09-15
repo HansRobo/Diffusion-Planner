@@ -9,9 +9,11 @@ calls ``wandb.log`` once per epoch, so the same names are produced here as plain
 
 Names are the cross-repository contract, so they are reproduced value for value:
 epoch aggregates under ``train/*`` and ``val/*``, live diagnostics under
-``perf/*``.  Diffusion-Planner-specific series (turn indicator, neighbour
-prediction, road-border and neighbour-collision penalties, the diffusion
-``ego_planning_loss``) have no counterpart in this head and are not emitted.
+``perf/*``.  Diffusion-Planner-specific series (neighbour prediction, road-border
+and neighbour-collision penalties, the diffusion ``ego_planning_loss``) have no
+counterpart in this head and are not emitted.  The turn-indicator head
+(``drivor_turn_indicator``) adds ``loss/turn_indicator`` and
+``turn_indicator/{accuracy,change_accuracy}``.
 """
 
 from typing import Any, Mapping, Optional
@@ -44,6 +46,10 @@ METRIC_NAMES: dict[str, str] = {
     "label_entropy": "loss/learnable/label_entropy_floor",
     "min_loss0": "trajectory/error_before_refinement",
     "min_loss": "trajectory/error_after_refinement",
+    # Turn-indicator head (loss.py::turn_indicator_loss_terms).  The change
+    # accuracy is derived in :func:`epoch_metrics` from two batch sums.
+    "turn_indicator_loss": "loss/turn_indicator",
+    "turn_indicator_accuracy": "turn_indicator/accuracy",
     # ``score``/``best_score`` are legacy loss-dict aliases; the canonical
     # oracle selection series are emitted by :func:`selection_metrics`, so these
     # must not share their keys.
@@ -74,7 +80,12 @@ PROGRESS_LOSS_KEYS: tuple[tuple[str, str], ...] = (
     ("comfort_loss", "loss_Comfort"),
     ("human_loss", "loss_HumanTeacher"),
     ("logit_absmax", "logit_absmax"),
+    ("turn_indicator_loss", "loss_TurnIndicator"),
+    ("turn_indicator_accuracy", "turn_indicator_accuracy"),
 )
+
+# Batch sums behind ``turn_indicator/change_accuracy``; not emitted themselves.
+_TURN_CHANGE_SUM_KEYS = ("turn_indicator_change_correct", "turn_indicator_change_count")
 
 PROGRESS_TRAJECTORY_KEYS: tuple[str, ...] = (
     "selected_ADE",
@@ -298,10 +309,19 @@ def epoch_metrics(
             continue
         if has_oracle_selection and key in {"score", "best_score"}:
             continue
+        if key in _TURN_CHANGE_SUM_KEYS:
+            continue
         scalar = _as_float(value)
         if scalar is None:
             continue
         out[metric_name(prefix, key)] = scalar
+
+    # Change accuracy = correct changes / change frames.  Both are per-batch sums
+    # (or, for an epoch, means of per-batch sums), so the ratio is exact either way.
+    change_correct = _as_float(loss_dict.get("turn_indicator_change_correct"))
+    change_count = _as_float(loss_dict.get("turn_indicator_change_count"))
+    if change_correct is not None and change_count is not None and change_count > 0:
+        out[metric_path(prefix, "turn_indicator/change_accuracy")] = change_correct / change_count
 
     total = _as_float(loss_dict.get("loss"))
     if total is not None:

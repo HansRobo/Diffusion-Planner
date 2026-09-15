@@ -2,9 +2,11 @@
 
 Kept apart from ``train_epoch.py`` and ``validate_model.py`` because almost
 nothing in those is shared: the diffusion head's losses (neighbour prediction,
-turn indicator, road-border and neighbour-collision penalties, the DiT sampler)
-have no counterpart here, and this head's objective needs the PDM oracle labels
-for its own proposals every step.
+road-border and neighbour-collision penalties, the DiT sampler) have no
+counterpart here, and this head's objective needs the PDM oracle labels for its
+own proposals every step.  The one shared piece is the turn-indicator
+cross-entropy (``loss.py::turn_indicator_loss_terms``), added when the head is
+built with ``drivor_turn_indicator``.
 
 Throughput notes -- the whole step is written to avoid host synchronisation:
 autocast + TF32 for the model, the oracle on un-normalized tensors under
@@ -53,6 +55,7 @@ def build_drivor_loss(args) -> DrivoRLoss:
         final_score_weight=args.drivor_final_score_weight,
         prev_weight=args.drivor_prev_weight,
         label_smoothing=args.drivor_label_smoothing,
+        turn_indicator_weight=float(getattr(args, "drivor_turn_indicator_weight", 1.0)),
     )
 
 
@@ -461,6 +464,10 @@ def train_epoch_drivor(
     for step, inputs in enumerate(iterator):
         inputs = {key: value.to(device, non_blocking=True) for key, value in inputs.items()}
         model_inputs, oracle_inputs, ego_future, ego_reference = prepare_batch(inputs, args, aug)
+        # Teacher-forcing target for the turn-indicator head (training only:
+        # validation feeds the selected proposal, so its accuracy is the
+        # deployment number).  Metric; the decoder normalizes it.
+        model_inputs["ego_future_target"] = ego_future
 
         detailed = (step % log_every) == 0
 
@@ -473,7 +480,9 @@ def train_epoch_drivor(
         # deliberately outside autocast so label boundaries cannot move with the
         # compute dtype.
         labels = oracle(pred["proposals"], oracle_inputs, ego_reference)
-        loss_dict = loss_fn(pred, ego_future, labels)
+        loss_dict = loss_fn(
+            pred, ego_future, labels, turn_indicators=model_inputs["turn_indicators"]
+        )
 
         optimizer.zero_grad(set_to_none=True)
         total = loss_dict["loss"]
@@ -563,11 +572,14 @@ def train_epoch_drivor(
     metrics = epoch_metrics(means, "train", extra)
     if ddp.get_rank() == 0:
         print(
-            "train loss={:.4f} trajectory={:.4f} scorer={:.4f} oracle_selected={:.4f}".format(
+            "train loss={:.4f} trajectory={:.4f} scorer={:.4f} oracle_selected={:.4f} "
+            "turn_indicator={:.4f} turn_acc={:.3f}".format(
                 means.get("loss", float("nan")),
                 means.get("trajectory_loss", float("nan")),
                 means.get("final_score_loss", float("nan")),
                 extra.get("train/selection/oracle_selected", float("nan")),
+                means.get("turn_indicator_loss", float("nan")),
+                means.get("turn_indicator_accuracy", float("nan")),
             )
         )
     return metrics, means.get("loss", float("nan")), global_step
@@ -616,7 +628,9 @@ def validate_drivor(
             _, pred = model(model_inputs)
 
         labels = oracle(pred["proposals"], oracle_inputs, ego_reference)
-        loss_dict = loss_fn(pred, ego_future, labels)
+        loss_dict = loss_fn(
+            pred, ego_future, labels, turn_indicators=model_inputs["turn_indicators"]
+        )
         accumulator.add(loss_dict)
         traj_accumulator.add(trajectory_metrics(pred, ego_future))
         traj_accumulator.add(selection_metrics(loss_dict, "val"))

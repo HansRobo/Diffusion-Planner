@@ -12,9 +12,11 @@ This replaces the diffusion (DiT / DPM-Solver) decoder with the DrivoR head:
       -> PDMS aggregate -> argmax -> ONE ego trajectory
 
 The scene tokens are the Diffusion-Planner encoder's fused token stream, so the
-whole vector/mixer encoder is reused verbatim; only the head changes.  Nothing
-but the ego trajectory is produced: neighbour prediction and the turn-indicator
-branch of the diffusion head are gone.
+whole vector/mixer encoder is reused verbatim; only the head changes.  No
+neighbour prediction is produced.  With ``drivor_turn_indicator`` the diffusion
+Decoder's ``TurnIndicatorNetwork`` rides along and emits the 5-class
+``turn_indicator_logit`` (teacher-forced with the demonstration future in
+training, fed the selected proposal at inference).
 """
 
 from typing import Optional
@@ -28,6 +30,7 @@ from diffusion_planner.model.module.drivor_scorer import (
     Scorer,
     aggregate_pdm_score,
 )
+from diffusion_planner.model.module.turn_indicator import TurnIndicatorNetwork
 
 POSE_STATE_SIZE = 4  # x, y, cos(yaw), sin(yaw) -- Diffusion-Planner's pose layout
 
@@ -113,14 +116,40 @@ class DrivoRDecoder(nn.Module):
         self.apply(_basic_init)
         nn.init.normal_(self.init_feature.weight, mean=0.0, std=0.02)
 
+        # Optional turn-indicator head: the same parameter- and feature-independent
+        # network the diffusion Decoder uses (it reads the ego trajectory plus the
+        # raw turn-history / lane / route inputs, never these proposal tokens), at
+        # the diffusion path's half-size hyperparameters, on this head's horizon.
+        # Built AFTER ``_basic_init`` so its own initialisation survives.
+        # ``getattr(..., False)``: an args.json written before this field existed
+        # describes a checkpoint without the head.
+        self.turn_indicator_predictor = None
+        if bool(getattr(config, "drivor_turn_indicator", False)):
+            self.turn_indicator_predictor = TurnIndicatorNetwork(
+                hidden_dim=d_model // 2,
+                num_heads=max(1, int(getattr(config, "num_heads", 8)) // 2),
+                mixer_depth=max(1, int(getattr(config, "encoder_mixer_depth", 6)) // 2),
+                fusion_depth=max(1, int(getattr(config, "encoder_fusion_depth", 6)) // 2),
+                drop_path_rate=float(getattr(config, "encoder_drop_path_rate", 0.0)),
+                trajectory_len=self.poses_num,
+            )
+
     def forward(
         self,
         encoding: torch.Tensor,
         encoding_mask: Optional[torch.Tensor] = None,
+        inputs: Optional[dict] = None,
+        target_trajectory: Optional[torch.Tensor] = None,
     ) -> dict:
         """Args:
         encoding: [B, S, D] fused scene tokens from the DP encoder.
         encoding_mask: [B, S] bool, True where the token is padding.
+        inputs: the (normalized) model input dict; required when the
+            turn-indicator head is built (it reads ``lanes``, ``route_lanes``,
+            their speed limits and ``turn_indicators``).
+        target_trajectory: [B, poses_num, 4] METRIC demonstration future.  In
+            training mode the turn-indicator head is teacher-forced with it;
+            otherwise (or when None) it conditions on the selected proposal.
         """
 
         batch_size = encoding.shape[0]
@@ -158,7 +187,7 @@ class DrivoRDecoder(nn.Module):
         chosen = torch.argmax(pdm_score, dim=1)
         trajectory = proposals[torch.arange(batch_size, device=proposals.device), chosen]
 
-        return {
+        out = {
             # Ego-only output, kept in the repository's [B, P, T, 4] layout so
             # ONNX export / visualisation / closed-loop consume it unchanged.
             "prediction": trajectory[:, None],
@@ -171,6 +200,34 @@ class DrivoRDecoder(nn.Module):
             "score_weights": score_weights,
             "chosen_index": chosen,
         }
+
+        if self.turn_indicator_predictor is not None:
+            if inputs is None:
+                raise ValueError(
+                    "DrivoRDecoder: the turn-indicator head needs the model inputs "
+                    "(lanes, route_lanes, turn_indicators); pass inputs="
+                )
+            # Same convention as the diffusion Decoder: the GT future while
+            # training, the model's own trajectory at inference.
+            ego = (
+                target_trajectory
+                if (self.training and target_trajectory is not None)
+                else trajectory
+            )
+            out["turn_indicator_logit"] = self._compute_turn_indicator(ego, inputs)
+        return out
+
+    def _compute_turn_indicator(self, ego_trajectory: torch.Tensor, inputs: dict) -> torch.Tensor:
+        """Turn-indicator logits ``[B, 5]`` from a METRIC ego trajectory.
+
+        The network was designed on the diffusion path, where it sees the
+        state-normalized trajectory, so the metric input is normalized here with
+        the same ego slice of the state normalizer the proposal heads use.
+        Method name shared with ``Decoder`` so ``TurnIndicatorONNXWrapper`` can
+        drive either head.
+        """
+        normalized = (ego_trajectory.float() - self.state_mean[0, 0]) / self.state_std[0, 0]
+        return self.turn_indicator_predictor(normalized, inputs)
 
     def _decode(self, head: nn.Module, tokens: torch.Tensor) -> torch.Tensor:
         normalized = head(tokens).reshape(tokens.shape[0], -1, self.poses_num, self.state_size)

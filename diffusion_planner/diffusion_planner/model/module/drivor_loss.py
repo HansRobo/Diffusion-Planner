@@ -19,6 +19,7 @@ from typing import Any, Mapping, Optional
 import torch
 import torch.nn.functional as F
 
+from diffusion_planner.loss import turn_indicator_loss_terms
 from diffusion_planner.model.module.drivor_scorer import HEAD_BY_METRIC
 from diffusion_planner.utils.drivor_oracle import ORACLE_METRIC_NAMES, TTC_UNDEFINED
 
@@ -75,22 +76,32 @@ class DrivoRLoss(torch.nn.Module):
         final_score_weight: float = 1.0,
         prev_weight: float = 1.0,
         label_smoothing: float = 0.02,
+        turn_indicator_weight: float = 1.0,
     ) -> None:
         super().__init__()
         self.trajectory_weight = float(trajectory_weight)
         self.final_score_weight = float(final_score_weight)
         self.prev_weight = float(prev_weight)
+        self.turn_indicator_weight = float(turn_indicator_weight)
         if not 0.0 <= float(label_smoothing) < 1.0:
             raise ValueError(f"label_smoothing must be in [0, 1), got {label_smoothing}")
         self.label_smoothing = float(label_smoothing)
 
     # -- oracle-free half --------------------------------------------------
-    def local_terms(self, pred: Mapping[str, Any], target_trajectory: torch.Tensor) -> dict:
+    def local_terms(
+        self,
+        pred: Mapping[str, Any],
+        target_trajectory: torch.Tensor,
+        turn_indicators: Optional[torch.Tensor] = None,
+    ) -> dict:
         """Every term that is a function of the prediction and the GT alone.
 
         Args:
             pred: the DrivoR head's output dict.
             target_trajectory: ``[B, T, 4]`` expert future (x, y, cos, sin).
+            turn_indicators: ``[B, INPUT_T + 1]`` recorded indicator history; with
+                ``pred["turn_indicator_logit"]`` present this adds the
+                turn-indicator cross-entropy (``drivor_turn_indicator``).
         """
         proposal_list = pred["proposal_list"]
         target = target_trajectory
@@ -129,13 +140,24 @@ class DrivoRLoss(torch.nn.Module):
             human_loss = F.binary_cross_entropy_with_logits(human_logit.float(), human_target)
             human_entropy = _label_entropy(human_target)
 
+        # Optional turn-indicator head: the cross-entropy shared with the diffusion
+        # Decoder.  Oracle-free, so it belongs to this half.
+        turn_terms: dict[str, torch.Tensor] = {}
+        turn_loss = trajectory_loss.new_zeros(())
+        turn_logit = pred.get("turn_indicator_logit")
+        if turn_logit is not None and turn_indicators is not None:
+            turn_terms = turn_indicator_loss_terms(turn_logit, turn_indicators)
+            turn_loss = turn_terms["turn_indicator_loss"]
+
         return {
             "trajectory_loss": trajectory_loss,
             "min_loss_list": min_loss_list,
             "human_loss": human_loss,
             "human_entropy": human_entropy,
+            "turn_indicator_terms": turn_terms,
             "local_loss": self.trajectory_weight * trajectory_loss
-            + self.final_score_weight * human_loss,
+            + self.final_score_weight * human_loss
+            + self.turn_indicator_weight * turn_loss,
         }
 
     # -- oracle-dependent half ---------------------------------------------
@@ -218,9 +240,13 @@ class DrivoRLoss(torch.nn.Module):
         if pred["pred_logit"].get("human_closeness") is not None:
             final_score_loss = final_score_loss + human_loss
 
+        turn_terms = dict(local.get("turn_indicator_terms") or {})
+        turn_loss = turn_terms.get("turn_indicator_loss", trajectory_loss.new_zeros(()))
+
         result = {
             "loss": self.trajectory_weight * trajectory_loss
-            + self.final_score_weight * final_score_loss,
+            + self.final_score_weight * final_score_loss
+            + self.turn_indicator_weight * turn_loss,
             "trajectory_loss": trajectory_loss,
             "human_loss": human_loss,
             "final_score_loss": final_score_loss,
@@ -230,6 +256,7 @@ class DrivoRLoss(torch.nn.Module):
             "_deferred_loss": self.final_score_weight * score_head_sum,
         }
         result.update({LOSS_KEY_BY_METRIC[name]: value for name, value in score_losses.items()})
+        result.update(turn_terms)
 
         # Soft-target cross-entropy is H(labels) + KL(labels || prediction) and
         # only the KL term has a gradient, so the learnable remainder is
@@ -268,9 +295,10 @@ class DrivoRLoss(torch.nn.Module):
         pred: Mapping[str, Any],
         target_trajectory: torch.Tensor,
         oracle: torch.Tensor,
+        turn_indicators: Optional[torch.Tensor] = None,
     ) -> dict:
         """The two halves back-to-back: the original serial computation."""
-        local = self.local_terms(pred, target_trajectory)
+        local = self.local_terms(pred, target_trajectory, turn_indicators)
         return self.finish(local, pred, oracle)
 
 

@@ -211,6 +211,22 @@ class TrainConfig:
     drivor_label_smoothing: float = 0.02
     drivor_grad_clip: float = 1.0
 
+    # Turn-indicator head: the diffusion Decoder's ``TurnIndicatorNetwork`` on
+    # this head's ``drivor_num_poses`` horizon.  Teacher-forced with the
+    # demonstration future in training, fed the selected proposal at inference;
+    # emits the 5-class ``turn_indicator_logit`` the rollout / ROS node expect.
+    # The decoder reads it with ``getattr(..., False)``, so an args.json written
+    # before this field existed still describes a head-less checkpoint.
+    drivor_turn_indicator: bool = True
+    drivor_turn_indicator_weight: float = 1.0
+    # Train ONLY the turn-indicator head, everything else frozen -- for adding
+    # the head to an existing DrivoR checkpoint (see ``drivor_init_model_path``).
+    drivor_turn_indicator_only: bool = False
+    # Load matching weights (strict=False) before training; optimizer, schedule
+    # and epoch start fresh.  Unlike ``resume_model_path`` only the
+    # ``decoder.turn_indicator_predictor.*`` keys may be missing.
+    drivor_init_model_path: Optional[str] = None
+
     # Trajectory sampling -- NOT Diffusion-Planner's OUTPUT_T (80 poses / 8 s).
     #
     # The *horizon* is the part that is not a free choice: navsim scores 4 s
