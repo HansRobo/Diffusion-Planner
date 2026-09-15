@@ -126,3 +126,31 @@ def test_a_failing_encoder_is_raised_rather_than_dropped(evaluation, monkeypatch
 
     with pytest.raises(RuntimeError, match="ffmpeg exited 1"):
         ev.execute_jobs([_job("r0")])
+
+
+def test_a_shared_pool_is_used_instead_of_building_one(evaluation, monkeypatch):
+    """A pool built per group respawns every worker, and each one re-imports torch."""
+    ev, _encoded = evaluation
+    built = []
+    monkeypatch.setattr(cle, "render_pool", lambda workers: built.append(workers) or _Pool())
+    shared = _Pool()
+    ev.shared_render = (shared, ev.out_dir)
+
+    ev.execute_jobs([_job("r0")])
+
+    assert built == [], "a group built its own pool while the caller was sharing one"
+    assert len(shared.submitted) == 2
+
+
+def test_a_shared_pool_defers_the_join_to_the_caller(evaluation, monkeypatch):
+    """The caller joins after the last group, which is what lets an encode overlap the next."""
+    ev, encoded = evaluation
+    shared = _Pool()
+    ev.shared_render = (shared, ev.out_dir)
+
+    merged = ev.execute_jobs([_job("r0")])
+
+    assert encoded == [], "the group waited for its encoders instead of leaving them running"
+    for args in shared.submitted:
+        assert args[0].is_dir(), "the frames were torn down with the group that wrote them"
+    assert len(merged.video_mp4s) == 2
