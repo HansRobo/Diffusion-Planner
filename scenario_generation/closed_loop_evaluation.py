@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+from contextlib import nullcontext
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -428,13 +429,29 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
         suffix = f"_{self.ddp_rank}" if self.ddp_world_size > 1 else ""
         segments_path = self.out_dir / f"segments{suffix}.jsonl"
         digests_path = self.out_dir / f"tdigests{suffix}.jsonl"
+        # ``shared_render`` is the caller's ``(pool, frames_root)``, alive for the whole rank.
+        # Building them per group respawns every worker, and each one re-imports torch and
+        # matplotlib; that latency lands inside the first ``render_drain``, and at high rank
+        # counts a group often holds a single segment, so the pool was rebuilt for one rollout.
+        # They are taken as a pair because an encode reads both: owning one and borrowing the
+        # other would tear the frames down under a running encoder.
+        shared = getattr(self, "shared_render", None)
+        pool_ctx = (
+            nullcontext(shared[0])
+            if shared is not None
+            else render_pool(self.config.params.draw_workers)
+        )
+        # ffmpeg consumes and deletes these, so they must not land in the output tree.
+        frames_ctx = (
+            nullcontext(str(shared[1]))
+            if shared is not None
+            else tempfile.TemporaryDirectory(prefix="closed_loop_frames_")
+        )
         with (
             segments_path.open("w", encoding="utf-8") as fout,
             digests_path.open("w", encoding="utf-8") as fdigest,
-            # One pool for every segment: a spawned worker re-imports torch and matplotlib.
-            render_pool(self.config.params.draw_workers) as draw_pool,
-            # ffmpeg consumes and deletes these, so they must not land in the output tree.
-            tempfile.TemporaryDirectory(prefix="closed_loop_frames_") as frames_root,
+            pool_ctx as draw_pool,
+            frames_ctx as frames_root,
         ):
             for ri, job in enumerate(jobs):
                 assert isinstance(job, FullRouteRouteJob)
@@ -452,12 +469,15 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 if partial_timers is not None:
                     merged.extras.setdefault("timers", Timers()).merge(partial_timers)
                 self.on_job_complete(job, partial, ri, len(jobs))
-            # Must stay inside the ``with``: the encoders read frames_root, which is torn
-            # down on exit, and an ffmpeg failure surfaces nowhere else.
+            # Ours die at the end of this block, so the encoders reading them have to be
+            # waited on here. The caller's are joined after the last group instead, which is
+            # what lets an encode overlap the next group's rollout. Either way the wait must
+            # happen: an ffmpeg failure surfaces nowhere else.
             join = Timers()
             with join("mp4_join"):
-                for future in self._mp4_futures:
-                    future.result()
+                if shared is None:
+                    for future in self._mp4_futures:
+                        future.result()
             merged.extras.setdefault("timers", Timers()).merge(join)
         return merged
 
