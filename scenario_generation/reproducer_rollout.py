@@ -262,6 +262,54 @@ def _add_static_inputs(data: dict, model_args, n: int, device: str) -> None:
     )
 
 
+def _assert_plan_contract(model_args, replan_interval: int, tracker_mode: str) -> int:
+    """Validate the head's plan against how this rollout executes it; returns ``plan_len``.
+
+    The rollout single-steps at ``DT`` and executes ``replan_interval`` rows of each plan, so
+    three head/rollout mismatches that ``load_state_dict`` accepts happily have to fail at
+    startup instead of silently changing what is being measured:
+
+    * ``pose_dt != DT``: the DrivoR head's pose spacing is its own config (``drivor_pose_dt``),
+      not the sim step. One plan row per tick means a 0.5 s checkpoint drives the ego at 5x its
+      predicted speed.
+    * ``replan_interval`` outside ``1..plan_len``: past the horizon the cached-plan branch clamps
+      ``off`` to the last plan pose, so the ego holds the final pose instead of re-planning.
+    * ``tracker_mode="mpc"`` with a plan shorter than the MPC preview window:
+      ``MPCTracker.track`` pads a short reference with its last row, which reads to MPC as a
+      standing-still tail.
+    """
+    # Function-level import (as in _seed_state) so importing this module stays scipy-free.
+    from scenario_generation.mpc_tracker import MPC_HORIZON_STEPS
+
+    if getattr(model_args, "predictor_head", "diffusion") == "drivor":
+        # The DrivoR head has its own horizon (40 poses / 4 s by default), NOT future_len.
+        # drivor_pose_dt is read only by the training-time sampler, so an older args.json can
+        # lack it; its TrainConfig default is 0.1 == DT.
+        plan_len = int(model_args.drivor_num_poses)
+        pose_dt = float(getattr(model_args, "drivor_pose_dt", DT))
+    else:
+        plan_len = int(model_args.future_len)
+        pose_dt = DT
+    if abs(pose_dt - DT) > 1e-9:
+        raise ValueError(
+            f"plan pose_dt ({pose_dt}) must equal the rollout step DT ({DT}): the rollout "
+            f"executes one plan row per tick, so the ego would drive at {pose_dt / DT:g}x its "
+            "predicted speed."
+        )
+    if not 1 <= replan_interval <= plan_len:
+        raise ValueError(
+            f"replan_interval ({replan_interval}) must be in 1..plan_len ({plan_len}); beyond "
+            "the horizon the cached plan silently holds its final pose instead of re-planning."
+        )
+    if tracker_mode == "mpc" and plan_len < MPC_HORIZON_STEPS:
+        raise ValueError(
+            f"tracker_mode='mpc' needs at least MPC_HORIZON_STEPS ({MPC_HORIZON_STEPS}) plan "
+            f"poses, got {plan_len}; MPCTracker.track silently pads a short reference with its "
+            "last pose."
+        )
+    return plan_len
+
+
 def _to_torch_batch(np_dicts: list[dict], model_args, device: str) -> dict:
     """Concat N single-sample numpy dicts -> one batched, normalized torch dict.
 
@@ -1350,6 +1398,7 @@ def render_segment(
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    plan_len = _assert_plan_contract(model_args, replan_interval, tracker_mode)
     cap = max_steps if max_steps is not None else 3 * (end - start)
     timers = Timers()
     s = _seed_state(
@@ -1457,6 +1506,15 @@ def render_segment(
             data = _to_torch_batch([np_dict], model_args, device)
             _, outputs = model(data)
             pred = outputs["prediction"][0, 0].cpu().numpy()
+            if pred.shape != (plan_len, POSE_DIM):
+                # traj_head's output width comes from the same config that sized plan_len, so a
+                # checkpoint whose pose count disagrees with args.json loads without complaint.
+                # Both heads put the FIRST future step at row 0 (the diffusion decoder strips its
+                # t=0 anchor on the inference path), so no head-specific shift is needed here.
+                raise ValueError(
+                    f"model emitted a {pred.shape} plan; expected {(plan_len, POSE_DIM)} from "
+                    "the head config (args.json drivor_num_poses / future_len)."
+                )
             plan_world = _ego_pred_to_world(
                 pred[:, :2], pred[:, 2:4], s.live_pose[0], s.live_pose[1], s.live_pose[2]
             )
@@ -1603,6 +1661,15 @@ def run_segments_batched(
     from concurrent.futures import ThreadPoolExecutor
 
     timers = timers or Timers()
+    if getattr(model_args, "predictor_head", "diffusion") == "drivor":
+        # This path feeds the model's OWN decoded turn indicator back into turn_hist every tick;
+        # the DrivoR head emits no turn_indicator_logit, so the decode below would KeyError
+        # mid-rollout, after the state seeding and thread pool are up. render_segment scrolls the
+        # recorded signal instead (_feed_turn_indicator).
+        raise ValueError(
+            "run_segments_batched requires a head that emits turn_indicator_logit; "
+            "predictor_head='drivor' does not. Use render_segment for that head."
+        )
     if save_dir is not None and save_max_scenes < save_pre_steps + 1:
         # The buffer is save_max_scenes+1 deep and the window is >= save_pre_steps frames
         # plus the collision step. A smaller cap would silently truncate the window — fail

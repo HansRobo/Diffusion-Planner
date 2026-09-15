@@ -25,6 +25,10 @@ import math
 import numpy as np
 from scipy.optimize import minimize
 
+# Default MPC preview window: 20 steps = 2 s at 0.1 s. Read by the rollout's plan-contract
+# guard, which must know how many plan poses `track` actually consumes.
+MPC_HORIZON_STEPS = 20
+
 
 class MPCTracker:
     """MPC trajectory tracker with bicycle kinematic model.
@@ -52,7 +56,7 @@ class MPCTracker:
     def __init__(
         self,
         wheelbase: float,
-        horizon_steps: int = 20,
+        horizon_steps: int = MPC_HORIZON_STEPS,
         n_knots: int = 5,
         dt: float = 0.1,
         # Physical bounds

@@ -141,8 +141,8 @@ def main() -> None:
         draw_every=args.draw_every,
         neighbor_history_mode="recorded",
         tracker_mode="perfect",
+        model_path=str(args.model_path),
     )
-    summary["model_path"] = str(args.model_path)
 
     n_seg = summary["n_segments"]
     print(f"\n=== closed-loop validation: {n_seg} segments in {summary['elapsed_sec']:.1f}s ===")
@@ -162,6 +162,11 @@ def main() -> None:
         f"mean_segment_mean_clearance={summary['mean_segment_mean_clearance']:.3f} m"
     )
     print(f"total_snaps={summary['total_snaps']}  terminated={summary['terminated_counts']}")
+    print(
+        f"plan: {summary['predictor_head']} head, {summary['plan_len']} poses "
+        f"({summary['plan_horizon_s']} s), executing {summary['executed_depth_s']} s per replan, "
+        f"turn_indicator={summary['turn_indicator_source']}"
+    )
     print(f"videos: per-segment <route>_<start>_<end>.mp4 in {out_dir}")
 
 

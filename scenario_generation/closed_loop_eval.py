@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from scenario_generation.perf_timer import Timers
-from scenario_generation.reproducer_rollout import render_segment
+from scenario_generation.reproducer_rollout import DT, _assert_plan_contract, render_segment
 from scenario_generation.route_timeline import RouteTimeline, group_routes
 
 
@@ -129,6 +129,7 @@ def run_closed_loop_eval(
     unstick_radius_mult: float = 10.0,
     unstick_teleport_after: int = 300,
     tracker_mode: str = "mpc",
+    model_path: str = "",
     verbose: bool = True,
 ) -> dict:
     """Render closed-loop rollouts over every route under ``npz_root`` and aggregate metrics.
@@ -139,15 +140,24 @@ def run_closed_loop_eval(
     dir + an MP4 (``<route>_<start>_<end>.mp4``) are written. ``segments.jsonl`` and
     ``summary.json`` are written into ``out_dir``.
 
-    Turn indicators are CLOSED-LOOP: the model's own predicted turn indicator is fed back into
-    the input history each step, held across cached-plan steps when ``replan_interval`` > 1
-    (see ``render_segment``).
+    ``model_path`` is recorded in the summary for provenance (empty for the live in-training
+    model).
+
+    Turn indicators are closed-loop ONLY for a head that emits ``turn_indicator_logit``: the
+    model's own predicted indicator is fed back into the input history each step, held across
+    cached-plan steps when ``replan_interval`` > 1. A head without that key (``predictor_head=
+    "drivor"``) instead gets the RECORDED driver's signal scrolled in (see ``render_segment`` /
+    ``_feed_turn_indicator``); ``summary["turn_indicator_source"]`` says which happened.
 
     Returns the summary dict with extra keys ``video_mp4s`` (list[Path] of every per-segment MP4),
     ``segments`` (list[row]), and ``elapsed_sec``.
     """
     npz_root = Path(npz_root)
     out_dir = Path(out_dir)
+    # Fail on a head/rollout mismatch before anything is created or read; also the single source
+    # of truth for plan_len (render_segment re-checks it per segment for its other callers).
+    predictor_head = getattr(model_args, "predictor_head", "diffusion")
+    plan_len = _assert_plan_contract(model_args, replan_interval, tracker_mode)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     routes = enumerate_routes(npz_root)
@@ -217,6 +227,20 @@ def run_closed_loop_eval(
     summary = aggregate(rows, near_miss_thresh)
     summary["npz_root"] = str(npz_root)
     summary["n_routes"] = len(route_keys)
+    summary["model_path"] = str(model_path)
+    # Provenance: the summary has to say WHAT was rolled out, not just how it scored. The two
+    # heads differ in plan length AND in where the turn indicator comes from, so a number
+    # without these keys can be compared against a diffusion run by mistake.
+    summary["predictor_head"] = predictor_head
+    summary["plan_len"] = plan_len
+    summary["plan_horizon_s"] = round(plan_len * DT, 6)
+    summary["replan_interval"] = replan_interval
+    summary["executed_depth_s"] = round(replan_interval * DT, 6)
+    # The DrivoR head emits no turn_indicator_logit, so _feed_turn_indicator scrolls turn_hist
+    # with the RECORDED signal (open loop in the turn channel only). This is a config proxy for
+    # the runtime `"turn_indicator_logit" not in outputs` test — exact while drivor is the only
+    # logit-less head; a future third one needs this line updated alongside.
+    summary["turn_indicator_source"] = "recorded" if predictor_head == "drivor" else "closed_loop"
     summary["elapsed_sec"] = time.perf_counter() - t0
     summary["video_mp4s"] = video_mp4s
     summary["segments"] = rows
