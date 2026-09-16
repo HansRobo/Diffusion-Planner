@@ -6,6 +6,8 @@ Accepts the same ``ClosedLoopConfig`` fields as train.py. Example::
         --closed_loop_npz_root override.json site.json \\
         --model_path /media/.../best_model.pth \\
         --out_root /media/.../cl_results
+
+Results land directly under ``--out_root``; give each run its own directory.
 """
 
 from __future__ import annotations
@@ -14,7 +16,6 @@ import json
 import math
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -530,8 +531,7 @@ def main() -> int:
 
     model, model_args = FullRouteClosedLoopEvaluation.load_model_pair(args.model_path, cfg.device)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    out_root = base_out_root / timestamp
+    out_root = Path(base_out_root)
     out_root.mkdir(parents=True, exist_ok=True)
 
     ok = run_closed_loop_main(
