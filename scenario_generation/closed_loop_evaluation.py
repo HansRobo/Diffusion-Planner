@@ -453,6 +453,12 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                 self.on_job_complete(job, partial, ri, len(jobs))
         return merged
 
+    def _preserve_rollout_trace(self, png_dir: Path, segment_key: str) -> None:
+        """Call after colormaps consume the trace, before scratch frames are removed."""
+        rollout_src = png_dir / "rollout.jsonl"
+        if rollout_src.exists():
+            shutil.move(str(rollout_src), self.out_dir / f"{segment_key}.rollout.jsonl")
+
     def run_job(
         self,
         job: ClosedLoopJob,
@@ -497,15 +503,7 @@ class FullRouteClosedLoopEvaluation(ClosedLoopEvaluation):
                     centerline_thresh_m=params.deviation_collision_thresh_m,
                     title=f"{job.route_key} [{start},{end}]",
                 )
-            # render_segment always writes this next to the PNGs; png_dir may be a scratch
-            # dir (see execute_jobs) that gets wiped once the run finishes, so pull the trace
-            # out into out_dir now, alongside the mp4s, or it's lost with the frames.
-            rollout_src = png_dir / "rollout.jsonl"
-            if rollout_src.exists():
-                shutil.move(
-                    str(rollout_src),
-                    self.out_dir / f"{job.route_key}_{start}_{end}.rollout.jsonl",
-                )
+            self._preserve_rollout_trace(png_dir, f"{job.route_key}_{start}_{end}")
 
             row = {"route": job.route_key, **metrics}
             if self.config.pass_condition is not None:
