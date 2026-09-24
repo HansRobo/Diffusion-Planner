@@ -3,10 +3,13 @@
 ``execute_jobs`` renders each segment's PNGs (and the per-step ``rollout.jsonl`` next to
 them) into a scratch ``TemporaryDirectory`` that is deleted at the end of the run, so
 anything that isn't pulled out into ``out_dir`` first is lost. Regression coverage for that:
-see ``run_job``'s ``rollout_src`` move right after ``render_segment``/colormap rendering.
+Both legacy and native-H5 ``run_job`` implementations use ``_preserve_rollout_trace``
+after colormap rendering.
 """
 
 from pathlib import Path
+
+import pytest
 
 import scenario_generation.closed_loop_evaluation as cle
 from scenario_generation.closed_loop_evaluation import (
@@ -75,14 +78,28 @@ def _fake_render_segment(model, model_args, tl, start, end, png_dir, **kwargs):
     return {}
 
 
-def test_execute_jobs_preserves_rollout_jsonl(tmp_path, monkeypatch):
+@pytest.mark.parametrize("native_h5", [False, True])
+@pytest.mark.parametrize("colormaps", [False, True])
+def test_execute_jobs_preserves_rollout_jsonl(tmp_path, monkeypatch, native_h5, colormaps):
     monkeypatch.setattr(cle, "RouteTimeline", _FakeTimeline)
     monkeypatch.setattr(cle, "render_segment", _fake_render_segment)
+
+    colormap_sources = []
+
+    def fake_colormaps(png_dir, *args, **kwargs):
+        source = Path(png_dir) / "rollout.jsonl"
+        assert source.read_text() == '{"event": "start"}\n'
+        colormap_sources.append(source)
+
+    if colormaps:
+        import scenario_generation.trajectory_colormap as tc
+
+        monkeypatch.setattr(tc, "render_trajectory_colormaps", fake_colormaps)
 
     out_dir = tmp_path / "out"
     config = ClosedLoopEvalConfig(
         out_dir=out_dir,
-        params=_rollout_params(),
+        params=_rollout_params(colormap_metrics=("road_border",) if colormaps else ()),
         fps=10.0,
         verbose=False,
         profile=False,
@@ -104,8 +121,35 @@ def test_execute_jobs_preserves_rollout_jsonl(tmp_path, monkeypatch):
         seg_len=100,
     )
 
+    if native_h5:
+        import new_dp_h5_eval.closed_loop as native
+
+        class FakeNativeTimeline(_FakeTimeline):
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(native, "NativeH5RouteTimeline", FakeNativeTimeline)
+        monkeypatch.setattr(native, "render_segment", _fake_render_segment)
+        evaluator = native.NativeH5FullRouteClosedLoopEvaluation(
+            model=None,
+            model_args=None,
+            config=config,
+            routes=[{"route_id": "routeA", "h5_path": str(tmp_path / "frames.h5")}],
+            seg_len=100,
+            ddp_rank=0,
+            ddp_world_size=1,
+        )
+        job = evaluator.discover_jobs()[0]
+
     evaluator.execute_jobs([job])
 
     rollout_path = out_dir / "routeA_0_5.rollout.jsonl"
-    assert rollout_path.is_file(), "rollout.jsonl should be moved into out_dir, not lost with scratch frames"
+    assert rollout_path.is_file(), (
+        "rollout.jsonl should be moved into out_dir, not lost with scratch frames"
+    )
     assert rollout_path.read_text() == '{"event": "start"}\n'
+    assert len(colormap_sources) == int(colormaps)
+    assert all(not source.parent.exists() for source in colormap_sources)

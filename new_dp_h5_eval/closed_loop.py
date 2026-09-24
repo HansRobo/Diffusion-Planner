@@ -284,6 +284,7 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
                         strong_brake_mps2=self.config.params.strong_brake_mps2,
                         title=f"{job.route_key} [{start},{end}]",
                     )
+                self._preserve_rollout_trace(png_dir, f"{job.route_key}_{start}_{end}")
                 row = {"route": job.route_key, **metrics}
                 if self.config.pass_condition is not None:
                     row["passed"] = evaluate_segment_pass(row, self.config.pass_condition)
