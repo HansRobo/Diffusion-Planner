@@ -16,7 +16,8 @@
 #   env: CKPT OUT OPENSCENARIOS_BASE SUITE SCENARIO_ROOT GPUS JOBS_PER_GPU MAX_STEPS
 #        REPLAN_INTERVAL DRAW_EVERY MAX_CASES CASE_TIMEOUT USE_MPS CLAIM_DIR MAX_FAILED
 #        ROS_DOMAIN_SPREAD EXPORT DELIVERY_ROOT RUN_NAME PYTHON SCENARIO_SIM_MODEL
-#        SCENARIO_SIM_ORT_INTRA
+#        SCENARIO_SIM_ORT_EP SCENARIO_SIM_TRT_CACHE SCENARIO_SIM_ORT_INTRA
+#        CLOSED_LOOP_PNG_COMPRESS_LEVEL
 set -uo pipefail
 
 OPENSCENARIOS_BASE="${OPENSCENARIOS_BASE:-/mnt/storage_rdma/diffusion_planner/openscenarios}"
@@ -122,6 +123,13 @@ MAX_FAILED="${MAX_FAILED:-}"
 ROS_DOMAIN_SPREAD="${ROS_DOMAIN_SPREAD:-1}"
 USE_MPS="${USE_MPS:-1}"
 
+# TensorRT by default for a graph: it is what the vehicle runs. Exported for this script's children
+# only, so a closed-loop step in the same process tree keeps whatever it had.
+case "$MODEL" in
+  *.onnx) export SCENARIO_SIM_ORT_EP="${SCENARIO_SIM_ORT_EP:-trt}" ;;
+esac
+export SCENARIO_SIM_TRT_CACHE="${SCENARIO_SIM_TRT_CACHE:-/var/tmp/${USER:-u}/trt_engine_cache}"
+
 mkdir -p "$OUT"
 
 if [ -f "/opt/ros/humble/setup.bash" ]; then
@@ -140,7 +148,8 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
   echo "cases=$(find "$SCENARIO_ROOT" -name '*.xosc' 2>/dev/null | wc -l)"
   echo "jobs=$JOBS jobs_per_gpu=$JOBS_PER_GPU gpus=$GPUS max_steps=$MAX_STEPS"
   echo "draw_every=${DRAW_EVERY:-off} max_cases=${MAX_CASES:-all} use_mps=$USE_MPS case_timeout=${CASE_TIMEOUT}s"
-  echo "ort_intra=${SCENARIO_SIM_ORT_INTRA:-1}"
+  echo "ort_ep=${SCENARIO_SIM_ORT_EP:-<n/a>} ort_intra=${SCENARIO_SIM_ORT_INTRA:-1} trt_cache=$SCENARIO_SIM_TRT_CACHE"
+  echo "png_compress_level=${CLOSED_LOOP_PNG_COMPRESS_LEVEL:-default}"
 } | tee "$OUT/run_context.txt"
 
 if [ "$USE_MPS" = 1 ]; then
@@ -188,6 +197,36 @@ PY
 CLAIM_DIR=${CLAIM_DIR:-$OUT/claims}
 mkdir -p "$CLAIM_DIR"
 echo "[pool] $(wc -l < "$OUT/work.tsv") cases over $JOBS persistent workers, claiming under $CLAIM_DIR"
+
+# Build the TensorRT engine once, here, before any worker starts. Every worker on this host wants
+# the same engine, and left to themselves all $JOBS of them would build it at once, each paying
+# the build and competing for the memory to do it. Fatal on anything but a registered TensorRT
+# provider: a prewarm that quietly lands on CUDA leaves a cold cache and hands the whole pool the
+# stampede this exists to prevent.
+if [ "${SCENARIO_SIM_ORT_EP:-}" = trt ]; then
+  echo "[pool] warming the TensorRT engine cache under $SCENARIO_SIM_TRT_CACHE"
+  t_warm=$(date +%s)
+  # torch first: onnxruntime's GPU providers dlopen the CUDA libraries that live in the venv's
+  # nvidia/* wheels, which are not on the loader path until torch has pulled them in.
+  CUDA_VISIBLE_DEVICES=0 "$PYTHON" - "$MODEL" <<'PY' || {
+import os, sys
+import torch  # noqa: F401
+from scenario_generation.simulate import load_onnx_model, trt_engine_cache_dir
+
+onnx = sys.argv[1]
+print("engine cache:", trt_engine_cache_dir(os.environ["SCENARIO_SIM_TRT_CACHE"], onnx, 0),
+      flush=True)
+# load_onnx_model raises unless TensorRT actually registered, which is the check this needs.
+model, _ = load_onnx_model(onnx, "cuda")
+print("providers:", model.session.get_providers())
+# The engine is built on the first run, not when the session opens.
+model.warm_up()
+PY
+    echo "[pool] FATAL: TensorRT prewarm failed; not starting $JOBS workers on a cold cache" >&2
+    exit 3
+  }
+  echo "[pool] engine cache warm after $(( $(date +%s) - t_warm ))s"
+fi
 
 echo "### SUITE $(date -Is)"
 t0=$(date +%s)
