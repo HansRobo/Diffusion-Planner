@@ -105,7 +105,7 @@ def test_asking_for_cpu_by_device_does_not_request_a_gpu_provider(monkeypatch):
             "cuda:1",
             [TENSORRT_EP, CUDA_EP, CPU_EP],
             {
-                TENSORRT_EP: {"device_id": 1, **_TRT_CACHE_OPTIONS},
+                TENSORRT_EP: {"device_id": 1, **_TRT_CACHE_OPTIONS, "trt_fp16_enable": False},
                 CUDA_EP: {"device_id": 1},
                 CPU_EP: {},
             },
@@ -130,3 +130,37 @@ def test_intra_op_threads_follow_the_environment(monkeypatch):
     monkeypatch.setenv("SCENARIO_SIM_ORT_INTRA", "4")
 
     assert _open_session(monkeypatch, "cuda").sess_options.intra_op_num_threads == 4
+
+
+def test_tensorrt_is_chosen_by_the_environment(monkeypatch):
+    monkeypatch.setenv("SCENARIO_SIM_ORT_EP", "trt")
+    session = _open_session(monkeypatch, "cuda:0", engine_cache_dir=_TRT_CACHE)
+    assert session.providers == [TENSORRT_EP, CUDA_EP, CPU_EP]
+
+
+def test_a_tensorrt_request_that_landed_on_cuda_raises():
+    """A TensorRT run that quietly became a CUDA run would be reported under the wrong name."""
+    from scenario_generation.simulate import _require_tensorrt
+
+    with pytest.raises(RuntimeError, match="asked for TensorrtExecutionProvider"):
+        _require_tensorrt(_Session([CUDA_EP, CPU_EP]), "m.onnx")
+
+
+def test_each_export_gets_its_own_engine_directory(tmp_path):
+    """TensorRT's cache does not notice new weights under the same graph, so two checkpoints of
+    one run -- same file name, same size -- must not share an engine."""
+    import os
+
+    from scenario_generation.simulate import _graph_key
+
+    a = tmp_path / "epoch0091" / "diffusion_planner.onnx"
+    b = tmp_path / "epoch0092" / "diffusion_planner.onnx"
+    for p in (a, b):
+        p.parent.mkdir()
+        p.write_bytes(b"x" * 16)
+        os.utime(p, ns=(1, 1))
+    assert _graph_key(a) != _graph_key(b)
+
+    before = _graph_key(a)
+    os.utime(a, ns=(2, 2))  # re-exported in place
+    assert _graph_key(a) != before

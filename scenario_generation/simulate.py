@@ -16,7 +16,9 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import argparse
+import hashlib
 import math
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -60,6 +62,65 @@ CPU_EP = "CPUExecutionProvider"
 _ACCELERATED = (TENSORRT_EP, CUDA_EP)
 
 
+def _sanitize(text: str) -> str:
+    return "".join(c if c.isalnum() or c in "._-" else "_" for c in text)
+
+
+def _graph_key(onnx_path: str | Path) -> str:
+    """Identify the graph an engine was built from, without reading it.
+
+    TensorRT's own cache does not notice new weights under an unchanged graph, so this key is
+    what separates two checkpoints of one training run. The path, the size and the modification
+    time together change whenever the export does. A transfer that rewrites the timestamp of an
+    unchanged file costs one rebuild, which is the safe direction: a stale engine that is
+    silently reused is a different model than the one being evaluated.
+    """
+    path = Path(onnx_path).resolve()
+    st = path.stat()
+    digest = hashlib.sha256(f"{path}:{st.st_size}:{st.st_mtime_ns}".encode())
+    return f"{_sanitize(Path(onnx_path).stem)}-{digest.hexdigest()[:12]}"
+
+
+def trt_engine_cache_dir(root: str | Path, onnx_path: str | Path, device_id: int) -> Path:
+    """Where an engine for this (graph, TensorRT build, GPU) may be reused from.
+
+    A serialized TensorRT engine is only valid for the GPU and the TensorRT build that produced
+    it, and compute capability alone does not identify the GPU: H100 and H200 are both sm90, so
+    a cache keyed on capability would offer an H100 engine to an H200 and fail at session open
+    rather than rebuild. Every part of that identity is therefore a path component, which makes
+    a foreign engine an ordinary cache miss.
+    """
+    import onnxruntime as ort
+
+    major, minor = torch.cuda.get_device_capability(device_id)
+    parts = [_sanitize(torch.cuda.get_device_name(device_id)), f"sm{major}{minor}"]
+    try:
+        import tensorrt
+
+        parts.append(f"trt{tensorrt.__version__}")
+    except Exception:  # noqa: BLE001 - the EP links its own TensorRT; the module need not import
+        parts.append("trtunknown")
+    parts.append(f"ort{ort.__version__}")
+    return Path(root) / "-".join(parts) / _graph_key(onnx_path)
+
+
+def _default_providers(device: str) -> tuple[list[str], bool]:
+    """``(providers, trt_required)`` for a caller that named none.
+
+    ``SCENARIO_SIM_ORT_EP=trt`` asks for TensorRT, which fuses the graph instead of launching it
+    op by op; anything else keeps the CUDA provider this path has always used. TensorRT is not
+    the default because it partitions the graph up front and refuses ops it cannot build, so a
+    model it dislikes would stop opening at all rather than run slower.
+    """
+    if device.startswith("cpu"):
+        return [CPU_EP], False
+    if os.environ.get("SCENARIO_SIM_ORT_EP", "cuda").lower() == "trt":
+        # The CUDA provider stays behind it: it is what the vehicle's stack pairs TensorRT with,
+        # and dropping it would move any node TensorRT declines onto the CPU.
+        return [TENSORRT_EP, CUDA_EP, CPU_EP], True
+    return [CUDA_EP, CPU_EP], False
+
+
 def _require_accelerator(session, requested: list[str], onnx_path) -> None:
     """Fail when the GPU provider that was asked for did not load.
 
@@ -79,6 +140,24 @@ def _require_accelerator(session, requested: list[str], onnx_path) -> None:
         f"but the session runs on {active}. ORT's GPU providers need CUDA 12.x + cuDNN 9.x; "
         "see the warning ORT printed above for the library it could not load. Pass "
         f"providers=['{CPU_EP}'] (or device='cpu') to run on CPU deliberately."
+    )
+
+
+def _require_tensorrt(session, onnx_path) -> None:
+    """Fail when TensorRT was asked for by name and did not register.
+
+    :func:`_require_accelerator` cannot cover this: it passes as soon as any accelerated
+    provider is active, and TensorRT always sits in front of CUDA, so a TensorRT run whose
+    provider failed to load would silently become a CUDA run reported under the other arm's
+    name. That is the one failure a comparison between the two cannot survive.
+    """
+    active = session.get_providers()
+    if TENSORRT_EP in active:
+        return
+    raise RuntimeError(
+        f"onnx model {onnx_path} asked for {TENSORRT_EP} but the session runs on {active}. "
+        "The provider resolves its plugins through the loader, so TensorRT's libraries must be "
+        "on LD_LIBRARY_PATH. Unset SCENARIO_SIM_ORT_EP to run on the CUDA provider instead."
     )
 
 
@@ -109,30 +188,44 @@ class _OnnxModel:
         import onnxruntime as ort
 
         self.device = device
+        trt_required = TENSORRT_EP in providers if providers is not None else False
         if providers is None:
-            # CUDA, not TensorRT, by default. TensorRT partitions the graph up front and refuses
-            # ops it cannot build, so making it the default turns a model it dislikes into a
-            # session that will not open at all. Ask for it explicitly, per model.
-            providers = [CPU_EP] if device.startswith("cpu") else [CUDA_EP, CPU_EP]
-        # TensorRT builds an engine per (graph, shape, GPU), which dominates session setup.
-        # Cached, a run over many routes pays for it once.
-        options = [
-            {
-                "trt_engine_cache_enable": True,
-                "trt_engine_cache_path": str(engine_cache_dir),
-                "trt_timing_cache_enable": True,
-            }
-            if p == TENSORRT_EP and engine_cache_dir is not None
-            else {}
-            for p in providers
-        ]
+            providers, trt_required = _default_providers(device)
+        options: list[dict] = [{} for _ in providers]
         target = torch.device(device)
+        device_id = 0
         if target.type == "cuda" and any(p in _ACCELERATED for p in providers):
             # ORT defaults to GPU 0 independently of torch.cuda.set_device() in each rank.
             device_id = target.index if target.index is not None else torch.cuda.current_device()
             for provider, option in zip(providers, options):
                 if provider in _ACCELERATED:
                     option["device_id"] = device_id
+        if TENSORRT_EP in providers:
+            # TensorRT builds an engine per (graph, shape, GPU), which dominates session setup.
+            # Cached, a host pays for it once instead of once per worker;
+            # the directory carries the identity the engine is only valid for, so a cache carried
+            # to another GPU rebuilds rather than being reused or failing to deserialize.
+            # A caller that names the directory owns what is in it. Otherwise the directory under
+            # the shared root is derived from that identity.
+            if engine_cache_dir is not None:
+                cache = Path(engine_cache_dir)
+            else:
+                root = os.environ.get(
+                    "SCENARIO_SIM_TRT_CACHE",
+                    f"/var/tmp/{os.environ.get('USER', 'u')}/trt_engine_cache",
+                )
+                cache = trt_engine_cache_dir(root, onnx_path, device_id)
+                cache.mkdir(parents=True, exist_ok=True)
+            trt = {
+                "trt_engine_cache_enable": True,
+                "trt_engine_cache_path": str(cache),
+                "trt_timing_cache_enable": True,
+            }
+            # The vehicle runs the graph in fp32; matching it is what makes this the vehicle's
+            # evaluation rather than a faster approximation of it.
+            if os.environ.get("SCENARIO_SIM_TRT_FP16", "0") != "1":
+                trt["trt_fp16_enable"] = False
+            options[providers.index(TENSORRT_EP)].update(trt)
         # One intra-op thread by default. onnxruntime sizes its thread pool from the machine's
         # core count and never looks at the affinity mask, so every process that opens a session
         # spawns a pool as wide as the whole box and they fight over the same cores -- the work
@@ -147,6 +240,8 @@ class _OnnxModel:
             provider_options=options,
         )
         _require_accelerator(self.session, providers, onnx_path)
+        if trt_required:
+            _require_tensorrt(self.session, onnx_path)
         self._inputs = [(i.name, i.type) for i in self.session.get_inputs()]
         self._outputs = [o.name for o in self.session.get_outputs()]
 
@@ -185,7 +280,11 @@ def load_onnx_model(
     the same contract as :func:`load_model` so the closed-loop rollout is agnostic to which it got.
 
     ``args`` (from ``args.json`` next to the onnx) supplies ``observation_normalizer`` /
-    ``predicted_neighbor_num`` / ``future_len`` exactly as for the .pth path."""
+    ``predicted_neighbor_num`` / ``future_len`` exactly as for the .pth path.
+
+    ``providers`` unset follows ``SCENARIO_SIM_ORT_EP``. ``engine_cache_dir`` unset puts the
+    TensorRT engine under ``SCENARIO_SIM_TRT_CACHE``, in the directory
+    :func:`trt_engine_cache_dir` names for this graph on this GPU."""
     from diffusion_planner.utils.config import Config
 
     args = Config(str(Path(onnx_path).parent / "args.json"))
@@ -694,13 +793,26 @@ def _draw_agent_view(
     fig.clf()
 
 
+# matplotlib hands PNG writing to PIL without a compress_level, so every frame is deflated at
+# PIL's default, and deflate is a large share of a render worker's per-frame cost.
+#
+# Left at that default unless asked. Lowering it does NOT change the MP4: PNG is lossless, so
+# ffmpeg decodes identical pixels and libx264 sees identical input, and build_mp4 deletes the
+# PNGs afterwards. But the PNG bytes themselves differ, so the choice belongs to whoever owns
+# the artifact policy rather than to this function.
+_PNG_COMPRESS_LEVEL = os.environ.get("CLOSED_LOOP_PNG_COMPRESS_LEVEL")
+
+
 def _save_and_close(fig, path: Path, dpi: int = 100) -> None:
     """Save a matplotlib figure and release resources.
 
     Avoids plt.close() which touches the global pyplot figure manager
     and is not thread-safe under concurrent saves.
     """
-    fig.savefig(path, dpi=dpi)
+    if _PNG_COMPRESS_LEVEL is not None and str(path).endswith(".png"):
+        fig.savefig(path, dpi=dpi, pil_kwargs={"compress_level": int(_PNG_COMPRESS_LEVEL)})
+    else:
+        fig.savefig(path, dpi=dpi)
     fig.clf()
 
 
