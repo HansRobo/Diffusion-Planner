@@ -36,7 +36,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out_dir", required=True)
     p.add_argument("--row_out", required=True, help="write the metrics row JSON here")
     p.add_argument("--device", default="cpu")
-    p.add_argument("--model_path", required=True, help="torch .pth checkpoint")
+    p.add_argument(
+        "--model_path",
+        required=True,
+        help="torch .pth checkpoint, or an exported .onnx graph -- the suffix picks the loader",
+    )
     p.add_argument(
         "--replan_interval",
         type=int,
@@ -58,13 +62,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from scenario_generation.simulate import load_model
+    from scenario_generation.simulate import load_model, load_onnx_model
 
     a = _parse_args(argv)
     timers = Timers()
     t_proc = time.perf_counter()
+    # What arrives decides which loader runs, as it does for the closed-loop evaluator:
+    # ``load_model`` is torch.load and cannot read a graph.
+    loader = load_onnx_model if str(a.model_path).endswith(".onnx") else load_model
     with timers("model_load"):
-        model, model_args = load_model(a.model_path, a.device)
+        model, model_args = loader(a.model_path, a.device)
 
     cfg = RolloutConfig(
         fps=a.fps,

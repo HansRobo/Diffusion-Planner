@@ -69,6 +69,17 @@ STRONG_BRAKE_MPS2 = -2.5
 _FALLBACK_EGO_BOX = (4.0, 1.8, 2.6)
 
 
+class ScenarioRejected(RuntimeError):
+    """The interpreter refused the scenario before the run began.
+
+    A ``RuntimeError`` still, so every caller that only knows the base class behaves exactly as
+    before. What the subclass buys is a caller that outlives one scenario: configure() runs
+    before the simulator core is built, so a refusal is evidence about the scenario and none at
+    all about the process, and a worker deciding whether its own state has gone bad must not
+    count it.
+    """
+
+
 @dataclass
 class RolloutConfig:
     """Tuning for a single scenario_sim rollout."""
@@ -191,7 +202,7 @@ def _start_sim(runner, osc_path: str | Path) -> None:
     """
     st_cfg = runner.configure()
     if st_cfg != "inactive":
-        raise RuntimeError(
+        raise ScenarioRejected(
             f"configure() did not reach 'inactive' (got '{st_cfg}') -- scenario "
             f"rejected by the interpreter at parse/configure time: {osc_path}"
         )
@@ -387,6 +398,7 @@ def run_scenario_sim_rollout(
     verbose: bool = True,
     timers: Timers | None = None,
     builder: LaneletSceneBuilder | None = None,
+    builders: dict[str, LaneletSceneBuilder] | None = None,
     draw_pool: Executor | None = None,
 ) -> dict:
     """Run one closed-loop OpenSCENARIO rollout and return an aggregate-ready row.
@@ -396,6 +408,11 @@ def run_scenario_sim_rollout(
     ``observation_normalizer`` / ``predicted_neighbor_num`` / ``future_len``). ``builder`` lets
     a caller that outlives one scenario reuse a parsed map, which is per-map work a
     per-scenario process would otherwise pay per scenario.
+
+    ``builders`` is the same saving for a caller running a suite that spans several maps. Which
+    map a scenario runs is known only once the interpreter has activated it, so the cache has to
+    be handed in and selected from here rather than chosen by the caller beforehand. It is
+    mutated in place: a map parsed for one scenario is there for the next that declares it.
     """
     # Participants in one DDS domain all discover each other, so processes sharing a domain cost
     # N^2 of discovery. 101 is the last domain whose RTPS base ports clear Linux's ephemeral
@@ -473,8 +490,13 @@ def run_scenario_sim_rollout(
         if map_path is None:
             map_path = runner.lanelet2_map_path()
         with timers("map_build"):
+            map_key = str(Path(map_path).resolve())
+            if builder is None and builders is not None:
+                builder = builders.get(map_key)
             if builder is None:
                 builder = LaneletSceneBuilder(str(map_path))
+                if builders is not None:
+                    builders[map_key] = builder
             elif Path(builder.lanelet_path).resolve() != Path(map_path).resolve():
                 # Route, centreline and road-border geometry all come off the builder's map. A
                 # builder carried over from another scenario would compute every one of them
