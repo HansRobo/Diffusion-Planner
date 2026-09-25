@@ -40,7 +40,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--model_path",
         required=True,
-        help="torch .pth checkpoint, or an ML Planner sampler .onnx",
+        help="torch .pth checkpoint, or an .onnx: an ML Planner sampler, or a Diffusion-Planner "
+        "export with its args.json alongside",
     )
     p.add_argument(
         "--replan_interval",
@@ -62,17 +63,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    from scenario_generation.simulate import load_model
+def _load(model_path: str, device: str):
+    """``(model, model_args)`` for whichever planner the file holds."""
+    from scenario_generation.simulate import load_model, load_onnx_model
 
+    if not model_path.endswith(".onnx"):
+        return load_model(model_path, device)
+    import onnx
+
+    # A sampler takes its own noise; a Diffusion-Planner export does not.
+    graph = onnx.load(model_path, load_external_data=False).graph
+    if any(i.name == "initial_noise" for i in graph.input):
+        return MlPlannerOnnx(model_path, device), None
+    return load_onnx_model(model_path, device)
+
+
+def main(argv: list[str] | None = None) -> int:
     a = _parse_args(argv)
     timers = Timers()
     t_proc = time.perf_counter()
     with timers("model_load"):
-        if a.model_path.endswith(".onnx"):
-            model, model_args = MlPlannerOnnx(a.model_path, a.device), None
-        else:
-            model, model_args = load_model(a.model_path, a.device)
+        model, model_args = _load(a.model_path, a.device)
 
     cfg = RolloutConfig(
         fps=a.fps,
