@@ -167,7 +167,7 @@ class MlPlannerObservation:
         self.turn: deque = deque(maxlen=self.history)
         # Longer than the window: a slot near its start may hold a signal heard just before it.
         self.lights: deque = deque(maxlen=self.history + _TL_TIMEOUT_TICKS)
-        # name -> [(tick, Pose2)]; kept past the window so a hold can reach back to it.
+        # name -> [(tick, Pose2)] over the window.
         self.agents: dict[str, deque] = {}
         self.current: dict = {}
         self.ego_box: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -209,7 +209,6 @@ class MlPlannerObservation:
         ctx = _Context(self, frame, sel)
         return {name: INPUT_BUILDERS[name](ctx) for name in s if name != "initial_noise"}
 
-    # -- histories on the grid ending at the current tick --------------------------------------
 
     def ego_history(self, frame: Pose2) -> np.ndarray:
         rows = list(self.ego)
