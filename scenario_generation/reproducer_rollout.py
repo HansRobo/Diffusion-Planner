@@ -471,10 +471,8 @@ class _SegState:
     # clearing; ``last_collision_uuid`` is the colliding UUID of the last SAVED collision (a new
     # episode is distinct only if its UUID differs). ``episode_eligible`` is set once per episode
     # (distinct?), ``episode_saved`` latches after the episode's one window is written.
-    # Per-step acceleration of median-then-EMA executed speed for strong braking.
+    # Per-step executed-speed acceleration for strong braking (no extra speed filter).
     accels: np.ndarray | None = None
-    brake_ema_speed: float | None = None
-    brake_speed_history: tuple[float, float] | None = None
     strong_brake_mps2: float = -2.5
     last_collision_uuid: object = None
     in_episode: bool = False
@@ -722,8 +720,6 @@ def _seed_state(
         rb_dists=np.full(cap, np.inf, dtype=np.float32),
         red_light=np.zeros(cap, dtype=bool),
         accels=np.zeros(cap, dtype=np.float32),
-        brake_ema_speed=float(dyn.speed),
-        brake_speed_history=(float(dyn.speed), float(dyn.speed)),
         gt_devs=np.full(cap, np.inf, dtype=np.float32),
         gt_dvs=np.full(cap, np.nan, dtype=np.float32),
         gt_das=np.full(cap, np.nan, dtype=np.float32),
@@ -928,9 +924,7 @@ def _gt_deviation_m(
         pose = window[0]
         if abs(_wrap_pi(float(pose[2]) - float(live_yaw))) > (np.pi / 2.0):
             return GTDeviation(_GT_DEV_INF, None, lo, hi)
-        return GTDeviation(
-            float(np.linalg.norm(live_xy - pose[:2])), pose[:2].copy(), lo, hi, lo
-        )
+        return GTDeviation(float(np.linalg.norm(live_xy - pose[:2])), pose[:2].copy(), lo, hi, lo)
     a = window[:-1, :2]
     b = window[1:, :2]
     ab = b - a  # (M-1, 2)
@@ -1143,9 +1137,6 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
 
     was_warmup = s.k < s.warmup_steps
     snaps_before = getattr(s, "snap_count", 0)
-    prev_ema_speed = getattr(s, "brake_ema_speed", None)
-    if prev_ema_speed is None:
-        prev_ema_speed = float(s.dyn.speed)
     with timers("advance"):
         if s.k < s.warmup_steps:
             tgt = min(idx + 1, len(s.tl) - 1)
@@ -1265,20 +1256,14 @@ def _advance_step(s: _SegState, pred: np.ndarray, idx, device, timers, override=
                 s.stuck = 0
                 s.snap_count += 1
 
+        # Use the executed-speed difference directly. Perfect tracking already smooths
+        # its speed upstream through the placed-pose window; another median/EMA changes
+        # the duration of threshold crossings and therefore the two-frame confirmation.
+        # Warmup and teleports must still break the braking event history.
         if was_warmup or getattr(s, "snap_count", 0) != snaps_before:
-            s.brake_ema_speed = float(s.dyn.speed)
-            s.brake_speed_history = (float(s.dyn.speed), float(s.dyn.speed))
             brake_accel = np.nan
         else:
-            old_speeds = getattr(s, "brake_speed_history", None) or (
-                float(prev_speed),
-                float(prev_speed),
-            )
-            current_speed = float(s.dyn.speed)
-            median_speed = sorted((*old_speeds, current_speed))[1]
-            s.brake_speed_history = (old_speeds[1], current_speed)
-            s.brake_ema_speed = 0.3 * median_speed + 0.7 * prev_ema_speed
-            brake_accel = (s.brake_ema_speed - prev_ema_speed) / DT
+            brake_accel = s.dyn.accel
         if s.accels is not None and s.k - 1 < len(s.accels):
             s.accels[s.k - 1] = brake_accel
 
@@ -1420,7 +1405,7 @@ def clearance_family_block(
 
 
 def strong_brake_block(accels: np.ndarray, thresh_mps2: float) -> dict:
-    """The ``strong_brake`` block from median-then-EMA executed-speed acceleration."""
+    """The ``strong_brake`` block from executed-speed acceleration without additional filtering."""
     mask = strong_brake_mask(accels, thresh_mps2=float(thresh_mps2))
     return {
         "thresh_mps2": float(thresh_mps2),
@@ -2270,7 +2255,7 @@ def render_segment(
             _score_into(s, neighbors_live, device, timers, np_dict)
 
             # Capture the pre-step pose used for scoring; write after advancing so this row
-            # also carries the exact filtered acceleration scored at step k.
+            # also carries the exact acceleration scored at step k.
             trace_row = {
                 "k": k,
                 "ego": [round(float(s.live_pose[0]), 3), round(float(s.live_pose[1]), 3)],
@@ -2293,9 +2278,7 @@ def render_segment(
                 else None,
                 "collision": bool(s.collisions[k]),
                 "collision_rear": bool(s.rear_collisions[k]),
-                "rb_dist_m": round(float(s.rb_dists[k]), 4)
-                if np.isfinite(s.rb_dists[k])
-                else None,
+                "rb_dist_m": round(float(s.rb_dists[k]), 4) if np.isfinite(s.rb_dists[k]) else None,
                 "centerline_dist_m": round(float(s.centerline_devs[k]), 4)
                 if np.isfinite(s.centerline_devs[k])
                 else None,
