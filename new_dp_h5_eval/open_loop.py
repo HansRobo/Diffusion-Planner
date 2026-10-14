@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
+from collections import defaultdict, deque
+from collections.abc import Iterator
+from concurrent.futures import Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import ExitStack
+from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
@@ -16,12 +20,15 @@ from planner_metrics.scene_data import extract_metric_scene_data
 from .dataset import H5FrameIndex
 from .metric_compat import legacy_lanes
 from .model import NewDpOnnxRunner
+from .render import render_view, save_prediction_png
 from .vehicle import (
     VehicleDimensions,
     add_vehicle_params_argument,
     sim_ego_shape,
     vehicle_params_from_args,
 )
+
+DRAW_QUEUE_PER_WORKER = 4
 
 DEFAULT_PARAMETERS = {
     "arrival": {"position_tolerance_m": 2.0, "heading_tolerance_deg": 10.0},
@@ -85,95 +92,6 @@ def _stack_metric_views(
     return {key: torch.stack([view[key] for view in views]) for key in views[0]}
 
 
-def _valid_points(values: np.ndarray) -> np.ndarray:
-    """Return a geometry row without H5's all-zero padding points."""
-    return values[np.any(values != 0, axis=-1)]
-
-
-def _draw_geometry(ax: object, geometries: np.ndarray, **kwargs: object) -> None:
-    """Draw every non-empty native H5 geometry independently."""
-    for geometry in geometries:
-        points = _valid_points(geometry)
-        if len(points):
-            ax.plot(points[:, 0], points[:, 1], **kwargs)
-            kwargs["label"] = "_nolegend_"
-
-
-def visualize_h5_prediction(
-    frame: dict[str, np.ndarray], prediction: np.ndarray, save_path: Path, title: str
-) -> None:
-    """Save one native-H5 scene without connecting zero-padded geometry to the origin."""
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    for lanes, color, label in (
-        (frame["lanes"], "#9ca3af", "Lanes"),
-        (frame["route_lanes"], "#00a6d6", "Route"),
-    ):
-        for lane in lanes:
-            points = _valid_points(lane)
-            if not len(points):
-                continue
-            center = points[:, :2]
-            ax.plot(center[:, 0], center[:, 1], color=color, alpha=0.75, linewidth=1.2, label=label)
-            ax.plot(
-                center[:, 0] + points[:, 2],
-                center[:, 1] + points[:, 3],
-                color=color,
-                alpha=0.35,
-                linewidth=0.8,
-            )
-            ax.plot(
-                center[:, 0] + points[:, 4],
-                center[:, 1] + points[:, 5],
-                color=color,
-                alpha=0.35,
-                linewidth=0.8,
-            )
-            label = "_nolegend_"
-
-    for geometries, color, label in (
-        (frame["road_borders"], "#dc2626", "Road border"),
-        (frame["stop_lines"], "#f59e0b", "Stop line"),
-    ):
-        _draw_geometry(ax, geometries, color=color, linewidth=1.0, label=label)
-
-    for area in frame["intersection_area"]:
-        points = _valid_points(area)
-        if len(points) >= 3:
-            ax.fill(points[:, 0], points[:, 1], color="#6b7280", alpha=0.15)
-
-    ego_past = _valid_points(frame["ego_agent_past"])
-    ax.plot(ego_past[:, 0], ego_past[:, 1], "--", color="#fb923c", label="Ego history")
-    ego_future = _valid_points(frame["ego_agent_future"])
-    ax.plot(ego_future[:, 0], ego_future[:, 1], "--", color="#111827", label="Ground truth")
-    for neighbor in frame["neighbor_agents_past"]:
-        valid = np.square(neighbor[:, 2]) + np.square(neighbor[:, 3]) > 0.5
-        if np.any(valid):
-            ax.plot(
-                neighbor[valid, 0], neighbor[valid, 1], color="#64748b", alpha=0.35, linewidth=0.8
-            )
-
-    ax.plot(prediction[:, 0], prediction[:, 1], color="#f97316", linewidth=2, label="New DP output")
-    ax.scatter(0.0, 0.0, color="#dc2626", marker="^", label="Ego")
-    ax.scatter(
-        prediction[-1, 0], prediction[-1, 1], color="black", marker="x", label="Prediction end"
-    )
-    goal = frame["goal_pose"]
-    if np.linalg.norm(goal[:2]) <= 100.0:
-        ax.scatter(goal[0], goal[1], color="#2563eb", marker="*", s=80, label="Goal")
-    ax.set_title(title)
-    ax.set_aspect("equal")
-    ax.set_xlim(-60.0, 60.0)
-    ax.set_ylim(-60.0, 60.0)
-    ax.grid(alpha=0.3)
-    ax.legend(loc="best")
-    fig.tight_layout()
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-
-
 def _scoring_ego_shapes(
     dataset: H5FrameIndex,
     resolved: dict[str, list[tuple[dict, int]]],
@@ -219,6 +137,53 @@ def _resolve_matrix(matrix_path: Path, dataset: H5FrameIndex) -> dict[str, list[
     return result
 
 
+def _prefetched_chunks(
+    dataset: H5FrameIndex, samples: list[tuple[dict, int]], batch_size: int, reader: Executor
+) -> Iterator[tuple[int, list[tuple[dict, int]], list[dict[str, np.ndarray]]]]:
+    """Each ``(offset, chunk, frames)`` of ``samples``, reading the next chunk's frames meanwhile."""
+
+    def read(offset: int) -> list[dict[str, np.ndarray]]:
+        return [dataset.frame(index) for _, index in samples[offset : offset + batch_size]]
+
+    pending = reader.submit(read, 0)
+    for offset in range(0, len(samples), batch_size):
+        frames = pending.result()
+        if offset + batch_size < len(samples):
+            pending = reader.submit(read, offset + batch_size)
+        yield offset, samples[offset : offset + batch_size], frames
+
+
+def _draw_pool(stack: ExitStack, workers: int) -> ProcessPoolExecutor:
+    """A drawing process pool that cancels its queued drawings when the run fails."""
+    if workers < 1:
+        raise ValueError(f"--draw-workers must be at least 1 to save images: {workers}")
+    pool = stack.enter_context(ProcessPoolExecutor(workers, mp_context=get_context("spawn")))
+    stack.callback(pool.shutdown, cancel_futures=True)
+    return pool
+
+
+def _wait_for_drawings(drawing: deque[Future], keep: int) -> None:
+    """Collect the oldest drawings, raising their errors, until at most ``keep`` are queued."""
+    while len(drawing) > keep:
+        drawing.popleft().result()
+
+
+def _detail_row(reference: dict, indexed: dict, sample_index: int, evaluation, i: int) -> dict:
+    """The details.jsonl row of one sample of a scored chunk."""
+    row = {
+        "sample_index": sample_index,
+        "h5_path": str(reference.get("h5_path", indexed["h5_path"])),
+        "frame_index": int(indexed["frame_index"]),
+        "frame_time_ns": int(indexed["frame_time_ns"]),
+        "metrics": {
+            key: float(value[i].float().item()) for key, value in evaluation.scores.items()
+        },
+    }
+    for section, fields in evaluation.details.items():
+        row[section] = {key: value[i].item() for key, value in fields.items()}
+    return row
+
+
 def run(
     matrix_path: Path,
     index_path: Path,
@@ -228,6 +193,7 @@ def run(
     seed: int = 0,
     providers: list[str] | None = None,
     visualize: bool = True,
+    draw_workers: int = 8,
     *,
     vehicle_params: dict[str, VehicleDimensions],
 ) -> dict:
@@ -235,7 +201,11 @@ def run(
     runner = NewDpOnnxRunner(str(onnx_path), providers)
     summaries: dict[str, dict[str, float]] = {}
     seed_cursor = 0
-    with H5FrameIndex(index_path) as dataset:
+    drawing: deque[Future] = deque()
+    with ExitStack() as stack:
+        dataset = stack.enter_context(H5FrameIndex(index_path))
+        reader = stack.enter_context(ThreadPoolExecutor(1))
+        draw = _draw_pool(stack, draw_workers) if visualize else None
         # Resolve everything before inference: partial/misaligned matrices fail atomically.
         resolved = _resolve_matrix(matrix_path, dataset)
         unknown = set(resolved).difference(METRICS)
@@ -245,9 +215,7 @@ def run(
         for metric_name, samples in resolved.items():
             totals: dict[str, float] = defaultdict(float)
             details: list[dict] = []
-            for offset in range(0, len(samples), batch_size):
-                chunk = samples[offset : offset + batch_size]
-                frames = [dataset.frame(index) for _, index in chunk]
+            for offset, chunk, frames in _prefetched_chunks(dataset, samples, batch_size, reader):
                 trajectories, _ = runner.predict(
                     frames, [seed + seed_cursor + offset + i for i in range(len(chunk))]
                 )
@@ -262,30 +230,25 @@ def run(
                     totals[key] += float(values.float().sum().item())
                 for i, (reference, row_index) in enumerate(chunk):
                     indexed = dataset.rows[row_index]
-                    row = {
-                        "sample_index": offset + i,
-                        "h5_path": str(reference.get("h5_path", indexed["h5_path"])),
-                        "frame_index": int(indexed["frame_index"]),
-                        "frame_time_ns": int(indexed["frame_time_ns"]),
-                        "metrics": {
-                            key: float(value[i].float().item())
-                            for key, value in evaluation.scores.items()
-                        },
-                    }
-                    for section, fields in evaluation.details.items():
-                        row[section] = {key: value[i].item() for key, value in fields.items()}
+                    row = _detail_row(reference, indexed, offset + i, evaluation, i)
                     if visualize:
+                        stem = Path(indexed["h5_path"]).stem
                         png_path = (
-                            output
-                            / "visualization"
-                            / metric_name
-                            / f"{offset + i:06d}_{Path(indexed['h5_path']).stem}.png"
+                            output / "visualization" / metric_name / f"{offset + i:06d}_{stem}.png"
                         )
-                        visualize_h5_prediction(
-                            frames[i], trajectories[i, 0], png_path, Path(indexed["h5_path"]).stem
+                        drawing.append(
+                            draw.submit(
+                                save_prediction_png,
+                                render_view(frames[i], scoring_shapes[row_index]),
+                                trajectories[i, 0],
+                                png_path,
+                                stem,
+                            )
                         )
                         row["visualization_png"] = str(png_path)
                     details.append(row)
+                _wait_for_drawings(drawing, DRAW_QUEUE_PER_WORKER * draw_workers)
+            _wait_for_drawings(drawing, 0)
             detail_path = output / "details" / metric_name / "details.jsonl"
             detail_path.parent.mkdir(parents=True, exist_ok=True)
             detail_path.write_text(
@@ -310,6 +273,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--provider", action="append", dest="providers")
     parser.add_argument("--no-visualization", action="store_false", dest="visualize")
+    parser.add_argument("--draw-workers", type=int, default=8)
     add_vehicle_params_argument(parser)
     args = parser.parse_args()
     vehicle_params = vehicle_params_from_args(parser, args)
@@ -324,6 +288,7 @@ def main() -> None:
                 args.seed,
                 args.providers,
                 args.visualize,
+                args.draw_workers,
                 vehicle_params=vehicle_params,
             ),
             indent=2,
