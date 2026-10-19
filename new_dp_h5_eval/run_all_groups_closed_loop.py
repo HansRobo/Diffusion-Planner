@@ -15,6 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import h5py
 import torch
 from diffusion_planner.config.closed_loop_config import ClosedLoopConfig
 from diffusion_planner.config.config_utils import save_config
@@ -23,15 +24,67 @@ from diffusion_planner.utils import ddp
 from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.closed_loop_evaluation import ClosedLoopEvalConfig
 from scenario_generation.lane_geometry_summary import pool_lane_geometry
-from scenario_generation.plan_optimizer import PlanOptimizerConfig, add_plan_optimizer_argument
+from scenario_generation.plan_optimizer import (
+    PlanOptimizerConfig,
+    add_plan_optimizer_argument,
+    per_vehicle_configs_from_args,
+)
 
 from .closed_loop import (
     NativeH5FullRouteClosedLoopEvaluation,
     ReproducerOnnxModel,
+    h5_project_id,
     model_args,
     rollout_params_from_closed_loop_config,
 )
-from .vehicle import add_vehicle_params_argument, vehicle_params_from_args
+from .vehicle import (
+    VehicleDimensions,
+    add_project_vehicle_map_argument,
+    add_vehicle_params_argument,
+    load_project_vehicle_map,
+    vehicle_params_from_args,
+)
+
+# float32 storage and the yaml's rounding stay well under a millimetre.
+_WHEEL_BASE_ATOL_M = 1e-3
+
+
+def route_plan_optimizers(
+    inputs: list[tuple[str, str, dict[str, list[dict]]]],
+    project_vehicles: dict[str, str],
+    plan_optimizers: dict[str, PlanOptimizerConfig],
+    vehicle_params: dict[str, VehicleDimensions],
+) -> dict[tuple[str, str], dict[str, PlanOptimizerConfig]]:
+    """``{(label, group): {route_id: config}}``: each route takes the config of the vehicle its
+    H5 project_id drives. That config's wheel base must be the one ``vehicle_params`` gives the
+    project, so a config placed under the wrong vehicle fails before any rollout."""
+    resolved: dict[tuple[str, str], dict[str, PlanOptimizerConfig]] = {}
+    for _, label, groups in inputs:
+        for group_name, routes in groups.items():
+            by_route = resolved[(label, group_name)] = {}
+            for route in routes:
+                h5_path = Path(route["h5_path"])
+                with h5py.File(h5_path, "r") as h5:
+                    project_id = h5_project_id(h5, h5_path)
+                vehicle = project_vehicles.get(project_id)
+                config = plan_optimizers.get(vehicle)
+                if config is None:
+                    raise ValueError(
+                        f"{h5_path}: no plan optimizer config for project {project_id!r} "
+                        f"(vehicle {vehicle!r}; have: {', '.join(sorted(plan_optimizers))})"
+                    )
+                dimensions = vehicle_params.get(project_id)
+                wheel_base = config.vehicle["wheel_base"]
+                if (
+                    dimensions is None
+                    or abs(wheel_base - dimensions.wheel_base) > _WHEEL_BASE_ATOL_M
+                ):
+                    raise ValueError(
+                        f"{h5_path}: {config.vehicle_yaml} has wheel_base {wheel_base}, but project "
+                        f"{project_id!r} has {dimensions and dimensions.wheel_base} in the vehicle params"
+                    )
+                by_route[str(route["route_id"])] = config
+    return resolved
 
 
 def _write_groups_manifest(out_dir: Path, summaries: dict[str, dict]) -> None:
@@ -171,6 +224,7 @@ def main() -> int:
     parser.add_argument("--closed_loop_draw_workers", type=int, default=4)
     add_vehicle_params_argument(parser)
     add_plan_optimizer_argument(parser)
+    add_project_vehicle_map_argument(parser)
     args = parser.parse_args()
     vehicle_params = vehicle_params_from_args(parser, args)
 
@@ -192,7 +246,28 @@ def main() -> int:
         plan_optimizer_config_dir=args.plan_optimizer_config_dir,
     )
     cfg.closed_loop_draw_workers = args.closed_loop_draw_workers
-    plan_optimizer = PlanOptimizerConfig.from_args(cfg)
+
+    inputs = [
+        (mode, label, _load_groups(manifest))
+        for manifest, mode, label in zip(args.closed_loop_h5_root, modes, labels)
+    ]
+    try:
+        plan_optimizers = per_vehicle_configs_from_args(cfg)
+    except OSError as exc:
+        parser.error(f"--plan_optimizer_config_dir: {exc}")
+    plan_optimizer = None if plan_optimizers is not None else PlanOptimizerConfig.from_args(cfg)
+    by_group: dict[tuple[str, str], dict[str, PlanOptimizerConfig]] = {}
+    if plan_optimizers is not None:
+        try:
+            by_group = route_plan_optimizers(
+                inputs,
+                load_project_vehicle_map(args.project_vehicle_map),
+                plan_optimizers,
+                vehicle_params,
+            )
+        except (OSError, ValueError) as exc:
+            parser.error(f"per-vehicle --plan_optimizer_config_dir: {exc}")
+
     rank, local_rank, world_size = ddp.ddp_setup_universal(True, cfg)
     if cfg.device.startswith("cuda"):
         import torch
@@ -207,8 +282,8 @@ def main() -> int:
 
     model = ReproducerOnnxModel(args.model_path, args.providers)
     evaluators: dict[str, NativeH5FullRouteClosedLoopEvaluation] = {}
-    for manifest, mode, label in zip(args.closed_loop_h5_root, modes, labels):
-        for group_name, routes in _load_groups(manifest).items():
+    for mode, label, groups in inputs:
+        for group_name, routes in groups.items():
             group_out = out_root / label / group_name
             key = f"{label}/{group_name}"
             evaluators[key] = NativeH5FullRouteClosedLoopEvaluation(
@@ -229,6 +304,7 @@ def main() -> int:
                 ),
                 routes=routes,
                 vehicle_params=vehicle_params,
+                route_plan_optimizers=by_group.get((label, group_name)),
                 seg_len=cfg.closed_loop_seg_len,
                 ddp_rank=rank,
                 ddp_world_size=world_size,

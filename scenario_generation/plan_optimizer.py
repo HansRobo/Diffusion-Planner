@@ -67,6 +67,29 @@ class PlanOptimizerConfig:
         return cls(param_yaml, vehicle_yaml, vehicle)
 
 
+def per_vehicle_configs_from_args(
+    args: argparse.Namespace,
+) -> dict[str, PlanOptimizerConfig] | None:
+    """``{vehicle: config}`` when ``--plan_optimizer_config_dir`` holds one directory per
+    vehicle rather than one vehicle's files; None when the optimizer is off or it holds one
+    vehicle, which ``PlanOptimizerConfig.from_args`` reads."""
+    if not args.plan_optimizer:
+        return None
+    root = Path(args.plan_optimizer_config_dir)
+    if (root / "vehicle_info.param.yaml").is_file():
+        return None
+    configs = {
+        path.name: PlanOptimizerConfig.from_dir(path)
+        for path in sorted(root.iterdir())
+        if (path / "vehicle_info.param.yaml").is_file()
+    }
+    if not configs:
+        raise FileNotFoundError(
+            f"{root} holds neither vehicle_info.param.yaml nor a directory per vehicle with one"
+        )
+    return configs
+
+
 class PlanOptimizer:
     """One rollout's optimizer: its warm start and goal latch carry from one cycle to the next."""
 

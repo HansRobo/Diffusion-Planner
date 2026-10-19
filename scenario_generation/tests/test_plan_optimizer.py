@@ -165,3 +165,19 @@ def test_reproducer_feeds_its_input_borders_and_goal_in_the_map_frame(config_dir
     assert gh == pytest.approx(3 * np.pi / 2)
     assert recorder.ego == pytest.approx((100.0, 50.0, np.pi / 2, 3.0))
     assert xy.shape == (80, 2) and h.shape == (80,)
+
+
+@pytest.mark.usefixtures("installed")
+def test_a_directory_per_vehicle_reads_each_vehicle(tmp_path, config_dir):
+    root = tmp_path / "configs"
+    root.mkdir()
+    config_dir.rename(root / "vehicle_a")
+    (root / "PROVENANCE.txt").write_text("")
+    configs = po.per_vehicle_configs_from_args(
+        _args("--plan_optimizer", "--plan_optimizer_config_dir", str(root))
+    )
+    assert list(configs) == ["vehicle_a"]
+    assert configs["vehicle_a"].vehicle["wheel_base"] == VEHICLE["wheel_base"]
+    # One vehicle's directory is left to from_args.
+    one = _args("--plan_optimizer", "--plan_optimizer_config_dir", str(root / "vehicle_a"))
+    assert po.per_vehicle_configs_from_args(one) is None

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -283,11 +284,15 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
         *args,
         routes: list[dict],
         vehicle_params: dict[str, VehicleDimensions],
+        route_plan_optimizers: dict[str, PlanOptimizerConfig] | None = None,
         **kwargs,
     ) -> None:
+        """With ``route_plan_optimizers`` (``{route_id: config}``), each route's rollout takes its
+        own config in place of ``params.plan_optimizer``."""
         super().__init__(*args, npz_root="native_h5", **kwargs)
         self.routes = routes
         self.vehicle_params = vehicle_params
+        self.route_plan_optimizers = route_plan_optimizers
         self._routes_by_id = {str(route["route_id"]): route for route in routes}
 
     def discover_jobs(self) -> list[FullRouteRouteJob]:
@@ -320,9 +325,12 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
             timers=timers,
             vehicle_params=self.vehicle_params,
         )
+        params = self.config.params
         rows: list[dict] = []
         video_mp4s: list[Path] = []
         try:
+            if self.route_plan_optimizers is not None:
+                params = replace(params, plan_optimizer=self.route_plan_optimizers[job.job_id])
             for start, end in timeline.iter_segments(job.seg_len):
                 png_dir = frames_root / f"{job.route_key}_{start}_{end}"
                 metrics = render_segment(
@@ -332,20 +340,20 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
                     start,
                     end,
                     png_dir,
-                    **self.config.params.render_kwargs(),
+                    **params.render_kwargs(),
                     draw_pool=draw_pool,
                     timers=timers,
                 )
-                if self.config.params.colormap_metrics:
+                if params.colormap_metrics:
                     from scenario_generation.trajectory_colormap import render_trajectory_colormaps
 
                     render_trajectory_colormaps(
                         png_dir,
                         self.out_dir,
                         f"{job.route_key}_{start}_{end}",
-                        metrics=self.config.params.colormap_metrics,
-                        near_miss_thresh=self.config.params.near_miss_thresh,
-                        strong_brake_mps2=self.config.params.strong_brake_mps2,
+                        metrics=params.colormap_metrics,
+                        near_miss_thresh=params.near_miss_thresh,
+                        strong_brake_mps2=params.strong_brake_mps2,
                         title=f"{job.route_key} [{start},{end}]",
                     )
                 self._preserve_rollout_trace(png_dir, f"{job.route_key}_{start}_{end}")
