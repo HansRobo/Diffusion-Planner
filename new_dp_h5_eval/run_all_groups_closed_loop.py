@@ -23,7 +23,7 @@ from diffusion_planner.utils import ddp
 from scenario_generation.closed_loop_ddp import shard_items
 from scenario_generation.closed_loop_evaluation import ClosedLoopEvalConfig
 from scenario_generation.lane_geometry_summary import pool_lane_geometry
-from scenario_generation.plan_optimizer import add_plan_optimizer_argument
+from scenario_generation.plan_optimizer import PlanOptimizerConfig, add_plan_optimizer_argument
 
 from .closed_loop import (
     NativeH5FullRouteClosedLoopEvaluation,
@@ -192,6 +192,7 @@ def main() -> int:
         plan_optimizer_config_dir=args.plan_optimizer_config_dir,
     )
     cfg.closed_loop_draw_workers = args.closed_loop_draw_workers
+    plan_optimizer = PlanOptimizerConfig.from_args(cfg)
     rank, local_rank, world_size = ddp.ddp_setup_universal(True, cfg)
     if cfg.device.startswith("cuda"):
         import torch
@@ -219,6 +220,7 @@ def main() -> int:
                         cfg,
                         drop_objects=(mode == "noobj"),
                         draw_every=cfg.closed_loop_draw_every,
+                        plan_optimizer=plan_optimizer,
                     ),
                     fps=float(cfg.closed_loop_fps),
                     verbose=False,

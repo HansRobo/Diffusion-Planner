@@ -43,6 +43,15 @@ from .schema import H5_FORMAT, H5_FORMAT_VERSIONS, MODEL_INPUT_NAMES
 from .vehicle import VehicleDimensions, sim_ego_shape
 
 
+def h5_project_id(h5: h5py.File, source: Path) -> str:
+    project_id = h5.attrs.get("project_id")
+    if isinstance(project_id, bytes):
+        project_id = project_id.decode()
+    if not project_id:
+        raise ValueError(f"closed-loop H5 has no project_id attribute: {source}")
+    return str(project_id)
+
+
 class NativeH5RouteTimeline(RouteTimeline):
     """Closed-loop route backed entirely by one multi-frame native H5 shard.
 
@@ -94,14 +103,9 @@ class NativeH5RouteTimeline(RouteTimeline):
             self.frame_indices = self._rows.copy()
             self.sim_ego_shape = None
             if vehicle_params is not None:
-                project_id = self._h5.attrs.get("project_id")
-                if isinstance(project_id, bytes):
-                    project_id = project_id.decode()
-                if not project_id:
-                    raise ValueError(f"closed-loop H5 has no project_id attribute: {self.h5_path}")
                 self.sim_ego_shape = sim_ego_shape(
                     self._h5["frames"]["ego_shape"][start:stop],
-                    str(project_id),
+                    h5_project_id(self._h5, self.h5_path),
                     vehicle_params,
                     source=str(self.h5_path),
                 )
@@ -375,7 +379,11 @@ class NativeH5FullRouteClosedLoopEvaluation(FullRouteClosedLoopEvaluation):
 
 
 def rollout_params_from_closed_loop_config(
-    cfg, *, drop_objects: bool, draw_every: int | None
+    cfg,
+    *,
+    drop_objects: bool,
+    draw_every: int | None,
+    plan_optimizer: PlanOptimizerConfig | None,
 ) -> RolloutParams:
     """Map the project's single ClosedLoopConfig source of truth to native H5 rollout params."""
     return RolloutParams(
@@ -413,5 +421,5 @@ def rollout_params_from_closed_loop_config(
         # Native-H5 evaluation has no separate media toggle.  Keep its rendering
         # output consistent with the regular closed-loop evaluator.
         colormap_metrics=tuple(cfg.closed_loop_colormap_metrics),
-        plan_optimizer=PlanOptimizerConfig.from_args(cfg),
+        plan_optimizer=plan_optimizer,
     )
